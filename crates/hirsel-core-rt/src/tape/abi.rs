@@ -125,7 +125,7 @@ pub unsafe extern "C" fn hirsel_core_tape_open(
             bound: 0,
             chooser: crate::tasks::recorded_chooser(),
             arg: if record { arg.to_vec() } else { Vec::new() },
-            grants: vec![],
+            net_rules: vec![],
         };
         let expect = super::Expect {
             identity,

@@ -351,7 +351,7 @@ fn tape_cli_replays() {
     ];
     let (code, out, err) = process::tape_request(&shown, dir.path());
     assert_eq!(code, Some(0), "show: {err}");
-    assert!(out.contains("format 2") && out.contains("GRANT") && out.contains("END"));
+    assert!(out.contains("format 3") && out.contains("GRANT") && out.contains("END"));
     assert!(!out.contains("site"));
     // Random already exists in the provider ABI. Its payload must also replay,
     // including DATA continuation, rather than leave the carrier empty.
@@ -412,4 +412,215 @@ fn tape_cli_replays() {
     );
     assert_ne!(code, Some(0));
     assert!(err.contains("Process cannot be recorded"), "{err}");
+}
+
+fn http_reply_bytes(
+    connection: &mut std::io::BufReader<std::net::TcpStream>,
+    status: &str,
+    body: &[u8],
+) -> Vec<u8> {
+    use std::io::{BufRead, Read};
+
+    let mut reply = String::new();
+    connection.read_line(&mut reply).unwrap();
+    assert_eq!(reply, status);
+    let mut length = None;
+    let mut date = None;
+    loop {
+        let mut line = String::new();
+        assert_ne!(connection.read_line(&mut line).unwrap(), 0, "{reply}");
+        reply.push_str(&line);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("Content-Length: ") {
+            length = Some(value.trim_end().parse::<usize>().unwrap());
+        }
+        if let Some(value) = line.strip_prefix("Date: ") {
+            date = Some(value.trim_end().to_owned());
+        }
+    }
+    assert_eq!(length, Some(body.len()), "{reply}");
+    if status.starts_with("HTTP/1.1 200 ") {
+        let date = date.expect("a successful response carries Date");
+        assert_eq!(date.len(), 29, "{date}");
+        assert!(date.ends_with(" GMT"), "{date}");
+    }
+    let mut got = vec![0; body.len()];
+    connection.read_exact(&mut got).unwrap();
+    assert_eq!(got, body);
+    let mut bytes = reply.into_bytes();
+    bytes.extend(got);
+    bytes
+}
+
+/// Record a real loopback server, including a head timeout, then replay with
+/// no grants at one worker. The client checks the HTTP responses independently.
+/// The linker observer compares bytes after each successful send on both runs.
+#[test]
+#[ignore = "explicit native integration target"]
+fn tape_http_replays_both_native_engines() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{Ipv4Addr, TcpStream};
+    use std::process::Stdio;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    let fixture = std::fs::read_to_string(root.join("core/front/tape/http.hirsel")).unwrap();
+    let main = app.join("main.hirsel");
+    let observer_src = dir.path().join("http-observe.c");
+    let observer_obj = dir.path().join("http-observe.o");
+    std::fs::write(&observer_src, include_str!("tape_http_observe.c")).unwrap();
+    let native = native_options(Backend::Cranelift, dir.path());
+    command(
+        Command::new(native.link.driver())
+            .arg("-c")
+            .arg(observer_src)
+            .arg("-I")
+            .arg(root.join("crates/hirsel-core-rt/include"))
+            .arg("-o")
+            .arg(&observer_obj),
+    )
+    .unwrap();
+    let linker = appending_driver(
+        dir.path(),
+        "clang-observe-http",
+        &format!(
+            "'{}' -Wl,--wrap=hirsel_core_host_send_pair",
+            observer_obj.display().to_string().replace('\'', "'\\''")
+        ),
+    );
+
+    for engine in ["cranelift", "llvm"] {
+        std::fs::write(&main, &fixture).unwrap();
+        let tape = dir.path().join(format!("{engine}.tape"));
+        let common = [
+            app.display().to_string(),
+            "--backend".to_owned(),
+            engine.to_owned(),
+            "--runtime".to_owned(),
+            native.runtime.canonicalize().unwrap().display().to_string(),
+            "--cc".to_owned(),
+            linker.display().to_string(),
+            "--libraries".to_owned(),
+            root.join("core").display().to_string(),
+            "--source-core".to_owned(),
+            "--source-std".to_owned(),
+            "--store".to_owned(),
+            dir.path().join("cache").display().to_string(),
+        ];
+        let invoke = |command: &str, args: &[&str]| {
+            let mut call = vec![command.to_owned()];
+            call.extend(common.iter().cloned());
+            call.extend(args.iter().map(|&arg| arg.to_owned()));
+            call
+        };
+        let record = invoke(
+            "run",
+            &[
+                "--grant",
+                "Net=Listen 127.0.0.0/8 0-65535;Listen 127.0.0.1/32 0-65535",
+                "--grant",
+                "Clock",
+                "--grant",
+                "Tasks",
+                "--grant",
+                "Stdout",
+                "--record",
+                tape.to_str().unwrap(),
+            ],
+        );
+        let mut child = process::tape_request_command(&record, dir.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut ports = String::new();
+        loop {
+            assert_ne!(output.read_line(&mut ports).unwrap(), 0, "{engine}");
+            if ports.ends_with(process::CHILD_MARK) {
+                break;
+            }
+            ports.clear();
+        }
+        ports.clear();
+        if output.read_line(&mut ports).unwrap() == 0 {
+            let failed = child.wait_with_output().unwrap();
+            panic!(
+                "{engine} recording exited {:?} before listening: {}",
+                failed.status.code(),
+                String::from_utf8_lossy(&failed.stderr)
+            );
+        }
+        let [server, stop] = ports
+            .split_whitespace()
+            .map(|port| port.parse::<u16>().unwrap())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let connect = |port| TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        let mut connection = BufReader::new(connect(server));
+        let mut wire = Vec::new();
+        for path in ["/first", "/second", "/third"] {
+            write!(
+                connection.get_mut(),
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            )
+            .unwrap();
+            wire.extend(http_reply_bytes(
+                &mut connection,
+                "HTTP/1.1 200 OK\r\n",
+                path.as_bytes(),
+            ));
+        }
+        drop(connection);
+
+        let mut slow = BufReader::new(connect(server));
+        slow.get_mut()
+            .write_all(b"GET /incomplete HTTP/1.1\r\nHost: ")
+            .unwrap();
+        wire.extend(http_reply_bytes(
+            &mut slow,
+            "HTTP/1.1 408 Request Timeout\r\n",
+            b"",
+        ));
+        drop(slow);
+        drop(connect(stop));
+
+        let recorded = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8(recorded.stderr).unwrap();
+        let observed = stderr.split_once(process::CHILD_MARK).unwrap().1;
+        assert_eq!(recorded.status.code(), Some(0), "{engine}: {observed}");
+        assert_eq!(
+            observed.as_bytes(),
+            wire,
+            "{engine} record compared to wire"
+        );
+        let sealed = std::fs::read(&tape).unwrap();
+
+        let replay = invoke("replay", &["--tape", tape.to_str().unwrap()]);
+        let (code, stdout, sent) = process::tape_request(&replay, dir.path());
+        assert_eq!(code, Some(0), "{engine} replay: {sent}");
+        assert!(stdout.is_empty(), "{engine}: {stdout}");
+        assert_eq!(sent.as_bytes(), wire, "{engine} replay compared to wire");
+        assert_eq!(std::fs::read(&tape).unwrap(), sealed);
+
+        let changed = fixture.replace(
+            "std.http.copy_bytes(std.http.path(req))",
+            "std.http.copy_bytes(string.as_bytes(\"/firsX\"))",
+        );
+        assert_ne!(changed, fixture);
+        std::fs::write(&main, changed).unwrap();
+        let mut diagnose = replay;
+        diagnose.push("--diagnose".into());
+        let (code, _, error) = process::tape_request(&diagnose, dir.path());
+        assert_eq!(code, Some(102), "{engine}: {error}");
+        assert!(error.contains("Diverged(Arg)"), "{engine}: {error}");
+    }
 }

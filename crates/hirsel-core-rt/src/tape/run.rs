@@ -233,6 +233,14 @@ unsafe extern "C" fn invoke(
             }
         }
         write_launch(&mut arg, &*(*config).launch);
+        let mut net_rules = vec![];
+        if run.mode == 0 && !(*(*config).launch).is_describe() {
+            let net = entry::hirsel_core_entry_grant(config, entry::NET, 0);
+            if net != 0 {
+                let handle = entry::hirsel_core_capability_handle(context, net);
+                net_rules = (*(handle as *const crate::net::Rules)).as_slice().to_vec();
+            }
+        }
         let header = Header {
             kind: KIND_RUN,
             mode: MODE_RECORD,
@@ -243,8 +251,8 @@ unsafe extern "C" fn invoke(
             limit: (*config).root_limit,
             bound: 0,
             chooser: crate::tasks::recorded_chooser(),
-            arg: arg.clone(),
-            grants: vec![],
+            arg,
+            net_rules,
         };
         let expect = Expect {
             identity: &run.identity,
@@ -258,7 +266,7 @@ unsafe extern "C" fn invoke(
         } else {
             Mode::Replay
         };
-        let opened = Tape::open(
+        let opened = Tape::open_with_startup(
             run.revision,
             (run.sink.provider(), directory),
             name.as_bytes(),
@@ -266,14 +274,14 @@ unsafe extern "C" fn invoke(
             &header,
             &expect,
         );
-        let (tape, arg) = match opened {
+        let (tape, startup) = match opened {
             Ok(t) => t,
             Err(e) => return stopped(run, format_args!("{e:?}")),
         };
         *run.launch = if run.mode == 0 {
             (*(*config).launch).clone()
         } else {
-            match read_launch(&arg) {
+            match read_launch(&startup.arg) {
                 Ok(launch) => launch,
                 Err(_) => return stopped(run, Fault::Corrupt),
             }
@@ -301,6 +309,8 @@ unsafe extern "C" fn invoke(
             let label = b"replay: revision differs\n";
             crate::os::diagnostic(run.stderr, label.as_ptr(), label.len());
         }
+        let replay_net_rules = (!startup.net_rules.is_empty())
+            .then(|| crate::net::RulesStorage::new(startup.net_rules.into_boxed_slice()));
         let files = (*context).host_files;
         for i in 0..run.requirements_len {
             let req = &*run.requirements.add(i);
@@ -333,7 +343,18 @@ unsafe extern "C" fn invoke(
                     (NO_HOST, 0)
                 };
                 match tape.on_tape(req.kind, (provider, handle)) {
-                    Ok((p, h)) => (*files).registry.taped_grant(p, h, tape.group()),
+                    Ok((p, h)) => {
+                        if req.kind == entry::NET {
+                            if run.mode != 0 && !run.launch.is_describe() {
+                                let Some(rules) = &replay_net_rules else {
+                                    return stopped(run, Fault::Corrupt);
+                                };
+                                tape.bind_replay_net_rules(h, rules.handle());
+                            }
+                            (*files).net_tape = Some(crate::net::SocketTape::new(p, h));
+                        }
+                        (*files).registry.taped_grant(p, h, tape.group())
+                    }
                     Err(f) => {
                         refuse(f);
                         causes::record(&mut *context, Cause::new(causes::TAPE, 0));

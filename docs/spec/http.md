@@ -1234,9 +1234,9 @@ A check read is taken only between operations, never inside one, so a phase make
 **Part B, unbuilt** (lands with §4): `host.wall_ms` once per signed-verifier check (K-2); `host.mono_ns` as a set read at each arm of the head's recovery timer (K-8). Keyed admission (K-5), the reply commit (K-6), the orphan sweep (K-6) and K-9's open check take no read of their own: each reads its store run's `at`, which comes from the store's one recorded `host.wall_ms` read per run (K-4).
 
 **What the tape records**, at issue and at delivery, through substitute `Net`, `Clock` and `Random` providers:
-- each `accept` and its peer address;
+- each listener's bound address and each accepted connection's peer address;
 - each receive's delivered bytes, exactly as fragmented;
-- each send's accepted count, including partial sends;
+- each send's offered buffers and deadline, checked at issue, and accepted count, including partial sends;
 - each readiness or deadline wake;
 - each clock read named above, with its point and kind;
 - each `host.random` delivery (principal minting).

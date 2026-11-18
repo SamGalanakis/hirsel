@@ -1,8 +1,6 @@
-//! Tape laws (REPLAY-SPEC v2.3 S1, tape format 2). Expected bytes come from
-//! testdata/vectors.py (hand encoding plus system libxxhash, no project code)
-//! and from 1004's model: model-f2-tape.bin is its models_v23.py `T` with the
-//! format-2 header and positioned GRANT, model-v23-tape.bin its format 1 original; expected
-//! results from sections 5 and 8.
+//! Tape laws (REPLAY-SPEC sections 4, 5 and 8). The testdata vectors use an
+//! independent encoder and the system libxxhash. The two-clock model has both
+//! a current vector and a format-2 refusal vector.
 use super::*;
 use crate::os::OsProvider;
 use std::collections::VecDeque;
@@ -19,8 +17,8 @@ pub(super) const REVISION: [u8; 32] = {
     b
 };
 const HAND: &[u8] = include_bytes!("testdata/hand-tape.bin");
-const MODEL: &[u8] = include_bytes!("testdata/model-f2-tape.bin");
-const MODEL_F1: &[u8] = include_bytes!("testdata/model-v23-tape.bin");
+const MODEL: &[u8] = include_bytes!("testdata/model-f3-tape.bin");
+const MODEL_F2: &[u8] = include_bytes!("testdata/model-f2-tape.bin");
 const XXH3: &[u8] = include_bytes!("testdata/xxh3.bin");
 
 // ---------- providers ----------
@@ -413,7 +411,7 @@ pub(super) fn header(build: [u8; 32]) -> Header {
         bound: 0,
         chooser: CHOOSER_FIFO,
         arg: b"arg".to_vec(),
-        grants: vec![],
+        net_rules: vec![],
     }
 }
 pub(super) fn expect() -> Expect<'static> {
@@ -535,7 +533,7 @@ fn xxh3_is_libxxhash_whole_and_in_two_parts() {
 /// The oracle is 1004's model (libxxhash), not this code. Its header is a
 /// Call tape's, with `revision[32]`.
 #[test]
-fn the_encoder_writes_the_format_2_model_tape_byte_for_byte() {
+fn the_encoder_writes_the_format_3_model_tape_byte_for_byte() {
     let h = Header {
         kind: KIND_CALL,
         mode: MODE_DURABLE,
@@ -547,7 +545,7 @@ fn the_encoder_writes_the_format_2_model_tape_byte_for_byte() {
         bound: 0,
         chooser: CHOOSER_FIFO,
         arg: b"arg-7".to_vec(),
-        grants: vec![],
+        net_rules: vec![],
     };
     let mono = |v: u64| Frame::Op {
         task: 0,
@@ -618,12 +616,162 @@ fn the_encoder_writes_the_format_2_model_tape_byte_for_byte() {
     );
 }
 
-/// Format 2 has no reader for format 1 (gavel 7): 1004's format 1 tape, a
-/// valid tape of its format, is Corrupt. Wrong implementation caught: a
-/// reader that still accepts format 1 beside format 2.
+/// The independent vector covers a Run's ordered duplicate rules, both
+/// address outcomes (including an ISSUE/DONE pair), and a continued receive.
 #[test]
-fn a_format_1_tape_is_corrupt() {
-    let mut older = MODEL_F1;
+fn network_outcomes_decode_with_exact_payloads() {
+    let mut bytes: &[u8] = include_bytes!("testdata/net-tape.bin");
+    let (mut blocks, header) = Blocks::open(|buf| bytes.read(buf)).unwrap();
+    let listen = hirsel_core_net::Rule::parse("Listen 127.0.0.1/32 0-65535").unwrap();
+    let connect = hirsel_core_net::Rule::parse("Connect ::1/128 1-65535").unwrap();
+    assert_eq!(header.net_rules, [listen, connect, listen]);
+
+    let mut encoded_header = header.encode(header.revision).unwrap();
+    let last = encoded_header.len() - 1;
+    encoded_header[last] = 0;
+    encoded_header[last - 1] = 0;
+    encoded_header[last - 3] = 1;
+    assert!(Header::decode(&encoded_header).is_err(), "reversed range");
+    encoded_header.pop();
+    assert!(Header::decode(&encoded_header).is_err(), "short rule list");
+
+    let mut decoder = Decoder::default();
+    let mut frames = Vec::new();
+    while let Some((flags, payload)) = blocks.next(|buf| bytes.read(buf)).unwrap() {
+        frames.extend(decoder.block(payload, flags & END != 0).unwrap());
+    }
+    let [
+        _,
+        _,
+        Frame::Op {
+            op: LISTEN,
+            out: bound,
+            ..
+        },
+        Frame::Issue { op: ACCEPT, .. },
+        Frame::Done { out: peer, .. },
+        Frame::Op {
+            op: RECV_BOUNDED,
+            out: read,
+            ..
+        },
+        Frame::Op {
+            op: SEND_PAIR,
+            out: send,
+            ..
+        },
+        Frame::Op {
+            op: RECV_BOUNDED,
+            out: error,
+            ..
+        },
+        Frame::End { .. },
+    ] = frames.as_slice()
+    else {
+        panic!("wrong network frame sequence");
+    };
+    for (address, port, object) in [(bound, 49217u16, 3), (peer, 49218u16, 4)] {
+        let mut expected = [0; 19];
+        expected[9..13].copy_from_slice(&0x7f000001u32.to_le_bytes());
+        expected[17..].copy_from_slice(&port.to_le_bytes());
+        assert_eq!(address.payload, expected);
+        assert_eq!(address.value, object);
+    }
+    let bytes: Vec<_> = (0..70_000).map(|i| (i * 7 + 1) as u8).collect();
+    assert_eq!(read.value, bytes.len() as u64);
+    assert_eq!(read.payload, bytes);
+    assert_eq!(send.value, 4);
+    assert_eq!((error.status, error.error), (ERROR, (5, 0)));
+    assert!(error.payload.is_empty());
+}
+
+/// A deadline may wake just as input becomes ready. The provider's final
+/// attempt appends a byte, so both runs must return success with that byte.
+#[test]
+fn socket_deadline_final_receive_records_its_success() {
+    unsafe extern "C" fn issue(_: *mut u8, _: *mut Request, _: u64) -> Step {
+        pending()
+    }
+
+    unsafe extern "C" fn abort(_: *mut u8, request: *mut Request, _: u64, why: u8) -> Outcome {
+        assert_eq!(why, ABORT_DEADLINE);
+        // SAFETY: this case pins the two-byte buffer with one byte of spare room.
+        unsafe {
+            let buffer = &mut (*request).buffer;
+            buffer.data.add(buffer.len).write(b'b');
+            buffer.len += 1;
+        }
+        Outcome {
+            value: 1,
+            ..Outcome::default()
+        }
+    }
+
+    let host = Provider {
+        state: ptr::null_mut(),
+        wait: crate::provider::immediate::wait,
+        issue,
+        resume: crate::provider::immediate::resume,
+        abort,
+        deliver: crate::provider::deliver,
+    };
+    let mut store = Store::default();
+    let h = header(REVISION);
+    for mode in [Mode::Record, Mode::Replay] {
+        // SAFETY: the store, provider and request operands stay pinned through end.
+        unsafe {
+            let (tape, _) = Tape::open(REVISION, store.dir(), b"t", mode, &h, &expect()).unwrap();
+            let (sub, object) = tape.on_tape(crate::entry::NET, (host, 0)).unwrap();
+            let mut network = crate::net::NetworkRequest {
+                send_tail: ptr::null(),
+                address: crate::net::Address::default(),
+                sockets: ptr::null_mut(),
+                until: None,
+                backlog: 0,
+                connecting: None,
+                denied: false,
+                direction: 1,
+            };
+            let mut bytes = [b'a', 0];
+            let mut request = Request {
+                operation: RECV_BOUNDED,
+                mode: 0,
+                handle: object,
+                path: (&mut network as *mut crate::net::NetworkRequest).cast(),
+                path_len: size_of_val(&network),
+                buffer: Buffer {
+                    data: bytes.as_mut_ptr(),
+                    len: 1,
+                    capacity: 2,
+                },
+                site: 0,
+            };
+            assert_eq!((sub.wait)(sub.state, &mut request, 0).kind, WAIT_READY);
+            assert_eq!((sub.issue)(sub.state, &mut request, 0).kind, STEP_PENDING);
+            let result = if mode == Mode::Record {
+                (sub.abort)(sub.state, &mut request, 0, ABORT_DEADLINE)
+            } else {
+                let step = (sub.resume)(sub.state, &mut request, 0);
+                assert_eq!(step.kind, STEP_DONE);
+                step.outcome
+            };
+            let result = (sub.deliver)(sub.state, &mut request, result);
+            assert_eq!(
+                (result.value, result.error, result.status),
+                (1, IoError::OK, 0)
+            );
+            assert_eq!(request.buffer.len, 2);
+            assert_eq!(&bytes, b"ab");
+            tape.end(&Ending::returned(&[])).unwrap();
+        }
+    }
+}
+
+/// The old format would interpret a socket's outcome as a scalar followed
+/// by another frame. Refuse the old format even when its bytes pass the checksum.
+#[test]
+fn a_format_2_tape_is_corrupt() {
+    let mut older = MODEL_F2;
     assert!(matches!(
         Blocks::open(|buf| older.read(buf)),
         Err(ReadError::Format(Stop::Corrupt))

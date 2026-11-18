@@ -23,9 +23,30 @@ impl Rules {
         }
     }
 }
-pub(crate) struct Grant {
+pub(crate) struct RulesStorage {
     _storage: Box<[Rule]>,
-    _view: Box<Rules>,
+    view: Box<Rules>,
+}
+
+impl RulesStorage {
+    pub(crate) fn new(storage: Box<[Rule]>) -> Self {
+        let view = Box::new(Rules {
+            data: storage.as_ptr(),
+            len: storage.len(),
+        });
+        Self {
+            _storage: storage,
+            view,
+        }
+    }
+
+    pub(crate) fn handle(&self) -> u64 {
+        (&*self.view as *const Rules) as u64
+    }
+}
+
+pub(crate) struct Grant {
+    _rules: RulesStorage,
     payer: crate::limit::Payer,
     charge: u64,
 }
@@ -86,7 +107,41 @@ pub(crate) struct NetworkRequest {
     pub until: Option<(Provider, u64, u64)>,
     pub backlog: u16,
     pub connecting: Option<u64>,
+    pub denied: bool,
+    pub direction: u8,
 }
+/// A CLI run substitutes all Net grants on one tape. A socket carrier
+/// keeps the tape's object ordinal and the usual two direction bits.
+#[derive(Clone, Copy)]
+pub(crate) struct SocketTape {
+    provider: Provider,
+    generation: u64,
+}
+
+impl SocketTape {
+    pub(crate) fn new(provider: Provider, handle: u64) -> Self {
+        Self {
+            provider,
+            generation: handle & !u64::from(u32::MAX),
+        }
+    }
+
+    fn handle(self, key: u64) -> u64 {
+        self.generation | (key >> 2)
+    }
+
+    fn carrier(self, mut outcome: Outcome) -> Outcome {
+        if outcome.status == 0 && outcome.error == IoError::OK {
+            outcome.value = u64::from(outcome.value as u32) << 2;
+        }
+        outcome
+    }
+
+    fn source(self, key: u64) -> Option<u64> {
+        crate::tape::source(&self.provider, self.handle(key)).map(|(_, handle)| handle | (key & 3))
+    }
+}
+
 unsafe fn deadline(
     context: *mut Context,
     kind: u8,
@@ -101,11 +156,18 @@ unsafe fn deadline(
         )
     })
 }
-pub(crate) unsafe fn permitted(request: &Request) -> bool {
+pub(crate) const DENIED: Outcome = Outcome {
+    value: 0,
+    error: IoError { tag: 1, code: 0 },
+    written: 0,
+    status: 0,
+};
+
+pub(crate) unsafe fn permitted(request: &Request, handle: u64) -> bool {
     // SAFETY: network adapters pin the scalar address and the grant's Rules.
     unsafe {
         let address = &(*request.path.cast::<NetworkRequest>()).address;
-        let rules = &*(request.handle as *const Rules);
+        let rules = &*(handle as *const Rules);
         rules.as_slice().iter().any(|r| {
             r.permits(
                 u8::from(request.operation == LISTEN),
@@ -207,6 +269,8 @@ unsafe fn address_op(
             until: deadline(context, until_kind, clock, deadline_ns),
             backlog,
             connecting: None,
+            denied: false,
+            direction: 0,
         };
         let mut request = Request {
             operation: op,
@@ -217,11 +281,11 @@ unsafe fn address_op(
             buffer: empty_buffer(),
             site,
         };
-        let outcome = hirsel_core_host(
-            context,
-            hirsel_core_capability_provider(context, n),
-            &mut request,
-        );
+        let provider = hirsel_core_capability_provider(context, n);
+        let mut outcome = hirsel_core_host(context, provider, &mut request);
+        if let Some(tape) = (*(*context).host_files).net_tape {
+            outcome = tape.carrier(outcome);
+        }
         AddressOutcome::new(outcome, network.address)
     }
 }
@@ -239,13 +303,17 @@ unsafe fn owned_op(
     site: u64,
 ) -> AddressOutcome {
     unsafe {
+        let files = (*context).host_files;
+        let tape = (*files).net_tape;
         let mut network = NetworkRequest {
             send_tail,
             address: Address::default(),
-            sockets: &raw mut (*(*context).host_files).sockets,
+            sockets: &raw mut (*files).sockets,
             until: deadline(context, until_kind, clock, deadline_ns),
             backlog: 0,
             connecting: None,
+            denied: false,
+            direction: (key & 3) as u8,
         };
         let mut buffer = if operand.is_null() {
             empty_buffer()
@@ -265,7 +333,17 @@ unsafe fn owned_op(
             buffer,
             site,
         };
-        let outcome = hirsel_core_host(context, (*(*context).run).provider, &mut request);
+        let outcome = if let Some(tape) = tape {
+            request.handle = tape.handle(key);
+            let outcome = hirsel_core_host(context, &tape.provider, &mut request);
+            if op == ACCEPT {
+                tape.carrier(outcome)
+            } else {
+                outcome
+            }
+        } else {
+            hirsel_core_host(context, (*(*context).run).provider, &mut request)
+        };
         if op == RECV_BOUNDED {
             (*operand).len = request.buffer.len;
         }
@@ -373,7 +451,15 @@ pub unsafe extern "C" fn hirsel_core_net_split(
 ) -> Outcome {
     let _commit = crate::sequencer::enter();
     unsafe {
-        let (read, write) = (*(*context).host_files).sockets.split(key);
+        let files = (*context).host_files;
+        let (read, write) = if let Some(tape) = (*files).net_tape {
+            if let Some(source) = tape.source(key) {
+                (*files).sockets.split(source);
+            }
+            (key | 1, key | 2)
+        } else {
+            (*files).sockets.split(key)
+        };
         Outcome {
             value: read,
             written: write,
@@ -387,7 +473,14 @@ pub unsafe extern "C" fn hirsel_core_net_split(
 pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64) {
     let _commit = crate::sequencer::enter();
     unsafe {
-        (*(*context).host_files).sockets.release(key);
+        let files = (*context).host_files;
+        let source = match (*files).net_tape {
+            Some(tape) => tape.source(key),
+            None => Some(key),
+        };
+        if let Some(source) = source {
+            (*files).sockets.release(source);
+        }
     }
 }
 /// # Safety
@@ -422,9 +515,16 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
         };
     }
     unsafe {
+        crate::process::deny_describe_capability(context);
         let provider = *hirsel_core_capability_provider(context, n);
-        let rules = &*(hirsel_core_capability_handle(context, n) as *const Rules);
-        let rules = rules.as_slice();
+        let parent = hirsel_core_capability_handle(context, n);
+        let taped = crate::tape::owns(&provider);
+        let rules_handle = if taped {
+            crate::tape::net_rules(&provider, parent)
+        } else {
+            parent
+        };
+        let rules = (*(rules_handle as *const Rules)).as_slice();
         let count = rules.iter().filter_map(|r| r.intersect(rule)).count();
         let charge = (count as u64)
             .checked_mul(37)
@@ -439,21 +539,22 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
                 status: 0,
             };
         }
-        let storage: Box<[Rule]> = rules.iter().filter_map(|r| r.intersect(rule)).collect();
-        let view = Box::new(Rules {
-            data: storage.as_ptr(),
-            len: storage.len(),
-        });
-        let handle = (&*view as *const Rules) as u64;
+        let rules = RulesStorage::new(rules.iter().filter_map(|r| r.intersect(rule)).collect());
+        let handle = rules.handle();
         let files = (*context).host_files;
         (*files).net_grants.lock().unwrap().push(Grant {
-            _storage: storage,
-            _view: view,
+            _rules: rules,
             payer,
             charge: charge.unwrap(),
         });
+        let value = if taped {
+            let (handle, group) = crate::tape::narrow_net(&provider, parent, handle);
+            (*files).registry.taped_grant(provider, handle, group)
+        } else {
+            (*files).registry.grant(provider, handle)
+        };
         Outcome {
-            value: (*files).registry.grant(provider, handle),
+            value,
             ..Outcome::default()
         }
     }

@@ -598,6 +598,8 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                         until: None,
                         backlog: 0,
                         connecting: Some(key),
+                        denied: false,
+                        direction: 0,
                     };
                     let mut r = Request {
                         operation: CONNECT,

@@ -1,4 +1,4 @@
-"""Independent oracle for the tape laws (REPLAY-SPEC v2.3 sections 4 and 5, tape format 2).
+"""Independent oracle for the tape laws (REPLAY-SPEC v2.3 sections 4 and 5, tape format 3).
 
 Imports no compiler or runtime code: it encodes the spec's byte format by hand
 and checks blocks with the system libxxhash. Run from anywhere:
@@ -10,8 +10,9 @@ It writes, next to itself:
   asserts they are check.hirsel's own HASHES;
 - hand-tape.bin: the tape the runtime's Record must write for the scripted run
   in tape/tests.rs (`scripted_run`), every value chosen here by hand;
-- grant-gap-tape.bin and model-f2-tape.bin: the positioned grant and wait
-  example and the format-2 port of the two-clock model.
+- grant-gap-tape.bin and model-f3-tape.bin: the positioned grant and wait
+  example and the format-3 port of the two-clock model;
+- net-tape.bin: a Run with duplicate Net rules, socket outcomes and DATA.
 """
 import ctypes, pathlib, re, struct
 
@@ -49,14 +50,15 @@ def block(seq, flags, payload):
     return head + payload + struct.pack('<Q', xxh3(TAPE_ID + head + payload))
 
 # Header: Call tape (no header grants), Record mode.
-header = (struct.pack('<HBB', 2, 2, 1) + TAPE_ID + lb(b'app@1/main/run') + BUILD
+header = (struct.pack('<HBB', 3, 2, 1) + TAPE_ID + lb(b'app@1/main/run') + BUILD
           + struct.pack('<IQQ', 0, 1000, 0) + bytes([0]) + lb(b'arg') + vi(0))
 
 # Op tags (provider.rs) and grant kinds (entry.rs).
 OPEN, READ, CLOSE, MKDTEMP, WALL_MS, MONO_NS, STDOUT, RENAME, SLEEP_UNTIL, SYNC_DIR = 0, 1, 3, 7, 10, 11, 12, 14, 15, 17
-DIR, CLOCK, K_STDOUT, ARGS = 0, 2, 4, 10
+LISTEN, ACCEPT, SEND_PAIR, RECV_BOUNDED = 20, 21, 26, 27
+DIR, NET, CLOCK, K_STDOUT, ARGS = 0, 1, 2, 4, 10
 WRITES = {2, 12, 13}
-PAYLOAD = {READ, MKDTEMP}
+PAYLOAD = {READ, MKDTEMP, LISTEN, ACCEPT, RECV_BOUNDED}
 
 def args(a):
     return lb(a) if len(a) <= 16 else bytes([17]) + struct.pack('<Q', xxh3(a))
@@ -132,10 +134,10 @@ g.put(bytes([4, 0]))              # WAKE gap 0, previous task 0
 g.op(SLEEP_UNTIL, 1, struct.pack('<Q', 9000), value=17)
 (HERE / 'grant-gap-tape.bin').write_bytes(g.end(FAILED, vi(2) + bytes([4]) + lb(b'no data') + bytes([0])))
 
-# The two-clock model from models_v23.py, with the format-2 header and a
+# The two-clock model from models_v23.py, with the format-3 header and a
 # positioned GRANT. The grant is at open, so its delta is zero.
 TAPE_ID = bytes(range(16))
-model_header = (struct.pack('<HBB', 2, 2, 2) + TAPE_ID + lb(b'pkg/charge#0001')
+model_header = (struct.pack('<HBB', 3, 2, 2) + TAPE_ID + lb(b'pkg/charge#0001')
                 + bytes(range(32)) + struct.pack('<IQQ', 1, 1024, 0) + b'\0'
                 + lb(b'arg-7') + vi(0))
 first_clock = bytes([0x13, 0, MONO_NS, 1, 0, 0]) + vi(zz(1_000_000_123))
@@ -146,4 +148,26 @@ model = b''.join([
     block(2, 0, second_clock),
     block(3, 2, bytes([10, 2, 0, 0]) + lb(struct.pack('<Q', 5_000))),
 ])
-(HERE / 'model-f2-tape.bin').write_bytes(model)
+(HERE / 'model-f3-tape.bin').write_bytes(model)
+
+
+# A real Run snapshot can contain repeated rules. Preserve their original order.
+TAPE_ID = bytes(range(16, 32))
+loopback = 0x7f000001
+listen_rule = struct.pack('<BBQQBHH', 1, 0, 0, loopback, 32, 0, 65535)
+connect_rule = struct.pack('<BBQQBHH', 0, 1, 0, 1, 128, 1, 65535)
+grants = bytes([NET]) + vi(3) + listen_rule + connect_rule + listen_rule
+header = (struct.pack('<HBB', 3, 1, 1) + TAPE_ID + lb(b'app@1/main/run') + BUILD
+          + struct.pack('<IQQ', 0, 1000, 0) + bytes([0]) + lb(b'arg') + lb(grants))
+net = Tape()
+net.grant(NET)
+net.grant(CLOCK)
+addr = lambda port: struct.pack('<BQQH', 0, 0, loopback, port)
+net.op(LISTEN, 1, addr(0) + struct.pack('<H', 8), 3, payload=addr(49217))
+deadline = vi(2) + struct.pack('<Q', 5000)
+net.put(bytes([1, ACCEPT]) + vi(3) + args(deadline))
+net.put(bytes([2, 0, 0]) + vi(4) + lb(addr(49218)))
+net.op(RECV_BOUNDED, 4, struct.pack('<Q', 70000) + deadline, 70000, payload=big)
+net.op(SEND_PAIR, 4, deadline + lb(b'abc') + lb(b'def'), value=4)
+net.op(RECV_BOUNDED, 4, struct.pack('<Q', 1) + deadline, error=(5, 0))
+(HERE / 'net-tape.bin').write_bytes(net.end(0, struct.pack('<I', 0)))

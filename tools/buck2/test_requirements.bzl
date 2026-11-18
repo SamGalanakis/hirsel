@@ -36,5 +36,6 @@ OPENAT2_TEST_CASES = {
         "native::tests::tape_run_after_end_cranelift",
         "native::tests::tape_run_after_end_llvm",
         "native::tests::tape_code_revision_is_the_entry_revision",
+        "native::tests::tape_http_replays_both_native_engines",
     ],
 }

@@ -204,6 +204,8 @@ struct Live {
     fault: Option<Fault>,
     /// Index ordinal - 1 (section 4.3: one sequence per tape, from 1).
     objects: Vec<Object>,
+    /// Replay Net grants retain an inert rule list without an inner provider.
+    replay_net_rules: BTreeMap<usize, u64>,
     /// The previous value of each clock op on each object (section 5.4).
     clocks: BTreeMap<(u8, u64), u64>,
     recorder: Option<Recorder>,
@@ -288,6 +290,11 @@ pub struct Tape {
     generation: u32,
     /// An across open of a tape whose revision is not the opener's.
     differs: bool,
+}
+
+struct Startup {
+    arg: Vec<u8>,
+    net_rules: Vec<hirsel_core_net::Rule>,
 }
 
 fn handle(generation: u32, ordinal: usize) -> u64 {
@@ -500,11 +507,83 @@ impl Replayer {
     }
 }
 
+fn socket_op(op: u8) -> bool {
+    matches!(op, CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR)
+}
+
+fn net_status(error: u8) -> u8 {
+    match error {
+        0 => OK,
+        6 => TIMED_OUT,
+        7 => ABORTED,
+        _ => ERROR,
+    }
+}
+
+fn address_bytes(address: crate::net::Address) -> [u8; 19] {
+    let mut bytes = [0; 19];
+    bytes[0] = address.family;
+    bytes[1..9].copy_from_slice(&address.hi.to_le_bytes());
+    bytes[9..17].copy_from_slice(&address.lo.to_le_bytes());
+    bytes[17..].copy_from_slice(&address.port.to_le_bytes());
+    bytes
+}
+
+unsafe fn buffer_bytes(buffer: &Buffer) -> &[u8] {
+    if buffer.len == 0 {
+        &[]
+    } else {
+        // SAFETY: the caller pins the buffer's initialized prefix.
+        unsafe { std::slice::from_raw_parts(buffer.data, buffer.len) }
+    }
+}
+
+unsafe fn socket_args(request: &Request) -> Args {
+    // SAFETY: the network adapter pins the address, deadline and carriers.
+    unsafe {
+        let n = &*request.path.cast::<crate::net::NetworkRequest>();
+        let mut args = Vec::new();
+        if matches!(request.operation, CONNECT | LISTEN) {
+            args.extend_from_slice(&address_bytes(n.address));
+        }
+        if request.operation == LISTEN {
+            args.extend_from_slice(&n.backlog.to_le_bytes());
+            return Args::of(&args);
+        }
+        if request.operation == RECV_BOUNDED {
+            let spare = request.buffer.capacity.saturating_sub(request.buffer.len) as u64;
+            args.extend_from_slice(&spare.to_le_bytes());
+        }
+        if let Some((_, clock, at)) = n.until {
+            put_varint(&mut args, ordinal_of(clock) as u64);
+            args.extend_from_slice(&at.to_le_bytes());
+        } else {
+            args.push(0);
+        }
+        if request.operation == SEND_PAIR {
+            let tail = &*n.send_tail;
+            let mut tail_len = Vec::new();
+            put_varint(&mut args, request.buffer.len as u64);
+            put_varint(&mut tail_len, tail.len as u64);
+            return Args::of_parts(&[
+                &args,
+                buffer_bytes(&request.buffer),
+                &tail_len,
+                buffer_bytes(tail),
+            ]);
+        }
+        Args::of(&args)
+    }
+}
+
 /// The canonical argument bytes of an operation (REPLAY-SPEC 4.1; the
 /// per-operation choice is recorded in followups.md for section 5.4).
-unsafe fn canonical(r: &Request) -> Vec<u8> {
+unsafe fn canonical(r: &Request) -> Args {
     // SAFETY: the request's operands are pinned for its issue.
     unsafe {
+        if socket_op(r.operation) {
+            return socket_args(r);
+        }
         let path = if r.path_len == 0 {
             &[][..]
         } else {
@@ -515,7 +594,7 @@ unsafe fn canonical(r: &Request) -> Vec<u8> {
         } else {
             std::slice::from_raw_parts(r.buffer.data, r.buffer.len)
         };
-        match r.operation {
+        Args::of(&match r.operation {
             OPEN => {
                 let mut a = vec![r.mode];
                 a.extend_from_slice(path);
@@ -528,7 +607,7 @@ unsafe fn canonical(r: &Request) -> Vec<u8> {
             MKDIR | REMOVE | REMOVE_TREE | RENAME => path.to_vec(),
             SLEEP_UNTIL => bytes.to_vec(),
             _ => vec![],
-        }
+        })
     }
 }
 
@@ -560,6 +639,20 @@ impl Tape {
         header: &Header,
         expect: &Expect,
     ) -> Result<(Tape, Vec<u8>), OpenError> {
+        // SAFETY: forwarded tape directory contract.
+        let (tape, stored) =
+            unsafe { Self::open_with_startup(revision, dir, name, mode, header, expect)? };
+        Ok((tape, stored.arg))
+    }
+
+    unsafe fn open_with_startup(
+        revision: [u8; 32],
+        dir: (Provider, u64),
+        name: &[u8],
+        mode: Mode,
+        header: &Header,
+        expect: &Expect,
+    ) -> Result<(Tape, Startup), OpenError> {
         let _commit = crate::sequencer::enter();
         if crate::tasks::parallel() && mode == Mode::Replay {
             crate::process::stop(b"ReplayWorkers");
@@ -569,7 +662,7 @@ impl Tape {
             handle: dir.1,
         };
         let mut differs = false;
-        let (live, arg) = match mode {
+        let (live, startup) = match mode {
             Mode::Record => {
                 if !matches!(
                     header.chooser,
@@ -599,11 +692,18 @@ impl Tape {
                     mode,
                     fault: None,
                     objects: vec![],
+                    replay_net_rules: BTreeMap::new(),
                     clocks: BTreeMap::new(),
                     recorder: Some(recorder),
                     replayer: None,
                 };
-                (live, header.arg.clone())
+                (
+                    live,
+                    Startup {
+                        arg: header.arg.clone(),
+                        net_rules: vec![],
+                    },
+                )
             }
             Mode::Replay => {
                 // SAFETY: forwarded.
@@ -639,6 +739,7 @@ impl Tape {
                     mode,
                     fault: None,
                     objects: vec![],
+                    replay_net_rules: BTreeMap::new(),
                     clocks: BTreeMap::new(),
                     recorder: None,
                     replayer: Some({
@@ -655,7 +756,13 @@ impl Tape {
                         replay
                     }),
                 };
-                (live, stored.arg)
+                (
+                    live,
+                    Startup {
+                        arg: stored.arg,
+                        net_rules: stored.net_rules,
+                    },
+                )
             }
         };
         let cell = cell();
@@ -674,8 +781,14 @@ impl Tape {
                 generation,
                 differs,
             },
-            arg,
+            startup,
         ))
+    }
+
+    fn bind_replay_net_rules(&self, handle: u64, rules: u64) {
+        let mut state = self.cell.state.lock().unwrap();
+        let live = state.live.as_mut().unwrap();
+        live.replay_net_rules.insert(ordinal_of(handle), rules);
     }
 
     /// `std.<kind>.on_tape`: the substitute for the capability `source`, as
@@ -886,6 +999,63 @@ impl Drop for Tape {
     }
 }
 
+const ISSUE: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step = issue;
+
+pub(crate) fn owns(provider: &Provider) -> bool {
+    ptr::fn_addr_eq(provider.issue, ISSUE)
+}
+
+/// The source of a substituted capability, present only during recording.
+pub(crate) fn source(provider: &Provider, handle: u64) -> Option<(Provider, u64)> {
+    let state = cell_of(provider.state).state.lock().unwrap();
+    if state.generation != generation_of(handle) {
+        return None;
+    }
+    let inner = state.live.as_ref()?.objects[ordinal_of(handle) - 1].inner?;
+    Some((inner.provider, inner.handle))
+}
+
+/// The source rules in Record or the inert snapshot (or its intersection)
+/// in Replay. A CLI Net grant stays live through the run's cleanup.
+pub(crate) fn net_rules(provider: &Provider, handle: u64) -> u64 {
+    let state = cell_of(provider.state).state.lock().unwrap();
+    let live = state.live.as_ref().unwrap();
+    let ordinal = ordinal_of(handle);
+    match live.objects[ordinal - 1].inner {
+        Some(inner) => inner.handle,
+        None => live.replay_net_rules[&ordinal],
+    }
+}
+
+/// Successful local narrowing assigns the child ordinal in commit order.
+pub(crate) fn narrow_net(provider: &Provider, parent: u64, rules: u64) -> (u64, schedule::Group) {
+    let _commit = crate::tasks::before_commit();
+    let cell = cell_of(provider.state);
+    let mut state = cell.state.lock().unwrap();
+    let generation = state.generation;
+    let live = state.live.as_mut().unwrap();
+    let task = schedule::task(cell);
+    live.commit(task, crate::tasks::group_index);
+    let inner = live.objects[ordinal_of(parent) - 1]
+        .inner
+        .map(|source| Inner {
+            provider: source.provider,
+            handle: rules,
+        });
+    let ordinal = live.objects.len() + 1;
+    if inner.is_none() {
+        live.replay_net_rules.insert(ordinal, rules);
+    }
+    live.objects.push(Object {
+        inner,
+        open_file: false,
+    });
+    (
+        handle(generation, ordinal),
+        schedule::Group::root(cell, generation),
+    )
+}
+
 fn cell_of(state: *mut u8) -> &'static Cell {
     // SAFETY: a tape provider's state is its leaked cell.
     unsafe { &*state.cast::<Cell>() }
@@ -895,6 +1065,22 @@ fn generation_of(h: u64) -> u32 {
 }
 fn ordinal_of(h: u64) -> usize {
     (h & 0xffff_ffff) as usize
+}
+
+unsafe fn source_handle(request: &Request, inner: Inner) -> u64 {
+    let direction = if matches!(request.operation, RECV_BOUNDED | SEND_PAIR) {
+        // SAFETY: owned network operations pin this operand through delivery.
+        unsafe { (*request.path.cast::<crate::net::NetworkRequest>()).direction }
+    } else {
+        0
+    };
+    inner.handle | u64::from(direction)
+}
+
+unsafe fn denied(request: &Request) -> bool {
+    // SAFETY: the network adapter supplies this operand for address operations.
+    matches!(request.operation, CONNECT | LISTEN)
+        && unsafe { (*request.path.cast::<crate::net::NetworkRequest>()).denied }
 }
 
 /// A first non-ready answer opens W explicitly. Subsequent callbacks keep
@@ -956,8 +1142,12 @@ unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
     drop(s);
     // SAFETY: forward with the source's handle and restore the pinned request.
     let w = unsafe {
-        (*r).handle = inner.handle;
-        let w = (inner.provider.wait)(inner.provider.state, r, token);
+        (*r).handle = source_handle(&*r, inner);
+        let w = if denied(&*r) {
+            Wait::default()
+        } else {
+            (inner.provider.wait)(inner.provider.state, r, token)
+        };
         (*r).handle = h;
         w
     };
@@ -974,6 +1164,7 @@ unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
     w
 }
 
+#[inline(never)]
 unsafe extern "C" fn issue(state: *mut u8, r: *mut Request, token: u64) -> Step {
     let cell = cell_of(state);
     // SAFETY: the driver's pinned request, in the task.
@@ -1043,17 +1234,24 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     let inner = live.objects[ordinal - 1].inner.unwrap();
     let before = r.buffer.len;
     drop(s);
-    r.handle = inner.handle;
-    // SAFETY: source callback, in the task, with its own handle.
-    let step = unsafe { (inner.provider.issue)(inner.provider.state, r, token) };
-    r.handle = h;
+    // SAFETY: address operations pin their permission result through delivery.
+    let denied = unsafe { denied(r) };
+    let step = if denied {
+        done(crate::net::DENIED)
+    } else {
+        r.handle = unsafe { source_handle(r, inner) };
+        // SAFETY: source callback, in the task, with its own handle.
+        let step = unsafe { (inner.provider.issue)(inner.provider.state, r, token) };
+        r.handle = h;
+        step
+    };
     let mut s = cell.state.lock().unwrap();
     let live = s.live.as_mut().unwrap();
     let own = Frame::Issue {
         task,
         op: r.operation,
         object: ordinal as u64,
-        args: Args::of(&args),
+        args,
     };
     if step.kind == STEP_PENDING {
         if let Err(e) = live.recorder.as_mut().unwrap().frame(&own) {
@@ -1093,7 +1291,9 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
         live.fault = Some(refuse(Fault::Io(e)));
     }
     live.schedule.events += 1;
-    s.delivering.insert(key, delivery);
+    if !denied {
+        s.delivering.insert(key, delivery);
+    }
     done(answer)
 }
 
@@ -1110,7 +1310,13 @@ unsafe fn record_out(
     let ordinal = ordinal_of(r.handle);
     let ok = o.status == 0 && o.error == IoError::OK;
     let mut out = Out {
-        status: if o.error == IoError::OK { OK } else { ERROR },
+        status: if socket_op(r.operation) {
+            net_status(o.error.tag)
+        } else if o.error == IoError::OK {
+            OK
+        } else {
+            ERROR
+        },
         value: o.value,
         error: (o.error.tag, u64::from(o.error.code)),
         written: o.written,
@@ -1118,7 +1324,7 @@ unsafe fn record_out(
     };
     let mut answer = o;
     let mut created = None;
-    if ok && matches!(r.operation, OPEN | MKDTEMP) {
+    if ok && matches!(r.operation, OPEN | MKDTEMP | LISTEN | CONNECT | ACCEPT) {
         live.objects.push(Object {
             inner: Some(Inner {
                 provider: inner.provider,
@@ -1140,7 +1346,11 @@ unsafe fn record_out(
             .unwrap_or(0);
         out.value = zz(o.value.wrapping_sub(prev) as i64);
     }
-    if ok && carries_payload(r.operation) && r.buffer.len > before {
+    if ok && matches!(r.operation, LISTEN | ACCEPT) {
+        // SAFETY: the source wrote the address into the pinned network operand.
+        let network = unsafe { &*r.path.cast::<crate::net::NetworkRequest>() };
+        out.payload = address_bytes(network.address).to_vec();
+    } else if ok && carries_payload(r.operation) && r.buffer.len > before {
         // SAFETY: source initialized these bytes in the request's spare carrier.
         out.payload =
             unsafe { std::slice::from_raw_parts(r.buffer.data.add(before), r.buffer.len - before) }
@@ -1163,7 +1373,7 @@ unsafe fn replay(
     generation: u32,
     ordinal: usize,
     r: &mut Request,
-    args: &[u8],
+    args: &Args,
 ) -> Result<Step, Fault> {
     let task = schedule::task_from_live();
     let rep = live.replayer.as_mut().unwrap();
@@ -1193,7 +1403,7 @@ unsafe fn replay(
     if object != ordinal as u64 {
         return Err(rep.diverged(Mismatch::Object));
     }
-    if stored != Args::of(args) {
+    if &stored != args {
         return Err(rep.diverged(Mismatch::Arg));
     }
     let Some(out) = out else {
@@ -1224,7 +1434,11 @@ unsafe fn replay_out(
     match out.status {
         OK => {}
         ERROR if out.error.0 != 0 => {}
-        ABORTED | TIMED_OUT => {}
+        ABORTED | TIMED_OUT => {
+            if socket_op(op) {
+                o.error.tag = if out.status == ABORTED { 7 } else { 6 };
+            }
+        }
         _ => return Err(Fault::Corrupt),
     }
     let ok = out.status == OK;
@@ -1233,7 +1447,7 @@ unsafe fn replay_out(
         o.value = prev.wrapping_add(unzz(out.value) as u64);
         live.clocks.insert((op, object), o.value);
     }
-    if ok && matches!(op, OPEN | MKDTEMP) {
+    if ok && matches!(op, OPEN | MKDTEMP | LISTEN | CONNECT | ACCEPT) {
         if out.value != live.objects.len() as u64 + 1 {
             return Err(Fault::Corrupt);
         }
@@ -1243,21 +1457,40 @@ unsafe fn replay_out(
         });
         o.value = handle(generation, live.objects.len());
     }
-    if carries_payload(op) {
-        let spare = r.buffer.capacity - r.buffer.len;
-        if out.payload.len() > spare || (op == READ && ok && out.payload.len() as u64 != out.value)
-        {
+    if matches!(op, LISTEN | ACCEPT) {
+        if ok {
+            // SAFETY: this request pins the writable address through delivery.
+            let network = unsafe { &mut *r.path.cast_mut().cast::<crate::net::NetworkRequest>() };
+            let mut bytes = Cursor::new(&out.payload);
+            network.address = crate::net::Address {
+                family: bytes.u8()?,
+                hi: u64::from_le_bytes(bytes.fixed()?),
+                lo: u64::from_le_bytes(bytes.fixed()?),
+                port: u16::from_le_bytes(bytes.fixed()?),
+            };
+        }
+    } else if carries_payload(op) {
+        let spare = r.buffer.capacity.saturating_sub(r.buffer.len);
+        if out.payload.len() > spare {
             return Err(Fault::Corrupt);
         }
-        // SAFETY: the payload fits the carrier's spare capacity.
-        unsafe {
-            ptr::copy_nonoverlapping(
-                out.payload.as_ptr(),
-                r.buffer.data.add(r.buffer.len),
-                out.payload.len(),
-            );
+        if !out.payload.is_empty() {
+            // SAFETY: the payload fits the carrier's spare capacity.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    out.payload.as_ptr(),
+                    r.buffer.data.add(r.buffer.len),
+                    out.payload.len(),
+                );
+            }
+            r.buffer.len += out.payload.len();
         }
-        r.buffer.len += out.payload.len();
+    } else if op == SEND_PAIR && ok {
+        // SAFETY: the send adapter pins the tail carrier through delivery.
+        let tail = unsafe { &*(*r.path.cast::<crate::net::NetworkRequest>()).send_tail };
+        if out.value > (r.buffer.len as u64).saturating_add(tail.len as u64) {
+            return Err(Fault::Corrupt);
+        }
     }
     Ok(o)
 }
@@ -1324,7 +1557,7 @@ unsafe fn complete(state: *mut u8, r: *mut Request, token: u64, why: Option<u8>)
     // SAFETY: forward with the pinned inner provider's own handle.
     let step = unsafe {
         let h = (*r).handle;
-        (*r).handle = p.handle;
+        (*r).handle = source_handle(&*r, p);
         let step = match why {
             Some(why) => done((p.provider.abort)(p.provider.state, r, token, why)),
             None => (p.provider.resume)(p.provider.state, r, token),
@@ -1349,7 +1582,9 @@ unsafe fn complete(state: *mut u8, r: *mut Request, token: u64, why: Option<u8>)
             step.outcome,
         )
     };
-    if let Some(why) = why {
+    if let Some(why) = why
+        && !socket_op(unsafe { (*r).operation })
+    {
         out.status = if why == ABORT_CANCEL {
             ABORTED
         } else {
@@ -1376,7 +1611,7 @@ unsafe extern "C" fn deliver(state: *mut u8, r: *mut Request, outcome: Outcome) 
     // SAFETY: the source's deliver with its own handle, in the task.
     unsafe {
         let h = (*r).handle;
-        (*r).handle = d.inner.handle;
+        (*r).handle = source_handle(&*r, d.inner);
         let mut o = (d.inner.provider.deliver)(d.inner.provider.state, r, d.outcome);
         (*r).handle = h;
         if let Some(created) = d.created {

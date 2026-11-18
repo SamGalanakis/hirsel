@@ -6,10 +6,11 @@
 //! block's xxh3-64 check, which covers the tape id, the block's flags, magic,
 //! sequence number and length, so a block from another tape or another place
 //! fails. Discovery is sequential from offset 0 and never resynchronises.
+use hirsel_core_net::Rule;
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 2;
+pub const FORMAT: u16 = 3;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// Block flags: closed for a durable barrier; the tape's last block.
 pub const BARRIER: u8 = 1;
@@ -213,7 +214,7 @@ pub struct Header {
     pub tape_id: [u8; 16],
     pub identity: Vec<u8>,
     /// The code's revision: the entry's code revision for a Run tape, the
-    /// called function's for a Call tape (format 2, gavel 7). No compiler,
+    /// called function's for a Call tape. No compiler,
     /// backend or runtime identity is in it.
     pub revision: [u8; 32],
     pub charge_policy: u32,
@@ -221,11 +222,48 @@ pub struct Header {
     pub bound: u64,
     pub chooser: u8,
     pub arg: Vec<u8>,
-    pub grants: Vec<u8>,
+    /// Inert snapshot of the Run's configured Net rules. Empty for a Call.
+    pub net_rules: Vec<Rule>,
 }
 /// The complete encoded header does not fit in block zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeaderTooLarge;
+
+const NET_KIND: u8 = 1;
+const NET_RULE_LEN: usize = 23;
+
+fn read_net_rule(bytes: &[u8]) -> Rule {
+    Rule {
+        dir: bytes[0],
+        family: bytes[1],
+        hi: u64::from_le_bytes(bytes[2..10].try_into().unwrap()),
+        lo: u64::from_le_bytes(bytes[10..18].try_into().unwrap()),
+        bits: bytes[18],
+        first: u16::from_le_bytes(bytes[19..21].try_into().unwrap()),
+        last: u16::from_le_bytes(bytes[21..23].try_into().unwrap()),
+    }
+}
+
+fn read_net_rules(bytes: &[u8]) -> Result<Vec<Rule>, Corrupt> {
+    if bytes.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut c = Cursor::new(bytes);
+    if c.u8()? != NET_KIND {
+        return Err(Corrupt);
+    }
+    let count = usize::try_from(c.varint()?).map_err(|_| Corrupt)?;
+    let len = count.checked_mul(NET_RULE_LEN).ok_or(Corrupt)?;
+    let rules = c.take(len)?.chunks_exact(NET_RULE_LEN).map(read_net_rule);
+    if count == 0 || !c.done() || !rules.clone().all(Rule::valid) {
+        return Err(Corrupt);
+    }
+    Ok(rules.collect())
+}
+
+fn varint_len(value: usize) -> usize {
+    (usize::BITS - value.leading_zeros()).div_ceil(7).max(1) as usize
+}
 
 impl Header {
     pub fn encoded_len(
@@ -238,8 +276,7 @@ impl Header {
             if field > MAX_LEN {
                 return Err(HeaderTooLarge);
             }
-            let bits = usize::BITS - field.leading_zeros();
-            len += field + bits.div_ceil(7).max(1) as usize;
+            len += field + varint_len(field);
         }
         if len > MAX_LEN {
             return Err(HeaderTooLarge);
@@ -248,7 +285,16 @@ impl Header {
     }
 
     pub fn encode(&self, revision: [u8; 32]) -> Result<Vec<u8>, HeaderTooLarge> {
-        let len = Self::encoded_len(self.identity.len(), self.arg.len(), self.grants.len())?;
+        let count = self.net_rules.len();
+        let grants_len = if count == 0 {
+            0
+        } else {
+            count
+                .checked_mul(NET_RULE_LEN)
+                .and_then(|len| len.checked_add(1 + varint_len(count)))
+                .ok_or(HeaderTooLarge)?
+        };
+        let len = Self::encoded_len(self.identity.len(), self.arg.len(), grants_len)?;
         let mut out = Vec::with_capacity(len);
         out.extend_from_slice(&FORMAT.to_le_bytes());
         out.push(self.kind);
@@ -261,10 +307,25 @@ impl Header {
         out.extend_from_slice(&self.bound.to_le_bytes());
         out.push(self.chooser);
         put_bytes(&mut out, &self.arg);
-        put_bytes(&mut out, &self.grants);
+        put_varint(&mut out, grants_len as u64);
+        if count != 0 {
+            out.push(NET_KIND);
+            put_varint(&mut out, count as u64);
+            for rule in &self.net_rules {
+                out.extend_from_slice(&[rule.dir, rule.family]);
+                out.extend_from_slice(&rule.hi.to_le_bytes());
+                out.extend_from_slice(&rule.lo.to_le_bytes());
+                out.push(rule.bits);
+                out.extend_from_slice(&rule.first.to_le_bytes());
+                out.extend_from_slice(&rule.last.to_le_bytes());
+            }
+        }
         Ok(out)
     }
     pub fn decode(payload: &[u8]) -> Result<Self, Corrupt> {
+        if payload.len() > MAX_LEN {
+            return Err(Corrupt);
+        }
         let mut c = Cursor::new(payload);
         if u16::from_le_bytes(c.fixed()?) != FORMAT {
             return Err(Corrupt);
@@ -275,7 +336,7 @@ impl Header {
             return Err(Corrupt);
         }
         let tape_id = c.fixed()?;
-        let identity = c.bytes()?.to_vec();
+        let identity = c.bytes()?;
         let revision = c.fixed()?;
         let charge_policy = u32::from_le_bytes(c.fixed()?);
         let limit = u64::from_le_bytes(c.fixed()?);
@@ -284,26 +345,24 @@ impl Header {
         if !matches!(chooser, CHOOSER_FIFO | CHOOSER_COMMIT) {
             return Err(Corrupt);
         }
-        let arg = c.bytes()?.to_vec();
-        let count = c.varint()?;
-        let grants = c
-            .take(usize::try_from(count).map_err(|_| Corrupt)?)?
-            .to_vec();
+        let arg = c.bytes()?;
+        let grants = c.bytes()?;
         if (kind == KIND_CALL && !grants.is_empty()) || !c.done() {
             return Err(Corrupt);
         }
+        let net_rules = read_net_rules(grants)?;
         Ok(Self {
             kind,
             mode,
             tape_id,
-            identity,
+            identity: identity.to_vec(),
             revision,
             charge_policy,
             limit,
             bound,
             chooser,
-            arg,
-            grants,
+            arg: arg.to_vec(),
+            net_rules,
         })
     }
 }
@@ -487,10 +546,20 @@ pub enum Args {
 }
 impl Args {
     pub fn of(bytes: &[u8]) -> Self {
-        if bytes.len() <= ARGS_LITERAL {
-            Args::Literal(bytes.to_vec())
+        Self::of_parts(&[bytes])
+    }
+    pub fn of_parts(parts: &[&[u8]]) -> Self {
+        let len = parts
+            .iter()
+            .fold(0usize, |len, part| len.saturating_add(part.len()));
+        if len <= ARGS_LITERAL {
+            let mut bytes = Vec::with_capacity(len);
+            for part in parts {
+                bytes.extend_from_slice(part);
+            }
+            Args::Literal(bytes)
         } else {
-            Args::Digest(xxh3(&[bytes]))
+            Args::Digest(xxh3(parts))
         }
     }
     fn encode(&self, out: &mut Vec<u8>) {
@@ -521,7 +590,7 @@ pub fn writes(op: u8) -> bool {
 }
 pub fn carries_payload(op: u8) -> bool {
     use crate::op::*;
-    matches!(op, READ | MKDTEMP | RANDOM)
+    matches!(op, READ | MKDTEMP | RANDOM | LISTEN | ACCEPT | RECV_BOUNDED)
 }
 
 /// An outcome as the tape stores it. `value` is stored as given: the recorder
@@ -533,8 +602,7 @@ pub struct Out {
     /// Error tag and code, present exactly when `status` is ERROR.
     pub error: (u8, u64),
     pub written: u64,
-    /// Read's bytes (all `value` of them, joined from DATA frames) and
-    /// mkdtemp's suffix.
+    /// Input bytes, a temporary-directory suffix, or a socket address.
     pub payload: Vec<u8>,
 }
 impl Out {
@@ -576,6 +644,21 @@ impl Out {
             if b.len() > PAYLOAD_CHUNK {
                 return Err(Corrupt);
             }
+            if matches!(op, op::LISTEN | op::ACCEPT) {
+                if status == OK {
+                    let [family, rest @ ..] = b else {
+                        return Err(Corrupt);
+                    };
+                    if b.len() != 19
+                        || *family > 1
+                        || (*family == 0 && rest[..8].iter().chain(&rest[12..16]).any(|&n| n != 0))
+                    {
+                        return Err(Corrupt);
+                    }
+                } else if !b.is_empty() {
+                    return Err(Corrupt);
+                }
+            }
             b.to_vec()
         } else {
             vec![]
@@ -588,15 +671,15 @@ impl Out {
             payload,
         })
     }
-    /// How many payload bytes this outcome needs in all: a successful read
-    /// carries `value` bytes, everything else only its first chunk.
-    fn needs(&self, op: u8) -> usize {
-        if op == crate::op::READ && self.status == OK {
-            self.value as usize
-        } else if op == crate::op::RANDOM {
-            self.written as usize
-        } else {
-            self.payload.len()
+    /// Total payload length determines whether DATA frames follow.
+    fn needs(&self, op: u8) -> Result<usize, Corrupt> {
+        match op {
+            op::READ | op::RECV_BOUNDED if self.status == OK => {
+                usize::try_from(self.value).map_err(|_| Corrupt)
+            }
+            op::RECV_BOUNDED => Ok(0),
+            op::RANDOM => usize::try_from(self.written).map_err(|_| Corrupt),
+            _ => Ok(self.payload.len()),
         }
     }
 }
@@ -824,12 +907,12 @@ impl Decoder {
                     let task = self.task(head, &mut c)?;
                     let op = self.issued.remove(&task).ok_or(Corrupt)?;
                     let out = Out::decode(op, &mut c)?;
-                    let needs = out.needs(op);
+                    let needs = out.needs(op)?;
                     let f = Frame::Done { gap, task, out };
-                    if self.hold(f.clone(), needs)? {
+                    let Some(frame) = self.complete(f, needs)? else {
                         continue;
-                    }
-                    f
+                    };
+                    frame
                 }
                 F_OP => {
                     let task = self.task(head, &mut c)?;
@@ -837,7 +920,7 @@ impl Decoder {
                     let object = c.varint()?;
                     let args = Args::decode(&mut c)?;
                     let out = Out::decode(op, &mut c)?;
-                    let needs = out.needs(op);
+                    let needs = out.needs(op)?;
                     let f = Frame::Op {
                         task,
                         op,
@@ -845,10 +928,10 @@ impl Decoder {
                         args,
                         out,
                     };
-                    if self.hold(f.clone(), needs)? {
+                    let Some(frame) = self.complete(f, needs)? else {
                         continue;
-                    }
-                    f
+                    };
+                    frame
                 }
                 F_WAKE => {
                     let gap = c.varint()?;
@@ -894,10 +977,10 @@ impl Decoder {
                         return Err(Corrupt);
                     }
                     out.payload.extend_from_slice(chunk);
-                    if self.hold(f.clone(), needs)? {
+                    let Some(frame) = self.complete(f, needs)? else {
                         continue;
-                    }
-                    f
+                    };
+                    frame
                 }
                 F_END => {
                     let gap = c.varint()?;
@@ -924,18 +1007,17 @@ impl Decoder {
         }
         Ok(frames)
     }
-    /// Keep a frame whose payload is short of `needs` until its DATA frames
-    /// arrive; true when it was kept.
-    fn hold(&mut self, f: Frame, needs: usize) -> Result<bool, Corrupt> {
+    /// Keep a frame whose payload is short of `needs` until its DATA frames arrive.
+    fn complete(&mut self, f: Frame, needs: usize) -> Result<Option<Frame>, Corrupt> {
         let (Frame::Op { out, .. } | Frame::Done { out, .. }) = &f else {
             unreachable!()
         };
         match out.payload.len().cmp(&needs) {
             std::cmp::Ordering::Less => {
                 self.open = Some((f, needs));
-                Ok(true)
+                Ok(None)
             }
-            std::cmp::Ordering::Equal => Ok(false),
+            std::cmp::Ordering::Equal => Ok(Some(f)),
             std::cmp::Ordering::Greater => Err(Corrupt),
         }
     }

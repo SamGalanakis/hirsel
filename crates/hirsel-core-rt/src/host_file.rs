@@ -56,6 +56,7 @@ pub(crate) struct Registry(Mutex<Entries>);
 pub(crate) struct Files {
     pub(crate) sockets: hirsel_core_net::Sockets,
     pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
+    pub(crate) net_tape: Option<crate::net::SocketTape>,
     // Children inherit these entries without borrowing the scheduler's sockets.
     pub(crate) registry: Registry,
 }

@@ -2005,7 +2005,7 @@ struct Ran {
     /// The output file's bytes' hash, when the request names one and it exists.
     output: Option<ContentHash>,
 }
-const CHILD_MARK: &str = "\u{1}request-child\n";
+pub(super) const CHILD_MARK: &str = "\u{1}request-child\n";
 /// The child: run the request in `REQUEST_CHILD_ARGS` as `hirsel` does.
 #[test]
 #[ignore = "explicit native integration target"]
@@ -2020,13 +2020,18 @@ fn request_child() {
     std::io::stderr().write_all(CHILD_MARK.as_bytes()).unwrap();
     crate::request::main(args)
 }
-/// Exercise the real CLI request in the existing process child harness.
-pub(super) fn tape_request(args: &[String], directory: &Path) -> (Option<i32>, String, String) {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+pub(super) fn tape_request_command(args: &[String], directory: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
         .args(["--exact", "native::tests::process::request_child", "--ignored", "--nocapture", "--test-threads=1"])
         .env("REQUEST_CHILD_ARGS", serde_json::to_string(args).unwrap())
-        .current_dir(directory)
-        .output().unwrap();
+        .current_dir(directory);
+    command
+}
+
+/// Exercise the real CLI request in the existing process child harness.
+pub(super) fn tape_request(args: &[String], directory: &Path) -> (Option<i32>, String, String) {
+    let output = tape_request_command(args, directory).output().unwrap();
     let after = |bytes: &[u8]| {
         let text=String::from_utf8_lossy(bytes);
         let at=text.find(CHILD_MARK).expect("request child started")+CHILD_MARK.len();

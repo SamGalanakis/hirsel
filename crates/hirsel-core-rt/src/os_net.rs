@@ -422,9 +422,15 @@ unsafe fn finish(request: &Request, n: &mut NetworkRequest, outcome: Outcome) ->
 /// substituted clock translates by its own reading, saturating at now.
 unsafe fn pending_deadline(n: &NetworkRequest) -> Option<u64> {
     unsafe {
-        n.until.map(|(p, clock, at)| {
+        n.until.and_then(|(p, clock, at)| {
+            // This translation is host scheduling, outside the program's clock reads.
+            let (p, clock) = if crate::tape::owns(&p) {
+                crate::tape::source(&p, clock)?
+            } else {
+                (p, clock)
+            };
             if crate::os::owns(&p) {
-                return crate::os::epoch(p.state).saturating_add(at);
+                return Some(crate::os::epoch(p.state).saturating_add(at));
             }
             let mut r = Request {
                 operation: MONO_NS,
@@ -441,7 +447,7 @@ unsafe fn pending_deadline(n: &NetworkRequest) -> Option<u64> {
             };
             let step = (p.issue)(p.state, &mut r, 0);
             let now = (p.deliver)(p.state, &mut r, step.outcome).value;
-            crate::os::monotonic_ns().saturating_add(at.saturating_sub(now))
+            Some(crate::os::monotonic_ns().saturating_add(at.saturating_sub(now)))
         })
     }
 }

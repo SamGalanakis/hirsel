@@ -210,11 +210,18 @@ pub(crate) unsafe fn drive(
                 return CANCELLED;
             }
         }
-        if matches!(operation, CONNECT | LISTEN) && !crate::net::permitted(&*request) {
-            return Outcome {
-                error: IoError { tag: 1, code: 0 },
-                ..Outcome::default()
-            };
+        if matches!(operation, CONNECT | LISTEN) {
+            if crate::tape::owns(&*provider) {
+                if let Some((_, handle)) = crate::tape::source(&*provider, (*request).handle) {
+                    (*(*request)
+                        .path
+                        .cast_mut()
+                        .cast::<crate::net::NetworkRequest>())
+                    .denied = !crate::net::permitted(&*request, handle);
+                }
+            } else if !crate::net::permitted(&*request, (*request).handle) {
+                return crate::net::DENIED;
+            }
         }
         let outcome = crate::tasks::provider_operation(context, &*provider, request, issued);
         if outcome.status == STATUS_REFUSED {

@@ -1,5 +1,6 @@
 use hirsel_wire_bench::{
-    DONE_MAX, MAX_FRAME, OUTCOME_RESERVE, REPLY_MAX, Result, codec, reference,
+    DONE_MAX, MAX_FRAME, OUTCOME_RESERVE, REPLY_MAX, Result, WS_MAX_WRITE_BUFFER, WS_READ_BUFFER,
+    codec, reference,
 };
 
 #[tokio::main(worker_threads = 2)]
@@ -34,7 +35,7 @@ async fn main() -> Result<()> {
     };
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     println!(
-        "LISTEN {} limits={limits:?} max_frame={MAX_FRAME} done_max={DONE_MAX} reply_max={REPLY_MAX} outcome_reserve={OUTCOME_RESERVE} rows_allowance_one={} budget=1048576 read_buffer=4096",
+        "LISTEN {} limits={limits:?} max_frame={MAX_FRAME} done_max={DONE_MAX} reply_max={REPLY_MAX} outcome_reserve={OUTCOME_RESERVE} rows_allowance_one={} budget=1048576 read_buffer={WS_READ_BUFFER} write_buffer=0 max_write_buffer={WS_MAX_WRITE_BUFFER}",
         listener.local_addr()?,
         MAX_FRAME - OUTCOME_RESERVE - 28
     );

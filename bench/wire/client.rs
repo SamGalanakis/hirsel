@@ -28,13 +28,12 @@ impl Client {
         request
             .headers_mut()
             .insert("Sec-WebSocket-Protocol", "hirsel.1".parse()?);
-        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-            .read_buffer_size(4096)
-            .write_buffer_size(0)
-            .max_message_size(Some(crate::MAX_FRAME))
-            .max_frame_size(Some(crate::MAX_FRAME));
-        let (mut socket, _) =
-            tokio_tungstenite::connect_async_with_config(request, Some(config), true).await?;
+        let (mut socket, _) = tokio_tungstenite::connect_async_with_config(
+            request,
+            Some(crate::websocket_config()),
+            true,
+        )
+        .await?;
         if let MaybeTlsStream::Plain(tcp) = socket.get_ref() {
             tcp.set_nodelay(true)?;
         }
@@ -88,12 +87,13 @@ impl Client {
         self.send(Frame::Subscribe(self.sub, self.board_slot, vec![], None))
             .await
     }
-    pub async fn snapshot(&mut self) -> Result<()> {
+    pub async fn snapshot(&mut self) -> Result<usize> {
         self.subscribe().await?;
         loop {
-            if matches!(self.receive().await?, Frame::Batch(_, complete, _, _) if complete.contains(&self.sub))
+            if let Frame::Batch(_, complete, rows, _) = self.receive().await?
+                && complete.contains(&self.sub)
             {
-                return Ok(());
+                return Ok(rows.iter().filter(|row| row.sub == self.sub).count());
             }
         }
     }

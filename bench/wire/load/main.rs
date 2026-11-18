@@ -3,7 +3,9 @@ use hirsel_wire_bench::{Result, client, codec, load};
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let mode = args.next().ok_or("wire-load converge|run|echo [options]")?;
+    let mode = args
+        .next()
+        .ok_or("wire-load converge|run|memory-subscribed|memory-unsubscribed|echo [options]")?;
     if mode == "codec" {
         use std::io::{Read, Write};
         let mut bytes = Vec::new();
@@ -23,6 +25,7 @@ async fn main() -> Result<()> {
     let mut toggles = 1000;
     let mut pace = 10;
     let mut samples = 2000;
+    let mut server_pid = None;
     while let Some(arg) = args.next() {
         let value = args.next().ok_or("missing option value")?;
         match arg.as_str() {
@@ -34,6 +37,7 @@ async fn main() -> Result<()> {
             "--toggles" => toggles = value.parse()?,
             "--pace" => pace = value.parse()?,
             "--samples" => samples = value.parse()?,
+            "--server-pid" => server_pid = Some(value.parse()?),
             _ => return Err(format!("unknown option {arg}").into()),
         }
     }
@@ -46,6 +50,21 @@ async fn main() -> Result<()> {
                 return Err("load incomplete: missed arrivals or observations".into());
             }
         }
+        "memory-subscribed" | "memory-unsubscribed" => {
+            let pid = server_pid.ok_or("memory measurement needs --server-pid")?;
+            let result = load::memory(
+                &url,
+                &wants,
+                config.clients,
+                mode == "memory-subscribed",
+                pid,
+            )
+            .await?;
+            println!("{result}");
+            if result["complete"] != true {
+                return Err("memory sample censored by session admission".into());
+            }
+        }
         "converge" => {
             let result = client::converge(&url, &wants, config.clients, toggles, pace).await?;
             println!(
@@ -53,7 +72,7 @@ async fn main() -> Result<()> {
                 result.clients, result.returned, result.reconnects, result.version
             );
         }
-        _ => return Err("expected converge, run or echo".into()),
+        _ => return Err("unknown wire-load mode".into()),
     }
     Ok(())
 }

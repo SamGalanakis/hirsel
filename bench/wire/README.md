@@ -62,8 +62,9 @@ next refusal closes with 1008. `DONE_MAX` is the constant 8,192 B, with an 8,172
 Returned payload bound. The outcome reserve is 41,140 B at q=4, leaving 220,976 B
 for rows in a Batch completing one subscription. Toggle's sole application
 reply is the five-byte value codec of `Ok(bool)`, within that bound by construction.
-Server and load sockets use 4 KiB read buffers, zero
-write-buffer thresholds, and 256 KiB frame/message caps. Kernel socket buffers
+Server, load, and echo sockets use 8 KiB read buffers, zero write-buffer
+thresholds, and 256 KiB frame/message caps. The write buffer can hold one
+maximum wire frame and one maximum control frame (262,297 B total). Kernel socket buffers
 are unchanged. The defaults are 32 sessions per IP, 10 new principals per IP per minute, and
 20 calls/s per principal with burst 40. The command above applies the prescribed
 benchmark overrides of 20,000 sessions and new principals per IP and 10^9 calls/s
@@ -77,9 +78,10 @@ of replies. Offered arrival i toggles bit i modulo 1,000,000, and connections
 are selected round-robin. This deterministic input is identical for both servers;
 the reported coalescing counts expose how many calls share a publication.
 Each connection has one queued arrival; a full queue increments
-`missed_arrivals`. The next transmitted position advances only on admission.
-Missed arrivals or unmatched observations make the command fail after reporting
-its JSON, so a lower completed rate cannot masquerade as the offered rate.
+`missed_arrivals`. A caller's local position advances when an arrival enters
+its queue. The `admitted` count records calls sent to the socket, and
+`returned` records calls confirmed by a durable outcome. Incomplete runs
+report the counts collected before the failure and exit with a failure status.
 
 Latency correlates the caller's durable Batch version with the independent
 observer's first Batch at that version or later, retaining timestamps even if the
@@ -91,7 +93,16 @@ and generator delay. Echo RTT reports the framing/socket/clock floor and CPU
 overhead separately. For the W9 throughput search, vary `--rate` while keeping
 N=1,000 and the duration fixed; a qualifying run must be complete and have
 scheduled-to-observe p99 at most 100 ms. Report the RSS of the reference process
-separately from the generator.
+separately from the generator. If connection setup fails, the load reports the
+number of established subscriptions and the error before returning a failure.
+No calls have been offered at that point.
+
+On a fresh board, run `wire-load memory-subscribed` and
+`wire-load memory-unsubscribed` with `--clients 10000 --server-pid PID` on
+separate server runs. Both seed and verify all 1,954 chunks, then hold the
+sessions open through the process memory sample. In the subscribed run every
+session must complete the same snapshot. The output records the reached
+population if an admission limit prevents the requested sample.
 
 `wire-load codec` reads one binary Frame from stdin and writes its strict
 re-encoding to stdout for the third-codec differential driver.

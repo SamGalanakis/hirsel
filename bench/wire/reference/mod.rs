@@ -17,7 +17,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::{
     Message,
-    protocol::{CloseFrame, WebSocketConfig, frame::coding::CloseCode},
+    protocol::{CloseFrame, frame::coding::CloseCode},
 };
 
 const WAL_MAGIC: &[u8] = b"WIREW7\0\x01";
@@ -668,14 +668,13 @@ async fn session(
     launch: Arc<Launch>,
 ) -> Result<()> {
     socket.set_nodelay(true)?;
-    let config = WebSocketConfig::default()
-        .read_buffer_size(4096)
-        .write_buffer_size(0)
-        .max_message_size(Some(MAX_FRAME))
-        .max_frame_size(Some(MAX_FRAME));
     let mut ws = tokio::time::timeout(
         Duration::from_millis(5000),
-        tokio_tungstenite::accept_hdr_async_with_config(socket, handshake, Some(config)),
+        tokio_tungstenite::accept_hdr_async_with_config(
+            socket,
+            handshake,
+            Some(crate::websocket_config()),
+        ),
     )
     .await??;
     let first = tokio::time::timeout(Duration::from_millis(10000), async {

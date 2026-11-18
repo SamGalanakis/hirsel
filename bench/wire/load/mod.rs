@@ -1,6 +1,6 @@
 use crate::client::{Client, returned};
 use crate::codec::{self, Frame, Want};
-use crate::{BITS, Result};
+use crate::{BITS, CHUNKS, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -76,11 +76,22 @@ pub async fn run(url: &str, wants: &[Want], config: Config) -> Result<Value> {
     if config.clients < 2 || config.rate == 0 || config.seconds == 0 {
         return Err("load requires >=2 clients and positive rate/seconds".into());
     }
-    let mut clients = Vec::new();
+    let offered = u64::from(config.rate) * u64::from(config.seconds);
+    let mut clients = Vec::with_capacity(config.clients);
     for _ in 0..config.clients {
-        let mut c = Client::connect(url, wants, None).await?;
-        c.snapshot().await?;
-        clients.push(c);
+        match connect_subscribed(url, wants).await {
+            Ok(client) => clients.push(client),
+            Err(error) => {
+                return Ok(json!({
+                    "complete": false, "connections": clients.len(), "requested_connections": config.clients,
+                    "setup_error": error.to_string(), "planned_offers": offered,
+                    "rate_per_second": config.rate, "seconds": config.seconds,
+                    "offered": 0, "admitted": 0, "returned": 0, "observed": 0,
+                    "calls_sharing_observer_batch": 0, "schedule_lag": distribution(&mut []),
+                    "socket_to_observe": distribution(&mut []), "scheduled_to_observe": distribution(&mut []),
+                }));
+            }
+        }
     }
     let observer = clients.remove(0);
     let (events, event_rx) = mpsc::channel(8192);
@@ -94,7 +105,6 @@ pub async fn run(url: &str, wants: &[Want], config: Config) -> Result<Value> {
         arrivals.push(tx);
         tasks.spawn(caller(owner, client, rx, events.clone()));
     }
-    let offered = u64::from(config.rate) * u64::from(config.seconds);
     let start = Instant::now() + Duration::from_millis(20);
     let cpu = cpu_seconds()?;
     let wall = Instant::now();
@@ -117,16 +127,39 @@ pub async fn run(url: &str, wants: &[Want], config: Config) -> Result<Value> {
         }
     }
     drop(arrivals);
-    while let Some(r) = tasks.join_next().await {
-        r??;
+    let mut run_error = None;
+    while let Some(joined) = tasks.join_next().await {
+        let outcome = joined
+            .map_err(crate::Error::from)
+            .and_then(|outcome| outcome);
+        run_error = run_error.or_else(|| outcome.err());
     }
-    // A snapshot gives a final-version barrier without changing the observer's cache.
-    let mut barrier = Client::connect(url, wants, None).await?;
-    barrier.snapshot().await?;
-    let final_version = barrier.version;
-    barrier.socket.close(None).await?;
-    let _ = stop_tx.send(final_version);
-    observe.await??;
+    if run_error.is_none() {
+        // A snapshot gives a final-version barrier without changing the observer's cache.
+        let barrier = async {
+            let mut barrier = connect_subscribed(url, wants).await?;
+            let final_version = barrier.version;
+            barrier.socket.close(None).await?;
+            Ok::<_, crate::Error>(final_version)
+        }
+        .await;
+        match barrier {
+            Ok(final_version) => {
+                let _ = stop_tx.send(final_version);
+            }
+            Err(error) => {
+                run_error = Some(error);
+                drop(stop_tx);
+            }
+        }
+    } else {
+        drop(stop_tx);
+    }
+    let observation = observe
+        .await
+        .map_err(crate::Error::from)
+        .and_then(|outcome| outcome);
+    run_error = run_error.or_else(|| observation.err());
     drop(events);
     let mut result = collector.await??;
     let cpu = cpu_seconds()? - cpu;
@@ -139,11 +172,90 @@ pub async fn run(url: &str, wants: &[Want], config: Config) -> Result<Value> {
     result["wall_seconds"] = json!(elapsed);
     result["generator_cpu_seconds"] = json!(cpu);
     result["generator_cpu_us_per_offered"] = json!(cpu * 1e6 / offered as f64);
-    result["complete"] = json!(missed == 0 && result["observed"].as_u64() == Some(offered));
+    result["complete"] =
+        json!(run_error.is_none() && missed == 0 && result["observed"].as_u64() == Some(offered));
+    result["run_error"] = json!(run_error.map(|error| error.to_string()));
     result["clock"] = json!(
         "one process monotonic clock; scheduled arrival and immediately-before-socket-send timestamps"
     );
     Ok(result)
+}
+
+async fn connect_subscribed(url: &str, wants: &[Want]) -> Result<Client> {
+    let mut client = Client::connect(url, wants, None).await?;
+    client.snapshot().await?;
+    Ok(client)
+}
+
+/// Seed one row per chunk, then keep the requested number of sockets live
+/// until the server's settled RSS has been read.
+pub async fn memory(
+    url: &str,
+    wants: &[Want],
+    count: usize,
+    subscribed: bool,
+    pid: u32,
+) -> Result<Value> {
+    let wall = Instant::now();
+    // At most 32 calls per principal, below the default burst of 40.
+    for chunks in (0..CHUNKS).step_by(32) {
+        let mut writer = Client::connect(url, wants, None).await?;
+        for (p, chunk) in (chunks..(chunks + 32).min(CHUNKS)).enumerate() {
+            writer.start_call(0, p as u64, chunk << 9).await?;
+            writer.finish_call(0, p as u64).await?;
+        }
+        writer.socket.close(None).await?;
+    }
+    let mut witness = Client::connect(url, wants, None).await?;
+    let rows = witness.snapshot().await?;
+    if rows != CHUNKS as usize || !witness.image.iter().step_by(64).all(|byte| *byte == 1) {
+        return Err(format!(
+            "seed witness expected {CHUNKS} chunks and each first bit set, found {rows} rows"
+        )
+        .into());
+    }
+    let version = witness.version;
+    witness.socket.close(None).await?;
+    let mut sockets = Vec::with_capacity(count);
+    let mut setup_error = None;
+    for _ in 0..count {
+        let result = async {
+            let mut client = Client::connect(url, wants, None).await?;
+            if subscribed && (client.snapshot().await? != rows || client.image != witness.image) {
+                return Err("subscribed session received an incomplete snapshot".into());
+            }
+            Ok::<_, crate::Error>(client.socket)
+        }
+        .await;
+        match result {
+            Ok(socket) => sockets.push(socket),
+            Err(error) => {
+                setup_error = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
+    let smaps = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))?;
+    let field = |text: &str, name: &str| -> Result<u64> {
+        Ok(text
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.split_whitespace().next())
+            .ok_or_else(|| format!("missing process metric {name}"))?
+            .parse()?)
+    };
+    Ok(json!({
+        "complete": sockets.len() == count,
+        "connections": sockets.len(), "requested_connections": count, "subscribed": subscribed,
+        "setup_error": setup_error, "seeded_chunks": rows, "seed_version": version,
+        "server_rss_bytes": field(&smaps, "Rss:")? * 1024,
+        "server_virtual_bytes": field(&status, "VmSize:")? * 1024,
+        "server_peak_rss_bytes": field(&status, "VmHWM:")? * 1024,
+        "server_threads": field(&status, "Threads:")?,
+        "wall_seconds": wall.elapsed().as_secs_f64(),
+    }))
 }
 
 async fn caller(
@@ -297,7 +409,9 @@ pub async fn echo(samples: usize) -> Result<Value> {
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await?;
         socket.set_nodelay(true)?;
-        let mut ws = tokio_tungstenite::accept_async(socket).await?;
+        let mut ws =
+            tokio_tungstenite::accept_async_with_config(socket, Some(crate::websocket_config()))
+                .await?;
         while let Some(message) = ws.next().await {
             match message? {
                 Message::Binary(b) => ws.send(Message::Binary(b)).await?,
@@ -307,7 +421,12 @@ pub async fn echo(samples: usize) -> Result<Value> {
         }
         Ok::<_, crate::Error>(())
     });
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/echo")).await?;
+    let (mut ws, _) = tokio_tungstenite::connect_async_with_config(
+        format!("ws://{addr}/echo"),
+        Some(crate::websocket_config()),
+        true,
+    )
+    .await?;
     if let tokio_tungstenite::MaybeTlsStream::Plain(socket) = ws.get_ref() {
         socket.set_nodelay(true)?;
     }

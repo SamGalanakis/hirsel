@@ -78,9 +78,11 @@ const fresh = (generation: bigint): Installation => ({version: RECOVERY_VERSION,
 export class ClientError extends Error {
   constructor(public readonly code: string) { super(code); this.name = 'ClientError'; }
 }
+type RowDelivery = { onRows: (rows: Row[]) => void; cache: Map<string, Row> }
+  | { onChanges: (rows: Row[], replace: boolean) => void };
 interface Sub {
-  want: Want; args: Uint8Array; onRows: (rows: Row[]) => void; id?: number;
-  complete: boolean; cache: Map<string, Row>; active: boolean;
+  want: Want; args: Uint8Array; delivery: RowDelivery; id?: number;
+  complete: boolean; active: boolean;
 }
 
 export class Client implements Transport {
@@ -307,22 +309,42 @@ export class Client implements Transport {
     if (frame.tag === 'Batch') {
       const [version, complete, rows, outcomes] = frame.values;
       if (version < this.version) { await this.incompatible(1008); return; }
-      const changed = new Map<Sub, Map<string, Row>>();
-      for (const sub of this.subs) if (sub.id !== undefined && complete.includes(sub.id)) changed.set(sub, new Map());
+      const changed = new Map<Sub, {rows: Row[]; replace: boolean}>();
+      for (const sub of this.subs) {
+        if (sub.id !== undefined && complete.includes(sub.id)) changed.set(sub, {rows: [], replace: true});
+      }
       for (const row of rows) {
         const sub = [...this.subs].find(s => s.active && s.id === row.sub);
         if (!sub) continue;
-        if (!sub.complete && !complete.includes(row.sub)) { await this.incompatible(1008); return; }
-        let cache = changed.get(sub);
-        if (!cache) { cache = new Map(sub.cache); changed.set(sub, cache); }
-        if (row.value.tag === 'None') cache.delete(key(row.key)); else cache.set(key(row.key), structuredClone(row));
+        let update = changed.get(sub);
+        if (!update) {
+          if (!sub.complete) { await this.incompatible(1008); return; }
+          update = {rows: [], replace: false};
+          changed.set(sub, update);
+        }
+        update.rows.push(row);
       }
       this.notifications = [];
       await this.outcomes(outcomes);
       this.version = version;
-      for (const [sub, cache] of changed) { sub.cache = cache; sub.complete = true; }
+      for (const [sub, update] of changed) {
+        sub.complete = true;
+        const delivery = sub.delivery;
+        if ('cache' in delivery) {
+          if (update.replace) delivery.cache.clear();
+          for (const row of update.rows) {
+            const id = key(row.key);
+            if (row.value.tag === 'None') delivery.cache.delete(id);
+            else delivery.cache.set(id, structuredClone(row));
+          }
+        }
+      }
       this.publish();
-      for (const [sub] of changed) sub.onRows([...sub.cache.values()].map(row => structuredClone(row)));
+      for (const [sub, update] of changed) {
+        const delivery = sub.delivery;
+        if ('onRows' in delivery) delivery.onRows([...delivery.cache.values()].map(row => structuredClone(row)));
+        else delivery.onChanges(update.rows, update.replace);
+      }
       this.options.onBatch?.(version);
     } else if (frame.tag === 'Reset') {
       const [version, outcomes] = frame.values;
@@ -461,8 +483,14 @@ export class Client implements Transport {
     });
   }
   subscribe(want: Want, args: Uint8Array, onRows: (rows: Row[]) => void): Subscription {
+    return this.addSubscription(want, args, {onRows, cache: new Map()});
+  }
+  subscribeChanges(want: Want, args: Uint8Array, onChanges: (rows: Row[], replace: boolean) => void): Subscription {
+    return this.addSubscription(want, args, {onChanges});
+  }
+  private addSubscription(want: Want, args: Uint8Array, delivery: RowDelivery): Subscription {
     if (!this.wants.some(w => sameWant(w, want))) throw new ClientError('UnknownWant');
-    const sub: Sub = {want: copyWant(want), args: args.slice(), onRows, complete: false, cache: new Map(), active: true};
+    const sub: Sub = {want: copyWant(want), args: args.slice(), delivery, complete: false, active: true};
     this.subs.add(sub);
     void this.enqueue(async () => this.subscribeAll());
     return {unsubscribe: () => {

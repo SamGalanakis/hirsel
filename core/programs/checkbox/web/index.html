@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Million checkboxes</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: dark;
+      background: #111819;
+      color: #f3f0db;
+      font: 16px "Courier New", monospace;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: clamp(1rem, 3vw, 3rem); }
+    main { max-width: 1000px; margin: auto; }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: .6rem 2rem;
+      margin-bottom: 1rem;
+    }
+    h1 { margin: 0; font: 700 clamp(2rem, 5vw, 3.75rem)/1 Georgia, serif; }
+    output { color: #9eedc3; font-variant-numeric: tabular-nums; }
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      background: #1d2a2b;
+      box-shadow: 0 0 0 1px #48615c;
+      image-rendering: pixelated;
+      cursor: crosshair;
+    }
+    canvas:focus-visible { outline: 2px solid #9eedc3; outline-offset: 4px; }
+    p { margin: .9rem 0 0; color: #b1c9be; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Million checkboxes</h1>
+      <output aria-label="Checked pixels">0 / 1,000,000</output>
+    </header>
+    <canvas width="1000" height="1000" tabindex="0" aria-label="Shared checkbox board"
+      aria-describedby="status"></canvas>
+    <p id="status" role="status">Connecting…</p>
+  </main>
+  <script type="module">
+    import {Client, BrowserStorage} from './client.js';
+    import {bind, identity, want} from './entries.js';
+    import {Frame} from './frame.js';
+    import {keys, values} from './codec.js';
+
+    const width = 1000;
+    const pixels = width * width;
+    const chunkSize = 64;
+    const bits = new Uint8Array(pixels / 8);
+    const canvas = document.querySelector('canvas');
+    const context = canvas.getContext('2d', {alpha: false});
+    const counter = document.querySelector('output');
+    const status = document.querySelector('#status');
+    const colors = [[29, 42, 43], [158, 237, 195], [255, 199, 110]];
+    const strip = context.createImageData(chunkSize * 8, 1);
+    const dirty = new Set();
+    let count = 0;
+    let painted = false;
+    let busy = false;
+    let prediction;
+    let cursor = 0;
+    let keyboard = false;
+    let draw;
+
+    context.fillStyle = 'rgb(29, 42, 43)';
+    context.fillRect(0, 0, width, width);
+
+    function checked(i) {
+      return (bits[i >> 3] >> (i & 7)) & 1;
+    }
+
+    function paintChunk(chunk) {
+      const start = chunk * chunkSize * 8;
+      const end = Math.min(pixels, start + chunkSize * 8);
+      for (let i = start; i < end; i++) {
+        const color = i === prediction || (keyboard && i === cursor) ? 2 : checked(i);
+        strip.data.set(colors[color], 4 * (i - start));
+        strip.data[4 * (i - start) + 3] = 255;
+      }
+      for (let i = start; i < end;) {
+        const x = i % width;
+        const y = Math.floor(i / width);
+        const length = Math.min(end - i, width - x);
+        const offset = i - start;
+        context.putImageData(strip, x - offset, y, offset, 0, length, 1);
+        i += length;
+      }
+    }
+
+    function scheduleDraw() {
+      if (draw !== undefined) return;
+      draw = requestAnimationFrame(() => {
+        for (const chunk of dirty) paintChunk(chunk);
+        dirty.clear();
+        const shown = count + (prediction === undefined ? 0 : 1 - 2 * checked(prediction));
+        counter.value = `${shown.toLocaleString('en-US')} / 1,000,000`;
+        draw = undefined;
+      });
+    }
+
+    function updateChunk(start, bytes) {
+      for (let offset = 0; offset < chunkSize && start + offset < bits.length; offset++) {
+        const at = start + offset;
+        const next = bytes[offset];
+        if (bits[at] === next) continue;
+        for (let shift = 0; shift < 8; shift++) {
+          count += ((next >> shift) & 1) - ((bits[at] >> shift) & 1);
+        }
+        bits[at] = next;
+        dirty.add(start / chunkSize);
+      }
+    }
+
+    const empty = new Uint8Array(chunkSize);
+    const present = new Set();
+    function onRows(rows, replace) {
+      const missing = replace ? new Set(present) : null;
+      for (const row of rows) {
+        const chunk = keys.u32.decode(row.key.subarray(4));
+        if (row.value.tag === 'Some') present.add(chunk);
+        else present.delete(chunk);
+        missing?.delete(chunk);
+        updateChunk(chunk * chunkSize, row.value.tag === 'Some' ? values.bytes.decode(row.value.value) : empty);
+      }
+      if (missing) {
+        for (const chunk of missing) {
+          present.delete(chunk);
+          updateChunk(chunk * chunkSize, empty);
+        }
+      }
+      painted = true;
+      status.textContent = 'Click a pixel to toggle it. With the board focused, use the arrow keys and Space.';
+      scheduleDraw();
+    }
+
+    const url = new URL('/hirsel', location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    const client = await Client.open({
+      url: url.href, frame: Frame, wants: want, identity, storage: new BrowserStorage(),
+      onDiagnostic: message => console.warn(message),
+      onState: state => {
+        if (state === 'Backoff' || state === 'Connecting') status.textContent = 'Connecting…';
+        else if (state === 'Ready') status.textContent = 'Loading board…';
+        else status.textContent = `Board unavailable (${state}). Reload to reconnect.`;
+      },
+      onPrediction: pending => {
+        if (prediction !== undefined) dirty.add(prediction >> 9);
+        prediction = pending.values().next().value;
+        if (prediction !== undefined) dirty.add(prediction >> 9);
+        scheduleDraw();
+      },
+    });
+    const api = bind({
+      call: (entry, arg, decode) => client.call(entry, arg, decode, values.u32.decode(arg)),
+      subscribe: (entry, arg, onChanges) => client.subscribeChanges(entry, arg, onChanges),
+    });
+    api.subscribe.board(undefined, onRows);
+
+    async function toggle(i) {
+      if (!painted || busy || client.state !== 'Ready') return;
+      busy = true;
+      try {
+        const outcome = await api.call.toggle(i);
+        if (outcome.tag !== 'Returned' || outcome.value.tag !== 'Ok') {
+          status.textContent = `Toggle failed (${outcome.value?.tag ?? outcome.tag}).`;
+        }
+      } catch (error) {
+        status.textContent = `Toggle failed (${error.message}).`;
+      } finally {
+        busy = false;
+      }
+    }
+
+    canvas.addEventListener('click', event => {
+      const box = canvas.getBoundingClientRect();
+      const x = Math.floor((event.clientX - box.left) * width / box.width);
+      const y = Math.floor((event.clientY - box.top) * width / box.height);
+      if (x >= 0 && y >= 0 && x < width && y < width) void toggle(y * width + x);
+    });
+
+    canvas.addEventListener('keydown', event => {
+      const step = {ArrowLeft: -1, ArrowRight: 1, ArrowUp: -width, ArrowDown: width}[event.key];
+      if (step === undefined && event.key !== ' ') return;
+      event.preventDefault();
+      dirty.add(cursor >> 9);
+      keyboard = true;
+      if (step === undefined) void toggle(cursor);
+      else cursor = Math.max(0, Math.min(pixels - 1, cursor + step));
+      dirty.add(cursor >> 9);
+      scheduleDraw();
+    });
+    canvas.addEventListener('blur', () => {
+      keyboard = false;
+      dirty.add(cursor >> 9);
+      scheduleDraw();
+    });
+  </script>
+</body>
+</html>

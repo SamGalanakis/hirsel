@@ -10,7 +10,8 @@ type TestServer: send {
     listener: Listener,
     c: Clock,
     tasks: Tasks,
-    cfg: http.Config
+    cfg: http.Config,
+    routes: router.Router[EchoState]
 }
 
 type EchoState: shareable + send {
@@ -65,16 +66,23 @@ fn echo(req: http.Request, scratch: Region, mut b: http.Body, state: EchoState) 
 }
 
 fn test_server(take server: TestServer) waits {
-    let TestServer(listener: take l, c: c, tasks: tasks, cfg: take cfg) = take server
+    let TestServer(listener: take l, c: c, tasks: tasks, cfg: take cfg, routes: take routes) = take server
     let mut listeners: List[Listener] = result.unwrap(list.with_capacity(1))
     result.unwrap(list.push(mut listeners, take l))
-    result.unwrap(http.serve(take listeners, c, tasks, take cfg, echo, EchoState(clock: c)))
+    result.unwrap(http.serve(take listeners, c, tasks, take cfg, take routes, EchoState(clock: c)))
 }
 
 fn listen_for_law(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config) -> (Task[()], Addr) waits {
+    let mut routes: router.Builder[EchoState] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/{tail...}", router.raw(echo)))
+    result.unwrap(router.add(mut routes, "POST", "/{tail...}", router.raw(echo)))
+    listen_with_routes(n, c, tasks, take cfg, result.unwrap(router.build(take routes)))
+}
+
+fn listen_with_routes(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config, take routes: router.Router[EchoState]) -> (Task[()], Addr) waits {
     let addr = Addr(ip: V4(2130706433), port: 0)
     let (listener, where_to) = result.unwrap(host.listen(n, addr, 8))
-    let job = TestServer(listener: take listener, c: c, tasks: tasks, cfg: take cfg)
+    let job = TestServer(listener: take listener, c: c, tasks: tasks, cfg: take cfg, routes: take routes)
     (result.unwrap(task.spawn(tasks, bytes 262144, take job, test_server)), where_to)
 }
 
@@ -276,6 +284,93 @@ fn pipelined(n: Net, c: Clock, tasks: Tasks, take requests: Bytes, count: u64, l
 fn http_request_scratch(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let requests = result.unwrap(b"GET /scratch HTTP/1.1\r\nHost: a\r\n\r\nGET /scratch HTTP/1.1\r\nHost: a\r\n\r\nGET /scratch HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
     pipelined(n, c, tasks, take requests, 3, 0)
+}
+
+fn capture_reply(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
+    let body = match http.capture(req, "id") {
+        Some(s) => match http.copy_bytes(string.as_bytes(s)) {
+            Ok(take copied) => take copied,
+            Error(e) => return Error(Allocation(e)),
+        },
+        None => list.new(),
+    }
+    Ok(Reply(http.response(200, take body, false)?))
+}
+
+fn static_reply(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
+    Ok(Reply(http.response(201, result.unwrap(b"fixed"), false)?))
+}
+
+fn explicit_head(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
+    Ok(Reply(http.response(202, result.unwrap(b"head"), false)?))
+}
+
+fn tail_reply(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
+    if let Some(tail) = http.capture_tail(req, "rest") {
+        if list.len(tail) == 2 && tail[0] == "a/b" && tail[1] == "end" {
+            return Ok(Reply(http.response(204, list.new(), false)?))
+        }
+    }
+    Ok(Reply(http.response(500, list.new(), true)?))
+}
+
+fn route_wire(n: Net, c: Clock, addr: Addr, request: Bytes, status: u16, length: String, allow: String, body: Bytes) -> bool waits {
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut input = take r
+    let mut output = take w
+    let until = At(c, after_ms(host.mono_ns(c), 90))
+    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    if !client_send(mut output, request, until) || !client_end(mut input, mut received, until) {
+        return false
+    }
+    let mut h = http1.head()
+    if http1.response(received, mut h) != Complete || h.status != status || list.slice(received, h.end, list.len(received)) != body {
+        return false
+    }
+    let mut saw_length = length == ""
+    let mut saw_allow = allow == ""
+    for i in 0u64 .. h.count {
+        let f = h.fields[i]
+        let name = list.slice(received, f.name.start, f.name.end)
+        let value = list.slice(received, f.value.start, f.value.end)
+        if http1.equal_ascii(name, string.as_bytes("Content-Length")) {
+            saw_length = value == string.as_bytes(length)
+        }
+        if http1.equal_ascii(name, string.as_bytes("Allow")) {
+            saw_allow = value == string.as_bytes(allow)
+        }
+    }
+    saw_length && saw_allow
+}
+
+// HTTP-11. A literal outranks a capture in either order. Decoding happens
+// within each segment. HEAD has fallback and explicit-route precedence.
+// expect: run http_router_dispatch(network) = true
+fn http_router_dispatch(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut routes: router.Builder[EchoState] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/item/{id}", router.raw(capture_reply)))
+    result.unwrap(router.add(mut routes, "GET", "/item/static", router.raw(static_reply)))
+    result.unwrap(router.add(mut routes, "HEAD", "/item/head", router.raw(explicit_head)))
+    result.unwrap(router.add(mut routes, "POST", "/item/static", router.Route(handler: static_reply, body_max: Some(1))))
+    result.unwrap(router.add(mut routes, "GET", "/other/a%2Fb", router.raw(static_reply)))
+    result.unwrap(router.add(mut routes, "GET", "/other/{id}", router.raw(capture_reply)))
+    result.unwrap(router.add(mut routes, "GET", "/files/{rest...}", router.raw(tail_reply)))
+    let mut cfg = test_config()
+    cfg.out_cap = 256
+    let (server, addr) = listen_with_routes(n, c, tasks, take cfg, result.unwrap(router.build(take routes)))
+    route_wire(n, c, addr, string.as_bytes("GET /item/static HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 201, "5", "", string.as_bytes("fixed")) && route_wire(n, c, addr, string.as_bytes("GET /item/a%2Fb HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 200, "3", "", string.as_bytes("a/b")) && route_wire(n, c, addr, string.as_bytes("HEAD /item/static HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 201, "5", "", string.as_bytes("")) && route_wire(n, c, addr, string.as_bytes("HEAD /item/head HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 202, "4", "", string.as_bytes("")) && route_wire(n, c, addr, string.as_bytes("GET /other/a%2fb HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 201, "5", "", string.as_bytes("fixed")) && route_wire(n, c, addr, string.as_bytes("GET /files/a%2Fb/end HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 204, "", "", string.as_bytes("")) && route_wire(n, c, addr, string.as_bytes("POST /item/static HTTP/1.1\r\nHost: a\r\nConnection: close\r\nContent-Length: 2\r\n\r\nab"), 413, "0", "", string.as_bytes("")) && route_wire(n, c, addr, string.as_bytes("GET /missing HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 404, "0", "", string.as_bytes("")) && route_wire(n, c, addr, string.as_bytes("PUT /item/static HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 405, "0", "GET, HEAD, POST", string.as_bytes("")) && route_wire(n, c, addr, string.as_bytes("OPTIONS * HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 204, "", "GET, HEAD, POST", string.as_bytes(""))
+}
+
+// HTTP-11. Both routes match /a/b and each accepts paths the other rejects.
+// expect: run http_router_conflict() = true
+fn http_router_conflict() -> bool {
+    let mut routes: router.Builder[EchoState] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/a/{x}", router.raw(capture_reply)))
+    result.unwrap(router.add(mut routes, "GET", "/{x}/b", router.raw(capture_reply)))
+    match router.build(take routes) {
+        Error(_) => true,
+        Ok(_) => false,
+    }
 }
 
 // L5. When ignoring a one-byte body the next head is preserved. An unread

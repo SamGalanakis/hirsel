@@ -1,6 +1,6 @@
 // B1 selects this entry in a source view of std.http so it measures the
 // production connection task with exactly one accepted socket.
-fn b1_handler(request: Request, scratch: Region, mut body: Body, state: ()) -> Result[Outcome, ResponseError] {
+fn b1_handler(request: Request, scratch: Region, mut body: Responder, state: ()) -> Result[Outcome, HandlerError] {
     let payload = result.unwrap(b"Hello, world")
     let mut reply = response(200, take payload, false)?
     header(mut reply, result.unwrap(b"content-type"), result.unwrap(b"text/plain"))?
@@ -25,7 +25,10 @@ pub fn b1_main(n: Net, c: Clock, out: Stdout) -> Result[(), Exit] waits {
     let at = host.mono_ns(c)
     let allocated: Result[(Sender[ConnectionSignal], Receiver[ConnectionSignal]), Capacity] = channel.new(1)
     let (tx, rx) = result.unwrap(take allocated)
-    let completed = run_connection(take socket, c, cfg, peer.ip, at, b1_handler, (), tx, 0)
+    let mut routes: router.Builder[()] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/", router.raw(b1_handler)))
+    let routing = result.unwrap(router.build(take routes))
+    let completed = run_connection(take socket, c, cfg, peer.ip, at, routing, (), tx, 0)
     b1_emit(out, "SERVED ", completed)
     Ok(())
 }

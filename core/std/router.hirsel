@@ -1,0 +1,318 @@
+pub type Route[S: shareable + send]: shareable + send {
+    handler: fn(http.Request, Region, mut http.Responder, S) -> Result[http.Outcome, http.HandlerError] waits,
+    body_max: Option[u64]
+}
+
+pub fn raw[S: shareable + send](handler: fn(http.Request, Region, mut http.Responder, S) -> Result[http.Outcome, http.HandlerError] waits) -> Route[S] {
+    Route(handler: handler, body_max: None)
+}
+
+type Segment: shareable + send = Literal(String) | Capture(String)
+
+pub opaque type Pattern: shareable + send {
+    pieces: List[Segment],
+    tail: Option[String]
+}
+
+pub type Entry[S: shareable + send]: shareable + send {
+    method: String,
+    pattern: Pattern,
+    route: Route[S]
+}
+
+pub opaque type Builder[S: shareable + send]: send {
+    entries: List[Entry[S]]
+}
+
+pub opaque type Router[S: shareable + send]: shareable + send {
+    entries: List[Entry[S]]
+}
+
+pub type AddError: send = InvalidMethod | InvalidPattern | Allocation(Capacity)
+
+pub type RouteConflict: key {}
+
+pub fn builder[S: shareable + send]() -> Builder[S] {
+    Builder(entries: list.new())
+}
+
+fn name_valid(name: String) -> bool {
+    let raw_bytes = string.as_bytes(name)
+    if list.len(raw_bytes) == 0 {
+        return false
+    }
+    for i in 0u64 .. list.len(raw_bytes) {
+        let c = raw_bytes[i]
+        if !int.is_ascii_alpha(c) && c != b'_' && (i == 0 || !int.is_ascii_digit(c)) {
+            return false
+        }
+    }
+    true
+}
+
+fn owned(s: String) -> Result[String, AddError] {
+    match string.from(s) {
+        Ok(take text) => Ok(take text),
+        Error(e) => Error(Allocation(e)),
+    }
+}
+
+fn parse(pattern: String) -> Result[Pattern, AddError] {
+    let raw_bytes = string.as_bytes(pattern)
+    let n = list.len(raw_bytes)
+    if n == 0 || raw_bytes[0] != b'/' {
+        return Error(InvalidPattern)
+    }
+    let mut pieces: List[Segment] = list.new()
+    let mut tail: Option[String] = None
+    if n == 1 {
+        return Ok(Pattern(pieces: take pieces, tail: take tail))
+    }
+    let mut start: u64 = 1
+    loop {
+        let mut end = start
+        while end < n && raw_bytes[end] != b'/' {
+            end += 1
+        }
+        if start == end && end != n {
+            return Error(InvalidPattern)
+        }
+        let item = if start < end && raw_bytes[start] == b'{' && raw_bytes[end - 1] == b'}' {
+            if end - start < 3 {
+                return Error(InvalidPattern)
+            }
+            let named = string.slice(pattern, start + 1, end - 1)
+            let rest = string.ends_with(named, "...")
+            let name = if rest {
+                string.slice(named, 0, string.byte_len(named) - 3)
+            } else {
+                named
+            }
+            if !name_valid(name) || capture_index_in(pieces, name) != None {
+                return Error(InvalidPattern)
+            }
+            if rest {
+                if end != n {
+                    return Error(InvalidPattern)
+                }
+                tail = Some(owned(name)?)
+                break
+            }
+            Capture(owned(name)?)
+        } else {
+            for c in list.slice(raw_bytes, start, end) {
+                if c == b'{' || c == b'}' {
+                    return Error(InvalidPattern)
+                }
+            }
+            let mut literal = string.new()
+            match uri.decode_text(pattern, http1.Span(start: start, end: end), mut literal) {
+                Ok(()) => {},
+                Error(Capacity(e)) => return Error(Allocation(e)),
+                Error(_) => return Error(InvalidPattern),
+            }
+            if literal == "." || literal == ".." {
+                return Error(InvalidPattern)
+            }
+            Literal(take literal)
+        }
+        if let Error((e, _)) = list.push(mut pieces, take item) {
+            return Error(Allocation(e))
+        }
+        if end == n {
+            break
+        }
+        start = end + 1
+    }
+    Ok(Pattern(pieces: take pieces, tail: take tail))
+}
+
+pub fn add[S: shareable + send](mut b: Builder[S], method: String, pattern: String, take route: Route[S]) -> Result[(), AddError] {
+    let raw_bytes = string.as_bytes(method)
+    if list.len(raw_bytes) == 0 {
+        return Error(InvalidMethod)
+    }
+    for c in raw_bytes {
+        if !http1.token(c) {
+            return Error(InvalidMethod)
+        }
+    }
+    let entry = Entry(method: owned(method)?, pattern: parse(pattern)?, route: take route)
+    match list.push(mut b.entries, take entry) {
+        Ok(()) => Ok(()),
+        Error((e, _)) => Error(Allocation(e)),
+    }
+}
+
+fn capture_index_in(pieces: List[Segment], name: String) -> Option[u64] {
+    for i in 0u64 .. list.len(pieces) {
+        if let Capture(s) = pieces[i] {
+            if s == name {
+                return Some(i)
+            }
+        }
+    }
+    None
+}
+
+pub fn capture_index(p: Pattern, name: String) -> Option[u64] {
+    capture_index_in(p.pieces, name)
+}
+
+pub fn tail_index(p: Pattern, name: String) -> Option[u64] {
+    if let Some(s) = p.tail {
+        if s == name {
+            return Some(list.len(p.pieces))
+        }
+    }
+    None
+}
+
+fn minimum(p: Pattern) -> u64 {
+    let n = list.len(p.pieces)
+    if n > 0 && p.tail != None {
+        n + 1
+    } else {
+        n
+    }
+}
+
+type Relationship: key = Disjoint | LeftSpecific | RightSpecific | Conflict
+
+// Go net/http pattern.go matches by strict subset. A preference in both
+// directions makes an overlap a conflict as long as a common path exists.
+fn relationship(a: Pattern, b: Pattern) -> Relationship {
+    let an = list.len(a.pieces)
+    let bn = list.len(b.pieces)
+    let amin = minimum(a)
+    let bmin = minimum(b)
+    let afixed = a.tail == None
+    let bfixed = b.tail == None
+    if afixed && an < bmin || bfixed && bn < amin {
+        return Disjoint
+    }
+    let mut left = amin > bmin || afixed && !bfixed
+    let mut right = bmin > amin || bfixed && !afixed
+    for i in 0u64 .. order.min(an, bn) {
+        match (a.pieces[i], b.pieces[i]) {
+            (Literal(x), Literal(y)) => {
+                if x != y {
+                    return Disjoint
+                }
+            },
+            (Literal(x), Capture(_)) => {
+                if x == "" {
+                    return Disjoint
+                }
+                left = true
+            },
+            (Capture(_), Literal(y)) => {
+                if y == "" {
+                    return Disjoint
+                }
+                right = true
+            },
+            _ => {},
+        }
+    }
+    if left == right {
+        Conflict
+    } else if left {
+        LeftSpecific
+    } else {
+        RightSpecific
+    }
+}
+
+pub fn build[S: shareable + send](take b: Builder[S]) -> Result[Router[S], RouteConflict] {
+    let Builder(entries: take entries) = take b
+    for i in 0u64 .. list.len(entries) {
+        for j in 0u64 .. i {
+            if entries[i].method == entries[j].method && relationship(entries[i].pattern, entries[j].pattern) == Conflict {
+                return Error(RouteConflict())
+            }
+        }
+    }
+    Ok(Router(entries: take entries))
+}
+
+fn matches(p: Pattern, path: List[String]) -> bool {
+    let n = list.len(p.pieces)
+    let len = list.len(path)
+    if len < minimum(p) || p.tail == None && len != n {
+        return false
+    }
+    for i in 0u64 .. n {
+        match p.pieces[i] {
+            Literal(s) => {
+                if s != path[i] {
+                    return false
+                }
+            },
+            Capture(_) => {
+                if path[i] == "" {
+                    return false
+                }
+            },
+        }
+    }
+    true
+}
+
+pub fn select[S: shareable + send](r: Router[S], method: Bytes, path: List[String]) -> Option[View[Entry[S]]] in r {
+    let head = method == string.as_bytes("HEAD")
+    let end = list.len(r.entries)
+    let mut selected = end
+    let mut selected_exact = false
+    for i in 0u64 .. end {
+        let entry = view r.entries[i]
+        let exact = method == string.as_bytes(entry.method)
+        if !exact && (!head || selected_exact || entry.method != "GET") {
+            continue
+        }
+        if matches(entry.pattern, path) && (selected == end || exact && !selected_exact || relationship(entry.pattern, r.entries[selected].pattern) == LeftSpecific) {
+            selected = i
+            selected_exact = exact
+        }
+    }
+    list.get(r.entries, selected)
+}
+
+fn has_method(methods: String, method: String) -> bool {
+    let raw_bytes = string.as_bytes(methods)
+    let mut start: u64 = 0
+    while start < list.len(raw_bytes) {
+        let mut end = start
+        while end < list.len(raw_bytes) && raw_bytes[end] != b',' {
+            end += 1
+        }
+        if list.slice(raw_bytes, start, end) == string.as_bytes(method) {
+            return true
+        }
+        start = end + 2
+    }
+    false
+}
+
+fn add_method(mut methods: String, method: String) -> Result[(), Capacity] {
+    if has_method(methods, method) {
+        return Ok(())
+    }
+    if string.byte_len(methods) != 0 {
+        string.push(mut methods, ", ")?
+    }
+    string.push(mut methods, method)
+}
+
+pub fn allow[S: shareable + send](r: Router[S], path: List[String], all: bool) -> Result[String, Capacity] {
+    let mut methods = string.new()
+    for entry in r.entries {
+        if all || matches(entry.pattern, path) {
+            add_method(mut methods, entry.method)?
+            if entry.method == "GET" {
+                add_method(mut methods, "HEAD")?
+            }
+        }
+    }
+    Ok(take methods)
+}

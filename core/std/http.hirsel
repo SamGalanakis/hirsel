@@ -27,6 +27,8 @@ pub opaque type Response: send {
 
 pub type ResponseError: send = StatusInvalid | HeaderReserved | HeaderInvalid | HeadTooLarge | Allocation(Capacity)
 
+pub type HandlerError = ResponseError
+
 /// Builds a final response. Only the connection may send informational statuses.
 pub fn response(status: u16, take body: Bytes, close: bool) -> Result[Response, ResponseError] {
     if status < 200 || status > 599 {
@@ -209,6 +211,12 @@ fn reason(status: u16) -> String {
     }
     if status == 304 {
         return "Not Modified"
+    }
+    if status == 404 {
+        return "Not Found"
+    }
+    if status == 405 {
+        return "Method Not Allowed"
     }
     ""
 }
@@ -622,6 +630,7 @@ pub opaque scoped type Request {
     head: View[http1.Head],
     meta: RequestHead,
     segments: List[String],
+    route: View[router.Pattern],
     inline_body: Option[View[Bytes]],
     deadline: u64
 }
@@ -640,6 +649,20 @@ pub fn path(r: Request) -> View[Bytes] in r {
 
 pub fn segments(r: Request) -> View[List[String]] in r {
     view r.segments
+}
+
+pub fn capture(r: Request, name: String) -> Option[View[String]] in r {
+    match router.capture_index(r.route, name) {
+        Some(i) => list.get(r.segments, i),
+        None => None,
+    }
+}
+
+pub fn capture_tail(r: Request, name: String) -> Option[View[List[String]]] in r {
+    match router.tail_index(r.route, name) {
+        Some(i) => Some(list.slice(r.segments, i, list.len(r.segments))),
+        None => None,
+    }
 }
 
 pub fn query(r: Request) -> View[Bytes] in r {
@@ -812,6 +835,8 @@ pub opaque scoped type Body {
     fault: Option[BodyError],
     output_failed: bool
 }
+
+pub type Responder = Body
 
 fn body_fault(mut b: Body, status: u16) -> BodyError {
     let error = failure(status)
@@ -1027,7 +1052,34 @@ fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress
     FinalReply(write_succeeded(write_unit(mut b.writer, out, r.body, b.clock, write_end)))
 }
 
-fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, frame: Framing, mut b: Body, mut out: Bytes, cfg: Config, handler: fn(Request, Region, mut Body, S) -> Result[Outcome, ResponseError] waits, state: S, mut cache: DateCache) -> Step waits {
+fn route_response[S: shareable + send](routes: router.Router[S], decoded: List[String], options_star: bool) -> Result[Outcome, HandlerError] {
+    let methods = match router.allow(routes, decoded, options_star) {
+        Ok(take methods) => take methods,
+        Error(e) => return Error(Allocation(e)),
+    }
+    let status: u16 = if options_star {
+        204
+    } else if string.byte_len(methods) == 0 {
+        404
+    } else {
+        405
+    }
+    let mut reply = response(status, list.new(), false)?
+    if status != 404 {
+        let name = match b"Allow" {
+            Ok(take name) => take name,
+            Error(e) => return Error(Allocation(e)),
+        }
+        let allow = match copy_bytes(string.as_bytes(methods)) {
+            Ok(take allow) => take allow,
+            Error(e) => return Error(Allocation(e)),
+        }
+        header(mut reply, take name, take allow)?
+    }
+    Ok(Reply(take reply))
+}
+
+fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, frame: Framing, mut b: Body, mut out: Bytes, cfg: Config, routes: router.Router[S], state: S, mut cache: DateCache) -> Step waits {
     let outcome = bound bytes cfg.handler_bytes {
         let normalized = match segments_of(part(input, meta.path)) {
             Ok(take x) => take x,
@@ -1038,22 +1090,44 @@ fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, f
                 return error_step(mut b.writer, 503, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))
             },
         }
-        let inline = match frame {
-            ContentLength(n) => if n <= cfg.body_inline && n <= list.len(input) - h.end && !meta.expect_continue {
-                Some(list.slice(input, h.end, h.end + n))
-            } else {
-                None
-            },
-            _ => None,
+        let verb = part(input, h.method)
+        let options_star = part(input, meta.path) == string.as_bytes("*")
+        let selected: Option[View[router.Entry[S]]] = if options_star {
+            None
+        } else {
+            router.select(routes, verb, normalized)
         }
-        if let Some(v) = inline {
-            b.input_at += list.len(v)
-            b.decoder.state = Finished
-            b.decoder.remaining = 0
-        }
-        let req = Request(input: view input, head: view h, meta: meta, segments: take normalized, inline_body: inline, deadline: b.handler_deadline)
-        let result = region scratch {
-            handler(req, scratch, mut b, state)
+        let result = if let Some(entry) = selected {
+            let body_max = match entry.route.body_max {
+                Some(n) => order.min(n, cfg.body_max),
+                None => cfg.body_max,
+            }
+            if let ContentLength(n) = frame {
+                if n > body_max {
+                    return error_step(mut b.writer, 413, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))
+                }
+            }
+            b.decoder.body_max = body_max
+            let inline = match frame {
+                ContentLength(n) => if n <= cfg.body_inline && n <= list.len(input) - h.end && !meta.expect_continue {
+                    Some(list.slice(input, h.end, h.end + n))
+                } else {
+                    None
+                },
+                _ => None,
+            }
+            if let Some(v) = inline {
+                b.input_at += list.len(v)
+                b.decoder.state = Finished
+                b.decoder.remaining = 0
+            }
+            let req = Request(input: view input, head: view h, meta: meta, segments: take normalized, route: view entry.pattern, inline_body: inline, deadline: b.handler_deadline)
+            let handler = entry.route.handler
+            region scratch {
+                handler(req, scratch, mut b, state)
+            }
+        } else {
+            route_response(routes, normalized, options_star)
         }
         let returned = host.mono_ns(b.clock)
         if b.output_failed {
@@ -1081,7 +1155,7 @@ fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, f
         }
         let abandon_expect = b.expect_continue && b.decoder.state != Finished
         let close = meta.close || reply.close || b.fault != None || abandon_expect
-        let suppress = part(input, h.method) == string.as_bytes("HEAD")
+        let suppress = verb == string.as_bytes("HEAD")
         match send_response(mut b, mut out, reply, h.version, suppress, close, cfg, mut cache) {
             FinalReply(true) => if close {
                 RepliedAndClose
@@ -1121,7 +1195,7 @@ type ConnectionJob[S: shareable + send]: send {
     cfg: Arc[Config],
     peer: Ip,
     at: u64,
-    handler: fn(Request, Region, mut Body, S) -> Result[Outcome, ResponseError] waits,
+    routes: Arc[router.Router[S]],
     state: Arc[S],
     inbox: Sender[ConnectionSignal],
     slot: u64,
@@ -1144,13 +1218,13 @@ fn change_source(inbox: Sender[ConnectionSignal], slot: u64, ip: Ip) -> bool wai
 }
 
 fn connection[S: shareable + send](take job: ConnectionJob[S]) waits {
-    let ConnectionJob(socket: take socket, c: c, cfg: take cfg, peer: peer, at: accepted, handler: handler, state: take state, inbox: take inbox, slot: slot, completion: take notice) = take job
+    let ConnectionJob(socket: take socket, c: c, cfg: take cfg, peer: peer, at: accepted, routes: take routes, state: take state, inbox: take inbox, slot: slot, completion: take notice) = take job
     let mut completion = take notice
     completion.armed = true
-    let _ = run_connection(take socket, c, cfg, peer, accepted, handler, state, inbox, slot)
+    let _ = run_connection(take socket, c, cfg, peer, accepted, routes, state, inbox, slot)
 }
 
-fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Config, peer: Ip, accepted: u64, handler: fn(Request, Region, mut Body, S) -> Result[Outcome, ResponseError] waits, state: S, inbox: Sender[ConnectionSignal], slot: u64) -> u64 waits {
+fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Config, peer: Ip, accepted: u64, routes: router.Router[S], state: S, inbox: Sender[ConnectionSignal], slot: u64) -> u64 waits {
     let (r, w) = net.split(take socket)
     let mut reader = take r
     let mut writer = take w
@@ -1225,7 +1299,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
         list.clear(mut scratch)
         let (reuse, input_at, scratch_at) = {
             let mut body = Body(input: view input, input_at: head.end, reader: take reader, writer: take writer, scratch: take scratch, scratch_at: 0, decoder: decoder(frame, head, cfg.body_max), head_max: cfg.head_max, fields_max: cfg.fields_max, clock: c, body_deadline: after_ms(completed, cfg.body_ms), handler_deadline: after_ms(completed, cfg.handler_ms), write_ms: cfg.write_ms, pipeline_max: cfg.pipeline_max, expect_continue: policy.expect_continue, fault: None, output_failed: false)
-            let step = handle(input, head, policy, frame, mut body, mut out, cfg, handler, state, mut date)
+            let step = handle(input, head, policy, frame, mut body, mut out, cfg, routes, state, mut date)
             let reuse = match step {
                 Keep(at, end) => {
                     completed_replies += 1
@@ -1408,9 +1482,8 @@ fn serve_alloc[T](take r: Result[T, Capacity]) -> Result[T, ServeError] {
     }
 }
 
-/// Serves a group of listeners with one handler per connection. The raw
-/// handler entry is also the seam for the router's later route selection.
-pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, handler: fn(Request, Region, mut Body, S) -> Result[Outcome, ResponseError] waits, take state: S) -> Result[(), ServeError] waits {
+/// Serves a group of listeners with an immutable router and shared handler state.
+pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], take state: S) -> Result[(), ServeError] waits {
     if !valid_config(cfg) {
         return Error(Configuration)
     }
@@ -1418,6 +1491,7 @@ pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, task
         return Ok(())
     }
     let shared = serve_alloc(result.capacity_only(arc.new(take state)))?
+    let routing = serve_alloc(result.capacity_only(arc.new(take routes)))?
     let settings = serve_alloc(result.capacity_only(arc.new(take cfg)))?
     let made: Result[(Sender[ConnectionSignal], Receiver[ConnectionSignal]), Capacity] = channel.new(settings.inbox_cap)
     let (tx, rx) = serve_alloc(take made)?
@@ -1488,14 +1562,14 @@ pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, task
                             continue
                         },
                     }
-                    let job = ConnectionJob(socket: take socket, c: c, cfg: arc.share(settings), peer: peer, at: at, handler: handler, state: arc.share(shared), inbox: channel.sender(tx), slot: vacant, completion: take completion)
+                    let job = ConnectionJob(socket: take socket, c: c, cfg: arc.share(settings), peer: peer, at: at, routes: arc.share(routing), state: arc.share(shared), inbox: channel.sender(tx), slot: vacant, completion: take completion)
                     match task.spawn(tasks, bytes child_bytes, take job, connection) {
                         Ok(take child) => {
                             group.connections[vacant] = Some(HttpSlot(child: take child, first: true, ip: ip))
                             in_first_phase += 1
                         },
                         Error((_, take refused)) => {
-                            let ConnectionJob(socket: take declined, c: _, cfg: _, peer: _, at: _, handler: _, state: _, inbox: _, slot: _, completion: _) = take refused
+                            let ConnectionJob(socket: take declined, c: _, cfg: _, peer: _, at: _, routes: _, state: _, inbox: _, slot: _, completion: _) = take refused
                             refuse(mut group.refusals, take declined, at)
                         },
                     }

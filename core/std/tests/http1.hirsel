@@ -16,9 +16,22 @@ fn same_head(a: http1.Head, b: http1.Head) -> bool {
 // L1: every split, including empty fragments, and the one-byte drip schedule.
 // The independent single-shot parser supplies parity; the existing corpus
 // supplies hand-derived syntax/offset answers. The counter counts buffer reads.
-fn resume_parity(raw: Bytes) -> bool {
+fn prefix_progress(at: u64, complete_at: u64) -> http1.Progress {
+    if at < complete_at {
+        Partial
+    } else {
+        Complete
+    }
+}
+
+fn resume_parity(raw: Bytes, complete_at: Option[u64]) -> bool {
     let mut whole = http1.head()
     let expected = http1.request(raw, mut whole)
+    if let Some(at) = complete_at {
+        if expected != Complete || whole.end != at {
+            return false
+        }
+    }
     let n = list.len(raw)
     let head_len = if expected == Complete {
         whole.end
@@ -29,6 +42,11 @@ fn resume_parity(raw: Bytes) -> bool {
         let mut h = http1.head()
         let mut cur = http1.cursor()
         let first = http1.resume(list.slice(raw, 0, split), mut h, mut cur)
+        if let Some(at) = complete_at {
+            if first != prefix_progress(split, at) {
+                return false
+            }
+        }
         let got = http1.resume(raw, mut h, mut cur)
         if got != expected || !same_head(h, whole) || cur.examined > head_len + 1 {
             return false
@@ -39,12 +57,22 @@ fn resume_parity(raw: Bytes) -> bool {
     let mut got: http1.Progress = Partial
     for end in 0u64 .. n + 1 {
         got = http1.resume(list.slice(raw, 0, end), mut h, mut cur)
+        if let Some(at) = complete_at {
+            if got != prefix_progress(end, at) {
+                return false
+            }
+        }
     }
     got == expected && same_head(h, whole) && cur.examined <= head_len
 }
 
 fn request_case(raw: Bytes, expected: http1.Progress, end: u64, method: Option[Bytes], target: Option[Bytes], version: Option[u8], names: List[Bytes], values: List[Bytes]) -> bool {
-    if !resume_parity(raw) {
+    let complete_at = if expected == Complete {
+        Some(end)
+    } else {
+        None
+    }
+    if !resume_parity(raw, complete_at) {
         return false
     }
     let mut h = http1.head()
@@ -653,7 +681,7 @@ fn go_adapter_boundary_12() -> bool {
 // restart_cursor_loses_field.
 // expect: run resume_utf8() = true
 fn resume_utf8() -> bool {
-    resume_parity(result.unwrap(b"GET /\xc2\xa2\xe2\x82\xac\xf0\x90\x80\x80 HTTP/1.1\r\nA: x\r\nB: y\r\n\r\nTAIL")) && resume_parity(result.unwrap(b"GET /\xe0\x80 HTTP/1.1\r\n\r\n")) && resume_parity(result.unwrap(b"GET /\xed\xa0 HTTP/1.1\r\n\r\n")) && resume_parity(result.unwrap(b"GET /\xf4\x90 HTTP/1.1\r\n\r\n")) && resume_parity(result.unwrap(b"GET /\xe2\x82"))
+    resume_parity(result.unwrap(b"GET /\xc2\xa2\xe2\x82\xac\xf0\x90\x80\x80 HTTP/1.1\r\nA: x\r\nB: y\r\n\r\nTAIL"), Some(39)) && resume_parity(result.unwrap(b"GET /\xe0\x80 HTTP/1.1\r\n\r\n"), None) && resume_parity(result.unwrap(b"GET /\xed\xa0 HTTP/1.1\r\n\r\n"), None) && resume_parity(result.unwrap(b"GET /\xf4\x90 HTTP/1.1\r\n\r\n"), None) && resume_parity(result.unwrap(b"GET /\xe2\x82"), None)
 }
 
 // HTTP-3 fixed bounds: exactly 8192 bytes succeeds; needing byte 8193 fails.
@@ -689,7 +717,7 @@ fn resume_field_limit() -> bool {
         result.unwrap(list.append(mut raw, result.unwrap(b"X:\r\n")))
     }
     result.unwrap(list.append(mut raw, result.unwrap(b"\r\n")))
-    if !resume_parity(raw) {
+    if !resume_parity(raw, Some(list.len(raw))) {
         return false
     }
     let mut h = http1.head()
@@ -697,7 +725,7 @@ fn resume_field_limit() -> bool {
         return false
     }
     raw[list.len(raw) - 2] = b'X'
-    http1.request(raw, mut h) == TooLarge && resume_parity(raw)
+    http1.request(raw, mut h) == TooLarge && resume_parity(raw, None)
 }
 
 // A request-line overflow maps to 414 rather than the field limit's 431.
@@ -731,4 +759,16 @@ fn resume_prefixed_limit() -> bool {
     h = http1.head()
     cur = http1.cursor()
     http1.resume(raw, mut h, mut cur) == TooLarge && cur.line_start == 8192 && cur.line_end == 0 && cur.examined == 8192
+}
+
+// The request head ends at byte 27. The body is already in the buffer on
+// some splits and does not change when the head first becomes complete.
+// expect: run resume_exact_prefix_progress() = true
+fn resume_exact_prefix_progress() -> bool {
+    let raw = result.unwrap(b"GET / HTTP/1.1\r\nHost: x\r\n\r\nbody")
+    let mut names: List[Bytes] = list.new()
+    result.unwrap(list.push(mut names, result.unwrap(b"Host")))
+    let mut values: List[Bytes] = list.new()
+    result.unwrap(list.push(mut values, result.unwrap(b"x")))
+    request_case(raw, Complete, 27, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
 }

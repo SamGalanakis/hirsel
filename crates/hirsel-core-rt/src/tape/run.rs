@@ -316,7 +316,7 @@ unsafe extern "C" fn invoke(
                     });
                 }
                 match tape.on_tape_args(&argv) {
-                    Ok(v) => (*files).vector(v),
+                    Ok(v) => (*files).registry.vector(v),
                     Err(f) => {
                         refuse(f);
                         causes::record(&mut *context, Cause::new(causes::TAPE, 0));
@@ -333,7 +333,7 @@ unsafe extern "C" fn invoke(
                     (NO_HOST, 0)
                 };
                 match tape.on_tape(req.kind, (provider, handle)) {
-                    Ok((p, h)) => (*files).taped_grant(p, h, tape.group()),
+                    Ok((p, h)) => (*files).registry.taped_grant(p, h, tape.group()),
                     Err(f) => {
                         refuse(f);
                         causes::record(&mut *context, Cause::new(causes::TAPE, 0));

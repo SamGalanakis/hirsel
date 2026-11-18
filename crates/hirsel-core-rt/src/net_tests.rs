@@ -134,7 +134,9 @@ fn net_narrow_retains_charge_until_run_end_and_refuses_invalid_or_capacity() {
         len: 1,
     };
     let mut files = Files::default();
-    let n = files.grant(provider, (&rules as *const Rules) as u64);
+    let n = files
+        .registry
+        .grant(provider, (&rules as *const Rules) as u64);
     let mut context = Context::new(40);
     context.host_files = &mut files;
     unsafe {

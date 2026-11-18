@@ -144,7 +144,7 @@ pub unsafe extern "C" fn hirsel_core_tape_open(
             &expect,
         ) {
             Ok((tape, _)) => {
-                let key = (*(*context).host_files).tape(tape);
+                let key = (*(*context).host_files).registry.tape(tape);
                 return Opened { tape: key, code: 0 };
             }
             Err(OpenError::Refused(r)) => match r {
@@ -178,7 +178,7 @@ pub unsafe extern "C" fn hirsel_core_tape_end(
 ) -> u64 {
     // SAFETY: the key is the caller's sole Tape; the chain is borrowed.
     unsafe {
-        let tape = (*(*context).host_files).untape(tape);
+        let tape = (*(*context).host_files).registry.untape(tape);
         let ending = if kind == END_RETURNED {
             Ending::returned(bytes(operand.cast()))
         } else {
@@ -212,7 +212,12 @@ pub struct Granted {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_tape_across(context: *mut Context, tape: u64) -> bool {
     // SAFETY: the registry is the run's.
-    unsafe { (*(*context).host_files).tape_ref(tape).revision_differs() }
+    unsafe {
+        (*(*context).host_files)
+            .registry
+            .tape_ref(tape)
+            .revision_differs()
+    }
 }
 
 /// `rt.tape_grant`: the substitute of the capability `source` of `kind`
@@ -234,18 +239,20 @@ pub unsafe extern "C" fn hirsel_core_tape_grant(
             let vector = crate::host_file::args(context, source);
             let views: Vec<&[u8]> = vector.iter().map(|b| bytes(b)).collect();
             (*files)
+                .registry
                 .tape_ref(tape)
                 .on_tape_args(&views)
-                .map(|stored| (*files).vector(stored))
+                .map(|stored| (*files).registry.vector(stored))
         } else {
             let provider = *entry::hirsel_core_capability_provider(context, source);
             let handle = entry::hirsel_core_capability_handle(context, source);
             (*files)
+                .registry
                 .tape_ref(tape)
                 .on_tape(kind, (provider, handle))
                 .map(|(p, h)| {
-                    let group = (*files).tape_ref(tape).group();
-                    (*files).taped_grant(p, h, group)
+                    let group = (*files).registry.tape_ref(tape).group();
+                    (*files).registry.taped_grant(p, h, group)
                 })
         };
         match result {
@@ -268,5 +275,5 @@ pub unsafe extern "C" fn hirsel_core_tape_grant(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_tape_drop(context: *mut Context, tape: u64) {
     // SAFETY: the key is the run's.
-    drop(unsafe { (*(*context).host_files).untape(tape) });
+    drop(unsafe { (*(*context).host_files).registry.untape(tape) });
 }

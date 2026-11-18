@@ -92,7 +92,7 @@ pub unsafe extern "C" fn hirsel_core_capability_provider(
     // SAFETY: trusted emitted operands designate the run's indexed grant metadata.
     unsafe {
         if handle & crate::host_file::DYNAMIC_GRANT != 0 {
-            (*(*context).host_files).grant_provider(handle)
+            (*(*context).host_files).registry.grant_provider(handle)
         } else {
             (*(*(*context).run).capabilities.add((handle - 1) as usize)).provider
         }
@@ -109,7 +109,7 @@ pub unsafe extern "C" fn hirsel_core_capability_handle(
     // SAFETY: the run owns this immutable capability's provider-local designation.
     unsafe {
         if handle & crate::host_file::DYNAMIC_GRANT != 0 {
-            (*(*context).host_files).grant_handle(handle)
+            (*(*context).host_files).registry.grant_handle(handle)
         } else {
             (*(*(*context).run).capabilities.add((handle - 1) as usize)).handle
         }

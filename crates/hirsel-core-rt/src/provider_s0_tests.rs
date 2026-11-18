@@ -877,6 +877,94 @@ unsafe extern "C" fn file_job(context: *mut Context, _: *mut u8, input: *mut u8)
         1
     }
 }
+/// Two children use the same inherited table while both files are live.
+#[test]
+fn s0_children_keep_distinct_host_file_slots() {
+    unsafe extern "C" fn open_child(context: *mut Context, result: *mut u8, input: *mut u8) -> u8 {
+        // The child owns its input and result, and the parent pins the provider.
+        unsafe {
+            let job = input.cast::<Job>().read();
+            let provider = (*job.rec).provider();
+            let mut open = request(job.operation, job.site);
+            let outcome =
+                crate::host_file::hirsel_core_host_file_open(context, &provider, &mut open);
+            result.cast::<u64>().write(outcome.value);
+            outcome.status
+        }
+    }
+    unsafe fn body(context: *mut Context, rec: *mut Rec) {
+        unsafe {
+            let mut layout = job_layout();
+            layout.result.bytes = size_of::<u64>();
+            let children = [41, 42].map(|site| {
+                let mut job = Job {
+                    rec,
+                    site,
+                    operation: crate::provider::OPEN,
+                };
+                hirsel_core_spawn(
+                    context,
+                    0,
+                    64,
+                    (&mut job as *mut Job).cast(),
+                    open_child,
+                    layout,
+                    0,
+                )
+                .task
+            });
+            for (site, child) in [41, 42].into_iter().zip(children) {
+                let mut value = 0u64;
+                let joined = hirsel_core_join(context, child, (&mut value as *mut u64).cast(), 1);
+                assert_eq!(joined.status, 0);
+                assert_eq!(joined.kind, 0);
+                (*rec).results.push((
+                    site,
+                    Outcome {
+                        value,
+                        ..Outcome::default()
+                    },
+                    0,
+                ));
+            }
+        }
+    }
+    let mut rec = Rec::new(ready, done0, never);
+    run(&mut rec, false, body);
+    assert_ne!(rec.result(41).0.value, rec.result(42).0.value);
+}
+
+/// The read bit on a shared descriptor wakes only the read direction.
+/// Replacing an arm invalidates its old epoll tag even on the same slot.
+#[test]
+fn s0_net_rearm_ignores_stale_directional_readiness() {
+    use std::os::unix::net::UnixStream;
+
+    let (socket, _peer) = UnixStream::pair().unwrap();
+    let mut sockets = hirsel_core_net::Sockets::default();
+    let key = sockets.insert(socket.into()).unwrap();
+    sockets.arm(key, false, 101).unwrap();
+    let first = sockets.arm(key, true, 201).unwrap();
+    let mut ready = Vec::new();
+    sockets
+        .dispatch(first, libc::EPOLLIN as u32, |t| ready.push(t))
+        .unwrap();
+    assert_eq!(ready, [101]);
+
+    let second = sockets.arm(key, false, 102).unwrap();
+    sockets
+        .dispatch(first, libc::EPOLLIN as u32, |t| ready.push(t))
+        .unwrap();
+    assert_eq!(ready, [101], "the old bit must not wake the rearmed reader");
+    sockets
+        .dispatch(second, libc::EPOLLOUT as u32, |t| ready.push(t))
+        .unwrap();
+    sockets
+        .dispatch(second, libc::EPOLLIN as u32, |t| ready.push(t))
+        .unwrap();
+    assert_eq!(ready, [101, 201, 102]);
+}
+
 /// Every closes of the opened file: the cleanup and teardown closes are site 0,
 /// the program's own close is site 77.
 fn closes(rec: &Rec) -> usize {

@@ -418,15 +418,15 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
             len: storage.len(),
         });
         let handle = (&*view as *const Rules) as u64;
-        let registry = &mut *(*context).host_files;
-        registry.net_grants.push(Grant {
+        let files = (*context).host_files;
+        (*files).net_grants.lock().unwrap().push(Grant {
             _storage: storage,
             _view: view,
             payer,
             charge: charge.unwrap(),
         });
         Outcome {
-            value: registry.grant(provider, handle),
+            value: (*files).registry.grant(provider, handle),
             ..Outcome::default()
         }
     }

@@ -1958,7 +1958,7 @@ pub unsafe extern "C" fn hirsel_core_spawn(
     // SAFETY: generated operands belong to the active parent and run.
     unsafe {
         let group = if tasks & crate::host_file::DYNAMIC_GRANT != 0 {
-            (*(*context).host_files).grant_group(tasks)
+            (*(*context).host_files).registry.grant_group(tasks)
         } else if tasks == 0 && (*context).run.is_null() {
             current_group()
         } else {
@@ -2358,13 +2358,14 @@ mod ready_routing_laws {
             run.all = &mut *tasks[0];
             let mut sockets = hirsel_core_net::Sockets::default();
             let mut keys = Vec::new();
+            let mut tags = Vec::new();
             let mut peers = Vec::new();
             for (i, task) in tasks.iter_mut().enumerate() {
                 run.parked.insert(i as u64 + 1, &mut **task);
                 let (socket, peer) = UnixStream::pair().unwrap();
                 socket.set_nonblocking(true).unwrap();
                 let key = sockets.insert(socket.into()).unwrap();
-                sockets.arm(key, false, i as u64 + 1).unwrap();
+                tags.push(sockets.arm(key, false, i as u64 + 1).unwrap());
                 keys.push(key);
                 peers.push(peer);
             }
@@ -2431,7 +2432,7 @@ mod ready_routing_laws {
                 }
                 assert_eq!(counters, [3, 3]);
                 unsafe { while !run.pop().is_null() {} }
-                let stale = ((keys[0] >> 34) << 32) | u64::from((keys[0] >> 2) as u32);
+                let stale = tags[0];
                 sockets.release(keys[0]);
                 let (socket, mut peer) = UnixStream::pair().unwrap();
                 socket.set_nonblocking(true).unwrap();

@@ -63,7 +63,9 @@ pub unsafe extern "C" fn hirsel_core_host_op(
                 } else {
                     let mut result = hirsel_core_host(context, provider, &mut request);
                     if op == MKDTEMP && result.status == 0 && result.error == IoError::OK {
-                        result.value = (*(*context).host_files).grant(*provider, result.value);
+                        result.value = (*(*context).host_files)
+                            .registry
+                            .grant(*provider, result.value);
                     }
                     result
                 }

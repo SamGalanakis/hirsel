@@ -68,16 +68,29 @@ impl Poller {
         }
     }
 }
+#[derive(Clone, Copy)]
+struct Wait {
+    token: u64,
+    generation: u32,
+}
+
+fn tag(index: usize, generation: u32) -> u64 {
+    index as u64 | (u64::from(generation) << 32)
+}
+
 struct Record {
     fd: OwnedFd,
     owners: u8,
     reset: bool,
     ended: bool,
-    waiters: [u64; 2],
+    waiters: [Option<Wait>; 2],
     registered: bool,
 }
 struct Slot {
     generation: u32,
+    // Registration generation is independent of the socket carrier's lifetime.
+    // It lasts across slot reuse, and a new arm publishes a fresh epoll tag.
+    armed_generation: u32,
     record: Option<Record>,
 }
 /// O(1) host storage per live descriptor. No table is sized from the fd limit.
@@ -123,6 +136,7 @@ impl Sockets {
             let index = u32::try_from(self.slots.len()).ok()?;
             self.slots.push(Slot {
                 generation: 1,
+                armed_generation: 0,
                 record: None,
             });
             index
@@ -133,7 +147,7 @@ impl Sockets {
             owners: 1,
             reset: false,
             ended: false,
-            waiters: [0; 2],
+            waiters: [None; 2],
             registered: false,
         });
         self.live += 1;
@@ -173,14 +187,19 @@ impl Sockets {
         self.record_mut(key).owners = 6;
         (key | 1, key | 2)
     }
-    fn update(&mut self, index: usize) -> io::Result<()> {
+    fn update(
+        &mut self,
+        index: usize,
+        generation: u32,
+        waiters: [Option<Wait>; 2],
+    ) -> io::Result<()> {
         let slot = &mut self.slots[index];
         let r = slot.record.as_mut().unwrap();
         let mut flags = 0;
-        if r.waiters[0] != 0 {
+        if waiters[0].is_some() {
             flags |= libc::EPOLLIN | libc::EPOLLRDHUP;
         }
-        if r.waiters[1] != 0 {
+        if waiters[1].is_some() {
             flags |= libc::EPOLLOUT;
         }
         if flags == 0 {
@@ -189,7 +208,6 @@ impl Sockets {
                     .as_ref()
                     .unwrap()
                     .ctl(libc::EPOLL_CTL_DEL, r.fd.as_raw_fd(), 0, 0)?;
-                r.registered = false;
             }
         } else {
             self.poller.as_ref().unwrap().ctl(
@@ -200,22 +218,36 @@ impl Sockets {
                 },
                 r.fd.as_raw_fd(),
                 flags as u32,
-                index as u64 | (u64::from(slot.generation) << 32),
+                tag(index, generation),
             )?;
-            r.registered = true;
         }
+        r.registered = flags != 0;
+        r.waiters = waiters;
+        slot.armed_generation = generation;
         Ok(())
     }
-    pub fn arm(&mut self, key: u64, write: bool, token: u64) -> io::Result<()> {
+    /// Returns the identity attached to the new epoll registration.
+    pub fn arm(&mut self, key: u64, write: bool, token: u64) -> io::Result<u64> {
         self.poller()?;
-        self.record_mut(key).waiters[usize::from(write)] = token;
-        self.update(((key >> 2) as u32) as usize)
+        let index = ((key >> 2) as u32) as usize;
+        let slot = &self.slots[index];
+        // Only the driver's current epoll_wait batch can retain an old tag.
+        // It cannot span a generation wrap. Reserve u64::MAX for eventfd.
+        let generation = slot.armed_generation.wrapping_add(1) % u32::MAX;
+        let wait = Wait { token, generation };
+        let mut waiters = slot.record.as_ref().unwrap().waiters;
+        waiters[usize::from(write)] = Some(wait);
+        self.update(index, wait.generation, waiters)?;
+        Ok(tag(index, wait.generation))
     }
     pub fn disarm(&mut self, key: u64, write: bool) -> io::Result<()> {
-        self.record_mut(key).waiters[usize::from(write)] = 0;
-        self.update(((key >> 2) as u32) as usize)
+        let index = ((key >> 2) as u32) as usize;
+        let slot = &self.slots[index];
+        let mut waiters = slot.record.as_ref().unwrap().waiters;
+        waiters[usize::from(write)] = None;
+        self.update(index, slot.armed_generation, waiters)
     }
-    /// Dispatch a host event directly, ignoring a released registration's generation.
+    /// Dispatch a host event only for the current registration.
     pub fn dispatch(
         &mut self,
         identity: u64,
@@ -226,22 +258,26 @@ impl Sockets {
         let Some(slot) = self.slots.get_mut(index) else {
             return Ok(());
         };
-        if slot.generation != (identity >> 32) as u32 {
+        let generation = (identity >> 32) as u32;
+        if slot.armed_generation != generation {
             return Ok(());
         }
-        let Some(r) = slot.record.as_mut() else {
+        let Some(r) = slot.record.as_ref() else {
             return Ok(());
         };
+        let mut waiters = r.waiters;
         let failed = flags & (libc::EPOLLERR | libc::EPOLLHUP) as u32 != 0;
         for (direction, mask) in [libc::EPOLLIN | libc::EPOLLRDHUP, libc::EPOLLOUT]
             .into_iter()
             .enumerate()
         {
-            if (failed || flags & mask as u32 != 0) && r.waiters[direction] != 0 {
-                ready(std::mem::take(&mut r.waiters[direction]));
+            if (failed || flags & mask as u32 != 0)
+                && let Some(wait) = waiters[direction].take()
+            {
+                ready(wait.token);
             }
         }
-        self.update(index)
+        self.update(index, generation, waiters)
     }
     /// Polls only returned registrations. Stack scratch is independent of live sockets.
     pub fn poll(&mut self, timeout_ms: i32, mut ready: impl FnMut(u64)) -> io::Result<usize> {

@@ -1,7 +1,11 @@
 //! Provider-aware mechanical HostFile ownership. The native carrier is a u64
 //! run-local key; provider metadata is private and never read inline by emitters.
 use crate::{Context, provider::*};
-use std::{collections::BTreeMap, ptr};
+use std::{
+    collections::BTreeMap,
+    ptr,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Clone, Copy)]
 struct File {
@@ -9,6 +13,12 @@ struct File {
     provider: Provider,
     handle: u64,
 }
+// SAFETY: transferring the opaque callback descriptor does not access its
+// state. The runtime invokes it under the run's provider calling contract.
+unsafe impl Send for File {}
+// SAFETY: sharing this immutable descriptor grants no access to its state.
+unsafe impl Sync for File {}
+
 pub(crate) const DYNAMIC_GRANT: u64 = 1 << 63;
 /// A substitute Args vector (tape.rs): pinned for the run, so its views stay
 /// valid after the tape ends.
@@ -16,31 +26,58 @@ struct Vector {
     _bytes: Vec<Vec<u8>>,
     views: Vec<Buffer>,
 }
+
+// SAFETY: the views point into the vector's own heap allocations. Moving
+// the owning entry between workers leaves the bytes and views in place.
+unsafe impl Send for Vector {}
+
+#[derive(Default)]
+struct Entries {
+    next: u64,
+    live: BTreeMap<u64, File>,
+    grants: BTreeMap<u64, Arc<File>>,
+    tapes: BTreeMap<u64, Arc<crate::tape::Tape>>,
+    vectors: BTreeMap<u64, Vector>,
+}
+impl Entries {
+    fn id(&mut self) -> u64 {
+        self.next += 1;
+        if self.next == DYNAMIC_GRANT {
+            crate::process::stop(b"HostHandles");
+        }
+        self.next
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct Registry(Mutex<Entries>);
+
 #[derive(Default)]
 pub(crate) struct Files {
     pub(crate) sockets: hirsel_core_net::Sockets,
-    pub(crate) net_grants: Vec<crate::net::Grant>,
-    next: u64,
-    live: BTreeMap<u64, File>,
-    grants: BTreeMap<u64, Box<File>>,
-    tapes: BTreeMap<u64, crate::tape::Tape>,
-    vectors: BTreeMap<u64, Vector>,
+    pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
+    // Children inherit these entries without borrowing the scheduler's sockets.
+    pub(crate) registry: Registry,
 }
-impl Files {
-    pub(crate) fn tape(&mut self, tape: crate::tape::Tape) -> u64 {
-        let id = self.id();
-        self.tapes.insert(id, tape);
+impl Registry {
+    pub(crate) fn tape(&self, tape: crate::tape::Tape) -> u64 {
+        let mut registry = self.0.lock().unwrap();
+        let id = registry.id();
+        registry.tapes.insert(id, Arc::new(tape));
         id
     }
-    pub(crate) fn tape_ref(&self, key: u64) -> &crate::tape::Tape {
-        &self.tapes[&key]
+    /// # Safety
+    /// The caller borrows the sole-owned tape handle for the entire borrow.
+    pub(crate) unsafe fn tape_ref(&self, key: u64) -> &crate::tape::Tape {
+        let tape = Arc::as_ptr(&self.0.lock().unwrap().tapes[&key]);
+        // SAFETY: the Arc stays in the table while this key is borrowed.
+        unsafe { &*tape }
     }
-    pub(crate) fn untape(&mut self, key: u64) -> crate::tape::Tape {
-        self.tapes.remove(&key).unwrap()
+    pub(crate) fn untape(&self, key: u64) -> crate::tape::Tape {
+        Arc::into_inner(self.0.lock().unwrap().tapes.remove(&key).unwrap()).unwrap()
     }
     /// Pin a substitute Args vector and return its handle.
-    pub(crate) fn vector(&mut self, bytes: Vec<Vec<u8>>) -> u64 {
-        let id = DYNAMIC_GRANT | self.id();
+    pub(crate) fn vector(&self, bytes: Vec<Vec<u8>>) -> u64 {
         let views = bytes
             .iter()
             .map(|b| Buffer {
@@ -49,7 +86,9 @@ impl Files {
                 capacity: 0,
             })
             .collect();
-        self.vectors.insert(
+        let mut registry = self.0.lock().unwrap();
+        let id = DYNAMIC_GRANT | registry.id();
+        registry.vectors.insert(
             id,
             Vector {
                 _bytes: bytes,
@@ -58,61 +97,76 @@ impl Files {
         );
         id
     }
-    fn id(&mut self) -> u64 {
-        self.next = self
-            .next
-            .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
-        if self.next == DYNAMIC_GRANT {
-            crate::process::stop(b"HostHandles");
-        }
-        self.next
+    fn views(&self, key: u64) -> &[Buffer] {
+        let views = &raw const self.0.lock().unwrap().vectors[&key].views[..];
+        // SAFETY: the slice points into a pinned Vec allocation never mutated
+        // or removed while Files is shared.
+        unsafe { &*views }
     }
-    fn insert(&mut self, file: File) -> u64 {
-        let id = self.id();
-        self.live.insert(id, file);
+    fn insert(&self, file: File) -> u64 {
+        let mut registry = self.0.lock().unwrap();
+        let id = registry.id();
+        registry.live.insert(id, file);
         id
     }
-    pub(crate) fn grant(&mut self, provider: Provider, handle: u64) -> u64 {
-        let id = DYNAMIC_GRANT | self.id();
-        self.grants.insert(
-            id,
-            Box::new(File {
-                provider,
-                handle,
-                group: None,
-            }),
-        );
+    fn file(&self, key: u64) -> File {
+        self.0.lock().unwrap().live[&key]
+    }
+    fn take_file(&self, key: u64) -> File {
+        self.0.lock().unwrap().live.remove(&key).unwrap()
+    }
+    fn insert_grant(&self, file: File) -> u64 {
+        let mut registry = self.0.lock().unwrap();
+        let id = DYNAMIC_GRANT | registry.id();
+        registry.grants.insert(id, Arc::new(file));
         id
+    }
+    pub(crate) fn grant(&self, provider: Provider, handle: u64) -> u64 {
+        self.insert_grant(File {
+            provider,
+            handle,
+            group: None,
+        })
     }
     pub(crate) fn taped_grant(
-        &mut self,
+        &self,
         provider: Provider,
         handle: u64,
         group: crate::tape::schedule::Group,
     ) -> u64 {
-        let id = self.grant(provider, handle);
-        self.grants.get_mut(&id).unwrap().group = Some(group);
-        id
+        self.insert_grant(File {
+            provider,
+            handle,
+            group: Some(group),
+        })
     }
     pub(crate) fn grant_group(&self, handle: u64) -> Option<crate::tape::schedule::Group> {
-        self.grants.get(&handle).and_then(|g| g.group)
+        self.0
+            .lock()
+            .unwrap()
+            .grants
+            .get(&handle)
+            .and_then(|g| g.group)
     }
     pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {
-        &raw const self.grants[&handle].provider
+        let file = Arc::as_ptr(&self.0.lock().unwrap().grants[&handle]);
+        // SAFETY: grants stay pinned until teardown.
+        unsafe { &raw const (*file).provider }
     }
     pub(crate) fn grant_handle(&self, handle: u64) -> u64 {
-        self.grants[&handle].handle
+        self.0.lock().unwrap().grants[&handle].handle
     }
+}
+impl Files {
     pub(crate) unsafe fn close_all(&mut self, context: *mut Context) {
         // A tape still open writes its buffered frames through its Dir's
         // provider, which outlives this teardown (section 8: as a crash).
-        while let Some((_, tape)) = self.tapes.pop_last() {
+        while let Some((_, tape)) = self.registry.0.get_mut().unwrap().tapes.pop_last() {
             drop(tape);
         }
         self.sockets = hirsel_core_net::Sockets::default();
-        self.net_grants.clear();
-        while let Some((_, file)) = self.live.pop_last() {
+        self.net_grants.get_mut().unwrap().clear();
+        while let Some((_, file)) = self.registry.0.get_mut().unwrap().live.pop_last() {
             // SAFETY: removed sole ownership before calling the pinned provider.
             unsafe { close(context, file) };
         }
@@ -164,7 +218,7 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
         };
         let provider = *provider;
         if result.status == 0 && result.error == IoError::OK {
-            result.value = (*(*context).host_files).insert(File {
+            result.value = (*(*context).host_files).registry.insert(File {
                 group: None,
                 provider,
                 handle: result.value,
@@ -204,9 +258,9 @@ pub unsafe extern "C" fn hirsel_core_host_file(
     unsafe {
         let registry = (*context).host_files;
         let owned = if (*request).operation == CLOSE {
-            (*registry).live.remove(&file).unwrap()
+            (*registry).registry.take_file(file)
         } else {
-            (&(*registry).live)[&file]
+            (*registry).registry.file(file)
         };
         (*request).handle = owned.handle;
         if (*request).operation != CLOSE {
@@ -229,7 +283,7 @@ pub unsafe extern "C" fn hirsel_core_host_file(
 pub unsafe extern "C" fn hirsel_core_hostfile_drop(context: *mut Context, file: u64) {
     // SAFETY: removing the sole ownership prevents teardown from closing twice.
     unsafe {
-        let owned = (*(*context).host_files).live.remove(&file).unwrap();
+        let owned = (*(*context).host_files).registry.take_file(file);
         close(context, owned);
     }
 }
@@ -242,7 +296,7 @@ pub(crate) unsafe fn args<'a>(context: *const Context, args: u64) -> &'a [Buffer
     // SAFETY: the run pins its argument table and every substitute vector.
     unsafe {
         if args & DYNAMIC_GRANT != 0 {
-            &(&(*(*context).host_files).vectors)[&args].views
+            (*(*context).host_files).registry.views(args)
         } else {
             let run = &*(*context).run;
             if run.args_len == 0 {

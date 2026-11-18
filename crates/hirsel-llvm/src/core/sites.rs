@@ -133,6 +133,7 @@ impl DebugFunction {
 /// The final link writer resolves these rows against the current SourceMap.
 pub(super) fn debug_plan(
     module: &Module,
+    function_symbols: &[String],
     failures: &failure::Failures,
     next: &mut usize,
     sink: &mut dyn Sink,
@@ -198,7 +199,7 @@ pub(super) fn debug_plan(
                 .copied()
                 .or_else(|| body.blocks.iter().find_map(|b| b.anchor));
             let file = first.map_or(generated_file, |anchor| files[&anchor.item.0]);
-            let base = symbol(module, FuncId(i as u32));
+            let base = &function_symbols[i];
             let name = module.instances[function.instance.index()]
                 .definition
                 .to_string();
@@ -250,7 +251,7 @@ pub(super) fn debug_plan(
             let wrapper = if failures.may_fail[i] {
                 None
             } else {
-                let wrapper = node(subprogram(base));
+                let wrapper = node(subprogram(base.clone()));
                 let location = node(Metadata::Location {
                     line: 0,
                     column: 0,

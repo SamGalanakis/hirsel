@@ -831,12 +831,12 @@ impl FunctionEmitter<'_> {
                 &[ptr(CONTEXT), ptr(base.clone())],
             );
         }
-        let symbol = symbol(self.module, FuncId(f.0));
+        let symbol = self.items.function_symbol(FuncId(f.0));
         let args = [CONTEXT, base.clone(), site];
         if self.failures.may_fail[f.0 as usize] {
             let failed = self.call(
                 &drop_signature(),
-                &Value::global(symbol),
+                &Value::global(symbol.to_owned()),
                 &args,
                 &CallAttrs::default(),
             );

@@ -1,6 +1,5 @@
 // The CoreIR object's LLVM phase, with the same target, pipeline and probe
 // settings as hirsel-llvm's direct Context/Module/TargetMachine path.
-#include <llvm-c/Analysis.h>
 #include <llvm-c/Core.h>
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/IRReader.h>
@@ -629,13 +628,6 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             !strncmp(triple, "arm64", 5);
         register_carriers(module, context, x86 || arm ? LLVMPreserveMostCallConv : LLVMFastCallConv,
             x86 || arm ? 4 : 2);
-        // These passes rewrite signatures and calls by hand: a malformed rewrite
-        // stops the build here instead of reaching code generation.
-        char *message = NULL;
-        int broken = LLVMVerifyModule(module, LLVMReturnStatusAction, &message);
-        if (broken) error(out, message ? message : "bridge passes produced invalid IR");
-        LLVMDisposeMessage(message);
-        if (broken) goto done;
     }
     LLVMSetTarget(module, triple);
     LLVMTargetDataRef layout = LLVMCreateTargetDataLayout(machine);

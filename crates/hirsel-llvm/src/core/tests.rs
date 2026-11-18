@@ -195,7 +195,7 @@ fn exposed_helpers_keep_imported_carrier_facts() {
 fn storage_roles_keep_moved_buffers_in_one_scope() {
     let module = text::parse(include_str!("../../tests/core_runtime/roles.core")).unwrap();
     wf::module(&module).unwrap();
-    let mut items = Items::default();
+    let mut items = Items::new(&module);
     let scopes = alias::Scopes::new(
         &module,
         &hirsel_core_ir::roles::Facts::new(&module),

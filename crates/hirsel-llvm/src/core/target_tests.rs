@@ -72,7 +72,7 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
     std::fs::create_dir_all(&dir).unwrap();
     for target in [Target::X86_64Linux, Target::Aarch64Linux] {
         let mut text = sink::TextSink::default();
-        let mut items = Items::default();
+        let mut items = Items::new(&module);
         let mut c =
             String::from("#include <stdint.h>\n#include <stdbool.h>\n#include <assert.h>\n");
         let mut checks = String::new();

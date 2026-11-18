@@ -88,16 +88,12 @@ type Result<T> = std::result::Result<T, Error>;
 
 /// The FORM instance link name, shared by declarations, definitions and callers.
 pub fn symbol(module: &Module, function: FuncId) -> String {
-    let mut name = String::from("h");
-    for byte in module.code_identity(function).0 {
-        write!(name, "{byte:02x}").unwrap();
-    }
-    name
+    hirsel_core_ir::symbol(module.code_identity(function))
 }
 
 /// The link name of `function`'s static descriptor (`Inst::DescriptorRef`).
-fn descriptor_symbol(module: &Module, function: FuncId) -> String {
-    symbol(module, function) + "$static"
+fn descriptor_symbol(function: &str) -> String {
+    format!("{function}$static")
 }
 
 /// The `"hirsel-carriers"` marker: each LLVM parameter whose place the bridge
@@ -260,8 +256,10 @@ fn emit_ir_target_with_role_facts(
 
 /// Deferred module items in the order of their LLVM text lines: globals, then
 /// declarations by result type and name, the shared byte order, module asm.
-#[derive(Default)]
-struct Items(std::collections::BTreeMap<String, Item>);
+struct Items {
+    function_symbols: Vec<String>,
+    pending: std::collections::BTreeMap<String, Item>,
+}
 enum Item {
     Global(Global),
     Declare(String, FnSig, FnAttrs),
@@ -272,8 +270,17 @@ enum Item {
     ReleaseLast(u32, bool),
 }
 impl Items {
+    fn new(module: &Module) -> Self {
+        Self {
+            function_symbols: module.link_symbols(),
+            pending: Default::default(),
+        }
+    }
+    fn function_symbol(&self, function: FuncId) -> &str {
+        &self.function_symbols[function.index()]
+    }
     fn insert(&mut self, key: String, item: Item) {
-        self.0.entry(key).or_insert(item);
+        self.pending.entry(key).or_insert(item);
     }
     pub fn global(&mut self, global: Global) {
         let mut key = String::new();
@@ -306,7 +313,7 @@ impl Items {
     }
     fn take_release_lasts(&mut self) -> Vec<(u32, bool)> {
         let mut lasts = Vec::new();
-        self.0.retain(|_, item| match item {
+        self.pending.retain(|_, item| match item {
             Item::ReleaseLast(t, atomic) => {
                 lasts.push((*t, *atomic));
                 false
@@ -319,7 +326,7 @@ impl Items {
         self.insert(format!("module asm \"{text}\""), Item::Asm(text));
     }
     fn emit(self, sink: &mut dyn Sink) {
-        for item in self.0.into_values() {
+        for item in self.pending.into_values() {
             match item {
                 Item::Global(global) => sink.global(&global),
                 Item::Declare(name, sig, attrs) => sink.declare(&name, &sig, &attrs),
@@ -368,6 +375,7 @@ fn emit_module(
         .then(|| expose::module(module, provided.prepay_step_trees))
         .flatten();
     let module = exposed.as_ref().unwrap_or(module);
+    let mut items = Items::new(module);
     let batch_steps = source.batch_steps && !provided.elide_steps;
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
     sink.metadata(
@@ -418,7 +426,8 @@ fn emit_module(
             else {
                 continue;
             };
-            let name = descriptor_symbol(module, function);
+            let function_symbol = items.function_symbol(function);
+            let name = descriptor_symbol(function_symbol);
             if !described.insert(name.clone()) {
                 continue;
             }
@@ -473,7 +482,7 @@ fn emit_module(
                 init: Some(Value::Struct {
                     packed: false,
                     fields: vec![
-                        (Type::Ptr, Value::global(symbol(module, function))),
+                        (Type::Ptr, Value::global(function_symbol.to_owned())),
                         (Type::I64, Value::Int(bytes.len() as i128)),
                         (Type::Ptr, Value::global(revision)),
                         (identity, Value::Bytes(bytes.to_vec())),
@@ -484,14 +493,13 @@ fn emit_module(
             });
         }
     }
-    let mut items = Items::default();
     let mut next_scope = alias::private_steps(sink);
     let failures = failure::Failures::new(module);
     let step_neutral =
         (!provided.elide_steps).then(|| steps::neutral_functions(module, provided.neutral));
     let neutral_functions = step_neutral.as_deref().unwrap_or_default();
     let debug = if source.debug_lines {
-        sites::debug_plan(module, &failures, &mut next_scope, sink)
+        sites::debug_plan(module, &items.function_symbols, &failures, &mut next_scope, sink)
     } else {
         module.functions.iter().map(|_| None).collect()
     };
@@ -504,7 +512,7 @@ fn emit_module(
         let has_status = failures.may_fail[i];
         let abi =
             abi::Return::for_signature(target, sig, &call_layouts, has_status || f.body.is_none());
-        let name = symbol(module, FuncId(i as u32));
+        let name = items.function_symbols[i].clone();
         let (params, locals) = abi.parameters(sig, &call_layouts, facts, |place| match place {
             PlaceTy::Value(t) => size(t),
             PlaceTy::Declared(t)
@@ -1661,13 +1669,14 @@ impl FunctionEmitter<'_> {
                 self.put(result, &Value::global(format!("s{}", data.0)))
             }
             Inst::FunctionRef { result, function } => {
-                self.put(result, &Value::global(symbol(self.module, function)))
+                let name = self.items.function_symbol(function).to_owned();
+                self.put(result, &Value::global(name))
             }
             Inst::DescriptorRef {
                 result, function, ..
             } => self.put(
                 result,
-                &Value::global(descriptor_symbol(self.module, function)),
+                &Value::global(descriptor_symbol(self.items.function_symbol(function))),
             ),
             Inst::Unary {
                 result,

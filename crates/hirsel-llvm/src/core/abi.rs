@@ -359,11 +359,14 @@ impl FunctionEmitter<'_> {
     }
     fn callee(&mut self, callee: Callee, has_status: bool) -> Value {
         match callee {
-            Callee::Direct(f) => Value::global(format!(
-                "{}{}",
-                symbol(self.module, f),
-                if has_status { "" } else { ".infallible" }
-            )),
+            Callee::Direct(f) => {
+                let name = self.items.function_symbol(f);
+                Value::global(if has_status {
+                    name.to_owned()
+                } else {
+                    format!("{name}.infallible")
+                })
+            }
             Callee::Indirect(v) => self.numeric(v),
             Callee::Runtime(_) => unreachable!(),
         }

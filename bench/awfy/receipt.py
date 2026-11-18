@@ -15,6 +15,7 @@ import sys
 
 import build
 import measure
+import profile_diff
 from measurement_artifacts import SHIPPING, check
 
 VERSION = 1
@@ -270,6 +271,59 @@ def compare(before_path, after_path, threshold):
     return int(failed)
 
 
+def profile(args):
+    before, after = rows_from(args.baseline), rows_from(args.candidate)
+    left, right = before[args.row], after[args.row]
+    if left["suite"] == "compile":
+        raise ValueError("profile-diff requires a runtime row")
+    fields = [field for field in (*IDENTITY, "marker", "stdout")
+              if field not in ARTIFACT_HASHES and left[field] != right[field]]
+    if fields:
+        raise ValueError(f"{args.row}: identity differs: {', '.join(fields)}")
+    affinity = set(left["affinity"])
+    assigned = os.sched_getaffinity(0)
+    if not affinity <= assigned:
+        raise ValueError(f"run on the recorded affinity {sorted(affinity)}")
+    out = args.out.resolve()
+    if out.is_relative_to(build.ROOT):
+        raise ValueError("use a new evidence directory outside the checkout")
+    baseline = left["sample"]["instructions"]
+    candidate = right["sample"]["instructions"]
+    percent = Decimal(100) * (candidate - baseline) / baseline
+    print(f"{args.row} PMU instructions:u {baseline:,} -> {candidate:,} ({percent:+.3f}%)", flush=True)
+    for field in ARTIFACT_HASHES:
+        if left[field] != right[field]:
+            print(f"{field} {left[field]} -> {right[field]}")
+    sides = []
+    for label, row in (("baseline", left), ("candidate", right)):
+        if not row["argv"][0].startswith("./"):
+            raise ValueError(f"{label}: expected a runtime executable relative to cwd")
+        path = (Path(row["cwd"]) / row["argv"][0]).resolve()
+        if sha256(path) != row["image_sha256"]:
+            raise ValueError(f"{label}: executable no longer matches the measured image")
+        for fixture, digest in row["fixture_files"].items():
+            if sha256(Path(fixture)) != digest:
+                raise ValueError(f"{label}: measured fixture has changed: {fixture}")
+        sides.append((out / label, row, path))
+    out.mkdir(parents=True)
+    try:
+        with measurement_slot(args.lock):
+            os.sched_setaffinity(0, affinity)
+            for directory, row, _ in sides:
+                directory.mkdir()
+                profile_diff.capture(row, directory)
+    finally:
+        os.sched_setaffinity(0, assigned)
+    mapped = []
+    for directory, _, executable in sides:
+        addresses = profile_diff.mapped_counts(directory, executable)
+        write(directory / "addresses.json", addresses)
+        mapped.append(addresses)
+    profile_diff.summarize(*mapped)
+    print(f"Profiles and source maps: {out}")
+    return 0
+
+
 def threshold(value):
     try:
         result = Decimal(value)
@@ -296,12 +350,20 @@ def main():
     comparison.add_argument("baseline", type=Path)
     comparison.add_argument("candidate", type=Path)
     comparison.add_argument("--threshold", type=threshold, default=Decimal("0.5"), metavar="PERCENT")
+    profiling = commands.add_parser("profile-diff", help="attribute one matched runtime row with Callgrind")
+    profiling.add_argument("row", metavar="SUITE/ROW")
+    profiling.add_argument("baseline", type=Path)
+    profiling.add_argument("candidate", type=Path)
+    profiling.add_argument("out", type=Path)
+    profiling.add_argument("--lock", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.action == "sample":
             return sample(args)
+        if args.action == "profile-diff":
+            return profile(args)
         return compare(args.baseline, args.candidate, args.threshold)
-    except (KeyError, OSError, ValueError, TypeError, AttributeError, re.error) as error:
+    except (KeyError, OSError, ValueError, TypeError, AttributeError, re.error, subprocess.SubprocessError) as error:
         print(f"{args.action}: {error}", file=sys.stderr)
         return 2
 

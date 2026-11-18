@@ -171,3 +171,21 @@ The same command reads two complete `board.json` files. It compares Hirsel
 instructions on the 72 runtime rows and the cold and warm-edit compile rows.
 `board.py --baseline PREVIOUS/board.json` records a nightly +2% triage result
 and uses exit 3 for a comparable regression. An incomplete board exits 1.
+
+### Profile a runtime delta
+
+Build both images with `--debug-lines on` for authored and inlined Hirsel
+locations. AWFY's release build adapter already sets it. Measure both images
+with the sampling command above. Then use the same measurement CPUs and lock.
+
+```sh
+python3 bench/awfy/receipt.py profile-diff awfy/Mandelbrot \
+  "$out/base-samples/receipt.json" "$out/candidate-samples/receipt.json" \
+  "$out/mandelbrot-profile" --lock "$lock"
+```
+
+The command prints the uninstrumented PMU delta first, followed by the
+Callgrind self-count deltas. It permits different release compiler or runtime
+hashes for attribution and prints both hashes when they differ. Each side
+keeps its raw profile, verified stdout and address map alongside offsets,
+disassembly and DWARF inline frames when available.

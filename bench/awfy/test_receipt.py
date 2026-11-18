@@ -61,3 +61,41 @@ class InstructionGuard(unittest.TestCase):
             result = compare(missing)
             self.assertEqual(result.returncode, 2)
             self.assertIn("missing: ['arena/CLBG::Mandelbrot']", result.stderr)
+
+
+class ProfileSelfCosts(unittest.TestCase):
+    def test_excludes_call_edges_and_keeps_inlined_line(self):
+        from profile_diff import self_counts
+
+        capture = """positions: instr line
+events: Ir
+ob=/release/awfy
+fl=/src/mandelbrot.hirsel
+fn=mandelbrot
+0x100 31 8
+cob=/release/awfy
+cfi=/src/helper.hirsel
+cfn=helper
+calls=8 0x200 9
+0x103 31 32
+fi=/src/helper.hirsel
+0x108 9 8
+fe=/src/mandelbrot.hirsel
+0x10b 32 8
+fl=/src/helper.hirsel
+fn=helper
+0x200 9 32
+totals: 56
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "callgrind.out"
+            path.write_text(capture)
+            self.assertEqual(self_counts(path), {
+                ("/release/awfy", "mandelbrot", 0x100, "/src/mandelbrot.hirsel", 31): 8,
+                ("/release/awfy", "mandelbrot", 0x108, "/src/helper.hirsel", 9): 8,
+                ("/release/awfy", "mandelbrot", 0x10b, "/src/mandelbrot.hirsel", 32): 8,
+                ("/release/awfy", "helper", 0x200, "/src/helper.hirsel", 9): 32,
+            })
+            path.write_text(capture.replace("totals: 56", "totals: 88"))
+            with self.assertRaises(ValueError):
+                self_counts(path)

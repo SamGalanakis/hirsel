@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 
-from std_native import ROOT, wait_load
+from std_native import ROOT
 
 
 BYTE_LAWS = ('refused_reply',
@@ -123,7 +123,6 @@ def main():
                     command.append('--release')
                 if args.cc:
                     command += ['--cc', str(args.cc.resolve())]
-                wait_load()
                 result = subprocess.run(command, capture_output=True, text=True)
                 try:
                     report = json.loads(result.stdout)

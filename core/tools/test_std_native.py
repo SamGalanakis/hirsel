@@ -73,7 +73,11 @@ class Walker(unittest.TestCase):
                     return compiler([str(self.binary), str(inputs), entry])
                 def __exit__(self, *exc):
                     pass
-            with patch('std_native.Evaluator', Resident), patch('std_native.subprocess.run', side_effect=compiler), contextlib.redirect_stdout(io.StringIO()):
+            with (patch('std_native.Evaluator', Resident),
+                  patch('std_native.subprocess.run', side_effect=compiler),
+                  patch('std_native.os.getloadavg', return_value=(64, 64, 64)),
+                  patch('std_native.time.sleep', side_effect=AssertionError('test waited for host load')),
+                  contextlib.redirect_stdout(io.StringIO())):
                 rows = run(root, root / 'compiler', root / 'runtime', cases,
                            ['evaluator', 'cranelift', 'llvm'], None, [], evaluator=root / 'evaluator', compare_revisions=True)
             self.assertEqual(len(calls), 4)

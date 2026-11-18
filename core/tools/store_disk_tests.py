@@ -9,7 +9,7 @@ import re
 import subprocess
 import tempfile
 
-from std_native import ROOT, Evaluator, wait_load
+from std_native import ROOT, Evaluator
 from store_tests import inputs
 from store_crash_tests import run_crashes
 
@@ -79,7 +79,6 @@ def main():
                     command.append('--release')
                 if args.cc:
                     command += ['--cc', str(args.cc.resolve())]
-                wait_load()
                 result = subprocess.run(command, capture_output=True, text=True)
                 try:
                     report = json.loads(result.stdout)

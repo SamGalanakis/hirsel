@@ -14,7 +14,7 @@ from runner_tests import (CALLS, LAWS, MUTANTS, evaluate, manifest, p19_module, 
                           l12_module, L12, l12_holds, l12_values, revision_holds,
                           l10_values, l10_holds, c_compiler, dir_for, native_run, counting_cc,
                           COUNTS)
-from std_native import ROOT, wait_load
+from std_native import ROOT
 
 
 OBSERVE_MUTANTS = (
@@ -223,7 +223,6 @@ class CallEvaluator:
                        '--grant', 'Stdout', '--grant', 'Stderr', '--grant', 'Clock', '--grant', 'Random', '--grant', 'Tasks',
                        '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535',
                        '--dir', str(dir_for(store))]
-            wait_load()
             built = subprocess.run(command, capture_output=True, text=True)
             if built.returncode:
                 return None, dict(error=built.stderr, command=command)

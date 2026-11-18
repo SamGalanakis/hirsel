@@ -12,8 +12,6 @@ import re
 import shlex
 import subprocess
 
-from std_native import wait_load
-
 SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'branches', 'migrate')
 
 
@@ -72,7 +70,6 @@ def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
         command += ['--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
     if engine == 'llvm-release' or (engine == 'llvm' and adapter == 'runner_crash.c'):
         command.append('--release')
-    wait_load()
     result = checked(command, environment)
     report = json.loads(result.stdout)
     if not report.get('accepted') or not report.get('native', {}).get('linked'):

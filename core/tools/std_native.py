@@ -603,7 +603,6 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     linker.chmod(0o755)
                 if linker:
                     command.extend(['--cc', str(linker)])
-                wait_load()
                 result = subprocess.run(command, cwd=host, capture_output=True)
                 row['ran'], row['cause'] = test_observation(case, result, entry)
                 row['passed'] = row['cause'] is None

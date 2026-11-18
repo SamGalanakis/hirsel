@@ -40,7 +40,7 @@ import shutil
 import subprocess
 import tempfile
 
-from std_native import MODEL_NET_RULES, ROOT, wait_load
+from std_native import MODEL_NET_RULES, ROOT
 from store_tests import inputs
 from store_crash_tests import checked, run_crashes
 
@@ -154,7 +154,6 @@ def charged(args, root, work, engine, module, modes, figure, cc=None, runner=Non
             command.append('--release')
     if cc or args.cc:
         command += ['--cc', str(cc or args.cc.resolve())]
-    wait_load()
     built = subprocess.run(command, capture_output=True, text=True)
     if built.returncode != 0:
         return None, built.stderr[-2000:]
@@ -719,7 +718,6 @@ def no_secret_at_rest(args, root, work, engine, row, mutant=False):
                '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
     if args.cc:
         command += ['--cc', str(args.cc.resolve())]
-    wait_load()
     checked(command, os.environ)
     nonce = os.urandom(16)
     encoded = base64.b64encode(b'anon:' + nonce).decode('ascii')
@@ -746,7 +744,6 @@ def manifest(root, work, name, runner=None, extra=()):
 
 
 def evaluate(evaluator, inputs_path, definition):
-    wait_load()
     request = dict(manifest=str(inputs_path), entry=definition, model_net=MODEL_NET_RULES)
     if definition in WIRE_TEST_INSTRUCTIONS:
         request['instructions'] = WIRE_TEST_INSTRUCTIONS[definition]
@@ -1123,7 +1120,6 @@ def native_run(args, engine, inputs_path, store, prefix, cc=None, runtime=None):
         command.append('--release')
     if cc or args.cc:
         command += ['--cc', str(cc or args.cc.resolve())]
-    wait_load()
     result = subprocess.run(command, capture_output=True, text=True)
     try:
         report = json.loads(result.stdout)

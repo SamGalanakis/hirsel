@@ -131,6 +131,39 @@ fn length_before_reserve() -> bool {
     result.unwrap(refused) && result.unwrap(partial)
 }
 
+// A 65th payload byte needs a 128-byte allocation while the 64-byte
+// prefix is still live. Refusal leaves the cursor and the prefix unchanged.
+// expect: run grow_preserves_partial() = true
+fn grow_preserves_partial() -> bool {
+    let mut prefix = unhex("82 c1 00 00 00 00")
+    for _ in 0u64 .. 64u64 {
+        result.unwrap(list.push(mut prefix, 97u8))
+    }
+    let last = unhex("62")
+    let small = bound bytes 128u64 {
+        let mut d = websocket.decoder(Server, 256u64)
+        let mut at = 0u64
+        let got_prefix = event(result.unwrap(websocket.next(mut d, prefix, mut at))) == 0
+        at = 0u64
+        let refused = match websocket.next(mut d, last, mut at) {
+            Error(Capacity(requested: 128u64, available: 64u64)) => true,
+            _ => false,
+        }
+        got_prefix && refused && at == 0u64 && websocket.buffered(d) == 64u64 && websocket.capacity(d) == 64u64
+    }
+    let enough = bound bytes 192u64 {
+        let mut d = websocket.decoder(Server, 256u64)
+        let mut at = 0u64
+        let got_prefix = event(result.unwrap(websocket.next(mut d, prefix, mut at))) == 0
+        at = 0u64
+        match websocket.next(mut d, last, mut at) {
+            Ok(Message(message)) => got_prefix && list.len(message) == 65u64 && list.slice(message, 0u64, 64u64) == list.slice(prefix, 6u64, 70u64) && message[64u64] == 98u8,
+            _ => false,
+        }
+    }
+    result.unwrap(small) && result.unwrap(enough)
+}
+
 // RFC 6455 section 5.7 Hello, mask 37fa213d. Hand-derived masked bytes.
 // Mutants: accept_unmasked, accept_masked_server, wrong_mask_phase.
 // expect: run masks_both_roles() = true

@@ -61,6 +61,11 @@ pub struct Checked {
     pub roles: u64,
     /// Executed copies of the size selected by [run_counting_copies].
     pub copies: u64,
+    /// Spawned tasks' native stack high-water mark at evaluator call entry.
+    /// Helper frames below that boundary use the reserved headroom.
+    pub task_stack_peak: usize,
+    /// Largest active evaluator activation chain in a spawned task.
+    pub task_call_depth: usize,
 }
 
 /// The modelled provider (CAP-5), deterministic so runs can be derived by hand:
@@ -579,6 +584,8 @@ struct Machine<'m> {
     role_checks: u64,
     copy_size: Option<u64>,
     copies: u64,
+    task_stack_peak: usize,
+    task_call_depth: usize,
     /// Whether each function inherits its caller's site (`source::inherits_site`).
     inherits: Vec<bool>,
     /// [`Nans::Scrambled`]: the count of NaNs stored so far, which picks the next one's
@@ -621,8 +628,33 @@ pub struct Event {
 /// Polls a task may perform before a peer that is ready gets a turn (CONC-10's
 /// fairness; native `POLLS_PER_TURN`).
 const POLLS_PER_TURN: u32 = 64;
-/// Each task thread's stack, reserved and committed as it is used.
-const TASK_STACK: usize = 128 << 20;
+/// Keep the root's existing stack. Spawned tasks need a bounded reservation:
+/// the checked evaluator's deepest existing recursive corpus path is 27
+/// activations / 27,520 bytes. Round twice that demand up to 64 KiB, and keep
+/// another 64 KiB for helper calls, thread entry and run-stop unwinding.
+const ROOT_STACK: usize = 128 << 20;
+const TASK_STACK: usize = 128 << 10;
+const STACK_HEADROOM: usize = 64 << 10;
+thread_local! {
+    static TASK_STACK_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(TASK_STACK) };
+    static TASK_STACK_ROOM: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, usize::MAX)) };
+}
+/// Run a harness control with a smaller spawned-task stack. The root keeps
+/// its existing stack, and a control cannot exceed the ordinary reservation.
+pub fn with_task_stack<R>(bytes: usize, run: impl FnOnce() -> R) -> R {
+    assert!(
+        (STACK_HEADROOM..=TASK_STACK).contains(&bytes),
+        "invalid evaluator task stack"
+    );
+    struct Restore(usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TASK_STACK_BYTES.with(|size| size.set(self.0));
+        }
+    }
+    let _restore = Restore(TASK_STACK_BYTES.with(|size| size.replace(bytes)));
+    run()
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum State {
@@ -1173,6 +1205,8 @@ fn run_world(
         loans: mach.loans,
         roles: mach.role_checks,
         copies: mach.copies,
+        task_stack_peak: mach.task_stack_peak,
+        task_call_depth: mach.task_call_depth,
     };
     let report = Report {
         outcome,
@@ -1248,9 +1282,14 @@ fn drive(mach: Machine<'_>) -> (Box<Machine<'_>>, Outcome, Vec<Cause>) {
                     resume: rx,
                     reply: reply_tx.clone(),
                 };
+                let stack = if k == 0 {
+                    ROOT_STACK
+                } else {
+                    TASK_STACK_BYTES.with(std::cell::Cell::get)
+                };
                 std::thread::Builder::new()
-                    .stack_size(TASK_STACK)
-                    .spawn_scoped(scope, move || task_thread(task, f, args, link))
+                    .stack_size(stack)
+                    .spawn_scoped(scope, move || task_thread(task, f, args, link, stack))
                     .expect("a task thread");
             }
             let resume = resumes[k].as_ref().expect("a started task");
@@ -1296,7 +1335,18 @@ fn drive(mach: Machine<'_>) -> (Box<Machine<'_>>, Outcome, Vec<Cause>) {
 
 /// A task thread: wait for the baton, run the task's body, hand the baton back.
 /// The thread's link sits in the baton while the task runs (`Machine::park`).
-fn task_thread<'m>(mut t: Task, f: FuncId, args: Vec<u64>, link: Link<'m>) {
+fn task_thread<'m>(mut t: Task, f: FuncId, args: Vec<u64>, link: Link<'m>, stack: usize) {
+    let origin = 0u8;
+    TASK_STACK_ROOM.with(|room| {
+        room.set((
+            &origin as *const u8 as usize,
+            if t.k == 0 {
+                usize::MAX
+            } else {
+                stack.saturating_sub(STACK_HEADROOM)
+            },
+        ))
+    });
     let Ok(Resume::Run(mut mach)) = link.resume.recv() else {
         return;
     };
@@ -1387,6 +1437,8 @@ impl<'m> Machine<'m> {
             role_checks: 0,
             copy_size: input.copy_size,
             copies: 0,
+            task_stack_peak: 0,
+            task_call_depth: 0,
             inherits: m
                 .functions
                 .iter()
@@ -1431,6 +1483,8 @@ impl<'m> Machine<'m> {
             role_checks: 0,
             copy_size: None,
             copies: 0,
+            task_stack_peak: 0,
+            task_call_depth: 0,
             inherits: Vec::new(),
             scrambled: None,
             sched: Sched::default(),
@@ -3224,6 +3278,21 @@ impl Machine<'_> {
         }
     }
     fn call(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<Vec<u64>> {
+        let frame = 0u8;
+        let exhausted = TASK_STACK_ROOM.with(|room| {
+            let (base, available) = room.get();
+            base.abs_diff(&frame as *const u8 as usize) > available
+        });
+        if exhausted {
+            // FAIL-15 bypasses every program cleanup and ends the entire run.
+            std::panic::resume_unwind(Box::new(RunStop("Stack")));
+        }
+        if self.sched.current != 0 {
+            let used =
+                TASK_STACK_ROOM.with(|room| room.get().0.abs_diff(&frame as *const u8 as usize));
+            self.task_stack_peak = self.task_stack_peak.max(used);
+            self.task_call_depth = self.task_call_depth.max(t.at.len() + 1);
+        }
         let m = self.m;
         let facts = &self.facts;
         let roles = self.roles[f.index()]

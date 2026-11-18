@@ -130,7 +130,8 @@ fn run(
     Ok(json!({"outcome":outcome, "used":report.used,
         "stdout":report.stdout, "stderr":report.stderr,
         "events":report.events.iter().map(|e| [u64::from(e.kind), e.task, e.object, e.value]).collect::<Vec<_>>(),
-        "checked":{"loans":checked.loans, "instructions":checked.instructions}}))
+        "checked":{"loans":checked.loans, "instructions":checked.instructions,
+                   "task_stack_peak":checked.task_stack_peak, "task_call_depth":checked.task_call_depth}}))
 }
 fn fault_report(fault: Box<dyn std::any::Any + Send>) -> Value {
     let message = fault
@@ -159,15 +160,22 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
         } else {
             None
         };
-        let report = evaluate(
-            driver,
-            store,
-            Path::new(manifest),
-            entry,
-            input["program_entry"].as_bool().unwrap_or(false),
-            input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
-            network,
-        )?;
+        let run = || {
+            evaluate(
+                driver,
+                store,
+                Path::new(manifest),
+                entry,
+                input["program_entry"].as_bool().unwrap_or(false),
+                input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
+                network,
+            )
+        };
+        let report = if let Some(bytes) = input["task_stack_bytes"].as_u64() {
+            eval::with_task_stack(usize::try_from(bytes).map_err(|e| e.to_string())?, run)
+        } else {
+            run()
+        }?;
         if let Some(out) = input["sdk_out"].as_str() {
             if report["outcome"] != json!({"kind":"returned","values":[1]}) {
                 return Err(format!("Frame schema export failed: {report}"));

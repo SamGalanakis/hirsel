@@ -1358,3 +1358,89 @@ fn scrambled_nans_reach_a_pun_but_not_reinterpret() {
     assert!(f64::from_bits(pun).is_nan() && pun != CANONICAL, "{pun:#x}");
     assert_eq!(observed, CANONICAL);
 }
+
+/// A spawned task stops the run before exhausting its small host stack. The
+/// same recursive body still fits the root's unchanged stack.
+#[test]
+fn spawned_evaluator_stack_stops_without_cleanup() {
+    let module = load(
+        "task stack",
+        r#"
+core v1
+type t0 = own "In" { n: u64 }
+type t1 = own "Out" { n: u64 }
+sig g0 = (u64) -> (u64)
+sig g1 = (ptr, &take t0) -> () dest t1
+sig g2 = (u64, &take t0, ptr, u64) -> (ptr, u64)
+sig g3 = (ptr, &mut t1) -> (u8, ptr)
+inst n0 = app@1/stack/main [] []
+inst n1 = app@1/stack/worker [] []
+inst n2 = app@1/stack/recurse [] []
+fn f0 = n0 g0 {
+ slot s0 = t0
+ slot s1 = t1
+ addr a0 = s0 : t0
+ addr a1 = s0 field 0 : u64
+ addr a2 = s1 : t1
+ addr a3 = s1 field 0 : u64
+b0(v0: u64):
+ live s0
+ live s1
+ address a0
+ address a1
+ address a2
+ address a3
+ store a1, v0
+ v1: u64 = const 65536
+ v2: ptr = fnref f1
+ v3: ptr, v4: u64 = call rt.spawn[t0, t1] g2 (v1, &a0, v2, v1)
+ v5: u8, v6: ptr = call rt.join[t1] g3 (v3, &a2)
+ v7: u64 = read a3
+ return v7
+}
+fn f1 = n1 g1 {
+ addr a0 = v0 : t1
+ addr a1 = a0 field 0 : u64
+ addr a2 = v2 : t0
+ addr a3 = a2 field 0 : u64
+b0(v0: ptr, v1: ptr, v2: ptr):
+ address a0
+ address a1
+ address a2
+ address a3
+ v3: u64 = read a3
+ v4: u64 = call f2 g0 (v3)
+ store a1, v4
+ drop a2 t0
+ return
+}
+fn f2 = n2 g0 {
+b0(v0: u64):
+ v1: u64 = const 0
+ v2: bool = eq v0, v1
+ branch v2, b1, b2
+b1:
+ return v1
+b2:
+ v3: u64 = const 1
+ v4: u64 = sub v0, v3
+ v5: u64 = call f2 g0 (v4)
+ v6: u64 = add v5, v3
+ return v6
+}
+"#,
+    );
+    wf::module(&module).unwrap();
+    assert_eq!(
+        eval::run(&module, FuncId(0), &[6], 1 << 20).outcome,
+        eval::Outcome::Returned(vec![6])
+    );
+    let stopped = eval::run(&module, FuncId(0), &[4096], 1 << 20);
+    assert_eq!(stopped.outcome, eval::Outcome::Stopped("Stack"));
+    assert_eq!(stopped.stderr, b"run stop: Stack\n");
+    assert!(stopped.trace.is_empty());
+    assert_eq!(
+        eval::run(&module, FuncId(2), &[4096], 1 << 20).outcome,
+        eval::Outcome::Returned(vec![4096])
+    );
+}

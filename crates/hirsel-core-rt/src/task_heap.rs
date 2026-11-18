@@ -10,13 +10,16 @@ use std::collections::VecDeque;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 const SLAB: usize = 64 * 1024;
 const HEADER_BACK: usize = 4096;
 const GROWTH_RESERVE_FACTOR: usize = 8;
 const MIN_GROWTH_RESERVATION: usize = 256 * 1024;
-// Each cached reservation keeps its header resident even after discarding its payload.
+// Each clean reservation still keeps its header resident.
 const EMPTY_DEDICATED_LIMIT: usize = 8;
+const DEDICATED_PURGE_DELAY: Duration = Duration::from_millis(100);
+const MAX_RETAINED_DEDICATED_BYTES: usize = 4 * 1024 * 1024;
 const SLAB_BINS: usize = size_bin(SLAB / 2) as usize + 1;
 
 const fn size_bin(stride: usize) -> u8 {
@@ -269,7 +272,21 @@ struct State {
     closed: bool,
     ready: [[Option<PagePointer>; SLAB_BINS]; 3],
     empty_slabs: Vec<PagePointer>,
-    empty_dedicated: VecDeque<PagePointer>,
+    dedicated: DedicatedCache,
+}
+
+#[derive(Default)]
+struct DedicatedCache {
+    clean: VecDeque<PagePointer>,
+    retained: VecDeque<RetainedPage>,
+    retained_bytes: usize,
+    live_bytes: usize,
+    peak_live_bytes: usize,
+}
+
+struct RetainedPage {
+    page: PagePointer,
+    freed_at: Instant,
 }
 
 impl Default for State {
@@ -278,7 +295,7 @@ impl Default for State {
             closed: false,
             ready: [[None; SLAB_BINS]; 3],
             empty_slabs: Vec::new(),
-            empty_dedicated: VecDeque::new(),
+            dedicated: DedicatedCache::default(),
         }
     }
 }
@@ -377,13 +394,29 @@ impl State {
         if class.fits_slab() {
             return self.empty_slabs.pop();
         }
-        // Use the smallest reservation that fits so a later large request can
-        // take a larger one. The last occupant's logical size is irrelevant.
+        self.dedicated.take(class)
+    }
+}
+
+impl DedicatedCache {
+    fn add_live(&mut self, bytes: usize) {
+        self.live_bytes += bytes;
+        self.peak_live_bytes = self.peak_live_bytes.max(self.live_bytes);
+    }
+
+    fn take(&mut self, class: Class) -> Option<PagePointer> {
+        if !self.retained.is_empty() {
+            self.purge_expired(Instant::now());
+        }
+        // Prefer the smallest fitting reservation, and the resident payload
+        // when two reservations are the same size.
         let (index, _) = self
-            .empty_dedicated
+            .retained
             .iter()
+            .map(|entry| entry.page)
+            .chain(self.clean.iter().copied())
             .enumerate()
-            .filter_map(|(index, &page)| {
+            .filter_map(|(index, page)| {
                 // SAFETY: the heap owns these empty pages and their mappings.
                 let page = unsafe { page.as_ref() };
                 let payload = unsafe { (*page.slots.get()).first };
@@ -392,7 +425,13 @@ impl State {
                     .then_some((index, extent))
             })
             .min_by_key(|&(_, extent)| extent)?;
-        let page = self.empty_dedicated.swap_remove_back(index).unwrap();
+        let page = if index < self.retained.len() {
+            self.remove_retained(index)
+        } else {
+            self.clean
+                .swap_remove_back(index - self.retained.len())
+                .unwrap()
+        };
         // SAFETY: the page has been taken off the cache and has no live slots.
         unsafe {
             let header = page.as_ref();
@@ -406,25 +445,66 @@ impl State {
         }
     }
 
-    fn recycle(&mut self, page: PagePointer, class: Class) -> Option<PagePointer> {
-        if class.fits_slab() {
-            self.empty_slabs.push(page);
-            return None;
+    fn retain(&mut self, page: PagePointer) {
+        // SAFETY: this heap owns the empty page and its mapping.
+        let bytes = unsafe { page.as_ref().backing.writable.get() };
+        self.live_bytes -= bytes;
+        let now = Instant::now();
+        self.purge_expired(now);
+
+        // Cap the free writable payload at the peak live dedicated footprint,
+        // with an absolute ceiling for heaps that briefly held large buffers.
+        let cap = self.peak_live_bytes.min(MAX_RETAINED_DEDICATED_BYTES);
+        if bytes > cap {
+            self.purge(page);
+            return;
         }
+        while self.retained_bytes > cap - bytes {
+            let oldest = self.remove_retained(0);
+            self.purge(oldest);
+        }
+        self.retained_bytes += bytes;
+        self.retained.push_back(RetainedPage {
+            page,
+            freed_at: now,
+        });
+    }
+
+    fn purge_expired(&mut self, now: Instant) {
+        // Check on dedicated allocation and free. An inactive heap holds at
+        // most its byte cap and releases its mappings on close.
+        while self
+            .retained
+            .front()
+            .is_some_and(|entry| now.duration_since(entry.freed_at) >= DEDICATED_PURGE_DELAY)
+        {
+            let oldest = self.remove_retained(0);
+            self.purge(oldest);
+        }
+    }
+
+    fn remove_retained(&mut self, index: usize) -> PagePointer {
+        let page = self.retained.remove(index).unwrap().page;
+        // SAFETY: this heap exclusively owns the removed empty page.
+        self.retained_bytes -= unsafe { page.as_ref().backing.writable.get() };
+        page
+    }
+
+    fn purge(&mut self, page: PagePointer) {
         // SAFETY: the heap owns this empty page. The payload starts on a
         // native page boundary, after the header and any ownership prefix.
         let header = unsafe { page.as_ref() };
         let payload = unsafe { (*header.slots.get()).first };
         if !header.backing.discard_payload(payload) {
-            return Some(page);
+            // SAFETY: the page is empty and detached from both queues.
+            unsafe { Page::destroy(page) };
+            return;
         }
-        let evicted = if self.empty_dedicated.len() == EMPTY_DEDICATED_LIMIT {
-            self.empty_dedicated.pop_front()
-        } else {
-            None
-        };
-        self.empty_dedicated.push_back(page);
-        evicted
+        if self.clean.len() == EMPTY_DEDICATED_LIMIT {
+            // SAFETY: this removes the cache's only reference to the empty page.
+            unsafe { Page::destroy(self.clean.pop_front().unwrap()) };
+        }
+        self.clean.push_back(page);
     }
 }
 
@@ -563,7 +643,8 @@ impl Heap {
         };
         // SAFETY: this heap owns all queues and the live slot until publication.
         unsafe {
-            let ready = if class.fits_slab() {
+            let slab = class.fits_slab();
+            let ready = if slab {
                 state.available(payer, key)
             } else {
                 None
@@ -576,6 +657,11 @@ impl Heap {
             } else {
                 Page::new(heap, payer, key)
             };
+            if !slab {
+                state
+                    .dedicated
+                    .add_live(page.as_ref().backing.writable.get());
+            }
             let pointer = Self::take(page, class, bytes);
             let slots = &*page.as_ref().slots.get();
             if slots.live == slots.limit {
@@ -602,13 +688,17 @@ impl Heap {
             .filter(|&page| unsafe { (*page.as_ref().slots.get()).live == 0 })
             .collect::<Vec<_>>();
         let slabs = std::mem::take(&mut state.empty_slabs);
-        let dedicated = std::mem::take(&mut state.empty_dedicated);
+        let dedicated = std::mem::take(&mut state.dedicated);
         drop(state);
         for page in spares.into_iter().chain(slabs) {
             // SAFETY: detached from the cache, with no live slots.
             unsafe { Page::destroy(page) };
         }
-        for page in dedicated {
+        for page in dedicated
+            .clean
+            .into_iter()
+            .chain(dedicated.retained.into_iter().map(|entry| entry.page))
+        {
             // SAFETY: detached from the cache, with no live slots.
             unsafe { Page::destroy(page) };
         }
@@ -668,8 +758,13 @@ pub(crate) unsafe fn try_grow_in_place(
         }
         let key = Page::key(page);
         let class = Class::for_block(bytes, align, kind, true);
+        let before = header.backing.writable.get();
         if !header.backing.extend(payload, class.stride) {
             return false;
+        }
+        let added = header.backing.writable.get() - before;
+        if added != 0 {
+            heap.lock().dedicated.add_live(added);
         }
         header.key.get().write(Key { class, ..key });
         #[cfg(feature = "memcheck")]
@@ -749,6 +844,10 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
             }
             return;
         }
+        if payload.addr().get() & (SLAB - 1) == 0 {
+            state.dedicated.retain(page);
+            return;
+        }
         push_free(slots, payload);
         if slots.live != 0 {
             if was_full {
@@ -756,7 +855,7 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
             }
         } else if !was_full && slots.previous.is_none() {
             // Already the queue head: it stays as the spare.
-        } else if class.fits_slab() && state.spare(class).is_none() {
+        } else if state.spare(class).is_none() {
             if !was_full {
                 state.unlink(page, class);
             }
@@ -765,10 +864,7 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
             if !was_full {
                 state.unlink(page, class);
             }
-            if let Some(retired) = state.recycle(page, class) {
-                drop(state);
-                Page::destroy(retired);
-            }
+            state.empty_slabs.push(page);
         }
     }
 }
@@ -934,6 +1030,80 @@ fn page_bytes() -> usize {
 #[cold]
 fn host_memory<T>() -> T {
     crate::process::stop(b"HostMemory")
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+    use crate::{Context, block};
+
+    fn resident(payload: NonNull<u8>) -> bool {
+        let mut flags = 0;
+        // SAFETY: the test holds a live or cached mapping for this native page.
+        assert_eq!(
+            unsafe { libc::mincore(payload.as_ptr().cast(), 4096, &mut flags) },
+            0
+        );
+        flags & 1 != 0
+    }
+
+    #[test]
+    fn dedicated_payload_retention_is_bounded_and_expires() {
+        const SMALL: usize = 8 * 1024;
+        const LARGE: usize = 1024 * 1024;
+        const OVERSIZED: usize = 8 * LARGE;
+        let context = Context::new(OVERSIZED as u64);
+        let payer = context.payer();
+        let heap = context.heap.get_or_init(Arc::default);
+        let allocate = |bytes| {
+            block::admit_storage(payer, Some(bytes as u64)).unwrap();
+            let pointer = Heap::allocate(heap, payer, bytes, 8, block::PLAIN, true);
+            // SAFETY: this test owns the new buffer and initializes its first page.
+            unsafe { pointer.as_ptr().write_bytes(0x5a, 4096) };
+            pointer
+        };
+        let free = |pointer, bytes| {
+            // SAFETY: the test transfers ownership with its full admitted charge.
+            unsafe { block::free(pointer, bytes as u64) };
+            assert_eq!(context.available(), OVERSIZED as u64);
+        };
+
+        let small = allocate(SMALL);
+        free(small, SMALL);
+        assert!(resident(small));
+        block::admit_storage(payer, Some(SMALL as u64)).unwrap();
+        let reused = Heap::allocate(heap, payer, SMALL, 8, block::PLAIN, true);
+        assert_eq!(reused, small);
+        assert!(resident(reused));
+        free(reused, SMALL);
+
+        // 1 MiB needs a separate reservation. Its release would leave 1 MiB
+        // plus 8 KiB empty against a 1 MiB peak, so the older page gets purged.
+        let large = allocate(LARGE);
+        free(large, LARGE);
+        assert!(!resident(small));
+        assert!(resident(large));
+        {
+            let mut state = heap.lock();
+            assert_eq!(state.dedicated.retained_bytes, LARGE);
+            let freed_at = state.dedicated.retained.front().unwrap().freed_at;
+            state
+                .dedicated
+                .purge_expired(freed_at + Duration::from_millis(99));
+            assert!(resident(large));
+            state
+                .dedicated
+                .purge_expired(freed_at + Duration::from_millis(100));
+            assert_eq!(state.dedicated.retained_bytes, 0);
+            assert!(!resident(large));
+        }
+
+        // An 8 MiB live peak still permits only 4 MiB of retained payload.
+        let oversized = allocate(OVERSIZED);
+        free(oversized, OVERSIZED);
+        assert_eq!(heap.lock().dedicated.retained_bytes, 0);
+        assert!(!resident(oversized));
+    }
 }
 
 #[cfg(test)]

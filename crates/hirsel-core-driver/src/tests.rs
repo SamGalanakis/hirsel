@@ -1416,7 +1416,7 @@ fn incomplete_source_is_not_an_emittable_instance() {
     let key = hirsel_core_ir::Identity::plain(DefPath::from_full("app@1/main/root").unwrap());
     assert!(matches!(
         product.instances([key], 8),
-        Err(InstanceStop::Incomplete(_))
+        Err(InstanceStop::Incomplete { .. })
     ));
 }
 
@@ -2672,7 +2672,7 @@ fn every_reached_instance_imports_its_closures() {
                         }
                     }
                 }
-                Err(InstanceStop::Incomplete(_) | InstanceStop::OutsideReached(_)) => {}
+                Err(InstanceStop::Incomplete { .. } | InstanceStop::OutsideReached(_)) => {}
                 Err(stop) => panic!("{name}: {stop:?}"),
             }
         }

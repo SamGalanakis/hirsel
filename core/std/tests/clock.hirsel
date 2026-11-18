@@ -17,3 +17,20 @@ fn overflowing_deadline(c: Clock) -> bool waits {
     clock.sleep_ns(c, int.wrapping_sub(0u64, 1))
     true
 }
+
+fn read_shared[S: shareable + send](read: fn(S) -> u64, take state: S) -> Result[u64, Capacity] {
+    let shared = result.capacity_only(arc.new(take state))?
+    Ok(read(shared))
+}
+
+fn monotonic_read(c: Clock) -> u64 {
+    host.mono_ns(c)
+}
+
+// A bare Clock satisfies both bounds and still designates the clock after sharing.
+// expect: run bare_clock_shared_state(clock) = true
+fn bare_clock_shared_state(c: Clock) -> bool waits {
+    let deadline = host.mono_ns(c) + 2_000_000
+    host.sleep_until(c, deadline)
+    result.unwrap(read_shared(monotonic_read, c)) >= deadline
+}

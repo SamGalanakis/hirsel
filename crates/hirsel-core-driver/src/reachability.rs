@@ -608,11 +608,12 @@ impl CheckProduct {
             && !matches!(stop, InstanceStop::Resource { .. })
         {
             let (path, construct) = match stop {
-                InstanceStop::Incomplete(p) => {
-                    (p, "body has no complete native product".to_owned())
-                }
                 InstanceStop::OutsideReached(p) => (p, "body is unavailable".to_owned()),
-                InstanceStop::Input {
+                InstanceStop::Incomplete {
+                    definition,
+                    message,
+                }
+                | InstanceStop::Input {
                     definition,
                     message,
                 } => (definition, message.clone()),

@@ -70,8 +70,11 @@ impl CheckProduct {
                         }
                         witness = Some(message);
                     }
-                    if witness.is_some() {
-                        return Err(InstanceStop::Incomplete(key.definition.clone()));
+                    if let Some(message) = &witness {
+                        return Err(InstanceStop::Incomplete {
+                            definition: key.definition.clone(),
+                            message: message.clone(),
+                        });
                     }
                 }
                 self.instance_step(key, &mut instances, None, &mut resolver, &mut |_, _| {})

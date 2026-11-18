@@ -508,9 +508,9 @@ fn recipe(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe,
 }
 
 /// A row's published [`Carried`] agrees with its body: a value record is exactly one
-/// field holding that value (a `ptr` is a plain `fn` or a borrow), a row carried as
-/// nothing has no fields, a value variant is the word [`word`] gives, and an address
-/// row may be anything.
+/// field holding that value (a capability designation is a `u64`, and a `ptr`
+/// is a plain `fn` or a borrow), a row carried as nothing has no fields, a value
+/// variant is the word [`word`] gives, and an address row may be anything.
 fn carries(shapes: &[Shape], shape: &Shape) -> bool {
     let fields = match &shape.body {
         Body::Record(fields) => fields.as_slice(),
@@ -525,7 +525,10 @@ fn carries(shapes: &[Shape], shape: &Shape) -> bool {
     match (shape.carried, fields) {
         (Carried::Address, _) => true,
         (Carried::Nothing, []) => true,
-        (Carried::Value(Ty::Scalar(s)), [f]) => f.ty == FieldTy::Scalar(s),
+        (Carried::Value(Ty::Scalar(s)), [f]) => {
+            f.ty == FieldTy::Scalar(s)
+                || s == Scalar::U64 && f.ty == FieldTy::Handle(Handle::Capability)
+        }
         (Carried::Value(Ty::Ptr), [f]) => matches!(f.ty, FieldTy::Fn | FieldTy::Borrow),
         _ => false,
     }

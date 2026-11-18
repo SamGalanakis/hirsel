@@ -48,7 +48,10 @@ pub enum InstanceStop {
         definition: DefPath,
         message: String,
     },
-    Incomplete(DefPath),
+    Incomplete {
+        definition: DefPath,
+        message: String,
+    },
 }
 /// The emitter supplies mechanical instance dependencies. In particular, a growing
 /// f[T] -> f[List[T]] family stops as a compiler resource outcome, not a language rule.
@@ -442,11 +445,22 @@ impl CheckProduct {
                 let product = self
                     .demand_body(&key.definition)
                     .map_err(|e| input(e.to_string()))?;
-                if !product.check.refusals.is_empty() || !product.incomplete.is_empty() {
-                    return Err(InstanceStop::Incomplete(key.definition.clone()));
-                }
-                if product.check.function.is_none() {
-                    return Err(InstanceStop::Incomplete(key.definition.clone()));
+                let message = if let Some(refusal) = product.check.refusals.first() {
+                    Some(format!("{}: {}", refusal.rule, refusal.message))
+                } else if let Some(gap) = product.incomplete.first() {
+                    Some(gap.message.clone())
+                } else {
+                    product
+                        .check
+                        .function
+                        .is_none()
+                        .then(|| "body has no complete native product".to_owned())
+                };
+                if let Some(message) = message {
+                    return Err(InstanceStop::Incomplete {
+                        definition: key.definition.clone(),
+                        message,
+                    });
                 }
                 Some(product)
             };

@@ -409,7 +409,7 @@ impl FunctionEmitter<'_> {
                 )
             }
             (_, Payer::Region(r)) => (
-                "hirsel_core_region_alloc",
+                "hirsel_core_region_slot_alloc",
                 vec![
                     ptr(CONTEXT),
                     ptr(r.clone()),
@@ -563,9 +563,25 @@ impl FunctionEmitter<'_> {
                     let Payer::Region(region) = &payer else {
                         unreachable!()
                     };
-                    let at = self.offset(region, super::memory_layout::REGION_ENTRY as u64);
+                    let n = self.counter();
+                    let refused = Label::new("entry_refused", n);
+                    let initialized = Label::new("entry_initialized", n);
+                    let join = Label::new("entry_join", n);
+                    let success = self.cmp(Predicate::Ne, &Type::Ptr, &block, &Value::Null);
+                    self.likely(&success, initialized, refused);
+                    self.block(initialized);
+                    let backing = self.load(&Type::Ptr, region, 8);
+                    let at = self.offset(&backing, super::memory_layout::REGION_ENTRY as u64);
                     let value = self.load(&Type::I64, &at, 8);
-                    self.put(token, &value);
+                    self.br(join);
+                    self.block(refused);
+                    self.br(join);
+                    self.block(join);
+                    let entry = self.emit(Operation::Phi(
+                        &Type::I64,
+                        &[(value, initialized), (int(0), refused)],
+                    ));
+                    self.put(token, &entry);
                 }
                 self.put(result, &block);
                 self.put(available, &room);
@@ -650,7 +666,8 @@ impl FunctionEmitter<'_> {
                 charge,
                 ..
             } => {
-                let region = self.numeric(region);
+                let slot = self.numeric(region);
+                let region = self.load(&Type::Ptr, &slot, 8);
                 let entry = self.numeric(entry);
                 let previous = self.numeric(previous);
                 let charge = self.numeric(charge);
@@ -736,12 +753,22 @@ impl FunctionEmitter<'_> {
                 }
             }
             Inst::RegionOpen { result } => {
-                let p = self.intrinsic("hirsel_core_region_open", Type::Ptr, &[ptr(CONTEXT)]);
-                self.put(result, &p);
+                let slot = self.temp(Type::Ptr);
+                self.store(&Type::Ptr, &Value::Null, &slot, 8);
+                self.put(result, &slot);
             }
             Inst::RegionClose { region } => {
-                let r = self.numeric(region);
-                self.runtime_void("hirsel_core_region_close", &[ptr(r)]);
+                let slot = self.numeric(region);
+                let backing = self.load(&Type::Ptr, &slot, 8);
+                let n = self.counter();
+                let close = Label::new("region_close", n);
+                let done = Label::new("region_closed", n);
+                let open = self.cmp(Predicate::Ne, &Type::Ptr, &backing, &Value::Null);
+                self.cond(&open, close, done);
+                self.block(close);
+                self.runtime_void("hirsel_core_region_close", &[ptr(backing)]);
+                self.br(done);
+                self.block(done);
             }
             Inst::Case { result, address } => {
                 let p = self.address(address);

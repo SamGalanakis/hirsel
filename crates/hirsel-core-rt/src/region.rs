@@ -150,10 +150,21 @@ impl Region {
     ) -> Result<NonNull<u8>, Capacity> {
         let payer = context.payer();
         payer.admit(charge)?;
-        if charge != Some(0) {
-            self.charge(payer, charge.unwrap());
+        Ok(self.allocate_admitted(payer, bytes, align, charge.unwrap()))
+    }
+
+    #[inline]
+    pub(crate) fn allocate_admitted(
+        &mut self,
+        payer: Payer,
+        bytes: usize,
+        align: usize,
+        charge: u64,
+    ) -> NonNull<u8> {
+        if charge != 0 {
+            self.charge(payer, charge);
         }
-        Ok(self.bump(bytes, align))
+        self.bump(bytes, align)
     }
 
     #[inline]

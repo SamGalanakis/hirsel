@@ -159,6 +159,52 @@ pub unsafe extern "C" fn hirsel_core_region_alloc(
     }
 }
 
+/// Allocate through a native activation's region slot. A null slot denotes an
+/// empty region. Materialize its backing after the first successful admission.
+///
+/// # Safety
+/// The caller owns the slot and a live task context. The slot is initialized
+/// to null on entry to the scope and otherwise holds its exclusively owned Region.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_region_slot_alloc(
+    context: *const Context,
+    slot: *mut *mut crate::region::Region,
+    bytes: usize,
+    align: usize,
+    charge: u64,
+    overflow: bool,
+) -> Allocation {
+    // SAFETY: the checked scope owns this initialized slot across every call.
+    let region = unsafe { *slot };
+    if !region.is_null() {
+        // SAFETY: this scope has its live, exclusive backing.
+        return unsafe {
+            hirsel_core_region_alloc(context, region, bytes, align, charge, overflow)
+        };
+    }
+    // SAFETY: the emitter passes the task-exclusive context.
+    let payer = unsafe { (*context).payer() };
+    if let Err(capacity) = payer.admit((!overflow).then_some(charge)) {
+        return Allocation {
+            pointer: ptr::null_mut(),
+            capacity,
+        };
+    }
+    // SAFETY: publish the backing only after admission. The slot's owner closes it.
+    let block = unsafe {
+        let region = hirsel_core_region_open(context);
+        *slot = region;
+        (*region).allocate_admitted(payer, bytes, align, charge)
+    };
+    Allocation {
+        pointer: block.as_ptr(),
+        capacity: Capacity {
+            requested: 0,
+            available: 0,
+        },
+    }
+}
+
 /// Lower a live region allocation's charge, without moving published bytes.
 /// # Safety
 /// The sole destination writer owns a live allocation and proves its unused tail;

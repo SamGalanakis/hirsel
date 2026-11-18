@@ -252,3 +252,30 @@ fn closing_and_reopening_a_region_reuses_chunks_without_visiting_values() {
         }
     }
 }
+
+#[test]
+fn region_slot_opens_only_after_admission_and_refunds_the_handed_over_payer() {
+    use crate::abi::*;
+    // SAFETY: the slot belongs to this context, starts empty and holds its only Region.
+    unsafe {
+        let ctx = hirsel_core_context_new(128);
+        let mut slot = std::ptr::null_mut();
+        let refusal = hirsel_core_region_slot_alloc(ctx, &mut slot, 136, 8, 136, false);
+        assert!(refusal.pointer.is_null());
+        assert_eq!(refusal.capacity.requested, 136);
+        assert_eq!(refusal.capacity.available, 128);
+        assert!(slot.is_null());
+
+        assert!(!hirsel_core_limit_enter(ctx, 64).pointer.is_null());
+        let allocation = hirsel_core_region_slot_alloc(ctx, &mut slot, 24, 8, 24, false);
+        assert!(!slot.is_null());
+        assert!(!allocation.pointer.is_null());
+        allocation.pointer.write(73);
+        hirsel_core_limit_exit(ctx);
+        assert_eq!((*ctx).available(), 104);
+        assert_eq!(allocation.pointer.read(), 73);
+        hirsel_core_region_close(slot);
+        assert_eq!((*ctx).available(), 128);
+        hirsel_core_context_free(ctx);
+    }
+}

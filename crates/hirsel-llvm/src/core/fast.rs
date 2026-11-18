@@ -338,13 +338,19 @@ impl FunctionEmitter<'_> {
     }
     fn fast_region(
         &mut self,
-        region: &Value,
+        slot: &Value,
         charge: &Value,
         bytes: &Value,
         align: u64,
     ) -> (Value, Value) {
         let (i1, i64) = (Type::I1, Type::I64);
         let n = self.counter();
+        let open = Label::new("region_open", n);
+        let slow_label = Label::new("region_slow", n);
+        let region = &self.load(&Type::Ptr, slot, 8);
+        let has_backing = self.cmp(Predicate::Ne, &Type::Ptr, region, &Value::Null);
+        self.likely(&has_backing, open, slow_label);
+        self.block(open);
         let payer = self.current_payer();
         let saved = self.load_native(region, REGION_PAYER, Type::Ptr);
         let accumulated = self.load_native(region, REGION_CHARGE, Type::I64);
@@ -356,7 +362,6 @@ impl FunctionEmitter<'_> {
         let reusable = self.bin(Binary::And, &i1, &same, &live);
         let reusable = self.bin(Binary::And, &i1, &reusable, &positive);
         let admit = Label::new("region_admit", n);
-        let slow_label = Label::new("region_slow", n);
         let bump = Label::new("region_bump", n);
         let refused = Label::new("region_refused", n);
         let store = Label::new("region_store", n);
@@ -407,10 +412,10 @@ impl FunctionEmitter<'_> {
         self.br(done);
         self.block(slow_label);
         let (slow, slow_room) = self.allocation_cold(
-            "hirsel_core_region_alloc",
+            "hirsel_core_region_slot_alloc",
             &[
                 ptr(CONTEXT),
-                ptr(region.clone()),
+                ptr(slot.clone()),
                 word(bytes.clone()),
                 word(int(align)),
                 word(charge.clone()),

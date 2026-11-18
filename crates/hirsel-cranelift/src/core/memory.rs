@@ -195,7 +195,7 @@ impl Function<'_, '_, '_> {
                     let overflow = self.get(overflow);
                     let r = if matches!(place, AllocPlace::Region(_)) {
                         self.c_call(
-                            "hirsel_core_region_alloc",
+                            "hirsel_core_region_slot_alloc",
                             &[p, p, u, u, u, boolean],
                             &[p, u, u],
                             &[ctx, payer, size, align, charge, overflow],
@@ -236,14 +236,19 @@ impl Function<'_, '_, '_> {
                 self.set(result, values[0]);
                 self.set(available, values[2]);
                 if let Some(token) = region_entry {
-                    // hirsel-core-rt abi::REGION_ENTRY, frozen on both 64-bit targets.
-                    let token_value = self.b.ins().load(
-                        types::I64,
-                        cranelift_codegen::ir::MemFlagsData::trusted(),
-                        payer,
-                        memory_layout::REGION_ENTRY as i32,
-                    );
-                    self.set(token, token_value);
+                    let loaded = self.b.create_block();
+                    let join = self.b.create_block();
+                    self.b.append_block_param(join, types::I64);
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    self.b
+                        .ins()
+                        .brif(values[0], loaded, &[], join, &[zero.into()]);
+                    self.b.switch_to_block(loaded);
+                    let region = self.load_word(payer, 0);
+                    let entry = self.load_word(region, memory_layout::REGION_ENTRY);
+                    self.b.ins().jump(join, &[entry.into()]);
+                    self.b.switch_to_block(join);
+                    self.set(token, self.b.block_params(join)[0]);
                 }
                 let refused = self.b.ins().icmp_imm_s(IntCC::Equal, values[0], 0);
                 let check = self.b.create_block();
@@ -416,7 +421,8 @@ impl Function<'_, '_, '_> {
                 previous,
                 charge,
             } => {
-                let region = self.get(region);
+                let slot = self.get(region);
+                let region = self.load_word(slot, 0);
                 let entry = self.get(entry);
                 let previous = self.get(previous);
                 let charge = self.get(charge);
@@ -571,12 +577,27 @@ impl Function<'_, '_, '_> {
                 self.c_call("hirsel_core_limit_exit", &[p], &[], &[self.context])?;
             }
             Inst::RegionOpen { result } => {
-                let values = self.c_call("hirsel_core_region_open", &[p], &[p], &[self.context])?;
-                self.set(result, values[0]);
+                use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
+                let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8,
+                    3,
+                ));
+                let null = self.b.ins().iconst(types::I64, 0);
+                let handle = self.b.ins().stack_addr(types::I64, slot, 0);
+                self.store_word(handle, 0, null);
+                self.set(result, handle);
             }
             Inst::RegionClose { region } => {
-                let region = self.get(region);
+                let slot = self.get(region);
+                let region = self.load_word(slot, 0);
+                let close = self.b.create_block();
+                let done = self.b.create_block();
+                self.b.ins().brif(region, close, &[], done, &[]);
+                self.b.switch_to_block(close);
                 self.c_call("hirsel_core_region_close", &[p], &[], &[region])?;
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
             }
             _ => {
                 return Err(unsupported(format!(

@@ -211,7 +211,7 @@ impl Function<'_, '_, '_> {
     }
     pub fn region_alloc(
         &mut self,
-        region: Value,
+        slot: Value,
         size: Value,
         align: u64,
         charge: Value,
@@ -221,6 +221,10 @@ impl Function<'_, '_, '_> {
         let done = self.b.create_block();
         self.b.append_block_param(done, types::I64);
         self.b.append_block_param(done, types::I64);
+        let open = self.b.create_block();
+        let region = self.load_word(slot, 0);
+        self.b.ins().brif(region, open, &[], slow, &[]);
+        self.b.switch_to_block(open);
         let payer = self.current_limit();
         let original = self.load_word(region, memory_layout::REGION_PAYER);
         let held = self.load_word(region, memory_layout::REGION_CHARGE);
@@ -286,10 +290,10 @@ impl Function<'_, '_, '_> {
         let alignment = self.b.ins().iconst(types::I64, align as i64);
         let no_overflow = self.b.ins().iconst(types::I8, 0);
         let values = self.c_call(
-            "hirsel_core_region_alloc",
+            "hirsel_core_region_slot_alloc",
             &[P, P, U, U, U, B],
             &[P, U, U],
-            &[self.context, region, size, alignment, charge, no_overflow],
+            &[self.context, slot, size, alignment, charge, no_overflow],
         )?;
         self.b
             .ins()

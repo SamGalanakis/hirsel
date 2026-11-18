@@ -50,6 +50,33 @@ bounded fan-in retries on full with the OS scheduler's yield. Hirsel and
 Goose lack a public cooperative task-yield operation, so `yield_many`
 runs on Tokio and Go. [Hirsel task and channel spec](../../docs/spec/tasks.md) · [Tokio scheduler benches](https://github.com/tokio-rs/tokio/blob/5f7be0ac42cb3e1b739da1562f98a797cd55a606/benches/rt_multi_threaded.rs) · [Tokio bounded contention](https://github.com/tokio-rs/tokio/blob/5f7be0ac42cb3e1b739da1562f98a797cd55a606/benches/sync_mpsc.rs) · [Goose threads and queues](https://github.com/aardappel/goose/blob/d5ae5bbda990923fa4129f969c7f853c20d4d1e6/docs/reference.md#22-threads)
 
+## S0 fixtures
+
+Matmul uses the Rayon twin so the worker count can change while all 16
+row blocks and their kernels stay fixed. Both sides use the LangArena
+matched Matmul at size 256. Each sets up the input matrices once,
+transposes the right matrix once per iteration, computes and retains every
+row block, joins in reverse submission order and checksums the center.
+T1 is the T16 workload at width 1. Rust uses one Rayon worker at that
+width. The Hirsel runtime currently executes the tasks on one worker.
+
+The other one-worker receipts cover spawn and join, a channel round trip
+with two capacity-one queues, and a single-owner Arc share/release pair.
+Spawn and channel use Tokio's multi-thread runtime with one worker. The Arc
+reference uses Rust std on the calling thread. Each executable prints its
+completed iterations and checksum. Both fields must match the hand-derived
+oracle independently on each side.
+
+```sh
+taskset -c 0-1 ./bench/multicore/build.py --s0 --out "$benchmark_bins" \
+  --hirsel "$release_driver" --runtime "$shipping_archive"
+taskset -c 0-11,16-27 ./bench/multicore/run.py --s0 \
+  --bins "$benchmark_bins" --out "$new_evidence_directory"
+```
+
+For Matmul scaling, use `--case matmul_t16 --workers 1 16` with the same
+binaries and fixtures.
+
 ## Qualifying command
 
 With the binaries built, run the following command and optionally select one

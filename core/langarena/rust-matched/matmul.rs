@@ -46,17 +46,17 @@ fn multiply(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
 struct Matrix {
     rows: Vec<Vec<f64>>,
 }
-struct Job {
+pub(crate) struct Job {
     a: std::sync::Arc<Matrix>,
     transposed: std::sync::Arc<Matrix>,
     start: usize,
     end: usize,
 }
-struct Block {
+pub(crate) struct Block {
     start: usize,
     rows: Vec<Vec<f64>>,
 }
-fn worker(job: Job) -> Block {
+pub(crate) fn worker(job: Job) -> Block {
     let n = job.a.rows.len();
     let mut rows = Vec::with_capacity(job.end - job.start);
     for i in job.start..job.end {
@@ -75,7 +75,13 @@ fn worker(job: Job) -> Block {
         rows,
     }
 }
-fn parallel(a: &std::sync::Arc<Matrix>, b: &[Vec<f64>], threads: usize) -> f64 {
+fn parallel<T>(
+    a: &std::sync::Arc<Matrix>,
+    b: &[Vec<f64>],
+    threads: usize,
+    spawn: &mut impl FnMut(Job) -> T,
+    join: &mut impl FnMut(T) -> Block,
+) -> f64 {
     let n = a.rows.len();
     let mut transposed = zeros(n);
     for i in 0..n {
@@ -92,11 +98,11 @@ fn parallel(a: &std::sync::Arc<Matrix>, b: &[Vec<f64>], threads: usize) -> f64 {
             start: i * n / threads,
             end: (i + 1) * n / threads,
         };
-        jobs.push(std::thread::spawn(move || worker(job)));
+        jobs.push(spawn(job));
     }
     let mut blocks = Vec::with_capacity(threads);
     while let Some(handle) = jobs.pop() {
-        blocks.push(handle.join().unwrap());
+        blocks.push(join(handle));
     }
     let center = n / 2;
     for block in &blocks {
@@ -106,6 +112,27 @@ fn parallel(a: &std::sync::Arc<Matrix>, b: &[Vec<f64>], threads: usize) -> f64 {
     }
     panic!("missing center row")
 }
+pub(crate) fn parallel_work<T>(
+    n: usize,
+    threads: usize,
+    rounds: u64,
+    mut spawn: impl FnMut(Job) -> T,
+    mut join: impl FnMut(T) -> Block,
+) -> (u32, u64) {
+    let a = std::sync::Arc::new(Matrix { rows: matrix(n) });
+    let b = matrix(n);
+    let mut total = 0u32;
+    let mut completed = 0;
+    for _ in 0..rounds {
+        total = total.wrapping_add(support::checksum(&format!(
+            "{:.7}",
+            parallel(&a, &b, threads, &mut spawn, &mut join)
+        )));
+        completed += 1;
+    }
+    (total, completed)
+}
+
 fn run(c: &support::Config) -> u32 {
     if c.name != "Matmul::Single" {
         let threads = match c.name.as_str() {
@@ -114,17 +141,14 @@ fn run(c: &support::Config) -> u32 {
             "Matmul::T16" => 16,
             _ => panic!("unknown task"),
         };
-        let n = c.number("n");
-        let a = std::sync::Arc::new(Matrix { rows: matrix(n) });
-        let b = matrix(n);
-        let mut total = 0u32;
-        for _ in 0..c.warmup + c.iterations {
-            total = total.wrapping_add(support::checksum(&format!(
-                "{:.7}",
-                parallel(&a, &b, threads)
-            )));
-        }
-        return total;
+        return parallel_work(
+            c.number("n"),
+            threads,
+            c.warmup + c.iterations,
+            |job| std::thread::spawn(move || worker(job)),
+            |handle| handle.join().unwrap(),
+        )
+        .0;
     }
     assert_eq!(c.name, "Matmul::Single");
     let n = c.number("n");

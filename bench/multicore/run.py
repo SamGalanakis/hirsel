@@ -33,6 +33,21 @@ SIZES = {
     "yield_many": 12500,
     "fan_in": 12500,
 }
+S0_SIZES = {
+    "matmul_t16": 4,
+    "spawn_join": 10000,
+    "ping_pong": 100000,
+    "arc_pair": 1000000,
+}
+# Fields are completed iterations and checksum. Matmul uses the center
+# dot product -814846225/33554432, rounded to "-24.2843099"; the other
+# three checksums are the sum of the integers from 1 through the count.
+S0_WORK = {
+    "matmul_t16": b"4 1286528612\n",
+    "spawn_join": b"10000 50005000\n",
+    "ping_pong": b"100000 5000050000\n",
+    "arc_pair": b"1000000 500000500000\n",
+}
 FASTA_SHA = "eb604786ef13cc1012c3fc3cc760a4a159bfbae30cf6e12bf37792799b1df24e"
 STANDARD_FASTA_SHA = "3fcf4f78104c8a65ef210fe1d469f4e473456c791225f2f1f9114f4986aa09fa"
 # Exact outputs for the pinned Rust programs at the published inputs.
@@ -121,7 +136,15 @@ def matches(output, wanted):
     return True
 
 
-def sample_command(bins, case, language, width, size):
+def sample_command(bins, case, language, width, size, s0=False):
+    if s0:
+        if case == "matmul_t16" and language == "Hirsel":
+            return [bins / "hirsel/matmul_t16", size]
+        if language == "Rust":
+            return [bins / "rust/s0", case, width, size]
+        if language == "Tokio":
+            return [bins / "tokio", case, width, size, "work-receipt"]
+        return [bins / "hirsel/runtime", case, size, "work-receipt"]
     runtime = case not in GAME_ROWS
     if language == "Tokio":
         return [bins / "tokio", case, width, size]
@@ -140,7 +163,11 @@ def sample_command(bins, case, language, width, size):
     return [directory / case, *args]
 
 
-def applicable(case):
+def applicable(case, s0=False):
+    if case in {"matmul_t16", "arc_pair"}:
+        return ("Hirsel", "Rust")
+    if s0:
+        return ("Hirsel", "Tokio")
     if case == "yield_many":
         return ("Tokio", "Go")
     if case in GAME_ROWS:
@@ -148,8 +175,8 @@ def applicable(case):
     return ("Hirsel", "Tokio", "Go", "Goose")
 
 
-def observe(bins, out, case, language, width, size, wanted, kernel):
-    command = sample_command(bins, case, language, width, size)
+def observe(bins, out, case, language, width, size, wanted, kernel, s0=False):
+    command = sample_command(bins, case, language, width, size, s0)
     if not command[0].is_file():
         return {"status": "missing-binary"}
     directory = out / f"{case}-{language.lower()}-{width}"
@@ -194,11 +221,14 @@ def validate_sample(directory, case, wanted, cpus, kernel=False):
     else:
         output = stdout.read_bytes()
         sha256 = digest(output)
-        valid = matches(output, wanted)
+        valid = output == wanted if isinstance(wanted, bytes) else matches(output, wanted)
     row = {"status": "ok", "cpus": cpus, "sha256": sha256}
     if not valid:
         row["status"] = "wrong-output"
         return row
+    if isinstance(wanted, bytes):
+        iterations, checksum = map(int, output.split())
+        row.update(iterations=iterations, checksum=checksum)
     counters = {}
     perf = directory / "perf.csv"
     if perf.is_file():
@@ -242,7 +272,7 @@ def table(rows):
     def fmt(number):
         return f"{number:.3f}" if number is not None else "—"
 
-    cases = [case for case in SIZES if any(row["case"] == case for row in rows)]
+    cases = [case for case in SIZES | S0_SIZES if any(row["case"] == case for row in rows)]
     if any(row["language"] == "Hirsel" for row in rows):
         peers = LANGUAGES[1:]
         print("| Workload | " + " | ".join(f"Hirsel/{peer} I at 1" for peer in peers) + " |")
@@ -290,7 +320,7 @@ def table(rows):
         print("| Workload | " + " | ".join(map(str, widths)) + " |")
         print("| --- |" + " ---: |" * len(widths))
         for case in cases:
-            if case not in GAME_ROWS and "Hirsel" in applicable(case):
+            if "Tokio" in applicable(case) and "Hirsel" in applicable(case):
                 cells = [fmt(ratio(value(case, "Hirsel", w, "seconds"),
                                    value(case, "Tokio", w, "seconds"))) for w in widths]
                 print(f"| {case} | " + " | ".join(cells) + " |")
@@ -306,11 +336,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", type=Path, help="binaries and FASTA from build.py")
     parser.add_argument("--out", type=Path, help="new evidence directory outside the repository")
-    parser.add_argument("--case", nargs="+", choices=SIZES)
-    parser.add_argument("--workers", nargs="+", type=int, choices=WIDTHS, default=list(WIDTHS))
+    parser.add_argument("--case", nargs="+", choices=SIZES | S0_SIZES)
+    parser.add_argument("--workers", nargs="+", type=int, choices=WIDTHS)
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--languages", nargs="+", choices=LANGUAGES)
     selection.add_argument("--standard-rust", action="store_true", help="measure published Rust data inputs")
+    parser.add_argument("--s0", action="store_true", help="validate both fields and measure only the S0 fixtures")
     parser.add_argument("--read", nargs="+", type=Path, help="render existing sample JSON files")
     args = parser.parse_args()
     if args.read:
@@ -321,24 +352,28 @@ def main():
         bins, out = args.bins.resolve(), args.out.resolve()
         if out.is_relative_to(ROOT) or out.exists():
             parser.error("--out must be a new directory outside the repository")
-        if not set(CPUS[:max(args.workers)]) <= os.sched_getaffinity(0):
+        workers = args.workers or ([1] if args.s0 else WIDTHS)
+        if args.s0 and args.standard_rust:
+            parser.error("--s0 and --standard-rust select different workloads")
+        if not set(CPUS[:max(workers)]) <= os.sched_getaffinity(0):
             parser.error("the requested CPUs must be in the caller's affinity")
-        sizes = STANDARD_RUST_SIZES if args.standard_rust else SIZES
+        sizes = S0_SIZES if args.s0 else STANDARD_RUST_SIZES if args.standard_rust else SIZES
         languages = ("Rust",) if args.standard_rust else args.languages or LANGUAGES
         cases = tuple(dict.fromkeys(args.case or sizes))
         if any(case not in sizes for case in cases):
-            parser.error("--standard-rust runs only Benchmarks Game data workloads")
-        oracles = {case: expected(case, bins / "input.fasta", args.standard_rust) for case in cases}
+            parser.error("the requested workload is outside the selected suite")
+        oracles = {case: S0_WORK[case] if args.s0 else expected(case, bins / "input.fasta", args.standard_rust)
+                   for case in cases}
         out.mkdir(parents=True)
         rows = []
         for case in cases:
             kernel = args.standard_rust or case == "mandelbrot"
             size = sizes[case]
-            for width in sorted(set(args.workers)):
-                for language in applicable(case):
+            for width in sorted(set(workers)):
+                for language in applicable(case, args.s0):
                     if language not in languages:
                         continue
-                    result = observe(bins, out, case, language, width, size, oracles[case], kernel)
+                    result = observe(bins, out, case, language, width, size, oracles[case], kernel, args.s0)
                     rows.append(result | {"case": case, "language": language, "width": width, "size": size})
                     print(f"{case} {language} {width}: {result['status']}", file=sys.stderr, flush=True)
                     (out / "samples.json").write_text(json.dumps(rows, indent=2) + "\n")

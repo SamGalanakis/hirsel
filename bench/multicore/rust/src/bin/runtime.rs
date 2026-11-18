@@ -25,15 +25,17 @@ async fn spawn_chain(rounds: u64) -> u64 {
     sum
 }
 
-async fn spawn_join(rounds: u64) -> u64 {
+async fn spawn_join(rounds: u64) -> (u64, u64) {
     let mut sum = 0;
+    let mut completed = 0;
     for i in 0..rounds {
         sum += tokio::spawn(async move { i + 1 }).await.unwrap();
+        completed += 1;
     }
-    sum
+    (sum, completed)
 }
 
-async fn ping_pong(rounds: u64) -> u64 {
+async fn ping_pong(rounds: u64) -> (u64, u64) {
     let (send, mut requests) = mpsc::channel(1);
     let (reply, mut responses) = mpsc::channel(1);
     let worker = tokio::spawn(async move {
@@ -45,12 +47,14 @@ async fn ping_pong(rounds: u64) -> u64 {
         }
     });
     let mut sum = 0;
+    let mut completed = 0;
     for i in 0..rounds {
         send.send(i).await.unwrap();
         sum += responses.recv().await.unwrap();
+        completed += 1;
     }
     worker.await.unwrap();
-    sum
+    (sum, completed)
 }
 
 async fn yield_many(rounds: u64) -> u64 {
@@ -102,15 +106,19 @@ fn main() {
         .worker_threads(workers)
         .build()
         .unwrap();
-    let sum = runtime.block_on(async {
+    let (sum, completed) = runtime.block_on(async {
         match args[1].as_str() {
             "spawn_join" => spawn_join(rounds).await,
-            "spawn_chain" => spawn_chain(rounds).await,
+            "spawn_chain" => (spawn_chain(rounds).await, 0),
             "ping_pong" => ping_pong(rounds).await,
-            "yield_many" => yield_many(rounds).await,
-            "fan_in" => fan_in(rounds).await,
+            "yield_many" => (yield_many(rounds).await, 0),
+            "fan_in" => (fan_in(rounds).await, 0),
             case => panic!("unknown workload: {case}"),
         }
     });
-    println!("{sum}");
+    if args.get(4).is_some_and(|mode| mode == "work-receipt") {
+        println!("{completed} {sum}");
+    } else {
+        println!("{sum}");
+    }
 }

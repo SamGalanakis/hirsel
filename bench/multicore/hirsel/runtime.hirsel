@@ -3,13 +3,15 @@ const TASK_BYTES: u64 = 65536
 
 fn identity(take value: u64) -> u64 { value }
 
-fn spawn_join(tasks: Tasks, rounds: u64, lane: u64) -> u64 waits {
+fn spawn_join(tasks: Tasks, rounds: u64, lane: u64) -> (u64, u64) waits {
     let mut sum: u64 = 0
+    let mut completed: u64 = 0
     for i in 0 .. rounds {
         let h = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, lane * rounds + i + 1, identity))
         sum += result.unwrap(task.join(take h))
+        completed += 1
     }
-    sum
+    (sum, completed)
 }
 
 type Chain: send {
@@ -18,7 +20,10 @@ type Chain: send {
     lane: u64
 }
 
-fn chain(take job: Chain) -> u64 waits { spawn_join(job.tasks, job.rounds, job.lane) }
+fn chain(take job: Chain) -> u64 waits {
+    let (sum, _) = spawn_join(job.tasks, job.rounds, job.lane)
+    sum
+}
 
 fn spawn_chain(tasks: Tasks, rounds: u64) -> u64 waits {
     let mut jobs: List[Task[u64]] = list.new()
@@ -47,18 +52,36 @@ fn echo(take job: Echo) -> () waits {
     }
 }
 
-fn ping_pong(tasks: Tasks, rounds: u64) -> u64 waits {
+fn ping_pong(tasks: Tasks, rounds: u64) -> (u64, u64) waits {
     let (take send, take requests): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
     let (take replies, take receive): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
     let job = Echo(requests: take requests, replies: take replies, rounds: rounds)
     let h = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, echo))
     let mut sum: u64 = 0
+    let mut completed: u64 = 0
     for i in 0 .. rounds {
         result.unwrap(channel.send(send, i))
         sum += result.unwrap(channel.receive(receive))
+        completed += 1
     }
     result.unwrap(task.join(take h))
-    sum
+    (sum, completed)
+}
+
+type ArcValue: shareable + send {
+    value: u64
+}
+
+fn arc_pair(rounds: u64) -> (u64, u64) {
+    let original = result.unwrap(arc.new(ArcValue(value: 1)))
+    let mut sum: u64 = 0
+    let mut completed: u64 = 0
+    for i in 0 .. rounds {
+        let shared = arc.share(original)
+        sum += i + shared.value
+        completed += 1
+    }
+    (sum, completed)
 }
 
 type Producer: send {
@@ -95,18 +118,26 @@ pub fn main(tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
     let Some(case) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
     let Some(number) = args.get(argv, 1) else { return Error(Exit(status: 2)) }
     let rounds: u64 = result.unwrap(int.parse(number))
-    let sum = if case == "spawn_join" {
+    let (sum, completed) = if case == "spawn_join" {
         spawn_join(tasks, rounds, 0)
     } else if case == "spawn_chain" {
-        spawn_chain(tasks, rounds)
+        (spawn_chain(tasks, rounds), 0)
     } else if case == "ping_pong" {
         ping_pong(tasks, rounds)
     } else if case == "fan_in" {
-        fan_in(tasks, rounds)
+        (fan_in(tasks, rounds), 0)
+    } else if case == "arc_pair" {
+        arc_pair(rounds)
     } else {
         return Error(Exit(status: 2))
     }
-    let mut line = result.unwrap(string.from(""))
+    let mut line = string.new()
+    if let Some(mode) = args.get(argv, 2) {
+        if mode == "work-receipt" {
+            result.unwrap(string.push_u64(mut line, completed))
+            result.unwrap(string.push(mut line, " "))
+        }
+    }
     result.unwrap(string.push_u64(mut line, sum))
     result.unwrap(string.push(mut line, "\n"))
     result.unwrap(stdout.write(out, line))

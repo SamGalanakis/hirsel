@@ -110,14 +110,15 @@ def time_rust_kernel(text, case):
 ''' + after)
 
 
-def build_rust(out, game, standard):
+def build_rust(out, game, standard, s0=False):
     path = out / "rust"
     path.mkdir(exist_ok=True)
     crate = BENCH / "rust"
+    binaries = ["--bin", "runtime", "--bin", "s0"] if s0 else ["--bin", "runtime"]
     cargo = subprocess.check_output(
         [str(ROOT / "tools/capped"), "cargo", "build", "--release", "--locked",
          "--manifest-path", str(crate / "Cargo.toml"), "--target-dir", str(out / "cargo"),
-         "--bin", "runtime", "--message-format=json"],
+         *binaries, "--message-format=json"],
         cwd=crate, env=os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "2"},
         text=True,
     )
@@ -131,6 +132,10 @@ def build_rust(out, game, standard):
                     externs[target] = file
             if target == "runtime" and artifact["executable"]:
                 shutil.copy2(artifact["executable"], out / "tokio")
+            if target == "s0" and artifact["executable"]:
+                shutil.copy2(artifact["executable"], path / "s0")
+    if s0:
+        return
     rustc = subprocess.check_output(
         ["rustup", "which", "--toolchain", "1.99.0", "rustc"], text=True
     ).strip()
@@ -181,14 +186,19 @@ def hirsel_inputs(src):
     def library(name):
         return [unit(file, True) for file in sorted((ROOT / "core" / name).glob("*.hirsel"))]
 
+    sources = [unit(src, False)]
+    if src.stem == "matmul_t16":
+        sources += [unit(ROOT / "core/langarena" / name, False)
+                    for name in ("matmul.hirsel", "helper.hirsel", "harness.hirsel")]
+
     return {"core": core, "packages": [
         {"package": core, "dependencies": [], "sources": library("core")},
         {"package": std, "dependencies": [core], "sources": library("std")},
-        {"package": app, "dependencies": [core, std], "sources": [unit(src, False)]},
+        {"package": app, "dependencies": [core, std], "sources": sources},
     ]}
 
 
-def build_hirsel(out, compiler, runtime, engine):
+def build_hirsel(out, compiler, runtime, engine, s0=False):
     path = out / "hirsel"
     path.mkdir(exist_ok=True)
     llvm = ROOT / "tools/buck2/toolchains/llvm-files"
@@ -199,6 +209,10 @@ def build_hirsel(out, compiler, runtime, engine):
     succeeded = True
     for src in sorted((BENCH / "hirsel").glob("*.hirsel")):
         case = src.stem
+        if s0 and case not in {"runtime", "matmul_t16"}:
+            continue
+        if not s0 and case == "matmul_t16":
+            continue
         inputs = out / f"{case}.json"
         inputs.write_text(json.dumps(hirsel_inputs(src)))
         # Build independently so a refusal in one port still leaves the other binaries usable.
@@ -244,14 +258,18 @@ def main():
     parser.add_argument("--engine", choices=["llvm", "cranelift"], default="llvm")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--languages", nargs="+", choices=["rust", "go", "hirsel", "goose"])
+    selection.add_argument("--s0", action="store_true", help="build only the S0 Hirsel, Tokio and Rust fixtures")
     selection.add_argument("--standard-rust", action="store_true", help="build published Rust data inputs and phase timings")
     options = parser.parse_args()
-    languages = ["rust"] if options.standard_rust else options.languages or ["rust", "go", "hirsel", "goose"]
+    if options.s0:
+        languages = ["rust", "hirsel"]
+    else:
+        languages = ["rust"] if options.standard_rust else options.languages or ["rust", "go", "hirsel", "goose"]
     out = options.out.resolve()
     if out.is_relative_to(ROOT):
         parser.error("--out must be outside the repository")
     for needed, for_languages in [
-        ("game", {"rust", "go"}), ("goose", {"goose"}),
+        ("game", set() if options.s0 else {"rust", "go"}), ("goose", {"goose"}),
         ("hirsel", {"hirsel"}), ("runtime", {"hirsel"}),
     ]:
         if for_languages.intersection(languages) and getattr(options, needed) is None:
@@ -260,11 +278,11 @@ def main():
     succeeded = True
     for language in dict.fromkeys(languages):
         if language == "rust":
-            build_rust(out, options.game.resolve(), options.standard_rust)
+            build_rust(out, options.game, options.standard_rust, options.s0)
         elif language == "go":
             build_go(out, options.game.resolve(), options.go)
         elif language == "hirsel":
-            succeeded = build_hirsel(out, options.hirsel.resolve(), options.runtime.resolve(), options.engine)
+            succeeded = build_hirsel(out, options.hirsel.resolve(), options.runtime.resolve(), options.engine, options.s0)
         elif language == "goose":
             build_goose(out, options.goose.resolve())
     return 0 if succeeded else 1

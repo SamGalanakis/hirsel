@@ -174,16 +174,23 @@ pub fn dispatch_wait(tasks: Tasks, config: String, name: String, warmup: u64, it
         return Error(Config)
     }
     let n: u64 = int.narrow(ni)
+    let (checksum, _) = parallel_work(tasks, n, threads, warmup + iterations)?
+    Ok(checksum)
+}
+
+pub fn parallel_work(tasks: Tasks, n: u64, threads: u64, rounds: u64) -> Result[(u32, u64), helper.Error] waits {
     let a = match arc.new(Matrix(rows: matrix(n)?)) {
         Ok(take x) => take x,
         Error((c, take unused)) => return Error(Capacity(c))
     }
     let b = matrix(n)?
     let mut total: u32 = 0
-    for _ in 0 .. warmup + iterations {
+    let mut completed: u64 = 0
+    for _ in 0 .. rounds {
         total = int.wrapping_add(total, helper.checksum_f64(parallel(tasks, a, b, threads)?)?)
+        completed += 1
     }
-    Ok(total)
+    Ok((total, completed))
 }
 
 pub fn main(tasks: Tasks, out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {

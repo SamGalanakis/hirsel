@@ -29,14 +29,26 @@ def main():
         shutil.copytree(sources, library, copy_function=shutil.copyfile)
         backtrace = library / "std/src/sys/backtrace.rs"
         shutil.copyfile(image, backtrace.with_name("hirsel_panic_image.rs"))
-        original = backtrace.read_text()
-        marker = '    writeln!(fmt, "stack backtrace:")?;\n'
-        if original.count(marker) != 1:
-            raise SystemExit("Rust's backtrace formatter changed. Recheck the image header insertion.")
-        backtrace.write_text(original.replace(marker, marker + '''    #[path = "hirsel_panic_image.rs"]
+        source = backtrace.read_text()
+        signature = "unsafe fn _print_fmt(fmt: &mut fmt::Formatter<'_>, print_fmt: PrintFmt) -> fmt::Result {"
+        next_item = "/// Fixed frame used to clean the backtrace with `RUST_BACKTRACE=1`."
+        before, found_signature, body = source.partition(signature)
+        formatter, found_next_item, after = body.partition(next_item)
+        if not (found_signature and found_next_item and 'feature="backtrace-trace-only"' in formatter.replace(" ", "")):
+            raise SystemExit("Rust's trace-only formatter changed. Recheck the native panic renderer.")
+        before = before.replace(
+            "use crate::backtrace_rs::{self, BacktraceFmt, BytesOrWideString, PrintFmt};",
+            "use crate::backtrace_rs::{BytesOrWideString, PrintFmt};",
+        ).replace("use crate::{env, fmt, io};", "use crate::{fmt, io};")
+        after = after.replace("backtrace_rs::set_image_base(", "crate::backtrace_rs::set_image_base(")
+        backtrace.write_text(before + signature + '''
+    #[path = "hirsel_panic_image.rs"]
     mod hirsel_panic_image;
-    hirsel_panic_image::write(fmt)?;
-'''))
+    // SAFETY: the caller holds the backtrace lock.
+    unsafe { hirsel_panic_image::write(fmt, print_fmt) }
+}
+
+''' + next_item + after)
         subprocess.run([
             rustc, library / "std/src/lib.rs", "--crate-name", "std", "--edition=2024",
             "--crate-type=rlib", "--target", target, "--sysroot", sysroot,

@@ -1,8 +1,38 @@
-// Included in std's trace-only formatter. The loader supplies the main image's
-// bias, which llvm-symbolizer needs for the absolute PCs of a PIE.
+use crate::backtrace_rs::{self, PrintFmt};
 use crate::{fmt, ptr, slice};
 
-pub(super) fn write(out: &mut fmt::Formatter<'_>) -> fmt::Result {
+// Linux's trace-only output needs the PCs and no symbol or filename callbacks.
+pub(super) unsafe fn write(out: &mut fmt::Formatter<'_>, format: PrintFmt) -> fmt::Result {
+    out.write_str("stack backtrace:\n")?;
+    write_image(out)?;
+    let short = format == PrintFmt::Short;
+    let mut index = 0;
+    let mut result = Ok(());
+    // SAFETY: std's BacktraceLock serializes this trace just as it does the
+    // symbolizing formatter.
+    unsafe {
+        backtrace_rs::trace_unsynchronized(|frame| {
+            if short && index > super::MAX_NB_FRAMES {
+                return false;
+            }
+            const HEX_WIDTH: usize = 2 + 2 * size_of::<usize>();
+            let pc = frame.ip();
+            result = writeln!(out, "{index:4}: {pc:HEX_WIDTH$?}");
+            index += 1;
+            result.is_ok()
+        });
+    }
+    result?;
+    if short {
+        out.write_str(
+            "note: Some details are omitted, \
+             run with `RUST_BACKTRACE=full` for a verbose backtrace.\n",
+        )?;
+    }
+    Ok(())
+}
+
+fn write_image(out: &mut fmt::Formatter<'_>) -> fmt::Result {
     let mut image = Image::default();
     // SAFETY: the callback borrows this live stack value synchronously.
     unsafe { libc::dl_iterate_phdr(Some(main_image), (&raw mut image).cast()) };

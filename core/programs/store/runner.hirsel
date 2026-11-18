@@ -3342,10 +3342,10 @@ fn test_rows_normalized(c: Clock, r: Random) -> Result[(), ()] waits {
     }
 }
 
-pub type WireConfig: send { max_subs: u64, socket: std.wsock.Config, q: u64, budget: u64, n_service: u64, n_place: u64 }
+pub type WireConfig: send { max_subs: u64, socket: std.wsock.Config, q: u64, budget: u64, n_service: u64, n_place: u64, site: Option[std.wsock.Site] }
 
 pub fn wire_defaults(n_service: u64, n_place: u64) -> WireConfig {
-    WireConfig(max_subs: 128u64, socket: std.wsock.defaults(), q: 4, budget: 1048576, n_service: n_service, n_place: n_place)
+    WireConfig(max_subs: 128u64, socket: std.wsock.defaults(), q: 4, budget: 1048576, n_service: n_service, n_place: n_place, site: None)
 }
 
 fn wire_round(n: u64) -> u64 { (n + 7u64) & 0xfffffffffffffff8u64 }
@@ -3884,8 +3884,10 @@ fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] 
         } else { true }
     }
     let mut abandoned = 0u64
-    let result = match std.wsock.server_with(take socket, take slot, peer, proxies, c.socket, clock, accepted, admission) {
-        Ok(take up) => wire_owner(WireOwner(upgraded: take up, service: take service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take control), mut abandoned),
+    let received = std.wsock.server_with(take socket, take slot, peer, proxies, c.socket, clock, accepted, c.site, admission)
+    let result: Result[(), std.wsock.Error] = match take received {
+        Ok(None) => Ok(()),
+        Ok(Some(take up)) => wire_owner(WireOwner(upgraded: take up, service: take service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take control), mut abandoned),
         Error(e) => Error(e),
     }
     let _ = take active

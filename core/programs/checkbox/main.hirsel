@@ -1,0 +1,254 @@
+const N_PLACE: u64 = 1048576
+
+type Bit: codec via u32(to: bit_wire, from: bit) {
+    index: u32,
+}
+
+fn bit_wire(i: Bit) -> View[u32] in i {
+    view i.index
+}
+
+fn bit(take i: u32) -> Result[Bit, ()] {
+    if i < 1000000 {
+        Ok(Bit(index: i))
+    } else {
+        Error(())
+    }
+}
+
+// Never has no built-in codec. The wire conversion cannot construct this type.
+type NoError: codec via() (to: error_wire, from: no_error) {
+    never: Never
+}
+
+fn error_wire(e: NoError) -> View[()] in e {
+    e.never
+}
+
+fn no_error(take _value: ()) -> Result[NoError, ()] {
+    Error(())
+}
+
+type Handles: send {
+    chunks: store.store.Table[u32, Bytes]
+}
+
+type Registry = store.runner.Registry[(), Handles]
+
+fn handles(mut db: store.store.Db) -> Result[Handles, store.store.Error] waits {
+    let codec: std.codec.Codec[Bytes] = std.codec.of()
+    let chunks = store.store.table(mut db, "chunks", std.codec.key_u32(), codec)?
+    Ok(Handles(chunks: chunks))
+}
+
+fn query_handles(h: Handles) -> Handles {
+    Handles(chunks: store.store.query_table(h.chunks))
+}
+
+fn chunk(i: Bit) -> u32 {
+    i.index >> 9
+}
+
+fn zero_chunk() -> Bytes {
+    let mut data: Bytes = result.unwrap(list.with_capacity(64u64))
+    for _ in 0u64 .. 64u64 {
+        result.unwrap(list.push(mut data, 0u8))
+    }
+    data
+}
+
+fn flip(mut data: Bytes, i: Bit) -> bool {
+    let index: u64 = int.widen((i.index >> 3) & 63u32)
+    let mask: u8 = 1u8 << int.narrow(i.index & 7u32)
+    data[index] ^= mask
+    data[index] & mask != 0u8
+}
+
+fn toggle(mut tx: store.store.Tx, h: Handles, take i: Bit) -> Result[bool, NoError] {
+    let key = chunk(i)
+    let old = result.unwrap(store.store.fetch(tx, store.store.shape(h.chunks), key))
+    let mut data = match take old {
+        Some(take value) => take value,
+        None => zero_chunk()
+    }
+    let checked = flip(mut data, i)
+    result.unwrap(store.store.put(mut tx, h.chunks, key, data))
+    Ok(checked)
+}
+
+fn board(tx: store.store.Tx, h: Handles, take _arg: ()) -> Result[store.runner.Cover, Capacity] {
+    store.runner.cover(store.store.shape(h.chunks), Unbounded, Unbounded)
+}
+
+fn place(mut registry: Registry) -> Result[(), store.runner.RegisterError] {
+    store.runner.transact(mut registry, code.describe(toggle), 65536u64, store.runner.DEFAULT_STEPS)?
+    store.runner.query(mut registry, code.describe(board), 1048576u64, store.runner.DEFAULT_STEPS)
+}
+
+fn asset(path: Bytes) -> Option[std.wsock.Asset] {
+    if path == string.as_bytes("/") {
+        return Some(std.wsock.Asset(name: result.unwrap(string.from("index.html")), content_type: result.unwrap(string.from("text/html; charset=utf-8"))))
+    }
+    let name = if path == string.as_bytes("/client.js") {
+        "client.js"
+    } else if path == string.as_bytes("/codec.js") {
+        "codec.js"
+    } else if path == string.as_bytes("/entries.js") {
+        "entries.js"
+    } else if path == string.as_bytes("/frame.js") {
+        "frame.js"
+    } else {
+        return None
+    }
+    Some(std.wsock.Asset(name: result.unwrap(string.from(name)), content_type: result.unwrap(string.from("text/javascript; charset=utf-8"))))
+}
+
+type Settings {
+    listen: Addr,
+    proxies: List[std.wsock.Prefix],
+    policy: store.ingress.Config
+}
+
+fn settings(a: Args) -> Result[Settings, Exit] {
+    let invalid = Exit(status: 2u8)
+    let mut listen = Addr(ip: V4(0x7f000001u32), port: 7700u16)
+    let mut proxies: List[std.wsock.Prefix] = list.new()
+    let mut policy = store.ingress.defaults()
+    let mut i = 0u64
+    while i < args.len(a) {
+        let name = option.unwrap(args.get(a, i))
+        let Some(value) = args.get(a, i + 1u64) else {
+            return Error(invalid)
+        }
+        if name == "--listen" {
+            let Some((address, port_text)) = std.string.split_once(value, ":") else {
+                return Error(invalid)
+            }
+            let Some(ip) = std.wsock.parse_ip(address) else {
+                return Error(invalid)
+            }
+            let parsed: Result[u16, ParseError] = int.parse(port_text)
+            let Ok(port) = parsed else {
+                return Error(invalid)
+            }
+            listen = Addr(ip: ip, port: port)
+        } else if name == "--ingress" {
+            let Some(prefix) = std.wsock.parse_prefix(value) else {
+                return Error(invalid)
+            }
+            result.unwrap(list.push(mut proxies, prefix))
+        } else {
+            let parsed: Result[u64, ParseError] = int.parse(value)
+            let Ok(n) = parsed else {
+                return Error(invalid)
+            }
+            if n == 0u64 || n > 1000000000u64 {
+                return Error(invalid)
+            }
+            if name == "--per-ip-sessions" {
+                policy.sessions = n
+            } else if name == "--per-ip-new-principals" {
+                policy.mint_burst = n
+            } else if name == "--principal-rate" {
+                policy.call_period_ns = 1000000000u64 / n
+            } else {
+                return Error(invalid)
+            }
+        }
+        i += 2u64
+    }
+    Ok(Settings(listen: listen, proxies: take proxies, policy: policy))
+}
+
+type Server: send {
+    listener: Listener,
+    clock: Clock,
+    tasks: Tasks,
+    args: Args,
+    head: Sender[store.runner.Req],
+    post: Sender[store.runner.PubIn],
+    policy: store.ingress.Ingress,
+    proxies: List[std.wsock.Prefix],
+    config: store.runner.WireConfig,
+}
+
+fn serve(take server: Server) -> Result[(), std.wsock.Error] waits {
+    let Server(listener: take listener, clock: c, tasks: tasks, args: a, head: take head, post: take post, policy: take policy, proxies: take proxies, config: config) = take server
+    let service: scoped[view] fn() -> store.runner.Service[store.runner.WireSession[(), Handles]] = fn() -> store.runner.Service[store.runner.WireSession[(), Handles]] {
+        store.runner.wire_place_service(code.describe(place), policy, head, c, tasks, config, a)
+    }
+    store.runner.serve_admitted(take listener, tasks, c, post, config, 1024u64, take proxies, policy, service)
+}
+
+fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
+    let Settings(listen: listen, proxies: take proxies, policy: options) = settings(a)?
+    let failed = Exit(status: 1u8)
+    let mut db = match store.store.open(tasks, directory, c, random, store.store.defaults()) {
+        Ok(take value) => take value,
+        Error(_) => return Error(failed),
+    }
+    let codec: std.codec.Codec[Bytes] = std.codec.of()
+    match store.store.create_table(mut db, store.store.spec("chunks", std.codec.key_u32(), codec)) {
+        Ok(ticket) => if let Error(_) = store.store.durable(mut db, ticket) {
+            return Error(failed)
+        },
+        Error(Exists(_)) => (),
+        Error(_) => return Error(failed),
+    }
+    let (policy, take admission_task) = result.unwrap(store.ingress.start(tasks, c, random, options, 8388608u64))
+    let (head, inbox): (Sender[store.runner.Req], Receiver[store.runner.Req]) = result.unwrap(channel.new(256u64))
+    let mail = result.unwrap(store.runner.mailbox(256u64))
+    let (take listener, _) = match host.listen(n, listen, 128u16) {
+        Ok(take pair) => take pair,
+        Error(_) => return Error(failed),
+    }
+    let mut config = store.runner.wire_defaults(65536u64, N_PLACE)
+    config.site = Some(std.wsock.Site(dir: web, find: asset))
+    let server = Server(listener: take listener, clock: c, tasks: tasks, args: a, head: take head, post: store.runner.post(mail), policy: take policy, proxies: take proxies, config: config)
+    let mut serving = match task.spawn(tasks, bytes 1153433600u64, take server, serve) {
+        Ok(take job) => take job,
+        Error(_) => return Error(failed),
+    }
+    let ended = store.runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 67108864u64)
+    task.cancel(mut serving)
+    let _ = task.join(take serving)
+    let mut admission = take admission_task
+    task.cancel(mut admission)
+    let _ = task.join(take admission)
+    if let Error(_) = ended {
+        return Error(failed)
+    }
+    Ok(())
+}
+
+pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
+    store.runner.main(a, code.describe(place), scoped fn() -> Result[(), Exit] waits {
+        start(n, directory, web, c, random, tasks, a)
+    })
+}
+
+fn at_bit(raw: u32, expected_chunk: u32, expected_byte: u64, expected_mask: u8) -> bool {
+    let i = result.unwrap(bit(raw))
+    let mut data = zero_chunk()
+    if chunk(i) != expected_chunk || !flip(mut data, i) {
+        return false
+    }
+    for offset in 0u64 .. 64u64 {
+        let want = if offset == expected_byte {
+            expected_mask
+        } else {
+            0u8
+        }
+        if data[offset] != want {
+            return false
+        }
+    }
+    if flip(mut data, i) {
+        return false
+    }
+    data == zero_chunk()
+}
+
+pub fn bit_law() -> bool {
+    at_bit(0u32, 0u32, 0u64, 1u8) && at_bit(7u32, 0u32, 0u64, 128u8) && at_bit(8u32, 0u32, 1u64, 1u8) && at_bit(511u32, 0u32, 63u64, 128u8) && at_bit(512u32, 1u32, 0u64, 1u8) && at_bit(999999u32, 1953u32, 7u64, 128u8)
+}

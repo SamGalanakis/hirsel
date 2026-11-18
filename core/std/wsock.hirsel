@@ -15,6 +15,31 @@ fn normalize(ip: Ip) -> Ip {
     }
 }
 
+pub fn parse_ip(s: String) -> Option[Ip] {
+    literal(string.as_bytes(s))
+}
+
+pub fn parse_prefix(s: String) -> Option[Prefix] {
+    let Some((address, length)) = string.split_once(s, "/") else {
+        return None
+    }
+    let parsed: Result[u8, ParseError] = int.parse(length)
+    let Ok(bits) = parsed else {
+        return None
+    }
+    let Some(ip) = parse_ip(address) else {
+        return None
+    }
+    let maximum: u8 = match ip {
+        V4(_) => 32,
+        V6(_, _) => 128
+    }
+    if bits > maximum {
+        return None
+    }
+    Some(Prefix(ip: ip, bits: bits))
+}
+
 fn contains(prefix: Prefix, ip: Ip) -> bool {
     match (prefix.ip, ip) {
         (V4(a), V4(b)) => prefix.bits <= 32 && (prefix.bits == 0 || a >> int.widen(32 - prefix.bits) == b >> int.widen(32 - prefix.bits)),
@@ -629,13 +654,16 @@ fn buffer(n: u64) -> Result[Bytes, Error] {
     }
 }
 
-fn send_head(mut w: WriteHalf, b: Bytes, deadline: Until) -> Result[(), Error] waits {
+fn send_response(mut w: WriteHalf, head: Bytes, body: Bytes, deadline: Until) -> Result[(), Error] waits {
     let mut at: u64 = 0
-    while at != list.len(b) {
-        if at != 0 && expired(deadline) {
+    let split = list.len(head)
+    while at != split + list.len(body) {
+        if expired(deadline) {
             return Error(Network(TimedOut))
         }
-        match host.send_pair(mut w, list.slice(b, at, list.len(b)), string.as_bytes(""), deadline) {
+        let prefix = list.slice(head, order.min(at, split), split)
+        let tail = list.slice(body, int.saturating_sub(at, split), list.len(body))
+        match host.send_pair(mut w, prefix, tail, deadline) {
             Ok(n) => {
                 at += n
             },
@@ -658,7 +686,7 @@ pub fn refuse(mut w: WriteHalf, code: u16, deadline: Until) -> Result[(), Error]
     } else {
         string.as_bytes("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
     }
-    send_head(mut w, b, deadline)
+    send_response(mut w, b, string.as_bytes(""), deadline)
 }
 
 /// Refuses an accepted socket without exposing its halves to a transport caller.
@@ -672,62 +700,147 @@ pub fn refuse_socket(take socket: Socket, code: u16, deadline: Until) -> Result[
 /// The lease is consumed on every error path and returned with success until
 /// Hello acceptance. The accept loop acquires it before spawning session state.
 pub fn server(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64) -> Result[Upgraded, Error] waits {
-    server_with(take socket, take slot, peer, ingress, config, clock, accepted_ns, scoped fn(ip: Ip) -> bool {
+    let request = receive_request(take socket, config, clock, accepted_ns)?
+    upgrade_request(take request, take slot, peer, ingress, config, clock, scoped fn(ip: Ip) -> bool {
         true
     })
 }
 
-/// The source policy runs after sanitization and before writing 101.
-pub fn server_with(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
+pub type Asset {
+    name: String,
+    content_type: String
+}
+
+/// The route selects a filename from a fixed list. The request supplies no path
+/// to the filesystem.
+pub type Site: send {
+    dir: Dir,
+    find: fn(Bytes) -> Option[Asset]
+}
+
+type Request {
+    reader: ReadHalf,
+    writer: WriteHalf,
+    input: Bytes,
+    head: http1.Head,
+    deadline: Until,
+}
+
+fn receive_request(take socket: Socket, config: Config, clock: Clock, accepted_ns: u64) -> Result[Request, Error] waits {
     if !valid(config) {
         return Error(Configuration)
     }
     let (r, w) = net.split(take socket)
-    let mut input_half = r
-    let mut output_half = w
+    let mut reader = take r
+    let mut writer = take w
     let deadline = At(clock, after(accepted_ns, config.upgrade_ms))
     let mut input = buffer(8192)?
-    let mut attempted = false
+    let mut head = http1.head()
+    let mut cursor = http1.cursor()
     loop {
-        if attempted && expired(deadline) {
+        if expired(deadline) {
             return Error(Network(TimedOut))
         }
-        let upgraded = match websocket.server(input) {
-            Ok(value) => value,
-            Error(c) => return Error(Allocation(c))
+        let status: u16 = match http1.resume(input, mut head, mut cursor) {
+            Complete => return Ok(Request(reader: take reader, writer: take writer, input: take input, head: take head, deadline: deadline)),
+            Partial => 0,
+            Bad => 400,
+            TooLarge => 431,
         }
-        match upgraded {
-            Upgraded(end, response) => {
-                let ip = match source(input, peer, ingress) {
-                    Ok(ip) => ip,
-                    Error(code) => {
-                        let _ = refuse(mut output_half, code, deadline)
-                        return Error(Http(code))
-                    }
-                }
-                if !admit(ip) {
-                    let _ = refuse(mut output_half, 503u16, deadline)
-                    return Error(Http(503u16))
-                }
-                if expired(deadline) {
-                    return Error(Network(TimedOut))
-                }
-                send_head(mut output_half, response, deadline)?
-                return Ok(Upgraded(reader: Reader(half: take input_half, input: take input, cursor: end, decoder: websocket.decoder(Server, config.max_frame)), writer: Writer(half: take output_half, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
-            },
-            Refused(code) => {
-                let _ = refuse(mut output_half, code, deadline)
-                return Error(Http(code))
-            },
-            Waiting => {}
+        if status != 0 {
+            let _ = refuse(mut writer, status, deadline)
+            return Error(Http(status))
         }
         let max = list.capacity(input)
-        match host.recv_bounded(mut input_half, mut input, max, deadline) {
+        match host.recv_bounded(mut reader, mut input, max, deadline) {
             Ok(0) => return Error(Eof),
             Ok(_) => {},
-            Error(e) => return Error(Network(e))
+            Error(e) => return Error(Network(e)),
         }
-        attempted = true
+    }
+}
+
+/// Serve one request. Static responses close the connection. The source policy
+/// runs after sanitization and before writing 101.
+pub fn server_with(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, site: Option[Site], admit: scoped fn(Ip) -> bool waits) -> Result[Option[Upgraded], Error] waits {
+    let request = receive_request(take socket, config, clock, accepted_ns)?
+    let use_upgrade = match site {
+        None => true,
+        Some(_) => list.slice(request.input, request.head.target.start, request.head.target.end) == string.as_bytes("/hirsel"),
+    }
+    if use_upgrade {
+        let upgraded = upgrade_request(take request, take slot, peer, ingress, config, clock, admit)?
+        return Ok(Some(take upgraded))
+    }
+    let web = option.unwrap(site)
+    let asset = if list.slice(request.input, request.head.method.start, request.head.method.end) == string.as_bytes("GET") {
+        (web.find)(list.slice(request.input, request.head.target.start, request.head.target.end))
+    } else {
+        None
+    }
+    let Request(writer: take output, deadline: deadline, ..) = take request
+    let mut writer = take output
+    let Some(take selected) = take asset else {
+        refuse(mut writer, 404, deadline)?
+        return Ok(None)
+    }
+    let body = match file.read(web.dir, selected.name) {
+        Ok(take data) => take data,
+        Error(Io(NotFound)) => {
+            refuse(mut writer, 404, deadline)?
+            return Ok(None)
+        },
+        Error(_) => {
+            send_response(mut writer, string.as_bytes("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"), string.as_bytes(""), deadline)?
+            return Ok(None)
+        },
+    }
+    let built_header = static_head(selected.content_type, list.len(body))
+    let header = match take built_header {
+        Ok(take text) => take text,
+        Error(c) => return Error(Allocation(c))
+    }
+    send_response(mut writer, string.as_bytes(header), body, deadline)?
+    Ok(None)
+}
+
+fn static_head(content_type: String, size: u64) -> Result[String, Capacity] {
+    let mut head = string.from("HTTP/1.1 200 OK\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Type: ")?
+    string.push(mut head, content_type)?
+    string.push(mut head, "\r\nContent-Length: ")?
+    string.push_u64(mut head, size)?
+    string.push(mut head, "\r\n\r\n")?
+    Ok(take head)
+}
+
+fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
+    let Request(reader: take reader, writer: take output, input: take input, head: take head, deadline: deadline) = take request
+    let mut writer = take output
+    let upgraded = match websocket.server_head(input, head) {
+        Ok(take value) => take value,
+        Error(c) => return Error(Allocation(c)),
+    }
+    match take upgraded {
+        Upgraded(end, take response) => {
+            let ip = match source_for_head(input, head, peer, ingress) {
+                Ok(ip) => ip,
+                Error(code) => {
+                    let _ = refuse(mut writer, code, deadline)
+                    return Error(Http(code))
+                },
+            }
+            if !admit(ip) {
+                let _ = refuse(mut writer, 503, deadline)
+                return Error(Http(503))
+            }
+            send_response(mut writer, response, string.as_bytes(""), deadline)?
+            Ok(Upgraded(reader: Reader(half: take reader, input: take input, cursor: end, decoder: websocket.decoder(Server, config.max_frame)), writer: Writer(half: take writer, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
+        },
+        Refused(code) => {
+            let _ = refuse(mut writer, code, deadline)
+            Error(Http(code))
+        },
+        Waiting => Error(Configuration),
     }
 }
 
@@ -760,7 +873,7 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
         Ok(_) => {},
         Error(c) => return Error(Allocation(c))
     }
-    send_head(mut output_half, request, deadline)?
+    send_response(mut output_half, request, string.as_bytes(""), deadline)?
     let mut input = buffer(8192)?
     let mut attempted = false
     loop {

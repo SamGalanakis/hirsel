@@ -129,6 +129,11 @@ pub fn server(b: Bytes) -> Result[Upgrade, Capacity] {
         TooLarge => return Ok(Refused(431)),
         Complete => {}
     }
+    server_head(b, h)
+}
+
+/// Upgrade a request whose complete head has already been parsed.
+pub fn server_head(b: Bytes, h: http1.Head) -> Result[Upgrade, Capacity] {
     let key = match server_checks(b, h) {
         Ok(x) => x,
         Error(status) => return Ok(Refused(status))

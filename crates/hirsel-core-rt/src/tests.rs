@@ -545,7 +545,7 @@ fn the_header_numbers_every_event_kind_as_the_table_does() {
 #[test]
 fn same_size_own_blocks_reuse_mappings_and_pack_small_slots() {
     use crate::task_heap::MAP_REQUESTS;
-    let context = Context::new(1_000_000);
+    let mut context = Context::new(1_000_000);
     let before = MAP_REQUESTS.with(std::cell::Cell::get);
     let mut requests_after_first = 0;
     for iteration in 0..3 {
@@ -565,6 +565,27 @@ fn same_size_own_blocks_reuse_mappings_and_pack_small_slots() {
             assert_eq!(requests, requests_after_first);
         }
     }
+
+    // Two payers have partial pages of the same class above 256 bytes.
+    // The newest page belongs to the inner payer, even after forwarding.
+    let outer = Block::new(&context, Some(24), 320, 8).unwrap();
+    context.limit_enter(64).unwrap();
+    let inner = Block::new(&context, Some(24), 320, 8).unwrap();
+    context.limit_exit();
+    let sibling = Block::new(&context, Some(24), 320, 8).unwrap();
+    assert_eq!(
+        sibling.pointer().addr().get() - outer.pointer().addr().get(),
+        320
+    );
+    assert_eq!(context.available(), 1_000_000 - 72);
+    drop((outer, inner, sibling));
+    assert_eq!(context.available(), 1_000_000);
+
+    let large = Block::new(&context, Some(24), 131_072, 131_072).unwrap();
+    let address = large.pointer().addr();
+    drop(large);
+    let large = Block::new(&context, Some(24), 131_072, 131_072).unwrap();
+    assert_eq!(large.pointer().addr(), address);
 }
 
 #[test]

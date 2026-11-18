@@ -2,19 +2,30 @@
 //! page queues, a class keeps only pages that can supply a block. The task
 //! owns the queue even if it resumes on a different worker.
 use crate::{abi_layout::own_prefix, limit::Payer};
-use std::collections::HashMap;
 use std::ptr::{self, NonNull};
 use std::sync::{Arc, Mutex, OnceLock};
 
 const SLAB: usize = 64 * 1024;
 const HEADER_BACK: usize = 4096;
-const DIRECT_CLASSES: usize = 32;
+const SLAB_BINS: usize = size_bin(SLAB / 2) as usize + 1;
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+const fn size_bin(stride: usize) -> u8 {
+    if stride <= 64 {
+        return (stride / 8 - 1) as u8;
+    }
+    // Four classes per doubling above 64 bytes. Subtract one so the
+    // power-of-two endpoint belongs to the preceding group.
+    let group = (stride - 1).ilog2();
+    let lane = ((stride - 1) >> (group - 2)) & 3;
+    (8 + (group as usize - 6) * 4 + lane) as u8
+}
+
+#[derive(Clone, Copy)]
 struct Class {
     stride: usize,
     align: usize,
     kind: u8,
+    bin: u8,
 }
 impl Class {
     fn for_block(bytes: usize, align: usize, kind: u8) -> Self {
@@ -35,17 +46,21 @@ impl Class {
             stride,
             align,
             kind,
+            bin: size_bin(stride),
         }
     }
     fn offset(self) -> usize {
         own_prefix(self.kind).next_multiple_of(self.align)
     }
     fn fits_slab(self) -> bool {
-        self.stride <= SLAB / 2
+        (self.bin as usize) < SLAB_BINS
+    }
+    fn large_bin(self) -> usize {
+        usize::from(self.bin) - SLAB_BINS
     }
 }
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy)]
 struct Key {
     payer: usize,
     class: Class,
@@ -152,15 +167,22 @@ impl Page {
 #[derive(Default)]
 pub(crate) struct Heap(Mutex<State>);
 
-#[derive(Default)]
 struct State {
     closed: bool,
-    // A direct page per small class, as in mimalloc's pages_free_direct.
-    // The full key also distinguishes alignments and original payers.
-    direct: [[Option<PagePointer>; DIRECT_CLASSES]; 3],
-    ready: HashMap<Key, PagePointer>,
+    ready: [[Option<PagePointer>; SLAB_BINS]; 3],
     empty_slabs: Vec<PagePointer>,
-    empty_large: HashMap<Class, Vec<PagePointer>>,
+    empty_large: Vec<Option<PagePointer>>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            closed: false,
+            ready: [[None; SLAB_BINS]; 3],
+            empty_slabs: Vec::new(),
+            empty_large: Vec::new(),
+        }
+    }
 }
 
 // SAFETY: unique live blocks pin their pages and read only immutable funding.
@@ -168,58 +190,85 @@ struct State {
 unsafe impl Send for State {}
 
 impl State {
-    unsafe fn link(&mut self, page: PagePointer, key: Key) {
+    fn ready_head(&mut self, class: Class) -> &mut Option<PagePointer> {
+        &mut self.ready[usize::from(class.kind)][usize::from(class.bin)]
+    }
+
+    fn available(&mut self, key: Key) -> Option<PagePointer> {
+        let mut current = *self.ready_head(key.class);
+        while let Some(page) = current {
+            // SAFETY: this heap owns the ready list. Only pages with a live
+            // slot are linked here, and their payer and alignment stay fixed.
+            unsafe {
+                let existing = Page::key(page);
+                if existing.payer == key.payer && existing.class.align == key.class.align {
+                    return Some(page);
+                }
+                current = (*page.as_ref().slots.get()).next;
+            }
+        }
+        None
+    }
+
+    unsafe fn link(&mut self, page: PagePointer, class: Class) {
         // SAFETY: exclusively held heap; this page was absent from the class queue.
         unsafe {
             let slots = &mut *page.as_ref().slots.get();
             slots.previous = None;
-            slots.next = self.ready.insert(key, page);
+            slots.next = self.ready_head(class).replace(page);
             if let Some(next) = slots.next {
                 (*next.as_ref().slots.get()).previous = Some(page);
             }
         }
     }
 
-    unsafe fn unlink(&mut self, page: PagePointer, key: Key) {
+    unsafe fn unlink(&mut self, page: PagePointer, class: Class) {
         // SAFETY: exclusively held heap; this page belongs to the class queue.
         unsafe {
             let slots = &mut *page.as_ref().slots.get();
             let previous = slots.previous.take();
+            let next = slots.next.take();
             if let Some(previous) = previous {
-                (*previous.as_ref().slots.get()).next = slots.next;
-            } else if let Some(next) = slots.next {
-                *self.ready.get_mut(&key).unwrap() = next;
+                (*previous.as_ref().slots.get()).next = next;
             } else {
-                self.ready.remove(&key);
+                *self.ready_head(class) = next;
             }
-            if let Some(next) = slots.next.take() {
+            if let Some(next) = next {
                 (*next.as_ref().slots.get()).previous = previous;
             }
         }
-        if let Some(slot) = self.direct_slot(key.class)
-            && *slot == Some(page)
-        {
-            *slot = None;
-        }
-    }
-
-    fn direct_slot(&mut self, class: Class) -> Option<&mut Option<PagePointer>> {
-        self.direct[usize::from(class.kind)].get_mut(class.stride / 8 - 1)
     }
 
     fn cached(&mut self, class: Class) -> Option<PagePointer> {
         if class.fits_slab() {
-            self.empty_slabs.pop()
-        } else {
-            self.empty_large.get_mut(&class)?.pop()
+            return self.empty_slabs.pop();
         }
+        let mut link = self.empty_large.get_mut(class.large_bin())?;
+        while let Some(page) = *link {
+            // SAFETY: the heap owns these empty mappings and their links.
+            let slots = unsafe { &mut *page.as_ref().slots.get() };
+            // Large mappings have this bin's exact stride and a fixed
+            // payload offset. Any mapping with sufficient alignment works.
+            if slots.first.addr().get() & (class.align - 1) == 0 {
+                *link = slots.next.take();
+                return Some(page);
+            }
+            link = &mut slots.next;
+        }
+        None
     }
 
     fn recycle(&mut self, page: PagePointer, class: Class) {
         if class.fits_slab() {
             self.empty_slabs.push(page);
         } else {
-            self.empty_large.entry(class).or_default().push(page);
+            let bin = class.large_bin();
+            if bin >= self.empty_large.len() {
+                self.empty_large.resize(bin + 1, None);
+            }
+            let head = self.empty_large[bin].replace(page);
+            // SAFETY: this one-slot page is empty and never joins the ready list.
+            unsafe { (*page.as_ref().slots.get()).next = head };
         }
     }
 }
@@ -240,20 +289,18 @@ impl Heap {
         let mut state = heap.0.lock().unwrap();
         // SAFETY: this heap owns all queues and the live slot until publication.
         unsafe {
-            let direct = state.direct_slot(class).and_then(|slot| *slot);
-            let page = if let Some(page) = direct.filter(|page| Page::key(*page) == key) {
+            let ready = if class.fits_slab() {
+                state.available(key)
+            } else {
+                None
+            };
+            let page = if let Some(page) = ready {
                 page
-            } else if let Some(&page) = state.ready.get(&key) {
+            } else if let Some(page) = state.cached(class) {
+                Page::reuse(page, payer, key);
                 page
             } else {
-                let page = if let Some(page) = state.cached(class) {
-                    Page::reuse(page, payer, key);
-                    page
-                } else {
-                    Page::new(heap, payer, key)
-                };
-                state.link(page, key);
-                page
+                Page::new(heap, payer, key)
             };
             let slots = &mut *page.as_ref().slots.get();
             let pointer = if let Some(free) = NonNull::new(slots.free) {
@@ -268,9 +315,11 @@ impl Heap {
             };
             slots.live += 1;
             if slots.live == slots.limit {
-                state.unlink(page, key);
-            } else if let Some(slot) = state.direct_slot(class) {
-                *slot = Some(page);
+                if ready.is_some() {
+                    state.unlink(page, class);
+                }
+            } else if ready.is_none() {
+                state.link(page, class);
             }
             #[cfg(feature = "memcheck")]
             allocation_check::allocated(pointer, bytes, kind);
@@ -285,14 +334,22 @@ impl Heap {
     pub(crate) fn close(&self) {
         let mut state = self.0.lock().unwrap();
         state.closed = true;
-        state.direct = Default::default();
-        state.ready.clear();
+        state.ready = [[None; SLAB_BINS]; 3];
         let slabs = std::mem::take(&mut state.empty_slabs);
         let large = std::mem::take(&mut state.empty_large);
         drop(state);
-        for page in slabs.into_iter().chain(large.into_values().flatten()) {
+        for page in slabs {
             // SAFETY: detached from the cache, with no live slots.
             unsafe { Page::destroy(page) };
+        }
+        for mut current in large {
+            while let Some(page) = current {
+                // SAFETY: the detached list contains only empty pages.
+                unsafe {
+                    current = (*page.as_ref().slots.get()).next;
+                    Page::destroy(page);
+                }
+            }
         }
     }
 }
@@ -351,7 +408,7 @@ pub(crate) unsafe fn release(payload: NonNull<u8>) {
             }
         } else if slots.live == 0 {
             if !was_full {
-                state.unlink(page, key);
+                state.unlink(page, key.class);
             }
             state.recycle(page, key.class);
         } else {
@@ -362,7 +419,7 @@ pub(crate) unsafe fn release(payload: NonNull<u8>) {
             allocation_check::link_access(payload, false);
             slots.free = payload.as_ptr();
             if was_full {
-                state.link(page, key);
+                state.link(page, key.class);
             }
         }
     }

@@ -751,6 +751,20 @@ impl Funding {
         cache.stats
     }
 
+    /// The word `drain` tests on this thread, for a commit served by another
+    /// worker on this owner's behalf.
+    #[inline(always)]
+    pub(crate) fn pending_word(&self) -> *const AtomicBool {
+        let domain = self.payer.get().slot().domain;
+        // SAFETY: the current Funding and dispatch binding pin their state.
+        unsafe {
+            match BOUND.get().filter(|binding| binding.domain == domain) {
+                Some(binding) => binding.inbox.as_ref().pending_word(),
+                None => &domain.as_ref().pending,
+            }
+        }
+    }
+
     /// Apply only the running owner's ordered refunds. No admission or allocation.
     #[inline(always)]
     pub fn drain(&self) {

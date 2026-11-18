@@ -58,6 +58,9 @@ impl Inbox {
     pub(super) fn pending(&self) -> bool {
         self.pending.load(Ordering::Acquire)
     }
+    pub(super) fn pending_word(&self) -> &AtomicBool {
+        &self.pending
+    }
     fn notify(&self) {
         self.pending.store(true, Ordering::Release);
     }

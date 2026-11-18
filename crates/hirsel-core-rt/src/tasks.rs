@@ -2373,9 +2373,18 @@ unsafe fn event_for(task_pointer: *mut Task, kind: u8, object: u64, value: u64) 
 unsafe fn record_event(task_pointer: *mut Task, kind: u8, object: u64, value: u64) {
     // SAFETY: current pins its scheduler; callback cannot suspend or re-enter.
     unsafe {
+        (*(*task_pointer).context).current.drain();
+        record_folded(task_pointer, kind, object, value);
+    }
+}
+
+/// Record an event whose owner has no pending credit to fold.
+#[inline(always)]
+unsafe fn record_folded(task_pointer: *mut Task, kind: u8, object: u64, value: u64) {
+    // SAFETY: the token holder pins the task's scheduler; callback cannot suspend.
+    unsafe {
         let task = NonNull::new_unchecked(task_pointer).as_ref();
         let run = NonNull::new_unchecked(task.run).as_ref();
-        (*task.context).current.drain();
         if let Some(event) = run.provider.event {
             event(
                 run.provider.state,
@@ -2726,12 +2735,32 @@ pub(crate) unsafe fn park(queue: *mut Waiters) -> crate::sequencer::Guard {
 /// # Safety
 /// The active commit holds the condition's owner alive through the event.
 pub(crate) unsafe fn event_wake_waiters(kind: u8, object: u64, value: u64, queue: *mut Waiters) {
-    let _commit = crate::sequencer::enter();
     let task = CURRENT.get();
+    // SAFETY: as for event_wake_waiters_for, with the running task.
+    unsafe { event_wake_waiters_for(task, kind, object, value, queue, true) }
+}
+
+/// Record a waking event for `task`, the running task or a delegated
+/// requester. A served event has already been shown to need no fold.
+/// # Safety
+/// The active commit holds the condition's owner alive through the event.
+pub(crate) unsafe fn event_wake_waiters_for(
+    task: *mut Task,
+    kind: u8,
+    object: u64,
+    value: u64,
+    queue: *mut Waiters,
+    fold: bool,
+) {
+    let _commit = crate::sequencer::enter();
     // SAFETY: recording and waking use the same commit, before any switch.
     unsafe {
         if !task.is_null() {
-            record_event(task, kind, object, value);
+            if fold {
+                record_event(task, kind, object, value);
+            } else {
+                record_folded(task, kind, object, value);
+            }
             let _wakes = Waiters::wake_all(queue);
             #[cfg(feature = "testing")]
             if matches!(kind, PUBLISH | RECEIVE)
@@ -2746,6 +2775,78 @@ pub(crate) unsafe fn event_wake_waiters(kind: u8, object: u64, value: u64, queue
             }
             poll_event(task, kind, value);
         }
+    }
+}
+
+/// A channel commit another worker may complete for this task.
+#[repr(C)]
+pub(crate) struct Delegated {
+    request: crate::sequencer::Request,
+    pub(crate) task: *mut Task,
+    context: *mut Context,
+    pending: *const AtomicBool,
+    kind: u8,
+    pub(crate) channel: *mut u8,
+    pub(crate) value: *mut u8,
+}
+
+/// Offer a channel commit for delegation. None means a holder completed it;
+/// otherwise the caller holds the token and runs the operation itself.
+/// # Safety
+/// The running task's context and the operands stay pinned for the call.
+#[inline(always)]
+pub(crate) unsafe fn delegate(
+    context: *mut Context,
+    kind: u8,
+    channel: *mut u8,
+    value: *mut u8,
+    serve: unsafe fn(*mut Delegated) -> bool,
+) -> Option<crate::sequencer::Guard> {
+    let task = CURRENT.get();
+    // SAFETY: the running task pins its context and scheduler.
+    unsafe {
+        if task.is_null() || WORKER.get().is_null() {
+            return Some(crate::sequencer::enter());
+        }
+        if (*task).replay {
+            return Some(before_commit());
+        }
+        let mut request = Delegated {
+            request: crate::sequencer::Request {
+                serve: std::mem::transmute::<
+                    unsafe fn(*mut Delegated) -> bool,
+                    unsafe fn(*mut crate::sequencer::Request) -> bool,
+                >(serve),
+            },
+            task,
+            context,
+            pending: (*context).current.pending_word(),
+            kind,
+            channel,
+            value,
+        };
+        match crate::sequencer::enter_or_delegate(&raw mut request.request) {
+            crate::sequencer::Entry::Held(guard) => Some(guard),
+            crate::sequencer::Entry::Served => None,
+        }
+    }
+}
+
+/// Whether a holder may complete `request` without its task: no pending
+/// cancellation, no credit to fold, no poll turn or driver poll at this event.
+/// # Safety
+/// The caller holds the token; the requester is blocked on its request.
+pub(crate) unsafe fn delegable(request: &Delegated) -> bool {
+    // SAFETY: the blocked requester pins its task, context and scheduler.
+    unsafe {
+        let task = request.task;
+        let run = (*task).run;
+        let poll = hirsel_core_layout::event::is_poll(request.kind, 0);
+        !(*task).replay
+            && !cancel_takes_effect(&*request.context, cancel_flag(task))
+            && !(*request.pending).load(Ordering::Acquire)
+            && !(poll && (*task).polls_left <= 1)
+            && ((*run).net.is_null() || ((*run).pool.is_some() && !poll))
     }
 }
 

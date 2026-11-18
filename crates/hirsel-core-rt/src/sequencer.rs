@@ -11,6 +11,17 @@ use std::{
 
 /// Commits granted inside one cohort while another cohort waits.
 const COHORT_PASSES: u32 = 64;
+/// Delegated requests a releasing holder serves before handing off.
+const SERVE_BATCH: usize = 8;
+
+/// A commit another worker may perform for a waiting requester (typed
+/// delegation, H-Synch shape). `serve` runs under the token on the holder's
+/// worker; it either completes the request and returns true, or returns
+/// false before any mutation, and the requester is granted the token.
+#[repr(C)]
+pub(crate) struct Request {
+    pub(crate) serve: unsafe fn(*mut Request) -> bool,
+}
 const COHORTS: usize = 8;
 
 #[derive(Default)]
@@ -41,6 +52,10 @@ struct Node {
     waiting: AtomicBool,
     /// The predecessor passed the global token with the local one.
     inherited: AtomicBool,
+    /// A delegable request, published before the node is enqueued.
+    request: AtomicPtr<Request>,
+    /// The holder completed the request instead of granting the token.
+    served: AtomicBool,
     #[cfg(feature = "testing")]
     released_at: std::sync::atomic::AtomicU64,
     #[cfg(feature = "testing")]
@@ -58,6 +73,7 @@ impl Mcs {
             (*node).next.store(ptr::null_mut(), Ordering::Relaxed);
             (*node).waiting.store(true, Ordering::Relaxed);
             (*node).inherited.store(false, Ordering::Relaxed);
+            (*node).served.store(false, Ordering::Relaxed);
             let predecessor = self.tail.swap(node, Ordering::AcqRel);
             if !predecessor.is_null() {
                 (*predecessor).next.store(node, Ordering::Release);
@@ -117,28 +133,87 @@ impl Mcs {
     }
 }
 
+enum Acquired {
+    Free,
+    /// Granted after waiting; the node carries the hand-off stamp.
+    Queued(*const Node),
+    Served,
+}
+
 impl Sequencer {
     /// Take the token for `node` in `cohort`. Returns the node whose
     /// hand-off stamp describes a queued grant, if the requester waited.
     /// # Safety
     /// As for `Mcs::acquire`; the same cohort is passed to `release`.
-    unsafe fn acquire(&self, node: *mut Node, cohort: usize) -> Option<*const Node> {
+    unsafe fn acquire(&self, node: *mut Node, cohort: usize) -> Acquired {
         let c = &self.cohorts[cohort];
         // SAFETY: the worker owns its node; the local holder alone owns the
         // cohort's global node.
         unsafe {
             let queued = c.local.acquire(node);
+            if (*node).served.load(Ordering::Relaxed) {
+                return Acquired::Served;
+            }
             if (*node).inherited.load(Ordering::Relaxed) {
-                return Some(node);
+                return Acquired::Queued(node);
             }
             c.passes.store(0, Ordering::Relaxed);
-            let remote = self.global.acquire(&raw const c.node as *mut Node);
-            if remote {
-                Some(&raw const c.node)
+            if self.global.acquire(&raw const c.node as *mut Node) {
+                Acquired::Queued(&raw const c.node)
+            } else if queued {
+                Acquired::Queued(node)
             } else {
-                queued.then_some(node.cast_const())
+                Acquired::Free
             }
         }
+    }
+
+    /// Complete the delegated requests linked behind the holder in its cohort,
+    /// in queue order, stopping at the first that needs the token itself.
+    /// # Safety
+    /// Node and cohort are the current holder's, and it holds the token.
+    unsafe fn serve(&self, node: *mut Node, cohort: usize) -> usize {
+        let local = &self.cohorts[cohort].local;
+        let mut served = 0;
+        // SAFETY: a linked waiter's node stays pinned until it is signalled;
+        // its request was published before its link.
+        unsafe {
+            while served < SERVE_BATCH {
+                let next = (*node).next.load(Ordering::Acquire);
+                if next.is_null() {
+                    break;
+                }
+                let request = (*next).request.load(Ordering::Acquire);
+                if request.is_null() || !((*request).serve)(request) {
+                    break;
+                }
+                let mut after = (*next).next.load(Ordering::Acquire);
+                if after.is_null() {
+                    (*node).next.store(ptr::null_mut(), Ordering::Relaxed);
+                    if local
+                        .tail
+                        .compare_exchange(next, node, Ordering::AcqRel, Ordering::Acquire)
+                        .is_err()
+                    {
+                        let mut spins = 0u32;
+                        loop {
+                            after = (*next).next.load(Ordering::Acquire);
+                            if !after.is_null() {
+                                break;
+                            }
+                            backoff(&mut spins);
+                        }
+                        (*node).next.store(after, Ordering::Release);
+                    }
+                } else {
+                    (*node).next.store(after, Ordering::Release);
+                }
+                (*next).served.store(true, Ordering::Relaxed);
+                (*next).waiting.store(false, Ordering::Release);
+                served += 1;
+            }
+        }
+        served
     }
 
     /// # Safety
@@ -196,7 +271,7 @@ fn backoff(spins: &mut u32) {
         std::thread::yield_now();
     }
 }
-const SPIN_LIMIT: u32 = 1 << 10;
+const SPIN_LIMIT: u32 = 1 << 16;
 
 /// A worker pins this record on its OS stack. Nested runtime operations use
 /// the current commit without adding themselves to the MCS queue.
@@ -224,12 +299,17 @@ impl Owner {
         }
     }
 
-    fn acquire(&self) {
+    /// False only when the holder served this node's request instead.
+    fn acquire(&self) -> bool {
         let cohort = current_cohort();
         self.cohort.set(cohort);
         // SAFETY: the pinned worker enqueues only its own idle node.
         let _queued =
-            unsafe { (*self.sequencer).acquire(&raw const self.node as *mut Node, cohort) };
+            match unsafe { (*self.sequencer).acquire(&raw const self.node as *mut Node, cohort) } {
+                Acquired::Served => return false,
+                Acquired::Free => None,
+                Acquired::Queued(stamp) => Some(stamp),
+            };
         #[cfg(feature = "testing")]
         if let Some(sample) = &self.sample {
             let now = crate::os::monotonic_ns();
@@ -247,6 +327,25 @@ impl Owner {
                 }
             }
         }
+        true
+    }
+
+    /// Serve linked delegated requests, then release. Nested entries made by
+    /// a served request reuse the held token.
+    fn finish(&self) {
+        self.depth.set(1);
+        // SAFETY: this worker holds the token with its node and cohort.
+        let _served = unsafe {
+            (*self.sequencer).serve(&raw const self.node as *mut Node, self.cohort.get())
+        };
+        #[cfg(feature = "testing")]
+        if let Some(sample) = &self.sample {
+            sample.serves.set(sample.serves.get() + _served as u64);
+        }
+        self.depth.set(0);
+        self.held.set(false);
+        self.release();
+        (self.published)();
     }
 
     fn release(&self) {
@@ -273,13 +372,15 @@ impl Owner {
     pub(crate) fn report(&self, index: usize) {
         if let Some(sample) = &self.sample {
             eprintln!(
-                "sequencer worker={index} commits={} service_ns={} handoffs={} handoff_ns={} cross_l3={} cross_l3_ns={}",
+                "sequencer worker={index} commits={} service_ns={} handoffs={} handoff_ns={} cross_l3={} cross_l3_ns={} served={} delegated={}",
                 sample.commits.get(),
                 sample.service.get(),
                 sample.transfers.get(),
                 sample.handoff.get(),
                 sample.cross.get(),
                 sample.cross_ns.get(),
+                sample.serves.get(),
+                sample.delegated.get(),
             );
         }
     }
@@ -295,6 +396,8 @@ struct Sample {
     handoff: Cell<u64>,
     cross: Cell<u64>,
     cross_ns: Cell<u64>,
+    serves: Cell<u64>,
+    delegated: Cell<u64>,
 }
 
 #[cfg(feature = "testing")]
@@ -346,10 +449,7 @@ impl Drop for Guard {
             let depth = owner.depth.get() - 1;
             owner.depth.set(depth);
             if depth == 0 {
-                // SAFETY: the worker exits its outermost commit.
-                owner.held.set(false);
-                owner.release();
-                (owner.published)();
+                owner.finish();
             }
         }
     }
@@ -395,9 +495,45 @@ pub(crate) fn release_handed() {
     // SAFETY: install pins the current worker and its sequencer on this thread.
     if let Some(owner) = unsafe { at.as_ref() }
         && owner.depth.get() == 0
-        && owner.held.replace(false)
+        && owner.held.get()
     {
-        owner.release();
-        (owner.published)();
+        owner.finish();
     }
+}
+
+/// The outcome of offering a commit for delegation.
+pub(crate) enum Entry {
+    /// The requester holds the token, as after `enter`.
+    Held(Guard),
+    /// Another worker completed the request under the token.
+    Served,
+}
+
+/// Enter the commit, or let the current holder complete `request` for this
+/// worker while it waits in the same cohort.
+/// # Safety
+/// Request and everything it points to stay pinned until this returns.
+pub(crate) unsafe fn enter_or_delegate(request: *mut Request) -> Entry {
+    let at = OWNER.get();
+    // SAFETY: install pins the current worker and its sequencer on this thread.
+    let Some(owner) = (unsafe { at.as_ref() }) else {
+        return Entry::Held(Guard(at));
+    };
+    if owner.held.get() {
+        return Entry::Held(enter());
+    }
+    owner.node.request.store(request, Ordering::Relaxed);
+    owner.held.set(true);
+    let served = !owner.acquire();
+    owner.node.request.store(ptr::null_mut(), Ordering::Relaxed);
+    if served {
+        owner.held.set(false);
+        #[cfg(feature = "testing")]
+        if let Some(sample) = &owner.sample {
+            sample.delegated.set(sample.delegated.get() + 1);
+        }
+        return Entry::Served;
+    }
+    owner.depth.set(1);
+    Entry::Held(Guard(at))
 }

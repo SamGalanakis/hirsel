@@ -2055,3 +2055,125 @@ fn sixteen_worker_recording_replays_at_one_with_exact_refunds_and_exhaustion_sit
     let (_, replayed) = execute(Some(recorded.store.file()));
     assert_eq!(replayed, events);
 }
+
+struct FanInReplay {
+    store: Store,
+    record: bool,
+    sum: u64,
+}
+
+#[derive(Clone, Copy)]
+struct FanInJob {
+    send: *mut Channel,
+    lane: u64,
+}
+
+const FAN_IN_ROUNDS: u64 = 200;
+
+unsafe extern "C" fn fan_in_producer(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: each producer owns its sender handle and drops it at the end.
+    unsafe {
+        let job = input.cast::<FanInJob>().read();
+        for i in 0..FAN_IN_ROUNDS {
+            let mut value = job.lane * FAN_IN_ROUNDS + i + 1;
+            let sent = hirsel_core_send(context, job.send, (&raw mut value).cast(), 21);
+            assert!(sent.transferred);
+        }
+        hirsel_core_sender_drop(job.send);
+    }
+    0
+}
+
+unsafe extern "C" fn fan_in_root(context: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: root owns the tape store, the receiver and every producer handle.
+    unsafe {
+        out.cast::<u64>().write(0);
+        let case = input.cast::<*mut FanInReplay>().read();
+        let mode = if (*case).record {
+            Mode::Record
+        } else {
+            Mode::Replay
+        };
+        let mut header = header(REVISION);
+        header.kind = KIND_RUN;
+        header.chooser = format::CHOOSER_COMMIT;
+        let (tape, _) = Tape::open(
+            REVISION,
+            (*case).store.dir(),
+            b"t",
+            mode,
+            &header,
+            &expect(),
+        )
+        .unwrap();
+        let channel = hirsel_core_channel_new(context, 1, crate::tasks_tests::value::<u64>(8), 20);
+        let mut handles = [std::ptr::null_mut(); 16];
+        for (lane, task) in handles.iter_mut().enumerate() {
+            let mut job = FanInJob {
+                send: hirsel_core_channel_sender(channel.sender),
+                lane: lane as u64,
+            };
+            *task = hirsel_core_spawn(
+                context,
+                0,
+                64,
+                (&raw mut job).cast(),
+                fan_in_producer,
+                crate::tasks_tests::layout::<FanInJob, u64>(8),
+                22,
+            )
+            .task;
+            assert!(!task.is_null());
+        }
+        hirsel_core_sender_drop(channel.sender);
+        let mut sum = 0;
+        for _ in 0..16 * FAN_IN_ROUNDS {
+            let mut value = 0u64;
+            let got = hirsel_core_receive(context, channel.receiver, (&raw mut value).cast(), 23);
+            assert!(got.transferred);
+            sum += value;
+        }
+        for task in handles {
+            let mut result = 0u64;
+            assert_eq!(
+                hirsel_core_join(context, task, (&raw mut result).cast(), 24).status,
+                0
+            );
+        }
+        assert_eq!(hirsel_core_receiver_drop(context, channel.receiver), 0);
+        (*case).sum = sum;
+        tape.end(&ending()).unwrap();
+    }
+    0
+}
+
+/// Holders complete waiting senders' and receivers' commits at N=16. Each
+/// served event keeps its task, position and poll count, so the one-worker
+/// replay, which serves nothing, reproduces the recorded event stream.
+#[test]
+fn sixteen_worker_channel_recording_with_served_commits_replays_at_one() {
+    fn execute(record: Option<&[u8]>) -> (FanInReplay, Vec<Event>) {
+        let mut case = FanInReplay {
+            store: Store::default(),
+            record: record.is_none(),
+            sum: 0,
+        };
+        if let Some(bytes) = record {
+            case.store.files.insert(b"t".to_vec(), bytes.to_vec());
+        }
+        let width = if record.is_none() { 16 } else { 1 };
+        let (_, events) = with_workers(width, || {
+            crate::tasks_tests::run(fan_in_root, &raw mut case)
+        });
+        // The sum of 1 through 16 x 200.
+        assert_eq!(case.sum, 3200 * 3201 / 2);
+        (case, events)
+    }
+    let (recorded, events) = execute(None);
+    assert_eq!(
+        events.iter().filter(|event| event.kind == RECEIVE).count(),
+        3200
+    );
+    let (_, replayed) = execute(Some(recorded.store.file()));
+    assert_eq!(replayed, events);
+}

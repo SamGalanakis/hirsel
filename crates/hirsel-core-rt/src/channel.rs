@@ -148,6 +148,22 @@ unsafe fn publish(channel: *mut Channel, value: *mut u8) -> u8 {
         if (*channel).len == (*channel).capacity {
             return 1;
         }
+        store(channel, value);
+        tasks::event_wake_waiters(
+            tasks::PUBLISH,
+            (*channel).id,
+            0,
+            &raw mut (*channel).receive_waiters,
+        );
+        0
+    }
+}
+/// Copy an item into the room the caller has checked.
+/// # Safety
+/// The queue is open, not full, and the caller holds the token.
+unsafe fn store(channel: *mut Channel, value: *mut u8) {
+    // SAFETY: as stated; value is an initialized T.
+    unsafe {
         let rest = (*channel).capacity - (*channel).head;
         let at = if (*channel).len >= rest {
             (*channel).len - rest
@@ -160,13 +176,56 @@ unsafe fn publish(channel: *mut Channel, value: *mut u8) -> u8 {
             (*channel).item.bytes,
         );
         (*channel).len += 1;
-        tasks::event_wake_waiters(
+    }
+}
+/// A holder completes a waiting sender's publish when it has room and needs
+/// no cancellation, fold or poll turn; otherwise the sender takes the token.
+/// # Safety
+/// Called by the sequencer under the token for a blocked requester.
+unsafe fn serve_send(request: *mut tasks::Delegated) -> bool {
+    // SAFETY: the requester pins its sender, value and task until signalled.
+    unsafe {
+        let request = &*request;
+        let channel = request.channel.cast::<Channel>();
+        if (*channel).receiver != Receiver::Open
+            || (*channel).len == (*channel).capacity
+            || !tasks::delegable(request)
+        {
+            return false;
+        }
+        store(channel, request.value);
+        tasks::event_wake_waiters_for(
+            request.task,
             tasks::PUBLISH,
             (*channel).id,
             0,
             &raw mut (*channel).receive_waiters,
+            false,
         );
-        0
+        true
+    }
+}
+/// The receiving counterpart of `serve_send`.
+/// # Safety
+/// As for `serve_send`.
+unsafe fn serve_receive(request: *mut tasks::Delegated) -> bool {
+    // SAFETY: the requester pins its receiver, destination and task until signalled.
+    unsafe {
+        let request = &*request;
+        let channel = request.channel.cast::<Channel>();
+        if (*channel).len == 0 || !tasks::delegable(request) {
+            return false;
+        }
+        load(channel, request.value);
+        tasks::event_wake_waiters_for(
+            request.task,
+            tasks::RECEIVE,
+            (*channel).id,
+            0,
+            &raw mut (*channel).send_waiters,
+            false,
+        );
+        true
     }
 }
 /// # Safety
@@ -195,6 +254,14 @@ pub unsafe extern "C" fn hirsel_core_send(
 ) -> Transfer {
     // SAFETY: sender and pending input are pinned by the suspended caller.
     unsafe {
+        let Some(_held) =
+            tasks::delegate(context, tasks::PUBLISH, channel.cast(), value, serve_send)
+        else {
+            return Transfer {
+                transferred: true,
+                status: 0,
+            };
+        };
         let mut _resumed = None;
         loop {
             let _commit = tasks::before_commit();
@@ -239,6 +306,22 @@ unsafe fn take(channel: *mut Channel, destination: *mut u8) -> bool {
         if (*channel).len == 0 {
             return false;
         }
+        load(channel, destination);
+        tasks::event_wake_waiters(
+            tasks::RECEIVE,
+            (*channel).id,
+            0,
+            &raw mut (*channel).send_waiters,
+        );
+        true
+    }
+}
+/// Move the front item out of a nonempty queue.
+/// # Safety
+/// The queue is nonempty and the caller holds the token.
+unsafe fn load(channel: *mut Channel, destination: *mut u8) {
+    // SAFETY: as stated; destination is writable T.
+    unsafe {
         copy_item(
             (*channel)
                 .storage
@@ -252,13 +335,6 @@ unsafe fn take(channel: *mut Channel, destination: *mut u8) -> bool {
             (*channel).head = 0;
         }
         (*channel).len -= 1;
-        tasks::event_wake_waiters(
-            tasks::RECEIVE,
-            (*channel).id,
-            0,
-            &raw mut (*channel).send_waiters,
-        );
-        true
     }
 }
 /// # Safety
@@ -273,6 +349,18 @@ pub unsafe extern "C" fn hirsel_core_receive(
 ) -> Transfer {
     // SAFETY: receiver keeps the queue alive across each suspension.
     unsafe {
+        let Some(_held) = tasks::delegate(
+            context,
+            tasks::RECEIVE,
+            channel.cast(),
+            destination,
+            serve_receive,
+        ) else {
+            return Transfer {
+                transferred: true,
+                status: 0,
+            };
+        };
         let mut _resumed = None;
         loop {
             let _commit = tasks::before_commit();

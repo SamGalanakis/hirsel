@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--compiler', type=Path, required=True)
     parser.add_argument('--evaluator', type=Path)
     parser.add_argument('--model-runtime', type=Path)
+    parser.add_argument('--schedule-runtime', type=Path)
     parser.add_argument('--phase', choices=['front', 'std', 'm1'], required=True)
     parser.add_argument('--facts', choices=['both', 'on', 'off'], default='both')
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
@@ -46,7 +47,8 @@ def main():
                 owners = json.loads((ROOT / 'core/tools/std_native_owners.json').read_text())
                 rows = std_native.run(ROOT, compiler, runtime, contracts, ['llvm'], None, owners,
                                       cc, 30, evaluator, target, emulator, sysroot,
-                                      model_runtime=args.model_runtime.resolve() if args.model_runtime else None)
+                                      model_runtime=args.model_runtime.resolve() if args.model_runtime else None,
+                                      schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None)
                 executed += sum(r['ran'] for r in rows if r['engine'] == 'llvm')
                 passed &= all(r['passed'] for r in rows if r['applicable'])
             else:

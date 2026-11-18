@@ -367,7 +367,7 @@ def save_row(rows, row, output):
         output.write_text(json.dumps(rows, indent=2) + '\n')
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', model_runtime=None):
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', model_runtime=None, schedule_runtime=None):
     rows = []
     requested_engines = set(engines)
     engines = list(engines)
@@ -579,6 +579,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                     'hirsel_core_host_op'))
                 if case.schedule:
                     seeds, most = case.schedule
+                    if schedule_runtime is not None:
+                        command[command.index('--runtime') + 1] = str(schedule_runtime)
                     scripts.append(('std_schedule.c', [f'-DSEEDS={seeds}'] + ([f'-DMAX_EVENTS={most}u'] if most is not None else []),
                                     'hirsel_core_os_run_with_sources'))
                 if scripts:
@@ -622,6 +624,7 @@ def main():
     parser.add_argument('--compiler', type=Path)
     parser.add_argument('--runtime', type=Path)
     parser.add_argument('--model-runtime', type=Path)
+    parser.add_argument('--schedule-runtime', type=Path)
     parser.add_argument('--evaluator', type=Path, help='test-only hirsel-core-contract-eval backend')
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--backend', choices=['all', 'evaluator', 'both', 'cranelift', 'llvm'], default='both')
@@ -647,7 +650,8 @@ def main():
                args.report, owners, args.cc.resolve() if args.cc else None, args.timeout, args.evaluator.resolve() if args.evaluator else None, args.target,
                args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None,
                typescript=args.typescript, node=args.node,
-               model_runtime=args.model_runtime.resolve() if args.model_runtime else None)
+               model_runtime=args.model_runtime.resolve() if args.model_runtime else None,
+               schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None)
     return int(any(r['applicable'] and not r['passed'] for r in rows))
 
 

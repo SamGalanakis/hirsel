@@ -17,6 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, required=True)
     parser.add_argument('--model-runtime', type=Path)
+    parser.add_argument('--schedule-runtime', type=Path)
     parser.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
     parser.add_argument('--cc', type=Path, default=(Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang')
                         if 'LLVM_SYS_231_PREFIX' in os.environ else None)
@@ -35,7 +36,8 @@ def main():
             owners = json.loads(Path(__file__).with_name('std_native_owners.json').read_text())
             rows = run(root, args.compiler.resolve(), args.runtime.resolve(), contracts, engines, None, owners,
                        args.cc.resolve() if args.cc else None,
-                       model_runtime=args.model_runtime.resolve() if args.model_runtime else None)
+                       model_runtime=args.model_runtime.resolve() if args.model_runtime else None,
+                       schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None)
             findings = [f"{row['engine']} {row['file']}:{row['line']} {row['test']}: {row['cause']}"
                         for row in rows if row['applicable'] and not row['passed']]
             # tools/sweep counts this line: one body per law and engine.

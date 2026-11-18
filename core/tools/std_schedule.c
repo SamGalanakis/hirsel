@@ -1,7 +1,6 @@
 /* Scripted schedules for native std contracts, linked through
  * --wrap=hirsel_core_os_run_with_sources. The law runs once per seed 1..SEEDS, each
- * run a fresh OS process configuration whose scheduler picks the next runnable task
- * from a seeded LCG. The first failing run's status is returned. After all runs pass,
+ * run a fresh OS process configuration with a seeded ScheduleScript. The first failing run's status is returned. After all runs pass,
  * the shim refuses (exit 104) when fewer than two seeds produced different event
  * streams, so a law cannot pass vacuously under one schedule, and when any run emitted
  * more than MAX_EVENTS CONC-10 events. */
@@ -14,17 +13,13 @@
 #ifndef MAX_EVENTS
 #define MAX_EVENTS UINT64_MAX
 #endif
-static struct { uint64_t rng, hash, events; } s;
+extern uint8_t hirsel_core_test_run_scripted(const HirselCoreProcessConfig *, HirselCoreEntry, uint64_t);
+static struct { uint64_t hash, events; } s;
 static void event(void *state, HirselCoreEvent e) {
     (void)state;
     uint64_t words[4] = {e.kind, e.task, e.object, e.value};
     for (int i = 0; i < 4; i++) s.hash = (s.hash ^ words[i]) * 1099511628211u;
     s.events++;
-}
-static size_t choose(void *state, size_t runnable) {
-    (void)state;
-    s.rng = s.rng * 6364136223846793005u + 1442695040888963407u;
-    return (size_t)((s.rng >> 33) % runnable);
 }
 uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     const HirselCoreView *names, const HirselCoreSourceTable *sources, HirselCoreEntry entry) {
@@ -35,9 +30,9 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         if (!open.process) return HIRSEL_CORE_NOT_STARTED;
         hirsel_core_os_process_set_sources(open.process, sources);
         HirselCoreProcessConfig cfg = *hirsel_core_os_process_config(open.process);
-        s.rng = seed; s.hash = 14695981039346656037u; s.events = 0;
-        cfg.scheduler = (HirselCoreSchedulerProvider){&s, event, choose};
-        uint8_t status = hirsel_core_run(&cfg, entry);
+        s.hash = 14695981039346656037u; s.events = 0;
+        cfg.scheduler.event = event;
+        uint8_t status = hirsel_core_test_run_scripted(&cfg, entry, seed);
         hirsel_core_os_process_free(open.process);
         if (status) {
             dprintf(2, "schedule seed %llu: status %u\n", (unsigned long long)seed, status);

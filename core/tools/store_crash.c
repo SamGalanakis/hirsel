@@ -19,6 +19,7 @@ extern uint64_t store_crash_floor(void *);
 extern void store_crash_sync_failure(void *, uint8_t);
 extern uint64_t store_crash_failed_syncs(void *);
 extern void store_crash_free(void *);
+extern uint8_t hirsel_core_test_run_scripted(const HirselCoreProcessConfig *, HirselCoreEntry, uint64_t);
 _Static_assert(sizeof(HirselCoreHostOutcome)==32, "provider outcome ABI");
 
 /* Borrow the owner's live Task handle from root spawn until root join returns.
@@ -72,18 +73,12 @@ static uint8_t cancellation_entry(HirselCoreContext *ctx,const HirselCoreProcess
     return cancellation.entry(ctx,config,result);
 }
 
-static struct { uint64_t rng, hash; } schedule;
+static uint64_t schedule_hash;
 static void schedule_event(void *state,HirselCoreEvent event) {
     (void)state;
     uint64_t words[4]={event.kind,event.task,event.object,event.value};
-    for(unsigned i=0;i<4;i++) schedule.hash=(schedule.hash^words[i])*1099511628211u;
+    for(unsigned i=0;i<4;i++) schedule_hash=(schedule_hash^words[i])*1099511628211u;
 }
-static size_t schedule_choose(void *state,size_t runnable) {
-    (void)state;
-    schedule.rng=schedule.rng*6364136223846793005u+1442695040888963407u;
-    return (size_t)((schedule.rng>>33)%runnable);
-}
-
 /* journal-ack (L24 (iv)(a)): each Sync answers Until(now) twice, so it stays
  * parked across exactly one scheduler turn of the other tasks. Counted in
  * turns, not time: an expired Until re-runs wait at the next turn. */
@@ -145,7 +140,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         memcpy(raw_seed,input->args[2].data,input->args[2].len);
         seed=strtoull(raw_seed,0,10);
     }
-    schedule.rng=seed; schedule.hash=14695981039346656037u;
+    schedule_hash=14695981039346656037u;
     cancellation.enabled=!strcmp(scenario,"journal-cancel");
     cancellation.target=cut; cancellation.entry=entry;
     int uncut=!strcmp(raw_cut,"count");
@@ -181,8 +176,9 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         cfg.grants=grants; cfg.grants_len=input->parameters_len;
         cfg.provider=&provider; cfg.state=state; cfg.diagnostic=diagnostic;
         cfg.stop_fd=2; cfg.capabilities=caps; cfg.capabilities_len=input->parameters_len;
-        if(seed) cfg.scheduler=(HirselCoreSchedulerProvider){&schedule,schedule_event,schedule_choose};
-        status=hirsel_core_run(&cfg,cancellation.enabled?cancellation_entry:entry);
+        HirselCoreEntry run_entry=cancellation.enabled?cancellation_entry:entry;
+        if(seed) cfg.scheduler.event=schedule_event;
+        status=seed?hirsel_core_test_run_scripted(&cfg,run_entry,seed):hirsel_core_run(&cfg,run_entry);
         if(status) {fprintf(stderr,"store phase %s: status %u\n",phases[phase],status);break;}
         if(phase==1 && failure && store_crash_failed_syncs(state)!=1) {
             fprintf(stderr,"named sync failure was not reached\n");status=120;break;
@@ -195,7 +191,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         }
     }
     if(!status) printf("cuts %llu\n",(unsigned long long)(cancellation.enabled?cancellation.events:store_crash_events(state)));
-    if(!status && seed) printf("events %llu\n",(unsigned long long)schedule.hash);
+    if(!status && seed) printf("events %llu\n",(unsigned long long)schedule_hash);
     store_crash_free(state);
     return status;
 }

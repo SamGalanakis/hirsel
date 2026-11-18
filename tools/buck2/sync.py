@@ -675,8 +675,10 @@ def first_party(meta: dict) -> str:
         if phase == "std":
             binaries["hirsel-core-contract-eval"] = "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"
             binaries["model-runtime.a"] = "//:core-llvm-runtime-fixtures[aarch64]"
+            binaries["schedule-runtime.a"] = "//:core-scripted-runtime-archives[aarch64]"
             arguments += ["--evaluator", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core-contract-eval",
-                          "--model-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/model-runtime.a"]
+                          "--model-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/model-runtime.a",
+                          "--schedule-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/schedule-runtime.a"]
         out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/aarch64.py",
             args=arguments, bin_exes=binaries, production=True, native_tools=True, host=True,
             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt-archives[aarch64]"},
@@ -709,6 +711,8 @@ def first_party(meta: dict) -> str:
         crate="core_llvm_runtime_fixture", crate_root="crates/hirsel-llvm/tests/core_runtime/lib.rs",
         srcs=["crates/hirsel-llvm/tests/core_runtime/lib.rs"], features=[], deps=["//:hirsel-core-rt-native-fixture"],
         manifest_dir="crates/hirsel-llvm", package_name="hirsel-llvm", version="0.1.0", edition="2024"))
+    out.append("\n" + call("hirsel_pic_staticlib", name="core-scripted-runtime-pic", library=":hirsel-core-rt-native-fixture"))
+    out.append("\n" + call("hirsel_core_runtime_archives", name="core-scripted-runtime-archives", library=":hirsel-core-rt-native-fixture", archive_name="libhirsel_core_rt.a"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-native-runtime-fixture-pic", library=":core-llvm-runtime-fixture"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-runtime-pic", library=":hirsel-core-rt"))
     out.append("\n" + call("hirsel_core_runtime_archives", name="core-cranelift-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_cranelift_fixture.a"))
@@ -755,7 +759,7 @@ def first_party(meta: dict) -> str:
                                   "--evaluator", "buck-out/tmp/cargo-bin-exe/core-store-s1/hirsel-core-contract-eval"],
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
-                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-scripted-runtime-pic"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/std_schedule.c"]')))
     out.append("\n" + call("hirsel_library", name="core-store-crash-provider", crate="store_crash_bridge",
                             crate_root="core/tools/store_crash_bridge.rs",
@@ -768,7 +772,7 @@ def first_party(meta: dict) -> str:
                                   "--evaluator", "buck-out/tmp/cargo-bin-exe/core-store-s2/hirsel-core-contract-eval"],
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
-                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-scripted-runtime-pic",
                                        "HIRSEL_STORE_CRASH_BRIDGE": "//:core-store-crash-provider[shared]"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/store_crash.c"]')))
     out.append("\n" + call("hirsel_script_test", name="core-store-s3", script="core/tools/store_journal_tests.py",
@@ -777,7 +781,7 @@ def first_party(meta: dict) -> str:
                                   "--evaluator", "buck-out/tmp/cargo-bin-exe/core-store-s3/hirsel-core-contract-eval"],
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
-                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-scripted-runtime-pic",
                                        "HIRSEL_STORE_CRASH_BRIDGE": "//:core-store-crash-provider[shared]"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/store_crash.c"]')))
     # R1 exercises durable calls, runs-once and store refusal across the evaluator
@@ -834,8 +838,10 @@ def first_party(meta: dict) -> str:
         name = "core-native-laws-" + engine
         out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/gate_native_laws.py",
                                 host=True, args=["--backend", engine, "--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel",
-                                                             "--model-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/model-runtime.a"],
-                                bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel", "model-runtime.a": "//:core-native-runtime-fixture-pic"},
+                                                             "--model-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/model-runtime.a",
+                                                             "--schedule-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/schedule-runtime.a"],
+                                bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel", "model-runtime.a": "//:core-native-runtime-fixture-pic",
+                                          "schedule-runtime.a": "//:core-scripted-runtime-pic"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
                                 data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c"]')))
     out.append("\n" + call("hirsel_script_test", name="test-measurement-artifacts", script="tools/tests/measurement_artifacts.py",

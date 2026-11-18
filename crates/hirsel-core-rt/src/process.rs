@@ -127,6 +127,23 @@ pub unsafe extern "C" fn hirsel_core_describe_emit(
     }
 }
 
+/// Run a native fixture under a seeded ScheduleScript.
+///
+/// # Safety
+/// The configuration, entry, and callback state remain live through the run.
+#[cfg(feature = "testing")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_run_scripted(
+    config: *const Config,
+    entry: Entry,
+    seed: u64,
+) -> u8 {
+    use crate::schedule_script::ScheduleScript;
+    let script = std::sync::Arc::new(ScheduleScript::new(seed));
+    // SAFETY: the native fixture pins the configuration and entry for this call.
+    script.install(|| unsafe { hirsel_core_run(config, entry) })
+}
+
 /// # Safety
 /// Config, entry and all borrowed grants/arguments remain live through the run.
 /// The generated entry thunk returns only after cleanup on every exit edge.

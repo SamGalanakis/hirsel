@@ -11,7 +11,7 @@ It writes, next to itself:
 - hand-tape.bin: the tape the runtime's Record must write for the scripted run
   in tape/tests.rs (`scripted_run`), every value chosen here by hand;
 - grant-gap-tape.bin and model-f3-tape.bin: the positioned grant and wait
-  example and the format-3 port of the two-clock model;
+  example and the two-clock model;
 - net-tape.bin: a Run with duplicate Net rules, socket outcomes and DATA.
 """
 import ctypes, pathlib, re, struct
@@ -134,8 +134,7 @@ g.put(bytes([4, 0]))              # WAKE gap 0, previous task 0
 g.op(SLEEP_UNTIL, 1, struct.pack('<Q', 9000), value=17)
 (HERE / 'grant-gap-tape.bin').write_bytes(g.end(FAILED, vi(2) + bytes([4]) + lb(b'no data') + bytes([0])))
 
-# The two-clock model from models_v23.py, with the format-3 header and a
-# positioned GRANT. The grant is at open, so its delta is zero.
+# The two-clock model places GRANT at open, with a delta of zero.
 TAPE_ID = bytes(range(16))
 model_header = (struct.pack('<HBB', 3, 2, 2) + TAPE_ID + lb(b'pkg/charge#0001')
                 + bytes(range(32)) + struct.pack('<IQQ', 1, 1024, 0) + b'\0'

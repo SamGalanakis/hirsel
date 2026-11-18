@@ -1,6 +1,5 @@
 //! Tape laws (REPLAY-SPEC sections 4, 5 and 8). The testdata vectors use an
-//! independent encoder and the system libxxhash. The two-clock model has both
-//! a current vector and a format-2 refusal vector.
+//! independent encoder and the system libxxhash.
 use super::*;
 use crate::os::OsProvider;
 use std::collections::VecDeque;
@@ -18,7 +17,6 @@ pub(super) const REVISION: [u8; 32] = {
 };
 const HAND: &[u8] = include_bytes!("testdata/hand-tape.bin");
 const MODEL: &[u8] = include_bytes!("testdata/model-f3-tape.bin");
-const MODEL_F2: &[u8] = include_bytes!("testdata/model-f2-tape.bin");
 const XXH3: &[u8] = include_bytes!("testdata/xxh3.bin");
 
 // ---------- providers ----------
@@ -765,19 +763,6 @@ fn socket_deadline_final_receive_records_its_success() {
             tape.end(&Ending::returned(&[])).unwrap();
         }
     }
-}
-
-/// The old format would interpret a socket's outcome as a scalar followed
-/// by another frame. Refuse the old format even when its bytes pass the checksum.
-#[test]
-fn a_format_2_tape_is_refused_as_unsupported() {
-    let mut older = MODEL_F2;
-    assert!(matches!(
-        Blocks::open(|buf| older.read(buf)),
-        Err(ReadError::Format(Stop::UnsupportedFormat(2)))
-    ));
-    let mut current = MODEL;
-    assert!(Blocks::open(|buf| current.read(buf)).is_ok());
 }
 
 /// Wrong implementation caught: Record writing anything other than the

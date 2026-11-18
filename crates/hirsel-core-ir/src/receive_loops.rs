@@ -241,6 +241,7 @@ impl Region<'_> {
     fn private(&mut self, inst: &Inst) -> Option<()> {
         match *inst {
             Inst::Const { .. }
+            | Inst::LayoutConst { .. }
             | Inst::Step { .. }
             | Inst::StorageLive { .. }
             | Inst::StorageDead { .. }

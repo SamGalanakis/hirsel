@@ -870,6 +870,17 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 format!("const v{} is a NaN other than the canonical one", result.0)
             })
         }
+        Inst::LayoutConst { result, ref query } => {
+            c.def(result)?;
+            let mut known = true;
+            query.clone().map_types(|t| {
+                known &= t.index() < c.m.types.len();
+                t
+            });
+            need(known && c.ty(result)? == Ty::Scalar(Scalar::U64), || {
+                "bad layout constant".into()
+            })
+        }
         Inst::ReadStatic { result, data } => {
             c.def(result)?;
             need(
@@ -892,7 +903,11 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.def(result)?;
             need(
                 function.index() < c.m.functions.len()
-                    && identity.index() < c.m.statics.len()
+                    && c.m
+                        .statics
+                        .get(identity.index())
+                        .and_then(Static::literal_bytes)
+                        .is_some()
                     && c.ty(result)? == Ty::Ptr,
                 || "bad descriptor reference".into(),
             )

@@ -1010,7 +1010,7 @@ fn packed_iteration_uses_one_cursor_for_variable_records() {
                     }
                 }
                 let data = emitter.module.statics.len();
-                emitter.module.statics.push(Static {
+                emitter.module.statics.push(Static::Bytes {
                     align: 8,
                     bytes: blob,
                 });
@@ -1142,7 +1142,9 @@ fn aggregate_constants_publish_values_and_use_read_only_tables() {
     )));
     assert_eq!(emitter.module.statics.len(), 1);
     assert_eq!(
-        emitter.module.statics[0].bytes,
+        emitter.module.statics[0]
+            .native(&emitter.module.types, &emitter.recipes)
+            .1,
         (0u16..8)
             .flat_map(|i| (i * 3).to_le_bytes())
             .collect::<Vec<_>>()
@@ -1457,7 +1459,11 @@ fn code_identity_bytes_follow_prog9() {
                 failures.push(format!("{header}: {:?} {:?}", check.refusals, check.gaps));
             }
             emitter.seal();
-            found |= emitter.module.statics.iter().any(|s| s.bytes == want);
+            found |= emitter
+                .module
+                .statics
+                .iter()
+                .any(|s| s.literal_bytes() == Some(&want));
         }
         if !found {
             failures.push(format!("{header}: code.identity does not read these bytes"));

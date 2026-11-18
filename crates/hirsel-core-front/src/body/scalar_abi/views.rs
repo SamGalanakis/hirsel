@@ -7,12 +7,12 @@ pub(super) fn scalar_copies(module: &Module, recipes: &[Recipe], body: &mut Body
     let constants: HashMap<_, _> = body
         .insts
         .iter()
-        .filter_map(|i| {
-            if let Inst::Const { result, bits } = i {
-                Some((*result, *bits))
-            } else {
-                None
+        .filter_map(|i| match i {
+            Inst::Const { result, bits } => Some((*result, *bits)),
+            Inst::LayoutConst { result, query } => {
+                Some((*result, query.native(&module.types, recipes)))
             }
+            _ => None,
         })
         .collect();
     let old = std::mem::take(&mut body.insts);

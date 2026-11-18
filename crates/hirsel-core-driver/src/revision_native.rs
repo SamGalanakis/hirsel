@@ -47,6 +47,65 @@ const WRAP_1002: &str = "pub fn main() -> Result[(), Exit] { if entry(1) == 1002
 const LINES: &str = "fn entry(x: u64) -> u64 {\n    let xs = [1u64, 2u64, 3u64];\n    xs[x] + x * 1000u64\n}\n";
 const S45: &str = "fn entry() -> u64 { let r: Result[List[u64], Capacity] = list.with_capacity(1); match r { Ok(_) => 7, Error(_) => 8 } }\n";
 
+const OWN_LAYOUT: &str = r#"
+type Key: key + ordered { a: u8, b: u64, c: u16 }
+const FIRST: Key = Key(a: 5, b: 0x0102030405060708, c: 0x090a)
+
+pub fn main() -> Result[(), Exit] {
+    let mut first = FIRST
+    first.a = 5
+    let next = Key(a: 6, b: 0, c: 0)
+    if first < next && first.b == 0x0102030405060708 && first.c == 0x090a {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}
+"#;
+
+#[test]
+fn own_layout_is_resolved_after_the_code_revision() {
+    use hirsel_core_ir::{Inst, LayoutQuery, Static};
+    use hirsel_core_layout::Layout;
+
+    let dir = tempfile::tempdir().unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let product = Driver::default()
+        .check(revision_request(OWN_LAYOUT, None, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+    let reached = product.reachable(&entry, 65_536).unwrap();
+    assert!(reached.accepted());
+    let instance = reached.instances.as_ref().unwrap().iter()
+        .find(|i| i.definition == entry).unwrap();
+    let module = reached.materialized.get(instance).ir().unwrap();
+    let saved = crate::revision::body(module, &mut Vec::new()).unwrap();
+    let mut layouts = hirsel_core_layout::compute(&module.types).unwrap();
+    let (ty, data) = module.statics.iter().find_map(|s| match s {
+        Static::Aggregate { ty, .. } => Some((*ty, s)),
+        _ => None,
+    }).expect("checked aggregate");
+    let body = module.functions.iter().find_map(|f| f.body.as_ref()).unwrap();
+    let size = body.insts.iter().find_map(|i| match i {
+        Inst::LayoutConst { result, query: LayoutQuery::HeldSize(row) } if *row == ty => Some(*result),
+        _ => None,
+    }).expect("checked copy uses its type's size");
+    for (size_bytes, offsets, expected) in [
+        (24, vec![0, 8, 16], vec![5, 0, 0, 0, 0, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1, 10, 9, 0, 0, 0, 0, 0, 0]),
+        (16, vec![10, 0, 8], vec![8, 7, 6, 5, 4, 3, 2, 1, 10, 9, 5, 0, 0, 0, 0, 0]),
+    ] {
+        let Layout::Fixed(layout) = &mut layouts[ty.index()].layout else { unreachable!() };
+        layout.size = size_bytes;
+        layout.offsets = vec![offsets];
+        assert_eq!(data.native(&module.types, &layouts), (8, expected.into()));
+        let native = hirsel_core_ir::native_layout::resolve(module, &layouts);
+        assert!(native.functions.iter().filter_map(|f| f.body.as_ref()).any(|b| {
+            b.insts.contains(&Inst::Const { result: size, bits: size_bytes })
+        }));
+        assert_eq!(crate::revision::body(module, &mut Vec::new()).unwrap(), saved);
+    }
+}
+
 fn revision_cases() -> Vec<RevisionCase> {
     let s = |name, a: &str, b: &str, wrap: &str, expect| RevisionCase {
         name,

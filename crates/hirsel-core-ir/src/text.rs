@@ -25,6 +25,23 @@ use crate::ir::*;
 use hirsel_core_ids::DefPath;
 use hirsel_core_layout::FieldTy;
 
+fn static_value(value: &StaticValue) -> String {
+    match value {
+        StaticValue::Bits(bits) => bits.to_string(),
+        StaticValue::Fields { case, fields } => {
+            let fields = fields
+                .iter()
+                .map(static_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            match case {
+                Some(case) => format!("case {case} [{fields}]"),
+                None => format!("[{fields}]"),
+            }
+        }
+    }
+}
+
 macro_rules! names {
     ($ty:ident { $($v:ident = $s:literal),* $(,)? }) => {
         impl $ty {
@@ -315,8 +332,19 @@ impl Printer {
             self.line(&format!("type t{i} = {}", shape(t)));
         }
         for (i, s) in m.statics.iter().enumerate() {
-            let hex: String = s.bytes.iter().map(|b| format!("{b:02x}")).collect();
-            self.line(&format!("static d{i} = align {} hex {hex}", s.align));
+            match s {
+                Static::Bytes { align, bytes } => {
+                    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                    self.line(&format!("static d{i} = align {align} hex {hex}"));
+                }
+                Static::Aggregate { ty, value } => {
+                    self.line(&format!(
+                        "static d{i} = aggregate t{} {}",
+                        ty.0,
+                        static_value(value)
+                    ));
+                }
+            }
         }
         for (i, s) in m.signatures.iter().enumerate() {
             let params = list(&s.params, |p| match p {
@@ -429,6 +457,20 @@ impl Printer {
                             constant(b.values[result.index()], *bits)
                         )
                     }
+                    Inst::LayoutConst { result, query } => match query {
+                        LayoutQuery::FieldSize(field) => {
+                            format!("{} = field_size {}", def(*result), field_ty(field))
+                        }
+                        LayoutQuery::HeldSize(ty) => {
+                            format!("{} = held_size t{}", def(*result), ty.0)
+                        }
+                        LayoutQuery::FrameCapacity(field) => {
+                            format!("{} = frame_capacity {}", def(*result), field_ty(field))
+                        }
+                        LayoutQuery::BlockSize { ty, prefix } => {
+                            format!("{} = block_size t{} {prefix}", def(*result), ty.0)
+                        }
+                    },
                     Inst::ReadStatic { result, data } => {
                         format!("{} = static d{}", def(*result), data.0)
                     }
@@ -1031,6 +1073,19 @@ impl<'a> Line<'a> {
             }
         })
     }
+    fn static_value(&mut self) -> R<StaticValue> {
+        let case = if self.eat("case") {
+            Some(self.num()?)
+        } else {
+            None
+        };
+        if case.is_some() || self.peek() == Some("[") {
+            let fields = self.seq("[", "]", Self::static_value)?;
+            Ok(StaticValue::Fields { case, fields })
+        } else {
+            Ok(StaticValue::Bits(self.num()?))
+        }
+    }
     fn fields(&mut self) -> R<Vec<hirsel_core_layout::Field>> {
         self.expect("{")?;
         let mut out = Vec::new();
@@ -1548,6 +1603,21 @@ impl BodyParser {
                 result,
                 bits: parse_constant(self.ty_of(result)?, l.next()?)?,
             }
+        } else if matches!(
+            op,
+            "field_size" | "held_size" | "block_size" | "frame_capacity"
+        ) {
+            one(&defs)?;
+            let query = match op {
+                "field_size" => LayoutQuery::FieldSize(l.field_ty()?),
+                "frame_capacity" => LayoutQuery::FrameCapacity(l.field_ty()?),
+                "held_size" => LayoutQuery::HeldSize(TypeId(l.id('t')?)),
+                _ => LayoutQuery::BlockSize {
+                    ty: TypeId(l.id('t')?),
+                    prefix: l.num()?,
+                },
+            };
+            Inst::LayoutConst { result, query }
         } else if op == "static" {
             one(&defs)?;
             Inst::ReadStatic {
@@ -1892,6 +1962,13 @@ impl Parser {
                     let mut l = self.line().unwrap();
                     l.next()?;
                     expect_index(&mut l, 'd', n)?;
+                    if l.eat("aggregate") {
+                        let ty = TypeId(l.id('t')?);
+                        let value = l.static_value()?;
+                        l.end()?;
+                        self.module.statics.push(Static::Aggregate { ty, value });
+                        continue;
+                    }
                     l.expect("align")?;
                     let align = l.num()?;
                     l.expect("hex")?;
@@ -1903,7 +1980,7 @@ impl Parser {
                         .ok()
                         .filter(|_| hex.len() % 2 == 0)
                         .ok_or("bad hex")?;
-                    self.module.statics.push(Static { align, bytes });
+                    self.module.statics.push(Static::Bytes { align, bytes });
                 }
                 "sig" => {
                     let n = index(self.module.signatures.len());

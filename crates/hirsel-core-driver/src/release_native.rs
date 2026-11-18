@@ -78,6 +78,7 @@ fn cannot_install_step_bound(module: &Module) -> bool {
                         Callee::Runtime(op) => step_elision_compatible(op),
                     },
                     Inst::Const { .. }
+                    | Inst::LayoutConst { .. }
                     | Inst::ReadStatic { .. }
                     | Inst::Unary { .. }
                     | Inst::Binary { .. }

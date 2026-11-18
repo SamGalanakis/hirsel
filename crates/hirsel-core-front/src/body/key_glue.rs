@@ -798,14 +798,14 @@ impl Derive<'_> {
         b: ValueId,
         different: BlockId,
     ) -> Result<(), &'static str> {
-        let Layout::Fixed(layout) = self.recipes[ty.index()].layout.clone() else {
+        if matches!(self.recipes[ty.index()].layout, Layout::Compact(_)) {
             return self.order_located(c, &FieldTy::Inline(TypeRef(ty.0)), a, b, different);
-        };
+        }
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
                 for (i, f) in fs.iter().enumerate() {
-                    let x = c.offset(a, layout.offsets[0][i]);
-                    let y = c.offset(b, layout.offsets[0][i]);
+                    let x = c.field_pointer(a, ty, None, i as u32);
+                    let y = c.field_pointer(b, ty, None, i as u32);
                     self.order_field(c, &f.ty, x, y, different)?;
                 }
             }
@@ -843,8 +843,8 @@ impl Derive<'_> {
                 for (i, case) in cs.iter().enumerate() {
                     c.start(c.body.edges[arms[i].edge.index()].target);
                     for (j, f) in case.fields.iter().enumerate() {
-                        let x = c.offset(a, layout.offsets[i][j]);
-                        let y = c.offset(b, layout.offsets[i][j]);
+                        let x = c.field_pointer(a, ty, Some(i as u32), j as u32);
+                        let y = c.field_pointer(b, ty, Some(i as u32), j as u32);
                         self.order_field(c, &f.ty, x, y, different)?;
                     }
                     c.jump(done, &[]);
@@ -1208,7 +1208,6 @@ impl Derive<'_> {
         len: [ValueId; 2],
         different: BlockId,
     ) -> Result<(), &'static str> {
-        let stride = hirsel_core_layout::field_size(&self.module.types, &self.recipes, item).0;
         let zero = c.constant(0);
         let head = c.block(&[Ty::Scalar(Scalar::U64)]);
         let check = c.block(&[]);
@@ -1223,7 +1222,7 @@ impl Derive<'_> {
         let more = c.compare(CompareOp::Lt, i, len[1]);
         c.branch(more, body, done);
         c.start(body);
-        let stride = c.constant(stride);
+        let stride = c.field_size(item);
         let offset = c.mul(i, stride);
         let a = c.offset_value(data[0], offset);
         let b = c.offset_value(data[1], offset);
@@ -1242,13 +1241,10 @@ impl Derive<'_> {
         p: ValueId,
         mut h: ValueId,
     ) -> Result<ValueId, &'static str> {
-        let Layout::Fixed(layout) = self.recipes[ty.index()].layout.clone() else {
-            unreachable!("key glue takes value rows; compact payloads are reached through Locator");
-        };
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
                 for (i, f) in fs.into_iter().enumerate() {
-                    let at = c.offset(p, layout.offsets[0][i]);
+                    let at = c.field_pointer(p, ty, None, i as u32);
                     h = self.fold_field(c, &f.ty, at, h)?;
                 }
             }
@@ -1284,7 +1280,7 @@ impl Derive<'_> {
                     c.start(c.body.edges[arms[i].edge.index()].target);
                     let mut current = h;
                     for (j, f) in case.fields.into_iter().enumerate() {
-                        let at = c.offset(p, layout.offsets[i][j]);
+                        let at = c.field_pointer(p, ty, Some(i as u32), j as u32);
                         current = self.fold_field(c, &f.ty, at, current)?;
                     }
                     c.jump(done, &[current]);
@@ -1538,7 +1534,6 @@ impl Derive<'_> {
         len: ValueId,
         h: ValueId,
     ) -> Result<ValueId, &'static str> {
-        let stride = hirsel_core_layout::field_size(&self.module.types, &self.recipes, item).0;
         let zero = c.constant(0);
         let head = c.block(&[Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::U64)]);
         let body = c.block(&[]);
@@ -1549,7 +1544,7 @@ impl Derive<'_> {
         let on = c.compare(CompareOp::Lt, ps[0], len);
         c.branch(on, body, done);
         c.start(body);
-        let stride = c.constant(stride);
+        let stride = c.field_size(item);
         let offset = c.mul(ps[0], stride);
         let p = c.offset_value(data, offset);
         let h = self.fold_field(c, item, p, ps[1])?;
@@ -1570,14 +1565,14 @@ impl Derive<'_> {
         blob: ValueId,
         at: ValueId,
     ) -> Result<(), &'static str> {
-        let Layout::Fixed(layout) = self.recipes[ty.index()].layout.clone() else {
+        if matches!(self.recipes[ty.index()].layout, Layout::Compact(_)) {
             return Err("the packed encoding of this span element is not built");
-        };
+        }
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
                 let mut off = 0;
                 for (i, f) in fs.iter().enumerate() {
-                    let x = c.offset(p, layout.offsets[0][i]);
+                    let x = c.field_pointer(p, ty, None, i as u32);
                     let k = c.constant(off);
                     let to = c.binary(BinaryOp::Add, at, k);
                     self.encode_field(c, &f.ty, x, blob, to)?;
@@ -1620,7 +1615,7 @@ impl Derive<'_> {
                     Self::store_packed(c, blob, at, k, Scalar::U64);
                     let mut off = 8;
                     for (j, f) in case.fields.iter().enumerate() {
-                        let x = c.offset(p, layout.offsets[i][j]);
+                        let x = c.field_pointer(p, ty, Some(i as u32), j as u32);
                         let k = c.constant(off);
                         let to = c.binary(BinaryOp::Add, at, k);
                         self.encode_field(c, &f.ty, x, blob, to)?;
@@ -1675,7 +1670,7 @@ impl Derive<'_> {
             }
             FieldTy::Inline(t) => self.encode_type(c, TypeId(t.0), x, blob, at)?,
             FieldTy::Array(item, len) => {
-                let (native, _, logical) =
+                let (_, _, logical) =
                     hirsel_core_layout::field_size(&self.module.types, &self.recipes, item);
                 let zero = c.constant(0);
                 let head = c.block(&[Ty::Scalar(Scalar::U64)]);
@@ -1688,7 +1683,7 @@ impl Derive<'_> {
                 let on = c.compare(CompareOp::Lt, i, limit);
                 c.branch(on, body, done);
                 c.start(body);
-                let n = c.constant(native);
+                let n = c.field_size(item);
                 let n = c.mul(i, n);
                 let from = c.offset_value(x, n);
                 let l = c.constant(logical);
@@ -1726,14 +1721,11 @@ impl Derive<'_> {
         b: ValueId,
         no: BlockId,
     ) -> Result<(), &'static str> {
-        let Layout::Fixed(layout) = self.recipes[ty.index()].layout.clone() else {
-            unreachable!("key glue takes value rows; compact payloads are reached through Locator");
-        };
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
                 for (i, f) in fs.into_iter().enumerate() {
-                    let x = c.offset(a, layout.offsets[0][i]);
-                    let y = c.offset(b, layout.offsets[0][i]);
+                    let x = c.field_pointer(a, ty, None, i as u32);
+                    let y = c.field_pointer(b, ty, None, i as u32);
                     self.equal_field(c, &f.ty, x, y, no)?;
                 }
             }
@@ -1772,8 +1764,8 @@ impl Derive<'_> {
                 for (i, case) in cs.into_iter().enumerate() {
                     c.start(c.body.edges[arms[i].edge.index()].target);
                     for (j, f) in case.fields.into_iter().enumerate() {
-                        let x = c.offset(a, layout.offsets[i][j]);
-                        let y = c.offset(b, layout.offsets[i][j]);
+                        let x = c.field_pointer(a, ty, Some(i as u32), j as u32);
+                        let y = c.field_pointer(b, ty, Some(i as u32), j as u32);
                         self.equal_field(c, &f.ty, x, y, no)?;
                     }
                     c.jump(done, &[]);
@@ -1880,7 +1872,6 @@ impl Derive<'_> {
         len: ValueId,
         no: BlockId,
     ) -> Result<(), &'static str> {
-        let stride = hirsel_core_layout::field_size(&self.module.types, &self.recipes, item).0;
         let zero = c.constant(0);
         let head = c.block(&[Ty::Scalar(Scalar::U64)]);
         let body = c.block(&[]);
@@ -1891,7 +1882,7 @@ impl Derive<'_> {
         let on = c.compare(CompareOp::Lt, i, len);
         c.branch(on, body, done);
         c.start(body);
-        let stride = c.constant(stride);
+        let stride = c.field_size(item);
         let offset = c.mul(i, stride);
         let x = c.offset_value(a, offset);
         let y = c.offset_value(b, offset);
@@ -2000,6 +1991,14 @@ impl Code {
         self.inst(Inst::Const { result, bits });
         result
     }
+    pub(super) fn field_size(&mut self, field: &FieldTy) -> ValueId {
+        let result = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(Inst::LayoutConst {
+            result,
+            query: LayoutQuery::FieldSize(field.clone()),
+        });
+        result
+    }
     pub(super) fn boolean(&mut self, value: bool) -> ValueId {
         let result = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(Inst::Const {
@@ -2053,6 +2052,41 @@ impl Code {
             fail: None,
         });
         id
+    }
+    pub(super) fn field_pointer(
+        &mut self,
+        p: ValueId,
+        ty: TypeId,
+        case: Option<u32>,
+        field: u32,
+    ) -> ValueId {
+        let base = self.address(p, PlaceTy::Declared(ty));
+        self.project_field_pointer(base, case, field)
+    }
+    pub(super) fn project_field_pointer(
+        &mut self,
+        base: AddressId,
+        case: Option<u32>,
+        field: u32,
+    ) -> ValueId {
+        let step = match case {
+            None => Step::Field(field),
+            Some(case) => Step::CaseField { case, field },
+        };
+        let steps = PoolRange::push(&mut self.body.pools.steps, [step]);
+        let address = AddressId(self.body.addresses.len() as u32);
+        self.body.addresses.push(AddressInfo {
+            base: AddressBase::Address(base),
+            steps,
+            ty: PlaceTy::Value(Ty::Scalar(Scalar::U8)),
+        });
+        self.inst(Inst::Address {
+            address,
+            fail: None,
+        });
+        let result = self.value(Ty::Ptr);
+        self.inst(Inst::Pointer { result, address });
+        result
     }
     pub(super) fn offset_value(&mut self, p: ValueId, offset: ValueId) -> ValueId {
         let steps = PoolRange::push(&mut self.body.pools.steps, [Step::Byte(offset)]);

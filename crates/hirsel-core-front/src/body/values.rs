@@ -72,15 +72,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        let (size, align) = self.e.block(rid);
+        let (_, align) = self.e.block(rid);
         let grant = self.e.module.types[rid.index()].grant;
         self.admit_with_handback(
             ty,
             admission::OwnedAllocation {
-                layout: Some(rid),
+                row: rid,
+                prefix: 0,
                 kind: AllocKind::Resource { grant },
                 charge,
-                size,
                 align,
             },
             &reps,

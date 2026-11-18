@@ -1100,7 +1100,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             environments: vec![],
             environment: None,
             owning: !scoped,
-            physical: 8,
+            own_record: None,
             send: true,
         });
         for (slot, fact) in written_anchors.into_iter().enumerate() {
@@ -1118,6 +1118,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             (f, signature)
         });
         child.run_row(row, body);
+        let own_row = child.close_capture_record(n);
         std::mem::swap(&mut child.t, &mut self.t);
         let mut frame = child.capture_frame.take().unwrap();
         frame.callback_paths = std::mem::take(&mut child.descriptors.paths);
@@ -1211,7 +1212,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             unreachable!()
         };
         let callable = self.t.mk(TyKind::Fn(ps, r, w, kind));
-        self.owning_value(callable, code, &frame, n)
+        let Some(own_row) = own_row else {
+            return (ERROR, None);
+        };
+        self.owning_value(callable, code, &frame, own_row, n)
     }
 
     fn callable_signature(&mut self, ty: TyId) -> Result<SigId, &'static str> {
@@ -1268,7 +1272,7 @@ pub(super) struct CaptureFrame {
     pub(super) environment: Option<ValueId>,
     owning: bool,
     view_only: bool,
-    physical: u64,
+    own_record: Option<AddressId>,
     send: bool,
 }
 
@@ -1665,36 +1669,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
             }
         }
-        let (size, align) = match self.rep(original.ty) {
-            Ok(Rep::None) => (0, 1),
-            Ok(Rep::Scalar(ty)) => {
-                let size = match ty {
-                    Ty::Ptr => 8,
-                    Ty::Scalar(s) => s.size(),
-                };
-                (size, size)
-            }
-            Ok(Rep::Place(id)) => {
-                let Layout::Fixed(layout) = &self.e.recipes[id.index()].layout else {
-                    unreachable!()
-                };
-                (layout.size, layout.align)
-            }
-            Err(what) => {
-                self.gap(n, what);
-                (0, 1)
-            }
-        };
         let send = has_bounds(&self.p.decls, &self.t, original.ty, &self.params) & crate::SEND != 0;
         let frame = self.capture_frame.as_mut().unwrap();
         let offset = if owning {
-            (frame.physical + align - 1) & !(align - 1)
+            0
         } else {
             let offset = frame.words as u64 * 8;
             frame.words += 1;
             offset
         };
-        frame.physical = offset + size;
         frame.send &= send;
         frame.by_slot[slot as usize] = Some(index);
         frame.captures.push(Capture {
@@ -1710,12 +1693,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // capture reuses it, in whatever block it is reached from. So it is computed in
         // the entry block, which dominates them all, never at that first use.
         let binding = if let Some(environment) = environment {
-            let offset = self.entry_const(Ty::Scalar(Scalar::U64), offset);
             let address = if owning {
-                self.rep(original.ty).ok().and_then(Rep::stored).map(|ty| {
-                    self.entry_address(AddressBase::Value(environment), &[Step::Byte(offset)], ty)
+                let place = self.rep(original.ty).ok().and_then(Rep::stored);
+                place.map(|place| {
+                    let base = match self.capture_frame.as_ref().unwrap().own_record {
+                        Some(base) => base,
+                        None => {
+                            let prefix = self.entry_const(Ty::Scalar(Scalar::U64), 8);
+                            let base = self.entry_address(
+                                AddressBase::Value(environment),
+                                &[Step::Byte(prefix)],
+                                PlaceTy::Value(Ty::Ptr),
+                            );
+                            self.capture_frame.as_mut().unwrap().own_record = Some(base);
+                            base
+                        }
+                    };
+                    self.entry_address(
+                        AddressBase::Address(base),
+                        &[Step::Field(index as u32)],
+                        place,
+                    )
                 })
             } else {
+                let offset = self.entry_const(Ty::Scalar(Scalar::U64), offset);
                 let address = self.entry_address(
                     AddressBase::Value(environment),
                     &[Step::Byte(offset)],
@@ -2631,11 +2632,36 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.store_word(carrier, 8, null, n);
         Some(carrier)
     }
+    /// The closure body discovers its captures in first-use order. Fill in the
+    /// type of its environment record once that list is complete.
+    fn close_capture_record(&mut self, n: NodeId) -> Option<TypeId> {
+        let frame = self.capture_frame.as_ref()?;
+        if !frame.owning || frame.captures.is_empty() {
+            return None;
+        }
+        let base = frame.own_record;
+        let types = frame
+            .captures
+            .iter()
+            .map(|capture| frame.outer[capture.slot as usize].unwrap().ty)
+            .collect();
+        let record = self.t.mk(TyKind::Tuple(types));
+        let row = self.place_row(
+            record,
+            "a closure environment without a place is not built",
+            n,
+        )?;
+        if let Some(base) = base {
+            self.b.addresses[base.index()].ty = PlaceTy::Declared(row);
+        }
+        Some(row)
+    }
     fn owning_value(
         &mut self,
         callable: TyId,
         code: Option<ValueId>,
         frame: &CaptureFrame,
+        row: TypeId,
         n: NodeId,
     ) -> (TyId, Option<ValueId>) {
         let (Some(result), Some(cap)) = (self.p.core_decl("Result"), self.p.core_decl("Capacity"))
@@ -2675,31 +2701,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
         }
-        // The environment is the captures' record from offset 8, behind the word
-        // naming its fixed descriptor (core-ir crate docs, "Callable environments").
-        let record = self.t.mk(TyKind::Tuple(types.clone()));
-        let row = match self.rep(record) {
-            Ok(Rep::Place(row)) => row,
-            Ok(_) => unreachable!("a tuple of captures is carried by address"),
-            Err(what) => {
-                self.gap(n, what);
-                return (result, None);
-            }
-        };
         let recipe = &self.e.recipes[row.index()];
-        let Layout::Fixed(layout) = &recipe.layout else {
-            unreachable!("a carried row is fixed")
-        };
-        // The body reads each capture where the capture pass placed it.
-        assert!(
-            layout.align <= 8
-                && frame
-                    .captures
-                    .iter()
-                    .zip(&layout.offsets[0])
-                    .all(|(capture, &at)| capture.offset == 8 + at),
-            "an environment's captures are where its record places them"
-        );
         let logical = recipe.logical_size.expect("a fixed row's logical size");
         let Some(charge) = hirsel_core_layout::charge::closure_env(logical) else {
             self.refuse("OWN-2", n, "closure charge exceeds u64");
@@ -2718,23 +2720,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         };
         let allocation = admission::OwnedAllocation {
-            layout: None,
+            row,
+            prefix: 8,
             kind: AllocKind::Environment {
                 ty: hirsel_core_layout::TypeRef(row.0),
             },
             charge,
-            size: (frame.physical + 7) & !7,
             align: 8,
         };
         let value =
             self.admit_with_handback(result, allocation, &reps, &values, n, |cx, to, block| {
-                for (i, capture) in frame.captures.iter().enumerate() {
-                    if let Some(place) = reps[i].stored() {
-                        let offset = cx
-                            .konst(Ty::Scalar(Scalar::U64), capture.offset, n)
-                            .unwrap();
-                        let at =
-                            cx.address(AddressBase::Value(block), &[Step::Byte(offset)], place, n);
+                let prefix = cx.konst(Ty::Scalar(Scalar::U64), 8, n).unwrap();
+                let fields = cx.address(
+                    AddressBase::Value(block),
+                    &[Step::Byte(prefix)],
+                    PlaceTy::Declared(row),
+                    n,
+                );
+                for (i, rep) in reps.iter().enumerate() {
+                    if let Some(place) = rep.stored() {
+                        let at = cx.address(
+                            AddressBase::Address(fields),
+                            &[Step::Field(i as u32)],
+                            place,
+                            n,
+                        );
                         cx.install(at, reps[i], values[i], n);
                     }
                 }

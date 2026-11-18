@@ -45,11 +45,10 @@ const IN_PLACE: [&str; 6] = [
     "list.reserve",
 ];
 
-/// A frame-backed list: its frame bytes and how many elements they hold.
+/// Storage reserved for the frame-backed path of a list.
 #[derive(Clone, Copy)]
 pub(super) struct FrameList {
     pub bytes: AddressId,
-    pub elems: u64,
     pub item: TyId,
     pub lent: bool,
 }
@@ -256,43 +255,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if self.list_storage_static(item) != Some(true) || self.drop_id(item).is_some() {
             return;
         }
-        let stride = match self.rep(item) {
-            Ok(Rep::Scalar(Ty::Scalar(s))) => s.size(),
-            Ok(Rep::Scalar(Ty::Ptr)) => hirsel_core_layout::POINTER,
-            Ok(Rep::Place(id)) => {
-                match held_size(
-                    self.e.module.types[id.index()].repr,
-                    &self.e.recipes[id.index()],
-                    false,
-                ) {
-                    Ok(size) => size,
-                    Err(_) => return,
-                }
-            }
-            _ => return,
-        };
-        let elems = FRAME_LIST_BYTES / stride.max(1);
         let AddressBase::Slot(slot) = self.b.addresses[address.index()].base else {
             return;
         };
-        if elems < 4 {
-            return;
-        }
         let size = FRAME_LIST_BYTES + if lent { FRAME_LIST_LINK_BYTES } else { 0 };
         let words = self.t.mk(TyKind::Array(scalar(Scalar::U64), size / 8));
         let Some(row) = self.place_row(words, "frame list bytes without a place", n) else {
             return;
         };
         let bytes = self.entry_slot(PlaceTy::Declared(row), n);
-        self.frame_slots.insert(
-            slot,
-            FrameList {
-                bytes,
-                elems,
-                item,
-                lent,
-            },
-        );
+        self.frame_slots
+            .insert(slot, FrameList { bytes, item, lent });
     }
 
     /// The frame list `header` points at, when it is one of this body's.
@@ -400,7 +373,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<()> {
         let frame = self.pointer(f.bytes, n);
         let data = self.carrier_word(header, carrier, SeqWord::Data, n);
-        let room = self.konst(Ty::Scalar(Scalar::U64), f.elems, n)?;
+        let field = self.edge_field(f.item, n)?;
+        let room = self.layout_word(LayoutQuery::FrameCapacity(field), n);
         let fits = self.list_compare(CompareOp::Le, new_cap, room, n);
         let null = self.konst(Ty::Ptr, 0, n)?;
         let [unowned, first] = [(); 2].map(|_| self.new_block(&[]));

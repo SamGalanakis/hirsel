@@ -1049,10 +1049,14 @@ fn run_world(
     limit: u64,
     mut input: WorldInput<'_>,
 ) -> (Report, Checked) {
-    let mut mach = Machine::new(m, limit, &input);
+    let recipes = compute(&m.types).expect("layouts");
+    let native = crate::native_layout::resolve(m, &recipes);
+    let m = native.as_ref();
+    let mut mach = Machine::new(m, recipes, limit, &input);
     for s in &m.statics {
-        let p = mach.block(s.bytes.len() as u64, None, 0, None);
-        mach.mem[split(p).0].bytes.clone_from(&s.bytes);
+        let (_, bytes) = s.native(&m.types, &mach.recipes);
+        let p = mach.block(bytes.len() as u64, None, 0, None);
+        mach.mem[split(p).0].bytes.copy_from_slice(&bytes);
         mach.mem[split(p).0].fixed = true;
     }
     let target = mach
@@ -1121,7 +1125,7 @@ fn run_world(
                     mach.mem[split(at).0].fixed = true;
                     at
                 });
-                let bytes = &m.statics[identity.index()].bytes;
+                let bytes = m.statics[identity.index()].literal_bytes().unwrap();
                 let mut block = Vec::with_capacity(24 + bytes.len());
                 block.extend_from_slice(&(FN_BASE + u64::from(function.0)).to_le_bytes());
                 block.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
@@ -1412,11 +1416,11 @@ fn cause(r: RaiseCause) -> &'static str {
 }
 
 impl<'m> Machine<'m> {
-    fn new(m: &'m Module, limit: u64, input: &WorldInput<'_>) -> Self {
+    fn new(m: &'m Module, recipes: Vec<Recipe>, limit: u64, input: &WorldInput<'_>) -> Self {
         Self {
             next_step_bound: 1,
             m,
-            recipes: compute(&m.types).expect("layouts"),
+            recipes,
             mem: Blocks::default(),
             peak_reserved: 0,
             root: Some(Limit::new(limit, None, false, 0)),
@@ -3695,6 +3699,7 @@ impl Machine<'_> {
         let ty = |v: ValueId| b.values[v.index()];
         match *inst {
             Inst::Const { result, bits } => vals[result.index()] = bits,
+            Inst::LayoutConst { .. } => unreachable!("engine-private operands are resolved"),
             Inst::FunctionRef { result, function } => {
                 vals[result.index()] = FN_BASE + u64::from(function.0)
             }
@@ -4494,7 +4499,7 @@ fn ended_byte_limits_release_their_records() {
     use hirsel_guard::admission::{Owner, OwnerKind};
 
     let module = Module::default();
-    let mut machine = Machine::new(&module, 64, &WorldInput::default());
+    let mut machine = Machine::new(&module, vec![], 64, &WorldInput::default());
     let meter = Owner::new(OwnerKind::Ledger);
     let measure = meter.enter();
     let mut peak = 0;

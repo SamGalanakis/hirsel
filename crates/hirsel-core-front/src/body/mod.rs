@@ -29,9 +29,9 @@ use hirsel_core_ids::DefPath;
 use hirsel_core_ir::{
     AddressBase, AddressId, AddressInfo, AllocKind, AllocPlace, Anchor, Arg, ArithMode, ArithOp,
     BinaryOp, Block, BlockId, Body, CallId, CallSite, Callee, CompareOp, ConvertMode, Edge, EdgeId,
-    FuncId, Function, Inst, InstanceId, InstanceKey, ItemId, Loan, Module, Param, PlaceTy,
-    PoolRange, ReadMode, SeqWord, SigId, Signature, SlotId, Step, Terminator, Ty, TypeId, UnaryOp,
-    ValueId,
+    FuncId, Function, Inst, InstanceId, InstanceKey, ItemId, LayoutQuery, Loan, Module, Param,
+    PlaceTy, PoolRange, ReadMode, SeqWord, SigId, Signature, SlotId, Step, Terminator, Ty, TypeId,
+    UnaryOp, ValueId,
 };
 use hirsel_core_layout::{
     Carried, FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef,
@@ -272,7 +272,7 @@ impl Emitter {
             return id;
         }
         let id = hirsel_core_ir::StaticId(self.module.statics.len() as u32);
-        self.module.statics.push(hirsel_core_ir::Static {
+        self.module.statics.push(hirsel_core_ir::Static::Bytes {
             align: 1,
             bytes: bytes.to_vec(),
         });
@@ -1803,12 +1803,20 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
     /// A held value's native stride or portable logical size. Rigid parameters
     /// retain the kind of size until mechanical instance materialization.
+    pub(super) fn layout_word(&mut self, query: LayoutQuery, n: NodeId) -> ValueId {
+        let result = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(Inst::LayoutConst { result, query }, n);
+        result
+    }
     pub(super) fn layout_size(&mut self, ty: TyId, logical: bool, n: NodeId) -> Option<ValueId> {
         let (id, bits) = match self.rep(ty) {
             Ok(Rep::Scalar(Ty::Scalar(s))) => (None, s.size()),
             Ok(Rep::Scalar(Ty::Ptr)) => (None, hirsel_core_layout::POINTER),
             Ok(Rep::None) => (None, 0),
             Ok(Rep::Place(id)) => {
+                if !logical {
+                    return Some(self.native_size(id, n));
+                }
                 let bits = held_size(
                     self.e.module.types[id.index()].repr,
                     &self.e.recipes[id.index()],
@@ -1835,6 +1843,10 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         Some(value)
     }
 
+    fn native_size(&mut self, id: TypeId, n: NodeId) -> ValueId {
+        self.layout_word(LayoutQuery::HeldSize(id), n)
+    }
+
     /// Copy the value of row `id` that `from` points at into place `to` (a move or a
     /// copy of plain data: the source needs no cleanup afterwards).
     fn copy_to(&mut self, to: AddressId, from: ValueId, id: TypeId, n: NodeId) {
@@ -1845,22 +1857,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             return;
         }
         let from = self.address(AddressBase::Value(from), &[], PlaceTy::Declared(id), n);
-        let size = self.e.size(id);
-        let bytes = self.value(Ty::Scalar(Scalar::U64));
-        if self.e.generic_names.contains_key(&id) {
-            self.copies.push(CopySize {
-                value: bytes,
-                ty: id,
-                logical: false,
-            });
-        }
-        self.inst(
-            Inst::Const {
-                result: bytes,
-                bits: size,
-            },
-            n,
-        );
+        let bytes = self.native_size(id, n);
         self.inst(Inst::Copy { to, from, bytes }, n);
     }
     /// A fresh place holding a copy of the value `from` points at; its pointer.

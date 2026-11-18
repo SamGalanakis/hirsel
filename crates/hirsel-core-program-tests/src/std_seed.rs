@@ -443,7 +443,11 @@ fn float_constant_tables_are_read_only_data() {
             .any(|i| matches!(i, Inst::Store { .. } | Inst::Copy { .. }))
     );
     assert_eq!(module.statics.len(), 1);
-    assert_eq!(module.statics[0].bytes.len(), 19 * 8);
+    let recipes = hirsel_core_layout::compute(&module.types).unwrap();
+    assert_eq!(
+        module.statics[0].native(&module.types, &recipes).1.len(),
+        19 * 8
+    );
     println!(
         "std.float.shift_for SHIFTS: {} CoreIR instructions per lookup, no table stores/copies",
         end + 1 - start

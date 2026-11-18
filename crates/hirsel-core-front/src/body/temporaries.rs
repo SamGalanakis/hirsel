@@ -150,16 +150,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             value: off,
         });
         let from = self.address(AddressBase::Value(t.value), &[], PlaceTy::Declared(t.id), n);
-        let bytes = self
-            .konst(Ty::Scalar(Scalar::U64), self.e.size(t.id), n)
-            .unwrap();
-        if self.e.generic_names.contains_key(&t.id) {
-            self.copies.push(CopySize {
-                value: bytes,
-                ty: t.id,
-                logical: false,
-            });
-        }
+        let bytes = self.native_size(t.id, n);
         self.inst(
             Inst::Copy {
                 to: storage,

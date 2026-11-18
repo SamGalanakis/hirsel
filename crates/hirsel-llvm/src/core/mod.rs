@@ -359,6 +359,9 @@ fn emit_module(
     provided: EmissionFacts<'_>,
     sink: &mut dyn Sink,
 ) -> Result<()> {
+    let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
+    let native = hirsel_core_ir::native_layout::resolve(module, &recipes);
+    let module = native.as_ref();
     let exposed = source.batch_steps.then(|| expose::module(module)).flatten();
     let module = exposed.as_ref().unwrap_or(module);
     let batch_steps = source.batch_steps && !provided.elide_steps;
@@ -382,14 +385,15 @@ fn emit_module(
         },
     );
     for (i, data) in module.statics.iter().enumerate() {
+        let (align, bytes) = data.native(&module.types, &recipes);
         sink.global(&Global {
             name: format!("s{i}").into(),
             linkage: Linkage::Private,
             constant: true,
             externally_initialized: false,
-            ty: Type::bytes(data.bytes.len() as u64),
-            init: Some(Value::Bytes(data.bytes.to_vec())),
-            align: data.align,
+            ty: Type::bytes(bytes.len() as u64),
+            init: Some(Value::Bytes(bytes.into_owned())),
+            align,
             absolute_symbol: false,
         });
     }
@@ -454,7 +458,7 @@ fn emit_module(
                     absolute_symbol: false,
                 });
             }
-            let bytes = &module.statics[identity.index()].bytes;
+            let bytes = module.statics[identity.index()].literal_bytes().unwrap();
             let identity = Type::bytes(bytes.len() as u64);
             sink.global(&Global {
                 name: name.into(),
@@ -476,7 +480,6 @@ fn emit_module(
             });
         }
     }
-    let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
     let mut items = Items::default();
     let mut next_scope = alias::private_steps(sink);
     let failures = failure::Failures::new(module);
@@ -1614,6 +1617,7 @@ impl FunctionEmitter<'_> {
         match *inst {
             // Its literal stands at each use.
             Inst::Const { .. } => {}
+            Inst::LayoutConst { .. } => unreachable!("engine-private operands are resolved"),
             Inst::ReadStatic { result, data } => {
                 self.put(result, &Value::global(format!("s{}", data.0)))
             }

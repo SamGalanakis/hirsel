@@ -4,9 +4,9 @@ use super::*;
 pub(super) struct OwnedAllocation {
     pub kind: AllocKind,
     pub charge: u64,
-    pub size: u64,
     pub align: u64,
-    pub layout: Option<TypeId>,
+    pub row: TypeId,
+    pub prefix: u64,
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -51,13 +51,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let to = self.result_slot(PlaceTy::Declared(id), n);
         let c = self.konst(Ty::Scalar(Scalar::U64), allocation.charge, n)?;
-        let sz = self.konst(Ty::Scalar(Scalar::U64), allocation.size, n)?;
+        let sz = self.layout_word(
+            LayoutQuery::BlockSize {
+                ty: allocation.row,
+                prefix: allocation.prefix,
+            },
+            n,
+        );
         let block = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
         let fail = self.fail_to(n);
-        let overflow = allocation
-            .layout
-            .and_then(|id| self.allocation_layout(id, block, n));
+        let overflow = if matches!(allocation.kind, AllocKind::Resource { .. }) {
+            self.allocation_layout(allocation.row, block, n)
+        } else {
+            None
+        };
         self.inst(
             Inst::Alloc {
                 result: block,

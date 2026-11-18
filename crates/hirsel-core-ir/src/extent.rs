@@ -25,6 +25,7 @@ pub(crate) fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
     let mut defs = vec![];
     match *i {
         Inst::Const { result, .. }
+        | Inst::LayoutConst { result, .. }
         | Inst::ReadStatic { result, .. }
         | Inst::FunctionRef { result, .. }
         | Inst::DescriptorRef { result, .. }

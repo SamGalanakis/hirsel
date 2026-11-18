@@ -62,6 +62,9 @@ impl Remap {
         }
         for inst in &mut body.insts {
             match inst {
+                Inst::LayoutConst { query, .. } => {
+                    query.map_types(|t| TypeRef(self.types[t.index()].0));
+                }
                 Inst::ReadStatic { data, .. } => *data = self.statics[data.index()],
                 Inst::FunctionRef { function, .. } => *function = self.functions[function.index()],
                 Inst::DescriptorRef {
@@ -122,6 +125,7 @@ pub fn join(units: &[Unit<'_>], entry: &Identity) -> Result<(Module, FuncId), St
     let mut instances = HashMap::default();
     let mut functions = HashMap::default();
     let mut statics = HashMap::default();
+    let mut aggregates = HashMap::default();
     let mut items = HashMap::default();
     let mut remaps = Vec::with_capacity(units.len());
     let mut root = None;
@@ -189,12 +193,32 @@ pub fn join(units: &[Unit<'_>], entry: &Identity) -> Result<(Module, FuncId), St
             map.functions.push(id);
         }
         for data in &module.statics {
-            let id = *statics.entry(data.bytes.clone()).or_insert_with(|| {
+            let mut append = |data| {
                 let id = StaticId(out.statics.len() as u32);
-                out.statics.push(data.clone());
+                out.statics.push(data);
                 id
-            });
-            out.statics[id.index()].align = out.statics[id.index()].align.max(data.align);
+            };
+            let id = match data {
+                Static::Bytes { align, bytes } => {
+                    let id = *statics
+                        .entry(bytes.clone())
+                        .or_insert_with(|| append(data.clone()));
+                    let Static::Bytes { align: held, .. } = &mut out.statics[id.index()] else {
+                        unreachable!()
+                    };
+                    *held = (*held).max(*align);
+                    id
+                }
+                Static::Aggregate { ty, value } => {
+                    let ty = map.types[ty.index()];
+                    *aggregates.entry((ty, value.clone())).or_insert_with(|| {
+                        append(Static::Aggregate {
+                            ty,
+                            value: value.clone(),
+                        })
+                    })
+                }
+            };
             map.statics.push(id);
         }
         for item in &module.items {

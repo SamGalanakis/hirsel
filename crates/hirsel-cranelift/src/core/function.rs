@@ -445,6 +445,7 @@ impl Function<'_, '_, '_> {
                 };
                 self.set(result, v);
             }
+            Inst::LayoutConst { .. } => unreachable!("engine-private operands are resolved"),
             Inst::Pointer { result, address } => {
                 let pointer = self.addr(address);
                 self.set(result, pointer);

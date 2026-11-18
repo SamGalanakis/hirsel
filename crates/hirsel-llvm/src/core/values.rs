@@ -187,6 +187,7 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                     }
                 }
                 Inst::Const { .. }
+                | Inst::LayoutConst { .. }
                 | Inst::ReadStatic { .. }
                 | Inst::FunctionRef { .. }
                 | Inst::DescriptorRef { .. }
@@ -329,6 +330,7 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                     }
                 }
                 Inst::Const { .. }
+                | Inst::LayoutConst { .. }
                 | Inst::ReadStatic { .. }
                 | Inst::FunctionRef { .. }
                 | Inst::DescriptorRef { .. }

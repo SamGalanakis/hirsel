@@ -111,8 +111,8 @@ impl Derive<'_> {
             ret(c, &[zero, zero]);
             return Ok(());
         }
-        let size = self.row_size(ty);
-        copy(c, to, from, size);
+        let size = c.field_size(&FieldTy::Inline(TypeRef(ty.0)));
+        copy_value(c, to, from, size);
         if let Some(f) = self.module.types[ty.index()].clone {
             let requested = c.value(Ty::Scalar(Scalar::U64));
             let available = c.value(Ty::Scalar(Scalar::U64));
@@ -142,27 +142,11 @@ impl Derive<'_> {
         ret(c, &[requested, available]);
         Ok(())
     }
-    fn row_size(&self, ty: TypeId) -> u64 {
-        hirsel_core_layout::field_size(
-            &self.module.types,
-            &self.recipes,
-            &FieldTy::Inline(TypeRef(ty.0)),
-        )
-        .0
-    }
-    fn allocation_kind(&self, edge: &FieldTy) -> AllocKind {
-        AllocKind::Own { edge: edge.clone() }
-    }
-    fn size_of(&self, field: &FieldTy) -> u64 {
-        hirsel_core_layout::field_size(&self.module.types, &self.recipes, field).0
-    }
-    /// A Box block of target row `t`: the bytes it holds and its charge, the
-    /// target's logical size rounded up to 8 (MEM-24), as `box.new` admits it.
-    fn boxed(&self, t: TypeId) -> (u64, u64) {
+    /// A box's charge is its target's logical size rounded up to 8 (MEM-24).
+    fn box_charge(&self, t: TypeId) -> u64 {
         let (repr, recipe) = (self.module.types[t.index()].repr, &self.recipes[t.index()]);
-        let size = held_size(repr, recipe, false).expect("a boxed target has a fixed layout");
         let logical = held_size(repr, recipe, true).expect("a boxed target has a logical size");
-        (size, round8(logical))
+        round8(logical)
     }
     /// The charge of `count` elements of `item` in a List block: their logical
     /// sizes, rounded up to 8 (MEM-24), never their native strides.
@@ -202,12 +186,6 @@ impl Derive<'_> {
             _ => false,
         }
     }
-    fn offsets(&self, ty: TypeId) -> Vec<Vec<u64>> {
-        match &self.recipes[ty.index()].layout {
-            Layout::Fixed(l) => l.offsets.clone(),
-            _ => unreachable!("clone glue takes value rows"),
-        }
-    }
     /// Replace the own parts of the copy at `to` of the `ty` at `from`; on a refusal
     /// drop the parts replaced so far and jump to `fail(requested, available)`.
     fn clone_parts(
@@ -218,18 +196,14 @@ impl Derive<'_> {
         to: ValueId,
         fail: BlockId,
     ) -> Result<(), &'static str> {
-        let offsets = self.offsets(ty);
+        let places = [from, to].map(|p| c.address(p, PlaceTy::Declared(ty)));
         match self.module.types[ty.index()].body.clone() {
-            ShapeBody::Record(fs) => {
-                let fields: Vec<_> = fs.into_iter().map(|f| f.ty).collect();
-                self.clone_fields(c, &fields, &offsets[0], from, to, fail)
-            }
+            ShapeBody::Record(fs) => self.clone_fields(c, &fs, places, None, fail),
             ShapeBody::Variant(cs) => {
-                let at = c.address(from, PlaceTy::Declared(ty));
                 let tag = c.value(Ty::Scalar(Scalar::U32));
                 c.inst(Inst::Case {
                     result: tag,
-                    address: at,
+                    address: places[0],
                 });
                 let done = c.block(&[]);
                 let mut arms = vec![];
@@ -252,8 +226,7 @@ impl Derive<'_> {
                 });
                 for (i, case) in cs.into_iter().enumerate() {
                     c.start(c.body.edges[arms[i].edge.index()].target);
-                    let fields: Vec<_> = case.fields.into_iter().map(|f| f.ty).collect();
-                    self.clone_fields(c, &fields, &offsets[i], from, to, fail)?;
+                    self.clone_fields(c, &case.fields, places, Some(i as u32), fail)?;
                     c.jump(done, &[]);
                 }
                 c.start(done);
@@ -261,23 +234,22 @@ impl Derive<'_> {
             }
         }
     }
-    /// The fields at `offsets`, in declaration order; a refusal at field k drops
-    /// fields k-1 down to 0 before `fail`.
+    /// A refusal at field k drops fields k-1 down to 0 before `fail`.
     fn clone_fields(
         &mut self,
         c: &mut Code,
-        fields: &[FieldTy],
-        offsets: &[u64],
-        from: ValueId,
-        to: ValueId,
+        fields: &[hirsel_core_layout::Field],
+        places: [AddressId; 2],
+        case: Option<u32>,
         fail: BlockId,
     ) -> Result<(), &'static str> {
         let mut undo = fail;
-        for (f, &off) in fields.iter().zip(offsets) {
+        for (i, field) in fields.iter().enumerate() {
+            let f = &field.ty;
             if !self.owns(f, &mut vec![]) {
                 continue;
             }
-            let (x, y) = (c.offset(from, off), c.offset(to, off));
+            let [x, y] = places.map(|base| c.project_field_pointer(base, case, i as u32));
             self.clone_field(c, f, x, y, undo)?;
             // A later refusal drops this field, then what came before it.
             let next = c.block(&[Ty::Scalar(Scalar::U64); 2]);
@@ -308,8 +280,13 @@ impl Derive<'_> {
             }
             FieldTy::Box(t) => {
                 let t = TypeId(t.0);
-                let (size, charge) = self.boxed(t);
-                let block = alloc(c, self.allocation_kind(field), charge, size, fail);
+                let charge = self.box_charge(t);
+                let charged = c.constant(charge);
+                let size = c.field_size(&FieldTy::Inline(TypeRef(t.0)));
+                let kind = AllocKind::Own {
+                    edge: field.clone(),
+                };
+                let block = alloc_kind(c, kind, charged, size, fail);
                 let f = self.function(t, KeyOp::Clone)?;
                 let old = c.read(from, Ty::Ptr);
                 let x = c.address(old, PlaceTy::Declared(t));
@@ -371,7 +348,7 @@ impl Derive<'_> {
                 c.start(some);
                 // The block holds `len` native strides and is charged `len` logical
                 // sizes (MEM-24), as a List's own growth charges it.
-                let k = c.constant(self.size_of(item));
+                let k = c.field_size(item);
                 let bytes = c.mul(len, k);
                 let charge = self.seq_charge(c, item, len);
                 let kind = AllocKind::Own {
@@ -450,7 +427,7 @@ impl Derive<'_> {
         let on = c.compare(CompareOp::Lt, i, len);
         c.branch(on, body, done);
         c.start(body);
-        let stride = c.constant(self.size_of(item));
+        let stride = c.field_size(item);
         let at = c.mul(i, stride);
         let x = c.offset_value(from, at);
         let y = c.offset_value(to, at);
@@ -485,7 +462,7 @@ impl Derive<'_> {
         c.start(body);
         let one = c.constant(1);
         let j = c.binary(BinaryOp::Sub, i, one);
-        let stride = c.constant(self.size_of(item));
+        let stride = c.field_size(item);
         let off = c.mul(j, stride);
         let p = c.offset_value(at, off);
         self.drop_field(c, item, p)?;
@@ -518,7 +495,7 @@ impl Derive<'_> {
                     ty: t,
                     fail: None,
                 });
-                let charge = c.constant(self.boxed(t).1);
+                let charge = c.constant(self.box_charge(t));
                 c.inst(Inst::Free { block, charge });
             }
             FieldTy::Rc(t) | FieldTy::Arc(t) => {
@@ -645,11 +622,6 @@ fn copy_value(c: &mut Code, to: ValueId, from: ValueId, bytes: ValueId) {
     let to = c.address(to, PlaceTy::Value(Ty::Scalar(Scalar::U8)));
     let from = c.address(from, PlaceTy::Value(Ty::Scalar(Scalar::U8)));
     c.inst(Inst::Copy { to, from, bytes });
-}
-fn alloc(c: &mut Code, kind: AllocKind, charge: u64, size: u64, fail: BlockId) -> ValueId {
-    let charge = c.constant(charge);
-    let size = c.constant(size);
-    alloc_kind(c, kind, charge, size, fail)
 }
 /// Admit from the current limit. A refusal jumps to `fail(charge, available)`.
 fn alloc_kind(

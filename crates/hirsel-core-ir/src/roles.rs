@@ -855,6 +855,7 @@ impl<'a> Seal<'a> {
             | Inst::Release { node, .. }
             | Inst::TryUnwrap { node, .. } => self.used(node, Use::Other),
             Inst::Const { .. }
+            | Inst::LayoutConst { .. }
             | Inst::ReadStatic { .. }
             | Inst::FunctionRef { .. }
             | Inst::DescriptorRef { .. }

@@ -5,6 +5,7 @@ use super::*;
 pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut ValueId)) {
     match inst {
         Inst::Const { result, .. }
+        | Inst::LayoutConst { result, .. }
         | Inst::ReadStatic { result, .. }
         | Inst::FunctionRef { result, .. }
         | Inst::DescriptorRef { result, .. }
@@ -478,7 +479,7 @@ pub(super) fn compact(
     used.fill(false);
     mark_values(body, aliases, &mut used);
     for inst in &body.insts {
-        if let Inst::Const { result, .. } = inst
+        if let Inst::Const { result, .. } | Inst::LayoutConst { result, .. } = inst
             && !used[result.index()]
         {
             dead[result.index()] = true;
@@ -504,7 +505,7 @@ pub(super) fn compact(
         let start = body.insts.len() as u32;
         for i in block.insts.start as usize..(block.insts.start + block.insts.len) as usize {
             if matches!(old[i], Inst::Address {address,..} if !live[address.index()])
-                || matches!(old[i], Inst::Const {result,..} | Inst::Read {result,mode:ReadMode::Bits,..} if dead[result.index()])
+                || matches!(old[i], Inst::Const {result,..} | Inst::LayoutConst {result,..} | Inst::Read {result,mode:ReadMode::Bits,..} if dead[result.index()])
             {
                 continue;
             }

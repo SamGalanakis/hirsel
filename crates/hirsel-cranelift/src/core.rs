@@ -314,7 +314,7 @@ fn descriptors(
                 }
                 object.define_data(revision, &carrier).map_err(error)?;
             }
-            let bytes = &input.statics[identity.index()].bytes;
+            let bytes = input.statics[identity.index()].literal_bytes().unwrap();
             let mut image = Vec::with_capacity(24 + bytes.len());
             image.extend_from_slice(&[0; 8]);
             image.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
@@ -344,6 +344,8 @@ fn emit(
     observer: &impl profile::Observer,
 ) -> Result<Object> {
     let setup = observer.enter("module_setup");
+    let native = c::native_layout::resolve(input, layouts);
+    let input = native.as_ref();
     let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
     if !supports_target(options.target) {
         return Err(refuse(
@@ -404,8 +406,9 @@ fn emit(
             )
             .map_err(error)?;
         let mut desc = DataDescription::new();
-        desc.define(data.bytes.clone().into_boxed_slice());
-        desc.set_align(u64::from(data.align));
+        let (align, bytes) = data.native(&input.types, layouts);
+        desc.define(bytes.into_owned().into_boxed_slice());
+        desc.set_align(u64::from(align));
         object.define_data(id, &desc).map_err(error)?;
         statics.push(id);
     }

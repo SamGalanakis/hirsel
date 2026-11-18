@@ -913,6 +913,9 @@ fn fill(
     }
     for inst in &mut body.insts {
         match inst {
+            Inst::LayoutConst { query, .. } => {
+                query.map_types(|t| TypeRef(s.ty(TypeId(t.0)).0));
+            }
             Inst::FunctionRef { function, .. } | Inst::DescriptorRef { function, .. } => {
                 *function = s.function(*function)
             }
@@ -940,7 +943,6 @@ fn fill(
         let Inst::Alloc {
             result,
             charge,
-            size,
             align,
             kind,
             overflow,
@@ -980,7 +982,6 @@ fn fill(
             _ => unreachable!("only typed resource and region constructors use block relocation"),
         };
         allocation_constants.insert(*charge, amount.unwrap_or(u64::MAX));
-        allocation_constants.insert(*size, fixed.size);
         allocation_constants.insert(overflow.unwrap(), u64::from(amount.is_none()));
         // The closed charge is known here. Keep only a true overflow operand;
         // an admitted resource uses its resource allocation and cause cell.

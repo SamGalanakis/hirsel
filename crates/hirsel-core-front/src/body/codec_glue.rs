@@ -508,12 +508,6 @@ impl Derive<'_> {
         else {
             return Err("the tuple codec's decode refusal is not a Stop".into());
         };
-        let stop_size = hirsel_core_layout::field_size(
-            &self.module.types,
-            &self.recipes,
-            &FieldTy::Inline(stop),
-        )
-        .0;
         let stop = TypeId(stop.0);
         let ShapeBody::Record(fields) = self.module.types[rows.tuple.index()].body.clone() else {
             return Err("the tuple codec's row is not a tuple".into());
@@ -585,7 +579,7 @@ impl Derive<'_> {
                 &[Step::CaseField { case: 1, field: 0 }],
                 PlaceTy::Declared(stop),
             );
-            let bytes = c.constant(stop_size);
+            let bytes = c.field_size(&FieldTy::Inline(TypeRef(stop.0)));
             c.inst(Inst::Copy { to, from, bytes });
             Self::returns(c);
             c.start(next);
@@ -620,7 +614,7 @@ impl Derive<'_> {
                 &[Step::CaseField { case: 0, field: 0 }],
                 place,
             );
-            let bytes = c.constant(size);
+            let bytes = c.field_size(&fields[i].ty);
             c.inst(Inst::Copy { to, from, bytes });
         }
         Self::returns(c);

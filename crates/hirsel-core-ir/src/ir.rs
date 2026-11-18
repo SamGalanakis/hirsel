@@ -625,6 +625,25 @@ pub enum Inst {
     PromoteFrame {
         carrier: AddressId,
     },
+    /// An engine-private byte count. Resolve it from the shared layout recipe
+    /// before running code or selecting machine instructions.
+    LayoutConst {
+        result: ValueId,
+        query: LayoutQuery,
+    },
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum LayoutQuery {
+    /// The native stride of the field as held by an own value.
+    FieldSize(FieldTy),
+    /// The native stride of a declared value as carried in a slot.
+    HeldSize(TypeId),
+    /// The bytes of a fixed row's body, plus its fixed prefix.
+    BlockSize { ty: TypeId, prefix: u64 },
+    /// Number of elements that fit in the frame-backed List buffer. A row is
+    /// eligible only if the frame holds the first growth of four elements.
+    FrameCapacity(FieldTy),
 }
 
 /// What an `Alloc` makes. The block's bookkeeping (its limit record,
@@ -1602,9 +1621,20 @@ pub struct Function {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct Static {
-    pub align: u32,
-    pub bytes: Vec<u8>,
+pub enum Static {
+    Bytes { align: u32, bytes: Vec<u8> },
+    Aggregate { ty: TypeId, value: StaticValue },
+}
+
+/// A plain constant in declaration order. The enclosing type supplies each
+/// field's type, and the engine supplies its native layout.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum StaticValue {
+    Bits(u64),
+    Fields {
+        case: Option<u32>,
+        fields: Vec<StaticValue>,
+    },
 }
 
 /// Compiler-owned writer bookkeeping, never reachable as source payload storage.

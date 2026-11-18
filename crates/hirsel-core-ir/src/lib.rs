@@ -1032,9 +1032,11 @@ pub mod eval;
 pub mod extent;
 pub mod failure;
 mod ir;
+pub mod native_layout;
 pub mod receive_loops;
 pub mod roles;
 pub mod source;
+mod static_data;
 pub mod text;
 #[cfg(any(test, feature = "wf"))]
 pub mod wf;

@@ -28,29 +28,12 @@ pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
 fn private_runner_launch_hook_is_lowered_and_evaluated() {
     let directory = tempfile::tempdir().unwrap();
     let runner = include_str!("../../../core/programs/store/runner.hirsel");
-    let hooks = &runner
-        [runner.find("// Private runtime").unwrap()..runner.find("// One erased adapter").unwrap()];
     let source = format!(
-        "{hooks}\npub fn probe(a: Args) -> u64 {{\n let d = result.unwrap(launch_digest())\n let t = result.unwrap(launch_target(a))\n launch_word(0u64, 0u64) + list.len(d) + string.byte_len(t)\n}}\n"
+        "{runner}\npub fn probe(a: Args) -> u64 {{\n let d = result.unwrap(launch_digest())\n let t = result.unwrap(launch_target(a))\n launch_word(0u64, 0u64) + list.len(d) + string.byte_len(t)\n}}\n"
     );
-    let mut req = request(&source, directory.path());
-    req.inputs.packages[0].package = package("store");
-    req.inputs.packages[0].sources[0].modules = vec!["runner".into()];
-    req.inputs.packages[0].dependencies.push(package("core"));
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
-    req.inputs.packages.insert(
-        0,
-        PackageManifest::directory(&root, package("core"), true).unwrap(),
-    );
-    let product = Driver::default()
-        .check(req, &mut Meter::new(false))
-        .unwrap();
-    assert!(
-        product.accepted(),
-        "{:?} {:?}",
-        product.diagnostics,
-        product.incomplete
-    );
+    let path = directory.path().join("runner.hirsel");
+    std::fs::write(&path, source).unwrap();
+    let product = runner_launch_fixture(directory.path(), Some(&path));
     let identity =
         hirsel_core_ir::Identity::plain(DefPath::from_full("store@1/runner/probe").unwrap());
     let units = product.units([identity.clone()], 65_536).unwrap();

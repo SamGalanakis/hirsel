@@ -263,6 +263,47 @@ impl Waiters {
     }
 }
 
+use crate::tape::schedule::Group;
+
+struct LiveTape {
+    group: Group,
+    opened: u64,
+    members: usize,
+}
+
+#[derive(Default)]
+struct Tapes {
+    live: Vec<LiveTape>,
+    next_open: u64,
+}
+
+impl Tapes {
+    fn open(&mut self, group: Group) {
+        let opened = self.next_open;
+        self.next_open = opened.checked_add(1)
+            .unwrap_or_else(|| crate::process::stop(b"TapeSlots"));
+        self.live.push(LiveTape { group, opened, members: 0 });
+    }
+
+    fn membership(&mut self, group: Group) -> Option<&mut usize> {
+        self.live.iter_mut().find(|entry| entry.group.same(group))
+            .map(|entry| &mut entry.members)
+    }
+
+    fn close(&mut self, group: Group) {
+        if let Some(index) = self.live.iter().position(|entry| entry.group.same(group)) {
+            self.live.swap_remove(index);
+        }
+    }
+
+    fn seal_deadlock(&mut self) -> Option<([u8; 16], crate::tape::Fault)> {
+        self.live.drain(..)
+            .filter_map(|entry| entry.group.seal_deadlock().err().map(|fault| (entry.opened, fault)))
+            .min_by_key(|(opened, _)| *opened)
+            .map(|(_, fault)| fault)
+    }
+}
+
 struct Scheduler {
     deferred: *mut Task,
     deferred_tail: *mut Task,
@@ -283,7 +324,7 @@ struct Scheduler {
     /// request order, taken at the next scheduler turn.
     cancels: Vec<*mut Task>,
     outside_cancels: Vec<*mut Task>,
-    taped: bool,
+    tapes: Tapes,
     net: *mut hirsel_core_net::Sockets,
     model: Option<hirsel_core_net::model::Model>,
     parked: Parked,
@@ -321,29 +362,19 @@ impl Scheduler {
     unsafe fn pop(&mut self) -> *mut Task {
         // SAFETY: only the idle scheduler manipulates the ready queues.
         unsafe {
-            if self.taped {
-                let mut task = self.all;
-                while !task.is_null() {
-                    if let Some(group) = (*task).group
-                        && !group.failed()
-                    {
-                        use crate::tape::schedule::Turn;
-                        let wanted = match group.turn() {
-                            Turn::Wait(id) | Turn::Event(Some(id)) => Some(id),
-                            Turn::Grant | Turn::Finish => Some(0),
-                            _ => None,
-                        };
-                        if let Some(id) = wanted {
-                            let target = self.group_task(group, id);
-                            if !target.is_null() && (*target).state == State::Ready {
-                                return self.unlink_ready(target);
-                            }
-                            if matches!(group.turn(), Turn::Wait(_) | Turn::Grant | Turn::Finish) {
-                                group.fail();
-                            }
-                        }
+            for entry in &self.tapes.live {
+                let group = entry.group;
+                use crate::tape::schedule::Turn;
+                let wanted = match group.turn() {
+                    Turn::Wait(id) | Turn::Event(Some(id)) => Some(id),
+                    Turn::Grant | Turn::Finish => Some(0),
+                    _ => None,
+                };
+                if let Some(id) = wanted {
+                    let target = self.group_task(group, id);
+                    if !target.is_null() && (*target).state == State::Ready {
+                        return self.unlink_ready(target);
                     }
-                    task = (*task).all;
                 }
             }
             // The FIFO identity retains the old ready order, including the
@@ -531,7 +562,7 @@ impl Scheduler {
     /// rule that readiness wins a tie with a deadline (net-proposal-999 D3).
     unsafe fn take_wakes(&mut self) {
         // SAFETY: idle owns every task and operation frame.
-        if self.taped {
+        if !self.tapes.live.is_empty() {
             // SAFETY: idle owns tasks; retirement removes queued requests.
             unsafe {
                 for task in std::mem::take(&mut self.outside_cancels) {
@@ -606,19 +637,8 @@ impl Scheduler {
     unsafe fn tape_inputs(&mut self) {
         // SAFETY: called only from idle; tasks and their pinned operations live.
         unsafe {
-            let mut groups = Vec::new();
-            let mut task = self.all;
-            while !task.is_null() {
-                if let Some(group) = (*task).group
-                    && !groups
-                        .iter()
-                        .any(|g: &crate::tape::schedule::Group| g.same(group))
-                {
-                    groups.push(group);
-                }
-                task = (*task).all;
-            }
-            for group in groups {
+            for index in 0..self.tapes.live.len() {
+                let group = self.tapes.live[index].group;
                 use crate::tape::schedule::Turn;
                 loop {
                     let turn = group.turn();
@@ -680,22 +700,32 @@ impl Scheduler {
                         }
                     }
                 }
-                if group.failed() {
-                    let mut target = self.all;
-                    while !target.is_null() {
-                        if (*target).group.is_some_and(|g| g.same(group))
-                            && (*target).state == State::Provider
-                        {
-                            self.runnable(
-                                target,
-                                OperationState::ReadyToDeliver(Some(crate::tape::REFUSED)),
-                            );
-                        }
-                        target = (*target).all;
-                    }
-                }
             }
         }
+    }
+
+    fn has_outside_wait(&self) -> bool {
+        // SAFETY: each entry points to its pinned provider operation.
+        self.parked.live.values().any(|&task| unsafe {
+            !(*task).group.is_some_and(|group| group.drives_replay((*(*task).operation).provider))
+        })
+    }
+
+    fn stop_quiescent(&mut self) -> ! {
+        if let Some((id, fault)) = self.tapes.seal_deadlock() {
+            let tape = u128::from_be_bytes(id);
+            let verdict = match fault {
+                crate::tape::Fault::Diverged(divergence) => {
+                    format!("Replay tape {tape:032x}: Diverged({:?}) at {}", divergence.kind, divergence.at)
+                }
+                crate::tape::Fault::Truncated(at) => format!("Replay tape {tape:032x}: Truncated at {at}"),
+                crate::tape::Fault::Damaged(block) => format!("Replay tape {tape:032x}: Damaged block {block}"),
+                crate::tape::Fault::Corrupt => format!("Replay tape {tape:032x}: Corrupt"),
+                fault => format!("Tape {tape:032x}: {fault}"),
+            };
+            crate::process::stop(verdict.as_bytes());
+        }
+        crate::process::stop(b"Deadlock");
     }
 
     fn now(&self) -> u64 {
@@ -732,7 +762,7 @@ impl Scheduler {
                 && self.now() == now
                 && deadline.is_none_or(|at| at > now)
             {
-                crate::process::stop(b"Deadlock");
+                self.stop_quiescent();
             }
             return;
         }
@@ -749,28 +779,8 @@ impl Scheduler {
                 }
             }
             None => {
-                // A closed replay cannot await host readiness. An input that
-                // cannot make progress at this coordinate is a schedule fault.
-                if self.taped {
-                    let mut task = self.all;
-                    // SAFETY: idle owns the task list; only taped runs need replay-input diagnosis.
-                    unsafe {
-                        while !task.is_null() {
-                            if let Some(group) = (*task).group
-                                && group.replaying()
-                                && (*task).state == State::Provider
-                            {
-                                group.fail();
-                                self.tape_inputs();
-                                return;
-                            }
-                            task = (*task).all;
-                        }
-                    }
-                }
-                let provider = !self.parked.live.is_empty();
-                if self.head.is_null() && self.deferred.is_null() && !provider {
-                    crate::process::stop(b"Deadlock");
+                if !self.has_outside_wait() {
+                    self.stop_quiescent();
                 }
                 if !self.net.is_null() {
                     self.poll_net(-1);
@@ -1521,7 +1531,7 @@ pub(crate) fn before_tape_frame(group: crate::tape::schedule::Group, ending: boo
             match group.turn() {
                 Turn::Fifo | Turn::Event(None | Some(0)) => return,
                 Turn::Grant if !ending => return,
-                Turn::Finish => return,
+                Turn::Finish | Turn::Deadlock => return,
                 Turn::Grant => {
                     group.fail();
                     return;
@@ -1549,7 +1559,7 @@ fn replay_boundary(provider_entry: bool) {
         }
         loop {
             match group.turn() {
-                Turn::Fifo => return,
+                Turn::Fifo | Turn::Deadlock => return,
                 Turn::Event(Some(id)) if id == group.task => return,
                 Turn::Wait(id) if id == group.task && provider_entry => return,
                 Turn::Wait(id) if id == group.task => {
@@ -1837,21 +1847,30 @@ fn poll_timeout(deadline: Option<u64>) -> i32 {
     })
 }
 
-pub(crate) fn attach_tape(group: crate::tape::schedule::Group) {
+pub(crate) fn attach_tape(group: Group) {
     let task = CURRENT.get();
     if !task.is_null() {
-        // SAFETY: CURRENT pins this task while tape.open executes.
+        // SAFETY: CURRENT pins the active task and run through the membership move.
         unsafe {
-            assign_tape(task, group);
+            let tapes = &mut (*(*task).run).tapes;
+            if let Some(old) = (*task).group
+                && let Some(members) = tapes.membership(old)
+            {
+                *members -= 1;
+            }
+            tapes.open(group);
+            *tapes.membership(group).unwrap() += 1;
+            (*task).group = Some(group);
+            (*task).replay = group.replaying();
         }
     }
 }
-unsafe fn assign_tape(task: *mut Task, group: crate::tape::schedule::Group) {
-    // SAFETY: caller exclusively owns this task before publication or execution.
-    unsafe {
-        (*(*task).run).taped = true;
-        (*task).group = Some(group);
-        (*task).replay = group.replaying();
+
+pub(crate) fn detach_tape(group: Group) {
+    let task = CURRENT.get();
+    if !task.is_null() {
+        // SAFETY: the active task owns the inventory through the tape close.
+        unsafe { (*(*task).run).tapes.close(group) };
     }
 }
 
@@ -1979,6 +1998,11 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
         before_commit();
         record_event(task, END, (*task).id, (*task).failed as u64);
         (*task).state = State::Ended;
+        if let Some(group) = (*task).group
+            && let Some(members) = (*(*task).run).tapes.membership(group)
+        {
+            *members -= 1;
+        }
         Waiters::wake_all(&raw mut (*task).waiters);
         hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle);
         std::hint::unreachable_unchecked();
@@ -2016,7 +2040,7 @@ pub unsafe fn run_root(
         readies: Readies::new(),
         cancels: Vec::new(),
         outside_cancels: Vec::new(),
-        taped: false,
+        tapes: Tapes::default(),
         net: ptr::null_mut(),
         model: None,
         parked: Parked::default(),
@@ -2192,6 +2216,9 @@ unsafe fn spawn_in(
         let task = Box::into_raw(task);
         if let Some(group) = (*task).group {
             (*task).replay = group.replaying();
+            if let Some(members) = (*run).tapes.membership(group) {
+                *members += 1;
+            }
         }
         (*task).context = (*task).owned_context.as_mut().unwrap();
         (*(*task).context).events = if (*(*task).context).events != 0 {
@@ -2578,7 +2605,7 @@ mod ready_routing_laws {
                 readies: Readies::new(),
                 cancels: Vec::new(),
                 outside_cancels: Vec::new(),
-                taped: false,
+                tapes: Tapes::default(),
                 net: ptr::null_mut(),
                 model: None,
                 parked: Parked::default(),

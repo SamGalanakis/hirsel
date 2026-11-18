@@ -196,6 +196,7 @@ struct Replayer {
 }
 
 struct Live {
+    tape_id: [u8; 16],
     schedule: schedule::Schedule,
     waiting: BTreeMap<usize, u64>,
     pending: BTreeMap<usize, Pending>,
@@ -275,6 +276,11 @@ fn cell() -> &'static Cell {
     c
 }
 
+enum Seal<'a> {
+    Unsealed,
+    Explicit(&'a Ending),
+    Deadlock,
+}
 /// An open tape. Dropping it without `end` writes its buffered frames and
 /// nothing else (section 8: equivalent to a crash at that point).
 pub struct Tape {
@@ -580,6 +586,7 @@ impl Tape {
                 };
                 recorder.close(0).map_err(OpenError::Io)?;
                 let live = Live {
+                    tape_id: header.tape_id,
                     waiting: BTreeMap::new(),
                     pending: BTreeMap::new(),
                     schedule: schedule::Schedule::new(header.chooser),
@@ -619,6 +626,7 @@ impl Tape {
                 }
                 differs = stored.revision != revision;
                 let live = Live {
+                    tape_id: stored.tape_id,
                     waiting: BTreeMap::new(),
                     pending: BTreeMap::new(),
                     schedule: schedule::Schedule::new(stored.chooser),
@@ -763,13 +771,19 @@ impl Tape {
     /// way the tape's handles end here.
     pub fn end(self, ending: &Ending) -> Result<(), Fault> {
         crate::tasks::before_tape_frame(self.group(), true);
-        let result = self.finish(Some(ending));
+        let result = self.finish(Seal::Explicit(ending));
         std::mem::forget(self);
         result
     }
-    fn finish(&self, end: Option<&Ending>) -> Result<(), Fault> {
-        let mut s = self.cell.state.lock().unwrap();
-        if s.generation != self.generation {
+    fn finish(&self, seal: Seal<'_>) -> Result<(), Fault> {
+        crate::tasks::detach_tape(self.group());
+        finish(self.cell, self.generation, seal)
+    }
+}
+
+fn finish(cell: &'static Cell, expected_generation: u32, seal: Seal<'_>) -> Result<(), Fault> {
+        let mut s = cell.state.lock().unwrap();
+        if s.generation != expected_generation {
             return Err(Fault::Ended);
         }
         let generation = s.generation;
@@ -783,8 +797,16 @@ impl Tape {
             }
         }
         drop(s);
+        let deadlock = matches!(seal, Seal::Deadlock).then(|| Ending::deadlock(live.schedule.events));
+        let end = match seal {
+            Seal::Unsealed => None,
+            Seal::Explicit(ending) => Some(ending),
+            Seal::Deadlock => deadlock.as_ref(),
+        };
         let mut result = live.fault.map_or(Ok(()), Err);
-        if end.is_some() && result.is_ok() && (!live.waiting.is_empty() || !live.pending.is_empty())
+        if matches!(seal, Seal::Explicit(_))
+            && result.is_ok()
+            && (!live.waiting.is_empty() || !live.pending.is_empty())
         {
             result = Err(Fault::Diverged(Divergence {
                 at: live.replayer.as_ref().map_or(1, |r| r.taken + 1),
@@ -814,7 +836,8 @@ impl Tape {
                     Err(rep.diverged(Mismatch::Schedule))
                 }
                 Ok(Frame::End { ending: e, .. }) if e != *ending => {
-                    Err(rep.diverged(Mismatch::Outcome))
+                    let kind = if deadlock.is_some() { Mismatch::Schedule } else { Mismatch::Outcome };
+                    Err(rep.diverged(kind))
                 }
                 Ok(Frame::End { .. }) => rep.next().map_or_else(
                     |f| match f {
@@ -833,7 +856,11 @@ impl Tape {
                     | Frame::Choose { .. }
                     | Frame::Wait { .. },
                 ) => Err(rep.diverged(Mismatch::Schedule)),
-                Ok(_) => Err(rep.diverged(Mismatch::Extra)),
+                Ok(_) => Err(rep.diverged(if deadlock.is_some() {
+                    Mismatch::Schedule
+                } else {
+                    Mismatch::Extra
+                })),
                 Err(f) => Err(f),
             };
         }
@@ -841,13 +868,12 @@ impl Tape {
             let closed = rep.source.close().map_err(Fault::Io);
             result = result.and(closed);
         }
-        FREE.with_borrow_mut(|f| f.push(self.cell));
+        FREE.with_borrow_mut(|f| f.push(cell));
         result
-    }
 }
 impl Drop for Tape {
     fn drop(&mut self) {
-        let _ = self.finish(None);
+        let _ = self.finish(Seal::Unsealed);
     }
 }
 

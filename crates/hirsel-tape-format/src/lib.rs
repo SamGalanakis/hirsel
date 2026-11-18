@@ -59,6 +59,7 @@ pub const END_COMPLETE: u8 = 0;
 pub const END_RETURNED: u8 = 0;
 pub const END_FAILED: u8 = 1;
 pub const END_CANCELLED: u8 = 2;
+pub const END_DEADLOCK: u8 = 3;
 
 /// What a complete END frame records: the domain's outcome kind and its
 /// bytes in the argument encoding (v2.3 R9). Replay compares it.
@@ -75,6 +76,29 @@ impl Ending {
             outcome: Args::of(bytes),
         }
     }
+    /// A deadlocked domain records its total number of committed events.
+    pub fn deadlock(events: u64) -> Self {
+        let mut bytes = Vec::new();
+        put_varint(&mut bytes, events);
+        Self {
+            kind: END_DEADLOCK,
+            outcome: Args::Literal(bytes),
+        }
+    }
+
+    /// The event count of a canonical Deadlock outcome.
+    pub fn deadlock_events(&self) -> Option<u64> {
+        if self.kind != END_DEADLOCK {
+            return None;
+        }
+        let Args::Literal(bytes) = &self.outcome else {
+            return None;
+        };
+        let mut cursor = Cursor::new(bytes);
+        let count = cursor.varint().ok()?;
+        cursor.done().then_some(count)
+    }
+
     /// `Failed` or `Cancelled`: `varint count`, then per cause, primary
     /// first, its kind (core.hirsel order) and, for `Fail`, its text. Sites
     /// are not included.
@@ -879,17 +903,17 @@ impl Decoder {
                     let gap = c.varint()?;
                     let status = c.u8()?;
                     let kind = c.u8()?;
-                    if !end || status != END_COMPLETE || kind > END_CANCELLED {
+                    if !end || status != END_COMPLETE || kind > END_DEADLOCK {
                         return Err(Corrupt);
                     }
-                    let outcome = Args::decode(&mut c)?;
-                    if !c.done() {
+                    let ending = Ending {
+                        kind,
+                        outcome: Args::decode(&mut c)?,
+                    };
+                    if !c.done() || (kind == END_DEADLOCK && ending.deadlock_events().is_none()) {
                         return Err(Corrupt);
                     }
-                    Frame::End {
-                        gap,
-                        ending: Ending { kind, outcome },
-                    }
+                    Frame::End { gap, ending }
                 }
                 _ => return Err(Corrupt),
             };

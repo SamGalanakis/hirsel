@@ -482,7 +482,7 @@ fn replay(
 }
 
 /// Block boundaries by the length fields alone (section 5.2's layout).
-fn boundaries(t: &[u8]) -> Vec<usize> {
+pub(super) fn boundaries(t: &[u8]) -> Vec<usize> {
     let mut at = vec![0];
     let mut p = 0;
     while p < t.len() {

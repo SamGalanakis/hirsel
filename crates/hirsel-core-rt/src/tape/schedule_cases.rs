@@ -1447,3 +1447,194 @@ fn positioned_end() {
     }
     assert_ne!(tapes[0], tapes[1]);
 }
+
+struct Quiescence {
+    dir: (Provider, u64),
+    mode: Mode,
+    end_last: bool,
+    reorder: bool,
+}
+
+fn quiescence_header(id: u8) -> Header {
+    let mut h = header(REVISION);
+    h.kind = KIND_RUN;
+    h.chooser = format::CHOOSER_COMMIT;
+    h.tape_id = [id; 16];
+    h
+}
+
+unsafe extern "C" fn wait_channel(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: the child owns this receiver and will stay parked on it.
+    unsafe {
+        let receiver = input.cast::<*mut Channel>().read();
+        hirsel_core_receive(context, receiver, NonNull::dangling().as_ptr(), 9).status
+    }
+}
+
+unsafe extern "C" fn end_child(_: *mut Context, _: *mut u8, _: *mut u8) -> u8 {
+    0
+}
+
+unsafe extern "C" fn park_at_quiescence(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            eprintln!("user cleanup ran");
+        }
+    }
+    let _cleanup = Cleanup;
+    // SAFETY: the parent owns both ends of the closed world. Only the child
+    // marked end_child can run after both receives would park.
+    unsafe {
+        let case = &**input.cast::<*const Quiescence>();
+        let q = hirsel_core_channel_new(context, 1, value::<()>(0), 0);
+        let spare = case.reorder.then(|| {
+            Tape::open(REVISION, case.dir, b"spare", Mode::Record, &quiescence_header(3), &expect())
+                .unwrap().0
+        });
+        let (x, _) = Tape::open(
+            REVISION, case.dir, b"x", case.mode, &quiescence_header(1), &expect(),
+        ).unwrap();
+        let _y = if case.end_last {
+            let r = hirsel_core_channel_new(context, 1, value::<()>(0), 0);
+            let mut receiver = r.receiver;
+            let waiter = hirsel_core_spawn(
+                context, 0, 0, (&raw mut receiver).cast(), wait_channel,
+                layout::<*mut Channel>(), 0,
+            );
+            let child = hirsel_core_spawn(
+                context, 0, 8, NonNull::dangling().as_ptr(), end_child, layout::<()>(), 0,
+            );
+            assert!(!waiter.task.is_null() && !child.task.is_null());
+            None
+        } else {
+            for _ in 0..7 {
+                assert_eq!(hirsel_core_check_cancel(context, 0), 0);
+            }
+            Some(Tape::open(
+                REVISION, case.dir, b"y", case.mode, &quiescence_header(2), &expect(),
+            ).unwrap().0)
+        };
+        // Removal swaps the last open cell to the front. X remains the older
+        // of the two live generations in both inventory orders.
+        drop(spare);
+        hirsel_core_receive(context, q.receiver, NonNull::dangling().as_ptr(), 11);
+        drop(x);
+        panic!("the receive has no sender that could run");
+    }
+}
+
+#[test]
+#[ignore = "spawned by the quiescence laws"]
+fn quiescence_child() {
+    let directory = std::env::var_os("TAPE_QUIESCENCE_DIR").unwrap();
+    let case = std::env::var("TAPE_QUIESCENCE_MODE").unwrap();
+    let quiet = || std::fs::OpenOptions::new().write(true).open("/dev/null").unwrap().into();
+    let mut os = Box::new(crate::os::OsProvider::new(quiet(), quiet()));
+    let dir = os.grant(std::path::Path::new(&directory)).unwrap();
+    let args = Quiescence {
+        dir: (os.provider(), dir),
+        mode: if case.contains("record") { Mode::Record } else { Mode::Replay },
+        end_last: case.contains("last"),
+        reorder: case.contains("swap"),
+    };
+    let mut input = &raw const args;
+    let mut context = Context::new(1 << 20);
+    causes::task_start(&mut context).unwrap();
+    // SAFETY: the complete child execution has unit output and pins the input.
+    unsafe {
+        run_root(
+            &mut context, park_at_quiescence, (&raw mut input).cast(), ptr::null_mut(),
+            size_of::<*const Quiescence>(), 0, SchedulerProvider::default(),
+        );
+    }
+}
+
+fn run_quiescence(dir: &std::path::Path, mode: &str, expected: &str) {
+    if mode.contains("swap") {
+        let spare = dir.join("spare");
+        if spare.exists() {
+            std::fs::remove_file(spare).unwrap();
+        }
+    }
+    let output = crate::test_process::command()
+        .args(["--ignored", "--exact", "tape::schedule_cases::quiescence_child", "--test-threads=1"])
+        .env("TAPE_QUIESCENCE_DIR", dir)
+        .env("TAPE_QUIESCENCE_MODE", mode)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(102), "{mode}: {output:?}");
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), format!("run stop: {expected}\n"), "{mode}");
+}
+
+fn quiescence_directory(law: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("hirsel-quiescence-{law}-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn deadlock_seals_each_live_tape_after_the_last_runnable_task() {
+    let last = quiescence_directory("last");
+    run_quiescence(&last, "last-record", "Deadlock");
+    let bytes = std::fs::read(last.join("x")).unwrap();
+    let recorded = frames(&bytes).1;
+    // The opener makes a channel and spawns twice. C hands its allowance
+    // back and ends. Neither of the two receives commits.
+    assert_eq!(recorded.last(), Some(&Frame::End {
+        gap: 2,
+        ending: Ending::deadlock(5),
+    }));
+    run_quiescence(&last, "last-replay", "Deadlock");
+    std::fs::remove_dir_all(last).unwrap();
+
+    let two = quiescence_directory("two");
+    run_quiescence(&two, "two-record", "Deadlock");
+    let x = std::fs::read(two.join("x")).unwrap();
+    let y = std::fs::read(two.join("y")).unwrap();
+    // Moving the opener to Y leaves X with no members, but seven events.
+    for (bytes, events) in [(&x, 7), (&y, 0)] {
+        assert_eq!(frames(bytes).1, [Frame::End { gap: events, ending: Ending::deadlock(events) }]);
+    }
+    run_quiescence(&two, "two-replay", "Deadlock");
+    let (header, _) = frames(&y);
+    let future = encode(&header, &[
+        Frame::Wake { gap: 1, task: 0 },
+        Frame::End { gap: 0, ending: Ending::deadlock(1) },
+    ]);
+    std::fs::write(two.join("y"), future).unwrap();
+    run_quiescence(&two, "two-replay", "Replay tape 02020202020202020202020202020202: Diverged(Schedule) at 1");
+    std::fs::remove_dir_all(two).unwrap();
+}
+
+#[test]
+fn quiescence_reports_every_tape_before_selecting_the_oldest_fault() {
+    let dir = quiescence_directory("damage");
+    run_quiescence(&dir, "two-record", "Deadlock");
+    let x = std::fs::read(dir.join("x")).unwrap();
+    let y = std::fs::read(dir.join("y")).unwrap();
+    let (header, _) = frames(&y);
+    let first = boundaries(&y)[1];
+    let payload = &y[first + BLOCK_HEAD..y.len() - BLOCK_CHECK];
+    let mut damaged_y = y[..first].to_vec();
+    damaged_y.extend(block(&header.tape_id, 0, 1, &[]));
+    damaged_y.extend(block(&header.tape_id, format::END, 2, payload));
+    *damaged_y.last_mut().unwrap() ^= 1;
+    std::fs::write(dir.join("y"), &damaged_y).unwrap();
+    for mode in ["two-replay", "two-replay-swap"] {
+        run_quiescence(&dir, mode, "Replay tape 02020202020202020202020202020202: Damaged block 2");
+    }
+
+    let mut damaged_x = x.clone();
+    *damaged_x.last_mut().unwrap() ^= 1;
+    std::fs::write(dir.join("x"), &damaged_x).unwrap();
+    for mode in ["two-replay", "two-replay-swap"] {
+        run_quiescence(&dir, mode, "Replay tape 01010101010101010101010101010101: Damaged block 1");
+    }
+    std::fs::write(dir.join("x"), &x).unwrap();
+    for (cut, verdict) in [(first, "Diverged(Missing) at 1"), (y.len() - 1, "Truncated at 1")] {
+        std::fs::write(dir.join("y"), &y[..cut]).unwrap();
+        run_quiescence(&dir, "two-replay", &format!("Replay tape 02020202020202020202020202020202: {verdict}"));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -27,6 +27,11 @@ impl Group {
         }
         state.live.as_mut().map(f)
     }
+    pub fn seal_deadlock(self) -> Result<(), ([u8; 16], Fault)> {
+        let id = self.with(|live| live.tape_id).unwrap();
+        finish(self.cell, self.generation, Seal::Deadlock).map_err(|fault| (id, fault))
+    }
+
     pub fn check(self) -> Result<(), Fault> {
         self.with(|live| live.fault.map_or(Ok(()), Err))
             .unwrap_or(Err(Fault::Ended))
@@ -74,9 +79,10 @@ impl Group {
     pub fn replaying(self) -> bool {
         self.with(|live| live.mode == Mode::Replay).unwrap_or(false)
     }
-    pub fn failed(self) -> bool {
-        self.with(|live| live.fault.is_some()).unwrap_or(true)
+    pub fn drives_replay(self, provider: Provider) -> bool {
+        provider.state == self.cell.provider.state && self.replaying()
     }
+
     pub fn fail(self) {
         self.with(Live::schedule_fault);
     }
@@ -123,6 +129,7 @@ pub(crate) enum Turn {
     Wait(u64),
     Grant,
     Finish,
+    Deadlock,
     Wake(u64),
     Cancel(u64),
     Done(u64),
@@ -176,7 +183,14 @@ impl Live {
             Ok(frame) => match *frame {
                 Frame::Wait { gap, task } => (gap, Turn::Wait(task)),
                 Frame::Grant { gap, .. } => (gap, Turn::Grant),
-                Frame::End { gap, .. } => (gap, Turn::Finish),
+                Frame::End { gap, ref ending } => {
+                    let turn = if ending.kind == END_DEADLOCK {
+                        Turn::Deadlock
+                    } else {
+                        Turn::Finish
+                    };
+                    (gap, turn)
+                }
                 Frame::Wake { gap, task } => (gap, Turn::Wake(task)),
                 Frame::Cancel { gap, task } => (gap, Turn::Cancel(task)),
                 Frame::Done { gap, task, .. } => (gap, Turn::Done(task)),

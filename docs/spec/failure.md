@@ -229,6 +229,7 @@ writes one line to stderr, `run stop: ` and the stop's name
 |---|---|
 | the stack is exhausted | `Stack` |
 | every task waits on another task (a join, a channel send or receive, an abandon), no timer is pending and no provider operation is outstanding | `Deadlock` |
+| at whole-run quiescence a replay tape diverges or its reader reports a fault | `Replay tape` with the tape id and verdict |
 | a counted value's holders would pass `2^64 − 1` | `CountOverflow` |
 | a channel's senders would pass `2^64 − 1` | `ChannelSenders` |
 | a `Latest` root's handles would pass `2^64 − 1` | `LatestHandles` |

@@ -488,9 +488,7 @@ impl FunctionEmitter<'_> {
         }
         let counter = self.step_counter();
         let before = self.load_steps(&counter);
-        // The runtime installs a nonnegative window and clamps an exhausted
-        // bound back to zero before any further Step can run.
-        let after = self.bin(Binary::SubNsw, &Type::I64, &before, &int(1));
+        let after = self.bin(Binary::Sub, &Type::I64, &before, &int(1));
         self.store_steps(&after, &counter);
         let positive = self.cmp(Predicate::Sgt, &Type::I64, &after, &int(0));
         let n = self.counter();

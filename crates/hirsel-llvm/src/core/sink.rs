@@ -310,7 +310,6 @@ pub(super) enum Binary {
     FSub,
     FMul,
     FDiv,
-    SubNsw,
 }
 impl Binary {
     pub fn name(self) -> &'static str {
@@ -332,7 +331,6 @@ impl Binary {
             Self::FSub => "fsub",
             Self::FMul => "fmul",
             Self::FDiv => "fdiv",
-            Self::SubNsw => "sub nsw",
         }
     }
 }

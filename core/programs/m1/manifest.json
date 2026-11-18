@@ -88,6 +88,13 @@
           "signatures": true
         },
         {
+          "file": "core/core/flow.hirsel",
+          "modules": [
+            "flow"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/core/host.hirsel",
           "modules": [
             "host"

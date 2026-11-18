@@ -150,6 +150,56 @@ fn date_field(mut out: Bytes, wall_ms: u64) -> Result[(), ResponseError] {
     head_text(mut out, " GMT\r\n")
 }
 
+type DateCache {
+    second: Option[u64],
+    length: u64,
+    words: Inline[u64, 6]
+}
+
+fn date_cache() -> DateCache {
+    DateCache(second: None, length: 0, words:[0; 6])
+}
+
+fn append_date(mut out: Bytes, wall_ms: u64, mut cache: DateCache) -> Result[(), ResponseError] {
+    let second = wall_ms / 1000
+    if cache.second == Some(second) {
+        if cache.length > list.capacity(out) - list.len(out) {
+            return Error(HeadTooLarge)
+        }
+        let whole = cache.length / 8
+        for i in 0u64 .. whole {
+            if let Error(c) = list.put_word_le(mut out, cache.words[i]) {
+                return Error(Allocation(c))
+            }
+        }
+        let mut tail = cache.words[whole]
+        for _ in whole * 8 .. cache.length {
+            if let Error((c, _)) = list.push(mut out, int.narrow(tail & 255)) {
+                return Error(Allocation(c))
+            }
+            tail /= 256
+        }
+        return Ok(())
+    }
+    let start = list.len(out)
+    date_field(mut out, wall_ms)?
+    let n = list.len(out) - start
+    let whole = n / 8
+    for i in 0u64 .. whole {
+        cache.words[i] = list.word_le(out, start + i * 8)
+    }
+    // A u64 millisecond timestamp has at most a nine-digit year.
+    let mut tail = 0u64
+    for i in whole * 8 .. n {
+        let byte: u64 = int.widen(out[start + i])
+        tail |= int.wrapping_shl(byte, int.narrow((i % 8) * 8))
+    }
+    cache.words[whole] = tail
+    cache.length = n
+    cache.second = Some(second)
+    Ok(())
+}
+
 fn reason(status: u16) -> String {
     if status == 200 {
         return "OK"
@@ -169,7 +219,7 @@ fn has_body(status: u16) -> bool {
 
 // Construct the whole head before the first send. A full head leaves the
 // connection free to send a bounded error, with no partial header to undo.
-fn response_head(mut out: Bytes, r: Response, version: u8, close: bool, wall_ms: u64) -> Result[(), ResponseError] {
+fn response_head(mut out: Bytes, r: Response, version: u8, close: bool, wall_ms: u64, mut cache: DateCache) -> Result[(), ResponseError] {
     if r.invalid {
         return Error(HeaderInvalid)
     }
@@ -201,7 +251,7 @@ fn response_head(mut out: Bytes, r: Response, version: u8, close: bool, wall_ms:
     } else if version == 0 {
         head_text(mut out, "Connection: keep-alive\r\n")?
     }
-    date_field(mut out, wall_ms)?
+    append_date(mut out, wall_ms, mut cache)?
     head_text(mut out, "\r\n")
 }
 
@@ -962,8 +1012,8 @@ fn error_step(mut w: WriteHalf, status: u16, clock: Clock, end: u64) -> Step wai
     }
 }
 
-fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress: bool, close: bool, cfg: Config) -> OutputResult waits {
-    if let Error(_) = response_head(mut out, r, version, close, host.wall_ms(b.clock)) {
+fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress: bool, close: bool, cfg: Config, mut cache: DateCache) -> OutputResult waits {
+    if let Error(_) = response_head(mut out, r, version, close, host.wall_ms(b.clock), mut cache) {
         return ClosingReply(write_succeeded(reply_error(mut b.writer, 500, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))))
     }
     let write_end = after_ms(host.mono_ns(b.clock), cfg.write_ms)
@@ -977,7 +1027,7 @@ fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress
     FinalReply(write_succeeded(write_unit(mut b.writer, out, r.body, b.clock, write_end)))
 }
 
-fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, frame: Framing, mut b: Body, mut out: Bytes, cfg: Config, handler: fn(Request, mut Body, S) -> Result[Outcome, ResponseError] waits, state: S) -> Step waits {
+fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, frame: Framing, mut b: Body, mut out: Bytes, cfg: Config, handler: fn(Request, mut Body, S) -> Result[Outcome, ResponseError] waits, state: S, mut cache: DateCache) -> Step waits {
     let outcome = bound bytes cfg.handler_bytes {
         let normalized = match segments_of(part(input, meta.path)) {
             Ok(take x) => take x,
@@ -1030,7 +1080,7 @@ fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, f
         let abandon_expect = b.expect_continue && b.decoder.state != Finished
         let close = meta.close || reply.close || b.fault != None || abandon_expect
         let suppress = part(input, h.method) == string.as_bytes("HEAD")
-        match send_response(mut b, mut out, reply, h.version, suppress, close, cfg) {
+        match send_response(mut b, mut out, reply, h.version, suppress, close, cfg, mut cache) {
             FinalReply(true) => if close {
                 RepliedAndClose
             } else {
@@ -1121,6 +1171,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
     let mut start = accepted
     let mut batch: u64 = 0
     let mut completed_replies: u64 = 0
+    let mut date = date_cache()
     loop {
         let mut head = http1.head()
         match read_head(mut reader, mut input, mut scratch, mut head, c, first, start, cfg) {
@@ -1172,7 +1223,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
         list.clear(mut scratch)
         let (reuse, input_at, scratch_at) = {
             let mut body = Body(input: view input, input_at: head.end, reader: take reader, writer: take writer, scratch: take scratch, scratch_at: 0, decoder: decoder(frame, head, cfg.body_max), head_max: cfg.head_max, fields_max: cfg.fields_max, clock: c, body_deadline: after_ms(completed, cfg.body_ms), handler_deadline: after_ms(completed, cfg.handler_ms), write_ms: cfg.write_ms, pipeline_max: cfg.pipeline_max, expect_continue: policy.expect_continue, fault: None, output_failed: false)
-            let step = handle(input, head, policy, frame, mut body, mut out, cfg, handler, state)
+            let step = handle(input, head, policy, frame, mut body, mut out, cfg, handler, state, mut date)
             let reuse = match step {
                 Keep(at, end) => {
                     completed_replies += 1

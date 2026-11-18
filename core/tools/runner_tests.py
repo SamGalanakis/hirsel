@@ -96,7 +96,15 @@ def counted(name, report):
     # Keep other event kinds in place for the head's slice-order assertion.
     observed = {'store@1/runner_calls/tally', 'store@1/runner_calls/hung',
                 'store@1/runner_calls/answer', 'store@1/runner/offer'}
-    events = [e for e, site in zip(events, sources) if e[0] != kind or site in observed]
+    retirement = set()
+    attributed = []
+    for e, site in zip(events, sources):
+        if e[0] == 18:  # LATEST_PUBLISH. A closing owner publishes its dead head lease.
+            retirement.add(e[1])
+        wakes_head = site == 'store@1/runner/try_head' and e[1] in retirement
+        if e[0] != kind or site in observed or wakes_head:
+            attributed.append(e)
+    events = attributed
     if sum(1 for e in events if e[0] == kind) != want:
         return False
     if name == 'calls_deadline_hung':

@@ -3,7 +3,7 @@
 // (16 + 32), so an 80-byte pool refuses until one of the two blocks drops.
 pub fn law_pool_holds_writer_bytes(tasks: Tasks, clock: Clock) -> bool waits {
     let config = wire_defaults(0u64, 0u64)
-    let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 80u64)
+    let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 80u64, 2u64)
     let (pool, take pooled_task) = result.unwrap(take allocated)
     let (one_to, one_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = result.unwrap(channel.new(1u64))
     let (two_to, two_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = result.unwrap(channel.new(1u64))

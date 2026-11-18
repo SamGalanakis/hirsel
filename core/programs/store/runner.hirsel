@@ -3538,8 +3538,8 @@ fn wire_pool[C: send](take pool: WirePool[C]) -> () waits {
     }
 }
 
-fn start_wire_pool[C: send](tasks: Tasks, c: WireConfig, clock: Clock, n: u64) -> Result[(Sender[WireAllocation[C]], Task[()]), Capacity] {
-    let allocation_inbox: Result[(Sender[WireAllocation[C]], Receiver[WireAllocation[C]]), Capacity] = channel.new(1024u64)
+fn start_wire_pool[C: send](tasks: Tasks, c: WireConfig, clock: Clock, n: u64, slots: u64) -> Result[(Sender[WireAllocation[C]], Task[()]), Capacity] {
+    let allocation_inbox: Result[(Sender[WireAllocation[C]], Receiver[WireAllocation[C]]), Capacity] = channel.new(slots)
     let (to, inbox) = match take allocation_inbox { Ok(take pair) => take pair, Error(cap) => return Error(cap) }
     // Registry construction may reserve n_place. Hello key growth is bounded
     // by the wire payload, rounded identities and the list of Bytes handles.
@@ -3736,13 +3736,18 @@ fn wire_close_payload(code: u16) -> Bytes {
 
 type WireOwner[C: send]: send { upgraded: std.wsock.Upgraded, service: Box[Service[C]], publisher: Sender[PubIn], config: WireConfig, clock: Clock, tasks: Tasks, managed: Option[OwnerControl] }
 
+fn wire_connection_pool_bytes(c: WireConfig) -> u64 {
+    let peak = wire_variable_peak(c)
+    if c.n_pool < peak { c.n_pool } else { peak }
+}
+
 // Serves an already upgraded connection. W3c constructs the service at Hello;
 // its sender joins the one publisher inbox lazily at the first Subscribe.
 pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded, take service: Service[C], to_publisher: Sender[PubIn], c: WireConfig, clock: Clock) -> Result[Task[Result[(), std.wsock.Error]], Capacity] {
     let boxed = match box.new(take service) { Ok(take accepted) => take accepted, Error((cap, _)) => return Error(cap) }
     let x = WireOwner(upgraded: take upgraded, service: take boxed, publisher: channel.sender(to_publisher), config: c, clock: clock, tasks: tasks, managed: None)
     let run: fn(take WireOwner[C]) -> Result[(), std.wsock.Error] waits = wire_connection_owner
-    let allowance = if wire_configuration(c) { WIRE_OWNER_FLOOR - WIRE_OWNER_TASK_BYTES + WIRE_SESSION_CEILING + 524288u64 } else { 0u64 }
+    let allowance = if wire_configuration(c) { WIRE_OWNER_FLOOR - WIRE_OWNER_TASK_BYTES + wire_connection_pool_bytes(c) + 8192u64 } else { 0u64 }
     match task.spawn(tasks, bytes allowance, take x, run) {
         Ok(take h) => Ok(take h),
         Error((cap, _)) => Error(cap),
@@ -3753,8 +3758,8 @@ fn wire_connection_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.
     if !wire_configuration(x.config) { return Error(Configuration) }
     let mut abandoned = 0u64
     let c = x.config
-    let pool_bytes = if c.n_pool < WIRE_SESSION_CEILING { c.n_pool } else { WIRE_SESSION_CEILING }
-    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(x.tasks, c, x.clock, pool_bytes)
+    // The reader and owner each wait for their single allocation request.
+    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(x.tasks, c, x.clock, wire_connection_pool_bytes(c), 2u64)
     let (to, take holding) = match take allocated {
         Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)),
     }
@@ -4258,7 +4263,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
     let ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock, policy: take policy,
         limit: limit, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to) = take seed
     let pool = std.wsock.pending(config.socket)?
-    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, config.n_pool)
+    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, config.n_pool, 1024u64)
     let (allocation, allocation_task) = match take allocated {
         Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)),
     }

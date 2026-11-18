@@ -47,11 +47,11 @@ Only the head runs it, in a store run under the entry's n: `Ok` commits and its
 reply is written with the effects; `Error` aborts the effects and the store keeps the
 reply alone in the aborted run's frame (STORE-SPEC F2).
 
-R5 records each call (RUNNER-SPEC §7). Every reply a run writes carries, in the same Tx
-and after the reply, a `store.CallRecord`: the requested key, the exact argument bytes,
+R5 records each call (RUNNER-SPEC §7). Every reply a run writes carries, in the same
+commit, a `store.CallRecord`: the requested key, the exact argument bytes,
 the stream, and the `code.revision` of the entry that ran, which `transact` copies when
 it registers the entry. That holds for a commit, for an abort's kept reply, and for the
-runner's reply-only commit after a body fails or runs out of steps. The one exception
+runner's `store.conclude` after a body fails or runs out of steps. The one exception
 is `Failed(Gone)`, whose entry no longer exists: its reply has no record.
 `store.recorded(db, branch, v)` reads a record back from a disk store; a memory store
 keeps none.
@@ -255,6 +255,50 @@ once. At most sixteen refusal tasks each reserve 16384 working bytes and a
 320-byte record. The shared ingress task and its bounded tables have their own
 caller-supplied reservation. Logical reservations, live charge, virtual stacks and RSS are different
 quantities.
+
+RUNNER-SPEC v2.18 defines caller key scope in slices RC1, RA, RS, RR and RC4. `Caller{issuer: u8, subject: Bytes}` names the admitted caller. It is not
+secret, and its subject is at most 64 bytes. Issuer 1 is anonymous: its subject is the first
+16 bytes of SHA-256 over a versioned domain tag and the bearer token. A later issuer
+(a keyed-op sender, an account) takes the next unused number when its spec lands. Ingress computes the
+Caller once, at Hello or at the HTTP Bearer check. `Admitted` and each request carry it, and the
+store's stream key becomes `caller_key || u32-BE(stream)`, so no token byte is
+stored. `caller_key` is the issuer, the subject's length and the subject. RC1
+requires a fresh store and starts a fresh SDK recovery generation. A place
+registers exactly one `policy(mut r, f, reads, n, s)`, a static `fn(Tx, Caller)
+-> Result[KeyScope, Capacity]` whose Tx reads only the tables named in `reads`, and nothing
+else: no handles, no captured state. `store.catalog_table` names the tables it grants
+without reading them. It has no default: a second registration is
+`PolicyTwice`, and a place with none fails to open with `NoPolicy`. It always runs
+through `store.authorize`, in an isolated execution under its own grant, with the
+same metered reads on every path; a read it cannot record stops it. The adapter then runs the body under `store.narrow` or
+`store.narrow_view` to that scope. A policy that faults or runs out runs no body.
+Transact bodies take `(mut Tx, H, Caller, A)` and query bodies `(Tx, H, Caller, A)`.
+`cover(tx, shape, lo, hi)` refuses a span outside the scope, by `range`'s rule. The
+policy's reads are in each subscription's read set, so a commit that changes a
+caller's scope re-runs that caller's subscriptions. A changed scope resets them.
+A main commit that replaces the authority or catalog root advances one store-owned
+counter. So does every `adopt`. The store publishes the counter before it publishes the
+followed snapshot. Each content unit and checked reply carries the counter value
+it was authorized at. Each writer (a WebSocket session, an SSE group, a one-shot read, an
+HTTP call response) loads the counter after it takes a unit (a frame, an SSE event,
+or an HTTP head with its body) and before it writes it, every time it takes it. A unit
+stamped below the counter is not written. Stale content is dropped and the session gets
+`Reset`. For a stale reply the owner asks the publisher for the caller's current scope,
+and the reply is offered again if `store.scope_within` that scope holds the scope it ran
+under. Otherwise the reply becomes `Withheld` (Outcome tag 5), which is final and runs
+nothing again. A reply stale three times ends retryably instead. A duplicate send is re-authorized by the head, and its stored
+digest must equal the caller's current one, or it is `Withheld`. A failed policy is
+answered `Failed(Policy)`, with no detail. The catalog changes only in a separate
+`migrate` phase, published in one commit. `handles` gets a `store.Schema` that only
+opens existing tables and indexes. `store.serve` owns each admitted position's
+`Completion`. It runs the policy and the body as two isolated executions over one
+snapshot and commits the record with the reply, so neither commits alone. It returns
+a receipt for the first delivery. Replay reads the Caller back from the recorded
+stream key or claim key, and a concluded run's base, time and seed from its record. A
+run concluded after a refusal for room replays as `Unknown(AdmissionRefused)`. Its
+recorded-code mode requires an equal replay identity (the launch digest with the
+selected constructors, derived by `place_head`) and the recorded policy identity
+(`CallRecord.authority`); otherwise its verdict is `Unknown(RevisionUnknown)`. A chosen candidate always runs (RUNNER-SPEC v2.18).
 
 **Operating a place (RUNNER-SPEC v2.15 §12; specified, not built).**
 `operate(config, stop, status, watch)` owns a place from store open to store close.

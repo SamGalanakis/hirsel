@@ -127,7 +127,7 @@ Module `std.http` of package `std`. It replaces every other HTTP/1.1 server path
 - **Acceptor** children, one per listener. Each calls `accept` and sends `Accepted` to the inbox. When the inbox is full it waits, so it stops accepting and the kernel backlog holds the rest. The backlog therefore takes part in overload; among accepted sockets, fairness is accept order.
 - **Socket tasks**, all spawned by the supervisor, because a child's limit comes from its spawner and no task outlives its spawner (CONC-3, CONC-8): connections (reservation C), stream groups (S, §2), upgraded protocol tasks (U, HTTP-10) and refusal tasks (R).
 - **Ending.** Cancelling `serve` cancels every child, then joins it (CONC-8).
-- **Stopping (v2.15, RUNNER-SPEC §12.1).** A `Stop(D)` event on the supervisor's inbox, with D an absolute deadline on `serve`'s `Clock`, stops the server in order. The supervisor cancels and joins every acceptor, which drops the listeners, so the host refuses new connections. It admits nothing more: a `Promote` is answered as a refusal, and an `Established` protocol task is sent the same stop. A connection closes after its current exchange, as if the request had said `close` (HTTP-7), and a connection between requests closes at once. Every unit deadline of a running exchange becomes min(its own, D). A one-shot read waiting for its initial result (B-11) is such an exchange. A stream group (§2) ends its stream at the stop: its writer finishes the event it is writing and closes, as at `lease_end`, and the client reconnects elsewhere. So a live stream never holds `serve` until D. When the supervisor has no children, `serve` returns `Ok(())`. At D the caller cancels `serve` (Ending). This is not HTTP-7's drain: HTTP-7 discards an unread body to keep one connection open, and the stop never keeps one open. Its laws are the HTTP halves of RUNNER-SPEC L28 and L34, built in slice O3.
+- **Stopping (v2.15, RUNNER-SPEC §12.1).** A `Stop(D)` event on the supervisor's inbox, with D an absolute deadline on `serve`'s `Clock`, stops the server in order. The supervisor cancels and joins every acceptor, which drops the listeners, so the host refuses new connections. It admits nothing more: a `Promote` is answered as a refusal, and an `Established` protocol task is sent the same stop. A connection closes after its current exchange, as if the request had said `close` (HTTP-7), and a connection between requests closes at once. Every unit deadline of a running exchange becomes min(its own, D). A one-shot read waiting for its initial result (B-11) is such an exchange. A stream group (§2) ends its stream at the stop: its writer finishes the event it is writing and closes, as at `lease_end`, and the client reconnects elsewhere. So a live stream never holds `serve` until D. When the supervisor has no children, `serve` returns `Ok(())`. At D the caller cancels `serve` (Ending). This is not HTTP-7's drain: HTTP-7 discards an unread body to keep one connection open, and the stop never keeps one open. Its laws are the HTTP halves of RUNNER-SPEC O28 and O34, built in slice O3.
 
 `Config` is a plain record. All of its fields are required, and the runner's generator fills them in.
 
@@ -492,8 +492,9 @@ Every byte the server keeps appears here, with its payer, admission and refund. 
 | 13a | Reader monitor and timer children | T(h) + 64 + T(0) + 4096 | |
 | 13b | Credits channel | ch(k, unit) | raw streams only |
 | 13c | The stream's hand-over block: encoded head and encoded P | W_s = `out_cap` + `state_max` | **not in S**: the supervisor's hand-over reserve (HTTP-1), from the connection's end until the writer has copied the head and the producer has decoded P |
-| 14 | Subscription state and held content (B-9) | the session `budget` per group | **not in S**: on the publisher's ledger for the group's session, as for a session; held until the publisher's sweep finds the group's retirement mark (§2 Publisher retirement), which happens at the latest after the next message the publisher takes, so the sessions it holds, live or ended but not yet swept, number at most `streams_max` + `reads_max` + 1 (§2 Publisher retirement; reads, row 14a) |
+| 14 | Subscription state and held content (B-9) | the session `budget` per group | **not in S**: on the publisher's ledger for the group's session, as for a session; held until the publisher's sweep finds the group's retirement mark (§2 Publisher retirement), which happens at the latest after the next message the publisher takes, so the sessions it holds, live or ended but not yet swept, number at most `streams_max` + `reads_max` + `http_max` + 1 (§2 Publisher retirement; reads, row 14a; call responses, row 14b) |
 | 14a | A one-shot read's subscription (B-11) | one frame's rows allowance | on the publisher's ledger; at most `reads_max` live or unswept (the read slot is held until its mark is set), retired as row 14 |
+| 14b | A connection's authority (RUNNER-SPEC v2.18 B1): no per-session state. The writer holds the place's `AuthorityReader`, a share of one store-owned 8 B register | nothing per group | — |
 
 **Upgrade**
 
@@ -507,8 +508,8 @@ Every byte the server keeps appears here, with its payer, admission and refund. 
 |---|---|---|---|---|---|
 | 16 | An HTTP send's reply channel | ch(1, `DONE_MAX` + 16) | the connection (row 8's scope) | before the send goes to the relay | when the reply is received, or the connection ends |
 | 16a | Relay send records (B-8): record, reply sender, deadline timer child | `relay_sends_max` × (64 + T(0) + 4096) | the relay's own limit | when the relay accepts the send | when the send's Outcome is handed over and its timer is joined, and, if that timer had queued an `Expired`, when the relay has taken it (B-8) |
-| 16c | Delivered Outcomes (B-8): each a delivery block the relay copies the Outcome into | (`http_max` + 1) × `DONE_MAX` | the relay's own limit (MEM-20: the charge stays with the relay while the block lives) | when the relay copies an Outcome for hand-over | when the connection drops the block after writing its response, or at once when the reply channel is closed |
-| 16b | Relay positions (B-8): argument copy, stream key, digest, and the outcome reserve for the head's answer | `relay_positions_max` × (`arg_max` + 128 + `DONE_MAX`) | the relay's own limit; the head's `Told` payload is allocated by the publisher inside this reserve (RUNNER-SPEC F12) | when the relay forwards the position | when the head's `Told` for it reaches the relay, never at a send's `Abandoned` |
+| 16c | Delivered Outcomes (B-8): each a delivery block the relay copies the Outcome into, with its stamp, the run's scope and Caller, and a share for the recheck answer's scope that the publisher allocates inside it (RUNNER-SPEC v2.18 M3; ATTACK-4 M2) | (`http_max` + 1) × (`DONE_MAX` + 8 + 2·`n_policy` + `CALLER_MAX`) | the relay's own limit (MEM-20: the charge stays with the relay while the block lives) | when the relay copies an Outcome for hand-over | when the connection drops the block after writing its response, or at once when the reply channel is closed |
+| 16b | Relay positions (B-8): argument copy, stream key, digest, and the outcome reserve for the head's answer, its stamp, run scope and Caller (ATTACK-4 M2) | `relay_positions_max` × (`arg_max` + 128 + `DONE_MAX` + 8 + `n_policy` + `CALLER_MAX`) | the relay's own limit; the head's `Told` payload is allocated by the publisher inside this reserve (RUNNER-SPEC F12) | when the relay forwards the position | when the head's `Told` for it reaches the relay, never at a send's `Abandoned` |
 | 17 | Keyed-operation claims (§4) | K-7 | **Part B**: specified in §4, not built with Part A | | |
 
 **Bounds.** HTTP-1's sum bounds the server, row 14 and 14a bound what the publisher holds for HTTP, and the relay's limit (B-8) bounds every request that outlives its connection. No row's total depends on client behaviour beyond these bounds.
@@ -583,7 +584,7 @@ A `Stream` (HTTP-10) runs as one task group, spawned by the supervisor. It follo
 **Publisher retirement** (RUNNER-SPEC v2.13's pattern: a mark the session owns, swept by the publisher after every message, and a coalesced wake that is safe to drop).
 - **The sweep.** After every message it takes, the publisher `try_receive`s the retirement mark of each joined session that has one. A closed mark means the session ended: the publisher drops its subscriptions (their Cover, read set and held content) and the session, as for `Left`. A live session's mark is empty, so the test changes nothing.
 - **The wake.** The ending session's `Drained` makes sure such a message comes. If PubIn is full the `Drained` is dropped, which is safe: a full PubIn holds a message the publisher will take, and the sweep follows it. No step depends on a blocked sender winning a slot (CONC-10 promises no such fairness).
-- **So every ended group is retired** without any later traffic and without the group waiting. A group's slot is freed when its task ends, which may come before the sweep. But a session gets state on the publisher only when the publisher takes its `Joined`, and a sweep follows every message. So right after each sweep every session the publisher holds had an open mark, which means it was a live group or read holding a `streams_max` or `reads_max` slot, and before the next sweep one more message can add one session. The publisher therefore holds subscription state for at most `streams_max` + `reads_max` + 1 sessions.
+- **So every ended group is retired** without any later traffic and without the group waiting. A group's slot is freed when its task ends, which may come before the sweep. But a session gets state on the publisher only when the publisher takes its `Joined`, and a sweep follows every message. So right after each sweep every session the publisher holds had an open mark, which means it was a live group or read holding a `streams_max` or `reads_max` slot, or a live connection writing a call response (at most `http_max`, B-8 "Release", RUNNER-SPEC v2.17). Before the next sweep one more message can add one session. The publisher therefore holds state for at most `streams_max` + `reads_max` + `http_max` + 1 sessions.
 - **What this adds to RUNNER-SPEC** (§7 prerequisites): `Joined` may carry a retirement mark, and the publisher sweeps marks after every message. PubIn's message variants are unchanged, and no frame changes. A WebSocket session needs no mark; its end stays `Left`.
 
 **The release bound.** From the end decision, the group's own work and waits take at most:
@@ -637,7 +638,7 @@ Every request from any transport passes the same four steps, in this order. WebS
 - checks the entry against `a`'s attenuation (`NotAllowed`);
 - decodes the argument bytes with the entry's real decoder, inside `bound bytes arg_max` and a step bound, so a `via` validator's work is bounded (`Malformed(Bad)`);
 - computes `request_digest(entry key, argument bytes)` (store.hirsel:1303);
-- forms the stream key `principal ‖ u32-BE(stream)`;
+- forms the stream key `caller_key ‖ u32-BE(stream)` from the Caller ingress computed (RUNNER-SPEC v2.15 item 2: the bearer token is never stored);
 - checks the byte budget and the deadline against `a`'s arrival time (`Budget`, `Deadline`).
 
 `Send` holds the entry key, stream key, position, argument bytes, digest, budget and deadline. It is opaque, and made only by `prepare` (and, in Part B, by K-9's `prepare_retired` for a `Retired` binding). So the store never sees a digest the runner did not compute.
@@ -770,7 +771,7 @@ runner.bind(mut r: Registry[G, H], take b: HttpBinding) -> Result[(), BindError]
 **The principal.** It is authenticated separately, by `Authorization: Bearer <base64url of the principal, unpadded>`.
 - A rung-1 principal is 21 B and comes from `POST /.hirsel/principal` (B-2's minting; 201 with `{"principal": "<base64url>"}`, or 429 over the per-IP limit).
 - A missing or invalid principal gives 401.
-- The stream key is the WebSocket one: `principal ‖ u32-BE(stream)`.
+- The stream key is the WebSocket one: `caller_key ‖ u32-BE(stream)` (RUNNER-SPEC v2.15). The same token gives the same Caller, and so the same streams, over both transports (RUNNER-SPEC law L29).
 
 **Behaviour.**
 - The send is one send under RUNNER-SPEC V1-V5, held by the relay (B-8): one unit, its own deadline (`deadline_ms` from arrival), and exactly one Outcome.
@@ -793,7 +794,7 @@ runner.bind(mut r: Registry[G, H], take b: HttpBinding) -> Result[(), BindError]
 |---|---|
 | `Refused(NoEntry)` | 404 |
 | `Refused(Malformed(Bad))` | 400 `{"refused": "malformed", "kind": <Bad.kind>}` |
-| `Refused(NotAllowed)` | 403 |
+| `Refused(NotAllowed)` | 403, with no body |
 | `Refused(Overloaded)`, from a principal's call rate | 429, `Retry-After: 1` |
 | `Refused(Overloaded)`, from capacity (the Ingress inbox or bucket table, the relay, the head's store refusal under V3) | 503, `Retry-After: 1` |
 | `Refused(Deadline)` | 504 |
@@ -817,10 +818,11 @@ The relay knows which `Overloaded` it has, because it made the decision or recei
 |---|---|
 | `Returned(Ok(r))`, or R for query and compute | `ok_status`, with r in JSON |
 | `Returned(Error(e))` | `error_status`, with e in JSON |
-| `Failed(Raised(k))`, `Failed(OutOfBytes(_))`, `Failed(OutOfTime(_))`, `Failed(Gone)` | 500 `{"fault": "<variant>", ...}` |
+| `Failed(Raised(k))`, `Failed(OutOfBytes(_))`, `Failed(OutOfTime(_))`, `Failed(Gone)`, `Failed(Policy)` (RUNNER-SPEC v2.17) | 500 `{"fault": "<variant>", ...}`; `Failed(Policy)` is `{"fault": "policy"}` with no other member |
+| `Withheld` (RUNNER-SPEC v2.18): the position completed, and a completed recheck or the head's duplicate re-authorization found the bytes may not be released to this Caller (B-8 "Release") | 403 `{"outcome": "withheld"}`. Terminal: the generated client never retries it, and re-reads the effect through a query. The body tells it apart from `Refused(NotAllowed)`'s bodiless 403 |
 | `InDoubt` | 502 `{"outcome": "in_doubt"}`. It never means a fresh key is safe; the client retries with the same key |
 
-**Duplicates.** When the head's answer came from a `Duplicate` admission, the relay sets `Idempotent-Replayed: true` beside the original outcome's status and body (B-8 says how it knows). So equal identities give equal statuses and bodies over any transport.
+**Duplicates.** When the head's answer came from a `Duplicate` admission, the relay sets `Idempotent-Replayed: true` beside the original outcome's status and body (B-8 says how it knows), if the connection's writer check passes (B-8 "Release"); otherwise the answer is `Withheld`'s 403. So equal identities under equal authority give equal statuses and bodies over any transport.
 
 `Retry-After` is the constant 1. It is not computed from load, so replay needs no extra input.
 
@@ -830,7 +832,7 @@ The relay knows which `Overloaded` it has, because it made the decision or recei
 
 **Charges per send** (HTTP-15 rows 16a and 16b; the delivery block, row 16c, is below), each with its own cap and refund:
 - **A send record**, one per HTTP send: the record, the send's reply sender and its deadline timer child. At most `relay_sends_max` (1024). Taken when the relay accepts the send; refunded after the send's one Outcome is handed over, once its timer is joined and any `Expired` that timer queued has been taken (Timers, below).
-- **A position**, one per forwarded (stream, position): the argument copy, the stream key, the digest, and the outcome reserve of `DONE_MAX` for the head's answer. At most `relay_positions_max` (1024) in total and 1+q (q = 4) per principal. Taken when the relay forwards; refunded only when the head's `Told` for it reaches the relay. A send's `Abandoned`, or its connection closing, never refunds a position: the head may still answer it.
+- **A position**, one per forwarded (stream, position): the argument copy, the stream key, the digest, and the outcome reserve of `DONE_MAX + 8 + n_policy + CALLER_MAX` for the head's answer with its stamp, run scope and Caller (ATTACK-4 M2). At most `relay_positions_max` (1024) in total and 1+q (q = 4) per principal. Taken when the relay forwards; refunded only when the head's `Told` for it reaches the relay. A send's `Abandoned`, or its connection closing, never refunds a position: the head may still answer it.
 - On acceptance the relay copies the argument bytes into the position, so every byte that can outlive the connection is in the relay's limit, not the connection's.
 - Over any cap, the send is `Refused(Overloaded)` (503), and nothing is forwarded.
 
@@ -846,13 +848,20 @@ The relay knows which `Overloaded` it has, because it made the decision or recei
 
 The relay hands every Outcome by `try_send` into the send's fresh 1-slot reply channel, so handing never waits. A closed channel (the connection ended) makes the hand-over a no-op. Either way the send record is refunded; the position stays until its `Told`.
 
-**Keyed sends** (§4) are Part B. The local join rule above is for `Stream` sends only. A keyed send is forwarded under its own send id with no local decision, and the head decides liveness from the store (K-5).
+**Keyed sends** (§4) are Part B. The local join rule above is for `Stream` sends only. A keyed send is forwarded under its own send id with no local decision, and the head decides liveness from the store (K-5). Its response is released by the Release rule below, at its own connection.
 
-**Delivery blocks** (HTTP-15 row 16c). To hand an Outcome over, the relay copies it into a fresh delivery block under its own limit and moves that block into the reply channel; then it drops its own copy. MEM-20 keeps the block's charge on the relay until the connection drops it, which is after its response is written (or at once, when the channel is closed and the `try_send` returns the block). Each connection has at most one ask outstanding, so at most `http_max` blocks are with connections and one is being copied. Only then is the position's `DONE_MAX` reserve free for reuse at its `Told`.
+**Delivery blocks** (HTTP-15 row 16c). To hand an Outcome over, the relay copies it into a fresh delivery block under its own limit and moves that block into the reply channel; then it drops its own copy. MEM-20 keeps the block's charge on the relay until the connection drops it, which is after its response is written (or at once, when the channel is closed and the `try_send` returns the block). Each connection has at most one ask outstanding, so at most `http_max` blocks are with connections and one is being copied. Only then is the position's outcome reserve free for reuse at its `Told`. A `Reauthorized` answer to the connection's recheck is allocated by the publisher inside the block's second `n_policy` share, and freed with the block.
 
 **Timers.** At hand-over the relay cancels the send's deadline timer and joins it; a sleeping timer's join is immediate. The timer's result says whether it had already sent `Expired`. If it had, the send record stays charged until the relay takes that `Expired`, which it ignores, because send ids are never reused. So each live or retiring record has at most one `Expired` queued, and the inbox's `relay_sends_max` share covers every one.
 
 **Order.** The head's answers reach the relay as `Told` from the publisher, in V3/V4 order, exactly as for a session; the relay never takes an answer directly from the head. Each `Told` carries an internal `replayed` bit that is set when the head's answer came from a `Duplicate` admission. The bit is runner-internal: the WebSocket session ignores it, and no wire tag changes.
+
+**Release (RUNNER-SPEC v2.18 B1).** The release decision for a call response is its own connection's, at its writer, not the relay's.
+- Before its Ask, the connection joins the publisher as a marked session (§2 "Publisher retirement"), with its Caller, so that it can post `Recheck`. A `Joined` that does not fit gives 503 with `Retry-After: 1`, and nothing is forwarded. Nothing has to be installed before the check (RUNNER-SPEC v2.18 M4).
+- Each `Told` carries its stamp and the run's scope (RUNNER-SPEC CHANGES-v2.18 release 4), and the relay copies them into the delivery block.
+- **The unit** is the response head with its whole body, stamped with the Outcome's stamp when it is checked (RUNNER-SPEC §3: `Returned` and `Failed(Raised|OutOfBytes|OutOfTime)`, ATTACK-4 B6). It is written by RUNNER-SPEC's writer rule (CHANGES-v2.18 release 5), with no exception for this path (ATTACK-4 B5): before it writes the head, the connection loads the place's authority register, R, **every time it takes the unit**, a re-offer included. A checked Outcome is written only if its stamp ≥ R. Otherwise the connection `try_send`s `Recheck{session, R, content: false}` (a full `PubIn` is 503 `{"refused": "reset"}` at once) and waits for `Reauthorized`. If `store.scope_within(scope, run scope)`, it re-offers the response stamped `seq` and loads again; if not, it writes `Withheld`'s fixed 403, which carries no stamp. Three stale loads, or one `Reauthorized(Stopped)` (VERIFY-5 M1), give 503 `{"refused": "reset"}` with `Retry-After: 1`. A response whose head was accepted is finished as it is.
+- The same rule holds for a local join's answer (above) and a keyed send's (K-5): each connection loads for its own response, whatever another connection answered.
+- After its response, the connection drops its mark and `try_send`s one `Drained`, as B-11's read does. So the publisher holds at most `streams_max + reads_max + http_max + 1` sessions (§2).
 
 **Disconnects.** A connection that closes or passes its deadline drops its `Receiver`. Its send stays owed in the relay until its deadline or the head's answer. Execution is the head's and is never cancelled by HTTP.
 
@@ -929,8 +938,9 @@ A query entry returns an opaque `Cover`, not a codec value (RUNNER-SPEC rule 2, 
 - **Payer.** The read's session record and its inbox are in the handler's scope (`handler_bytes`, HTTP-15 row 8); the delivered frame's rows are on the publisher's ledger (row 14a), as for a session.
 - **The end.** The handler drops its inbox `Receiver` and its retirement mark's `Sender`, `try_send`s one `Drained`, and then sends `ReadDone` to release the slot. Nothing here waits on the publisher. A read that fails or is cancelled drops its mark mechanically too, and if the connection task ends holding a slot, the supervisor releases the slot at that task's end. After it joins that task, the supervisor `try_send`s one `Drained` (RUNNER-SPEC v2.14, CHANGES-v2.14 item 3). The publisher retires the session at its next sweep (§2 Publisher retirement), without any later traffic.
 - **Consistency.** The rows are exactly the Cover's state at `version`, the publisher's base when the Subscribe ran (RUNNER-SPEC §4, G3).
+- **Release (RUNNER-SPEC v2.18 B1).** The handler joins with its Caller, like any session. **The unit** is the 200 head with its whole body, stamped with its snapshot's `seq`, and so is every data-bearing error response (an `Ended` with a B-7 status that carries a query's fault detail; ATTACK-4 B6). A fixed status with no data passes unchecked. After it takes the unit and before it writes the head, the writer loads the authority register. If the stamp is below it, nothing of the unit is written, and the answer is 503 `{"refused": "reset"}` with `Retry-After: 1`, so the client re-requests. A head that passed is written with its body, whatever commits meanwhile. An SSE group's writer checks each event the same way. A stale event is dropped and goes through the owner's recheck with `content` set (RUNNER-SPEC §3; ATTACK-4 B4), which ends in `event: reset`, and the stream ends. A scope change does the same.
 - **Bounds.** The rows allowance is the WebSocket one (RUNNER-SPEC §3 frame bounds), so equal reads give equal answers over both transports. An oversized result is the 503 of B-9.
-- **Failure.** An `Ended` is answered with its B-7 status, and a passed `Request.deadline` with HTTP-5's 503; both then end as above.
+- **Failure.** An `Ended` is answered with its B-7 status, checked as above when it carries data, and a passed `Request.deadline` with HTTP-5's 503; both then end as above.
 - **describe** exports a query binding's result schema as this envelope over the Cover's tables. It does not pretend `Cover` has an ordinary B-4 form.
 - A `Read` binding of a compute entry returns R, through B-5.
 
@@ -1008,10 +1018,11 @@ A query entry returns an opaque `Cover`, not a codec value (RUNNER-SPEC rule 2, 
 
 ```hirsel unbuilt
 pub type Sender: send { name: String, secret: Bytes }
+pub type Namespace: send { name: String, senders: List[Sender] }   // RUNNER-SPEC v2.17 M3: one identity domain, declared once per place
 pub type Verifier: send =
     Bearer(String)                          // the key header, e.g. "Idempotency-Key"
-  | StandardWebhooks(List[Sender], u64)     // senders, timestamp tolerance in seconds
-  | GitHub(List[Sender])                    // senders
+  | StandardWebhooks(Namespace, u64)        // the senders' namespace, timestamp tolerance in seconds
+  | GitHub(Namespace)                       // the senders' namespace
 pub type KeyedRule: send {
   verifier: Verifier,      // K-2
   retention_ms: u64,       // K-6; required, no default
@@ -1025,11 +1036,14 @@ pub type Retirement: send { verifier: Verifier }   // the same verifier kind and
 - a `retention_ms` of 0 or above 2^53, or not above the binding's `deadline_ms` (K-6 measures retention from the reply run's start);
 - a `keys_max` of 0, or a `principal_keys_max` of 0 or above `keys_max`;
 - a signed verifier with no senders, a duplicate sender name, or a sender name outside `[a-z0-9_-]{1,32}`;
+- a namespace name outside `[a-z0-9_-]{1,24}`, or **a namespace declared twice in the place** (`NamespaceTwice`, RUNNER-SPEC v2.17 M3). Ownership is place-wide: two signed bindings, keyed or retired, that give the same namespace name must give the same verifier kind and the same `Namespace` value (equal name, sender names and secrets), and then they are one identity domain (RUNNER-SPEC v2.18 M8: the kind is compared at bind, since the store's entry records one kind). Any other second use of the name is refused;
 - a signed verifier whose route has no `{sender}` selector (K-2), or a `Bearer` route that has one;
 - a `StandardWebhooks` tolerance of 0;
 - a `Retired` binding with an `entry`, `fields` or statuses (it has none: its argument schema, field mapping and statuses are the op record's, K-9). `bind` runs before any store is open, so whether its route's captures are the record's `Path` fields is checked at open (below).
 
-**The op record.** A keyed `op`'s policy is fixed at its first admission and kept in the store (K-4 `keyed_ops`): the entry key, the argument schema and the result schema (from describe's `Described.args` and `Described.result`), the field mapping (each field's `FieldSource`: path capture name, query name or body member, in declared field order), the method, `ok_status` and `error_status`, `retention_ms`, `keys_max`, `principal_keys_max`, `arg_max`, the entry's byte and step bounds, `deadline_ms`, and the verifier's kind and sender names (never secrets). It never changes. The route is not in it, so a route can move (B-12); a route's captures must still name the record's `Path` fields. At open, the head compares every bound keyed or retired `op` with its record (for a `Retired` binding: method, verifier kind and sender names, and that its route's captures are exactly the record's `Path` fields plus, for a signed verifier, `{sender}`); any difference refuses the open with `KeyedOpChanged(op, field)`, and the way to change a policy is a new `op`.
+**The op record.** A keyed `op`'s policy is fixed at its first admission and kept in the store (K-4 `keyed_ops`): the entry key, the argument schema and the result schema (from describe's `Described.args` and `Described.result`), the field mapping (each field's `FieldSource`: path capture name, query name or body member, in declared field order), the method, `ok_status` and `error_status`, `retention_ms`, `keys_max`, `principal_keys_max`, `arg_max`, the entry's byte and step bounds, `deadline_ms`, and the verifier's kind, namespace name and sender names (never secrets). It never changes. The route is not in it, so a route can move (B-12); a route's captures must still name the record's `Path` fields. At open, the head compares every bound keyed or retired `op` with its record (for a `Retired` binding: method, verifier kind, **namespace name** and sender names, and that its route's captures are exactly the record's `Path` fields plus, for a signed verifier, `{sender}`); any difference refuses the open with `KeyedOpChanged(op, field)`, and the way to change a policy is a new `op`.
+
+**The namespace registry (RUNNER-SPEC v2.17 M3).** The store's `namespaces` tree (K-4) records each namespace at the first admission under it: its verifier kind and its sender names. The entry is kept after every op using it is retired or swept, so a name once used keeps its meaning for the store's life. At open, every bound or retired signed binding's namespace is compared with its entry. A namespace whose kind or sender names differ refuses the open with `NamespaceChanged(name)`. A sender may be added only under a new namespace.
 
 ### K-2: The principal and the verifiers
 
@@ -1046,14 +1060,14 @@ A claim is scoped by its principal. The verifier decides the principal and the k
 - Exactly one each of `webhook-id`, `webhook-timestamp` and `webhook-signature`; otherwise 401. The timestamp is decimal digits, at most 19, parsed as u64; otherwise 401.
 - The signature is valid when one of the space-separated `v1,<base64>` entries equals HMAC-SHA256(secret, `id.timestamp.body`) over the raw body bytes.
 - The freshness test is `max(now_s, ts) − min(now_s, ts) ≤ tolerance_s`, with `now_s` = ⌊one recorded `host.wall_ms` read / 1000⌋ (§5). It cannot overflow for any reading.
-- Principal: `hook:` ‖ sender name. Key: the verified `webhook-id`.
+- Principal: `hook:` ‖ sender name. Key: the verified `webhook-id`. Its Caller (RUNNER-SPEC v2.16 M3, v2.17) has subject `len8 ‖ namespace ‖ len8 ‖ sender`, at most 1 + 24 + 1 + 32 = 58 B. `namespace` is the declared, stable, non-secret name of K-1's `Namespace`, owned place-wide and recorded in the store (K-1 "The namespace registry"). Two providers' senders with the same name therefore have different subjects unless they share one declaration. A route move or a secret rotation keeps the subject.
 - **Guarantee:** a claim's key is authenticated with its body and time, so a replayed delivery inside the tolerance is a duplicate, and one outside it is refused.
 
 **`GitHub(senders)`**
 - The sender is selected as above.
 - Exactly one each of `X-Hub-Signature-256` (`sha256=` + 64 lowercase hex) and `X-GitHub-Delivery`; otherwise 401.
 - The signature is valid when it equals HMAC-SHA256(secret, body).
-- Principal: `hook:` ‖ sender name. Key: `X-GitHub-Delivery`.
+- Principal: `hook:` ‖ sender name. Key: `X-GitHub-Delivery`. Its Caller has the same `len8 ‖ namespace ‖ len8 ‖ sender` subject as StandardWebhooks', under this verifier's own namespace.
 - **Guarantee, weaker and stated in OpenAPI:** the body is authenticated, but the key and freshness are not. Someone who has seen one delivery can resend its body under a new delivery ID, and that is a new claim that runs again. A GitHub-bound entry must therefore be safe to run twice for one body, or must dedup on the body's own content. There is no timestamp check, because GitHub signs no timestamp.
 
 **Tenants.** A tenant is a sender: one secret per tenant, chosen by the selector and proven by its signature. A tenant id in a header or body is never authority.
@@ -1070,19 +1084,20 @@ Keyed claims live in the store's **control section**, beside `stream_ops`, not i
 **Commit rules (F2 extended).**
 - A body's run that succeeds commits its application writes, the claim's reply and the claim's control writes together.
 - An `Error` (`Aborted`) or a `Failed` run commits a **control-only** commit: the reply, the expiry index entries, the counts and the call record are kept; application writes are dropped, so the commit holds zero application effects. Today's F2 keeps only `stream_ops` on `Error` (store.hirsel:867); the extension keeps the keyed control writes the same way.
-- `record` (store.hirsel:1412) accepts a reply for a keyed claim in the control write set, as it accepts a stream reply today. The call record identifies a claim by (`op`, principal, key) in place of (stream, position).
+- `record` (store.hirsel:1412) accepts a reply for a keyed claim in the control write set, as it accepts a stream reply today. The call record identifies a claim by (`op`, caller key, key) in place of (stream, position).
 - The journal's section encoding and the checkpoint's roots gain the keyed trees. Existing stream keys and their encodings are unchanged, and AE1-AE3 and AH1-AH3 are untouched.
 
-**Trees.** Lengths are bounded before encoding: `op` ≤ 64 B (B-12), principal ≤ 64 B (`anon:` 21 B; `hook:` + a sender name ≤ 37 B), key ≤ 255 B. Write ‖ for concatenation and len8 for a one-byte length.
+**Trees.** Wherever a key below has `caller`, it holds the caller key `u8 issuer ‖ len8 ‖ subject` (RUNNER-SPEC v2.15), at most 66 B because the subject is at most 64 B (a signed sender's is at most 58 B, K-2). So no token byte is stored. Lengths are bounded before encoding: `op` ≤ 64 B (B-12), the caller key ≤ 66 B, key ≤ 255 B. Write ‖ for concatenation and len8 for a one-byte length.
 
 | Tree | Key | Value |
 |---|---|---|
 | `keyed_ops` | len8 ‖ op | the op record (K-1), ≤ `op_record_max` (16384 B, both schemas included; `bind` refuses a larger one) |
-| `claims` | len8 ‖ op ‖ len8 ‖ principal ‖ len8 ‖ key (≤ 387 B) | state u8 (1 Admitted, 2 Replied) ‖ digest (32) ‖ expires_ms u64 (0 while Admitted) ‖ while Admitted: the argument bytes (≤ `arg_max`); while Replied: the reply (≤ `DONE_MAX`) |
-| `claim_exp` | len8 ‖ op ‖ u64-BE expires_ms ‖ the claim key | empty |
-| `claim_pexp` | len8 ‖ op ‖ len8 ‖ principal ‖ u64-BE expires_ms ‖ the claim key | empty |
+| `claims` | len8 ‖ op ‖ caller ‖ len8 ‖ key (≤ 65 + 66 + 256 = 387 B) | state u8 (1 Admitted, 2 Replied) ‖ request digest (32) ‖ expires_ms u64 (0 while Admitted), a 41 B header; while Admitted: the argument bytes (≤ `arg_max`); while Replied: the scope digest (32, RUNNER-SPEC v2.17 B2), so a 73 B header, then the reply (≤ `DONE_MAX`) |
+| `claim_exp` | len8 ‖ op ‖ u64-BE expires_ms ‖ the claim key (≤ 460 B) | empty |
+| `claim_pexp` | len8 ‖ op ‖ caller ‖ u64-BE expires_ms ‖ the claim key (≤ 65 + 66 + 8 + 387 = 526 B) | empty |
 | `claim_count` | len8 ‖ op | u64: live-or-unreclaimed rows of this op |
-| `claim_pcount` | len8 ‖ op ‖ len8 ‖ principal | u64: live-or-unreclaimed rows of this (op, principal) |
+| `claim_pcount` | len8 ‖ op ‖ caller (≤ 131 B) | u64: live-or-unreclaimed rows of this (op, caller) |
+| `namespaces` (RUNNER-SPEC v2.17 M3) | len8 ‖ namespace (≤ 25 B) | verifier kind u8 ‖ the sender names, each len8-prefixed (≤ 16384 B, as `op_record_max`) |
 | `claim_open` | the claim key | empty: present exactly while the row is Admitted |
 
 - **The digest** is `request_digest(entry key, argument bytes)` (B-2), the same function as for streams.
@@ -1104,13 +1119,13 @@ Keyed claims live in the store's **control section**, beside `stream_ops`, not i
 |---|---|
 | Absent (no row, or an expired one) | Reclaim (K-6). Then, if `claim_pcount ≥ principal_keys_max` or `claim_count ≥ keys_max`, `Error(Full)` (503), with nothing committed. Otherwise the store's resident admission (K-7) must also accept the row and its terminal reserve; if it does not, `Error(Full)`, with nothing committed. Otherwise commit the row as Admitted with d and the arguments, add `claim_open`, add 1 to both counts (an expired row being replaced is one delta: its count, index and open entries are removed and the new ones added, a net 0 on the counts), take the terminal reserve, and execute. |
 | Live, digest ≠ d | `RequestMismatch` (422). |
-| Replied (live), digest equal | `Duplicate(reply)`: the op record's status and the stored body, plus `Idempotent-Replayed: true`. |
+| Replied (live), digest equal | The head re-authorizes the Caller (RUNNER-SPEC v2.18 H2). If its current digest equals the stored one: `Duplicate(Stored{reply, scope_digest})`, giving the op record's status and the stored body, plus `Idempotent-Replayed: true`, once the connection's writer check passes (B-8 "Release"). Otherwise: `Withheld`'s 403. Only the digest is stored, so a retry after any change to the Caller's scope, a grow included, is `Withheld`. |
 | Admitted, with a live worker in this open | The send joins the worker if its digest equals the worker's (H1); at its own deadline it gets `Abandoned` (409). |
 | Admitted, with no live worker | **Ownerless** (K-8). The send starts a worker and re-runs the body, or joins the recovery run if one holds the claim; an earlier attempt never committed its body, because its effects and its reply commit together (F2). |
 
 **The head.** The head treats a claim key like a stream key for H1-H3: one worker per live claim, and a same-digest send joins (RUNNER-SPEC L21). Its worker table is the record of which Admitted rows have a live worker.
 
-**Keyed sends through the relay.** The relay makes no liveness or digest decision for a keyed send: it holds no local join for keyed sends, and forwards every one to the head under the send's own **send id**. It is charged as every HTTP send is: a send record (B-8 row 16a, retired as B-8's Timers says), a position (row 16b), and a delivery block for its Outcome (row 16c). The head answers each send by its send id, through the publisher's `Told`, as it answers a stream send by (stream, position). So:
+**Keyed sends through the relay.** The relay makes no liveness or digest decision for a keyed send: it holds no local join for keyed sends, and forwards every one to the head under the send's own **send id**. It is charged as every HTTP send is: a send record (B-8 row 16a, retired as B-8's Timers says), a position (row 16b), and a delivery block for its Outcome (row 16c). The head answers each send by its send id, through the publisher's `Told`, as it answers a stream send by (stream, position). Each send's response is released at its own connection's writer by B-8's Release rule, loaded after every take, a re-offer included, whatever another send of the same claim was answered (RUNNER-SPEC CHANGES-v2.18 release 5; ATTACK-4 B5). So:
 - a send that joins a worker gets that worker's outcome, and a send admitted as a new claim gets the new claim's;
 - when a claim expires while its old reply's delivery is still delayed, a retry with other arguments is admitted as a new claim (the row is absent), and the old send still gets the old outcome, because answers follow send ids, never claim keys. No generation field is stored: the send id carries the identity of the delivery.
 
@@ -1147,18 +1162,18 @@ Keyed claims live in the store's **control section**, beside `stream_ops`, not i
 **Quotas.** At most `keys_max` live-or-unreclaimed rows per op, and at most `principal_keys_max` per (op, principal). A binding with one tenant sets them equal. Both counts change atomically in the commit that changes the rows.
 
 **Bytes.** With E(k, v) = 62 + round8(k) + round8(v), the store's per-entry charge (store.hirsel:1164), one claim costs at most:
-- `claims`: E(387, 41 + max(`arg_max`, `DONE_MAX`));
-- `claim_exp` and `claim_pexp`: E(460, 0) + E(525, 0);
+- `claims`: E(387, max(41 + `arg_max`, 73 + `DONE_MAX`)) (RUNNER-SPEC v2.17 M2: an Admitted row has a 41 B header, a Replied row 73 B);
+- `claim_exp` and `claim_pexp`: E(460, 0) + E(526, 0) (RUNNER-SPEC v2.16 M2: `claim_pexp` nests the caller key twice, 65 + 66 + 8 + 387 = 526);
 - `claim_open` while Admitted: E(387, 0);
-- and per op and per (op, principal) with rows: E(65, 8) and E(130, 8); per op, its record E(65, `op_record_max`).
+- and per op and per (op, caller) with rows: E(65, 8) and E(131, 8); per op, its record E(65, `op_record_max`); per namespace, E(25, `op_record_max`), kept for the store's life.
 
-A binding's resident bound is `keys_max` × (the claim cost) + E(65, 8) + E(65, `op_record_max`) + `keys_max` × E(130, 8). The sum over bound ops counts against the store's `resident_limit`.
+A binding's resident bound is `keys_max` × (the claim cost) + E(65, 8) + E(65, `op_record_max`) + `keys_max` × E(131, 8). The sum over bound ops counts against the store's `resident_limit`.
 
 **The terminal reserve.** At admission the claim takes a reserve **R_t** that pays for its whole terminal transition, so that the control-only reply commit can never be refused for room:
-- the row's growth: none, because the Admitted row is charged at max(`arg_max`, `DONE_MAX`) from admission;
-- the two expiry index entries, E(460, 0) + E(525, 0) (`claim_open`'s removal frees E(387, 0), not counted against it);
-- the call record and the reply commit's journal frame, at their bounds for one claim: `frame_max(claim)` = the frame header + the call record (≤ `call_record_max`) + the control delta's writes, each at the journal's per-write overhead plus its key and value bounds: the `claims` row (387, 41 + `DONE_MAX`), the `claim_exp` and `claim_pexp` inserts (460 and 525, empty values) and the `claim_open` delete (387);
-- the retained-root peak: the control delta is exactly 4 mutations (`claims`, `claim_exp`, `claim_pexp`, `claim_open`); the call record is a frame section, not a tree (store.hirsel:870). One std `omap` insert or remove copies its path and may split, merge or redistribute one node per level (api/omap.md), so it allocates at most 2h + 1 nodes, where h, the height bound, is 1 + ⌈log₁₆ n_max⌉ (non-root nodes hold at least 16) with n_max = `resident_limit` / 70, since no entry charges less than E(1, 0) = 70, orphan rows and every other table included. A node charges at most N = 104 + 32 × (24 + 8) + 32 × round8(k_phys), its header, its slots and its cloned keys (api/omap.md), with k_phys ≤ 536 the longest physical key of the keyed trees. So the peak is 4 × (2h + 1) × N; these copies stay resident while a snapshot retains the old root. The terminal delta changes no count, and a success's application writes are not in it.
+- the row's growth: none, because the Admitted row is charged at max(41 + `arg_max`, 73 + `DONE_MAX`) from admission;
+- the two expiry index entries, E(460, 0) + E(526, 0) (v2.16 M2; `claim_open`'s removal frees E(387, 0), not counted against it);
+- the call record and the reply commit's journal frame, at their bounds for one claim: `frame_max(claim)` = the frame header + the call record (≤ `call_record_max`) + the control delta's writes, each at the journal's per-write overhead plus its key and value bounds: the `claims` row (387, 73 + `DONE_MAX`), the `claim_exp` and `claim_pexp` inserts (460 and 526, empty values; v2.17 M2 corrects 525) and the `claim_open` delete (387);
+- the retained-root peak: the control delta is exactly 4 mutations (`claims`, `claim_exp`, `claim_pexp`, `claim_open`); the call record is a frame section, not a tree (store.hirsel:870). One std `omap` insert or remove copies its path and may split, merge or redistribute one node per level (api/omap.md), so it allocates at most 2h + 1 nodes, where h, the height bound, is 1 + ⌈log₁₆ n_max⌉ (non-root nodes hold at least 16) with n_max = `resident_limit` / 70, since no entry charges less than E(1, 0) = 70, orphan rows and every other table included. A node charges at most N = 104 + 32 × (24 + 8) + 32 × round8(k_phys), its header, its slots and its cloned keys (api/omap.md), with k_phys ≤ 537 the longest physical key of the keyed trees (v2.17 M2: 526 + 11). So the peak is 4 × (2h + 1) × N; these copies stay resident while a snapshot retains the old root. The terminal delta changes no count, and a success's application writes are not in it.
 
 The store keeps `db.reserved`, the sum of R_t over Admitted claims. Its resident admission tests every commit against `resident_limit − db.reserved`, except a claim c's own terminal commit, which is tested against `resident_limit − (db.reserved − R_t(c))`: it may spend its own reserve and nothing of any other claim's. That commit subtracts R_t(c) from `db.reserved` atomically with the reply; a refused commit leaves R_t(c) reserved. So every Admitted claim's control-only terminal transition fits whatever the others commit, retained snapshots included. A successful run's application effects are not reserved: if that commit is refused for room, the run is an ownerless refusal (K-8), never a lost claim.
 
@@ -1172,13 +1187,13 @@ The store keeps `db.reserved`, the sum of R_t over Admitted claims. Its resident
 - **Membership.** The head keeps two in-memory maps (std `omap`):
   - **members**: claim key → (refusals u8, queued seq or none), one entry per Admitted claim that has become ownerless in this open or was found at open;
   - **fifo**: seq u64 → claim key, the queue in order; a claim has at most one fifo entry, named by its member's seq.
-  - The queue is filled at open from `claim_open`, and a claim is enqueued when it becomes ownerless in this open (its worker's commit was refused, RUNNER-SPEC H2's `Refused(c)`). Enqueueing a queued claim is a no-op.
+  - The queue is filled at open from `claim_open`, and a claim is enqueued when it becomes ownerless in this open (its worker's commit was refused, RUNNER-SPEC H2's `NoRoom(p, c)`). Enqueueing a queued claim is a no-op.
   - **It follows the durable lifecycle.** The commit that replies to a claim, by any worker (client-started or recovery), deletes its member and its fifo entry in the same step as the head's worker-table removal. A claim is therefore in the maps only while its row is Admitted, and their size is at most the number of Admitted rows, which is at most Σ `keys_max` over the bound ops' records (a removed op's rows are bound through `Retired`, and quotas never change for an `op`).
   - **Refusal count.** `refusals` stays with the member across dequeue, re-enqueue and client-started workers; a refused commit by any worker of the claim raises it. It is reset only by the next open.
 - **Its charge.** From std `omap`'s documented costs (api/omap.md): `new` allocates nothing, a node charges 104 B plus 32 slots of key and value, and owned payloads are charged with it. Leaves and branches are at least half full, so a map of n entries with slot sizes s_k and s_v and a payload of p bytes per entry charges at most C(n) = 2⌈n/16⌉ × (104 + 32 × (s_k + s_v)) + n × p. For **members** s_k = 24 (a `Bytes` header), s_v = 24 and p = 392 (the claim key); for **fifo** s_k = 8, s_v = 24 and p = 392. The head updates both with `insert_owned` while unshared, so no old version is retained. With n_r = Σ `keys_max` over the bound ops' records, the head reserves at open C_members(n_r) + C_fifo(n_r), plus the recovery timer child (T(0) and the timer's 4096-byte budget, as B-8 row 16a's deadline timer) and one more slot of the head's inbox for its tick. All of it is refunded when the head ends.
 - **Scheduling.** The head has a recovery timer child (the runner's timer pattern) that ticks every `recover_ms` (1000) into the head's inbox; a dropped tick is harmless because the next one comes. On a tick, and after each group, if no recovery run is in flight, the head takes the queue's front and clears its member's seq. Before starting, it checks afresh: the claim's row is Admitted (`claim_open` present in the head's current snapshot) and no worker holds it. If a worker holds it, the entry is dropped and the member stays (with its refusals) for that worker's outcome; if the row is no longer Admitted, the member is gone already (above). Otherwise the head starts one run. So recovery needs no client retry and no unrelated traffic.
 - **Run inputs.** A recovery run uses only the row's arguments and the op record's entry key, byte bound, step bound and `deadline_ms`, so it is bounded like any send. A send that arrives during it joins it.
-- **Fair retry.** If the run's commit is refused (`Refused(c)`), the claim goes to the back of the queue with its refusal count raised, so a refused front never blocks the claims behind it. At `recover_max` (3) refusals in one open, by any of its workers, the head commits the claim's reserved control-only reply `Failed(OutOfBytes(c))`, which K-7's terminal reserve guarantees fits. Retrying the same refused transition cannot supply missing room, so the bound is not a policy choice but the guarantee of progress.
+- **Fair retry.** If the run's commit is refused (`NoRoom(p, c)`), the claim goes to the back of the queue with its refusal count raised, so a refused front never blocks the claims behind it. At `recover_max` (3) refusals in one open, by any of its workers, the head commits the claim's reserved control-only reply `Failed(OutOfBytes(Room{requested, available}))`, the two numbers of the third refusal's `Capacity` as `serve` returned it with `NoRoom(p, c)` (STORE AM1; ATTACK-4 B7), which K-7's terminal reserve guarantees fits. Retrying the same refused transition cannot supply missing room, so the bound is not a policy choice but the guarantee of progress.
 - **A gone entry** (the op is `Retired`, or its entry key is not in this registry) gets the control-only `Failed(Gone)` reply from its reserve.
 - **The reply commit** writes the reply, `expires_ms`, the index entries and, on success, the body's effects atomically. An `Error` or a `Failed` is a control-only commit (K-4).
 - **A crash after the reply commit and before HTTP delivery** gives `Duplicate` on the retry.
@@ -1187,7 +1202,7 @@ The store keeps `db.reserved`, the sum of R_t over Admitted claims. Its resident
 ### K-9: Removing a keyed op
 
 A removed keyed op must still answer its live claims' retries, with the original status and body, until they expire.
-- **The program keeps a `Retired` binding** for the `op`: the same method and verifier (kind and sender names as the op record), a route whose captures are the record's `Path` fields, and no entry, fields or statuses. It routes on its route and the alias and runs its verifier.
+- **The program keeps a `Retired` binding** for the `op`: the same method and verifier (kind, namespace name and sender names as the op record; RUNNER-SPEC v2.18 M8, ATTACK-4 M6: a redeclaration under another namespace is refused **at open**, by K-1's comparison with its own op record, since `bind` runs before any store is open), a route whose captures are the record's `Path` fields, and no entry, fields or statuses. It routes on its route and the alias and runs its verifier.
 - **Retired preparation.** In place of B-2 step 3, it calls `runner.prepare_retired(record, a: Admitted, request) -> Result[Send, Refusal]`, which needs no registry entry and no decoder. It checks the op against `a`'s attenuation, as `prepare` checks the entry. It assembles the argument record from the path, query and body by the record's field mapping (B-4's forms and assembly; on the alias, `Path` fields come from the query, B-12), encodes it in declared field order with the record's argument schema inside `bound bytes arg_max`, refusing a value that does not fit the schema (400, `Bad.kind`), and computes `request_digest(record's entry key, those bytes)`. B-4's assembly reads only the schema and the mapping; the live path's decoder only validates the bytes it produced. So the bytes are canonical for the schema, and equal arguments give the original digest even after the entry and its decoder are gone. A `via` validator does not run; it ran when the claim was admitted, and a request whose bytes differ has another digest. It then checks the byte budget and the deadline against `a`'s arrival time, as `prepare` does. Its `Send` holds the record's entry key, the claim key (op, principal, key) in place of a stream key, the argument bytes, the digest, the budget and the deadline.
 - **The answer**, from the store, by K-5's order: liveness first, then digest. A live claim with another digest gets `RequestMismatch` (422). A live Replied claim with an equal digest gets `Duplicate`, rendered from the op record's result schema and statuses. A live Admitted claim with an equal digest is recovered (K-8) as a gone entry, and the send joins that run. An absent claim gets `Failed(Gone)` (B-7's 500 row) with nothing committed. It judges liveness at main's last committed `at`, so it relies on no time the store has not persisted, and it runs nothing.
 - **The open check.** At open, after `db.reserved` is rebuilt (K-7) and before any admission, recovery or sweep, when some op record's `op` is not bound, the head runs one commit on main that writes nothing and judges at its `at` (K-4); the store still writes that commit's frame, so the `at` the decision relies on is durable before the open proceeds. An unbound op with a live row (an Admitted row, or a Replied row not expired (K-5) at that `at`) refuses the open with `KeyedOpDropped(op, last_expiry_ms)`, where `last_expiry_ms` is `Never` when a row's expiry is `NEVER` or the row is Admitted. If the store refuses that commit for room, the open is refused with `Capacity(reserved)`, as K-7's reopen check. So a deploy can never silently strand a live claim, the error says when the `Retired` binding can be dropped, and a later wall-clock rollback cannot make an unbound op's rows live again: every later decision reads an `at` at least as large.
@@ -1202,6 +1217,8 @@ A removed keyed op must still answer its live claims' retries, with the original
 ## 5. Replay
 
 The provider tape stays authoritative (CAP-8, CAP-9).
+
+**Tapes hold credentials (RUNNER-SPEC v2.16 M5).** The Net and Random tapes are byte-exact, so they hold minted anonymous tokens and `Authorization` headers. They are **credential-bearing**: their files are readable only by their owner, and an export needs an explicit credentials flag. A tape is never redacted in place, because that would break replay. Routine logs and diagnostics name a session by its Caller, and never include Hello or Welcome bodies, token headers or Random deliveries. The keyed record's Caller is decoded by K-4's claim grammar, and K-8's ownerless recovery runs the policy with it.
 
 **The clock contract.** Every reading of time is an explicit, recorded provider read at a named point. No rule reuses a reading across operations, and no code reads time ambiently. Each `host.mono_ns` read is either a **set read**, which computes a deadline, or a **check read**, which tests one already set (HTTP-5). The named points are exhaustive for Part A:
 

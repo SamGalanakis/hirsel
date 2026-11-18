@@ -29,6 +29,8 @@ const GROWTH_RESERVE_FACTOR: usize = 8;
 const MIN_GROWTH_RESERVATION: usize = 256 * 1024;
 // Bound clean reservations and their external descriptors.
 const EMPTY_DEDICATED_LIMIT: usize = 8;
+// Detached empty slabs a parked task keeps, each with its header resident.
+const EMPTY_SLAB_LIMIT: usize = 8;
 const DEDICATED_PURGE_DELAY: Duration = Duration::from_millis(100);
 const MAX_RETAINED_DEDICATED_BYTES: usize = 4 * 1024 * 1024;
 const SLAB_BINS: usize = size_bin(SLAB / 2) as usize + 1;
@@ -417,7 +419,7 @@ impl Page {
 #[derive(Default)]
 pub(crate) struct Heap {
     locked: AtomicBool,
-    /// `State::listed` is not empty.
+    /// `State::listed` is not empty, or detached empty slabs exceed `EMPTY_SLAB_LIMIT`.
     pending: AtomicBool,
     state: std::cell::UnsafeCell<State>,
 }
@@ -450,7 +452,7 @@ impl Drop for Locked<'_> {
 struct State {
     closed: bool,
     ready: [[Option<PagePointer>; SLAB_BINS]; 3],
-    empty_slabs: Vec<PagePointer>,
+    empty_slabs: VecDeque<PagePointer>,
     dedicated: DedicatedCache,
     /// Spread pages to purge when the task parks.
     listed: Vec<PagePointer>,
@@ -479,7 +481,7 @@ impl Default for State {
         Self {
             closed: false,
             ready: [[None; SLAB_BINS]; 3],
-            empty_slabs: Vec::new(),
+            empty_slabs: VecDeque::new(),
             dedicated: DedicatedCache::default(),
             listed: Vec::new(),
             nurseries: HashMap::new(),
@@ -580,7 +582,7 @@ impl State {
 
     fn cached(&mut self, class: Class) -> Option<PagePointer> {
         if class.fits_slab() {
-            return self.empty_slabs.pop();
+            return self.empty_slabs.pop_back();
         }
         self.dedicated.take(class)
     }
@@ -823,6 +825,8 @@ impl Heap {
             }
             #[cfg(not(feature = "memcheck"))]
             let _ = bytes;
+            #[cfg(not(any(test, feature = "charge-observation", feature = "memcheck")))]
+            let _ = class;
             #[cfg(any(test, feature = "charge-observation"))]
             crate::peak::allocated(pointer.as_ptr(), class.stride);
             pointer
@@ -923,13 +927,15 @@ impl Heap {
             slots.bump = end - slots.first.addr().get();
             slots.live += 1;
             slots.limit = slots.live;
-            let pointer = slots.first.with_addr(
-                std::num::NonZeroUsize::new_unchecked(start + class.offset()),
-            );
+            let pointer = slots.first.with_addr(std::num::NonZeroUsize::new_unchecked(
+                start + class.offset(),
+            ));
             #[cfg(feature = "memcheck")]
             allocation_check::allocated(pointer, bytes, class.kind);
             #[cfg(not(feature = "memcheck"))]
             let _ = bytes;
+            #[cfg(not(any(test, feature = "charge-observation", feature = "memcheck")))]
+            let _ = class;
             #[cfg(any(test, feature = "charge-observation"))]
             crate::peak::allocated(pointer.as_ptr(), class.stride);
             Some(pointer)
@@ -942,7 +948,8 @@ impl Heap {
         self.pending.load(Ordering::Relaxed)
     }
 
-    /// Return the listed pages' native pages that hold no live slot.
+    /// Return the listed pages' native pages that hold no live slot, and
+    /// unmap the oldest detached empty slabs beyond `EMPTY_SLAB_LIMIT`.
     #[cold]
     #[inline(never)]
     pub(crate) fn purge(&self) {
@@ -955,6 +962,12 @@ impl Heap {
             unsafe { purge(page) };
         }
         state.listed = listed;
+        while state.empty_slabs.len() > EMPTY_SLAB_LIMIT {
+            let oldest = state.empty_slabs.pop_front().unwrap();
+            // SAFETY: the cache held the empty slab's only reference, and the
+            // purge list, just emptied, no longer names it.
+            unsafe { Page::destroy(oldest) };
+        }
     }
 
     /// Retire the task's cache; pages with transferred blocks keep their heap
@@ -1248,9 +1261,8 @@ unsafe fn purge(page: PagePointer) {
         let mut run: Option<usize> = None;
         let pages = spread.touched.div_ceil(native).min(SLAB / native);
         for at in 1..=pages {
-            let returned = at < pages
-                && keep & (1 << at) == 0
-                && u32::from(slots.discarded) & (1 << at) == 0;
+            let returned =
+                at < pages && keep & (1 << at) == 0 && u32::from(slots.discarded) & (1 << at) == 0;
             if at < pages && keep & (1 << at) == 0 && at * native < live_end {
                 lost |= 1 << at;
             }
@@ -1362,7 +1374,11 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
             if !was_full {
                 state.unlink(page, class);
             }
-            state.empty_slabs.push(page);
+            state.empty_slabs.push_back(page);
+            if state.empty_slabs.len() > EMPTY_SLAB_LIMIT {
+                // A running task reuses its burst's slabs; it trims them when it parks.
+                state.0.pending.store(true, Ordering::Relaxed);
+            }
         }
     }
 }

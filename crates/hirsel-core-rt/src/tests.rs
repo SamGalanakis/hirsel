@@ -660,13 +660,22 @@ fn purged_slab_pages_keep_survivors_and_hand_each_slot_out_once() {
     let write = |block: &Block, value: u64| {
         for word in 0..WORDS {
             // SAFETY: a live 40-byte block has five aligned writable words.
-            unsafe { block.pointer().cast::<u64>().add(word).write(value + word as u64) };
+            unsafe {
+                block
+                    .pointer()
+                    .cast::<u64>()
+                    .add(word)
+                    .write(value + word as u64)
+            };
         }
     };
     let read = |block: &Block, value: u64| {
         for word in 0..WORDS {
             // SAFETY: as above.
-            assert_eq!(unsafe { block.pointer().cast::<u64>().add(word).read() }, value + word as u64);
+            assert_eq!(
+                unsafe { block.pointer().cast::<u64>().add(word).read() },
+                value + word as u64
+            );
         }
     };
     let fill = |count: u64, base: u64| -> Vec<_> {

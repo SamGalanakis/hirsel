@@ -217,6 +217,10 @@ impl<'context> Module<'context> {
                 }
                 function = LLVMGetNextFunction(function);
             }
+            unsafe extern "C" {
+                fn hirsel_llvm_fixed_width_checks(module: LLVMModuleRef);
+            }
+            hirsel_llvm_fixed_width_checks(self.raw);
             let mut error = LLVMRunPasses(self.raw, pipeline.as_ptr(), machine.raw, options);
             if error.is_null() {
                 unsafe extern "C" {

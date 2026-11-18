@@ -26,6 +26,7 @@ extern void hirsel_llvm_share_cold_sites(void *module);
 extern void hirsel_llvm_share_cold_step_sync(void *module, void *machine);
 extern void hirsel_llvm_reuse_step_flags(void *module);
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
+extern void hirsel_llvm_fixed_width_checks(void *module);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
 typedef struct { const uint8_t *data; size_t len; LLVMModuleRef module; } HirselLlvmUnit;
@@ -659,6 +660,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         const char *pipeline = export_count
             ? "globaldce,function(sroa),hotcoldsplit,default<O3>"
             : "function(sroa),hotcoldsplit,default<O3>";
+        hirsel_llvm_fixed_width_checks(module);
         LLVMErrorRef e = LLVMRunPasses(module, pipeline, machine, options);
         if (!e) {
             hirsel_llvm_mark_loop_callbacks(module);

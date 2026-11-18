@@ -26,12 +26,41 @@
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/PatternMatch.h>
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Transforms/Utils/FunctionComparator.h>
 using namespace llvm;
 using hirsel_llvm::versionLoop;
+
+// Keep the width guard and let LICM hoist the limit when the length is
+// invariant. The subtraction wraps on the rejected short-buffer path.
+extern "C" void hirsel_llvm_fixed_width_checks(void *Raw) noexcept {
+  using namespace llvm::PatternMatch;
+  for (Function &F : *static_cast<Module *>(Raw))
+    for (BasicBlock &BB : F) {
+      auto *Branch = dyn_cast<CondBrInst>(BB.getTerminator());
+      if (!Branch) continue;
+      Value *End, *Length, *Sum, *Start;
+      auto *Condition = Branch->getCondition();
+      // CoreIR booleans are bytes until LLVM promotes the branch condition.
+      auto Within = m_ZExt(m_SpecificICmp(ICmpInst::ICMP_ULE, m_Value(End), m_Value(Length)));
+      auto NoOverflow = m_c_Xor(
+          m_ZExt(m_SpecificICmp(ICmpInst::ICMP_ULT, m_Value(Sum), m_Value(Start))), m_One());
+      if (!match(Condition, m_SpecificICmp(ICmpInst::ICMP_NE, m_c_And(Within, NoOverflow), m_Zero())) ||
+          End != Sum) continue;
+      const APInt *Width;
+      if (!match(End, m_Add(m_Specific(Start), m_APInt(Width))) ||
+          Width->isZero()) continue;
+      IRBuilder<> B(Branch);
+      Value *Fixed = ConstantInt::get(End->getType(), *Width);
+      Value *HasWidth = B.CreateICmpUGE(Length, Fixed);
+      Value *Limit = B.CreateSub(Length, Fixed);
+      Branch->setCondition(B.CreateAnd(HasWidth, B.CreateICmpULE(Start, Limit)));
+      RecursivelyDeleteTriviallyDeadInstructions(Condition);
+    }
+}
 
 static bool versionCopy(Loop &L, LoopInfo &LI, DominatorTree &DT,
                         ScalarEvolution &SE, AAResults &AA) {

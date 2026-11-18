@@ -422,3 +422,66 @@ fn repair_stops_new_faults_and_drains_queues() {
     assert_eq!(m.queued_bytes(c), [0; 3]);
     close(&m, [l, c, s]);
 }
+
+#[test]
+fn omitting_the_trace_preserves_prefix_and_seed_choices() {
+    let recorded = Model::new(Config {
+        prefix: BTreeMap::from([(Choice::Send, vec![0; 19]), (Choice::Receive, vec![0; 19])]),
+        seed: 73,
+        ..Config::default()
+    });
+    let unrecorded = Model::new(Config {
+        prefix: BTreeMap::from([(Choice::Send, vec![0; 19]), (Choice::Receive, vec![0; 19])]),
+        seed: 73,
+        record_decisions: false,
+        ..Config::default()
+    });
+    let kinds = [
+        Choice::Send,
+        Choice::Receive,
+        Choice::Delivery,
+        Choice::Fault,
+    ];
+    for i in 0..10000 {
+        let kind = kinds[i % kinds.len()];
+        let alternatives = 1 + i % 127;
+        assert_eq!(
+            recorded.choose(kind, alternatives),
+            unrecorded.choose(kind, alternatives)
+        );
+    }
+    assert_eq!(
+        recorded.decisions().values().map(Vec::len).sum::<usize>(),
+        10000
+    );
+    assert!(unrecorded.decisions().is_empty());
+    // The setting also preserves actual short IO, not just harness choices.
+    let a = pair(&recorded);
+    let b = pair(&unrecorded);
+    assert_eq!(a, b);
+    let mut sent = 0;
+    let mut received = vec![];
+    let input = b"one complete message over many bounded short IO attempts";
+    while received.len() < input.len() {
+        if sent < input.len() {
+            let left = recorded.attempt(Operation::Send(a.1), &input[sent..], 0, 10);
+            let right = unrecorded.attempt(Operation::Send(b.1), &input[sent..], 0, 10);
+            assert_eq!(left, right);
+            if let Some(reply) = left {
+                sent += reply.value as usize;
+            }
+        }
+        assert_eq!(recorded.poll(None, true), unrecorded.poll(None, true));
+        let left = recorded.attempt(Operation::Recv(a.2), &[], 13, 11);
+        let right = unrecorded.attempt(Operation::Recv(b.2), &[], 13, 11);
+        assert_eq!(left, right);
+        if let Some(reply) = left {
+            received.extend(reply.bytes);
+        }
+        assert_eq!(recorded.now(), unrecorded.now());
+    }
+    assert_eq!(received, input);
+    close(&recorded, [a.0, a.1, a.2]);
+    close(&unrecorded, [b.0, b.1, b.2]);
+    assert!(unrecorded.decisions().is_empty());
+}

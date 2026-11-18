@@ -14,7 +14,9 @@ readable queue independently and varies legal send/receive prefixes. Partition
 acts on one send direction; reset discards undelivered bytes and preserves
 readable bytes. A write-half release enables EOF after preceding bytes drain.
 
-The harness records every byte-prefix and fault choice. Replaying a decision
+The harness records every byte-prefix and fault choice by default. A long law
+that does not consume that trace may set `record_decisions` to false; its prefix
+and seed still select exactly the same choices. Replaying a decision
 prefix uses the same stable model handles; the remaining choices use the seed.
 `poll` advances idle time to the next scheduled delivery, fault or deadline.
 `repair` stops faults and repairs directions; callers then drain or signal every

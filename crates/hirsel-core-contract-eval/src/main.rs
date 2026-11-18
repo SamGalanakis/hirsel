@@ -154,7 +154,16 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
                         .map_err(|_| "invalid net rule")
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut net = eval::Network::default();
+            // These laws observe runner events, not the network explorer's
+            // per-byte choice trace. Keep identical prefixes and seed choices.
+            let model = hirsel_core_net::model::Model::new(hirsel_core_net::model::Config {
+                record_decisions: false,
+                ..Default::default()
+            });
+            let mut net = eval::Network {
+                grants: Default::default(),
+                sockets: hirsel_core_net::Sockets::with_model(model),
+            };
             net.grants.insert(0, rules);
             Some(net)
         } else {

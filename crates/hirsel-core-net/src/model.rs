@@ -24,6 +24,8 @@ pub struct Config {
     pub seed: u64,
     /// Zero-based choices. Unspecified suffix choices come from the seed.
     pub prefix: BTreeMap<Choice, Vec<usize>>,
+    /// Keep the schedule for prefix exploration. Long laws may omit the trace.
+    pub record_decisions: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -34,6 +36,7 @@ impl Default for Config {
             latency_ns: 0,
             seed: 1,
             prefix: BTreeMap::new(),
+            record_decisions: true,
         }
     }
 }
@@ -149,6 +152,7 @@ struct State {
     port: u16,
     random: [SplitMix64; Choice::COUNT],
     decisions: BTreeMap<Choice, Vec<Decision>>,
+    choice_indices: [usize; Choice::COUNT],
     liveness: bool,
     records: BTreeMap<u64, Record>,
     connections: BTreeMap<u64, Connection>,
@@ -176,6 +180,7 @@ impl Model {
             port: 49152,
             random,
             decisions: BTreeMap::new(),
+            choice_indices: [0; Choice::COUNT],
             liveness: false,
             records: BTreeMap::new(),
             connections: BTreeMap::new(),
@@ -322,22 +327,25 @@ impl State {
         if kind == Choice::Fault && self.liveness {
             return 0;
         }
-        let decisions = self.decisions.entry(kind).or_default();
+        let index = &mut self.choice_indices[kind as usize];
         let selected = self
             .config
             .prefix
             .get(&kind)
-            .and_then(|prefix| prefix.get(decisions.len()))
+            .and_then(|prefix| prefix.get(*index))
             .copied()
             .unwrap_or_else(|| self.random[kind as usize].choose(alternatives));
         assert!(
             selected < alternatives,
             "choice prefix outside this branch's bounds"
         );
-        decisions.push(Decision {
-            alternatives,
-            selected,
-        });
+        *index = index.checked_add(1).expect("model choice index exhausted");
+        if self.config.record_decisions {
+            self.decisions.entry(kind).or_default().push(Decision {
+                alternatives,
+                selected,
+            });
+        }
         selected
     }
     fn key(&mut self) -> u64 {

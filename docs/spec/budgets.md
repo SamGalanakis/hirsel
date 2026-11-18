@@ -118,6 +118,8 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | `Latest` root | 32 |
 | `log.new` node | 24 |
 | a log's entries | as `List[E]` storage |
+| a flow port | `cap × (16 + size(T)) + 64`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
+| a flow stage | `m + size(X) + 320`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
 | `isolate` | 32 for its cause cell, from the current limit (inside a finalizer, its grant); refunded when `body` returns, and when a caught failure leaves the current obligation's cell unused ([FAIL-16](failure.md#fail-16-isolation)) |
 
 `list.new`, `string.new`, `map.new`, `deque.new`, `heap.new`, `list.with_capacity(0)` and an empty span builder
@@ -129,14 +131,14 @@ selected value's bytes when its type is streamable and the whole copied blob oth
 Creating a resource admits its cause cell, and can therefore fail with `Capacity`; then
 nothing was admitted, so nothing is refunded, and the literal's fields come back in its
 error ([T1.2](ownership.md#own-26-the-transition-table)). This holds unless
-it is **mechanical**: its cleanup can never add a cause. Exactly five resources are
-mechanical, and they have no cause cell: `Sender`, `Receiver`, `Task`, `Latest` and
-`HostFile`. The first four run no finalizer; their cleanup closes a channel, ends a child
-(CONC-8) or releases a `Latest` root (CONC-13), and
-a cause raised while it drops queued items or a result goes into the cell of the value whose
-finalizer raised it. `HostFile`'s finalizer closes the host file and ignores the outcome
-([core](core.md)). Every other resource, and every capability that is a
-resource, admits its cell; `channel.sender` and `latest.handle` admit nothing.
+it is **mechanical**: its cleanup can never add a cause. These mechanical resources have no cause cell: `Sender`, `Receiver`, `Task`,
+`Latest`, `Flow`, `HostFile`, `Tape` and the four socket resources described in
+[Net](net.md). The channel and task handles close a channel or end a child. A `Latest`
+handle releases its root. If cleaning a queued item or result raises a cause, the
+value's finalizer owns that cause. A `Flow` discards its entries and refunds every
+charge during cleanup. Its stages run no user cleanup ([CONC-14](tasks.md#conc-14-flows)).
+`HostFile` closes the host file and ignores the outcome. Other resources admit their
+cells. `channel.sender` and `latest.handle` admit nothing.
 
 Sizes are logical, never an engine's: scalars are their widths, `bool` 1, `char` 4, `()` 0; a
 record or tuple is the sum of its fields; a variant type, plain or own, is 8 plus its largest
@@ -274,9 +276,13 @@ is core's plain record `{ steps: u64 }`.
   bound stops a task follows from that task's source and values alone. The steps a run takes under a bound
   of `n` are at most `n` for each task spawned under it, and the limits that admit those tasks bound how
   many there are. `main` and a task spawned with no bound current take steps under none.
+  A flow stage ([CONC-14](tasks.md#conc-14-flows)) copies the owner's remaining steps at
+  `flow.stage`. Each item uses a fresh bound of `k` within that copy. The copy refuses
+  entry when fewer than `k` remain. The stage state is an input value of this bound.
 - **Slices.** While a step bound is current, every 65,536th step a task takes under it is a
   **slice end**: an event ([CONC-10](tasks.md#conc-10-event-order)) at which the scheduler may
-  run another task. It is not a cancellation point and changes nothing else, so code under a
+  run another task. A flow stage has no event at its slice end. A task's slice end observes
+  no cancellation and changes nothing else, so code under a
   bound that computes for long does not keep the tasks it does not wait for from running.
 - **Determinism.** Which steps a run takes, where a bound stops it and where its slices end
   depend only on its source and the values at its replay point

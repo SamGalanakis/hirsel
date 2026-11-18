@@ -238,6 +238,8 @@ writes one line to stderr, `run stop: ` and the stop's name
 | the host refuses the signal stack, a signal action, the clock or the page size | `SignalStack`, `Signal`, `Clock`, `PageSize` |
 | a host provider lacks one of its five callbacks when the run installs it, before `main`, or answers a `wait` or step kind outside the provider ABI | `Provider` |
 
+A flow operation ends at its closure ([CONC-14](tasks.md#conc-14-flows)). The `Deadlock` rule does not count its owner as waiting.
+
 Termination by the host writes nothing and its status is the host's.
 
 ### FAIL-16: Isolation

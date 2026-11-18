@@ -31,6 +31,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `tape`, `port` | not yet in the core source | CAP-9 |
 | `log` | [log](../../core/core/log.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
+| `flow` | [flow](../../core/core/flow.hirsel) | CONC-14 |
 | `args`, `host`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [host](../../core/core/host.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5 |
 
 A library module may extend a core module by name (LANG-7).
@@ -80,6 +81,8 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | `Task[R]` | resource, mechanical | none | 8 | resource, and R's |
 | `Sender[T]`, `Receiver[T]` | resource, mechanical | `send` | 24 | resource |
 | `Latest[T]` | resource, mechanical | `send` | 8 | resource |
+| `Flow` | resource, mechanical | none | 8 | resource |
+| `Sink[T]`, `Into[T]`, `Port[T]` | plain | `shareable`, `send` | 8 | nothing |
 | `HostFile` | resource, mechanical | `send` | 8 | resource |
 | `Socket`, `ReadHalf`, `WriteHalf`, `Listener` | resource, mechanical | `send` | 8 | resource |
 | `Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Env`, `Process`, `Tasks` | plain | `shareable`, `send` | 8 | capability |
@@ -88,6 +91,13 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | `Causes` | own | `send` | 8 | opaque owner |
 | `Log[E]` | own | none | 8 | opaque owner, and E's |
 | `StaticFn[F]` | plain | `shareable`, `send`, `key` | 8 | nothing |
+
+Flow endpoints are usable with the flow that created them. `Wire` has cases
+`Foreign`, `Started`, `Zero` and `Refused(Capacity)`. `Push[T]` has cases `Ok`,
+`Ended(T)`, `Order(T)`, `Closed(T)` and `Stalled(T)`. `Pull[T]` has cases
+`Item(key, from, x)`, `Dropped(from, at)`, `End` and `Stalled`. `Halt` has cases
+`OutOfTime` and `Failed`. These types are plain enums. `Failure` is a plain struct
+with fields `stage`, `key` and `halt`.
 
 `Args` designates the entry arguments, which are host memory outside every limit, immutable
 and live for the run; `args.get` returns a view of one. `Causes` owns its chain's cause

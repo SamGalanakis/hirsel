@@ -7,8 +7,8 @@ created only through a `Tasks` capability ([CAP-1](capabilities.md#cap-1-authori
 A task's handle is a resource that is not `send`, so it stays in the task that spawned it,
 and a task ends only after cleaning its handles (CONC-8): no task outlives its spawner.
 A value passes from one task to another only by moving through a spawn, a channel or a
-join. The only program memory two tasks can both read is the immutable payload of an `Arc`
-(CONC-11). Whether tasks run in parallel is the engine's choice and is not observable,
+join. A flow stage ([CONC-14](#conc-14-flows)) receives and sends plain values through its flow's ports. The only program memory two tasks can both read is the immutable payload of an `Arc`
+(CONC-11). Whether tasks and stages run in parallel is the engine's choice and is not observable,
 except in a run that CONC-10 leaves unspecified.
 
 ### CONC-2: The send bound
@@ -129,7 +129,7 @@ while it waits in progress for readiness, through its provider's abort, whose re
 operation's `Aborted` error; the request stays pending and is observed at the next
 cancellation point. An operation that does not wait after issue is reached only at issue,
 and no host operation of v1 waits after issue.
-A user function declared `waits` is not itself a cancellation point. Observing it is a failure with cause `Cancelled`
+A user function declared `waits` is not itself a cancellation point. A flow operation ends at its closure within the stages' step bounds and observes no cancellation. A task looping over flow operations observes cancellation only where it reaches an explicit cancellation point. Observing a request is a failure with cause `Cancelled`
 ([FAIL-2](failure.md#fail-2-causes)), which runs the task's cleanup. Pure code is never
 cancelled. A step bound may stop it, and the scheduler may run another task at its slice
 ends ([MEM-30](budgets.md#mem-30-step-bounds)); neither is a cancellation point. A **shield**, a finalizer
@@ -169,7 +169,7 @@ creation, share, release, `try_unwrap` and `with_unique` test, and every admissi
 ([MEM-21](budgets.md#mem-21-admission)). Each operation observes the state that the order gives.
 That list follows one rule: an operation whose result can depend on the order of tasks is
 an event, and one whose result cannot, such as a change to a value only its own task
-reaches, is not. So only events need sequencing when tasks run in parallel, and no
+reaches, is not. Stage steps are private. The only owner flow operations in the event order are wiring refusals that return `Capacity` ([CONC-14](#conc-14-flows)). So only events need sequencing when tasks run in parallel, and no
 operation observes a state that no prefix of the order gives: no weaker ordering is
 visible.
 The order is chosen by the scheduler provider at the replay point
@@ -265,4 +265,101 @@ fn reload(h: Latest[Config], take c: Config) -> Result[(), Capacity] {
   match arc.new(take c) { Ok(take a) => { latest.publish(h, take a); Ok(()) }, Error((e, _)) => Error(e) }
 }
 fn routes(h: Latest[Config]) -> u64 { let c = latest.read(h); list.len(c.routes) }
+```
+
+### CONC-14: Flows
+
+
+A **flow** is a resource, held by the task that made it (its **owner**), that runs a fixed graph of
+**stages** joined by **ports**. Items, and the state of each stage, are `plain + codec`
+([OWN-4](ownership.md#own-4-bounds)) and hold nothing ([OWN-2](ownership.md#own-2-type-summaries)), whatever
+their `via`. A type argument that holds something is refused. A port moves an item by copying its plain
+representation.
+
+**Wiring.** The owner wires the graph from its end backwards. `flow.sink(mut f)` makes a merge that the
+owner reads, and returns it with an `Into[T]` naming that merge. `flow.stage(mut f, to, cap, bytes m,
+steps k, x, body)` adds a stage whose one output is a new port of `cap` slots into `to`, and returns the
+stage's input merge as an `Into[A]`. `flow.port(mut f, to, cap)` adds a port into `to` that the owner
+writes. A port's index in its merge is its creation order there, and stages are numbered from 0 in
+creation order. Wiring returns `Err(Foreign)` for a handle of another flow, `Err(Zero)` for `cap = 0`
+and `Err(Refused(Capacity))` when the charge is refused. The owner's first `push`, `advance`, `end` or
+`next` **seals** the flow, and wiring after it returns `Err(Started)`. A handle of another flow in any
+other flow operation fails the owner with `Bounds`.
+
+**Charges.** Each port charges `cap × (16 + size(T)) + 64` bytes, and each stage `m + size(X) + 320`,
+to the current limit ([MEM-21](budgets.md#mem-21-admission)). Each charge is refunded to the record it
+was charged to when the flow is cleaned ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)). A
+total above the largest `u64` is refused as a request of that largest value.
+
+**Bodies.** `body` is a `StaticFn` in the **transform fragment**. Its **reach** is the instance set that
+its revision covers ([PROG-9](programs.md#prog-9-code-descriptors)). No instance in the reach is `waits`, no
+expression in it has a type that holds a resource or a capability, and no call in it goes through a
+callable value (`code.callable`, or a parameter, field or local of callable type) other than a closure
+written inside the reach. `flow.stage` refuses any other body, and a body whose reach PROG-9 cannot
+close. A stage is not a task ([CONC-1](#conc-1-tasks)): it has no handle, and
+its `task.check_cancel()` finds no request.
+
+**Ports.** A port holds, in order, items `(key, x)`, frontier marks and at most one terminal, with
+non-decreasing keys; its **bound** is the key of its last entry, or 0. `push(p, key, x)` below the
+bound returns `Order(x)`. `advance(p, k)` above the bound appends a mark at `k`. The operation `end(p)`, or a failure
+of its writer, appends the terminal `End` at the bound or `Dropped(from, at)` at `at`. A port is
+**ended** once it has a terminal. Pushing to it returns `Ended(x)`. An advance or repeated end leaves it ended. A
+port of `cap` slots gives its `i`th item the slot that the reader's take of item `i − cap` from that
+port frees. A reader that stops after taking `t` items from a port, the failing or refused one counted
+on its own port, is **gone** for that port, and the port's `i`th push then returns `Closed(x)` exactly
+when `i > t + cap`, with no free slot needed. A push reports `Ended`, then
+`Order`, then `Closed`.
+
+**Merges.** A port's **lower bound** is the key of its first entry, or its bound if it is empty. A merge
+delivers the first entry of port `i`, at key `k`, when every other port `j` that has not given its
+terminal has a lower bound above `k` for `j < i`, or at least `k` for `j > i`. A `Dropped` terminal is
+delivered once, in place, and the merge gives `End` once every port has given its terminal. The owner's
+`next` skips marks and returns `End` every time after the first `End`.
+
+**Stage steps.** A **step** of a stage takes its merge's next deliverable entry and completes it. An
+item runs `body(take x, key, a)` under a fresh `bound steps k` within a copy of the owner's remaining
+steps made at `flow.stage`, which refuses entry when fewer than `k` remain, and with temporaries charged
+to the stage's own limit of `m` bytes. It returns the next `x` and an `Option`: `Some(b)` is pushed at
+the same key, and `None` appends a mark there. A mark is passed on as a mark. The stage's **position** is
+the key of the last entry it completed. When its merge gives `End`, the stage ends its port. When an item
+fails, its merge gives `Dropped`, or its own push gives `Closed`, the stage stops. A failing item at key
+`k` ends its port with `Dropped(i, k)`, where `i` is the port's index, and a delivered `Dropped(from, at)`
+ends it with `Dropped(i, at)`. Every position below `at` is complete. Only the first
+counts as the stage failing, with `halt` `OutOfTime` (`k` or the copy ran out) or `Failed`. A refused
+admission is a value the body handles. Leaving it unhandled fails in the ordinary way.
+
+**The fixed point.** Steps of different stages commute, except that a mark may replace an unread mark,
+which no answer reads. So taking steps until none is possible reaches, up to marks,
+one state, the **closure**. Every owner operation acts on the closure of the state its earlier
+operations left: `push` gives `Ok`, or `Stalled(x)` when the closure has no free slot. `next` gives the
+sink's next item, `Dropped` or `End`, or `Stalled` when the closure has none. `flow.finish(take f)` ends
+the owner's live ports, takes the closure discarding every entry that reaches a sink, refunds every
+charge, and returns `Ok(())` or `Err(Failure { stage, key, halt })` for the lowest-numbered stage that
+failed, with the failing item's key. Cleaning a flow without `finish` may skip remaining steps. It refunds every charge and has no result.
+
+Every answer depends only on the owner's operations and is identical at every degree of parallelism.
+A wiring refusal that returns `Capacity` is the flow's only event ([CONC-10](#conc-10-event-order)).
+Flow operations end within bounded steps and observe no cancellation ([CONC-7](#conc-7-cancellation-points)).
+An owner that loops over flow operations checks for cancellation at an explicit cancellation point.
+
+```hirsel
+fn double(take seen: u64, key: u64, x: u64) -> (u64, Option[u64]) {
+  (seen + 1, Some(x * 2))
+}
+fn run() -> Result[u64, Wire] waits {
+  let mut f = flow.new();
+  let (s, out): (Sink[u64], Into[u64]) = flow.sink(mut f)?;
+  let into = flow.stage(mut f, out, 4, bytes 256, steps 1000, 0, code.describe(double))?;
+  let p = flow.port(mut f, into, 4)?;
+  flow.push(mut f, p, 1, 20); flow.push(mut f, p, 2, 1); flow.end(mut f, p);
+  let mut sum: u64 = 0;
+  loop {
+    match flow.next(mut f, s) {
+      Item(key: _, from: _, x: x) => { sum += x },
+      _ => break,
+    }
+  }
+  match flow.finish(take f) { _ => () }
+  Ok(sum)                                                  // 42, at every worker count
+}
 ```

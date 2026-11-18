@@ -104,8 +104,12 @@ fn f(x: u64) -> u64 { let x = x + 1; x }                  // refused: LANG-7, sh
 Every top-level function writes a complete signature: parameter names, modes and types,
 the result type and its anchors ([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)),
 `waits` and region outlives clauses ([MEM-6](memory.md#mem-6-roots)). Checking a body reads that body, the signatures and type
-summaries ([OWN-2](ownership.md#own-2-type-summaries)) it names, and nothing else: no fact is
-inferred from another body, and no check revisits a definition after its callers are seen.
+summaries ([OWN-2](ownership.md#own-2-type-summaries)) it names. Ordinary calls take their
+checking facts from the callee's signature.
+The transform-fragment check for a `StaticFn` given to `flow.stage`
+([CONC-14](tasks.md#conc-14-flows)) also reads each body in the instance set
+[PROG-9](programs.md#prog-9-code-descriptors) defines. Editing a dependency's body
+can therefore refuse that call.
 A closure writes its parameter types; its result type may be omitted when the expected
 type gives it.
 
@@ -118,7 +122,8 @@ declared `waits` without such a call is refused too. Cleanup never counts: final
 cleanup of task handles run shielded and observe no cancellation
 ([FAIL-11](failure.md#fail-11-resources), [CONC-8](tasks.md#conc-8-abandoned-handles)), so a
 finalizer may call `waits` operations without being marked, and no implicit cleanup makes a
-function `waits`.
+function `waits`. A flow transform's reach holds no resource, so its implicit cleanup
+runs no user code.
 
 A body that does not have its declared result type is refused by LANG-11, at the
 expression that has the wrong type.

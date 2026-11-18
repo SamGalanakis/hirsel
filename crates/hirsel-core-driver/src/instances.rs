@@ -84,6 +84,7 @@ pub fn collect_instances(
 /// its record instead.
 #[derive(Default)]
 pub(crate) struct InstanceSet {
+    flow_revisions: Option<Arc<std::collections::BTreeMap<Identity, ContentHash>>>,
     rows: std::collections::BTreeMap<Identity, usize>,
     bodies: Vec<InstanceBody>,
     /// Each walked instance's key and the store its record lives in, when the
@@ -313,7 +314,12 @@ impl InstanceSet {
         described
             .into_iter()
             .map(|identity| {
-                let revision = self.revision(&identity, prior)?;
+                let revision = self
+                    .flow_revisions
+                    .as_ref()
+                    .and_then(|checked| checked.get(&identity))
+                    .copied()
+                    .or_else(|| self.revision(&identity, prior))?;
                 Some((identity, revision))
             })
             .collect()
@@ -390,6 +396,7 @@ impl CheckProduct {
         records: Option<(&Records, Expand<'_>)>,
         mut observe: impl FnMut(&Identity, &'static str),
     ) -> Result<Vec<Identity>, InstanceStop> {
+        instances.flow_revisions = self.flow_revisions.clone();
         let mut resolver = Resolver::default();
         collect_instances(roots, limit, |key| {
             self.instance_step(key, instances, records, &mut resolver, &mut observe)

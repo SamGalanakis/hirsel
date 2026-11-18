@@ -929,4 +929,41 @@ mod tests {
             assert!(runs > 1, "{mode:?} must exercise competing enabled steps");
         }
     }
+
+    #[test]
+    fn finish_reports_the_same_failure_before_or_after_advance_has_run_the_item() {
+        use crate::schedule_script::{FlowMode, ScheduleScript};
+        use std::sync::{Arc, atomic::AtomicUsize};
+
+        for (mode, before_finish) in [(FlowMode::Eager, 1), (FlowMode::Lazy, 0)] {
+            let script = Arc::new(ScheduleScript::new(0).with_flow_mode(mode));
+            script.install(|| {
+                let context = crate::Context::new(900);
+                let calls = Arc::new(AtomicUsize::new(0));
+                let observed = Arc::clone(&calls);
+                let mut flow = Reference::<u64>::default();
+                let sink = flow.sink().unwrap();
+                let into = flow
+                    .stage(&context, sink, 1, words(), move |_, _, value| {
+                        observed.fetch_add(1, Ordering::Relaxed);
+                        100u64.checked_div(*value).map(Some).ok_or(Halt::Failed)
+                    })
+                    .unwrap();
+                let p = flow.port(&context, into, 1, 8).unwrap();
+                assert_eq!(flow.push(p, 7, 0), Ok(()));
+                flow.advance(p, 8).unwrap();
+                assert_eq!(calls.load(Ordering::Relaxed), before_finish);
+                assert_eq!(
+                    flow.finish(),
+                    Err(Failure {
+                        stage: 0,
+                        key: 7,
+                        halt: Halt::Failed
+                    })
+                );
+                assert_eq!(calls.load(Ordering::Relaxed), 1);
+                assert_eq!(context.available(), 900);
+            });
+        }
+    }
 }

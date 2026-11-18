@@ -1,13 +1,13 @@
 //! CONC-14 checks the same instantiated edges that supply a PROG-9 revision.
 use super::*;
-use crate::instances::{InstanceSet, InstanceStop, collect_instances};
+use crate::instances::InstanceSet;
 use hirsel_core_ir::{Closure, RevisionRoot};
 use hirsel_core_layout::{Body, FieldTy, Handle, Repr};
 use hirsel_core_materialize::Resolver;
 
 impl CheckProduct {
     pub(crate) fn flow_refusals(
-        &self,
+        &mut self,
         mut bind: impl FnMut(&DefinitionProduct, &mut Site),
     ) -> Vec<Refusal> {
         let mut diagnostics = Vec::new();
@@ -18,9 +18,9 @@ impl CheckProduct {
                     continue;
                 };
                 let message = checked
-                    .entry(root)
-                    .or_insert_with(|| self.fragment_refusal(root));
-                if let Some(message) = message {
+                    .entry(root.clone())
+                    .or_insert_with(|| self.fragment_revision(root));
+                if let Err(message) = message {
                     let mut site = *site;
                     bind(definition, &mut site);
                     diagnostics.push(Refusal {
@@ -34,56 +34,76 @@ impl CheckProduct {
                 }
             }
         }
+        let revisions: BTreeMap<_, _> = checked
+            .into_iter()
+            .filter_map(|(root, result)| result.ok().map(|revision| (root, revision)))
+            .collect();
+        self.flow_revisions = (!revisions.is_empty()).then(|| Arc::new(revisions));
         diagnostics
     }
 
-    fn fragment_refusal(&self, root: &hirsel_core_ir::Identity) -> Option<String> {
+    fn fragment_revision(&self, root: &hirsel_core_ir::Identity) -> Result<ContentHash, String> {
         let mut instances = InstanceSet::default();
         let mut resolver = Resolver::default();
         let mut witness = None;
-        let walk = collect_instances(
-            [root.clone()],
-            crate::native::DEFAULT_INSTANCE_LIMIT,
-            |key| {
-                if let Ok(definition) = self.demand_body(&key.definition) {
-                    let facts = &definition.check.flow;
-                    let arguments = resolver.arguments(key).ok();
-                    let bad = arguments.as_ref().map_or(0, |args| {
-                        args.iter().enumerate().fold(0, |bits, (i, arg)| {
-                            bits | (u64::from(holds_authority(arg)) << i)
-                        })
-                    });
-                    if facts.waits {
-                        witness = Some(format!("`{}` is declared `waits`", key.definition));
-                    } else if let Some(fact) = facts
-                        .violations
-                        .iter()
-                        .filter(|fact| fact.when == 0 || fact.when & bad != 0)
-                        .min_by_key(|fact| fact.at)
+        let mut visited = 0;
+        let revision = hirsel_core_ir::code_revision(root, |key| {
+            if visited == crate::native::DEFAULT_INSTANCE_LIMIT {
+                witness = Some(format!(
+                    "the stage body's static reach cannot be closed within {} instances",
+                    crate::native::DEFAULT_INSTANCE_LIMIT
+                ));
+                return None;
+            }
+            visited += 1;
+            if let Ok(definition) = self.demand_body(&key.definition) {
+                let facts = &definition.check.flow;
+                let arguments = resolver.arguments(key).ok();
+                let bad = arguments.as_ref().map_or(0, |args| {
+                    args.iter().enumerate().fold(0, |bits, (i, arg)| {
+                        bits | (u64::from(holds_authority(arg)) << i)
+                    })
+                });
+                if facts.waits {
+                    witness = Some(format!("`{}` is declared `waits`", key.definition));
+                } else if let Some(fact) = facts
+                    .violations
+                    .iter()
+                    .filter(|fact| fact.when == 0 || fact.when & bad != 0)
+                    .min_by_key(|fact| fact.at)
+                {
+                    let mut message = fact.message.clone();
+                    if fact.when != 0
+                        && let Some(args) = arguments
                     {
-                        let mut message = fact.message.clone();
-                        if fact.when != 0
-                            && let Some(args) = arguments
-                        {
-                            let i = (fact.when & bad).trailing_zeros() as usize;
-                            message.push_str(&format!(" at `{}`", args[i].rows[0].shape.name));
-                        }
-                        witness = Some(message);
+                        let i = (fact.when & bad).trailing_zeros() as usize;
+                        message.push_str(&format!(" at `{}`", args[i].rows[0].shape.name));
                     }
-                    if let Some(message) = &witness {
-                        return Err(InstanceStop::Incomplete {
-                            definition: key.definition.clone(),
-                            message: message.clone(),
-                        });
-                    }
+                    witness = Some(message);
                 }
-                self.instance_step(key, &mut instances, None, &mut resolver, &mut |_, _| {})
-            },
-        );
-        witness.or_else(|| {
-            walk.err()
-                .map(|stop| format!("the stage body's static reach cannot be closed ({stop:?})"))
-        })
+                if witness.is_some() {
+                    return None;
+                }
+            }
+            let children = match self.instance_step(
+                key,
+                &mut instances,
+                None,
+                &mut resolver,
+                &mut |_, _| {},
+            ) {
+                Ok(children) => children,
+                Err(stop) => {
+                    witness = Some(format!(
+                        "the stage body's static reach cannot be closed ({stop:?})"
+                    ));
+                    return None;
+                }
+            };
+            Some((instances.get(key).body, children))
+        });
+        revision
+            .ok_or_else(|| witness.expect("a refused revision row explains why closure stopped"))
     }
 }
 

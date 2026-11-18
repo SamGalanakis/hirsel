@@ -76,6 +76,40 @@ fn flow_charges_follow_their_record_through_bound_exit() {
     assert_eq!(context.available(), 16_000_063);
 }
 
+#[test]
+fn flow_charges_key_slots_and_large_stage_state_at_the_exact_limit() {
+    use crate::flow::{Reference, StageCharge};
+
+    let context = Context::new(16_000_064);
+    let mut flow = Reference::<()>::default();
+    let sink = flow.sink().unwrap();
+    flow.port(&context, sink, 1_000_000, 0).unwrap();
+    assert_eq!(context.available(), 0);
+    drop(flow);
+    assert_eq!(context.available(), 16_000_064);
+
+    let context = Context::new(1424);
+    let mut flow = Reference::<()>::default();
+    let sink = flow.sink().unwrap();
+    let state = [0u64; 128];
+    flow.stage(
+        &context,
+        sink,
+        1,
+        StageCharge {
+            output: 0,
+            working: 0,
+            state: size_of_val(&state) as u64,
+            item_steps: 1000,
+        },
+        move |_, key, _| Ok(state[key as usize].checked_add(1).map(|_| ())),
+    )
+    .unwrap();
+    assert_eq!(context.available(), 0);
+    assert_eq!(flow.finish(), Ok(()));
+    assert_eq!(context.available(), 1424);
+}
+
 struct Foreign(Vec<Block>);
 // SAFETY: sole affine custody moves to the worker; its only operation is drop,
 // which publishes refunds under the domain mutex without touching live records.

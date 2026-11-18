@@ -11,14 +11,18 @@
 //! - `mut x` as the first argument of `list.append` outside a loop. Bulk
 //!   appends inside a loop and `fill` can move straight to the heap. Keep
 //!   their frame-growth arms out of the loops that use the resulting carrier.
+//!   A list initialized before a dynamic loop that both pushes and pops it
+//!   also starts on the heap. That loop reuses its capacity after each pop,
+//!   so the inline frame growth would save only the initial allocations.
 //! - the base of an index, `x[i]`;
 //! - a bare argument of a checked call, which is a view (OWN-7);
 //! - a `mut` argument of a call, which is lent for the call (OWN-7);
 //! - the source of a viewing `for`, or `view x`;
 //!
 //! and the use is not inside a closure. Everything else (a move, `take x`, a return,
-//! a field, element, payload or capture, or a direct assignment to `x`) escapes. Its element type must be plain, so dropping the list visits no
-//! element (MEM-32), and fixed, so the slot's element count is known here.
+//! a field, element, payload or capture, or a direct assignment to `x`) escapes.
+//! Its element type must be plain so dropping the list visits no element
+//! (MEM-32), and fixed so the slot's element count is known here.
 //!
 //! The slot holds [`FRAME_LIST_BYTES`]. Local-only growth stays in the frame
 //! while it fits. A slot whose storage may be lent records its original payer
@@ -93,18 +97,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .filter(|&&p| p != u32::MAX)
                 .map(|&p| NodeId(p))
         };
-        let enclosed_by = |mut n: NodeId, kinds: &[NodeKind]| {
+        let enclosing = |mut n: NodeId, kinds: &[NodeKind]| {
             while let Some(p) = up(n) {
                 if kinds.contains(&self.kind(p)) {
-                    return true;
+                    return Some(p);
                 }
                 n = p;
             }
-            false
+            None
         };
-        let in_closure = |n| enclosed_by(n, &[NodeKind::Closure, NodeKind::ScopedClosure]);
-        let in_loop = |n| {
-            enclosed_by(
+        let in_closure = |n| enclosing(n, &[NodeKind::Closure, NodeKind::ScopedClosure]).is_some();
+        let enclosing_loop = |n| {
+            enclosing(
                 n,
                 &[
                     NodeKind::Loop,
@@ -113,6 +117,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     NodeKind::ForTake,
                 ],
             )
+        };
+        let dynamic_loop = |n| {
+            if self.kind(n) != NodeKind::For {
+                return true;
+            }
+            let mut source = self.kids(n)[1];
+            while self.kind(source) == NodeKind::Group {
+                source = self.kids(source)[0];
+            }
+            !(self.kind(source) == NodeKind::Binary
+                && matches!(self.token_text(source), ".." | "..=")
+                && self
+                    .kids(source)
+                    .iter()
+                    .all(|&n| self.token_kind(n) == Some(TokenKind::Integer)))
         };
         let mut found = HashMap::default();
         for s in lets {
@@ -129,8 +148,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if found.is_empty() {
             return found;
         }
+        let info = &self.p.items[self.at.module as usize][self.at.item as usize];
+        let mut stack_ops = HashMap::default();
         // Some(true) means the callee needs to identify this allocation.
-        let backing = |u: NodeId| {
+        let mut backing = |b: u32, u: NodeId| {
             let p = up(u)?;
             let kids = self.kids(p);
             match self.kind(p) {
@@ -150,17 +171,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         {
                             let callee = &self.p.fns[f];
                             let path = &callee.path;
-                            if path.is_core("list.fill")
-                                || (path.is_core("list.append") && in_loop(c))
-                            {
-                                return None;
-                            }
-                            if callee.body.is_none()
-                                && (IN_PLACE.iter().any(|op| path.is_core(op))
+                            if callee.body.is_none() {
+                                if path.is_core("list.fill")
+                                    || (path.is_core("list.append") && enclosing_loop(c).is_some())
+                                {
+                                    return None;
+                                }
+                                let push = path.is_core("list.push");
+                                if (push || path.is_core("list.pop"))
+                                    && let Some(loop_node) = enclosing_loop(c)
+                                    && dynamic_loop(loop_node)
+                                    && info.resolution.binders[b as usize].site.span.start
+                                        < tree.node(loop_node).origin.span.start
+                                    && stack_ops
+                                        .insert((b, loop_node), push)
+                                        .is_some_and(|earlier| earlier != push)
+                                {
+                                    return None;
+                                }
+                                if IN_PLACE.iter().any(|op| path.is_core(op))
                                     || path.is_core("list.append")
-                                    || path.is_core("list.put_word_le"))
-                            {
-                                return Some(false);
+                                    || path.is_core("list.put_word_le")
+                                {
+                                    return Some(false);
+                                }
                             }
                         }
                         (args[0] != p).then_some(true)
@@ -170,14 +204,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => None,
             }
         };
-        let info = &self.p.items[self.at.module as usize][self.at.item as usize];
         for name in &info.resolution.names {
             if let Target::Binder(b) = name.target
                 && let Some(lent) = found.get_mut(&b)
             {
                 if name.projections.start == name.projections.end
                     && !in_closure(name.node)
-                    && let Some(loaned) = backing(name.node)
+                    && let Some(loaned) = backing(b, name.node)
                 {
                     *lent |= loaned;
                 } else {

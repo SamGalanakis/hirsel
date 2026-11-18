@@ -77,12 +77,12 @@ def startup(command, marker, log):
     return int(result.stdout) if result.returncode == 0 else None
 
 
-def runtime(command, marker, directory):
+def runtime(command, marker, directory, exact_output=False):
     with measurement_slot():
         result = core_measure.sample(command, directory)
     output = (directory / "stdout").read_bytes()
-    if result["status"] == "ok" and not any(re.fullmatch(marker, line)
-                                           for line in output.splitlines(keepends=True)):
+    lines = [output] if exact_output else output.splitlines(keepends=True)
+    if result["status"] == "ok" and not any(re.fullmatch(marker, line) for line in lines):
         result["status"] = "wrong-output"
     result["directory"] = str(directory)
     return result
@@ -112,6 +112,18 @@ def rows(root, arena, upstream):
         }
 
 
+def pool_rows(root, upstream):
+    checksums = {"Json": 156, "Storage": 5461}
+    for name, commands in rows(root, False, upstream):
+        if name not in checksums:
+            continue
+        marker = f"verified checksum={checksums[name]}\n".encode()
+        for side in ("hirsel", "goose"):
+            binary, _, outer, inner = commands[side][0]
+            commands[side] = ([binary, name + "Pool", outer, inner], marker)
+        yield name, commands
+
+
 def write_results(out, results):
     target = out / "samples.json"
     temporary = target.with_suffix(".tmp")
@@ -125,7 +137,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("build", type=Path)
     parser.add_argument("out", type=Path)
-    parser.add_argument("--arena", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--arena", action="store_true")
+    mode.add_argument("--pool", action="store_true", help="sample only the matched Json and Storage pools")
+    parser.add_argument("--sides", nargs="+", choices=SIDES, default=SIDES,
+                        help="reuse unchanged comparison samples when measuring another toolchain")
     parser.add_argument("--upstream", type=Path)
     parser.add_argument("--only", nargs="+")
     args = parser.parse_args()
@@ -141,14 +157,15 @@ def main():
     os.chdir(args.build.resolve())
     sizes = {}
     results = {}
-    cases = dict(rows(Path.cwd(), args.arena, upstream))
+    cases = dict(pool_rows(Path.cwd(), upstream) if args.pool else rows(Path.cwd(), args.arena, upstream))
     if args.only and set(args.only) - cases.keys():
         parser.error("unknown benchmark selection")
     for name, commands in cases.items():
         if args.only and name not in args.only:
             continue
         result = results.setdefault(name, {})
-        for side, (command, marker) in commands.items():
+        for side in args.sides:
+            command, marker = commands[side]
             binary = command[0]
             if not binary.is_file():
                 result[side] = {"status": "missing-binary"}
@@ -159,10 +176,12 @@ def main():
             invocation = list(map(str, command))
             observed = result[side] = {"stripped_bytes": sizes[binary], "status": "ok"}
             if not args.arena and name != "Hello":
-                observed.update(runtime(invocation, marker, out / stem))
-            observed["startup_ns"] = startup(invocation, marker, out / f"{stem}-startup.log")
-            if observed["startup_ns"] is None and observed["status"] == "ok":
-                observed["status"] = "wrong-startup-output"
+                observed.update(runtime(invocation, marker, out / stem,
+                                        exact_output=args.pool and side != "rust"))
+            if not args.pool:
+                observed["startup_ns"] = startup(invocation, marker, out / f"{stem}-startup.log")
+                if observed["startup_ns"] is None and observed["status"] == "ok":
+                    observed["status"] = "wrong-startup-output"
             print(name, side, observed["status"], flush=True)
             write_results(out, results)
     return 0 if results and all(s["status"] == "ok" for row in results.values() for s in row.values()) else 1

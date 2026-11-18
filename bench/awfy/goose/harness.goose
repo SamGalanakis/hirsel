@@ -6,10 +6,12 @@ import havlak;
 import small;
 import numeric;
 import json_parse;
+import json_pool;
 import rap;
 import richards;
 import lists;
 import trees;
+import trees_pool;
 
 fn verify<F>(inner: i64) -> bool {
     for _ in inner {
@@ -38,6 +40,21 @@ fn run(name: u8[:], inner: i64) -> bool {
     return false;
 }
 
+fn run_pool(json: bool, outer: i64, inner: i64) {
+    let expected = if json { 156 } else { 5461 };
+    for _ in outer {
+        var checksum = 0;
+        for _ in inner {
+            checksum = if json { json_pool::benchmark(rap::document()) } else { trees_pool::benchmark() };
+            if checksum != expected { break; }
+        }
+        let verified = checksum == expected;
+        print(if verified { "verified checksum=" } else { "failed checksum=" }, checksum);
+        flush_stdout();
+        if !verified { exit(1); }
+    }
+}
+
 fn main() {
     let argv = args();
     if argv.len != 4 { abort("usage: harness BENCHMARK OUTER INNER"); }
@@ -46,8 +63,13 @@ fn main() {
     if !valid_outer || !valid_inner || outer <= 0 || inner <= 0 {
         abort("expected positive iteration counts");
     }
+    let name = argv[1];
+    if name == "JsonPool" || name == "StoragePool" {
+        run_pool(name == "JsonPool", outer, inner);
+        return;
+    }
     for _ in outer {
-        if !run(argv[1], inner) { abort("benchmark verification failed"); }
+        if !run(name, inner) { abort("benchmark verification failed"); }
         write_stdout("verified\n");
         flush_stdout();
     }

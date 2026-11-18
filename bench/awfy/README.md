@@ -51,6 +51,34 @@ line is the greeting. For AWFY it follows one complete checked outer iteration.
 GNU strip reports the size of the full executable after stripping. AWFY tasks
 share one suite binary per language. Each Hello uses a separate binary.
 
+## Matched document pools
+
+The AWFY harnesses also accept `JsonPool` and `StoragePool`. Both use
+one document owner per inner iteration. Their append-only collections hold
+fixed-size descriptors and typed, one-based links. Links never leave the
+document's construction and verification, and collection indexing checks
+bounds. Storage reserves each node's descriptor and contiguous run of child
+slots before descending. Json preserves the AWFY parser and object hash
+index. It stores unescaped text and number spans as input offsets and puts
+only decoded strings in a shared byte buffer.
+
+Build the harnesses as above, then sample the pool cases at the same AWFY
+sizes. Each Hirsel and Goose run must report `verified checksum=156` for
+Json and `verified checksum=5461` for Storage. These are the AWFY reference
+operations length and tree node count. The Rust denominator uses the
+standard Resid ports of the same workloads.
+
+```sh
+taskset -c 0-11,16-27 python3 bench/awfy/measure.py "$out/build" "$out/pools-before" \
+  --upstream "$awfy" --pool
+```
+
+To test the MEM-32 reopen condition, rebuild the same Hirsel harness with
+the toolchain that implements all MEM-32 obligations. Point the measurement
+at its build directory and pass `--pool --sides hirsel`. Reuse the first
+Goose and Rust samples as denominators. Compare Hirsel/Goose for each workload
+against the 1.5× threshold in [MEM-32's reopen rule](../../docs/spec/memory.md#memory-model-settled).
+
 ## LangArena
 
 Use the upstream Rust and Goose release suite binaries from LangArena revision

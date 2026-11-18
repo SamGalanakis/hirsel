@@ -1,0 +1,364 @@
+// AWFY JavaScript json.js. The parser's one document owns the grow-only pools.
+// Private, one-based handles index only their own collection; zero ends a chain.
+type NodeRef { index: u32 }
+type ElementRef { index: u32 }
+type MemberRef { index: u32 }
+type ObjectRef { index: u32 }
+
+type Text {
+    start: u32,
+    end: u32,
+    decoded: bool
+}
+
+type Elements {
+    head: ElementRef,
+    count: u32
+}
+
+type Element {
+    node: NodeRef,
+    next: ElementRef
+}
+
+type Member {
+    name: Text,
+    node: NodeRef,
+    next: MemberRef
+}
+
+type Object {
+    head: MemberRef,
+    hash_index: Inline[MemberRef, 32]
+}
+
+type Value = Null | True | False | Number(Text) | Str(Text) | Array(Elements) | ObjectValue(ObjectRef)
+
+type Document {
+    nodes: List[Value],
+    elements: List[Element],
+    members: List[Member],
+    objects: List[Object],
+    decoded: Bytes
+}
+
+type Cursor {
+    index: u64,
+    line: u64,
+    column: u64
+}
+
+type Error = Syntax | Memory(Capacity)
+
+fn memory(take c: Capacity) -> Error {
+    Memory(c)
+}
+
+fn slot(length: u64) -> u64 {
+    int.wrapping_mul(length, 1402589) & 31
+}
+
+fn text_range(start: u64, end: u64, decoded: bool) -> Text {
+    Text(start: int.narrow(start), end: int.narrow(end), decoded: decoded)
+}
+
+fn byte(input: Bytes, c: Cursor) -> u8 {
+    if c.index < list.len(input) {
+        input[c.index]
+    } else {
+        0
+    }
+}
+
+fn advance(input: Bytes, mut c: Cursor) {
+    if byte(input, c) == 10 {
+        c.line += 1
+        c.column = 0
+    }
+    c.index += 1
+    c.column += 1
+}
+
+fn skip_whitespace(input: Bytes, mut c: Cursor) {
+    let mut current = byte(input, c)
+    while current == 32 || current == 9 || current == 10 || current == 13 {
+        advance(input, mut c)
+        current = byte(input, c)
+    }
+}
+
+fn consume(input: Bytes, mut c: Cursor, expected: u8) -> bool {
+    if byte(input, c) != expected {
+        return false
+    }
+    advance(input, mut c)
+    true
+}
+
+fn required(input: Bytes, mut c: Cursor, expected: u8) -> Result[(), Error] {
+    if consume(input, mut c, expected) {
+        Ok(())
+    } else {
+        Error(Syntax)
+    }
+}
+
+fn literal(input: Bytes, mut c: Cursor, spelling: String) -> Result[(), Error] {
+    for b in string.as_bytes(spelling) {
+        required(input, mut c, b)?
+    }
+    Ok(())
+}
+
+fn digit(input: Bytes, mut c: Cursor) -> bool {
+    let current = byte(input, c)
+    if current < 48 || current > 57 {
+        return false
+    }
+    advance(input, mut c)
+    true
+}
+
+fn number(input: Bytes, mut c: Cursor) -> Result[Value, Error] {
+    let start = c.index
+    let _ = consume(input, mut c, 45)
+    let leading_zero = byte(input, c) == 48
+    if !digit(input, mut c) {
+        return Error(Syntax)
+    }
+    if !leading_zero {
+        while digit(input, mut c) {}
+    }
+    if consume(input, mut c, 46) {
+        if !digit(input, mut c) {
+            return Error(Syntax)
+        }
+        while digit(input, mut c) {}
+    }
+    if consume(input, mut c, 101) || consume(input, mut c, 69) {
+        if !consume(input, mut c, 43) {
+            let _ = consume(input, mut c, 45)
+        }
+        if !digit(input, mut c) {
+            return Error(Syntax)
+        }
+        while digit(input, mut c) {}
+    }
+    Ok(Number(text_range(start, c.index, false)))
+}
+
+fn read_string(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Text, Error] {
+    required(input, mut c, 34)?
+    let mut start = c.index
+    let decoded_start = list.len(doc.decoded)
+    let mut decoded = false
+    let mut ch = byte(input, c)
+    while ch != 34 {
+        if ch == 92 {
+            decoded = true
+            result.map_err(list.append(mut doc.decoded, list.slice(input, start, c.index)), memory)?
+            advance(input, mut c)
+            let escaped = match byte(input, c) {
+                34 => 34u8,
+                47 => 47u8,
+                92 => 92u8,
+                98 => 8u8,
+                102 => 12u8,
+                110 => 10u8,
+                114 => 13u8,
+                116 => 9u8,
+                _ => return Error(Syntax),
+            }
+            result.map_err(result.capacity_only(list.push(mut doc.decoded, escaped)), memory)?
+            advance(input, mut c)
+            start = c.index
+        } else {
+            if ch < 32 {
+                return Error(Syntax)
+            }
+            advance(input, mut c)
+        }
+        ch = byte(input, c)
+    }
+    let range = if decoded {
+        result.map_err(list.append(mut doc.decoded, list.slice(input, start, c.index)), memory)?
+        text_range(decoded_start, list.len(doc.decoded), true)
+    } else {
+        text_range(start, c.index, false)
+    }
+    advance(input, mut c)
+    Ok(range)
+}
+
+fn array(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Value, Error] {
+    advance(input, mut c)
+    let mut head = ElementRef(index: 0)
+    let mut tail = head
+    let mut count = 0u32
+    skip_whitespace(input, mut c)
+    if !consume(input, mut c, 93) {
+        let mut more = true
+        while more {
+            skip_whitespace(input, mut c)
+            let node = read_node(mut doc, input, mut c)?
+            let next = ElementRef(index: int.narrow(list.len(doc.elements) + 1))
+            let element = Element(node: node, next: ElementRef(index: 0))
+            result.map_err(result.capacity_only(list.push(mut doc.elements, take element)), memory)?
+            if tail.index == 0 {
+                head = next
+            } else {
+                let index: u64 = int.widen(tail.index - 1)
+                doc.elements[index].next = next
+            }
+            tail = next
+            count += 1
+            skip_whitespace(input, mut c)
+            more = consume(input, mut c, 44)
+        }
+        required(input, mut c, 93)?
+    }
+    Ok(Array(Elements(head: head, count: count)))
+}
+
+fn read_object(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Value, Error] {
+    advance(input, mut c)
+    let none = MemberRef(index: 0)
+    let mut object = Object(head: none, hash_index: [none; 32])
+    let mut tail = none
+    let mut count = 0u32
+    skip_whitespace(input, mut c)
+    if !consume(input, mut c, 125) {
+        let mut more = true
+        while more {
+            skip_whitespace(input, mut c)
+            let name = read_string(mut doc, input, mut c)?
+            skip_whitespace(input, mut c)
+            required(input, mut c, 58)?
+            skip_whitespace(input, mut c)
+            let node = read_node(mut doc, input, mut c)?
+            let next = MemberRef(index: int.narrow(list.len(doc.members) + 1))
+            let member = Member(name: name, node: node, next: none)
+            result.map_err(result.capacity_only(list.push(mut doc.members, take member)), memory)?
+            if tail.index == 0 {
+                object.head = next
+            } else {
+                let index: u64 = int.widen(tail.index - 1)
+                doc.members[index].next = next
+            }
+            tail = next
+            count += 1
+            object.hash_index[slot(int.widen(name.end - name.start))] = if count <= 255 {
+                next
+            } else {
+                none
+            }
+            skip_whitespace(input, mut c)
+            more = consume(input, mut c, 44)
+        }
+        required(input, mut c, 125)?
+    }
+    let handle = ObjectRef(index: int.narrow(list.len(doc.objects) + 1))
+    result.map_err(result.capacity_only(list.push(mut doc.objects, take object)), memory)?
+    Ok(ObjectValue(handle))
+}
+
+fn value(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Value, Error] {
+    match byte(input, c) {
+        110 => {
+            literal(input, mut c, "null")?
+            Ok(Null)
+        },
+        116 => {
+            literal(input, mut c, "true")?
+            Ok(True)
+        },
+        102 => {
+            literal(input, mut c, "false")?
+            Ok(False)
+        },
+        34 => Ok(Str(read_string(mut doc, input, mut c)?)),
+        91 => array(mut doc, input, mut c),
+        123 => read_object(mut doc, input, mut c),
+        _ => number(input, mut c),
+    }
+}
+
+fn read_node(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[NodeRef, Error] {
+    let node = value(mut doc, input, mut c)?
+    let handle = NodeRef(index: int.narrow(list.len(doc.nodes) + 1))
+    result.map_err(result.capacity_only(list.push(mut doc.nodes, take node)), memory)?
+    Ok(handle)
+}
+
+fn matches(input: Bytes, decoded: Bytes, text: Text, key: Bytes) -> bool {
+    let start: u64 = int.widen(text.start)
+    let end: u64 = int.widen(text.end)
+    if text.decoded {
+        list.slice(decoded, start, end) == key
+    } else {
+        list.slice(input, start, end) == key
+    }
+}
+
+fn find(doc: Document, input: Bytes, object: Object, key: Bytes) -> Option[NodeRef] {
+    let cached = object.hash_index[slot(list.len(key))]
+    if cached.index != 0 {
+        let index: u64 = int.widen(cached.index - 1)
+        let member = doc.members[index]
+        if matches(input, doc.decoded, member.name, key) {
+            return Some(member.node)
+        }
+    }
+
+    // The original hash index is only a hint. The last matching member wins.
+    let mut found: Option[NodeRef] = None
+    let mut next = object.head
+    while next.index != 0 {
+        let index: u64 = int.widen(next.index - 1)
+        let member = doc.members[index]
+        if matches(input, doc.decoded, member.name, key) {
+            found = Some(member.node)
+        }
+        next = member.next
+    }
+    found
+}
+
+fn checksum(doc: Document, input: Bytes, root: NodeRef) -> u64 {
+    let root_index: u64 = int.widen(root.index - 1)
+    let ObjectValue(handle) = doc.nodes[root_index] else {
+        return 0
+    }
+    let index: u64 = int.widen(handle.index - 1)
+    let object = doc.objects[index]
+    let Some(head) = find(doc, input, object, string.as_bytes("head")) else {
+        return 0
+    }
+    let head_index: u64 = int.widen(head.index - 1)
+    let ObjectValue(_) = doc.nodes[head_index] else {
+        return 0
+    }
+    let Some(operations) = find(doc, input, object, string.as_bytes("operations")) else {
+        return 0
+    }
+    let operations_index: u64 = int.widen(operations.index - 1)
+    match doc.nodes[operations_index] {
+        Array(elements) => int.widen(elements.count),
+        _ => 0,
+    }
+}
+
+pub fn benchmark(text: String) -> Result[u64, Capacity] {
+    let input = string.as_bytes(text)
+    let mut doc = Document(nodes: list.new(), elements: list.new(), members: list.new(), objects: list.new(), decoded: list.new())
+    let mut c = Cursor(index: 0, line: 1, column: 0)
+    skip_whitespace(input, mut c)
+    match read_node(mut doc, input, mut c) {
+        Error(Syntax) => Ok(0),
+        Error(Memory(capacity)) => Error(capacity),
+        Ok(root) => {
+            skip_whitespace(input, mut c)
+            Ok(if c.index == list.len(input) { checksum(doc, input, root) } else { 0 })
+        },
+    }
+}

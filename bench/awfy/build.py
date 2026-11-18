@@ -62,7 +62,7 @@ def goose(args):
         f"namespace rap;\nfn document() -> const u8[:] {{ return {fixture(args.upstream)}; }}\n")
     command = [ROOT / "tools/capped"]
     env = capped_env(args.out)
-    for module in ("hello", "harness"):
+    for module in args.goose_entries:
         generated = args.out / f"goose-{module}.c"
         subprocess.run([*command, args.goose, "-O2", "--standalone", "-o", generated,
                         source / (module + ".goose")], env=env, check=True)
@@ -83,6 +83,8 @@ def main():
     parser.add_argument("--upstream", type=Path, required=True, help="pinned AWFY checkout")
     parser.add_argument("--artifacts", type=Path, help="JSON from core/tools/measurement_artifacts.py")
     parser.add_argument("--hirsel-entries", nargs="+", default=["hello", "harness"])
+    parser.add_argument("--goose-entries", choices=["hello", "harness"], nargs="+",
+                        default=["hello", "harness"])
     parser.add_argument("--goose", type=Path, help="Goose release compiler")
     parser.add_argument("--rust", type=Path, help="Resid's bench/v2/t1-awfy/rust directory")
     args = parser.parse_args()

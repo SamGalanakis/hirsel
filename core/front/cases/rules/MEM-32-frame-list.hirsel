@@ -34,8 +34,9 @@
 // expect: run escape_send(6) = 151000
 // expect: run escape_kept(6) = 151000
 // expect: run escape_lent(6) = 1151000
-
-type Holder { xs: List[u64] }
+type Holder {
+    xs: List[u64]
+}
 
 fn sum(xs: List[u64]) -> u64 {
     let mut s = 0u64
@@ -195,7 +196,9 @@ fn by_lent(n: u64) -> u64 {
 }
 
 fn escape_return(n: u64) -> u64 {
-    let r = bound bytes 1000 { by_return(n) * 10000 + room() }
+    let r = bound bytes 1000 {
+        by_return(n) * 10000 + room()
+    }
     match r {
         Ok(v) => v,
         Error(_) => 1
@@ -203,7 +206,9 @@ fn escape_return(n: u64) -> u64 {
 }
 
 fn escape_field(n: u64) -> u64 {
-    let r = bound bytes 1000 { by_field(n) * 10000 + room() }
+    let r = bound bytes 1000 {
+        by_field(n) * 10000 + room()
+    }
     match r {
         Ok(v) => v,
         Error(_) => 1
@@ -211,7 +216,9 @@ fn escape_field(n: u64) -> u64 {
 }
 
 fn escape_capture(n: u64) -> u64 {
-    let r = bound bytes 1000 { by_capture(n) * 10000 + room() }
+    let r = bound bytes 1000 {
+        by_capture(n) * 10000 + room()
+    }
     match r {
         Ok(v) => v,
         Error(_) => 1
@@ -219,7 +226,9 @@ fn escape_capture(n: u64) -> u64 {
 }
 
 fn escape_send(n: u64) -> u64 {
-    let r = bound bytes 1000 { by_send(n) * 10000 + room() }
+    let r = bound bytes 1000 {
+        by_send(n) * 10000 + room()
+    }
     match r {
         Ok(v) => v,
         Error(_) => 1
@@ -227,7 +236,9 @@ fn escape_send(n: u64) -> u64 {
 }
 
 fn escape_kept(n: u64) -> u64 {
-    let r = bound bytes 1000 { by_kept(n) * 10000 + room() }
+    let r = bound bytes 1000 {
+        by_kept(n) * 10000 + room()
+    }
     match r {
         Ok(v) => v,
         Error(_) => 1
@@ -235,7 +246,9 @@ fn escape_kept(n: u64) -> u64 {
 }
 
 fn escape_lent(n: u64) -> u64 {
-    let r = bound bytes 1000 { by_lent(n) * 10000 + room() }
+    let r = bound bytes 1000 {
+        by_lent(n) * 10000 + room()
+    }
     match r {
         Ok(v) => v,
         Error(_) => 1

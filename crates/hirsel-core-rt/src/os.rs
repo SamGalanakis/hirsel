@@ -416,9 +416,11 @@ pub(crate) fn monotonic_ns() -> u64 {
 pub(crate) const WAIT: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Wait = wait;
 /// SLEEP_UNTIL waits until its deadline (program mono_ns, from `epoch`), given to
 /// the scheduler as host CLOCK_MONOTONIC; it is Ready once the deadline has
-/// passed. Every other operation is Ready at once.
+/// passed. Every other operation is Ready at once. Never inlined, so `WAIT`
+/// has one address (`provider::deliver`).
 /// # Safety
 /// State is the run's live OsProvider; request meets the provider ABI contract.
+#[inline(never)]
 pub unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, _: u64) -> Wait {
     // SAFETY: pinned request and provider state.
     let wait = unsafe {
@@ -455,8 +457,10 @@ unsafe fn sleep_wait(state: *mut u8, request: &Request) -> Wait {
 /// `issue` as a provider callback, for recognising the OS provider's own.
 pub(crate) const ISSUE: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step = issue;
 /// Files and clocks finish immediately; sockets may park after a not-ready attempt.
+/// Never inlined, so `ISSUE` has one address (`provider::deliver`).
 /// # Safety
 /// As `wait`.
+#[inline(never)]
 pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) -> Step {
     if unsafe { matches!((*request).operation, WALL_MS | MONO_NS) } {
         let outcome = unsafe { clock(state, request) };

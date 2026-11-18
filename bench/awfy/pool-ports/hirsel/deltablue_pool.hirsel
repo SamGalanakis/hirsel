@@ -1,0 +1,512 @@
+// AWFY JavaScript deltablue.js. A planner owns both sides of the constraint graph.
+const REQUIRED: i32 = -800
+
+const PREFERRED: i32 = -400
+
+const STRONG_DEFAULT: i32 = -200
+
+const DEFAULT: i32 = 0
+
+const WEAKEST: i32 = 10000
+
+type Kind = Edit | Stay | Equality | Scale(u64, u64)
+
+type Direction: key = Unchosen | Forward | Backward
+
+type Constraint {
+    kind: Kind,
+    strength: i32,
+    first: u64,
+    second: u64,
+    direction: Direction,
+    satisfied: bool
+}
+
+type Variable {
+    value: i32,
+    first_edge: u64,
+    last_edge: u64,
+    source: Option[u64],
+    mark: u64,
+    walk: i32,
+    stay: bool
+}
+
+const NONE: u64 = 0xffffffffffffffffu64
+
+type Edge {
+    constraint: u64,
+    next: u64
+}
+
+type Planner {
+    vars: List[Variable],
+    constraints: List[Constraint],
+    edges: List[Edge],
+    pending: List[u64],
+    mark: u64,
+    valid: bool
+}
+
+fn planner() -> Planner {
+    Planner(vars: list.new(), constraints: list.new(), edges: list.new(), pending: list.new(), mark: 1, valid: true)
+}
+
+fn not_selected(c: Constraint) -> bool {
+    match c.kind {
+        Edit => !c.satisfied,
+        Stay => !c.satisfied,
+        _ => c.direction == Unchosen,
+    }
+}
+
+fn unary(c: Constraint) -> bool {
+    match c.kind {
+        Edit => true,
+        Stay => true,
+        _ => false,
+    }
+}
+
+fn edit(c: Constraint) -> bool {
+    if let Edit = c.kind {
+        true
+    } else {
+        false
+    }
+}
+
+fn output(c: Constraint) -> u64 {
+    if c.direction == Forward {
+        c.second
+    } else {
+        c.first
+    }
+}
+
+fn input(c: Constraint) -> u64 {
+    if c.direction == Forward {
+        c.first
+    } else {
+        c.second
+    }
+}
+
+fn add_variable(mut p: Planner, value: i32) -> Result[u64, Capacity] {
+    let index = list.len(p.vars)
+    let variable = Variable(value: value, first_edge: NONE, last_edge: NONE, source: None, mark: 0, walk: WEAKEST, stay: true)
+    result.capacity_only(list.push(mut p.vars, take variable))?
+    Ok(index)
+}
+
+fn append_edge(mut p: Planner, variable: u64, constraint: u64) -> Result[(), Capacity] {
+    let index = list.len(p.edges)
+    result.capacity_only(list.push(mut p.edges, Edge(constraint: constraint, next: NONE)))?
+    let previous = p.vars[variable].last_edge
+    if previous == NONE {
+        p.vars[variable].first_edge = index
+    } else {
+        p.edges[previous].next = index
+    }
+    p.vars[variable].last_edge = index
+    Ok(())
+}
+
+fn add_to_graph(mut p: Planner, id: u64) -> Result[(), Capacity] {
+    let c = p.constraints[id]
+    append_edge(mut p, c.first, id)?
+    if !unary(c) {
+        append_edge(mut p, c.second, id)?
+        if let Scale(scale, offset) = c.kind {
+            append_edge(mut p, scale, id)?
+            append_edge(mut p, offset, id)?
+        }
+    }
+    Ok(())
+}
+
+fn remove_from_variable(mut p: Planner, variable: u64, id: u64) {
+    let mut previous = NONE
+    let mut edge = p.vars[variable].first_edge
+    while edge != NONE {
+        let next = p.edges[edge].next
+        if p.edges[edge].constraint == id {
+            if previous == NONE {
+                p.vars[variable].first_edge = next
+            } else {
+                p.edges[previous].next = next
+            }
+            if next == NONE {
+                p.vars[variable].last_edge = previous
+            }
+        } else {
+            previous = edge
+        }
+        edge = next
+    }
+    if p.vars[variable].source == Some(id) {
+        p.vars[variable].source = None
+    }
+}
+
+fn unselect(mut c: Constraint) {
+    c.direction = Unchosen
+    c.satisfied = false
+}
+
+fn remove_from_graph(mut p: Planner, id: u64) {
+    let c = p.constraints[id]
+    remove_from_variable(mut p, c.first, id)
+    if !unary(c) {
+        remove_from_variable(mut p, c.second, id)
+        if let Scale(scale, offset) = c.kind {
+            remove_from_variable(mut p, scale, id)
+            remove_from_variable(mut p, offset, id)
+        }
+    }
+    unselect(mut p.constraints[id])
+}
+
+fn choose(mut p: Planner, id: u64, mark: u64) {
+    let c = p.constraints[id]
+    let a_mark = p.vars[c.first].mark
+    let a_walk = p.vars[c.first].walk
+    if unary(c) {
+        p.constraints[id].satisfied = a_mark != mark && c.strength < a_walk
+        return
+    }
+    let b_mark = p.vars[c.second].mark
+    let b_walk = p.vars[c.second].walk
+    p.constraints[id].direction = if a_mark == mark {
+        if b_mark != mark && c.strength < b_walk {
+            Forward
+        } else {
+            Unchosen
+        }
+    } else if b_mark == mark {
+        if a_mark != mark && c.strength < a_walk {
+            Backward
+        } else {
+            Unchosen
+        }
+    } else if a_walk > b_walk {
+        if c.strength < a_walk {
+            Backward
+        } else {
+            Unchosen
+        }
+    } else if c.strength < b_walk {
+        Forward
+    } else {
+        Unchosen
+    }
+}
+
+fn execute(mut p: Planner, id: u64) {
+    let c = p.constraints[id]
+    match c.kind {
+        Equality => {
+            let source = input(c)
+            let dest = output(c)
+            p.vars[dest].value = p.vars[source].value
+        },
+        Scale(scale, offset) => {
+            let s = p.vars[scale].value
+            let o = p.vars[offset].value
+            if c.direction == Forward {
+                p.vars[c.second].value = p.vars[c.first].value * s + o
+            } else {
+                p.vars[c.first].value = (p.vars[c.second].value - o) / s
+            }
+        },
+        _ => {},
+    }
+}
+
+fn recalculate(mut p: Planner, id: u64) {
+    let c = p.constraints[id]
+    let dest = output(c)
+    if unary(c) {
+        p.vars[dest].walk = c.strength
+        p.vars[dest].stay = !edit(c)
+    } else {
+        let source = input(c)
+        let strength = p.vars[source].walk
+        p.vars[dest].walk = if c.strength > strength {
+            c.strength
+        } else {
+            strength
+        }
+        let mut stay = p.vars[source].stay
+        if let Scale(scale, offset) = c.kind {
+            stay = stay && p.vars[scale].stay && p.vars[offset].stay
+        }
+        p.vars[dest].stay = stay
+    }
+    if p.vars[dest].stay {
+        execute(mut p, id)
+    }
+}
+
+fn inputs_known(p: Planner, id: u64, mark: u64) -> bool {
+    let c = p.constraints[id]
+    if unary(c) {
+        return true
+    }
+    let source = input(c)
+    p.vars[source].mark == mark || p.vars[source].stay || p.vars[source].source == None
+}
+
+fn mark_inputs(mut p: Planner, id: u64, mark: u64) {
+    let c = p.constraints[id]
+    if !unary(c) {
+        p.vars[input(c)].mark = mark
+        if let Scale(scale, offset) = c.kind {
+            p.vars[scale].mark = mark
+            p.vars[offset].mark = mark
+        }
+    }
+}
+
+fn append_consumers(p: Planner, v: u64, mut todo: List[u64]) -> Result[(), Capacity] {
+    let mut edge = p.vars[v].first_edge
+    while edge != NONE {
+        let id = p.edges[edge].constraint
+        edge = p.edges[edge].next
+        if p.vars[v].source != Some(id) && !not_selected(p.constraints[id]) {
+            result.capacity_only(list.push(mut todo, id))?
+        }
+    }
+    Ok(())
+}
+
+fn add_propagate(mut p: Planner, id: u64, mark: u64) -> Result[bool, Capacity] {
+    let mut todo: List[u64] = list.new()
+    result.capacity_only(list.push(mut todo, id))?
+    let mut cursor = 0u64
+    while cursor < list.len(todo) {
+        let next = todo[cursor]
+        let c = p.constraints[next]
+        let dest = output(c)
+        if p.vars[dest].mark == mark {
+            incremental_remove(mut p, id)?
+            return Ok(false)
+        }
+        recalculate(mut p, next)
+        append_consumers(p, dest, mut todo)?
+        cursor += 1
+    }
+    Ok(true)
+}
+
+fn satisfy(mut p: Planner, id: u64, mark: u64) -> Result[Option[u64], Capacity] {
+    choose(mut p, id, mark)
+    let c = p.constraints[id]
+    if not_selected(c) {
+        p.valid = p.valid && c.strength != REQUIRED
+        return Ok(None)
+    }
+    mark_inputs(mut p, id, mark)
+    let dest = output(c)
+    let overridden = p.vars[dest].source
+    if let Some(old) = overridden {
+        unselect(mut p.constraints[old])
+    }
+    p.vars[dest].source = Some(id)
+    if !add_propagate(mut p, id, mark)? {
+        p.valid = false
+        return Ok(None)
+    }
+    p.vars[dest].mark = mark
+    Ok(overridden)
+}
+
+fn incremental_add(mut p: Planner, id: u64) -> Result[(), Capacity] {
+    p.mark += 1
+    let mark = p.mark
+    let mut next = Some(id)
+    while let Some(c) = next {
+        next = satisfy(mut p, c, mark)?
+    }
+    Ok(())
+}
+
+fn add_constraint(mut p: Planner, kind: Kind, strength: i32, first: u64, second: u64) -> Result[u64, Capacity] {
+    let id = list.len(p.constraints)
+    let c = Constraint(kind: kind, strength: strength, first: first, second: second, direction: Unchosen, satisfied: false)
+    result.capacity_only(list.push(mut p.constraints, c))?
+    add_to_graph(mut p, id)?
+    incremental_add(mut p, id)?
+    Ok(id)
+}
+
+fn remove_propagate(mut p: Planner, start: u64) -> Result[(), Capacity] {
+    p.vars[start].source = None
+    p.vars[start].walk = WEAKEST
+    p.vars[start].stay = true
+    let pending_start = list.len(p.pending)
+    let mut todo: List[u64] = list.new()
+    result.capacity_only(list.push(mut todo, start))?
+    let mut cursor = 0u64
+    while cursor < list.len(todo) {
+        let v = todo[cursor]
+        let mut edge = p.vars[v].first_edge
+        while edge != NONE {
+            let id = p.edges[edge].constraint
+            edge = p.edges[edge].next
+            if not_selected(p.constraints[id]) {
+                result.capacity_only(list.push(mut p.pending, id))?
+            }
+        }
+        edge = p.vars[v].first_edge
+        while edge != NONE {
+            let id = p.edges[edge].constraint
+            edge = p.edges[edge].next
+            let c = p.constraints[id]
+            if p.vars[v].source != Some(id) && !not_selected(c) {
+                recalculate(mut p, id)
+                result.capacity_only(list.push(mut todo, output(c)))?
+            }
+        }
+        cursor += 1
+    }
+    // AWFY Vector.sort's swap path is unimplemented. Preserve its precondition.
+    let count = list.len(p.pending) - pending_start
+    p.valid = p.valid && (count <= 1 || (count == 2 && p.constraints[p.pending[pending_start]].strength < p.constraints[p.pending[pending_start + 1]].strength))
+    Ok(())
+}
+
+fn incremental_remove(mut p: Planner, id: u64) -> Result[(), Capacity] {
+    let dest = output(p.constraints[id])
+    unselect(mut p.constraints[id])
+    remove_from_graph(mut p, id)
+    let start = list.len(p.pending)
+    remove_propagate(mut p, dest)?
+    let end = list.len(p.pending)
+    for i in start .. end {
+        let c = p.pending[i]
+        incremental_add(mut p, c)?
+    }
+    for _ in start .. end {
+        let _ = list.pop(mut p.pending)
+    }
+    Ok(())
+}
+
+fn destroy(mut p: Planner, id: u64) -> Result[(), Capacity] {
+    if !not_selected(p.constraints[id]) {
+        incremental_remove(mut p, id)?
+    }
+    remove_from_graph(mut p, id)
+    Ok(())
+}
+
+fn make_plan(mut p: Planner, edit_id: u64) -> Result[List[u64], Capacity] {
+    p.mark += 1
+    let mark = p.mark
+    let mut todo: List[u64] = list.new()
+    let mut plan: List[u64] = list.new()
+    if edit(p.constraints[edit_id]) && !not_selected(p.constraints[edit_id]) {
+        result.capacity_only(list.push(mut todo, edit_id))?
+    }
+    let mut cursor = 0u64
+    while cursor < list.len(todo) {
+        let id = todo[cursor]
+        let c = p.constraints[id]
+        let dest = output(c)
+        if p.vars[dest].mark != mark && inputs_known(p, id, mark) {
+            result.capacity_only(list.push(mut plan, id))?
+            p.vars[dest].mark = mark
+            append_consumers(p, dest, mut todo)?
+        }
+        cursor += 1
+    }
+    Ok(take plan)
+}
+
+fn execute_plan(mut p: Planner, plan: List[u64]) {
+    for id in plan {
+        execute(mut p, id)
+    }
+}
+
+fn change(mut p: Planner, v: u64, value: i32) -> Result[(), Capacity] {
+    let c = add_constraint(mut p, Edit, PREFERRED, v, v)?
+    let plan = make_plan(mut p, c)?
+    for _ in 0u64 .. 10 {
+        p.vars[v].value = value
+        execute_plan(mut p, plan)
+    }
+    destroy(mut p, c)
+}
+
+fn chain(size: u64) -> Result[bool, Capacity] {
+    let mut p = planner()
+    let mut vars: List[u64] = list.new()
+    for _ in 0 .. size + 1 {
+        let v = add_variable(mut p, 0)?
+        result.capacity_only(list.push(mut vars, v))?
+    }
+    for i in 0 .. size {
+        let _ = add_constraint(mut p, Equality, REQUIRED, vars[i], vars[i + 1])?
+    }
+    let first = vars[0]
+    let last = vars[size]
+    let _ = add_constraint(mut p, Stay, STRONG_DEFAULT, last, last)?
+    let c = add_constraint(mut p, Edit, PREFERRED, first, first)?
+    let plan = make_plan(mut p, c)?
+    for i in 0u64 .. 100 {
+        let proposed: i32 = int.narrow(i)
+        p.vars[first].value = proposed
+        execute_plan(mut p, plan)
+        if p.vars[last].value != proposed {
+            return Ok(false)
+        }
+    }
+    destroy(mut p, c)?
+    Ok(p.valid)
+}
+
+fn projection(size: u64) -> Result[bool, Capacity] {
+    let mut p = planner()
+    let mut destinations: List[u64] = list.new()
+    let scale = add_variable(mut p, 10)?
+    let offset = add_variable(mut p, 1000)?
+    let mut src = 0u64
+    let mut dst = 0u64
+    for i in 1 .. size + 1 {
+        let initial: i32 = int.narrow(i)
+        src = add_variable(mut p, initial)?
+        dst = add_variable(mut p, initial)?
+        result.capacity_only(list.push(mut destinations, dst))?
+        let _ = add_constraint(mut p, Stay, DEFAULT, src, src)?
+        let _ = add_constraint(mut p, Scale(scale, offset), REQUIRED, src, dst)?
+    }
+    change(mut p, src, 17)?
+    if p.vars[dst].value != 1170 {
+        return Ok(false)
+    }
+    change(mut p, dst, 1050)?
+    if p.vars[src].value != 5 {
+        return Ok(false)
+    }
+    change(mut p, scale, 5)?
+    for i in 0 .. size - 1 {
+        let n: i32 = int.narrow(i + 1)
+        if p.vars[destinations[i]].value != n * 5 + 1000 {
+            return Ok(false)
+        }
+    }
+    change(mut p, offset, 2000)?
+    for i in 0 .. size - 1 {
+        let n: i32 = int.narrow(i + 1)
+        if p.vars[destinations[i]].value != n * 5 + 2000 {
+            return Ok(false)
+        }
+    }
+    Ok(p.valid)
+}
+
+pub fn benchmark(size: u64) -> Result[bool, Capacity] {
+    Ok(chain(size)? && projection(size)?)
+}

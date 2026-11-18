@@ -81,7 +81,8 @@ Build the harnesses as above, then sample the pool cases at the same AWFY
 sizes. Each Hirsel and Goose run must report `verified checksum=156` for
 Json and `verified checksum=5461` for Storage. These are the AWFY reference
 operations length and tree node count. The Rust denominator uses the
-standard Resid ports of the same workloads.
+matched ports in `pool-ports/rust`, compiled separately from the original
+Resid harness. Do not use original `Json` or `Storage` as pool denominators.
 
 ```sh
 taskset -c 0-11,16-27 python3 bench/awfy/measure.py "$out/build" "$out/pools-before" \
@@ -113,3 +114,29 @@ and zero warmup iterations. The Rust run supplies each first-iteration
 checksum. Each sampled binary must confirm that checksum. Rust and Goose use
 their full LangArena suite executables. Each Hirsel group uses its existing
 standalone executable and root limit.
+
+## Nightly goal board
+
+From a dedicated checkout of main, run the board with clean source checkouts
+at the four pins printed by `board.py --help`. The output directory must be
+new and outside the checkout.
+
+```sh
+taskset -c 20-21 python3 bench/awfy/board.py "$out" \
+  --awfy "$awfy" --resid "$resid" --goose "$goose" --langarena "$langarena"
+```
+
+The board builds the release compiler and shipping runtime, builds fresh
+peers, then samples AWFY original-14, AWFY pool/index (8), and LangArena
+(50). Each runtime row runs adjacent Rust, Hirsel and Goose samples, with
+the order reversed on alternate rows. The size row reuses verification of
+all 14 original workloads. The cold and edit compile rows compare the whole
+LangArena suite against Cargo. The checkbox rows compare the same wire load
+against a fresh private Hirsel server and the Rust reference, never port 7700.
+
+The board uses CPUs 20–21 for builds and 10–11 for samples. It holds
+`/run/user/1000/hirsel-board.lock` while measuring. It needs Linux perf user
+counters, CMake, Clang, Rust 1.99.0 with the pinned Cargo dependencies
+available, Node.js, and GNU strip and time. Keep `board.json` and `board.md`
+with the captured logs. An incomplete comparison has no ratio and makes the
+command exit nonzero.

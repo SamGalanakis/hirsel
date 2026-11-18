@@ -95,7 +95,7 @@ def sources(name, layout):
     return [base/name/(layout+'.rs'), base/name/'program.rs', base/'support.rs']
 
 
-def sample(command, directory, compiler_only=False, env=None):
+def sample(command, directory, compiler_only=False, env=None, *, cycles=False, cwd=None):
     directory.mkdir()
     perf = directory/'perf.csv'
     stats = directory/'time.txt'
@@ -114,14 +114,15 @@ def sample(command, directory, compiler_only=False, env=None):
                   '--', *map(str, command)]
     else:
         # Other benchmarks retain their existing measurement contract.
-        launch = [str(REPO/'tools/capped'), 'perf', 'stat', '-x', ';', '-e', 'instructions:u,duration_time', '-o', str(perf), '--', '/usr/bin/time', '-f', '%e\t%M', '-o', str(stats), *map(str, command)]
+        events = '{instructions:u,cycles:u},duration_time' if cycles else 'instructions:u,duration_time'
+        launch = [str(REPO/'tools/capped'), 'perf', 'stat', '-x', ';', '-e', events, '-o', str(perf), '--', '/usr/bin/time', '-f', '%e\t%M', '-o', str(stats), *map(str, command)]
     started = time.monotonic()
     with contextlib.ExitStack() as stack:
         if compiler_only:
             lock = stack.enter_context(open('/tmp/hirsel-langarena-measure.lock', 'a'))
             fcntl.flock(lock, fcntl.LOCK_EX)
         with (directory/'stdout').open('wb') as out, (directory/'stderr').open('wb') as err:
-            result = subprocess.run(launch, stdout=out, stderr=err, env=env)
+            result = subprocess.run(launch, stdout=out, stderr=err, env=env, cwd=cwd)
     if compiler_only:
         control.unlink()
         control.with_suffix('.ack').unlink()
@@ -135,6 +136,7 @@ def sample(command, directory, compiler_only=False, env=None):
         fields = stats.read_text().strip().splitlines()[-1].split('\t')
         if len(fields) == 2:
             seconds, rss = fields
+    cycle_count = None
     if perf.exists():
         for line in perf.read_text().splitlines():
             fields = line.split(';')
@@ -145,7 +147,9 @@ def sample(command, directory, compiler_only=False, env=None):
                     instructions = int(fields[0])
                 else:
                     status = 'missing-counter' if status == 'ok' else status
-    if not instructions:
+            if len(fields) > 2 and fields[2] == 'cycles:u' and fields[0].strip().isdigit():
+                cycle_count = int(fields[0])
+    if not instructions or (cycles and not cycle_count):
         status = 'missing-counter' if status == 'ok' else status
     stderr = (directory/'stderr').read_text()
     if compiler_only and status == 'ok' and 'Events disabled' not in stderr:
@@ -153,7 +157,8 @@ def sample(command, directory, compiler_only=False, env=None):
     if 'kernel killed' in stderr or result.returncode in (137, -9):
         status = 'memory-censored'
     peak = re.search(r'capped: peak (\d+) MiB of', stderr)
-    return dict(status=status, instructions=instructions, seconds=seconds, max_rss_kib=rss, tree_peak_mib=peak[1] if peak else '', wrapper_seconds=f'{elapsed:.6f}', directory=directory)
+    counters = {'cycles': cycle_count} if cycles else {}
+    return dict(status=status, instructions=instructions, seconds=seconds, max_rss_kib=rss, tree_peak_mib=peak[1] if peak else '', wrapper_seconds=f'{elapsed:.6f}', directory=directory, **counters)
 
 
 def main():

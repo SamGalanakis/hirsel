@@ -24,19 +24,22 @@ def root_mib(name):
     return 64
 
 
-def build_hirsel(out, artifacts, rows):
+def build_hirsel(out, artifacts, rows, env=None):
     manifest = out / "inputs.json"
     manifest.write_text(json.dumps(inputs(ROOT, "harness")))
     for module, mib in sorted({(group(row["name"]), root_mib(row["name"])) for row in rows}):
         print(f"building {module} at {mib} MiB", flush=True)
-        subprocess.run([
+        result = subprocess.run([
             ROOT / "tools/capped", artifacts["compiler"], "build",
             "--inputs", manifest, "--entry", f"langarena@1/{module}/main",
             "--store", out / "store", "--backend", "llvm", "--release",
             "--runtime", artifacts["runtime"], "--cc", llvm_path() / "bin/clang",
             "--dir", out, "--grant", "Stdout", "--grant", "Tasks", "--limit", str(mib << 20),
-            "-o", out / f"{module}-{mib}",
-        ], env={**capped_env(out), "LD_LIBRARY_PATH": str(llvm_path() / "lib")}, check=True)
+            "--json", "-o", out / f"{module}-{mib}",
+        ], env={**(env or capped_env(out)), "LD_LIBRARY_PATH": str(llvm_path() / "lib")},
+            stdout=subprocess.PIPE)
+        (out / f"{module}-{mib}-build.json").write_bytes(result.stdout)
+        result.check_returncode()
 
 
 def oracle(out, binary, rows):

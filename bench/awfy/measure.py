@@ -121,7 +121,21 @@ def pool_rows(root, upstream):
         for side in ("hirsel", "goose"):
             _, _, outer, inner = commands[side][0]
             commands[side] = ([root / f"{side}-pools", name + "Pool", outer, inner], marker)
+        _, _, outer, inner = commands["rust"][0]
+        row = name + "Pool"
+        commands["rust"] = ([root / "rust-pool_index", row, outer, inner],
+                            row.encode() + rb": iterations=1 runtime: \d+us\n")
         yield name, commands
+
+
+def matched_pool_rows(root, upstream):
+    yield from ((name + "Pool", commands) for name, commands in pool_rows(root, upstream))
+    for name, commands in rows(root, False, upstream):
+        if name in {"CD", "DeltaBlue", "Havlak", "List", "Richards", "Towers"}:
+            yield name, {
+                side: ([root / f"{side}-pool_index", *command[1:]], marker)
+                for side, (command, marker) in commands.items()
+            }
 
 
 def size_board(build, upstream):
@@ -136,12 +150,15 @@ def size_board(build, upstream):
                                  env=env, stdout=subprocess.PIPE, check=True)
             if not any(re.fullmatch(marker, line) for line in run.stdout.splitlines(keepends=True)):
                 raise ValueError(f"{side} did not verify {name}")
-    # One executable per side. Pool and index variants have their own rows.
+    return verified_sizes(build, [name for name, _ in originals])
+
+
+def verified_sizes(build, names):
     sizes = {side: stripped_size(build / f"{side}-harness") for side in SIDES}
     native = json.loads((build / "hirsel-harness-build.json").read_text())["native"]
     certified = native.get("step_charging_elided", False)
-    return {"verified_workloads": [name for name, _ in originals], "stripped_bytes": sizes,
-            "hirsel_certified": {name: certified for name, _ in originals},
+    return {"verified_workloads": names, "stripped_bytes": sizes,
+            "hirsel_certified": dict.fromkeys(names, certified),
             "hirsel_over_rust": sizes["hirsel"] / sizes["rust"],
             "hirsel_over_goose": sizes["hirsel"] / sizes["goose"]}
 

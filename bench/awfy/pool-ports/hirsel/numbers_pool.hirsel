@@ -1,0 +1,101 @@
+// AWFY som.js IdentityDictionary over block names.
+type Entry {
+    key: u64,
+    hash: u64,
+    value: u64,
+    next: Option[u64]
+}
+
+pub type Dictionary {
+    buckets: List[Option[u64]],
+    entries: List[Entry]
+}
+
+pub fn new() -> Result[Dictionary, Capacity] {
+    let mut buckets: List[Option[u64]] = list.new()
+    let empty: Option[u64] = None
+    list.fill(mut buckets, 16, empty)?
+    Ok(Dictionary(buckets: take buckets, entries: list.new()))
+}
+
+fn hash(key: u64) -> u64 {
+    key ^ (key >> 16)
+}
+
+pub fn get(d: Dictionary, key: u64) -> Option[u64] {
+    let hashed = hash(key)
+    let mut next = d.buckets[hashed & (list.len(d.buckets) - 1)]
+    while let Some(index) = next {
+        let entry = d.entries[index]
+        if entry.key == key && entry.hash == hashed {
+            return Some(entry.value)
+        }
+        next = entry.next
+    }
+    None
+}
+
+fn transfer(mut d: Dictionary) -> Result[(), Capacity] {
+    let size = list.len(d.buckets)
+    let empty: Option[u64] = None
+    list.fill(mut d.buckets, size, empty)?
+    for i in 0 .. size {
+        let mut next = d.buckets[i]
+        d.buckets[i] = None
+        let mut low_tail: Option[u64] = None
+        let mut high_tail: Option[u64] = None
+        while let Some(index) = next {
+            let record = d.entries[index]
+            if (record.hash & size) == 0 {
+                if let Some(tail) = low_tail {
+                    d.entries[tail].next = Some(index)
+                } else {
+                    d.buckets[i] = Some(index)
+                }
+                low_tail = Some(index)
+            } else {
+                if let Some(tail) = high_tail {
+                    d.entries[tail].next = Some(index)
+                } else {
+                    d.buckets[i + size] = Some(index)
+                }
+                high_tail = Some(index)
+            }
+            next = record.next
+        }
+        if let Some(tail) = low_tail {
+            d.entries[tail].next = None
+        }
+        if let Some(tail) = high_tail {
+            d.entries[tail].next = None
+        }
+    }
+    Ok(())
+}
+
+pub fn put(mut d: Dictionary, key: u64, value: u64) -> Result[(), Capacity] {
+    let hashed = hash(key)
+    let slot = hashed & (list.len(d.buckets) - 1)
+    let mut next = d.buckets[slot]
+    let mut previous: Option[u64] = None
+    while let Some(index) = next {
+        let entry = d.entries[index]
+        if entry.key == key && entry.hash == hashed {
+            d.entries[index].value = value
+            return Ok(())
+        }
+        previous = next
+        next = entry.next
+    }
+    let added = list.len(d.entries)
+    result.capacity_only(list.push(mut d.entries, Entry(key: key, hash: hashed, value: value, next: None)))?
+    if let Some(index) = previous {
+        d.entries[index].next = Some(added)
+    } else {
+        d.buckets[slot] = Some(added)
+    }
+    if list.len(d.entries) > list.len(d.buckets) {
+        transfer(mut d)?
+    }
+    Ok(())
+}

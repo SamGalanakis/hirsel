@@ -114,12 +114,14 @@ def check(path, recorded):
     return actual
 
 
-def build():
+def build(threads=None):
     """Buck locates cached outputs or builds exactly the canonical targets."""
     with contextlib.redirect_stdout(sys.stderr):
         wait_load()
     command = [str(ROOT / '.buck2/bin/buck2'), 'build', '--target-platforms',
                '//tools/buck2:release', COMPILER_TARGET, RUNTIME_TARGET, '--show-json-output']
+    if threads is not None:
+        command += ['--num-threads', str(threads)]
     completed = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, text=True, check=True)
     outputs = json.loads(completed.stdout)
     compiler = ROOT / outputs['root' + COMPILER_TARGET]
@@ -134,6 +136,7 @@ def main():
     p.add_argument('--compiler-profile', choices=['release', 'checked', 'unknown'], default='unknown')
     p.add_argument('--runtime-profile', choices=['ordinary-release', 'checked', 'unknown'])
     p.add_argument('--diagnostic', action='store_true')
+    p.add_argument('--threads', type=int, help='limit Buck parallelism when building')
     p.add_argument('--check', type=Path, metavar='PATH',
                    help='re-hash PATH and fail unless it matches --identity; call right before each batch')
     p.add_argument('--identity', type=Path, metavar='JSON', help='an earlier output of this tool, for --check')
@@ -150,7 +153,7 @@ def main():
         p.error('supply both --compiler and --runtime, or neither to build/locate them')
     try:
         if args.compiler is None:
-            args.compiler, args.runtime = build()
+            args.compiler, args.runtime = build(args.threads)
             args.compiler_profile = 'release'
         result = identity(args.compiler, args.runtime, args.compiler_profile,
                           args.runtime_profile, args.diagnostic)

@@ -1,0 +1,340 @@
+// AWFY JavaScript cd.js. Red-black trees hold aircraft state, visited
+// voxels, and voxel buckets. Collisions are counted after building each frame.
+const MIN: f64 = 0.0
+
+const MAX_XY: f64 = 1000.0
+
+const MAX_Z: f64 = 10.0
+
+const RADIUS: f64 = 1.0
+
+const VOXEL: f64 = RADIUS * 2.0
+
+
+type V2 {
+    x: f64,
+    y: f64
+}
+
+type V3 {
+    x: f64,
+    y: f64,
+    z: f64
+}
+
+type Aircraft {
+    callsign: u64,
+    position: V3
+}
+
+type Motion {
+    callsign: u64,
+    from: V3,
+    to: V3
+}
+
+type Collision {
+    first: u64,
+    second: u64,
+    position: V3
+}
+
+const NONE: u64 = 0xffffffffffffffffu64
+
+type Bucket {
+    head: u64,
+    tail: u64,
+    count: u64
+}
+
+type Entry {
+    motion: Motion,
+    next: u64
+}
+
+type BucketMap {
+    tree: red_black.Tree[V2, u64],
+    buckets: List[Bucket],
+    entries: List[Entry]
+}
+
+fn zero(a: f64) -> bool {
+    float.eq(a, 0.0)
+}
+
+fn less(a: f64, b: f64) -> bool {
+    float.lt(a, b)
+}
+
+fn at_most(a: f64, b: f64) -> bool {
+    float.le(a, b)
+}
+
+fn compare_numbers(a: f64, b: f64) -> Order {
+    if float.eq(a, b) {
+        return Equal
+    }
+    if float.lt(a, b) {
+        return Less
+    }
+    if float.gt(a, b) || float.eq(a, a) {
+        return Greater
+    }
+    Less
+}
+
+fn compare_voxels(a: V2, b: V2) -> Order {
+    match compare_numbers(a.x, b.x) {
+        Equal => compare_numbers(a.y, b.y),
+        other => other,
+    }
+}
+
+fn compare_callsigns(a: u64, b: u64) -> Order {
+    if a < b {
+        Less
+    } else if a == b {
+        Equal
+    } else {
+        Greater
+    }
+}
+
+fn add(a: V3, b: V3) -> V3 {
+    V3(x: a.x + b.x, y: a.y + b.y, z: a.z + b.z)
+}
+
+fn sub(a: V3, b: V3) -> V3 {
+    V3(x: a.x - b.x, y: a.y - b.y, z: a.z - b.z)
+}
+
+fn scale(a: V3, k: f64) -> V3 {
+    V3(x: a.x * k, y: a.y * k, z: a.z * k)
+}
+
+fn dot(a: V3, b: V3) -> f64 {
+    a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+fn squared(a: V3) -> f64 {
+    dot(a, a)
+}
+
+fn unit_interval(lo: f64, hi: f64) -> bool {
+    (at_most(lo, 1.0) && at_most(1.0, hi)) || (at_most(lo, 0.0) && at_most(0.0, hi)) || (at_most(0.0, lo) && at_most(hi, 1.0))
+}
+
+fn intersection(m: Motion, other: Motion) -> Option[V3] {
+    let delta1 = sub(m.to, m.from)
+    let delta2 = sub(other.to, other.from)
+    let a = squared(sub(delta2, delta1))
+    if zero(a) {
+        let distance = float.sqrt(squared(sub(other.from, m.from)))
+        if at_most(distance, RADIUS) {
+            return Some(scale(add(m.from, other.from), 0.5))
+        }
+        return None
+    }
+    let b = 2.0 * dot(sub(m.from, other.from), sub(delta1, delta2))
+    let c = -RADIUS * RADIUS + squared(sub(other.from, m.from))
+    let discriminant = b * b - 4.0 * a * c
+    if less(discriminant, 0.0) {
+        return None
+    }
+    let lo = (-b - float.sqrt(discriminant)) / (2.0 * a)
+    let hi = (-b + float.sqrt(discriminant)) / (2.0 * a)
+    if at_most(lo, hi) && unit_interval(lo, hi) {
+        let t = if at_most(lo, 0.0) {
+            0.0f64
+        } else {
+            lo
+        }
+        let position = scale(add(add(m.from, scale(delta1, t)), add(other.from, scale(delta2, t))), 0.5)
+        if at_most(MIN, position.x) && at_most(position.x, MAX_XY) && at_most(MIN, position.y) && at_most(position.y, MAX_XY) && at_most(MIN, position.z) && at_most(position.z, MAX_Z) {
+            return Some(position)
+        }
+    }
+    None
+}
+
+fn crossing(edge: f64, coordinate: f64, velocity: f64) -> (f64, f64) {
+    let margin = RADIUS / 2.0
+    let lo = (edge - margin - coordinate) / velocity
+    let hi = (edge + VOXEL + margin - coordinate) / velocity
+    if less(velocity, 0.0) {
+        (hi, lo)
+    } else {
+        (lo, hi)
+    }
+}
+
+fn in_voxel(voxel: V2, m: Motion) -> bool {
+    if less(voxel.x, MIN) || less(MAX_XY, voxel.x) || less(voxel.y, MIN) || less(MAX_XY, voxel.y) {
+        return false
+    }
+    let dx = m.to.x - m.from.x
+    let dy = m.to.y - m.from.y
+    let margin = RADIUS / 2.0
+    let (lx, hx) = crossing(voxel.x, m.from.x, dx)
+    let (ly, hy) = crossing(voxel.y, m.from.y, dy)
+    ((zero(dx) && at_most(voxel.x, m.from.x + margin) && at_most(m.from.x - margin, voxel.x + VOXEL)) || unit_interval(lx, hx)) && ((zero(dy) && at_most(voxel.y, m.from.y + margin) && at_most(m.from.y - margin, voxel.y + VOXEL)) || unit_interval(ly, hy)) && (zero(dx) || zero(dy) || (at_most(ly, hx) && at_most(hx, hy)) || (at_most(ly, lx) && at_most(lx, hy)) || (at_most(lx, ly) && at_most(hy, hx)))
+}
+
+fn voxel_hash(p: V3) -> V2 {
+    let ix: Result[i32, FloatError] = float.to_int(float.trunc(p.x / VOXEL))
+    let iy: Result[i32, FloatError] = float.to_int(float.trunc(p.y / VOXEL))
+    let x: f64 = float.from_int(result.unwrap(ix))
+    let y: f64 = float.from_int(result.unwrap(iy))
+    V2(x: x * VOXEL - (if less(p.x, 0.0) {
+        VOXEL
+    } else {
+        0.0
+    }), y: y * VOXEL - (if less(p.y, 0.0) {
+        VOXEL
+    } else {
+        0.0
+    }))
+}
+
+fn put_motion(mut map: BucketMap, voxel: V2, m: Motion) -> Result[(), Capacity] {
+    let node = red_black.find(map.tree, voxel, compare_voxels)
+    let bucket = if node == 0 {
+        let index = list.len(map.buckets)
+        result.capacity_only(list.push(mut map.buckets, Bucket(head: NONE, tail: NONE, count: 0)))?
+        let _ = red_black.put(mut map.tree, voxel, index, compare_voxels)?
+        index
+    } else {
+        let (_, index) = red_black.entry(map.tree, node)
+        index
+    }
+    let entry = list.len(map.entries)
+    result.capacity_only(list.push(mut map.entries, Entry(motion: m, next: NONE)))?
+    let head = map.buckets[bucket].head
+    let tail = map.buckets[bucket].tail
+    if head == NONE {
+        map.buckets[bucket].head = entry
+    } else {
+        map.entries[tail].next = entry
+    }
+    map.buckets[bucket].tail = entry
+    map.buckets[bucket].count += 1
+    Ok(())
+}
+
+fn recurse(mut map: BucketMap, mut seen: red_black.Tree[V2, bool], voxel: V2, m: Motion) -> Result[(), Capacity] {
+    if !in_voxel(voxel, m) || red_black.put(mut seen, voxel, true, compare_voxels)? == Some(true) {
+        return Ok(())
+    }
+    put_motion(mut map, voxel, m)?
+    let x = voxel.x
+    let y = voxel.y
+    recurse(mut map, mut seen, V2(x: x - VOXEL, y: y), m)?
+    recurse(mut map, mut seen, V2(x: x + VOXEL, y: y), m)?
+    recurse(mut map, mut seen, V2(x: x, y: y - VOXEL), m)?
+    recurse(mut map, mut seen, V2(x: x, y: y + VOXEL), m)?
+    recurse(mut map, mut seen, V2(x: x - VOXEL, y: y - VOXEL), m)?
+    recurse(mut map, mut seen, V2(x: x - VOXEL, y: y + VOXEL), m)?
+    recurse(mut map, mut seen, V2(x: x + VOXEL, y: y - VOXEL), m)?
+    recurse(mut map, mut seen, V2(x: x + VOXEL, y: y + VOXEL), m)
+}
+
+fn reduce(motions: List[Motion]) -> Result[(BucketMap, List[u64]), Capacity] {
+    let tree: Result[red_black.Tree[V2, u64], Capacity] = red_black.new()
+    let mut map = BucketMap(tree: tree?, buckets: list.new(), entries: list.new())
+    for m in motions {
+        let fresh: Result[red_black.Tree[V2, bool], Capacity] = red_black.new()
+        let mut seen = fresh?
+        recurse(mut map, mut seen, voxel_hash(m.from), m)?
+    }
+    let mut reduced: List[u64] = list.new()
+    let mut node = red_black.first(map.tree)
+    while node != 0 {
+        let (_, bucket) = red_black.entry(map.tree, node)
+        if map.buckets[bucket].count > 1 {
+            result.capacity_only(list.push(mut reduced, bucket))?
+        }
+        node = red_black.next(map.tree, node)
+    }
+    Ok((take map, take reduced))
+}
+
+fn handle_frame(mut state: red_black.Tree[u64, V3], frame: List[Aircraft]) -> Result[u64, Capacity] {
+    let fresh: Result[red_black.Tree[u64, bool], Capacity] = red_black.new()
+    let mut seen = fresh?
+    let mut motions: List[Motion] = list.new()
+    for aircraft in frame {
+        let current = aircraft.position
+        let old = red_black.put(mut state, aircraft.callsign, current, compare_callsigns)?
+        let _ = red_black.put(mut seen, aircraft.callsign, true, compare_callsigns)?
+        let previous = match old {
+            Some(p) => p,
+            None => current
+        }
+        result.capacity_only(list.push(mut motions, Motion(callsign: aircraft.callsign, from: previous, to: current)))?
+    }
+    let mut remove: List[u64] = list.new()
+    let mut node = red_black.first(state)
+    while node != 0 {
+        let (callsign, _) = red_black.entry(state, node)
+        if red_black.find(seen, callsign, compare_callsigns) == 0 {
+            result.capacity_only(list.push(mut remove, callsign))?
+        }
+        node = red_black.next(state, node)
+    }
+    for callsign in remove {
+        red_black.remove(mut state, callsign, compare_callsigns)
+    }
+    let (map, reduced) = reduce(motions)?
+    let mut collisions: List[Collision] = list.new()
+    for bucket in reduced {
+        let mut i = map.buckets[bucket].head
+        while i != NONE {
+            let first = map.entries[i].motion
+            let mut j = map.entries[i].next
+            while j != NONE {
+                let second = map.entries[j].motion
+                if let Some(point) = intersection(first, second) {
+                    result.capacity_only(list.push(mut collisions, Collision(first: first.callsign, second: second.callsign, position: point)))?
+                }
+                j = map.entries[j].next
+            }
+            i = map.entries[i].next
+        }
+    }
+    Ok(list.len(collisions))
+}
+
+fn simulate(size: u64, time: f64) -> Result[List[Aircraft], Capacity] {
+    let mut frame: List[Aircraft] = list.new()
+    let mut i = 0u64
+    while i < size {
+        let (sine, cosine) = option.unwrap(trig.sin_cos(time))
+        let lane: f64 = float.from_int(i * 3)
+        result.capacity_only(list.push(mut frame, Aircraft(callsign: i, position: V3(x: time, y: cosine * 2.0 + lane, z: 10.0))))?
+        result.capacity_only(list.push(mut frame, Aircraft(callsign: i + 1, position: V3(x: time, y: sine * 2.0 + lane, z: 10.0))))?
+        i += 2
+    }
+    Ok(take frame)
+}
+
+pub fn benchmark(size: u64) -> Result[bool, Capacity] {
+    let expected = match size {
+        2 => 42u64,
+        10 => 390u64,
+        100 => 4305u64,
+        200 => 8655u64,
+        250 => 10830u64,
+        500 => 14484u64,
+        1000 => 14484u64,
+        _ => return Ok(false),
+    }
+    let fresh: Result[red_black.Tree[u64, V3], Capacity] = red_black.new()
+    let mut state = fresh?
+    let mut total = 0u64
+    for i in 0u64 .. 200 {
+        let frame: f64 = float.from_int(i)
+        let aircraft = simulate(size, frame / 10.0)?
+        total += handle_frame(mut state, aircraft)?
+    }
+    Ok(total == expected)
+}

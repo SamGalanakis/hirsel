@@ -11,7 +11,7 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-sys.path.insert(0, str(ROOT / "core/tools"))
+sys.path.append(str(ROOT / "core/tools"))
 from langarena import inputs
 
 
@@ -19,8 +19,8 @@ def llvm_path():
     return ROOT / "tools/buck2/toolchains/llvm-files"
 
 
-def capped_env(out):
-    return {**os.environ, "HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "1",
+def capped_env(out, limit="2G", jobs="1"):
+    return {**os.environ, "HIRSEL_MEMORY_LIMIT": limit, "HIRSEL_JOBS": jobs,
             "XDG_DATA_HOME": str(out / "data"), "XDG_CACHE_HOME": str(out / "cache")}
 
 
@@ -32,15 +32,27 @@ def fixture(upstream):
     return json.dumps(text, ensure_ascii=False)
 
 
-def hirsel(args):
+def hirsel(args, matched=False):
     artifacts = json.loads(args.artifacts.read_text())
     compiler, runtime = (artifacts[key] for key in ("compiler", "runtime"))
     spec = inputs(ROOT, "harness")
     rap = args.out / "rap.hirsel"
     rap.write_text(f"pub fn document() -> String {{ {fixture(args.upstream)} }}\n")
+    sources = list((HERE / "hirsel").glob("*.hirsel"))
+    if matched:
+        variants = HERE / "pool-ports/hirsel"
+        harness = args.out / "pool_index.hirsel"
+        port(HERE / "hirsel/harness.hirsel", harness, {
+            "havlak.benchmark(inner)": "havlak_pool.benchmark(inner)",
+            "cd.benchmark(inner)": "cd_pool.benchmark(inner)",
+            "deltablue.benchmark(inner)": "deltablue_pool.benchmark(inner)",
+            "lists.list_benchmark()": "linked_small.list_benchmark()",
+            "trees.towers_benchmark()": "linked_small.towers_benchmark()",
+        })
+        sources += [harness, *variants.glob("*.hirsel")]
     spec["packages"][-1].update(package={"name": "awfy", "version": "1"}, sources=[
         {"file": str(source), "modules": [source.stem], "signatures": False}
-        for source in [*sorted((HERE / "hirsel").glob("*.hirsel")), rap]
+        for source in [*sorted(sources), rap]
     ])
     out = args.out
     manifest = out / "hirsel-inputs.json"
@@ -52,7 +64,7 @@ def hirsel(args):
             "--backend", "llvm", "--release", "--debug-lines", "on", "--runtime", runtime,
             "--cc", str(llvm_path() / "bin/clang"),
             "--grant", "Stdout", "--json", "-o", str(out / f"hirsel-{module}"),
-        ], env={**capped_env(out), "LD_LIBRARY_PATH": str(llvm_path() / "lib")},
+        ], env={**getattr(args, "env", capped_env(out)), "LD_LIBRARY_PATH": str(llvm_path() / "lib")},
             stdout=subprocess.PIPE)
         if result.returncode:
             sys.stderr.buffer.write(result.stdout)
@@ -60,26 +72,69 @@ def hirsel(args):
         (out / f"hirsel-{module}-build.json").write_bytes(result.stdout)
 
 
-def goose(args):
+def port(source, destination, replacements):
+    body = source.read_text()
+    for old, new in replacements.items():
+        if old not in body:
+            raise ValueError(f"{source}: missing pool dispatch anchor {old!r}")
+        body = body.replace(old, new)
+    destination.write_text(body)
+
+
+def goose_executable(compiler, source, output, env, cflags=()):
+    generated = output.with_suffix(".c")
+    command = [ROOT / "tools/capped"]
+    subprocess.run([*command, compiler, "-O2", "--standalone", "-o", generated, source],
+                   env=env, check=True)
+    subprocess.run([*command, "clang", "-O2", "-w", *cflags, generated, "-o", output,
+                    "-lm", "-pthread", "-ldl"], env=env, check=True)
+
+
+def goose(args, matched=False):
     source = args.out / "goose-src"
     shutil.copytree(HERE / "goose", source, dirs_exist_ok=True)
     (source / "rap.goose").write_text(
         f"namespace rap;\nfn document() -> const u8[:] {{ return {fixture(args.upstream)}; }}\n")
-    command = [ROOT / "tools/capped"]
-    env = capped_env(args.out)
+    if matched:
+        for variant in (HERE / "pool-ports/goose").glob("*.goose"):
+            shutil.copyfile(variant, source / variant.name)
+        port(source / "harness.goose", source / "pool_index.goose", {
+            "import havlak;": "import havlak_pool;", "havlak::": "havlak_pool::",
+            "import lists;": "import list_index;", "lists::": "list_index::",
+        })
+    env = getattr(args, "env", capped_env(args.out))
     for module in args.goose_entries:
-        generated = args.out / f"goose-{module}.c"
-        subprocess.run([*command, args.goose, "-O2", "--standalone", "-o", generated,
-                        source / (module + ".goose")], env=env, check=True)
-        subprocess.run([*command, "clang", "-O2", "-w", "-ffp-contract=off", "-gline-tables-only",
-                        generated, "-o", args.out / f"goose-{module}", "-lm", "-pthread", "-ldl"],
-                       env=env, check=True)
+        goose_executable(args.goose, source / f"{module}.goose", args.out / f"goose-{module}",
+                         env, ("-ffp-contract=off", "-gline-tables-only"))
 
 
-def rust(args):
-    for module, source in (("hello", HERE / "hello.rs"), ("harness", args.rust / "src/main.rs")):
+def rust(args, matched=False):
+    sources = [("harness", args.rust / "src/main.rs")]
+    if getattr(args, "hello", True):
+        sources.append(("hello", HERE / "hello.rs"))
+    if matched:
+        source = args.out / "rust-pool-src"
+        shutil.copytree(args.rust / "src", source)
+        variants = sorted((HERE / "pool-ports/rust").glob("*.rs"))
+        for variant in variants:
+            shutil.copyfile(variant, source / variant.name)
+        main = source / "main.rs"
+        port(main, main, {
+            "mod som;": "mod som;\n" + "\n".join(f"mod {variant.stem};" for variant in variants),
+            "havlak::inner(inner)": "havlak_pool::benchmark(inner)",
+            "cd::inner(inner)": "cd_pool::inner(inner)",
+            "deltablue::inner(inner)": "deltablue_pool::inner(inner)",
+            "small::list_inner(inner)": "(0..inner).all(|_| linked_small::list() == 10)",
+            "small::towers_inner(inner)": "(0..inner).all(|_| linked_small::towers() == 8191)",
+            "    match name {\n": '    match name {\n'
+            '        "JsonPool" => (0..inner).all(|_| json_pool::benchmark() == 156),\n'
+            '        "StoragePool" => (0..inner).all(|_| trees_pool::benchmark() == 5461),\n',
+        })
+        sources.append(("pool_index", main))
+    for module, source in sources:
         subprocess.run([ROOT / "tools/capped", "rustc", "--edition=2021", "-C", "opt-level=3", "-C", "debuginfo=1",
-                        source, "-o", args.out / f"rust-{module}"], env=capped_env(args.out), check=True)
+                        source, "-o", args.out / f"rust-{module}"],
+                       env=getattr(args, "env", capped_env(args.out)), check=True)
 
 
 def main():
@@ -100,7 +155,7 @@ def main():
     if args.goose:
         goose(args)
     if args.rust:
-        rust(args)
+        rust(args, matched=True)
 
 
 if __name__ == "__main__":

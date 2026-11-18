@@ -43,19 +43,20 @@ def inputs(work, source=PROGRAM / "main.hirsel", store_sources=None):
     return path
 
 
-def build(compiler, work, web, listen, source=PROGRAM / "main.hirsel", store_sources=None):
+def build(compiler, work, web, listen, source=PROGRAM / "main.hirsel", store_sources=None, *,
+          prefix=(), flags=(), env=None, stdout=None):
     work.mkdir(parents=True, exist_ok=True)
     data = work / "data"
     data.mkdir(exist_ok=True)
     executable = work / "checkbox"
     port = int(listen.rsplit(":", 1)[1])
     subprocess.run([
-        compiler, "build", "--source-core", "--inputs", inputs(work, source, store_sources),
+        *prefix, compiler, "build", *flags, "--source-core", "--inputs", inputs(work, source, store_sources),
         "--store", work / "compiler-store", "--entry", ENTRY + "/main",
         "--dir", data, "--dir", web, "--grant", "Tasks", "--grant", "Clock",
         "--grant", "Random", "--grant", f"Net=Listen {listen.rsplit(':', 1)[0]}/32 {port}-{port}",
         "--limit", str(2 << 30), "-o", executable,
-    ], check=True, cwd=ROOT)
+    ], check=True, cwd=ROOT, env=env, stdout=stdout)
     return executable
 
 

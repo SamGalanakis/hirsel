@@ -1,0 +1,91 @@
+// AWFY list.js and towers.js. Every link indexes its invocation's grow-only pool.
+const NONE: u64 = 0xffffffffffffffffu64
+
+type Element {
+    value: i64,
+    next: u64
+}
+
+fn make_list(mut pool: List[Element], size: i64) -> Result[u64, Capacity] {
+    if size == 0 { return Ok(NONE) }
+    let node = list.len(pool)
+    result.capacity_only(list.push(mut pool, Element(value: size, next: NONE)))?
+    let rest = make_list(mut pool, size - 1)?
+    pool[node].next = rest
+    Ok(node)
+}
+
+fn shorter(pool: List[Element], first: u64, second: u64) -> bool {
+    let mut left = first
+    let mut right = second
+    while right != NONE {
+        if left == NONE { return true }
+        left = pool[left].next
+        right = pool[right].next
+    }
+    false
+}
+
+fn tail(pool: List[Element], x: u64, y: u64, z: u64) -> u64 {
+    if !shorter(pool, y, x) { return z }
+    if x == NONE || y == NONE || z == NONE { return NONE }
+    tail(pool, tail(pool, pool[x].next, y, z), tail(pool, pool[y].next, z, x), tail(pool, pool[z].next, x, y))
+}
+
+fn length(pool: List[Element], node: u64) -> u64 {
+    if node == NONE { 0 } else { 1 + length(pool, pool[node].next) }
+}
+
+pub fn list_benchmark() -> Result[u64, Capacity] {
+    let mut pool: List[Element] = list.new()
+    let x = make_list(mut pool, 15)?
+    let y = make_list(mut pool, 10)?
+    let z = make_list(mut pool, 6)?
+    Ok(length(pool, tail(pool, x, y, z)))
+}
+
+type Towers {
+    piles: Inline[u64, 3],
+    disks: List[Element],
+    moves: u64
+}
+
+fn push(mut towers: Towers, disk: u64, pile: u64) -> bool {
+    let top = towers.piles[pile]
+    if top != NONE && towers.disks[disk].value >= towers.disks[top].value {
+        return false
+    }
+    towers.disks[disk].next = top
+    towers.piles[pile] = disk
+    true
+}
+
+fn move_top(mut towers: Towers, from: u64, to: u64) -> bool {
+    let disk = towers.piles[from]
+    if disk == NONE { return false }
+    towers.piles[from] = towers.disks[disk].next
+    towers.disks[disk].next = NONE
+    towers.moves += 1
+    push(mut towers, disk, to)
+}
+
+fn move_disks(mut towers: Towers, count: u64, from: u64, to: u64) -> bool {
+    if count == 1 {
+        move_top(mut towers, from, to)
+    } else {
+        let other = 3 - from - to
+        move_disks(mut towers, count - 1, from, other) && move_top(mut towers, from, to) && move_disks(mut towers, count - 1, other, to)
+    }
+}
+
+pub fn towers_benchmark() -> Result[u64, Capacity] {
+    let mut towers = Towers(piles: [NONE, NONE, NONE], disks: list.new(), moves: 0)
+    let mut size = 14i64
+    while size > 0 {
+        size -= 1
+        let disk = list.len(towers.disks)
+        result.capacity_only(list.push(mut towers.disks, Element(value: size, next: NONE)))?
+        if !push(mut towers, disk, 0) { return Ok(0) }
+    }
+    Ok(if move_disks(mut towers, 13, 0, 1) { towers.moves } else { 0 })
+}

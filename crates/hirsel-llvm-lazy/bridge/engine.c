@@ -674,8 +674,14 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     if (!speed) hirsel_llvm_promote_development_slots(module);
     LLVMAttributeRef probe = LLVMCreateStringAttribute(context, "probe-stack", 11, "inline-asm", 10);
     LLVMAttributeRef interval = LLVMCreateStringAttribute(context, "stack-probe-size", 16, "4096", 4);
+#ifdef HIRSEL_PROFILE_FRAME_POINTERS
+    LLVMAttributeRef frame_pointer = LLVMCreateStringAttribute(context, "frame-pointer", 13, "all", 3);
+#endif
     for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f)) {
         if (LLVMCountBasicBlocks(f)) {
+#ifdef HIRSEL_PROFILE_FRAME_POINTERS
+            LLVMAddAttributeAtIndex(f, LLVMAttributeFunctionIndex, frame_pointer);
+#endif
             LLVMAddAttributeAtIndex(f, LLVMAttributeFunctionIndex, probe);
             LLVMAddAttributeAtIndex(f, LLVMAttributeFunctionIndex, interval);
         }

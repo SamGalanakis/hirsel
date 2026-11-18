@@ -1,0 +1,196 @@
+type PlaceEndpoint: shareable + send {
+    net: Net,
+    clock: Clock,
+    address: Addr
+}
+
+type PlaceJob: send {
+    dir: Dir,
+    clock: Clock,
+    random: Random,
+    tasks: Tasks,
+    listener: Listener,
+    ready: Sender[()]
+}
+
+fn put_counter(mut db: store.store.Db, table: store.store.Table[u64, u64], value: u64) waits {
+    let written = result.unwrap(store.store.run(mut db, None, fn(mut tx: store.store.Tx) -> Result[(), store.store.Error] {
+        store.store.put(mut tx, table, 1u64, value)
+    }))
+    match take written {
+        Committed(take done) => result.unwrap(store.store.durable(mut db, done.ticket)),
+        _ => fail("counter transaction did not commit"),
+    }
+}
+
+fn get_counter(db: store.store.Db, shape: store.store.Shape[u64, u64]) -> u64 {
+    let read = result.unwrap(store.store.look(store.store.snapshot(db), None, fn(tx: store.store.Tx) -> u64 {
+        option.unwrap(result.unwrap(store.store.fetch(tx, shape, 1u64)))
+    }))
+    match take read {
+        Seen(take row) => row.value,
+        _ => fail("counter read did not complete"),
+    }
+}
+
+fn place_writer(take job: PlaceJob) waits {
+    let PlaceJob(dir: dir, clock: clock, random: random, tasks: tasks, listener: take listener, ready: take ready) = take job
+    let mut db = result.unwrap(store.store.open(tasks, dir, clock, random, store.store.defaults()))
+    let codec: std.codec.Codec[u64] = std.codec.of()
+    let ticket = result.unwrap(store.store.create_table(mut db, store.store.spec("counter", std.codec.key_u64(), codec)))
+    result.unwrap(store.store.durable(mut db, ticket))
+    let table = result.unwrap(store.store.table(mut db, "counter", std.codec.key_u64(), codec))
+    let shape = store.store.shape(table)
+    put_counter(mut db, table, 0)
+    result.unwrap(channel.send(ready, ()))
+    let mut accepting = take listener
+    let mut buffer: Bytes = result.unwrap(list.with_capacity(8))
+    loop {
+        match host.accept(mut accepting, Never) {
+            Ok((take socket, _)) => {
+                let value = get_counter(db, shape) + 1
+                put_counter(mut db, table, value)
+                list.clear(mut buffer)
+                let mut rest = value
+                for _ in 0u64 .. 8u64 {
+                    result.unwrap(list.push(mut buffer, int.narrow(rest & 255)))
+                    rest /= 256
+                }
+                let (reader, writer) = net.split(take socket)
+                let mut output = take writer
+                let deadline = int.saturating_add(host.mono_ns(clock), 5000000000u64)
+                let mut sent = 0u64
+                while sent < 8 && host.mono_ns(clock) < deadline {
+                    match host.send(mut output, list.slice(buffer, sent, 8), At(clock, deadline)) {
+                        Ok(0) => break,
+                        Ok(n) => { sent += n },
+                        Error(_) => break,
+                    }
+                }
+            },
+            Error(_) => break,
+        }
+    }
+    result.unwrap(store.store.close(take db))
+}
+
+fn place_increment(place: PlaceEndpoint, deadline: u64) -> Result[Option[Bytes], std.http.ResponseError] waits {
+    let connected = host.connect(place.net, place.address, At(place.clock, deadline))
+    let socket = match take connected {
+        Ok(take s) => take s,
+        Error(_) => return Ok(None),
+    }
+    let (reader, writer) = net.split(take socket)
+    let mut input = take reader
+    let allocated: Result[Bytes, Capacity] = list.with_capacity(8)
+    let mut payload = match take allocated {
+        Ok(take b) => take b,
+        Error(c) => return Error(Allocation(c)),
+    }
+    while list.len(payload) < 8 {
+        match host.recv(mut input, mut payload, At(place.clock, deadline)) {
+            Ok(0) => return Ok(None),
+            Ok(_) => {},
+            Error(_) => return Ok(None),
+        }
+    }
+    let mut value = 0u64
+    for i in 0u64 .. 8u64 {
+        let b: u64 = int.widen(payload[i])
+        value |= int.wrapping_shl(b, int.narrow(i * 8))
+    }
+    let mut rendered = string.new()
+    if let Error(c) = string.push_u64(mut rendered, value) {
+        return Error(Allocation(c))
+    }
+    match string.into_bytes(take rendered) {
+        Ok(take b) => Ok(Some(take b)),
+        Error((c, _)) => Error(Allocation(c)),
+    }
+}
+
+fn message_document[in r](take w: Writer[std.json.Json, in r]) -> Result[Child[std.json.Json], BuildError] {
+    emit(take w, Obj(emit(fn(take members: Writer[IndexedSpan[std.json.Member], in r]) -> Result[Child[IndexedSpan[std.json.Member]], BuildError] {
+        writer.append(mut members, fn(take entry: Writer[std.json.Member, in r]) -> Result[Child[std.json.Member], BuildError] {
+            emit(take entry, std.json.Member(key: "message", value: emit(fn(take v: Writer[std.json.Json, in r]) -> Result[Child[std.json.Json], BuildError] {
+                emit(take v, Str("Hello, world"))
+            })))
+        })?
+        writer.close(take members)
+    })))
+}
+
+fn message_json(scratch: Region) -> Result[Bytes, std.http.ResponseError] {
+    // Object tag and metadata, one member, and its offset in the member span.
+    let built = build_stream_in(scratch, bytes 41, fn(take w: Writer[std.json.Json, in scratch]) -> Result[Child[std.json.Json], BuildError] {
+        message_document(take w)
+    })
+    let document = match take built {
+        Ok(take b) => finish(take b),
+        Error(Capacity(c)) => return Error(Allocation(c)),
+        Error(Overflow) => fail("message document exceeds its encoding"),
+    }
+    let mut body = string.new()
+    if let Error(c) = std.json.push_json(mut body, document) {
+        return Error(Allocation(c))
+    }
+    match string.into_bytes(take body) {
+        Ok(take payload) => Ok(take payload),
+        Error((c, _)) => Error(Allocation(c)),
+    }
+}
+
+fn reply(status: u16, content_type: String, take body: Bytes) -> Result[std.http.Outcome, std.http.ResponseError] {
+    let mut response = std.http.response(status, take body, false)?
+    let field = match std.http.copy_bytes(string.as_bytes(content_type)) {
+        Ok(take value) => take value,
+        Error(c) => return Error(Allocation(c)),
+    }
+    std.http.header(mut response, result.unwrap(b"content-type"), take field)?
+    Ok(Reply(take response))
+}
+
+fn plaintext(request: std.http.Request, scratch: Region, mut out: std.http.Responder, state: PlaceEndpoint) -> Result[std.http.Outcome, std.http.HandlerError] {
+    reply(200, "text/plain", result.unwrap(b"Hello, world"))
+}
+
+fn json(request: std.http.Request, scratch: Region, mut out: std.http.Responder, state: PlaceEndpoint) -> Result[std.http.Outcome, std.http.HandlerError] {
+    reply(200, "application/json", message_json(scratch)?)
+}
+
+fn stored_counter(request: std.http.Request, scratch: Region, mut out: std.http.Responder, state: PlaceEndpoint) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let stored = place_increment(state, std.http.handler_deadline(request))?
+    match take stored {
+        Some(take payload) => reply(200, "text/plain", take payload),
+        None => reply(503, "text/plain", list.new()),
+    }
+}
+
+pub fn main(net: Net, clock: Clock, tasks: Tasks, out: Stdout, dir: Dir, random: Random) -> Result[(), Exit] waits {
+    let (place_listener, place_address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0), 128))
+    let (ready, opened): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
+    let job = PlaceJob(dir: dir, clock: clock, random: random, tasks: tasks, listener: take place_listener, ready: take ready)
+    let mut place = result.unwrap(task.spawn(tasks, bytes 805306368u64, take job, place_writer))
+    result.unwrap(channel.receive(opened))
+    let state = PlaceEndpoint(net: net, clock: clock, address: place_address)
+    let cfg = std.http.Config(ingress: list.new(), sockets_max: 128, http_max: 128, upgrades_max: 0, conns_max: 128, ip_sockets_max: 128, refuse_max: 4, refuse_ms: 1000, inbox_cap: 256, head_max: 8192, fields_max: 64, pipeline_max: 8192, body_inline: 16384, body_max: 1048576, out_cap: 8192, handler_bytes: 262144, first_head_ms: 5000, idle_ms: 60000, head_ms: 10000, body_ms: 30000, handler_ms: 30000, write_ms: 30000, drain_ms: 2000, linger_ms: 2000, drain_max: 65536, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
+    let (listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0), 128))
+    let mut line = result.unwrap(string.from("LISTEN 127.0.0.1:"))
+    result.unwrap(string.push_u64(mut line, int.widen(address.port)))
+    result.unwrap(string.push_char(mut line, '\n'))
+    result.unwrap(stdout.write(out, line))
+    let mut listeners: List[Listener] = list.new()
+    result.unwrap(list.push(mut listeners, take listener))
+    let mut routes: std.router.Builder[PlaceEndpoint] = std.router.builder()
+    result.unwrap(std.router.add(mut routes, "GET", "/plaintext", std.router.raw(plaintext)))
+    result.unwrap(std.router.add(mut routes, "GET", "/json", std.router.raw(json)))
+    result.unwrap(std.router.add(mut routes, "GET", "/store", std.router.raw(stored_counter)))
+    let routing = result.unwrap(std.router.build(take routes))
+    let served = std.http.serve(take listeners, clock, tasks, take cfg, take routing, state)
+    task.cancel(mut place)
+    let _ = task.join(take place)
+    match served {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 1)),
+    }
+}

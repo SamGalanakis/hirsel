@@ -6,7 +6,10 @@ cxx_library(
         "failure_edges.h": "//crates/hirsel-llvm/bridge:failure_edges.h",
     },
     header_namespace = "",
-    compiler_flags = ["-O2", "-fvisibility=hidden"],
+    compiler_flags = ["-O2", "-fvisibility=hidden"] + select({
+        "//tools/buck2:profile_profiling": ["-DHIRSEL_PROFILE_FRAME_POINTERS"],
+        "DEFAULT": [],
+    }),
     deps = ["toolchains//:libllvm", "//crates/hirsel-llvm/bridge:checked-copy-static", ":compose"],
     preferred_linkage = "shared",
     visibility = ["PUBLIC"],

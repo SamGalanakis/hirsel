@@ -175,7 +175,31 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                     } else {
                         h.target = Span(start: cur.start, end: at)
                         cur.part = 0
-                        state = Version
+                        if next + 8 <= limit {
+                            // The version is one little-endian word. Ignore
+                            // only the bit distinguishing HTTP/1.0 and 1.1.
+                            let word = list.word_le(b, next)
+                            let mismatch = (word & 0xfeffffffffffffff) ^ 0x302e312f50545448
+                            if mismatch == 0 {
+                                let minor: u8 = int.truncate(word >> 56)
+                                h.version = minor - b'0'
+                                cur.part = 7
+                                next += 8
+                                state = RequestEnd
+                            } else {
+                                // Keep the first bad byte as the cursor's stop,
+                                // while charging every byte in the loaded word.
+                                let bit: u64 = int.widen(int.trailing_zeros(mismatch))
+                                let scanned = (bit >> 3) + 1
+                                cur.part = order.min(scanned, 7)
+                                cur.examined += 8 - scanned
+                                next += scanned
+                                state = Version
+                                result = Bad
+                            }
+                        } else {
+                            state = Version
+                        }
                     }
                 } else if !target_byte(c, mut cur) {
                     result = Bad
@@ -258,7 +282,7 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                 let mut start = cur.value_start
                 let mut end = cur.value_end
                 let mut value = c
-                loop {
+                'value_bytes: loop {
                     if value == 13 || value == 10 {
                         state = if value == 13 {
                             FieldLf
@@ -278,6 +302,23 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                             end = next
                         }
                     } else {
+                        end = next
+                    }
+                    // Visit common value bytes in full eight-byte groups.
+                    // Stop the group on the first exceptional byte, so a
+                    // field or head terminator never reads into the next one.
+                    while next + 8 <= limit {
+                        let begin = next
+                        for _ in 0u64 .. 8 {
+                            value = b[next]
+                            next += 1
+                            if value <= 32 || value == 127 {
+                                if next > begin + 1 {
+                                    end = next - 1
+                                }
+                                continue 'value_bytes
+                            }
+                        }
                         end = next
                     }
                     if next == limit {

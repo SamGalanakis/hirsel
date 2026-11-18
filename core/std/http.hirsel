@@ -426,6 +426,19 @@ fn authority(b: Bytes) -> bool {
         }
         at += 1
     } else {
+        let high_bits: u64 = 0x8080808080808080
+        while at + 8 <= n {
+            let folded = list.word_le(b, at) | 0x2020202020202020
+            let ascii = folded & ~high_bits
+            // With bit seven clear, the additions cannot carry between bytes.
+            // That bit marks a byte at or above 'a', or past 'z', respectively.
+            let at_least_a = int.wrapping_add(ascii, 0x1f1f1f1f1f1f1f1f)
+            let past_z = int.wrapping_add(ascii, 0x0505050505050505)
+            if (at_least_a & ~(past_z | folded) & high_bits) != high_bits {
+                break
+            }
+            at += 8
+        }
         while at < n && b[at] != b':' {
             let c = b[at]
             if c == b'%' {

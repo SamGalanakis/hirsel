@@ -23,7 +23,7 @@ pub struct Config {
     pub latency_ns: u64,
     pub seed: u64,
     /// Zero-based choices. Unspecified suffix choices come from the seed.
-    pub prefix: Vec<usize>,
+    pub prefix: BTreeMap<Choice, Vec<usize>>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -33,20 +33,43 @@ impl Default for Config {
             max_handles: 256,
             latency_ns: 0,
             seed: 1,
-            prefix: vec![],
+            prefix: BTreeMap::new(),
         }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Choice {
     Send,
     Receive,
     Delivery,
     Fault,
+    Schedule,
 }
+impl Choice {
+    const COUNT: usize = 5;
+}
+
+/// The model and its scripted dispatcher use the same deterministic generator.
+pub struct SplitMix64(u64);
+impl SplitMix64 {
+    pub fn new(seed: u64, stream: u64) -> Self {
+        Self(Self::mix(seed ^ stream.wrapping_mul(0x9e3779b97f4a7c15)))
+    }
+
+    pub fn choose(&mut self, alternatives: usize) -> usize {
+        self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
+        (Self::mix(self.0) % alternatives as u64) as usize
+    }
+
+    fn mix(mut value: u64) -> u64 {
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+        value ^ (value >> 31)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Decision {
-    pub kind: Choice,
     pub alternatives: usize,
     pub selected: usize,
 }
@@ -124,8 +147,9 @@ struct State {
     now: u64,
     next: u64,
     port: u16,
-    random: u64,
-    decisions: Vec<Decision>,
+    random: [SplitMix64; Choice::COUNT],
+    decisions: BTreeMap<Choice, Vec<Decision>>,
+    liveness: bool,
     records: BTreeMap<u64, Record>,
     connections: BTreeMap<u64, Connection>,
     waiters: BTreeMap<u64, Operation>,
@@ -144,14 +168,15 @@ impl Default for Model {
 impl Model {
     pub fn new(config: Config) -> Self {
         assert!(config.queue_bytes > 0 && config.max_prefix > 0 && config.max_handles > 0);
-        let random = config.seed;
+        let random = std::array::from_fn(|kind| SplitMix64::new(config.seed, kind as u64));
         Self(Arc::new(Mutex::new(State {
             config,
             now: 0,
             next: 1,
             port: 49152,
             random,
-            decisions: vec![],
+            decisions: BTreeMap::new(),
+            liveness: false,
             records: BTreeMap::new(),
             connections: BTreeMap::new(),
             waiters: BTreeMap::new(),
@@ -177,26 +202,33 @@ impl Model {
         let mut s = self.state();
         s.now = s.now.max(now);
     }
-    /// Harness choice, recorded alongside send/receive/delivery choices. Fault
-    /// exploration uses it at each reached branch, including branches in retries.
+    /// Harness choice in the given stream. Fault alternatives put the no-fault
+    /// branch at zero, which repair selects without drawing or recording a choice.
     pub fn choose(&self, kind: Choice, alternatives: usize) -> usize {
         self.state().choose(kind, alternatives)
     }
-    pub fn decisions(&self) -> Vec<Decision> {
+    pub fn decisions(&self) -> BTreeMap<Choice, Vec<Decision>> {
         self.state().decisions.clone()
     }
     pub fn schedule(&self, at: u64, fault: Fault) {
         let mut s = self.state();
+        if s.liveness {
+            return;
+        }
         let pos = s.faults.partition_point(|(time, _)| *time <= at);
         s.faults.insert(pos, (at, fault));
     }
     pub fn fault(&self, fault: Fault) {
-        self.state().fault(fault);
+        let mut s = self.state();
+        if !s.liveness {
+            s.fault(fault);
+        }
     }
-    /// Stops future faults, repairs every direction, and lets normal delivery
-    /// drain the queues. Owners must still finish or cancel their operations.
+    /// Enters liveness mode permanently. Clears pending faults, heals partitions,
+    /// and lets ordinary delivery drain the queues. Resets remain irreversible. Owners must still finish or cancel their operations.
     pub fn repair(&self) {
         let mut s = self.state();
+        s.liveness = true;
         s.faults.clear();
         for c in s.connections.values_mut() {
             for d in &mut c.directions {
@@ -287,24 +319,22 @@ impl Model {
 impl State {
     fn choose(&mut self, kind: Choice, alternatives: usize) -> usize {
         assert!(alternatives > 0);
-        // SplitMix64 is deterministic even for seed zero.
-        self.random = self.random.wrapping_add(0x9e3779b97f4a7c15);
-        let mut random = self.random;
-        random = (random ^ (random >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-        random = (random ^ (random >> 27)).wrapping_mul(0x94d049bb133111eb);
-        random ^= random >> 31;
+        if kind == Choice::Fault && self.liveness {
+            return 0;
+        }
+        let decisions = self.decisions.entry(kind).or_default();
         let selected = self
             .config
             .prefix
-            .get(self.decisions.len())
+            .get(&kind)
+            .and_then(|prefix| prefix.get(decisions.len()))
             .copied()
-            .unwrap_or((random as usize) % alternatives);
+            .unwrap_or_else(|| self.random[kind as usize].choose(alternatives));
         assert!(
             selected < alternatives,
             "choice prefix outside this branch's bounds"
         );
-        self.decisions.push(Decision {
-            kind,
+        decisions.push(Decision {
             alternatives,
             selected,
         });

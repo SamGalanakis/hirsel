@@ -200,7 +200,10 @@ fn aborted_or_expired_waits_preserve_listener_bytes_and_send_prefix() {
     }
 }
 /// Reaching a timeout creates a second fault choice absent in the baseline.
-fn retry_scenario(prefix: Vec<usize>, seed: u64) -> (Vec<Decision>, usize) {
+fn retry_scenario(
+    prefix: BTreeMap<Choice, Vec<usize>>,
+    seed: u64,
+) -> (BTreeMap<Choice, Vec<Decision>>, usize) {
     let m = Model::new(Config {
         prefix,
         seed,
@@ -245,6 +248,13 @@ fn retry_scenario(prefix: Vec<usize>, seed: u64) -> (Vec<Decision>, usize) {
     assert_eq!((m.pending(), m.live_handles()), (0, 0));
     (m.decisions(), attempts)
 }
+fn exact_prefixes(trace: &BTreeMap<Choice, Vec<Decision>>) -> BTreeMap<Choice, Vec<usize>> {
+    trace
+        .iter()
+        .map(|(&kind, decisions)| (kind, decisions.iter().map(|d| d.selected).collect()))
+        .collect()
+}
+
 #[test]
 fn bounded_choice_prefixes_reach_fault_inside_fault_created_retry_and_replay() {
     // Dynamic prefix enumeration, adapted from TigerBeetle exhaustigen.zig.
@@ -253,15 +263,15 @@ fn bounded_choice_prefixes_reach_fault_inside_fault_created_retry_and_replay() {
     let mut retry_fault = false;
     let mut complete = false;
     for _ in 0..128 {
-        let (trace, retries) = retry_scenario(prefix.clone(), 1);
-        let exact: Vec<_> = trace.iter().map(|d| d.selected).collect();
-        assert_eq!(retry_scenario(exact, 999), (trace.clone(), retries));
-        retry_fault |= retries == 2
-            && trace
-                .iter()
-                .filter(|d| d.kind == Choice::Fault && d.selected == 1)
-                .count()
-                == 2;
+        let (decisions, retries) =
+            retry_scenario(BTreeMap::from([(Choice::Fault, prefix.clone())]), 1);
+        assert_eq!(
+            retry_scenario(exact_prefixes(&decisions), 999),
+            (decisions.clone(), retries)
+        );
+        // Only the fault branches have multiple alternatives in this scenario.
+        let trace = &decisions[&Choice::Fault];
+        retry_fault |= retries == 2 && trace.iter().filter(|d| d.selected == 1).count() == 2;
         explored += 1;
         let Some(at) = (0..trace.len())
             .rev()
@@ -282,9 +292,9 @@ fn bounded_choice_prefixes_reach_fault_inside_fault_created_retry_and_replay() {
 #[test]
 fn seeded_multifault_runs_repair_drain_and_replay_exact_choices() {
     for seed in 0..32 {
-        let (trace, attempts) = retry_scenario(vec![], seed);
+        let (trace, attempts) = retry_scenario(BTreeMap::new(), seed);
         assert_eq!(
-            retry_scenario(trace.iter().map(|d| d.selected).collect(), seed ^ 1234),
+            retry_scenario(exact_prefixes(&trace), seed ^ 1234),
             (trace, attempts)
         );
     }
@@ -329,4 +339,86 @@ fn model_identities_never_alias_native_generations_or_wrap_onto_live_handles() {
     assert_eq!(model.live_handles(), 1);
     model.release(l.value);
     assert_eq!((model.live_handles(), model.pending()), (0, 0));
+}
+
+#[test]
+fn shrinking_fault_prefix_preserves_schedule_decisions() {
+    let run = |faults: Vec<usize>, expected_error| {
+        let m = Model::new(Config {
+            prefix: BTreeMap::from([(Choice::Schedule, vec![1, 0, 1]), (Choice::Fault, faults)]),
+            // This seed chooses no fault on the third send with an empty prefix.
+            seed: 1,
+            ..Config::default()
+        });
+        let (l, c, s) = pair(&m);
+        let mut errors = Vec::new();
+        for send in 0..3 {
+            m.choose(Choice::Schedule, 2);
+            if m.choose(Choice::Fault, 2) == 1 {
+                m.fault(Fault::Reset { socket: c });
+            }
+            errors.push(
+                m.attempt(Operation::Send(c), b"x", 0, 10 + send)
+                    .unwrap()
+                    .error,
+            );
+        }
+        assert_eq!(errors, [0, 0, expected_error]);
+        m.choose(Choice::Schedule, 256);
+        close(&m, [l, c, s]);
+        m.decisions().remove(&Choice::Schedule).unwrap()
+    };
+
+    let faulted = run(vec![0, 0, 1], 5);
+    let shrunk = run(vec![], 0);
+    assert_eq!(
+        faulted[..3].iter().map(|d| d.selected).collect::<Vec<_>>(),
+        [1, 0, 1]
+    );
+    assert_eq!(shrunk, faulted);
+}
+
+#[test]
+fn repair_stops_new_faults_and_drains_queues() {
+    let m = Model::new(Config {
+        prefix: BTreeMap::from([(Choice::Fault, vec![1])]),
+        ..Config::default()
+    });
+    let (l, c, s) = pair(&m);
+    m.schedule(
+        5,
+        Fault::Partition {
+            socket: c,
+            blocked: true,
+        },
+    );
+    m.schedule(50, Fault::Reset { socket: c });
+    m.advance_to(5);
+    put(&m, c, b"x");
+    assert_eq!(m.queued_bytes(c), [1, 0, 0]);
+    assert!(m.attempt(Operation::Recv(s), &[], 1, 12).is_none());
+
+    m.advance_to(10);
+    m.repair();
+    assert_eq!(m.choose(Choice::Fault, 2), 0);
+    assert!(!m.decisions().contains_key(&Choice::Fault));
+    m.schedule(51, Fault::Reset { socket: c });
+    m.fault(Fault::Reset { socket: c });
+    m.advance_to(51);
+    assert_eq!(m.poll(None, false), [12]);
+    assert_eq!(
+        m.attempt(Operation::Recv(s), &[], 1, 12).unwrap().bytes,
+        b"x"
+    );
+    assert_eq!(m.queued_bytes(c), [0; 3]);
+    assert_eq!(m.pending(), 0);
+    // Successful sends distinguish a healed connection from a reset with
+    // readable bytes still buffered.
+    put(&m, c, b"y");
+    assert_eq!(
+        m.attempt(Operation::Recv(s), &[], 1, 13).unwrap().bytes,
+        b"y"
+    );
+    assert_eq!(m.queued_bytes(c), [0; 3]);
+    close(&m, [l, c, s]);
 }

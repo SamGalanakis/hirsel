@@ -2,7 +2,7 @@ use super::*;
 use crate::{Context, block::Block};
 
 fn snapshot(context: &Context) -> Vec<String> {
-    let payer = context.current.payer;
+    let payer = context.current.payer.get();
     let d = payer.domain();
     let f = payer.forest();
     let slot_id = |p: Option<NonNull<Slot>>| p.map(|p| unsafe { p.as_ref().id });
@@ -191,4 +191,156 @@ fn forwarded_lexical_parent_uses_the_unchanged_general_union() {
         states
     }
     assert_eq!(run(false), run(true));
+}
+
+#[test]
+fn a_join_result_grows_from_the_joiners_bound_while_its_funder_is_live() {
+    use crate::{
+        abi::*,
+        channel::*,
+        tasks::{
+            REFUND, SPAWN, checkpoint, hirsel_core_check_cancel, hirsel_core_join,
+            hirsel_core_spawn,
+        },
+        tasks_tests::{layout, run, value},
+    };
+    use std::{mem::MaybeUninit, ptr};
+
+    #[repr(C)]
+    struct List {
+        data: NonNull<u8>,
+        len: u64,
+        capacity: u64,
+    }
+
+    struct Send {
+        sender: *mut Channel,
+        check: *const Cell<bool>,
+    }
+
+    unsafe extern "C" fn sibling(context: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: S owns the list until the channel takes it and keeps its limit live.
+        unsafe {
+            let Send { sender, check } = input.cast::<Send>().read();
+            let data = Block::new(&*context, Some(32), 32, 8).unwrap().into_raw();
+            data.cast::<[u64; 4]>().write([0, 1, 2, 3]);
+            let mut list = List {
+                data,
+                len: 4,
+                capacity: 4,
+            };
+            assert!(hirsel_core_send(context, sender, (&raw mut list).cast(), 1).transferred);
+            hirsel_core_sender_drop(sender);
+            while !(*check).get() {
+                checkpoint(false);
+            }
+            let before = (*context).available();
+            hirsel_core_check_cancel(context, 2);
+            let credited = (*context).available() - before;
+            out.cast::<(u64, u64)>().write((before, credited));
+        }
+        0
+    }
+
+    unsafe extern "C" fn relay(context: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: C owns the receiver and returns the received owning carrier.
+        unsafe {
+            let receiver = input.cast::<*mut Channel>().read();
+            assert!(hirsel_core_receive(context, receiver, out, 3).transferred);
+            assert_eq!(hirsel_core_receiver_drop(context, receiver), 0);
+        }
+        0
+    }
+
+    unsafe extern "C" fn parent(context: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: P moves endpoints once and joins both handles before returning.
+        unsafe {
+            let bytes = input.cast::<u64>().read();
+            let checked = Cell::new(false);
+            let q = hirsel_core_channel_new(context, 1, value::<List>(24), 0);
+            let mut send = Send {
+                sender: q.sender,
+                check: &checked,
+            };
+            let s = hirsel_core_spawn(
+                context,
+                0,
+                128,
+                (&raw mut send).cast(),
+                sibling,
+                layout::<Send, (u64, u64)>(16),
+                0,
+            );
+            let mut receiver = q.receiver;
+            let c = hirsel_core_spawn(
+                context,
+                0,
+                0,
+                (&raw mut receiver).cast(),
+                relay,
+                layout::<*mut Channel, List>(24),
+                0,
+            );
+            let mut joined = MaybeUninit::<List>::uninit();
+            assert_eq!(
+                hirsel_core_join(context, c.task, joined.as_mut_ptr().cast(), 4).kind,
+                0
+            );
+            let mut list = joined.assume_init();
+            let old = list.data;
+            assert!(!hirsel_core_limit_enter(context, bytes).pointer.is_null());
+            let grew = crate::growth::grow(
+                &*context,
+                (&raw mut list).cast(),
+                64,
+                8,
+                64,
+                8,
+                32,
+                32,
+                false,
+                crate::block::PLAIN,
+            );
+            let paid = match grew {
+                Ok(data) => {
+                    let keeps_prefix = data.cast::<[u64; 4]>().read() == [0, 1, 2, 3];
+                    data.cast::<u64>().as_ptr().add(4).write(4);
+                    bytes == 64 && list.capacity == 8 && keeps_prefix && (*context).available() == 0
+                }
+                Err(cap) => {
+                    bytes == 32
+                        && cap
+                            == Capacity {
+                                requested: 64,
+                                available: 32,
+                            }
+                        && list.data == old
+                        && list.capacity == 4
+                        && old.cast::<[u64; 4]>().read() == [0, 1, 2, 3]
+                }
+            };
+            hirsel_core_limit_exit(context);
+            checked.set(true);
+            let mut balance = (0u64, 0u64);
+            assert_eq!(
+                hirsel_core_join(context, s.task, (&raw mut balance).cast(), 5).kind,
+                0
+            );
+            drop(Block::from_raw(list.data, list.capacity * 8));
+            out.cast::<u64>().write(u64::from(
+                paid && balance == (96, if bytes == 64 { 32 } else { 0 }),
+            ));
+        }
+        0
+    }
+
+    for bytes in [32u64, 64] {
+        let (paid, events) = run(parent, bytes);
+        assert_eq!(paid, 1, "P's bound has {bytes} bytes");
+        let sibling = events.iter().find(|e| e.kind == SPAWN).unwrap().object;
+        let refunds = events
+            .iter()
+            .filter(|e| e.kind == REFUND && e.task == 0 && e.object == sibling && e.value == 32);
+        assert_eq!(refunds.count(), usize::from(bytes == 64));
+    }
 }

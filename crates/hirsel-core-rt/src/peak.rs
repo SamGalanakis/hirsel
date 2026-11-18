@@ -305,10 +305,10 @@ mod tests {
         let run = Run::start(&context);
         context.limit_enter(600).unwrap();
         context.current.admit(Some(40)).unwrap();
-        let survivor = context.current.payer;
+        let survivor = context.current.payer.get();
         context.limit_enter(100).unwrap();
         context.current.admit(Some(10)).unwrap();
-        let nested = context.current.payer;
+        let nested = context.current.payer.get();
         context.limit_exit();
         context.limit_exit();
         assert_eq!(context.available(), 950);
@@ -412,9 +412,9 @@ mod tests {
         };
         let mut context = Context::new(128);
         let run = Run::start(&context);
-        let shared = block::allocate(context.payer(None), Some(16), 16, 8, block::PLAIN).unwrap();
-        let unique = block::allocate(context.payer(None), Some(16), 16, 8, block::PLAIN).unwrap();
-        let parent = block::allocate(context.payer(None), Some(40), 48, 8, block::PLAIN).unwrap();
+        let shared = block::allocate(context.payer(), Some(16), 16, 8, block::PLAIN).unwrap();
+        let unique = block::allocate(context.payer(), Some(16), 16, 8, block::PLAIN).unwrap();
+        let parent = block::allocate(context.payer(), Some(40), 48, 8, block::PLAIN).unwrap();
         // SAFETY: initialize fresh counted storage and transfer three shared
         // holders and the only unique holder into the four-field parent.
         unsafe {
@@ -549,8 +549,7 @@ mod tests {
         for kind in [crate::block::PLAIN, crate::block::GRAPH] {
             let context = Context::new(4096);
             let run = Run::start(&context);
-            let old =
-                crate::block::allocate_like(&context, None, Some(1024), 1024, 8, kind).unwrap();
+            let old = crate::block::allocate(context.payer(), Some(1024), 1024, 8, kind).unwrap();
             let mut carrier = [old.as_ptr().addr() as u64, 1, 1024];
             // SAFETY: exclusive live sequence backing and carrier, exact charges
             // and initialized prefix; the byte to transfer is initialized here.

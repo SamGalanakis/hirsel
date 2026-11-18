@@ -692,7 +692,7 @@ pub fn sequence_edge(shapes: &[Shape], place: PlaceTy) -> Option<&FieldTy> {
 pub enum AllocPlace {
     /// The current limit (MEM-19).
     Current,
-    /// The limit the block's record leads to: growth keeps the limit (MEM-26).
+    /// Like allocation uses the current limit, as does growth (MEM-26).
     Like(ValueId),
     /// FORM v1b: in this region, charged to the current limit until it closes (MEM-1).
     Region(ValueId),

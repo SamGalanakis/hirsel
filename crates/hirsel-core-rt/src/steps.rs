@@ -1,33 +1,47 @@
-//! MEM-30 deterministic, shared step scopes. Only the running task caches a window.
+//! MEM-30 step budgets and slice counters belong to one task.
 use crate::{Context, causes};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const UNBOUNDED: i64 = 1 << 62;
 pub const SLICE: u64 = 65_536;
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct Bound {
-    left: Mutex<u64>,
-    parent: Option<Arc<Bound>>,
     id: u64,
+    left: u64,
 }
-impl Drop for Bound {
-    fn drop(&mut self) {
-        let mut parent = self.parent.take();
-        let mut left = *self.left.get_mut().unwrap();
-        while let Some(record) = parent {
-            *record.left.lock().unwrap() += left;
-            match Arc::try_unwrap(record) {
-                Ok(mut record) => {
-                    left = *record.left.get_mut().unwrap();
-                    parent = record.parent.take();
-                }
-                Err(_) => break,
-            }
-        }
+
+fn bound(left: u64) -> Bound {
+    let id = NEXT
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .unwrap_or_else(|_| crate::process::stop(b"StepIds"));
+    Bound { id, left }
+}
+
+// The active bound and slice hold the tails beyond the emitter's common window.
+// Switching tasks leaves all three words intact.
+fn window_left(context: &Context) -> u64 {
+    context.steps.max(0) as u64
+}
+
+fn install_window(context: &mut Context, slice: u64) {
+    if let Some(current) = context.step_bounds.last_mut() {
+        let window = current.left.min(slice);
+        current.left -= window;
+        context.step_slice_tail = slice - window;
+        context.steps = window as i64;
+    } else {
+        context.step_slice_tail = slice;
+        context.steps = UNBOUNDED;
+    }
+}
+
+pub(crate) fn inherit(child: &mut Context, parent: &Context) {
+    if let Some(current) = parent.step_bounds.last() {
+        child
+            .step_bounds
+            .push(bound(current.left + window_left(parent)));
+        install_window(child, SLICE);
     }
 }
 
@@ -35,24 +49,14 @@ pub(crate) fn is_active(context: &Context, id: u64) -> bool {
     context.step_bounds.iter().any(|bound| bound.id == id)
 }
 
-pub(crate) fn settle(context: &mut Context) {
-    if context.step_loaded != 0 {
-        let used = context.step_loaded - context.steps.max(0) as u64;
-        *context.step_bounds.last().unwrap().left.lock().unwrap() -= used;
-        context.step_slice += used;
-        context.step_loaded = 0;
+fn leave(context: &mut Context) {
+    let window = window_left(context);
+    let left = context.step_bounds.pop().expect("an open step scope").left + window;
+    if let Some(parent) = context.step_bounds.last_mut() {
+        parent.left += left;
     }
-}
-pub(crate) fn resume(context: &mut Context) {
-    if let Some(bound) = context.step_bounds.last() {
-        let left = *bound.left.lock().unwrap();
-        let window = left.min(SLICE - context.step_slice);
-        context.step_loaded = window;
-        context.steps = window as i64;
-    } else {
-        context.step_loaded = 0;
-        context.steps = UNBOUNDED;
-    }
+    let slice = context.step_slice_tail + window;
+    install_window(context, slice);
 }
 
 /// # Safety
@@ -61,26 +65,18 @@ pub(crate) fn resume(context: &mut Context) {
 pub unsafe extern "C" fn hirsel_core_step_enter(context: *mut Context, steps: u64) -> bool {
     // SAFETY: the caller provides its live exclusive task context.
     let context = unsafe { &mut *context };
-    settle(context);
-    let parent = context.step_bounds.last().cloned();
-    if let Some(parent) = &parent {
-        let mut left = parent.left.lock().unwrap();
-        if *left < steps {
-            drop(left);
-            resume(context);
+    let window = window_left(context);
+    let mut slice = context.step_slice_tail;
+    if let Some(current) = context.step_bounds.last_mut() {
+        let left = current.left + window;
+        if left < steps {
             return false;
         }
-        *left -= steps;
+        current.left = left - steps;
+        slice += window;
     }
-    let id = NEXT
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .unwrap_or_else(|_| crate::process::stop(b"StepIds"));
-    context.step_bounds.push(Arc::new(Bound {
-        left: Mutex::new(steps),
-        parent,
-        id,
-    }));
-    resume(context);
+    context.step_bounds.push(bound(steps));
+    install_window(context, slice);
     true
 }
 
@@ -89,10 +85,7 @@ pub unsafe extern "C" fn hirsel_core_step_enter(context: *mut Context, steps: u6
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_step_leave(context: *mut Context) {
     // SAFETY: the caller owns this task and an entered scope.
-    let context = unsafe { &mut *context };
-    settle(context);
-    context.step_bounds.pop().expect("an open step scope");
-    resume(context);
+    leave(unsafe { &mut *context });
 }
 
 /// # Safety
@@ -101,7 +94,6 @@ pub unsafe extern "C" fn hirsel_core_step_leave(context: *mut Context) {
 pub unsafe extern "C" fn hirsel_core_step_catch(context: *mut Context) -> bool {
     // SAFETY: the caller owns this task and an entered scope.
     let context = unsafe { &mut *context };
-    settle(context);
     let id = context.step_bounds.last().expect("an open step scope").id;
     let caught = context.causes.iter().next().is_some()
         && context
@@ -123,8 +115,7 @@ pub unsafe extern "C" fn hirsel_core_step_catch(context: *mut Context) -> bool {
         }
         drop(chain);
     }
-    context.step_bounds.pop();
-    resume(context);
+    leave(context);
     caught
 }
 
@@ -133,23 +124,27 @@ pub unsafe extern "C" fn hirsel_core_step_catch(context: *mut Context) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) -> u8 {
     // SAFETY: the engine supplies the exclusively running task's context.
-    unsafe {
-        let attempted = (*context).steps < 0;
-        settle(&mut *context);
-        if attempted {
-            if let Some(bound) = (*context).step_bounds.last() {
-                let mut cause = causes::Cause::new(causes::OUT_OF_TIME, site);
-                cause.message.data = std::ptr::without_provenance_mut(bound.id as usize);
-                causes::record(&mut *context, cause);
-                return 1;
-            }
-        }
-        if (*context).step_slice == SLICE {
-            (*context).step_slice = 0;
-            crate::tasks::event(hirsel_core_layout::event::STEP_SLICE, 0, SLICE);
-            crate::tasks::checkpoint(false);
-        }
-        resume(&mut *context);
-        0
+    let ctx = unsafe { &mut *context };
+    if ctx.steps < 0
+        && let Some(current) = ctx.step_bounds.last()
+    {
+        ctx.steps = 0;
+        let mut cause = causes::Cause::new(causes::OUT_OF_TIME, site);
+        cause.message.data = std::ptr::without_provenance_mut(current.id as usize);
+        causes::record(ctx, cause);
+        return 1;
     }
+    let slice_end = ctx.step_slice_tail == 0;
+    let slice = if slice_end {
+        SLICE
+    } else {
+        ctx.step_slice_tail
+    };
+    install_window(ctx, slice);
+    if slice_end {
+        crate::tasks::event(hirsel_core_layout::event::STEP_SLICE, 0, SLICE);
+        // SAFETY: the step window is installed and no borrow spans the switch.
+        unsafe { crate::tasks::checkpoint(false) };
+    }
+    0
 }

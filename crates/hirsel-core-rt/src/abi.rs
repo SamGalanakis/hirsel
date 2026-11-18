@@ -4,7 +4,7 @@
 //! `capacity` is zero. Null from the active finalizer grant takes the emitter's
 //! Capacity failure path; an inner bound returns ordinary Capacity. `free`, limit
 //! exit and mechanical release never
-//! fail. `alloc like` follows the original payer except within finalizers.
+//! fail. All allocation admits from the current limit.
 //!
 //! `region_alloc`, `resource_alloc` and `task_start` use the same Allocation
 //! convention. Success pointers from `limit_enter` and `task_start` equal the
@@ -98,14 +98,10 @@
 //! A statically empty bound can emit the
 //! checked reservation and refund without materializing a payer table identity.
 //!
-//! Scheduler binds native execution on resume and unbinds before transferring
-//! it. Bind drains prepaid per-slot remote refunds; local accounting has no
-//! atomics or lock. Foreign-payer growth (MEM-26) and a received resource's grant
-//! use abi_tasks::payer_lease over the original payer's complete table and drain
-//! prior refunds before admission. The one-worker scheduler owns that lease
-//! throughout its turn. Multiple workers must quiesce every task sharing the
-//! domain across growth; a received grant keeps the lease through finalizer_end,
-//! including suspension. No local admission/refund/enter/exit acquires a lock.
+//! Scheduler binds native execution on resume without delivering credits.
+//! Admissions use the current limit. Foreign refunds and hand-overs post credits
+//! to prepaid slots, folded by the recipient at its next event. A received
+//! finalizer has custody of the grant until its hand-over.
 
 //! Optional charge-observation archive: `hirsel_core_observe_charge() -> ()` samples
 //! after an emitted debit; `hirsel_core_peak_charge() -> u64` reads the completed
@@ -128,7 +124,7 @@ pub use crate::peak::{
 
 use crate::{
     Capacity, Context,
-    block::{allocate, free, funding},
+    block::{allocate, free},
 };
 
 /// Open an empty explicit region. Opening admits nothing.
@@ -508,33 +504,23 @@ pub unsafe extern "C" fn hirsel_core_context_free(context: *mut Context) {
     }
 }
 /// # Safety
-/// Context is live and exclusively used by its task. `like` is null or a live
-/// own/counted/resource allocation. Caller has exclusive execution custody over
-/// its payer for growth. For a collection, the emitter selects null whenever
-/// capacity is zero, even if its data points at a static literal. Size/alignment/
-/// kind are the emitter's native layout.
+/// Context is live and exclusively used by its task. Size, alignment and kind
+/// are the emitter's native layout.
 /// Overflow denotes an exact logical charge greater than u64::MAX. The caller
 /// owns a successful pointer and must free it once after cleaning its payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_alloc(
     context: *const Context,
-    like: *mut u8,
+    _reserved: *mut u8,
     bytes: usize,
     align: usize,
     charge: u64,
     overflow: bool,
     kind: u8,
 ) -> Allocation {
-    // SAFETY: the emitter supplies a live context and optional live block.
-    let (context, like) = unsafe { (&*context, NonNull::new(like).map(|p| funding(p))) };
-    match crate::block::allocate_like(
-        context,
-        like,
-        (!overflow).then_some(charge),
-        bytes,
-        align,
-        kind,
-    ) {
+    // SAFETY: the emitter supplies a live context.
+    let payer = unsafe { (*context).payer() };
+    match crate::block::allocate(payer, (!overflow).then_some(charge), bytes, align, kind) {
         Ok(p) => Allocation {
             pointer: p.as_ptr(),
             capacity: Capacity {
@@ -792,13 +778,7 @@ pub unsafe fn inline_own_alloc(
     bytes: usize,
     align: usize,
 ) -> Result<NonNull<u8>, Capacity> {
-    allocate(
-        context.payer(None),
-        charge,
-        bytes,
-        align,
-        crate::block::PLAIN,
-    )
+    allocate(context.payer(), charge, bytes, align, crate::block::PLAIN)
 }
 /// Rust instruction shim for emitted plain-own refund and physical deallocation.
 /// # Safety
@@ -873,7 +853,7 @@ pub unsafe extern "C" fn hirsel_core_release_buffer_enqueue(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_test_inline_admission(context: *const Context) -> bool {
     // SAFETY: the test object runs under the same task/payer discipline as alloc.
-    unsafe { (&*context).payer(None).injected() }
+    unsafe { (&*context).payer().injected() }
 }
 
 /// Emitted free when lowering proves this block was admitted from the still

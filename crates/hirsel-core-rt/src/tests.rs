@@ -74,20 +74,20 @@ fn ended_parent_with_live_child_forwards_reservations_and_compresses() {
 }
 
 #[test]
-fn growth_uses_original_payer_and_keeps_old_storage_on_refusal() {
+fn growth_uses_current_room_and_keeps_old_storage_on_refusal() {
     let mut ctx = Context::new(64);
     let block = Block::new(&ctx, Some(8), 8, 8).unwrap();
     let other = Block::new(&ctx, Some(24), 24, 8).unwrap();
-    ctx.limit_enter(32).unwrap();
+    ctx.limit_enter(8).unwrap();
     let error = block.replacement(&ctx, Some(16), 16, 8).err().unwrap();
     assert_eq!(
         error,
         Capacity {
             requested: 16,
-            available: 0
+            available: 8
         }
     );
-    assert_eq!(ctx.available(), 32);
+    assert_eq!(ctx.available(), 8);
     ctx.limit_exit();
     let replacement = block.replacement(&ctx, Some(16), 16, 64).unwrap();
     assert_eq!(replacement.pointer().as_ptr() as usize % 64, 0);
@@ -377,17 +377,19 @@ fn owned_failure_string_outlives_its_frame_and_context_without_admission() {
 }
 
 #[test]
-fn original_payer_growth_outlives_its_last_context_and_old_block() {
+fn growth_refunds_a_retired_payer_and_keeps_the_receiver_live() {
     let source = Context::new(48);
     let old = Block::new(&source, Some(8), 8, 8).unwrap();
     drop(source);
-    let receiver = Context::new(0);
+    let receiver = Context::new(40);
     let next = old.replacement(&receiver, Some(16), 16, 8).unwrap();
+    assert_eq!(receiver.available(), 24);
     drop(old);
     let last = next.replacement(&receiver, Some(24), 24, 8).unwrap();
+    assert_eq!(receiver.available(), 0);
     drop(next);
     drop(last);
-    assert_eq!(receiver.available(), 0);
+    assert_eq!(receiver.available(), 40);
 }
 
 #[test]
@@ -518,16 +520,20 @@ fn ordinary_native_words_and_balances_match_the_inline_contract() {
 }
 
 #[test]
-fn leaf_buffer_growth_preserves_plain_prefix_and_original_payer() {
+fn leaf_buffer_growth_preserves_plain_prefix_and_installs_current_payer() {
     let mut context = Context::new(128);
     let original = crate::block::Block::new(&context, Some(8), 8, 8).unwrap();
     // SAFETY: fixture owns eight fresh writable payload bytes.
     unsafe { original.pointer().as_ptr().write_bytes(17, 8) };
-    context.limit_enter(0).unwrap();
+    context.limit_enter(24).unwrap();
     let grown = original.replacement(&context, Some(24), 24, 8).unwrap();
-    // SAFETY: both allocations are live and original-payer words precede payloads.
+    // SAFETY: both allocations are live and their payer words precede payloads.
     unsafe {
         assert_eq!(crate::block::funding(grown.pointer()).native_tag(), 0);
+        assert_eq!(
+            crate::block::funding(grown.pointer()).record_pointer(),
+            context.limit_record()
+        );
         assert_eq!(crate::block::funding(original.pointer()).native_tag(), 0);
         std::ptr::copy_nonoverlapping(original.pointer().as_ptr(), grown.pointer().as_ptr(), 8);
         assert_eq!(grown.pointer().as_ptr().read(), 17);

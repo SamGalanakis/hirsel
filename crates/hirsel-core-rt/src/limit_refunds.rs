@@ -161,8 +161,26 @@ impl Remote {
         }
     }
     pub(super) fn enqueue(&mut self, payer: Payer, bytes: u64, inbox: Option<NonNull<Inbox>>) {
+        self.queue(payer, inbox);
+        let slot = payer.slot();
+        if bytes != 0 {
+            slot.pending.fetch_add(bytes, Ordering::Relaxed);
+        } else {
+            slot.pending_zeros.fetch_add(1, Ordering::Relaxed);
+        }
+        Self::notify(payer, inbox, &self.inboxes);
+    }
+
+    pub(super) fn enqueue_handover(&mut self, payer: Payer, unused: u64, inbox: NonNull<Inbox>) {
+        self.queue(payer, Some(inbox));
+        payer.slot().handover.set(Some(unused));
+        Self::notify(payer, Some(inbox), &self.inboxes);
+    }
+
+    fn queue(&mut self, payer: Payer, inbox: Option<NonNull<Inbox>>) {
         let slot = payer.slot();
         if slot.pending.load(Ordering::Relaxed) == 0
+            && slot.handover.get().is_none()
             && slot.pending_zeros.load(Ordering::Relaxed) == 0
         {
             let pointer = NonNull::from(slot);
@@ -175,16 +193,14 @@ impl Remote {
                 self.unassigned = Some(pointer);
             }
         }
-        if bytes != 0 {
-            slot.pending.fetch_add(bytes, Ordering::Relaxed);
-        } else {
-            slot.pending_zeros.fetch_add(1, Ordering::Relaxed);
-        }
+    }
+
+    fn notify(payer: Payer, inbox: Option<NonNull<Inbox>>, inboxes: &HashMap<u64, Box<Inbox>>) {
         if let Some(inbox) = inbox {
             // SAFETY: live limit metadata retains this domain-owned inbox.
             unsafe { inbox.as_ref().notify() };
         } else {
-            for inbox in self.inboxes.values() {
+            for inbox in inboxes.values() {
                 inbox.notify();
             }
         }
@@ -197,7 +213,7 @@ impl Remote {
             // both the table lease and domain mutex for links and canonicalization.
             unsafe {
                 head = *slot.as_ref().next_pending.get();
-                let payer = Payer(slot).canonical();
+                let payer = Payer(slot).root();
                 let inbox = (*payer.local()).live.inbox;
                 Self::push(inbox, slot);
                 inbox.as_ref().notify();
@@ -215,7 +231,7 @@ impl Remote {
             // SAFETY: each queued node stays pinned until delivery, not routing.
             unsafe {
                 head = *slot.as_ref().next_pending.get();
-                let payer = Payer(slot).canonical();
+                let payer = Payer(slot).root();
                 let target = (*payer.local()).live.inbox;
                 Self::push(target, slot);
                 target.as_ref().notify();

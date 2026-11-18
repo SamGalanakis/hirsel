@@ -112,6 +112,29 @@ def main():
                 if count != int(sends.group(1)):
                     failures.append(f'{fixture.stem}: evaluator try-send count {count}, expected {sends.group(1)}')
                     continue
+            by_task = re.search(r'// hand-derived try-send by task: ([\d,]+)', text)
+            if by_task:
+                want = [int(n) for n in by_task.group(1).split(',')]
+                tasks = [0] + [e[2] for e in report['events'] if e[0] == SPAWN]
+                got = [sum(e[0] == KIND['TRY_SEND'] and e[1] == task for e in report['events'])
+                       for task in tasks]
+                if got != want:
+                    failures.append(f'{fixture.stem}: sends by task {got}, expected {want}')
+                    continue
+            capacity = re.search(r'// hand-derived capacity: (\d+),(\d+)', text)
+            if capacity:
+                want = [tuple(map(int, capacity.groups()))]
+                got = [(e[2], e[3]) for e in report['events'] if e[0] == KIND['CAPACITY']]
+                if got != want:
+                    failures.append(f'{fixture.stem}: capacity events {got}, expected {want}')
+                    continue
+            refund = re.search(r'// hand-derived refund: (\d+),(\d+),(\d+)', text)
+            if refund:
+                want = tuple(map(int, refund.groups()))
+                got = sum(tuple(e[1:]) == want for e in report['events'] if e[0] == KIND['REFUND'])
+                if got != 1:
+                    failures.append(f'{fixture.stem}: observed {got} copies of refund {want}, expected one')
+                    continue
             slices = re.search(r'// hand-derived step slices: (\d+)', text)
             if slices:
                 count = sum(e[0] == KIND['STEP_SLICE'] for e in report['events'])

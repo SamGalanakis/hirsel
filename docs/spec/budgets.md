@@ -20,16 +20,14 @@ bookkeeping: drop flags and the limit records of MEM-20.
 ### MEM-20: Limit records and hand-over
 
 Every block, counted node, region allocation, queue, task record and cause cell is charged
-to the limit current where it is made, except that growth of a collection with storage is
-charged where MEM-26 and MEM-27 say, and refers to the record of the limit it was charged
-to. A block keeps
-its record when its owner is moved, sent, returned or received: its refund goes to the
+to the limit current where it is made, except that growth is charged where MEM-26 says,
+and refers to the record of the limit it was charged to. A block keeps its record when its owner is moved, sent, returned or received: its refund goes to the
 limit the record leads to.
 
 When a limit ends (its bound scope exits, its finalizer returns, or its task finishes), the
 unused part of its reservation is refunded to its parent at once, and its record is joined
-to the parent's: from then on the record leads to the parent, for refunds and for growth
-(MEM-26), and if the parent ends in turn, on to its parent, up to the root. This
+to the parent's: from then on the record leads to the parent for refunds, and if the parent ends
+in turn, on to its parent, up to the root. This
 **hand-over** visits no value, admits nothing and cannot fail: the parent already holds the
 surviving bytes as part of the reservation it gave. It covers everything the limit funded
 that outlives it: a bound scope's result and anything moved outward, the cause cells of a
@@ -181,15 +179,11 @@ fn copy_bounded(src: String) -> Result[Result[String, Capacity], Capacity] {
 fn f() -> Result[u64, Capacity] { bound bytes { 1 } }       // refused: LANG-5, bound needs a size
 ```
 
-### MEM-26: Growth keeps the limit
+### MEM-26: Growth charges the current limit
 
-A collection with no storage, empty or static, refers to no limit; its first growth is
-charged to the current limit. Outside a finalizer (MEM-27), growing a collection that has storage charges the new storage to the limit
-its current storage's record leads to, not to the current one, and refunds the old storage
-there. So growing an outer owner that has storage inside a bound scope never touches the scope's limit:
-whether the scope is exhausted makes no difference, and the growth is admitted or returns
-`Capacity` against the owner's limit, which has already lost the scope's reservation `n`
-(MEM-25).
+Growing a collection admits its new storage from the current limit and refunds the old storage to the
+limit its record leads to. The new storage refers to the current limit's record. Growth briefly holds
+both (MEM-24). A refusal leaves the collection and its old charge unchanged.
 
 ### MEM-27: Finalizer grants
 
@@ -197,9 +191,7 @@ A resource type whose finalizer allocates, creates resources or spawns declares
 `grant bytes n`; one without a declaration has a grant of 0. Creating a value of the type
 reserves the grant as part of its charge (MEM-24). The grant is a limit of `n` bytes, and it
 is the current limit while the finalizer runs: its allocations, and the storage, cause cell
-and grant of every resource or task it creates, are admitted from it. A collection that grows inside a finalizer is admitted from the grant
-too, whatever limit its storage refers to, and its old storage is refunded to the limit its
-record leads to. Exceeding it is a
+and grant of every resource or task it creates, are admitted from it. Exceeding it is a
 finalizer failure with cause `Capacity` ([FAIL-12](failure.md#fail-12-finalizer-failure)),
 recorded in the resource's own cause cell ([FAIL-10](failure.md#fail-10-cause-chain)), and
 abandons the finalizer body. The one exception is the cell an `isolate` reserves at its
@@ -208,6 +200,10 @@ entry: refused, it is the value `Error(Capacity)` and never this failure
 refunded, and what survives it (cause cells, sent values) is handed over to the limit that
 funded the resource (MEM-20). So cleanup, failure cleanup included, never admits from any
 limit but a grant.
+
+While the finalizer runs, the grant's record belongs to the task running it; when the finalizer returns
+in another task than the one that created the resource, handing the grant's unused part and records back
+is an event.
 
 ```hirsel
 resource type Log grant bytes 256 { sink: Sender[String] }
@@ -272,15 +268,12 @@ is core's plain record `{ steps: u64 }`.
   ([CONC-7](tasks.md#conc-7-cancellation-points)), not by its bound. Step bounds and limits
   are independent and nest in either order; a step bound admits nothing and charges
   nothing. Because a core call is one step, a step bound bounds time only together with the
-  limits that bound the sizes core calls work on. A task spawned while a bound is current
-  draws its steps from that bound, shared with its spawner and with every other task spawned
-  under it, so the steps all of them take never exceed `n`; which task takes the step that
-  exhausts it follows the event order ([CONC-10](tasks.md#conc-10-event-order)). The
-  exhausting step fails its own task with `OutOfTime`; a child's failure reaches its joiner
-  ([CONC-6](tasks.md#conc-6-join)), and each other task under the bound fails at its next
-  step. A bound outlives its scope while a task spawned under it still runs, and returns its
-  unused steps to the bound it was reserved from when the scope has exited and the last such
-  task has ended. `main` and a task spawned with no bound current take steps under none.
+  limits that bound the sizes core calls work on.
+  A task spawned while a bound is current runs under its own root bound of what that bound has left at the
+  spawn; the spawner's bound is not reduced, and no steps return. No two tasks share a bound, so where a
+  bound stops a task follows from that task's source and values alone. The steps a run takes under a bound
+  of `n` are at most `n` for each task spawned under it, and the limits that admit those tasks bound how
+  many there are. `main` and a task spawned with no bound current take steps under none.
 - **Slices.** While a step bound is current, every 65,536th step a task takes under it is a
   **slice end**: an event ([CONC-10](tasks.md#conc-10-event-order)) at which the scheduler may
   run another task. It is not a cancellation point and changes nothing else, so code under a

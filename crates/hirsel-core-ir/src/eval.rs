@@ -358,6 +358,7 @@ mod block_table_tests {
 
 struct Res {
     grant: u64,
+    creator: usize,
     settled: bool,
     cell_used: bool,
 }
@@ -459,12 +460,11 @@ struct Reservation {
     cells: Vec<(Limit, u64)>,
 }
 struct StepBound {
+    id: u64,
     left: u64,
-    parent: Option<usize>,
-    users: usize,
 }
 struct Task {
-    step_bounds: Vec<usize>,
+    step_bounds: Vec<StepBound>,
     slice_steps: u64,
     limits: Vec<Limit>,
     /// The active chain: the causes of the failure in progress, primary first.
@@ -547,7 +547,7 @@ struct Machine<'m> {
     recipes: Vec<Recipe>,
     mem: Blocks,
     root: Option<Limit>,
-    step_bounds: Vec<StepBound>,
+    next_step_bound: u64,
     peak_reserved: u64,
     regions: Vec<Vec<usize>>,
     children: Vec<Child>,
@@ -1274,9 +1274,6 @@ fn task_thread<'m>(mut t: Task, f: FuncId, args: Vec<u64>, link: Link<'m>) {
             mach.child_main(&mut t, f, &args);
             None
         };
-        while let Some(bound) = t.step_bounds.pop() {
-            mach.step_release(bound);
-        }
         mach.links[k] = None;
         root
     }));
@@ -1317,7 +1314,7 @@ fn cause(r: RaiseCause) -> &'static str {
 impl<'m> Machine<'m> {
     fn new(m: &'m Module, limit: u64, input: &WorldInput<'_>) -> Self {
         Self {
-            step_bounds: Vec::new(),
+            next_step_bound: 1,
             m,
             recipes: compute(&m.types).expect("layouts"),
             mem: Blocks::default(),
@@ -1368,7 +1365,7 @@ impl<'m> Machine<'m> {
     /// What a parked task's slot holds while its baton runs elsewhere.
     fn shell(&self) -> Machine<'m> {
         Machine {
-            step_bounds: Vec::new(),
+            next_step_bound: 1,
             m: self.m,
             recipes: Vec::new(),
             mem: Blocks::default(),
@@ -1515,7 +1512,7 @@ impl Machine<'_> {
         if let (Ok(values), Carried::Value(ty)) = (&returned, self.m.types[r.index()].carried) {
             self.store(rb, bytes_of(ty), values[0]);
         }
-        self.end_limit(t.limits.pop().unwrap());
+        self.end_limit(t.limits.pop().unwrap(), None);
         let status = match t.chain.first().map(|c| c.kind) {
             _ if returned.is_ok() => 0,
             Some("Cancelled") => 2,
@@ -2096,7 +2093,12 @@ impl Machine<'_> {
         let blk = self.mem.remove(b);
         let mut n = blk.charge;
         if let Some(r) = &blk.res {
-            n -= if r.settled { r.grant } else { 0 };
+            if !r.settled {
+                let payer = blk.limit.as_ref().expect("a resource payer");
+                let grant = Limit::new(r.grant, Some(payer.clone()), true, self.sched.current);
+                self.end_limit(grant, None);
+            }
+            n -= r.grant;
             n -= if r.cell_used { charge::CAUSE_CELL } else { 0 };
         }
         if let Some(l) = blk.limit {
@@ -2129,19 +2131,6 @@ impl Machine<'_> {
             Err(room)
         }
     }
-    /// The limit growth of `old` admits from: the one its record leads to, or,
-    /// inside a finalizer (N03, MEM-27), the current limit, which is the grant or a
-    /// bound scope entered within it (MEM-25).
-    fn like(&self, t: &Task, old: u64) -> Limit {
-        if t.limits.iter().any(|l| l.0.grant) {
-            return t.limits.last().unwrap().clone();
-        }
-        self.mem[split(old).0]
-            .limit
-            .as_ref()
-            .expect("a charged block")
-            .find()
-    }
     /// An `alloc` or `grow` admission of `n`, refused outright when its exact
     /// charge overflowed: Err(the room left).
     fn admit_charge(&mut self, l: &Limit, n: u64, overflowed: bool) -> Result<(), u64> {
@@ -2168,14 +2157,6 @@ impl Machine<'_> {
             self.sched.tasks[owner].refunds.push((l, n));
         }
     }
-    /// CONC-10: growth charged to a limit another task owns is an event of the
-    /// growing task (native `allocate_like`).
-    fn foreign_charge(&mut self, l: &Limit, n: u64) {
-        let owner = l.find().0.owner;
-        if owner != self.sched.current && owner < self.sched.tasks.len() {
-            self.event(CHARGE, self.sched.tasks[owner].id, n);
-        }
-    }
     /// Apply the running task's pending refunds, each to the live limit its record
     /// now leads to (native `drain_refunds`).
     fn drain_refunds(&mut self) {
@@ -2186,23 +2167,10 @@ impl Machine<'_> {
             }
         }
     }
-    /// Apply every pending refund whose record leads to `l`, before `l` ends.
-    fn settle(&mut self, l: &Limit) {
-        for k in 0..self.sched.tasks.len() {
-            let pending = std::mem::take(&mut self.sched.tasks[k].refunds);
-            for (r, n) in pending {
-                if Arc::ptr_eq(&r.find().0, &l.0) {
-                    l.subtract(n);
-                } else {
-                    self.sched.tasks[k].refunds.push((r, n));
-                }
-            }
-        }
-    }
-    /// MEM-20: refund the unused part to the parent and forward the record to it.
-    /// Refunds still pending for `l` land in it first (native `drain_locked` at retire).
-    fn end_limit(&mut self, l: Limit) {
-        self.settle(&l);
+    /// MEM-20: the old owner folds before handing the limit to its parent.
+    /// The recipient sees the unused reservation only upon its next event.
+    fn end_limit(&mut self, l: Limit, creator: Option<usize>) {
+        let current = self.sched.current;
         let (parent, unused) = {
             let state = l.0.state.lock().unwrap();
             (
@@ -2211,10 +2179,22 @@ impl Machine<'_> {
             )
         };
         let owner = parent.0.owner;
-        if unused != 0 && owner != self.sched.current && owner < self.sched.tasks.len() {
-            self.event(REFUND, self.sched.tasks[owner].id, unused);
+        if owner != current || creator.is_some_and(|creator| creator != current) {
+            self.drain_refunds();
+            let unused = l.0.cap - l.used();
+            if owner < self.sched.tasks.len() {
+                self.event(REFUND, self.sched.tasks[owner].id, unused);
+            }
+            if owner == current || owner >= self.sched.tasks.len() {
+                parent.subtract(unused);
+            } else {
+                self.sched.tasks[owner]
+                    .refunds
+                    .push((parent.clone(), unused));
+            }
+        } else {
+            parent.subtract(unused);
         }
-        parent.subtract(unused);
         let mut state = l.0.state.lock().unwrap();
         state.parent = Some(parent);
         state.ended = true;
@@ -2586,7 +2566,8 @@ impl Machine<'_> {
         }
         let mut failed = false;
         if let Some(f) = self.shape(ty).finalizer {
-            let grant = self.mem[b].res.as_ref().expect("a resource block").grant;
+            let resource = self.mem[b].res.as_ref().expect("a resource block");
+            let (grant, creator) = (resource.grant, resource.creator);
             let payer = self.mem[b].limit.clone().expect("charged");
             let g = Limit::new(grant, Some(payer.clone()), true, self.sched.current);
             t.limits.push(g);
@@ -2596,7 +2577,6 @@ impl Machine<'_> {
                 resource: true,
             }));
             failed = self.call(t, FuncId(f.0), &[blk]).is_err();
-            self.end_limit(t.limits.pop().unwrap());
             // FAIL-10: a used resource cell left with a chain; a cell an isolate
             // installed in its place (unused) is refunded now.
             let used = match t.obligations.pop().expect("the finalizer's obligation") {
@@ -2607,6 +2587,7 @@ impl Machine<'_> {
                 }
                 None => true,
             };
+            self.end_limit(t.limits.pop().unwrap(), Some(creator));
             let res = self.mem[b].res.as_mut().unwrap();
             res.settled = true;
             res.cell_used |= used;
@@ -2737,20 +2718,18 @@ impl Machine<'_> {
         }
     }
 
-    fn step_release(&mut self, mut bound: usize) {
-        loop {
-            let record = &mut self.step_bounds[bound];
-            record.users -= 1;
-            if record.users != 0 {
-                return;
-            }
-            let (parent, left) = (record.parent, record.left);
-            let Some(parent) = parent else {
-                return;
-            };
-            self.step_bounds[parent].left += left;
-            bound = parent;
+    fn step_bound(&mut self, left: u64) -> StepBound {
+        let id = self.next_step_bound;
+        self.next_step_bound += 1;
+        StepBound { id, left }
+    }
+
+    fn step_leave(t: &mut Task) -> StepBound {
+        let bound = t.step_bounds.pop().expect("an open step scope");
+        if let Some(parent) = t.step_bounds.last_mut() {
+            parent.left += bound.left;
         }
+        bound
     }
 
     // ---- engine operations (CONC-3..6)
@@ -2758,36 +2737,27 @@ impl Machine<'_> {
         let cur = t.limits.last().unwrap();
         Ok(match op {
             RtOp::StepEnter => {
-                let parent = t.step_bounds.last().copied();
                 let n = a[0];
-                if parent.is_some_and(|p| self.step_bounds[p].left < n) {
+                if t.step_bounds.last().is_some_and(|parent| parent.left < n) {
                     vec![0]
                 } else {
-                    if let Some(p) = parent {
-                        self.step_bounds[p].left -= n;
-                        self.step_bounds[p].users += 1;
+                    if let Some(parent) = t.step_bounds.last_mut() {
+                        parent.left -= n;
                     }
-                    let id = self.step_bounds.len();
-                    self.step_bounds.push(StepBound {
-                        left: n,
-                        parent,
-                        users: 1,
-                    });
-                    t.step_bounds.push(id);
+                    t.step_bounds.push(self.step_bound(n));
                     vec![1]
                 }
             }
             RtOp::StepLeave => {
-                let bound = t.step_bounds.pop().expect("an open step scope");
-                self.step_release(bound);
+                Self::step_leave(t);
                 vec![]
             }
             RtOp::StepCatch => {
-                let bound = t.step_bounds.pop().expect("an open step scope");
+                let bound = Self::step_leave(t);
                 let caught = !t.chain.is_empty()
                     && t.chain
                         .iter()
-                        .all(|c| c.kind == "OutOfTime" && c.message[0] == bound as u64 + 1);
+                        .all(|c| c.kind == "OutOfTime" && c.message[0] == bound.id);
                 if caught {
                     t.chain.clear();
                     let mut cells = std::mem::take(&mut t.cells).into_iter();
@@ -2803,7 +2773,6 @@ impl Machine<'_> {
                         self.refund(limit, amount);
                     }
                 }
-                self.step_release(bound);
                 vec![u64::from(caught)]
             }
             RtOp::Spawn { x, r } => {
@@ -2822,10 +2791,10 @@ impl Machine<'_> {
                 self.put(xb, &bytes);
                 let rb = self.block(self.held(r), None, 0, None);
                 // The child's primary cell is part of the spawn's charge to `cur`.
-                let inherited = t.step_bounds.last().copied();
-                if let Some(bound) = inherited {
-                    self.step_bounds[bound].users += 1;
-                }
+                let inherited = t
+                    .step_bounds
+                    .last()
+                    .map(|bound| self.step_bound(bound.left));
                 let mut child = Task {
                     step_bounds: inherited.into_iter().collect(),
                     slice_steps: 0,
@@ -2959,7 +2928,7 @@ impl Machine<'_> {
                         || (cause.kind == "OutOfTime"
                             && t.step_bounds
                                 .iter()
-                                .any(|&id| cause.message[0] == id as u64 + 1))
+                                .any(|bound| cause.message[0] == bound.id))
                 }) {
                     // FAIL-16: not caught; the failure goes on past the isolate.
                     self.refund(r.limit, charge::CAUSE_CELL);
@@ -3816,10 +3785,7 @@ impl Machine<'_> {
                 size,
                 ..
             } => {
-                let l = match place {
-                    AllocPlace::Like(v) => self.like(t, vals[v.index()]),
-                    AllocPlace::Current | AllocPlace::Region(_) => t.limits.last().unwrap().clone(),
-                };
+                let l = t.limits.last().unwrap().clone();
                 if let Some(token) = region_entry {
                     vals[token.index()] = 0;
                 }
@@ -3831,15 +3797,13 @@ impl Machine<'_> {
                         let res = match kind {
                             AllocKind::Resource { grant } => Some(Res {
                                 grant: *grant,
+                                creator: self.sched.current,
                                 settled: false,
                                 cell_used: false,
                             }),
                             _ => None,
                         };
                         let p = self.block(vals[size.index()], Some(l.clone()), n, res);
-                        if matches!(place, AllocPlace::Like(_)) {
-                            self.foreign_charge(&l, n);
-                        }
                         if let AllocKind::Environment { ty } = kind {
                             self.store(p, 8, ENV_BASE + u64::from(ty.0));
                         }
@@ -3909,20 +3873,21 @@ impl Machine<'_> {
                 }
             }
             Inst::Step { .. } => {
-                if let Some(&bound) = t.step_bounds.last() {
-                    if self.step_bounds[bound].left == 0 {
+                if let Some(bound) = t.step_bounds.last_mut() {
+                    if bound.left == 0 {
+                        let id = bound.id;
                         let site = self.site(t);
                         self.record(
                             t,
                             Cause {
                                 kind: "OutOfTime",
-                                message: [bound as u64 + 1, 0, 0],
+                                message: [id, 0, 0],
                                 site,
                             },
                         );
                         return Err(Stop::Chained);
                     }
-                    self.step_bounds[bound].left -= 1;
+                    bound.left -= 1;
                     t.slice_steps += 1;
                     if t.slice_steps == 65_536 {
                         t.slice_steps = 0;
@@ -3950,7 +3915,7 @@ impl Machine<'_> {
             }
             Inst::LimitExit => {
                 let l = t.limits.pop().unwrap();
-                self.end_limit(l);
+                self.end_limit(l, None);
             }
             Inst::Drop { address, ty, .. } => {
                 let at = places[address.index()].0;
@@ -4014,7 +3979,7 @@ impl Machine<'_> {
                     "grow of storage its carrier does not own"
                 );
                 self.edge(old, &edge, "grow's old storage");
-                let l = self.like(t, old);
+                let l = t.limits.last().unwrap().clone();
                 let n = vals[charge.index()];
                 match self.admit_charge(&l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
                     Err(_) if l.0.grant => return Err(Stop::Cause("Capacity")),
@@ -4037,7 +4002,6 @@ impl Machine<'_> {
                             "grow to a block that does not hold the carrier's elements"
                         );
                         let p = self.block(vals[size.index()], Some(l.clone()), n, None);
-                        self.foreign_charge(&l, n);
                         let nb = split(p).0;
                         self.mem[nb].class =
                             Some(cleanup_class(&self.m.types, &self.recipes, &edge));
@@ -4281,7 +4245,7 @@ fn ended_byte_limits_release_their_records() {
         machine.admit(&root, 0).unwrap();
         let scope = Limit::new(0, Some(root.clone()), false, 0);
         peak = peak.max(meter.bytes());
-        machine.end_limit(scope);
+        machine.end_limit(scope, None);
     }
     assert_eq!(root.used(), 0);
     assert_eq!(meter.bytes(), 0);
@@ -4297,8 +4261,8 @@ fn ended_byte_limits_release_their_records() {
     let inner = Limit::new(48, Some(outer.clone()), false, 0);
     machine.admit(&inner, 8).unwrap();
     let block = machine.block(8, Some(inner.clone()), 8, None);
-    machine.end_limit(inner);
-    machine.end_limit(outer);
+    machine.end_limit(inner, None);
+    machine.end_limit(outer, None);
     assert_eq!(root.used(), 8);
     machine.free(block);
     assert_eq!(root.used(), 0);

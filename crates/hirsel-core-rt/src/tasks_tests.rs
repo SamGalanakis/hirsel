@@ -1,6 +1,6 @@
 use crate::{Context, abi::*, block::Block, causes, channel::*, tasks::*};
 use std::ptr;
-fn value<T>(logical: u64) -> ValueLayout {
+pub(crate) fn value<T>(logical: u64) -> ValueLayout {
     ValueLayout {
         bytes: size_of::<T>(),
         align: align_of::<T>(),
@@ -8,13 +8,13 @@ fn value<T>(logical: u64) -> ValueLayout {
         clean: None,
     }
 }
-fn layout<X, R>(result: u64) -> TaskLayout {
+pub(crate) fn layout<X, R>(result: u64) -> TaskLayout {
     TaskLayout {
         input: value::<X>(0),
         result: value::<R>(result),
     }
 }
-fn run<X: Copy>(body: Body, mut input: X) -> (u64, Vec<Event>) {
+pub(crate) fn run<X: Copy>(body: Body, mut input: X) -> (u64, Vec<Event>) {
     let mut events = Vec::<Event>::new();
     unsafe extern "C" fn event(state: *mut u8, event: Event) {
         // SAFETY: run pins this exclusively accessed test event vector.
@@ -679,60 +679,34 @@ fn abandoning_successful_resource_result_propagates_its_finalizer_failure() {
 }
 
 #[test]
-fn foreign_growth_defers_parent_refunds_until_parent_events_and_received_grant_reuses_room() {
-    #[derive(Clone, Copy)]
-    struct Input {
-        parent: *const Context,
-        first: std::ptr::NonNull<u8>,
-        second: std::ptr::NonNull<u8>,
-        resource: std::ptr::NonNull<u8>,
-    }
+fn received_grant_reuses_room_without_an_event() {
     unsafe extern "C" fn child(context: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
-        // SAFETY: the child owns both transferred blocks and the resource, while
-        // its blocked parent grants exclusive access to its original payer.
+        // SAFETY: this child owns the received resource and both grant allocations.
         unsafe {
-            let input = input.cast::<Input>().read();
-            let before = (*input.parent).available();
-            drop(Block::from_raw(input.first, 8));
-            let second = Block::from_raw(input.second, 8);
-            let grown = second.replacement(&*context, Some(16), 16, 8).unwrap();
-            // MEM-20: the parent's eight-byte refund is still pending: this
-            // child event cannot make it visible to the parent's limit.
-            let growth = (*input.parent).available() == before - 16;
-            drop(second);
-            drop(grown);
-            hirsel_core_finalizer_begin(context, input.resource);
-            let first = Block::new(&*context, Some(16), 16, 8).unwrap();
-            drop(first);
+            let resource = input.cast::<std::ptr::NonNull<u8>>().read();
+            hirsel_core_finalizer_begin(context, resource);
+            drop(Block::new(&*context, Some(16), 16, 8).unwrap());
             let next = Block::new(&*context, Some(16), 16, 8);
-            let grant = next.is_ok();
+            out.cast::<u64>().write(u64::from(next.is_ok()));
             drop(next);
-            hirsel_core_finalizer_end(context, input.resource);
-            hirsel_core_resource_free(input.resource, 0);
-            out.cast::<u64>()
-                .write(u64::from(growth) | (u64::from(grant) << 1));
+            hirsel_core_finalizer_end(context, resource);
+            hirsel_core_resource_free(resource, 0);
         }
         0
     }
     unsafe extern "C" fn root(context: *mut Context, out: *mut u8, _: *mut u8) -> u8 {
-        // SAFETY: prepared owners move once to a child; join moves its plain result.
+        // SAFETY: the resource moves once to the child, and join moves its result back.
         unsafe {
-            let mut input = Input {
-                parent: context,
-                first: Block::new(&*context, Some(8), 8, 8).unwrap().into_raw(),
-                second: Block::new(&*context, Some(8), 8, 8).unwrap().into_raw(),
-                resource: std::ptr::NonNull::new(
-                    hirsel_core_resource_alloc(&*context, 1, 8, 0, 16).pointer,
-                )
-                .unwrap(),
-            };
+            let mut resource =
+                std::ptr::NonNull::new(hirsel_core_resource_alloc(context, 1, 8, 0, 16).pointer)
+                    .unwrap();
             let task = hirsel_core_spawn(
                 context,
                 0,
                 0,
-                (&mut input as *mut Input).cast(),
+                (&raw mut resource).cast(),
                 child,
-                layout::<Input, u64>(8),
+                layout::<std::ptr::NonNull<u8>, u64>(8),
                 0,
             );
             let joined = hirsel_core_join(context, task.task, out, 1);
@@ -741,17 +715,15 @@ fn foreign_growth_defers_parent_refunds_until_parent_events_and_received_grant_r
         0
     }
     let (result, events) = run(root, ());
-    assert_eq!(result, 3);
-    let refund = events
+    assert_eq!(result, 1);
+    let child = events
         .iter()
-        .position(|e| e.kind == REFUND && e.value == 8)
-        .unwrap();
-    let charge = events
-        .iter()
-        .position(|e| e.kind == CHARGE && e.value == 16)
-        .unwrap();
-    assert!(refund < charge);
-    // SAFETY: native context binding has the same logical task ownership as Rust.
+        .find(|event| event.kind == SPAWN)
+        .unwrap()
+        .object;
+    let first = events.iter().find(|event| event.task == child).unwrap();
+    assert_eq!((first.kind, first.object, first.value), (REFUND, 0, 16));
+    // SAFETY: native context binding must give the finalizer the same custody.
     unsafe {
         let context = hirsel_core_context_new(1 << 20);
         assert!(!hirsel_core_task_start(context).pointer.is_null());
@@ -762,14 +734,14 @@ fn foreign_growth_defers_parent_refunds_until_parent_events_and_received_grant_r
                 context,
                 root,
                 ptr::null_mut(),
-                (&mut result as *mut u64).cast(),
+                (&raw mut result).cast(),
                 0,
                 8,
                 SchedulerProvider::default()
             ),
             0
         );
-        assert_eq!(result, 3);
+        assert_eq!(result, 1);
         assert_eq!((*context).available(), before);
         hirsel_core_context_free(context);
     }

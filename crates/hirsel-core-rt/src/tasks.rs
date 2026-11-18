@@ -80,9 +80,9 @@ impl Drop for Storage {
 }
 
 pub use hirsel_core_layout::event::{
-    ARC_NEW, ARC_RELEASE, ARC_SHARE, ARC_UNWRAP, CANCEL, CANCELLED, CAPACITY, CHARGE, CHECK_CANCEL,
-    CLOSE, END, JOIN, LATEST_PUBLISH, LATEST_READ, PUBLISH, RECEIVE, REFUND, SENDERS, SPAWN,
-    TRY_RECEIVE, TRY_SEND,
+    ARC_NEW, ARC_RELEASE, ARC_SHARE, ARC_UNWRAP, CANCEL, CANCELLED, CAPACITY, CHECK_CANCEL, CLOSE,
+    END, JOIN, LATEST_PUBLISH, LATEST_READ, PUBLISH, RECEIVE, REFUND, SENDERS, SPAWN, TRY_RECEIVE,
+    TRY_SEND,
 };
 /// Only no-effect polls count; effectful operations never consume this allowance.
 pub(crate) const POLLS_PER_TURN: u32 = 64;
@@ -1385,6 +1385,15 @@ pub(crate) fn event(kind: u8, object: u64, value: u64) {
 /// Task is the running task, so it pins its scheduler and sink.
 #[inline(always)]
 unsafe fn event_for(task_pointer: *mut Task, kind: u8, object: u64, value: u64) {
+    // SAFETY: the running task pins the scheduler through both operations.
+    unsafe {
+        record_event(task_pointer, kind, object, value);
+        poll_event(task_pointer, kind, value);
+    }
+}
+
+#[inline(always)]
+unsafe fn record_event(task_pointer: *mut Task, kind: u8, object: u64, value: u64) {
     // SAFETY: current pins its scheduler; callback cannot suspend or re-enter.
     unsafe {
         let task = NonNull::new_unchecked(task_pointer).as_ref();
@@ -1411,9 +1420,26 @@ unsafe fn event_for(task_pointer: *mut Task, kind: u8, object: u64, value: u64) 
         if let Some(group) = task.group {
             group.event();
         }
-        poll_event(task_pointer, kind, value);
     }
 }
+/// Publish the accounting change before a scheduler poll can switch tasks.
+pub(crate) fn commit_refund(owner: u64, bytes: u64, publish: impl FnOnce()) {
+    let task = CURRENT.get();
+    if !task.is_null() {
+        // SAFETY: the running task pins the scheduler. Recording cannot switch.
+        unsafe { record_event(task, REFUND, owner, bytes) };
+    }
+    publish();
+}
+
+pub(crate) fn poll_after_refund() {
+    let task = CURRENT.get();
+    if !task.is_null() {
+        // SAFETY: the running task pins its scheduler; the refund is published.
+        unsafe { poll_event(task, REFUND, 0) };
+    }
+}
+
 /// Complete a recorded inline operation without consulting task TLS.
 /// # Safety
 /// Context's immutable event word is nonzero and pins its current Task/run.
@@ -1838,7 +1864,6 @@ pub unsafe fn run_root(
             abi::task_resume((*task).context);
             crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
             hirsel_stack::switch(&mut run.idle, (*task).sp);
-            crate::steps::settle(&mut *(*task).context);
             crate::fiber::guard((0, 0));
             CURRENT.set(previous);
             match (*task).state {
@@ -1890,9 +1915,7 @@ unsafe fn spawn_in(
         let parent = CURRENT.get();
         let run = (*parent).run;
         let id = (*run).id();
-        crate::steps::settle(&mut *context);
         let child_context = abi::task_child(context, &mut record, bytes, id);
-        crate::steps::resume(&mut *context);
         let task = Box::new(Task {
             arc_gate: AtomicBool::new((*run).provider.event.is_some()),
             recorded_refunds: AtomicBool::new(false),

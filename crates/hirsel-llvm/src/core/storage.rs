@@ -11,7 +11,6 @@ pub(super) fn zeroext(ty: Type, value: impl Into<Value>) -> CArg {
 pub(super) enum Payer {
     Current,
     /// Like the block at this pointer (null charges the current limit).
-    Like(Value),
     Region(Value),
 }
 
@@ -303,7 +302,6 @@ impl FunctionEmitter<'_> {
         size: &Value,
         align: u64,
         overflow: Option<ValueId>,
-        owned_like: bool,
     ) -> (Value, Value) {
         // The prefix follows the block's cleanup class (crate docs,
         // "Cleanup classes"): terminal blocks carry only the payer word.
@@ -344,7 +342,6 @@ impl FunctionEmitter<'_> {
             size,
             align,
             overflow,
-            owned_like,
         );
         if let Some(fast) = fast {
             return fast;
@@ -374,22 +371,16 @@ impl FunctionEmitter<'_> {
                     word(charge.clone()),
                 ],
             ),
-            (_, place) => {
-                let like = match place {
-                    Payer::Like(old) => old.clone(),
-                    _ => Value::Null,
-                };
-                (
-                    "hirsel_core_alloc",
-                    vec![
-                        ptr(CONTEXT),
-                        ptr(like),
-                        word(size.clone()),
-                        word(int(align)),
-                        word(charge.clone()),
-                    ],
-                )
-            }
+            (_, Payer::Current) => (
+                "hirsel_core_alloc",
+                vec![
+                    ptr(CONTEXT),
+                    ptr(Value::Null),
+                    word(size.clone()),
+                    word(int(align)),
+                    word(charge.clone()),
+                ],
+            ),
         };
         if resource.is_none() {
             let overflow = overflow.map_or(FALSE, |v| {
@@ -414,7 +405,7 @@ impl FunctionEmitter<'_> {
         overflow: Option<ValueId>,
         fail: Option<BlockId>,
     ) -> (Value, Value) {
-        let (block, room) = self.allocate_raw(kind, place, charge, size, align, overflow, false);
+        let (block, room) = self.allocate_raw(kind, place, charge, size, align, overflow);
         self.allocation_status(&block, fail);
         (block, room)
     }
@@ -489,8 +480,7 @@ impl FunctionEmitter<'_> {
                 fail,
             } => {
                 let payer = match place {
-                    AllocPlace::Current => Payer::Current,
-                    AllocPlace::Like(v) => Payer::Like(self.numeric(v)),
+                    AllocPlace::Current | AllocPlace::Like(_) => Payer::Current,
                     AllocPlace::Region(r) => Payer::Region(self.numeric(r)),
                 };
                 let (charge, size) = (self.numeric(charge), self.numeric(size));

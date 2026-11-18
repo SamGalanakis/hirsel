@@ -1,10 +1,10 @@
-// hand-derived step slices: 2
-// hand-derived try-send: 43690
-// S5: both tasks share131072 Steps. The root spends2 on spawn/unwrap,
-// the child1 on entry. Each trip takes send, receive and latch:3 Steps.
-// Root's65536th Step is receive21845; child's is latch21845. Each has
-// exactly one slice, and the two loops publish43690 messages in total.
-// Every send/receive succeeds, so only the slices schedule either loop.
+// hand-derived step slices: 3
+// hand-derived try-send by task: 43690,43690
+// Spawn costs the parent one step, so the child starts with 131071.
+// The parent's unwrap and the child's entry each cost one. Both then have
+// 131070 steps for trips of send, receive and latch. Each stops at its
+// 43691st send, regardless of which one runs first. The parent has two
+// slice ends and the child has one.
 type Pair: send { tx: Sender[u64], rx: Receiver[u64] }
 fn spin(take p: Pair) {
     loop { let _ = channel.try_send(p.tx, 0u64); let _ = channel.try_receive(p.rx) }

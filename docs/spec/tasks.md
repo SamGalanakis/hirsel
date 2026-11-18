@@ -163,7 +163,7 @@ cleaned ([T7.7](ownership.md#own-26-the-transition-table)).
 A run has one total order of **events**: spawn, task end, cancellation requests and their
 observation, every `task.check_cancel()`, publication by `send`, every `try_send` decision, delivery by `receive`, every `try_receive` decision, every
 change of a channel's sender count, `join`, channel close, every `latest.publish` and
-`latest.read` and every change of a `Latest` root's handle count (CONC-13), every slice end ([MEM-30](budgets.md#mem-30-step-bounds)), every charge or refund that
+`latest.read` and every change of a `Latest` root's handle count (CONC-13), every slice end ([MEM-30](budgets.md#mem-30-step-bounds)), every refund or hand-over that
 crosses tasks ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), every `Arc`
 creation, share, release, `try_unwrap` and `with_unique` test, and every admission that returns `Capacity`
 ([MEM-21](budgets.md#mem-21-admission)). Each operation observes the state that the order gives.

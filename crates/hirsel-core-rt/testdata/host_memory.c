@@ -36,8 +36,8 @@ int main(int argc, char **argv) {
     void *argument = old.pointer;
     unsigned body = mode;
     if (mode == 1) {
-        /* Growth must use the old block's root payer, not this empty scope. */
-        assert(hirsel_core_limit_enter(ctx, 0).pointer);
+        /* Fund the growth from a different current limit before testing host refusal. */
+        assert(hirsel_core_limit_enter(ctx, bytes).pointer);
     } else if (mode == 2 || mode == 3) {
         HirselCoreRegion *region = hirsel_core_region_open(4096);
         if (mode == 3) assert(hirsel_core_region_alloc(ctx, region, 8, 8, 8, false).pointer);
@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
         ((uint8_t *)buffer.pointer)[0] = 42;
         carrier[0] = (uintptr_t)buffer.pointer; carrier[1] = 1; carrier[2] = 16384;
         argument = carrier; body = 7;
-        if (mode == 9) assert(hirsel_core_limit_enter(ctx, 0).pointer);
+        if (mode == 9) assert(hirsel_core_limit_enter(ctx, bytes).pointer);
         realloc_payload = buffer.pointer; realloc_carrier = carrier;
     }
     struct rlimit denied = {0, 0};

@@ -83,14 +83,30 @@ def main():
             row = dict(kind=kind, engine=engine, recorded=True, replayed=True, unrecorded=True,
                        events=len(events), cancelled=cancels)
             if kind == 'steps':
-                slices = [e for e in events if int(e[1]) == KIND['STEP_SLICE']]
-                assert len(slices) == 2, (engine, slices)
-                children = {e[3] for e in events if int(e[1]) == KIND['SPAWN']}
-                assert len(children) == 1 and {e[2] for e in slices} == {'0', *children}, (engine, slices)
-                assert all(e[3:] == ['0', '65536'] for e in slices), slices
-                assert sum(int(e[1]) == KIND['TRY_SEND'] for e in events) == 43690, events[-10:]
-                row['step_slices'] = 2
-                row['step_sends'] = 43690
+                def step_counts(trace_events):
+                    children = [e[3] for e in trace_events if int(e[1]) == KIND['SPAWN']]
+                    assert len(children) == 1, (engine, children)
+                    tasks = ['0', children[0]]
+                    slices = [e for e in trace_events if int(e[1]) == KIND['STEP_SLICE']]
+                    assert all(e[3:] == ['0', '65536'] for e in slices), slices
+                    assert [sum(e[2] == t for e in slices) for t in tasks] == [2, 1], (engine, slices)
+                    sends = [sum(int(e[1]) == KIND['TRY_SEND'] and e[2] == t
+                                 for e in trace_events) for t in tasks]
+                    assert sends == [43690, 43690], (engine, sends)
+
+                step_counts(events)
+                last = folder / 'trace-last'
+                last_env = dict(os.environ, HIRSEL_POLL_TRACE=str(last))
+                record = subprocess.run([str(binary)], capture_output=True, env=last_env, timeout=5)
+                replay = subprocess.run([str(binary)], capture_output=True,
+                                        env=dict(last_env, HIRSEL_POLL_REPLAY='1'), timeout=5)
+                assert (record.returncode, record.stdout, record.stderr) == (0, b'', b'')
+                assert (replay.returncode, replay.stdout, replay.stderr) == (0, b'', b'')
+                assert last.read_text() != trace.read_text(), 'the two schedules coincide'
+                step_counts([line.split() for line in last.read_text().splitlines() if line.startswith('E ')])
+                row['schedules'] = 2
+                row['step_slices'] = 3
+                row['step_sends'] = 87380
             if kind == 'latest':
                 # CONC-13: publish and read are ordered events that record no
                 # value, and replay holds under a second schedule.

@@ -152,7 +152,7 @@ fn check_abi(
         ("consuming foreign fallback", 9, large),
         ("consuming invalid layout", 8, invalid_layout),
         ("ordinary inline", 0, large),
-        ("foreign-payer growth", 1, large),
+        ("growth in a different current limit", 1, large),
         ("first region block", 2, large),
         ("inline region refill", 3, large),
         ("Rc node", 4, large),

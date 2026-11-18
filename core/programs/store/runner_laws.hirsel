@@ -471,6 +471,41 @@ fn test_p02_start_finish(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
     if law_p02_start_finish(c, tasks) { Ok(()) } else { Error(()) }
 }
 
+fn return_child(take n: u64) -> u64 { n }
+fn granted_spawn(tasks: Tasks, take n: u64) -> Result[u64, Capacity] waits {
+    let h = match task.spawn(tasks, bytes 0u64, n, return_child) {
+        Ok(take h) => take h,
+        Error((c, _)) => return Error(c),
+    }
+    match task.join(take h) { Ok(v) => Ok(v), _ => fail("granted child failed") }
+}
+
+pub fn law_granted_tasks_copy_steps(tasks: Tasks) -> bool waits {
+    let mut r: runner.Registry[Tasks, ()] = runner.registry()
+    result.unwrap(runner.granted(mut r, code.describe(granted_spawn), 65536u64, 1000u64))
+    let codec = std.codec.of_u64()
+    let key = key_of(code.identity(code.describe(granted_spawn)), codec, codec)
+    let mut arg: Bytes = list.new()
+    result.unwrap(std.codec.put_u64(7u64, mut arg))
+    let ran = bound steps 1000000u64 {
+        match runner.start(r, tasks, tasks, key, take arg) {
+            Ok(take h) => match runner.finish(take h) {
+                Returned(b) => list.len(b) == 8u64 && b[0u64] == 7u8 &&
+                    b[1u64] == 0u8 && b[2u64] == 0u8 && b[3u64] == 0u8 &&
+                    b[4u64] == 0u8 && b[5u64] == 0u8 && b[6u64] == 0u8 && b[7u64] == 0u8,
+                _ => false,
+            },
+            Error(_) => false,
+        }
+    }
+    match ran { Ok(v) => v, Error(_) => false }
+}
+
+@test
+fn test_granted_tasks_copy_steps(tasks: Tasks) -> Result[(), ()] waits {
+    if law_granted_tasks_copy_steps(tasks) { Ok(()) } else { Error(()) }
+}
+
 resource type BusyGrant: send { clock: Clock } drop(g) { loop {} }
 fn grant_returns(g: BusyGrant, take x: u32) -> Result[u32, Capacity] waits {
     std.clock.sleep_ns(g.clock, 0u64)

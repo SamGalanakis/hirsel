@@ -192,33 +192,6 @@ pub(crate) fn allocate(
         Ok(payload)
     }
 }
-/// Growth alone borrows its original payer. The single-worker scheduler grants
-/// the exclusive table lease for this non-suspending operation.
-#[inline]
-pub(crate) fn allocate_like(
-    context: &Context,
-    like: Option<&Payer>,
-    charge: Option<u64>,
-    bytes: usize,
-    align: usize,
-    kind: u8,
-) -> Result<NonNull<u8>, Capacity> {
-    if context.finalizing != 0 || like.is_none() {
-        return allocate(context.payer(None), charge, bytes, align, kind);
-    }
-    let payer = *like.unwrap();
-    if payer.record_pointer() == context.limit_record() {
-        return allocate(context.payer(None), charge, bytes, align, kind);
-    }
-    crate::abi_tasks::payer_lease(|| {
-        let funding = payer.growth_funding();
-        let result = allocate(funding.payer, charge, bytes, align, kind);
-        if result.is_ok() && funding.owner() != crate::tasks::current_id() {
-            crate::tasks::event(crate::tasks::CHARGE, funding.owner(), charge.unwrap());
-        }
-        result
-    })
-}
 /// # Safety
 /// Live own, graph or resource payload; its native payer word stays initialized.
 #[inline]
@@ -298,7 +271,7 @@ impl Block {
         bytes: usize,
         align: usize,
     ) -> Result<Self, Capacity> {
-        Self::paid(context.payer(None), charge, bytes, align, PLAIN)
+        Self::paid(context.payer(), charge, bytes, align, PLAIN)
     }
     pub fn graph(
         context: &Context,
@@ -306,7 +279,7 @@ impl Block {
         bytes: usize,
         align: usize,
     ) -> Result<Self, Capacity> {
-        Self::paid(context.payer(None), charge, bytes, align, GRAPH)
+        Self::paid(context.payer(), charge, bytes, align, GRAPH)
     }
     #[inline]
     pub(crate) fn paid(
@@ -347,9 +320,8 @@ impl Block {
         bytes: usize,
         align: usize,
     ) -> Result<Self, Capacity> {
-        let pointer = allocate_like(
-            context,
-            Some(self.payer()),
+        let pointer = allocate(
+            context.payer(),
             charge,
             bytes,
             align,

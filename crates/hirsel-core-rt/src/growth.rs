@@ -67,9 +67,8 @@ pub(crate) unsafe fn grow(
         crate::peak::sample();
         Ok(replacement)
     } else {
-        let replacement = block::allocate_like(
-            context,
-            Some(&original),
+        let replacement = block::allocate(
+            context.payer(),
             (!overflow).then_some(charge),
             bytes,
             align,

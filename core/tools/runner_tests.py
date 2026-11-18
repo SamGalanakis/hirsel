@@ -41,7 +41,7 @@ from store_tests import inputs
 from store_crash_tests import checked, run_crashes
 
 
-LAWS = ('p01_call', 'p02_start_finish', 'p09_describe', 'p13_duplicate_refused', 'p15_types_roundtrip',
+LAWS = ('granted_tasks_copy_steps', 'p01_call', 'p02_start_finish', 'p09_describe', 'p13_duplicate_refused', 'p15_types_roundtrip',
         'p19_place_bound', 'l4_malformed_flood', 'step_bounds')
 SIZES = (1, 100, 1000, 10000)
 # place_n registers in chunks of CHUNK calls, one function each, so no one function's

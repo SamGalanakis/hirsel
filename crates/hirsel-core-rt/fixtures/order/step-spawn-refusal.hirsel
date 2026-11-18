@@ -1,0 +1,26 @@
+// A failed spawn spends one of the five steps and returns its input. Holding
+// the task's u64 result would cost 296 bytes even with a zero-byte grant.
+// hand-derived capacity: 296,0
+fn child(take input: u64) -> u64 { input }
+fn leaf() -> u64 { 7u64 }
+pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
+    let ran = bound steps 5u64 {
+        let tried = bound bytes 0u64 {
+            match task.spawn(tasks, bytes 0u64, 7u64, child) {
+                Error((c, 7u64)) => c.requested == 296u64 && c.available == 0u64,
+                _ => false,
+            }
+        }
+        match tried {
+            Ok(true) => match (bound steps 4u64 { leaf(); leaf(); leaf(); leaf() }) {
+                Ok(7u64) => match (bound steps 1u64 { leaf() }) {
+                    Error(e) => e.steps == 1u64,
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+    match ran { Ok(true) => Ok(()), _ => Error(Exit(status: 1)) }
+}

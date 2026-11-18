@@ -154,7 +154,6 @@ impl FunctionEmitter<'_> {
         bytes: &Value,
         align: u64,
         overflow: Option<ValueId>,
-        owned_like: bool,
     ) -> Option<(Value, Value)> {
         if resource {
             return None;
@@ -175,10 +174,6 @@ impl FunctionEmitter<'_> {
         let maximum = ((i64::MAX as u64) & !(alignment - 1)) - offset;
         let n = self.counter();
         let payer = self.current_payer();
-        let like = match place {
-            Payer::Like(old) => old.clone(),
-            _ => Value::Null,
-        };
         let overflow = overflow.map_or(FALSE, |v| {
             let flag = self.numeric(v);
             self.cmp(Predicate::Ne, &Type::I8, &flag, &int(0))
@@ -192,31 +187,7 @@ impl FunctionEmitter<'_> {
         };
         let admit = Label::new("admit", n);
         let slow_label = Label::new("allocation_slow", n);
-        let payer_label = Label::new("allocation_payer", n);
-        self.likely(
-            &eligible,
-            if matches!(place, Payer::Like(_)) {
-                payer_label
-            } else {
-                admit
-            },
-            slow_label,
-        );
-        if matches!(place, Payer::Like(_)) {
-            self.block(payer_label);
-            if !owned_like {
-                let empty = self.cmp(Predicate::Eq, &Type::Ptr, &like, &Value::Null);
-                let header = Label::new("allocation_header", n);
-                self.likely(&empty, admit, header);
-                self.block(header);
-            }
-            let header = self.offset(&like, back(OWN_PAYER_BACK));
-            let raw = self.load(&i64, &header, 8);
-            let original = self.bin(Binary::And, &i64, &raw, &int(!(OWN_TAG_MASK as u64)));
-            let current = self.cast(Cast::PtrToInt, &Type::Ptr, &payer, &i64);
-            let same = self.cmp(Predicate::Eq, &i64, &original, &current);
-            self.likely(&same, admit, slow_label);
-        }
+        self.likely(&eligible, admit, slow_label);
         self.block(admit);
         let available = self.load_native(&payer, LIMIT_AVAILABLE, Type::I64);
         // Unsigned charge-1 < room is exactly charge != 0 && charge <= room,
@@ -268,7 +239,7 @@ impl FunctionEmitter<'_> {
             "hirsel_core_alloc",
             &[
                 ptr(CONTEXT),
-                ptr(like),
+                ptr(Value::Null),
                 word(bytes.clone()),
                 word(int(align)),
                 word(charge.clone()),

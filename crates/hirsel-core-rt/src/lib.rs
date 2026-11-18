@@ -77,9 +77,8 @@ pub struct Context {
     pub(crate) active_resource: *mut causes::Resource,
     pub(crate) host_files: *mut host_file::Files,
     pub(crate) isolates: Vec<crate::isolate::Reservation>,
-    pub(crate) step_bounds: Vec<std::sync::Arc<steps::Bound>>,
-    pub(crate) step_loaded: u64,
-    pub(crate) step_slice: u64,
+    pub(crate) step_bounds: Vec<steps::Bound>,
+    pub(crate) step_slice_tail: u64,
 }
 
 impl Context {
@@ -89,15 +88,14 @@ impl Context {
         Self::with_funding(Funding::root(bytes))
     }
 
-    pub(crate) fn with_funding(mut current: Funding) -> Self {
+    pub(crate) fn with_funding(current: Funding) -> Self {
         current.normalize();
         Self {
             current,
             events: 0,
             steps: steps::UNBOUNDED,
             step_bounds: Vec::new(),
-            step_loaded: 0,
-            step_slice: 0,
+            step_slice_tail: steps::SLICE,
             run: std::ptr::null(),
             cancel_requested: AtomicBool::new(false),
             cancel_shield: 0,
@@ -193,22 +191,13 @@ impl Context {
     }
 
     #[inline]
-    pub(crate) fn payer(&self, like: Option<&limit::Payer>) -> limit::Payer {
-        if self.finalizing != 0 {
-            limit::Payer::from_current(self.limit_record())
-        } else {
-            like.copied().map_or_else(
-                || limit::Payer::from_current(self.limit_record()),
-                limit::Payer::canonical,
-            )
-        }
+    pub(crate) fn payer(&self) -> limit::Payer {
+        limit::Payer::from_current(self.limit_record())
     }
 }
 
 impl Drop for Context {
     fn drop(&mut self) {
-        steps::settle(self);
-        self.step_bounds.clear();
         while self.bound_depth != 0 {
             self.limit_exit();
         }

@@ -18,7 +18,6 @@ pub const ARC_SHARE: u8 = 11;
 pub const ARC_RELEASE: u8 = 12;
 pub const ARC_UNWRAP: u8 = 13;
 pub const REFUND: u8 = 14;
-pub const CHARGE: u8 = 15;
 pub const CHECK_CANCEL: u8 = 16;
 pub const CAPACITY: u8 = 17;
 /// CONC-13: a `Latest` root replaced, or read. Neither records a value.
@@ -29,7 +28,7 @@ pub const TRY_RECEIVE: u8 = 20;
 pub const STEP_SLICE: u8 = 21;
 
 /// Every kind by its header name.
-pub const ALL: [(&str, u8); 22] = [
+pub const ALL: [(&str, u8); 21] = [
     ("SPAWN", SPAWN),
     ("END", END),
     ("CANCEL", CANCEL),
@@ -45,7 +44,6 @@ pub const ALL: [(&str, u8); 22] = [
     ("ARC_RELEASE", ARC_RELEASE),
     ("ARC_UNWRAP", ARC_UNWRAP),
     ("REFUND", REFUND),
-    ("CHARGE", CHARGE),
     ("CHECK_CANCEL", CHECK_CANCEL),
     ("CAPACITY", CAPACITY),
     ("LATEST_PUBLISH", LATEST_PUBLISH),

@@ -57,7 +57,7 @@ from each concrete cleanup recipe: childless Boxes, scalar/plain sequence and Ma
 buffers, and counted payloads of the same kind use this short prefix. Count and
 payload offsets stay the same. Terminal children free in place, including inside
 a counted parent's worklist; they never borrow a dormant frame. Generic producers
-derive the property after substitution and growth preserves it and the payer.
+derive the property after substitution and growth preserves that property.
 Fixed nonleaf blocks use a 32-byte prefix: next, immutable descriptor,
 cursor and payer. The descriptor shares the concrete mechanical recipe, portable
 charge and payload offset across all blocks of that shape. Dynamic buffers and
@@ -81,12 +81,11 @@ current canonical record refunds directly before deallocation; other payers
 retain the existing forwarded or remote settlement path. A scheduler binds native task execution on resume
 and unbinds before moving it to another worker. Foreign refunds accumulate in
 prepaid per-slot mailboxes until the payer task's event. Resuming only binds
-execution custody and caches that task's inbox. MEM-26 also makes growth of a
-received collection an ordered foreign charge. The provider's payer_lease hook
-holds the table lease for foreign growth; received grants execute as the
-finalizing task until handover. One OS worker supplies the exclusive lease.
-With multiple workers, the scheduler must quiesce every task sharing the table
-for growth and the entire received finalizer, including suspension.
+execution custody and caches the running task's inbox. Growth admits from the
+current limit (MEM-26). A received grant belongs to the finalizing task until
+hand-over. The old owner folds pending credits before hand-over, and the
+recipient applies the returned reservation and joins the records at its next
+event.
 Guard bounds cache the immutable page extent when each stack is mapped, so a
 normal scheduler switch performs no sysconf page-size query.
 
@@ -196,8 +195,8 @@ publish these offsets; primitive raise passes the complete 40-byte value.
 
 CONC-10 poll fairness uses one allowance of 64 polls per task. The only polls are
 try_send Full, no-request check_cancel, Arc unwrap returning its holder, and
-Capacity refusal. No-request checks and Capacity have event codes 16 and 17;
-foreign CHARGE retains code 15. Successful operations never consume the allowance.
+Capacity refusal. No-request checks and Capacity have event codes 16 and 17.
+Successful operations never consume the allowance.
 Poll results are fixed before scheduling and never observe cancellation. Runnable
 pollers defer until already-ready peers have a turn; the provider records its
 choice among eligible peers. This is not a loop-backedge yield or a time quantum.

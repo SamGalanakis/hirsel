@@ -104,12 +104,11 @@ impl FunctionEmitter<'_> {
         };
         let (block, room) = self.allocate_raw(
             &AllocKind::Own { edge },
-            &Payer::Like(old.clone()),
+            &Payer::Current,
             charge,
             size,
             align,
             overflow,
-            dispatch,
         );
         let allocated = Label::new("grow_allocated", n);
         let copy = Label::new("grow_copy", n);

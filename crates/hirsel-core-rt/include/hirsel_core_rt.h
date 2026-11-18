@@ -85,7 +85,7 @@ int8_t hirsel_core_compare_bytes(const uint8_t *a, uint64_t a_len, const uint8_t
                                  uint64_t b_len);
 HirselCoreContext *hirsel_core_context_new(uint64_t bytes);
 void hirsel_core_context_free(HirselCoreContext *);
-HirselCoreAllocation hirsel_core_alloc(const HirselCoreContext *, void *like,
+HirselCoreAllocation hirsel_core_alloc(const HirselCoreContext *, void *reserved,
     size_t bytes, size_t alignment, uint64_t charge, bool charge_overflow, uint8_t native_kind);
 void hirsel_core_free(void *, uint64_t remaining_charge);
 HirselCoreAllocation hirsel_core_limit_enter(HirselCoreContext *, uint64_t bytes);

@@ -172,7 +172,7 @@ pub const OWN_ORDINARY_MAX_TAG: usize = OWN_ORDINARY_GRAPH_TAG;
 // uncharged spare words. Dynamic uses GRAPH_PREFIX_BYTES. Count stays at
 // NODE_COUNT, payload at NODE_PAYLOAD. A terminal owning edge frees immediately
 // after its last count event; a Fixed one goes through its descriptor.
-// Like/growth retain the same property and original payer; logical charges and
+// Like/growth retain the same cleanup property; logical charges and
 // admission/refund ordering are independent of this native prefix selection.
 
 /// Reuse an owned sequence buffer from this many OLD native payload bytes.

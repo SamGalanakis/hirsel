@@ -75,16 +75,13 @@ impl Function<'_, '_, '_> {
         }
         Ok(())
     }
-    #[allow(clippy::too_many_arguments)]
     pub fn own_alloc(
         &mut self,
         native_kind: u8,
-        like: Option<Value>,
         size: Value,
         align: u64,
         charge: Value,
         overflow: Option<Value>,
-        owned_like: bool,
     ) -> Result<[Value; 2]> {
         let slow = self.cold_block();
         let fast = self.b.create_block();
@@ -110,38 +107,12 @@ impl Function<'_, '_, '_> {
         );
         let overflow = overflow.unwrap_or_else(|| self.b.ins().iconst(types::I8, 0));
         let fallback = self.b.ins().bor(too_large, overflow);
-        let eligible = self.b.create_block();
         let fallback = if alignment > 512 {
             self.b.ins().iconst(types::I8, 1)
         } else {
             fallback
         };
-        self.b.ins().brif(fallback, slow, &[], eligible, &[]);
-        self.b.switch_to_block(eligible);
-        if let Some(like) = like {
-            // This operand is an owned block, not a collection carrier. A producer
-            // with capacity zero selects Current even when data is a static pointer.
-            if !owned_like {
-                let header = self.b.create_block();
-                let empty = self.b.ins().icmp_imm_s(IntCC::Equal, like, 0);
-                self.b.ins().brif(empty, fast, &[], header, &[]);
-                self.b.switch_to_block(header);
-            }
-            let tagged = self.b.ins().load(
-                types::I64,
-                Flags::trusted(),
-                like,
-                -(memory_layout::OWN_PAYER_BACK as i32),
-            );
-            let original = self
-                .b
-                .ins()
-                .band_imm_s(tagged, !(memory_layout::OWN_TAG_MASK as i64));
-            let same = self.b.ins().icmp(IntCC::Equal, original, payer);
-            self.b.ins().brif(same, fast, &[], slow, &[]);
-        } else {
-            self.b.ins().jump(fast, &[]);
-        }
+        self.b.ins().brif(fallback, slow, &[], fast, &[]);
         self.b.switch_to_block(fast);
         let available = self.load_word(payer, memory_layout::LIMIT_AVAILABLE);
         // Wrapping charge-1 < available combines positive charge and room.
@@ -188,7 +159,7 @@ impl Function<'_, '_, '_> {
         let zero = self.b.ins().iconst(types::I64, 0);
         self.b.ins().jump(done, &[pointer.into(), zero.into()]);
         self.b.switch_to_block(slow);
-        let like = like.unwrap_or_else(|| self.b.ins().iconst(types::I64, 0));
+        let reserved = self.b.ins().iconst(types::I64, 0);
         let align_value = self.b.ins().iconst(types::I64, align as i64);
         let native = self.b.ins().iconst(types::I8, native_kind as i64);
         let values = self.c_call(
@@ -197,7 +168,7 @@ impl Function<'_, '_, '_> {
             &[P, U, U],
             &[
                 self.context,
-                like,
+                reserved,
                 size,
                 align_value,
                 charge,

@@ -83,7 +83,7 @@ impl Region {
         align: usize,
         charge: Option<u64>,
     ) -> Result<NonNull<u8>, Capacity> {
-        let payer = context.payer(None);
+        let payer = context.payer();
         payer.admit(charge)?;
         if charge != Some(0) {
             self.charge(payer, charge.unwrap());

@@ -57,7 +57,7 @@ void *hirsel_core_latest_publish(HirselCoreLatest *, void *node);
 void *hirsel_core_latest_read(HirselCoreLatest *);
 void hirsel_core_latest_drop(HirselCoreContext *, HirselCoreLatest *);
 bool hirsel_core_latest_release(HirselCoreLatest *, HirselCoreWorklist *, uint64_t point);
-/* Scheduler events include CHARGE (effectful foreign growth), CHECK_CANCEL
+/* Scheduler events include REFUND (foreign refund or hand-over), CHECK_CANCEL
    (no request) and CAPACITY (requested, available). Only Full, Empty, no-request
    check, failed Arc unwrap and Capacity count as polls. */
 /* Event dispatch after an emitted Arc update/test. These do not change counts,

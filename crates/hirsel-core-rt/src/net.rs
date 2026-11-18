@@ -403,7 +403,7 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
             .checked_mul(37)
             .and_then(|n| n.checked_add(7))
             .map(|n| n & !7);
-        let payer = (*context).payer(None);
+        let payer = (*context).payer();
         if let Err(capacity) = payer.admit(charge) {
             return Outcome {
                 value: capacity.requested,

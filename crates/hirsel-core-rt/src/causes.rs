@@ -282,6 +282,7 @@ pub unsafe fn record_string(context: &mut Context, site: u64, message: StringMes
 pub(crate) struct Resource {
     pub(crate) cell: Option<Box<Cell>>,
     grant: Option<Funding>,
+    creator: u64,
     previous: Option<Funding>,
     previous_resource: *mut Resource,
     previous_grant_depth: usize,
@@ -307,7 +308,7 @@ pub unsafe fn resource_new(
     align: usize,
 ) -> Result<std::ptr::NonNull<u8>, Capacity> {
     let block = Block::paid(
-        context.payer(None),
+        context.payer(),
         charge::resource(storage, grant),
         bytes,
         align,
@@ -317,6 +318,7 @@ pub unsafe fn resource_new(
     let state = Box::new(Resource {
         cell: Some(Cell::prepaid(*payer)),
         grant: Some(payer.prepaid(grant)),
+        creator: crate::tasks::current_id(),
         previous: None,
         previous_resource: ptr::null_mut(),
         previous_grant_depth: usize::MAX,
@@ -350,12 +352,8 @@ pub unsafe fn finalizer_begin(context: &mut Context, pointer: std::ptr::NonNull<
     ));
     // SAFETY: the state stays alive through finalizer_end and field cleanup.
     context.active_resource = unsafe { block::resource(pointer) };
-    crate::abi_tasks::payer_lease(|| {
-        context.current.drain();
-        context.current.normalize();
-        context.current.task_owner(crate::tasks::current_id());
-        context.current.bind();
-    });
+    context.current.task_owner(crate::tasks::current_id());
+    context.current.bind();
     context.finalizing += 1;
 }
 
@@ -370,7 +368,7 @@ pub unsafe fn finalizer_end(context: &mut Context, pointer: std::ptr::NonNull<u8
     if resource.cell.as_ref().is_some_and(|cell| cell.reserved) {
         drop(resource.cell.take());
     }
-    context.current.handover();
+    context.current.handover(resource.creator);
     context.current = resource.previous.take().unwrap();
     context.active_resource = resource.previous_resource;
     context.grant_depth = resource.previous_grant_depth;

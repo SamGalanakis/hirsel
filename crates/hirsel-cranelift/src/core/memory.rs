@@ -158,19 +158,7 @@ impl Function<'_, '_, '_> {
                 // there is no guessed function status or call to the old runtime.
                 let values = if resource.is_none() && !matches!(place, AllocPlace::Region(_)) {
                     let overflow = overflow.map(|v| self.get(v));
-                    let like = match place {
-                        AllocPlace::Like(v) => Some(self.get(v)),
-                        _ => None,
-                    };
-                    let values = self.own_alloc(
-                        native_kind,
-                        like,
-                        size,
-                        alignment,
-                        charge,
-                        overflow,
-                        false,
-                    )?;
+                    let values = self.own_alloc(native_kind, size, alignment, charge, overflow)?;
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
                 } else if let Some(overflow) = overflow {
                     let overflow = self.get(overflow);
@@ -182,16 +170,13 @@ impl Function<'_, '_, '_> {
                             &[ctx, payer, size, align, charge, overflow],
                         )?
                     } else {
-                        let like = match place {
-                            AllocPlace::Like(v) => self.get(v),
-                            _ => self.b.ins().iconst(types::I64, 0),
-                        };
+                        let reserved = self.b.ins().iconst(types::I64, 0);
                         let kind = self.b.ins().iconst(types::I8, i64::from(native_kind));
                         self.c_call(
                             "hirsel_core_alloc",
                             &[p, p, u, u, u, boolean, Ty::Scalar(Scalar::U8)],
                             &[p, u, u],
-                            &[ctx, like, size, align, charge, overflow, kind],
+                            &[ctx, reserved, size, align, charge, overflow, kind],
                         )?
                     };
                     [r[0], r[1], r[2]]
@@ -213,13 +198,7 @@ impl Function<'_, '_, '_> {
                         AllocPlace::Region(_) => {
                             self.region_alloc(payer, size, alignment, charge)?
                         }
-                        _ => {
-                            let like = match place {
-                                AllocPlace::Like(v) => Some(self.get(v)),
-                                _ => None,
-                            };
-                            self.own_alloc(native_kind, like, size, alignment, charge, None, false)?
-                        }
+                        _ => self.own_alloc(native_kind, size, alignment, charge, None)?,
                     };
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
                 };

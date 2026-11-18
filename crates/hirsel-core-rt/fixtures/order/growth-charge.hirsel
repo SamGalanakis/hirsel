@@ -1,19 +1,21 @@
-// CONC-10 CHARGE: growth borrows the block's original payer, so a child that grows
-// a list the root allocated charges the root's budget and records CHARGE for the root.
+// The root funds four u64s. The child's push admits 64 from its own limit,
+// installs eight slots and posts exactly one 32-byte refund to the root.
+// hand-derived refund: 1,0,32
+// hand-derived stdout: cr
 type Work:send { xs: List[u64], out: Stdout }
 fn child(take x: Work) -> u64 waits {
     let Work(xs: ys, out: out) = take x
     let mut xs = take ys
-    let mut i = 0u64
-    while i < 40u64 { let _ = list.push(mut xs, i); i += 1 }
+    result.unwrap(list.push(mut xs, 4u64))
     result.unwrap(stdout.write(out, "c"))
     list.len(xs)
 }
 pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
-    let mut xs: List[u64] = list.new()
-    result.unwrap(list.push(mut xs, 7u64))
-    let h = result.unwrap(task.spawn(tasks, bytes 4096, Work(xs: take xs, out: out), child))
-    let _ = task.join(take h)
-    result.unwrap(stdout.write(out, "r"))
-    Ok(())
+    let mut xs: List[u64] = result.unwrap(list.with_capacity(4u64))
+    for i in 0u64 .. 4u64 { result.unwrap(list.push(mut xs, i)) }
+    let h = result.unwrap(task.spawn(tasks, bytes 64, Work(xs: take xs, out: out), child))
+    match task.join(take h) {
+        Ok(5u64) => { result.unwrap(stdout.write(out, "r")); Ok(()) },
+        _ => Error(Exit(status: 1)),
+    }
 }

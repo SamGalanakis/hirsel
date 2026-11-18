@@ -611,10 +611,10 @@
 //! to `alloc`; `free` refunds the same amount to the limit the block's record now
 //! leads to (MEM-20, MEM-23). `limit_enter b` admits `b` and makes a limit of `b`
 //! current; `limit_exit` returns its unused part and forwards its record to the
-//! parent, so blocks made inside stay charged (MEM-25). `alloc .. like v` admits
-//! against the limit `v` was charged to (MEM-26), except inside a finalizer, where
-//! it admits from the current limit (MEM-27): the grant, or a bound scope entered
-//! within the finalizer, which is then current (MEM-19). A refusal is the failure
+//! parent, so blocks made inside stay charged (MEM-25). `alloc .. like v` and
+//! ordinary `alloc` both admit from the current limit (MEM-26). In a finalizer
+//! the current limit is its grant or an enclosing bound scope entered within it
+//! (MEM-19, MEM-27). A refusal is the failure
 //! `Capacity` only when the refusing limit is the grant itself; a bound scope's
 //! refusal, inside a finalizer too, is a value (MEM-25), and `limit_enter`'s always
 //! is. A resource value is a pointer to its block, charged
@@ -644,10 +644,9 @@
 //!   block of that edge at offset 0. Capacity 0 owns nothing (an empty carrier, or
 //!   one over static bytes): its producer allocates against the current limit
 //!   (`alloc for seq E`), copies `length` elements and frees nothing, as before.
-//! - **Admission** is `alloc .. like` the old block's (MEM-26): the whole new
-//!   `charge` is admitted against the limit the old block was charged to, before
-//!   any refund, so a grow never needs room it frees. Inside a finalizer it admits
-//!   from the current limit (MEM-27). `overflow` refuses as on `alloc`.
+//! - **Admission** takes the full new `charge` from the current limit before
+//!   refunding the old storage to the limit its record leads to (MEM-26).
+//!   `overflow` refuses as on `alloc`.
 //! - **Refusal**: `vR` is null, `vA` the room the refusing limit had, and the
 //!   carrier, its old block and its elements are untouched. Under a finalizer's
 //!   grant a refusal is the failure `Capacity` (`fail bN`).

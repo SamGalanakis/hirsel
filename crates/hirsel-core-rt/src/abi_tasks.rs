@@ -15,8 +15,8 @@ pub(crate) fn task_child(
     let primary = record.partition(hirsel_core_layout::charge::CAUSE_CELL);
     let mut context = Context::with_funding(reservation);
     context.primary = Some(crate::causes::Cell::prepaid(primary));
-    // SAFETY: parent is exclusively suspended inside this spawn operation.
-    context.step_bounds = unsafe { (*parent).step_bounds.last().cloned().into_iter().collect() };
+    // SAFETY: the running parent owns its flushed step counter.
+    crate::steps::inherit(&mut context, unsafe { &*parent });
     // SAFETY: spawner and child share the same run-owned provider configuration.
     context.run = unsafe { (*parent).run };
     // SAFETY: child inherits recording; spawn replaces the pointer before publication.
@@ -30,10 +30,7 @@ pub(crate) fn task_child(
 pub(crate) unsafe fn task_handover(context: *mut Context) {
     // SAFETY: child's remaining funding forwards to its live spawner without a value walk.
     unsafe {
-        crate::steps::settle(&mut *context);
-        (*context).step_bounds.clear();
-        crate::steps::resume(&mut *context);
-        (*context).current.handover();
+        (*context).current.handover(crate::tasks::current_id());
     }
 }
 /// Rebind task custody without making foreign refunds visible. Only the
@@ -42,17 +39,8 @@ pub(crate) unsafe fn task_handover(context: *mut Context) {
 pub(crate) fn task_resume(context: *mut Context) {
     // SAFETY: the cooperative scheduler owns this task's exclusive execution.
     unsafe {
-        crate::steps::resume(&mut *context);
         (*context).current.bind();
         (*context).current.normalize();
-    }
-}
-
-/// One slow path for cross-task refunds, before publishing to the payer mailbox. Local
-/// refund does not invoke a provider. No allocation, no suspended callback.
-pub(crate) fn cross_task_refund(owner: u64, bytes: u64) {
-    if bytes != 0 && owner != crate::tasks::current_id() {
-        crate::tasks::event(crate::tasks::REFUND, owner, bytes);
     }
 }
 
@@ -69,17 +57,6 @@ pub use crate::tasks::{
     hirsel_core_cancel, hirsel_core_check_cancel, hirsel_core_join, hirsel_core_spawn,
     hirsel_core_task_drop,
 };
-
-/// Exclusive execution of the payer's entire table, including queued refunds.
-/// The current scheduler has one OS worker and callbacks here cannot suspend,
-/// so its running turn already holds the lease. A multiworker scheduler must
-/// acquire the payer domain before invoking this closure, quiesce every task
-/// sharing that domain, and retain the lease until the closure returns. It must
-/// also hold it for a received finalizer's full body, even across suspension.
-#[inline]
-pub(crate) fn payer_lease<R>(operation: impl FnOnce() -> R) -> R {
-    operation()
-}
 
 /// Poll events: CHECK_CANCEL and CAPACITY. A Capacity
 /// snapshot is recorded before the scheduling turn, admits nothing and observes

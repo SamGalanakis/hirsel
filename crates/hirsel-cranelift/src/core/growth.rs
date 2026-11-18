@@ -92,7 +92,7 @@ impl Function<'_, '_, '_> {
             self.b.ins().jump(classic, &[]);
         }
         self.b.switch_to_block(classic);
-        let values = self.own_alloc(kind, Some(old), size, align, charge, overflow, dispatch)?;
+        let values = self.own_alloc(kind, size, align, charge, overflow)?;
         let null = self.b.ins().icmp_imm_s(IntCC::Equal, values[0], 0);
         let copied = self.b.create_block();
         self.b

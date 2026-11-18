@@ -418,10 +418,11 @@ unsafe fn grant(node: *mut Node) {
     }
 }
 
-/// Instrumented sample: token-queue parks, lobby parks and idle worker parks.
+/// Instrumented sample: token-queue parks, lobby parks, idle worker parks,
+/// unparks of a pinned fiber's worker and unparks of a sleeper for stealable work.
 #[cfg(feature = "testing")]
-pub(crate) static PARKS: [std::sync::atomic::AtomicU64; 3] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+pub(crate) static PARKS: [std::sync::atomic::AtomicU64; 5] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 5];
 
 fn futex_wait(word: &AtomicU32, expected: u32) {
     // SAFETY: FUTEX_WAIT reads the pinned word and returns at once if it changed.

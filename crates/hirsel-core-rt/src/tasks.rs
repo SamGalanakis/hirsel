@@ -405,6 +405,8 @@ impl Tapes {
 
 const RESIDUAL_DOMAIN: u64 = 0;
 const LOCAL_QUEUE: usize = 256;
+/// How long an idle worker spins for a wake before it parks its thread.
+const IDLE_SPIN_NS: u64 = 50_000;
 const LIFO_TURNS: u8 = 3;
 
 #[derive(Clone, Copy)]
@@ -481,6 +483,8 @@ struct Pool {
     sleeping: AtomicUsize,
     /// Each worker's last observed L3 cohort.
     cohorts: Vec<AtomicUsize>,
+    /// Set by every unpark of the worker, so its idle spin sees the wake.
+    nudged: Vec<AtomicBool>,
 
     spare: crate::fiber::Spare,
     readies: Arc<Readies>,
@@ -515,6 +519,7 @@ impl Pool {
             sleepers: Mutex::default(),
             sleeping: AtomicUsize::new(0),
             cohorts: (0..workers).map(|_| AtomicUsize::new(0)).collect(),
+            nudged: (0..workers).map(|_| AtomicBool::new(false)).collect(),
 
             spare: crate::fiber::Spare::default(),
             readies,
@@ -551,10 +556,17 @@ impl Pool {
     }
 
     fn wake_workers(&self) {
-        for thread in self.threads.iter().filter_map(OnceLock::get) {
-            thread.unpark();
+        for index in 0..self.threads.len() {
+            self.unpark(index);
         }
         self.readies.wake_poller();
+    }
+
+    fn unpark(&self, index: usize) {
+        self.nudged[index].store(true, Ordering::Release);
+        if let Some(thread) = self.threads[index].get() {
+            thread.unpark();
+        }
     }
 
     /// Wake one parked worker for newly stealable work, as Tokio's
@@ -576,10 +588,10 @@ impl Pool {
             at.map(|at| sleepers.swap_remove(at))
         };
         if let Some(index) = sleeper {
+            #[cfg(feature = "testing")]
+            crate::sequencer::PARKS[4].fetch_add(1, Ordering::Relaxed);
             self.sleeping.fetch_sub(1, Ordering::SeqCst);
-            if let Some(thread) = self.threads[index].get() {
-                thread.unpark();
-            }
+            self.unpark(index);
         }
     }
 
@@ -636,9 +648,9 @@ impl Pool {
                     queue.pinned.push_back(delivery.task);
                 }
                 drop(queue);
-                if let Some(thread) = self.threads[worker].get() {
-                    thread.unpark();
-                }
+                #[cfg(feature = "testing")]
+                crate::sequencer::PARKS[3].fetch_add(1, Ordering::Relaxed);
+                self.unpark(worker);
             } else {
                 let mut queue = self.queues[source].lock().unwrap();
                 queue.lifo_seen = false;
@@ -675,9 +687,7 @@ impl Pool {
     }
 
     fn wake_flow_owner(&self, index: usize) {
-        if let Some(thread) = self.threads[index].get() {
-            thread.unpark();
-        }
+        self.unpark(index);
         self.readies.wake_poller();
     }
 
@@ -3466,10 +3476,31 @@ impl RunPtr {
     /// # Safety
     /// The caller is a registered worker and owns none of the run's locks.
     unsafe fn park_worker(self, pool: &Pool, root: TaskPtr, index: usize) {
+        pool.nudged[index].store(false, Ordering::Relaxed);
         pool.sleep(index);
         if pool.has_work(index) {
             pool.wake(index);
             return;
+        }
+        // Spin briefly for a wake before the quiescence commit and the OS
+        // park: a worker whose pinned fiber is woken a few microseconds
+        // later would otherwise pay two context switches per wake (Go's
+        // spinning Ms). The spin reads only this worker's flag and the
+        // readiness flag, which outside threads set without a nudge.
+        let deadline = crate::os::monotonic_ns().saturating_add(IDLE_SPIN_NS);
+        loop {
+            if pool.nudged[index].load(Ordering::Acquire)
+                || pool.readies.pending.load(Ordering::Acquire)
+            {
+                pool.wake(index);
+                return;
+            }
+            if crate::os::monotonic_ns() >= deadline {
+                break;
+            }
+            for _ in 0..64 {
+                std::hint::spin_loop();
+            }
         }
         // SAFETY: recheck under registry exclusion then the residual lock.
         let (deadline, poller) = unsafe {

@@ -950,7 +950,7 @@ def admission_laws(args, root, work, engines, row):
          'WSent => return Ok(None),', 'unread_client'),
         ('slot_freed_at_answer', 'h.queued += count', 'h.queued = 0u64', 'unread_client'),
         ('refusal_rows_uncapped', 'if s.refusals >= 1u64 + s.config.q { return Error(1008u16) }', 'if false { return Error(1008u16) }', 'unread_client'),
-        ('reset_drops_held', 'wire_queue(mut work, Reset(version, take done), take marks, list.new())', 'wire_queue(mut work, Reset(version, list.new()), take marks, list.new())', 'unread_client'),
+        ('reset_drops_held', 'wire_queue(mut output, Reset(version, take done), take marks, list.new())', 'wire_queue(mut output, Reset(version, list.new()), take marks, list.new())', 'unread_client'),
     )
     for name, old, new, law in mutants:
         if args.admission_mutant and name not in args.admission_mutant:

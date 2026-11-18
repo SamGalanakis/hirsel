@@ -177,7 +177,7 @@ fn serve(take server: Server) -> Result[(), std.wsock.Error] waits {
     let service: scoped[view] fn() -> store.runner.Service[store.runner.WireSession[(), Handles]] = fn() -> store.runner.Service[store.runner.WireSession[(), Handles]] {
         store.runner.wire_place_service(code.describe(place), policy, head, c, tasks, config, a)
     }
-    store.runner.serve_admitted(take listener, tasks, c, post, config, 1024u64, take proxies, policy, service)
+    store.runner.serve_admitted(take listener, tasks, c, post, config, store.runner.WIRE_OWNER_LIMIT, take proxies, policy, service)
 }
 
 fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {

@@ -1,6 +1,6 @@
 fn wire_call_ready[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, take pending: WirePending, allowed: bool) -> Result[(), u16] {
     let plan = wire_plan_call(s, take pending, allowed)?
-    wire_apply_call(mut s, mut work, take plan)
+    wire_apply_plan(mut s, mut work, take plan)
 }
 
 // WIRE W3c: hand-sized replies and the exact 41,140-byte outcome reserve.
@@ -91,7 +91,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
     let mut retained = 0u64
     for o in work.output { if let Batch(_, _, _, ds) = o.frame { for d in ds { retained += wire_done_size(d.outcome) } } }
     if retained != 41140u64 { return false }
-    result.unwrap(wire_reset(mut s, mut work, 7u64))
+    result.unwrap(wire_reset(mut s, mut work.output, 7u64))
     let reset = result.unwrap(wire_step(mut s, mut work, WPoll(true)))
     if wire_units(s) != 5u64 || s.refusals != 5u64 { return false }
     if let Error(1008u16) = wire_refused(mut s, mut work, 10u32, 0u64, Overloaded) {} else { return false }

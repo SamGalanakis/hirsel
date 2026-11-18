@@ -23,7 +23,7 @@ fn inspect(context: (), frame: store.runner.Frame) -> Option[u16] { None }
 fn finish(mut context: ()) -> Option[store.runner.PubIn] { None }
 
 fn service() -> store.runner.Service[()] {
-    store.runner.Service(context: (), step: step, ready: ready, allocate: fn(mut context: (), take plan: store.runner.ServiceAllocation) -> Result[store.runner.CallPlan, u16] { Error(1013u16) }, finish: finish, check: inspect)
+    store.runner.Service(context: (), step: step, ready: ready, allocate: fn(mut context: (), take plan: store.runner.ServiceAllocation) -> Result[store.runner.ServicePlan, u16] { Error(1013u16) }, finish: finish, check: inspect)
 }
 
 fn run(n: Net, tasks: Tasks, clock: Clock, config: store.runner.WireConfig) -> Result[(), Exit] waits {

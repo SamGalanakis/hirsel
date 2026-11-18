@@ -83,7 +83,7 @@ fn fault_step(mut context: (), mut work: store.runner.WireWork, take input: stor
 
 fn fault_service() -> store.runner.Service[()] {
     store.runner.Service(context: (), step: fault_step, ready: fn(context: ()) -> bool { true },
-        allocate: fn(mut context: (), take plan: store.runner.ServiceAllocation) -> Result[store.runner.CallPlan, u16] { Error(1013u16) },
+        allocate: fn(mut context: (), take plan: store.runner.ServiceAllocation) -> Result[store.runner.ServicePlan, u16] { Error(1013u16) },
         finish: fn(mut context: ()) -> Option[store.runner.PubIn] { None },
         check: fn(context: (), f: store.runner.Frame) -> Option[u16] { None })
 }

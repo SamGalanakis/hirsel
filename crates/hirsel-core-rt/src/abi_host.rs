@@ -57,14 +57,15 @@ pub use crate::host_file::{
 /// StringMessage carrier. String bytes are already UTF-8 by source typing.
 pub(crate) unsafe fn format_cause(cause: &crate::causes::Cause) -> String {
     // SAFETY: same pinned Cause contract; numeric fallback needs no source.
-    unsafe { format_cause_at(cause, cause.site) }
+    unsafe { format_cause_at(cause, format_args!("{}", cause.site)) }
 }
 
 /// # Safety
 /// Same pinned Cause/message contract as format_cause.
+#[cold]
 pub(crate) unsafe fn format_cause_at(
     cause: &crate::causes::Cause,
-    site: impl std::fmt::Display,
+    site: std::fmt::Arguments<'_>,
 ) -> String {
     let name = [
         "Overflow",

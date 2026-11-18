@@ -68,7 +68,7 @@ impl Metadata {
             && let Some(image) = MappedImage::new(file)
         {
             let digest: DeferredDigest = LazyLock::new(Box::new(move || {
-                Executable::Digest(Sha256::digest(image.bytes()).into())
+                Executable::Digest(hash_bytes(image.bytes()))
             }));
             return Self::with_image(Image::Deferred(Arc::new(digest)), target, n_place, describe);
         }
@@ -91,12 +91,7 @@ impl Metadata {
 
     /// The evaluator already owns the exact image it loaded; no pathname reopen.
     pub fn loaded(image: &[u8], target: &str, n_place: u64, describe: bool) -> Self {
-        Self::embedded(
-            Some(Sha256::digest(image).into()),
-            target,
-            n_place,
-            describe,
-        )
+        Self::embedded(Some(hash_bytes(image)), target, n_place, describe)
     }
 
     pub fn embedded(digest: Option<[u8; 32]>, target: &str, n_place: u64, describe: bool) -> Self {
@@ -159,6 +154,7 @@ impl Metadata {
     }
 }
 
+#[cold]
 fn read_digest(image: io::Result<File>) -> Executable {
     match image.and_then(hash) {
         Ok(digest) => Executable::Digest(digest),
@@ -172,10 +168,22 @@ fn hash(mut image: File) -> io::Result<[u8; 32]> {
     loop {
         let count = image.read(&mut scratch)?;
         if count == 0 {
-            return Ok(hash.finalize().into());
+            return Ok(finish_hash(hash));
         }
         hash.update(&scratch[..count]);
     }
+}
+
+fn hash_bytes(bytes: &[u8]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(bytes);
+    finish_hash(hash)
+}
+
+// Both the mapping and the fallback reader finish the same streaming digest.
+#[inline(never)]
+fn finish_hash(hash: Sha256) -> [u8; 32] {
+    hash.finalize().into()
 }
 
 // Capture the executable while it is still the launch image. The read-only

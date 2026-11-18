@@ -364,6 +364,8 @@ struct LiveTape {
 struct Tapes {
     live: Vec<LiveTape>,
     next_open: u64,
+    // Opening a tape links its scheduler input path, including task ordering.
+    take_inputs: Option<unsafe fn(&mut Scheduler)>,
 }
 
 impl Tapes {
@@ -377,6 +379,7 @@ impl Tapes {
             opened,
             members: 0,
         });
+        self.take_inputs = Some(Scheduler::take_tape_inputs);
     }
 
     fn membership(&mut self, group: Group) -> Option<&mut usize> {
@@ -389,6 +392,9 @@ impl Tapes {
     fn close(&mut self, group: Group) {
         if let Some(index) = self.live.iter().position(|entry| entry.group.same(group)) {
             self.live.swap_remove(index);
+            if self.live.is_empty() {
+                self.take_inputs = None;
+            }
         }
     }
 
@@ -1298,23 +1304,9 @@ impl Scheduler {
     /// next cancellation point (CONC-7). Readiness before timers is the network
     /// rule that readiness wins a tie with a deadline (net-proposal-999 D3).
     unsafe fn capture_wakes(&mut self, captured: &mut Vec<ReadyArm>, net_timeout: i32) {
-        // SAFETY: idle owns every task and operation frame.
-        if !self.tapes.live.is_empty() {
-            // SAFETY: idle owns tasks; retirement removes queued requests.
-            unsafe {
-                for task in std::mem::take(&mut self.outside_cancels) {
-                    if let Some(group) = (*task).group
-                        && group.cancel(None)
-                    {
-                        cancel_flag(task).store(true, Ordering::Release);
-                        if (*task).state == State::Provider {
-                            self.cancels.push(task);
-                        }
-                        self.wake_cancelled(task);
-                    }
-                }
-                self.tape_inputs();
-            }
+        if let Some(take_inputs) = self.tapes.take_inputs {
+            // SAFETY: idle owns every task and operation frame.
+            unsafe { take_inputs(self) };
         }
         self.poll_net(net_timeout);
         // SAFETY: no task is running; every parked operation's frame is pinned.
@@ -1396,9 +1388,20 @@ impl Scheduler {
         }
     }
 
-    unsafe fn tape_inputs(&mut self) {
-        // SAFETY: called only from idle; tasks and their pinned operations live.
+    unsafe fn take_tape_inputs(&mut self) {
+        // SAFETY: idle owns tasks; retirement removes queued requests.
         unsafe {
+            for task in std::mem::take(&mut self.outside_cancels) {
+                if let Some(group) = (*task).group
+                    && group.cancel(None)
+                {
+                    cancel_flag(task).store(true, Ordering::Release);
+                    if (*task).state == State::Provider {
+                        self.cancels.push(task);
+                    }
+                    self.wake_cancelled(task);
+                }
+            }
             for index in 0..self.tapes.live.len() {
                 let group = self.tapes.live[index].group;
                 use crate::tape::schedule::Turn;

@@ -1296,11 +1296,6 @@ fn direct_link(
     if optimize {
         // Keep the executable's code revision even when no tape reads it.
         process.args(["--gc-sections", "--undefined=hirsel_code_revision"]);
-        if recipe.target == TARGET {
-            // Page-align code so changes to read-only data do not move
-            // generated loops within a cache line on x86-64.
-            process.args(["-z", "separate-code"]);
-        }
     }
     let mut inserted = false;
     for argument in &recipe.args {
@@ -1461,9 +1456,7 @@ fn link_objects(
     revisions: impl FnOnce() -> Result<BTreeMap<Identity, ContentHash>, NativeStop>,
 ) -> Result<Linked, NativeStop> {
     // The executable key includes the mode-specific lld options.
-    let link_mode = if options.optimize && options.target == TARGET {
-        "release-link-gc-sections-separate-code"
-    } else if options.optimize {
+    let link_mode = if options.optimize {
         "release-link-gc-sections"
     } else {
         "development-link-O0"

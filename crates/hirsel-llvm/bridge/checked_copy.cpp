@@ -13,6 +13,7 @@
 #include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/AliasAnalysis.h>
+#include <llvm/Analysis/BlockFrequencyInfo.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/IR/Dominators.h>
@@ -795,4 +796,91 @@ extern "C" void hirsel_llvm_share_cold_sites(void *Raw) {
       Call->eraseFromParent();
     }
   }
+}
+
+// A spilled Step window is flushed and reloaded around every refill. Share
+// that sequence only where final block frequencies put it off the hot path.
+// Leave functions with loops alone: even replacing a loop-external refill
+// changes Base64's register allocation in its hot loop.
+// Outline the same context-relative counter address and pass the original
+// site through, so each failure still reports the Step that exhausted it.
+struct StepSite {
+  StoreInst *Store;
+  CallInst *Call;
+  LoadInst *Load;
+};
+
+static void shareColdStepSites(Module &M, FunctionAnalysisManager &FAM) {
+  auto *Step = M.getFunction("hirsel_core_step_out");
+  if (!Step || !Step->isDeclaration()) return;
+
+  MapVector<uint64_t, SmallVector<StepSite, 8>> Groups;
+  for (Use &U : Step->uses()) {
+    auto *Call = dyn_cast<CallInst>(U.getUser());
+    if (!Call || !Call->isCallee(&U) ||
+        Call->getFunctionType() != Step->getFunctionType() ||
+        Call->getCallingConv() != CallingConv::C || Call->hasOperandBundles() ||
+        Call->isMustTailCall() || Call->isConvergent())
+      continue;
+    auto *Store = dyn_cast_or_null<StoreInst>(Call->getPrevNode());
+    auto *Load = dyn_cast_or_null<LoadInst>(Call->getNextNode());
+    if (!Store || !Load || !Store->isSimple() || !Load->isSimple() ||
+        !Load->getType()->isIntegerTy(64) ||
+        !Store->getValueOperand()->getType()->isIntegerTy(64) ||
+        Load->getPointerOperand() != Store->getPointerOperand() ||
+        Store->getAlign() < Align(8) || Load->getAlign() < Align(8))
+      continue;
+    auto *Address = dyn_cast<GetElementPtrInst>(Store->getPointerOperand());
+    if (!Address || Address->getPointerOperand() != Call->getArgOperand(0) ||
+        Address->getNumIndices() != 1 || !Address->getSourceElementType()->isIntegerTy(8))
+      continue;
+    auto &F = *Call->getFunction();
+    auto *B = Call->getParent();
+    if (!FAM.getResult<LoopAnalysis>(F).empty()) continue;
+    const auto &Freq = FAM.getResult<BlockFrequencyAnalysis>(F);
+    if (Freq.getBlockFreq(B).getFrequency() > Freq.getEntryFreq().getFrequency() / 100)
+      continue;
+    if (auto *Offset = dyn_cast<ConstantInt>(Address->getOperand(1));
+        Offset && Offset->getBitWidth() == 64)
+      Groups[Offset->getZExtValue()].push_back({Store, Call, Load});
+  }
+
+  for (auto &[Offset, Sites] : Groups) {
+    if (Sites.size() < 4) continue;
+    auto &C = M.getContext();
+    auto *Word = Type::getInt64Ty(C);
+    auto *Status = Step->getReturnType();
+    auto *Result = StructType::get(Word, Status);
+    auto *Type = FunctionType::get(Result, {Step->getArg(0)->getType(), Word, Word}, false);
+    auto *Shared = Function::Create(Type, GlobalValue::InternalLinkage, "hirsel.step.sync", M);
+    Shared->addFnAttr(Attribute::Cold);
+    IRBuilder<> Builder(BasicBlock::Create(C, "", Shared));
+    auto *Address = Builder.CreateConstGEP1_64(Type::getInt8Ty(C), Shared->getArg(0), Offset);
+    Builder.CreateAlignedStore(Shared->getArg(2), Address, Align(8));
+    auto *Outcome = Builder.CreateCall(Step, {Shared->getArg(0), Shared->getArg(1)});
+    auto *Remaining = Builder.CreateAlignedLoad(Word, Address, Align(8));
+    auto *Pair = Builder.CreateInsertValue(PoisonValue::get(Result), Remaining, 0);
+    Builder.CreateRet(Builder.CreateInsertValue(Pair, Outcome, 1));
+
+    for (auto &[Store, Call, Load] : Sites) {
+      Builder.SetInsertPoint(Call);
+      Builder.SetCurrentDebugLocation(Call->getDebugLoc());
+      auto *New = Builder.CreateCall(Shared, {
+          Call->getArgOperand(0), Call->getArgOperand(1), Store->getValueOperand()});
+      Call->replaceAllUsesWith(Builder.CreateExtractValue(New, 1));
+      Load->replaceAllUsesWith(Builder.CreateExtractValue(New, 0));
+      Store->eraseFromParent();
+      Call->eraseFromParent();
+      Load->eraseFromParent();
+    }
+  }
+}
+
+extern "C" void hirsel_llvm_share_cold_step_sync(void *Raw, void *Machine) {
+  auto &M = *static_cast<Module *>(Raw);
+  if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return;
+  runLoopPass(static_cast<TargetMachine *>(Machine),
+              [&](PassBuilder &, FunctionAnalysisManager &FAM) {
+                shareColdStepSites(M, FAM);
+              });
 }

@@ -9,6 +9,8 @@ The limit applies to the total decoded bytes of a chunked body.
 Set `upgrade_bytes` to declare how many bytes an upgraded protocol on
 the route may reserve. Set `stream_bytes` to bound a stream group's
 reservation on the route. `raw(handler)` creates an ordinary response route.
+Set `steps` to bound the handler's source steps. Exhaustion closes that
+connection and releases the request region and responder.
 
 Patterns match decoded path segments. A literal can contain percent escapes.
 `{name}` captures a single nonempty segment. Final `{name...}` captures

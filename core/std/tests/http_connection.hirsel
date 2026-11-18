@@ -351,7 +351,7 @@ fn http_router_dispatch(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     result.unwrap(router.add(mut routes, "GET", "/item/{id}", router.raw(capture_reply)))
     result.unwrap(router.add(mut routes, "GET", "/item/static", router.raw(static_reply)))
     result.unwrap(router.add(mut routes, "HEAD", "/item/head", router.raw(explicit_head)))
-    result.unwrap(router.add(mut routes, "POST", "/item/static", router.Route(handler: static_reply, body_max: Some(1), upgrade_bytes: None, stream_bytes: None)))
+    result.unwrap(router.add(mut routes, "POST", "/item/static", router.Route(handler: static_reply, body_max: Some(1), upgrade_bytes: None, stream_bytes: None, steps: None)))
     result.unwrap(router.add(mut routes, "GET", "/other/a%2Fb", router.raw(static_reply)))
     result.unwrap(router.add(mut routes, "GET", "/other/{id}", router.raw(capture_reply)))
     result.unwrap(router.add(mut routes, "GET", "/files/{rest...}", router.raw(tail_reply)))
@@ -421,7 +421,7 @@ fn http_upgrade_handoff(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     cfg.http_max = 1
     cfg.state_max = 64
     let mut routes: router.Builder[EchoState] = router.builder()
-    result.unwrap(router.add(mut routes, "GET", "/echo", router.Route(handler: upgrade_route, body_max: None, upgrade_bytes: Some(4096), stream_bytes: None)))
+    result.unwrap(router.add(mut routes, "GET", "/echo", router.Route(handler: upgrade_route, body_max: None, upgrade_bytes: Some(4096), stream_bytes: None, steps: None)))
     result.unwrap(router.add(mut routes, "GET", "/plain", router.raw(static_reply)))
     let (server, addr) = listen_with_routes(n, c, tasks, take cfg, result.unwrap(router.build(take routes)))
     if !route_wire(n, c, addr, string.as_bytes("GET /echo HTTP/1.1\r\nHost: a\r\nConnection: Upgrade\r\nUpgrade: echo\r\nContent-Length: 1\r\n\r\nx"), 400, "0", "", string.as_bytes("")) {
@@ -491,7 +491,7 @@ fn http_raw_stream(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     cfg.heartbeat_ms = 10
     cfg.lease_ms = 40
     let mut routes: router.Builder[EchoState] = router.builder()
-    result.unwrap(router.add(mut routes, "GET", "/items", router.Route(handler: stream_route, body_max: None, upgrade_bytes: None, stream_bytes: Some(32768))))
+    result.unwrap(router.add(mut routes, "GET", "/items", router.Route(handler: stream_route, body_max: None, upgrade_bytes: None, stream_bytes: Some(32768), steps: None)))
     let (server, addr) = listen_with_routes(n, c, tasks, take cfg, result.unwrap(router.build(take routes)))
     if !route_wire(n, c, addr, string.as_bytes("GET /items HTTP/1.1\r\nHost: a\r\n\r\n"), 200, "", "", string.as_bytes("3\r\none\r\n3\r\ntwo\r\n0\r\n\r\n")) {
         return false
@@ -536,7 +536,7 @@ fn http_stream_lease(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     cfg.heartbeat_ms = 5
     cfg.lease_ms = 12
     let mut routes: router.Builder[EchoState] = router.builder()
-    result.unwrap(router.add(mut routes, "GET", "/live", router.Route(handler: heartbeat_route, body_max: None, upgrade_bytes: None, stream_bytes: Some(32768))))
+    result.unwrap(router.add(mut routes, "GET", "/live", router.Route(handler: heartbeat_route, body_max: None, upgrade_bytes: None, stream_bytes: Some(32768), steps: None)))
     let (server, addr) = listen_with_routes(n, c, tasks, take cfg, result.unwrap(router.build(take routes)))
     route_wire(n, c, addr, string.as_bytes("GET /live HTTP/1.1\r\nHost: a\r\n\r\n"), 200, "", "", string.as_bytes("3\r\n:\n\n\r\n3\r\n:\n\n\r\n0\r\n\r\n"))
 }
@@ -621,6 +621,38 @@ fn http_asset_validators(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let job = AssetServer(listener: take listener, c: c, tasks: tasks, entries: asset_manifest())
     let server = result.unwrap(task.spawn(tasks, bytes 262144, take job, serve_asset_law))
     asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nRange: bytes=0-1\r\n\r\n", 200, identity_tag(), "no-cache", "", "5", string.as_bytes("hello")) && asset_wire(n, c, addr, "GET /index-2cf24dba.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: \"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\"\r\n\r\n", 200, gzip_tag(), "public, max-age=31536000, immutable", "gzip", "25", gzip_hello()) && asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: W/\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\"\r\n\r\n", 304, gzip_tag(), "no-cache", "gzip", "", string.as_bytes("")) && asset_wire(n, c, addr, "HEAD /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip;q=0\r\n\r\n", 200, identity_tag(), "no-cache", "", "5", string.as_bytes(""))
+}
+
+fn step_work(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
+    let mut sum: u64 = 0
+    for i in 0u64 .. 128 {
+        sum += i
+    }
+    Ok(Reply(http.response(if sum == 8128 {
+        204
+    } else {
+        500
+    }, list.new(), false)?))
+}
+
+// HTTP-5/MEM-30. One route exhausts its step bound during computation. The
+// server releases that exchange and runs the same handler under another bound.
+// expect: run http_handler_steps(network) = true
+fn http_handler_steps(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut routes: router.Builder[EchoState] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/small", router.Route(handler: step_work, body_max: None, upgrade_bytes: None, stream_bytes: None, steps: Some(64))))
+    result.unwrap(router.add(mut routes, "GET", "/large", router.Route(handler: step_work, body_max: None, upgrade_bytes: None, stream_bytes: None, steps: Some(4096))))
+    let (server, addr) = listen_with_routes(n, c, tasks, test_config(), result.unwrap(router.build(take routes)))
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut input = take r
+    let mut output = take w
+    let deadline = At(c, after_ms(host.mono_ns(c), 90))
+    let request = string.as_bytes("GET /small HTTP/1.1\r\nHost: a\r\n\r\n")
+    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    if !client_send(mut output, request, deadline) || !client_end(mut input, mut received, deadline) || list.len(received) != 0 {
+        return false
+    }
+    route_wire(n, c, addr, string.as_bytes("GET /large HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 204, "", "", string.as_bytes(""))
 }
 
 // L5. When ignoring a one-byte body the next head is preserved. An unread

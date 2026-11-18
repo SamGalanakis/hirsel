@@ -1265,105 +1265,126 @@ fn encode_stream(mut out: Bytes, take spec: stream.Spec, c: Clock, version: u8, 
     Ok(stream.prepare(take spec, out, chunked, heartbeat, suppress, at, pre_head))
 }
 
-fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, frame: Framing, mut b: Body, mut out: Bytes, cfg: Config, routes: router.Router[S], state: S, mut cache: DateCache) -> Step waits {
-    let outcome = bound bytes cfg.handler_bytes {
-        let normalized = match segments_of(part(input, meta.path)) {
-            Ok(take x) => take x,
-            Error(BadTarget) => {
-                return error_step(mut b.writer, 400, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))
-            },
-            Error(TargetCapacity) => {
-                return error_step(mut b.writer, 503, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))
-            },
-        }
-        let verb = part(input, h.method)
-        let options_star = part(input, meta.path) == string.as_bytes("*")
-        let selected: Option[View[router.Entry[S]]] = if options_star {
-            None
-        } else {
-            router.select(routes, verb, normalized)
-        }
-        let result = if let Some(entry) = selected {
-            let body_max = match entry.route.body_max {
-                Some(n) => order.min(n, cfg.body_max),
-                None => cfg.body_max,
+fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, frame: Framing, take request_body: Body in input, mut out: Bytes, cfg: Config, routes: router.Router[S], state: S, mut cache: DateCache) -> (Step, Option[Body]) in input waits {
+    let mut b = take request_body
+    let step = 'exchange: {
+        let outcome = bound bytes cfg.handler_bytes {
+            let normalized = match segments_of(part(input, meta.path)) {
+                Ok(take x) => take x,
+                Error(BadTarget) => {
+                    break 'exchange error_step(mut b.writer, 400, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))
+                },
+                Error(TargetCapacity) => {
+                    break 'exchange error_step(mut b.writer, 503, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))
+                },
             }
-            if let ContentLength(n) = frame {
-                if n > body_max {
-                    return error_step(mut b.writer, 413, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))
+            let verb = part(input, h.method)
+            let options_star = part(input, meta.path) == string.as_bytes("*")
+            let selected: Option[View[router.Entry[S]]] = if options_star {
+                None
+            } else {
+                router.select(routes, verb, normalized)
+            }
+            let result = if let Some(entry) = selected {
+                let body_max = match entry.route.body_max {
+                    Some(n) => order.min(n, cfg.body_max),
+                    None => cfg.body_max,
                 }
-            }
-            b.decoder.body_max = body_max
-            let inline = match frame {
-                ContentLength(n) => if n <= cfg.body_inline && n <= list.len(input) - h.end && !meta.expect_continue {
-                    Some(list.slice(input, h.end, h.end + n))
-                } else {
-                    None
-                },
-                _ => None,
-            }
-            if let Some(v) = inline {
-                b.input_at += list.len(v)
-                b.decoder.state = Finished
-                b.decoder.remaining = 0
-            }
-            let req = Request(input: view input, head: view h, meta: meta, segments: take normalized, route: view entry.pattern, inline_body: inline, deadline: b.handler_deadline, state_max: cfg.state_max, out_cap: cfg.out_cap)
-            let handler = entry.route.handler
-            let handled = region scratch {
-                handler(req, scratch, mut b, state)
-            }
-            match take handled {
-                Ok(Upgrade(take spec)) => {
-                    let returned = host.mono_ns(b.clock)
-                    if b.output_failed {
-                        return CloseConnection
+                if let ContentLength(n) = frame {
+                    if n > body_max {
+                        break 'exchange error_step(mut b.writer, 413, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))
                     }
-                    if returned >= b.handler_deadline {
-                        return error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms))
+                }
+                b.decoder.body_max = body_max
+                let inline = match frame {
+                    ContentLength(n) => if n <= cfg.body_inline && n <= list.len(input) - h.end && !meta.expect_continue {
+                        Some(list.slice(input, h.end, h.end + n))
+                    } else {
+                        None
+                    },
+                    _ => None,
+                }
+                if let Some(v) = inline {
+                    b.input_at += list.len(v)
+                    b.decoder.state = Finished
+                    b.decoder.remaining = 0
+                }
+                let req = Request(input: view input, head: view h, meta: meta, segments: take normalized, route: view entry.pattern, inline_body: inline, deadline: b.handler_deadline, state_max: cfg.state_max, out_cap: cfg.out_cap)
+                let handler = entry.route.handler
+                let handled = if let Some(limit) = entry.route.steps {
+                    let limited = bound steps limit {
+                        let mut bounded = take b
+                        let reply = region scratch {
+                            handler(req, scratch, mut bounded, state)
+                        }
+                        (take bounded, take reply)
                     }
-                    match encode_upgrade(mut out, req, take spec, entry.route.upgrade_bytes, b.clock, mut cache) {
-                        Ok(take offer) => MoveSocket(ToUpgrade(take offer)),
-                        Error(Allocation(_)) => error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms)),
-                        Error(_) => error_step(mut b.writer, 500, b.clock, after_ms(returned, cfg.write_ms)),
-                    }
-                },
-                Ok(Stream(take spec)) => {
-                    let returned = host.mono_ns(b.clock)
-                    if b.output_failed {
-                        return CloseConnection
-                    }
-                    if let Some(e) = b.fault {
-                        return error_step(mut b.writer, e.status, b.clock, after_ms(returned, cfg.write_ms))
-                    }
-                    if returned >= b.handler_deadline {
-                        return error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms))
-                    }
-                    let Some(max_bytes) = entry.route.stream_bytes else {
-                        return error_step(mut b.writer, 500, b.clock, after_ms(returned, cfg.write_ms))
-                    }
-                    match encode_stream(mut out, take spec, b.clock, h.version, verb == string.as_bytes("HEAD"), returned, b.handler_deadline, mut cache) {
-                        Ok(take offer) => {
-                            if stream.reservation(offer, cfg.out_cap) > max_bytes {
-                                return error_step(mut b.writer, 500, b.clock, after_ms(returned, cfg.write_ms))
-                            }
-                            MoveSocket(ToStream(take offer))
+                    match take limited {
+                        Ok((take resumed, take reply)) => {
+                            b = take resumed
+                            take reply
                         },
-                        Error(Allocation(_)) => error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms)),
-                        Error(_) => error_step(mut b.writer, 500, b.clock, after_ms(returned, cfg.write_ms)),
+                        Error(_) => return (CloseConnection, None),
                     }
-                },
-                Ok(Reply(take reply)) => return handle_reply(mut b, mut out, Ok(take reply), h.version, verb == string.as_bytes("HEAD"), meta.close, cfg, mut cache),
-                Error(e) => return handle_reply(mut b, mut out, Error(e), h.version, verb == string.as_bytes("HEAD"), meta.close, cfg, mut cache),
+                } else {
+                    region scratch {
+                        handler(req, scratch, mut b, state)
+                    }
+                }
+                match take handled {
+                    Ok(Upgrade(take spec)) => {
+                        let returned = host.mono_ns(b.clock)
+                        if b.output_failed {
+                            break 'exchange CloseConnection
+                        }
+                        if returned >= b.handler_deadline {
+                            break 'exchange error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms))
+                        }
+                        match encode_upgrade(mut out, req, take spec, entry.route.upgrade_bytes, b.clock, mut cache) {
+                            Ok(take offer) => MoveSocket(ToUpgrade(take offer)),
+                            Error(Allocation(_)) => error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms)),
+                            Error(_) => error_step(mut b.writer, 500, b.clock, after_ms(returned, cfg.write_ms)),
+                        }
+                    },
+                    Ok(Stream(take spec)) => {
+                        let returned = host.mono_ns(b.clock)
+                        if b.output_failed {
+                            break 'exchange CloseConnection
+                        }
+                        if let Some(e) = b.fault {
+                            break 'exchange error_step(mut b.writer, e.status, b.clock, after_ms(returned, cfg.write_ms))
+                        }
+                        if returned >= b.handler_deadline {
+                            break 'exchange error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms))
+                        }
+                        let Some(max_bytes) = entry.route.stream_bytes else {
+                            break 'exchange error_step(mut b.writer, 500, b.clock, after_ms(returned, cfg.write_ms))
+                        }
+                        match encode_stream(mut out, take spec, b.clock, h.version, verb == string.as_bytes("HEAD"), returned, b.handler_deadline, mut cache) {
+                            Ok(take offer) => {
+                                if stream.reservation(offer, cfg.out_cap) > max_bytes {
+                                    break 'exchange error_step(mut b.writer, 500, b.clock, after_ms(returned, cfg.write_ms))
+                                }
+                                MoveSocket(ToStream(take offer))
+                            },
+                            Error(Allocation(_)) => error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms)),
+                            Error(_) => error_step(mut b.writer, 500, b.clock, after_ms(returned, cfg.write_ms)),
+                        }
+                    },
+                    Ok(Reply(take reply)) => break 'exchange handle_reply(mut b, mut out, Ok(take reply), h.version, verb == string.as_bytes("HEAD"), meta.close, cfg, mut cache),
+                    Error(e) => break 'exchange handle_reply(mut b, mut out, Error(e), h.version, verb == string.as_bytes("HEAD"), meta.close, cfg, mut cache),
+                }
+            } else {
+                break 'exchange handle_reply(mut b, mut out, route_response(routes, normalized, options_star), h.version, verb == string.as_bytes("HEAD"), meta.close, cfg, mut cache)
             }
-        } else {
-            return handle_reply(mut b, mut out, route_response(routes, normalized, options_star), h.version, verb == string.as_bytes("HEAD"), meta.close, cfg, mut cache)
+            result
         }
-        result
+        match take outcome {
+            Ok(take step) => take step,
+            Error(_) => error_step(mut b.writer, 503, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms)),
+        }
     }
-    match take outcome {
-        Ok(take step) => take step,
-        Error(_) => error_step(mut b.writer, 503, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms)),
-    }
+    (take step, Some(take b))
 }
 
 fn handle_reply(mut b: Body, mut out: Bytes, take result: Result[Response, HandlerError], version: u8, suppress: bool, request_close: bool, cfg: Config, mut cache: DateCache) -> Step waits {
@@ -1641,8 +1662,12 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
         }
         list.clear(mut scratch)
         let (reuse, input_at, scratch_at, offer) = {
-            let mut body = Body(input: view input, input_at: head.end, reader: take reader, writer: take writer, scratch: take scratch, scratch_at: 0, decoder: decoder(frame, head, cfg.body_max), head_max: cfg.head_max, fields_max: cfg.fields_max, clock: c, body_deadline: after_ms(completed, cfg.body_ms), handler_deadline: after_ms(completed, cfg.handler_ms), write_ms: cfg.write_ms, pipeline_max: cfg.pipeline_max, expect_continue: policy.expect_continue, fault: None, output_failed: false)
-            let step = handle(input, head, policy, frame, mut body, mut out, cfg, routes, state, mut date)
+            let initial = Body(input: view input, input_at: head.end, reader: take reader, writer: take writer, scratch: take scratch, scratch_at: 0, decoder: decoder(frame, head, cfg.body_max), head_max: cfg.head_max, fields_max: cfg.fields_max, clock: c, body_deadline: after_ms(completed, cfg.body_ms), handler_deadline: after_ms(completed, cfg.handler_ms), write_ms: cfg.write_ms, pipeline_max: cfg.pipeline_max, expect_continue: policy.expect_continue, fault: None, output_failed: false)
+            let (step, remaining) = handle(input, head, policy, frame, take initial, mut out, cfg, routes, state, mut date)
+            let mut body = match take remaining {
+                Some(take resumed) => take resumed,
+                None => return completed_replies,
+            }
             let (reuse, offer): (bool, Option[Handover]) = match take step {
                 Keep(at, end) => {
                     completed_replies += 1

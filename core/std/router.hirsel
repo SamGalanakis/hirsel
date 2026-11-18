@@ -2,11 +2,12 @@ pub type Route[S: shareable + send]: shareable + send {
     handler: fn(http.Request, Region, mut http.Responder, S) -> Result[http.Outcome, http.HandlerError] waits,
     body_max: Option[u64],
     upgrade_bytes: Option[u64],
-    stream_bytes: Option[u64]
+    stream_bytes: Option[u64],
+    steps: Option[u64]
 }
 
 pub fn raw[S: shareable + send](handler: fn(http.Request, Region, mut http.Responder, S) -> Result[http.Outcome, http.HandlerError] waits) -> Route[S] {
-    Route(handler: handler, body_max: None, upgrade_bytes: None, stream_bytes: None)
+    Route(handler: handler, body_max: None, upgrade_bytes: None, stream_bytes: None, steps: None)
 }
 
 type Segment: shareable + send = Literal(String) | Capture(String)

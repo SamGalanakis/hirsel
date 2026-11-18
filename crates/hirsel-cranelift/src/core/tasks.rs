@@ -257,7 +257,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::Listen
                     | HostOp::Accept
                     | HostOp::Recv
-                    | HostOp::Send
+                    | HostOp::SendPair
                     | HostOp::NetNarrow
                     | HostOp::NetSplit => (null, no_mode),
                 };
@@ -268,7 +268,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::Listen
                     | HostOp::Accept
                     | HostOp::Recv
-                    | HostOp::Send
+                    | HostOp::SendPair
                     | HostOp::NetNarrow
                     | HostOp::NetSplit => {
                         let signature = op_signature(op);

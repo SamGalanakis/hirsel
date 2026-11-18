@@ -1732,25 +1732,34 @@ impl Machine<'_> {
             }
             HostOp::Accept => Operation::Accept(a[0]),
             HostOp::Recv => Operation::Recv(a[0]),
-            HostOp::Send => Operation::Send(a[0]),
+            HostOp::SendPair => Operation::Send(a[0]),
             _ => unreachable!(),
         };
-        let (input, data, len, cap) = if matches!(op, HostOp::Recv | HostOp::Send) {
+        let (input, data, len, cap) = if matches!(op, HostOp::Recv | HostOp::SendPair) {
             self.carrier(a[1])
         } else {
             (vec![], 0, 0, 0)
         };
+        let tail = if op == HostOp::SendPair {
+            self.carrier(a[2]).0
+        } else {
+            vec![]
+        };
         let until = match op {
             HostOp::Connect => 5,
             HostOp::Accept => 1,
+            HostOp::SendPair => 3,
             _ => 2,
         };
         let deadline = (op != HostOp::Listen && a[until] != 0).then(|| a[until + 2]);
         let token = t.k as u64 + 1;
         let reply = loop {
-            if let Some(r) =
-                model.attempt(operation, &input, cap.saturating_sub(len) as usize, token)
-            {
+            if let Some(r) = model.attempt_parts(
+                operation,
+                [&input, &tail],
+                cap.saturating_sub(len) as usize,
+                token,
+            ) {
                 break r;
             }
             if deadline.is_some_and(|at| at <= model.now()) {
@@ -1810,7 +1819,7 @@ impl Machine<'_> {
             self.check_cancel(t)?;
         }
         Ok(match op {
-            HostOp::Connect | HostOp::Listen | HostOp::Accept | HostOp::Recv | HostOp::Send => {
+            HostOp::Connect | HostOp::Listen | HostOp::Accept | HostOp::Recv | HostOp::SendPair => {
                 return self.network_host(t, op, a);
             }
             HostOp::NetSplit => {

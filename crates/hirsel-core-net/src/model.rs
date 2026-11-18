@@ -281,6 +281,16 @@ impl Model {
         [d.accepted.len(), d.transit.len(), d.readable.len()]
     }
     pub fn attempt(&self, op: Operation, input: &[u8], spare: usize, token: u64) -> Option<Reply> {
+        self.attempt_parts(op, [input, &[]], spare, token)
+    }
+
+    pub fn attempt_parts(
+        &self,
+        op: Operation,
+        input: [&[u8]; 2],
+        spare: usize,
+        token: u64,
+    ) -> Option<Reply> {
         let mut s = self.state();
         s.waiters.remove(&token);
         s.events();
@@ -387,7 +397,7 @@ impl State {
         }
         None
     }
-    fn attempt(&mut self, op: Operation, input: &[u8], spare: usize) -> Option<Reply> {
+    fn attempt(&mut self, op: Operation, input: [&[u8]; 2], spare: usize) -> Option<Reply> {
         match op {
             Operation::Listen(mut address, backlog) => {
                 if address.port == 0 {
@@ -490,7 +500,9 @@ impl State {
                 })
             }
             Operation::Send(key) => {
-                if input.is_empty() {
+                let [prefix, tail] = input;
+                let len = prefix.len() + tail.len();
+                if len == 0 {
                     return Some(Reply::value(0));
                 }
                 let (id, side) = self.endpoint(key);
@@ -502,11 +514,13 @@ impl State {
                 if available == 0 {
                     return None;
                 }
-                let bound = available.min(input.len()).min(self.config.max_prefix);
+                let bound = available.min(len).min(self.config.max_prefix);
                 let n = self.choose(Choice::Send, bound) + 1;
-                self.connections.get_mut(&id).unwrap().directions[side]
-                    .accepted
-                    .extend(&input[..n]);
+                let first = n.min(prefix.len());
+                let accepted =
+                    &mut self.connections.get_mut(&id).unwrap().directions[side].accepted;
+                accepted.extend(&prefix[..first]);
+                accepted.extend(&tail[..n - first]);
                 self.enable_delivery();
                 Some(Reply::value(n as u64))
             }

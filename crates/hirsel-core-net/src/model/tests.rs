@@ -464,7 +464,12 @@ fn omitting_the_trace_preserves_prefix_and_seed_choices() {
     let input = b"one complete message over many bounded short IO attempts";
     while received.len() < input.len() {
         if sent < input.len() {
-            let left = recorded.attempt(Operation::Send(a.1), &input[sent..], 0, 10);
+            let left = recorded.attempt_parts(
+                Operation::Send(a.1),
+                [&input[sent..sent + 1], &input[sent + 1..]],
+                0,
+                10,
+            );
             let right = unrecorded.attempt(Operation::Send(b.1), &input[sent..], 0, 10);
             assert_eq!(left, right);
             if let Some(reply) = left {

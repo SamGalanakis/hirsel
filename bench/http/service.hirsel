@@ -61,7 +61,7 @@ fn place_writer(take job: PlaceJob) waits {
                 let deadline = int.saturating_add(host.mono_ns(clock), 5000000000u64)
                 let mut sent = 0u64
                 while sent < 8 && host.mono_ns(clock) < deadline {
-                    match host.send(mut output, list.slice(buffer, sent, 8), At(clock, deadline)) {
+                    match host.send_pair(mut output, list.slice(buffer, sent, 8), string.as_bytes(""), At(clock, deadline)) {
                         Ok(0) => break,
                         Ok(n) => { sent += n },
                         Error(_) => break,

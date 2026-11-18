@@ -91,7 +91,7 @@ fn client_send(mut w: WriteHalf, data: Bytes, until: Until) -> bool waits {
     let mut delivered: u64 = 0
     let end = list.len(data)
     while delivered < end {
-        match host.send(mut w, list.slice(data, delivered, end), until) {
+        match host.send_pair(mut w, list.slice(data, delivered, end), string.as_bytes(""), until) {
             Ok(0) => return false,
             Ok(n) => {
                 delivered += n

@@ -166,12 +166,39 @@ unsafe fn socket(n: &mut NetworkRequest, listener: bool) -> Result<u64, i32> {
 #[cfg(test)]
 thread_local! { pub(crate) static ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
+/// An attempt with two nonempty parts is one sendmsg. An empty part still
+/// permits the single-buffer syscall.
+unsafe fn send_pair(fd: i32, prefix: &Buffer, tail: &Buffer) -> isize {
+    // SAFETY: both immutable prefixes are pinned by the request. sendmsg
+    // reads the iovecs and their bytes synchronously and retains no pointer.
+    unsafe {
+        if prefix.len == 0 || tail.len == 0 {
+            let bytes = if prefix.len == 0 { tail } else { prefix };
+            return libc::send(fd, bytes.data.cast(), bytes.len, libc::MSG_NOSIGNAL);
+        }
+        let mut parts = [
+            libc::iovec {
+                iov_base: prefix.data.cast(),
+                iov_len: prefix.len,
+            },
+            libc::iovec {
+                iov_base: tail.data.cast(),
+                iov_len: tail.len,
+            },
+        ];
+        let mut message: libc::msghdr = zeroed();
+        message.msg_iov = parts.as_mut_ptr();
+        message.msg_iovlen = parts.len();
+        libc::sendmsg(fd, &message, libc::MSG_NOSIGNAL)
+    }
+}
+
 /// A not-ready attempt is None. All other attempts commit one result.
 unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) -> Option<Outcome> {
     #[cfg(test)]
     ATTEMPTS.set(ATTEMPTS.get() + 1);
     unsafe {
-        let write = matches!(request.operation, CONNECT | SEND);
+        let write = matches!(request.operation, CONNECT | SEND_PAIR);
         let sockets = &mut *n.sockets;
         let key = n.connecting.unwrap_or(request.handle);
         if !first && request.operation != LISTEN {
@@ -307,10 +334,13 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                     Err(e) => Err(e),
                 }
             }
-            RECV | SEND => {
+            RECV | SEND_PAIR => {
                 let b = &mut request.buffer;
                 let receiving = request.operation == RECV;
-                if (receiving && b.len >= b.capacity) || (!receiving && b.len == 0) {
+                let tail = (!receiving).then(|| &*n.send_tail);
+                if (receiving && b.len >= b.capacity)
+                    || tail.is_some_and(|tail| b.len == 0 && tail.len == 0)
+                {
                     return Some(Outcome::default());
                 }
                 if !receiving && sockets.reset(key) {
@@ -320,15 +350,15 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                     return Some(Outcome::default());
                 }
                 let rc = retry(|| {
-                    if receiving {
+                    if let Some(tail) = tail {
+                        send_pair(sockets.fd(key), b, tail)
+                    } else {
                         libc::recv(
                             sockets.fd(key),
                             b.data.add(b.len).cast(),
                             b.capacity - b.len,
                             0,
                         )
-                    } else {
-                        libc::send(sockets.fd(key), b.data.cast(), b.len, libc::MSG_NOSIGNAL)
                     }
                 });
                 match rc {
@@ -435,7 +465,7 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
             deadline
         };
         let key = n.connecting.unwrap_or(request.handle);
-        let write = matches!(request.operation, CONNECT | SEND);
+        let write = matches!(request.operation, CONNECT | SEND_PAIR);
         if let Err(e) = (*n.sockets).arm(key, write, token) {
             return finish(request, n, error(e.raw_os_error().unwrap_or(libc::EIO)));
         }
@@ -460,7 +490,7 @@ pub(crate) unsafe fn abort(request: *mut Request, token: u64, reason: u8) -> Out
         let r = &*request;
         let n = &mut *r.path.cast_mut().cast::<NetworkRequest>();
         let key = n.connecting.unwrap_or(r.handle);
-        (*n.sockets).disarm(key, matches!(r.operation, CONNECT | SEND));
+        (*n.sockets).disarm(key, matches!(r.operation, CONNECT | SEND_PAIR));
         finish(r, n, signal(if reason == ABORT_CANCEL { 7 } else { 6 })).outcome
     }
 }

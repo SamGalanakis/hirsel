@@ -921,9 +921,9 @@ pub fn write_wire_until(mut w: WriteHalf, prefix: Bytes, body: Bytes, c: Clock, 
             return Error(TimedOut)
         }
         let sent = if committed < boundary {
-            host.send(mut w, list.slice(prefix, committed, boundary), At(c, until))
+            host.send_pair(mut w, list.slice(prefix, committed, boundary), body, At(c, until))
         } else {
-            host.send(mut w, list.slice(body, committed - boundary, list.len(body)), At(c, until))
+            host.send_pair(mut w, list.slice(body, committed - boundary, list.len(body)), string.as_bytes(""), At(c, until))
         }
         match sent {
             Ok(0) => return Error(Reset),
@@ -1209,10 +1209,6 @@ fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress
         return FinalReply(write_succeeded(write_wire_until(mut b.writer, out, string.as_bytes(""), b.clock, write_end, b.stop)))
     }
     let payload = response_body(r)
-    if list.len(payload) <= list.capacity(out) - list.len(out) {
-        let _ = list.append(mut out, payload)
-        return FinalReply(write_succeeded(write_wire_until(mut b.writer, out, string.as_bytes(""), b.clock, write_end, b.stop)))
-    }
     FinalReply(write_succeeded(write_wire_until(mut b.writer, out, payload, b.clock, write_end, b.stop)))
 }
 

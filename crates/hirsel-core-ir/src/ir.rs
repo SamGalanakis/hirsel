@@ -840,9 +840,9 @@ pub enum HostOp {
     Listen,
     Accept,
     Recv,
-    Send,
-    NetNarrow,
-    NetSplit,
+    SendPair = 26,
+    NetNarrow = 24,
+    NetSplit = 25,
 }
 
 impl HostOp {
@@ -870,7 +870,7 @@ impl HostOp {
         HostOp::Listen,
         HostOp::Accept,
         HostOp::Recv,
-        HostOp::Send,
+        HostOp::SendPair,
         HostOp::NetNarrow,
         HostOp::NetSplit,
     ];
@@ -904,7 +904,7 @@ impl HostOp {
             HostOp::Listen => "host_listen",
             HostOp::Accept => "host_accept",
             HostOp::Recv => "host_recv",
-            HostOp::Send => "host_send",
+            HostOp::SendPair => "host_send_pair",
             HostOp::NetNarrow => "net_narrow",
             HostOp::NetSplit => "net_split",
         }
@@ -916,7 +916,7 @@ impl HostOp {
             Self::Listen => "hirsel_core_host_listen",
             Self::Accept => "hirsel_core_host_accept",
             Self::Recv => "hirsel_core_host_recv",
-            Self::Send => "hirsel_core_host_send",
+            Self::SendPair => "hirsel_core_host_send_pair",
             Self::NetNarrow => "hirsel_core_net_narrow",
             Self::NetSplit => "hirsel_core_net_split",
             _ => unreachable!(),
@@ -1108,8 +1108,9 @@ impl RtOp {
                             Ty::Scalar(Scalar::U16),
                         ],
                     ),
-                    HostOp::Recv | HostOp::Send => {
-                        (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome)
+                    HostOp::Recv => (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome),
+                    HostOp::SendPair => {
+                        (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
                     }
                     HostOp::NetNarrow => (
                         vec![

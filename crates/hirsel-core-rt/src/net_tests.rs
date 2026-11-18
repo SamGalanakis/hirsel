@@ -221,10 +221,13 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 );
                 let c = hirsel_core_net_split(context, client, 4);
                 let s = hirsel_core_net_split(context, server, 4);
-                let mut bytes = *b"abcdef";
-                let mut out = carrier(&mut bytes, 6);
+                let mut first = *b"abc";
+                let mut second = *b"def";
+                let prefix = carrier(&mut first, 3);
+                let tail = carrier(&mut second, 3);
                 assert_eq!(
-                    hirsel_core_host_send(context, c.written, &mut out, 0, 0, 0, 5).value,
+                    hirsel_core_host_send_pair(context, c.written, &prefix, &tail, 0, 0, 0, 5)
+                        .value,
                     6
                 );
                 let mut bytes = [0; 3];
@@ -261,7 +264,17 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 );
                 input.len = 0;
                 assert_eq!(
-                    hirsel_core_host_send(context, s.written, &mut input, 0, 0, 0, 7).value,
+                    hirsel_core_host_send_pair(
+                        context,
+                        s.written,
+                        &input,
+                        &empty_buffer(),
+                        0,
+                        0,
+                        0,
+                        7
+                    )
+                    .value,
                     0
                 );
                 crate::os_net::ATTEMPTS.set(0);
@@ -307,8 +320,17 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 let split = hirsel_core_net_split(context, key, 1);
                 let mut payload = vec![0x5a; 256 * 1024];
                 let len = payload.len();
-                let mut b = carrier(&mut payload, len);
-                let first = hirsel_core_host_send(context, split.written, &mut b, 1, clock, 0, 2);
+                let b = carrier(&mut payload, len);
+                let first = hirsel_core_host_send_pair(
+                    context,
+                    split.written,
+                    &b,
+                    &empty_buffer(),
+                    1,
+                    clock,
+                    0,
+                    2,
+                );
                 assert_eq!(first.error, IoError::OK);
                 assert!(
                     first.value > 0 && first.value < len as u64,
@@ -350,10 +372,19 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 drop(peer);
                 // Observe the reset through the writer first, while receive data is queued.
                 let mut payload = [1u8; 1];
-                let mut b = carrier(&mut payload, 1);
+                let b = carrier(&mut payload, 1);
                 let mut reset = false;
                 for _ in 0..1000 {
-                    let out = hirsel_core_host_send(context, split.written, &mut b, 1, clock, 0, 2);
+                    let out = hirsel_core_host_send_pair(
+                        context,
+                        split.written,
+                        &b,
+                        &empty_buffer(),
+                        1,
+                        clock,
+                        0,
+                        2,
+                    );
                     if out.error.tag == 5 {
                         reset = true;
                         break;
@@ -378,9 +409,18 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                     5
                 );
                 assert_eq!(
-                    hirsel_core_host_send(context, split.written, &mut b, 0, 0, 0, 4)
-                        .error
-                        .tag,
+                    hirsel_core_host_send_pair(
+                        context,
+                        split.written,
+                        &b,
+                        &empty_buffer(),
+                        0,
+                        0,
+                        0,
+                        4
+                    )
+                    .error
+                    .tag,
                     5
                 );
                 hirsel_core_socket_drop(context, split.value);
@@ -461,6 +501,7 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                         .insert(OwnedFd::from_raw_fd(fd))
                         .unwrap();
                     let mut network = NetworkRequest {
+                        send_tail: ptr::null(),
                         address: Address::default(),
                         sockets: &mut (*(*context).host_files).sockets,
                         until: None,

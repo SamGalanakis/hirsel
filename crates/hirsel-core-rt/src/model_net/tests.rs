@@ -22,17 +22,22 @@ unsafe extern "C" fn wire(context: *mut Context, _: *mut u8, input: *mut u8) -> 
         assert_ne!(s.port, 0);
         let client = hirsel_core_net_split(context, c.value, 4);
         let server = hirsel_core_net_split(context, s.value, 5);
-        for byte in b"abc" {
-            let mut byte = *byte;
-            let mut output = Buffer {
-                data: &mut byte,
-                len: 1,
+        let message = b"abc";
+        for sent in 0..message.len() {
+            let first = usize::from(sent == 0);
+            let prefix = Buffer {
+                data: message[sent..].as_ptr().cast_mut(),
+                len: first,
                 capacity: 0,
             };
-            assert_eq!(
-                hirsel_core_host_send(context, client.written, &mut output, 0, 0, 0, 6).value,
-                1
-            );
+            let tail = Buffer {
+                data: message[sent + first..].as_ptr().cast_mut(),
+                len: message.len() - sent - first,
+                capacity: 0,
+            };
+            let result =
+                hirsel_core_host_send_pair(context, client.written, &prefix, &tail, 0, 0, 0, 6);
+            assert_eq!((result.error, result.value), (IoError::OK, 1));
         }
         let mut bytes = [0; 3];
         let mut buffer = Buffer {
@@ -82,13 +87,23 @@ unsafe extern "C" fn wire(context: *mut Context, _: *mut u8, input: *mut u8) -> 
             socket: c.value,
             blocked: true,
         });
-        let mut output = Buffer {
+        let output = Buffer {
             data: b"x".as_ptr().cast_mut(),
             len: 1,
             capacity: 0,
         };
         assert_eq!(
-            hirsel_core_host_send(context, client.written, &mut output, 0, 0, 0, 10).value,
+            hirsel_core_host_send_pair(
+                context,
+                client.written,
+                &output,
+                &empty_buffer(),
+                0,
+                0,
+                0,
+                10
+            )
+            .value,
             1
         );
         fixture.model.schedule(

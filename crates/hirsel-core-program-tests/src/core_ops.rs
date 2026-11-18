@@ -484,7 +484,7 @@ fn f(n: Net, c: Clock, tasks: Tasks) -> u64 waits {
     host.sleep_until(c, 10)
     task.cancel(mut h)
     let payload = result.unwrap(b"x")
-    let sent = result.unwrap(host.send(mut cw, payload, Never))
+    let sent = result.unwrap(host.send_pair(mut cw, payload, string.as_bytes(""), Never))
     let (signal, r0) = result.unwrap(task.join(take h))
     let mut r = r0
     let mut b: Bytes = result.unwrap(list.with_capacity(1))

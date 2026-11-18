@@ -30,7 +30,7 @@ impl ModelProvider {
 fn modeled(op: u8) -> bool {
     matches!(
         op,
-        CONNECT | LISTEN | ACCEPT | RECV | SEND | MONO_NS | WALL_MS | SLEEP_UNTIL
+        CONNECT | LISTEN | ACCEPT | RECV | SEND_PAIR | MONO_NS | WALL_MS | SLEEP_UNTIL
     )
 }
 /// # Safety
@@ -100,15 +100,22 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             LISTEN => Operation::Listen(address, n.backlog),
             ACCEPT => Operation::Accept(r.handle),
             RECV => Operation::Recv(r.handle),
-            SEND => Operation::Send(r.handle),
+            SEND_PAIR => Operation::Send(r.handle),
             _ => unreachable!(),
         };
-        let input = if r.operation == SEND && r.buffer.len != 0 {
-            std::slice::from_raw_parts(r.buffer.data, r.buffer.len)
+        let input = if r.operation == SEND_PAIR {
+            // SAFETY: the send adapter pins both initialized prefixes.
+            [&r.buffer, &*n.send_tail].map(|part| {
+                if part.len == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(part.data, part.len)
+                }
+            })
         } else {
-            &[]
+            [&[][..]; 2]
         };
-        if let Some(reply) = p.model.attempt(
+        if let Some(reply) = p.model.attempt_parts(
             operation,
             input,
             r.buffer.capacity.saturating_sub(r.buffer.len),

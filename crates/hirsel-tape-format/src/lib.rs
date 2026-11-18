@@ -973,5 +973,5 @@ pub mod op {
     pub const LISTEN: u8 = 20;
     pub const ACCEPT: u8 = 21;
     pub const RECV: u8 = 22;
-    pub const SEND: u8 = 23;
+    pub const SEND_PAIR: u8 = 26;
 }

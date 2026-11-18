@@ -182,7 +182,10 @@ HirselCoreHostOutcome hirsel_core_host_connect(HirselCoreContext *, uint64_t, ui
 HirselCoreAddressOutcome hirsel_core_host_listen(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint16_t, uint16_t, uint64_t);
 HirselCoreAddressOutcome hirsel_core_host_accept(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_host_recv(HirselCoreContext *, uint64_t, HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
-HirselCoreHostOutcome hirsel_core_host_send(HirselCoreContext *, uint64_t, HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
+/* SEND_PAIR (26): buffer borrows the first prefix. The first word at path
+   is a const HirselCoreBuffer * borrowing the second prefix. Both remain
+   pinned through deliver. Outcome.value counts their concatenated prefix. */
+HirselCoreHostOutcome hirsel_core_host_send_pair(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, uint8_t, uint16_t, uint16_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_split(HirselCoreContext *, uint64_t, uint64_t);
 void hirsel_core_socket_drop(HirselCoreContext *, uint64_t);

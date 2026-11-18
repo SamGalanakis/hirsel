@@ -291,7 +291,7 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::Listen
                     | HostOp::Accept
                     | HostOp::Recv
-                    | HostOp::Send
+                    | HostOp::SendPair
                     | HostOp::NetNarrow
                     | HostOp::NetSplit
             )
@@ -377,7 +377,7 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::Listen
                     | HostOp::Accept
                     | HostOp::Recv
-                    | HostOp::Send
+                    | HostOp::SendPair
                     | HostOp::NetNarrow
                     | HostOp::NetSplit
             )

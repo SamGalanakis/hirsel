@@ -9,8 +9,7 @@ fn wire(n: Net, c: Clock) -> u64 waits {
     let (sr0, sw) = net.split(take server)
     let mut cw = cw0
     let mut sr = sr0
-    let payload = result.unwrap(b"abc")
-    let sent = result.unwrap(host.send(mut cw, payload, Never))
+    let sent = result.unwrap(host.send_pair(mut cw, string.as_bytes("a"), string.as_bytes("bc"), Never))
     let mut input: Bytes = result.unwrap(list.with_capacity(3))
     let received = result.unwrap(host.recv(mut sr, mut input, At(c, 0)))
     let address_ok = match peer.ip { V4(2130706433u32) => 1u64, _ => 0u64 }

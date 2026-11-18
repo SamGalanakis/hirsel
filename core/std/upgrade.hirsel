@@ -129,5 +129,5 @@ pub fn read(mut s: Socket, mut into: Bytes, until: Until) -> Result[u64, NetErro
 
 pub fn write(mut s: Socket, data: Bytes, until: Until) -> Result[u64, NetError] waits {
     let end = http.control_until(s.notice, s.clock, until)?
-    host.send(mut s.writer, data, end)
+    host.send_pair(mut s.writer, data, string.as_bytes(""), end)
 }

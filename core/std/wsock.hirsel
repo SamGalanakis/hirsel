@@ -506,7 +506,7 @@ pub fn flush(mut w: Writer, mut out: Outbound, deadline: Until) -> Result[bool, 
     if prepare(mut w.buffer, mut out)? {
         return Ok(true)
     }
-    let sent = host.send(mut w.half, remaining(w.buffer), deadline)
+    let sent = host.send_pair(mut w.half, remaining(w.buffer), string.as_bytes(""), deadline)
     match sent {
         Ok(n) => {
             wrote(mut w.buffer, n)
@@ -531,12 +531,12 @@ pub fn pong(mut w: Writer, control: websocket.Control) {
     owe_pong(mut w.buffer, control)
 }
 
-/// Current unsent prefix, borrowed until host.send completes.
+/// Current unsent prefix, borrowed until host.send_pair completes.
 pub fn remaining(b: WriteBuffer) -> View[Bytes] in b {
     list.slice(b.pending, b.cursor, list.len(b.pending))
 }
 
-/// Commit the prefix count returned by host.send, without copying the frame.
+/// Commit the prefix count returned by host.send_pair, without copying the frame.
 pub fn wrote(mut b: WriteBuffer, count: u64) {
     b.cursor += count
     if b.cursor == list.len(b.pending) {
@@ -634,7 +634,7 @@ fn send_head(mut w: WriteHalf, b: Bytes, deadline: Until) -> Result[(), Error] w
         if at != 0 && expired(deadline) {
             return Error(Network(TimedOut))
         }
-        match host.send(mut w, list.slice(b, at, list.len(b)), deadline) {
+        match host.send_pair(mut w, list.slice(b, at, list.len(b)), string.as_bytes(""), deadline) {
             Ok(n) => {
                 at += n
             },

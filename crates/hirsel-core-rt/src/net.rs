@@ -76,8 +76,11 @@ impl AddressOutcome {
         }
     }
 }
-/// Borrowed through delivery. Providers may fill address, but own no byte buffer.
+/// Borrowed through delivery. Only the leading send-tail pointer is visible
+/// to external providers, and only for SEND_PAIR.
+#[repr(C)]
 pub(crate) struct NetworkRequest {
+    pub send_tail: *const Buffer,
     pub address: Address,
     pub sockets: *mut hirsel_core_net::Sockets,
     pub until: Option<(Provider, u64, u64)>,
@@ -114,7 +117,7 @@ pub(crate) unsafe fn permitted(request: &Request) -> bool {
         })
     }
 }
-fn buffer() -> Buffer {
+pub(crate) fn empty_buffer() -> Buffer {
     Buffer {
         data: ptr::null_mut(),
         len: 0,
@@ -198,6 +201,7 @@ unsafe fn address_op(
             port,
         };
         let mut network = NetworkRequest {
+            send_tail: ptr::null(),
             address,
             sockets: &raw mut (*(*context).host_files).sockets,
             until: deadline(context, until_kind, clock, deadline_ns),
@@ -210,7 +214,7 @@ unsafe fn address_op(
             handle: hirsel_core_capability_handle(context, n),
             path: (&mut network as *mut NetworkRequest).cast(),
             path_len: size_of::<NetworkRequest>(),
-            buffer: buffer(),
+            buffer: empty_buffer(),
             site,
         };
         let outcome = hirsel_core_host(
@@ -227,6 +231,7 @@ unsafe fn owned_op(
     op: u8,
     key: u64,
     operand: *mut Buffer,
+    send_tail: *const Buffer,
     until_kind: u8,
     clock: u64,
     deadline_ns: u64,
@@ -234,6 +239,7 @@ unsafe fn owned_op(
 ) -> AddressOutcome {
     unsafe {
         let mut network = NetworkRequest {
+            send_tail,
             address: Address::default(),
             sockets: &raw mut (*(*context).host_files).sockets,
             until: deadline(context, until_kind, clock, deadline_ns),
@@ -247,7 +253,7 @@ unsafe fn owned_op(
             path: (&mut network as *mut NetworkRequest).cast(),
             path_len: size_of::<NetworkRequest>(),
             buffer: if operand.is_null() {
-                buffer()
+                empty_buffer()
             } else {
                 *operand
             },
@@ -277,6 +283,7 @@ pub unsafe extern "C" fn hirsel_core_host_accept(
             ACCEPT,
             key,
             ptr::null_mut(),
+            ptr::null(),
             until_kind,
             clock,
             deadline_ns,
@@ -303,6 +310,7 @@ pub unsafe extern "C" fn hirsel_core_host_recv(
             RECV,
             key,
             operand,
+            ptr::null(),
             until_kind,
             clock,
             deadline_ns,
@@ -312,24 +320,30 @@ pub unsafe extern "C" fn hirsel_core_host_recv(
     }
 }
 /// # Safety
-/// Live write half, immutable caller buffer and optional Clock designation.
+/// A live write half and optional Clock designation from this run, with
+/// both readable byte carriers (and their initialized prefixes) pinned
+/// and immutable through delivery.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_host_send(
+pub unsafe extern "C" fn hirsel_core_host_send_pair(
     context: *mut Context,
     key: u64,
-    operand: *mut Buffer,
+    prefix: *const Buffer,
+    tail: *const Buffer,
     until_kind: u8,
     clock: u64,
     deadline_ns: u64,
     site: u64,
 ) -> Outcome {
+    // SAFETY: the caller pins both carriers and the write half until delivery.
+    // owned_op writes back the first carrier only for receive.
     unsafe {
         owned_op(
             context,
-            SEND,
+            SEND_PAIR,
             key,
-            operand,
+            prefix.cast_mut(),
+            tail,
             until_kind,
             clock,
             deadline_ns,

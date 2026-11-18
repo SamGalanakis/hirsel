@@ -70,7 +70,7 @@ impl FunctionEmitter<'_> {
             | HostOp::Listen
             | HostOp::Accept
             | HostOp::Recv
-            | HostOp::Send
+            | HostOp::SendPair
             | HostOp::NetNarrow
             | HostOp::NetSplit => {
                 let mut operands = vec![ptr(CONTEXT)];

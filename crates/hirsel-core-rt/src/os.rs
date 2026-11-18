@@ -400,7 +400,7 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
     if unsafe {
         matches!(
             (*request).operation,
-            CONNECT | LISTEN | ACCEPT | RECV | SEND
+            CONNECT | LISTEN | ACCEPT | RECV | SEND_PAIR
         )
     } {
         let step = unsafe { crate::os_net::step(request, token, true) };

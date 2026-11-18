@@ -269,7 +269,7 @@ fn write_head(mut socket: WriteHalf, head: Bytes, c: Clock, deadline: u64, ms: u
         return Ok(EndSent)
     }
     let stop = after_ms(at, ms)
-    let sent = match host.send(mut socket, head, At(c, http.clamp_deadline(signal, order.min(stop, deadline)))) {
+    let sent = match host.send_pair(mut socket, head, string.as_bytes(""), At(c, http.clamp_deadline(signal, order.min(stop, deadline)))) {
         Ok(0) => return Error(Reset),
         Ok(n) => n,
         Error(TimedOut) => {

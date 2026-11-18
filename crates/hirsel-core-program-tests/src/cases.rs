@@ -1284,6 +1284,73 @@ fn construction_in_place() {
 }
 
 #[test]
+fn flow_transform_rejects() {
+    let failures = run_case(&root().join("cases/body/flow-transform-rejects.hirsel"));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+    use hirsel_core_driver::{CheckRequest, Driver, LibraryInput, Meter};
+    let files = tempfile::tempdir().unwrap();
+    let source = "fn body(take s: u64, k: u64, x: u64) -> (u64, Option[u64]) { (s, Some(dep.api.h(x))) }\n\
+        fn wire(mut f: Flow, output: Into[u64]) -> Result[Into[u64], Wire] {\n\
+            flow.stage(mut f, output, 1, bytes 0, steps 100, 0, code.describe(body))\n\
+        }";
+    let app = files.path().join("main.hirsel");
+    let dep = files.path().join("dep.hirsel");
+    std::fs::write(&app, source).unwrap();
+    let mut inputs = crate::source_manifest(source, app, &core_dir(), "main");
+    inputs
+        .packages
+        .last_mut()
+        .unwrap()
+        .dependencies
+        .push(package("dep"));
+    inputs.packages.push(PackageManifest {
+        package: package("dep"),
+        dependencies: vec![package("core")],
+        sources: vec![ModuleSource {
+            file: dep.clone(),
+            modules: vec!["api".into()],
+            signatures: false,
+        }],
+    });
+    let mut driver = Driver::default();
+    let mut check = |helper| {
+        std::fs::write(&dep, helper).unwrap();
+        driver
+            .check(
+                CheckRequest {
+                    inputs: inputs.clone(),
+                    store: files.path().join("store"),
+                    entry: None,
+                    library: LibraryInput::Sources,
+                    manifest: None,
+                },
+                &mut Meter::new(false),
+            )
+            .unwrap()
+    };
+    let before = check("pub fn h(x: u64) -> u64 { x + 1 }");
+    assert!(before.diagnostics.is_empty(), "{:?}", before.diagnostics);
+    let after = check("pub fn h(x: u64) -> u64 { let _unused: Option[Sender[u8]] = None; x + 1 }");
+    let [bad] = after.diagnostics.as_slice() else {
+        panic!("{:?}", after.diagnostics)
+    };
+    assert_eq!(bad.rule, "CONC-14");
+    assert!(
+        bad.message.contains("dep@1/api/h") && bad.message.contains("Sender[u8]"),
+        "{bad:?}"
+    );
+    let module = after.index.module_path(bad.primary.module);
+    assert_eq!(module.package, package("app"));
+    assert!(
+        after
+            .rechecked
+            .iter()
+            .all(|path| path.package_is("dep", "1"))
+    );
+}
+
+#[test]
 fn corpus() {
     let mut paths = vec![];
     cases(&root().join("cases"), &mut paths);

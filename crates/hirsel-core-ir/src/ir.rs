@@ -1453,7 +1453,7 @@ pub fn revision_symbol(digest: ContentHash) -> String {
 }
 /// Whose code revision a described function has (PROG-9 `code.revision`):
 /// the code a call through the `StaticFn` runs.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RevisionRoot {
     /// A reached instance: the described item, which a `$callable` adapter
     /// calls.
@@ -1503,18 +1503,9 @@ impl Module {
 /// instance the walk reaches has no row.
 pub fn code_revision(
     root: &Identity,
-    mut row: impl FnMut(&Identity) -> Option<(ContentHash, Vec<Identity>)>,
+    row: impl FnMut(&Identity) -> Option<(ContentHash, Vec<Identity>)>,
 ) -> Option<ContentHash> {
-    let mut reached = std::collections::BTreeMap::new();
-    let mut pending = vec![root.clone()];
-    while let Some(identity) = pending.pop() {
-        if reached.contains_key(&identity) {
-            continue;
-        }
-        let (body, children) = row(&identity)?;
-        pending.extend(children.into_iter().filter(|c| !reached.contains_key(c)));
-        reached.insert(identity, body);
-    }
+    let reached = revision_rows(root, row)?;
     let mut rows: Vec<[u8; 64]> = reached
         .iter()
         .map(|(identity, body)| {
@@ -1532,6 +1523,23 @@ pub fn code_revision(
             .into_iter()
             .chain(rows.iter().map(|r| &r[..])),
     ))
+}
+
+fn revision_rows<T>(
+    root: &Identity,
+    mut row: impl FnMut(&Identity) -> Option<(T, Vec<Identity>)>,
+) -> Option<std::collections::BTreeMap<Identity, T>> {
+    let mut reached = std::collections::BTreeMap::new();
+    let mut pending = vec![root.clone()];
+    while let Some(identity) = pending.pop() {
+        if reached.contains_key(&identity) {
+            continue;
+        }
+        let (body, children) = row(&identity)?;
+        pending.extend(children.into_iter().filter(|c| !reached.contains_key(c)));
+        reached.insert(identity, body);
+    }
+    Some(reached)
 }
 /// The code revision of an intrinsic: its one row, with the zero body.
 pub fn intrinsic_revision(root: &Identity) -> ContentHash {

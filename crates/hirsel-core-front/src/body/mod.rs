@@ -37,7 +37,7 @@ use hirsel_core_layout::{
 };
 use hirsel_core_resolve::{Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 mod admission;
 mod anchors;
@@ -53,6 +53,7 @@ mod compare;
 mod constants;
 mod control;
 pub(crate) mod core_ops;
+pub(crate) mod flow;
 mod growth;
 mod key_glue;
 mod lists;
@@ -118,6 +119,7 @@ pub struct CoreCheck {
     pub function: Option<FuncId>,
     /// Layout/type relocations for a rigid generic body, checked once.
     pub template: Option<GenericTemplate>,
+    pub flow: flow::Facts,
 }
 
 /// Source conventions survive physical sealing. Generated fixed-ABI glue has the
@@ -830,7 +832,7 @@ pub(super) fn loan(mode: Mode) -> Loan {
     match mode {
         Mode::Mut => Loan::Mut,
         Mode::Take => Loan::Take,
-        Mode::View | Mode::Bytes => Loan::View,
+        Mode::View | Mode::Bytes | Mode::Steps => Loan::View,
     }
 }
 
@@ -923,6 +925,7 @@ impl Program<'_> {
         let mut cx = Cx::new(self, f, e);
         cx.run(f, body);
         let mut out = cx.finish();
+        out.flow.waits = fd.waits;
         if self.entry.as_ref() == Some(&fd.path) {
             self.check_entry(fd, &mut out.refusals);
         }
@@ -1109,6 +1112,7 @@ struct Cx<'c, 'a, 'e> {
     /// described function, its identity static and that static's length, so a
     /// `code.identity` or `code.callable` of one reads no descriptor.
     static_fns: HashMap<ValueId, (FuncId, hirsel_core_ir::StaticId, u64)>,
+    flow_literals: HashSet<ValueId>,
     /// The growth path is cold (growth.rs).
     growth: growth::Growth,
     /// The signature a source body's entry was emitted against. A row first mentioned
@@ -1262,6 +1266,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             b: Body::default(),
             func: None,
             static_fns: HashMap::default(),
+            flow_literals: HashSet::default(),
             growth: growth::Growth::default(),
             emitted: None,
             ir_item,
@@ -1486,6 +1491,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn written_mode(&self, a: NodeId) -> &'static str {
         match self.kind(a) {
             NodeKind::BytesArgument => "bytes",
+            NodeKind::StepsArgument => "steps",
             NodeKind::Unary => match self.token_text(a) {
                 "mut" => "mut",
                 "view" => "view",
@@ -2194,7 +2200,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     && b.site.span.end <= pd.site.span.end
             }) {
                 let origin = match pd.mode {
-                    Mode::View | Mode::Bytes => Origin::ViewParam,
+                    Mode::View | Mode::Bytes | Mode::Steps => Origin::ViewParam,
                     Mode::Mut => Origin::MutParam,
                     Mode::Take => Origin::TakeParam,
                 };
@@ -2582,6 +2588,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn checked(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let outer = std::mem::replace(&mut self.node, n);
         let (t, v) = self.expr_inner(n, want);
+        self.flow_expression(n, t);
+        if matches!(self.kind(n), NodeKind::Closure | NodeKind::ScopedClosure)
+            && let Some(v) = v
+        {
+            self.flow_literals.insert(v);
+        }
         if t.0 > HOLE.0 && self.anchor_tracked(t) {
             self.finish_anchors(n, t, v);
         } else {

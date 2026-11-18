@@ -161,6 +161,7 @@ impl Words<'_> {
                 Mode::Mut => self.word("mut"),
                 Mode::Take => self.word("take"),
                 Mode::Bytes => self.word("bytes"),
+                Mode::Steps => self.word("steps"),
             }
             self.ty(t, p)?;
         }

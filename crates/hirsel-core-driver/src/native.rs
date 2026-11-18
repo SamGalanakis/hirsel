@@ -108,6 +108,8 @@ pub struct NativeOptions {
         )>,
     >,
 }
+pub(crate) const DEFAULT_INSTANCE_LIMIT: usize = 65_536;
+
 impl NativeOptions {
     /// A request's options before its flags: the development engine
     /// (Cranelift), unoptimised, without line tables or charge report. An
@@ -130,7 +132,7 @@ impl NativeOptions {
             parts: crate::PackageProduct::default_cache().join("release-parts"),
             output,
             root_limit: 64 * 1024 * 1024,
-            instance_limit: 65_536,
+            instance_limit: DEFAULT_INSTANCE_LIMIT,
             tape: None,
             directories: vec![],
             grant_mask: 0,

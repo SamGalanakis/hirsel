@@ -846,6 +846,9 @@ impl Parser<'_> {
             NodeKind::MutParameter
         } else if self.eat(sym::BYTES) {
             NodeKind::BytesParameter
+        } else if self.at(sym::STEPS) && self.token(1).kind == TokenKind::Ident {
+            self.bump();
+            NodeKind::StepsParameter
         } else {
             NodeKind::Parameter
         };
@@ -1077,6 +1080,18 @@ impl Parser<'_> {
             &[e],
         ))
     }
+    fn step_argument_starts(&self) -> bool {
+        matches!(
+            self.token(1).kind,
+            TokenKind::Ident
+                | TokenKind::Integer
+                | TokenKind::KwIf
+                | TokenKind::KwMatch
+                | TokenKind::KwTrue
+                | TokenKind::KwFalse
+        )
+    }
+
     fn expr(&mut self, minimum: u8) -> Parsed<NodeId> {
         self.nested(|p| p.expr_inner(minimum))
     }
@@ -1123,6 +1138,9 @@ impl Parser<'_> {
                             NodeKind::LabelledArgument
                         } else if p.eat(sym::BYTES) {
                             NodeKind::BytesArgument
+                        } else if p.at(sym::STEPS) && p.step_argument_starts() {
+                            p.bump();
+                            NodeKind::StepsArgument
                         } else {
                             return p.expr(0);
                         };

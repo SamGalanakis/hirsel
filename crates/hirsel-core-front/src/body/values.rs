@@ -943,6 +943,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.refuse_label(a, None, "this payload is not labelled".to_owned());
                     return (ERROR, None);
                 }
+                (NodeKind::StepsArgument, _) => {
+                    self.refuse_compared(
+                        "OWN-7",
+                        a,
+                        "steps",
+                        "take",
+                        "a payload takes no `steps` mark",
+                    );
+                    self.kids(a)[0]
+                }
                 // A payload is a `take` parameter, never a `bytes` one (OWN-7).
                 (NodeKind::BytesArgument, _) => {
                     let message = "a payload takes no `bytes` mark";
@@ -1031,7 +1041,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for (i, &arg) in args.iter().enumerate() {
             let child = if matches!(
                 self.kind(arg),
-                NodeKind::LabelledArgument | NodeKind::BytesArgument
+                NodeKind::LabelledArgument | NodeKind::BytesArgument | NodeKind::StepsArgument
             ) {
                 self.kids(arg)[0]
             } else {

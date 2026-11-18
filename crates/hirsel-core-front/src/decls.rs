@@ -181,6 +181,8 @@ pub enum Role {
     Log,
     StaticFn,
     Socket,
+    Flow,
+    FlowEndpoint,
 }
 impl Role {
     fn of(path: &DefPath) -> Option<Role> {
@@ -220,6 +222,8 @@ impl Role {
             "Causes" => Role::Causes,
             "Log" => Role::Log,
             "StaticFn" => Role::StaticFn,
+            "Flow" => Role::Flow,
+            "Into" | "Port" | "Sink" => Role::FlowEndpoint,
 
             "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin" | "Env"
             | "Process" | "Tasks" => Role::Capability,
@@ -247,14 +251,16 @@ impl Role {
             | Role::Site
             | Role::Child
             | Role::Link
-            | Role::StaticFn => Kind::Plain,
+            | Role::StaticFn
+            | Role::FlowEndpoint => Kind::Plain,
             Role::Task
             | Role::Sender
             | Role::Receiver
             | Role::Socket
             | Role::HostFile
             | Role::Tape
-            | Role::Latest => Kind::Resource,
+            | Role::Latest
+            | Role::Flow => Kind::Resource,
         }
     }
 }
@@ -1530,6 +1536,14 @@ impl Program<'_> {
                         let tnode = item.tree.children(p)[0];
                         let ty = self.lower_ty(at, tnode, &generics);
                         let bytes = pn.kind == NodeKind::BytesParameter;
+                        let steps = pn.kind == NodeKind::StepsParameter;
+                        if steps && ty != scalar(Scalar::U64) && ty != ERROR {
+                            self.refusals.push(refusal(
+                                "LANG-5",
+                                self.site(at, p),
+                                "a `steps` parameter has type `u64`",
+                            ));
+                        }
                         if bytes && ty != scalar(Scalar::U64) && ty != ERROR {
                             self.refusals.push(refusal(
                                 "LANG-5",
@@ -1540,7 +1554,7 @@ impl Program<'_> {
                         params.push(ParamDecl {
                             bytes,
                             name,
-                            mode: mode_of(pn.kind),
+                            mode: if steps { Mode::Steps } else { mode_of(pn.kind) },
                             ty,
                             site: self.site(at, p),
                         });
@@ -2095,7 +2109,8 @@ impl Program<'_> {
                     | Role::Socket
                     | Role::HostFile
                     | Role::Tape
-                    | Role::Latest,
+                    | Role::Latest
+                    | Role::Flow,
                 ) => H_RESOURCE,
                 Some(Role::View | Role::Region | Role::Dest | Role::Writer) => H_SCOPED,
                 Some(
@@ -2120,7 +2135,9 @@ impl Program<'_> {
             if decl.role.is_some() {
                 // A built-in holds what its arguments hold: `List[T]` holds a resource
                 // when `T` does (MEM-17 never clones it, LANG-14 never captures it).
-                params = (1u64 << decl.generics.len()) - 1;
+                if decl.role != Some(Role::FlowEndpoint) {
+                    params = (1u64 << decl.generics.len()) - 1;
+                }
             } else {
                 for f in decl.all_fields() {
                     walk_holds(
@@ -2367,6 +2384,41 @@ impl Tarjan<'_> {
                 self.out[m] = h;
             }
         }
+    }
+}
+
+/// The fixed holds set and the rigid parameters that contribute to it. This
+/// reads the actual fields' summaries, including for a type with `codec via`.
+pub(crate) fn holds_components(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+) -> (u8, u64) {
+    match t.kind(ty) {
+        TyKind::Param(i) => (0, 1 << i),
+        TyKind::Tuple(xs) => xs.iter().fold((0, 0), |(holds, params), &x| {
+            let (h, p) = holds_components(decls, t, x);
+            (holds | h, params | p)
+        }),
+        TyKind::Anchored(x, _) | TyKind::Array(x, _) => holds_components(decls, t, *x),
+        TyKind::Fn(_, _, _, Callable::Scoped | Callable::ScopedView) => (H_SCOPED, 0),
+        TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend) => (H_OPAQUE, 0),
+        TyKind::View(x) => {
+            let (holds, params) = holds_components(decls, t, *x);
+            (holds | H_SCOPED, params)
+        }
+        TyKind::Region(_) => (H_SCOPED, 0),
+        TyKind::Adt(d, xs) => {
+            let summary = &decls[d.index()].summary;
+            xs.iter()
+                .enumerate()
+                .filter(|(i, _)| summary.holds_params & (1 << i) != 0)
+                .fold((summary.holds, 0), |(holds, params), (_, &x)| {
+                    let (h, p) = holds_components(decls, t, x);
+                    (holds | h, params | p)
+                })
+        }
+        _ => (0, 0),
     }
 }
 
@@ -2752,6 +2804,8 @@ pub(crate) fn mode_of(k: NodeKind) -> Mode {
 pub(crate) fn callable_mode_of(k: NodeKind) -> Mode {
     if k == NodeKind::BytesParameter {
         Mode::Bytes
+    } else if k == NodeKind::StepsParameter {
+        Mode::Steps
     } else {
         mode_of(k)
     }
@@ -2896,6 +2950,7 @@ fn write_canonical<const LAYOUT: bool>(
                     Mode::Mut => "mut ",
                     Mode::Take => "take ",
                     Mode::Bytes => "bytes ",
+                    Mode::Steps => "steps ",
                 });
                 child(*p, s);
             }

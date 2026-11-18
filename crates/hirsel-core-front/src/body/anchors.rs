@@ -605,7 +605,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn anchor_argument(&mut self, n: NodeId) -> Fact {
         let n = if matches!(
             self.kind(n),
-            NodeKind::LabelledArgument | NodeKind::BytesArgument
+            NodeKind::LabelledArgument | NodeKind::BytesArgument | NodeKind::StepsArgument
         ) {
             self.kids(n)[0]
         } else {

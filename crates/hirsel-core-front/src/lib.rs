@@ -27,6 +27,7 @@ mod own;
 mod test_functions;
 mod types;
 
+pub use body::flow::Facts as FlowFacts;
 pub use body::{
     CoreCheck, Counts, Emitter, GLUE_OPERATIONS, GenericTemplate, NamePart, import_instance,
     is_glue, materialize, materialize_glue,

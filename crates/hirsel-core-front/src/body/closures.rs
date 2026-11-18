@@ -361,6 +361,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Ok(None) => self.expr(callee, None),
             Err(()) => return (ERROR, None),
         };
+        let mut written = callee;
+        while self.kind(written) == NodeKind::Group {
+            written = self.kids(written)[0];
+        }
+        if !matches!(
+            self.kind(written),
+            NodeKind::Closure | NodeKind::ScopedClosure
+        ) && value.is_none_or(|v| !self.flow_literals.contains(&v))
+        {
+            self.flow_callable(n);
+        }
         // Views carry the referent's bytes (FORM #56), including a callable's
         // code/environment pair; invoking one borrows the same callable.
         let ty = self.bare(ty);
@@ -457,6 +468,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }));
         for (i, &arg) in args.iter().enumerate() {
             let (mode, pt) = scratch.params[i];
+            let arg = self.step_argument(arg, mode);
             let bytes = mode == Mode::Bytes;
             let arg = match (self.kind(arg), bytes) {
                 (NodeKind::LabelledArgument, _) => {
@@ -477,7 +489,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 _ => arg,
             };
-            let mode = if bytes { Mode::View } else { mode };
+            let mode = if bytes || mode == Mode::Steps {
+                Mode::View
+            } else {
+                mode
+            };
             if !self.argument_rooted(
                 mode,
                 pt,
@@ -925,7 +941,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         fd.params.push(crate::decls::ParamDecl {
                             bytes: self.kind(param) == NodeKind::BytesParameter,
                             name: self.item.symbol(token),
-                            mode: crate::decls::mode_of(self.kind(param)),
+                            mode: if self.kind(param) == NodeKind::StepsParameter {
+                                Mode::Steps
+                            } else {
+                                crate::decls::mode_of(self.kind(param))
+                            },
                             ty,
                             site: self.p.site(self.at, param),
                         });

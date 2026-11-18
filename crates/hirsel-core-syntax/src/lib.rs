@@ -184,6 +184,8 @@ pub enum NodeKind {
     CodecVia,
     RemovedField,
     RemovedVariant,
+    StepsParameter,
+    StepsArgument,
 }
 /// `token` is the defining name, operator, literal or projection token, according to kind.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -265,7 +267,8 @@ impl ResolutionSize {
             | NodeKind::Parameter
             | NodeKind::TakeParameter
             | NodeKind::MutParameter
-            | NodeKind::BytesParameter => self.binders += 1,
+            | NodeKind::BytesParameter
+            | NodeKind::StepsParameter => self.binders += 1,
             NodeKind::Region | NodeKind::Drop => {
                 self.binders += 1;
                 self.scopes += 1;

@@ -34,6 +34,28 @@ pub opaque type Arc[T: shareable + send]
 
 pub opaque resource type Latest[T: shareable + send]
 
+pub opaque resource type Flow
+
+pub opaque type Into[T]
+
+pub opaque type Port[T]
+
+pub opaque type Sink[T]
+
+pub type Wire = Foreign | Started | Zero | Refused(Capacity)
+
+pub type Push[T: plain] = Ok | Ended(T) | Order(T) | Closed(T) | Stalled(T)
+
+pub type Pull[T: plain] = Item(key: u64, from: u32, x: T) | Dropped(from: u32, at: u64) | End | Stalled
+
+pub type Halt = OutOfTime | Failed
+
+pub type Failure {
+    stage: u32,
+    key: u64,
+    halt: Halt
+}
+
 pub opaque type View[T]
 
 pub opaque type Unique: key

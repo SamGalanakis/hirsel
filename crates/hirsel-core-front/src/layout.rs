@@ -315,6 +315,16 @@ impl<T: TyRead> Shapes<'_, T> {
                         let held = Some(FieldTy::Handle(handle));
                         return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
+                    Some(Role::Flow) => {
+                        return self.fill(
+                            r,
+                            ty,
+                            LRepr::Resource,
+                            record(vec![("handle", FieldTy::Scalar(Scalar::U64))]),
+                            None,
+                            None,
+                        );
+                    }
                     // A capability, Args, Unique, Site or StaticFn: one plain word,
                     // never cleaned by the holder. StaticFn is carried in CoreIR as a
                     // pointer because it is directly callable; its physical width stays
@@ -322,11 +332,16 @@ impl<T: TyRead> Shapes<'_, T> {
                     _ if handle(decl)
                         || matches!(
                             decl.role,
-                            Some(Role::Unique | Role::Site | Role::StaticFn)
+                            Some(Role::Unique | Role::Site | Role::StaticFn | Role::FlowEndpoint)
                         ) =>
                     {
-                        let body = record(vec![("handle", FieldTy::Scalar(Scalar::U64))]);
-                        let held = Some(FieldTy::Scalar(Scalar::U64));
+                        let field = if decl.role == Some(Role::Capability) {
+                            FieldTy::Handle(Handle::Capability)
+                        } else {
+                            FieldTy::Scalar(Scalar::U64)
+                        };
+                        let body = record(vec![("handle", field.clone())]);
+                        let held = Some(field);
                         return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
                     Some(_) => return None,
@@ -563,7 +578,10 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::List) => FieldTy::Seq(Box::new(self.field(args[0])?)),
                 Some(Role::String) => FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
                 Some(Role::Map) => FieldTy::Inline(self.shape(ty)?),
-                Some(Role::Log | Role::StaticFn) => FieldTy::Scalar(Scalar::U64),
+                Some(Role::Log | Role::StaticFn | Role::FlowEndpoint) => {
+                    FieldTy::Scalar(Scalar::U64)
+                }
+                Some(Role::Capability) => FieldTy::Handle(Handle::Capability),
                 _ if handle(&self.decls[d.index()]) => FieldTy::Scalar(Scalar::U64),
                 Some(Role::Task) => FieldTy::Handle(Handle::Task),
                 Some(Role::Sender) => FieldTy::Handle(Handle::Sender),
@@ -725,7 +743,10 @@ pub(crate) fn carried(
         // "Core types").
         TyKind::Adt(d, _)
             if handle(&decls[d.index()])
-                || matches!(decls[d.index()].role, Some(Role::Unique | Role::Site)) =>
+                || matches!(
+                    decls[d.index()].role,
+                    Some(Role::Unique | Role::Site | Role::FlowEndpoint)
+                ) =>
         {
             Carried::Value(Ty::Scalar(Scalar::U64))
         }

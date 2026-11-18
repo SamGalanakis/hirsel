@@ -33,6 +33,7 @@ pub enum Mode {
     Mut,
     Take,
     Bytes,
+    Steps,
 }
 
 impl Mode {
@@ -43,6 +44,7 @@ impl Mode {
             Mode::Mut => "mut",
             Mode::Take => "take",
             Mode::Bytes => "bytes",
+            Mode::Steps => "steps",
         }
     }
 }

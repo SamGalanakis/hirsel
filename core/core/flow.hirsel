@@ -1,0 +1,18 @@
+// Module `flow` (CONC-14).
+pub fn new() -> Flow
+
+pub fn sink[T: plain + codec](mut f: Flow) -> Result[(Sink[T], Into[T]), Wire]
+
+pub fn stage[X: plain + codec, A: plain + codec, B: plain + codec](mut f: Flow, to: Into[B], cap: u32, bytes m: u64, steps k: u64, x: X, body: StaticFn[fn(take X, u64, A) -> (X, Option[B])]) -> Result[Into[A], Wire]
+
+pub fn port[T: plain + codec](mut f: Flow, to: Into[T], cap: u32) -> Result[Port[T], Wire]
+
+pub fn push[T: plain + codec](mut f: Flow, p: Port[T], key: u64, x: T) -> Push[T] waits
+
+pub fn advance[T: plain + codec](mut f: Flow, p: Port[T], key: u64)
+
+pub fn end[T: plain + codec](mut f: Flow, p: Port[T])
+
+pub fn next[T: plain + codec](mut f: Flow, s: Sink[T]) -> Pull[T] waits
+
+pub fn finish(take f: Flow) -> Result[(), Failure] waits

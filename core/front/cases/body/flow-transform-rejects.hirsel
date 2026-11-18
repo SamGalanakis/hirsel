@@ -1,0 +1,127 @@
+type Job: codec via u64(to: job_tag, from: missing_job) {
+    tag: u64,
+    run: StaticFn[fn() -> u64]
+}
+
+fn job_tag(job: Job) -> View[u64] in job { view job.tag }
+
+fn missing_job(take tag: u64) -> Result[Job, ()] { Error(()) }
+
+fn job_body(take state: u64, key: u64, job: Job) -> (u64, Option[u64]) {
+    (state, Some((code.callable(job.run))()))
+}
+
+fn helper(run: fn() -> u64) -> u64 { run() }
+
+fn helper_body(take state: u64, key: u64, value: u64) -> (u64, Option[u64]) {
+    (state, Some(helper(fn() -> u64 { 7u64 })))
+}
+
+fn nested_flow(take state: u64, key: u64, value: u64) -> (u64, Option[u64]) {
+    let _ = flow.new()
+    (state, Some(value))
+}
+
+fn wrong_output(take state: u64, key: u64, value: u64) -> (u64, Option[i64]) {
+    (state, Some(7i64))
+}
+
+fn wire_job(mut f: Flow, output: Into[u64]) -> Result[Into[Job], Wire] {
+    flow.stage(mut f, output, 1, bytes 0, steps 100, 0, code.describe(job_body))
+}
+
+fn wire_helper(mut f: Flow, output: Into[u64]) -> Result[Into[u64], Wire] {
+    flow.stage(mut f, output, 1, bytes 0, steps 100, 0, code.describe(helper_body))
+}
+
+fn wire_nested(mut f: Flow, output: Into[u64]) -> Result[Into[u64], Wire] {
+    flow.stage(mut f, output, 1, bytes 0, steps 100, 0, code.describe(nested_flow))
+}
+
+fn wire_wrong(mut f: Flow, output: Into[u64]) -> Result[Into[u64], Wire] {
+    flow.stage(mut f, output, 1, bytes 0, steps 100, 0, code.describe(wrong_output))
+}
+
+type Reading: codec via u64(to: reading_value, from: missing_reading) {
+    n: u64,
+    c: Clock
+}
+
+fn reading_value(reading: Reading) -> View[u64] in reading { view reading.n }
+
+fn missing_reading(take n: u64) -> Result[Reading, ()] { Error(()) }
+
+fn wire_reading_port(mut f: Flow, input: Into[Reading]) -> Result[Port[Reading], Wire] {
+    flow.port(mut f, input, 1)
+}
+
+fn reading_state(take state: Reading, key: u64, value: u64) -> (Reading, Option[u64]) {
+    (state, Some(value))
+}
+
+fn wire_reading_state(mut f: Flow, output: Into[u64], state: Reading) -> Result[Into[u64], Wire] {
+    flow.stage(mut f, output, 1, bytes 0, steps 100, state, code.describe(reading_state))
+}
+
+type Clean: codec via u64(to: clean_value, from: make_clean) { a: u64, b: u64 }
+
+fn clean_value(clean: Clean) -> View[u64] in clean { view clean.a }
+
+fn make_clean(take a: u64) -> Result[Clean, ()] { Ok(Clean(a: a, b: 0)) }
+
+fn wire_clean(mut f: Flow, input: Into[Clean]) -> Result[Port[Clean], Wire] {
+    flow.port(mut f, input, 1)
+}
+
+fn closure_body(take state: u64, key: u64, value: u64) -> (u64, Option[u64]) {
+    (state, Some((fn() -> u64 { 17u64 })()))
+}
+
+fn wire_closure(mut f: Flow, output: Into[u64]) -> Result[Into[u64], Wire] {
+    flow.stage(mut f, output, 1, bytes 0, steps 100, 0, code.describe(closure_body))
+}
+
+type Hint[T] { tag: u64 }
+
+fn generic[T](hint: Hint[T]) -> u64 {
+    let _unused: Option[T] = None
+    hint.tag
+}
+
+fn generic_body(take state: u64, key: u64, value: u64) -> (u64, Option[u64]) {
+    let hint: Hint[Sender[u8]] = Hint(tag: value)
+    (state, Some(generic(hint)))
+}
+
+fn wire_generic(mut f: Flow, output: Into[u64]) -> Result[Into[u64], Wire] {
+    flow.stage(mut f, output, 1, bytes 0, steps 100, 0, code.describe(generic_body))
+}
+
+resource type Park {
+    tx: Sender[u64],
+    rx: Receiver[u64]
+} drop(p) {
+    let _ = channel.receive(p.rx)
+}
+
+fn parking_body(take state: u64, key: u64, value: u64) -> (u64, Option[u64]) {
+    let ends: (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (take tx, take rx) = take ends
+    let _ = result.unwrap(Park(tx: take tx, rx: take rx))
+    (state, Some(1u64))
+}
+
+fn wire_parking(mut f: Flow, output: Into[u64]) -> Result[Into[u64], Wire] {
+    flow.stage(mut f, output, 1, bytes 0, steps 100, 0, code.describe(parking_body))
+}
+
+// expect: refuse CONC-14 at 30:57
+// expect: refuse CONC-14 at 34:57
+// expect: refuse CONC-14 at 38:57
+// expect: refuse LANG-11 at 42:57
+// expect: refuse CONC-14 at 55:5
+// expect: refuse CONC-14 at 63:54
+// expect: refuse CONC-14 at 97:57
+// expect: refuse CONC-14 at 115:57
+// expect: compared LANG-11 at 42:57 | core@1/core/StaticFn[fn(take u64, u64, u64) -> (u64, core@1/core/Option[i64])] | core@1/core/StaticFn[fn(take u64, u64, u64) -> (u64, core@1/core/Option[u64])]
+// expect: gap this generic core operation is not built

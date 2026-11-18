@@ -76,6 +76,15 @@ macro_rules! operations {
 
 operations! {
 
+    ("flow", "new", Lane::PendingCode, "B", "mc-f1-1180", false),
+    ("flow", "sink", Lane::PendingCode, "B", "mc-f1-1180", false),
+    ("flow", "stage", Lane::PendingCode, "B", "mc-f1-1180", false),
+    ("flow", "port", Lane::PendingCode, "B", "mc-f1-1180", false),
+    ("flow", "push", Lane::PendingCode, "B", "mc-f1-1180", false),
+    ("flow", "advance", Lane::PendingCode, "B", "mc-f1-1180", false),
+    ("flow", "end", Lane::PendingCode, "B", "mc-f1-1180", false),
+    ("flow", "next", Lane::PendingCode, "B", "mc-f1-1180", false),
+    ("flow", "finish", Lane::PendingCode, "B", "mc-f1-1180", false),
     ("int", "parse", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("core", "isolate", Lane::PendingCode, "A", "core-check-callables-913", false),
     ("latest", "new", Lane::Runtime(Kernel::LatestNew), "A", "core-ops-914", false),
@@ -1582,6 +1591,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                 | "wire-w1a-1063"
                 | "tape-s2-1074"
                 | "mem-b-1172"
+                | "mc-f1-1180"
         ));
         if entry.private {
             assert!(

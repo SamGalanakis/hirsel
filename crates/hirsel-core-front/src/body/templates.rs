@@ -135,6 +135,7 @@ impl NameRecipe {
                         Mode::Mut => "mut ",
                         Mode::Take => "take ",
                         Mode::Bytes => "bytes ",
+                        Mode::Steps => "steps ",
                     });
                     self.ty(p, t, ty);
                 }

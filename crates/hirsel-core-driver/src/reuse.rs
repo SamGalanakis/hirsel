@@ -601,6 +601,9 @@ impl Keys {
                 capture(site);
             }
         }
+        for (site, _) in &check.flow.stages {
+            capture(site);
+        }
         anchors
     }
     pub fn bind_site(&self, anchors: &BTreeMap<crate::ItemAt, DefPath>, site: &mut Site) {

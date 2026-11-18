@@ -18,6 +18,7 @@ mod callable_variants;
 mod carried_law;
 mod check_index;
 mod executable;
+mod flow;
 mod instances;
 mod native;
 mod native_debug;
@@ -327,6 +328,7 @@ mod body {
                     gaps: vec![],
                     function: disk.function.map(hirsel_core_ir::FuncId),
                     template: disk.template,
+                    flow: disk.flow,
                     counts: hirsel_core_front::Counts {
                         nodes,
                         uses,
@@ -478,6 +480,7 @@ struct DiskCheckRef<'a> {
     incomplete: Vec<Incomplete>,
     counts: [u64; 6],
     template: &'a Option<hirsel_core_front::GenericTemplate>,
+    flow: hirsel_core_front::FlowFacts,
     function: Option<u32>,
     resolved: bool,
 }
@@ -516,6 +519,10 @@ impl<'a> DiskCheckRef<'a> {
             canonical(&mut g.primary);
             g.causal.iter_mut().for_each(canonical);
         }
+        let mut flow = d.check.flow.clone();
+        for (site, _) in &mut flow.stages {
+            canonical(site);
+        }
         Ok(Self {
             anchors,
             key: &d.key,
@@ -524,6 +531,7 @@ impl<'a> DiskCheckRef<'a> {
             incomplete,
             counts: [c.nodes, c.uses, c.places, c.calls, c.types, c.bytes],
             template: &d.check.template,
+            flow,
             function: d.check.function.map(|f| f.0),
             resolved: d.resolved,
         })
@@ -539,6 +547,7 @@ struct DiskCheck {
     incomplete: Vec<Incomplete>,
     counts: [u64; 6],
     template: Option<hirsel_core_front::GenericTemplate>,
+    flow: hirsel_core_front::FlowFacts,
     function: Option<u32>,
     resolved: bool,
 }
@@ -1100,6 +1109,10 @@ impl Driver {
                 );
             }
             meter.finish("publish/body records");
+            let diagnostics = result.flow_refusals(|definition, site| {
+                keys.bind_site(&definition.anchors, site);
+            });
+            result.diagnostics.extend(diagnostics);
             // Check binds an entry's declaration part; its ABI is read from
             // the body's IR in the build.
             result.native_entry = request.entry.as_ref().map(|e| native::bind_entry(&p, e));

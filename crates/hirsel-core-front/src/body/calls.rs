@@ -48,6 +48,32 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
+    pub(super) fn step_argument(&mut self, arg: NodeId, mode: Mode) -> NodeId {
+        if self.kind(arg) == NodeKind::StepsArgument {
+            if mode != Mode::Steps {
+                self.refuse_compared(
+                    "OWN-7",
+                    arg,
+                    "steps",
+                    mode.keyword(),
+                    "this parameter takes no `steps` mark",
+                );
+            }
+            self.kids(arg)[0]
+        } else {
+            if mode == Mode::Steps {
+                self.refuse_compared(
+                    "OWN-7",
+                    arg,
+                    self.written_mode(arg),
+                    "steps",
+                    "this parameter needs a `steps` argument",
+                );
+            }
+            arg
+        }
+    }
+
     // ---- calls
     pub(super) fn call(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let mut scratch = self.call_scratch.pop().unwrap_or_default();
@@ -103,6 +129,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.put_form(n, f, args, want);
         }
         let g = &p.fns[f];
+        if g.path.is_core("code.callable") {
+            self.flow_callable(n);
+        }
         if g.result == ERROR {
             // The callee's refused header owns the diagnostic. Its error result
             // cannot supply pattern payloads or a value for live emission.
@@ -239,6 +268,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut map_key_at = None;
         let mut map_insertion = None;
         for (i, &a) in args.iter().enumerate() {
+            let a_mode = g.params[i].mode;
+            let a = self.step_argument(a, a_mode);
+            let a_mode = if a_mode == Mode::Steps {
+                Mode::View
+            } else {
+                a_mode
+            };
             let e = match (self.kind(a), g.params[i].bytes) {
                 (NodeKind::LabelledArgument, _) => {
                     // The resolver already refuses labels on ordinary calls (LANG-9).
@@ -262,7 +298,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => a,
             };
             if self.argument_rooted(
-                g.params[i].mode,
+                a_mode,
                 g.params[i].ty,
                 call,
                 i,
@@ -481,6 +517,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if result == NEVER {
             self.dead = true;
         }
+        if g.path.is_core("flow.stage") {
+            self.flow_stage(args[6], vals[6]);
+        }
         if !undetermined
             && g.path.package_is("core", "1")
             && g.path.0.modules == ["core"]
@@ -640,6 +679,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             return true;
                         }
                         self.use_place(at, Use::Mut(Hold::CallMut(call, i as u32)), e);
+                        self.flow_expression(e, at.ty);
                         self.arg_ty_rooted(pt, at.ty, e, found, roots);
                         if self.live()
                             && at.ty.0 > HOLE.0
@@ -734,6 +774,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         })
                         .is_some();
                 let ty = at.ty;
+                self.flow_expression(e, ty);
                 if (projected && (self.is_view(ty) || !self.copies(ty)))
                     || (at.place.len > 0
                         && self.is_view(ty)
@@ -959,6 +1000,37 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             let g = &p.fns[f].generics[i];
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
+            let path = &p.fns[f].path;
+            if missing == 0
+                && (path.is_core("flow.sink")
+                    || path.is_core("flow.stage")
+                    || path.is_core("flow.port"))
+            {
+                let (holds, _) = crate::decls::holds_components(&p.decls, &self.t, t);
+                if holds != 0 {
+                    let shown = self.shown(t);
+                    let mut message = format!(
+                        "flow values must hold nothing; `{shown}` holds an owned, scoped or authority value"
+                    );
+                    if let TyKind::Adt(d, xs) = self.t.kind(t).clone() {
+                        for field in p.decls[d.index()].all_fields() {
+                            let ty = crate::types::subst(&mut self.t, field.ty, &xs);
+                            let (holds, _) = crate::decls::holds_components(&p.decls, &self.t, ty);
+                            if holds != 0 {
+                                message = format!(
+                                    "flow values must hold nothing; field `{}` of `{shown}` has type `{}`",
+                                    field.name,
+                                    self.shown(ty)
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    self.refuse("CONC-14", n, message);
+                    return;
+                }
+            }
+
             if missing != 0 {
                 let (a, b) = (self.shown(t), crate::decls::bound_names(missing));
                 let transfer = p.fns[f].path.package_is("core", "1")

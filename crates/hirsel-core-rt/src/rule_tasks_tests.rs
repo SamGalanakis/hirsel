@@ -1,10 +1,11 @@
 //! CONC-8/10/11 and FAIL-3 at the scheduler/custody boundary.
 use super::*;
+use crate::schedule_script::{ScheduleScript, UNTAPED};
+use std::sync::Arc;
 #[derive(Default)]
 struct Trace {
     events: Vec<Event>,
     choices: Vec<(usize, usize)>,
-    replay: Option<Vec<(usize, usize)>>,
 }
 unsafe extern "C" fn event(state: *mut u8, e: Event) {
     // SAFETY: scheduler alone accesses this pinned host recorder.
@@ -12,31 +13,21 @@ unsafe extern "C" fn event(state: *mut u8, e: Event) {
         (*state.cast::<Trace>()).events.push(e);
     }
 }
-unsafe extern "C" fn choose(state: *mut u8, count: usize) -> usize {
-    // SAFETY: scheduler alone accesses the recorder; replay has one choice per call.
-    unsafe {
-        let trace = &mut *state.cast::<Trace>();
-        let selected = trace.replay.as_ref().map_or(count - 1, |choices| {
-            let (old, selected) = choices[trace.choices.len()];
-            assert_eq!(old, count);
-            selected
-        });
-        trace.choices.push((count, selected));
-        selected
-    }
-}
 fn recorded(body: Body, replay: Option<Vec<(usize, usize)>>) -> (u64, Trace) {
-    let mut trace = Trace {
-        replay,
-        ..Trace::default()
-    };
+    let mut trace = Trace::default();
+    let mut script = ScheduleScript::last();
+    if let Some(prefix) = &replay {
+        script =
+            script.with_schedule_prefix(UNTAPED, prefix.iter().map(|&(_, index)| index).collect());
+    }
+    let script = Arc::new(script);
     let mut context = Context::new(4096);
     causes::task_start(&mut context).unwrap();
     let before = context.available();
     let mut output = 0u64;
     let mut unit = 0u8;
     // SAFETY: pinned host recorder and root output live until every child is retired.
-    unsafe {
+    script.install(|| unsafe {
         assert_eq!(
             run_root(
                 &mut context,
@@ -48,15 +39,16 @@ fn recorded(body: Body, replay: Option<Vec<(usize, usize)>>) -> (u64, Trace) {
                 SchedulerProvider {
                     state: (&mut trace as *mut Trace).cast(),
                     event: Some(event),
-                    choose: Some(choose)
+                    ..SchedulerProvider::default()
                 }
             ),
             0
         );
-    }
+    });
+    trace.choices = script.schedule_decisions(UNTAPED);
     assert_eq!(context.available(), before);
-    if let Some(replay) = &trace.replay {
-        assert_eq!(trace.choices.len(), replay.len());
+    if let Some(replay) = replay {
+        assert_eq!(trace.choices, replay);
     }
     (output, trace)
 }

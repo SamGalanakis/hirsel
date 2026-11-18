@@ -95,20 +95,20 @@ pub struct Event {
     pub value: u64,
 }
 /// Event callbacks record completed transitions and must not suspend/re-enter.
-/// The choice callback selects a runnable queue position. Null uses FIFO.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SchedulerProvider {
     pub state: *mut u8,
     pub event: Option<unsafe extern "C" fn(*mut u8, Event)>,
-    pub choose: Option<unsafe extern "C" fn(*mut u8, usize) -> usize>,
+    /// Reserved ABI word. Schedule scripts are installed by the Rust test harness.
+    pub reserved: usize,
 }
 impl Default for SchedulerProvider {
     fn default() -> Self {
         Self {
             state: ptr::null_mut(),
             event: None,
-            choose: None,
+            reserved: 0,
         }
     }
 }
@@ -217,6 +217,10 @@ struct Scheduler {
     all: *mut Task,
     next: u64,
     provider: SchedulerProvider,
+    #[cfg(any(test, feature = "testing"))]
+    script: Option<Arc<crate::schedule_script::ScheduleScript>>,
+    #[cfg(any(test, feature = "testing"))]
+    script_groups: Vec<crate::tape::schedule::Group>,
     readies: Arc<Readies>,
     /// Cancellation requests for tasks parked in a provider operation, in
     /// request order, taken at the next scheduler turn.
@@ -305,33 +309,83 @@ impl Scheduler {
                 self.head = std::mem::replace(&mut self.deferred, ptr::null_mut());
                 self.tail = std::mem::replace(&mut self.deferred_tail, ptr::null_mut());
             }
-            let mut count = 0;
-            let mut at = self.head;
-            while !at.is_null() {
-                count += 1;
-                at = (*at).ready;
-            }
-            if count == 0 {
+            if self.head.is_null() {
                 return ptr::null_mut();
             }
-            let choice = self
-                .provider
-                .choose
-                .map_or(0, |choose| choose(self.provider.state, count));
-            let mut selected = self.head;
-            for _ in 0..choice {
-                selected = (*selected).ready;
+            #[cfg(any(test, feature = "testing"))]
+            if let Some(script) = self.script.clone() {
+                let selected = self.scripted_task(&script);
+                return self.unlink_ready(selected);
             }
-            if let Some(group) = (*selected).group
-                && group.fifo()
-            {
-                selected = self.head;
-                while !(*selected).group.is_some_and(|g| g.same(group)) {
-                    selected = (*selected).ready;
-                }
-            }
-            self.unlink_ready(selected)
+            self.unlink_ready(self.head)
         }
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    unsafe fn scripted_task(
+        &mut self,
+        script: &crate::schedule_script::ScheduleScript,
+    ) -> *mut Task {
+        // SAFETY: pop holds the dispatcher and head is ready.
+        unsafe {
+            if let Some(group) = (*self.head).group {
+                if group.replaying() || group.fifo() {
+                    return self.head;
+                }
+                let domain = self
+                    .script_groups
+                    .iter()
+                    .position(|g| g.same(group))
+                    .unwrap_or_else(|| {
+                        self.script_groups.push(group);
+                        self.script_groups.len() - 1
+                    });
+                let live = self.live_group_tasks(group);
+                let runnable: Vec<_> = live
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, &(_, task))| {
+                        ((*task).state == State::Ready).then_some(index)
+                    })
+                    .collect();
+                return live[script.choose_task(domain as u64, live.len(), &runnable)].1;
+            }
+
+            let mut runnable = Vec::new();
+            let mut task = self.head;
+            while !task.is_null() {
+                if (*task).group.is_none() {
+                    runnable.push(task);
+                }
+                task = (*task).ready;
+            }
+            let indices: Vec<_> = (0..runnable.len()).collect();
+            let selected =
+                script.choose_task(crate::schedule_script::UNTAPED, runnable.len(), &indices);
+            runnable[selected]
+        }
+    }
+
+    unsafe fn live_group_tasks(
+        &self,
+        group: crate::tape::schedule::Group,
+    ) -> Vec<(u64, *mut Task)> {
+        let mut live = Vec::new();
+        let mut task = self.all;
+        // SAFETY: the dispatcher owns the creation list.
+        unsafe {
+            while !task.is_null() {
+                if (*task).state != State::Ended
+                    && let Some(member) = (*task).group
+                    && member.same(group)
+                {
+                    live.push((member.task, task));
+                }
+                task = (*task).all;
+            }
+        }
+        live.sort_unstable_by_key(|&(id, _)| id);
+        live
     }
 
     unsafe fn group_task(&self, group: crate::tape::schedule::Group, id: u64) -> *mut Task {
@@ -540,18 +594,7 @@ impl Scheduler {
                     let id = match turn {
                         Turn::Wake(id) | Turn::Cancel(id) | Turn::Done(id) => id,
                         Turn::Choose(index) => {
-                            let mut live = Vec::new();
-                            let mut at = self.all;
-                            while !at.is_null() {
-                                if (*at).state != State::Ended
-                                    && let Some(g) = (*at).group
-                                    && g.same(group)
-                                {
-                                    live.push((g.task, at));
-                                }
-                                at = (*at).all;
-                            }
-                            live.sort_unstable_by_key(|&(id, _)| id);
+                            let live = self.live_group_tasks(group);
                             if let Some(&(id, at)) =
                                 usize::try_from(index).ok().and_then(|i| live.get(i))
                                 && (*at).state == State::Ready
@@ -1725,15 +1768,15 @@ impl Drop for CallbackTask {
     }
 }
 pub(crate) fn recorded_chooser() -> u8 {
-    let task = CURRENT.get();
-    // SAFETY: CURRENT pins the scheduler while the tape opens.
-    unsafe {
-        if !task.is_null() && (*(*task).run).provider.choose.is_some() {
-            hirsel_tape_format::CHOOSER_COMMIT
-        } else {
-            hirsel_tape_format::CHOOSER_FIFO
+    #[cfg(any(test, feature = "testing"))]
+    {
+        let task = CURRENT.get();
+        // SAFETY: CURRENT pins the scheduler while the tape opens.
+        if unsafe { !task.is_null() && (*(*task).run).script.is_some() } {
+            return hirsel_tape_format::CHOOSER_COMMIT;
         }
     }
+    hirsel_tape_format::CHOOSER_FIFO
 }
 pub(crate) fn has_provider_task() -> bool {
     !CURRENT.get().is_null() || !CALLBACK_TASK.get().is_null()
@@ -1978,6 +2021,10 @@ pub unsafe fn run_root(
         all: ptr::null_mut(),
         next: 1,
         provider,
+        #[cfg(any(test, feature = "testing"))]
+        script: crate::schedule_script::installed(),
+        #[cfg(any(test, feature = "testing"))]
+        script_groups: Vec::new(),
         readies: Readies::new(),
         cancels: Vec::new(),
         outside_cancels: Vec::new(),
@@ -2540,6 +2587,8 @@ mod ready_routing_laws {
                 all: ptr::null_mut(),
                 next: 1,
                 provider: SchedulerProvider::default(),
+                script: None,
+                script_groups: Vec::new(),
                 readies: Readies::new(),
                 cancels: Vec::new(),
                 outside_cancels: Vec::new(),

@@ -1,13 +1,14 @@
 //! S2 cases live in S1's bypass-law body, so the existing acceptance selector
 //! runs the scheduling and no-host laws together.
 use super::{tests::*, *};
-use crate::{Context, causes, channel::*, tasks::*};
-use std::{collections::BTreeSet, ptr::NonNull};
+use crate::{Context, causes, channel::*, schedule_script::ScheduleScript, tasks::*};
+use std::{collections::BTreeSet, ptr::NonNull, sync::Arc};
 
 struct Script {
     waited: BTreeSet<u64>,
     calls: usize,
     pending: bool,
+    fault_at: Option<u8>,
     manual: bool,
     armed: Option<u64>,
 }
@@ -17,6 +18,9 @@ impl Script {
             // SAFETY: the case pins Script until its run ends.
             let s = unsafe { &mut *s.cast::<Script>() };
             s.calls += 1;
+            if s.fault_at.is_some() {
+                return Wait::default();
+            }
             if s.manual {
                 return if s.armed.replace(token) == Some(token) {
                     Wait::default()
@@ -36,10 +40,17 @@ impl Script {
                 Wait::default()
             }
         }
-        unsafe extern "C" fn issue(s: *mut u8, _: *mut Request, token: u64) -> Step {
+        unsafe extern "C" fn issue(s: *mut u8, request: *mut Request, token: u64) -> Step {
             // SAFETY: synchronous run-local script.
             let s = unsafe { &mut *s.cast::<Script>() };
             s.calls += 1;
+            // SAFETY: the provider owns this request through issue.
+            if s.fault_at == Some(unsafe { (*request).mode }) {
+                return done(Outcome {
+                    error: IoError { tag: 1, code: 0 },
+                    ..Outcome::default()
+                });
+            }
             if s.pending {
                 hirsel_core_ready(token);
                 pending()
@@ -101,7 +112,7 @@ struct Job {
     handle: u64,
     sender: *mut Channel,
     number: u64,
-    observations: *mut Vec<(u64, u64, u8)>,
+    observations: *mut Vec<(u64, u64, u8, IoError)>,
 }
 unsafe extern "C" fn sleeper(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
     // SAFETY: the task owns its input and sender; observations outlive the run.
@@ -116,9 +127,9 @@ unsafe extern "C" fn sleeper(context: *mut Context, _: *mut u8, input: *mut u8) 
         );
         crate::tasks::event(crate::tasks::CHECK_CANCEL, 0, 0);
         let outcome = hirsel_core_host(context, &job.provider, &mut r);
-        (*job.observations).push((job.number, outcome.value, outcome.status));
+        (*job.observations).push((job.number, outcome.value, outcome.status, outcome.error));
         let mut n = job.number;
-        if outcome.status == 0 {
+        if outcome.status == 0 && outcome.error == IoError::OK {
             hirsel_core_send(context, job.sender, (&mut n as *mut u64).cast(), 0);
         }
         hirsel_core_sender_drop(job.sender);
@@ -132,8 +143,9 @@ struct Run {
     script: Script,
     mode: Mode,
     chooser: u8,
+    fault_case: bool,
     result: Option<Result<(), Fault>>,
-    observed: Vec<(u64, u64, u8)>,
+    observed: Vec<(u64, u64, u8, IoError)>,
     received: Vec<u64>,
 }
 unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
@@ -142,7 +154,11 @@ unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> 
         let run = &mut **input.cast::<*mut Run>();
         let mut h = header(REVISION);
         h.kind = KIND_RUN;
-        h.chooser = run.chooser;
+        h.chooser = if run.fault_case {
+            recorded_chooser()
+        } else {
+            run.chooser
+        };
         let dir = run.store.dir();
         let (tape, _) = Tape::open(REVISION, dir, b"t", run.mode, &h, &expect()).unwrap();
         let sub = tape
@@ -185,20 +201,23 @@ unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> 
             hirsel_core_join(context, task, ptr::null_mut(), 0);
         }
         hirsel_core_receiver_drop(context, channel.receiver);
-        run.result = Some(tape.end(&ending()));
+        let end = if run.fault_case {
+            Ending::returned(&0u32.to_le_bytes())
+        } else {
+            ending()
+        };
+        run.result = Some(tape.end(&end));
     }
     0
 }
-unsafe extern "C" fn lifo(_: *mut u8, n: usize) -> usize {
-    n - 1
-}
-fn run_case(bytes: Option<&[u8]>, chooser: u8, pending: bool) -> Run {
+fn run_case(bytes: Option<&[u8]>, chooser: u8, pending: bool, fault_case: bool) -> Run {
     let mut run = Run {
         store: Store::default(),
         script: Script {
             waited: BTreeSet::new(),
             calls: 0,
             pending,
+            fault_at: (fault_case && bytes.is_none()).then_some(2),
             manual: false,
             armed: None,
         },
@@ -208,6 +227,7 @@ fn run_case(bytes: Option<&[u8]>, chooser: u8, pending: bool) -> Run {
             Mode::Record
         },
         chooser,
+        fault_case,
         result: None,
         observed: vec![],
         received: vec![],
@@ -221,21 +241,28 @@ fn run_case(bytes: Option<&[u8]>, chooser: u8, pending: bool) -> Run {
     causes::task_start(&mut context).unwrap();
     let mut input: *mut Run = &mut run;
     // SAFETY: all borrowed case state is pinned for the cooperative run.
-    unsafe {
-        let result = run_root(
+    let mut execute = || unsafe {
+        run_root(
             &mut context,
             root,
             (&mut input as *mut *mut Run).cast(),
             ptr::null_mut(),
             size_of::<*mut Run>(),
             0,
-            SchedulerProvider {
-                choose: Some(lifo),
-                ..SchedulerProvider::default()
-            },
-        );
-        assert_eq!(result, 0);
-    }
+            SchedulerProvider::default(),
+        )
+    };
+    let status = if bytes.is_some() {
+        execute()
+    } else {
+        let script = if fault_case {
+            ScheduleScript::new(0).with_schedule_prefix(0, vec![2])
+        } else {
+            ScheduleScript::last()
+        };
+        Arc::new(script).install(execute)
+    };
+    assert_eq!(status, 0);
     run
 }
 fn frames(mut bytes: &[u8]) -> (Header, Vec<Frame>) {
@@ -280,11 +307,11 @@ pub(super) fn run() {
     overlapping_open();
     for chooser in [format::CHOOSER_FIFO, format::CHOOSER_COMMIT] {
         for pending in [false, true] {
-            let recorded = run_case(None, chooser, pending);
+            let recorded = run_case(None, chooser, pending, false);
             assert_eq!(recorded.result, Some(Ok(())));
             assert_eq!(recorded.received.len(), 2);
             let bytes = recorded.store.file();
-            let replayed = run_case(Some(bytes), chooser, pending);
+            let replayed = run_case(Some(bytes), chooser, pending, false);
             assert_eq!(
                 replayed.script.calls, 0,
                 "replay reached the inner provider"
@@ -309,7 +336,7 @@ pub(super) fn run() {
                     })
                     .unwrap();
                 omit(&mut changed, at);
-                let replayed = run_case(Some(&encode(&header, &changed)), chooser, pending);
+                let replayed = run_case(Some(&encode(&header, &changed)), chooser, pending, false);
                 assert!(
                     matches!(
                         replayed.result,
@@ -327,6 +354,37 @@ pub(super) fn run() {
     }
 }
 
+#[test]
+fn scripted_fault_replays_from_a_complete_tape_without_the_script() {
+    let recorded = run_case(None, format::CHOOSER_COMMIT, false, true);
+    let bytes = recorded.store.file();
+    let (header, frames) = frames(bytes);
+    assert_eq!(header.chooser, format::CHOOSER_COMMIT);
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, Frame::Choose { index: 2, .. }))
+    );
+    assert!(matches!(
+        frames.last(),
+        Some(Frame::End { ending, .. }) if *ending == Ending::returned(&0u32.to_le_bytes())
+    ));
+
+    let replayed = run_case(Some(bytes), format::CHOOSER_COMMIT, false, true);
+    assert_eq!(replayed.script.calls, 0);
+    for run in [recorded, replayed] {
+        assert_eq!(
+            run.observed,
+            [
+                (2, 0, 0, IoError { tag: 1, code: 0 }),
+                (1, 17, 0, IoError::OK)
+            ]
+        );
+        assert_eq!(run.received, [1]);
+        assert_eq!(run.result, Some(Ok(())));
+    }
+}
+
 fn overlapping_open() {
     struct Case {
         store: Store,
@@ -341,6 +399,7 @@ fn overlapping_open() {
                 waited: BTreeSet::new(),
                 calls: 0,
                 pending: false,
+                fault_at: None,
                 manual: false,
                 armed: None,
             };
@@ -426,6 +485,7 @@ fn grant_gap_vector() {
         waited: BTreeSet::new(),
         calls: 0,
         pending: false,
+        fault_at: None,
         manual: false,
         armed: None,
     };
@@ -1032,6 +1092,7 @@ fn timeline(scenario: Scenario, chooser: u8, bytes: Option<&[u8]>) -> Timeline {
             waited: BTreeSet::new(),
             calls: 0,
             pending: false,
+            fault_at: None,
             manual: true,
             armed: None,
         },
@@ -1069,17 +1130,6 @@ fn timeline(scenario: Scenario, chooser: u8, bytes: Option<&[u8]>) -> Timeline {
     } else {
         None
     };
-    unsafe extern "C" fn choose(state: *mut u8, count: usize) -> usize {
-        // SAFETY: run_root pins the writer's script.
-        if matches!(
-            unsafe { (*state.cast::<Timeline>()).scenario },
-            Scenario::Pipe { reverse: true }
-        ) {
-            count - 1
-        } else {
-            0
-        }
-    }
     unsafe extern "C" fn trace(state: *mut u8, event: Event) {
         // SAFETY: run_root pins the fixture state and calls one committer at a time.
         unsafe { (*state.cast::<Timeline>()).events.push(event) };
@@ -1090,24 +1140,27 @@ fn timeline(scenario: Scenario, chooser: u8, bytes: Option<&[u8]>) -> Timeline {
     causes::task_start(&mut context).unwrap();
     let mut input = &raw mut t;
     // SAFETY: the fixture pins each borrowed object through run_root.
-    unsafe {
-        assert_eq!(
-            run_root(
-                &mut context,
-                timeline_root,
-                (&raw mut input).cast(),
-                ptr::null_mut(),
-                size_of::<*mut Timeline>(),
-                0,
-                SchedulerProvider {
-                    state: (&raw mut t).cast(),
-                    choose: bytes.is_none().then_some(choose),
-                    event: Some(trace),
-                },
-            ),
-            0
-        );
-    }
+    let mut execute = || unsafe {
+        run_root(
+            &mut context,
+            timeline_root,
+            (&raw mut input).cast(),
+            ptr::null_mut(),
+            size_of::<*mut Timeline>(),
+            0,
+            SchedulerProvider {
+                state: (&raw mut t).cast(),
+                event: Some(trace),
+                ..SchedulerProvider::default()
+            },
+        )
+    };
+    let status = if bytes.is_none() && matches!(scenario, Scenario::Pipe { reverse: true }) {
+        Arc::new(ScheduleScript::new(0).with_schedule_prefix(0, vec![2])).install(execute)
+    } else {
+        execute()
+    };
+    assert_eq!(status, 0);
     if let Some((mut reader, writer, other)) = pipe {
         use std::io::Read;
         drop(writer);

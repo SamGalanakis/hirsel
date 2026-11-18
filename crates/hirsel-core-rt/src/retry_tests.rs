@@ -1,5 +1,7 @@
 //! The M1 ready/gate handshake: Full offers a peer turn but never cancellation.
+use crate::schedule_script::{ScheduleScript, UNTAPED};
 use crate::{Context, causes, channel::*, tasks::*};
+use std::sync::Arc;
 use std::{
     process::Stdio,
     ptr,
@@ -10,7 +12,6 @@ use std::{
 struct Trace {
     events: Vec<Event>,
     choices: Vec<(usize, usize)>,
-    replay: Option<Vec<(usize, usize)>>,
     parent_ran: bool,
     child_started: bool,
     kind: u8,
@@ -21,22 +22,6 @@ unsafe extern "C" fn record(state: *mut u8, event: Event) {
     // SAFETY: callbacks exclusively borrow pinned host instrumentation.
     unsafe {
         (*state.cast::<Trace>()).events.push(event);
-    }
-}
-unsafe extern "C" fn choose(state: *mut u8, n: usize) -> usize {
-    // SAFETY: idle scheduler owns the recorder. Prefer the last candidate so a
-    // yielding caller merely appended to its own queue cannot pass this test.
-    unsafe {
-        let trace = &mut *state.cast::<Trace>();
-        let choice = if let Some(replay) = &trace.replay {
-            let (count, choice) = replay[trace.choices.len()];
-            assert_eq!(count, n);
-            choice
-        } else {
-            n - 1
-        };
-        trace.choices.push((n, choice));
-        choice
     }
 }
 fn value<T>() -> ValueLayout {
@@ -213,16 +198,21 @@ unsafe extern "C" fn root(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
 }
 fn execute(kind: u8, replay: Option<Vec<(usize, usize)>>, recording: bool) -> Trace {
     let mut trace = Trace {
-        replay,
         kind,
         count: std::sync::atomic::AtomicU64::new(2),
         ..Trace::default()
     };
+    let mut script = ScheduleScript::last();
+    if let Some(prefix) = &replay {
+        script =
+            script.with_schedule_prefix(UNTAPED, prefix.iter().map(|&(_, index)| index).collect());
+    }
+    let script = Arc::new(script);
     let mut context = Context::new(8192);
     causes::task_start(&mut context).unwrap();
     let mut pointer = &mut trace as *mut Trace;
     // SAFETY: trace is pinned outside fiber storage through completion and replay.
-    unsafe {
+    script.install(|| unsafe {
         assert_eq!(
             run_root(
                 &mut context,
@@ -234,12 +224,13 @@ fn execute(kind: u8, replay: Option<Vec<(usize, usize)>>, recording: bool) -> Tr
                 SchedulerProvider {
                     state: pointer.cast(),
                     event: recording.then_some(record),
-                    choose: Some(choose)
+                    ..SchedulerProvider::default()
                 }
             ),
             0
         );
-    }
+    });
+    trace.choices = script.schedule_decisions(UNTAPED);
     trace
 }
 #[test]

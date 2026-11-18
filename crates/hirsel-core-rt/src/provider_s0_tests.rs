@@ -3,6 +3,7 @@
 //! and how many scheduler events have been emitted. The oracle is section 3's
 //! state table: wait, resume and abort run at the wake outside any task; issue
 //! and deliver run in the task; deliver runs once per operation.
+use crate::schedule_script::ScheduleScript;
 use crate::{
     Context, causes,
     provider::{
@@ -11,6 +12,7 @@ use crate::{
     },
     tasks::*,
 };
+use std::sync::Arc;
 use std::{
     ptr,
     sync::atomic::{AtomicU64, Ordering},
@@ -205,9 +207,6 @@ unsafe extern "C" fn count_event(state: *mut u8, event: Event) {
         r.log.push(event);
     }
 }
-unsafe extern "C" fn lifo(_: *mut u8, count: usize) -> usize {
-    count - 1
-}
 
 #[derive(Clone, Copy)]
 struct Job {
@@ -321,7 +320,7 @@ fn run(rec: &mut Rec, lifo_choice: bool, body: unsafe fn(*mut Context, *mut Rec)
     let mut input = Root { rec: state, body };
     let mut result = 0u8;
     // SAFETY: Root, Rec and the destination outlive the run.
-    let failed = unsafe {
+    let mut execute = || unsafe {
         run_root(
             &mut context,
             root,
@@ -332,9 +331,14 @@ fn run(rec: &mut Rec, lifo_choice: bool, body: unsafe fn(*mut Context, *mut Rec)
             SchedulerProvider {
                 state: state.cast(),
                 event: Some(count_event),
-                choose: if lifo_choice { Some(lifo) } else { None },
+                ..SchedulerProvider::default()
             },
         )
+    };
+    let failed = if lifo_choice {
+        Arc::new(ScheduleScript::last()).install(execute)
+    } else {
+        execute()
     };
     assert_eq!(failed, 0);
     rec.assert_contexts();

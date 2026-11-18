@@ -89,7 +89,7 @@ enum {
 typedef struct {
     void *state;
     void (*event)(void *, HirselCoreEvent);
-    size_t (*choose)(void *, size_t runnable_count);
+    size_t reserved;
 } HirselCoreSchedulerProvider;
 typedef struct { uint8_t kind; const HirselCoreProvider *provider; uint64_t handle; } HirselCoreEntryGrant;
 typedef struct { uint8_t kind; size_t index; } HirselCoreEntryRequirement;

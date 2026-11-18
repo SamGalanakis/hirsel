@@ -39,7 +39,7 @@ pub(crate) fn run<X: Copy>(body: Body, mut input: X) -> (u64, Vec<Event>) {
                 SchedulerProvider {
                     state: (&mut events as *mut Vec<Event>).cast(),
                     event: Some(event),
-                    choose: None
+                    ..SchedulerProvider::default()
                 }
             ),
             0

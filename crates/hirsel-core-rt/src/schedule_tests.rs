@@ -1,8 +1,10 @@
 //! Executed failure-model-884 families at native ABI boundaries. The scheduler
 //! records runnable choices, then replays them. The oracle is unique custody,
 //! the spec's reverse cleanup and complete causes, not runtime implementation state.
+use crate::schedule_script::{ScheduleScript, UNTAPED};
 use crate::{Context, abi::*, causes, channel::*, tasks::*};
 use std::ptr;
+use std::sync::Arc;
 #[derive(Clone, Copy, Debug)]
 struct Plan {
     mask: u8,
@@ -14,9 +16,8 @@ struct Plan {
 }
 struct Session {
     plan: Plan,
-    random: u64,
+    seed: u64,
     replay: Option<Vec<(usize, usize)>>,
-    at: usize,
     choices: Vec<(usize, usize)>,
     events: Vec<Event>,
     ids: Vec<u64>,
@@ -30,9 +31,8 @@ impl Session {
     fn new(plan: Plan, seed: u64) -> Self {
         Self {
             plan,
-            random: seed,
+            seed,
             replay: None,
-            at: 0,
             choices: vec![],
             events: vec![],
             ids: vec![],
@@ -52,26 +52,6 @@ unsafe extern "C" fn event(state: *mut u8, event: Event) {
             s.ids.push(event.object);
         }
         s.events.push(event);
-    }
-}
-unsafe extern "C" fn choose(state: *mut u8, count: usize) -> usize {
-    // SAFETY: exclusive host test recorder; no task runs while choosing.
-    unsafe {
-        let s = &mut *state.cast::<Session>();
-        let selected = if let Some(replay) = &s.replay {
-            let (previous, n) = replay[s.at];
-            assert_eq!(previous, count);
-            n
-        } else {
-            s.random = s
-                .random
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (s.random >> 32) as usize % count
-        };
-        s.at += 1;
-        s.choices.push((count, selected));
-        selected
     }
 }
 fn scalar<T>(logical: u64) -> ValueLayout {
@@ -372,9 +352,15 @@ fn execute(mut session: Session) -> Session {
     causes::task_start(&mut context).unwrap();
     let mut pointer = &mut session as *mut Session;
     let mut unit = 0u8;
+    let mut script = ScheduleScript::new(session.seed);
+    if let Some(replay) = &session.replay {
+        script =
+            script.with_schedule_prefix(UNTAPED, replay.iter().map(|&(_, index)| index).collect());
+    }
+    let script = Arc::new(script);
     // SAFETY: instrumentation is pinned outside the run; callbacks do not retain borrows.
-    unsafe {
-        let status = run_root(
+    let status = script.install(|| unsafe {
+        run_root(
             &mut context,
             root,
             (&mut pointer as *mut *mut Session).cast(),
@@ -384,9 +370,13 @@ fn execute(mut session: Session) -> Session {
             SchedulerProvider {
                 state: pointer.cast(),
                 event: Some(event),
-                choose: Some(choose),
+                ..SchedulerProvider::default()
             },
-        );
+        )
+    });
+    session.choices = script.schedule_decisions(UNTAPED);
+    // SAFETY: the completed run leaves its causes with this context.
+    unsafe {
         let chain = causes::Causes::from_raw(hirsel_core_causes_take(&mut context));
         let values = chain.iter().map(|c| (c.kind(), c.site)).collect::<Vec<_>>();
         drop(chain);
@@ -431,7 +421,7 @@ fn execute(mut session: Session) -> Session {
         session.plan
     );
     if let Some(replay) = &session.replay {
-        assert_eq!(session.at, replay.len());
+        assert_eq!(&session.choices, replay);
     }
     session
 }

@@ -32,6 +32,8 @@ pub mod process;
 pub mod provider;
 pub mod region;
 mod retention;
+#[cfg(any(test, feature = "testing"))]
+pub mod schedule_script;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
 pub mod steps;

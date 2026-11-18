@@ -14,6 +14,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -116,6 +117,12 @@ def test_module(root, file, source):
     return module
 
 
+def matches_filter(root, case, selector):
+    return (case.name.startswith(selector)
+            or case.package == 'std' and ('std.' + case.name).startswith(selector)
+            or str(case.file.relative_to(root)).startswith(selector))
+
+
 def discover(root, filters):
     contracts = []
     files = [p for package in ['core', 'std'] for p in (root / 'core' / package / 'tests').glob('*.hirsel')]
@@ -177,7 +184,7 @@ def discover(root, filters):
             first_write = None
             host_op = 0
             engine_fact = None
-            if not filters or any(case.name.startswith(f) or ('std.' + case.name).startswith(f) and case.package == 'std' or str(file.relative_to(root)).startswith(f) for f in filters):
+            if not filters or any(matches_filter(root, case, selector) for selector in filters):
                 contracts.append(case)
     if not contracts:
         raise ValueError(f'no expect: run tests match {filters!r}')
@@ -328,7 +335,10 @@ def wait_load():
 def observation(case, result):
     if case.expected.startswith('fail '):
         kind = case.expected.removeprefix('fail ').encode()
-        good = result.returncode == 101 and result.stdout == case.stdout and re.match(re.escape(kind) + rb'(?:\s|$|:|\()', result.stderr)
+        diagnostics = result.stderr[len(case.stderr):]
+        good = (result.returncode == 101 and result.stdout == case.stdout
+                and result.stderr.startswith(case.stderr)
+                and re.match(re.escape(kind) + rb'(?:\s|$|:|\()', diagnostics))
     else:
         good = result.returncode == 0 and result.stdout == case.stdout and result.stderr == case.stderr
     if good:
@@ -680,6 +690,14 @@ def main():
                typescript=args.typescript, node=args.node,
                model_runtime=args.model_runtime.resolve() if args.model_runtime else None,
                schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None)
+    ran = {(row['test'], row['file']) for row in rows if row['ran']}
+    empty = [selector for selector in args.filter
+             if not any(matches_filter(root, case, selector) and
+                        (case.name, str(case.file.relative_to(root))) in ran for case in contracts)]
+    if empty:
+        for selector in empty:
+            print(f'no test bodies ran for filter {selector!r}', file=sys.stderr)
+        return 1
     return int(any(r['applicable'] and not r['passed'] for r in rows))
 
 

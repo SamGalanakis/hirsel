@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -123,6 +124,12 @@ class Walker(unittest.TestCase):
         self.assertEqual(test_observation(fail, result([failed], 1), entry), (True, None))
         self.assertIsNotNone(test_observation(case, result([failed], 1), entry)[1])
         self.assertIsNotNone(test_observation(fail, result([dict(failed, status=None)], 1), entry)[1])
+
+        fail = Contract(case.file, 1, 'law()', 'fail Bounds', False, stderr='é'.encode())
+        annotated = dict(failed, stderr='éBounds at 3\n')
+        self.assertEqual(test_observation(fail, result([annotated], 1), entry), (True, None))
+        for stderr in ['Bounds at 3\n', 'ééBounds at 3\n', 'xBounds at 3\n', 'éOverflow at 3\n']:
+            self.assertIsNotNone(test_observation(fail, result([dict(failed, stderr=stderr)], 1), entry)[1])
 
     def test_native_walker_uses_driver_tests_for_every_law_on_both_engines(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -261,6 +268,19 @@ class Walker(unittest.TestCase):
         self.assertIn('std@1/x:2..4', cause)
         self.assertEqual(owner(cause, [{'row': 'M2', 'message': 'Dest values are not built', 'owner': '895'}]), 'M2 core-check-895')
         self.assertEqual(first_stop({'stopped': 'link: missing symbol'}), 'link: missing symbol')
+
+    def test_cli_rejects_native_only_selector_on_evaluator(self):
+        with tempfile.TemporaryDirectory() as temp:
+            report = Path(temp) / 'report.json'
+            selector = 'io:stderr_bytes_prefix'
+            result = subprocess.run([sys.executable, str(Path(__file__).with_name('std_native.py')),
+                                     '--backend', 'evaluator', '--evaluator', sys.executable,
+                                     '--filter', selector, '--report', str(report)], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn(f'no test bodies ran for filter {selector!r}', result.stdout + result.stderr)
+            rows = json.loads(report.read_text())
+            self.assertEqual([(r['test'], r['ran'], r['applicable']) for r in rows],
+                             [(selector, False, False)])
 
     def test_ordinary_evaluator_laws_and_native_only_accounting(self):
         with tempfile.TemporaryDirectory() as temp:

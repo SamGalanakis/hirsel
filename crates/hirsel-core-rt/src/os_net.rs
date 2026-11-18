@@ -11,6 +11,15 @@ use std::{
     ptr,
 };
 
+/// Installed by the native Net adapters on their pinned request. The common
+/// OS provider can forward a socket operation without linking its backend.
+pub(crate) struct Operations {
+    pub step: unsafe fn(*mut Request, u64, bool) -> Step,
+    pub abort: unsafe fn(*mut Request, u64, u8) -> Outcome,
+}
+
+pub(crate) static OPERATIONS: Operations = Operations { step, abort };
+
 fn errno() -> i32 {
     io::Error::last_os_error()
         .raw_os_error()

@@ -109,6 +109,7 @@ pub(crate) struct NetworkRequest {
     pub connecting: Option<u64>,
     pub denied: bool,
     pub direction: u8,
+    pub os: &'static crate::os_net::Operations,
 }
 /// A CLI run substitutes all Net grants on one tape. A socket carrier
 /// keeps the tape's object ordinal and the usual two direction bits.
@@ -271,6 +272,7 @@ unsafe fn address_op(
             connecting: None,
             denied: false,
             direction: 0,
+            os: &crate::os_net::OPERATIONS,
         };
         let mut request = Request {
             operation: op,
@@ -314,6 +316,7 @@ unsafe fn owned_op(
             connecting: None,
             denied: false,
             direction: (key & 3) as u8,
+            os: &crate::os_net::OPERATIONS,
         };
         let mut buffer = if operand.is_null() {
             empty_buffer()

@@ -4,17 +4,21 @@ use crate::{
     provider::*,
 };
 use hirsel_core_net::model::{Model, Operation, Reply};
+use std::sync::Arc;
 
 /// Pin this adapter and its fallback through the run, like OsProvider. Select
 /// the returned Provider for both Net and Clock, and as the run's provider for
 /// operations through owned socket handles. Other host operations use fallback.
 pub struct ModelProvider {
-    model: Model,
+    model: Arc<Model>,
     fallback: Provider,
 }
 impl ModelProvider {
     pub fn new(model: Model, fallback: Provider) -> Self {
-        Self { model, fallback }
+        Self {
+            model: Arc::new(model),
+            fallback,
+        }
     }
     pub fn provider(&mut self) -> Provider {
         Provider {
@@ -25,6 +29,14 @@ impl ModelProvider {
             abort,
             deliver,
         }
+    }
+}
+impl crate::tasks::ModelClock for Model {
+    fn now(&self) -> u64 {
+        Model::now(self)
+    }
+    fn poll(&self, deadline: Option<u64>, idle: bool) -> Vec<u64> {
+        Model::poll(self, deadline, idle)
     }
 }
 fn modeled(op: u8) -> bool {
@@ -42,7 +54,7 @@ unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, token: u64) -> 
         if !modeled(r.operation) {
             return (p.fallback.wait)(p.fallback.state, request, token);
         }
-        crate::tasks::attach_model(&p.model);
+        crate::tasks::attach_model(p.model.clone());
         if r.operation == SLEEP_UNTIL && r.buffer.len >= 8 {
             let at = r.buffer.data.cast::<u64>().read_unaligned();
             if at > p.model.now() {
@@ -74,7 +86,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
         if !modeled(r.operation) {
             return (p.fallback.issue)(p.fallback.state, request, token);
         }
-        crate::tasks::attach_model(&p.model);
+        crate::tasks::attach_model(p.model.clone());
         if matches!(r.operation, MONO_NS | WALL_MS | SLEEP_UNTIL) {
             return Step {
                 outcome: Outcome {

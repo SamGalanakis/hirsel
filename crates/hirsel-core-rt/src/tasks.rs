@@ -1002,7 +1002,7 @@ struct Scheduler {
     outside_cancels: Vec<*mut Task>,
     tapes: Tapes,
     net: *mut hirsel_core_net::Sockets,
-    model: Option<hirsel_core_net::model::Model>,
+    model: Option<Arc<dyn ModelClock>>,
     parked: WaitArms<*mut Task>,
 }
 const _: () =
@@ -1781,7 +1781,7 @@ struct Readies {
     worker: std::thread::Thread,
     peers: Mutex<Vec<std::thread::Thread>>,
     net: Mutex<Option<Arc<hirsel_core_net::Poller>>>,
-    model: Mutex<Option<hirsel_core_net::model::Model>>,
+    model: Mutex<Option<Arc<dyn ModelClock>>>,
 }
 impl Readies {
     fn new() -> Arc<Self> {
@@ -2720,18 +2720,26 @@ pub(crate) fn current_group() -> Option<crate::tape::schedule::Group> {
     // SAFETY: CURRENT pins its task, or is null outside a task.
     unsafe { task.as_ref().and_then(|t| t.group) }
 }
-pub(crate) fn attach_model(model: &hirsel_core_net::model::Model) {
+/// A model's clock and readiness drive the scheduler only after its provider
+/// attaches. Keeping these callbacks with the provider lets native-only runs
+/// link the scheduler without the deterministic network simulation.
+pub(crate) trait ModelClock: Send + Sync {
+    fn now(&self) -> u64;
+    fn poll(&self, deadline: Option<u64>, idle: bool) -> Vec<u64>;
+}
+
+pub(crate) fn attach_model(model: Arc<dyn ModelClock>) {
     let task = if CURRENT.get().is_null() {
         CALLBACK_TASK.get()
     } else {
         CURRENT.get()
     };
     if task.is_null() {
-        ALONE.with(|r| *r.0.model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model.clone()));
+        ALONE.with(|r| *r.0.model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model));
     } else {
         // SAFETY: the provider callback's task pins its run on this worker.
         unsafe {
-            (*(*task).run).model = Some(model.clone());
+            (*(*task).run).model = Some(model);
         }
     }
 }

@@ -600,6 +600,7 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                         connecting: Some(key),
                         denied: false,
                         direction: 0,
+                        os: &crate::os_net::OPERATIONS,
                     };
                     let mut r = Request {
                         operation: CONNECT,

@@ -478,7 +478,7 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
             CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR
         )
     } {
-        let step = unsafe { crate::os_net::step(request, token, true) };
+        let step = unsafe { (socket_operations(request).step)(request, token, true) };
         #[cfg(test)]
         probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
         return step;
@@ -530,12 +530,17 @@ pub(crate) mod probe {
         });
     }
 }
+/// The Net adapters pin the private extension of each socket request.
+#[inline]
+unsafe fn socket_operations(request: *const Request) -> &'static crate::os_net::Operations {
+    unsafe { (*(*request).path.cast::<crate::net::NetworkRequest>()).os }
+}
 /// Only socket operations enter I under the OS provider.
 unsafe extern "C" fn resume(_: *mut u8, request: *mut Request, token: u64) -> Step {
-    unsafe { crate::os_net::step(request, token, false) }
+    unsafe { (socket_operations(request).step)(request, token, false) }
 }
 unsafe extern "C" fn abort(_: *mut u8, request: *mut Request, token: u64, reason: u8) -> Outcome {
-    unsafe { crate::os_net::abort(request, token, reason) }
+    unsafe { (socket_operations(request).abort)(request, token, reason) }
 }
 unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: a provider operation exclusively owns the adapter during issue.

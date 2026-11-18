@@ -504,12 +504,19 @@ impl NameIndex {
                 self.modules[m.0 as usize].merge = range;
             }
         }
-        for d in self.definitions.own_iter() {
-            let m = &self.modules[d.site.module.0 as usize];
+        for definitions in self
+            .definitions
+            .own_slice()
+            .chunk_by(|a, b| a.site.module == b.site.module)
+        {
+            let m = &self.modules[definitions[0].site.module.0 as usize];
             if m.depth != 1 || m.package == package {
                 continue;
             }
-            if let Some(core) = self.core_module(m.name) {
+            let Some(core) = self.core_module(m.name) else {
+                continue;
+            };
+            for d in definitions {
                 if let Some(&old) = self.members.get(&(core, d.name)) {
                     let mut r =
                         Refusal::new("LANG-7", d.site, "extension redeclares a core member");

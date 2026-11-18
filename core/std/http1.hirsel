@@ -26,7 +26,7 @@ pub type Progress: key = Partial | Complete | Bad | TooLarge
 
 // The caller retains the growing buffer, Head and Cursor until completion.
 // No offsets or fields are rediscovered after a fragment boundary.
-type Scan: key = Leading | LeadingLf | Method | Target | Version | RequestEnd | RequestLf | FieldStart | Name | ValueStart | Value | FieldLf | EndLf
+type Scan: key = Leading | LeadingLf | Method | Target | Version | RequestEnd | RequestLf | FieldStart | Name | Value | FieldLf | EndLf
 
 pub type Cursor {
     state: Scan,
@@ -54,27 +54,6 @@ pub fn cursor() -> Cursor {
 fn finish_field(mut h: Head, mut cur: Cursor) {
     h.fields[h.count] = Header(name: Span(start: cur.start, end: cur.name_end), value: Span(start: cur.value_start, end: cur.value_end))
     h.count += 1
-    cur.state = FieldStart
-}
-
-fn scan_value(c: u8, next: u64, mut h: Head, mut cur: Cursor) {
-    if c == 13 || c == 10 {
-        if c == 13 {
-            cur.state = FieldLf
-        } else {
-            finish_field(mut h, mut cur)
-        }
-    } else if c < 32 && c != 9 || c == 127 {
-        cur.result = Bad
-    } else if c == b' ' || c == 9 {
-        if cur.state == ValueStart {
-            cur.value_start = next
-            cur.value_end = next
-        }
-    } else {
-        cur.value_end = next
-        cur.state = Value
-    }
 }
 
 fn target_byte(c: u8, mut cur: Cursor) -> bool {
@@ -126,99 +105,101 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
     }
     let limit = order.min(8192, list.len(b))
     let mut next = cur.offset
+    let mut state = cur.state
+    let mut result: Progress = Partial
     while next < limit {
         let at = next
         let c = b[at]
         next += 1
-        match cur.state {
+        match state {
             Leading => {
                 if c == 13 {
-                    cur.state = LeadingLf
+                    state = LeadingLf
                 } else if c == 10 {
                     cur.line_start = next
                 } else {
                     if !token(c) {
-                        cur.result = Bad
+                        result = Bad
                     } else {
                         cur.start = at
-                        cur.state = Method
+                        state = Method
                     }
                 }
             },
             LeadingLf => {
                 if c != 10 {
-                    cur.result = Bad
+                    result = Bad
                 } else {
                     cur.line_start = next
-                    cur.state = Leading
+                    state = Leading
                 }
             },
             Method => {
                 if c == b' ' {
                     h.method = Span(start: cur.start, end: at)
                     cur.start = next
-                    cur.state = Target
+                    state = Target
                 } else if !token(c) {
-                    cur.result = Bad
+                    result = Bad
                 }
             },
             Target => {
                 if c == b' ' && cur.utf8_left == 0 {
                     if at == cur.start {
-                        cur.result = Bad
+                        result = Bad
                     } else {
                         h.target = Span(start: cur.start, end: at)
                         cur.part = 0
-                        cur.state = Version
+                        state = Version
                     }
                 } else if !target_byte(c, mut cur) {
-                    cur.result = Bad
+                    result = Bad
                 }
             },
             Version => {
                 if cur.part < 7 {
                     if c != string.as_bytes("HTTP/1.")[cur.part] {
-                        cur.result = Bad
+                        result = Bad
                     }
                     cur.part += 1
                 } else if c == b'0' || c == b'1' {
                     h.version = c - b'0'
-                    cur.state = RequestEnd
+                    state = RequestEnd
                 } else {
-                    cur.result = Bad
+                    result = Bad
                 }
             },
             RequestEnd => {
                 if c == 13 {
-                    cur.state = RequestLf
+                    state = RequestLf
                 } else if c == 10 {
                     cur.line_end = next
-                    cur.state = FieldStart
+                    state = FieldStart
                 } else {
-                    cur.result = Bad
+                    result = Bad
                 }
             },
             RequestLf => {
                 if c == 10 {
                     cur.line_end = next
-                    cur.state = FieldStart
+                    state = FieldStart
                 } else {
-                    cur.result = Bad
+                    result = Bad
                 }
             },
             FieldStart => {
                 if c == 13 {
-                    cur.state = EndLf
+                    state = EndLf
                 } else if c == 10 {
                     h.end = next
-                    cur.result = Complete
+                    result = Complete
                 } else if h.count == 64 {
-                    cur.result = TooLarge
+                    result = TooLarge
                 } else if token(c) {
                     cur.start = at
-                    cur.state = Name
+                    state = Name
                 } else {
-                    cur.result = Bad
+                    result = Bad
                 }
             },
             Name => {
@@ -226,39 +207,78 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                     cur.name_end = at
                     cur.value_start = next
                     cur.value_end = next
-                    cur.state = ValueStart
+                    state = Value
                 } else if !token(c) {
-                    cur.result = Bad
+                    result = Bad
                 }
             },
-            ValueStart => scan_value(c, next, mut h, mut cur),
-            Value => scan_value(c, next, mut h, mut cur),
+            Value => {
+                let mut start = cur.value_start
+                let mut end = cur.value_end
+                let mut value = c
+                loop {
+                    if value == 13 || value == 10 {
+                        state = if value == 13 {
+                            FieldLf
+                        } else {
+                            FieldStart
+                        }
+                        break
+                    }
+                    if value < 32 && value != 9 || value == 127 {
+                        result = Bad
+                        break
+                    }
+                    if value == b' ' || value == 9 {
+                        // An empty span still tracks the first possible value byte.
+                        if start == end {
+                            start = next
+                            end = next
+                        }
+                    } else {
+                        end = next
+                    }
+                    if next == limit {
+                        break
+                    }
+                    value = b[next]
+                    next += 1
+                }
+                cur.value_start = start
+                cur.value_end = end
+                if state == FieldStart {
+                    finish_field(mut h, mut cur)
+                }
+            },
             FieldLf => {
                 if c == 10 {
                     finish_field(mut h, mut cur)
+                    state = FieldStart
                 } else {
-                    cur.result = Bad
+                    result = Bad
                 }
             },
             EndLf => {
                 if c == 10 {
                     h.end = next
-                    cur.result = Complete
+                    result = Complete
                 } else {
-                    cur.result = Bad
+                    result = Bad
                 }
             }
         }
-        if cur.result != Partial {
+        if result != Partial {
             break
         }
     }
     cur.examined += next - cur.offset
     cur.offset = next
-    if cur.result == Partial && next == 8192 {
-        cur.result = TooLarge
+    cur.state = state
+    if result == Partial && next == 8192 {
+        result = TooLarge
     }
-    cur.result
+    cur.result = result
+    result
 }
 
 type Stop = More | Malformed | Limit

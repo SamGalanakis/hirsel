@@ -1,6 +1,4 @@
-/* Test-only link wrapper. Records exact semantic events and runnable choices.
-   Replay checks every candidate count, choice and event in sequence.
-   HIRSEL_POLL_FIRST records the schedule that always runs the first candidate. */
+/* Test-only link wrapper. Records the semantic events of the FIFO scheduler. */
 #include "hirsel_core_rt.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,14 +12,6 @@ static void event(void *s, HirselCoreEvent e) {
         if(fscanf(trace," E %u %"SCNu64" %"SCNu64" %"SCNu64,&k,&t,&o,&v)!=4 || k!=e.kind || t!=e.task || o!=e.object || v!=e.value) abort();
     } else fprintf(trace,"E %u %"PRIu64" %"PRIu64" %"PRIu64"\n",e.kind,e.task,e.object,e.value);
 }
-static size_t choose(void *s,size_t n) {
-    (void)s;
-    size_t count,c;
-    if(replay) {
-        if(fscanf(trace," C %zu %zu",&count,&c)!=2 || count!=n || c>=n) abort();
-    } else { c=getenv("HIRSEL_POLL_FIRST") ? 0 : n-1; fprintf(trace,"C %zu %zu\n",n,c); }
-    return c;
-}
 uint8_t __real_hirsel_core_run(const HirselCoreProcessConfig*,HirselCoreEntry);
 uint8_t __wrap_hirsel_core_run(const HirselCoreProcessConfig *input,HirselCoreEntry entry) {
     const char *file=getenv("HIRSEL_POLL_TRACE");
@@ -30,7 +20,7 @@ uint8_t __wrap_hirsel_core_run(const HirselCoreProcessConfig *input,HirselCoreEn
     trace=fopen(file,replay ? "r" : "w"); if(!trace) abort();
     setvbuf(trace,NULL,_IONBF,0);
     HirselCoreProcessConfig cfg=*input;
-    cfg.scheduler=(HirselCoreSchedulerProvider){.event=event,.choose=choose};
+    cfg.scheduler=(HirselCoreSchedulerProvider){.event=event};
 #ifdef PENDING_STDOUT
     extern void pending_stdout(HirselCoreProcessConfig *);
     pending_stdout(&cfg);

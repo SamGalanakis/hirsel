@@ -2,8 +2,8 @@
 """CONC-10 event order: the evaluator against native, through the poll recorder.
 
 Each fixture in fixtures/order runs natively (cranelift) under the recorder with
-HIRSEL_POLL_FIRST, which always runs the first runnable candidate: native's default
-FIFO rule. The same program runs on the evaluator (hirsel-core-contract-eval). Their
+the default FIFO scheduler. The same program runs on the evaluator
+(hirsel-core-contract-eval). Their
 stdout and their whole CONC-10 event lists must be equal: every kind, none dropped.
 Kind numbers come from the published header.
 
@@ -181,7 +181,7 @@ def main():
                     failures.append(f'{fixture.stem}/{backend}: evaluator/build entry revisions differ')
                     continue
                 trace = folder / f'{backend}.trace'
-                env = dict(os.environ, HIRSEL_POLL_TRACE=str(trace), HIRSEL_POLL_FIRST='1')
+                env = dict(os.environ, HIRSEL_POLL_TRACE=str(trace))
                 try:
                     native = subprocess.run([str(folder / backend)], capture_output=True, timeout=30, env=env)
                 except subprocess.TimeoutExpired:

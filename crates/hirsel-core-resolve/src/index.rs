@@ -423,27 +423,21 @@ impl NameIndex {
     ) -> impl Iterator<Item = (DefinitionId, &Definition)> + '_ {
         let module_row = &self.modules[module.0 as usize];
         let merge = module_row.merge;
-        let single = (merge.start == merge.end).then_some((module, module_row));
-        single
+        let direct = if merge.start == merge.end && self.reachable_from(own, module_row.package) {
+            self.member_row(module, name, ns, constructor)
+        } else {
+            None
+        };
+        direct
             .into_iter()
-            .chain(
-                merge
-                    .slice(&self.extensions)
-                    .iter()
-                    .map(|&m| (m, &self.modules[m.0 as usize])),
-            )
-            .filter_map(move |(m, module)| {
-                let package = module.package;
+            .chain(merge.slice(&self.extensions).iter().filter_map(move |&m| {
+                let package = self.modules[m.0 as usize].package;
                 if !self.reachable_from(own, package) {
                     return None;
                 }
                 let (id, d) = self.member_row(m, name, ns, constructor)?;
-                (merge.start == merge.end
-                    || d.site.module == from
-                    || d.public
-                    || Some(package) == self.core)
-                    .then_some((id, d))
-            })
+                (d.site.module == from || d.public || Some(package) == self.core).then_some((id, d))
+            }))
     }
     pub fn configure_core(&mut self, package: PackageKey) {
         self.core = Some(package);

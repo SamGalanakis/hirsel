@@ -7,6 +7,7 @@ pub const RESOLVE_NESTING_LIMIT: u32 = 384;
 // Two MiB of generation-stamped words at most. Larger scope/name products
 // use the packed-key set, so this is a representation choice, not a tool limit.
 const LOCAL_READ_WORD_LIMIT: usize = 131_072;
+const MODULE_HEAD_COLUMN: usize = 8;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BinderKind {
     Local,
@@ -122,6 +123,7 @@ pub struct ResolutionScratch {
     loops: Vec<NodeKind>,
     seen: ReadSet,
     recorded: Vec<[u32; 10]>,
+    module_heads: Vec<Option<ModuleId>>,
     local_words: Vec<ReadWord>,
     local_stride: usize,
     local_limit: usize,
@@ -171,6 +173,7 @@ impl ResolutionScratch {
             self.local_words.fill(ReadWord::default());
         }
         self.recorded.resize(index.symbols.len(), [0; 10]);
+        self.module_heads.resize(index.symbols.len(), None);
         if self.seen.generation == 1 {
             self.recorded.fill([0; 10]);
         }
@@ -292,7 +295,7 @@ impl<'a> Resolver<'a, '_> {
         let dense = match scope {
             LookupScope::Module(module) if module == self.module => Some(mode),
             LookupScope::Prelude(_) => Some(4 + mode),
-            LookupScope::Modules(_) => Some(8),
+            LookupScope::Modules(_) => Some(MODULE_HEAD_COLUMN),
             LookupScope::Variants(_) => Some(9),
             _ => None,
         };
@@ -526,7 +529,14 @@ impl<'a> Resolver<'a, '_> {
         )
     }
     fn head_lookup(&mut self, n: NodeId, name: Symbol) -> Option<Target> {
+        // The first lookup records the dependency. Its stamp also marks the
+        // result for the rest of the item, whose package and index are fixed.
+        let symbol = name.0 as usize;
+        if self.scratch.recorded[symbol][MODULE_HEAD_COLUMN] == self.scratch.seen.generation {
+            return self.scratch.module_heads[symbol].map(Target::Module);
+        }
         let m = self.index.module_head_from(self.package, name);
+        self.scratch.module_heads[symbol] = m;
         self.record(
             n,
             Namespace::Value,

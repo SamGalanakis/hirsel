@@ -11222,15 +11222,32 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     Ok(true)
 }
 
+fn journal_crash_retry(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Exit] waits {
+    let mut options = journal_crash_options()
+    options.create = false
+    match open(tasks, d, c, r, options) {
+        Error(Io(Other(125))) => (),
+        _ => return Error(Exit(status: 35))
+    }
+    // Both attempts share a provider and process. The failed open must
+    // release the lock before the exact predecessor can be read again.
+    match journal_crash_read(d, c, r, tasks, 2, "orphan-end") {
+        Ok(true) => Ok(()),
+        _ => Error(Exit(status: 36))
+    }
+}
+
 // Test-only entry: the existing W2 adapter runs init, a cut/failure, then an
 // independent prefix oracle whose minimum comes only from returned durable.
 pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0))
     let scenario = option.unwrap(args.get(argv, 1))
+    let recovery_sync = scenario == "orphan-end-recovery-sync"
+    let orphan_end = recovery_sync || scenario == "orphan-end"
     if phase == "init" {
         let mut db = result.unwrap(open(tasks, d, c, r, journal_crash_options()))
         result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
-        if scenario == "orphan-end" {
+        if orphan_end {
             let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
             let written = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, 0, 10) }))
             match take written {
@@ -11240,7 +11257,9 @@ pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args,
         }
         result.unwrap(close(take db))
         Ok(())
-    } else if scenario == "orphan-end" {
+    } else if recovery_sync && phase == "reopen" {
+        journal_crash_retry(d, c, r, tasks)
+    } else if orphan_end {
         if phase == "read" {
             // Both crashes happened during successor creation. The predecessor's
             // acknowledged value survives, and the incomplete successor is absent.

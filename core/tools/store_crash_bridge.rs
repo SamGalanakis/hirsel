@@ -7,6 +7,8 @@ use std::{collections::BTreeMap, ffi::c_void, slice};
 mod test_provider;
 use test_provider::crash::{FileSystem, Op};
 
+const ORPHAN_END_SYNC_FAILURE: u8 = 6;
+
 #[repr(C)]
 #[derive(Default)]
 pub struct Error {
@@ -46,6 +48,7 @@ struct Bridge {
     split_at: usize,
     random: u8,
     orphan_end: bool,
+    orphan_end_path: Option<String>,
 }
 impl Bridge {
     fn exists(&self, name: &str) -> bool {
@@ -188,7 +191,11 @@ impl Bridge {
                     assert_eq!(self.failed_syncs, 1, "store retried a failed write");
                     return Self::error(5);
                 }
-                if self.orphan_end && self.phase == 3 && is_segment(&name) {
+                if self.orphan_end
+                    && self.phase == 3
+                    && self.sync_failure != ORPHAN_END_SYNC_FAILURE
+                    && is_segment(&name)
+                {
                     // The second crash keeps the reused segment name and
                     // only the beginning of its new header.
                     self.fs.issue(&Op::Write(&name, &data[..24]));
@@ -240,6 +247,13 @@ impl Bridge {
                     return Self::error(1);
                 }
                 if self.apply(Op::Remove(&name)) {
+                    if self.phase == 3
+                        && self.sync_failure == ORPHAN_END_SYNC_FAILURE
+                        && self.failed_syncs == 0
+                        && self.orphan_end_path.as_deref() == Some(name.as_str())
+                    {
+                        self.armed = true;
+                    }
                     Outcome::default()
                 } else {
                     Self::error(5)
@@ -318,6 +332,9 @@ impl Bridge {
                         // Both inode syncs have finished. Only the END name
                         // survives the first crash, before the directory sync.
                         self.fs.persist_name(&name);
+                        if self.sync_failure == ORPHAN_END_SYNC_FAILURE {
+                            self.orphan_end_path = Some(name);
+                        }
                         self.crashed = true;
                     }
                     Outcome::default()
@@ -326,6 +343,11 @@ impl Bridge {
                 }
             }
             17 => {
+                if self.phase == 3 && self.sync_failure == ORPHAN_END_SYNC_FAILURE && self.armed {
+                    self.armed = false;
+                    self.failed_syncs += 1;
+                    return Self::error(5);
+                }
                 if self.apply(Op::SyncDir) {
                     Outcome::default()
                 } else {
@@ -371,6 +393,7 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         split_at: 0,
         random: 1,
         orphan_end: false,
+        orphan_end_path: None,
     }))
     .cast()
 }
@@ -482,10 +505,11 @@ pub unsafe extern "C" fn store_crash_floor(p: *mut c_void) -> u64 {
 }
 
 /// # Safety
-/// `p` is live and quiescent, and `kind` is 0 (off), 1 (segment), 2 (END), 3 (pack), or 4 (segment write).
+/// `p` is live and quiescent. `kind` is 0 (off), 1 (segment), 2 (END),
+/// 3 (pack), 4 (segment write), 5 (byte split), or 6 (orphan END recovery).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn store_crash_sync_failure(p: *mut c_void, kind: u8) {
-    assert!(kind <= 5);
+    assert!(kind <= ORPHAN_END_SYNC_FAILURE);
     // SAFETY: the C wrapper configures the bridge before starting a run.
     unsafe { (*p.cast::<Bridge>()).sync_failure = kind };
 }

@@ -770,11 +770,11 @@ fn socket_deadline_final_receive_records_its_success() {
 /// The old format would interpret a socket's outcome as a scalar followed
 /// by another frame. Refuse the old format even when its bytes pass the checksum.
 #[test]
-fn a_format_2_tape_is_corrupt() {
+fn a_format_2_tape_is_refused_as_unsupported() {
     let mut older = MODEL_F2;
     assert!(matches!(
         Blocks::open(|buf| older.read(buf)),
-        Err(ReadError::Format(Stop::Corrupt))
+        Err(ReadError::Format(Stop::UnsupportedFormat(2)))
     ));
     let mut current = MODEL;
     assert!(Blocks::open(|buf| current.read(buf)).is_ok());

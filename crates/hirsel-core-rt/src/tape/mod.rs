@@ -66,6 +66,7 @@ pub enum Fault {
     Truncated(u64),
     Damaged(u64),
     Corrupt,
+    UnsupportedFormat(u16),
     /// The sink's write failed (S1 has no barriers; S3 poisons instead).
     Io(IoError),
     /// The tape was ended or dropped (section 8).
@@ -82,6 +83,7 @@ impl Fault {
             Stop::Truncated => Fault::Truncated(at),
             Stop::Damaged(k) => Fault::Damaged(k),
             Stop::Corrupt => Fault::Corrupt,
+            Stop::UnsupportedFormat(found) => Fault::UnsupportedFormat(found),
         }
     }
 }
@@ -153,6 +155,7 @@ impl std::fmt::Display for Fault {
             Fault::Truncated(at) => write!(f, "truncated at {at}"),
             Fault::Damaged(k) => write!(f, "block {k} damaged"),
             Fault::Corrupt => f.write_str("corrupt"),
+            Fault::UnsupportedFormat(found) => Stop::UnsupportedFormat(*found).fmt(f),
             Fault::Io(e) => write!(f, "tape write failed ({}, {})", e.tag, e.code),
             Fault::Ended => f.write_str("ended"),
         }

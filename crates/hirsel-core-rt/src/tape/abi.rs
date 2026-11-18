@@ -29,8 +29,8 @@ fn word(tag: u8, sub: u8, value: u64) -> u64 {
 fn io(e: IoError) -> u64 {
     word(5, e.tag, u64::from(e.code))
 }
-/// End's word for a fault. `Ended` cannot reach `tape.end`, whose Tape is the
-/// caller's own.
+/// End's word for a fault. `UnsupportedFormat` is an open-time refusal
+/// and `Ended` cannot reach `tape.end`, whose Tape is the caller's own.
 fn fault_word(f: Fault) -> u64 {
     match f {
         Fault::Diverged(d) => {
@@ -47,7 +47,7 @@ fn fault_word(f: Fault) -> u64 {
         }
         Fault::Truncated(at) => word(2, 0, at),
         Fault::Damaged(k) => word(3, 0, k),
-        Fault::Corrupt | Fault::Ended => word(4, 0, 0),
+        Fault::Corrupt | Fault::Ended | Fault::UnsupportedFormat(_) => word(4, 0, 0),
         Fault::Io(e) => io(e),
     }
 }

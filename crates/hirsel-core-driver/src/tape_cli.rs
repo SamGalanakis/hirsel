@@ -12,7 +12,9 @@ fn damaged(error: impl std::fmt::Debug) -> io::Error {
 fn block_error(error: ReadError<io::Error>) -> io::Error {
     match error {
         ReadError::Source(e) => e,
-        ReadError::Format(stop) => damaged(stop),
+        ReadError::Format(stop) => {
+            io::Error::new(io::ErrorKind::InvalidData, format!("tape: {stop}"))
+        }
     }
 }
 

@@ -276,6 +276,7 @@ unsafe extern "C" fn invoke(
         );
         let (tape, startup) = match opened {
             Ok(t) => t,
+            Err(OpenError::Unreadable(f @ Fault::UnsupportedFormat(_))) => return stopped(run, f),
             Err(e) => return stopped(run, format_args!("{e:?}")),
         };
         *run.launch = if run.mode == 0 {

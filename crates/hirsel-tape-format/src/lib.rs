@@ -322,18 +322,19 @@ impl Header {
         }
         Ok(out)
     }
-    pub fn decode(payload: &[u8]) -> Result<Self, Corrupt> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Stop> {
         if payload.len() > MAX_LEN {
-            return Err(Corrupt);
+            return Err(Stop::Corrupt);
         }
         let mut c = Cursor::new(payload);
-        if u16::from_le_bytes(c.fixed()?) != FORMAT {
-            return Err(Corrupt);
+        let found = u16::from_le_bytes(c.fixed()?);
+        if found != FORMAT {
+            return Err(Stop::UnsupportedFormat(found));
         }
         let kind = c.u8()?;
         let mode = c.u8()?;
         if !matches!(kind, KIND_RUN | KIND_CALL) || !matches!(mode, MODE_RECORD | MODE_DURABLE) {
-            return Err(Corrupt);
+            return Err(Stop::Corrupt);
         }
         let tape_id = c.fixed()?;
         let identity = c.bytes()?;
@@ -343,12 +344,12 @@ impl Header {
         let bound = u64::from_le_bytes(c.fixed()?);
         let chooser = c.u8()?;
         if !matches!(chooser, CHOOSER_FIFO | CHOOSER_COMMIT) {
-            return Err(Corrupt);
+            return Err(Stop::Corrupt);
         }
         let arg = c.bytes()?;
         let grants = c.bytes()?;
         if (kind == KIND_CALL && !grants.is_empty()) || !c.done() {
-            return Err(Corrupt);
+            return Err(Stop::Corrupt);
         }
         let net_rules = read_net_rules(grants)?;
         Ok(Self {
@@ -395,6 +396,19 @@ pub enum Stop {
     Damaged(u64),
     /// A validated block whose bytes break the grammar.
     Corrupt,
+    /// The checked header names a format this reader does not support.
+    UnsupportedFormat(u16),
+}
+impl std::fmt::Display for Stop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedFormat(found) => write!(
+                f,
+                "unsupported tape format {found} (supported format {FORMAT}). Re-record the tape."
+            ),
+            _ => write!(f, "{self:?}"),
+        }
+    }
 }
 impl From<Corrupt> for Stop {
     fn from(_: Corrupt) -> Self {
@@ -439,7 +453,7 @@ impl Blocks {
         if bytes[0] != 0 {
             return Err(Stop::Damaged(0).into());
         }
-        let header = Header::decode(payload).map_err(Stop::from)?;
+        let header = Header::decode(payload)?;
         Ok((
             Self {
                 bytes,

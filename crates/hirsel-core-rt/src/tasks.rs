@@ -2333,8 +2333,14 @@ pub(crate) fn before_arc_commit() -> crate::sequencer::Guard {
 }
 
 /// Only a provider entry can reach a taped WAIT without first committing.
+/// Inline: a task that is not replaying pays one field read for the boundary.
+#[inline(always)]
 pub(crate) fn before_provider_entry() -> crate::sequencer::Guard {
-    replay_boundary(true);
+    let task = CURRENT.get();
+    // SAFETY: CURRENT pins this task.
+    if !task.is_null() && unsafe { (*task).replay } {
+        replay_boundary(true);
+    }
     crate::sequencer::enter()
 }
 
@@ -2366,6 +2372,7 @@ fn tape_boundary(group: Group, ending: bool) {
     }
 }
 
+#[inline(never)]
 fn replay_boundary(provider_entry: bool) {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins this task. No scheduler reference is held across a switch.

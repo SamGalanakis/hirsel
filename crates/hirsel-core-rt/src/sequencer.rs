@@ -28,6 +28,55 @@ const COHORTS: usize = 8;
 pub(crate) struct Sequencer {
     global: Mcs,
     cohorts: [Cohort; COHORTS],
+    lobby: Lobby,
+}
+
+/// Requesters beyond this many queue in the lobby, parked, instead of
+/// spinning in the token queue (capping active spinners: Dice's Malthusian
+/// locks, CNA). A token queue longer than this only adds spinning threads
+/// that preempt the holder; it cannot raise the serial commit rate.
+const ACTIVE: u32 = 10;
+
+#[repr(align(64))]
+#[derive(Default)]
+struct Lobby {
+    /// Requesters admitted to the token queue, the holder included.
+    active: AtomicU32,
+    /// Bumped on each departure; parked requesters wait on it.
+    turn: AtomicU32,
+    parked: AtomicU32,
+}
+
+impl Lobby {
+    fn enter(&self) {
+        loop {
+            let active = self.active.load(Ordering::Relaxed);
+            if active < ACTIVE {
+                if self
+                    .active
+                    .compare_exchange_weak(active, active + 1, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return;
+                }
+                continue;
+            }
+            let turn = self.turn.load(Ordering::Acquire);
+            self.parked.fetch_add(1, Ordering::SeqCst);
+            if self.active.load(Ordering::SeqCst) >= ACTIVE {
+                futex_wait(&self.turn, turn);
+            }
+            self.parked.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    fn leave(&self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        if self.parked.load(Ordering::SeqCst) != 0 {
+            self.turn.fetch_add(1, Ordering::Release);
+            futex_wake(&self.turn);
+        }
+    }
 }
 
 #[repr(align(64))]
@@ -49,7 +98,8 @@ struct Mcs {
 #[derive(Default)]
 struct Node {
     next: AtomicPtr<Node>,
-    waiting: AtomicBool,
+    /// GRANTED, SPINNING or PARKED; the waiter parks on this word.
+    waiting: AtomicU32,
     /// The predecessor passed the global token with the local one.
     inherited: AtomicBool,
     /// A delegable request, published before the node is enqueued.
@@ -71,15 +121,26 @@ impl Mcs {
         // pinned until the successor publishes its link.
         unsafe {
             (*node).next.store(ptr::null_mut(), Ordering::Relaxed);
-            (*node).waiting.store(true, Ordering::Relaxed);
+            (*node).waiting.store(SPINNING, Ordering::Relaxed);
             (*node).inherited.store(false, Ordering::Relaxed);
             (*node).served.store(false, Ordering::Relaxed);
             let predecessor = self.tail.swap(node, Ordering::AcqRel);
             if !predecessor.is_null() {
                 (*predecessor).next.store(node, Ordering::Release);
                 let mut spins = 0u32;
-                while (*node).waiting.load(Ordering::Acquire) {
-                    backoff(&mut spins);
+                while (*node).waiting.load(Ordering::Acquire) != GRANTED {
+                    if spins < WAIT_SPINS {
+                        spins += 1;
+                        std::hint::spin_loop();
+                    } else if (*node)
+                        .waiting
+                        .compare_exchange(SPINNING, PARKED, Ordering::Acquire, Ordering::Acquire)
+                        .is_ok()
+                        || (*node).waiting.load(Ordering::Acquire) == PARKED
+                    {
+                        futex_wait(&(*node).waiting, PARKED);
+                        spins = 0;
+                    }
                 }
             }
             !predecessor.is_null()
@@ -128,7 +189,7 @@ impl Mcs {
                     .store(crate::os::monotonic_ns(), Ordering::Relaxed);
             }
             (*next).inherited.store(inherited, Ordering::Relaxed);
-            (*next).waiting.store(false, Ordering::Release);
+            grant(next);
         }
     }
 }
@@ -209,7 +270,7 @@ impl Sequencer {
                     (*node).next.store(after, Ordering::Release);
                 }
                 (*next).served.store(true, Ordering::Relaxed);
-                (*next).waiting.store(false, Ordering::Release);
+                grant(next);
                 served += 1;
             }
         }
@@ -276,9 +337,65 @@ fn current_cohort() -> usize {
 /// Keepable commits one holder may run without releasing.
 const KEPT_RUN: u32 = 64;
 
+/// This worker's cohort as of its last re-read, or the current CPU's.
+pub(crate) fn cohort() -> usize {
+    // SAFETY: install pins the current worker on this thread.
+    match unsafe { OWNER.get().as_ref() } {
+        Some(owner) if owner.recheck.get() != 0 => owner.cohort.get(),
+        _ => current_cohort(),
+    }
+}
+
 /// Outermost acquisitions between re-reads of the worker's CPU. A worker
 /// rarely migrates, and a stale cohort only costs locality.
 const COHORT_RECHECK: u32 = 64;
+
+const GRANTED: u32 = 0;
+const SPINNING: u32 = 1;
+const PARKED: u32 = 2;
+/// Spins before a queued waiter parks. A spinning waiter that the host
+/// preempts, or that shares a core with the holder, stalls every waiter
+/// behind it once it is granted; past about one queue's worth of commits a
+/// parked waiter costs one futex wake instead (spin-then-park, as in
+/// parking_lot and the lock-cohorting papers' blocking variants).
+const WAIT_SPINS: u32 = 1 << 13;
+
+/// Hand the token to a queued node, waking it if it parked.
+/// # Safety
+/// Node is a linked waiter that has not been granted.
+unsafe fn grant(node: *mut Node) {
+    // SAFETY: the waiter pins its node until it observes GRANTED.
+    unsafe {
+        if (*node).waiting.swap(GRANTED, Ordering::Release) == PARKED {
+            futex_wake(&(*node).waiting);
+        }
+    }
+}
+
+fn futex_wait(word: &AtomicU32, expected: u32) {
+    // SAFETY: FUTEX_WAIT reads the pinned word and returns at once if it changed.
+    unsafe {
+        libc::syscall(
+            libc::SYS_futex,
+            word.as_ptr(),
+            libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
+            expected,
+            ptr::null::<libc::timespec>(),
+        );
+    }
+}
+
+fn futex_wake(word: &AtomicU32) {
+    // SAFETY: waking a pinned word has no other effect.
+    unsafe {
+        libc::syscall(
+            libc::SYS_futex,
+            word.as_ptr(),
+            libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+            1,
+        );
+    }
+}
 
 /// Spin briefly, then yield the CPU: a waiter that shares its CPU with the
 /// holder or a preempted enqueuer would otherwise spin out its whole time
@@ -350,10 +467,16 @@ impl Owner {
                 self.cohort.get()
             }
         };
+        // SAFETY: the sequencer outlives its owners.
+        let lobby = unsafe { &(*self.sequencer).lobby };
+        lobby.enter();
         // SAFETY: the pinned worker enqueues only its own idle node.
         let _queued =
             match unsafe { (*self.sequencer).acquire(&raw const self.node as *mut Node, cohort) } {
-                Acquired::Served => return false,
+                Acquired::Served => {
+                    lobby.leave();
+                    return false;
+                }
                 Acquired::Free => None,
                 Acquired::Queued(stamp) => Some(stamp),
             };
@@ -431,6 +554,7 @@ impl Owner {
                 self.cohort.get(),
                 measured,
             );
+            (*self.sequencer).lobby.leave();
         }
     }
 

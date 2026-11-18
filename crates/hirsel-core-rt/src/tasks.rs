@@ -433,6 +433,8 @@ struct WorkerQueue {
     lifo: Option<TaskPtr>,
     /// A thief passed over the current LIFO task once.
     lifo_seen: bool,
+    /// A thief in another L3 cohort passed this queue over once.
+    remote_seen: bool,
     lifo_turns: u8,
     local: VecDeque<TaskPtr>,
 }
@@ -444,6 +446,7 @@ impl WorkerQueue {
             deferred: VecDeque::new(),
             lifo: None,
             lifo_seen: false,
+            remote_seen: false,
             lifo_turns: 0,
             local: VecDeque::with_capacity(LOCAL_QUEUE),
         }
@@ -476,6 +479,9 @@ struct Pool {
     threads: Vec<OnceLock<std::thread::Thread>>,
     sleepers: Mutex<Vec<usize>>,
     sleeping: AtomicUsize,
+    /// Each worker's last observed L3 cohort.
+    cohorts: Vec<AtomicUsize>,
+
     spare: crate::fiber::Spare,
     readies: Arc<Readies>,
     funding: crate::limit::CacheDomain,
@@ -508,6 +514,8 @@ impl Pool {
             threads: (0..workers).map(|_| OnceLock::new()).collect(),
             sleepers: Mutex::default(),
             sleeping: AtomicUsize::new(0),
+            cohorts: (0..workers).map(|_| AtomicUsize::new(0)).collect(),
+
             spare: crate::fiber::Spare::default(),
             readies,
             funding,
@@ -551,12 +559,22 @@ impl Pool {
 
     /// Wake one parked worker for newly stealable work, as Tokio's
     /// `notify_parked` does. The fence pairs with `sleep`'s.
-    fn notify_one(&self) {
+    fn notify_one(&self, source: usize) {
         std::sync::atomic::fence(Ordering::SeqCst);
         if self.sleeping.load(Ordering::SeqCst) == 0 {
             return;
         }
-        let sleeper = self.sleepers.lock().unwrap().pop();
+        // Prefer a sleeper in the publisher's cohort, so the work and the
+        // commits it makes stay in one L3.
+        let cohort = self.cohorts[source].load(Ordering::Relaxed);
+        let sleeper = {
+            let mut sleepers = self.sleepers.lock().unwrap();
+            let at = sleepers
+                .iter()
+                .rposition(|&i| self.cohorts[i].load(Ordering::Relaxed) == cohort)
+                .or_else(|| sleepers.len().checked_sub(1));
+            at.map(|at| sleepers.swap_remove(at))
+        };
         if let Some(index) = sleeper {
             self.sleeping.fetch_sub(1, Ordering::SeqCst);
             if let Some(thread) = self.threads[index].get() {
@@ -568,6 +586,7 @@ impl Pool {
     /// Register before the last look at stealable work, so a publisher that
     /// misses the work's consumer finds it here instead.
     fn sleep(&self, index: usize) {
+        self.cohorts[index].store(crate::sequencer::cohort(), Ordering::Relaxed);
         let mut sleepers = self.sleepers.lock().unwrap();
         if !sleepers.contains(&index) {
             sleepers.push(index);
@@ -631,7 +650,7 @@ impl Pool {
                     queue.local.push_back(previous);
                 }
                 drop(queue);
-                self.notify_one();
+                self.notify_one(source);
             }
         }
         self.readies.wake_poller();
@@ -669,11 +688,25 @@ impl Pool {
         if let Some(task) = self.injector.lock().unwrap().pop_front() {
             return Some(task);
         }
+        let cohort = crate::sequencer::cohort();
+        self.cohorts[index].store(cohort, Ordering::Relaxed);
         for offset in 1..self.queues.len() {
             let other = (index + offset) % self.queues.len();
             let Ok(mut victim) = self.queues[other].try_lock() else {
                 continue;
             };
+            // Like hierarchical work stealing, a thief in another L3 takes
+            // work only after passing it over once, so a same-L3 thief wins.
+            if self.cohorts[other].load(Ordering::Relaxed) != cohort {
+                if victim.local.is_empty() && victim.lifo.is_none() {
+                    victim.remote_seen = false;
+                    continue;
+                }
+                if !std::mem::replace(&mut victim.remote_seen, true) {
+                    continue;
+                }
+                victim.remote_seen = false;
+            }
             if let Some(first) = victim.local.pop_front() {
                 let count = victim.local.len() / 2;
                 let batch: Vec<_> = victim.local.drain(..count).collect();
@@ -717,10 +750,10 @@ struct FlowJob {
 /// still owns its unit until every successor has taken one.
 pub(crate) fn enqueue_flow(flow: Arc<dyn FlowWork>, stage: usize) {
     // SAFETY: the owner or a stage is running on a scoped pool worker.
-    let pool = unsafe { &*(*WORKER.get()).pool };
+    let (pool, source) = unsafe { (&*(*WORKER.get()).pool, (*WORKER.get()).index) };
     pool.units.fetch_add(1, Ordering::AcqRel);
     pool.flow.lock().unwrap().push_back(FlowJob { flow, stage });
-    pool.notify_one();
+    pool.notify_one(source);
     pool.readies.wake_poller();
 }
 

@@ -54,6 +54,9 @@ def main():
             "--crate-type=rlib", "--target", target, "--sysroot", sysroot,
             f"--remap-path-prefix={library}=/rustc/{commit}/library",
             "-Zforce-unstable-if-unmarked", "-Copt-level=3", "-Ccodegen-units=1",
+            # The shipping runtime aborts, while the raw panic formatter and
+            # profilers still need the DWARF call-frame information.
+            "-Cpanic=abort", "-Cforce-unwind-tables=yes",
             "-Cembed-bitcode=yes", "-Aunfulfilled-lint-expectations",
             "--cfg", "backtrace_in_libstd", "--cfg", 'feature="backtrace"',
             "--cfg", 'feature="backtrace-trace-only"', "--cfg", 'feature="panic-unwind"',

@@ -1,11 +1,15 @@
 //! Fixed-slot pages with one payer and one owner per page. Like mimalloc's
 //! page queues, a class keeps only pages that can supply a block. The task
-//! owns the queue even if it resumes on a different worker.
+//! owns the queue even if it resumes on a different worker. As mimalloc
+//! retires a queue's last page lazily, a queue keeps at most one empty page,
+//! at its head, with its free list intact: a block that is allocated and
+//! freed alone reuses its slot without resetting the page.
 use crate::{abi_layout::own_prefix, limit::Payer};
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::ptr::{self, NonNull};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 const SLAB: usize = 64 * 1024;
 const HEADER_BACK: usize = 4096;
@@ -26,6 +30,31 @@ const fn size_bin(stride: usize) -> u8 {
     (8 + (group as usize - 6) * 4 + lane) as u8
 }
 
+// Like Go's size_to_class8 and mimalloc's direct pages, word-aligned blocks
+// up to DIRECT_WORDS words take their stride and bin from a table.
+const DIRECT_WORDS: usize = 128;
+const DIRECT: [(u16, u8); DIRECT_WORDS + 1] = {
+    let mut table = [(0, 0); DIRECT_WORDS + 1];
+    let mut words = 1;
+    while words <= DIRECT_WORDS {
+        let bytes = words * 8;
+        let unit = if bytes <= 64 {
+            64
+        } else {
+            bytes.next_power_of_two()
+        } / 8;
+        let stride = bytes.next_multiple_of(unit);
+        table[words] = (stride as u16, size_bin(stride));
+        words += 1;
+    }
+    table
+};
+
+// Direct classes are below the smallest native page and fit a slab.
+const _: () = assert!(
+    DIRECT[DIRECT_WORDS].0 as usize <= HEADER_BACK && (DIRECT[DIRECT_WORDS].1 as usize) < SLAB_BINS
+);
+
 #[derive(Clone, Copy)]
 struct Class {
     stride: usize,
@@ -36,19 +65,19 @@ struct Class {
 }
 impl Class {
     fn for_block(bytes: usize, align: usize, kind: u8, growable: bool) -> Self {
+        if let Some(class) = Self::direct(bytes, align, kind, growable) {
+            return class;
+        }
+        // Alignments and bins are powers of two, so rounding is a mask.
         let align = align.max(8);
-        let offset = own_prefix(kind)
-            .checked_next_multiple_of(align)
-            .unwrap_or_else(host_memory);
+        let offset = round_up(own_prefix(kind), align).unwrap_or_else(host_memory);
         let bytes = bytes.max(1).checked_add(offset).unwrap_or_else(host_memory);
         let bin = bytes
             .max(64)
             .checked_next_power_of_two()
             .unwrap_or_else(host_memory)
             / 8;
-        let stride = bytes
-            .checked_next_multiple_of(align.max(bin))
-            .unwrap_or_else(host_memory);
+        let stride = round_up(bytes, align.max(bin)).unwrap_or_else(host_memory);
         Self {
             stride,
             align,
@@ -57,6 +86,24 @@ impl Class {
             growable,
         }
     }
+    /// A word-aligned class from the table. Every ownership prefix is a
+    /// whole number of words.
+    #[inline(always)]
+    fn direct(bytes: usize, align: usize, kind: u8, growable: bool) -> Option<Self> {
+        if align > 8 || bytes > DIRECT_WORDS * 8 {
+            return None;
+        }
+        let words = (bytes.max(1) + own_prefix(kind)).div_ceil(8);
+        let &(stride, bin) = DIRECT.get(words)?;
+        Some(Self {
+            stride: usize::from(stride),
+            align: 8,
+            kind,
+            bin,
+            growable,
+        })
+    }
+
     fn offset(self) -> usize {
         own_prefix(self.kind).next_multiple_of(self.align)
     }
@@ -64,6 +111,11 @@ impl Class {
         // A dedicated mapping would cost a header page for a sub-page payload.
         (self.bin as usize) < SLAB_BINS && (!self.growable || self.stride <= page_bytes())
     }
+}
+
+#[inline(always)]
+fn round_up(bytes: usize, unit: usize) -> Option<usize> {
+    Some(bytes.checked_add(unit - 1)? & !(unit - 1))
 }
 
 #[derive(Clone, Copy)]
@@ -179,8 +231,39 @@ impl Page {
     }
 }
 
+/// The owning task allocates and frees here; a transferred block's last
+/// owner frees from another worker. That rare contention spins on a plain
+/// flag, as mimalloc's and snmalloc's internal locks do.
 #[derive(Default)]
-pub(crate) struct Heap(Mutex<State>);
+pub(crate) struct Heap {
+    locked: AtomicBool,
+    state: std::cell::UnsafeCell<State>,
+}
+
+// SAFETY: State is reached only through Locked, which holds the flag.
+unsafe impl Sync for Heap {}
+
+struct Locked<'a>(&'a Heap);
+
+impl std::ops::Deref for Locked<'_> {
+    type Target = State;
+    fn deref(&self) -> &State {
+        // SAFETY: this guard holds the heap's flag.
+        unsafe { &*self.0.state.get() }
+    }
+}
+impl std::ops::DerefMut for Locked<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        // SAFETY: this guard holds the heap's flag.
+        unsafe { &mut *self.0.state.get() }
+    }
+}
+impl Drop for Locked<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.0.locked.store(false, Ordering::Release);
+    }
+}
 
 struct State {
     closed: bool,
@@ -209,11 +292,26 @@ impl State {
         &mut self.ready[usize::from(class.kind)][usize::from(class.bin)]
     }
 
-    fn available(&mut self, key: Key) -> Option<PagePointer> {
-        let mut current = *self.ready_head(key.class);
+    /// The head's empty page, if the queue keeps one.
+    fn spare(&mut self, class: Class) -> Option<PagePointer> {
+        // SAFETY: this heap owns the ready list and its pages' slots.
+        self.ready_head(class)
+            .filter(|&page| unsafe { (*page.as_ref().slots.get()).live == 0 })
+    }
+
+    fn available(&mut self, payer: Payer, key: Key) -> Option<PagePointer> {
+        let head = *self.ready_head(key.class);
+        let spare = self.spare(key.class);
+        // Prefer partial pages, so the empty head is the last resort.
+        let mut current = if spare.is_some() {
+            // SAFETY: this heap owns the ready list.
+            unsafe { (*head?.as_ref().slots.get()).next }
+        } else {
+            head
+        };
         while let Some(page) = current {
-            // SAFETY: this heap owns the ready list. Only pages with a live
-            // slot are linked here, and their payer and alignment stay fixed.
+            // SAFETY: this heap owns the ready list. A linked page with a live
+            // slot keeps its payer and alignment fixed.
             unsafe {
                 let existing = Page::key(page);
                 if existing.payer == key.payer && existing.class.align == key.class.align {
@@ -222,15 +320,36 @@ impl State {
                 current = (*page.as_ref().slots.get()).next;
             }
         }
-        None
+        let page = spare?;
+        // SAFETY: the empty head has no live slot, so this heap may rebind it.
+        // The same bin and alignment keep its stride and free slots valid.
+        unsafe {
+            let existing = Page::key(page);
+            if existing.class.align != key.class.align {
+                let slots = &*page.as_ref().slots.get();
+                let links = (slots.previous, slots.next);
+                Page::reuse(page, payer, key);
+                let slots = &mut *page.as_ref().slots.get();
+                (slots.previous, slots.next) = links;
+            } else if existing.payer != key.payer {
+                page.as_ref().payer.get().write(payer);
+                page.as_ref().key.get().write(key);
+            }
+        }
+        Some(page)
     }
 
     unsafe fn link(&mut self, page: PagePointer, class: Class) {
-        // SAFETY: exclusively held heap; this page was absent from the class queue.
+        // SAFETY: exclusively held heap; this page was absent from the class
+        // queue. A partial page goes after an empty head, which stays first.
         unsafe {
             let slots = &mut *page.as_ref().slots.get();
-            slots.previous = None;
-            slots.next = self.ready_head(class).replace(page);
+            let after = self.spare(class).filter(|_| slots.live != 0);
+            slots.previous = after;
+            slots.next = match after {
+                Some(head) => (*head.as_ref().slots.get()).next.replace(page),
+                None => self.ready_head(class).replace(page),
+            };
             if let Some(next) = slots.next {
                 (*next.as_ref().slots.get()).previous = Some(page);
             }
@@ -310,6 +429,46 @@ impl State {
 }
 
 impl Heap {
+    #[inline(always)]
+    fn try_lock(&self) -> Option<Locked<'_>> {
+        self.locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+            .then_some(Locked(self))
+    }
+
+    #[inline(always)]
+    fn lock(&self) -> Locked<'_> {
+        self.try_lock().unwrap_or_else(|| {
+            self.contend();
+            Locked(self)
+        })
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn contend(&self) {
+        let mut spins = 0_u32;
+        loop {
+            while self.locked.load(Ordering::Relaxed) {
+                if spins < 64 {
+                    spins += 1;
+                    std::hint::spin_loop();
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+            if self
+                .locked
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+
+    #[inline]
     pub(crate) fn allocate(
         heap: &Arc<Self>,
         payer: Payer,
@@ -318,27 +477,49 @@ impl Heap {
         kind: u8,
         growable: bool,
     ) -> NonNull<u8> {
-        let class = Class::for_block(bytes, align, kind, growable);
-        let key = Key {
-            payer: payer.record_pointer().addr(),
-            class,
+        // Each miss is a tail call, so the hit saves no registers.
+        let Some(class) = Class::direct(bytes, align, kind, growable) else {
+            return Self::allocate_locking(heap, payer, bytes, align, kind, growable);
         };
-        let mut state = heap.0.lock().unwrap();
-        // SAFETY: this heap owns all queues and the live slot until publication.
+        let Some(mut state) = heap.try_lock() else {
+            return Self::allocate_locking(heap, payer, bytes, align, kind, growable);
+        };
+        // SAFETY: this heap owns its queues. The head page of a matching payer
+        // and alignment has a free slot and stays partial after this one.
+        // Direct classes are below a native page, so they always fit a slab.
         unsafe {
-            let ready = if class.fits_slab() {
-                state.available(key)
-            } else {
-                None
-            };
-            let page = if let Some(page) = ready {
-                page
-            } else if let Some(page) = state.cached(class) {
-                Page::reuse(page, payer, key);
-                page
-            } else {
-                Page::new(heap, payer, key)
-            };
+            if let Some(page) = *state.ready_head(class)
+                && (*page.as_ref().key.get()).payer == payer.record_pointer().addr()
+                && (*page.as_ref().key.get()).class.align == class.align
+                && (*page.as_ref().slots.get()).live + 1 < (*page.as_ref().slots.get()).limit
+            {
+                return Self::take(page, class, bytes);
+            }
+            Self::allocate_slow(heap, state, payer, bytes, align, kind, growable)
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn allocate_locking(
+        heap: &Arc<Self>,
+        payer: Payer,
+        bytes: usize,
+        align: usize,
+        kind: u8,
+        growable: bool,
+    ) -> NonNull<u8> {
+        let state = heap.lock();
+        // SAFETY: the lock is held.
+        unsafe { Self::allocate_slow(heap, state, payer, bytes, align, kind, growable) }
+    }
+
+    /// # Safety
+    /// The heap lock is held and `page` has a free slot of `class`.
+    #[inline(always)]
+    unsafe fn take(page: PagePointer, class: Class, bytes: usize) -> NonNull<u8> {
+        // SAFETY: the caller owns the page's slots under the heap lock.
+        unsafe {
             let slots = &mut *page.as_ref().slots.get();
             let pointer = if let Some(free) = NonNull::new(slots.free) {
                 #[cfg(feature = "memcheck")]
@@ -351,6 +532,52 @@ impl Heap {
                 pointer
             };
             slots.live += 1;
+            #[cfg(feature = "memcheck")]
+            {
+                slots.checked_bytes = bytes;
+                allocation_check::allocated(pointer, bytes, class.kind);
+            }
+            #[cfg(not(feature = "memcheck"))]
+            let _ = bytes;
+            #[cfg(any(test, feature = "charge-observation"))]
+            crate::peak::allocated(pointer.as_ptr(), class.stride);
+            pointer
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    unsafe fn allocate_slow(
+        heap: &Arc<Self>,
+        mut state: Locked<'_>,
+        payer: Payer,
+        bytes: usize,
+        align: usize,
+        kind: u8,
+        growable: bool,
+    ) -> NonNull<u8> {
+        let class = Class::for_block(bytes, align, kind, growable);
+        let key = Key {
+            payer: payer.record_pointer().addr(),
+            class,
+        };
+        // SAFETY: this heap owns all queues and the live slot until publication.
+        unsafe {
+            let ready = if class.fits_slab() {
+                state.available(payer, key)
+            } else {
+                None
+            };
+            let page = if let Some(page) = ready {
+                page
+            } else if let Some(page) = state.cached(class) {
+                Page::reuse(page, payer, key);
+                page
+            } else {
+                Page::new(heap, payer, key)
+            };
+            let pointer = Self::take(page, class, bytes);
+            let slots = &*page.as_ref().slots.get();
             if slots.live == slots.limit {
                 if ready.is_some() {
                     state.unlink(page, class);
@@ -358,13 +585,6 @@ impl Heap {
             } else if ready.is_none() {
                 state.link(page, class);
             }
-            #[cfg(feature = "memcheck")]
-            {
-                slots.checked_bytes = bytes;
-                allocation_check::allocated(pointer, bytes, kind);
-            }
-            #[cfg(any(test, feature = "charge-observation"))]
-            crate::peak::allocated(pointer.as_ptr(), class.stride);
             pointer
         }
     }
@@ -372,13 +592,19 @@ impl Heap {
     /// Retire the task's cache; pages with transferred blocks keep their heap
     /// alive and are released by the last free on whichever task owns that block.
     pub(crate) fn close(&self) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.lock();
         state.closed = true;
-        state.ready = [[None; SLAB_BINS]; 3];
+        let spares = std::mem::replace(&mut state.ready, [[None; SLAB_BINS]; 3])
+            .into_iter()
+            .flatten()
+            .flatten()
+            // SAFETY: the heap lock owns the queued pages' slots.
+            .filter(|&page| unsafe { (*page.as_ref().slots.get()).live == 0 })
+            .collect::<Vec<_>>();
         let slabs = std::mem::take(&mut state.empty_slabs);
         let dedicated = std::mem::take(&mut state.empty_dedicated);
         drop(state);
-        for page in slabs {
+        for page in spares.into_iter().chain(slabs) {
             // SAFETY: detached from the cache, with no live slots.
             unsafe { Page::destroy(page) };
         }
@@ -460,6 +686,7 @@ pub(crate) unsafe fn try_grow_in_place(
 
 /// # Safety
 /// The caller transfers the unique, cleaned slot after its logical refund.
+#[inline]
 pub(crate) unsafe fn release(payload: NonNull<u8>) {
     // SAFETY: the slot pins its header and the page's heap while live.
     let page = unsafe { page_of(payload) };
@@ -467,13 +694,51 @@ pub(crate) unsafe fn release(payload: NonNull<u8>) {
     let heap = unsafe { &page.as_ref().heap };
     #[cfg(any(test, feature = "charge-observation"))]
     crate::peak::deallocated(payload.as_ptr());
-    let mut state = heap.0.lock().unwrap();
+    let state = heap.lock();
     // SAFETY: the heap lock owns the free list and page lifecycle. This slot is
     // writable and never shared after its caller publishes the refund.
     unsafe {
-        let key = Page::key(page);
         #[cfg(feature = "memcheck")]
-        allocation_check::freed(payload, key.class.kind);
+        allocation_check::freed(payload, (*page.as_ref().key.get()).class.kind);
+        let slots = &mut *page.as_ref().slots.get();
+        // A partial page keeps its queue position, and an emptied head stays
+        // as the spare. A closed heap destroys the page at its last slot.
+        if slots.live != slots.limit
+            && (slots.live > 1 || (slots.previous.is_none() && !state.closed))
+        {
+            slots.live -= 1;
+            push_free(slots, payload);
+        } else {
+            release_slow(state, page, payload);
+        }
+    }
+}
+
+/// # Safety
+/// The heap lock owns `slots`; `payload` is one of its slots, no longer live.
+#[inline(always)]
+unsafe fn push_free(slots: &mut Slots, payload: NonNull<u8>) {
+    // SAFETY: the released slot holds at least one pointer-sized word.
+    unsafe {
+        #[cfg(feature = "memcheck")]
+        allocation_check::link_access(payload, true);
+        payload.cast::<*mut u8>().write(slots.free);
+        #[cfg(feature = "memcheck")]
+        allocation_check::link_access(payload, false);
+    }
+    slots.free = payload.as_ptr();
+}
+
+/// The release that fills a full page's first hole, empties a page or
+/// meets a closed heap.
+/// # Safety
+/// As [`release`], with the page's heap lock held as `state`.
+#[cold]
+#[inline(never)]
+unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNull<u8>) {
+    // SAFETY: the heap lock owns the free list and page lifecycle.
+    unsafe {
+        let class = Page::key(page).class;
         let slots = &mut *page.as_ref().slots.get();
         let was_full = slots.live == slots.limit;
         slots.live -= 1;
@@ -482,23 +747,27 @@ pub(crate) unsafe fn release(payload: NonNull<u8>) {
                 drop(state);
                 Page::destroy(page);
             }
-        } else if slots.live == 0 {
-            if !was_full {
-                state.unlink(page, key.class);
+            return;
+        }
+        push_free(slots, payload);
+        if slots.live != 0 {
+            if was_full {
+                state.link(page, class);
             }
-            if let Some(retired) = state.recycle(page, key.class) {
+        } else if !was_full && slots.previous.is_none() {
+            // Already the queue head: it stays as the spare.
+        } else if class.fits_slab() && state.spare(class).is_none() {
+            if !was_full {
+                state.unlink(page, class);
+            }
+            state.link(page, class);
+        } else {
+            if !was_full {
+                state.unlink(page, class);
+            }
+            if let Some(retired) = state.recycle(page, class) {
                 drop(state);
                 Page::destroy(retired);
-            }
-        } else {
-            #[cfg(feature = "memcheck")]
-            allocation_check::link_access(payload, true);
-            payload.cast::<*mut u8>().write(slots.free);
-            #[cfg(feature = "memcheck")]
-            allocation_check::link_access(payload, false);
-            slots.free = payload.as_ptr();
-            if was_full {
-                state.link(page, key.class);
             }
         }
     }

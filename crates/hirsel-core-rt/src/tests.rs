@@ -554,7 +554,7 @@ fn same_size_own_blocks_reuse_mappings_and_pack_small_slots() {
             .collect();
         let first = blocks[0].pointer().addr().get();
         let second = blocks[1].pointer().addr().get();
-        assert_eq!(second - first, 24);
+        assert_eq!(second.abs_diff(first), 24);
         drop(blocks);
         assert_eq!(context.available(), 1_000_000);
         let requests = MAP_REQUESTS.with(std::cell::Cell::get);
@@ -620,6 +620,57 @@ fn cross_task_slots_return_to_the_allocating_heap_and_survive_its_exit() {
     // SAFETY: the transferred payload keeps its physical mapping alive.
     assert_eq!(unsafe { survivor.pointer().cast::<u64>().read() }, 17);
     drop((survivor, block));
+}
+
+/// A task heap keeps an emptied page at its class queue head for the next
+/// block. Closing the heap must unmap that page too, or every finished task
+/// that freed its last small block leaks a slab.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn closed_task_heaps_unmap_their_emptied_pages() {
+    const CHILD: &str = "CLOSED_TASK_HEAPS_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = crate::test_process::command()
+            .args([
+                "--exact",
+                "tests::closed_task_heaps_unmap_their_emptied_pages",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child output: {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+    let mapped_kib = || {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("VmSize:"))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+    };
+    let task = || {
+        let context = Context::new(64);
+        drop(Block::new(&context, Some(24), 24, 8).unwrap());
+        drop(Block::new(&context, Some(24), 200, 8).unwrap());
+        assert_eq!(context.available(), 64);
+    };
+    task();
+    let before = mapped_kib();
+    for _ in 0..1000 {
+        task();
+    }
+    // Leaking both 64 KiB slabs per task would map 128000 KiB more.
+    let grown = mapped_kib() - before;
+    assert!(grown < 8 * 1024, "{grown} KiB stayed mapped");
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

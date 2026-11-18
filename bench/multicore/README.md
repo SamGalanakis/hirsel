@@ -156,3 +156,36 @@ and vacant-slot transfers. Each worker reports its peak cached vacancies
 and the number it returns at exit. Add `--s0` with `matmul_t16` or
 `arc_pair` for the Rust comparisons. Matmul reports first dispatch count and
 total submit-to-dispatch time per worker in both runtimes.
+
+## S8u search fixtures
+
+Build the release driver with `//:hirsel-core-rt-test-pool-archives` and pass
+the test-pool archive for the host architecture. The runner sets the
+runtime width and takes one capped sample for each side at widths 1 and 16.
+
+```sh
+taskset -c 0-11,16-27 python3 bench/multicore/build.py --s8u --out "$benchmark_bins" \
+  --hirsel "$release_driver" --runtime "$test_pool_archive"
+taskset -c 0-11,16-27 python3 bench/multicore/s8u.py \
+  --bins "$benchmark_bins" --out "$new_evidence_directory"
+```
+
+Knapsack splits at depth five and visits up to 2,048 nodes per live stage in
+each round. The 60 seeded weights are in increasing order, with each value
+equal to its weight plus 300. This gives density order for the fractional
+upper bound. The portfolio uses four seeded single-bit searches with random
+restarts on a 64-site chain. Each live stage searches up to 16,384 iterations
+per round. The Hirsel owner submits to all live stages before reading each
+capacity-one reply in lane order. The Rust region model keeps that round
+structure and publishes updates inside a round via atomics. It uses Rayon
+to model dispatch, private state and ordered collection. The Rust twins use
+Rayon without rounds for knapsack and scoped threads for the portfolio.
+The one-worker portfolio twin visits all four seeds in round-robin quanta.
+
+The runner checks each returned witness against an independent
+dynamic-programming optimum and reports explored work, relative speedups,
+and cancellation lag. Knapsack reports the interval from discovery of the
+final incumbent to the last search stopping. Hirsel stage clocks are
+unavailable, so its owner timestamps bound the lag. The output receipt
+records elapsed nanoseconds, work, quality, witness, lower and upper lag
+bounds in nanoseconds, and rounds in that order.

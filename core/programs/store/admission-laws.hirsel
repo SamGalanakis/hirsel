@@ -1,3 +1,8 @@
+fn wire_call_ready[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, take pending: WirePending, allowed: bool) -> Result[(), u16] {
+    let plan = wire_plan_call(s, take pending, allowed)?
+    wire_apply_call(mut s, mut work, take plan)
+}
+
 // WIRE W3c: hand-sized replies and the exact 41,140-byte outcome reserve.
 fn w3c_bytes(take count: u32) -> Result[Bytes, Capacity] {
     let mut b: Bytes = list.new()
@@ -36,7 +41,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
     let principal = option.unwrap(ingress.hello(policy, V4(1u32), None))
     let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(5u64))
     let service = wire_service_seed(take reg, policy, head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
-    let Service(context: take initial, step: _, ready: _, authenticate: _, finish: _, check: _) = take service
+    let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
     let mut s = take initial
     let mut work = wire_work()
     let (owner, events): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
@@ -135,7 +140,7 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool w
     let principal = option.unwrap(ingress.hello(policy, V4(1u32), None))
     let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
     let service = wire_service_seed(take reg, policy, head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
-    let Service(context: take initial, step: _, ready: _, authenticate: _, finish: _, check: _) = take service
+    let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
     let mut s = take initial
     let mut work = wire_work()
     s.phase = 2u8
@@ -248,7 +253,7 @@ fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
     let (to_pub, releases): (Sender[PubIn], Receiver[PubIn]) = result.unwrap(channel.new(5u64))
     let (to_owner, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
     let service = wire_service_seed(w3c_registry(), policy, to_head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
-    let Service(context: take initial, step: _, ready: _, authenticate: _, finish: _, check: _) = take service
+    let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
     let mut owner = take initial
     owner.phase = 3u8
     owner.caller = Some(take caller)
@@ -439,7 +444,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let config = wire_defaults(1048576u64, 1048576u64)
     let service = wire_service_seed(take reg, policy, head, c, tasks, config, string.new())
-    let Service(context: take initial, step: _, ready: _, authenticate: _, finish: _, check: _) = take service
+    let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
     let mut owner = take initial
     let mut work = wire_work()
     let (events, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))

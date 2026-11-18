@@ -37,6 +37,7 @@ N_PLACE = 16 * 1024 * 1024
 
 CALLS = ('release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
          'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'calls_retired_head', 'l14_handles', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'publisher_never_blocks', 'owed_ended_delivered')
+NATIVE_ONLY_CALLS = {'drain_reopened', 'lag_window'}
 
 # L3 (RUNNER-SPEC v2.6): execution counts read from CONC-10 events, (event kind, count).
 # TRY_SEND is kind 7 in crates/hirsel-core-layout/src/event.rs. calls_runs_once
@@ -666,6 +667,8 @@ def main():
     root = args.root.resolve()
     evaluator = args.evaluator.resolve()
     engines = args.backend or ['evaluator', 'cranelift', 'llvm']
+    if engines == ['evaluator'] and NATIVE_ONLY_CALLS.intersection(args.call_law or ()):
+        p.error('drain_reopened and lag_window require a native backend')
     if args.part == 'rc1' and (not args.compiler or not args.runtime or engines == ['evaluator']):
         p.error('RC1 requires a native backend, --compiler and --runtime')
     rows = []
@@ -729,6 +732,8 @@ def main():
             row(engine='evaluator', law='p19_place_twice', passed=value == 1, result=report)
         if 'evaluator' in engines and r1:
             for name in selected_calls:
+                if name in NATIVE_ONLY_CALLS:
+                    continue
                 value, report = evaluate(evaluator, base, 'store@1/runner_calls/law_' + name)
                 row(engine='evaluator', law=name, passed=value == 1 and counted(name, report), result=report)
             for name in (() if args.part == 'calls' else SUBS):

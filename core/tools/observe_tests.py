@@ -9,10 +9,11 @@ import sys
 import tempfile
 
 from case_progress import Case
-from runner_tests import CALLS, c_compiler, dir_for, evaluate, manifest
+from runner_tests import CALLS, NATIVE_ONLY_CALLS, c_compiler, dir_for, evaluate, manifest
 from std_native import ROOT
 
 
+LIVE_CASES = (*(case for case in CALLS if case not in NATIVE_ONLY_CALLS), 'observe_early_then_late')
 CLAUSES = ('J1', 'J2', 'J3', 'J4', 'J5', 'J6')
 
 
@@ -501,7 +502,7 @@ def main():
     p.add_argument('--compiler', type=Path, required=True)
     p.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
     p.add_argument('--cc', type=Path)
-    p.add_argument('--case', action='append')
+    p.add_argument('--case', action='append', choices=LIVE_CASES)
     p.add_argument('--identity-only', action='store_true', help='run the identity fixtures')
     p.add_argument('--artifacts', type=Path, default=Path('buck-out/observe'))
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
@@ -519,7 +520,7 @@ def main():
         work = Path(tmp)
         calls = CallEvaluator(args, root, work)
         m = observed_manifest(root, work) if not args.identity_only else manifest(root, work, 'identity-inputs')
-        cases = () if args.identity_only else (args.case or (*CALLS, 'observe_early_then_late'))
+        cases = () if args.identity_only else (args.case or LIVE_CASES)
         for case in cases:
             value, report = calls(m, 'store@1/runner_calls/law_' + case)
             bodies += bool(report.get('outcome'))

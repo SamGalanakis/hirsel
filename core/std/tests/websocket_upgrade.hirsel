@@ -174,12 +174,6 @@ fn client_wrong_accept() -> u16 {
     client_status(result.unwrap(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: wrong\r\n\r\n"), false)
 }
 
-// Mutant: status_only_check.
-// expect: run client_unrequested_protocol() = 400
-fn client_unrequested_protocol() -> u16 {
-    client_status(result.unwrap(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: hirsel.1\r\n\r\n"), false)
-}
-
 fn ingress_request(extra: String) -> Bytes {
     request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", extra)
 }

@@ -213,10 +213,15 @@ impl DiskIndex {
             image: image_name(identity),
         });
     }
+    #[inline]
     fn installed(&self) -> io::Result<&Pages> {
         if let Some(pages) = self.pages.get() {
             return Ok(pages);
         }
+        self.load_sections()
+    }
+    #[cold]
+    fn load_sections(&self) -> io::Result<&Pages> {
         let &(identity, hash) = self.root.get().ok_or_else(|| {
             io::Error::other("core image sections are read before their publication")
         })?;
@@ -242,11 +247,21 @@ impl DiskIndex {
             image: image_name(identity),
         }))
     }
+    #[inline]
     fn page<'a>(&self, pages: &'a Pages, n: usize) -> io::Result<&'a [u8]> {
         let cell = pages.pages.get(n).ok_or_else(|| damaged(pages))?;
         if let Some(page) = cell.get() {
             return Ok(page);
         }
+        self.load_page(pages, n, cell)
+    }
+    #[cold]
+    fn load_page<'a>(
+        &self,
+        pages: &Pages,
+        n: usize,
+        cell: &'a OnceLock<Arc<[u8]>>,
+    ) -> io::Result<&'a [u8]> {
         // The page's hash is in the sections record the image root names, so a
         // page that reads back different bytes refuses the request: there is no
         // other path to its rows.
@@ -296,28 +311,20 @@ impl DiskIndex {
         Ok(true)
     }
     #[inline]
-    fn fixed<const N: usize>(&self, pages: &Pages, at: u64) -> io::Result<[u8; N]> {
-        let offset = usize::try_from(at).map_err(|_| damaged(pages))?;
-        if let Some(bytes) = self
-            .page(pages, offset / PAGE)?
-            .get(offset % PAGE..)
-            .and_then(|tail| tail.get(..N))
-        {
-            return Ok(bytes.try_into().unwrap());
-        }
-        let mut bytes = [0; N];
-        self.read(pages, at, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn u32(&self, pages: &Pages, at: u64) -> io::Result<u32> {
-        Ok(u32::from_le_bytes(self.fixed(pages, at)?))
-    }
     fn u64(&self, pages: &Pages, at: u64) -> io::Result<u64> {
-        Ok(u64::from_le_bytes(self.fixed(pages, at)?))
+        let offset = usize::try_from(at).map_err(|_| damaged(pages))?;
+        let start = offset % PAGE;
+        if let Some(bytes) = self.page(pages, offset / PAGE)?.get(start..start + 8) {
+            return Ok(u64::from_le_bytes(bytes.try_into().unwrap()));
+        }
+        let mut bytes = [0; 8];
+        self.read(pages, at, &mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
     }
     fn span(&self, pages: &Pages, section: &Section, index: u32) -> io::Result<(u64, usize)> {
-        let start = self.u32(pages, section.offsets + 4 * u64::from(index))?;
-        let end = self.u32(pages, section.offsets + 4 * u64::from(index) + 4)?;
+        let offsets = self.u64(pages, section.offsets + 4 * u64::from(index))?;
+        let start = offsets as u32;
+        let end = (offsets >> 32) as u32;
         let len = end.checked_sub(start).ok_or_else(|| damaged(pages))?;
         Ok((section.heap + u64::from(start), len as usize))
     }
@@ -328,6 +335,7 @@ impl DiskIndex {
         self.rows.load(Ordering::Relaxed)
     }
 }
+#[cold]
 fn damaged(pages: &Pages) -> io::Error {
     io::Error::other(format!(
         "core image {} is damaged: a section reference is outside its pages; rebuild the image",
@@ -528,16 +536,26 @@ mod tests {
         assert_eq!(index.row(d(7), 0).unwrap(), encode(&big).unwrap());
         let pages = index.installed().unwrap();
         for at in 0..=bytes.len() + 8 {
-            let expected = bytes
-                .get(at..at + 4)
-                .map(|b| u32::from_le_bytes(b.try_into().unwrap()));
-            assert_eq!(index.u32(pages, at as u64).ok(), expected, "u32 at {at}");
-            let expected = bytes
-                .get(at..at + 8)
-                .map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+            let word = bytes.get(at..at + 8);
+            let expected = word.map(|b| u64::from_le_bytes(b.try_into().unwrap()));
             assert_eq!(index.u64(pages, at as u64).ok(), expected, "u64 at {at}");
+            let expected_span = word.and_then(|b| {
+                let start = u32::from_le_bytes(b[..4].try_into().unwrap());
+                let end = u32::from_le_bytes(b[4..].try_into().unwrap());
+                end.checked_sub(start)
+                    .map(|len| (u64::from(start), len as usize))
+            });
+            let section = Section {
+                offsets: at as u64,
+                heap: 0,
+                slots: None,
+            };
+            assert_eq!(
+                index.span(pages, &section, 0).ok(),
+                expected_span,
+                "span at {at}"
+            );
         }
-        assert!(index.u32(pages, u64::MAX).is_err());
         assert!(index.u64(pages, u64::MAX).is_err());
     }
 

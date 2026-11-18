@@ -83,3 +83,13 @@ fn failing_body_cleans_tail() -> u64 {
     }
     count
 }
+
+// expect: run narrow_map_keys_use_value_parameters() = 42
+fn narrow_map_keys_use_value_parameters() -> u64 {
+    let mut counts: Map[u32, u64] = map.new()
+    result.unwrap(map.insert(mut counts, 5u32, 42u64))
+    match map.get(counts, 5u32) {
+        Some(value) => value,
+        None => 0,
+    }
+}

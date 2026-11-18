@@ -804,8 +804,8 @@ impl Derive<'_> {
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
                 for (i, f) in fs.iter().enumerate() {
-                    let x = c.field_pointer(a, ty, None, i as u32);
-                    let y = c.field_pointer(b, ty, None, i as u32);
+                    let x = c.field_pointer(self.module, a, ty, None, i as u32);
+                    let y = c.field_pointer(self.module, b, ty, None, i as u32);
                     self.order_field(c, &f.ty, x, y, different)?;
                 }
             }
@@ -843,8 +843,8 @@ impl Derive<'_> {
                 for (i, case) in cs.iter().enumerate() {
                     c.start(c.body.edges[arms[i].edge.index()].target);
                     for (j, f) in case.fields.iter().enumerate() {
-                        let x = c.field_pointer(a, ty, Some(i as u32), j as u32);
-                        let y = c.field_pointer(b, ty, Some(i as u32), j as u32);
+                        let x = c.field_pointer(self.module, a, ty, Some(i as u32), j as u32);
+                        let y = c.field_pointer(self.module, b, ty, Some(i as u32), j as u32);
                         self.order_field(c, &f.ty, x, y, different)?;
                     }
                     c.jump(done, &[]);
@@ -1244,7 +1244,7 @@ impl Derive<'_> {
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
                 for (i, f) in fs.into_iter().enumerate() {
-                    let at = c.field_pointer(p, ty, None, i as u32);
+                    let at = c.field_pointer(self.module, p, ty, None, i as u32);
                     h = self.fold_field(c, &f.ty, at, h)?;
                 }
             }
@@ -1280,7 +1280,7 @@ impl Derive<'_> {
                     c.start(c.body.edges[arms[i].edge.index()].target);
                     let mut current = h;
                     for (j, f) in case.fields.into_iter().enumerate() {
-                        let at = c.field_pointer(p, ty, Some(i as u32), j as u32);
+                        let at = c.field_pointer(self.module, p, ty, Some(i as u32), j as u32);
                         current = self.fold_field(c, &f.ty, at, current)?;
                     }
                     c.jump(done, &[current]);
@@ -1572,7 +1572,7 @@ impl Derive<'_> {
             ShapeBody::Record(fs) => {
                 let mut off = 0;
                 for (i, f) in fs.iter().enumerate() {
-                    let x = c.field_pointer(p, ty, None, i as u32);
+                    let x = c.field_pointer(self.module, p, ty, None, i as u32);
                     let k = c.constant(off);
                     let to = c.binary(BinaryOp::Add, at, k);
                     self.encode_field(c, &f.ty, x, blob, to)?;
@@ -1615,7 +1615,7 @@ impl Derive<'_> {
                     Self::store_packed(c, blob, at, k, Scalar::U64);
                     let mut off = 8;
                     for (j, f) in case.fields.iter().enumerate() {
-                        let x = c.field_pointer(p, ty, Some(i as u32), j as u32);
+                        let x = c.field_pointer(self.module, p, ty, Some(i as u32), j as u32);
                         let k = c.constant(off);
                         let to = c.binary(BinaryOp::Add, at, k);
                         self.encode_field(c, &f.ty, x, blob, to)?;
@@ -1724,8 +1724,8 @@ impl Derive<'_> {
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
                 for (i, f) in fs.into_iter().enumerate() {
-                    let x = c.field_pointer(a, ty, None, i as u32);
-                    let y = c.field_pointer(b, ty, None, i as u32);
+                    let x = c.field_pointer(self.module, a, ty, None, i as u32);
+                    let y = c.field_pointer(self.module, b, ty, None, i as u32);
                     self.equal_field(c, &f.ty, x, y, no)?;
                 }
             }
@@ -1764,8 +1764,8 @@ impl Derive<'_> {
                 for (i, case) in cs.into_iter().enumerate() {
                     c.start(c.body.edges[arms[i].edge.index()].target);
                     for (j, f) in case.fields.into_iter().enumerate() {
-                        let x = c.field_pointer(a, ty, Some(i as u32), j as u32);
-                        let y = c.field_pointer(b, ty, Some(i as u32), j as u32);
+                        let x = c.field_pointer(self.module, a, ty, Some(i as u32), j as u32);
+                        let y = c.field_pointer(self.module, b, ty, Some(i as u32), j as u32);
                         self.equal_field(c, &f.ty, x, y, no)?;
                     }
                     c.jump(done, &[]);
@@ -2053,13 +2053,19 @@ impl Code {
         });
         id
     }
-    pub(super) fn field_pointer(
+    fn field_pointer(
         &mut self,
+        module: &Module,
         p: ValueId,
         ty: TypeId,
         case: Option<u32>,
         field: u32,
     ) -> ValueId {
+        // A primitive scalar row wraps its value for generic glue. Its single
+        // field is the scalar itself, which will follow the scalar ABI.
+        if case.is_none() && field == 0 && scalar_row(module, ty).is_some() {
+            return p;
+        }
         let base = self.address(p, PlaceTy::Declared(ty));
         self.project_field_pointer(base, case, field)
     }

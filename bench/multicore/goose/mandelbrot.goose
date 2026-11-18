@@ -40,6 +40,7 @@ fn main() {
     var ids: i64[>..] = [];
     var image: u8[>..] = [];
     image.resize(width * width / 8, 0);
+    let start = clock_ns();
     for i in workers {
         ids.push(thread_spawn(render, width, i * width / workers, (i + 1) * width / workers));
     }
@@ -49,6 +50,10 @@ fn main() {
         for byte, j in part.bytes { image[at + j] = byte; }
     }
     for id in ids { thread_wait(id); }
+    let elapsed = clock_ns() - start;
+    var timing: u8[>..] = [];
+    format(timing, "multicore-kernel-ns=", elapsed, "\n");
+    write_stderr(timing);
     var header: u8[>..] = [];
     format(header, "P4\n", width, " ", width, "\n");
     write_stdout(header);

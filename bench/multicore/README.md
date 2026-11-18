@@ -24,13 +24,13 @@ parallel work already present upstream, with the worker controls below.
 The Rust compiler uses the upstream Ivy Bridge target and Go uses
 `GOAMD64=v2`. The source contributors and license are on each program page.
 
-| Workload | Rust | Go | Fixed input |
-| --- | --- | --- | --- |
-| Mandelbrot | #4, Rayon | #4, workers from `GOMAXPROCS` | 1024 × 1024 PBM |
-| Spectral norm | #6, Rayon | #4, workers from `GOMAXPROCS` | 1600 rows, 10 power iterations |
-| Fannkuch-redux | #6, Rayon | #3, runtime honors `GOMAXPROCS` | 11 elements |
-| K-nucleotide | #3, same per-length hash kernels in a Rayon pool | #7, workers from `GOMAXPROCS` | FASTA Go #1 at 120000, record THREE |
-| Binary trees | #5, Rayon | #2, goroutines | Depth 16 |
+| Workload | Rust | Go | Shared input | Rust vectorization |
+| --- | --- | --- | --- | --- |
+| Mandelbrot | #4, Rayon | #4, workers from `GOMAXPROCS` | 16000 × 16000 PBM | Eight-lane source, LLVM emits AVX |
+| Spectral norm | #6, Rayon | #4, workers from `GOMAXPROCS` | 1600 rows, 10 power iterations | Explicit SSE2/SSE3 intrinsics |
+| Fannkuch-redux | #6, Rayon | #3, runtime honors `GOMAXPROCS` | 11 elements | Explicit SSSE3/SSE4.1 intrinsics |
+| K-nucleotide | #3, same per-length hash kernels in a Rayon pool | #7, workers from `GOMAXPROCS` | FASTA Go #1 at 120000, record THREE | Scalar source |
+| Binary trees | #5, Rayon | #2, goroutines | Depth 16 | Scalar source |
 
 The k-nucleotide Rust submission used fixed OS threads. The Rayon adaptation
 keeps each per-length hash job and lets the gate control the pool width. The
@@ -53,14 +53,17 @@ runs on Tokio and Go. [Hirsel task and channel spec](../../docs/spec/tasks.md) �
 ## Qualifying command
 
 With the binaries built, run the following command and optionally select one
-or more workloads with `--case` and widths with `--workers`.
+or more workloads with `--case` and widths with `--workers`. The default widths are 1, 2, 4, 8, 12 and 16.
 
 ```sh
 taskset -c 0-11,16-27 ./bench/multicore/run.py \
   --bins "$benchmark_bins" --out "$new_evidence_directory"
 ```
 
-The command prints ratios, wall speedups and peak RSS. It saves the process-tree
+Use the kernel-speedup table for shared Mandelbrot scaling. It times the
+render after setup and ends before PBM output. The process-wall table and
+instruction ratios still include output and startup. The runner validates
+the whole PBM and retains its SHA-256 in the sample record. It saves the process-tree
 `perf stat` counters, GNU time RSS, output and diagnostics outside the repository.
 Width N uses the first N of `0-11,16-19`. On the measured Ryzen 9 5950X that
 means 12 distinct cores at width 16, four with both SMT siblings active.
@@ -70,6 +73,24 @@ checks each frequency and exact query count. It allows either order for
 equal counts and the exact float32 or float64 rounding at three decimal
 places. A required missing or wrong sample returns failure. Use
 `run.py --read path/to/samples.json` to print the tables again.
+
+To measure the Rust reference at all five published sizes, use a separate
+build directory. This keeps the FASTA input at n=25000000 distinct
+from the compact shared FASTA fixture.
+
+```sh
+taskset -c 0-1 ./bench/multicore/build.py --standard-rust \
+  --out "$rust_scale_bins" --game /tmp/benchmarks-game
+taskset -c 0-11,16-27 ./bench/multicore/run.py --standard-rust \
+  --bins "$rust_scale_bins" --out "$new_evidence_directory"
+```
+
+The standard Rust measurements use Mandelbrot 16000, spectral norm 5500,
+fannkuch 12, FASTA 25000000 for k-nucleotide, and tree depth 21. The kernel
+timer starts after pool initialization and any input parsing. For binary
+trees it times the parallel batches. For k-nucleotide it times the seven
+count jobs. Use the process-wall table for full lifecycle cost. Use the
+shared suite for cross-language comparisons at identical inputs.
 
 | Workload | Multicore slice measurement |
 | --- | --- |

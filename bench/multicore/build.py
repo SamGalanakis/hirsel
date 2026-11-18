@@ -20,6 +20,22 @@ GAME_ROWS = {
     "binarytrees": (5, 2),
 }
 
+STANDARD_RUST_SIZES = {
+    "mandelbrot": 16000,
+    "spectralnorm": 5500,
+    "fannkuchredux": 12,
+    "knucleotide": 25000000,
+    "binarytrees": 21,
+}
+
+RUST_KERNEL = {
+    "mandelbrot": ("    rows.par_chunks_mut", '    println!("P4'),
+    "spectralnorm": ("    let answer = simd::spectralnorm", '    println!("{:.9}'),
+    "fannkuchredux": ("    let (checksum, max_rev) = fannkuchredux", '    println!("{}'),
+    "knucleotide": ("    let (results, (mono, di))", "    Freq(1).print(&mono)"),
+    "binarytrees": ("    let messages =", "    for message in messages"),
+}
+
 
 def run(command, **kwargs):
     subprocess.run(list(map(str, command)), check=True, **kwargs)
@@ -45,6 +61,11 @@ def go_source(game, case, version):
     if case == "mandelbrot":
         text = replacement(text, "runtime.NumCPU() * 2\n    runtime.GOMAXPROCS(pool)",
                            "runtime.GOMAXPROCS(0) * 2")
+        text = replacement(text, '    "sync/atomic"', '    "sync/atomic"\n    "time"')
+        text = replacement(text, "    // start pool workers", "    start := time.Now()\n    // start pool workers")
+        text = replacement(text, "    wg.Wait()", """    wg.Wait()
+    elapsed := time.Since(start).Nanoseconds()
+    fmt.Fprintf(os.Stderr, "multicore-kernel-ns=%d\\n", elapsed)""")
     elif case == "spectralnorm":
         text = replacement(text, "var nCPU = 4", "var nCPU = runtime.GOMAXPROCS(0)")
         text = replacement(text, "   runtime.GOMAXPROCS(nCPU)\n", "")
@@ -78,7 +99,18 @@ def rust_source(game, case, version):
     return text
 
 
-def build_rust(out, game):
+def time_rust_kernel(text, case):
+    # Pin the unchanged upstream kernel between preparation and output.
+    before, after = RUST_KERNEL[case]
+    text = replacement(text, before, """    rayon::ThreadPoolBuilder::new().build_global().unwrap();
+    let kernel_start = std::time::Instant::now();
+""" + before)
+    return replacement(text, after, '''    let kernel_ns = kernel_start.elapsed().as_nanos();
+    eprintln!("multicore-kernel-ns={}", kernel_ns);
+''' + after)
+
+
+def build_rust(out, game, standard):
     path = out / "rust"
     path.mkdir(exist_ok=True)
     crate = BENCH / "rust"
@@ -104,11 +136,22 @@ def build_rust(out, game):
     ).strip()
     for case, (version, _) in GAME_ROWS.items():
         src = out / f"{case}.rs"
-        src.write_text(rust_source(game, case, version))
+        text = rust_source(game, case, version)
+        if standard or case == "mandelbrot":
+            text = time_rust_kernel(text, case)
+        src.write_text(text)
         deps = [arg for name in ("rayon", "bumpalo", "hashbrown")
                 for arg in ("--extern", f"{name}={externs[name]}")]
         run([rustc, src, "-C", "opt-level=3", "-C", "target-cpu=ivybridge", "-C", "codegen-units=1",
              "-L", f"dependency={out / 'cargo/release/deps'}", *deps, "-o", path / case])
+
+    if standard:
+        src = out / "fasta.rs"
+        src.write_text(source(game, "fasta", "rust", 1))
+        fasta = path / "fasta"
+        run([rustc, src, "-C", "opt-level=3", "-o", fasta])
+        with (out / "input.fasta").open("wb") as file:
+            run([fasta, STANDARD_RUST_SIZES["knucleotide"]], stdout=file)
 
 
 def build_go(out, game, go):
@@ -167,6 +210,8 @@ def build_hirsel(out, compiler, runtime, engine):
             "--dir", out, "--grant", "Stdout", "--grant", "Tasks", "--limit", "268435456",
             "--json", "-o", path / case,
         ]
+        if case == "mandelbrot":
+            command += ["--grant", "Clock", "--grant", "Stderr"]
         if engine == "llvm":
             command.append("--release")
         with log.open("wb") as file:
@@ -197,9 +242,11 @@ def main():
     parser.add_argument("--hirsel", type=Path, help="release Hirsel driver")
     parser.add_argument("--runtime", type=Path, help="shipping native runtime archive")
     parser.add_argument("--engine", choices=["llvm", "cranelift"], default="llvm")
-    parser.add_argument("--languages", nargs="+", choices=["rust", "go", "hirsel", "goose"],
-                        default=["rust", "go", "hirsel", "goose"])
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--languages", nargs="+", choices=["rust", "go", "hirsel", "goose"])
+    selection.add_argument("--standard-rust", action="store_true", help="build published Rust data inputs and phase timings")
     options = parser.parse_args()
+    languages = ["rust"] if options.standard_rust else options.languages or ["rust", "go", "hirsel", "goose"]
     out = options.out.resolve()
     if out.is_relative_to(ROOT):
         parser.error("--out must be outside the repository")
@@ -207,13 +254,13 @@ def main():
         ("game", {"rust", "go"}), ("goose", {"goose"}),
         ("hirsel", {"hirsel"}), ("runtime", {"hirsel"}),
     ]:
-        if for_languages.intersection(options.languages) and getattr(options, needed) is None:
+        if for_languages.intersection(languages) and getattr(options, needed) is None:
             parser.error(f"--{needed} is required for {', '.join(sorted(for_languages))}")
     out.mkdir(parents=True, exist_ok=True)
     succeeded = True
-    for language in dict.fromkeys(options.languages):
+    for language in dict.fromkeys(languages):
         if language == "rust":
-            build_rust(out, options.game.resolve())
+            build_rust(out, options.game.resolve(), options.standard_rust)
         elif language == "go":
             build_go(out, options.game.resolve(), options.go)
         elif language == "hirsel":

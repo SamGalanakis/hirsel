@@ -13,16 +13,16 @@ import struct
 import subprocess
 import sys
 
-from build import GAME_ROWS, ROOT
+from build import GAME_ROWS, ROOT, STANDARD_RUST_SIZES
 
 sys.path.insert(0, str(ROOT / "core/tools"))
 from std_native import wait_load
 
 CPUS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 17, 18, 19)
-WIDTHS = (1, 2, 4, 8, 16)
+WIDTHS = (1, 2, 4, 8, 12, 16)
 LANGUAGES = ("Hirsel", "Rust", "Tokio", "Go", "Goose")
 SIZES = {
-    "mandelbrot": 1024,
+    "mandelbrot": STANDARD_RUST_SIZES["mandelbrot"],
     "spectralnorm": 1600,
     "fannkuchredux": 11,
     "knucleotide": 120000,
@@ -34,7 +34,15 @@ SIZES = {
     "fan_in": 12500,
 }
 FASTA_SHA = "eb604786ef13cc1012c3fc3cc760a4a159bfbae30cf6e12bf37792799b1df24e"
-MANDELBROT_SHA = "1b6c110c5056c02ad06266ccd0c740992682a6bcbf71d8fb50961fe7b31cd1ef"
+STANDARD_FASTA_SHA = "3fcf4f78104c8a65ef210fe1d469f4e473456c791225f2f1f9114f4986aa09fa"
+# Exact outputs for the pinned Rust programs at the published inputs.
+STANDARD_OUTPUT = {
+    "mandelbrot": "609262469ee6a0262ccd03932e557f745c9e7b997ad17835a02a0232a64807be",
+    "spectralnorm": "f9d5b5e3eb7657cf1bbba4cc856651864df9cd9fd9a6be9b9bc5fcbb67150deb",
+    "fannkuchredux": "4265a65135c506a68d90d6474003fb9030b7ee244a06c046bd89b3932a28ce20",
+    "knucleotide": "f8c042fe770dda8f870b967605ea40ca2e353f2bdf92e89a327209dd31d445c7",
+    "binarytrees": "341de11a51feab3d8122b4b5d6a68b038a2d14434aa9bc2372f39300bf5f48e1",
+}
 QUERIES = (b"GGT", b"GGTA", b"GGTATT", b"GGTATTTTAATT", b"GGTATTTTAATTTATAGT")
 
 
@@ -42,10 +50,16 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def expected(case, fasta):
+def expected(case, fasta, standard=False):
+    if standard:
+        if case == "knucleotide":
+            with fasta.open("rb") as file:
+                if hashlib.file_digest(file, "sha256").hexdigest() != STANDARD_FASTA_SHA:
+                    raise ValueError(f"{fasta} does not match the standard FASTA input")
+        return STANDARD_OUTPUT[case]
     n = SIZES[case]
     if case == "mandelbrot":
-        return MANDELBROT_SHA
+        return STANDARD_OUTPUT[case]
     if case == "spectralnorm":
         return digest(b"1.274224152\n")
     if case == "fannkuchredux":
@@ -76,8 +90,8 @@ def expected(case, fasta):
     return digest(f"{n * (n + 1) // 2}\n".encode())
 
 
-def matches(case, output, wanted):
-    if case != "knucleotide":
+def matches(output, wanted):
+    if isinstance(wanted, str):
         return digest(output) == wanted
     counts, queries = wanted
     sections = output.split(b"\n\n")
@@ -107,20 +121,20 @@ def matches(case, output, wanted):
     return True
 
 
-def sample_command(bins, case, language, width):
+def sample_command(bins, case, language, width, size):
     runtime = case not in GAME_ROWS
     if language == "Tokio":
-        return [bins / "tokio", case, width, SIZES[case]]
+        return [bins / "tokio", case, width, size]
     directory = bins / language.lower()
     if runtime:
-        args = [case, SIZES[case]]
+        args = [case, size]
         if language == "Go":
             args.insert(1, width)
         return [directory / "runtime", *args]
     if case == "knucleotide":
         args = {"Hirsel": ["input.fasta"], "Goose": [width]}.get(language, [])
     else:
-        args = [SIZES[case]]
+        args = [size]
         if language == "Goose":
             args.append(width)
     return [directory / case, *args]
@@ -134,8 +148,8 @@ def applicable(case):
     return ("Hirsel", "Tokio", "Go", "Goose")
 
 
-def observe(bins, out, case, language, width, wanted):
-    command = sample_command(bins, case, language, width)
+def observe(bins, out, case, language, width, size, wanted, kernel):
+    command = sample_command(bins, case, language, width, size)
     if not command[0].is_file():
         return {"status": "missing-binary"}
     directory = out / f"{case}-{language.lower()}-{width}"
@@ -162,15 +176,27 @@ def observe(bins, out, case, language, width, wanted):
                                     cwd=ROOT, env=env, stdin=inp, stdout=out_file, stderr=err)
     row = {"status": "ok", "cpus": cpus}
     if result.returncode:
+        if case == "mandelbrot":
+            (directory / "stdout").unlink(missing_ok=True)
         row["status"] = f"exit:{result.returncode}"
         return row
-    return validate_sample(directory, case, wanted, cpus)
+    return validate_sample(directory, case, wanted, cpus, kernel)
 
 
-def validate_sample(directory, case, wanted, cpus):
-    output = (directory / "stdout").read_bytes()
-    row = {"status": "ok", "cpus": cpus, "sha256": digest(output)}
-    if not matches(case, output, wanted):
+def validate_sample(directory, case, wanted, cpus, kernel=False):
+    stdout = directory / "stdout"
+    if case == "mandelbrot":
+        # One standard PBM is 32 MB. Retain its exact digest instead of the bitmap.
+        with stdout.open("rb") as file:
+            sha256 = hashlib.file_digest(file, "sha256").hexdigest()
+        stdout.unlink()
+        valid = sha256 == wanted
+    else:
+        output = stdout.read_bytes()
+        sha256 = digest(output)
+        valid = matches(output, wanted)
+    row = {"status": "ok", "cpus": cpus, "sha256": sha256}
+    if not valid:
         row["status"] = "wrong-output"
         return row
     counters = {}
@@ -187,6 +213,12 @@ def validate_sample(directory, case, wanted, cpus):
     if not rss.is_file() or not rss.read_text().strip().isdigit():
         row["status"] = "missing-rss"
         return row
+    if kernel:
+        durations = re.findall(r"^multicore-kernel-ns=(\d+)$", (directory / "stderr").read_text(), re.M)
+        if len(durations) != 1 or not 0 < int(durations[0]) <= counters["duration_time"]:
+            row["status"] = "missing-or-invalid-kernel-time"
+            return row
+        row["kernel_seconds"] = int(durations[0]) / 1e9
     return row | {
         "instructions": counters["instructions:u"],
         "seconds": counters["duration_time"] / 1e9,
@@ -201,7 +233,7 @@ def table(rows):
     def value(case, language, width, field):
         row = index.get((case, language, width), {})
         if row.get("status") == "ok":
-            return row[field]
+            return row.get(field)
         return None
 
     def ratio(left, right):
@@ -211,25 +243,29 @@ def table(rows):
         return f"{number:.3f}" if number is not None else "—"
 
     cases = [case for case in SIZES if any(row["case"] == case for row in rows)]
-    peers = LANGUAGES[1:]
-    print("| Workload | " + " | ".join(f"Hirsel/{peer} I at 1" for peer in peers) + " |")
-    print("| --- |" + " ---: |" * len(peers))
-    cohorts = {peer: [] for peer in peers}
-    for case in cases:
-        left = value(case, "Hirsel", 1, "instructions")
-        ratios = []
-        for peer in peers:
-            r = ratio(left, value(case, peer, 1, "instructions"))
-            if r is not None:
-                cohorts[peer].append(r)
-            ratios.append(fmt(r))
-        print(f"| {case} | " + " | ".join(ratios) + " |")
-    aggregates = [f"{fmt(statistics.geometric_mean(rs))} ({len(rs)})" if rs else "—"
-                  for rs in cohorts.values()]
-    print("| Geomean (rows) | " + " | ".join(aggregates) + " |")
+    if any(row["language"] == "Hirsel" for row in rows):
+        peers = LANGUAGES[1:]
+        print("| Workload | " + " | ".join(f"Hirsel/{peer} I at 1" for peer in peers) + " |")
+        print("| --- |" + " ---: |" * len(peers))
+        cohorts = {peer: [] for peer in peers}
+        for case in cases:
+            left = value(case, "Hirsel", 1, "instructions")
+            ratios = []
+            for peer in peers:
+                r = ratio(left, value(case, peer, 1, "instructions"))
+                if r is not None:
+                    cohorts[peer].append(r)
+                ratios.append(fmt(r))
+            print(f"| {case} | " + " | ".join(ratios) + " |")
+        aggregates = [f"{fmt(statistics.geometric_mean(rs))} ({len(rs)})" if rs else "—"
+                      for rs in cohorts.values()]
+        print("| Geomean (rows) | " + " | ".join(aggregates) + " |")
 
-    for field, heading in [("seconds", "Wall speedup vs own 1-worker sample"),
-                           ("max_rss_kib", "Peak RSS in MiB")]:
+    measures = [("seconds", "Process wall speedup vs own 1-worker sample"),
+                ("max_rss_kib", "Peak RSS in MiB")]
+    if any("kernel_seconds" in row for row in rows):
+        measures.insert(0, ("kernel_seconds", "Kernel speedup vs own 1-worker sample"))
+    for field, heading in measures:
         print(f"\n{heading}\n")
         print("| Workload | Language | " + " | ".join(map(str, widths)) + " |")
         print("| --- | --- |" + " ---: |" * len(widths))
@@ -239,10 +275,14 @@ def table(rows):
                 cells = []
                 for width in widths:
                     observed = value(case, language, width, field)
-                    metric = ratio(initial, observed) if field == "seconds" else (
+                    metric = ratio(initial, observed) if field != "max_rss_kib" else (
                         observed / 1024 if observed is not None else None
                     )
                     cells.append(fmt(metric))
+                if field == "kernel_seconds" and not any(
+                    "kernel_seconds" in index.get((case, language, width), {}) for width in widths
+                ):
+                    continue
                 if any((case, language, width) in index for width in widths):
                     print(f"| {case} | {language} | " + " | ".join(cells) + " |")
     if any(row["language"] == "Tokio" for row in rows):
@@ -266,9 +306,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", type=Path, help="binaries and FASTA from build.py")
     parser.add_argument("--out", type=Path, help="new evidence directory outside the repository")
-    parser.add_argument("--case", nargs="+", choices=SIZES, default=list(SIZES))
+    parser.add_argument("--case", nargs="+", choices=SIZES)
     parser.add_argument("--workers", nargs="+", type=int, choices=WIDTHS, default=list(WIDTHS))
-    parser.add_argument("--languages", nargs="+", choices=LANGUAGES, default=list(LANGUAGES))
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--languages", nargs="+", choices=LANGUAGES)
+    selection.add_argument("--standard-rust", action="store_true", help="measure published Rust data inputs")
     parser.add_argument("--read", nargs="+", type=Path, help="render existing sample JSON files")
     args = parser.parse_args()
     if args.read:
@@ -281,21 +323,31 @@ def main():
             parser.error("--out must be a new directory outside the repository")
         if not set(CPUS[:max(args.workers)]) <= os.sched_getaffinity(0):
             parser.error("the requested CPUs must be in the caller's affinity")
-        oracles = {case: expected(case, bins / "input.fasta") for case in args.case}
+        sizes = STANDARD_RUST_SIZES if args.standard_rust else SIZES
+        languages = ("Rust",) if args.standard_rust else args.languages or LANGUAGES
+        cases = tuple(dict.fromkeys(args.case or sizes))
+        if any(case not in sizes for case in cases):
+            parser.error("--standard-rust runs only Benchmarks Game data workloads")
+        oracles = {case: expected(case, bins / "input.fasta", args.standard_rust) for case in cases}
         out.mkdir(parents=True)
         rows = []
-        for case in dict.fromkeys(args.case):
+        for case in cases:
+            kernel = args.standard_rust or case == "mandelbrot"
+            size = sizes[case]
             for width in sorted(set(args.workers)):
                 for language in applicable(case):
-                    if language not in args.languages:
+                    if language not in languages:
                         continue
-                    result = observe(bins, out, case, language, width, oracles[case])
-                    rows.append(result | {"case": case, "language": language, "width": width})
+                    result = observe(bins, out, case, language, width, size, oracles[case], kernel)
+                    rows.append(result | {"case": case, "language": language, "width": width, "size": size})
                     print(f"{case} {language} {width}: {result['status']}", file=sys.stderr, flush=True)
                     (out / "samples.json").write_text(json.dumps(rows, indent=2) + "\n")
     keys = [(row["case"], row["language"], row["width"]) for row in rows]
     if len(keys) != len(set(keys)):
         parser.error("more than one sample for the same point")
+    for case in {row["case"] for row in rows}:
+        if len({row.get("size") for row in rows if row["case"] == case}) > 1:
+            parser.error(f"mixed input sizes for {case}")
     table(rows)
     return 0 if rows and all(s["status"] == "ok" for s in rows) else 1
 

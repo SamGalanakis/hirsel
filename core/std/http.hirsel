@@ -1718,8 +1718,11 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
     let mut batch: u64 = 0
     let mut completed_replies: u64 = 0
     let mut date = date_cache()
+    let mut head = http1.head()
     loop {
-        let mut head = http1.head()
+        // Only the parsed field prefix is visible to request consumers.
+        // A fresh cursor supplies the other request offsets before Ready.
+        head.count = 0
         match read_head(mut reader, mut input, mut scratch, mut head, c, first, start, cfg, inbox, slot, signal) {
             PeerClosed => break,
             Rejected(status) => {

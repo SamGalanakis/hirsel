@@ -20,6 +20,8 @@ library std installed check
 core@1/arc/new
 core@1/arc/share
 core@1/arc/try_unwrap
+# DECISIONS.md 2026-11-16 (gavel 8, MEM-15/OWN-12): scoped unique access.
+core@1/arc/with_unique
 core@1/args/get
 core@1/args/len
 core@1/box/new
@@ -40,8 +42,6 @@ core@1/code/identity
 # revision of the entry that ran in each call record (RUNNER-SPEC R5, §7).
 core@1/code/revision
 core@1/core/$clone
-core@1/core/$clone_in
-core@1/core/$clone_twin
 core@1/core/$needs_drop
 core@1/core/Arc
 core@1/core/Args
@@ -120,11 +120,15 @@ core@1/core/replace
 core@1/deque/Deque
 core@1/deque/Deque.$clone
 core@1/deque/Slots
+# DECISIONS.md 2026-11-18 (memory model, MEM-31): in-place deque insertion.
+core@1/deque/finish_prepared_push
 core@1/deque/grow
 core@1/deque/len
 core@1/deque/new
 core@1/deque/pop_back
 core@1/deque/pop_front
+# MEM-31: preparation and publication are the two halves of the same insertion.
+core@1/deque/prepare_push
 core@1/deque/push_back
 core@1/deque/push_front
 core@1/deque/reverse
@@ -267,6 +271,8 @@ core@1/map/len
 core@1/map/make_room
 core@1/map/new
 core@1/map/pop_entry
+# DECISIONS.md 2026-11-18 (memory model, MEM-31): in-place map insertion.
+core@1/map/probe_insert
 core@1/map/push_entry
 core@1/map/regrow
 core@1/map/reindex

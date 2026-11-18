@@ -675,3 +675,47 @@ fn bad_write_delimiter() -> bool {
     result.unwrap(csv.field(mut w, mut out, "foo"))
     false
 }
+
+// RFC 4180 section 2. A comma in a field requires quotes. The delimiter must
+// stay pending when the destination cannot grow.
+// expect: run writer_field_refusal_retries() = true
+fn writer_field_refusal_retries() -> bool {
+    let mut w = csv.writer(dialect(44, true))
+    let mut out = string.new()
+    result.unwrap(string.reserve(mut out, 8))
+    result.unwrap(csv.field(mut w, mut out, "aaa"))
+    let denied = result.unwrap(bound bytes 0 {
+        csv.field(mut w, mut out, "b,b")
+    })
+    if let Ok(_) = denied {
+        return false
+    }
+    if out != "aaa" {
+        return false
+    }
+    result.unwrap(csv.field(mut w, mut out, "b,b"))
+    result.unwrap(csv.end(mut w, mut out))
+    out == "aaa,\"b,b\"\r\n"
+}
+
+// RFC 4180 section 2. Quote the sole empty field and end it with CRLF.
+// An early reset would change what the same writer appends on retry.
+// expect: run writer_end_refusal_retries() = true
+fn writer_end_refusal_retries() -> bool {
+    let mut w = csv.writer(dialect(44, true))
+    let mut out = string.new()
+    result.unwrap(string.reserve(mut out, 8))
+    result.unwrap(string.push(mut out, "abcde\r\n"))
+    result.unwrap(csv.field(mut w, mut out, ""))
+    let denied = result.unwrap(bound bytes 0 {
+        csv.end(mut w, mut out)
+    })
+    if let Ok(_) = denied {
+        return false
+    }
+    if out != "abcde\r\n" {
+        return false
+    }
+    result.unwrap(csv.end(mut w, mut out))
+    out == "abcde\r\n\"\"\r\n"
+}

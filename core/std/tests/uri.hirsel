@@ -418,3 +418,23 @@ fn base_must_be_absolute() -> bool {
     }
     refused && out == "pre"
 }
+
+// RFC 3986 sections 2.1 and 3.3. A slash inside a segment is %2F.
+// expect: run encode_refusal_retries() = true
+fn encode_refusal_retries() -> bool {
+    let mut out = string.new()
+    result.unwrap(string.reserve(mut out, 8))
+    result.unwrap(string.push(mut out, "route=/"))
+    let raw = result.unwrap(b"/")
+    let denied = result.unwrap(bound bytes 0 {
+        uri.encode(mut out, raw, Segment)
+    })
+    if let Ok(_) = denied {
+        return false
+    }
+    if out != "route=/" {
+        return false
+    }
+    result.unwrap(uri.encode(mut out, raw, Segment))
+    out == "route=/%2F"
+}

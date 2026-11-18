@@ -502,7 +502,9 @@ fn request_policy(b: Bytes, h: http1.Head) -> Result[RequestHead, u16] {
             expect = true
         } else if http1.equal_ascii(name, string.as_bytes("connection")) {
             close = close || http1.contains(value, string.as_bytes("close"))
-            keep_alive = keep_alive || http1.contains(value, string.as_bytes("keep-alive"))
+            if h.version == 0 && !close {
+                keep_alive = keep_alive || http1.contains(value, string.as_bytes("keep-alive"))
+            }
         } else if http1.equal_ascii(name, string.as_bytes("upgrade")) {
             upgrade_field = true
         }

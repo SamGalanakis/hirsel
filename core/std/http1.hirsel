@@ -95,6 +95,29 @@ fn target_byte(c: u8, mut cur: Cursor) -> bool {
     true
 }
 
+// The component owns its ASCII run until a separator, invalid byte, or
+// fragment boundary. Other token bytes use the full RFC 9110 classifier.
+fn scan_token(b: Bytes, first: u8, start: u64, limit: u64, separator: u8) -> (u64, Progress) {
+    let mut c = first
+    let mut next = start
+    loop {
+        let lower = c | 0x20
+        if lower < b'a' || lower > b'z' {
+            if c == separator {
+                return (next, Complete)
+            }
+            if !token(c) {
+                return (next, Bad)
+            }
+        }
+        if next == limit {
+            return (next, Partial)
+        }
+        c = b[next]
+        next += 1
+    }
+}
+
 /// Resumes over a growing buffer whose examined prefix has not changed.
 /// Initialize h with head() and cur with cursor(), once per request. Terminal
 /// results are sticky. Each head byte is read once; no allocation or I/O.
@@ -135,12 +158,14 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                 }
             },
             Method => {
-                if c == b' ' {
-                    h.method = Span(start: cur.start, end: at)
+                let (stop, scanned) = scan_token(b, c, next, limit, b' ')
+                next = stop
+                if scanned == Complete {
+                    h.method = Span(start: cur.start, end: next - 1)
                     cur.start = next
                     state = Target
-                } else if !token(c) {
-                    result = Bad
+                } else {
+                    result = scanned
                 }
             },
             Target => {
@@ -157,17 +182,32 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                 }
             },
             Version => {
-                if cur.part < 7 {
-                    if c != string.as_bytes("HTTP/1.")[cur.part] {
-                        result = Bad
+                let prefix = string.as_bytes("HTTP/1.")
+                let mut part = cur.part
+                let mut version_byte = c
+                loop {
+                    if part >= 7 {
+                        if version_byte == b'0' || version_byte == b'1' {
+                            h.version = version_byte - b'0'
+                            state = RequestEnd
+                        } else {
+                            result = Bad
+                        }
+                        break
                     }
-                    cur.part += 1
-                } else if c == b'0' || c == b'1' {
-                    h.version = c - b'0'
-                    state = RequestEnd
-                } else {
-                    result = Bad
+                    let expected = prefix[part]
+                    part += 1
+                    if version_byte != expected {
+                        result = Bad
+                        break
+                    }
+                    if next == limit {
+                        break
+                    }
+                    version_byte = b[next]
+                    next += 1
                 }
+                cur.part = part
             },
             RequestEnd => {
                 if c == 13 {
@@ -203,13 +243,15 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                 }
             },
             Name => {
-                if c == b':' {
-                    cur.name_end = at
+                let (stop, scanned) = scan_token(b, c, next, limit, b':')
+                next = stop
+                if scanned == Complete {
+                    cur.name_end = next - 1
                     cur.value_start = next
                     cur.value_end = next
                     state = Value
-                } else if !token(c) {
-                    result = Bad
+                } else {
+                    result = scanned
                 }
             },
             Value => {

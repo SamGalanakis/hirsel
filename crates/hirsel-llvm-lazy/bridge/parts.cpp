@@ -1,7 +1,7 @@
 // The release module's codegen parts. Whole-program O3 has run; each
 // out-of-line definition is then a part keyed by its bitcode, a part whose
-// object a caller already holds is not generated again, and the rest are
-// generated together in one object the caller cuts per part.
+// object a caller already holds is not generated again, and each of the rest
+// is generated from that bitcode alone, the parts in parallel.
 //
 // A part is one definition with the declarations it references. A local
 // constant it references is defined in it `linkonce_odr` (a weak hidden
@@ -24,20 +24,31 @@
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/StringMap.h>
+#include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DiagnosticInfo.h>
+#include <llvm/IR/DiagnosticPrinter.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/ModuleSlotTracker.h>
+#include <llvm/MC/TargetRegistry.h>
 #include <llvm/Support/CBindingWrapping.h>
+#include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/xxhash.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/TargetParser/Triple.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Utils/ValueMapper.h>
+#include <algorithm>
+#include <cstring>
+#include <atomic>
+#include <numeric>
+#include <pthread.h>
 #include <string>
 #include <vector>
 
@@ -200,36 +211,109 @@ struct References {
         }
         if (auto *md = dyn_cast<MetadataAsValue>(v)) metadata(md->getMetadata());
     }
-    DenseSet<const Metadata *> seen_md;
-    bool metadata_values = false;
-    void metadata(const Metadata *md) {
-        if (!md || !seen_md.insert(md).second) return;
+    // Whether each metadata seen names a global (an inlined call's history
+    // names its callees): the part's copy of it names the part's declarations.
+    DenseMap<const Metadata *, bool> names_global;
+    DenseSet<const Metadata *> open;
+    bool cycle = false;
+    bool metadata(const Metadata *md) {
+        if (!md) return false;
+        if (auto seen = names_global.find(md); seen != names_global.end()) {
+            cycle |= open.contains(md);
+            return seen->second;
+        }
+        names_global[md] = false;
+        open.insert(md);
+        bool named = false;
         if (auto *v = dyn_cast<ValueAsMetadata>(md)) {
-            metadata_values |= !isa<ConstantData>(v->getValue());
+            named = isa<Constant>(v->getValue()) && !isa<ConstantData>(v->getValue());
             value(v->getValue());
         }
         else if (auto *n = dyn_cast<MDNode>(md))
-            for (const MDOperand &op : n->operands()) metadata(op.get());
+            for (const MDOperand &op : n->operands()) named |= metadata(op.get());
         else if (auto *list = dyn_cast<DIArgList>(md))
-            for (ValueAsMetadata *v : list->getArgs()) metadata(v);
+            for (ValueAsMetadata *v : list->getArgs()) named |= metadata(v);
+        names_global[md] = named;
+        open.erase(md);
+        return named;
+    }
+    // A node met again inside its own operands was answered before them: on
+    // a cycle, every node naming one that names a global names one too.
+    void settle() {
+        for (bool changed = cycle; changed;) {
+            changed = false;
+            for (auto &[md, named] : names_global) {
+                if (named) continue;
+                if (auto *n = dyn_cast<MDNode>(md))
+                    for (const MDOperand &op : n->operands())
+                        if (op && names_global.lookup(op.get())) {
+                            named = changed = true;
+                            break;
+                        }
+            }
+        }
     }
 };
 
+// Gives `to` the uses of `from`, in their order: a use set to a value goes to
+// the front of its use list, so the last is set first.
+void hand_uses(Value &from, Value &to) {
+    SmallVector<Use *, 16> uses;
+    for (Use &u : from.uses()) uses.push_back(&u);
+    for (auto u = uses.rbegin(); u != uses.rend(); ++u) (*u)->set(&to);
+    if (from.isUsedByMetadata()) ValueAsMetadata::handleRAUW(&from, &to);
+}
+
 // Bitcode of `m` alone: no IR symbol table, which only restates the module.
+// It keeps each value's use-list order, which instruction selection and
+// register allocation follow: a part generated from its bitcode is then the
+// code its definition gets in the module.
 void bitcode(const Module &m, SmallVectorImpl<char> &out) {
     BitcodeWriter writer(out);
-    writer.writeModule(m);
+    writer.writeModule(m, /*ShouldPreserveUseListOrder=*/true);
     writer.writeStrtab();
+}
+
+// Lists the uses of each local value of `f`'s clone in the order `f` lists
+// those of the value it copies.
+void order_uses_like(const Function &f, const ValueToValueMapTy &map) {
+    auto order = [&](const Value &from) {
+        if (!from.hasNUsesOrMore(2)) return;
+        auto copy = map.find(&from);
+        if (copy == map.end() || !copy->second) return;
+        DenseMap<std::pair<const User *, unsigned>, unsigned> position;
+        unsigned n = 0;
+        for (const Use &u : from.uses()) {
+            auto user = map.find(u.getUser());
+            if (user != map.end() && user->second) {
+                const Value *copied = user->second;
+                position[{cast<User>(copied), u.getOperandNo()}] = n;
+            }
+            ++n;
+        }
+        copy->second->sortUseList([&](const Use &l, const Use &r) {
+            return position.lookup({l.getUser(), l.getOperandNo()}) < position.lookup({r.getUser(), r.getOperandNo()});
+        });
+    };
+    for (const Argument &a : f.args()) order(a);
+    for (const BasicBlock &b : f) {
+        order(b);
+        for (const Instruction &i : b) order(i);
+    }
 }
 
 // The bitcode of `f` alone, with what it references, in a module of its own.
 // The part's definition borrows `f`'s body for the write: its blocks move in,
-// its operands that name a global name the part's declaration instead, and
-// all of it is put back after, so `m` is as it was. A body the move cannot
-// put back exactly (a block whose address is taken, metadata that names a
-// value, debug records, a subprogram whose units the part must list) is
-// cloned instead; both give the same bitcode.
-void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets, SmallVectorImpl<char> &out) {
+// its operands and metadata that name a global name the part's declaration
+// instead, and all of it is put back after, so `m` is as it was. The move
+// keeps every use-list order the code generator follows. A body the move
+// cannot put back exactly (a block whose address is taken, debug records, a
+// subprogram whose units the part must list) is cloned instead, and the
+// clone's values list their uses in the order `f`'s list theirs. With
+// `unwind_tables` the part's definition has an unwind table, as its frame
+// moves are in the program's.
+void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets, bool unwind_tables,
+                  SmallVectorImpl<char> &out) {
     LLVMContext &context = m.getContext();
     auto p = std::make_unique<Module>("hirsel-part", context);
     p->setSourceFileName("hirsel-part");
@@ -253,7 +337,7 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets, Sm
             movable = movable && !i.hasDbgRecords();
         }
     }
-    movable = movable && !refs.metadata_values;
+    refs.settle();
     ValueToValueMapTy map;
     std::string assembly;
     std::vector<std::pair<GlobalVariable *, GlobalVariable *>> constants;
@@ -290,6 +374,10 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets, Sm
         own->setLinkage(GlobalValue::ExternalLinkage);
         own->setVisibility(GlobalValue::HiddenVisibility);
     }
+    auto unwind = [&] {
+        if (unwind_tables && !own->needsUnwindTableEntry()) own->setUWTableKind(UWTableKind::Async);
+    };
+    unwind();
     map[&f] = own;
     // After `f` is mapped: a constant may point back at it.
     for (auto &[from, to] : constants) to->setInitializer(MapValue(from->getInitializer(), map));
@@ -299,6 +387,8 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets, Sm
         for (Argument &a : f.args()) map[&a] = &*to++;
         SmallVector<ReturnInst *, 8> returns;
         CloneFunctionInto(own, &f, map, CloneFunctionChangeType::DifferentModule, returns);
+        order_uses_like(f, map);
+        unwind(); // The clone takes `f`'s attributes.
         bitcode(*p, out);
         return;
     }
@@ -309,23 +399,37 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets, Sm
     p->getOrInsertNamedMetadata("llvm.dbg.cu");
     own->splice(own->end(), &f);
     for (auto [from, to] = std::pair(f.arg_begin(), own->arg_begin()); from != f.arg_end(); ++from, ++to)
-        from->replaceAllUsesWith(&*to);
+        hand_uses(*from, *to);
     std::vector<std::pair<Use *, Value *>> moved;
+    std::vector<std::tuple<Instruction *, unsigned, MDNode *>> retagged;
     for (BasicBlock &b : *own)
-        for (Instruction &i : b)
+        for (Instruction &i : b) {
             for (Use &u : i.operands()) {
                 Value *v = u.get();
-                if (!isa<Constant>(v) || isa<ConstantData>(v)) continue;
-                Value *n = MapValue(v, map);
+                Value *n = nullptr;
+                if (auto *md = dyn_cast<MetadataAsValue>(v)) {
+                    if (refs.names_global.lookup(md->getMetadata()))
+                        n = MetadataAsValue::get(context, MapMetadata(md->getMetadata(), map, RF_IgnoreMissingLocals));
+                } else if (isa<Constant>(v) && !isa<ConstantData>(v))
+                    n = MapValue(v, map);
                 if (n && n != v) {
                     moved.push_back({&u, v});
                     u.set(n);
                 }
             }
+            SmallVector<std::pair<unsigned, MDNode *>, 4> tags;
+            i.getAllMetadataOtherThanDebugLoc(tags);
+            for (auto &[kind, node] : tags)
+                if (refs.names_global.lookup(node)) {
+                    retagged.push_back({&i, kind, node});
+                    i.setMetadata(kind, MapMetadata(node, map));
+                }
+        }
     bitcode(*p, out);
+    for (auto &[i, kind, node] : retagged) i->setMetadata(kind, node);
     for (auto it = moved.rbegin(); it != moved.rend(); ++it) it->first->set(it->second);
     for (auto [from, to] = std::pair(f.arg_begin(), own->arg_begin()); from != f.arg_end(); ++from, ++to)
-        to->replaceAllUsesWith(&*from);
+        hand_uses(*to, *from);
     f.splice(f.end(), own);
 }
 
@@ -388,17 +492,104 @@ std::string unsplittable(const Module &m) {
     return "";
 }
 
+// One missed part: its bitcode in, its object or an LLVM message out.
+struct Miss {
+    SmallVector<char, 0> code;
+    SmallVector<char, 0> object;
+    std::string error;
+};
+
+// An error diagnostic is the part's error, and other diagnostics are dropped:
+// reading a part without debug lines drops its empty compile unit list with a
+// warning on every part.
+void diagnose(const DiagnosticInfo *d, void *miss) {
+    if (d->getSeverity() != DS_Error) return;
+    std::string &error = static_cast<Miss *>(miss)->error;
+    if (!error.empty()) return;
+    raw_string_ostream os(error);
+    DiagnosticPrinterRawOStream printer(os);
+    d->print(printer);
+}
+
+// Generate the object of `miss` from its bitcode alone, in a context of its
+// own, with `tm`: what `LLVMTargetMachineEmitToMemoryBuffer` does.
+void generate(TargetMachine &tm, Miss &miss) {
+    LLVMContext context;
+    context.setDiscardValueNames(true);
+    context.setDiagnosticHandlerCallBack(diagnose, &miss);
+    auto parsed = parseBitcodeFile(MemoryBufferRef(StringRef(miss.code.data(), miss.code.size()), "hirsel-part"), context);
+    if (!parsed) {
+        if (miss.error.empty()) miss.error = toString(parsed.takeError());
+        else consumeError(parsed.takeError());
+        return;
+    }
+    Module &p = **parsed;
+    p.setDataLayout(tm.createDataLayout());
+    raw_svector_ostream os(miss.object);
+    legacy::PassManager passes;
+    if (tm.addPassesToEmitFile(passes, os, nullptr, CodeGenFileType::ObjectFile)) {
+        miss.error = "the target machine cannot emit an object";
+        return;
+    }
+    passes.run(p);
+}
+
+struct Workers {
+    const TargetMachine &tm;
+    std::vector<Miss> &misses;
+    std::vector<size_t> order;
+    std::atomic<size_t> next{0};
+};
+
+// A worker takes the largest part not yet taken until none is left, on a
+// target machine of its own: a machine holds per-module state.
+void *work(void *arg) {
+    Workers &w = *static_cast<Workers *>(arg);
+    std::unique_ptr<TargetMachine> tm(w.tm.getTarget().createTargetMachine(
+        w.tm.getTargetTriple(), w.tm.getTargetCPU(), w.tm.getTargetFeatureString(), w.tm.Options,
+        w.tm.getRelocationModel(), w.tm.getCodeModel(), w.tm.getOptLevel()));
+    for (size_t k; (k = w.next.fetch_add(1)) < w.order.size();) {
+        Miss &miss = w.misses[w.order[k]];
+        if (tm) generate(*tm, miss);
+        else miss.error = "LLVM could not create the target machine";
+    }
+    return nullptr;
+}
+
+// Generate every miss on up to `jobs` threads, the calling thread one of them.
+// Each thread has the stack the guard gives the compiler's own thread.
+void generate_all(const TargetMachine &tm, std::vector<Miss> &misses, unsigned jobs) {
+    Workers w{tm, misses, std::vector<size_t>(misses.size())};
+    std::iota(w.order.begin(), w.order.end(), 0);
+    std::stable_sort(w.order.begin(), w.order.end(),
+                     [&](size_t a, size_t b) { return misses[a].code.size() > misses[b].code.size(); });
+    size_t width = std::min<size_t>(std::max(jobs, 1u), misses.size());
+    std::vector<pthread_t> threads;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, size_t(128) << 20);
+    for (size_t i = 1; i < width; ++i) {
+        pthread_t t;
+        if (pthread_create(&t, &attr, work, &w) == 0) threads.push_back(t);
+    }
+    pthread_attr_destroy(&attr);
+    work(&w);
+    for (pthread_t t : threads) pthread_join(t, nullptr);
+}
+
 }  // namespace
 
-// Generate `module` once for every definition a caller does not hold. Each
+// Generate every definition of `module` a caller does not hold. Each
 // out-of-line definition is a part keyed by its own bitcode (`part`); `reuse`
 // gets the machine text, the part's definition name and bitcode, and answers 1
-// when it holds the part's object, whose body is then dropped. One codegen
-// over what is left gives one object with a section per definition, which
-// `deliver` gets and the caller cuts per part. A module that cannot be cut
-// (`unsplittable`) is one part named "" keyed by the module's bitcode.
+// when it holds the part's object. With `jobs` 0 the rest are generated
+// together in one object with a section per definition, which `deliver` gets
+// and the caller cuts per part. Otherwise each missed part is generated from
+// its bitcode alone on up to `jobs` threads, and `deliver` gets its object, in
+// part order. A module that cannot be cut (`unsplittable`) is one part named
+// "" keyed by the module's bitcode and generated whole.
 // Returns 0, or 1 with `*error` set to an LLVM message.
-extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine,
+extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     int (*reuse)(void *, const char *, size_t, const char *, size_t, const uint8_t *, size_t),
     void (*deliver)(void *, const uint8_t *, size_t), void *context, char **error) {
     Module &m = *unwrap(module);
@@ -425,24 +616,41 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
         return reuse(context, name.data(), name.size(), machine_key.data(), machine_key.size(),
                      (const uint8_t *)code.data(), code.size()) != 0;
     };
-    size_t misses = 0;
+    std::vector<Miss> misses;
     if (whole) {
         SmallVector<char, 0> code;
         bitcode(m, code);
         if (ask("", code)) return 0;
-        misses = 1;
+        jobs = 0;
+        misses.emplace_back();
     } else {
         // Keyed while local definitions are still local: a part's bitcode
         // then carries each constant it reaches with its initializer, which
         // the part's object holds a copy of.
         StringMap<std::string> sets = asm_lines(m);
+        // A program with debug information gives every function its frame
+        // moves, in the unwind tables when a function of it needs one there:
+        // a part without such a function then needs an unwind table of its own.
+        bool unwind_tables = !m.debug_compile_units().empty() &&
+            any_of(m, [](const Function &g) { return !g.isDeclaration() && g.needsUnwindTableEntry(); });
         std::vector<Function *> held;
         for (Function &f : m) {
             if (f.isDeclaration()) continue;
-            SmallVector<char, 0> code;
-            part_bitcode(m, f, sets, code);
-            if (ask(f.getName(), code)) held.push_back(&f);
-            else ++misses;
+            Miss miss;
+            part_bitcode(m, f, sets, unwind_tables, miss.code);
+            if (ask(f.getName(), miss.code)) held.push_back(&f);
+            else misses.push_back(std::move(miss));
+        }
+        if (jobs) {
+            if (misses.empty()) return 0;
+            generate_all(tm, misses, jobs);
+            for (Miss &miss : misses)
+                if (!miss.error.empty()) {
+                    *error = strdup(miss.error.c_str());
+                    return 1;
+                }
+            for (Miss &miss : misses) deliver(context, (const uint8_t *)miss.object.data(), miss.object.size());
+            return 0;
         }
         // Every local definition is a hidden global: a part's references to
         // another part's definitions resolve at link time.
@@ -453,7 +661,7 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
             }
         for (Function *f : held) f->deleteBody();
     }
-    if (!misses) return 0;
+    if (misses.empty()) return 0;
     LLVMMemoryBufferRef object = nullptr;
     if (LLVMTargetMachineEmitToMemoryBuffer(machine, module, LLVMObjectFile, error, &object)) return 1;
     deliver(context, (const uint8_t *)LLVMGetBufferStart(object), LLVMGetBufferSize(object));

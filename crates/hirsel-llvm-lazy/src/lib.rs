@@ -50,20 +50,22 @@ pub fn emit_program_for_target(
     target: hirsel_core_layout::Target,
 ) -> Result<Vec<u8>, String> {
     Ok(
-        emit_program_parts(units, exports, target, &mut |_, _, _| false)?
-            .object
+        emit_program_parts(units, exports, target, 0, &mut |_, _, _| false)?
+            .objects
+            .pop()
             .expect("an unreused program is generated"),
     )
 }
 
 /// A release program's parts after whole-program optimisation, in order, and
-/// the one object generated for every part not reused.
+/// the objects generated for the parts not reused.
 #[derive(Default)]
 pub struct Program {
     pub parts: Vec<Part>,
-    /// A section per definition; [`core::split_native_object`] cuts it per
-    /// part. None when every part was reused.
-    pub object: Option<Vec<u8>>,
+    /// One object per part not reused, in part order, or one object with a
+    /// section per such part; [`core::split_native_object`] cuts either per
+    /// part. Empty when every part was reused.
+    pub objects: Vec<Vec<u8>>,
 }
 /// One out-of-line definition, by its content-derived symbol. The empty name
 /// is a whole module that cannot be cut per definition: its only part.
@@ -75,11 +77,14 @@ pub struct Part {
 /// Compose a release program for `target` and generate it in parts, one per
 /// out-of-line definition after whole-program optimisation. `reuse` sees each
 /// part's definition name, the code generator's machine text and the part's
-/// bitcode, in order, and answers whether the caller holds its object.
+/// bitcode, in order, and answers whether the caller holds its object. Each
+/// part not held is generated from its bitcode alone on up to `jobs` threads;
+/// with `jobs` 0 they are generated together as one object.
 pub fn emit_program_parts(
     units: &[Unit<'_>],
     exports: &[String],
     target: hirsel_core_layout::Target,
+    jobs: u32,
     reuse: &mut dyn FnMut(&str, &str, &[u8]) -> bool,
 ) -> Result<Program, String> {
     let context = units
@@ -118,7 +123,7 @@ pub fn emit_program_parts(
             Unit::Text(ir) => lowered.push(loader::ProgramUnit::Text(ir)),
         }
     }
-    loader::program(lowered, exports, target, reuse)
+    loader::program(lowered, exports, target, jobs, reuse)
 }
 
 #[cfg(test)]

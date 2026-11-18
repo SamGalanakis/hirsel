@@ -32,7 +32,7 @@ extern void hirsel_llvm_composer_free(void *composer);
 extern void hirsel_llvm_merge_glue(LLVMModuleRef module);
 typedef int (*HirselLlvmReuse)(void *, const char *, size_t, const char *, size_t, const uint8_t *, size_t);
 typedef void (*HirselLlvmDeliver)(void *, const uint8_t *, size_t);
-extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine,
+extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *context, char **error);
 static pthread_once_t initialized = PTHREAD_ONCE_INIT;
 static void initialize(void) {
@@ -546,7 +546,7 @@ static int public_body(LLVMValueRef f) {
 
 static void emit_program(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
-                          uint8_t speed, const char *triple, const char *cpu,
+                          uint8_t speed, const char *triple, const char *cpu, unsigned jobs,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
                           HirselLlvmOutput *out) {
     pthread_once(&initialized, initialize);
@@ -690,9 +690,10 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     }
     buffer = NULL; message = NULL;
     // A program is keyed in parts, one per definition, and what no caller
-    // holds is generated as one object to cut per part; a standalone module,
-    // which keeps its order, as one object.
-    if (export_count) failed = hirsel_llvm_emit_parts(module, machine, reuse, deliver, receiver, &message);
+    // holds is generated per part on `jobs` threads, or with `jobs` 0 as one
+    // object to cut per part; a standalone module, which keeps its order, as
+    // one object.
+    if (export_count) failed = hirsel_llvm_emit_parts(module, machine, jobs, reuse, deliver, receiver, &message);
     else {
         failed = LLVMTargetMachineEmitToMemoryBuffer(machine, module, LLVMObjectFile, &message, &buffer);
         if (!failed && buffer) {
@@ -712,20 +713,21 @@ done:
     if (own_context) LLVMContextDispose(context); LLVMDisposeTargetMachine(machine);
 }
 // Emit units as parts (exports given) or as one standalone object: `reuse` is
-// asked first for each part, `deliver` gets the one object generated, if any,
-// and `out` is empty or holds the error.
+// asked first for each part, `deliver` gets each missed part's object on
+// `jobs` threads, or with `jobs` 0 the one object generated, if any, and `out`
+// is empty or holds the error.
 __attribute__((visibility("default")))
-void hirsel_llvm_program_v5(const HirselLlvmUnit *units, size_t count,
+void hirsel_llvm_program_v6(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
-                          uint8_t speed, const char *triple, const char *cpu,
+                          uint8_t speed, const char *triple, const char *cpu, unsigned jobs,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
                           HirselLlvmOutput *out) {
-    emit_program(units, count, exports, export_count, speed, triple, cpu, reuse, deliver, receiver, out);
+    emit_program(units, count, exports, export_count, speed, triple, cpu, jobs, reuse, deliver, receiver, out);
 }
 __attribute__((visibility("default")))
 void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
     HirselLlvmUnit unit = { ir, len, NULL };
-    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, NULL, NULL, NULL, out);
+    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, 0, NULL, NULL, NULL, out);
 }
 
 extern const void *hirsel_llvm_no_folder_api(void);

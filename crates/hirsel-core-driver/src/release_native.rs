@@ -175,10 +175,13 @@ impl CheckProduct {
                 .collect::<Vec<_>>();
             let mut parts = Vec::new();
             let mut failure = None;
+            // One code generator thread per CPU this process may run on.
+            let jobs = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
             let program = hirsel_llvm_lazy::emit_program_parts(
                 &units,
                 &[instance.symbol()],
                 target,
+                jobs,
                 &mut |_, machine, bitcode| {
                     let loaded = part_key(&generator, machine, bitcode).and_then(|key| {
                         parts.push(key);
@@ -201,8 +204,9 @@ impl CheckProduct {
             if let Some(error) = failure {
                 return Err(error.into());
             }
-            // The one object generated now is cut per missed part; those parts
-            // join the hits in part order.
+            // Each missed part's object, or the one object of a module
+            // generated whole, is cut to the part's finished object; those
+            // parts join the hits in part order.
             let missed = program
                 .parts
                 .iter()
@@ -210,14 +214,19 @@ impl CheckProduct {
                 .filter(|(part, _)| !part.reused)
                 .map(|(part, &key)| (part.name.as_str(), key))
                 .collect::<Vec<_>>();
-            let mut made = match &program.object {
-                Some(object) => hirsel_llvm_lazy::core::split_native_object(
-                    object,
-                    &missed,
-                    options.debug_lines,
-                )
-                .map_err(emit)?,
-                None => Vec::new(),
+            let cut = |object: &[u8], parts: &[(&str, ContentHash)]| {
+                hirsel_llvm_lazy::core::split_native_object(object, parts, options.debug_lines)
+                    .map_err(emit)
+            };
+            let mut made = match program.objects.as_slice() {
+                [object] => cut(object, &missed)?,
+                objects => {
+                    let mut made = Vec::with_capacity(missed.len());
+                    for (object, part) in objects.iter().zip(&missed) {
+                        made.extend(cut(object, std::slice::from_ref(part))?);
+                    }
+                    made
+                }
             }
             .into_iter();
             let mut hits = std::mem::take(&mut held).into_iter();

@@ -50,6 +50,7 @@ type Program = unsafe extern "C" fn(
     u8,
     *const libc::c_char,
     *const libc::c_char,
+    u32,
     Reuse,
     Deliver,
     *mut libc::c_void,
@@ -218,7 +219,7 @@ fn load() -> Result<Backend, String> {
     // engine.c built in this same artifact. No foreign component is selected.
     let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v1".as_ptr()) };
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
-    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v5".as_ptr()) };
+    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v6".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
     if compile.is_null() || free.is_null() || program.is_null() || construction.is_null() {
@@ -294,25 +295,31 @@ pub(crate) fn compile_module(
     speed: bool,
     target: hirsel_core_layout::Target,
 ) -> Result<Vec<u8>, String> {
-    let program = emit(
+    let mut program = emit(
         vec![ProgramUnit::Native(module)],
         &[],
         speed,
         target,
+        0,
         &mut |_, _, _| false,
     )?;
-    Ok(program.object.expect("a standalone module is one object"))
+    Ok(program
+        .objects
+        .pop()
+        .expect("a standalone module is one object"))
 }
 
-/// A program's parts, in order, and the one object generated for the parts
-/// `reuse` did not answer true for.
+/// A program's parts, in order, and the objects generated for the parts
+/// `reuse` did not answer true for: one per part on `jobs` threads, or with
+/// `jobs` 0 one for them all.
 pub(crate) fn program(
     units: Vec<ProgramUnit<'_>>,
     exports: &[String],
     target: hirsel_core_layout::Target,
+    jobs: u32,
     reuse: &mut dyn FnMut(&str, &str, &[u8]) -> bool,
 ) -> Result<crate::Program, String> {
-    emit(units, exports, true, target, reuse)
+    emit(units, exports, true, target, jobs, reuse)
 }
 
 struct Receiver<'a> {
@@ -351,7 +358,10 @@ unsafe extern "C" fn deliver_part(receiver: *mut libc::c_void, object: *const u8
     // SAFETY: as in `reuse_part`; the object is copied before the callback returns.
     unsafe {
         let receiver = &mut *(receiver as *mut Receiver<'_>);
-        receiver.program.object = Some(std::slice::from_raw_parts(object, len).to_vec());
+        receiver
+            .program
+            .objects
+            .push(std::slice::from_raw_parts(object, len).to_vec());
     }
 }
 
@@ -360,6 +370,7 @@ fn emit(
     exports: &[String],
     speed: bool,
     target: hirsel_core_layout::Target,
+    jobs: u32,
     reuse: &mut dyn FnMut(&str, &str, &[u8]) -> bool,
 ) -> Result<crate::Program, String> {
     let triple = CString::new(target.triple()).unwrap();
@@ -410,6 +421,7 @@ fn emit(
             u8::from(speed),
             triple.as_ptr(),
             cpu.as_ptr(),
+            jobs,
             reuse_part,
             deliver_part,
             &mut receiver as *mut Receiver<'_> as *mut libc::c_void,

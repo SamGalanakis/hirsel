@@ -35,6 +35,23 @@ pub fn push[T: ordered](mut h: Heap[T], take x: T) -> Result[(), (Capacity, T)] 
     Ok(())
 }
 
+// A caller that constructed into spare space already published the last slot.
+// If the item belongs there, no copy of it has been made.
+fn prepare_push[T: ordered](h: Heap[T], i: u64) {
+    slots_unmark_spare(h.items, i)
+}
+
+fn finish_prepared_push[T: ordered](mut h: Heap[T], tail: u64) {
+    slots_publish_spare(mut h.items, tail)
+    if tail > 0 {
+        let parent = (tail - 1) / 2
+        if slots_view(h.items, tail) < slots_view(h.items, parent) {
+            let item = slots_take(mut h.items, tail)
+            let _ = push(mut h, take item)
+        }
+    }
+}
+
 pub fn pop[T: ordered](mut h: Heap[T]) -> Option[T] {
     let count = list.len(h.items)
     if count == 0 {
@@ -76,6 +93,10 @@ pub fn pop[T: ordered](mut h: Heap[T]) -> Option[T] {
 
 // These operate on List's allocation while its live set contains a hole.
 // Views, clones and cleanup see an inhabited prefix at every public boundary.
+fn slots_unmark_spare[T](s: List[T], i: u64)
+
+fn slots_publish_spare[T](mut s: List[T], i: u64)
+
 fn slots_put[T](mut xs: List[T], i: u64, take x: T)
 
 fn slots_take[T](mut xs: List[T], i: u64) -> T

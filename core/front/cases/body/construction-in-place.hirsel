@@ -1,0 +1,196 @@
+// expect: accept
+// expect: run item_refuses_before_growth() = 1608
+// expect: run failed_cleanup() = fail Division trace 9,2,1
+// expect: run transfer(false) = 83 copies 80,0
+// expect: run transfer(true) = 83 copies 80,0
+// expect: run result_writes_once(0) = 168 copies 64,0
+// expect: run result_writes_once(10) = 528 copies 64,0
+// expect: run spare_slot_writes_once(10) = 528 copies 64,0
+// expect: run replacement(true,0) = fail Division trace 2,0,1
+// expect: run replacement(false,1) = fail Bounds trace 2,1
+// expect: run replacement(false,0) = 12 trace 1,2
+// expect: run nested_return() = 45 trace 3,5,4
+// expect: run collection_order() = 121234
+// expect: run map_values(false) = 12 trace 1,2
+// expect: run map_values(true) = fail Division trace 2,0,1
+type Pair: key + ordered {
+    a: u64,
+    b: u64
+}
+
+fn item() -> Result[Pair, Capacity] {
+    let _: List[u64] = list.with_capacity(2)?
+    Ok(Pair(a: 1, b: 2))
+}
+
+fn push_item(mut full: List[Pair]) -> Result[(), Capacity] {
+    match list.push(mut full, item()?) {
+        Ok(()) => Ok(()),
+        Error((why, _)) => Error(why),
+    }
+}
+
+fn item_refuses_before_growth() -> u64 {
+    // Two 16-byte elements fill the 32-byte backing block. Only eight bytes
+    // remain for item's first admission. Growth would request 4 * 16.
+    let result = bound bytes 40 {
+        let mut full: List[Pair] = result.unwrap(list.with_capacity(2))
+        result.unwrap(list.push(mut full, Pair(a: 3, b: 4)))
+        result.unwrap(list.push(mut full, Pair(a: 5, b: 6)))
+        push_item(mut full)
+    }
+    match result {
+        Ok(Error(why)) => why.requested * 100 + why.available,
+        _ => 0,
+    }
+}
+
+resource type Part {
+    id: u64,
+    divisor: u64
+} drop(part) {
+    let _ = 1 / part.divisor
+}
+
+fn new_part(id: u64, divisor: u64) -> Part {
+    result.unwrap(Part(id: id, divisor: divisor))
+}
+
+type Envelope {
+    part: Part
+}
+
+fn make_envelope() -> Envelope {
+    let older = result.unwrap(Part(id: 1, divisor: 1))
+    let failure = result.unwrap(Part(id: 9, divisor: 0))
+    return Envelope(part: new_part(2, 1))
+}
+
+fn failed_cleanup() -> u64 {
+    let x = make_envelope()
+    x.part.id
+}
+
+fn replacement_value(fails: bool) -> Envelope {
+    let failure = new_part(2, if fails {
+        0
+    } else {
+        1
+    })
+    if fails {
+        return Envelope(part: new_part(0, 1))
+    }
+    Envelope(part: take failure)
+}
+
+fn replacement(fails: bool, index: u64) -> u64 {
+    let mut xs: List[Envelope] = result.unwrap(list.with_capacity(1))
+    result.unwrap(list.push(mut xs, Envelope(part: new_part(1, 1))))
+    let old = list.set(mut xs, index, replacement_value(fails))
+    old.part.id * 10 + xs[0].part.id
+}
+
+type TwoParts {
+    first: Part,
+    second: Part
+}
+
+fn leave_while_building() -> TwoParts {
+    TwoParts(first: new_part(3, 1), second: {
+        return TwoParts(first: new_part(4, 1), second: new_part(5, 1))
+    })
+}
+
+fn nested_return() -> u64 {
+    let parts = leave_while_building()
+    parts.first.id * 10 + parts.second.id
+}
+
+fn send_or_return(tx: Sender[List[u64]], send: bool) -> List[u64] {
+    let payload = {
+        let mut values: List[u64] = list.new()
+        result.unwrap(list.fill(mut values, 10, 83u64))
+        take values
+    }
+    if send {
+        result.unwrap(channel.try_send(tx, take payload))
+        return list.new()
+    }
+    take payload
+}
+
+fn transfer(send: bool) -> u64 {
+    let (tx, rx): (Sender[List[u64]], Receiver[List[u64]]) = result.unwrap(channel.new(1))
+    let returned = send_or_return(tx, send)
+    if send {
+        let received = result.unwrap(channel.try_receive(rx))
+        received[9]
+    } else {
+        returned[9]
+    }
+}
+
+type Eight {
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+    f: u64,
+    g: u64,
+    h: u64
+}
+
+fn eight(n: u64) -> Eight {
+    if n == 0 {
+        return Eight(a: 0, b: 1, c: 2, d: 3, e: 4, f: 5, g: 6, h: 7)
+    }
+    let result = Eight(a: n, b: n + 1, c: n + 2, d: n + 3, e: n + 4, f: n + 5, g: n + 6, h: n + 7)
+    result
+}
+
+fn total(x: Eight) -> u64 {
+    x.a + 2 * x.b + 3 * x.c + 4 * x.d + 5 * x.e + 6 * x.f + 7 * x.g + 8 * x.h
+}
+
+fn result_writes_once(n: u64) -> u64 {
+    total(eight(n))
+}
+
+fn spare_slot_writes_once(n: u64) -> u64 {
+    let mut xs: List[Eight] = result.unwrap(list.with_capacity(1))
+    match list.push(mut xs, eight(n)) {
+        Ok(()) => xs[0].a + 2 * xs[0].b + 3 * xs[0].c + 4 * xs[0].d + 5 * xs[0].e + 6 * xs[0].f + 7 * xs[0].g + 8 * xs[0].h,
+        Error(_) => 0,
+    }
+}
+
+fn collection_order() -> u64 {
+    let mut d: Deque[Pair] = deque.new()
+    result.unwrap(deque.push_back(mut d, Pair(a: 9, b: 0)))
+    let _ = deque.pop_front(mut d)
+    result.unwrap(deque.push_front(mut d, Pair(a: 2, b: 0)))
+    result.unwrap(deque.push_front(mut d, Pair(a: 1, b: 0)))
+    let first = option.unwrap(deque.pop_front(mut d))
+    let second = option.unwrap(deque.pop_front(mut d))
+    let mut h: Heap[Pair] = heap.new()
+    result.unwrap(heap.push(mut h, Pair(a: 4, b: 0)))
+    result.unwrap(heap.push(mut h, Pair(a: 2, b: 0)))
+    result.unwrap(heap.push(mut h, Pair(a: 3, b: 0)))
+    result.unwrap(heap.push(mut h, Pair(a: 1, b: 0)))
+    let mut order = first.a * 10 + second.a
+    while heap.len(h) != 0 {
+        let next = option.unwrap(heap.pop(mut h))
+        order = order * 10 + next.a
+    }
+    order
+}
+
+fn map_values(fails: bool) -> u64 {
+    let mut m: Map[Pair, Envelope] = map.new()
+    result.unwrap(map.reserve(mut m, 2))
+    result.unwrap(map.insert(mut m, Pair(a: 17, b: 19), Envelope(part: new_part(1, 1))))
+    result.unwrap(map.insert(mut m, Pair(a: 17, b: 19), replacement_value(fails)))
+    let got = option.unwrap(map.get(m, Pair(a: 17, b: 19)))
+    map.len(m) * 10 + got.part.id
+}

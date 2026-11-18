@@ -38,8 +38,17 @@ pub(super) struct Patterns {
     scopes: Vec<Scope>,
 }
 #[derive(Clone, Copy)]
+pub(super) struct SlotReplacement {
+    pub(super) slot: AddressId,
+    pub(super) previous: ValueId,
+    pub(super) present: ValueId,
+    pub(super) ty: TypeId,
+}
+
+#[derive(Clone, Copy)]
 enum ScopeKind {
     Region(Option<ValueId>),
+    Restore(SlotReplacement),
     Bound {
         failed: usize,
     },
@@ -1107,7 +1116,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (mut took, mut kept) = (false, false);
         let mark = self.log.len();
         let was_dead = self.dead;
-        let join = self.new_join();
+        let join = self.new_result_join();
         let matrix = self.patterns.matrix.len();
         let edge_mark = self.patterns.edges.len();
         let escape_mark = self.patterns.escaping.len();
@@ -1162,7 +1171,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.patterns.rebind = false;
             let taken = temp.is_some_and(|i| !self.temp_live(i));
             let body = *a.last().unwrap();
-            let (at, v) = self.expr(body, ty.and_then(expect).or(want));
+            let (at, v) = self.result_expr(body, ty.and_then(expect).or(want));
             if ty.is_none() && at != NEVER {
                 ty = Some(at);
             }
@@ -1452,7 +1461,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let was_dead = self.dead;
         let no_block = self.live().then(|| self.new_block(&[]));
         let escape_mark = self.patterns.escaping.len();
-        let join = self.new_join();
+        let join = self.new_result_join();
         self.pattern_tests(id, subject, no_block);
         // The condition's temporaries, the scrutinee unless the pattern takes it,
         // end before either branch runs (LANG-6).
@@ -1469,7 +1478,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let chosen = self.chosen_pattern(id, subject, condition[0]);
         self.bind_pattern(id, chosen, false);
         self.end_owners(cond, None, true, condition[0]);
-        let (yt, yv) = self.expr(c[1], if c.len() == 2 { expect(UNIT) } else { want });
+        let (yt, yv) = self.result_expr(c[1], if c.len() == 2 { expect(UNIT) } else { want });
         self.pattern_scope_end(scope, holds, cond, c[1], yt, yv);
         self.depth -= 1;
         let yes = self.arm_edge(mark);
@@ -1478,7 +1487,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.start(no);
         }
         let (ot, ov) = if let Some(&other) = c.get(2) {
-            self.expr(
+            self.result_expr(
                 other,
                 want.filter(|w| w.payload == 0)
                     .or_else(|| {
@@ -1595,7 +1604,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             None
         }
     }
-    fn wrap_case(
+    pub(super) fn wrap_case(
         &mut self,
         ty: TyId,
         case: u32,
@@ -1783,10 +1792,33 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.pattern_scope_exits_one(i, n);
         }
     }
+    pub(super) fn restore_on_exit(&mut self, slot: SlotReplacement) {
+        self.patterns.scopes.push(Scope {
+            kind: ScopeKind::Restore(slot),
+            frame: None,
+            owners: self.owner_mark(),
+        });
+        self.epoch += 1;
+    }
+
+    pub(super) fn commit_restored_slot(&mut self) {
+        self.patterns.scopes.pop();
+        self.epoch += 1;
+    }
+
     pub(super) fn pattern_scope_exits_one(&mut self, i: usize, n: NodeId) {
         match self.patterns.scopes[i].kind {
             ScopeKind::Region(Some(region)) => self.inst(Inst::RegionClose { region }, n),
             ScopeKind::Bound { .. } => self.inst(Inst::LimitExit, n),
+            ScopeKind::Restore(old) => {
+                let restore = self.new_block(&[]);
+                let done = self.new_block(&[]);
+                self.list_branch(old.present, restore, done, n);
+                self.start(restore);
+                self.copy_to(old.slot, old.previous, old.ty, n);
+                self.jump(done, &[], n);
+                self.start(done);
+            }
             ScopeKind::StepBound {
                 failed,
                 steps,
@@ -1822,7 +1854,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.patterns.scopes.iter().any(|s| {
             matches!(
                 s.kind,
-                ScopeKind::Region(Some(_)) | ScopeKind::Bound { .. } | ScopeKind::StepBound { .. }
+                ScopeKind::Region(Some(_))
+                    | ScopeKind::Bound { .. }
+                    | ScopeKind::StepBound { .. }
+                    | ScopeKind::Restore(_)
             )
         })
     }
@@ -1886,7 +1921,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.scope_slots.push(b);
         }
         let body = self.kids(n)[0];
-        let (t, v) = self.expr(body, want);
+        let (t, v) = self.result_expr(body, want);
         if !self.contains_region_value(t) {
             self.region_result_anchors(scope, body, t)
         }

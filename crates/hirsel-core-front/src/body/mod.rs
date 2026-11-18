@@ -1055,6 +1055,7 @@ struct Join {
     anchors: u32,
     /// The row of the own value its edges carry, which is a temporary after it.
     drop: Option<TypeId>,
+    destination: Option<AddressId>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1192,6 +1193,10 @@ struct Cx<'c, 'a, 'e> {
     /// The destination a declared result is written to: the entry block's first
     /// parameter and its place.
     dest: Option<(ValueId, TypeId)>,
+    return_place: Option<AddressId>,
+    returned_local: Option<(u32, AddressId)>,
+    /// The uninitialized destination offered to this particular expression.
+    destination: Option<(NodeId, AddressId)>,
     /// A clone body's `to` (MEM-17): its result is built in a local `dest` and moved
     /// here on `Ok`.
     clone_to: Option<ValueId>,
@@ -1327,6 +1332,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             waited: false,
             entry: fd.is_test || p.entry.as_ref() == Some(&fd.path),
             dest: None,
+            return_place: None,
+            returned_local: None,
+            destination: None,
             clone_to: None,
             reps: HashMap::default(),
             kind_cache: HashMap::default(),
@@ -1811,6 +1819,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         if self.e.needs_drop(id) {
             self.consume(Some(from), n);
         }
+        if self.pointer_address(from) == Some(to) {
+            return;
+        }
         let from = self.address(AddressBase::Value(from), &[], PlaceTy::Declared(id), n);
         let size = self.e.size(id);
         let bytes = self.value(Ty::Scalar(Scalar::U64));
@@ -1882,7 +1893,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
         let v = match (self.dest, v) {
             (Some((dest, id)), Some(v)) => {
-                let to = self.address(AddressBase::Value(dest), &[], PlaceTy::Declared(id), n);
+                let to = self.return_place.unwrap_or_else(|| {
+                    self.address(AddressBase::Value(dest), &[], PlaceTy::Declared(id), n)
+                });
                 self.copy_to(to, v, id, n);
                 if self.e.runs_code(id) && !self.is_view(self.fd.result) {
                     self.pending = Some((AddressBase::Address(to), id));
@@ -2031,6 +2044,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.joins.push(Join::default());
         self.joins.len() - 1
     }
+    fn new_result_join(&mut self) -> usize {
+        let j = self.new_join();
+        self.joins[j].destination = self.expression_destination(self.node);
+        j
+    }
     /// Leave the current block for join `j`, whose parameters carry a value of `ty`.
     fn goto(&mut self, j: usize, ty: TyId, v: Option<ValueId>, n: NodeId) {
         if !self.live() {
@@ -2053,7 +2071,17 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
         self.join_descriptor(j, v);
         self.joins[j].anchors = self.anchors.union(self.joins[j].anchors, self.anchors.last);
-        let args: Vec<ValueId> = v.into_iter().collect();
+        let value = match (self.joins[j].destination, v) {
+            (Some(to), Some(from)) if self.pointer_address(from) != Some(to) => {
+                let PlaceTy::Declared(id) = self.b.addresses[to.index()].ty else {
+                    unreachable!("only aggregate results have a destination");
+                };
+                self.copy_to(to, from, id, n);
+                Some(self.pointer(to, n))
+            }
+            _ => v,
+        };
+        let args: Vec<ValueId> = value.into_iter().collect();
         self.jump(blk, &args, n);
     }
     /// Continue at join `j`, if any edge reached it; its parameter is the joined value.
@@ -2061,6 +2089,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let blk = self.joins[j].block?;
         self.start(blk);
         let v = self.block_params(blk).first().copied();
+        if let (Some(v), Some(to)) = (v, self.joins[j].destination) {
+            self.note_pointer(v, to);
+        }
         let anchors = self.joins[j].anchors;
         self.anchors.last = anchors;
         if anchors != 0 {
@@ -2232,15 +2263,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         if self.fd.drop_of.is_some() || self.fd.clone_of.is_some() {
             self.source_step(body);
         }
-        let result = self.fd.result;
-        let (_, v) = self.expr(
-            body,
-            Some(Want {
-                ty: result,
-                view: false,
-                payload: 0,
-            }),
-        );
+        if let Some((dest, id)) = self.dest
+            && !self.is_view(self.fd.result)
+        {
+            self.return_place =
+                Some(self.address(AddressBase::Value(dest), &[], PlaceTy::Declared(id), body));
+        }
+        let v = self.return_operand(body);
         self.ret(v, body);
         // Only a body checked to its end shows that nothing it calls waits.
         if self.fd.waits && !self.waited && !self.entry && self.fd.drop_of.is_none() && !self.broken
@@ -2338,6 +2367,149 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
 
     // ---- expressions
+    fn can_construct(&self, n: NodeId) -> bool {
+        match self.kind(n) {
+            NodeKind::Call | NodeKind::Tuple | NodeKind::Array | NodeKind::RepeatArray => true,
+            NodeKind::Group => self.can_construct(self.kids(n)[0]),
+            NodeKind::Block => self
+                .block_tail(n)
+                .is_some_and(|tail| self.can_construct(tail)),
+            NodeKind::If => self.kids(n)[1..].iter().any(|&arm| self.can_construct(arm)),
+            NodeKind::Match => self.kids(n)[1..]
+                .iter()
+                .any(|&arm| self.can_construct(*self.kids(arm).last().unwrap())),
+            NodeKind::Path => matches!(
+                self.p.target(self.at, n),
+                Some(Target::ContextualConstructor { .. })
+            ),
+            _ => false,
+        }
+    }
+
+    /// A partial aggregate in the result place must not overlap another return
+    /// from one of its fields. A nested function has its own result place.
+    fn may_return(&self, n: NodeId) -> bool {
+        match self.kind(n) {
+            NodeKind::Return | NodeKind::Try => true,
+            NodeKind::Closure | NodeKind::ScopedClosure => false,
+            _ => self.kids(n).iter().any(|&child| self.may_return(child)),
+        }
+    }
+
+    fn returned_local(&self, body: NodeId) -> Option<u32> {
+        let tail = self.block_tail(body)?;
+        let local = self.returned_binding(tail)?;
+        let stmts = self.kids(body);
+        let start = stmts.iter().position(|&stmt| {
+            matches!(self.kind(stmt), NodeKind::Let | NodeKind::LetMut)
+                && self.binder(self.kids(stmt)[0]) == Some(local)
+        })?;
+        stmts[start..]
+            .iter()
+            .all(|&stmt| self.returns_only(stmt, local))
+            .then_some(local)
+    }
+
+    fn block_tail(&self, n: NodeId) -> Option<NodeId> {
+        let &tail = self.kids(n).last()?;
+        (self.kind(tail) == NodeKind::ExpressionStatement).then(|| self.kids(tail)[0])
+    }
+
+    fn returned_binding(&self, n: NodeId) -> Option<u32> {
+        match self.kind(n) {
+            NodeKind::Return | NodeKind::Group => self.returned_binding(*self.kids(n).first()?),
+            NodeKind::Unary if self.token_text(n) == "take" => {
+                self.returned_binding(self.kids(n)[0])
+            }
+            NodeKind::Block => self.returned_binding(self.block_tail(n)?),
+            NodeKind::If if self.kids(n).len() == 3 => {
+                let local = self.returned_binding(self.kids(n)[1])?;
+                (self.returned_binding(self.kids(n)[2]) == Some(local)).then_some(local)
+            }
+            NodeKind::Match => {
+                let mut arms = self.kids(n)[1..].iter();
+                let arm_result = |&arm| self.returned_binding(*self.kids(arm).last()?);
+                let local = arm_result(arms.next()?)?;
+                arms.all(|arm| arm_result(arm) == Some(local))
+                    .then_some(local)
+            }
+            NodeKind::Path => match self.p.resolved(self.at, n)? {
+                use_ if !use_.projections.is_empty() => None,
+                use_ => match use_.target {
+                    Target::Binder(id) => Some(id),
+                    _ => None,
+                },
+            },
+            _ => None,
+        }
+    }
+
+    fn returns_only(&self, n: NodeId, local: u32) -> bool {
+        match self.kind(n) {
+            NodeKind::Return => {
+                self.returned_binding(n) == Some(local)
+                    && self
+                        .kids(n)
+                        .iter()
+                        .all(|&child| self.returns_only(child, local))
+            }
+            NodeKind::Try => false,
+            NodeKind::Closure | NodeKind::ScopedClosure => true,
+            _ => self
+                .kids(n)
+                .iter()
+                .all(|&child| self.returns_only(child, local)),
+        }
+    }
+
+    fn return_operand(&mut self, n: NodeId) -> Option<ValueId> {
+        self.expr_into(n, expect(self.fd.result), self.return_place)
+            .1
+    }
+
+    fn expression_destination(&self, n: NodeId) -> Option<AddressId> {
+        self.destination
+            .filter(|&(node, _)| node == n)
+            .map(|(_, to)| to)
+    }
+
+    // The enclosing recipe may describe the field as a carrier or holder.
+    // Its constructor uses the field value's own declared recipe.
+    fn field_destination(
+        &mut self,
+        base: AddressId,
+        steps: &[Step],
+        ty: TypeId,
+        n: NodeId,
+    ) -> AddressId {
+        let ty = PlaceTy::Declared(ty);
+        let projected = self.address(AddressBase::Address(base), steps, ty, n);
+        let pointer = self.pointer(projected, n);
+        self.address(AddressBase::Value(pointer), &[], ty, n)
+    }
+
+    fn result_slot(&mut self, ty: PlaceTy, n: NodeId) -> AddressId {
+        self.expression_destination(n)
+            .filter(|to| self.b.addresses[to.index()].ty == ty)
+            .unwrap_or_else(|| self.new_slot(ty, n))
+    }
+
+    fn expr_into(
+        &mut self,
+        n: NodeId,
+        want: Option<Want>,
+        to: Option<AddressId>,
+    ) -> (TyId, Option<ValueId>) {
+        let outer = std::mem::replace(&mut self.destination, to.map(|to| (n, to)));
+        let result = self.expr(n, want);
+        self.destination = outer;
+        result
+    }
+
+    fn result_expr(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        self.expr_into(n, want, self.expression_destination(self.node))
+    }
+
     /// Check `n` against `want` when given; a construct that passes `want` inward checks
     /// it there and returns `want`'s type, so the outer check here passes.
     fn expr(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
@@ -2456,7 +2628,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 )
         });
         match self.kind(n) {
-            NodeKind::Group => self.expr(c[0], want),
+            NodeKind::Group => self.result_expr(c[0], want),
             NodeKind::Literal => self.literal(n, want, false),
             NodeKind::Unit => (UNIT, None),
             NodeKind::Path => self.path(n, want),

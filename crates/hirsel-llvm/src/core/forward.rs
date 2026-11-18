@@ -127,26 +127,29 @@ impl<'a> Forwarding<'a> {
             return None;
         }
         let arguments = site.args.get(&self.body.pools.args).unwrap();
-        let dest = match signature.dest {
-            None => None,
-            Some(t) => {
-                let hirsel_core_layout::Layout::Fixed(layout) = &recipes[t.index()].layout else {
-                    return None;
-                };
-                let Arg::Address(a) = arguments[0] else {
-                    return None;
-                };
-                let Root::Slot(slot) = self.root(a)? else {
-                    return None;
-                };
-                let input = self.body.blocks[0]
-                    .params
-                    .get(&self.body.pools.values)
-                    .unwrap()[0];
-                Some((Root::Slot(slot), Root::Input(input), layout.size))
+        let dest = signature.dest.is_some();
+        let mut staged = None;
+        if let Some(t) = signature.dest {
+            let Arg::Address(a) = arguments[0] else {
+                return None;
+            };
+            let input = self.body.blocks[0]
+                .params
+                .get(&self.body.pools.values)
+                .unwrap()[0];
+            let target = Root::Input(input);
+            match self.root(a)? {
+                root if root == target => {}
+                source @ Root::Slot(_) => {
+                    let hirsel_core_layout::Layout::Fixed(layout) = &recipes[t.index()].layout
+                    else {
+                        return None;
+                    };
+                    staged = Some((source, target, layout.size));
+                }
+                Root::Input(_) => return None,
             }
-        };
-        let mut copied = false;
+        }
         for inst in &insts[prefix + 1..] {
             match *inst {
                 Inst::Const { .. } | Inst::Pointer { .. } | Inst::StorageDead { .. } => {}
@@ -155,24 +158,22 @@ impl<'a> Forwarding<'a> {
                     fail: None,
                 } if self.body.addresses[address.index()].steps.len == 0 => {}
                 Inst::Copy { to, from, bytes } => {
-                    let (source, target, size) = dest?;
-                    if copied
-                        || self.root(from) != Some(source)
+                    let (source, target, size) = staged.take()?;
+                    if self.root(from) != Some(source)
                         || self.root(to) != Some(target)
                         || constants[bytes.index()] != Some(size)
                     {
                         return None;
                     }
-                    copied = true;
                 }
                 _ => return None,
             }
         }
-        if copied != dest.is_some() {
+        if staged.is_some() {
             return None;
         }
         let frame_safe = arguments.iter().enumerate().all(|(i, arg)| {
-            if dest.is_some() && i == 0 {
+            if dest && i == 0 {
                 return true;
             }
             match *arg {
@@ -183,7 +184,7 @@ impl<'a> Forwarding<'a> {
         Some(Ending {
             prefix,
             call,
-            destination: dest.is_some(),
+            destination: dest,
             frame_safe,
         })
     }

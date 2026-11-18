@@ -59,6 +59,8 @@ pub struct Checked {
     /// Accesses through an address with a storage role, each checked against the
     /// bytes the activation's other roles touched (crate docs, "Roles").
     pub roles: u64,
+    /// Executed copies of the size selected by [run_counting_copies].
+    pub copies: u64,
 }
 
 /// The modelled provider (CAP-5), deterministic so runs can be derived by hand:
@@ -575,6 +577,8 @@ struct Machine<'m> {
     /// touched (`lo -> (hi, role)`, disjoint, a role's adjacent spans merged).
     footprints: Vec<Footprint>,
     role_checks: u64,
+    copy_size: Option<u64>,
+    copies: u64,
     /// Whether each function inherits its caller's site (`source::inherits_site`).
     inherits: Vec<bool>,
     /// [`Nans::Scrambled`]: the count of NaNs stored so far, which picks the next one's
@@ -761,6 +765,28 @@ pub fn run_nans(m: &Module, f: FuncId, args: &[u64], limit: u64, nans: Nans) -> 
         },
     )
 }
+/// Run a work-count case, counting executed explicit copies of `bytes` bytes.
+pub fn run_counting_copies(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    nans: Nans,
+    bytes: u64,
+) -> (Report, Checked) {
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            nans,
+            copy_size: Some(bytes),
+            ..WorldInput::default()
+        },
+    )
+}
+
 /// Each described instance's code revision, supplied by the program's reach.
 pub type Revisions = std::collections::BTreeMap<ContentHash, ContentHash>;
 /// A run whose descriptors' revision carriers hold the supplied revisions.
@@ -954,6 +980,7 @@ struct WorldInput<'a> {
     nans: Nans,
     destination: Option<&'a mut [u8]>,
     instructions: u64,
+    copy_size: Option<u64>,
 }
 impl Default for WorldInput<'_> {
     fn default() -> Self {
@@ -967,6 +994,7 @@ impl Default for WorldInput<'_> {
             nans: Nans::Canonical,
             destination: None,
             instructions: u64::MAX,
+            copy_size: None,
         }
     }
 }
@@ -1094,9 +1122,18 @@ fn run_world(
     if let Some(network) = input.network.take() {
         mach.world.network = network;
     }
-    let destination = input.destination.as_ref().map(|bytes| {
-        let p = mach.block(bytes.len() as u64, None, 0, None);
-        mach.mem[split(p).0].bytes.copy_from_slice(bytes);
+    // A host caller still receives an aggregate when it only inspects the
+    // status. Forwarding a return may lend this place before writing to it.
+    let signature = &m.signatures[m.functions[f.index()].signature.index()];
+    let destination = signature.dest.map(|ty| {
+        let size = input
+            .destination
+            .as_ref()
+            .map_or_else(|| mach.held(TypeRef(ty.0)), |bytes| bytes.len() as u64);
+        let p = mach.block(size, None, 0, None);
+        if let Some(bytes) = input.destination.as_ref() {
+            mach.mem[split(p).0].bytes.copy_from_slice(bytes);
+        }
         p
     });
     let arguments = destination
@@ -1135,6 +1172,7 @@ fn run_world(
         instructions: input.instructions - mach.instructions,
         loans: mach.loans,
         roles: mach.role_checks,
+        copies: mach.copies,
     };
     let report = Report {
         outcome,
@@ -1347,6 +1385,8 @@ impl<'m> Machine<'m> {
             roles: vec![None; m.functions.len()],
             footprints: Vec::new(),
             role_checks: 0,
+            copy_size: input.copy_size,
+            copies: 0,
             inherits: m
                 .functions
                 .iter()
@@ -1389,6 +1429,8 @@ impl<'m> Machine<'m> {
             roles: Vec::new(),
             footprints: Vec::new(),
             role_checks: 0,
+            copy_size: None,
+            copies: 0,
             inherits: Vec::new(),
             scrambled: None,
             sched: Sched::default(),
@@ -3954,7 +3996,9 @@ impl Machine<'_> {
                 }
             }
             Inst::Copy { to, from, bytes } => {
-                let n = vals[bytes.index()] as usize;
+                let bytes = vals[bytes.index()];
+                self.copies += u64::from(self.copy_size == Some(bytes));
+                let n = bytes as usize;
                 if n == 0 {
                     // Zero bytes touch no storage; a zero-sized `List`'s null data is
                     // a valid operand (SEM-4).

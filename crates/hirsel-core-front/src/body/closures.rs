@@ -768,7 +768,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let signature = abi.signature;
         let dest = self.e.module.signatures[signature.index()]
             .dest
-            .map(|id| self.new_slot(PlaceTy::Declared(id), n));
+            .map(|id| self.result_slot(PlaceTy::Declared(id), n));
         // Arguments follow their concrete signature; mutable places retain addresses.
         scratch.ir_args.clear();
         scratch.ir_args.extend(dest.map(Arg::Address));

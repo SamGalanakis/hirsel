@@ -13,6 +13,18 @@ pub(super) struct CallScratch {
     pub(super) ir_args: Vec<Arg>,
 }
 
+fn slot_push_kind(path: &DefPath) -> Option<slots::SlotPush> {
+    if path.is_core("deque.push_back") {
+        Some(slots::SlotPush::Back)
+    } else if path.is_core("deque.push_front") {
+        Some(slots::SlotPush::Front)
+    } else if path.is_core("heap.push") {
+        Some(slots::SlotPush::Heap)
+    } else {
+        None
+    }
+}
+
 impl<'c, 'a> Cx<'c, 'a, '_> {
     /// LANG-11 step 3 extends the existing literal-operand deferral only to
     /// tuples and arrays whose leaves are all unsuffixed numeric literals.
@@ -221,6 +233,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             self.determined(f, found, checked, n);
         }
+        let mut push = None;
+        let mut replacement = None;
+        let mut slot_push = None;
+        let mut map_key_at = None;
+        let mut map_insertion = None;
         for (i, &a) in args.iter().enumerate() {
             let e = match (self.kind(a), g.params[i].bytes) {
                 (NodeKind::LabelledArgument, _) => {
@@ -266,7 +283,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 continue;
             }
             // A literal operand waits for the other arguments and the result (LANG-21).
-            if self.defer_call_argument(e) {
+            if self.defer_call_argument(e)
+                && !(i == 1
+                    && g.path.is_core("map.insert")
+                    && self.known_rooted(g.params[i].ty, found, roots).is_some())
+            {
                 later.push((i, e));
                 continue;
             }
@@ -280,7 +301,51 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         view,
                         payload: 0,
                     };
-                    self.expr(e, Some(w)).1
+                    let place = if i == 1
+                        && g.path.is_core("list.push")
+                        && let Some(header) = vals[0]
+                        && self.can_construct(e)
+                    {
+                        push = self.list_push_destination(t, header, e);
+                        push.map(|(_, to)| to)
+                    } else if i == 1
+                        && let Some(kind) = slot_push_kind(&g.path)
+                        && let Some(header) = vals[0]
+                        && self.can_construct(e)
+                    {
+                        slot_push = self.prepare_slot_push(kind, t, header, e);
+                        slot_push.map(|prepared| prepared.slot)
+                    } else if i == 2
+                        && g.path.is_core("list.set")
+                        && let (Some(header), Some(index)) = (vals[0], vals[1])
+                        && self.can_construct(e)
+                    {
+                        replacement = self.list_replacement(t, header, index, e);
+                        replacement.map(|slot| slot.slot)
+                    } else if i != 0
+                        && g.path.is_core("map.insert")
+                        && let Some(header) = vals[0]
+                        && let [Some(k), Some(v)] = found.as_slice()
+                    {
+                        let types = [*k, *v];
+                        if i == 1 && self.can_construct(e) {
+                            map_key_at = self.map_key_destination(&types, header, e);
+                            map_key_at
+                        } else if i == 2 {
+                            let construct =
+                                self.can_construct(e) && self.nonempty_aggregate(t).is_some();
+                            if map_key_at.is_some() || construct {
+                                map_insertion =
+                                    self.map_insertion(&types, header, vals[1], construct, e);
+                            }
+                            map_insertion.and_then(|p| p.replacement.map(|r| r.slot))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    self.expr_into(e, Some(w), place).1
                 }
                 None => {
                     // A call takes the partly known parameter type as its expected type.
@@ -446,8 +511,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             | "clone"
                             | "clone_in"
                     )));
+        // A plain or explicitly taken value can skip the ordinary expression
+        // arm. A staged key still needs to publish into its vacant entry.
+        if map_insertion.is_none()
+            && map_key_at.is_some()
+            && let Some(header) = vals[0]
+        {
+            map_insertion = self.map_insertion(&[tys[0], tys[1]], header, vals[1], false, n);
+        }
         self.source_step(n);
-        let v = if builtin {
+        let v = if let Some(insertion) = map_insertion {
+            self.finish_map_insertion(insertion, map_key_at, f, &[tys[0], tys[1]], vals, result, n)
+        } else if let Some(replacement) = replacement {
+            self.finish_list_replacement(tys[0], replacement, vals[2], n)
+        } else if let Some(prepared) = slot_push
+            && let Some(header) = vals[0]
+        {
+            self.finish_slot_push(prepared, f, tys[0], header, vals[1], result, n)
+        } else if let Some((full, to)) = push
+            && self.live()
+            && let Some(header) = vals[0]
+        {
+            let direct = vals[1].and_then(|v| self.pointer_address(v)) == Some(to);
+            self.list_push(tys[0], header, vals[1], result, n, Some((full, direct)))
+        } else if builtin {
             self.intrinsic(f, tys, vals, n)
         } else {
             self.emit_call(f, tys, vals, result, n)
@@ -1192,7 +1279,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let sig = &self.e.module.signatures[signature.index()];
         let (dest, result_ty) = (sig.dest, sig.results.first().copied());
         // The destination is the first argument: a fresh place the result is written to.
-        let dest = dest.map(|id| self.new_slot(PlaceTy::Declared(id), n));
+        let source_call = self.expression_destination(n).is_some()
+            && self.kind(n) == NodeKind::Call
+            && matches!(self.p.target(self.at, self.kids(n)[0]), Some(Target::Definition(id))
+                if matches!(self.p.by_definition[id.0 as usize], Some(Def::Fn(source)) if source as usize == f));
+        let dest = dest.map(|id| {
+            if source_call {
+                self.result_slot(PlaceTy::Declared(id), n)
+            } else {
+                self.new_slot(PlaceTy::Declared(id), n)
+            }
+        });
         let start = self.b.pools.args.len();
         self.b.pools.args.extend(dest.map(Arg::Address));
         for (i, p) in g.params.iter().enumerate() {

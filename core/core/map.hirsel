@@ -26,27 +26,13 @@ pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
 }
 
 pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, (K, V))] {
-    let h = hash(k)
-    // The first empty index word is the insertion position unless growth moves it.
-    let mut j: u64 = 0
-    let n = index_len(m)
-    if n != 0 {
-        let mask = int.wrapping_sub(n, 1)
-        j = h & mask
-        loop {
-            let s = index_get(m, j)
-            if s == 0 {
-                break
-            }
-            let i = int.wrapping_sub(s, 1)
-            if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
-                let _ = swap_value(mut m, i, take v)
-                let _ = take k
-                return Ok(())
-            }
-            j = int.wrapping_add(j, 1) & mask
-        }
+    let (h, index, existing) = probe_insert(m, k)
+    if existing {
+        let _ = swap_value(mut m, index, take v)
+        let _ = take k
+        return Ok(())
     }
+    let mut j = index
     let cap = capacity(m)
     if slots(m) == cap {
         match make_room(mut m) {
@@ -66,6 +52,29 @@ pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (
     push_entry(mut m, h, take k, take v)
     index_set(mut m, j, s)
     Ok(())
+}
+
+// The existing entry, or the first empty index word if the key is absent.
+fn probe_insert[K: key, V](m: Map[K, V], k: K) -> (u64, u64, bool) {
+    let h = hash(k)
+    let mut j: u64 = 0
+    let n = index_len(m)
+    if n != 0 {
+        let mask = int.wrapping_sub(n, 1)
+        j = h & mask
+        loop {
+            let s = index_get(m, j)
+            if s == 0 {
+                break
+            }
+            let i = int.wrapping_sub(s, 1)
+            if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
+                return (h, i, true)
+            }
+            j = int.wrapping_add(j, 1) & mask
+        }
+    }
+    (h, j, false)
 }
 
 pub fn update[K: key, V, R](mut m: Map[K, V], k: K, f: scoped fn(mut V) -> R) -> Option[R] {

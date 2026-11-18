@@ -42,6 +42,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn note_pointer(&mut self, result: ValueId, address: AddressId) {
         self.growth.pointers.insert(result, address);
     }
+    pub(super) fn pointer_address(&self, value: ValueId) -> Option<AddressId> {
+        self.growth.pointers.get(&value).copied()
+    }
     /// Read the used or capacity word of the sequence or map whose header
     /// `header` points at; an own List's (its row `carrier`) is a typed carrier
     /// word (FORM #113), a Map's two raw words.

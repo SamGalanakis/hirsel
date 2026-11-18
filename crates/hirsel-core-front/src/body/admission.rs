@@ -49,7 +49,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let to = self.result_slot(PlaceTy::Declared(id), n);
         let c = self.konst(Ty::Scalar(Scalar::U64), allocation.charge, n)?;
         let sz = self.konst(Ty::Scalar(Scalar::U64), allocation.size, n)?;
         let block = self.value(Ty::Ptr);

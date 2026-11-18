@@ -1113,17 +1113,37 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut elem = expected.map(|(_, elem, _)| elem);
         let mut result = expected.map(|(ty, _, _)| ty);
         let mut to = None;
+        let can_place = self.expression_destination(n).is_none() || !self.may_return(n);
         for (i, &child) in children[..if repeat { 1 } else { children.len() }]
             .iter()
             .enumerate()
         {
-            let (ty, value) = self.expr(
+            let field = if !repeat
+                && can_place
+                && self.live()
+                && let Some((array, elem, _)) = expected
+                && let Ok(Rep::Place(field_ty)) = self.rep(elem)
+                && let Some(place) = self.place_ty(array, n)
+                && let Some(index) = self.konst(Ty::Scalar(Scalar::U64), i as u64, child)
+            {
+                let array_slot = *to.get_or_insert_with(|| self.result_slot(place, n));
+                Some(self.field_destination(
+                    array_slot,
+                    &[Step::Field(0), Step::Element(index)],
+                    field_ty,
+                    child,
+                ))
+            } else {
+                None
+            };
+            let (ty, value) = self.expr_into(
                 child,
                 if expected.is_some() {
                     elem.and_then(expect)
                 } else {
                     None
                 },
+                field,
             );
             if expected.is_none()
                 && let Some(elem) = elem
@@ -1155,22 +1175,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse("SEM-9", child, "a repeated array element must be plain");
             }
             if to.is_none() {
-                to = self
-                    .place_ty(array, n)
-                    .filter(|_| self.live())
-                    .map(|p| self.new_slot(p, n));
+                to = self.place_ty(array, n).filter(|_| self.live()).map(|p| {
+                    if can_place {
+                        self.result_slot(p, n)
+                    } else {
+                        self.new_slot(p, n)
+                    }
+                });
             }
             if let (Some(to), Some(place), Ok(rep)) = (to, self.place_ty(elem, n), self.rep(elem)) {
                 if repeat {
                     // A compact CFG fills the array; source length never expands the checker work.
                     self.repeat_array(to, place, rep, value, count, n);
-                } else if let Some(index) = self.konst(Ty::Scalar(Scalar::U64), i as u64, child) {
-                    let address = self.address(
-                        AddressBase::Address(to),
-                        &[Step::Field(0), Step::Element(index)],
-                        place,
-                        child,
-                    );
+                } else {
+                    let address = match field {
+                        Some(address) => address,
+                        None => {
+                            let Some(index) = self.konst(Ty::Scalar(Scalar::U64), i as u64, child)
+                            else {
+                                continue;
+                            };
+                            self.address(
+                                AddressBase::Address(to),
+                                &[Step::Field(0), Step::Element(index)],
+                                place,
+                                child,
+                            )
+                        }
+                    };
                     self.install(address, rep, value, child);
                     // Keep each completed element owned until the array is complete.
                     // Failure cleans those temporaries in reverse construction order.
@@ -1188,7 +1220,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             && let Some(place) = self.place_ty(ty, n)
             && self.live()
         {
-            to = Some(self.new_slot(place, n));
+            to = Some(self.result_slot(place, n));
         }
         let value = to.filter(|_| self.live()).map(|a| self.pointer(a, n));
         for i in parts..self.array_parts.len() {

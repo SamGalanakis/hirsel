@@ -203,6 +203,10 @@ operations! {
     ("heap", "slots_new", Lane::Value, "A", "core-collections-918", true),
     ("heap", "slots_move", Lane::Value, "A", "core-collections-918", true),
     ("heap", "slots_free", Lane::Value, "A", "core-collections-918", true),
+    ("heap", "prepare_push", Lane::PendingCode, "C", "mem-b-1172", true),
+    ("heap", "finish_prepared_push", Lane::PendingCode, "C", "mem-b-1172", true),
+    ("heap", "slots_unmark_spare", Lane::Value, "A", "mem-b-1172", true),
+    ("heap", "slots_publish_spare", Lane::Value, "A", "mem-b-1172", true),
     ("heap", "slots_put", Lane::Value, "A", "core-collections-918", true),
     ("heap", "slots_take", Lane::Value, "A", "core-collections-918", true),
     ("heap", "slots_view", Lane::Value, "A", "core-collections-918", true),
@@ -219,6 +223,10 @@ operations! {
     ("deque", "slots_forget_ring", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_empty", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_new", Lane::Value, "A", "core-collections-918", true),
+    ("deque", "prepare_push", Lane::PendingCode, "C", "mem-b-1172", true),
+    ("deque", "finish_prepared_push", Lane::PendingCode, "C", "mem-b-1172", true),
+    ("deque", "slots_unmark_spare", Lane::Value, "A", "mem-b-1172", true),
+    ("deque", "slots_publish_spare", Lane::Value, "A", "mem-b-1172", true),
     ("deque", "slots_put", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_take", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_move", Lane::Value, "A", "core-collections-918", true),
@@ -258,6 +266,7 @@ operations! {
     ("list", "swap", Lane::Value, "A", "core-collections-918", false),
     ("list", "clear", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "append", Lane::PendingCode, "A", "core-check-calls-910", false),
+    ("map", "probe_insert", Lane::PendingCode, "C", "mem-b-1172", true),
     ("map", "push_entry", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "pop_entry", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "undo_clone", Lane::Value, "C", "core-check-callables-913", true),
@@ -1572,6 +1581,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                 | "tape-build-1037"
                 | "wire-w1a-1063"
                 | "tape-s2-1074"
+                | "mem-b-1172"
         ));
         if entry.private {
             assert!(

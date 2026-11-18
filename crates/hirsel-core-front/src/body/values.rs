@@ -661,12 +661,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         scratch.vals.clear();
         scratch.tys.clear();
         let fields = self.kids(n);
+        let mut slot = None;
+        let mut field_places = Vec::new();
+        let can_place_fields = self.expression_destination(n).is_none() || !self.may_return(n);
         for (i, &field) in fields.iter().enumerate() {
             let expected = want.and_then(|w| match self.t.kind(w.ty) {
                 TyKind::Tuple(xs) if w.payload == 0 => xs.get(i).copied(),
                 _ => None,
             });
-            let (ty, value) = self.expr(field, expected.and_then(expect));
+            let place = if can_place_fields
+                && self.live()
+                && let Some(ty) = expected
+                && let Ok(Rep::Place(field_ty)) = self.rep(ty)
+                && let Some(want) = want
+                && matches!(self.t.kind(want.ty), TyKind::Tuple(xs) if xs.len() == fields.len())
+                && let Ok(Rep::Place(id)) = self.rep(want.ty)
+            {
+                let to = *slot.get_or_insert_with(|| self.result_slot(PlaceTy::Declared(id), n));
+                let address = self.field_destination(to, &[Step::Field(i as u32)], field_ty, field);
+                field_places.push((i, address));
+                Some(address)
+            } else {
+                None
+            };
+            let (ty, value) = self.expr_into(field, expected.and_then(expect), place);
             scratch.tys.push(ty);
             scratch.vals.push(value);
             self.anchor_field(n, anchors::Component::Field(i as u32), field);
@@ -680,18 +698,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let ty = self.t.mk(TyKind::Tuple(scratch.tys.clone()));
         let value = match self.rep(ty) {
             Ok(Rep::Place(id)) if self.live() => {
-                let slot = self.new_slot(PlaceTy::Declared(id), n);
+                let slot = slot.unwrap_or_else(|| self.result_slot(PlaceTy::Declared(id), n));
+                let mut field_places = field_places.into_iter().peekable();
                 for (i, (&ty, &value)) in scratch.tys.iter().zip(&scratch.vals).enumerate() {
                     match self.rep(ty) {
                         Ok(Rep::None) => {}
                         Ok(rep) => {
                             let place = rep.stored().unwrap();
-                            let address = self.address(
-                                AddressBase::Address(slot),
-                                &[Step::Field(i as u32)],
-                                place,
-                                n,
-                            );
+                            let address =
+                                if field_places.peek().is_some_and(|(field, _)| *field == i) {
+                                    field_places.next().unwrap().1
+                                } else {
+                                    self.address(
+                                        AddressBase::Address(slot),
+                                        &[Step::Field(i as u32)],
+                                        place,
+                                        n,
+                                    )
+                                };
                             self.install(address, rep, value, n);
                         }
                         Err(what) => self.gap(n, what),
@@ -902,6 +926,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let mut vals: Vec<Option<ValueId>> = vec![None; k];
         let mut later = vec![];
+        let mut destination = None;
+        let mut field_places = Vec::new();
+        let can_place_fields = self.expression_destination(n).is_none() || !self.may_return(n);
         for (i, (&a, f)) in args.iter().zip(fields).enumerate() {
             let e = match (self.kind(a), labelled) {
                 (NodeKind::LabelledArgument, true) if self.token_text(a) == f.name => {
@@ -933,8 +960,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 later.push((i, e));
                 continue;
             }
-            vals[i] = match self.known(fields[i].ty, &found) {
-                Some(t) => self.expr(e, expect(t)).1,
+            vals[i] = match self.known(f.ty, &found) {
+                Some(t) => {
+                    let field = if can_place_fields
+                        && lit.is_none()
+                        && self.live()
+                        && let Ok(Rep::Place(field)) = self.rep(t)
+                        && let Some(ty) = self.known(own, &found)
+                        && let Ok(Rep::Place(id)) = self.rep(ty)
+                    {
+                        let to = *destination
+                            .get_or_insert_with(|| self.result_slot(PlaceTy::Declared(id), n));
+                        let address = self.field_destination(to, &[field_step(case, i)], field, e);
+                        field_places.push((i, address));
+                        Some(address)
+                    } else {
+                        None
+                    };
+                    self.expr_into(e, expect(t), field).1
+                }
                 None => {
                     let (at, v) = if let Some(hint) =
                         want.and_then(|w| self.payload_argument(lit.unwrap_or(own), f.ty, w))
@@ -1017,7 +1061,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return (ty, None);
         }
-        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let to = destination.unwrap_or_else(|| self.result_slot(PlaceTy::Declared(id), n));
+        let mut field_places = field_places.into_iter().peekable();
         if let Some(case) = case {
             self.inst(Inst::SetCase { address: to, case }, n);
         }
@@ -1027,20 +1072,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Ok(r) => r,
                 Err(what) => return self.gap_ty(n, what),
             };
-            let step = match case {
-                Some(case) => Step::CaseField {
-                    case,
-                    field: i as u32,
-                },
-                None => Step::Field(i as u32),
-            };
             let Some(place) = r.stored() else {
                 continue;
             };
             if vals[i].is_none() {
                 return self.gap_ty(n, "this field value is not built");
             }
-            let at = self.address(AddressBase::Address(to), &[step], place, n);
+            let at = if field_places.peek().is_some_and(|(field, _)| *field == i) {
+                field_places.next().unwrap().1
+            } else {
+                self.address(AddressBase::Address(to), &[field_step(case, i)], place, n)
+            };
             self.install(at, r, vals[i], n);
         }
         let p = self.pointer(to, n);
@@ -1052,6 +1094,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         self.temp(ty, Some(p));
         (ty, Some(p))
+    }
+}
+
+fn field_step(case: Option<u32>, field: usize) -> Step {
+    let field = field as u32;
+    match case {
+        Some(case) => Step::CaseField { case, field },
+        None => Step::Field(field),
     }
 }
 

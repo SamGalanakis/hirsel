@@ -315,7 +315,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let capacity = self.prelude("Capacity", n)?;
         let capacity = self.t.mk(TyKind::Adt(capacity, vec![]));
         let capacity_id = self.place_row(capacity, "a capacity without a place is not built", n)?;
-        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let to = self.result_slot(PlaceTy::Declared(id), n);
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
         let storage = self.list_storage(item, n)?;
@@ -821,6 +821,59 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// its true arm (growth.rs), then the element stored within capacity. The taken
     /// element stays the caller's temporary until the store or the `Error((c, x))`
     /// install consumes it, so a raise from `grow` drops it once (A1 cleanup).
+    /// Select storage before evaluating the element. OWN-11 reserves the list
+    /// through the argument, so its allocation and length cannot change. Only
+    /// the full path uses a local place, and admission remains after evaluation.
+    pub(super) fn list_push_destination(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        n: NodeId,
+    ) -> Option<(ValueId, AddressId)> {
+        let ty = self.nonempty_aggregate(item)?;
+        let carrier = self.list_carrier(item, n)?;
+        let full = self.full_test(header, carrier, n);
+        let slot = self.choose_spare_slot(ty, full, n, |cx| {
+            let len = cx.carrier_word(header, carrier, SeqWord::Len, n);
+            let element = cx.list_element(item, header, len, n)?;
+            cx.pointer_address(element)
+        })?;
+        Some((full, slot))
+    }
+
+    pub(super) fn nonempty_aggregate(&mut self, item: TyId) -> Option<TypeId> {
+        let Ok(Rep::Place(ty)) = self.rep(item) else {
+            return None;
+        };
+        (self.live() && !self.e.generic_names.contains_key(&ty) && self.e.size(ty) != 0)
+            .then_some(ty)
+    }
+
+    pub(super) fn choose_spare_slot(
+        &mut self,
+        ty: TypeId,
+        full: ValueId,
+        n: NodeId,
+        spare_slot: impl FnOnce(&mut Self) -> Option<AddressId>,
+    ) -> Option<AddressId> {
+        let local = self.new_block(&[]);
+        let spare = self.new_block(&[]);
+        let chosen = self.new_block(&[Ty::Ptr]);
+        self.list_branch(full, local, spare, n);
+        let place = PlaceTy::Declared(ty);
+        self.start(local);
+        let at = self.new_slot(place, n);
+        let pointer = self.pointer(at, n);
+        self.jump(chosen, &[pointer], n);
+        self.start(spare);
+        let at = spare_slot(self)?;
+        let pointer = self.pointer(at, n);
+        self.jump(chosen, &[pointer], n);
+        self.start(chosen);
+        let pointer = self.block_params(chosen)[0];
+        Some(self.address(AddressBase::Value(pointer), &[], place, n))
+    }
+
     pub(super) fn list_push(
         &mut self,
         item: TyId,
@@ -828,6 +881,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         value: Option<ValueId>,
         result: TyId,
         n: NodeId,
+        destination: Option<(ValueId, bool)>,
     ) -> Option<ValueId> {
         let Some(carrier) = self.list_carrier(item, n) else {
             self.gap(n, "a push onto a List without its carrier row is not built");
@@ -858,15 +912,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let cap_id = self.place_row(cap_ty, "a Capacity without a place is not built", n)?;
         let grown_id =
             self.place_row(grown_ty, "a reserve result without a place is not built", n)?;
-        let to = self.new_slot(PlaceTy::Declared(out_id), n);
-        let full = self.full_test(header, carrier, n);
+        let to = self.result_slot(PlaceTy::Declared(out_id), n);
+        let (full, direct) =
+            destination.unwrap_or_else(|| (self.full_test(header, carrier, n), false));
         let (grow_block, store, failed, done) = (
             self.new_block(&[]),
             self.new_block(&[]),
             self.new_block(&[]),
             self.new_block(&[]),
         );
-        self.list_branch(full, grow_block, store, n);
+        let publish = if direct { self.new_block(&[]) } else { store };
+        self.list_branch(full, grow_block, publish, n);
         self.start(grow_block);
         let cold = self.is_full_test(Some(full));
         let grown = self.true_arm(cold, |cx| {
@@ -923,7 +979,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         self.jump(done, &[], n);
         self.start(store);
-        self.put_last(item, carrier, rep, header, value, n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        if let Some(place) = rep.stored() {
+            let element = self.list_element(item, header, len, n)?;
+            let at = self.address(AddressBase::Value(element), &[], place, n);
+            self.install(at, rep, value, n);
+        }
+        let len = if direct {
+            self.jump(publish, &[], n);
+            self.start(publish);
+            self.consume(value, n);
+            self.carrier_word(header, carrier, SeqWord::Len, n)
+        } else {
+            len
+        };
+        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
+        let (new_len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, one, n);
+        self.set_carrier_word(header, carrier, SeqWord::Len, new_len, n);
         self.inst(
             Inst::SetCase {
                 address: to,
@@ -936,29 +1008,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let value = self.pointer(to, n);
         self.temp(result, Some(value));
         Some(value)
-    }
-
-    /// The element goes in at `len` and `len` grows by one; `len < capacity` holds.
-    /// A zero-sized element stores nothing and still grows `len`.
-    fn put_last(
-        &mut self,
-        item: TyId,
-        carrier: TypeId,
-        rep: Rep,
-        header: ValueId,
-        value: Option<ValueId>,
-        n: NodeId,
-    ) -> Option<()> {
-        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
-        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        let element = self.list_element(item, header, len, n)?;
-        if let Some(place) = rep.stored() {
-            let at = self.address(AddressBase::Value(element), &[], place, n);
-            self.install(at, rep, value, n);
-        }
-        let (new_len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, one, n);
-        self.set_carrier_word(header, carrier, SeqWord::Len, new_len, n);
-        Some(())
     }
 
     pub(super) fn list_append(
@@ -1263,6 +1312,70 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
+    /// The old occupant keeps custody through argument evaluation. Save its
+    /// inline bytes and restore them if evaluation leaves the call before commit.
+    /// An invalid index still evaluates the item in a local place.
+    pub(super) fn list_replacement(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        index: ValueId,
+        n: NodeId,
+    ) -> Option<patterns::SlotReplacement> {
+        let ty = self.nonempty_aggregate(item)?;
+        let carrier = self.list_carrier(item, n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        let present = self.list_compare(CompareOp::Lt, index, len, n);
+        let place = PlaceTy::Declared(ty);
+        let saved = self.new_slot(place, n);
+        let valid = self.new_block(&[]);
+        let invalid = self.new_block(&[]);
+        let chosen = self.new_block(&[Ty::Ptr]);
+        self.list_branch(present, valid, invalid, n);
+        self.start(valid);
+        let pointer = self.list_element(item, header, index, n)?;
+        self.copy_to(saved, pointer, ty, n);
+        self.jump(chosen, &[pointer], n);
+        self.start(invalid);
+        let local = self.new_slot(place, n);
+        let pointer = self.pointer(local, n);
+        self.jump(chosen, &[pointer], n);
+        self.start(chosen);
+        let pointer = self.block_params(chosen)[0];
+        let replacement = patterns::SlotReplacement {
+            slot: self.address(AddressBase::Value(pointer), &[], place, n),
+            previous: self.pointer(saved, n),
+            present,
+            ty,
+        };
+        self.restore_on_exit(replacement);
+        Some(replacement)
+    }
+
+    pub(super) fn finish_list_replacement(
+        &mut self,
+        item: TyId,
+        replacement: patterns::SlotReplacement,
+        value: Option<ValueId>,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        self.commit_restored_slot();
+        if !self.live() {
+            return None;
+        }
+        self.list_require_element(replacement.present, n);
+        self.install(replacement.slot, Rep::Place(replacement.ty), value, n);
+        let old = match self.expression_destination(n) {
+            Some(to) if self.b.addresses[to.index()].ty == PlaceTy::Declared(replacement.ty) => {
+                self.copy_to(to, replacement.previous, replacement.ty, n);
+                self.pointer(to, n)
+            }
+            _ => replacement.previous,
+        };
+        self.temp(item, Some(old));
+        Some(old)
+    }
+
     pub(super) fn list_set(
         &mut self,
         item: TyId,
@@ -1273,16 +1386,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         let carrier = self.list_carrier(item, n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        let in_bounds = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::Compare {
-                result: in_bounds,
-                op: CompareOp::Lt,
-                left: index,
-                right: len,
-            },
-            n,
-        );
+        let in_bounds = self.list_compare(CompareOp::Lt, index, len, n);
+        self.list_require_element(in_bounds, n);
+        let pointer = self.list_element(item, header, index, n)?;
+        self.replace_value(item, Some(pointer), value, n)
+    }
+
+    fn list_require_element(&mut self, in_bounds: ValueId, n: NodeId) {
         let yes = self.new_block(&[]);
         let no = self.new_block(&[]);
         let ye = self.edge(yes, &[]);
@@ -1305,8 +1415,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some(n),
         );
         self.start(yes);
-        let pointer = self.list_element(item, header, index, n)?;
-        self.replace_value(item, Some(pointer), value, n)
     }
 
     /// Both indices are checked before moving either element. The scratch place

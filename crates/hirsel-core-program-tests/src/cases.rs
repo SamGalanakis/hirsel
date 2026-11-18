@@ -848,6 +848,18 @@ pub(super) fn run_expect(
         },
         w => (w, 0),
     };
+    let (want, copies) = match want {
+        [w @ .., "copies", count] => {
+            let Some((width, count)) = count
+                .split_once(',')
+                .and_then(|(width, count)| Some((width.parse().ok()?, count.parse::<u64>().ok()?)))
+            else {
+                return Some(format!("run {call}: unreadable copy width and count"));
+            };
+            (w, Some((width, count)))
+        }
+        w => (w, None),
+    };
     let (want, trace) = match want.iter().position(|w| *w == "trace") {
         Some(i) => (&want[..i], want.get(i + 1).copied()),
         None => (want, None),
@@ -856,8 +868,12 @@ pub(super) fn run_expect(
     // the corpus names the case it stopped in and checks the rest. Every stored NaN is
     // scrambled, so a reader of float bytes other than `reinterpret` misses its run
     // line (FORM #97).
-    let report = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        eval::run_nans(module, f, &args, u64::MAX, eval::Nans::Scrambled).0
+    let (report, work) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let nans = eval::Nans::Scrambled;
+        match copies {
+            Some((width, _)) => eval::run_counting_copies(module, f, &args, u64::MAX, nans, width),
+            None => eval::run_nans(module, f, &args, u64::MAX, nans),
+        }
     })) {
         Ok(report) => report,
         Err(stop) => {
@@ -869,6 +885,14 @@ pub(super) fn run_expect(
             return Some(format!("run {call}: the evaluator stopped: {why}"));
         }
     };
+    if let Some((width, expected)) = copies
+        && work.copies != expected
+    {
+        return Some(format!(
+            "run {call}: want {expected} copies of {width} bytes, got {}",
+            work.copies
+        ));
+    }
     if let Some(trace) = trace {
         let t: Vec<u64> = trace.split(',').map(|x| x.parse().unwrap()).collect();
         if report.trace != t {
@@ -1251,6 +1275,12 @@ fn recovered_header_cases() -> Vec<String> {
         }
     }
     failures
+}
+
+#[test]
+fn construction_in_place() {
+    let failures = run_case(&root().join("cases/body/construction-in-place.hirsel"));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

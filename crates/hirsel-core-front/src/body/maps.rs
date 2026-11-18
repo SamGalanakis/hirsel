@@ -10,7 +10,235 @@ pub(super) struct MapEntry {
     collection: TyId,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct MapInsertion {
+    full: ValueId,
+    existing: ValueId,
+    index: ValueId,
+    hash: ValueId,
+    pub(super) replacement: Option<patterns::SlotReplacement>,
+}
+
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn map_key_destination(
+        &mut self,
+        types: &[TyId; 2],
+        header: ValueId,
+        n: NodeId,
+    ) -> Option<AddressId> {
+        let ty = self.nonempty_aggregate(types[0])?;
+        let (count, full) = self.map_room(header, n);
+        self.choose_spare_slot(ty, full, n, |cx| {
+            cx.map_field(types, header, count, 2, PlaceTy::Declared(ty), n)
+        })
+    }
+
+    pub(super) fn map_insertion(
+        &mut self,
+        types: &[TyId; 2],
+        header: ValueId,
+        key: Option<ValueId>,
+        construct_value: bool,
+        n: NodeId,
+    ) -> Option<MapInsertion> {
+        if !self.live() {
+            return None;
+        }
+        let probe = self.p.core_fn("map", "probe_insert")?;
+        let probe_ty = self.t.mk(TyKind::Tuple(vec![
+            scalar(Scalar::U64),
+            scalar(Scalar::U64),
+            BOOL,
+        ]));
+        let value = self.emit_call(probe, types, &[Some(header), key], probe_ty, n)?;
+        let id = self.place_row(probe_ty, "a map probe requires a tuple", n)?;
+        let at = self.address(AddressBase::Value(value), &[], PlaceTy::Declared(id), n);
+        let (u, boolean) = (Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::Bool));
+        let [hash, index, existing] = [(0, u), (1, u), (2, boolean)].map(|(i, t)| {
+            let field = self.address(
+                AddressBase::Address(at),
+                &[Step::Field(i)],
+                PlaceTy::Value(t),
+                n,
+            );
+            self.read_bits(field, t, n)
+        });
+        let (count, full) = self.map_room(header, n);
+        let replacement = if construct_value {
+            self.prepare_map_value(types, header, count, full, existing, index, n)
+        } else {
+            None
+        };
+        Some(MapInsertion {
+            full,
+            existing,
+            index,
+            hash,
+            replacement,
+        })
+    }
+
+    fn map_room(&mut self, header: ValueId, n: NodeId) -> (ValueId, ValueId) {
+        let u = Ty::Scalar(Scalar::U64);
+        let count = self.read_sequence_word(header, 8, u, n);
+        let cap = self.read_sequence_word(header, 16, u, n);
+        (count, self.list_compare(CompareOp::Eq, count, cap, n))
+    }
+
+    fn map_field(
+        &mut self,
+        types: &[TyId; 2],
+        header: ValueId,
+        index: ValueId,
+        field: u32,
+        place: PlaceTy,
+        n: NodeId,
+    ) -> Option<AddressId> {
+        let collection = self.map_type(types)?;
+        let entry = self.map_entry_at(header, collection, index, n)?;
+        Some(self.address(AddressBase::Address(entry), &[Step::Field(field)], place, n))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_map_value(
+        &mut self,
+        types: &[TyId; 2],
+        header: ValueId,
+        count: ValueId,
+        full: ValueId,
+        existing: ValueId,
+        index: ValueId,
+        n: NodeId,
+    ) -> Option<patterns::SlotReplacement> {
+        let ty = self.nonempty_aggregate(types[1])?;
+        let place = PlaceTy::Declared(ty);
+        let saved = self.new_slot(place, n);
+        let old = self.new_block(&[]);
+        let absent = self.new_block(&[]);
+        let chosen = self.new_block(&[Ty::Ptr]);
+        self.list_branch(existing, old, absent, n);
+        self.start(old);
+        let address = self.map_field(types, header, index, 3, place, n)?;
+        let pointer = self.pointer(address, n);
+        self.copy_to(saved, pointer, ty, n);
+        self.jump(chosen, &[pointer], n);
+        self.start(absent);
+        let address = self.choose_spare_slot(ty, full, n, |cx| {
+            cx.map_field(types, header, count, 3, place, n)
+        })?;
+        let pointer = self.pointer(address, n);
+        self.jump(chosen, &[pointer], n);
+        self.start(chosen);
+        let pointer = self.block_params(chosen)[0];
+        let replacement = patterns::SlotReplacement {
+            slot: self.address(AddressBase::Value(pointer), &[], place, n),
+            previous: self.pointer(saved, n),
+            present: existing,
+            ty,
+        };
+        self.restore_on_exit(replacement);
+        Some(replacement)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn finish_map_insertion(
+        &mut self,
+        insertion: MapInsertion,
+        key_at: Option<AddressId>,
+        f: usize,
+        types: &[TyId; 2],
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        if insertion.replacement.is_some() {
+            self.commit_restored_slot();
+        }
+        if !self.live() {
+            return None;
+        }
+        let header = vals[0]?;
+        let key = vals[1];
+        let value = vals[2];
+        let direct = |cx: &Self, value: Option<ValueId>, at: Option<AddressId>| {
+            at.is_some() && value.and_then(|v| cx.pointer_address(v)) == at
+        };
+        let direct_key = direct(self, key, key_at);
+        let direct_value = direct(self, value, insertion.replacement.map(|r| r.slot));
+        let owners = [self.temp_index(key), self.temp_index(value)].map(|i| {
+            i.map(|i| {
+                let cleanup::Owner::Temp(temp) = self.owners[i] else {
+                    unreachable!("the index names a temporary");
+                };
+                (i, temp.avail)
+            })
+        });
+        let replace = self.new_block(&[]);
+        let absent = self.new_block(&[]);
+        let full = self.new_block(&[]);
+        let spare = self.new_block(&[]);
+        let join = self.new_result_join();
+        self.list_branch(insertion.existing, replace, absent, n);
+        self.start(absent);
+        self.list_branch(insertion.full, full, spare, n);
+        self.start(full);
+        let built = self.emit_call(f, types, vals, result, n);
+        self.goto(join, result, built, n);
+        for &(owner, state) in owners.iter().flatten() {
+            self.set_temp(owner, state);
+        }
+        self.start(spare);
+        let (count, _) = self.map_room(header, n);
+        let hash = insertion.hash;
+        self.map_append(
+            types,
+            header,
+            count,
+            hash,
+            [key, value],
+            [direct_key, direct_value],
+            n,
+        )?;
+        let u = Ty::Scalar(Scalar::U64);
+        let one = self.konst(u, 1, n)?;
+        let next = self.map_binary(BinaryOp::Add, count, one, n);
+        let recipe = self.map_entry(types[0], types[1], n)?;
+        let index = self.map_index_at(header, recipe, insertion.index, n)?;
+        self.inst(
+            Inst::Store {
+                address: index,
+                value: next,
+            },
+            n,
+        );
+        let built = self.wrap_case(result, 0, UNIT, None, n);
+        self.goto(join, result, built, n);
+        for &(owner, state) in owners.iter().flatten() {
+            self.set_temp(owner, state);
+        }
+        self.start(replace);
+        if let Some(replacement) = insertion.replacement {
+            self.install(replacement.slot, Rep::Place(replacement.ty), value, n);
+            let mark = self.owner_mark();
+            self.temp(types[1], Some(replacement.previous));
+            self.end_owners(mark, None, true, n);
+            if let Some(key) = key
+                && let Some(id) = self.drop_id(types[0])
+            {
+                self.consume(Some(key), n);
+                self.emit_drop(AddressBase::Value(key), id, n);
+            }
+        } else {
+            let built = self.emit_call(f, types, vals, result, n);
+            self.goto(join, result, built, n);
+            return self.land(join);
+        }
+        self.consume(key, n);
+        let built = self.wrap_case(result, 0, UNIT, None, n);
+        self.goto(join, result, built, n);
+        self.land(join)
+    }
+
     pub(super) fn map_value(
         &mut self,
         name: &str,
@@ -274,10 +502,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let header = vals[0]?;
         let u = Ty::Scalar(Scalar::U64);
         let count = self.read_sequence_word(header, 8, u, n);
+        self.map_append(
+            types,
+            header,
+            count,
+            vals[1]?,
+            [vals[2], vals[3]],
+            [false; 2],
+            n,
+        )?;
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn map_append(
+        &mut self,
+        types: &[TyId],
+        header: ValueId,
+        count: ValueId,
+        hash: ValueId,
+        values: [Option<ValueId>; 2],
+        placed: [bool; 2],
+        n: NodeId,
+    ) -> Option<()> {
+        let u = Ty::Scalar(Scalar::U64);
         let collection = self.map_type(types)?;
         let entry = self.map_entry_at(header, collection, count, n)?;
         let state = self.konst(u, 1, n)?;
-        for (field, value) in [(0, vals[1]?), (1, state)] {
+        for (field, value) in [(0, hash), (1, state)] {
             let at = self.address(
                 AddressBase::Address(entry),
                 &[Step::Field(field)],
@@ -286,7 +538,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             self.inst(Inst::Store { address: at, value }, n);
         }
-        for (field, ty, value) in [(2, types[0], vals[2]), (3, types[1], vals[3])] {
+        for (i, (value, already_placed)) in values.into_iter().zip(placed).enumerate() {
+            if already_placed {
+                self.consume(value, n);
+                continue;
+            }
+            let field = i as u32 + 2;
+            let ty = types[i];
             let rep = match self.rep(ty) {
                 Ok(rep) => rep,
                 Err(what) => {
@@ -312,7 +570,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
-        None
+        Some(())
     }
 
     fn map_regrow(

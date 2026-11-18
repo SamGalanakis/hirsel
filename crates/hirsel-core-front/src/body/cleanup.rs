@@ -467,7 +467,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.jump(head, &[], n);
         self.start(out);
     }
-    fn emit_drop(&mut self, base: AddressBase, id: TypeId, n: NodeId) {
+    pub(super) fn emit_drop(&mut self, base: AddressBase, id: TypeId, n: NodeId) {
         crate::cost_scope!("phase", "cleanup emission");
         let address = match base {
             AddressBase::Address(a) => a,

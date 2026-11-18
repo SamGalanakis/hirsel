@@ -164,9 +164,28 @@ pub const PRELUDE: [&str; 14] = [
 /// callee reads those items, though no resolved name of the body reaches them,
 /// so its reuse key hashes their closures (the driver's `Keys::for_body`).
 /// Lowering builds no other path: a new one is added here first.
-pub const SIBLING_READS: [(&str, &str, &str, &[&str]); 2] = [
+pub const SIBLING_READS: [(&str, &str, &str, &[&str]); 6] = [
     // `list.push` grows a full list by calling `list.grow` (body/lists.rs).
     ("core", "list", "push", &["grow"]),
+    (
+        "core",
+        "heap",
+        "push",
+        &["prepare_push", "finish_prepared_push"],
+    ),
+    (
+        "core",
+        "deque",
+        "push_front",
+        &["prepare_push", "finish_prepared_push"],
+    ),
+    (
+        "core",
+        "deque",
+        "push_back",
+        &["prepare_push", "finish_prepared_push"],
+    ),
+    ("core", "map", "insert", &["probe_insert"]),
     // `codec.of[T]` at a built-in T calls T's maker (body/calls.rs `codec_of`,
     // and body/templates.rs `codec_maker` at an instance).
     ("std", "codec", "of", &body::BUILTIN_CODEC_MAKERS),

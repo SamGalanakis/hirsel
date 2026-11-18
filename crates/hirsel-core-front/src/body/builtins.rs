@@ -62,7 +62,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.list_clear(item, vals[0]?, n);
                 return Some(None);
             }
-            "push" => return Some(self.list_push(item, vals[0]?, vals[1], result, n)),
+            "push" => return Some(self.list_push(item, vals[0]?, vals[1], result, n, None)),
             "fill" => return Some(self.list_fill(item, vals[0]?, vals[1]?, vals[2], result, n)),
             "append" => return Some(self.list_append(item, vals[0]?, vals[1]?, result, n)),
             "reserve" => {
@@ -107,7 +107,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => return None,
         };
-        let slot = self.new_slot(PlaceTy::Declared(id), n);
+        let slot = self.result_slot(PlaceTy::Declared(id), n);
         let pointer = self.pointer(slot, n);
         let null = self.konst(Ty::Ptr, 0, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;

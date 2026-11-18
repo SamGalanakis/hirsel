@@ -4,7 +4,149 @@
 use super::*;
 use hirsel_core_ir::{ArithMode, ArithOp};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SlotPush {
+    Back,
+    Front,
+    Heap,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct PreparedPush {
+    pub(super) slot: AddressId,
+    full: ValueId,
+    index: ValueId,
+    kind: SlotPush,
+}
+
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn prepare_slot_push(
+        &mut self,
+        kind: SlotPush,
+        item: TyId,
+        header: ValueId,
+        n: NodeId,
+    ) -> Option<PreparedPush> {
+        let ty = self.nonempty_aggregate(item)?;
+        let word = Ty::Scalar(Scalar::U64);
+        let len = self.read_sequence_word(header, 8, word, n);
+        let cap = self.read_sequence_word(header, 16, word, n);
+        let full = self.list_compare(CompareOp::Eq, len, cap, n);
+        let one = self.konst(word, 1, n)?;
+        let index = if kind == SlotPush::Heap {
+            len
+        } else {
+            let head = self.read_sequence_word(header, 24, word, n);
+            let (mask, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, cap, one, n);
+            let (pos, _) = match kind {
+                SlotPush::Front => self.list_arith(ArithOp::Sub, ArithMode::Wrapping, head, one, n),
+                _ => self.list_arith(ArithOp::Add, ArithMode::Wrapping, head, len, n),
+            };
+            let index = self.value(word);
+            self.inst(
+                Inst::Binary {
+                    result: index,
+                    op: BinaryOp::BitAnd,
+                    left: pos,
+                    right: mask,
+                    fail: None,
+                },
+                n,
+            );
+            index
+        };
+        let module = if kind == SlotPush::Heap {
+            "heap"
+        } else {
+            "deque"
+        };
+        let Some(prepare) = self.p.core_fn(module, "prepare_push") else {
+            self.gap(n, "a prepared push requires its slot preparation body");
+            return None;
+        };
+        let slot = self.choose_spare_slot(ty, full, n, |cx| {
+            cx.emit_call(prepare, &[item], &[Some(header), Some(index)], UNIT, n);
+            Some(cx.slots_at(item, header, index, n)?.0)
+        })?;
+        Some(PreparedPush {
+            slot,
+            full,
+            index,
+            kind,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn finish_slot_push(
+        &mut self,
+        prepared: PreparedPush,
+        f: usize,
+        item: TyId,
+        header: ValueId,
+        value: Option<ValueId>,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        if !self.live() || value.and_then(|v| self.pointer_address(v)) != Some(prepared.slot) {
+            return self.emit_call(f, &[item], &[Some(header), value], result, n);
+        }
+        let full = self.new_block(&[]);
+        let spare = self.new_block(&[]);
+        let join = self.new_result_join();
+        self.list_branch(prepared.full, full, spare, n);
+        self.start(full);
+        let built = self.emit_call(f, &[item], &[Some(header), value], result, n);
+        self.goto(join, result, built, n);
+        self.start(spare);
+        self.consume(value, n);
+        let module = if prepared.kind == SlotPush::Heap {
+            "heap"
+        } else {
+            "deque"
+        };
+        let Some(publish) = self.p.core_fn(module, "finish_prepared_push") else {
+            self.gap(n, "a prepared push requires its publication body");
+            return None;
+        };
+        let front = (prepared.kind != SlotPush::Heap)
+            .then(|| {
+                self.konst(
+                    Ty::Scalar(Scalar::Bool),
+                    u64::from(prepared.kind == SlotPush::Front),
+                    n,
+                )
+            })
+            .flatten();
+        let mut args = vec![Some(header), Some(prepared.index)];
+        if let Some(front) = front {
+            args.push(Some(front));
+        }
+        self.emit_call(publish, &[item], &args, UNIT, n);
+        let built = self.wrap_case(result, 0, UNIT, None, n);
+        self.goto(join, result, built, n);
+        self.land(join)
+    }
+
+    fn publish_slot(
+        &mut self,
+        header: ValueId,
+        address: AddressId,
+        ty: PlaceTy,
+        n: NodeId,
+    ) -> Option<()> {
+        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
+        self.inst(
+            Inst::Mark {
+                address,
+                count: one,
+                ty,
+                live: true,
+            },
+            n,
+        );
+        self.slots_count(header, true, one, n)
+    }
+
     pub(super) fn slots_value(
         &mut self,
         name: &str,
@@ -21,6 +163,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             // byte offset. Slots' sole raw field has exactly those same words.
             "slots_new" => Some(self.slots_new(item, vals[0]?, result, n)),
             "slots_empty" => Some(self.empty_list(result, n)),
+            "slots_unmark_spare" | "slots_publish_spare" => {
+                let header = vals[0]?;
+                let (address, ty) = self.slots_at(item, header, vals[1]?, n)?;
+                if name == "slots_publish_spare" {
+                    self.publish_slot(header, address, ty, n)?;
+                } else {
+                    let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
+                    self.inst(
+                        Inst::Unmark {
+                            address,
+                            count: one,
+                            ty,
+                            live: false,
+                        },
+                        n,
+                    );
+                }
+                Some(None)
+            }
             "slots_put" => {
                 let header = vals[0]?;
                 let index = vals[1]?;
@@ -28,17 +189,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let rep = self.rep_at(item, n)?;
                 self.install(at, rep, vals[2], n);
                 self.consume(vals[2], n);
-                let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
-                self.inst(
-                    Inst::Mark {
-                        address: at,
-                        count: one,
-                        ty,
-                        live: true,
-                    },
-                    n,
-                );
-                self.slots_count(header, true, one, n)?;
+                self.publish_slot(header, at, ty, n)?;
                 Some(None)
             }
             "slots_take" => {

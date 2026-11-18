@@ -7,7 +7,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (scope, freezes) = (self.scope_slots.len(), self.freezes.len());
         let owners = self.owner_mark();
         self.tail_ty = UNIT;
+        let outer = self.returned_local;
+        if let Some(to) = self.expression_destination(n)
+            && let Some(local) = self.returned_local(n)
+        {
+            self.returned_local = Some((local, to));
+        }
         let r = self.statements(n, want);
+        self.returned_local = outer;
         let value = std::mem::replace(&mut self.tail_ty, UNIT);
         let captured_return = self.fd.body == Some(n) && self.return_descriptor(r.1);
         if !captured_return {
@@ -41,7 +48,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             match self.kind(s) {
                 // The tail's temporaries last to the end of the enclosing statement.
                 NodeKind::ExpressionStatement if last => {
-                    let r = self.expr(self.kids(s)[0], want);
+                    let r = self.result_expr(self.kids(s)[0], want);
                     self.tail_ty = self.synth_ty;
                     return r;
                 }
@@ -102,7 +109,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.destructure_let(s, pat, value, declared, rest.first().copied());
         }
         let freezes = self.freezes.len();
-        let (t, v) = self.expr(value, declared.and_then(expect));
+        let to = self
+            .returned_local
+            .and_then(|(local, to)| (self.binder(pat) == Some(local)).then_some(to));
+        let (t, v) = self.expr_into(value, declared.and_then(expect), to);
         let ty = declared.unwrap_or(t);
         let kind = self.type_kind(ty);
         let anchors = if kind == Kind::Scoped {
@@ -139,7 +149,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return t == NEVER;
                 };
                 let (binding, origin) = if self.kind(s) == NodeKind::LetMut {
-                    (Binding::Slot(self.slot(ty, v, pat)), Origin::LetMut)
+                    let address = if let Some(to) = to
+                        && let Ok(r @ Rep::Place(id)) = self.rep(ty)
+                        && self.b.addresses[to.index()].ty == PlaceTy::Declared(id)
+                    {
+                        self.install(to, r, v, pat);
+                        Some(to)
+                    } else {
+                        self.slot(ty, v, pat)
+                    };
+                    (Binding::Slot(address), Origin::LetMut)
                 } else {
                     // The binding owns the temporary's place itself.
                     self.consume(v, pat);
@@ -395,7 +414,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let cv = self.condition(c[0]);
         let full = self.is_full_test(cv);
-        let join = self.new_join();
+        let join = self.new_result_join();
         let mut no_block = None;
         if self.live()
             && let Some(cv) = cv
@@ -430,7 +449,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.merge_arms(mark, [yes, no], was_dead, n);
             return (UNIT, None);
         };
-        let (yt, yv) = self.true_arm(full, |cx| cx.expr(c[1], want));
+        let (yt, yv) = self.true_arm(full, |cx| cx.result_expr(c[1], want));
         let yes = self.arm_edge(mark);
         self.goto(join, yt, yv, c[1]);
         if let Some(no) = no_block {
@@ -441,7 +460,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .filter(|w| w.payload == 0)
             .or(if yt == NEVER { None } else { expect(yt) })
             .or(want);
-        let (ot, ov) = self.expr(other, other_want);
+        let (ot, ov) = self.result_expr(other, other_want);
         let no = self.arm_edge(mark);
         let ty = if yt == NEVER { ot } else { yt };
         self.goto(join, ty, ov, other);
@@ -1171,7 +1190,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             payload: 0,
         };
         let v = match self.kids(n).first() {
-            Some(&e) => self.expr(e, Some(w)).1,
+            Some(&e) => self.return_operand(e),
             None => {
                 self.coerce(UNIT, w, n);
                 None

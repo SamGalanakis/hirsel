@@ -2427,10 +2427,15 @@ fn replay_boundary(provider_entry: bool) {
 }
 
 unsafe fn live_index(task: *mut Task, group: crate::tape::schedule::Group) -> u64 {
+    if group.task == 0 {
+        return 0;
+    }
     let mut index = 0;
     // SAFETY: the active committer owns its scheduler's creation list.
     unsafe {
-        let mut at = (*(*task).run).all;
+        // The list is newest first. Each tape starts at its opener and assigns
+        // child ordinals in creation order, so only older tasks can rank lower.
+        let mut at = (*task).all;
         while !at.is_null() {
             if (*at).state != State::Ended
                 && (*at)

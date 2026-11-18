@@ -158,6 +158,7 @@ impl World {
 #[derive(Default)]
 pub(super) struct Store {
     pub(super) files: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub(super) close_to: Option<std::path::PathBuf>,
     open: BTreeMap<u64, (Vec<u8>, usize)>,
     next: u64,
     write_error: Option<IoError>,
@@ -221,7 +222,11 @@ impl Store {
                     o.value = n as u64;
                 }
                 CLOSE => {
-                    st.open.remove(&r.handle).unwrap();
+                    let (name, _) = st.open.remove(&r.handle).unwrap();
+                    if let Some(directory) = &st.close_to {
+                        let path = directory.join(std::str::from_utf8(&name).unwrap());
+                        std::fs::write(path, &st.files[&name]).unwrap();
+                    }
                 }
                 op => panic!("the store has no op {op}"),
             }

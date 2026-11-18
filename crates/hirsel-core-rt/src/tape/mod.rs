@@ -423,7 +423,9 @@ impl Recorder {
             self.retained_buffer = None;
             self.buffer.extend_from_slice(&d);
         }
-        if self.buffer.len() >= CLOSE_AT {
+        if matches!(f, Frame::End { .. }) {
+            self.close(format::END)?;
+        } else if self.buffer.len() >= CLOSE_AT {
             self.close(0)?;
         }
         Ok(())
@@ -819,7 +821,6 @@ fn finish(cell: &'static Cell, expected_generation: u32, seal: Seal<'_>) -> Resu
                     gap: live.schedule.events - live.schedule.last,
                     ending: e.clone(),
                 })
-                .and_then(|()| rec.close(format::END))
             } else if rec.buffer.is_empty() {
                 Ok(())
             } else {

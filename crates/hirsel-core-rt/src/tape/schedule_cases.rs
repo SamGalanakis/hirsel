@@ -372,19 +372,7 @@ pub(super) fn run() {
                     })
                     .unwrap();
                 omit(&mut changed, at);
-                let replayed = run_case(Some(&encode(&header, &changed)), chooser, pending, false);
-                assert!(
-                    matches!(
-                        replayed.result,
-                        Some(Err(Fault::Diverged(Divergence {
-                            kind: Mismatch::Schedule,
-                            ..
-                        })))
-                    ),
-                    "dropped {}: {:?}",
-                    if drop_wait { "WAIT" } else { "WAKE" },
-                    replayed.result
-                );
+                replay_schedule_fault(&encode(&header, &changed), chooser, if pending { "bypass-pending" } else { "bypass" }, None);
             }
         }
     }
@@ -1274,15 +1262,12 @@ fn positioned_wait() {
             for dropped in [wait, wake] {
                 let mut changed = all.clone();
                 omit(&mut changed, dropped);
-                let replay = timeline(scenario, chooser, Some(&encode(&header, &changed)));
-                let Some(Err(Fault::Diverged(Divergence {
-                    at,
-                    kind: Mismatch::Schedule,
-                }))) = replay.result
-                else {
-                    panic!("dropping frame {}: {:?}", dropped + 1, replay.result);
-                };
-                assert_eq!(at, wake as u64 + u64::from(dropped == wake));
+                replay_schedule_fault(
+                    &encode(&header, &changed),
+                    chooser,
+                    if between { "wait-between" } else { "wait-after" },
+                    Some(wake as u64 + u64::from(dropped == wake)),
+                );
             }
             tapes.push(bytes.to_vec());
         }
@@ -1319,13 +1304,11 @@ fn latest_pair() {
         for delta in [-1, 1] {
             let mut changed = all.clone();
             *gap(&mut changed[wake]).unwrap() = (2i64 + delta) as u64;
-            let replay = timeline(Scenario::Latest, chooser, Some(&encode(&header, &changed)));
-            assert_eq!(
-                replay.result,
-                Some(Err(Fault::Diverged(Divergence {
-                    at: wake as u64 + 1,
-                    kind: Mismatch::Schedule,
-                })))
+            replay_schedule_fault(
+                &encode(&header, &changed),
+                chooser,
+                "latest",
+                Some(wake as u64 + 1),
             );
         }
     }
@@ -1529,12 +1512,22 @@ unsafe extern "C" fn park_at_quiescence(context: *mut Context, _: *mut u8, input
 fn quiescence_child() {
     let directory = std::env::var_os("TAPE_QUIESCENCE_DIR").unwrap();
     let case = std::env::var("TAPE_QUIESCENCE_MODE").unwrap();
-    let quiet = || std::fs::OpenOptions::new().write(true).open("/dev/null").unwrap().into();
-    let mut os = Box::new(crate::os::OsProvider::new(quiet(), quiet()));
-    let dir = os.grant(std::path::Path::new(&directory)).unwrap();
+    let directory = std::path::Path::new(&directory);
+    let mut store = Store::default();
+    let mode = if case.contains("record") {
+        store.close_to = Some(directory.to_owned());
+        Mode::Record
+    } else {
+        for name in ["x", "y"] {
+            if let Ok(bytes) = std::fs::read(directory.join(name)) {
+                store.files.insert(name.as_bytes().to_vec(), bytes);
+            }
+        }
+        Mode::Replay
+    };
     let args = Quiescence {
-        dir: (os.provider(), dir),
-        mode: if case.contains("record") { Mode::Record } else { Mode::Replay },
+        dir: store.dir(),
+        mode,
         end_last: case.contains("last"),
         reorder: case.contains("swap"),
     };
@@ -1551,12 +1544,6 @@ fn quiescence_child() {
 }
 
 fn run_quiescence(dir: &std::path::Path, mode: &str, expected: &str) {
-    if mode.contains("swap") {
-        let spare = dir.join("spare");
-        if spare.exists() {
-            std::fs::remove_file(spare).unwrap();
-        }
-    }
     let output = crate::test_process::command()
         .args(["--ignored", "--exact", "tape::schedule_cases::quiescence_child", "--test-threads=1"])
         .env("TAPE_QUIESCENCE_DIR", dir)
@@ -1637,4 +1624,44 @@ fn quiescence_reports_every_tape_before_selecting_the_oldest_fault() {
         run_quiescence(&dir, "two-replay", &format!("Replay tape 02020202020202020202020202020202: {verdict}"));
     }
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "spawned by the malformed schedule laws"]
+fn schedule_fault_child() {
+    let input = std::env::var_os("TAPE_FAULT_BYTES").unwrap();
+    let bytes = std::fs::read(input).unwrap();
+    let chooser = std::env::var("TAPE_FAULT_CHOOSER").unwrap().parse().unwrap();
+    let case = std::env::var("TAPE_FAULT_CASE").unwrap();
+    let result = match case.as_str() {
+        "bypass" | "bypass-pending" => run_case(Some(&bytes), chooser, case == "bypass-pending", false).result,
+        "wait-between" | "wait-after" => timeline(Scenario::Wait { between: case == "wait-between" }, chooser, Some(&bytes)).result,
+        "latest" => timeline(Scenario::Latest, chooser, Some(&bytes)).result,
+        _ => unreachable!("unknown case"),
+    };
+    let Some(Err(Fault::Diverged(Divergence { kind: Mismatch::Schedule, at }))) = result else {
+        panic!("expected the schedule divergence, got {result:?}");
+    };
+    eprintln!("Diverged(Schedule) at {at}");
+}
+
+fn replay_schedule_fault(bytes: &[u8], chooser: u8, case: &str, at: Option<u64>) {
+    let dir = quiescence_directory("fault");
+    let path = dir.join("tape");
+    std::fs::write(&path, bytes).unwrap();
+    let output = crate::test_process::command()
+        .args(["--ignored", "--exact", "tape::schedule_cases::schedule_fault_child", "--test-threads=1", "--nocapture"])
+        .env("TAPE_FAULT_BYTES", path)
+        .env("TAPE_FAULT_CHOOSER", chooser.to_string())
+        .env("TAPE_FAULT_CASE", case)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert!(matches!(output.status.code(), Some(0 | 102)), "{case}: {output:?}");
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
+    let (source, position) = diagnostic.trim_end().rsplit_once("Diverged(Schedule) at ").unwrap();
+    assert!(source.is_empty() || source.starts_with("run stop: Replay tape "));
+    if let Some(at) = at {
+        assert_eq!(position.parse::<u64>().unwrap(), at, "{case}");
+    }
 }

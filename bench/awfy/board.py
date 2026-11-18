@@ -33,6 +33,38 @@ PINS = {
     "langarena": "3c9f84ddaeec834c0631747cb789e8cfd602f993",
 }
 COUNTERS = ("instructions", "cycles")
+EXPECTED = {
+    "AWFY original": (
+        "DeltaBlue", "Richards", "Json", "CD", "Havlak", "Bounce", "List", "Mandelbrot",
+        "NBody", "Permute", "Queens", "Sieve", "Storage", "Towers",
+    ),
+    "AWFY pool/index": ("JsonPool", "StoragePool", "DeltaBlue", "Richards", "CD", "Havlak", "List", "Towers"),
+    "LangArena": tuple(
+        f"{group}::{row}"
+        for group, names in {
+            "Binarytrees": "Obj Arena",
+            "Brainfuck": "Array Recursion",
+            "Matmul": "Single T4 T8 T16",
+            "Base64": "Encode Decode",
+            "Json": "Generate ParseDom ParseMapping",
+            "CSV": "Parse",
+            "Etc": "Sieve TextRaytracer NeuralNet CacheSimulation GameOfLife Words LogParser",
+            "Template": "Regex Parse",
+            "Sort": "Quick Merge Self",
+            "Graph": "BFS DFS AStar",
+            "Hash": "SHA256 CRC32",
+            "Calculator": "Ast Interpreter",
+            "Maze": "Generator BFS AStar",
+            "CLBG": "Fannkuchredux Mandelbrot Nbody Spectralnorm",
+            "Compress": "BWTEncode BWTDecode HuffEncode HuffDecode ArithEncode ArithDecode LZWEncode LZWDecode",
+            "Distance": "Jaro NGram",
+        }.items()
+        for row in names.split()
+    ),
+    "Compile": ("LangArena cold", "LangArena edit"),
+    "Size": ("AWFY original-14 harness",),
+    "Checkbox": ("converge, 64 clients", "memory-subscribed, 64 clients", "memory-unsubscribed, 64 clients"),
+}
 NOTES = (
     "Instructions and cycles count user-space CPU work; seconds measures elapsed time. "
     "Hirsel checks bounds and overflow and admits bytes. Certified images elide Step charging. "
@@ -107,8 +139,19 @@ class Board:
         self.report = {"commit": commit, "pins": PINS, "notes": NOTES, "rows": [], "failures": {}}
 
     def save(self):
+        observed = {(row["goal"], row["row"]): row for row in self.report["rows"]}
+        expected = [
+            {"goal": goal, "row": name, "status": (
+                observed[goal, name]["status"] if (goal, name) in observed else "missing")}
+            for goal, names in EXPECTED.items() for name in names
+        ]
+        self.report["expected_rows"] = expected
+        self.report["complete"] = (
+            all(row["status"] == "ok" for row in expected) and not self.report["failures"]
+        )
         write_json(self.out / "board.json", self.report)
-        lines = ["# Hirsel goal board", "", *NOTES, "",
+        lines = ["# Hirsel goal board", "",
+                 "Complete" if self.report["complete"] else "Incomplete", "", *NOTES, "",
                  "| Goal | Row | Metric | H/R | H/G | Certified | Commit |",
                  "| --- | --- | --- | ---: | ---: | --- | --- |"]
         for row in self.report["rows"]:
@@ -123,21 +166,46 @@ class Board:
         if self.report["failures"]:
             lines += ["", "## Incomplete samples", ""]
             lines += [f"- {label}: {reason}" for label, reason in self.report["failures"].items()]
+        missing = [f"{row['goal']}/{row['row']}" for row in expected if row["status"] == "missing"]
+        if missing:
+            lines += ["", "## Missing rows", "", *[f"- {label}" for label in missing]]
         (self.out / "board.md").write_text("\n".join(lines) + "\n")
 
+    def finish(self):
+        self.save()
+        print(self.out / "board.md", flush=True)
+        return int(not self.report["complete"])
+
     def row(self, goal, name, certified, samples, fields):
+        label = f"{goal}/{name}"
+        if name not in EXPECTED.get(goal, ()) or any(
+            (row["goal"], row["row"]) == (goal, name) for row in self.report["rows"]
+        ):
+            raise ValueError(f"unexpected or repeated row {label}")
+        sides = ("hirsel", "rust") if goal in ("Compile", "Checkbox") else measure.SIDES
+        complete = True
+        for side in sides:
+            sample = samples.get(side, {})
+            status = sample.get("status", "missing")
+            if status == "ok" and not all(
+                field in sample and math.isfinite(float(sample[field])) and float(sample[field]) > 0
+                for field in fields
+            ):
+                status = "missing-or-invalid-metric"
+                sample["status"] = status
+            if status != "ok":
+                self.report["failures"][f"{label}/{side}"] = status
+                complete = False
         self.report["rows"].append({"goal": goal, "row": name, "certified": certified,
+                                    "status": "ok" if complete else "failed",
                                     "commit": self.report["commit"], "samples": samples,
                                     "metrics": fields, "ratios": ratios(samples, fields)})
-        for side, sample in samples.items():
-            if sample["status"] != "ok":
-                self.report["failures"][f"{goal}/{name}/{side}"] = sample["status"]
         self.save()
 
     def attempt(self, label, operation, *args):
         try:
             return operation(*args)
-        except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+        except (ValueError, OSError, RuntimeError, KeyError, subprocess.SubprocessError) as error:
             print(f"{label}: {error}", file=sys.stderr, flush=True)
             self.report["failures"][label] = str(error)
             self.save()
@@ -171,7 +239,7 @@ def runtime_rows(board, goal, directory, rows):
 
 def awfy_rows(board, out, upstream):
     originals = [(name, commands) for name, commands in measure.rows(out, False, upstream) if name != "Hello"]
-    if len(originals) != 14 or len(dict(originals)) != 14:
+    if sorted(dict(originals)) != sorted(EXPECTED["AWFY original"]) or len(originals) != 14:
         raise ValueError("the original board requires 14 distinct AWFY rows")
     verified = runtime_rows(board, "AWFY original", out, originals)
     if len(verified) == len(originals):
@@ -183,7 +251,7 @@ def awfy_rows(board, out, upstream):
         board.report["failures"]["Size"] = "not all original harness results verified"
         board.save()
     pools = list(measure.matched_pool_rows(out, upstream))
-    if len(pools) != 8 or len(dict(pools)) != 8:
+    if sorted(dict(pools)) != sorted(EXPECTED["AWFY pool/index"]) or len(pools) != 8:
         raise ValueError("the pool board requires eight distinct AWFY rows")
     runtime_rows(board, "AWFY pool/index", out, pools)
 
@@ -417,32 +485,29 @@ def prepare_arena(out, args, compiler, artifacts, env):
     build.goose_executable(compiler, args.goose / "bench/kostya/goose/src/main.goose", out / "goose", env)
     rows = [dict(row, iterations=1, warmup_iterations=0, checksum=0)
             for row in json.loads((args.langarena / "run.js").read_text())]
-    if len(rows) != 50 or len({row["name"] for row in rows}) != 50:
+    if sorted(row["name"] for row in rows) != sorted(EXPECTED["LangArena"]):
         raise ValueError("LangArena requires 50 distinct workloads")
     arena.build_hirsel(out, artifacts, rows, env)
     return rows
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("out", type=Path)
-    for name in PINS:
-        parser.add_argument(f"--{name}", type=lambda path: Path(path).resolve(), required=True,
-                            help=f"clean checkout at {PINS[name]}")
-    args = parser.parse_args()
-    os.sched_setaffinity(0, BUILD_CPUS)
-    out = args.out.resolve()
-    if out.is_relative_to(ROOT):
-        parser.error("use a new evidence directory outside the checkout")
+@contextmanager
+def measurement_slot(path):
+    with path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def run_board(board, args):
+    out = board.out
+    board.report["commit"] = git(ROOT, "rev-parse", "HEAD")
     if git(ROOT, "status", "--porcelain"):
-        parser.error("run the board from a clean Hirsel checkout")
+        raise ValueError("run the board from a clean Hirsel checkout")
     for name, commit in PINS.items():
         checkout = getattr(args, name)
         if git(checkout, "rev-parse", "HEAD") != commit or git(checkout, "status", "--porcelain", "--untracked-files=no"):
-            parser.error(f"{checkout} must have unmodified tracked sources at {commit}")
-    out.mkdir(parents=True)
-    board = Board(out, git(ROOT, "rev-parse", "HEAD"))
-    board.save()
+            raise ValueError(f"{checkout} must have unmodified tracked sources at {commit}")
+
     env = build.capped_env(out, "8G", "2") | {"LD_LIBRARY_PATH": str(build.llvm_path() / "lib")}
     artifact_file = out / "toolchain.json"
     run([sys.executable, ROOT / "tools/buck2/prepare.py"], env=env)
@@ -484,8 +549,7 @@ def main():
     compile_ready = board.attempt("Compile preparation", prepare_compile, compile_dir, artifacts, env)
     checkbox_dir = out / "checkbox"
     checkbox_ready = board.attempt("Checkbox build", prepare_checkbox, checkbox_dir, artifacts, env)
-    with LOCK.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with measurement_slot(LOCK):
         os.sched_setaffinity(0, {min(MEASURE_CPUS)})
         if awfy_ready:
             board.attempt("AWFY measurement", awfy_rows, board, awfy, args.awfy)
@@ -504,9 +568,24 @@ def main():
         if checkbox_ready:
             os.sched_setaffinity(0, MEASURE_CPUS)
             board.attempt("Checkbox measurement", checkbox_rows, board, checkbox_dir, checkbox_ready)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("out", type=Path)
+    for name in PINS:
+        parser.add_argument(f"--{name}", type=lambda path: Path(path).resolve(), required=True,
+                            help=f"clean checkout at {PINS[name]}")
+    args = parser.parse_args()
+    os.sched_setaffinity(0, BUILD_CPUS)
+    out = args.out.resolve()
+    if out.is_relative_to(ROOT):
+        parser.error("use a new evidence directory outside the checkout")
+    out.mkdir(parents=True)
+    board = Board(out, None)
     board.save()
-    print(board.out / "board.md", flush=True)
-    return int(bool(board.report["failures"]))
+    board.attempt("Board", run_board, board, args)
+    return board.finish()
 
 
 if __name__ == "__main__":

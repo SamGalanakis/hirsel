@@ -1,25 +1,10 @@
 //! Semantic event coordinates, independent of task pointers and host time.
 //! Like rr's Frame ticks, gaps locate inputs; Hirsel counts CONC-10 events
 //! instead of instructions so both native engines use the same coordinates.
-use super::*;
+pub(crate) use super::dispatch::{Group, Turn};
+use super::{dispatch::Hooks, *};
 
-#[derive(Clone, Copy)]
-pub(crate) struct Group {
-    cell: &'static Cell,
-    generation: u32,
-    pub task: u64,
-}
 impl Group {
-    pub fn root(cell: &'static Cell, generation: u32) -> Self {
-        Self {
-            cell,
-            generation,
-            task: 0,
-        }
-    }
-    pub fn same(self, other: Self) -> bool {
-        ptr::eq(self.cell, other.cell) && self.generation == other.generation
-    }
     fn with<R>(self, f: impl FnOnce(&mut Live) -> R) -> Option<R> {
         let mut state = self.cell.state.lock().unwrap();
         if state.generation != self.generation {
@@ -27,33 +12,44 @@ impl Group {
         }
         state.live.as_mut().map(f)
     }
-    pub fn seal_deadlock(self) -> Result<(), ([u8; 16], Fault)> {
-        let id = self.with(|live| live.tape_id).unwrap();
-        finish(self.cell, self.generation, Seal::Deadlock).map_err(|fault| (id, fault))
+    #[cfg(any(test, feature = "testing"))]
+    pub fn fifo(self) -> bool {
+        self.with(|live| live.schedule.chooser == format::CHOOSER_FIFO)
+            .unwrap_or(false)
+    }
+}
+
+pub(super) struct TapeHooks;
+
+impl Hooks for TapeHooks {
+    fn seal_deadlock(&self, group: Group) -> Result<(), ([u8; 16], Fault)> {
+        let id = group.with(|live| live.tape_id).unwrap();
+        finish(group.cell, group.generation, Seal::Deadlock).map_err(|fault| (id, fault))
     }
 
-    pub fn check(self) -> Result<(), Fault> {
-        self.with(|live| live.fault.map_or(Ok(()), Err))
+    fn check(&self, group: Group) -> Result<(), Fault> {
+        group
+            .with(|live| live.fault.map_or(Ok(()), Err))
             .unwrap_or(Err(Fault::Ended))
     }
-    pub fn cancel_wait(self, request: *mut Request) {
-        self.with(|live| {
+    fn cancel_wait(&self, group: Group, request: *mut Request) {
+        group.with(|live| {
             live.waiting.remove(&(request as usize));
         });
     }
-    pub fn child(self) -> Self {
-        let task = self
+    fn child(&self, group: Group) -> Group {
+        let task = group
             .with(|live| {
                 let task = live.schedule.next_task;
                 live.schedule.next_task += 1;
                 task
             })
             .unwrap_or(0);
-        Self { task, ..self }
+        Group { task, ..group }
     }
-    pub fn event(self, index: impl FnOnce() -> u64, ended: bool) {
-        self.with(|live| {
-            live.commit(self.task, index);
+    fn event(&self, group: Group, index: &dyn Fn() -> u64, ended: bool) {
+        group.with(|live| {
+            live.commit(group.task, index);
             if ended {
                 live.schedule.previous = None;
             }
@@ -61,78 +57,106 @@ impl Group {
     }
     /// Only the active replay dispatcher asks for a turn. WAIT and GRANT
     /// are consumed at their own call sites, after the named fiber reaches them.
-    pub fn turn(self) -> Turn {
-        self.with(Live::turn).unwrap_or(Turn::Fifo)
+    fn turn(&self, group: Group) -> Turn {
+        group.with(Live::turn).unwrap_or(Turn::Fifo)
     }
-    pub fn choose(self, task: u64) {
-        self.with(|live| {
+    fn choose(&self, group: Group, task: u64) {
+        group.with(|live| {
             let rep = live.replayer.as_mut().unwrap();
             rep.next().unwrap();
             live.schedule.last = live.schedule.events;
             live.schedule.selected = Some(task);
         });
     }
-    pub fn fifo(self) -> bool {
-        self.with(|live| live.schedule.chooser == format::CHOOSER_FIFO)
+    fn replaying(&self, group: Group) -> bool {
+        group
+            .with(|live| live.mode == Mode::Replay)
             .unwrap_or(false)
     }
-    pub fn replaying(self) -> bool {
-        self.with(|live| live.mode == Mode::Replay).unwrap_or(false)
+    fn fail(&self, group: Group) {
+        group.with(Live::schedule_fault);
     }
-    pub fn drives_replay(self, provider: Provider) -> bool {
-        provider.state == self.cell.provider.state && self.replaying()
-    }
-
-    pub fn fail(self) {
-        self.with(Live::schedule_fault);
-    }
-    pub fn wake(self, request: *mut Request) {
-        self.with(|live| {
+    fn wake(&self, group: Group, request: *mut Request) {
+        group.with(|live| {
             if live.mode == Mode::Record && live.waiting.remove(&(request as usize)).is_some() {
                 live.write_input(Frame::Wake {
                     gap: 0,
-                    task: self.task,
+                    task: group.task,
                 });
             }
         });
     }
     /// An external request is an input. Replay obtains it from CANCEL instead.
-    pub fn cancel(self, source: Option<Self>) -> bool {
-        if source.is_some_and(|s| s.same(self)) {
+    fn cancel(&self, group: Group, source: Option<Group>) -> bool {
+        if source.is_some_and(|s| s.same(group)) {
             return true;
         }
-        self.with(|live| {
-            if live.mode == Mode::Replay {
-                return false;
-            }
-            live.write_input(Frame::Cancel {
-                gap: 0,
-                task: self.task,
-            });
-            true
-        })
-        .unwrap_or(true)
+        group
+            .with(|live| {
+                if live.mode == Mode::Replay {
+                    return false;
+                }
+                live.write_input(Frame::Cancel {
+                    gap: 0,
+                    task: group.task,
+                });
+                true
+            })
+            .unwrap_or(true)
     }
-    pub fn consume_input(self) {
-        self.with(|live| {
+    fn consume_input(&self, group: Group) {
+        group.with(|live| {
             live.replayer.as_mut().unwrap().next().unwrap();
             live.schedule.last = live.schedule.events;
         });
     }
-}
+    fn source(&self, cell: &Cell, handle: u64) -> Option<(Provider, u64)> {
+        let state = cell.state.lock().unwrap();
+        if state.generation != generation_of(handle) {
+            return None;
+        }
+        let inner = state.live.as_ref()?.objects[ordinal_of(handle) - 1].inner?;
+        Some((inner.provider, inner.handle))
+    }
 
-#[derive(Clone, Copy)]
-pub(crate) enum Turn {
-    Fifo,
-    Event(Option<u64>),
-    Choose(u64),
-    Wait(u64),
-    Grant,
-    Finish,
-    Deadlock,
-    Wake(u64),
-    Cancel(u64),
-    Done(u64),
+    fn net_rules(&self, cell: &Cell, handle: u64) -> u64 {
+        let state = cell.state.lock().unwrap();
+        let live = state.live.as_ref().unwrap();
+        let ordinal = ordinal_of(handle);
+        match live.objects[ordinal - 1].inner {
+            Some(inner) => inner.handle,
+            None => live.replay_net_rules[&ordinal],
+        }
+    }
+
+    fn narrow_net(&self, cell: &'static Cell, parent: u64, rules: u64) -> (u64, Group) {
+        let _commit = crate::tasks::before_commit();
+        let mut state = cell.state.lock().unwrap();
+        let generation = state.generation;
+        let live = state.live.as_mut().unwrap();
+        let task = super::schedule::task(cell);
+        live.commit(task, crate::tasks::group_index);
+        let inner = live.objects[ordinal_of(parent) - 1]
+            .inner
+            .map(|source| Inner {
+                provider: source.provider,
+                handle: rules,
+            });
+        let ordinal = live.objects.len() + 1;
+        if inner.is_none() {
+            live.replay_net_rules.insert(ordinal, rules);
+        }
+        live.objects.push(Object {
+            inner,
+            open_file: false,
+        });
+        (handle(generation, ordinal), Group::root(cell, generation))
+    }
+
+    unsafe fn issue(&self, cell: &Cell, request: *mut Request, token: u64) -> Step {
+        // SAFETY: the driver pins the request for this call.
+        unsafe { issue_in(cell, &mut *request, token) }
+    }
 }
 
 pub(super) struct Schedule {

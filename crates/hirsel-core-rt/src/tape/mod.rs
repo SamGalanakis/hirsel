@@ -15,9 +15,11 @@
 //! dropping a tape advances its cell's generation, so every handle made
 //! through it then fails before issue and never uses its source.
 pub mod abi;
+mod dispatch;
 pub mod run;
-pub use hirsel_tape_format as format;
 pub(crate) mod schedule;
+pub(crate) use dispatch::{narrow_net, net_rules, owns, source};
+pub use hirsel_tape_format as format;
 #[cfg(test)]
 mod schedule_cases;
 #[cfg(test)]
@@ -241,6 +243,7 @@ struct State {
 pub struct Cell {
     state: Mutex<State>,
     provider: Provider,
+    hooks: &'static dyn dispatch::Hooks,
 }
 
 // SAFETY: the cell's mutable state is behind its mutex; the provider's state
@@ -268,11 +271,12 @@ fn cell() -> &'static Cell {
         provider: Provider {
             state: ptr::null_mut(),
             wait,
-            issue,
+            issue: dispatch::issue,
             resume,
             abort,
             deliver,
         },
+        hooks: &schedule::TapeHooks,
     }));
     c.provider.state = (c as *mut Cell).cast();
     c
@@ -290,6 +294,8 @@ pub struct Tape {
     generation: u32,
     /// An across open of a tape whose revision is not the opener's.
     differs: bool,
+    // The common registry can drop an open tape without linking the codec.
+    drop_unsealed: fn(&Self),
 }
 
 struct Startup {
@@ -780,6 +786,9 @@ impl Tape {
                 cell,
                 generation,
                 differs,
+                drop_unsealed: |tape| {
+                    let _ = tape.finish(Seal::Unsealed);
+                },
             },
             startup,
         ))
@@ -995,65 +1004,8 @@ fn finish(cell: &'static Cell, expected_generation: u32, seal: Seal<'_>) -> Resu
 }
 impl Drop for Tape {
     fn drop(&mut self) {
-        let _ = self.finish(Seal::Unsealed);
+        (self.drop_unsealed)(self);
     }
-}
-
-const ISSUE: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step = issue;
-
-pub(crate) fn owns(provider: &Provider) -> bool {
-    ptr::fn_addr_eq(provider.issue, ISSUE)
-}
-
-/// The source of a substituted capability, present only during recording.
-pub(crate) fn source(provider: &Provider, handle: u64) -> Option<(Provider, u64)> {
-    let state = cell_of(provider.state).state.lock().unwrap();
-    if state.generation != generation_of(handle) {
-        return None;
-    }
-    let inner = state.live.as_ref()?.objects[ordinal_of(handle) - 1].inner?;
-    Some((inner.provider, inner.handle))
-}
-
-/// The source rules in Record or the inert snapshot (or its intersection)
-/// in Replay. A CLI Net grant stays live through the run's cleanup.
-pub(crate) fn net_rules(provider: &Provider, handle: u64) -> u64 {
-    let state = cell_of(provider.state).state.lock().unwrap();
-    let live = state.live.as_ref().unwrap();
-    let ordinal = ordinal_of(handle);
-    match live.objects[ordinal - 1].inner {
-        Some(inner) => inner.handle,
-        None => live.replay_net_rules[&ordinal],
-    }
-}
-
-/// Successful local narrowing assigns the child ordinal in commit order.
-pub(crate) fn narrow_net(provider: &Provider, parent: u64, rules: u64) -> (u64, schedule::Group) {
-    let _commit = crate::tasks::before_commit();
-    let cell = cell_of(provider.state);
-    let mut state = cell.state.lock().unwrap();
-    let generation = state.generation;
-    let live = state.live.as_mut().unwrap();
-    let task = schedule::task(cell);
-    live.commit(task, crate::tasks::group_index);
-    let inner = live.objects[ordinal_of(parent) - 1]
-        .inner
-        .map(|source| Inner {
-            provider: source.provider,
-            handle: rules,
-        });
-    let ordinal = live.objects.len() + 1;
-    if inner.is_none() {
-        live.replay_net_rules.insert(ordinal, rules);
-    }
-    live.objects.push(Object {
-        inner,
-        open_file: false,
-    });
-    (
-        handle(generation, ordinal),
-        schedule::Group::root(cell, generation),
-    )
 }
 
 fn cell_of(state: *mut u8) -> &'static Cell {
@@ -1162,13 +1114,6 @@ unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
         }
     }
     w
-}
-
-#[inline(never)]
-unsafe extern "C" fn issue(state: *mut u8, r: *mut Request, token: u64) -> Step {
-    let cell = cell_of(state);
-    // SAFETY: the driver's pinned request, in the task.
-    unsafe { issue_in(cell, &mut *r, token) }
 }
 
 fn done(outcome: Outcome) -> Step {

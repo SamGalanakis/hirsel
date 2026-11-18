@@ -27,11 +27,12 @@ considered and left out: it is a separate language feature and is unnecessary
 for launch configuration. There is no compiler rule naming `store@1/runner` to
 require or extract a constant argument.
 
-- Native Linux launch opens `/proc/self/exe` once and maps the image read-only.
-  The first digest reader hashes that mapping and releases it. When a mapping
-  cannot be made, the launcher hashes the opened file directly. Replacement,
-  rename or deletion of the file after launch leaves the digest stable.
-  Both native backends use the same runtime launch boundary.
+- To capture the image on Linux, the native launcher opens `/proc/self/exe`
+  once and maps it read-only. The first digest reader hashes that mapping and
+  releases it. If mapping fails, the launcher hashes the opened file directly.
+  Replacement, rename or deletion of the file after launch leaves the digest
+  stable. Both native backends use the same runtime launch boundary. A closed
+  release executable with no digest reader may omit capture on an untaped run.
 - An evaluator launching a built artifact hashes the artifact it loaded, and
   retains that artifact's target. It never hashes the evaluator executable.
   Source-only evaluation has no executable image and is unavailable.

@@ -109,11 +109,12 @@ pub(super) fn emit(
             ],
         )?
     } else {
-        f.value_call(
-            "hirsel_core_os_run_with_sources",
-            I8,
-            &[config, names, sources, entry],
-        )?
+        let runner = if plan.launch_digest_unused {
+            "hirsel_core_os_run_without_digest"
+        } else {
+            "hirsel_core_os_run_with_sources"
+        };
+        f.value_call(runner, I8, &[config, names, sources, entry])?
     };
     f.void_call("free", &[args])?;
     if let Some(path) = &plan.charge_report {

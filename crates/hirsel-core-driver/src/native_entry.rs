@@ -42,6 +42,7 @@ pub(crate) struct Plan<'a> {
     exit_offset: Option<u64>,
     parameters: Vec<Requirement<'a>>,
     cleanup: Option<String>,
+    launch_digest_unused: bool,
     root_limit: u64,
     grant_mask: u64,
     net_rules: &'a [hirsel_core_net::Rule],
@@ -85,6 +86,7 @@ impl<'a> Plan<'a> {
         identity: String,
         binding: &'a EntryAbi,
         cleanup: Option<String>,
+        launch_digest_unused: bool,
         options: &'a NativeOptions,
     ) -> std::result::Result<Self, NativeStop> {
         let Layout::Fixed(layout) = &binding.recipe.layout else {
@@ -121,6 +123,7 @@ impl<'a> Plan<'a> {
             layout,
             exit_offset: binding.exit_offset,
             parameters,
+            launch_digest_unused: launch_digest_unused && cleanup.is_none(),
             cleanup,
             root_limit: options.root_limit,
             grant_mask: options.grant_mask,

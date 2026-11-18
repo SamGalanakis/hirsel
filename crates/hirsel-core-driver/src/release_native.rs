@@ -205,7 +205,7 @@ impl CheckProduct {
         runtime: ContentHash,
         store: &Store,
         closed_executable: bool,
-    ) -> Result<(Vec<ObjectProduct>, bool), NativeStop> {
+    ) -> Result<Emitted, NativeStop> {
         let compiler = compiler_identity()?;
         // Release is LLVM's alone: every object here is libLLVM's output.
         let llvm = crate::tool_inputs::llvm_library()?;
@@ -261,6 +261,19 @@ impl CheckProduct {
                 }
             })?;
         let elide_steps = closed_executable && cannot_install_step_bound(&joined);
+        // The closed-unit walk above proves calls, function references and
+        // finalizers stay in the image. The separate result cleanup is
+        // considered when selecting the entry plan.
+        let launch_digest_unused = elide_steps
+            && !joined
+                .functions
+                .iter()
+                .filter_map(|f| f.body.as_ref())
+                .any(|body| {
+                    body.calls
+                        .iter()
+                        .any(|call| call.callee == Callee::Runtime(RtOp::LaunchWord))
+                });
         modules = vec![Cow::Owned(joined)];
         let refs = modules.iter().map(|m| &**m).collect::<Vec<_>>();
         // The checked body keys identify the source-neutral published modules.
@@ -421,7 +434,12 @@ impl CheckProduct {
                 compiled,
             })
             .collect();
-        Ok((objects, elide_steps))
+        Ok(Emitted {
+            objects,
+            table: None,
+            step_charging_elided: elide_steps,
+            launch_digest_unused,
+        })
     }
 }
 

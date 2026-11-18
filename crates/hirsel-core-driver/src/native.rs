@@ -483,6 +483,7 @@ struct Emitted {
     objects: Vec<ObjectProduct>,
     table: Option<Table>,
     step_charging_elided: bool,
+    launch_digest_unused: bool,
 }
 
 impl CheckProduct {
@@ -510,7 +511,7 @@ impl CheckProduct {
         // Only the executable is invoked by our launcher with an empty bound
         // stack. Objects returned to a caller must work in any task context.
         if matches!(options.backend, Backend::Llvm) && options.optimize {
-            let (objects, step_charging_elided) = self.emit_release(
+            return self.emit_release(
                 entry,
                 instances,
                 &reached.materialized,
@@ -518,12 +519,7 @@ impl CheckProduct {
                 inputs.toolchain.runtime,
                 &Store::new(&options.store)?,
                 closed_executable && inputs.recipe.uses_hirsel_launcher(),
-            )?;
-            return Ok(Emitted {
-                objects,
-                table: None,
-                step_charging_elided,
-            });
+            );
         }
         let (objects, table) = self.emit_instances(
             instances,
@@ -536,6 +532,7 @@ impl CheckProduct {
             objects,
             table,
             step_charging_elided: false,
+            launch_digest_unused: false,
         })
     }
     /// Emit `instances` for `options`, each a hit on its stored object or
@@ -843,6 +840,7 @@ impl CheckProduct {
             mut objects,
             table,
             step_charging_elided,
+            launch_digest_unused,
         } = self.emit_reached(entry, reached, options, true)?;
         let store = Store::new(&options.store)?;
         let (link, cleanup) = match (reach, prior) {
@@ -923,6 +921,7 @@ impl CheckProduct {
             entry.to_string(),
             &link.abi,
             link.cleanup.as_ref().map(|c| c.identity.symbol()),
+            launch_digest_unused,
             options,
         )?;
         let image = self

@@ -7,6 +7,7 @@ use crate::{
     process::{Config, View},
     provider::{Buffer, IoError, Provider},
 };
+use hirsel_core_ids::launch::Metadata;
 use std::{
     ffi::OsStr,
     io,
@@ -148,7 +149,7 @@ pub struct OsProcess {
     grants: Vec<u64>,
     diagnostic: Vec<u8>,
     config: Config,
-    _launch: Box<hirsel_core_ids::launch::Metadata>,
+    _launch: Box<Metadata>,
     describe_out: Option<OwnedFd>,
 }
 #[repr(C)]
@@ -197,6 +198,7 @@ impl OsProcess {
         input: &OsConfig,
         probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
         directory_ops: Option<&DirectoryOperations>,
+        launch_metadata: fn(&str, u64, bool) -> Metadata,
     ) -> Result<Box<Self>, StartupError> {
         // SAFETY: copy launcher input before acquiring any program grant.
         unsafe {
@@ -226,11 +228,7 @@ impl OsProcess {
             args.drain(..prefix);
             let target = std::str::from_utf8(bytes(input.target))
                 .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
-            let launch = Box::new(hirsel_core_ids::launch::Metadata::native(
-                target,
-                n_place,
-                describe_mode,
-            ));
+            let launch = Box::new(launch_metadata(target, n_place, describe_mode));
             let mut os = Box::new(OsProvider::new(
                 duplicate(if !describe_mode && input.grant_mask & (1 << STDOUT) != 0 {
                     input.stdout_fd
@@ -387,6 +385,7 @@ pub unsafe extern "C" fn hirsel_core_os_process_new(config: *const OsConfig) -> 
             &*config,
             OsProvider::probe_directory,
             Some(&hirsel_core_os_directory_ops),
+            Metadata::native,
         )
     } {
         Ok(process) => OpenProcess {
@@ -470,6 +469,32 @@ pub unsafe extern "C" fn hirsel_core_os_run_with_sources(
     entry: crate::process::Entry,
 ) -> u8 {
     // SAFETY: all configuration and source storage is pinned by the caller.
+    unsafe { run_os_with_sources(input, parameter_names, sources, entry, Metadata::native) }
+}
+
+/// OS entry for a closed executable without any launch-digest reader.
+/// # Safety
+/// The caller meets os_run_with_sources' contract and the executable cannot
+/// observe the executable digest, including through linked code or a Run tape.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_os_run_without_digest(
+    input: *const OsConfig,
+    parameter_names: *const View,
+    sources: *const crate::abi_sites::SourceTable,
+    entry: crate::process::Entry,
+) -> u8 {
+    // SAFETY: all configuration and source storage is pinned by the caller.
+    unsafe { run_os_with_sources(input, parameter_names, sources, entry, Metadata::source) }
+}
+
+unsafe fn run_os_with_sources(
+    input: *const OsConfig,
+    parameter_names: *const View,
+    sources: *const crate::abi_sites::SourceTable,
+    entry: crate::process::Entry,
+    launch_metadata: fn(&str, u64, bool) -> Metadata,
+) -> u8 {
+    // SAFETY: all configuration and source storage is pinned by the caller.
     unsafe {
         let operations = (*input).directory_ops.as_ref();
         run_with_sources_and_probe(
@@ -479,6 +504,7 @@ pub unsafe extern "C" fn hirsel_core_os_run_with_sources(
             entry,
             |os, handle| (operations.unwrap().probe)(os, handle),
             operations,
+            launch_metadata,
         )
     }
 }
@@ -498,6 +524,7 @@ unsafe fn run_with_probe(
             entry,
             probe,
             Some(&hirsel_core_os_directory_ops),
+            Metadata::native,
         )
     }
 }
@@ -508,9 +535,10 @@ unsafe fn run_with_sources_and_probe(
     entry: crate::process::Entry,
     probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
     directory_ops: Option<&DirectoryOperations>,
+    launch_metadata: fn(&str, u64, bool) -> Metadata,
 ) -> u8 {
     // SAFETY: input tables are borrowed from the OS entry's configuration.
-    match unsafe { OsProcess::new(input, probe, directory_ops) } {
+    match unsafe { OsProcess::new(input, probe, directory_ops, launch_metadata) } {
         Ok(mut process) => {
             // SAFETY: table is borrowed until this call completes reporting.
             unsafe { crate::abi_sites::hirsel_core_os_process_set_sources(&mut *process, sources) };

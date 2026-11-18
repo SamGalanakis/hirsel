@@ -24,6 +24,9 @@ void hirsel_core_os_process_set_sources(HirselCoreOsProcess *, const HirselCoreS
    Existing entry points and Config/OsConfig layouts are unchanged. */
 uint8_t hirsel_core_os_run_with_sources(const HirselCoreOsConfig *, const HirselCoreView *parameter_names,
                                       const HirselCoreSourceTable *, HirselCoreEntry);
+/* Native linker entry for a closed executable with no executable digest reader. */
+uint8_t hirsel_core_os_run_without_digest(const HirselCoreOsConfig *, const HirselCoreView *,
+                                         const HirselCoreSourceTable *, HirselCoreEntry);
 /* FORM #122: a link plan can select a run tape without changing ordinary
    startup. Paths and code identity are NUL-terminated generated strings;
    mode is 0 Record, 1 Replay or 2 diagnose (Across, never live). */

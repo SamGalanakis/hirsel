@@ -49,7 +49,10 @@ takes peak RSS from GNU time. The startup sample measures monotonic elapsed time
 from the spawn request to the first line confirming the work. For Hello that
 line is the greeting. For AWFY it follows one complete checked outer iteration.
 GNU strip reports the size of the full executable after stripping. AWFY tasks
-share one suite binary per language. Each Hello uses a separate binary.
+share one suite binary per language. The Hirsel harnesses reach each workload's entry through a
+function value, as Rust's harness calls a separate function per benchmark, so
+no workload is compiled into the dispatcher and rows do not share register
+allocation. Each Hello uses a separate binary.
 
 ## Original AWFY size board
 

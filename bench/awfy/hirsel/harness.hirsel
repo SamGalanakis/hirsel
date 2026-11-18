@@ -50,66 +50,106 @@ fn repeat(inner: u64, check: scoped fn() -> Result[bool, Capacity]) -> Result[bo
     Ok(true)
 }
 
+// Each workload is its own entry, reached through a function value as Rust's
+// harness reaches its per-benchmark entries, so no workload is compiled into the
+// dispatcher and one workload's code never shares a register allocation with another's.
+type Entry = fn(u64) -> Result[bool, Capacity]
+
 fn run(name: String, inner: u64) -> Result[bool, Capacity] {
-    if name == "CD" {
-        return cd.benchmark(inner)
+    let Some(workload) = entry(name) else {
+        return Ok(false)
     }
-    if name == "Bounce" {
-        return repeat(inner, fn() -> Result[bool, Capacity] {
-            Ok(small.bounce() == 1331)
-        })
-    }
-    if name == "DeltaBlue" {
-        return deltablue.benchmark(inner)
-    }
-    if name == "Havlak" {
-        return havlak.benchmark(inner)
-    }
-    if name == "Json" {
-        return repeat(inner, fn() -> Result[bool, Capacity] {
-            json_parse.benchmark(rap.document())
-        })
-    }
-    if name == "List" {
-        return repeat(inner, fn() -> Result[bool, Capacity] {
-            Ok(lists.list_benchmark()? == 10)
-        })
-    }
-    if name == "Mandelbrot" {
-        return Ok(numeric.mandelbrot(inner))
-    }
-    if name == "NBody" {
-        return Ok(numeric.nbody(inner))
-    }
-    if name == "Permute" {
-        return repeat(inner, fn() -> Result[bool, Capacity] {
-            Ok(small.permute() == 8660)
-        })
-    }
-    if name == "Queens" {
-        return repeat(inner, fn() -> Result[bool, Capacity] {
-            Ok(small.queens())
-        })
-    }
-    if name == "Richards" {
-        return repeat(inner, fn() -> Result[bool, Capacity] {
-            richards.benchmark()
-        })
-    }
-    if name == "Sieve" {
-        return repeat(inner, fn() -> Result[bool, Capacity] {
-            Ok(small.sieve() == 669)
-        })
-    }
-    if name == "Storage" {
-        return repeat(inner, fn() -> Result[bool, Capacity] {
-            Ok(trees.storage()? == 5461)
-        })
-    }
-    if name == "Towers" {
-        return repeat(inner, fn() -> Result[bool, Capacity] {
-            Ok(trees.towers_benchmark()? == 8191)
-        })
-    }
-    Ok(false)
+    workload(inner)
+}
+
+fn entry(name: String) -> Option[Entry] {
+    if name == "CD" { return Some(run_cd) }
+    if name == "Bounce" { return Some(run_bounce) }
+    if name == "DeltaBlue" { return Some(run_deltablue) }
+    if name == "Havlak" { return Some(run_havlak) }
+    if name == "Json" { return Some(run_json) }
+    if name == "List" { return Some(run_list) }
+    if name == "Mandelbrot" { return Some(run_mandelbrot) }
+    if name == "NBody" { return Some(run_nbody) }
+    if name == "Permute" { return Some(run_permute) }
+    if name == "Queens" { return Some(run_queens) }
+    if name == "Richards" { return Some(run_richards) }
+    if name == "Sieve" { return Some(run_sieve) }
+    if name == "Storage" { return Some(run_storage) }
+    if name == "Towers" { return Some(run_towers) }
+    None
+}
+
+fn run_cd(inner: u64) -> Result[bool, Capacity] {
+    cd.benchmark(inner)
+}
+
+fn run_bounce(inner: u64) -> Result[bool, Capacity] {
+    repeat(inner, fn() -> Result[bool, Capacity] {
+        Ok(small.bounce() == 1331)
+    })
+}
+
+fn run_deltablue(inner: u64) -> Result[bool, Capacity] {
+    deltablue.benchmark(inner)
+}
+
+fn run_havlak(inner: u64) -> Result[bool, Capacity] {
+    havlak.benchmark(inner)
+}
+
+fn run_json(inner: u64) -> Result[bool, Capacity] {
+    repeat(inner, fn() -> Result[bool, Capacity] {
+        json_parse.benchmark(rap.document())
+    })
+}
+
+fn run_list(inner: u64) -> Result[bool, Capacity] {
+    repeat(inner, fn() -> Result[bool, Capacity] {
+        Ok(lists.list_benchmark()? == 10)
+    })
+}
+
+fn run_mandelbrot(inner: u64) -> Result[bool, Capacity] {
+    Ok(numeric.mandelbrot(inner))
+}
+
+fn run_nbody(inner: u64) -> Result[bool, Capacity] {
+    Ok(numeric.nbody(inner))
+}
+
+fn run_permute(inner: u64) -> Result[bool, Capacity] {
+    repeat(inner, fn() -> Result[bool, Capacity] {
+        Ok(small.permute() == 8660)
+    })
+}
+
+fn run_queens(inner: u64) -> Result[bool, Capacity] {
+    repeat(inner, fn() -> Result[bool, Capacity] {
+        Ok(small.queens())
+    })
+}
+
+fn run_richards(inner: u64) -> Result[bool, Capacity] {
+    repeat(inner, fn() -> Result[bool, Capacity] {
+        richards.benchmark()
+    })
+}
+
+fn run_sieve(inner: u64) -> Result[bool, Capacity] {
+    repeat(inner, fn() -> Result[bool, Capacity] {
+        Ok(small.sieve() == 669)
+    })
+}
+
+fn run_storage(inner: u64) -> Result[bool, Capacity] {
+    repeat(inner, fn() -> Result[bool, Capacity] {
+        Ok(trees.storage()? == 5461)
+    })
+}
+
+fn run_towers(inner: u64) -> Result[bool, Capacity] {
+    repeat(inner, fn() -> Result[bool, Capacity] {
+        Ok(trees.towers_benchmark()? == 8191)
+    })
 }

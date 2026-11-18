@@ -19,18 +19,27 @@ def run(binaries, source, server_cpu, client_cpu, output):
     os.sched_setaffinity(0, {client_cpu})
     results = {}
     skid = {}
+    cycles = {}
     with tempfile.TemporaryDirectory(prefix="b1-", dir=output) as scratch:
         scratch = Path(scratch)
         for name in NAMES:
             command = [str(binaries[name])]
-            cost = b1.measure(name, command, server_cpu, 32768, scratch)
+            cost, cycles[name] = b1.measure(name, command, server_cpu, 32768, scratch)
             profile = b1.profile(name, command, server_cpu, 131072, scratch)
             buckets, _, skid[name] = attribution.phases(
                 profile, binaries[name], source if name == "hirsel" else None)
             results[name] = cost, buckets
         hirsel, tokio, hyper = (results[name][0] for name in ("hirsel", "tokio", "hyper"))
-        print(f"B1 total user instructions: **{hirsel / tokio:.2f}× Tokio+httparse** and "
-              f"**{hirsel / hyper:.2f}× Hyper**.")
+        print(f"B1 against Hyper: **{hirsel / hyper:.2f}× user instructions**, "
+              f"**{cycles['hirsel'] / cycles['hyper']:.2f}× cycles**.")
+        print("Hirsel also records replay, charges budgets, validates Host and rejects "
+              "duplicate Content-Length.")
+        print()
+        print("Tokio+httparse floor (minimal server: no protocol validation, static response): "
+              f"{hirsel / tokio:.2f}× user instructions, "
+              f"{cycles['hirsel'] / cycles['tokio']:.2f}× cycles.")
+        print("Hirsel also records replay, charges budgets, validates Host and rejects "
+              "duplicate Content-Length.")
         print()
         print("Kernel-leaf sample shares: " + ", ".join(f"{n} {skid[n]:.1%}" for n in NAMES) + ".")
         print()
@@ -48,9 +57,9 @@ def run(binaries, source, server_cpu, client_cpu, output):
                                   "--tool=callgrind", "--quiet", "--dump-instr=yes",
                                   "--compress-strings=no", "--compress-pos=no",
                                   f"--callgrind-out-file={path}", str(binaries[name])],
-                                 count, hirsel=name == "hirsel")
+                                 count, has_date=name != "tokio")
             results = callgrind_phase.estimate(scratch, binaries, source, ROOT / "core/std/http1.hirsel")
-        attribution.ratios(results)
+        attribution.phase_counts(results)
 
 
 def main():

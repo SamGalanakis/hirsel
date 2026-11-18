@@ -21,17 +21,17 @@ request, waits for the complete response, and repeats on the same connection:
 GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n
 ```
 
-Both servers send exactly:
+Hyper and Hirsel send the same response, with a live IMF-fixdate timestamp:
 
 ```text
-HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 12\r\n\r\nHello, world
+HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 12\r\nDate: <timestamp>\r\n\r\nHello, world
 ```
 
-HTTP/1.1 keeps this connection alive without a response `Connection` header.
-Hyper's automatic Date header is disabled to keep the response fixed. Both
-servers use the same current-thread Tokio runtime and TCP_NODELAY. The Tokio
-baseline parses with httparse and writes static bytes. Hyper uses its HTTP/1
-connection and a `Full<Bytes>` body, without an Axum router.
+HTTP/1.1 keeps the connection alive without a response `Connection` header.
+Hyper uses its current-thread Tokio runtime, TCP_NODELAY, automatic Date,
+HTTP/1 connection and a `Full<Bytes>` body. Hirsel also records replay, charges
+budgets, validates Host and rejects duplicate Content-Length. Tokio+httparse
+is a minimal server floor with a static response, lowercase headers and no Date.
 
 Only the server runs under Callgrind. One sample consists of two fresh server
 processes, serving 1,024 and 8,192 requests respectively. The reported cost is
@@ -75,7 +75,7 @@ target; run them directly when changing this workload.
   protocol implementation. Its task-per-connection loop is useful for general
   service, but adds a task for this one-connection workload. Both baselines
   directly await the single connection; Hyper selects HTTP/1 only, uses an
-  unboxed fixed body and omits Date. The Tokio baseline retains the existing
+  unboxed fixed body and includes Date. The Tokio floor retains the existing
   httparse loop, which is smaller but deliberately lacks Hyper's general HTTP
   framing and service behavior.
 - ADOPTED Callgrind's `events` and `summary` format. The reader selects `Ir` by
@@ -87,5 +87,5 @@ Run `instructions hirsel --compiler PATH --runtime ARCHIVE --cc PATH` with
 the checkout's checked driver, runtime archive and pinned Clang wrapper.
 The command builds the HTTP connection task with LLVM release code and
 serves one socket. It verifies the same status, content type, body length
-and body as the Rust baselines, plus Hirsel's IMF-fixdate Date field. The
+and body as Hyper, including the casing and format of the live Date field. The
 served count comes from responses whose writes completed before peer EOF.

@@ -57,15 +57,15 @@ def build_hirsel(compiler, runtime, cc, directory):
     return [str(binary)]
 
 
-def hirsel_reply(replies):
+def dated_reply(replies):
     status = replies.readline(128)
     content_type = replies.readline(128)
     length = replies.readline(128)
     date = replies.readline(128)
-    if not (status == b'HTTP/1.1 200 OK\r\n' and content_type == b'content-type: text/plain\r\n'
+    if not (status == b'HTTP/1.1 200 OK\r\n' and content_type == b'Content-Type: text/plain\r\n'
             and length == b'Content-Length: 12\r\n' and date.startswith(b'Date: ')
             and date.endswith(b' GMT\r\n') and replies.readline(128) == b'\r\n'):
-        raise RuntimeError(f'unexpected Hirsel response: {status + content_type + length + date!r}')
+        raise RuntimeError(f'unexpected dated response: {status + content_type + length + date!r}')
     parsed = email.utils.parsedate_to_datetime(date[6:-2].decode('ascii'))
     if email.utils.format_datetime(parsed, usegmt=True).encode('ascii') != date[6:-2]:
         raise RuntimeError(f'invalid HTTP Date: {date!r}')
@@ -92,7 +92,7 @@ def stop(process):
             continue
 
 
-def exchange(command, requests, timeout=900, *, hirsel=False):
+def exchange(command, requests, timeout=900, *, has_date=False):
     """One connection, no readiness probe connection and no measured client."""
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen([*command, '--requests', str(requests), '--port', '0'],
@@ -114,7 +114,7 @@ def exchange(command, requests, timeout=900, *, hirsel=False):
                             raise TimeoutError('sample exceeded 15 minutes executing')
                         stream.settimeout(min(30, remaining))
                         stream.sendall(REQUEST)
-                        reply = hirsel_reply(replies) if hirsel else replies.read(len(RESPONSE))
+                        reply = dated_reply(replies) if has_date else replies.read(len(RESPONSE))
                         if reply != RESPONSE:
                             raise RuntimeError(f'response {index + 1} differs: {reply!r}')
                     stream.shutdown(socket.SHUT_WR)
@@ -186,7 +186,7 @@ def main():
         if not command:
             parser.error('--command must not be empty')
         if args.check:
-            exchange(command, 3, hirsel=args.server == 'hirsel')
+            exchange(command, 3, has_date=args.server in {'hirsel', 'hyper'})
             print(f'{args.server}: 3/3 verified replies on one connection, CPU {cpu}')
             return
         counts = []
@@ -198,7 +198,7 @@ def main():
                 with open('/tmp/hirsel-langarena-measure.lock', 'a') as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
                     exchange(['valgrind', '--tool=callgrind', '--quiet',
-                              f'--callgrind-out-file={profile}', *command], requests, hirsel=args.server == 'hirsel')
+                              f'--callgrind-out-file={profile}', *command], requests, has_date=args.server in {'hirsel', 'hyper'})
                 counts.append(instructions(profile))
         cost = per_request(*counts, args.small, args.large)
         print('workload                    server   cpu  small  large       Ir_small        Ir_large     Ir/request')

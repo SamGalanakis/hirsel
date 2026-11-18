@@ -191,15 +191,12 @@ def phases(profile, binary, http_source=None):
             skid / total)
 
 
-def ratios(results):
-    print("| Phase | Hirsel share | Hirsel / Tokio+httparse | Hirsel / Hyper |")
-    print("| --- | ---: | ---: | ---: |")
+def phase_counts(results):
+    print("| Phase | Hirsel share | Hirsel instructions | Hyper instructions | Tokio floor instructions |")
+    print("| --- | ---: | ---: | ---: | ---: |")
 
-    def ratio(left, right):
-        return f"{left / right:.2f}×" if right else "—"
-
+    hirsel, hyper, tokio = (results[name] for name in ("hirsel", "hyper", "tokio"))
     for phase in (*PHASES, "Total"):
-        hirsel, tokio, hyper = (results[name] for name in ("hirsel", "tokio", "hyper"))
-        hi, to, hy = (cost * (1 if phase == "Total" else shares[phase])
-                      for cost, shares in (hirsel, tokio, hyper))
-        print(f"| {phase} | {hi / hirsel[0]:.1%} | {ratio(hi, to)} | {ratio(hi, hy)} |")
+        hi, hy, to = (cost * (1 if phase == "Total" else shares[phase])
+                      for cost, shares in (hirsel, hyper, tokio))
+        print(f"| {phase} | {hi / hirsel[0]:.1%} | {hi:.1f} | {hy:.1f} | {to:.1f} |")

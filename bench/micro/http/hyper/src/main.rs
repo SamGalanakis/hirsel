@@ -37,7 +37,8 @@ fn main() {
                 }
             });
             http1::Builder::new()
-                .auto_date_header(false)
+                .auto_date_header(true)
+                .title_case_headers(true)
                 .serve_connection(TokioIo::new(stream), service)
                 .await
                 .unwrap();

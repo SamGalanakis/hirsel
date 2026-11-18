@@ -3,7 +3,7 @@
 fn b1_handler(request: Request, scratch: Region, mut body: Responder, state: ()) -> Result[Outcome, HandlerError] {
     let payload = result.unwrap(b"Hello, world")
     let mut reply = response(200, take payload, false)?
-    header(mut reply, result.unwrap(b"content-type"), result.unwrap(b"text/plain"))?
+    header(mut reply, result.unwrap(b"Content-Type"), result.unwrap(b"text/plain"))?
     Ok(Reply(take reply))
 }
 

@@ -30,9 +30,12 @@ def ready_line(stream):
 
 def verify_reply(stream, name):
     assert stream.readline(128) == b"HTTP/1.1 200 OK\r\n"
-    assert stream.readline(128).lower() == b"content-type: text/plain\r\n"
-    assert stream.readline(128).lower() == b"content-length: 12\r\n"
-    if name == "hirsel":
+    if name == "tokio":
+        assert stream.readline(128) == b"content-type: text/plain\r\n"
+        assert stream.readline(128) == b"content-length: 12\r\n"
+    else:
+        assert stream.readline(128) == b"Content-Type: text/plain\r\n"
+        assert stream.readline(128) == b"Content-Length: 12\r\n"
         line = stream.readline(128)
         assert line.startswith(b"Date: ") and line.endswith(b" GMT\r\n"), line
         date = email.utils.parsedate_to_datetime(line[6:-2].decode("ascii"))
@@ -118,13 +121,19 @@ def exchange(name, command, perf, cpu, requests, warmup):
 
 def measure(name, command, server_cpu, requests, directory):
     stat_path = directory / f"{name}.stat"
-    exchange(name, command, ["stat", "-x", ",", "-o", str(stat_path), "-e", "instructions:u"],
+    events = ("instructions:u", "cycles")
+    exchange(name, command, ["stat", "-x", ",", "-o", str(stat_path), "-e", ",".join(events)],
              server_cpu, requests, warmup=1024)
-    row, = [line.split(",") for line in stat_path.read_text().splitlines()
-            if ",instructions:u," in line]
-    if float(row[4]) < 99.5:
-        raise RuntimeError(f"instructions:u ran for only {row[4]}% of the sample")
-    return int(row[0]) / requests
+    counters = {}
+    for line in stat_path.read_text().splitlines():
+        row = line.split(",")
+        if len(row) >= 5 and row[2] in events:
+            if float(row[4]) < 99.5:
+                raise RuntimeError(f"{row[2]} ran for only {row[4]}% of the sample")
+            counters[row[2]] = int(row[0]) / requests
+    if counters.keys() != set(events):
+        raise RuntimeError(f"missing B1 counters in {stat_path}")
+    return counters["instructions:u"], counters["cycles"]
 
 
 def profile(name, command, server_cpu, requests, directory):
@@ -157,6 +166,7 @@ if __name__ == "__main__":
     command = shlex.split(args.server)
     destination = args.output.resolve()
     if not args.profile_only:
-        per_request = measure(args.name, command, args.server_cpu, args.requests, destination)
-        (destination / f"{args.name}.per-request").write_text(str(per_request))
+        instructions, cycles = measure(args.name, command, args.server_cpu, args.requests, destination)
+        (destination / f"{args.name}.per-request").write_text(str(instructions))
+        (destination / f"{args.name}.cycles-per-request").write_text(str(cycles))
     profile(args.name, command, args.server_cpu, args.requests * 4, destination)

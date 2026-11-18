@@ -19,8 +19,11 @@ B1 reuses the serial keep-alive workload in `bench/micro/http`. Hardware
 instruction counts cover the server during the measured requests, with
 separate frame-pointer profiles. The analyzer uses startup-subtracted
 Callgrind self instructions for phase attribution when kernel IPs dominate
-the hardware samples. The two B1 references omit Date. Hirsel sends Date as
-required by std HTTP. The service benchmark runs all three servers with Date.
+the hardware samples. Hyper and Hirsel send the same B1 reply with a live Date. B1 reports cycles
+alongside user instructions. Hirsel also records replay, charges budgets,
+validates Host and rejects duplicate Content-Length. Tokio+httparse is the
+minimal server floor with a static response and no Date. The service benchmark
+runs all three servers with Date.
 
 The service routes are `/plaintext`, `/json` and `/store`. Hirsel registers
 them in a std HTTP route table and builds the JSON document in the request's

@@ -8,6 +8,7 @@
 #endif
 #include "forward_reads.h"
 #include "loop_version.h"
+#include <map>
 #include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/AliasAnalysis.h>
@@ -21,8 +22,10 @@
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/DebugInfo.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/Error.h>
+#include <llvm/Transforms/Utils/FunctionComparator.h>
 using namespace llvm;
 using hirsel_llvm::versionLoop;
 
@@ -625,6 +628,74 @@ extern "C" void hirsel_llvm_inline_recursive_leaves(void *Raw) {
   }
 }
 
+// Outlined Step edges can differ only in the site forwarded to the runtime.
+// Keep their existing call boundaries and share the rest of the outlined body.
+static void shareStepWindows(Module &M, Function &Step) {
+  struct Window {
+    CallInst *Call;
+    Constant *Site;
+  };
+  GlobalNumberState Numbers;
+  auto Less = [&](Function *Left, Function *Right) {
+    return FunctionComparator(Left, Right, &Numbers).compare() < 0;
+  };
+  std::map<Function *, SmallVector<Window, 4>, decltype(Less)> Groups(Less);
+  for (auto &F : M) {
+    if (!F.hasLocalLinkage() || !F.hasFnAttribute(Attribute::Cold) || F.hasAddressTaken() ||
+        F.size() != 1 || F.arg_size() != 3 || F.getCallingConv() != CallingConv::Fast ||
+        F.isVarArg() || !F.getReturnType()->isIntegerTy(1) ||
+        !F.getArg(0)->getType()->isPointerTy() || !F.getArg(1)->getType()->isIntegerTy(64) ||
+        !F.getArg(2)->getType()->isPointerTy() || F.getEntryBlock().hasAddressTaken())
+      continue;
+    CallInst *Call = nullptr;
+    for (auto &I : F.getEntryBlock()) {
+      auto *C = dyn_cast<CallInst>(&I);
+      if (!C || isa<IntrinsicInst>(C)) continue;
+      if (Call || C->getCalledFunction() != &Step || C->hasOperandBundles()) {
+        Call = nullptr;
+        break;
+      }
+      Call = C;
+    }
+    if (!Call) continue;
+    auto *Site = dyn_cast<Constant>(Call->getArgOperand(1));
+    if (!Site || (!isa<ConstantInt>(Site) && !isa<ConstantExpr>(Site))) continue;
+    // Compare using the same placeholder. Restore the real site at every exit.
+    Call->setArgOperand(1, PoisonValue::get(Site->getType()));
+    Groups[&F].push_back({Call, Site});
+  }
+  for (auto &[F, Windows] : Groups) {
+    // The new shared body needs one frame and one unwind entry of its own.
+    if (Windows.size() < 4) {
+      for (const auto &Window : Windows) Window.Call->setArgOperand(1, Window.Site);
+      continue;
+    }
+    auto &First = Windows.front();
+    SmallVector<Type *, 4> Args(F->getFunctionType()->params());
+    Args.push_back(First.Site->getType());
+    auto *Type = FunctionType::get(F->getReturnType(), Args, false);
+    auto *Shared = Function::Create(Type, GlobalValue::InternalLinkage, "hirsel.step.window", M);
+    ValueToValueMapTy Map;
+    for (auto &Arg : F->args()) Map[&Arg] = Shared->getArg(Arg.getArgNo());
+    SmallVector<ReturnInst *, 1> Returns;
+    CloneFunctionInto(Shared, F, Map, CloneFunctionChangeType::LocalChangesOnly, Returns);
+    Shared->setCallingConv(F->getCallingConv());
+    cast<CallInst>(Map[First.Call])->setArgOperand(1, Shared->getArg(F->arg_size()));
+    stripDebugInfo(*Shared);
+    for (const auto &Window : Windows) {
+      auto *Original = Window.Call->getFunction();
+      Original->getEntryBlock().eraseFromParent();
+      IRBuilder<> Builder(BasicBlock::Create(M.getContext(), "", Original));
+      auto *Tail = Builder.CreateCall(
+          Shared, {Original->getArg(0), Original->getArg(1), Original->getArg(2), Window.Site});
+      Tail->setCallingConv(Shared->getCallingConv());
+      Tail->setAttributes(Shared->getAttributes());
+      Tail->setTailCallKind(CallInst::TCK_Tail);
+      Builder.CreateRet(Tail);
+    }
+  }
+}
+
 // Inlining and Step versioning can copy the same source Step many times. On
 // x86-64 a relocated source position costs a ten-byte movabs at each copy.
 // Share that load on the slow edge once it pays for a separate function.
@@ -633,6 +704,7 @@ extern "C" void hirsel_llvm_share_step_sites(void *Raw) {
   if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return;
   auto *Step = M.getFunction("hirsel_core_step_out");
   if (!Step) return;
+  shareStepWindows(M, *Step);
   MapVector<Constant *, SmallVector<CallInst *, 4>> Sites;
   for (auto &F : M)
     for (auto &B : F)

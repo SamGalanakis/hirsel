@@ -66,6 +66,59 @@ pub(crate) struct LinkRecipe {
     pub(crate) absent: Vec<PathBuf>,
     pub(crate) identity: ContentHash,
 }
+
+impl LinkRecipe {
+    /// The generated start is the only entry to Hirsel when the surrounding
+    /// link contains just the platform's startup objects and support libraries.
+    pub(crate) fn uses_hirsel_launcher(&self) -> bool {
+        self.source_files.is_empty()
+            && self.files.iter().all(|file| {
+                file.path == self.linker
+                    || matches!(
+                        file.path.file_name().and_then(OsStr::to_str),
+                        Some(
+                            "Scrt1.o"
+                                | "crt1.o"
+                                | "crti.o"
+                                | "crtn.o"
+                                | "crtbeginS.o"
+                                | "crtendS.o"
+                                | "crtbegin.o"
+                                | "crtend.o"
+                                | "libc.so"
+                                | "libc.so.6"
+                                | "libc_nonshared.a"
+                                | "libdl.a"
+                                | "libgcc.a"
+                                | "libgcc_s.so"
+                                | "libgcc_s.so.1"
+                                | "libm.so"
+                                | "libm.so.6"
+                                | "libmvec.so.1"
+                                | "libpthread.a"
+                                | "librt.a"
+                                | "libutil.a"
+                                | "ld-linux-x86-64.so.2"
+                                | "ld-linux-aarch64.so.1",
+                        )
+                    )
+            })
+            && !self.args.iter().any(|arg| {
+                let name = arg.trim_start_matches('-').split('=').next().unwrap();
+                matches!(
+                    name,
+                    "E" | "e"
+                        | "entry"
+                        | "shared"
+                        | "wrap"
+                        | "defsym"
+                        | "export-dynamic"
+                        | "export-dynamic-symbol"
+                        | "dynamic-list"
+                ) || (arg.starts_with("-e") && name != "eh-frame-hdr" && name != "enable-new-dtags")
+            })
+    }
+}
 fn selected(program: &Path, search: &OsStr) -> io::Result<PathBuf> {
     if program.components().count() > 1 || program.is_absolute() {
         return std::fs::canonicalize(program);

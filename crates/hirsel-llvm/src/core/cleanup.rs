@@ -63,7 +63,7 @@ pub(super) fn glue_emitter<'a>(
         step_labels: Default::default(),
         unchecked_steps: false,
         precharge: None,
-        step_neutral: &[],
+        step_neutral: Some(&[]),
         step_counter: None,
         neutral_step_call: false,
         view_invariants: Vec::new(),

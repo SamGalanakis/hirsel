@@ -1,5 +1,5 @@
 //! Test backend for core/tools/std_native.py. Selection and oracles live in the walker.
-use hirsel_core_driver::{CheckRequest, Driver, LibraryInput, Meter};
+use hirsel_core_driver::{CheckProduct, CheckRequest, Driver, LibraryInput, Meter};
 use hirsel_core_ids::DefPath;
 use hirsel_core_ir::{Identity, Module, eval};
 use hirsel_core_layout::{Layout, case_of, compute};
@@ -64,7 +64,14 @@ fn evaluate(
         return Ok(json!({"error":format!("not well formed: {error}"), "revision":revision}));
     }
     let mut result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run(&module, function, instructions, &revisions, network)
+        run(
+            &module,
+            function,
+            instructions,
+            &revisions,
+            network,
+            &product,
+        )
     })) {
         Ok(result) => result?,
         Err(fault) => fault_report(fault),
@@ -79,6 +86,7 @@ fn run(
     instructions: u64,
     revisions: &eval::Revisions,
     network: Option<eval::Network>,
+    product: &CheckProduct,
 ) -> Result<Value, String> {
     let signature = &module.signatures[module.functions[function.index()].signature.index()];
     let recipes = compute(&module.types).map_err(|e| format!("layouts: {e:?}"))?;
@@ -127,12 +135,32 @@ fn run(
         eval::Outcome::Failed(causes) => json!({"kind":"failed", "causes":causes}),
         eval::Outcome::Stopped(name) => json!({"kind":"stopped", "name":name}),
     };
-    Ok(json!({"outcome":outcome, "used":report.used,
+    let items = report
+        .sites
+        .iter()
+        .flatten()
+        .map(|site| module.items[site.item.index()].clone())
+        .collect::<Vec<_>>();
+    let sources = product.native_sources(&items).ok();
+    let sites = report
+        .sites
+        .iter()
+        .map(|site| {
+            let site = (*site)?;
+            let (file, line, column) = sources
+                .as_ref()?
+                .position(&module.items[site.item.index()], site.start)?;
+            Some((&file.path, line, column))
+        })
+        .collect::<Vec<_>>();
+    Ok(
+        json!({"outcome":outcome, "used":report.used, "cause_sites":sites,
         "stdout":report.stdout, "stderr":report.stderr,
         "events":report.events.iter().map(|e| [u64::from(e.kind), e.task, e.object, e.value]).collect::<Vec<_>>(),
         "event_sources":report.events.iter().map(|e| e.source.map(|s| module.items[s.item.index()].to_string())).collect::<Vec<_>>(),
         "checked":{"loans":checked.loans, "instructions":checked.instructions,
-                   "task_stack_peak":checked.task_stack_peak, "task_call_depth":checked.task_call_depth}}))
+                   "task_stack_peak":checked.task_stack_peak, "task_call_depth":checked.task_call_depth}}),
+    )
 }
 fn fault_report(fault: Box<dyn std::any::Any + Send>) -> Value {
     let message = fault

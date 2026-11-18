@@ -46,13 +46,18 @@ def hirsel(args):
     manifest = out / "hirsel-inputs.json"
     manifest.write_text(json.dumps(spec))
     for module in args.hirsel_entries:
-        subprocess.run([
+        result = subprocess.run([
             str(ROOT / "tools/capped"), compiler, "build", "--inputs", str(manifest),
             "--entry", f"awfy@1/{module}/main", "--store", str(out / "store"),
             "--backend", "llvm", "--release", "--debug-lines", "on", "--runtime", runtime,
             "--cc", str(llvm_path() / "bin/clang"),
-            "--grant", "Stdout", "-o", str(out / f"hirsel-{module}"),
-        ], env={**capped_env(out), "LD_LIBRARY_PATH": str(llvm_path() / "lib")}, check=True)
+            "--grant", "Stdout", "--json", "-o", str(out / f"hirsel-{module}"),
+        ], env={**capped_env(out), "LD_LIBRARY_PATH": str(llvm_path() / "lib")},
+            stdout=subprocess.PIPE)
+        if result.returncode:
+            sys.stderr.buffer.write(result.stdout)
+            result.check_returncode()
+        (out / f"hirsel-{module}-build.json").write_bytes(result.stdout)
 
 
 def goose(args):

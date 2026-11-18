@@ -342,6 +342,7 @@ fn release_last_name(t: u32, atomic: bool) -> String {
 struct EmissionFacts<'a> {
     roles: Option<&'a hirsel_core_ir::roles::Facts>,
     neutral: Option<&'a BTreeSet<hirsel_core_ids::ContentHash>>,
+    elide_steps: bool,
 }
 #[cfg(hirsel_lazy_core)]
 pub(crate) fn step_neutral_program(modules: &[&Module]) -> BTreeSet<hirsel_core_ids::ContentHash> {
@@ -360,6 +361,7 @@ fn emit_module(
 ) -> Result<()> {
     let exposed = source.batch_steps.then(|| expose::module(module)).flatten();
     let module = exposed.as_ref().unwrap_or(module);
+    let batch_steps = source.batch_steps && !provided.elide_steps;
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
     sink.metadata(
         0,
@@ -478,7 +480,9 @@ fn emit_module(
     let mut items = Items::default();
     let mut next_scope = alias::private_steps(sink);
     let failures = failure::Failures::new(module);
-    let step_neutral = steps::neutral_functions(module, provided.neutral);
+    let step_neutral =
+        (!provided.elide_steps).then(|| steps::neutral_functions(module, provided.neutral));
+    let neutral_functions = step_neutral.as_deref().unwrap_or_default();
     let debug = if source.debug_lines {
         sites::debug_plan(module, &failures, &mut next_scope, sink)
     } else {
@@ -554,7 +558,7 @@ fn emit_module(
             step_labels: Default::default(),
             unchecked_steps: false,
             precharge: None,
-            step_neutral: &step_neutral,
+            step_neutral: step_neutral.as_deref(),
             step_counter: None,
             neutral_step_call: false,
             view_invariants: Vec::new(),
@@ -638,7 +642,7 @@ fn emit_module(
         let signature = e.abi.signature(params);
         e.sink
             .begin_function(&body_name, &signature, &locals, &attrs);
-        if body.insts.iter().any(|i| matches!(i, Inst::Step { .. })) {
+        if !provided.elide_steps && body.insts.iter().any(|i| matches!(i, Inst::Step { .. })) {
             let counter = Local::Named("hirsel.step.counter");
             e.sink.alloca(counter, &Type::I64, 8);
             e.step_counter = Some(counter.into());
@@ -646,13 +650,13 @@ fn emit_module(
         }
         // Eager and lazy objects use the same exact-metering CFG at every
         // optimization level. LLVM promotes its joins to registers at Speed.
-        let step_loops = if source.batch_steps {
-            steps::loops(module, body, e.constants, &step_neutral)
+        let step_loops = if batch_steps {
+            steps::loops(module, body, e.constants, neutral_functions)
         } else {
             Vec::new()
         };
-        let step_regions = if source.batch_steps {
-            steps::regions(module, body, &step_neutral, &step_loops)
+        let step_regions = if batch_steps {
+            steps::regions(module, body, neutral_functions, &step_loops)
         } else {
             Vec::new()
         };
@@ -660,8 +664,8 @@ fn emit_module(
             .blocks
             .iter()
             .map(|b| {
-                if source.batch_steps {
-                    steps::groups(module, body, &step_neutral, b.insts)
+                if batch_steps {
+                    steps::groups(module, body, neutral_functions, b.insts)
                 } else {
                     Default::default()
                 }
@@ -781,7 +785,9 @@ fn emit_module(
                 .collect::<BTreeSet<_>>();
             for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
                 let index = b.insts.start as usize + offset;
-                if skipped.contains(&index) {
+                if skipped.contains(&index)
+                    || (provided.elide_steps && matches!(inst, Inst::Step { .. }))
+                {
                     continue;
                 }
                 e.debug_location = function_debug.map(|d| d.location(body.inst_anchors[index]));
@@ -863,7 +869,7 @@ pub(crate) fn emit_native_module_in_context(
     roles: &hirsel_core_ir::roles::Facts,
     observe_charge: bool,
     debug_lines: bool,
-    neutral: &BTreeSet<hirsel_core_ids::ContentHash>,
+    neutral: Option<&BTreeSet<hirsel_core_ids::ContentHash>>,
 ) -> Result<crate::construction::NativeModule> {
     native_module(
         module,
@@ -878,7 +884,8 @@ pub(crate) fn emit_native_module_in_context(
         },
         EmissionFacts {
             roles: Some(roles),
-            neutral: Some(neutral),
+            neutral,
+            elide_steps: neutral.is_none(),
         },
     )
 }
@@ -1261,7 +1268,7 @@ struct FunctionEmitter<'a> {
     step_labels: std::collections::BTreeMap<usize, Label>,
     unchecked_steps: bool,
     precharge: Option<steps::Precharge>,
-    step_neutral: &'a [bool],
+    step_neutral: Option<&'a [bool]>,
     step_counter: Option<Value>,
     neutral_step_call: bool,
     view_invariants: Vec<(Value, Value, u64)>,
@@ -1795,8 +1802,9 @@ impl FunctionEmitter<'_> {
                 self.put(result, &x);
             }
             Inst::Call { call } => {
-                self.neutral_step_call =
-                    steps::neutral_inst(self.module, self.body, inst, self.step_neutral);
+                self.neutral_step_call = self.step_neutral.is_some_and(|neutral| {
+                    steps::neutral_inst(self.module, self.body, inst, neutral)
+                });
                 let result = self.call_site(
                     &self.body.calls[call.index()],
                     self.receive_loops.call(call),
@@ -1807,8 +1815,9 @@ impl FunctionEmitter<'_> {
             _ => {
                 // Preserve the same no-Step proof used by region planning through
                 // allocation, growth and inert cleanup runtime calls too.
-                self.neutral_step_call =
-                    steps::neutral_inst(self.module, self.body, inst, self.step_neutral);
+                self.neutral_step_call = self.step_neutral.is_some_and(|neutral| {
+                    steps::neutral_inst(self.module, self.body, inst, neutral)
+                });
                 let result = self.storage(inst, index);
                 self.neutral_step_call = false;
                 result?;

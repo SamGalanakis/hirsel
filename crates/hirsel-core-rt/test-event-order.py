@@ -61,6 +61,78 @@ def manifest(source):
              sources=[dict(file=str(source), modules=['main'], signatures=False)])])
 
 
+def step_image_laws(args, evaluator, inputs, folder, source, recorder_linker):
+    """Launch the named roots without the recorder's foreign link adapter."""
+    roots = {'unbounded': True, 'bounded': False, 'flow_step_owner': False}
+    failures = ('failure_before_slice', 'failure_at_slice', 'failure_after_slice')
+
+    def position(offset):
+        prefix = source[:offset]
+        return prefix.count('\n') + 1, len(prefix.rsplit('\n', 1)[-1]) + 1
+
+    divide = position(source.index('1u64 / d', source.index('fn exhausted_finalizer(')))
+    finalizer = position(source.index('{', source.index('drop(f)')))
+    causes = [('Division', *divide), ('OutOfTime', *finalizer)]
+    # The evaluator delegates flows to the native reference.
+    for name in ('unbounded', 'bounded'):
+        report = evaluator.evaluate(inputs, f'app@1/main/{name}', program_entry=True)
+        outcome = json.loads(report.stdout).get('outcome')
+        if outcome != {'kind': 'returned', 'values': [1]}:
+            raise ValueError(f'{name}: evaluator {outcome}')
+    for name in failures:
+        report = json.loads(evaluator.evaluate(inputs, f'app@1/main/{name}', program_entry=True).stdout)
+        outcomes = report.get('outcome')
+        sites = report.get('cause_sites', [])
+        if outcomes != {'kind': 'failed', 'causes': [cause for cause, *_ in causes]} or len(sites) != 2 or any(
+                site is None or not site[0].endswith('step-bounds.hirsel') or tuple(site[1:]) != expected
+                for site, expected in zip(sites, (divide, finalizer), strict=True)):
+            raise ValueError(f'{name}: evaluator causes {outcomes} at {sites}')
+
+    def build(name, backend, store, certified, cc=args.cc):
+        store.mkdir(parents=True, exist_ok=True)
+        output = store / name
+        command = [str(args.compiler), 'build', '--source-core', '--inputs', str(inputs),
+                   '--entry', f'app@1/main/{name}', '--backend', backend,
+                   '--runtime', str(args.runtime), '--store', str(store / 'store'),
+                   '--cc', str(cc), '--json', '-o', str(output)]
+        if backend == 'llvm':
+            command.append('--release')
+        env = dict(os.environ, XDG_CACHE_HOME=str(store / 'cache'), XDG_DATA_HOME=str(store / 'data'))
+        result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True)
+        if result.returncode:
+            raise ValueError(f'{name}/{backend}: build {result.stdout!r} {result.stderr!r}')
+        actual = json.loads(result.stdout)['native']['step_charging_elided']
+        if actual != certified:
+            raise ValueError(f'{name}/{backend}: expected Step elision {certified}, got {actual}')
+        ran = subprocess.run([output], capture_output=True)
+        if name in failures:
+            sites = [(kind, int(line), int(column)) for kind, line, column in re.findall(
+                r'^(\w+) at .*step-bounds\.hirsel:(\d+):(\d+)$', ran.stderr.decode(), re.M)]
+            if ran.returncode != 101 or ran.stdout or len(ran.stderr.splitlines()) != 2 or sites != causes:
+                raise ValueError(f'{name}/{backend}: causes {ran}')
+        elif (ran.returncode, ran.stdout, ran.stderr) != (0, b'', b''):
+            raise ValueError(f'{name}/{backend}: run {ran}')
+        return output.read_bytes()
+
+    if 'cranelift' in (args.backend or ('cranelift', 'llvm')):
+        for name in (*roots, *failures):
+            build(name, 'cranelift', folder / 'cranelift-images', False)
+    if 'llvm' not in (args.backend or ('cranelift', 'llvm')):
+        return
+    build('flow_step_owner', 'llvm', folder / 'flow-image', False)
+    build('unbounded', 'llvm', folder / 'foreign-image', False, recorder_linker)
+    for name in failures:
+        build(name, 'llvm', folder / 'failure-images', False)
+    pair = ('unbounded', 'bounded')
+    cold = {name: build(name, 'llvm', folder / f'cold-{name}', roots[name]) for name in pair}
+    for order in (pair, pair[::-1]):
+        store = folder / f'warm-{order[0]}'
+        for name in order:
+            if build(name, 'llvm', store, roots[name]) != cold[name]:
+                raise ValueError(f'{name}: release bytes differ after priming with {order[0]}')
+    print('step-bounds: exact cause sites, metered flow stage and both cache orders pass', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, required=True)
@@ -212,6 +284,11 @@ def main():
                         failures.append(f'{fixture.stem}/{backend}: replay differs: {replay}')
                     else:
                         print(f'{fixture.stem}/{backend}: replay agrees', flush=True)
+            if fixture.stem == 'step-bounds' and args.release:
+                try:
+                    step_image_laws(args, evaluator, inputs, folder, text, fixture_linker)
+                except ValueError as error:
+                    failures.append(str(error))
     for failure in failures:
         print('FAIL', failure, flush=True)
     print(f'event order: {len(fixtures) - len(failures) - unbuilt} equal, {unbuilt} evaluator-only, {len(failures)} differ', flush=True)

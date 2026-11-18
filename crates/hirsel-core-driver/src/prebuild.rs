@@ -78,7 +78,7 @@ impl CheckProduct {
             }
         }
         let (objects, _) =
-            self.emit_instances(None, &instances, &materialized, &inputs, None, options)?;
+            self.emit_instances(&instances, &materialized, &inputs, None, options)?;
         prebuilt.instances = objects.len();
         prebuilt.compiled = objects.iter().filter(|o| o.compiled).count();
         Ok(prebuilt)

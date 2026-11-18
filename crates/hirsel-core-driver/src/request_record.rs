@@ -180,6 +180,7 @@ pub(crate) struct Native {
     revision: ContentHash,
     observation_mode: bool,
     debug_lines: bool,
+    step_charging_elided: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Value {
@@ -364,6 +365,7 @@ impl Value {
                 revision: n.revision,
                 observation_mode: n.observation_mode,
                 debug_lines: n.debug_lines,
+                step_charging_elided: n.step_charging_elided,
             }),
         }
     }
@@ -458,6 +460,7 @@ impl Hit {
             linked: false,
             observation_mode: n.observation_mode,
             debug_lines: n.debug_lines,
+            step_charging_elided: n.step_charging_elided,
             reach: Default::default(),
         })
     }

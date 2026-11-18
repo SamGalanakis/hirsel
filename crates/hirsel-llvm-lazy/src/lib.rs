@@ -50,7 +50,7 @@ pub fn emit_program_for_target(
     target: hirsel_core_layout::Target,
 ) -> Result<Vec<u8>, String> {
     Ok(
-        emit_program_parts(units, exports, target, 0, &mut |_, _, _| false)?
+        emit_program_parts(units, exports, target, 0, false, &mut |_, _, _| false)?
             .objects
             .pop()
             .expect("an unreused program is generated"),
@@ -80,11 +80,14 @@ pub struct Part {
 /// bitcode, in order, and answers whether the caller holds its object. Each
 /// part not held is generated from its bitcode alone on up to `jobs` threads;
 /// with `jobs` 0 they are generated together as one object.
+/// `elide_steps` requires a closed executable where no call or runtime entry
+/// can make a Step bound current or hold a receive grant at a refill.
 pub fn emit_program_parts(
     units: &[Unit<'_>],
     exports: &[String],
     target: hirsel_core_layout::Target,
     jobs: u32,
+    elide_steps: bool,
     reuse: &mut dyn FnMut(&str, &str, &[u8]) -> bool,
 ) -> Result<Program, String> {
     let context = units
@@ -99,7 +102,7 @@ pub fn emit_program_parts(
             Unit::Text(_) => None,
         })
         .collect::<Vec<_>>();
-    let neutral = core::step_neutral_program(&modules);
+    let neutral = (!elide_steps).then(|| core::step_neutral_program(&modules));
     let mut lowered = Vec::with_capacity(units.len());
     for unit in units {
         match unit {
@@ -116,7 +119,7 @@ pub fn emit_program_parts(
                     facts,
                     *observe_charge,
                     *debug_lines,
-                    &neutral,
+                    neutral.as_ref(),
                 )
                 .map_err(|e| e.to_string())?,
             )),

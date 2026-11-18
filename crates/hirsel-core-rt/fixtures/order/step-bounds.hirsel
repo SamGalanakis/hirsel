@@ -92,6 +92,68 @@ fn callback(k: u64) -> u64 {
         Error(e) => e.steps,
     }
 }
+fn shared_callback(n: u64) -> u64 {
+    let mut count = 0u64
+    while count < n { count += 1 }
+    count
+}
+// The call and three latches take four Steps. The same target runs outside
+// the scope first. Its standalone root supplies the other cache build order.
+// expect: run callback_both(3) = 133
+// expect: run callback_both(4) = 33
+fn callback_both(k: u64) -> u64 {
+    let f = code.callable(code.describe(shared_callback))
+    let first = f(3)
+    match (bound steps k { f(3) }) {
+        Ok(v) => first * 10 + v,
+        Error(e) => first * 10 + e.steps + 100,
+    }
+}
+pub fn unbounded() -> Result[(), Exit] {
+    let f = code.callable(code.describe(shared_callback))
+    if f(3) != 3 { return Error(Exit(status: 1)) }
+    // MEM-28. A nine-byte literal still asks for 16 bytes under this byte bound.
+    let admitted = bound bytes 15 {
+        let literal: Result[FrozenBytes, Capacity] = b"abcdefghi"
+        let value = literal?
+        list.len(bytebuf.as_bytes(value))
+    }
+    match admitted {
+        Error(c) => if c.requested == 16 && c.available == 15 { Ok(()) } else { Error(Exit(status: 2)) },
+        Ok(_) => Error(Exit(status: 3)),
+    }
+}
+pub fn bounded() -> Result[(), Exit] {
+    if callback_both(3) == 133 && callback_both(4) == 33 { Ok(()) } else { Error(Exit(status: 1)) }
+}
+
+fn stage_body(take state: (), key: u64, n: u64) -> ((), Option[u64]) {
+    ((), Some(shared_callback(n)))
+}
+// The owner has no lexical bound. The descriptor's stage can spend only two
+// Steps, so the call with three latches never publishes an Item.
+pub fn flow_step_owner() -> Result[(), Exit] waits {
+    let mut f = flow.new()
+    let (sink, out): (Sink[u64], Into[u64]) = result.unwrap(flow.sink(mut f))
+    let stage = result.unwrap(flow.stage(mut f, out, 1, bytes 0, steps 2, (), code.describe(stage_body)))
+    let p = result.unwrap(flow.port(mut f, stage, 1))
+    match flow.push(mut f, p, 7, 3u64) {
+        Ok => (),
+        _ => return Error(Exit(status: 1)),
+    }
+    flow.end(mut f, p)
+    match flow.next(mut f, sink) {
+        Dropped(from: 0, at: 7) => (),
+        _ => return Error(Exit(status: 2)),
+    }
+    match flow.finish(take f) {
+        Error(e) => match e.halt {
+            OutOfTime => Ok(()),
+            _ => Error(Exit(status: 3)),
+        },
+        Ok(()) => Error(Exit(status: 4)),
+    }
+}
 fn core_callback(k: u64) -> u64 {
     match (bound steps k { isolate(fn() -> u64 { 7 }) }) {
         Ok(Ok(Ok(v))) => v,
@@ -138,6 +200,31 @@ fn mixed(d: u64) {
         let _ = 1u64 / d
     }
 }
+
+// The unwrap and N-1 latches spend all N Steps. Division is an ordinary
+// failure. Cleanup attempts entry to Failing's finalizer at Step N+1.
+// expect: run exhausted_finalizer(65535,0) = fail Division,OutOfTime trace 0
+// expect: run exhausted_finalizer(65536,0) = fail Division,OutOfTime trace 0
+// expect: run exhausted_finalizer(65537,0) = fail Division,OutOfTime trace 0
+fn exhausted_finalizer(n: u64, d: u64) {
+    let _ = bound steps n {
+        let f = result.unwrap(Failing(d: 0))
+        for _ in 0u64 .. (n - 1) {}
+        let _ = 1u64 / d
+    }
+}
+pub fn failure_before_slice() -> Result[(), Exit] {
+    exhausted_finalizer(65535, 0)
+    Ok(())
+}
+pub fn failure_at_slice() -> Result[(), Exit] {
+    exhausted_finalizer(65536, 0)
+    Ok(())
+}
+pub fn failure_after_slice() -> Result[(), Exit] {
+    exhausted_finalizer(65537, 0)
+    Ok(())
+}
 fn isolated_mixed(d: u64) -> u64 {
     match isolate(fn() { mixed(d) }) {
         Ok(Error(cs)) => {
@@ -169,6 +256,7 @@ fn sort_callback(k: u64) -> u64 {
 // S1, S2, S6 and S7: five loop forms send 3 each. The children send 8 and 6.
 // hand-derived try-send: 29
 pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
+    if callback_both(3) != 133 || callback_both(4) != 33 { return Error(Exit(status: 2)) }
     if loop_count(5, 0) == 3 && loop_count(5, 1) == 3 && loop_count(5, 2) == 3 && loop_count(5, 3) == 3 && loop_count(5, 4) == 3 && callback(1) == 7 && core_callback(1) == 1 && core_callback(2) == 7 && finalizer(1) == 1 && finalizer(2) == 7 && glue(0) == 7 && glue(100) == 7 && sort_callback(1) == 1 && sort_callback(2) == 7 && isolate_stop() == 50 && optimized_spin() == 1000 && chunk_range(8, 3) == 3 && chunk_range(8, 8) == 7 && chunk_range(100000, 65536) == 65536 && chunk_list(3) == 3 && merged_calls(1) == 1 && merged_calls(2) == 7 && chunk_nested(1, 9) == 9 && chunk_nested(1, 10) == 7 && chunk_nested(7000, 65536) == 65536 && copy_spawn_budget(tasks) == 14 && isolated_mixed(0) == 12 && mixed_chain(tasks) {
         Ok(())
     } else { Error(Exit(status: 1)) }

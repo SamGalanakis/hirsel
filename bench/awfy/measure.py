@@ -138,7 +138,10 @@ def size_board(build, upstream):
                 raise ValueError(f"{side} did not verify {name}")
     # One executable per side. Pool and index variants have their own rows.
     sizes = {side: stripped_size(build / f"{side}-harness") for side in SIDES}
+    native = json.loads((build / "hirsel-harness-build.json").read_text())["native"]
+    certified = native.get("step_charging_elided", False)
     return {"verified_workloads": [name for name, _ in originals], "stripped_bytes": sizes,
+            "hirsel_certified": {name: certified for name, _ in originals},
             "hirsel_over_rust": sizes["hirsel"] / sizes["rust"],
             "hirsel_over_goose": sizes["hirsel"] / sizes["goose"]}
 

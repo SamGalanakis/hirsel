@@ -213,7 +213,7 @@ struct ReadCheck {
 static bool collectRead(Value *V, Loop &L, DominatorTree &DT,
                         Instruction *Before, SetVector<Instruction *> &Reads) {
   auto *I = dyn_cast<Instruction>(V);
-  if (!I || !L.contains(I)) return DT.dominates(V, L.getLoopPreheader()->getTerminator());
+  if (!I || !L.contains(I)) return DT.dominates(V, L.getLoopPredecessor()->getTerminator());
   if (Reads.contains(I)) return true;
   if (!DT.dominates(I, Before)) return false;
   if (auto *Load = dyn_cast<LoadInst>(I)) {
@@ -229,8 +229,8 @@ static bool collectRead(Value *V, Loop &L, DominatorTree &DT,
 
 static bool versionReadLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
                             ScalarEvolution &SE, DenseSet<BasicBlock *> &Done) {
-  BasicBlock *PH = L.getLoopPreheader(), *H = L.getHeader(), *Latch = L.getLoopLatch();
-  if (!PH || !Latch || !L.isInnermost() || L.getNumBlocks() < 3) return false;
+  BasicBlock *Entry = L.getLoopPredecessor(), *H = L.getHeader(), *Latch = L.getLoopLatch();
+  if (!Entry || !Latch || !L.isInnermost() || L.getNumBlocks() < 3) return false;
   auto *End = dyn_cast<CondBrInst>(Latch->getTerminator());
   auto *Eq = End ? dyn_cast<ICmpInst>(End->getCondition()) : nullptr;
   if (!Eq || Eq->getPredicate() != ICmpInst::ICMP_EQ ||
@@ -242,8 +242,8 @@ static bool versionReadLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
   if (!Next || Next->getOpcode() != Instruction::Add || !Next->hasNoUnsignedWrap() ||
       !One || !One->isOne() || !Index || Index->getParent() != H ||
       Index->getNumIncomingValues() != 2 || Index->getIncomingValueForBlock(Latch) != Next ||
-      !L.isLoopInvariant(Limit) || !DT.dominates(Limit, PH->getTerminator())) return false;
-  Value *Initial = Index->getIncomingValueForBlock(PH);
+      !L.isLoopInvariant(Limit) || !DT.dominates(Limit, Entry->getTerminator())) return false;
+  Value *Initial = Index->getIncomingValueForBlock(Entry);
   if (!Initial) return false;
 
   // No loop store, call into the runtime, volatile read, or other effect can
@@ -266,17 +266,24 @@ static bool versionReadLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
     if (OnTrue == L.contains(Branch->getSuccessor(1))) return false;
     Value *Bound = nullptr;
     SetVector<Instruction *> Reads;
-    if (Cmp->getOperand(0) == Index) {
-      Bound = Cmp->getOperand(1);
-      if (!OnTrue && Cmp->getPredicate() == ICmpInst::ICMP_EQ) {
+    Value *Left = Cmp->getOperand(0), *Right = Cmp->getOperand(1);
+    auto Pred = OnTrue ? Cmp->getPredicate() : Cmp->getInversePredicate();
+    if (Right == Index) {
+      std::swap(Left, Right);
+      Pred = ICmpInst::getSwappedPredicate(Pred);
+    }
+    if (Left == Index) {
+      Bound = Right;
+      if (Pred == ICmpInst::ICMP_NE) {
         // IndVarSimplify can turn the first unsigned check into equality
-        // with max(start, length), since the induction only increases by one.
+        // with max(start, length), or with length itself for a zero start.
+        // Limit <= length also proves inequality for every fast iteration.
         auto *Max = dyn_cast<IntrinsicInst>(Bound);
-        if (!Max || Max->getIntrinsicID() != Intrinsic::umax) return false;
-        if (Max->getArgOperand(0) == Initial) Bound = Max->getArgOperand(1);
-        else if (Max->getArgOperand(1) == Initial) Bound = Max->getArgOperand(0);
-        else return false;
-      } else if (!OnTrue || Cmp->getPredicate() != ICmpInst::ICMP_ULT) {
+        if (Max && Max->getIntrinsicID() == Intrinsic::umax) {
+          if (Max->getArgOperand(0) == Initial) Bound = Max->getArgOperand(1);
+          else if (Max->getArgOperand(1) == Initial) Bound = Max->getArgOperand(0);
+        }
+      } else if (Pred != ICmpInst::ICMP_ULT) {
         return false;
       }
       if (!collectRead(Bound, L, DT, Branch, Reads)) return false;
@@ -291,6 +298,14 @@ static bool versionReadLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
   }
   if (Bounds < 2 || Checks.size() + 1 != L.getNumBlocks()) return false;
 
+  // SimplifyCFG can merge a preheader with a preceding bounds check. Stage
+  // the new loads only on its loop-entry edge, after that check succeeded.
+  BasicBlock *PH = L.getLoopPreheader();
+  if (!PH) {
+    PH = InsertPreheaderForLoop(&L, &DT, &LI, nullptr, /*PreserveLCSSA=*/true);
+    if (!PH) return false;
+    SE.forgetLoop(&L);
+  }
   IRBuilder<> B(PH->getTerminator());
   Value *Nonempty = B.CreateFreeze(B.CreateICmpULT(Initial, Limit));
   versionLoop(L, Nonempty, LI, DT, SE, "read.fast.ph", ".read.checked");

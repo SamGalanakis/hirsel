@@ -259,6 +259,8 @@ pub struct BuildProduct {
     /// True means diagnostic instrumentation; timings are not performance samples.
     pub observation_mode: bool,
     pub debug_lines: bool,
+    /// The closed image cannot install a Step bound, so it emits no Step charging.
+    pub step_charging_elided: bool,
     /// The walk's and the link's work counters.
     pub reach: crate::reach::ReachCounters,
 }
@@ -477,6 +479,12 @@ enum Linked {
     Damaged(Vec<Identity>, usize, crate::reach::ReachCounters),
 }
 
+struct Emitted {
+    objects: Vec<ObjectProduct>,
+    table: Option<Table>,
+    step_charging_elided: bool,
+}
+
 impl CheckProduct {
     /// Dev keeps each checked body as an independent object. LLVM release
     /// composes owned bodies and published inline imports into one codegen unit.
@@ -486,7 +494,7 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable_for(entry, options)?;
-        Ok(self.emit_reached(entry, &reached, options)?.0)
+        Ok(self.emit_reached(entry, &reached, options, false)?.objects)
     }
     /// The reached instances' objects in link order, and for a Cranelift
     /// development build whose walk drafted a reach record, their table.
@@ -495,25 +503,46 @@ impl CheckProduct {
         entry: &DefPath,
         reached: &Reachable<'_>,
         options: &NativeOptions,
-    ) -> Result<(Vec<ObjectProduct>, Option<Table>), NativeStop> {
+        closed_executable: bool,
+    ) -> Result<Emitted, NativeStop> {
         let inputs = reached.native.as_ref().expect("a build's reachable set");
-        self.emit_instances(
-            Some(entry),
-            reached.require()?,
+        let instances = reached.require()?;
+        // Only the executable is invoked by our launcher with an empty bound
+        // stack. Objects returned to a caller must work in any task context.
+        if matches!(options.backend, Backend::Llvm) && options.optimize {
+            let (objects, step_charging_elided) = self.emit_release(
+                entry,
+                instances,
+                &reached.materialized,
+                options,
+                inputs.toolchain.runtime,
+                &Store::new(&options.store)?,
+                closed_executable && inputs.recipe.uses_hirsel_launcher(),
+            )?;
+            return Ok(Emitted {
+                objects,
+                table: None,
+                step_charging_elided,
+            });
+        }
+        let (objects, table) = self.emit_instances(
+            instances,
             &reached.materialized,
             inputs,
             reached.reach.as_ref(),
             options,
-        )
+        )?;
+        Ok(Emitted {
+            objects,
+            table,
+            step_charging_elided: false,
+        })
     }
     /// Emit `instances` for `options`, each a hit on its stored object or
     /// compiled and published under its key, with the table `reach`'s draft
     /// gathers; an instance `reach` expanded is read from its prior record.
-    /// `entry` is the program's, which only an optimised build, composing one
-    /// module, reads.
     pub(crate) fn emit_instances(
         &self,
-        entry: Option<&DefPath>,
         instances: &[Identity],
         materialized: &crate::instances::InstanceSet,
         inputs: &NativeInputs,
@@ -527,24 +556,9 @@ impl CheckProduct {
             )));
         }
         let store = Store::new(&options.store)?;
-        // Callable code variants are LLVM-release only. Dev and evaluator keep
-        // the shared semantic bodies; the dev measurements show no gain here.
         if matches!(options.backend, Backend::Llvm) && options.optimize {
-            let entry = entry.ok_or_else(|| {
-                NativeStop::Entry(
-                    "an optimised build composes its program's module from an entry".into(),
-                )
-            })?;
-            return Ok((
-                self.emit_release(
-                    entry,
-                    instances,
-                    materialized,
-                    options,
-                    inputs.toolchain.runtime,
-                    &store,
-                )?,
-                None,
+            return Err(NativeStop::Entry(
+                "an optimised build composes its program's module from an entry".into(),
             ));
         }
         let library_store = self
@@ -825,7 +839,11 @@ impl CheckProduct {
             (None, Some(sources)) => sources,
             (None, None) => unreachable!("rows are built without a recorded digest"),
         };
-        let (mut objects, table) = self.emit_reached(entry, reached, options)?;
+        let Emitted {
+            mut objects,
+            table,
+            step_charging_elided,
+        } = self.emit_reached(entry, reached, options, true)?;
         let store = Store::new(&options.store)?;
         let (link, cleanup) = match (reach, prior) {
             (Some(reach), Some(prior))
@@ -924,6 +942,7 @@ impl CheckProduct {
             },
             inputs.toolchain.image,
             inputs.recipe.clone(),
+            step_charging_elided,
             counters,
             record,
             revision,
@@ -1450,6 +1469,7 @@ fn link_objects(
     sources: impl FnOnce() -> io::Result<hirsel_core_ir::source::SourceMap>,
     toolchain: ContentHash,
     recipe: crate::tool_inputs::LinkRecipe,
+    step_charging_elided: bool,
     mut counters: crate::reach::ReachCounters,
     record: impl FnOnce(ContentHash) -> io::Result<u64>,
     revision: ContentHash,
@@ -1534,11 +1554,20 @@ fn link_objects(
         } else {
             None
         };
+        let recapture = || {
+            let recipe = crate::tool_inputs::recapture_link_recipe(&options.link, &options.target)
+                .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
+            if step_charging_elided && !recipe.uses_hirsel_launcher() {
+                return Err(NativeStop::Link(
+                    "direct link refused: process entry inputs changed".into(),
+                ));
+            }
+            Ok(recipe)
+        };
         let mut recipe = recipe;
         let mut missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
         if !missing.is_empty() {
-            recipe = crate::tool_inputs::recapture_link_recipe(&options.link, &options.target)
-                .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
+            recipe = recapture()?;
             missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
         }
         if !missing.is_empty() {
@@ -1618,9 +1647,7 @@ fn link_objects(
             if missing.is_empty() {
                 return Err(first);
             }
-            let refreshed =
-                crate::tool_inputs::recapture_link_recipe(&options.link, &options.target)
-                    .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
+            let refreshed = recapture()?;
             let remaining = crate::tool_inputs::missing_recipe_inputs(&refreshed);
             if !remaining.is_empty() {
                 return Err(NativeStop::Link(format!(
@@ -1661,6 +1688,7 @@ fn link_objects(
         linked,
         observation_mode: options.logical_charge_report.is_some(),
         debug_lines: options.debug_lines,
+        step_charging_elided,
         reach: counters,
     };
     // Copy from integrity-checked bytes even on a hit; a damaged materialized file
@@ -2103,21 +2131,21 @@ mod tests {
         let mut other_options = native_options(backend, dir.path());
         other_options.optimize = optimize;
         other_options.store = dir.path().join("another-app-native");
-        let objects = installed.emit_reachable(&entry, &other_options).unwrap();
-        let core = objects
-            .iter()
-            .filter(|o| o.instance.definition.package_is("core", "1"))
-            .collect::<Vec<_>>();
         if optimize {
-            assert!(core.is_empty(), "a release build links no library object");
+            let built = installed.build(&entry, &other_options).unwrap();
+            assert_eq!(built.identity, native.identity);
+            assert_eq!(built.compiled, 0);
+            run_clean(&built.executable, 7);
         } else {
+            let objects = installed.emit_reachable(&entry, &other_options).unwrap();
+            let core = objects
+                .iter()
+                .filter(|o| o.instance.definition.package_is("core", "1"))
+                .collect::<Vec<_>>();
             assert_eq!(core.len(), 2);
             assert!(core.iter().all(|o| !o.compiled));
+            assert_eq!(objects.iter().filter(|o| o.compiled).count(), 1);
         }
-        assert_eq!(
-            objects.iter().filter(|o| o.compiled).count(),
-            if optimize { 0 } else { 1 }
-        );
         // A cached negative body is refused only when this entry reaches it.
         let mut request = source_request(
             "pub fn main()->Result[(),Exit] { let _=unused_bad(); Ok(()) }",

@@ -7,6 +7,8 @@
 //! part. An unchanged definition is generated once, whichever program and
 //! build reached it.
 use super::*;
+use hirsel_core_ir::{Callee, FuncId, HostOp, Inst, RtOp};
+use hirsel_core_layout::flow::Op as FlowOp;
 use serde::{Deserialize, Serialize};
 
 /// The release unit's key: its inputs and the role facts each unit consumed.
@@ -15,7 +17,7 @@ fn unit_key(
     consumed: &[&[hirsel_core_ir::roles::BodyFacts]],
 ) -> io::Result<ContentHash> {
     crate::native::key(
-        "hirsel.core-release-unit.v5",
+        "hirsel.core-release-unit.v6",
         &(hirsel_core_ir::roles::FACTS_SCHEMA, consumed, inputs),
     )
 }
@@ -49,6 +51,149 @@ pub(crate) fn is_unit_record(payload: &[u8]) -> bool {
     decode::<Parts>(payload).is_some_and(|r| r.schema == PARTS_SCHEMA)
 }
 
+/// In a launched executable, every code pointer comes from a function or
+/// descriptor reference in the image. The launcher supplies only capabilities,
+/// spawn copies a parent's bound, and cleanup and the task entry adapters call
+/// back into the same image. Drop glue calls finalizers by type. Clone and
+/// codec code is called or named explicitly in the materialized bodies.
+fn cannot_install_step_bound(module: &Module) -> bool {
+    let defined = |f: FuncId| module.functions[f.index()].body.is_some();
+    module
+        .types
+        .iter()
+        .filter_map(|shape| shape.finalizer)
+        .all(|f| defined(FuncId(f.0)))
+        && module
+            .functions
+            .iter()
+            .filter_map(|f| f.body.as_ref())
+            .all(|body| {
+                body.insts.iter().all(|inst| match *inst {
+                    Inst::FunctionRef { function, .. } | Inst::DescriptorRef { function, .. } => {
+                        defined(function)
+                    }
+                    Inst::Call { call } => match body.calls[call.index()].callee {
+                        Callee::Direct(function) => defined(function),
+                        Callee::Indirect(_) => true,
+                        Callee::Runtime(op) => step_elision_compatible(op),
+                    },
+                    Inst::Const { .. }
+                    | Inst::ReadStatic { .. }
+                    | Inst::Unary { .. }
+                    | Inst::Binary { .. }
+                    | Inst::Compare { .. }
+                    | Inst::Convert { .. }
+                    | Inst::IntArith { .. }
+                    | Inst::MulAdd { .. }
+                    | Inst::ScalarUnary { .. }
+                    | Inst::Address { .. }
+                    | Inst::Read { .. }
+                    | Inst::Store { .. }
+                    | Inst::StorageLive { .. }
+                    | Inst::StorageDead { .. }
+                    | Inst::UpdateMask { .. }
+                    | Inst::Pointer { .. }
+                    | Inst::Alloc { .. }
+                    | Inst::Free { .. }
+                    | Inst::FrameRefund { .. }
+                    | Inst::Copy { .. }
+                    | Inst::Grow { .. }
+                    | Inst::Case { .. }
+                    | Inst::SetCase { .. }
+                    | Inst::RegionOpen { .. }
+                    | Inst::RegionClose { .. }
+                    | Inst::Trim { .. }
+                    | Inst::LimitEnter { .. }
+                    | Inst::LimitExit
+                    | Inst::Drop { .. }
+                    | Inst::Share { .. }
+                    | Inst::Release { .. }
+                    | Inst::TryUnwrap { .. }
+                    | Inst::Mark { .. }
+                    | Inst::Unmark { .. }
+                    | Inst::Step { .. }
+                    | Inst::PromoteFrame { .. } => true,
+                })
+            })
+}
+
+fn step_elision_compatible(op: RtOp) -> bool {
+    match op {
+        RtOp::StepEnter | RtOp::StepLeave | RtOp::StepCatch | RtOp::Flow(FlowOp::Stage) => false,
+        // The native receive-in-loop entry can retain the sequencer grant.
+        // A Step refill is one of the release boundaries for that grant.
+        RtOp::Receive { .. } => false,
+        RtOp::Spawn { .. }
+        | RtOp::Join { .. }
+        | RtOp::Cancel
+        | RtOp::CheckCancel
+        | RtOp::ChannelNew { .. }
+        | RtOp::ChannelSender
+        | RtOp::Send { .. }
+        | RtOp::TrySend { .. }
+        | RtOp::TryReceive { .. }
+        | RtOp::LatestNew { .. }
+        | RtOp::LatestHandle
+        | RtOp::LatestPublish
+        | RtOp::LatestRead
+        | RtOp::DestId
+        | RtOp::CompareBytes
+        | RtOp::HashBytes
+        | RtOp::CauseNext
+        | RtOp::CauseValue
+        | RtOp::ArgsLen
+        | RtOp::ArgsGet
+        | RtOp::TapeOpen
+        | RtOp::TapeEnd
+        | RtOp::TapeGrant
+        | RtOp::TapeAcross
+        | RtOp::IsolateEnter
+        | RtOp::IsolateLeave
+        | RtOp::IsolateCatch
+        | RtOp::LaunchWord
+        | RtOp::LaunchTarget { .. }
+        | RtOp::DescribeEmit
+        | RtOp::Flow(
+            FlowOp::New
+            | FlowOp::Sink
+            | FlowOp::Port
+            | FlowOp::Push
+            | FlowOp::Advance
+            | FlowOp::End
+            | FlowOp::Next
+            | FlowOp::Finish,
+        )
+        | RtOp::Host(
+            HostOp::Open
+            | HostOp::Read
+            | HostOp::Write
+            | HostOp::Close
+            | HostOp::TryLock
+            | HostOp::Unlock
+            | HostOp::Mkdir
+            | HostOp::Mkdtemp
+            | HostOp::Remove
+            | HostOp::RemoveTree
+            | HostOp::WallMs
+            | HostOp::MonoNs
+            | HostOp::Stdout
+            | HostOp::Stderr
+            | HostOp::Rename
+            | HostOp::SleepUntil
+            | HostOp::Sync
+            | HostOp::SyncDir
+            | HostOp::Random
+            | HostOp::Connect
+            | HostOp::Listen
+            | HostOp::Accept
+            | HostOp::RecvBounded
+            | HostOp::SendPair
+            | HostOp::NetNarrow
+            | HostOp::NetSplit,
+        ) => true,
+    }
+}
+
 impl CheckProduct {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn emit_release(
@@ -59,7 +204,8 @@ impl CheckProduct {
         options: &NativeOptions,
         runtime: ContentHash,
         store: &Store,
-    ) -> Result<Vec<ObjectProduct>, NativeStop> {
+        closed_executable: bool,
+    ) -> Result<(Vec<ObjectProduct>, bool), NativeStop> {
         let compiler = compiler_identity()?;
         // Release is LLVM's alone: every object here is libLLVM's output.
         let llvm = crate::tool_inputs::llvm_library()?;
@@ -114,6 +260,7 @@ impl CheckProduct {
                     message,
                 }
             })?;
+        let elide_steps = closed_executable && cannot_install_step_bound(&joined);
         modules = vec![Cow::Owned(joined)];
         let refs = modules.iter().map(|m| &**m).collect::<Vec<_>>();
         // The checked body keys identify the source-neutral published modules.
@@ -137,6 +284,8 @@ impl CheckProduct {
                 !hirsel_llvm_lazy::core::facts_enabled(),
                 runtime,
                 instance,
+                closed_executable,
+                elide_steps,
                 &refs,
             ),
             &consumed.iter().map(Vec::as_slice).collect::<Vec<_>>(),
@@ -182,6 +331,7 @@ impl CheckProduct {
                 &[instance.symbol()],
                 target,
                 jobs,
+                elide_steps,
                 &mut |_, machine, bitcode| {
                     let loaded = part_key(&generator, machine, bitcode).and_then(|key| {
                         parts.push(key);
@@ -257,7 +407,7 @@ impl CheckProduct {
                     .count()
             })
             .sum();
-        Ok(held
+        let objects = held
             .into_iter()
             .map(|(bare, object, file, compiled)| ObjectProduct {
                 private_variants: std::mem::take(&mut private_variants),
@@ -270,7 +420,8 @@ impl CheckProduct {
                 debug_record: None,
                 compiled,
             })
-            .collect())
+            .collect();
+        Ok((objects, elide_steps))
     }
 }
 

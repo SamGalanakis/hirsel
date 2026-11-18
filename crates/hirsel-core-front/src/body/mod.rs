@@ -54,6 +54,7 @@ mod constants;
 mod control;
 pub(crate) mod core_ops;
 pub(crate) mod flow;
+mod frame_lists;
 mod growth;
 mod key_glue;
 mod lists;
@@ -1233,6 +1234,11 @@ struct Cx<'c, 'a, 'e> {
     descriptors: closures::Descriptors,
     anchors: anchors::Anchors,
     anchor_path: Vec<anchors::Component>,
+    /// Binders of lists that never escape (frame_lists.rs), found at the first
+    /// `let mut` of a new list.
+    frame_binders: Option<HashSet<u32>>,
+    /// The frame bytes of each frame-backed list, by its slot.
+    frame_slots: HashMap<SlotId, frame_lists::FrameList>,
 }
 
 /// The gap a body reports when its emission stopped with no refusal or gap to say why.
@@ -1360,6 +1366,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             descriptors: closures::Descriptors::default(),
             anchors: anchors::Anchors::new(info.resolution.binders.len()),
             anchor_path: vec![],
+            frame_binders: None,
+            frame_slots: HashMap::default(),
         }
     }
 

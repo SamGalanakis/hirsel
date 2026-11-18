@@ -25,7 +25,7 @@ impl FunctionEmitter<'_> {
         let at = self.field_pointer(p, offset);
         self.store(&ty, value, &at, 8);
     }
-    fn current_payer(&mut self) -> Value {
+    pub(super) fn current_payer(&mut self) -> Value {
         self.load_native(&CONTEXT, CONTEXT_CURRENT_LIMIT, Type::Ptr)
     }
     pub(super) fn likely(&mut self, test: &Value, hot: Label, cold: Label) {
@@ -248,6 +248,60 @@ impl FunctionEmitter<'_> {
         let pointer = self.emit(Operation::Phi(&Type::Ptr, &pointers));
         let room = self.emit(Operation::Phi(&i64, &rooms));
         Some((pointer, room))
+    }
+    /// Admit `charge` for the frame bytes at `frame` (`alloc .. frame`): the own
+    /// allocation's inline admission with nothing allocated. A refusal, overflow
+    /// or test probe takes `hirsel_core_admit`, which keeps the Capacity event.
+    pub(super) fn frame_admit(
+        &mut self,
+        frame: &Value,
+        charge: &Value,
+        overflow: Option<ValueId>,
+    ) -> (Value, Value) {
+        let i64 = Type::I64;
+        let n = self.counter();
+        let payer = self.current_payer();
+        let overflow = overflow.map_or(FALSE, |v| {
+            let flag = self.numeric(v);
+            self.cmp(Predicate::Ne, &Type::I8, &flag, &int(0))
+        });
+        let eligible = if overflow == FALSE {
+            true.into()
+        } else {
+            self.bin(Binary::Xor, &Type::I1, &overflow, &true.into())
+        };
+        let admit = Label::new("frame_admit", n);
+        let debit = Label::new("frame_debit", n);
+        let slow = Label::new("frame_slow", n);
+        let done = Label::new("frame_done", n);
+        self.likely(&eligible, admit, slow);
+        self.block(admit);
+        let available = self.load_native(&payer, LIMIT_AVAILABLE, Type::I64);
+        let last = self.bin(Binary::Sub, &i64, charge, &int(1));
+        let fits = self.cmp(Predicate::Ult, &i64, &last, &available);
+        self.likely(&fits, if self.test_hooks { slow } else { debit }, slow);
+        self.block(debit);
+        self.admit_balance(&payer, charge, &available);
+        self.br(done);
+        self.block(slow);
+        let (admitted, room) = self.allocation_cold(
+            "hirsel_core_admit",
+            &[
+                ptr(CONTEXT),
+                word(charge.clone()),
+                zeroext(Type::I1, overflow),
+            ],
+        );
+        let present = self.cmp(Predicate::Ne, &Type::Ptr, &admitted, &Value::Null);
+        let slow_frame = self.emit(Operation::Select(&Type::Ptr, &present, frame, &Value::Null));
+        self.br(done);
+        self.block(done);
+        let pointer = self.emit(Operation::Phi(
+            &Type::Ptr,
+            &[(frame.clone(), debit), (slow_frame, slow)],
+        ));
+        let room = self.emit(Operation::Phi(&i64, &[(int(0), debit), (room, slow)]));
+        (pointer, room)
     }
     fn fast_region(
         &mut self,

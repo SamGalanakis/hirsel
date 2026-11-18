@@ -1130,8 +1130,19 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 })?;
                 c.is(flag, Ty::Scalar(Scalar::Bool))?;
             }
-            if let AllocPlace::Like(v) | AllocPlace::Region(v) = place {
+            if let AllocPlace::Like(v) | AllocPlace::Region(v) | AllocPlace::Frame(v) = place {
                 c.is(v, Ty::Ptr)?;
+            }
+            if matches!(place, AllocPlace::Frame(_)) {
+                need(
+                    matches!(
+                        kind,
+                        AllocKind::Own {
+                            edge: hirsel_core_layout::FieldTy::Seq(_)
+                        }
+                    ),
+                    || "frame bytes back only sequence storage".into(),
+                )?;
             }
             // Region storage is stable and stable storage is in a region (crate docs,
             // "Cleanup classes"); an own block names the edge that will own it.
@@ -1211,6 +1222,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.is(block, Ty::Ptr)?;
             c.is(charge, Ty::Scalar(Scalar::U64))
         }
+        Inst::FrameRefund { charge } => c.is(charge, Ty::Scalar(Scalar::U64)),
         Inst::Copy { to, from, bytes } => {
             c.writes(to)?;
             c.place(to)?;

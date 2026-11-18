@@ -117,7 +117,7 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
             }
             f(size);
             match place {
-                AllocPlace::Like(v) | AllocPlace::Region(v) => f(v),
+                AllocPlace::Like(v) | AllocPlace::Region(v) | AllocPlace::Frame(v) => f(v),
                 _ => {}
             }
         }
@@ -125,6 +125,7 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
             f(block);
             f(charge)
         }
+        Inst::FrameRefund { charge } => f(charge),
         Inst::Copy { bytes, .. } => f(bytes),
         Inst::Grow {
             result,

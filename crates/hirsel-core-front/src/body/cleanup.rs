@@ -328,10 +328,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return;
         }
+        let mut frame = None;
         let (base, id, avail, flag) = match o {
             Owner::Slot(s) => {
                 let v = self.var(s);
                 let Some(own) = v.own else { return };
+                frame = self.frame_list_at(own.address);
                 (
                     AddressBase::Address(own.address),
                     own.id,
@@ -357,7 +359,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         };
         match (avail, flag) {
-            (Avail::Live, _) => self.emit_drop(base, id, n),
+            (Avail::Live, _) => self.drop_owner(base, id, frame, n),
             (Avail::Maybe, Some(flag)) => {
                 let on = self.value(Ty::Scalar(Scalar::Bool));
                 self.inst(
@@ -383,7 +385,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if matches!(o,Owner::Temp(t) if self.temporary_storage(t).is_some()) {
                     self.store_flag(flag, false, n);
                 }
-                self.emit_drop(base, id, n);
+                self.drop_owner(base, id, frame, n);
                 self.jump(next, &[], n);
                 self.start(next);
             }
@@ -466,6 +468,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.emit_drop(AddressBase::Address(address), elem, n);
         self.jump(head, &[], n);
         self.start(out);
+    }
+    fn drop_owner(
+        &mut self,
+        base: AddressBase,
+        id: TypeId,
+        frame: Option<frame_lists::FrameList>,
+        n: NodeId,
+    ) {
+        match (frame, base) {
+            (Some(f), AddressBase::Address(address)) => {
+                let _ = self.drop_frame_list(f, address, id, n);
+            }
+            _ => self.emit_drop(base, id, n),
+        }
     }
     pub(super) fn emit_drop(&mut self, base: AddressBase, id: TypeId, n: NodeId) {
         crate::cost_scope!("phase", "cleanup emission");

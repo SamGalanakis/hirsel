@@ -61,7 +61,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     /// Some(true) when the element is known, without emitting code, to occupy
     /// storage; None when the representation is unknown.
-    fn list_storage_static(&mut self, item: TyId) -> Option<bool> {
+    pub(super) fn list_storage_static(&mut self, item: TyId) -> Option<bool> {
         match self.rep(item) {
             Ok(Rep::None) => Some(false),
             Ok(Rep::Scalar(_)) => Some(true),
@@ -679,7 +679,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let error = self.new_block(&[Ty::Scalar(Scalar::U64)]);
         let null = self.konst(Ty::Ptr, 0, n)?;
         let (moved, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, len, plan.stride, n);
-        self.list_branch(owned, like, current, n);
+        match self.frame_list(header) {
+            Some(f) => self.frame_growth(
+                f,
+                header,
+                carrier,
+                &plan,
+                [old_cap, new_cap, len, moved],
+                owned,
+                [like, current],
+                success,
+                error,
+                n,
+            )?,
+            None => self.list_branch(owned, like, current, n),
+        }
         // Capacity 0 owns no storage (empty, or static bytes): allocate in the
         // current limit and copy the elements over.
         self.start(current);
@@ -925,9 +939,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.list_branch(full, grow_block, publish, n);
         self.start(grow_block);
         let cold = self.is_full_test(Some(full));
-        let grown = self.true_arm(cold, |cx| {
-            cx.emit_call(grow, &[item], &[Some(header)], grown_ty, n)
-        })?;
+        // A frame list grows here: `grow`'s body would free its frame bytes.
+        let grown = if self.frame_list(header).is_some() {
+            let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
+            self.list_reserve(item, header, one, Ask::Bounded, grown_ty, n)
+        } else {
+            self.true_arm(cold, |cx| {
+                cx.emit_call(grow, &[item], &[Some(header)], grown_ty, n)
+            })
+        }?;
         let from = self.address(
             AddressBase::Value(grown),
             &[],

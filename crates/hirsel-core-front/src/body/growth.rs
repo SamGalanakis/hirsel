@@ -21,8 +21,8 @@ pub(super) enum FillWord {
 /// place. A root that is not a pointer this body built is its value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PlaceChain {
-    root: AddressBase,
-    steps: Vec<Step>,
+    pub(super) root: AddressBase,
+    pub(super) steps: Vec<Step>,
 }
 
 /// What the growth rule knows of this body's values.
@@ -71,7 +71,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         result
     }
-    fn place_chain(&self, mut value: ValueId) -> PlaceChain {
+    pub(super) fn place_chain(&self, mut value: ValueId) -> PlaceChain {
         let mut steps = Vec::new();
         let root = 'root: loop {
             let Some(&first) = self.growth.pointers.get(&value) else {

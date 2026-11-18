@@ -473,6 +473,11 @@ pub enum Inst {
         block: ValueId,
         charge: ValueId,
     },
+    /// Refund `charge`, which an `alloc .. frame` admitted, to the current limit; the
+    /// frame bytes stay where they are. Never fails.
+    FrameRefund {
+        charge: ValueId,
+    },
     /// Copy `bytes` bytes from the place `from` to the place `to`. The two ranges
     /// are the same or do not overlap (the evaluator stops the run otherwise). A move of a non-plain value is this copy; the source is then moved
     /// out and its drop flag cleared by the producer. Growth copies the old storage.
@@ -696,6 +701,9 @@ pub enum AllocPlace {
     Like(ValueId),
     /// FORM v1b: in this region, charged to the current limit until it closes (MEM-1).
     Region(ValueId),
+    /// Charged like `Current`, with the bytes at this pointer, the caller's frame, as
+    /// the block: nothing is allocated, and `FrameRefund` later returns the charge.
+    Frame(ValueId),
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

@@ -88,6 +88,7 @@ pub fn uses_v1(m: &Module) -> bool {
                             Inst::Alloc { .. }
                                 | Inst::Grow { .. }
                                 | Inst::Free { .. }
+                                | Inst::FrameRefund { .. }
                                 | Inst::Copy { .. }
                                 | Inst::RegionOpen { .. }
                                 | Inst::RegionClose { .. }
@@ -610,6 +611,7 @@ impl Printer {
                             AllocPlace::Current => String::new(),
                             AllocPlace::Like(b) => format!(" like v{}", b.0),
                             AllocPlace::Region(r) => format!(" in v{}", r.0),
+                            AllocPlace::Frame(r) => format!(" frame v{}", r.0),
                         };
                         format!(
                             "{}, {}{} = alloc {kind} {} align {align} charge {}{place}{}{}",
@@ -650,6 +652,7 @@ impl Printer {
                     Inst::Free { block, charge } => {
                         format!("free {} charge {}", v(block), v(charge))
                     }
+                    Inst::FrameRefund { charge } => format!("frame_refund {}", v(charge)),
                     Inst::Copy { to, from, bytes } => {
                         format!("copy a{}, a{}, {}", to.0, from.0, v(bytes))
                     }
@@ -1272,6 +1275,10 @@ impl BodyParser {
                     charge: l.value()?,
                 });
             }
+            Some("frame_refund") => {
+                l.next()?;
+                return Ok(Inst::FrameRefund { charge: l.value()? });
+            }
             Some("copy") => {
                 l.next()?;
                 let to = AddressId(l.id('a')?);
@@ -1442,6 +1449,8 @@ impl BodyParser {
                 AllocPlace::Like(l.value()?)
             } else if l.eat("in") {
                 AllocPlace::Region(l.value()?)
+            } else if l.eat("frame") {
+                AllocPlace::Frame(l.value()?)
             } else {
                 AllocPlace::Current
             };

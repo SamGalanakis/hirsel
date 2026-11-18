@@ -156,7 +156,12 @@ impl Function<'_, '_, '_> {
                 // Allocation = {pointer, Capacity{requested,available}}, a C
                 // struct of three words. On refusal only the pointer is null;
                 // there is no guessed function status or call to the old runtime.
-                let values = if resource.is_none() && !matches!(place, AllocPlace::Region(_)) {
+                let values = if let AllocPlace::Frame(frame) = place {
+                    let frame = self.get(frame);
+                    let overflow = overflow.map(|v| self.get(v));
+                    let values = self.frame_admit(frame, charge, overflow)?;
+                    [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
+                } else if resource.is_none() && !matches!(place, AllocPlace::Region(_)) {
                     let overflow = overflow.map(|v| self.get(v));
                     let values = self.own_alloc(native_kind, size, alignment, charge, overflow)?;
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
@@ -406,6 +411,16 @@ impl Function<'_, '_, '_> {
                     self.context,
                     block,
                     charge,
+                )?;
+            }
+            Inst::FrameRefund { charge } => {
+                let charge = self.get(charge);
+                let payer = self.current_limit();
+                self.c_call(
+                    "hirsel_core_refund_in",
+                    &[p, p, u],
+                    &[],
+                    &[self.context, payer, charge],
                 )?;
             }
             Inst::Copy { to, from, bytes } => {

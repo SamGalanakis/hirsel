@@ -167,6 +167,8 @@ void hirsel_core_refund(HirselCoreLimitRecord *original_payer, uint64_t nonzero_
 /* Context-aware refund: compare raw payer word with current, direct when equal;
    otherwise use original-payer lookup. No status/admission/allocation. */
 void hirsel_core_refund_in(const HirselCoreContext *, HirselCoreLimitRecord *original_payer, uint64_t bytes);
+/* Admission without allocation, for storage the caller holds (frame bytes). */
+HirselCoreAllocation hirsel_core_admit(const HirselCoreContext *, uint64_t charge, bool charge_overflow);
 /* Physical backing for a block already admitted by the current task. */
 void *hirsel_core_alloc_admitted(const HirselCoreContext *, HirselCoreLimitRecord *, size_t bytes,
     size_t alignment, uint8_t kind);

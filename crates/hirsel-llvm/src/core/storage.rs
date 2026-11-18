@@ -516,12 +516,20 @@ impl FunctionEmitter<'_> {
                 fail,
             } => {
                 let payer = match place {
-                    AllocPlace::Current | AllocPlace::Like(_) => Payer::Current,
+                    AllocPlace::Current | AllocPlace::Like(_) | AllocPlace::Frame(_) => {
+                        Payer::Current
+                    }
                     AllocPlace::Region(r) => Payer::Region(self.numeric(r)),
                 };
                 let (charge, size) = (self.numeric(charge), self.numeric(size));
-                let (block, room) =
-                    self.allocate(kind, &payer, &charge, &size, align, overflow, fail);
+                let (block, room) = if let AllocPlace::Frame(frame) = place {
+                    let frame = self.numeric(frame);
+                    let admitted = self.frame_admit(&frame, &charge, overflow);
+                    self.allocation_status(&admitted.0, fail);
+                    admitted
+                } else {
+                    self.allocate(kind, &payer, &charge, &size, align, overflow, fail)
+                };
                 if let Some(token) = region_entry {
                     let Payer::Region(region) = &payer else {
                         unreachable!()
@@ -626,6 +634,14 @@ impl FunctionEmitter<'_> {
                 let p = self.numeric(block);
                 let n = self.numeric(charge);
                 self.free_block(&p, &n);
+            }
+            Inst::FrameRefund { charge } => {
+                let n = self.numeric(charge);
+                let payer = self.current_payer();
+                self.runtime_void(
+                    "hirsel_core_refund_in",
+                    &[ptr(CONTEXT), ptr(payer), word(n)],
+                );
             }
             Inst::Copy { to, from, bytes } => {
                 let scopes = self.access_facts(&[to, from]);

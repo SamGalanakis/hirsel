@@ -633,6 +633,34 @@ pub unsafe extern "C" fn hirsel_core_region_refill(
     unsafe { (*region).refill(bytes, align).as_ptr() }
 }
 
+/// Admit `charge` against the current limit for storage the emitter already holds
+/// (a frame-backed list's bytes), allocating nothing. On success the pointer is
+/// the context; on refusal it is null with the Capacity, as `hirsel_core_alloc`.
+/// # Safety
+/// Context is live and exclusively used by its task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_admit(
+    context: *const Context,
+    charge: u64,
+    overflow: bool,
+) -> Allocation {
+    // SAFETY: the emitter supplies a live context.
+    let task = unsafe { &*context };
+    match crate::block::admit_storage(task.payer(), (!overflow).then_some(charge)) {
+        Ok(()) => Allocation {
+            pointer: context.cast_mut().cast(),
+            capacity: Capacity {
+                requested: 0,
+                available: 0,
+            },
+        },
+        Err(capacity) => Allocation {
+            pointer: ptr::null_mut(),
+            capacity,
+        },
+    }
+}
+
 /// Refund through an original payer after emitted physical deallocation. Remote
 /// payers use the event mailbox. Admits/allocates nothing, no failure status.
 /// # Safety

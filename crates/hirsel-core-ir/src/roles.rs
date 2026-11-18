@@ -743,6 +743,7 @@ impl<'a> Seal<'a> {
                 self.used(block, Use::Block);
                 self.used(charge, Use::Other);
             }
+            Inst::FrameRefund { charge } => self.used(charge, Use::Other),
             Inst::Alloc {
                 region_entry,
                 place,
@@ -755,7 +756,7 @@ impl<'a> Seal<'a> {
                 }
                 match place {
                     AllocPlace::Like(v) => self.used(v, Use::Block),
-                    AllocPlace::Region(v) => self.used(v, Use::Other),
+                    AllocPlace::Region(v) | AllocPlace::Frame(v) => self.used(v, Use::Other),
                     AllocPlace::Current => {}
                 }
                 self.used(charge, Use::Other);

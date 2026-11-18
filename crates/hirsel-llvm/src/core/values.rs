@@ -118,7 +118,9 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                     if let Some(v) = overflow {
                         read(v);
                     }
-                    if let AllocPlace::Region(v) | AllocPlace::Like(v) = place {
+                    if let AllocPlace::Region(v) | AllocPlace::Like(v) | AllocPlace::Frame(v) =
+                        place
+                    {
                         read(v);
                     }
                 }
@@ -126,6 +128,7 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                     read(block);
                     read(charge);
                 }
+                Inst::FrameRefund { charge } => read(charge),
                 Inst::Grow {
                     charge,
                     overflow,
@@ -338,6 +341,7 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::UpdateMask { .. }
                 | Inst::Alloc { .. }
                 | Inst::Free { .. }
+                | Inst::FrameRefund { .. }
                 | Inst::RegionOpen { .. }
                 | Inst::RegionClose { .. }
                 | Inst::Trim { .. }

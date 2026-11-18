@@ -165,6 +165,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     (Binding::Value(v), Origin::Let)
                 };
                 self.declare(b, ty, binding, origin, pat);
+                if let Binding::Slot(Some(address)) = binding
+                    && to.is_none()
+                    && self.live()
+                    && self.frame_binder(b, value)
+                {
+                    self.begin_frame_list(ty, address, pat);
+                }
                 self.bind_descriptor(b, v);
                 if matches!(kind, Kind::Scoped | Kind::Region) {
                     let mut initial = self.anchor_expression(value);

@@ -3966,6 +3966,9 @@ impl Machine<'_> {
                 match self.admit_charge(&l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
                     Err(_) if l.0.grant => return Err(Stop::Cause("Capacity")),
                     Err(room) => (vals[result.index()], vals[available.index()]) = (0, room),
+                    Ok(()) if let AllocPlace::Frame(at) = place => {
+                        (vals[result.index()], vals[available.index()]) = (vals[at.index()], 0);
+                    }
                     Ok(()) => {
                         let res = match kind {
                             AllocKind::Resource { grant } => Some(Res {
@@ -4010,6 +4013,10 @@ impl Machine<'_> {
                     "free refunds another charge"
                 );
                 self.free(p);
+            }
+            Inst::FrameRefund { charge } => {
+                let l = t.limits.last().unwrap().clone();
+                self.refund(l, vals[charge.index()]);
             }
             Inst::Pointer { result, address } => vals[result.index()] = places[address.index()].0,
             Inst::Trim {

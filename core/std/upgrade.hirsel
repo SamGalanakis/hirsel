@@ -50,6 +50,7 @@ pub opaque type Socket: send {
     writer: WriteHalf,
     tail: Option[Bytes],
     at: u64,
+    clock: Clock,
     notice: http.EstablishedNotice
 }
 
@@ -72,12 +73,18 @@ pub fn start[A: codec + send](take h: Taken) -> Result[Started[A], StartError] w
     }
     discard(take wire)
     let mut writer = take write_half
+    let signal = http.protocol_signal(notice)
     let now = host.mono_ns(clock)
+    if let Some(stop) = http.protocol_stop(notice) {
+        if now >= stop {
+            return Error(Network(TimedOut))
+        }
+    }
     if now >= deadline {
-        let _ = http.write_promotion_refusal(mut writer, clock, now, ms)
+        let _ = http.write_promotion_refusal(mut writer, clock, now, ms, signal)
         return Error(Network(TimedOut))
     }
-    match http.write_promotion_unit(mut writer, head, clock, now, ms) {
+    match http.write_promotion_unit(mut writer, head, clock, now, ms, signal) {
         Ok(()) => {},
         Error(e) => return Error(Network(e)),
     }
@@ -88,7 +95,7 @@ pub fn start[A: codec + send](take h: Taken) -> Result[Started[A], StartError] w
     } else {
         Some(take input)
     }
-    Ok(Started(socket: Socket(reader: take reader, writer: take writer, tail: take tail, at: at, notice: take notice), argument: take arg, clock: clock))
+    Ok(Started(socket: Socket(reader: take reader, writer: take writer, tail: take tail, at: at, clock: clock, notice: take notice), argument: take arg, clock: clock))
 }
 
 fn discard(take backing: Bytes) {}
@@ -97,7 +104,12 @@ pub fn established(mut s: Socket) -> bool waits {
     http.upgrade_established(mut s.notice)
 }
 
+pub fn stop_deadline(s: Socket) -> Option[u64] {
+    http.protocol_stop(s.notice)
+}
+
 pub fn read(mut s: Socket, mut into: Bytes, until: Until) -> Result[u64, NetError] waits {
+    let end = http.control_until(s.notice, s.clock, until)?
     let space = list.capacity(into) - list.len(into)
     if space == 0 {
         return Ok(0)
@@ -112,9 +124,10 @@ pub fn read(mut s: Socket, mut into: Bytes, until: Until) -> Result[u64, NetErro
         }
         return Ok(size)
     }
-    host.recv(mut s.reader, mut into, until)
+    host.recv(mut s.reader, mut into, end)
 }
 
 pub fn write(mut s: Socket, data: Bytes, until: Until) -> Result[u64, NetError] waits {
-    host.send(mut s.writer, data, until)
+    let end = http.control_until(s.notice, s.clock, until)?
+    host.send(mut s.writer, data, end)
 }

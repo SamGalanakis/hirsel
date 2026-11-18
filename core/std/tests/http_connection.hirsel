@@ -655,6 +655,226 @@ fn http_handler_steps(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     route_wire(n, c, addr, string.as_bytes("GET /large HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 204, "", "", string.as_bytes(""))
 }
 
+type StopServer: send {
+    listener: Listener,
+    c: Clock,
+    tasks: Tasks,
+    stop: Receiver[u64]
+}
+
+fn stop_server(take job: StopServer) waits {
+    let StopServer(listener: take listener, c: c, tasks: tasks, stop: take stop) = take job
+    let mut listeners: List[Listener] = result.unwrap(list.with_capacity(1))
+    result.unwrap(list.push(mut listeners, take listener))
+    let mut routes: router.Builder[EchoState] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/{tail...}", router.raw(echo)))
+    result.unwrap(router.add(mut routes, "GET", "/live", router.Route(handler: heartbeat_route, body_max: None, upgrade_bytes: None, stream_bytes: Some(32768), steps: None)))
+    result.unwrap(router.add(mut routes, "GET", "/protocol", router.Route(handler: controlled_upgrade_route, body_max: None, upgrade_bytes: Some(4096), stream_bytes: None, steps: None)))
+    let routing = result.unwrap(router.build(take routes))
+    let mut cfg = test_config()
+    cfg.out_cap = 256
+    cfg.streams_max = 1
+    cfg.upgrades_max = 1
+    cfg.state_max = 64
+    cfg.heartbeat_ms = 80
+    cfg.lease_ms = 200
+    result.unwrap(http.serve_with_stop(take listeners, c, tasks, take cfg, take routing, EchoState(clock: c), take stop))
+}
+
+fn stop_fixture(n: Net, c: Clock, tasks: Tasks) -> (Task[()], Addr, Sender[u64]) waits {
+    let (listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let stops: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1)
+    let (stop, receive_stop) = result.unwrap(take stops)
+    let server = result.unwrap(task.spawn(tasks, bytes 262144, StopServer(listener: take listener, c: c, tasks: tasks, stop: take receive_stop), stop_server))
+    (take server, addr, take stop)
+}
+
+// HTTP-1/O34. The idle socket closes when admission closes. A committed
+// response completes, and its connection then closes before another head.
+// expect: run http_stop_exchange(network) = true
+fn http_stop_exchange(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (server, addr, stop) = stop_fixture(n, c, tasks)
+    let end = after_ms(host.mono_ns(c), 90)
+    let until = At(c, end)
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, until)))
+    let mut idle_read = take r
+    let mut idle_write = take w
+    if empty_get(mut idle_write, mut idle_read, string.as_bytes("GET /skip HTTP/1.1\r\nHost: a\r\n\r\n"), c, end) != 200 {
+        return false
+    }
+    let (ar, aw) = net.split(result.unwrap(host.connect(n, addr, until)))
+    let mut active_read = take ar
+    let mut active_write = take aw
+    if !client_send(mut active_write, string.as_bytes("GET /large HTTP/1.1\r\nHost: a\r\n\r\n"), until) {
+        return false
+    }
+    let mut reply: Bytes = result.unwrap(list.with_capacity(512))
+    if client_head(mut active_read, mut reply, c, end) != 200 {
+        return false
+    }
+    let stop_at = host.mono_ns(c)
+    if let Error(_) = channel.send(stop, after_ms(stop_at, 40)) {
+        return false
+    }
+    let mut idle_tail: Bytes = result.unwrap(list.with_capacity(16))
+    if !client_end(mut idle_read, mut idle_tail, until) || list.len(idle_tail) != 0 || host.mono_ns(c) >= after_ms(stop_at, 40) {
+        return false
+    }
+    if let Ok(_) = host.connect(n, addr, until) {
+        return false
+    }
+    if !client_end(mut active_read, mut reply, until) {
+        return false
+    }
+    let mut head = http1.head()
+    if http1.response(reply, mut head) != Complete || list.len(reply) != head.end + 160 {
+        return false
+    }
+    for i in head.end .. list.len(reply) {
+        if reply[i] != b'x' {
+            return false
+        }
+    }
+    if let Ok(()) = task.join(take server) {
+        return host.mono_ns(c) < after_ms(stop_at, 40)
+    }
+    false
+}
+
+// HTTP-1/O28. A parked write keeps its committed prefix and is interrupted
+// at D, even though its own 30 ms output deadline has more time left.
+// expect: run http_stop_deadline(network) = true
+fn http_stop_deadline(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (server, addr, stop) = stop_fixture(n, c, tasks)
+    let end = after_ms(host.mono_ns(c), 90)
+    let until = At(c, end)
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, until)))
+    let mut input = take r
+    let mut output = take w
+    let request = string.as_bytes("GET /large HTTP/1.1\r\nHost: a\r\n\r\n")
+    let mut reply: Bytes = result.unwrap(list.with_capacity(512))
+    if !client_send(mut output, request, until) || client_head(mut input, mut reply, c, end) != 200 {
+        return false
+    }
+    let at = host.mono_ns(c)
+    if let Error(_) = channel.send(stop, after_ms(at, 2)) {
+        return false
+    }
+    host.sleep_until(c, after_ms(at, 3))
+    if !client_end(mut input, mut reply, until) || !within_wake(host.mono_ns(c) - at, 3, 1) {
+        return false
+    }
+    let mut h = http1.head()
+    if http1.response(reply, mut h) != Complete || list.len(reply) >= h.end + 160 {
+        return false
+    }
+    for i in h.end .. list.len(reply) {
+        if reply[i] != b'x' {
+            return false
+        }
+    }
+    if let Ok(()) = task.join(take server) {
+        true
+    } else {
+        false
+    }
+}
+
+// HTTP-1 and §2. A committed stream whose producer and timer are both
+// parked receives Stop immediately and sends its terminal unit before D.
+// expect: run http_stop_stream(network) = true
+fn http_stop_stream(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (server, addr, stop) = stop_fixture(n, c, tasks)
+    let end = after_ms(host.mono_ns(c), 90)
+    let until = At(c, end)
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, until)))
+    let mut input = take r
+    let mut output = take w
+    let mut reply: Bytes = result.unwrap(list.with_capacity(512))
+    if !client_send(mut output, string.as_bytes("GET /live HTTP/1.1\r\nHost: a\r\n\r\n"), until) || client_head(mut input, mut reply, c, end) != 200 {
+        return false
+    }
+    let d = after_ms(host.mono_ns(c), 40)
+    if let Error(_) = channel.send(stop, d) {
+        return false
+    }
+    if !client_end(mut input, mut reply, until) {
+        return false
+    }
+    let mut h = http1.head()
+    if http1.response(reply, mut h) != Complete || list.slice(reply, h.end, list.len(reply)) != string.as_bytes("0\r\n\r\n") {
+        return false
+    }
+    if let Ok(()) = task.join(take server) {
+        host.mono_ns(c) < d
+    } else {
+        false
+    }
+}
+
+fn controlled_upgrade(take handover: upgrade.Taken) waits {
+    let started: Result[upgrade.Started[()], upgrade.StartError] = upgrade.start(take handover)
+    let mut session = result.unwrap(take started)
+    if !upgrade.established(mut session.socket) {
+        return
+    }
+    let mut data: Bytes = result.unwrap(list.with_capacity(8))
+    if let Ok(1) = upgrade.read(mut session.socket, mut data, Never) {
+        if let Some(d) = upgrade.stop_deadline(session.socket) {
+            list.clear(mut data)
+            result.unwrap(list.put_word_le(mut data, d))
+            let mut sent: u64 = 0
+            while sent < 8 {
+                match upgrade.write(mut session.socket, list.slice(data, sent, 8), Never) {
+                    Ok(0) => return,
+                    Ok(n) => {
+                        sent += n
+                    },
+                    Error(_) => return,
+                }
+            }
+        }
+    }
+}
+
+fn controlled_upgrade_route(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
+    Ok(Upgrade(upgrade.spec(req, "echo", 4096, (), controlled_upgrade)?))
+}
+
+// HTTP-1. The established protocol reads the caller's exact stop deadline.
+// expect: run http_stop_upgrade(network) = true
+fn http_stop_upgrade(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (server, addr, stop) = stop_fixture(n, c, tasks)
+    let end = after_ms(host.mono_ns(c), 90)
+    let until = At(c, end)
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, until)))
+    let mut input = take r
+    let mut output = take w
+    let mut reply: Bytes = result.unwrap(list.with_capacity(512))
+    let request = string.as_bytes("GET /protocol HTTP/1.1\r\nHost: a\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+    if !client_send(mut output, request, until) || client_head(mut input, mut reply, c, end) != 101 {
+        return false
+    }
+    let now = host.mono_ns(c)
+    let d = after_ms(now, 47)
+    if let Error(_) = channel.send(stop, d) {
+        return false
+    }
+    host.sleep_until(c, after_ms(now, 1))
+    if !client_send(mut output, string.as_bytes("x"), until) || !client_end(mut input, mut reply, until) {
+        return false
+    }
+    let mut h = http1.head()
+    if http1.response(reply, mut h) != Complete || list.len(reply) != h.end + 8 || list.word_le(reply, h.end) != d {
+        return false
+    }
+    if let Ok(()) = task.join(take server) {
+        true
+    } else {
+        false
+    }
+}
+
 // L5. When ignoring a one-byte body the next head is preserved. An unread
 // 24-byte body is over the 16-byte drain limit. An invalid chunk caught by the
 // handler also closes, even though the handler returns a 200.

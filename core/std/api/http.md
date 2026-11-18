@@ -10,6 +10,13 @@ each connection at spawn, and keeps its reservation through the last
 request and linger. It counts accepted peers before reading a head and
 moves the per-IP count after validating a trusted forwarding field.
 
+`serve_with_stop` also takes a receiver for one absolute monotonic
+deadline. The supervisor commits the stop in the same inbox that commits
+idle/active transitions. It closes admission, cancels idle connections and
+shortens active exchanges to that deadline. A promoted stream finishes
+its current output and closes. An upgraded protocol can read the deadline
+from its socket. At the deadline any remaining socket task is cancelled.
+
 Build `routes` with [router](router.md). A raw handler receives an anchored
 `Request`, a scratch `Region`, a mutable `Responder` and a read-only
 view of shared state. The region's allocations

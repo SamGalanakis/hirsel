@@ -17,3 +17,5 @@ protocol socket and decoded argument. `read` consumes already buffered
 tail bytes first. `write` reports the number of bytes accepted by the socket.
 Call `established(mut socket)` when protocol setup completes to release the
 first-phase slot. The admitted socket slot stays in use until its task ends.
+When the server stops, `stop_deadline(socket)` exposes the original deadline.
+Socket reads and writes issued after stop use the earlier deadline.

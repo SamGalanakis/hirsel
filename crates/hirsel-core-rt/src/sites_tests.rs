@@ -5,31 +5,51 @@ use crate::{
     abi_sites::*,
     causes::{self, Cause, Causes},
     entry::*,
-    process::{Config, Entry, MainResult, View},
+    process::{Config, Entry, MainResult},
     tasks::*,
 };
 use std::{io::Read, os::fd::AsRawFd, os::unix::net::UnixStream, ptr};
 
-fn view(bytes: &[u8]) -> View {
-    View {
-        data: bytes.as_ptr(),
-        len: bytes.len(),
-    }
-}
 const PRIMARY: u64 = (2 << 32) | 3;
 const CLEANUP: u64 = 1 << 32;
-fn files() -> [SourceFile; 2] {
-    [
-        SourceFile {
-            path: view(b"lib/final.hirsel"),
-            source: view(b"\nfinalize"),
-        },
-        SourceFile {
-            path: view("app/é.hirsel".as_bytes()),
-            source: view("// heading\r\nfn é🙂\tfail".as_bytes()),
-        },
-    ]
+
+#[repr(C)]
+struct Files {
+    rows: [SourceFile; 2],
+    text: [u8; 128],
 }
+
+impl Files {
+    fn new(main: &str) -> Self {
+        let mut text = [0; 128];
+        let mut cursor = 0;
+        let mut view = |bytes: &str| {
+            let range = SourceView {
+                offset: std::mem::offset_of!(Files, text) + cursor,
+                len: bytes.len(),
+            };
+            text[cursor..cursor + bytes.len()].copy_from_slice(bytes.as_bytes());
+            cursor += bytes.len();
+            range
+        };
+        let rows = [
+            SourceFile {
+                path: view("lib/final.hirsel"),
+                source: view("\nfinalize"),
+            },
+            SourceFile {
+                path: view("app/é.hirsel"),
+                source: view(main),
+            },
+        ];
+        Self { rows, text }
+    }
+}
+
+fn files() -> Files {
+    Files::new("// heading\r\nfn é🙂\tfail")
+}
+
 fn items() -> [SourceItem; 2] {
     [
         SourceItem {
@@ -42,10 +62,10 @@ fn items() -> [SourceItem; 2] {
         },
     ]
 }
-fn table(files: &[SourceFile], items: &[SourceItem]) -> SourceTable {
+fn table(files: &Files, items: &[SourceItem]) -> SourceTable {
     SourceTable {
-        files: files.as_ptr(),
-        files_len: files.len(),
+        files: ptr::from_ref(files).cast(),
+        files_len: files.rows.len(),
         items: items.as_ptr(),
         items_len: items.len(),
     }
@@ -123,16 +143,7 @@ fn report_uses_scalar_columns_tab_one_origin_one_and_current_item_position() {
     );
     // Same word/body, current source moved above the item and multibyte/tab before
     // the raising operation. Coordinates must follow these newly borrowed bytes.
-    let moved = [
-        SourceFile {
-            path: view(b"lib/final.hirsel"),
-            source: view(b"\nfinalize"),
-        },
-        SourceFile {
-            path: view("app/é.hirsel".as_bytes()),
-            source: view("\n\n// heading\r\nfn é🙂\tfail".as_bytes()),
-        },
-    ];
+    let moved = Files::new("\n\n// heading\r\nfn é🙂\tfail");
     let moved_items = [
         SourceItem {
             file: 0,
@@ -166,7 +177,12 @@ fn no_source_or_none_site_keeps_numeric_fallback() {
         run(ptr::null(), primary, false),
         (101, format!("Fail(\"bad\") at {PRIMARY}\n"))
     );
-    let empty = table(&[], &[]);
+    let empty = SourceTable {
+        files: ptr::null(),
+        files_len: 0,
+        items: ptr::null(),
+        items_len: 0,
+    };
     assert_eq!(run(&empty, no_site, true), (101, "Bounds at 0\n".into()));
     assert_eq!(
         run(ptr::null(), no_site, false),
@@ -257,30 +273,32 @@ unsafe extern "C" fn success(_: *mut Context, _: *const Config, out: *mut MainRe
 }
 #[test]
 fn successful_run_never_reads_borrowed_source_storage() {
-    // SAFETY: one owned inaccessible page stands in for cold source storage.
-    // The valid descriptors stay readable; only an eager source read would fault.
+    // SAFETY: a live mapping holds the file directory and the ranges it
+    // names. Only an eager read of that protected storage would fault.
     unsafe {
         let bytes = libc::mmap(
             ptr::null_mut(),
             4096,
-            libc::PROT_NONE,
+            libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
             -1,
             0,
         );
         assert_ne!(bytes, libc::MAP_FAILED);
-        let f = [SourceFile {
-            path: view(b"never-read.hirsel"),
-            source: View {
-                data: bytes.cast(),
-                len: 4096,
-            },
-        }];
-        let i = [SourceItem {
+        let files = bytes.cast::<Files>();
+        files.write(self::files());
+        assert_eq!(libc::mprotect(bytes, 4096, libc::PROT_NONE), 0);
+        let items = [SourceItem {
             file: 0,
             file_offset: 0,
         }];
-        assert_eq!(run(&table(&f, &i), success, false), (0, String::new()));
+        let sources = SourceTable {
+            files: files.cast(),
+            files_len: 2,
+            items: items.as_ptr(),
+            items_len: items.len(),
+        };
+        assert_eq!(run(&sources, success, false), (0, String::new()));
         assert_eq!(run(ptr::null(), success, true), (0, String::new()));
         assert_eq!(libc::munmap(bytes, 4096), 0);
     }

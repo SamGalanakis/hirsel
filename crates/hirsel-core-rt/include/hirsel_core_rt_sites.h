@@ -5,10 +5,12 @@
    ((linked_item_ordinal + 1) << 32) | item_relative_byte_offset; 0 is none.
    Driver binds current source and relocates item IDs; runtime never re-sites a
    propagated/joined cause. Callers may supply UTF-8 source. Generated bindings
-   carry compact positions. The paths, source views and arrays borrow immutably
-   through reporting. The process does not free them. No startup parse/index,
+   carry compact positions. Each view is a byte range relative to the start of
+   the files allocation. The file directory and the views it names occupy that
+   one allocation. All storage is borrowed immutably through reporting. No startup parse/index,
    source copy or successful-run read. Empty table32B on both64-bit targets. */
-typedef struct { HirselCoreView path, source; } HirselCoreSourceFile;
+typedef struct { size_t offset, len; } HirselCoreSourceView;
+typedef struct { HirselCoreSourceView path, source; } HirselCoreSourceFile;
 typedef struct { uint32_t file, file_offset; } HirselCoreSourceItem;
 typedef struct {
     const HirselCoreSourceFile *files; size_t files_len;

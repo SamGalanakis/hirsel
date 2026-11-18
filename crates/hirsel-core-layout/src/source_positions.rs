@@ -3,7 +3,7 @@
 //! and zero for a UTF-8 continuation byte. Markers denote the byte after the
 //! event, so an offset landing on a newline is still on its original line.
 pub const TAG: u8 = 0xff;
-pub const SYMBOL: &str = "hirsel_core_source_positions_v1";
+pub const TABLE_SYMBOL: &str = "hirsel_core_relative_source_table_v1";
 
 pub fn encode(text: &str) -> Vec<u8> {
     let mut output = vec![TAG];

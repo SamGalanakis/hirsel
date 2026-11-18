@@ -99,31 +99,21 @@ pub(super) fn write(
         rules.extend(row);
     }
     let net_rules = bytes(object, None, rules, 8)?;
-    let mut files = Vec::new();
-    let mut pointers = Vec::new();
-    for file in &sources.files {
-        for content in [
-            file.path.as_bytes().to_vec(),
-            source_positions::encode(&file.text),
-        ] {
-            let len = content.len() as u64;
-            let data = bytes(object, None, content, 1)?;
-            pointers.push((files.len() as u32, data));
-            files.extend_from_slice(&0u64.to_le_bytes());
-            files.extend_from_slice(&len.to_le_bytes());
-        }
-    }
-    let files = define(object, None, files, 8, &pointers)?;
+    let files = bytes(object, None, source_files(sources), 8)?;
     let mut items = Vec::new();
     for item in sources.items.values() {
         items.extend_from_slice(&item.file.to_le_bytes());
         items.extend_from_slice(&item.file_offset.to_le_bytes());
     }
     let items = bytes(object, None, items, 4)?;
-    // Keep a link dependency on the decoder when the caller supplied a
-    // runtime archive. Old archives can read raw source but cannot read this.
+    // The versioned symbol binds the source layout to the supplied runtime.
     let decoder = object
-        .declare_data(source_positions::SYMBOL, Linkage::Import, false, false)
+        .declare_data(
+            source_positions::TABLE_SYMBOL,
+            Linkage::Import,
+            false,
+            false,
+        )
         .map_err(error)?;
     let mut table = vec![0; 40];
     table[8..16].copy_from_slice(&(sources.files.len() as u64).to_le_bytes());
@@ -155,4 +145,21 @@ pub(super) fn write(
         net_rules,
         sources,
     })
+}
+
+fn source_files(sources: &hirsel_core_ir::source::SourceMap) -> Vec<u8> {
+    let mut files = vec![0; 32 * sources.files.len()];
+    for (row, file) in sources.files.iter().enumerate() {
+        for (view, content) in [file.path.as_bytes(), &source_positions::encode(&file.text)]
+            .into_iter()
+            .enumerate()
+        {
+            let field = 32 * row + 16 * view;
+            let offset = files.len() as u64;
+            files[field..field + 8].copy_from_slice(&offset.to_le_bytes());
+            files[field + 8..field + 16].copy_from_slice(&(content.len() as u64).to_le_bytes());
+            files.extend_from_slice(content);
+        }
+    }
+    files
 }

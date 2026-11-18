@@ -614,8 +614,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                       ' "$@" -Wl,--wrap=hirsel_core_os_run_with_sources\n')
                     linker.chmod(0o755)
                 if case.first_write is not None:
+                    wrapped = 'hirsel_core_host_op' if case.host_op else 'hirsel_core_host_io'
                     scripts.append(('std_host.c', [f'-DFIRST={case.first_write}', f'-DFIRST_OP={case.host_op}'],
-                                    'hirsel_core_host_op'))
+                                    wrapped))
                 if case.schedule:
                     seeds, most = case.schedule
                     if schedule_runtime is not None:

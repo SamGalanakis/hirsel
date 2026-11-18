@@ -25,6 +25,7 @@
 #include <llvm/Analysis/ScalarEvolutionExpressions.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/InlineAsm.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/Passes/PassBuilder.h>
@@ -898,4 +899,51 @@ extern "C" void hirsel_llvm_share_cold_step_sync(void *Raw, void *Machine) {
               [&](PassBuilder &, FunctionAnalysisManager &FAM) {
                 shareColdStepSites(M, FAM);
               });
+}
+
+// The signed Step decrement cannot overflow. On x86 its flags give the same
+// slow edge as a separate compare with zero. Lower after the IR optimizers so
+// they can still propagate the ordinary arithmetic and conditional branch.
+extern "C" void hirsel_llvm_reuse_step_flags(void *Raw) {
+  auto &M = *static_cast<Module *>(Raw);
+  if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return;
+  auto *Refill = M.getFunction("hirsel_core_step_out");
+  if (!Refill) return;
+  auto *Word = Type::getInt64Ty(M.getContext());
+  auto *Asm = InlineAsm::get(FunctionType::get(Word, {Word}, false),
+      "decq $0; jle ${2:l}", "=r,0,!i,~{cc}", false);
+  for (Function &F : M) for (BasicBlock &BB : F) {
+    auto *Branch = dyn_cast<CondBrInst>(BB.getTerminator());
+    auto *Cmp = Branch ? dyn_cast<ICmpInst>(Branch->getCondition()) : nullptr;
+    if (!Cmp || !Cmp->hasOneUse()) continue;
+    auto *After = dyn_cast<BinaryOperator>(Cmp->getOperand(0));
+    auto *Limit = dyn_cast<ConstantInt>(Cmp->getOperand(1));
+    if (!After || After->getParent() != &BB || After->getType() != Word ||
+        !After->hasNoSignedWrap() || !Limit) continue;
+    unsigned SlowEdge;
+    if (Cmp->getPredicate() == ICmpInst::ICMP_SGT && Limit->isZero()) SlowEdge = 1;
+    else if (Cmp->getPredicate() == ICmpInst::ICMP_SLT && Limit->isOne()) SlowEdge = 0;
+    else continue;
+    auto *Delta = dyn_cast<ConstantInt>(After->getOperand(1));
+    if (!Delta || !((After->getOpcode() == Instruction::Add && Delta->isMinusOne()) ||
+                    (After->getOpcode() == Instruction::Sub && Delta->isOne()))) continue;
+    auto *Slow = Branch->getSuccessor(SlowEdge);
+    auto *Ready = Branch->getSuccessor(1 - SlowEdge);
+    if (Slow == Ready || !(
+        Slow->getName().starts_with("step_out") || llvm::any_of(*Slow, [Refill](Instruction &I) {
+          auto *Call = dyn_cast<CallInst>(&I);
+          return Call && Call->getCalledFunction() == Refill;
+        }))) continue;
+    if (llvm::any_of(After->users(), [&](User *U) {
+          auto *I = cast<Instruction>(U);
+          return I != Cmp && I->getParent() == &BB && !isa<PHINode>(I);
+        })) continue;
+    auto *Combined = CallBrInst::Create(Asm->getFunctionType(), Asm, Ready, {Slow},
+                                       {After->getOperand(0)}, "", Branch->getIterator());
+    Combined->setDebugLoc(Branch->getDebugLoc());
+    Branch->eraseFromParent();
+    Cmp->eraseFromParent();
+    After->replaceAllUsesWith(Combined);
+    After->eraseFromParent();
+  }
 }

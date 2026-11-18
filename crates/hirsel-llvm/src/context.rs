@@ -265,6 +265,7 @@ impl<'context> Module<'context> {
                         machine: LLVMTargetMachineRef,
                     );
                     fn hirsel_llvm_share_cold_sites(module: LLVMModuleRef);
+                    fn hirsel_llvm_reuse_step_flags(module: LLVMModuleRef);
                     fn hirsel_llvm_share_cold_step_sync(
                         module: LLVMModuleRef,
                         machine: LLVMTargetMachineRef,
@@ -275,6 +276,7 @@ impl<'context> Module<'context> {
                     );
                 }
                 hirsel_llvm_finish_reads(self.raw, machine.raw);
+                hirsel_llvm_reuse_step_flags(self.raw);
                 hirsel_llvm_share_cold_sites(self.raw);
                 hirsel_llvm_cold_failure_edges(self.raw, self.context.raw);
                 hirsel_llvm_share_cold_step_sync(self.raw, machine.raw);

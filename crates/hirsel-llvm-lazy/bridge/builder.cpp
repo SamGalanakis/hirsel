@@ -209,8 +209,10 @@ static LLVMValueRef alloca_value(HirselLlvmBuilder *u, LLVMTypeRef type, unsigne
     return wrap(a);
 }
 static LLVMValueRef binary(HirselLlvmBuilder *u, unsigned op, LLVMValueRef left, LLVMValueRef right) {
-    const Instruction::BinaryOps ops[] = {Instruction::Add, Instruction::Sub, Instruction::Mul, Instruction::UDiv, Instruction::SDiv, Instruction::URem, Instruction::SRem, Instruction::And, Instruction::Or, Instruction::Xor, Instruction::Shl, Instruction::LShr, Instruction::AShr, Instruction::FAdd, Instruction::FSub, Instruction::FMul, Instruction::FDiv, Instruction::FRem};
-    return wrap(u->builder.Insert(BinaryOperator::Create(ops[op], unwrap(left), unwrap(right))));
+    const Instruction::BinaryOps ops[] = {Instruction::Add, Instruction::Sub, Instruction::Mul, Instruction::UDiv, Instruction::SDiv, Instruction::URem, Instruction::SRem, Instruction::And, Instruction::Or, Instruction::Xor, Instruction::Shl, Instruction::LShr, Instruction::AShr, Instruction::FAdd, Instruction::FSub, Instruction::FMul, Instruction::FDiv, Instruction::Sub};
+    auto *result = BinaryOperator::Create(ops[op], unwrap(left), unwrap(right));
+    if (op == 17) result->setHasNoSignedWrap();
+    return wrap(u->builder.Insert(result));
 }
 static LLVMValueRef cast_value(HirselLlvmBuilder *u, unsigned op, LLVMValueRef value, LLVMTypeRef type) {
     const Instruction::CastOps ops[] = {Instruction::Trunc, Instruction::ZExt, Instruction::SExt, Instruction::FPToUI, Instruction::FPToSI, Instruction::UIToFP, Instruction::SIToFP, Instruction::FPTrunc, Instruction::FPExt, Instruction::PtrToInt, Instruction::IntToPtr, Instruction::BitCast};

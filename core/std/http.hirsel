@@ -25,7 +25,7 @@ pub opaque type Response: send {
     invalid: bool
 }
 
-pub type ResponseError: send = StatusInvalid | HeaderReserved | HeaderInvalid | HeadTooLarge | Allocation(Capacity)
+pub type ResponseError: send = StatusInvalid | HeaderReserved | HeaderInvalid | HeadTooLarge | InvalidUpgrade | Allocation(Capacity)
 
 pub type HandlerError = ResponseError
 
@@ -439,7 +439,18 @@ type RequestHead {
     path: http1.Span,
     query: http1.Span,
     expect_continue: bool,
+    upgrade_requested: bool,
     close: bool
+}
+
+fn connection_upgrade(b: Bytes, h: http1.Head) -> bool {
+    for i in 0u64 .. h.count {
+        let f = h.fields[i]
+        if http1.equal_ascii(part(b, f.name), string.as_bytes("connection")) && http1.contains(part(b, f.value), string.as_bytes("upgrade")) {
+            return true
+        }
+    }
+    false
 }
 
 fn request_policy(b: Bytes, h: http1.Head) -> Result[RequestHead, u16] {
@@ -448,6 +459,7 @@ fn request_policy(b: Bytes, h: http1.Head) -> Result[RequestHead, u16] {
     let mut expect = false
     let mut close = false
     let mut keep_alive = false
+    let mut upgrade_field = false
     for i in 0u64 .. h.count {
         let f = h.fields[i]
         let name = part(b, f.name)
@@ -465,6 +477,8 @@ fn request_policy(b: Bytes, h: http1.Head) -> Result[RequestHead, u16] {
         } else if http1.equal_ascii(name, string.as_bytes("connection")) {
             close = close || http1.contains(value, string.as_bytes("close"))
             keep_alive = keep_alive || http1.contains(value, string.as_bytes("keep-alive"))
+        } else if http1.equal_ascii(name, string.as_bytes("upgrade")) {
+            upgrade_field = true
         }
     }
     if h.version == 1 && host == None {
@@ -519,7 +533,7 @@ fn request_policy(b: Bytes, h: http1.Head) -> Result[RequestHead, u16] {
     } else {
         path_end + 1
     }
-    Ok(RequestHead(authority: host, path: http1.Span(start: start, end: path_end), query: http1.Span(start: query_at, end: end), expect_continue: expect, close: close || h.version == 0 && !keep_alive))
+    Ok(RequestHead(authority: host, path: http1.Span(start: start, end: path_end), query: http1.Span(start: query_at, end: end), expect_continue: expect, upgrade_requested: h.version == 1 && upgrade_field && connection_upgrade(b, h), close: close || h.version == 0 && !keep_alive))
 }
 
 type TargetError: key = BadTarget | TargetCapacity
@@ -632,7 +646,8 @@ pub opaque scoped type Request {
     segments: List[String],
     route: View[router.Pattern],
     inline_body: Option[View[Bytes]],
-    deadline: u64
+    deadline: u64,
+    state_max: u64
 }
 
 pub fn method(r: Request) -> View[Bytes] in r {
@@ -691,6 +706,37 @@ pub fn handler_deadline(r: Request) -> u64 {
 
 pub fn inline_body(r: Request) -> Option[View[Bytes]] in r {
     r.inline_body
+}
+
+fn upgrade_protocol(protocol: Bytes) -> bool {
+    let n = list.len(protocol)
+    if n == 0 {
+        return false
+    }
+    let mut version = false
+    for i in 0u64 .. n {
+        let c = protocol[i]
+        if c == b'/' && !version && i != 0 && i + 1 != n {
+            version = true
+        } else if !http1.token(c) {
+            return false
+        }
+    }
+    true
+}
+
+pub fn upgrade_offer(r: Request, protocol: String) -> Result[u64, HandlerError] {
+    let offered = string.as_bytes(protocol)
+    if !r.meta.upgrade_requested || !upgrade_protocol(offered) {
+        return Error(InvalidUpgrade)
+    }
+    for i in 0u64 .. r.head.count {
+        let f = r.head.fields[i]
+        if http1.equal_ascii(part(r.input, f.name), string.as_bytes("upgrade")) && http1.contains(part(r.input, f.value), offered) {
+            return Ok(r.state_max)
+        }
+    }
+    Error(InvalidUpgrade)
 }
 
 /// Copies a borrowed field or body into the current handler's allowance.
@@ -814,6 +860,14 @@ fn refusal_head(status: u16) -> String {
 
 fn reply_error(mut w: WriteHalf, status: u16, c: Clock, deadline: u64) -> Result[(), NetError] waits {
     write_unit(mut w, string.as_bytes(refusal_head(status)), string.as_bytes("Connection: close\r\nContent-Length: 0\r\n\r\n"), c, deadline)
+}
+
+pub fn write_promotion_unit(mut w: WriteHalf, head: Bytes, c: Clock, at: u64, ms: u64) -> Result[(), NetError] waits {
+    write_unit(mut w, head, string.as_bytes(""), c, after_ms(at, ms))
+}
+
+pub fn write_promotion_refusal(mut w: WriteHalf, c: Clock, at: u64, ms: u64) -> Result[(), NetError] waits {
+    reply_error(mut w, 503, c, after_ms(at, ms))
 }
 
 pub opaque scoped type Body {
@@ -999,9 +1053,17 @@ fn drain(mut b: Body, remaining: u64, deadline: u64) -> bool waits {
     }
 }
 
-pub type Outcome: send = Reply(Response)
+pub type Outcome: send = Reply(Response) | Upgrade(upgrade.Spec)
 
-type Step = Keep(u64, u64) | RepliedAndClose | CloseConnection
+type UpgradeOffer: send {
+    head: Bytes,
+    argument: Bytes,
+    bytes_reserved: u64,
+    run: fn(take upgrade.Taken) waits,
+    pre_head: u64
+}
+
+type Step = Keep(u64, u64) | RepliedAndClose | CloseConnection | MoveUpgrade(UpgradeOffer)
 
 fn discard(take bytes_to_drop: Bytes) {}
 
@@ -1052,7 +1114,7 @@ fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress
     FinalReply(write_succeeded(write_unit(mut b.writer, out, r.body, b.clock, write_end)))
 }
 
-fn route_response[S: shareable + send](routes: router.Router[S], decoded: List[String], options_star: bool) -> Result[Outcome, HandlerError] {
+fn route_response[S: shareable + send](routes: router.Router[S], decoded: List[String], options_star: bool) -> Result[Response, HandlerError] {
     let methods = match router.allow(routes, decoded, options_star) {
         Ok(take methods) => take methods,
         Error(e) => return Error(Allocation(e)),
@@ -1076,7 +1138,41 @@ fn route_response[S: shareable + send](routes: router.Router[S], decoded: List[S
         }
         header(mut reply, take name, take allow)?
     }
-    Ok(Reply(take reply))
+    Ok(take reply)
+}
+
+fn encode_upgrade(mut out: Bytes, req: Request, take spec: upgrade.Spec, max_bytes: Option[u64], c: Clock, mut cache: DateCache) -> Result[UpgradeOffer, HandlerError] {
+    let limit = upgrade_offer(req, spec.protocol)?
+    let Some(authorized) = max_bytes else {
+        return Error(InvalidUpgrade)
+    }
+    if list.capacity(spec.argument) > limit || spec.reservation > authorized {
+        return Error(InvalidUpgrade)
+    }
+    list.clear(mut out)
+    head_text(mut out, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: ")?
+    head_text(mut out, spec.protocol)?
+    head_text(mut out, "\r\n")?
+    for (name, value) in spec.fields {
+        if reserved_field(name) || http1.equal_ascii(name, string.as_bytes("upgrade")) {
+            return Error(HeaderReserved)
+        }
+        if !valid_field(name, value) {
+            return Error(HeaderInvalid)
+        }
+        append_head(mut out, name)?
+        head_text(mut out, ": ")?
+        append_head(mut out, value)?
+        head_text(mut out, "\r\n")?
+    }
+    append_date(mut out, host.wall_ms(c), mut cache)?
+    head_text(mut out, "\r\n")?
+    let head = match copy_bytes(out) {
+        Ok(take head) => take head,
+        Error(e) => return Error(Allocation(e)),
+    }
+    let upgrade.Spec(protocol: _, fields: _, argument: take argument, reservation: reserve, run: run) = take spec
+    Ok(UpgradeOffer(head: take head, argument: take argument, bytes_reserved: reserve, run: run, pre_head: req.deadline))
 }
 
 fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, frame: Framing, mut b: Body, mut out: Bytes, cfg: Config, routes: router.Router[S], state: S, mut cache: DateCache) -> Step waits {
@@ -1121,71 +1217,152 @@ fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, f
                 b.decoder.state = Finished
                 b.decoder.remaining = 0
             }
-            let req = Request(input: view input, head: view h, meta: meta, segments: take normalized, route: view entry.pattern, inline_body: inline, deadline: b.handler_deadline)
+            let req = Request(input: view input, head: view h, meta: meta, segments: take normalized, route: view entry.pattern, inline_body: inline, deadline: b.handler_deadline, state_max: cfg.state_max)
             let handler = entry.route.handler
-            region scratch {
+            let handled = region scratch {
                 handler(req, scratch, mut b, state)
             }
-        } else {
-            route_response(routes, normalized, options_star)
-        }
-        let returned = host.mono_ns(b.clock)
-        if b.output_failed {
-            return CloseConnection
-        }
-        if let Some(e) = b.fault {
-            if e.status == 408 || e.status == 503 {
-                return error_step(mut b.writer, e.status, b.clock, after_ms(returned, cfg.write_ms))
+            match take handled {
+                Ok(Upgrade(take spec)) => {
+                    let returned = host.mono_ns(b.clock)
+                    if b.output_failed {
+                        return CloseConnection
+                    }
+                    if returned >= b.handler_deadline {
+                        return error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms))
+                    }
+                    match encode_upgrade(mut out, req, take spec, entry.route.upgrade_bytes, b.clock, mut cache) {
+                        Ok(take offer) => MoveUpgrade(take offer),
+                        Error(Allocation(_)) => error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms)),
+                        Error(_) => error_step(mut b.writer, 500, b.clock, after_ms(returned, cfg.write_ms)),
+                    }
+                },
+                Ok(Reply(take reply)) => return handle_reply(mut b, mut out, Ok(take reply), h.version, verb == string.as_bytes("HEAD"), meta.close, cfg, mut cache),
+                Error(e) => return handle_reply(mut b, mut out, Error(e), h.version, verb == string.as_bytes("HEAD"), meta.close, cfg, mut cache),
             }
+        } else {
+            return handle_reply(mut b, mut out, route_response(routes, normalized, options_star), h.version, verb == string.as_bytes("HEAD"), meta.close, cfg, mut cache)
         }
-        if returned >= b.handler_deadline {
-            return error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms))
-        }
-        // Stream and upgrade outcomes take the halves here, before any
-        // response is committed. The caller owns ordinary close and drain.
-        let reply = match take result {
-            Ok(Reply(take r)) => take r,
-            Error(e) => {
-                let status: u16 = match e {
-                    Allocation(_) => 503,
-                    _ => 500
-                }
-                return error_step(mut b.writer, status, b.clock, after_ms(returned, cfg.write_ms))
-            },
-        }
-        let abandon_expect = b.expect_continue && b.decoder.state != Finished
-        let close = meta.close || reply.close || b.fault != None || abandon_expect
-        let suppress = verb == string.as_bytes("HEAD")
-        match send_response(mut b, mut out, reply, h.version, suppress, close, cfg, mut cache) {
-            FinalReply(true) => if close {
-                RepliedAndClose
-            } else {
-                Keep(host.mono_ns(b.clock), order.min(b.body_deadline, after_ms(returned, cfg.drain_ms)))
-            },
-            ClosingReply(true) => RepliedAndClose,
-            _ => CloseConnection,
-        }
+        result
     }
-    match outcome {
-        Ok(step) => step,
-        Error(_) => {
-            error_step(mut b.writer, 503, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))
-        },
+    match take outcome {
+        Ok(take step) => take step,
+        Error(_) => error_step(mut b.writer, 503, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms)),
     }
 }
 
-type ConnectionSignal: send = FirstResponse(u64) | Source(u64, Ip, Sender[bool]) | EndNotice | Refused(u64) | Accepted(Socket, Ip, u64) | ListenerFailed(NetError)
+fn handle_reply(mut b: Body, mut out: Bytes, take result: Result[Response, HandlerError], version: u8, suppress: bool, request_close: bool, cfg: Config, mut cache: DateCache) -> Step waits {
+    let returned = host.mono_ns(b.clock)
+    if b.output_failed {
+        return CloseConnection
+    }
+    if let Some(e) = b.fault {
+        if e.status == 408 || e.status == 503 {
+            return error_step(mut b.writer, e.status, b.clock, after_ms(returned, cfg.write_ms))
+        }
+    }
+    if returned >= b.handler_deadline {
+        return error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms))
+    }
+    // Stream and upgrade outcomes take the halves here, before any
+    // response is committed. The caller owns ordinary close and drain.
+    let reply = match take result {
+        Ok(take r) => take r,
+        Error(e) => {
+            let status: u16 = match e {
+                Allocation(_) => 503,
+                _ => 500
+            }
+            return error_step(mut b.writer, status, b.clock, after_ms(returned, cfg.write_ms))
+        },
+    }
+    let abandon_expect = b.expect_continue && b.decoder.state != Finished
+    let close = request_close || reply.close || b.fault != None || abandon_expect
+    match send_response(mut b, mut out, reply, version, suppress, close, cfg, mut cache) {
+        FinalReply(true) => if close {
+            RepliedAndClose
+        } else {
+            Keep(host.mono_ns(b.clock), order.min(b.body_deadline, after_ms(returned, cfg.drain_ms)))
+        },
+        ClosingReply(true) => RepliedAndClose,
+        _ => CloseConnection,
+    }
+}
+
+type ConnectionSignal: send = FirstResponse(u64) | Source(u64, Ip, Sender[bool]) | EndNotice | Refused(u64) | Accepted(Socket, Ip, u64) | ListenerFailed(NetError) | PromoteUpgrade(UpgradeRequest) | Established(u64, u64)
+
+type ChildSlot: send = HttpChild(u64) | UpgradeChild(u64)
+
+pub opaque type EstablishedNotice: send {
+    inbox: Sender[ConnectionSignal],
+    slot: u64,
+    generation: u64,
+    marked: bool
+}
+
+pub fn upgrade_established(mut notice: EstablishedNotice) -> bool waits {
+    if !notice.marked {
+        if let Error(_) = channel.send(notice.inbox, Established(notice.slot, notice.generation)) {
+            return false
+        }
+        notice.marked = true
+    }
+    true
+}
+
+type UpgradeRequest: send {
+    source_slot: u64,
+    transfer: upgrade.Transfer,
+    reserve: u64,
+    run: fn(take upgrade.Taken) waits,
+    reply: Sender[Option[upgrade.Transfer]]
+}
+
+type UpgradeJob: send {
+    transfer: upgrade.Transfer,
+    run: fn(take upgrade.Taken) waits,
+    notice: EstablishedNotice,
+    completion: Completion
+}
 
 resource type Completion: send {
-    done: Sender[u64],
+    done: Sender[ChildSlot],
     wake: Sender[ConnectionSignal],
-    slot: u64,
+    slot: ChildSlot,
     armed: bool
 } drop(completion) {
     if completion.armed {
         let _ = channel.try_send(completion.done, completion.slot)
         // If the inbox is full, its queued event will wake the supervisor.
         let _ = channel.try_send(completion.wake, EndNotice)
+    }
+}
+
+fn upgraded(take job: UpgradeJob) waits {
+    let UpgradeJob(transfer: take transfer, run: run, notice: take notice, completion: take done) = take job
+    let mut completion = take done
+    completion.armed = true
+    run(upgrade.hand_over(take transfer, take notice))
+}
+
+fn decline_upgrade(take transfer: upgrade.Transfer, cfg: Config) waits {
+    let upgrade.Transfer(reader: take reader, writer: take write_half, input: _, tail_at: _, head: _, argument: _, clock: clock, pre_head: _, write_ms: ms) = take transfer
+    let mut writer = take write_half
+    let _ = write_promotion_refusal(mut writer, clock, host.mono_ns(clock), ms)
+    let _ = net.finish(take writer, take reader, clock, after_ms(host.mono_ns(clock), cfg.linger_ms))
+}
+
+fn send_promotion(inbox: Sender[ConnectionSignal], slot: u64, take transfer: upgrade.Transfer, reserve: u64, run: fn(take upgrade.Taken) waits, cfg: Config) waits {
+    let made: Result[(Sender[Option[upgrade.Transfer]], Receiver[Option[upgrade.Transfer]]), Capacity] = channel.new(1)
+    let (tx, rx) = match take made {
+        Ok(take channels) => take channels,
+        Error(_) => return decline_upgrade(take transfer, cfg),
+    }
+    let request = UpgradeRequest(source_slot: slot, transfer: take transfer, reserve: reserve, run: run, reply: take tx)
+    if let Ok(()) = channel.send(inbox, PromoteUpgrade(take request)) {
+        if let Ok(Some(take denied)) = channel.receive(rx) {
+            decline_upgrade(take denied, cfg)
+        }
     }
 }
 
@@ -1278,15 +1455,6 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
                 break
             }
         }
-        let frame = match framing(input, head, cfg.body_max) {
-            Ok(f) => f,
-            Error(e) => {
-                if write_succeeded(reply_error(mut writer, e.status, c, after_ms(host.mono_ns(c), cfg.write_ms))) && first {
-                    let _ = channel.send(inbox, FirstResponse(slot))
-                }
-                break
-            },
-        }
         let policy = match request_policy(input, head) {
             Ok(p) => p,
             Error(status) => {
@@ -1296,33 +1464,60 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
                 break
             },
         }
+        let framed = framing(input, head, cfg.body_max)
+        let wire: Result[Framing, BodyError] = if policy.upgrade_requested {
+            match framed {
+                Ok(Empty) => Ok(Empty),
+                Ok(ContentLength(0)) => Ok(Empty),
+                _ => Error(failure(400)),
+            }
+        } else {
+            framed
+        }
+        let frame = match wire {
+            Ok(f) => f,
+            Error(e) => {
+                if write_succeeded(reply_error(mut writer, e.status, c, after_ms(host.mono_ns(c), cfg.write_ms))) && first {
+                    let _ = channel.send(inbox, FirstResponse(slot))
+                }
+                break
+            },
+        }
         list.clear(mut scratch)
-        let (reuse, input_at, scratch_at) = {
+        let (reuse, input_at, scratch_at, offer) = {
             let mut body = Body(input: view input, input_at: head.end, reader: take reader, writer: take writer, scratch: take scratch, scratch_at: 0, decoder: decoder(frame, head, cfg.body_max), head_max: cfg.head_max, fields_max: cfg.fields_max, clock: c, body_deadline: after_ms(completed, cfg.body_ms), handler_deadline: after_ms(completed, cfg.handler_ms), write_ms: cfg.write_ms, pipeline_max: cfg.pipeline_max, expect_continue: policy.expect_continue, fault: None, output_failed: false)
             let step = handle(input, head, policy, frame, mut body, mut out, cfg, routes, state, mut date)
-            let reuse = match step {
+            let (reuse, offer): (bool, Option[UpgradeOffer]) = match take step {
                 Keep(at, end) => {
                     completed_replies += 1
                     start = at
                     if first {
                         let _ = channel.send(inbox, FirstResponse(slot))
                     }
-                    drain(mut body, cfg.drain_max, end)
+                    (drain(mut body, cfg.drain_max, end), None)
                 },
                 RepliedAndClose => {
                     completed_replies += 1
                     if first {
                         let _ = channel.send(inbox, FirstResponse(slot))
                     }
-                    false
+                    (false, None)
                 },
-                CloseConnection => false,
+                CloseConnection => (false, None),
+                MoveUpgrade(take offer) => (false, Some(take offer)),
             }
             let Body(reader: take next_reader, writer: take next_writer, scratch: take s, input_at: input_at, scratch_at: scratch_at, input: _, decoder: _, head_max: _, fields_max: _, clock: _, body_deadline: _, handler_deadline: _, write_ms: _, pipeline_max: _, expect_continue: _, fault: _, output_failed: _) = take body
             reader = take next_reader
             writer = take next_writer
             scratch = take s
-            (reuse, input_at, scratch_at)
+            (reuse, input_at, scratch_at, take offer)
+        }
+        if let Some(take accepted_offer) = take offer {
+            let UpgradeOffer(head: take reply, argument: take argument, bytes_reserved: reserve, run: run, pre_head: deadline) = take accepted_offer
+            discard(take scratch)
+            let transfer = upgrade.Transfer(reader: take reader, writer: take writer, input: take input, tail_at: head.end, head: take reply, argument: take argument, clock: c, pre_head: deadline, write_ms: cfg.write_ms)
+            send_promotion(inbox, slot, take transfer, reserve, run, cfg)
+            return completed_replies
         }
         if !reuse {
             break
@@ -1405,11 +1600,20 @@ type RefusalSlot {
 type HttpSlot {
     child: Task[()],
     first: bool,
+    promoted: bool,
     ip: (u64, u64, u64)
+}
+
+type UpgradedSlot {
+    child: Task[()],
+    first: bool,
+    ip: (u64, u64, u64),
+    generation: u64
 }
 
 resource type ServerTasks {
     connections: List[Option[HttpSlot]],
+    upgraded: List[Option[UpgradedSlot]],
     refusals: List[RefusalSlot],
     acceptors: List[Task[()]]
 } drop(group) {
@@ -1425,6 +1629,14 @@ resource type ServerTasks {
             let mut active = take held
             task.cancel(mut active.child)
             group.connections[i] = Some(take active)
+        }
+    }
+    for i in 0u64 .. list.len(group.upgraded) {
+        let slot = replace(mut group.upgraded[i], None)
+        if let Some(take held) = take slot {
+            let mut active = take held
+            task.cancel(mut active.child)
+            group.upgraded[i] = Some(take active)
         }
     }
 }
@@ -1448,7 +1660,7 @@ fn bytes_for_connection(cfg: Config) -> u64 {
     let write_bytes = (cfg.out_cap + 7) / 8 * 8
     // Head, decoder and cursors are inline. Reserve J and the one-slot
     // hand-over reply alongside the handler's allowance.
-    read_bytes + write_bytes + 8192 + 1024 + 128 + cfg.handler_bytes
+    read_bytes + write_bytes + 8192 + 1024 + 192 + cfg.handler_bytes
 }
 
 fn valid_config(cfg: Config) -> bool {
@@ -1460,7 +1672,7 @@ fn valid_config(cfg: Config) -> bool {
     let input_size = int.saturating_add(cfg.pipeline_max, cfg.body_inline)
     let with_output = int.saturating_add(input_size, cfg.out_cap)
     let total = int.saturating_add(with_output, cfg.handler_bytes)
-    total <= 18446744073709551615 - 32768
+    total <= 18446744073709551615 - 32768 && cfg.state_max <= 18446744073709551608
 }
 
 fn source_key(ip: Ip) -> (u64, u64, u64) {
@@ -1482,6 +1694,53 @@ fn serve_alloc[T](take r: Result[T, Capacity]) -> Result[T, ServeError] {
     }
 }
 
+fn promote_upgrade(mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSignal], done: Sender[ChildSlot], mut generation: u64, take request: UpgradeRequest) {
+    let UpgradeRequest(source_slot: slot, transfer: take transfer, reserve: reserve, run: run, reply: take reply) = take request
+    let end = list.len(group.upgraded)
+    let mut vacant = end
+    for i in 0u64 .. end {
+        if let None = group.upgraded[i] {
+            vacant = i
+            break
+        }
+    }
+    if vacant == end {
+        let _ = channel.try_send(reply, Some(take transfer))
+        return
+    }
+    let completion = match Completion(done: channel.sender(done), wake: channel.sender(tx), slot: UpgradeChild(vacant), armed: false) {
+        Ok(take x) => take x,
+        Error(_) => {
+            let _ = channel.try_send(reply, Some(take transfer))
+            return
+        },
+    }
+    let mark = EstablishedNotice(inbox: channel.sender(tx), slot: vacant, generation: generation, marked: false)
+    let origin = replace(mut group.connections[slot], None)
+    let mut source = match take origin {
+        Some(take present) => take present,
+        None => {
+            let _ = channel.try_send(reply, Some(take transfer))
+            return
+        },
+    }
+    let job = UpgradeJob(transfer: take transfer, run: run, notice: take mark, completion: take completion)
+    match task.spawn(tasks, bytes reserve, take job, upgraded) {
+        Ok(take child) => {
+            group.upgraded[vacant] = Some(UpgradedSlot(child: take child, first: source.first, ip: source.ip, generation: generation))
+            source.first = false
+            source.promoted = true
+            generation = int.wrapping_add(generation, 1)
+            let _ = channel.try_send(reply, None)
+        },
+        Error((_, take refused)) => {
+            let UpgradeJob(transfer: take returned, run: _, notice: _, completion: _) = take refused
+            let _ = channel.try_send(reply, Some(take returned))
+        },
+    }
+    group.connections[slot] = Some(take source)
+}
+
 /// Serves a group of listeners with an immutable router and shared handler state.
 pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], take state: S) -> Result[(), ServeError] waits {
     if !valid_config(cfg) {
@@ -1496,18 +1755,24 @@ pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, task
     let made: Result[(Sender[ConnectionSignal], Receiver[ConnectionSignal]), Capacity] = channel.new(settings.inbox_cap)
     let (tx, rx) = serve_alloc(take made)?
     let http_slots = order.min(settings.http_max, settings.sockets_max)
+    let upgrade_slots = order.min(settings.upgrades_max, settings.sockets_max)
     let reserved: Result[List[Option[HttpSlot]], Capacity] = list.with_capacity(http_slots)
     let mut slots = serve_alloc(take reserved)?
-    let returns: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(order.max(http_slots, 1))
+    let upgrade_reserved: Result[List[Option[UpgradedSlot]], Capacity] = list.with_capacity(upgrade_slots)
+    let mut upgraded_slots = serve_alloc(take upgrade_reserved)?
+    let returns: Result[(Sender[ChildSlot], Receiver[ChildSlot]), Capacity] = channel.new(order.max(int.saturating_add(http_slots, upgrade_slots), 1))
     let (done_tx, done_rx) = serve_alloc(take returns)?
     for _ in 0u64 .. http_slots {
         let _ = list.push(mut slots, None)
+    }
+    for _ in 0u64 .. upgrade_slots {
+        let _ = list.push(mut upgraded_slots, None)
     }
     let refusal_slots: Result[List[RefusalSlot], Capacity] = list.with_capacity(settings.refuse_max)
     let refusals = serve_alloc(take refusal_slots)?
     let acceptor_slots: Result[List[Task[()]], Capacity] = list.with_capacity(list.len(listeners))
     let acceptors = serve_alloc(take acceptor_slots)?
-    let allocated_group = ServerTasks(connections: take slots, refusals: take refusals, acceptors: take acceptors)
+    let allocated_group = ServerTasks(connections: take slots, upgraded: take upgraded_slots, refusals: take refusals, acceptors: take acceptors)
     let mut group = serve_alloc(result.capacity_only(take allocated_group))?
     for i in 0u64 .. settings.refuse_max {
         let allocated: Result[(Sender[RefusalJob], Receiver[RefusalJob]), Capacity] = channel.new(1)
@@ -1532,17 +1797,22 @@ pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, task
     }
     let child_bytes = bytes_for_connection(settings)
     let mut in_first_phase: u64 = 0
+    let mut generation: u64 = 0
     while let Ok(take event) = channel.receive(rx) {
         match take event {
             Accepted(take socket, peer, at) => {
                 let ip = source_key(peer)
                 let mut from_ip: u64 = 0
+                let mut admitted: u64 = 0
                 let mut vacant = http_slots
                 for i in 0u64 .. http_slots {
                     match group.connections[i] {
                         Some(s) => {
-                            if s.ip == ip {
-                                from_ip += 1
+                            if !s.promoted {
+                                admitted += 1
+                                if s.ip == ip {
+                                    from_ip += 1
+                                }
                             }
                         },
                         None => {
@@ -1552,10 +1822,18 @@ pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, task
                         },
                     }
                 }
-                if vacant == http_slots || from_ip >= settings.ip_sockets_max || in_first_phase >= settings.conns_max {
+                for active in group.upgraded {
+                    if let Some(s) = active {
+                        admitted += 1
+                        if s.ip == ip {
+                            from_ip += 1
+                        }
+                    }
+                }
+                if vacant == http_slots || admitted >= settings.sockets_max || from_ip >= settings.ip_sockets_max || in_first_phase >= settings.conns_max {
                     refuse(mut group.refusals, take socket, at)
                 } else {
-                    let completion = match Completion(done: channel.sender(done_tx), wake: channel.sender(tx), slot: vacant, armed: false) {
+                    let completion = match Completion(done: channel.sender(done_tx), wake: channel.sender(tx), slot: HttpChild(vacant), armed: false) {
                         Ok(take x) => take x,
                         Error(_) => {
                             refuse(mut group.refusals, take socket, at)
@@ -1565,7 +1843,7 @@ pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, task
                     let job = ConnectionJob(socket: take socket, c: c, cfg: arc.share(settings), peer: peer, at: at, routes: arc.share(routing), state: arc.share(shared), inbox: channel.sender(tx), slot: vacant, completion: take completion)
                     match task.spawn(tasks, bytes child_bytes, take job, connection) {
                         Ok(take child) => {
-                            group.connections[vacant] = Some(HttpSlot(child: take child, first: true, ip: ip))
+                            group.connections[vacant] = Some(HttpSlot(child: take child, first: true, promoted: false, ip: ip))
                             in_first_phase += 1
                         },
                         Error((_, take refused)) => {
@@ -1580,6 +1858,13 @@ pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, task
                 let mut from_ip: u64 = 0
                 for i in 0u64 .. http_slots {
                     if let Some(s) = group.connections[i] {
+                        if !s.promoted && s.ip == ip {
+                            from_ip += 1
+                        }
+                    }
+                }
+                for active in group.upgraded {
+                    if let Some(s) = active {
                         if s.ip == ip {
                             from_ip += 1
                         }
@@ -1601,11 +1886,27 @@ pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, task
                 match take current {
                     Some(take session) => {
                         let mut s = take session
-                        s.first = false
+                        if s.first {
+                            s.first = false
+                            in_first_phase -= 1
+                        }
                         group.connections[slot] = Some(take s)
-                        in_first_phase -= 1
                     },
                     None => {},
+                }
+            },
+            PromoteUpgrade(take request) => {
+                promote_upgrade(mut group, tasks, tx, done_tx, mut generation, take request)
+            },
+            Established(slot, ticket) => {
+                let current = replace(mut group.upgraded[slot], None)
+                if let Some(take session) = take current {
+                    let mut s = take session
+                    if s.generation == ticket && s.first {
+                        s.first = false
+                        in_first_phase -= 1
+                    }
+                    group.upgraded[slot] = Some(take s)
                 }
             },
             EndNotice => {},
@@ -1615,13 +1916,27 @@ pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, task
             ListenerFailed(e) => return Error(Network(e)),
         }
         while let Ok(slot) = channel.try_receive(done_rx) {
-            let ended = replace(mut group.connections[slot], None)
-            if let Some(take s) = take ended {
-                let HttpSlot(child: take child, first: first, ip: _) = take s
-                let _ = task.join(take child)
-                if first {
-                    in_first_phase -= 1
-                }
+            match slot {
+                HttpChild(i) => {
+                    let ended = replace(mut group.connections[i], None)
+                    if let Some(take s) = take ended {
+                        let HttpSlot(child: take child, first: first, promoted: _, ip: _) = take s
+                        let _ = task.join(take child)
+                        if first {
+                            in_first_phase -= 1
+                        }
+                    }
+                },
+                UpgradeChild(i) => {
+                    let ended = replace(mut group.upgraded[i], None)
+                    if let Some(take s) = take ended {
+                        let UpgradedSlot(child: take child, first: first, ip: _, generation: _) = take s
+                        let _ = task.join(take child)
+                        if first {
+                            in_first_phase -= 1
+                        }
+                    }
+                },
             }
         }
     }

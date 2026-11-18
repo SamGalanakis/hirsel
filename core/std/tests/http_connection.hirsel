@@ -351,7 +351,7 @@ fn http_router_dispatch(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     result.unwrap(router.add(mut routes, "GET", "/item/{id}", router.raw(capture_reply)))
     result.unwrap(router.add(mut routes, "GET", "/item/static", router.raw(static_reply)))
     result.unwrap(router.add(mut routes, "HEAD", "/item/head", router.raw(explicit_head)))
-    result.unwrap(router.add(mut routes, "POST", "/item/static", router.Route(handler: static_reply, body_max: Some(1))))
+    result.unwrap(router.add(mut routes, "POST", "/item/static", router.Route(handler: static_reply, body_max: Some(1), upgrade_bytes: None)))
     result.unwrap(router.add(mut routes, "GET", "/other/a%2Fb", router.raw(static_reply)))
     result.unwrap(router.add(mut routes, "GET", "/other/{id}", router.raw(capture_reply)))
     result.unwrap(router.add(mut routes, "GET", "/files/{rest...}", router.raw(tail_reply)))
@@ -371,6 +371,92 @@ fn http_router_conflict() -> bool {
         Error(_) => true,
         Ok(_) => false,
     }
+}
+
+fn upgrade_echo(take handover: upgrade.Taken) waits {
+    let started: Result[upgrade.Started[u64], upgrade.StartError] = upgrade.start(take handover)
+    let mut session = match take started {
+        Ok(take session) => take session,
+        Error(_) => return,
+    }
+    if session.argument != 7 || !upgrade.established(mut session.socket) {
+        return
+    }
+    let mut incoming: Bytes = result.unwrap(list.with_capacity(3))
+    let until = At(session.clock, after_ms(host.mono_ns(session.clock), 20))
+    while list.len(incoming) < 3 {
+        match upgrade.read(mut session.socket, mut incoming, until) {
+            Ok(0) => return,
+            Ok(_) => {},
+            Error(_) => return,
+        }
+    }
+    if incoming == string.as_bytes("xyz") {
+        let reply = string.as_bytes("ok")
+        let mut sent: u64 = 0
+        while sent < list.len(reply) {
+            match upgrade.write(mut session.socket, list.slice(reply, sent, list.len(reply)), until) {
+                Ok(0) => return,
+                Ok(n) => {
+                    sent += n
+                },
+                Error(_) => return,
+            }
+        }
+    }
+}
+
+fn upgrade_route(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
+    Ok(Upgrade(upgrade.spec(req, "echo", 4096, 7u64, upgrade_echo)?))
+}
+
+// HTTP-10. The protocol receives the bytes after the head and writes only
+// after 101. A body is refused before the route, and an exhausted upgrade
+// population refuses the transfer before the 101 is committed.
+// expect: run http_upgrade_handoff(network) = true
+fn http_upgrade_handoff(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut cfg = test_config()
+    cfg.upgrades_max = 1
+    cfg.conns_max = 1
+    cfg.http_max = 1
+    cfg.state_max = 64
+    let mut routes: router.Builder[EchoState] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/echo", router.Route(handler: upgrade_route, body_max: None, upgrade_bytes: Some(4096))))
+    result.unwrap(router.add(mut routes, "GET", "/plain", router.raw(static_reply)))
+    let (server, addr) = listen_with_routes(n, c, tasks, take cfg, result.unwrap(router.build(take routes)))
+    if !route_wire(n, c, addr, string.as_bytes("GET /echo HTTP/1.1\r\nHost: a\r\nConnection: Upgrade\r\nUpgrade: echo\r\nContent-Length: 1\r\n\r\nx"), 400, "0", "", string.as_bytes("")) {
+        return false
+    }
+    host.sleep_until(c, after_ms(host.mono_ns(c), 6))
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut input = take r
+    let mut output = take w
+    let until = after_ms(host.mono_ns(c), 90)
+    let request = string.as_bytes("GET /echo HTTP/1.1\r\nHost: a\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+    if !client_send(mut output, request, At(c, until)) {
+        return false
+    }
+    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    if client_head(mut input, mut received, c, until) != 101 {
+        return false
+    }
+    if !route_wire(n, c, addr, string.as_bytes("GET /plain HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 201, "5", "", string.as_bytes("fixed")) {
+        return false
+    }
+    host.sleep_until(c, after_ms(host.mono_ns(c), 6))
+    if !route_wire(n, c, addr, request, 503, "0", "", string.as_bytes("")) {
+        return false
+    }
+    if !client_send(mut output, string.as_bytes("xyz"), At(c, until)) || !client_end(mut input, mut received, At(c, until)) {
+        return false
+    }
+    let mut h = http1.head()
+    if http1.response(received, mut h) != Complete || h.status != 101 || list.slice(received, h.end, list.len(received)) != string.as_bytes("ok") {
+        return false
+    }
+    host.sleep_until(c, after_ms(host.mono_ns(c), 6))
+    let tail = string.as_bytes("GET /echo HTTP/1.1\r\nHost: a\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\nxyz")
+    route_wire(n, c, addr, tail, 101, "", "", string.as_bytes("ok"))
 }
 
 // L5. When ignoring a one-byte body the next head is preserved. An unread
@@ -599,7 +685,7 @@ fn http_handler_starts_after_commit(n: Net, c: Clock, tasks: Tasks) -> bool wait
 }
 
 // L6. The live handler scope reserves its whole 4096 B. The connection has
-// only 1152 B of spare J and hand-off allowance, so the 128-byte writer
+// only 1216 B of spare J and hand-off allowance, so the 128-byte writer
 // cannot grow to hold this 2048-byte body. Direct sends must still finish.
 // expect: run http_large_body_fits_connection(network) = true
 fn http_large_body_fits_connection(n: Net, c: Clock, tasks: Tasks) -> bool waits {

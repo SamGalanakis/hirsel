@@ -1,0 +1,120 @@
+pub type Spec: send {
+    protocol: String,
+    fields: List[(Bytes, Bytes)],
+    argument: Bytes,
+    reservation: u64,
+    run: fn(take Taken) waits
+}
+
+pub fn spec[A: codec + send](req: http.Request, protocol: String, reserve: u64, arg: A, run: fn(take Taken) waits) -> Result[Spec, http.HandlerError] {
+    let limit = http.upgrade_offer(req, protocol)?
+    let coding: codec.Codec[A] = codec.of()
+    let encoded = bound bytes ((limit + 7) / 8 * 8) {
+        let mut out: Bytes = list.with_capacity(limit)?
+        codec.encode(coding, arg, mut out)?
+        take out
+    }
+    let argument = match take encoded {
+        Ok(take argument) => take argument,
+        Error(e) => return Error(Allocation(e)),
+    }
+    match string.from(protocol) {
+        Ok(take name) => Ok(Spec(protocol: take name, fields: list.new(), argument: take argument, reservation: reserve, run: run)),
+        Error(e) => Error(Allocation(e)),
+    }
+}
+
+pub type Transfer: send {
+    reader: ReadHalf,
+    writer: WriteHalf,
+    input: Bytes,
+    tail_at: u64,
+    head: Bytes,
+    argument: Bytes,
+    clock: Clock,
+    pre_head: u64,
+    write_ms: u64
+}
+
+pub opaque type Taken: send {
+    transfer: Transfer,
+    notice: http.EstablishedNotice
+}
+
+pub fn hand_over(take transfer: Transfer, take notice: http.EstablishedNotice) -> Taken {
+    Taken(transfer: take transfer, notice: take notice)
+}
+
+pub opaque type Socket: send {
+    reader: ReadHalf,
+    writer: WriteHalf,
+    tail: Option[Bytes],
+    at: u64,
+    notice: http.EstablishedNotice
+}
+
+pub type Started[A: send]: send {
+    socket: Socket,
+    argument: A,
+    clock: Clock
+}
+
+pub type StartError: send = Decode(codec.DecodeError) | Allocation(Capacity) | Network(NetError)
+
+pub fn start[A: codec + send](take h: Taken) -> Result[Started[A], StartError] waits {
+    let Taken(transfer: take transfer, notice: take notice) = take h
+    let Transfer(reader: take reader, writer: take write_half, input: take input, tail_at: at, head: take head, argument: take wire, clock: clock, pre_head: deadline, write_ms: ms) = take transfer
+    let value: Result[Result[A, codec.DecodeError], Capacity] = codec.decode(codec.of(), wire)
+    let arg = match take value {
+        Ok(Ok(take decoded)) => take decoded,
+        Ok(Error(e)) => return Error(Decode(e)),
+        Error(e) => return Error(Allocation(e)),
+    }
+    discard(take wire)
+    let mut writer = take write_half
+    let now = host.mono_ns(clock)
+    if now >= deadline {
+        let _ = http.write_promotion_refusal(mut writer, clock, now, ms)
+        return Error(Network(TimedOut))
+    }
+    match http.write_promotion_unit(mut writer, head, clock, now, ms) {
+        Ok(()) => {},
+        Error(e) => return Error(Network(e)),
+    }
+    discard(take head)
+    let tail: Option[Bytes] = if at == list.len(input) {
+        discard(take input)
+        None
+    } else {
+        Some(take input)
+    }
+    Ok(Started(socket: Socket(reader: take reader, writer: take writer, tail: take tail, at: at, notice: take notice), argument: take arg, clock: clock))
+}
+
+fn discard(take backing: Bytes) {}
+
+pub fn established(mut s: Socket) -> bool waits {
+    http.upgrade_established(mut s.notice)
+}
+
+pub fn read(mut s: Socket, mut into: Bytes, until: Until) -> Result[u64, NetError] waits {
+    let space = list.capacity(into) - list.len(into)
+    if space == 0 {
+        return Ok(0)
+    }
+    let backing = replace(mut s.tail, None)
+    if let Some(take tail) = take backing {
+        let size = order.min(space, list.len(tail) - s.at)
+        let _ = list.append(mut into, list.slice(tail, s.at, s.at + size))
+        s.at += size
+        if s.at != list.len(tail) {
+            s.tail = Some(take tail)
+        }
+        return Ok(size)
+    }
+    host.recv(mut s.reader, mut into, until)
+}
+
+pub fn write(mut s: Socket, data: Bytes, until: Until) -> Result[u64, NetError] waits {
+    host.send(mut s.writer, data, until)
+}

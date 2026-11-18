@@ -1640,9 +1640,13 @@ fn every_memory_sample_admission_refusal_matches_the_evaluator() {
         executions += cases.len();
         agree_cases(&module, &cases, true);
     }
-    // cleanup.core's f7 runs under limits 64, 100 and 150 make 1, 2 and 3 admissions:
-    // each adds its baseline and two refusals per admission (3 + 5 + 7) to 158.
-    assert_eq!(executions, 173);
+    // Each run contributes one baseline plus two injections per admission attempt.
+    // Reading the sample paths gives (runs, attempts): admission (11, 27),
+    // cleanup (13, 26), counted (2, 4), failure (5, 4), variants (7, 10).
+    // Both admission f2 runs attempt the initial allocation, bound entry (MEM-25)
+    // and growth (MEM-26). The 16-byte bound refuses growth, the 32-byte bound
+    // admits it. Replacing the old single f2 run with those two adds seven cases.
+    assert_eq!(executions, 180);
     println!("whole memory sample executions including every admission refusal: {executions}");
 }
 

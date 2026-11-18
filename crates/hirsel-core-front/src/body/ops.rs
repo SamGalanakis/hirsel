@@ -449,12 +449,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if self.live()
             && let Some(lv) = lv
         {
-            // `&&` skips its right side when the left is false, `||` when it is true
-            // (LANG-6), and the skipped side's value is the left one.
+            // A bounded loop's `&&` skips only on false. An explicit zero lets
+            // the optimizer relate entry to the right operand's comparison.
+            let loop_test = FrameKind::While { condition: Some(n) };
+            let short = if self
+                .frames
+                .last()
+                .is_some_and(|frame| frame.kind == loop_test)
+            {
+                self.konst(Ty::Scalar(Scalar::Bool), 0, c[0]).unwrap()
+            } else {
+                lv
+            };
             let rb = self.new_block(&[]);
             let jb = self.new_block(&[Ty::Scalar(Scalar::Bool)]);
             self.joins[join].block = Some(jb);
-            let (to_r, to_j) = (self.edge(rb, &[]), self.edge(jb, &[lv]));
+            let (to_r, to_j) = (self.edge(rb, &[]), self.edge(jb, &[short]));
             let (yes, no) = if and { (to_r, to_j) } else { (to_j, to_r) };
             self.end(
                 Terminator::Branch {

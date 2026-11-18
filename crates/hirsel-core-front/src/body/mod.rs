@@ -1066,7 +1066,7 @@ struct Join {
 #[derive(Clone, Copy, PartialEq)]
 enum FrameKind {
     Loop,
-    While,
+    While { condition: Option<NodeId> },
     Block,
 }
 struct Frame {

@@ -1523,7 +1523,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
         let condition = self.kids(c[0]);
-        self.push_frame(label, FrameKind::While, expect(UNIT));
+        self.push_frame(label, FrameKind::While { condition: None }, expect(UNIT));
         let fi = self.frames.len() - 1;
         let header = self.live().then(|| self.new_block(&[]));
         if let Some(h) = header {

@@ -563,7 +563,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if self.kind(c[0]) == NodeKind::ConditionLet {
             return self.while_let(n, label);
         }
-        self.push_frame(label, FrameKind::While, expect(UNIT));
+        let mut condition = c[0];
+        while self.kind(condition) == NodeKind::Group {
+            condition = self.kids(condition)[0];
+        }
+        // A true short-circuit conjunction proves its right-hand bound. Keep
+        // that fact visible in the emitted loop test, including through groups.
+        let condition =
+            if self.kind(condition) == NodeKind::Binary && self.token_text(condition) == "&&" {
+                let mut bound = self.kids(condition)[1];
+                while self.kind(bound) == NodeKind::Group {
+                    bound = self.kids(bound)[0];
+                }
+                (self.kind(bound) == NodeKind::Binary
+                    && matches!(self.token_text(bound), "<" | "<=" | ">" | ">="))
+                .then_some(condition)
+            } else {
+                None
+            };
+        self.push_frame(label, FrameKind::While { condition }, expect(UNIT));
         let mut header = None;
         if self.live() {
             let h = self.new_block(&[]);
@@ -811,7 +829,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             _ => None,
         };
-        self.push_frame(label, FrameKind::While, expect(UNIT));
+        self.push_frame(label, FrameKind::While { condition: None }, expect(UNIT));
         let fi = self.frames.len() - 1;
         let mut flow = None;
         if let (true, Some(_), Some(limit), Some(index_ir), Some(index_slot)) =
@@ -1126,7 +1144,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let Some(i) = self.frame_of(n) else {
             return (NEVER, None);
         };
-        if self.frames[i].kind == FrameKind::While && value.is_some() {
+        if matches!(self.frames[i].kind, FrameKind::While { .. }) && value.is_some() {
             // Refused LANG-15 by the resolver.
             self.halt();
             return (NEVER, None);

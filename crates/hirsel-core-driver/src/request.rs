@@ -53,6 +53,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             .positional
             .as_deref()
             .ok_or("tape show requires a tape file")?;
+        if !invocation
+            .options
+            .iter()
+            .any(|(option, _)| *option == crate::cli::OptionId::IncludeCredentials)
+        {
+            return Err("tape show requires --include-credentials".into());
+        }
         crate::tape_cli::show(Path::new(path))?;
         std::process::exit(0);
     }
@@ -239,6 +246,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::ProfileFront => profile_front = true,
             Opt::Image => image_path = Some(PathBuf::from(value)),
             Opt::Help
+            | Opt::IncludeCredentials
             | Opt::Lib
             | Opt::FmtCheck
             | Opt::Signatures

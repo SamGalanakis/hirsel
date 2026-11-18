@@ -203,10 +203,17 @@ Hello binds a 21-byte anonymous bearer or mints one. Defaults are 32 sessions pe
 source, ten new principals per minute, and 20 calls/second per principal with
 burst 40. Hello refusal is Close 1013; call refusal is `Refused(Overloaded)`.
 
-`runner.admitted` carries the opaque authenticated principal, attenuated entry
-keys, recorded arrival and decision times, and byte allowances. Pure `prepare`
-resolves current/gone/unknown keys, applies attenuation, decodes under byte and
-step bounds, computes the digest, and forms `principal || u32-BE(stream)`.
+`runner.admitted` carries the authenticated `Caller`, attenuated entry keys,
+recorded arrival and decision times, and byte allowances. Ingress derives the
+anonymous Caller at Hello or from the HTTP Bearer value. The wire owner transfers
+the token to the Welcome frame and retains the Caller. Pure `prepare` resolves
+current/gone/unknown keys, applies attenuation, decodes under byte and step
+bounds, computes the digest, and forms `caller_key || u32-BE(stream)`.
+`caller_key` writes the issuer byte, subject length byte and up to 64 subject bytes.
+
+Deploy RC1 with a fresh runner store directory. Older stores hold bearer tokens
+in stream keys. The SDK starts a fresh recovery generation and reports prior
+pending work as locally unknown.
 The composition root supplies retained activation keys through `retain_gone`.
 `Send` is opaque. The same policy and preparation functions serve other transports.
 

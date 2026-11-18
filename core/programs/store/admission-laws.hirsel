@@ -35,7 +35,8 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
     let mut work = wire_work()
     let (owner, events): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
     s.me = Some(take owner)
-    s.principal = Some(take principal)
+    let (take caller, _) = ingress.welcome(take principal)
+    s.caller = Some(take caller)
     s.phase = 3u8
     result.unwrap(list.push(mut s.entries, take key))
     result.unwrap(list.push(mut s.entries, take transact_key))
@@ -56,7 +57,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
         let at = host.mono_ns(clock)
         result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: stream, p: 0u64, slot: 1u32, deadline: 10000u32, arg: take arg, at: at, grows: true), true))
         let Req(e: take input) = result.unwrap(channel.try_receive(requests))
-        let Requested(Request(stream: take named, p: p, key: _, arg: _, digest: _, reply_to: _, live: _, identity: _, seed: _)) = take input else {
+        let Requested(Request(caller: _, stream: take named, p: p, key: _, arg: _, digest: _, reply_to: _, live: _, identity: _, seed: _)) = take input else {
             return false
         }
         let mut reply_bytes: Bytes = list.new()
@@ -118,7 +119,9 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool w
     let mut s = take initial
     let mut work = wire_work()
     s.phase = 2u8
-    s.principal = Some(take principal)
+    let (take caller, take token) = ingress.welcome(take principal)
+    s.caller = Some(take caller)
+    s.welcome_token = Some(take token)
     let entry_codec: std.codec.Codec[Result[Bytes, u32]] = std.codec.of()
     let entry = w3c_key(code.identity(code.describe(w3c_tx)), std.codec.of_u32(), entry_codec)
     result.unwrap(list.push(mut s.entries, result.unwrap(clone(entry))))
@@ -145,7 +148,7 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool w
     result.unwrap(std.codec.put_u32(0u32, mut old))
     let mut changed: Bytes = list.new()
     result.unwrap(std.codec.put_u32(1u32, mut changed))
-    let named: Bytes = match s.principal { Some(bound_principal) => wire_stream(bound_principal, 1u32), _ => return false }
+    let named: Bytes = match s.caller { Some(caller) => wire_stream(caller, 1u32), _ => return false }
     let digest = store.request_digest(entry, old)
     result.unwrap(map.insert(mut s.held, slot_key(named, 2u64), WireHeld(stream: 1u32, p: 2u64, digest: digest, forwarded: true, queued: 0u64, owed: list.new())))
     let mismatched = wire_check_live(s, Call(1u32, 2u64, 0u32, 10u32, take changed)) == Some(1008u16)
@@ -218,7 +221,8 @@ fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
     let data = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), std.codec.of_u32()))
     let (policy, take h) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
     let principal = option.unwrap(ingress.hello(policy, V4(1u32), None))
-    let stream = wire_stream(principal, 77u32)
+    let (take caller, _) = ingress.welcome(take principal)
+    let stream = wire_stream(caller, 77u32)
     let _ = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(w3c_retired(), list.new())))
     let (to_head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(5u64))
     let (to_pub, releases): (Sender[PubIn], Receiver[PubIn]) = result.unwrap(channel.new(5u64))
@@ -227,7 +231,7 @@ fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
     let Service(context: take initial, step: _, ready: _, finish: _, check: _) = take service
     let mut owner = take initial
     owner.phase = 3u8
-    owner.principal = Some(take principal)
+    owner.caller = Some(take caller)
     owner.me = Some(take to_owner)
     let put_codec: std.codec.Codec[Result[u64, u32]] = std.codec.of()
     let large_codec: std.codec.Codec[Result[Bytes, u32]] = std.codec.of()
@@ -251,7 +255,7 @@ fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, slot: u32, take arg: Bytes) ->
     result.unwrap(wire_call_ready(mut rig.owner, mut rig.work, WirePending(stream: stream, p: p, slot: slot, deadline: 10000u32, arg: take arg, at: at, grows: true), true))
     if let Some(take out) = wire_take_output(mut rig.owner, mut rig.work) { return take out }
     let q = result.unwrap(channel.try_receive(rig.requests))
-    result.unwrap(head_arrival(mut rig.head, take q))
+    result.unwrap(head_arrival(mut rig.head, take q, false))
     if list.len(rig.head.group) != 0u64 { result.unwrap(gate(mut rig.head)) }
     let release = result.unwrap(channel.try_receive(rig.releases))
     let PubIn(e: take released) = take release
@@ -304,15 +308,15 @@ fn w3c_close(take rig: W3cRig) -> () waits {
 pub fn law_refused_send_releases_timer(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
     let mut rig = w3c_rig(tasks, clock, random)
     // Other sessions can fill the shared head while this owner owes no sends.
-    let filling = result.unwrap(head_lease(rig.owner.head))
+    let filling = result.unwrap(head_lease(copy_wire_head(rig.owner.head)))
     for p in 0u64 .. 5u64 {
         let key = w3c_retired()
         let arg: Bytes = list.new()
         let digest = store.request_digest(key, arg)
-        let request = Request(stream: list.new(), p: p, key: take key, arg: take arg, digest: digest,
+        let request = Request(caller: None, stream: list.new(), p: p, key: take key, arg: take arg, digest: digest,
             reply_to: Wire(wire_me(rig.owner)), live: latest.handle(filling.live),
             identity: latest.handle(filling.identity), seed: result.unwrap(owner_seed(filling)))
-        result.unwrap(channel.try_send(rig.owner.head, Req(e: Requested(take request))))
+        if let Posted = try_head(rig.owner.head, Req(e: Requested(take request))) {} else { return false }
     }
     for stream in 0u32 .. 7u32 {
         let at = host.mono_ns(clock)

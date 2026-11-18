@@ -11,7 +11,7 @@ const bytes = (...values) => Uint8Array.of(...values);
 const want = {identity: bytes(1), args_fp: 1n, result_fp: 2n};
 const other = {identity: bytes(2), args_fp: 3n, result_fp: 4n};
 const token = bytes(97,110,111,110,58,...Array(16).fill(1));
-const initial = () => ({version:1,generation:1n,token,directory:[],nextStream:0,streams:{}});
+const initial = () => ({version:2,generation:1n,token,directory:[],nextStream:0,streams:{}});
 const returned = n => ({tag:'Returned',value:bytes(n)});
 const refused = tag => ({tag:'Refused',value:{tag}});
 const call = (stream,p,arg,slot=0,deadline=30000) => ({tag:'Call',values:[stream,p,slot,deadline,bytes(arg)]});

@@ -24,8 +24,13 @@ R1b's L1 builds core/programs/store/runner_crash.hirsel per native backend under
 store's W2 crash adapter (core/tools/store_crash_tests.py): every cut of each scenario,
 and one failed journal sync. Its two mutants need that adapter, so they run natively, on
 Cranelift only, and are red when the L1 floor check fails them.
+
+RC1's L31 uses the disk store and WebSocket client in runner_crash.hirsel.
+The native law runs in --part r1. --part rc1 selects it and, on Cranelift,
+restores the old stream key for the mutation control.
 """
 import argparse
+import base64
 import json
 import shlex
 import os
@@ -662,6 +667,54 @@ def drain_deadline(args, root, work, engine, name, runner=None, activation=False
                        count_only=() if activation else ('runner-deadline',))
 
 
+def no_secret_at_rest(args, root, work, engine, row, mutant=False):
+    name = 'token_in_stream_key' if mutant else 'no_secret_at_rest'
+    source = root / 'core/programs/store'
+    fixture = [(source / 'runner_crash.hirsel', 'runner_crash')]
+    runner = None
+    if mutant:
+        # Restore the v2.14 stream key: the full Hello token, then the stream.
+        ingress = source / 'ingress.hirsel'
+        text = ingress.read_text()
+        lo = text.index('    let tag =', text.index('pub fn caller('))
+        hi = text.index('    Ok(Some(runner.Caller(', lo)
+        changed_ingress = work / 'token_ingress.hirsel'
+        changed_ingress.write_text(text[:lo] + '    let subject: Bytes = clone(token)?\n' + text[hi:])
+        text = (source / 'runner.hirsel').read_text()
+        old = '    caller_key(c, mut stream)?'
+        assert text.count(old) == 1, name
+        runner = work / 'token_runner.hirsel'
+        runner.write_text(text.replace(old, '    list.append(mut stream, c.subject)?'))
+    selection = manifest(root, work, name, runner, fixture)
+    if mutant:
+        inputs_data = json.loads(selection.read_text())
+        for entry in inputs_data['packages'][-1]['sources']:
+            if entry['modules'] == ['ingress']:
+                entry['file'] = str(changed_ingress)
+        selection.write_text(json.dumps(inputs_data))
+    directory = work / f'{name}-{engine}-disk'
+    directory.mkdir()
+    binary = work / f'{name}-{engine}'
+    command = [str(args.compiler.resolve()), 'build', '--inputs', str(selection), '--source-core',
+               '--source-std', '--entry', 'store@1/runner_crash/no_secret_at_rest', '--backend', engine,
+               '--runtime', str(args.runtime.resolve()), '--store', str(work / f'l31-objects-{engine}'),
+               '--limit', str(64 * 1024 * 1024), '--dir', str(directory), '-o', str(binary),
+               '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random',
+               '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
+    if args.cc:
+        command += ['--cc', str(args.cc.resolve())]
+    wait_load()
+    checked(command, os.environ)
+    nonce = os.urandom(16)
+    encoded = base64.b64encode(b'anon:' + nonce).decode('ascii')
+    ran = subprocess.run([str(binary), encoded], capture_output=True, text=True)
+    files = [p for p in directory.rglob('*') if p.is_file()]
+    found = sorted(str(p.relative_to(directory)) for p in files if nonce in p.read_bytes())
+    passed = ran.returncode == 0 and bool(files) and bool(found) == mutant
+    row(engine=engine, law='no_secret_at_rest', mutant=name if mutant else None, passed=passed,
+        result={'exit': ran.returncode, 'files': len(files), 'matches': found, 'stderr': ran.stderr})
+
+
 def manifest(root, work, name, runner=None, extra=()):
     m = inputs(root)
     sources = m['packages'][-1]['sources']
@@ -1076,13 +1129,15 @@ def main():
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
     p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])
-    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls', 'deadline', 'activation'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1'])
     args = p.parse_args()
     r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1', 'calls')
     selected_calls = args.call_law or CALLS
     root = args.root.resolve()
     evaluator = args.evaluator.resolve()
     engines = args.backend or ['evaluator', 'cranelift', 'llvm']
+    if args.part == 'rc1' and (not args.compiler or not args.runtime or engines == ['evaluator']):
+        p.error('RC1 requires a native backend, --compiler and --runtime')
     rows = []
 
     def row(**r):
@@ -1120,7 +1175,12 @@ def main():
             frame_vectors(args, root, work, engines, row)
         if args.part in ('wire', 'socket'):
             socket_laws(args, root, work, engines, row)
-        if args.part in ('wire', 'session', 'ingress', 'admission', 'socket'):
+        if args.part in (None, 'r1', 'rc1'):
+            for engine in (e for e in engines if e != 'evaluator'):
+                no_secret_at_rest(args, root, work, engine, row)
+                if args.part == 'rc1' and not args.no_mutants and engine == 'cranelift':
+                    no_secret_at_rest(args, root, work, engine, row, mutant=True)
+        if args.part in ('wire', 'session', 'ingress', 'admission', 'socket', 'rc1'):
             if args.report:
                 args.report.write_text(json.dumps(rows, indent=2) + '\n')
             for r in rows:

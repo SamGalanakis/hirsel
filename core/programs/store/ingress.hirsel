@@ -24,9 +24,14 @@ pub opaque resource type Lease: send { returned: Sender[()] } drop(lease) {
     let _ = channel.try_send(lease.returned, ())
 }
 
-pub opaque type Principal: send { token: Bytes }
+pub opaque type Principal: send { token: Bytes, caller: runner.Caller }
 
 pub fn principal(p: Principal) -> View[Bytes] in p { view p.token }
+
+pub fn welcome(take p: Principal) -> (runner.Caller, Bytes) {
+    let Principal(token: take token, caller: take identity) = take p
+    (take identity, take token)
+}
 
 type Source: send { mints: List[u64], mint_head: u64, mint_count: u64, free: u64, returned: Receiver[()], to: Sender[()] }
 type Book: send { config: Config, sources: Map[Bytes, Source], calls: Map[Bytes, Bucket], source_order: Deque[Bytes], call_order: Deque[Bytes] }
@@ -126,9 +131,48 @@ fn valid_token(b: Bytes) -> bool {
     list.len(b) == 21u64 && b[0u64] == 97u8 && b[1u64] == 110u8 && b[2u64] == 111u8 && b[3u64] == 110u8 && b[4u64] == 58u8
 }
 
+pub fn caller(token: Bytes) -> Result[Option[runner.Caller], Capacity] {
+    if !valid_token(token) { return Ok(None) }
+    let tag = string.as_bytes("hirsel.caller.anon.v1")
+    let mut h = std.sha256.start()
+    std.sha256.add_byte(mut h, int.narrow(list.len(tag)))
+    std.sha256.add(mut h, tag, 0u64, list.len(tag))
+    std.sha256.add(mut h, token, 0u64, list.len(token))
+    let digest = std.sha256.finish(h)
+    let mut subject: Bytes = list.with_capacity(16u64)?
+    for i in 0u64 .. 16u64 { let _ = list.push(mut subject, digest[i]) }
+    Ok(Some(runner.Caller(issuer: 1u8, subject: take subject)))
+}
+
+// The HTTP Authorization parser passes the unpadded base64url value after Bearer.
+pub fn bearer(encoded: Bytes) -> Result[Option[runner.Caller], Capacity] {
+    if list.len(encoded) != 28u64 { return Ok(None) }
+    let mut standard: Bytes = list.with_capacity(28u64)?
+    for octet in encoded {
+        if octet == b'+' || octet == b'/' || octet == b'=' { return Ok(None) }
+        let c = match octet {
+            b'-' => b'+',
+            b'_' => b'/',
+            _ => octet,
+        }
+        let _ = list.push(mut standard, c)
+    }
+    match std.base64.decode(standard)? {
+        Some(token) => caller(token),
+        None => Ok(None),
+    }
+}
+
+fn authenticated(take token: Bytes) -> Answer {
+    match caller(token) {
+        Ok(Some(take c)) => Bound(Principal(token: take token, caller: take c)),
+        _ => RejectedPolicy,
+    }
+}
+
 fn bind(mut book: Book, key: Bytes, take token: Option[Bytes], now: u64, random: Random) -> Answer {
     if let Some(take b) = take token {
-        return if valid_token(b) { Bound(Principal(token: take b)) } else { RejectedPolicy }
+        return authenticated(take b)
     }
     if !ensure_source(mut book, key, now) { return RejectedPolicy }
     let c = book.config
@@ -149,7 +193,7 @@ fn bind(mut book: Book, key: Bytes, take token: Option[Bytes], now: u64, random:
     let mut token_bytes: Bytes = result.unwrap(list.with_capacity(21u64))
     result.unwrap(list.append(mut token_bytes, string.as_bytes("anon:")))
     result.unwrap(list.append(mut token_bytes, nonce))
-    Bound(Principal(token: take token_bytes))
+    authenticated(take token_bytes)
 }
 
 fn call_allowed(mut book: Book, key: Bytes, now: u64) -> bool {
@@ -210,8 +254,10 @@ pub fn hello(i: Ingress, source: Ip, take token: Option[Bytes]) -> Option[Princi
     match decide(i, Hello(source_key(source), take token)) { Bound(take p) => Some(take p), _ => None }
 }
 
-pub fn call(i: Ingress, p: Principal) -> bool waits {
-    match decide(i, Call(result.unwrap(clone(p.token)))) { Allowed => true, _ => false }
+pub fn call(i: Ingress, c: runner.Caller) -> bool waits {
+    let mut key: Bytes = list.new()
+    if let Error(_) = runner.caller_key(c, mut key) { return false }
+    match decide(i, Call(take key)) { Allowed => true, _ => false }
 }
 
 pub fn law_limits(random: Random) -> bool {
@@ -272,26 +318,37 @@ pub fn law_reply_isolated(tasks: Tasks, clock: Clock, random: Random) -> bool wa
     let b = match hello(i, V4(2u32), Some(take token)) { Some(take p) => take p, _ => return false }
     let same = principal(a) == principal(b)
     let mut allowed = true
-    for _ in 0u64 .. 20u64 { allowed = call(i, a) && call(i, b) && allowed }
-    let denied = !call(i, a)
+    for _ in 0u64 .. 20u64 { allowed = call(i, a.caller) && call(i, b.caller) && allowed }
+    let denied = !call(i, a.caller)
     task.cancel(mut h)
     let _ = task.join(take h)
     same && allowed && denied
 }
 
+fn caller_vector(i: Ingress, take token: Bytes, encoded: String, expected: Bytes) -> bool waits {
+    let p = match hello(i, V4(1u32), Some(take token)) { Some(take p) => take p, _ => return false }
+    let (take ws, _) = welcome(take p)
+    let http = match bearer(string.as_bytes(encoded)) { Ok(Some(take c)) => take c, _ => return false }
+    ws.issuer == 1u8 && http.issuer == 1u8 && ws.subject == expected && http.subject == expected
+}
+
+fn law_caller_vectors(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+    let (i, take handle) = result.unwrap(start(tasks, clock, random, defaults(), 1048576u64))
+    let mut h = take handle
+    let first = caller_vector(i, result.unwrap(b"\x61\x6e\x6f\x6e\x3a\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"), "YW5vbjoAAQIDBAUGBwgJCgsMDQ4P", result.unwrap(b"\xaf\x66\x43\x7c\xed\x7d\x10\x15\xa1\x13\xbb\x47\x15\x6b\x71\xf4"))
+    let second = caller_vector(i, result.unwrap(b"\x61\x6e\x6f\x6e\x3a\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"), "YW5vbjr_____________________", result.unwrap(b"\x46\x88\xbb\x3b\x3e\xa1\xc4\xaf\x80\x32\xc3\xa1\xf7\x22\x77\x6b"))
+    task.cancel(mut h)
+    let _ = task.join(take h)
+    first && second
+}
+
 @test
 fn test_ingress(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
-    if law_limits(random) && law_rates_and_expiry() && law_retirement_steps(random) && law_reply_isolated(tasks, clock, random) { Ok(()) } else { Error(()) }
+    if law_limits(random) && law_rates_and_expiry() && law_retirement_steps(random) && law_reply_isolated(tasks, clock, random) && law_caller_vectors(tasks, clock, random) { Ok(()) } else { Error(()) }
 }
 
 
 pub fn share(i: Ingress) -> Ingress { Ingress(to: channel.sender(i.to)) }
-
-pub fn share_principal(p: Principal) -> Result[Principal, Capacity] {
-    let copied: Bytes = clone(p.token)?
-    Ok(Principal(token: take copied))
-}
-
 
 // Minting has a strict rolling-minute bound, unlike calls' explicit burst/rate.
 fn prune_mints(mut s: Source, now: u64, window: u64, burst: u64) {

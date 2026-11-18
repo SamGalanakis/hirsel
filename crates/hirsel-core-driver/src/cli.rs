@@ -6,6 +6,7 @@ pub enum OptionId {
     Json,
     Record,
     Tape,
+    IncludeCredentials,
     Diagnose,
     SourceCore,
     SourceStd,
@@ -67,7 +68,7 @@ commands! {
     "build", "build [package-dir] [options]", "Build a native executable from its reachable definitions.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
-    "tape", "tape show TAPE", "Print the header and frames stored in a tape.";
+    "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
     "test", "test [package-dir] --limit BYTES --runtime ARCHIVE [options]", "Run each discovered @test in an independent process.";
     "image", "image [library-root] [options]", "Publish checked core and std source libraries.";
     "core-product", "core-product [options]", "Produce or inspect the published core package.";
@@ -110,7 +111,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--record"],
         Some("TAPE"),
         ["run"],
-        "Record all program grants and scheduling to a new tape."
+        "Record all program grants and scheduling to a new, owner-only tape."
     ),
     option!(
         Tape,
@@ -118,6 +119,13 @@ static OPTIONS: &[OptionSpec] = &[
         Some("TAPE"),
         ["replay"],
         "Replay this tape without host grants."
+    ),
+    option!(
+        IncludeCredentials,
+        ["--include-credentials"],
+        None,
+        ["tape"],
+        "Allow tape output that may contain credentials."
     ),
     option!(
         Diagnose,
@@ -501,7 +509,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         match arguments.next().as_deref() {
             Some("show") => {}
             Some("--help" | "-h") => return Ok(Action::Help(help(Some(command)))),
-            _ => return Err("expected: tape show TAPE".into()),
+            _ => return Err("expected: tape show TAPE --include-credentials".into()),
         }
     }
     let mut invocation = Invocation {

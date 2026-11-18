@@ -75,13 +75,14 @@ AArch64 runtime libraries.
 ## Record and replay
 
 `hirsel run app --record session.tape [grants] [-- arguments...]` records
-provider operations and task scheduling in a new tape. The tape path must not
-already exist. A main that takes Process cannot be recorded.
+provider operations and task scheduling in a new, owner-only tape. The tape may
+contain bearer tokens and other credentials from provider calls. Choose a path
+that does not exist yet. A main that takes Process cannot be recorded.
 
 ```sh
 hirsel run app --record session.tape --dir inputs --grant Stdout -- input.json
 hirsel replay app --tape session.tape
-hirsel tape show session.tape
+hirsel tape show session.tape --include-credentials
 hirsel replay app --tape session.tape --diagnose
 ```
 
@@ -92,8 +93,8 @@ running the program. `--diagnose` allows a different revision, labels it, and
 reports the first divergent request at its source position. It always replays
 and never continues with live effects.
 
-`tape show` reads the header and stored frames without building a program. Tape
-frames contain no source sites; source positions appear in diagnose replay.
+`tape show --include-credentials` writes the header and stored frames to standard
+output. Source positions appear in diagnose replay.
 
 ## Run tests
 

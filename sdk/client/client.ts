@@ -32,8 +32,9 @@ export interface Pending {
 export interface StreamRecord {
   next: bigint; pending?: Pending; terminal?: {p: bigint; outcome: Outcome<Uint8Array>}; retired: boolean;
 }
+export const RECOVERY_VERSION = 2;
 export interface Installation {
-  version: 1; generation: bigint; token: Uint8Array | null;
+  version: typeof RECOVERY_VERSION; generation: bigint; token: Uint8Array | null;
   directory: number[]; nextStream: number; streams: Record<string, StreamRecord>;
 }
 export interface Lease { release(): Promise<void>; lost: Promise<void> }
@@ -73,7 +74,7 @@ const equal = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every
 const sameWant = (a: Want, b: Want) => equal(a.identity, b.identity) && a.args_fp === b.args_fp && a.result_fp === b.result_fp;
 const copyWant = (w: Want): Want => ({identity: w.identity.slice(), args_fp: w.args_fp, result_fp: w.result_fp});
 const key = (b: Uint8Array) => Array.from(b, n => n.toString(16).padStart(2, '0')).join('');
-const fresh = (generation: bigint): Installation => ({version: 1, generation, token: null, directory: [], nextStream: 0, streams: {}});
+const fresh = (generation: bigint): Installation => ({version: RECOVERY_VERSION, generation, token: null, directory: [], nextStream: 0, streams: {}});
 export class ClientError extends Error {
   constructor(public readonly code: string) { super(code); this.name = 'ClientError'; }
 }
@@ -498,5 +499,5 @@ function randomGeneration(): bigint {
   return bytes.reduce((n, b) => (n << 32n) | BigInt(b), 0n);
 }
 export function intact(s: Installation): boolean {
-  return s.directory.every(n => Object.hasOwn(s.streams, n));
+  return s.version === RECOVERY_VERSION && s.directory.every(n => Object.hasOwn(s.streams, n));
 }

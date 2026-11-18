@@ -31,6 +31,25 @@ pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes)
 
 pub const DEFAULT_STEPS: u64 = 1 << 30
 
+pub type Caller: codec + send { issuer: u8, subject: Bytes }
+pub const SUBJECT_MAX: u64 = 64u64
+
+pub fn caller_key(c: Caller, mut out: Bytes) -> Result[(), Capacity] {
+    let n = list.len(c.subject)
+    if n > SUBJECT_MAX { return Error(Capacity(requested: n, available: SUBJECT_MAX)) }
+    list.reserve(mut out, n + 2u64)?
+    let _ = list.push(mut out, c.issuer)
+    let _ = list.push(mut out, int.narrow(n))
+    list.append(mut out, c.subject)
+}
+
+fn stream_key(c: Caller, number: u32) -> Result[Bytes, Capacity] {
+    let mut stream: Bytes = list.with_capacity(list.len(c.subject) + 6u64)?
+    caller_key(c, mut stream)?
+    std.codec.encode_key(std.codec.key_u32(), number, mut stream)?
+    Ok(take stream)
+}
+
 pub type OpenError: send = Store(store.Error) | Place(RegisterError)
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
@@ -1241,6 +1260,7 @@ pub opaque type Req: send { e: HeadIn }
 type HeadIn: send = Requested(Request) | OwnerLeft
 
 type Request: send {
+    caller: Option[Caller],
     stream: Bytes,
     p: u64,
     key: Bytes,
@@ -1616,7 +1636,7 @@ fn route_admission[G: send, H: send](mut hd: Head[G, H], take q: Request, closed
             commitless(mut hd, take q, Refused(RequestMismatch))
         } else if p == q.p {
             let owner = latest.read(q.identity).number
-            let Request(stream: take stream, p: _, key: _, arg: _, digest: _, reply_to: take to, live: _, identity: _, seed: _) = take q
+            let Request(caller: _, stream: take stream, p: _, key: _, arg: _, digest: _, reply_to: take to, live: _, identity: _, seed: _) = take q
             let mut w = match map.remove(mut hd.busy, stream) {
                 Some(take x) => take x,
                 None => return Ok(()),
@@ -1813,7 +1833,7 @@ fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Out
 
 fn worker[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome, t: store.Ticket, version: u64) -> Result[(), store.Error] {
     let owner = latest.read(q.identity).number
-    let Request(stream: take stream, p: p, key: _, arg: _, digest: d, reply_to: take to, live: _, identity: _, seed: _) = take q
+    let Request(caller: _, stream: take stream, p: p, key: _, arg: _, digest: d, reply_to: take to, live: _, identity: _, seed: _) = take q
     let mut waiters: List[Recipient] = list.new()
     result.unwrap(list.push(mut waiters, Recipient(owner: owner, to: take to)))
     let named: Bytes = result.unwrap(clone(stream))
@@ -1827,7 +1847,7 @@ fn worker[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome
 // Release on the one FIFO to the publisher.
 fn commitless[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome) -> Result[(), store.Error] waits {
     let owner = latest.read(q.identity).number
-    let Request(stream: take stream, p: p, key: _, arg: _, digest: _, reply_to: take to, live: _, identity: _, seed: _) = take q
+    let Request(caller: _, stream: take stream, p: p, key: _, arg: _, digest: _, reply_to: take to, live: _, identity: _, seed: _) = take q
     let mut answers: List[Answer] = list.new()
     result.unwrap(list.push(mut answers, Answer(recipient: Recipient(owner: owner, to: take to), row: KeyedDone(stream: take stream, p: p, outcome: take o))))
     let _ = channel.send(hd.out, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers))))
@@ -2159,7 +2179,7 @@ pub fn head_request(take stream: Bytes, p: u64, take key: Bytes, take arg: Bytes
     let blank = result.unwrap(result.capacity_only(arc.new(OwnerNumber(number: 0u64))))
     let identity = result.unwrap(result.capacity_only(latest.new(take blank)))
     let seed = result.unwrap(result.capacity_only(arc.new(OwnerNumber(number: 0u64))))
-    Req(e: Requested(Request(stream: take stream, p: p, key: take key, arg: take arg, digest: digest,
+    Req(e: Requested(Request(caller: None, stream: take stream, p: p, key: take key, arg: take arg, digest: digest,
         reply_to: Seam(take reply_to), live: take live, identity: take identity, seed: Some(take seed))))
 }
 
@@ -2572,7 +2592,7 @@ fn sessioned[G: send, H: send](s: Session[G, H], r: Registry[G, H], mut id: Opti
                         Some(l) => (latest.handle(l.live), latest.handle(l.identity)),
                         None => fail("runner: missing head lease"),
                     }
-                    let q = Request(stream: take stream, p: p, key: take key, arg: take arg, digest: d, reply_to: Seam(channel.sender(s.me)), live: take live, identity: take identity, seed: take seed)
+                    let q = Request(caller: None, stream: take stream, p: p, key: take key, arg: take arg, digest: d, reply_to: Seam(channel.sender(s.me)), live: take live, identity: take identity, seed: take seed)
                     if let Error(_) = channel.send(s.head, Req(e: Requested(take q))) {
                         return
                     }
@@ -4430,11 +4450,11 @@ pub fn retain_gone[G: send, H: send](mut r: Registry[G, H], take key: Bytes) -> 
 }
 
 pub opaque type Admitted: send {
-    principal: ingress.Principal, entries: List[Bytes], arrived: u64, now: u64, budget: u64, arg_max: u64
+    caller: Caller, entries: List[Bytes], arrived: u64, now: u64, budget: u64, arg_max: u64
 }
 
-pub fn admitted(take principal: ingress.Principal, take entries: List[Bytes], arrived: u64, now: u64, budget: u64, arg_max: u64) -> Admitted {
-    Admitted(principal: take principal, entries: take entries, arrived: arrived, now: now, budget: budget, arg_max: arg_max)
+pub fn admitted(take caller: Caller, take entries: List[Bytes], arrived: u64, now: u64, budget: u64, arg_max: u64) -> Admitted {
+    Admitted(caller: take caller, entries: take entries, arrived: arrived, now: now, budget: budget, arg_max: arg_max)
 }
 
 pub type CallWant: send { key: Bytes, stream: u32, p: u64, arg: Bytes, deadline_ms: u32 }
@@ -4456,12 +4476,7 @@ pub fn prepare[G: send, H: send](r: Registry[G, H], a: Admitted, take want: Call
         if let Some(take why) = check(want.arg) { return Error(take why) }
     }
     let digest = store.request_digest(want.key, want.arg)
-    let token = ingress.principal(a.principal)
-    let allocated: Result[Bytes, Capacity] = list.with_capacity(list.len(token) + 4u64)
-    let mut stream: Bytes = match take allocated { Ok(take b) => take b, Error(c) => return Error(Budget(room(c))) }
-    if let Error(c) = list.append(mut stream, token) { return Error(Budget(room(c))) }
-    let number: u64 = int.widen(want.stream)
-    for i in 0u64 .. 4u64 { let octet: u8 = int.narrow((number >> ((3u64 - i) * 8u64)) & 255u64); result.unwrap(list.push(mut stream, octet)) }
+    let stream = match stream_key(a.caller, want.stream) { Ok(take b) => take b, Error(c) => return Error(Budget(room(c))) }
     let CallWant(key: take key, stream: _, p: p, arg: take arg, deadline_ms: _) = take want
     Ok(Send(key: take key, stream: take stream, p: p, arg: take arg, digest: digest, deadline: end, budget: a.budget))
 }
@@ -4490,13 +4505,14 @@ type WireMark: send = Unit(Bytes) | V1
 // external item has no outcome units or subscription generations to retire.
 type WireOutput { frame: Frame, marks: List[WireMark], generations: List[(u32, u64)], external: bool }
 type WirePending: send { stream: u32, p: u64, slot: u32, deadline: u32, arg: Bytes, at: u64, grows: bool }
-type WirePolicy: send { policy: ingress.Ingress, source: Ip, token: Option[Bytes], principal: Option[ingress.Principal], to: Sender[WireEvent] }
+type WireAsk: send = Bind(Option[Bytes]) | CheckRate(Caller)
+type WirePolicy: send { policy: ingress.Ingress, source: Ip, request: WireAsk, to: Sender[WireEvent] }
 
 fn wire_policy(take job: WirePolicy) -> () waits {
-    let WirePolicy(policy: take policy, source: source, token: take token, principal: take principal, to: take to) = take job
-    let answer = match take principal {
-        Some(take p) => Rate(ingress.call(policy, p)),
-        None => Authenticated(ingress.hello(policy, source, take token)),
+    let WirePolicy(policy: take policy, source: source, request: take request, to: take to) = take job
+    let answer = match take request {
+        CheckRate(caller) => Rate(ingress.call(policy, caller)),
+        Bind(take token) => Authenticated(ingress.hello(policy, source, take token)),
     }
     let _ = channel.send(to, wire_event(take answer))
 }
@@ -4536,7 +4552,7 @@ fn try_head(head: WireHead, take req: Req) -> HeadOffer {
 
 pub opaque type WireSession[G: send, H: send]: send {
     registry: Registry[G, H], place: Option[StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]]], policy: ingress.Ingress, head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, target: String,
-    source: Ip, me: Option[Sender[WireEvent]], publisher: Option[Sender[PubIn]], principal: Option[ingress.Principal],
+    source: Ip, me: Option[Sender[WireEvent]], publisher: Option[Sender[PubIn]], caller: Option[Caller], welcome_token: Option[Bytes],
     phase: u8, wants: List[Want], entries: List[Bytes], placing: u64,
     asking: bool, pending: Option[WirePending],
     held: Map[Bytes, WireHeld], refusals: u64, last: u64, generation: u64,
@@ -4553,7 +4569,7 @@ fn wire_service_seed[G: send, H: send](take reg: Registry[G, H], policy: ingress
 
 fn wire_service_with_head[G: send, H: send](take reg: Registry[G, H], policy: ingress.Ingress, take head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H]] {
     let context = WireSession(registry: take reg, place: None, policy: ingress.share(policy), head: take head, clock: clock, tasks: tasks, config: config, target: take target,
-        source: V4(0u32), me: None, publisher: None, principal: None, phase: 0u8, wants: list.new(), entries: list.new(), placing: 0u64,
+        source: V4(0u32), me: None, publisher: None, caller: None, welcome_token: None, phase: 0u8, wants: list.new(), entries: list.new(), placing: 0u64,
         asking: false, pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64,
         joined: None, joining: None, join_lease: None, subscription: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false)
     Service(context: take context, step: wire_step, ready: wire_can_read, finish: wire_finish, check: wire_check_live)
@@ -4571,11 +4587,8 @@ fn wire_key(w: Want) -> Bytes {
     key
 }
 
-fn wire_stream(principal: ingress.Principal, number: u32) -> Bytes {
-    let mut stream: Bytes = result.unwrap(clone(ingress.principal(principal)))
-    let value: u64 = int.widen(number)
-    for i in 0u64 .. 4u64 { let octet: u8 = int.narrow((value >> ((3u64 - i) * 8u64)) & 255u64); result.unwrap(list.push(mut stream, octet)) }
-    stream
+fn wire_stream(caller: Caller, number: u32) -> Bytes {
+    result.unwrap(stream_key(caller, number))
 }
 
 fn wire_units[G: send, H: send](s: WireSession[G, H]) -> u64 {
@@ -4815,9 +4828,9 @@ fn wire_take_output[G: send, H: send](mut s: WireSession[G, H], mut work: WireWo
     Some(take f)
 }
 
-fn wire_begin_policy[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, take token: Option[Bytes], take principal: Option[ingress.Principal]) -> Result[(), u16] {
+fn wire_begin_policy[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, take request: WireAsk) -> Result[(), u16] {
     let to = match s.me { Some(to) => channel.sender(to), None => return Error(1008u16) }
-    let job = WirePolicy(policy: ingress.share(s.policy), source: s.source, token: take token, principal: take principal, to: take to)
+    let job = WirePolicy(policy: ingress.share(s.policy), source: s.source, request: take request, to: take to)
     match task.spawn(s.tasks, bytes 8192u64, take job, wire_policy) {
         Ok(take h) => { work.asking = Some(take h); s.asking = true; Ok(()) },
         Error(_) => Error(1013u16),
@@ -4829,10 +4842,10 @@ fn wire_call_ready[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
     if !allowed { return wire_refused(mut s, mut work, stream, p, Overloaded) }
     let index: u64 = int.widen(slot)
     if index >= list.len(s.entries) { return wire_refused(mut s, mut work, stream, p, NoEntry) }
-    let principal = match s.principal { Some(a) => result.unwrap(ingress.share_principal(a)), _ => return Error(1008u16) }
+    let caller: Caller = match s.caller { Some(a) => result.unwrap(clone(a)), _ => return Error(1008u16) }
     let mut entries: List[Bytes] = list.new()
     result.unwrap(list.push(mut entries, result.unwrap(clone(s.entries[index]))))
-    let context = admitted(take principal, take entries, at, host.mono_ns(s.clock), s.config.budget, s.config.socket.max_frame)
+    let context = admitted(take caller, take entries, at, host.mono_ns(s.clock), s.config.budget, s.config.socket.max_frame)
     let want = CallWant(key: result.unwrap(clone(s.entries[index])), stream: stream, p: p, arg: take arg, deadline_ms: deadline_ms)
     let sent = match prepare(s.registry, context, take want) { Ok(take send) => take send, Error(take why) => return wire_refused(mut s, mut work, stream, p, take why) }
     let k = slot_key(sent.stream, p)
@@ -4879,7 +4892,8 @@ fn wire_call_ready[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
             Some(lease) => (latest.handle(lease.live), latest.handle(lease.identity)),
             None => fail("runner: missing head lease"),
         }
-        let request = Request(stream: take named, p: position, key: take entry, arg: take argument, digest: digest, reply_to: Wire(wire_me(s)), live: take live, identity: take identity, seed: take seed)
+        let Admitted(caller: take principal, ..) = take context
+        let request = Request(caller: Some(take principal), stream: take named, p: position, key: take entry, arg: take argument, digest: digest, reply_to: Wire(wire_me(s)), live: take live, identity: take identity, seed: take seed)
         match try_head(s.head, Req(e: Requested(take request))) {
             Posted => (),
             InboxFull => return wire_refused(mut s, mut work, stream, p, Overloaded),
@@ -5086,18 +5100,18 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
                 if s.phase != 0u8 { return Error(1008u16) }
                 s.phase = 1u8
                 s.wants = take wanted
-                wire_begin_policy(mut s, mut work, take token, None)?
+                wire_begin_policy(mut s, mut work, Bind(take token))?
             },
             Call(stream, p, slot, deadline, take arg) => {
                 if s.phase != 3u8 { return Error(1008u16) }
-                let (take key, take auth) = match s.principal { Some(principal) => (slot_key(wire_stream(principal, stream), p), result.unwrap(ingress.share_principal(principal))), _ => return Error(1008u16) }
+                let (take key, take auth): (Bytes, Caller) = match s.caller { Some(caller) => (slot_key(wire_stream(caller, stream), p), result.unwrap(clone(caller))), _ => return Error(1008u16) }
                 let grows = match map.get(s.held, key) { Some(h) => !h.forwarded || h.queued != 0u64 || list.len(h.owed) != 0u64, _ => true }
                 let held = match map.get(s.held, key) { Some(h) => h.forwarded, _ => false }
                 if (wire_admission_closed(work, s.clock) && !held) || (grows && wire_units(s) >= 1u64 + s.config.q) {
                     wire_refused(mut s, mut work, stream, p, Overloaded)?
                 } else {
                     s.pending = Some(WirePending(stream: stream, p: p, slot: slot, deadline: deadline, arg: take arg, at: at, grows: grows))
-                    wire_begin_policy(mut s, mut work, None, Some(take auth))?
+                    wire_begin_policy(mut s, mut work, CheckRate(take auth))?
                 }
             },
             Subscribe(sub, slot, take arg, take resume) => {
@@ -5115,8 +5129,12 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
         WAuthenticated(take principal) => {
             let _ = replace(mut work.asking, None)
             s.asking = false
-            s.principal = take principal
-            if let None = s.principal { return Error(1013u16) }
+            let (take caller, take token) = match take principal {
+                Some(take p) => ingress.welcome(take p),
+                None => return Error(1013u16),
+            }
+            s.caller = Some(take caller)
+            s.welcome_token = Some(take token)
             if let Some(place) = s.place { s.registry = match placed(place, s.config.n_place) { Ok(take r) => take r, Error(_) => return Error(1013u16) } }
             let wanted = replace(mut s.wants, list.new())
             for take want in take wanted { result.unwrap(list.push(mut s.entries, wire_key(want))) }
@@ -5157,9 +5175,9 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
                 if s.placing == 0u64 {
                     s.placing += 1u64
                     if list.len(s.entries) == 0u64 { s.phase = 4u8 }
-                    let principal: Bytes = match s.principal { Some(p) => result.unwrap(clone(ingress.principal(p))), _ => fail("runner: unbound principal") }
+                    let token = option.unwrap(replace(mut s.welcome_token, None))
                     let q: u32 = int.narrow(s.config.q)
-                    return Ok(Some(Welcome(take principal, q, s.config.budget, result.unwrap(launch_digest()), result.unwrap(clone(s.target)), launch_word(0u64, 0u64))))
+                    return Ok(Some(Welcome(take token, q, s.config.budget, result.unwrap(launch_digest()), result.unwrap(clone(s.target)), launch_word(0u64, 0u64))))
                 }
                 let index = s.placing - 1u64
                 let slot: u32 = int.narrow(index)
@@ -5255,7 +5273,7 @@ fn wire_check_live[G: send, H: send](s: WireSession[G, H], f: Frame) -> Option[u
         if index >= list.len(s.entries) { return None }
         let key = s.entries[index]
         if !map.contains(s.registry.slots, key) && !map.contains(s.registry.gone, key) { return None }
-        let named: Bytes = match s.principal { Some(principal) => wire_stream(principal, stream), _ => return None }
+        let named: Bytes = match s.caller { Some(caller) => wire_stream(caller, stream), _ => return None }
         let position = slot_key(named, p)
         let prior: Option[store.RequestDigest] = match map.get(s.held, position) { Some(h) => if h.forwarded { Some(h.digest) } else { None }, _ => None }
         if let Some(digest) = prior {

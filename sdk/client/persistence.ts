@@ -1,4 +1,4 @@
-import {CorruptState, type Installation, type Want, type Pending, type StreamRecord} from './client.js';
+import {CorruptState, RECOVERY_VERSION, type Installation, type Want, type Pending, type StreamRecord} from './client.js';
 
 export function encodeState(state: Installation): string {
   return JSON.stringify(state, (_, value) => typeof value === 'bigint' ? {$bigint: value.toString()}
@@ -19,7 +19,7 @@ export function decodeState(text: string): Installation {
       }
       return value;
     });
-    if (!state || state.version !== 1 || typeof state.generation !== 'bigint'
+    if (!state || state.version !== RECOVERY_VERSION || typeof state.generation !== 'bigint'
       || (state.token !== null && !(state.token instanceof Uint8Array))
       || !Array.isArray(state.directory) || !state.directory.every(u32)
       || new Set(state.directory).size !== state.directory.length

@@ -182,9 +182,10 @@ pub fn slot(keys: List[Bytes], key: Bytes) -> u32 {
 }
 
 pub fn stream(token: Bytes, s: u32) -> Bytes {
-    let mut b: Bytes = result.unwrap(clone(token))
-    let n: u64 = int.widen(s)
-    for i in 0u64 .. 4u64 { let x: u8 = int.narrow((n >> ((3u64 - i) * 8u64)) & 255u64); result.unwrap(list.push(mut b, x)) }
+    let caller = option.unwrap(result.unwrap(ingress.caller(token)))
+    let mut b: Bytes = list.new()
+    result.unwrap(runner.caller_key(caller, mut b))
+    result.unwrap(std.codec.encode_key(std.codec.key_u32(), s, mut b))
     b
 }
 

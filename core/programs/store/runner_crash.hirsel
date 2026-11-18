@@ -182,6 +182,71 @@ fn options() -> store.Options {
     o
 }
 
+// L31 uses the disk harness without a crash. The host supplies one random token
+// and searches the files after the last acknowledged call and checkpoint.
+type SecretClient: send {
+    tasks: Tasks, net: Net, clock: Clock, random: Random, policy: ingress.Ingress,
+    head: Sender[runner.Req], post: Sender[runner.PubIn], token: Bytes
+}
+
+fn secret_client(take d: SecretClient) -> String waits {
+    let SecretClient(tasks: tasks, net: n, clock: c, random: r, policy: take policy, head: take head, post: take post, token: take token) = take d
+    let mut keys: List[Bytes] = list.new()
+    result.unwrap(list.push(mut keys, body_key(0u64)))
+    let pair = wire_client.pair(tasks, n, c, r, policy, head, post, code.describe(place), keys, Some(take token), 1u64, 2097152u64)
+    let (take wire, take server) = match take pair {
+        Ok(take connected) => take connected,
+        Error(Allocation(_)) => return "L31: client allocation refused",
+        Error(Network(Denied)) => return "L31: loopback grant refused",
+        Error(Network(_)) => return "L31: loopback connection failed",
+        Error(_) => return "L31: handshake failed",
+    }
+    let _ = take head
+    let mut answered = true
+    for p in 0u64 .. 2u64 {
+        wire_client.send_frame(wire, Call(7u32, p, 0u32, 5000u32, u64_bytes(p)))
+        let ok = match wire_client.next(wire) {
+            Ok(Batch(_, _, _, ds)) => list.len(ds) == 1u64 && ds[0u64].stream == 7u32 &&
+                ds[0u64].p == p && same(ds[0u64].outcome, returned(Ok(p))),
+            _ => false,
+        }
+        answered = answered && ok
+    }
+    let closed = wire_client.close(take wire)
+    let joined = match task.join(take server) { Ok(Ok(())) => true, _ => false }
+    if !answered { return "L31: calls did not return" }
+    if !closed || !joined { return "L31: connection did not close" }
+    ""
+}
+
+pub fn no_secret_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net) -> Result[(), Exit] waits {
+    let encoded = option.unwrap(args.get(argv, 0u64))
+    let token = option.unwrap(result.unwrap(std.base64.decode(string.as_bytes(encoded))))
+    let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(64u64))
+    let mail = result.unwrap(runner.mailbox(4u64))
+    let (policy, take policy_task) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
+    let mut policy_handle = take policy_task
+    let seed = SecretClient(tasks: tasks, net: n, clock: c, random: r, policy: take policy, head: take head, post: runner.post(mail), token: take token)
+    let driving = result.unwrap(task.spawn(tasks, bytes 33554432u64, take seed, secret_client))
+    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 1048576u64))
+    clean(result.unwrap(task.join(take driving)))
+    task.cancel(mut policy_handle)
+    let _ = task.join(take policy_handle)
+    let mut o = options()
+    o.create = false
+    let mut again = result.unwrap(store.open(tasks, d, c, r, o))
+    let h = result.unwrap(handles(mut again))
+    let total = result.unwrap(store.get(store.snapshot(again), store.shape(h.t), 0u64))
+    want(total == Some(2u64), "L31: two effects must be durable")
+    let ticket = result.unwrap(store.checkpoint(mut again))
+    result.unwrap(store.durable(mut again, ticket))
+    result.unwrap(store.close(take again))
+    Ok(())
+}
+
 fn ack(out: Stdout, v: u64) waits {
     let mut line = result.unwrap(string.with_capacity(32u64))
     result.unwrap(string.push(mut line, "ACK "))
@@ -327,7 +392,7 @@ fn served(take db: store.Db, c: Clock, r: Random, tasks: Tasks, n: Net, out: Std
 }
 
 fn nibble(x: u8) -> u8 { if x <= b'9' { x - b'0' } else { x - b'a' + 10u8 } }
-fn token(text: View[String]) -> Option[Bytes] {
+fn decode_fixture_token(text: View[String]) -> Option[Bytes] {
     if text == "-" { return None }
     let raw = string.as_bytes(text)
     want(list.len(raw) == 42u64, "runner_crash: invalid saved principal")
@@ -525,7 +590,7 @@ fn deadline_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args) -> () 
     existing.create = false
     let mut db = result.unwrap(store.open(tasks, d, c, r, existing))
     let data = result.unwrap(handles(mut db))
-    let named = option.unwrap(token(option.unwrap(args.get(argv, 4u64))))
+    let named = option.unwrap(decode_fixture_token(option.unwrap(args.get(argv, 4u64))))
     let stream = wire_client.stream(named, 0u32)
     want(match result.unwrap(store.get(store.snapshot(db), store.shape(data.t), 0u64)) { None => true, _ => false }, "runner-deadline: frozen effect reached disk")
     let digest = store.request_digest(body_key(0u64), u64_bytes(9u64))
@@ -557,7 +622,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
     if phase == "client" {
         let mode = option.unwrap(args.get(argv, 2u64))
         let port: u16 = int.narrow(arg_u64(option.unwrap(args.get(argv, 3u64))))
-        let principal = token(option.unwrap(args.get(argv, 4u64)))
+        let principal = decode_fixture_token(option.unwrap(args.get(argv, 4u64)))
         if mode == "init" {
             clean(drive(c, r, tasks, n, out, port, 1u64, list.new(), take principal))
         } else if mode == "write" {

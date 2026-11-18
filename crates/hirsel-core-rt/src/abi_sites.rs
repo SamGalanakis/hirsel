@@ -1,7 +1,11 @@
 //! FORM #91: late source binding for the existing Cause.site word at offset24.
-//! The driver supplies linked item ordinals and current UTF-8 source. Nothing
+//! The driver supplies linked item ordinals, paths and positions. Nothing
 //! reads these borrowed tables before failure reporting; no global registry.
 use crate::{causes::Cause, entry::OsProcess, process::View};
+use hirsel_core_layout::source_positions;
+
+#[unsafe(export_name = "hirsel_core_source_positions_v1")]
+pub static SOURCE_POSITIONS_V1: u8 = source_positions::TAG;
 
 #[repr(C)]
 pub struct SourceFile {
@@ -53,16 +57,26 @@ pub(crate) unsafe fn format_cause(cause: &Cause, sources: *const SourceTable) ->
         let item = &*sources.items.add(((cause.site >> 32) - 1) as usize);
         let file = &*sources.files.add(item.file as usize);
         let offset = item.file_offset as usize + (cause.site as u32) as usize;
-        let prefix = std::slice::from_raw_parts(file.source.data, offset);
-        let line = prefix.iter().filter(|&&b| b == b'\n').count() + 1;
-        let start = prefix
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |i| i + 1);
-        let column = std::str::from_utf8_unchecked(&prefix[start..])
-            .chars()
-            .count()
-            + 1;
+        let source = if file.source.len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(file.source.data, file.source.len)
+        };
+        let (line, column) = if let Some(markers) = source.strip_prefix(&[source_positions::TAG]) {
+            source_positions::position(markers, offset)
+        } else {
+            let prefix = &source[..offset];
+            let line = prefix.iter().filter(|&&b| b == b'\n').count() + 1;
+            let start = prefix
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map_or(0, |i| i + 1);
+            let column = std::str::from_utf8_unchecked(&prefix[start..])
+                .chars()
+                .count()
+                + 1;
+            (line, column)
+        };
         let path = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
             file.path.data,
             file.path.len,

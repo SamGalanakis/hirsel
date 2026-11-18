@@ -4,7 +4,8 @@
 /* FORM #91: Cause remains32 bytes, site@24 is
    ((linked_item_ordinal + 1) << 32) | item_relative_byte_offset; 0 is none.
    Driver binds current source and relocates item IDs; runtime never re-sites a
-   propagated/joined cause. UTF-8 paths/bytes and both arrays borrow immutably
+   propagated/joined cause. Callers may supply UTF-8 source. Generated bindings
+   carry compact positions. The paths, source views and arrays borrow immutably
    through reporting. The process does not free them. No startup parse/index,
    source copy or successful-run read. Empty table32B on both64-bit targets. */
 typedef struct { HirselCoreView path, source; } HirselCoreSourceFile;

@@ -1,5 +1,6 @@
 //! Static views and source bindings use the same ELF writer as generated code.
 use super::*;
+use hirsel_core_layout::source_positions;
 
 pub(super) struct Tables {
     pub parameters: DataId,
@@ -101,11 +102,15 @@ pub(super) fn write(
     let mut files = Vec::new();
     let mut pointers = Vec::new();
     for file in &sources.files {
-        for string in [&file.path, &file.text] {
-            let data = bytes(object, None, string.as_bytes().to_vec(), 1)?;
+        for content in [
+            file.path.as_bytes().to_vec(),
+            source_positions::encode(&file.text),
+        ] {
+            let len = content.len() as u64;
+            let data = bytes(object, None, content, 1)?;
             pointers.push((files.len() as u32, data));
             files.extend_from_slice(&0u64.to_le_bytes());
-            files.extend_from_slice(&(string.len() as u64).to_le_bytes());
+            files.extend_from_slice(&len.to_le_bytes());
         }
     }
     let files = define(object, None, files, 8, &pointers)?;
@@ -115,10 +120,21 @@ pub(super) fn write(
         items.extend_from_slice(&item.file_offset.to_le_bytes());
     }
     let items = bytes(object, None, items, 4)?;
-    let mut table = vec![0; 32];
+    // Keep a link dependency on the decoder when the caller supplied a
+    // runtime archive. Old archives can read raw source but cannot read this.
+    let decoder = object
+        .declare_data(source_positions::SYMBOL, Linkage::Import, false, false)
+        .map_err(error)?;
+    let mut table = vec![0; 40];
     table[8..16].copy_from_slice(&(sources.files.len() as u64).to_le_bytes());
     table[24..32].copy_from_slice(&(sources.items.len() as u64).to_le_bytes());
-    let sources = define(object, None, table, 8, &[(0, files), (16, items)])?;
+    let sources = define(
+        object,
+        None,
+        table,
+        8,
+        &[(0, files), (16, items), (32, decoder)],
+    )?;
     if plan.charge_report.is_some() {
         let mut label = DataDescription::new();
         label.define(

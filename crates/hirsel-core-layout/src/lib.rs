@@ -21,6 +21,7 @@ pub mod event;
 pub mod flow;
 mod recipe;
 mod shape;
+pub mod source_positions;
 mod target;
 
 pub use continuation::{Frames, Point, frames, spare_words};

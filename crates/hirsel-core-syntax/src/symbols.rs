@@ -142,7 +142,6 @@ pub struct Symbols {
     strings: hirsel_core_ids::published::Table<Arc<str>>,
     #[serde(skip)]
     index: FxHashMap<Arc<str>, Symbol>,
-    published_index: hirsel_core_ids::published::Map<Arc<str>, Symbol>,
     #[serde(skip)]
     single: [Symbol; 128],
 }
@@ -154,7 +153,6 @@ impl<'de> serde::Deserialize<'de> for Symbols {
         #[derive(serde::Deserialize)]
         struct Wire {
             strings: hirsel_core_ids::published::Table<Arc<str>>,
-            published_index: hirsel_core_ids::published::Map<Arc<str>, Symbol>,
         }
         let wire = Wire::deserialize(decoder)?;
         let base = wire.strings.base_len();
@@ -170,7 +168,6 @@ impl<'de> serde::Deserialize<'de> for Symbols {
         Ok(Self {
             strings: wire.strings,
             index,
-            published_index: wire.published_index,
             single: known.single,
         })
     }
@@ -310,7 +307,6 @@ impl Default for Symbols {
                 .map(|(i, s)| (s.clone(), Symbol(i as u32)))
                 .collect(),
             strings: strings.into(),
-            published_index: Default::default(),
         }
     }
 }
@@ -326,18 +322,10 @@ impl Symbols {
         &self,
         writer: &mut impl hirsel_core_ids::published::Publisher,
     ) -> std::io::Result<Self> {
-        use hirsel_core_ids::published::Map;
-        let names: Map<Arc<str>, Symbol> = self
-            .strings
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (Arc::clone(s), Symbol(i as u32)))
-            .collect();
         let known = Self::default();
         Ok(Self {
-            strings: writer.table(&self.strings)?,
+            strings: writer.indexed_table(&self.strings)?,
             index: known.index,
-            published_index: writer.map(&names)?,
             single: known.single,
         })
     }
@@ -356,7 +344,8 @@ impl Symbols {
         }
         let id = if let Some(&id) = self.index.get(text) {
             id
-        } else if let Some(id) = self.published_index.get(text).copied() {
+        } else if let Some(row) = self.strings.find_published(text) {
+            let id = Symbol(row);
             self.index.insert(Arc::from(text), id);
             id
         } else {
@@ -381,7 +370,7 @@ impl Symbols {
         self.index
             .get(text)
             .copied()
-            .or_else(|| self.published_index.get(text).copied())
+            .or_else(|| self.strings.find_published(text).map(Symbol))
     }
     #[inline(always)]
     pub fn text(&self, id: Symbol) -> &str {
@@ -516,11 +505,10 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    /// Table 0 holds the strings, table 1 the name index, as the image codec
-    /// writes them: a string is its u64 length and bytes, a symbol its u32.
     struct Names {
-        rows: Vec<(Arc<str>, Symbol)>,
+        rows: Vec<Arc<str>>,
         lookups: AtomicUsize,
+        reads: AtomicUsize,
     }
     fn text(name: &str) -> Vec<u8> {
         let mut bytes = (name.len() as u64).to_le_bytes().to_vec();
@@ -528,20 +516,16 @@ mod tests {
         bytes
     }
     impl Source for Names {
-        fn row(&self, table: Descriptor, index: u32) -> io::Result<Vec<u8>> {
-            let (name, id) = &self.rows[index as usize];
-            let mut bytes = text(name);
-            if table.table == 1 {
-                bytes.extend_from_slice(&id.0.to_le_bytes());
-            }
-            Ok(bytes)
+        fn row(&self, _: Descriptor, index: u32) -> io::Result<Vec<u8>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            Ok(text(&self.rows[index as usize]))
         }
         fn find(&self, _: Descriptor, key: &[u8]) -> io::Result<Option<u32>> {
             self.lookups.fetch_add(1, Ordering::Relaxed);
             Ok(self
                 .rows
                 .iter()
-                .position(|(name, _)| key == text(name))
+                .position(|name| key == text(name))
                 .map(|i| i as u32))
         }
     }
@@ -551,13 +535,9 @@ mod tests {
         let mut original = Symbols::default();
         let library = original.intern("library_name");
         let names = Arc::new(Names {
-            rows: original
-                .strings
-                .iter()
-                .enumerate()
-                .map(|(i, s)| (s.clone(), Symbol(i as u32)))
-                .collect(),
+            rows: original.strings.iter().cloned().collect(),
             lookups: AtomicUsize::new(0),
+            reads: AtomicUsize::new(0),
         });
         let descriptor = Descriptor {
             namespace: ContentHash([173; 32]),
@@ -567,12 +547,6 @@ mod tests {
         let reader = Reader::new(descriptor.namespace, names.clone());
         let mut published = Symbols {
             strings: reader.table(descriptor).unwrap(),
-            published_index: reader
-                .map(Descriptor {
-                    table: 1,
-                    ..descriptor
-                })
-                .unwrap(),
             index: FxHashMap::default(),
             single: original.single,
         };
@@ -588,7 +562,9 @@ mod tests {
         assert_eq!(names.lookups.load(Ordering::Relaxed), 0);
         assert_eq!(reopened.intern("own_name"), own);
         assert_eq!(reopened.intern("library_name"), library);
+        assert_eq!(names.reads.load(Ordering::Relaxed), 0);
         assert_eq!(reopened.text(library), "library_name");
+        assert_eq!(names.reads.load(Ordering::Relaxed), 1);
         assert_eq!(reopened.index.get("library_name"), Some(&library));
         assert_eq!(reopened.intern("library_name"), library);
         assert_eq!(names.lookups.load(Ordering::Relaxed), 1);

@@ -426,6 +426,19 @@ impl<T> Table<T> {
     pub fn descriptor(&self) -> Option<Descriptor> {
         self.prefix.as_ref().map(|p| p.descriptor)
     }
+    /// Look up a row number in a prefix written by `Publisher::indexed_table`.
+    /// The appended rows and overrides are owned by the caller.
+    pub fn find_published<Q: Serialize + ?Sized>(&self, key: &Q) -> Option<u32>
+    where
+        T: Borrow<Q>,
+    {
+        let prefix = self.prefix.as_ref()?;
+        #[cfg(feature = "front-observer")]
+        if prefix.observed {
+            return observed(|| prefix.find(key));
+        }
+        prefix.find(key)
+    }
     #[inline(always)]
     pub fn base_len(&self) -> usize {
         self.prefix
@@ -798,6 +811,11 @@ impl<
 /// The image writer freezes these component types without knowing their owners.
 pub trait Publisher {
     fn table<T: Clone + Serialize + serde::de::DeserializeOwned + Send + Sync + 'static>(
+        &mut self,
+        table: &Table<T>,
+    ) -> io::Result<Table<T>>;
+    /// Index the encoded rows themselves, with their original ordinals as values.
+    fn indexed_table<T: Clone + Serialize + serde::de::DeserializeOwned + Send + Sync + 'static>(
         &mut self,
         table: &Table<T>,
     ) -> io::Result<Table<T>>;

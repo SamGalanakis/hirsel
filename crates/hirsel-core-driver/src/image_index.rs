@@ -145,6 +145,15 @@ impl Publisher for Writer {
         let descriptor = self.section(&rows, None)?;
         self.reader.table(descriptor)
     }
+    fn indexed_table<T: Clone + Serialize + serde::de::DeserializeOwned + Send + Sync + 'static>(
+        &mut self,
+        table: &Table<T>,
+    ) -> io::Result<Table<T>> {
+        let rows = table.iter().map(encode).collect::<io::Result<Vec<_>>>()?;
+        let keys = rows.iter().map(Vec::len).collect::<Vec<_>>();
+        let descriptor = self.section(&rows, Some(&keys))?;
+        self.reader.table(descriptor)
+    }
     fn map<
         K: Clone
             + Ord
@@ -362,10 +371,9 @@ impl Source for DiskIndex {
         self.rows.fetch_add(1, Ordering::Relaxed);
         Ok(bytes)
     }
-    /// A map row is its key's encoding followed by its value's, a table has one
-    /// key type, every query type encodes as that key type does, and an encoding
-    /// of one type is prefix-free: a row that starts with the query's bytes has
-    /// exactly that key.
+    /// A row starts with its key's encoding. Every query encodes as the table's
+    /// key type, whose encoding is prefix-free, so a matching prefix is an
+    /// exact key match.
     fn find(&self, table: Descriptor, key: &[u8]) -> io::Result<Option<u32>> {
         let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Probe);
         let pages = self.installed()?;
@@ -492,6 +500,10 @@ mod tests {
         writer.table(&Table::<Vec<u8>>::default()).unwrap();
         writer.table(&Table::from(rows.clone())).unwrap();
         writer.table(&Table::from(vec![big.clone()])).unwrap();
+        let spellings = [b.as_str(), "aa", "", a.as_str(), "a"];
+        let names = writer
+            .indexed_table(&Table::from(spellings.map(Arc::<str>::from).to_vec()))
+            .unwrap();
         let bytes = writer.bytes.clone();
         let (sections, _) = writer.finish(&store).unwrap();
         let lens: Vec<u32> = [0, strings.len(), 2, numbers.len(), 1, 0, rows.len(), 1]
@@ -534,6 +546,11 @@ mod tests {
             assert_eq!(index.row(d(6), i as u32).unwrap(), encode(row).unwrap());
         }
         assert_eq!(index.row(d(7), 0).unwrap(), encode(&big).unwrap());
+        for (ordinal, spelling) in spellings.iter().enumerate() {
+            assert_eq!(names.find_published(*spelling), Some(ordinal as u32));
+            assert_eq!(&*names[ordinal], *spelling);
+        }
+        assert_eq!(names.find_published("ab"), None);
         let pages = index.installed().unwrap();
         for at in 0..=bytes.len() + 8 {
             let word = bytes.get(at..at + 8);

@@ -12,23 +12,24 @@
 //!   appends inside a loop and `fill` can move straight to the heap. Keep
 //!   their frame-growth arms out of the loops that use the resulting carrier.
 //! - the base of an index, `x[i]`;
-//! - a bare argument of a call of a function, which is a view (OWN-7);
+//! - a bare argument of a checked call, which is a view (OWN-7);
+//! - a `mut` argument of a call, which is lent for the call (OWN-7);
 //! - the source of a viewing `for`, or `view x`;
 //!
 //! and the use is not inside a closure. Everything else (a move, `take x`, a return,
-//! a field, element, payload or capture, `mut x` to any other callee, an assignment
-//! to `x`) escapes. Its element type must be plain, so dropping the list visits no
+//! a field, element, payload or capture, or a direct assignment to `x`) escapes. Its element type must be plain, so dropping the list visits no
 //! element (MEM-32), and fixed, so the slot's element count is known here.
 //!
-//! The slot holds [`FRAME_LIST_BYTES`]. Growth that fits them stays in the frame;
-//! growth past them moves the storage to the task heap as `grow` does. Dropping the
+//! The slot holds [`FRAME_LIST_BYTES`]. Local-only growth stays in the frame
+//! while it fits. A slot whose storage may be lent records its original payer
+//! and spills through the ordinary grow operation. Move-out promotes it with
+//! its existing logical charge. Dropping the
 //! list refunds its charge and frees only heap storage. The current limit is the one
 //! limit of the body: no `bound` scope changes it, so it pays each frame charge and
 //! takes each refund.
 use super::*;
 
-/// The frame bytes of one frame-backed list.
-pub(super) const FRAME_LIST_BYTES: u64 = 128;
+use hirsel_core_layout::{FRAME_LIST_BYTES, FRAME_LIST_LINK_BYTES};
 
 /// The core `list` operations that may take a frame-backed list as `mut`.
 const IN_PLACE: [&str; 6] = [
@@ -46,6 +47,7 @@ pub(super) struct FrameList {
     pub bytes: AddressId,
     pub elems: u64,
     pub item: TyId,
+    pub lent: bool,
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -66,7 +68,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .is_some_and(|f| self.p.fns[f].path.is_core("list.new"))
     }
     /// The binders of this body's lists that never escape, by the rule above.
-    fn frame_candidates(&self) -> HashSet<u32> {
+    fn frame_candidates(&self) -> HashMap<u32, bool> {
         let tree = self.item.tree;
         let nodes = self.item.range.nodes.clone();
         let start = nodes.start;
@@ -75,7 +77,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for id in nodes {
             let n = NodeId(id);
             match tree.node(n).kind {
-                NodeKind::Bound => return HashSet::default(),
+                NodeKind::Bound => return HashMap::default(),
                 NodeKind::LetMut => lets.push(n),
                 _ => {}
             }
@@ -112,7 +114,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 ],
             )
         };
-        let mut found = HashSet::default();
+        let mut found = HashMap::default();
         for s in lets {
             let kids = self.kids(s);
             if self.kind(kids[0]) == NodeKind::BindPattern
@@ -121,46 +123,66 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 && self.is_list_new(kids[kids.len() - 1])
                 && !in_closure(s)
             {
-                found.insert(b);
+                found.insert(b, false);
             }
         }
         if found.is_empty() {
             return found;
         }
-        let stays = |u: NodeId| {
-            let Some(p) = up(u) else { return false };
+        // Some(true) means the callee needs to identify this allocation.
+        let backing = |u: NodeId| {
+            let p = up(u)?;
             let kids = self.kids(p);
             match self.kind(p) {
-                NodeKind::Index | NodeKind::Call if kids[0] == u => self.kind(p) == NodeKind::Index,
-                NodeKind::Call => self.core_fn_at(kids[0]).is_some(),
-                NodeKind::For => kids[1] == u,
+                NodeKind::Index if kids[0] == u => Some(false),
+                NodeKind::Call if kids[0] != u => Some(false),
+                NodeKind::For if kids[1] == u => Some(false),
                 NodeKind::Unary => match self.token_text(p) {
-                    "view" => true,
-                    "mut" => up(p).is_some_and(|c| {
+                    "view" => Some(false),
+                    "mut" => {
+                        let c = up(p)?;
+                        if self.kind(c) != NodeKind::Call {
+                            return None;
+                        }
                         let args = self.kids(c);
-                        self.kind(c) == NodeKind::Call
-                            && args.get(1) == Some(&p)
-                            && self.core_fn_at(args[0]).is_some_and(|f| {
-                                let g = &self.p.fns[f];
-                                g.body.is_none()
-                                    && (IN_PLACE.iter().any(|op| g.path.is_core(op))
-                                        || (g.path.is_core("list.append") && !in_loop(c)))
-                            })
-                    }),
-                    _ => false,
+                        if args.get(1) == Some(&p)
+                            && let Some(f) = self.core_fn_at(args[0])
+                        {
+                            let callee = &self.p.fns[f];
+                            let path = &callee.path;
+                            if path.is_core("list.fill")
+                                || (path.is_core("list.append") && in_loop(c))
+                            {
+                                return None;
+                            }
+                            if callee.body.is_none()
+                                && (IN_PLACE.iter().any(|op| path.is_core(op))
+                                    || path.is_core("list.append")
+                                    || path.is_core("list.put_word_le"))
+                            {
+                                return Some(false);
+                            }
+                        }
+                        (args[0] != p).then_some(true)
+                    }
+                    _ => None,
                 },
-                _ => false,
+                _ => None,
             }
         };
         let info = &self.p.items[self.at.module as usize][self.at.item as usize];
         for name in &info.resolution.names {
             if let Target::Binder(b) = name.target
-                && found.contains(&b)
-                && (name.projections.start != name.projections.end
-                    || !stays(name.node)
-                    || in_closure(name.node))
+                && let Some(lent) = found.get_mut(&b)
             {
-                found.remove(&b);
+                if name.projections.start == name.projections.end
+                    && !in_closure(name.node)
+                    && let Some(loaned) = backing(name.node)
+                {
+                    *lent |= loaned;
+                } else {
+                    found.remove(&b);
+                }
             }
         }
         found
@@ -168,19 +190,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// Whether the `let mut` binder `b`, initialised by `value`, keeps its first
     /// storage in the frame.
-    pub(super) fn frame_binder(&mut self, b: u32, value: NodeId) -> bool {
+    pub(super) fn frame_binder(&mut self, b: u32, value: NodeId) -> Option<bool> {
         if !self.is_list_new(value) {
-            return false;
+            return None;
         }
         if self.frame_binders.is_none() {
             self.frame_binders = Some(self.frame_candidates());
         }
-        self.frame_binders.as_ref().is_some_and(|s| s.contains(&b))
+        self.frame_binders.as_ref()?.get(&b).copied()
     }
 
     /// Give the list slot at `address`, of type `ty`, its frame bytes when its
     /// element is plain and fixed and at least the first growth's four fit.
-    pub(super) fn begin_frame_list(&mut self, ty: TyId, address: AddressId, n: NodeId) {
+    pub(super) fn begin_frame_list(&mut self, ty: TyId, address: AddressId, lent: bool, n: NodeId) {
         let TyKind::Adt(d, args) = self.t.kind(ty) else {
             return;
         };
@@ -213,15 +235,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if elems < 4 {
             return;
         }
-        let words = self
-            .t
-            .mk(TyKind::Array(scalar(Scalar::U64), FRAME_LIST_BYTES / 8));
+        let size = FRAME_LIST_BYTES + if lent { FRAME_LIST_LINK_BYTES } else { 0 };
+        let words = self.t.mk(TyKind::Array(scalar(Scalar::U64), size / 8));
         let Some(row) = self.place_row(words, "frame list bytes without a place", n) else {
             return;
         };
         let bytes = self.entry_slot(PlaceTy::Declared(row), n);
-        self.frame_slots
-            .insert(slot, FrameList { bytes, elems, item });
+        self.frame_slots.insert(
+            slot,
+            FrameList {
+                bytes,
+                elems,
+                item,
+                lent,
+            },
+        );
     }
 
     /// The frame list `header` points at, when it is one of this body's.
@@ -281,6 +309,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         id: TypeId,
         n: NodeId,
     ) -> Option<()> {
+        if f.lent {
+            self.emit_drop(AddressBase::Address(address), id, n);
+            return Some(());
+        }
         let carrier = self.list_carrier(f.item, n)?;
         let header = self.pointer(address, n);
         let data = self.carrier_word(header, carrier, SeqWord::Data, n);
@@ -325,19 +357,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<()> {
         let frame = self.pointer(f.bytes, n);
         let data = self.carrier_word(header, carrier, SeqWord::Data, n);
-        let framed = self.list_compare(CompareOp::Eq, data, frame, n);
         let room = self.konst(Ty::Scalar(Scalar::U64), f.elems, n)?;
         let fits = self.list_compare(CompareOp::Le, new_cap, room, n);
         let null = self.konst(Ty::Ptr, 0, n)?;
-        let [heap, unowned, first, inside, regrow, spill] = [(); 6].map(|_| self.new_block(&[]));
-        self.list_branch(framed, inside, heap, n);
-        self.start(heap);
+        let [unowned, first] = [(); 2].map(|_| self.new_block(&[]));
+        let inside = if f.lent {
+            None
+        } else {
+            let [inside, heap] = [(); 2].map(|_| self.new_block(&[]));
+            let framed = self.list_compare(CompareOp::Eq, data, frame, n);
+            self.list_branch(framed, inside, heap, n);
+            self.start(heap);
+            Some(inside)
+        };
         self.list_branch(owned, like, unowned, n);
         self.start(unowned);
         self.list_branch(fits, first, current, n);
         // The first storage, or static bytes' copy, in the frame.
         self.start(first);
-        let (block, available) = self.list_allocate(plan, AllocPlace::Frame(frame), n);
+        let place = if f.lent {
+            AllocPlace::LentFrame(frame)
+        } else {
+            AllocPlace::Frame(frame)
+        };
+        let (block, available) = self.list_allocate(plan, place, n);
         let ok = self.list_compare(CompareOp::Ne, block, null, n);
         let (copy, refused) = (self.new_block(&[]), self.new_block(&[]));
         self.list_branch(ok, copy, refused, n);
@@ -355,7 +398,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.set_carrier_word(header, carrier, SeqWord::Data, frame, n);
         self.set_carrier_word(header, carrier, SeqWord::Cap, new_cap, n);
         self.jump(success, &[], n);
-        // Growth of frame storage: in place while it fits, else to the heap.
+        // Local-only storage keeps its in-frame growth. The shared grow path
+        // replaces lent storage and settles its original payer.
+        let Some(inside) = inside else {
+            return Some(());
+        };
+        let [regrow, spill] = [(); 2].map(|_| self.new_block(&[]));
         self.start(inside);
         let old_charge = self.admitted_list_charge(old_cap, plan.logical, n)?;
         self.list_branch(fits, regrow, spill, n);

@@ -161,6 +161,19 @@ impl Function<'_, '_, '_> {
                     let overflow = overflow.map(|v| self.get(v));
                     let values = self.frame_admit(frame, charge, overflow)?;
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
+                } else if let AllocPlace::LentFrame(frame) = place {
+                    let frame = self.get(frame);
+                    let overflow = overflow.map_or_else(
+                        || self.b.ins().iconst(types::I8, 0),
+                        |v| self.values[v.index()],
+                    );
+                    let values = self.c_call(
+                        "hirsel_core_admit_lent_frame",
+                        &[p, p, u, boolean],
+                        &[p, u, u],
+                        &[ctx, frame, charge, overflow],
+                    )?;
+                    [values[0], values[1], values[2]]
                 } else if resource.is_none() && !matches!(place, AllocPlace::Region(_)) {
                     let overflow = overflow.map(|v| self.get(v));
                     let values = self.own_alloc(native_kind, size, alignment, charge, overflow)?;
@@ -412,6 +425,26 @@ impl Function<'_, '_, '_> {
                     block,
                     charge,
                 )?;
+            }
+            Inst::PromoteFrame { carrier } => {
+                if let Some(hirsel_core_layout::FieldTy::Seq(elem)) =
+                    c::sequence_edge(&self.input.types, self.body.addresses[carrier.index()].ty)
+                {
+                    let stride =
+                        hirsel_core_layout::field_size(&self.input.types, self.layouts, elem).0;
+                    let at = self.addr(carrier);
+                    let data = self.load_word(at, 0);
+                    let len = self.load_word(at, 8);
+                    let cap = self.load_word(at, 16);
+                    let stride = self.b.ins().iconst(types::I64, stride as i64);
+                    let promoted = self.c_call(
+                        "hirsel_core_promote_frame_list",
+                        &[p, p, u, u, u],
+                        &[p],
+                        &[self.context, data, cap, len, stride],
+                    )?[0];
+                    self.store_word(at, 0, promoted);
+                }
             }
             Inst::FrameRefund { charge } => {
                 let charge = self.get(charge);

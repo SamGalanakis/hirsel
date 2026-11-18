@@ -27,7 +27,10 @@ pub(crate) unsafe fn grow(
     // SAFETY: the caller owns the only live carrier. In-place storage remains
     // billed to the same payer, with the old charge refunded after installation.
     let heap = context.heap.get_or_init(std::sync::Arc::default);
-    if unsafe { task_heap::try_grow_in_place(heap, old, payer, bytes, align, kind) } {
+    let frame_payer = context.frame_lists.remove(old);
+    if frame_payer.is_none()
+        && unsafe { task_heap::try_grow_in_place(heap, old, payer, bytes, align, kind) }
+    {
         unsafe { carrier.add(16).cast::<u64>().write(capacity) };
         payer.settle_in(context, refund);
         return Ok(old);
@@ -39,7 +42,11 @@ pub(crate) unsafe fn grow(
         std::ptr::copy_nonoverlapping(old.as_ptr(), replacement.as_ptr(), moved);
         carrier.cast::<*mut u8>().write(replacement.as_ptr());
         carrier.add(16).cast::<u64>().write(capacity);
-        block::free_in(context, old, refund);
+        if let Some(payer) = frame_payer {
+            payer.settle_in(context, refund);
+        } else {
+            block::free_in(context, old, refund);
+        }
     }
     Ok(replacement)
 }

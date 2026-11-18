@@ -166,6 +166,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         };
         let address = self.address(AddressBase::Value(pointer?), &[], place, n);
+        let bare = self.bare(ty);
+        if matches!(rep, Rep::Place(_))
+            && (has_param(&self.t, bare)
+                || matches!(self.t.kind(bare), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::List)))
+        {
+            self.inst(Inst::PromoteFrame { carrier: address }, n);
+        }
         let old = match rep {
             Rep::Scalar(t) => Some(self.read_bits(address, t, n)),
             Rep::Place(_) => Some(self.pointer(address, n)),

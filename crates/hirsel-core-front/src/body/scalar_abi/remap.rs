@@ -117,7 +117,10 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
             }
             f(size);
             match place {
-                AllocPlace::Like(v) | AllocPlace::Region(v) | AllocPlace::Frame(v) => f(v),
+                AllocPlace::Like(v)
+                | AllocPlace::Region(v)
+                | AllocPlace::Frame(v)
+                | AllocPlace::LentFrame(v) => f(v),
                 _ => {}
             }
         }
@@ -194,6 +197,7 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
         | Inst::Call { .. }
         | Inst::SetCase { .. }
         | Inst::Step { .. }
+        | Inst::PromoteFrame { .. }
         | Inst::LimitExit
         | Inst::Drop { .. } => {}
         Inst::Mark { count, .. } | Inst::Unmark { count, .. } => f(count),
@@ -201,6 +205,7 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
 }
 pub(super) fn addresses(inst: &mut Inst, f: &mut impl FnMut(&mut AddressId)) {
     match inst {
+        Inst::PromoteFrame { carrier } => f(carrier),
         Inst::Address { address, .. }
         | Inst::Read { address, .. }
         | Inst::Store { address, .. }

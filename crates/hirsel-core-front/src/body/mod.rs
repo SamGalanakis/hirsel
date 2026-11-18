@@ -1236,7 +1236,7 @@ struct Cx<'c, 'a, 'e> {
     anchor_path: Vec<anchors::Component>,
     /// Binders of lists that never escape (frame_lists.rs), found at the first
     /// `let mut` of a new list.
-    frame_binders: Option<HashSet<u32>>,
+    frame_binders: Option<HashMap<u32, bool>>,
     /// The frame bytes of each frame-backed list, by its slot.
     frame_slots: HashMap<SlotId, frame_lists::FrameList>,
 }

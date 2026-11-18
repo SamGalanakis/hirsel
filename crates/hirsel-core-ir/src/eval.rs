@@ -181,6 +181,7 @@ struct Blk {
     /// The limit the block is charged to; None for frame slots and engine records.
     limit: Option<Limit>,
     charge: u64,
+    lent_size: Option<u64>,
     res: Option<Res>,
     /// A counted node's kind, fixed by its `alloc`; its operations must name it.
     counted: Option<Counted>,
@@ -263,6 +264,7 @@ static DEAD_BLOCK: Blk = Blk {
     live: false,
     limit: None,
     charge: 0,
+    lent_size: None,
     res: None,
     counted: None,
     class: None,
@@ -293,6 +295,7 @@ mod block_table_tests {
             live: true,
             limit: None,
             charge: 0,
+            lent_size: None,
             res: None,
             counted: None,
             class: None,
@@ -2059,6 +2062,7 @@ impl Machine<'_> {
             live: true,
             limit,
             charge,
+            lent_size: None,
             res,
             counted: None,
             class: None,
@@ -2193,7 +2197,7 @@ impl Machine<'_> {
         );
         if let Some(size) = size {
             assert_eq!(
-                blk.bytes.len() as u64,
+                blk.lent_size.unwrap_or(blk.bytes.len() as u64),
                 size,
                 "cleanup of {what} frees a block of the recipe's {size} bytes, but it was \
                  allocated with {}",
@@ -2214,6 +2218,15 @@ impl Machine<'_> {
         assert!(!self.mem[b].fixed, "a free of static data");
         if let Some((at, _)) = self.mem[b].marks.iter().find(|(_, m)| m.0) {
             panic!("free of a block whose slot at +{at} is live: a slot kernel left a value in it");
+        }
+        if self.mem[b].lent_size.take().is_some() {
+            let slot = &mut self.mem[b];
+            let charge = std::mem::take(&mut slot.charge);
+            let payer = slot.limit.take().expect("a lent frame allocation's payer");
+            slot.class = None;
+            slot.marks.clear();
+            self.refund(payer, charge);
+            return;
         }
         let blk = self.mem.remove(b);
         let mut n = blk.charge;
@@ -3969,6 +3982,15 @@ impl Machine<'_> {
                     Ok(()) if let AllocPlace::Frame(at) = place => {
                         (vals[result.index()], vals[available.index()]) = (vals[at.index()], 0);
                     }
+                    Ok(()) if let AllocPlace::LentFrame(at) = place => {
+                        let p = vals[at.index()];
+                        let slot = &mut self.mem[split(p).0];
+                        slot.limit = Some(l);
+                        slot.charge = n;
+                        slot.lent_size = Some(vals[size.index()]);
+                        slot.class = Some(kind.cleanup(&self.m.types, &self.recipes));
+                        (vals[result.index()], vals[available.index()]) = (p, 0);
+                    }
                     Ok(()) => {
                         let res = match kind {
                             AllocKind::Resource { grant } => Some(Res {
@@ -4013,6 +4035,30 @@ impl Machine<'_> {
                     "free refunds another charge"
                 );
                 self.free(p);
+            }
+            Inst::PromoteFrame { carrier } => {
+                let at = places[carrier.index()].0;
+                if let Some(FieldTy::Seq(elem)) =
+                    sequence_edge(&self.m.types, b.addresses[carrier.index()].ty)
+                {
+                    let old = self.load(at, 8);
+                    if old != 0 && self.mem[split(old).0].lent_size.is_some() {
+                        let bytes = (self.load(at + 8, 8) * self.stride(elem)) as usize;
+                        let slot = &mut self.mem[split(old).0];
+                        let size = slot.lent_size.take().unwrap();
+                        let charge = std::mem::take(&mut slot.charge);
+                        let payer = slot.limit.take();
+                        let class = slot.class.take();
+                        let marks = std::mem::take(&mut slot.marks);
+                        let src = slot.bytes[..bytes].to_vec();
+                        let data = self.block(size, payer, charge, None);
+                        let heap = &mut self.mem[split(data).0];
+                        heap.class = class;
+                        heap.marks = marks;
+                        self.put(data, &src);
+                        self.store(at, 8, data);
+                    }
+                }
             }
             Inst::FrameRefund { charge } => {
                 let l = t.limits.last().unwrap().clone();

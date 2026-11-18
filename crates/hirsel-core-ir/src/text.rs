@@ -89,6 +89,7 @@ pub fn uses_v1(m: &Module) -> bool {
                                 | Inst::Grow { .. }
                                 | Inst::Free { .. }
                                 | Inst::FrameRefund { .. }
+                                | Inst::PromoteFrame { .. }
                                 | Inst::Copy { .. }
                                 | Inst::RegionOpen { .. }
                                 | Inst::RegionClose { .. }
@@ -612,6 +613,7 @@ impl Printer {
                             AllocPlace::Like(b) => format!(" like v{}", b.0),
                             AllocPlace::Region(r) => format!(" in v{}", r.0),
                             AllocPlace::Frame(r) => format!(" frame v{}", r.0),
+                            AllocPlace::LentFrame(r) => format!(" lent_frame v{}", r.0),
                         };
                         format!(
                             "{}, {}{} = alloc {kind} {} align {align} charge {}{place}{}{}",
@@ -653,6 +655,7 @@ impl Printer {
                         format!("free {} charge {}", v(block), v(charge))
                     }
                     Inst::FrameRefund { charge } => format!("frame_refund {}", v(charge)),
+                    Inst::PromoteFrame { carrier } => format!("promote_frame a{}", carrier.0),
                     Inst::Copy { to, from, bytes } => {
                         format!("copy a{}, a{}, {}", to.0, from.0, v(bytes))
                     }
@@ -1275,6 +1278,12 @@ impl BodyParser {
                     charge: l.value()?,
                 });
             }
+            Some("promote_frame") => {
+                l.next()?;
+                return Ok(Inst::PromoteFrame {
+                    carrier: AddressId(l.id('a')?),
+                });
+            }
             Some("frame_refund") => {
                 l.next()?;
                 return Ok(Inst::FrameRefund { charge: l.value()? });
@@ -1449,6 +1458,8 @@ impl BodyParser {
                 AllocPlace::Like(l.value()?)
             } else if l.eat("in") {
                 AllocPlace::Region(l.value()?)
+            } else if l.eat("lent_frame") {
+                AllocPlace::LentFrame(l.value()?)
             } else if l.eat("frame") {
                 AllocPlace::Frame(l.value()?)
             } else {

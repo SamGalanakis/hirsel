@@ -661,6 +661,70 @@ pub unsafe extern "C" fn hirsel_core_admit(
     }
 }
 
+/// Admit frame storage and publish its backing record for mutating callees.
+/// # Safety
+/// The task and the slot (payload plus allocation link) are live and exclusive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_admit_lent_frame(
+    context: *const Context,
+    frame: NonNull<u8>,
+    charge: u64,
+    overflow: bool,
+) -> Allocation {
+    // SAFETY: the caller owns the live context and the aligned frame slot.
+    let task = unsafe { &*context };
+    let payer = task.payer();
+    match crate::block::admit_storage(payer, (!overflow).then_some(charge)) {
+        Ok(()) => {
+            unsafe { task.frame_lists.insert(frame, payer) };
+            Allocation {
+                pointer: frame.as_ptr(),
+                capacity: Capacity {
+                    requested: 0,
+                    available: 0,
+                },
+            }
+        }
+        Err(capacity) => Allocation {
+            pointer: ptr::null_mut(),
+            capacity,
+        },
+    }
+}
+
+/// Keep the original charge while moving a frame-backed buffer to the heap.
+/// # Safety
+/// Storage, size and moved prefix come from a live sequence carrier's layout.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_promote_frame_list(
+    context: *const Context,
+    data: *mut u8,
+    capacity: u64,
+    len: u64,
+    stride: usize,
+) -> *mut u8 {
+    let Some(old) = NonNull::new(data) else {
+        return data;
+    };
+    // SAFETY: the caller owns the live context and carrier.
+    let task = unsafe { &*context };
+    let Some(payer) = task.frame_lists.remove(old) else {
+        return data;
+    };
+    let heap = task.heap.get_or_init(std::sync::Arc::default);
+    // A matching record proves both sizes fit the frame slot.
+    let replacement = crate::task_heap::Heap::allocate(
+        heap,
+        payer,
+        capacity as usize * stride,
+        8,
+        crate::block::PLAIN,
+        true,
+    );
+    unsafe { ptr::copy_nonoverlapping(data, replacement.as_ptr(), len as usize * stride) };
+    replacement.as_ptr()
+}
+
 /// Refund through an original payer after emitted physical deallocation. Remote
 /// payers use the event mailbox. Admits/allocates nothing, no failure status.
 /// # Safety
@@ -796,7 +860,12 @@ pub unsafe extern "C" fn hirsel_core_free_value(
 ) {
     // SAFETY: the emitter supplies the live block with the contract above.
     unsafe {
-        causes::free_value(&*context, pointer, charge);
+        let context = &*context;
+        if let Some(payer) = context.frame_lists.remove(pointer) {
+            payer.settle_in(context, charge);
+        } else {
+            causes::free_value(context, pointer, charge);
+        }
     }
 }
 

@@ -168,9 +168,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if let Binding::Slot(Some(address)) = binding
                     && to.is_none()
                     && self.live()
-                    && self.frame_binder(b, value)
+                    && let Some(lent) = self.frame_binder(b, value)
                 {
-                    self.begin_frame_list(ty, address, pat);
+                    self.begin_frame_list(ty, address, lent, pat);
                 }
                 self.bind_descriptor(b, v);
                 if matches!(kind, Kind::Scoped | Kind::Region) {

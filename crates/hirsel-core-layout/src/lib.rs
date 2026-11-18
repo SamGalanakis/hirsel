@@ -58,3 +58,8 @@ pub use shape::{
 
 #[cfg(test)]
 mod tests;
+
+/// Physical bytes available for the first storage of an eligible local list.
+pub const FRAME_LIST_BYTES: u64 = 128;
+/// A loaned list's frame slot also holds its allocation link and original payer.
+pub const FRAME_LIST_LINK_BYTES: u64 = 16;

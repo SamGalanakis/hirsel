@@ -516,15 +516,33 @@ impl FunctionEmitter<'_> {
                 fail,
             } => {
                 let payer = match place {
-                    AllocPlace::Current | AllocPlace::Like(_) | AllocPlace::Frame(_) => {
-                        Payer::Current
-                    }
+                    AllocPlace::Current
+                    | AllocPlace::Like(_)
+                    | AllocPlace::Frame(_)
+                    | AllocPlace::LentFrame(_) => Payer::Current,
                     AllocPlace::Region(r) => Payer::Region(self.numeric(r)),
                 };
                 let (charge, size) = (self.numeric(charge), self.numeric(size));
                 let (block, room) = if let AllocPlace::Frame(frame) = place {
                     let frame = self.numeric(frame);
                     let admitted = self.frame_admit(&frame, &charge, overflow);
+                    self.allocation_status(&admitted.0, fail);
+                    admitted
+                } else if let AllocPlace::LentFrame(frame) = place {
+                    let frame = self.numeric(frame);
+                    let overflow = overflow.map_or(FALSE, |v| {
+                        let flag = self.numeric(v);
+                        self.cmp(Predicate::Ne, &Type::I8, &flag, &int(0))
+                    });
+                    let admitted = self.allocation_cold(
+                        "hirsel_core_admit_lent_frame",
+                        &[
+                            ptr(CONTEXT),
+                            ptr(frame),
+                            word(charge),
+                            zeroext(Type::I1, overflow),
+                        ],
+                    );
                     self.allocation_status(&admitted.0, fail);
                     admitted
                 } else {
@@ -634,6 +652,31 @@ impl FunctionEmitter<'_> {
                 let p = self.numeric(block);
                 let n = self.numeric(charge);
                 self.free_block(&p, &n);
+            }
+            Inst::PromoteFrame { carrier } => {
+                if let Some(FieldTy::Seq(elem)) = hirsel_core_ir::sequence_edge(
+                    &self.module.types,
+                    self.body.addresses[carrier.index()].ty,
+                ) {
+                    let stride =
+                        hirsel_core_layout::field_size(&self.module.types, self.recipes, elem).0;
+                    let at = self.address(carrier);
+                    let data = self.load_native(&at, 0, Type::Ptr);
+                    let len = self.load_native(&at, 8, Type::I64);
+                    let cap = self.load_native(&at, 16, Type::I64);
+                    let promoted = self.intrinsic(
+                        "hirsel_core_promote_frame_list",
+                        Type::Ptr,
+                        &[
+                            ptr(CONTEXT),
+                            ptr(data),
+                            word(cap),
+                            word(len),
+                            word(int(stride)),
+                        ],
+                    );
+                    self.store_native(&at, 0, Type::Ptr, &promoted);
+                }
             }
             Inst::FrameRefund { charge } => {
                 let n = self.numeric(charge);

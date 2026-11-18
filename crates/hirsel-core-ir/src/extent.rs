@@ -143,7 +143,11 @@ pub(crate) fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
             size,
             ..
         } => {
-            if let AllocPlace::Like(x) | AllocPlace::Region(x) | AllocPlace::Frame(x) = place {
+            if let AllocPlace::Like(x)
+            | AllocPlace::Region(x)
+            | AllocPlace::Frame(x)
+            | AllocPlace::LentFrame(x) = place
+            {
                 uses.push(v(x));
             }
             uses.extend([charge, size].into_iter().chain(overflow).map(v));
@@ -151,6 +155,7 @@ pub(crate) fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
         }
         Inst::Free { block, charge } => uses.extend([v(block), v(charge)]),
         Inst::FrameRefund { charge } => uses.push(v(charge)),
+        Inst::PromoteFrame { carrier } => uses.push(a(carrier)),
         Inst::Copy { to, from, bytes } => uses.extend([a(to), a(from), v(bytes)]),
         Inst::Grow {
             result,

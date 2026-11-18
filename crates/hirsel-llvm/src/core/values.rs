@@ -118,8 +118,10 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                     if let Some(v) = overflow {
                         read(v);
                     }
-                    if let AllocPlace::Region(v) | AllocPlace::Like(v) | AllocPlace::Frame(v) =
-                        place
+                    if let AllocPlace::Region(v)
+                    | AllocPlace::Like(v)
+                    | AllocPlace::Frame(v)
+                    | AllocPlace::LentFrame(v) = place
                     {
                         read(v);
                     }
@@ -196,6 +198,7 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::SetCase { .. }
                 | Inst::RegionOpen { .. }
                 | Inst::Step { .. }
+                | Inst::PromoteFrame { .. }
                 | Inst::LimitExit
                 | Inst::Drop { .. }
                 | Inst::Mark { .. }
@@ -317,7 +320,7 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                     read(to);
                     read(from);
                 }
-                Inst::Grow { carrier, .. } => read(carrier),
+                Inst::Grow { carrier, .. } | Inst::PromoteFrame { carrier } => read(carrier),
                 Inst::Call { call } => {
                     for arg in body.calls[call.index()].args.get(&body.pools.args).unwrap() {
                         if let Arg::Address(address) = *arg {

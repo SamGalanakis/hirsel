@@ -619,6 +619,12 @@ pub enum Inst {
     Step {
         fail: Option<BlockId>,
     },
+    /// Relocate frame-backed sequence storage to the heap on a move-out,
+    /// transferring its existing payer and charge. Other layouts and storage
+    /// are already movable. The typed place may be closed from a generic body.
+    PromoteFrame {
+        carrier: AddressId,
+    },
 }
 
 /// What an `Alloc` makes. The block's bookkeeping (its limit record,
@@ -704,6 +710,9 @@ pub enum AllocPlace {
     /// Charged like `Current`, with the bytes at this pointer, the caller's frame, as
     /// the block: nothing is allocated, and `FrameRefund` later returns the charge.
     Frame(ValueId),
+    /// Frame storage with a live allocation record understood by lent callees.
+    /// The aligned slot includes FRAME_LIST_LINK_BYTES after its payload.
+    LentFrame(ValueId),
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

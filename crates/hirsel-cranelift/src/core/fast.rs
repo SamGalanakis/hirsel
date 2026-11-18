@@ -575,6 +575,7 @@ pub(super) fn empty_bound(body: &Body) -> bool {
             | Inst::Grow { .. }
             | Inst::Free { .. }
             | Inst::FrameRefund { .. }
+            | Inst::PromoteFrame { .. }
             | Inst::Drop { .. }
             | Inst::Call { .. }
             | Inst::RegionOpen { .. }

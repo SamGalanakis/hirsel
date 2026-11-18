@@ -255,12 +255,36 @@ fn escape_lent(n: u64) -> u64 {
     }
 }
 
-// OWN-7: a mutable callee may grow the list. After the callee pushes 20 values, the caller reads
+// A zero-byte callee bound refuses 4 -> 8. A 64-byte bound can pay for
+// all eight slots, and the refund for the original four goes to the caller.
+fn grow_under_bound(mut xs: List[u64]) -> bool {
+    let refused = bound bytes 0 {
+        list.reserve(mut xs, 4)?
+    }
+    match refused {
+        Ok(()) => return false,
+        Error(e) if e.requested == 64 && e.available == 0 => {},
+        Error(_) => return false
+    }
+    let grown = bound bytes 64 {
+        list.reserve(mut xs, 4)?
+        room()
+    }
+    match grown {
+        Ok(n) => n == 0,
+        Error(_) => false
+    }
+}
+
+// OWN-7: the callee's pushes take this list past 128 bytes. The caller reads
 // every retained element. The 32-slot buffer holds 256 of the 1000 bytes, so
 // the live probe sees 744 and the probe after caller drop sees all 1000.
 fn lent_contents() -> u64 {
     let mut xs: List[u64] = list.new()
     result.unwrap(list.push(mut xs, 100))
+    if !grow_under_bound(mut xs) {
+        return 3
+    }
     let err = push_all(mut xs, 20)
     if err != 0 || list.len(xs) != 21 || xs[0] != 100 {
         return 1
@@ -288,8 +312,16 @@ fn lent_growth() -> u64 {
 // Taking a lent place directly is refused by OWN-11, but OWN-13 lets replace
 // return its old value. The old 4-slot buffer stays live across the caller's
 // return and a second use of its stack. Its value is 91 and its charge is 32.
+fn exchange[T](mut xs: T, take empty: T) -> T {
+    replace(mut xs, take empty)
+}
+
 fn extract(mut xs: List[u64]) -> List[u64] {
-    replace(mut xs, list.new())
+    // A move changes physical backing without a new logical admission.
+    let old = bound bytes 0 {
+        exchange(mut xs, list.new())
+    }
+    result.unwrap(take old)
 }
 
 fn replaced() -> List[u64] {
@@ -333,7 +365,9 @@ fn lent_park(tasks: Tasks) -> u64 waits {
     let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
     let h = result.unwrap(task.spawn(tasks, bytes 4096, take tx, produce))
     let mut xs: List[u64] = list.new()
-    let _ = push_all(mut xs, 3)
+    result.unwrap(list.push(mut xs, 0))
+    result.unwrap(list.push(mut xs, 1))
+    result.unwrap(list.push(mut xs, 2))
     push_then_receive(mut xs, rx)
     result.unwrap(task.join(take h))
     if list.len(xs) == 5 && xs[0] == 0 && xs[1] == 1 && xs[2] == 2 && xs[3] == 100 && xs[4] == 99 {

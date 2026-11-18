@@ -594,3 +594,36 @@ fn fragment_frame_progress() -> bool {
         _ => false
     }
 }
+
+// RFC 6455 sections 7.4.1 and 8.1. E2 82 still owes one continuation when
+// the final frame ends, irrespective of where the transport splits the bytes.
+// expect: run utf8_missing_final_continuation_splits() = true
+fn utf8_missing_final_continuation_splits() -> bool {
+    let b = unhex("01 01 e2 80 01 82")
+    let end = list.len(b)
+    for split in 0u64 .. end {
+        let mut d = websocket.decoder(Client, 256)
+        let mut at: u64 = 0
+        let Ok(Need) = websocket.next(mut d, list.slice(b, 0, split), mut at) else {
+            return false
+        }
+        if at != split {
+            return false
+        }
+        at = 0
+        let tail = list.slice(b, split, end)
+        let Ok(Reject(code)) = websocket.next(mut d, tail, mut at) else {
+            return false
+        }
+        if code != 1007 || at != end - split {
+            return false
+        }
+        let Ok(Ended) = websocket.next(mut d, tail, mut at) else {
+            return false
+        }
+        if at != end - split {
+            return false
+        }
+    }
+    true
+}

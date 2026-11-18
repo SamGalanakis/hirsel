@@ -196,3 +196,24 @@ fn v4_short_suffix() -> u64 {
 fn v7_short_suffix() -> bool {
     uuid.v7(0, result.unwrap(b"0123456789"), 1) == None
 }
+
+// RFC 9562 appendix A.3. Refused text output must leave the existing
+// prefix intact even though the first digit would fit.
+// expect: run push_refusal_retries() = true
+fn push_refusal_retries() -> bool {
+    let mut out = string.new()
+    result.unwrap(string.reserve(mut out, 8))
+    result.unwrap(string.push(mut out, "id="))
+    let id = uuid.Uuid(hi: 0x919108f752d14320, lo: 0x9bacf847db4148a8)
+    let denied = result.unwrap(bound bytes 0 {
+        uuid.push(mut out, id)
+    })
+    if let Ok(_) = denied {
+        return false
+    }
+    if out != "id=" {
+        return false
+    }
+    result.unwrap(uuid.push(mut out, id))
+    out == "id=919108f7-52d1-4320-9bac-f847db4148a8"
+}

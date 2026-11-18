@@ -1190,3 +1190,34 @@ fn borrowed_branch_split_keeps_snapshot() -> bool {
     }
     option.unwrap(omap.get(changed, 1024)) == 1025 && nodes(option.unwrap(omap.root(old)), true) && nodes(option.unwrap(omap.root(changed)), true)
 }
+
+// An 8-byte key clone fits, then the 16-byte value clone is refused.
+// The temporary key must release its charge and the retry must see that row.
+// expect: run next_value_clone_refusal_retries() = true
+fn next_value_clone_refusal_retries() -> bool {
+    let mut ids: u64 = 0
+    let m: omap.OMap[String, String] = omap.new()
+    let key = result.unwrap(string.from("key"))
+    let value = result.unwrap(string.from("long value"))
+    let (take inserted, _) = result.unwrap(omap.insert(mut ids, m, take key, take value))
+    let mut c = result.unwrap(omap.range(inserted, Unbounded, Unbounded))
+    let checked = result.unwrap(bound bytes 8 {
+        let refusal = match omap.next(mut c) {
+            Error(e) => e.requested == 16 && e.available == 0,
+            _ => false
+        }
+        let reservation: Result[List[u8], Capacity] = list.with_capacity(8)
+        let refunded = match reservation {
+            Ok(probe) => list.capacity(probe) == 8,
+            Error(_) => false
+        }
+        refusal && refunded
+    })
+    if !checked {
+        return false
+    }
+    match result.unwrap(omap.next(mut c)) {
+        Some((k, v)) => k == "key" && v == "long value",
+        None => false
+    }
+}

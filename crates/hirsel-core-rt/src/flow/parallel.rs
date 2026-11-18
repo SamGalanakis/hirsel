@@ -10,6 +10,8 @@ type Graph = Reference<Plain, Ring>;
 
 // Yield the dispatcher to other jobs even if a producer keeps this stage ready.
 const STAGE_BATCH: usize = 64;
+// Give the downstream worker a group of entries without waiting for the full turn.
+const HANDOFF_BATCH: usize = 8;
 
 pub(super) struct Parallel {
     shared: Arc<Shared>,
@@ -41,6 +43,12 @@ enum WaitFor {
     Sink(usize),
     Drain,
     Stop,
+}
+
+#[derive(Default)]
+struct Handoffs {
+    reader: Option<usize>,
+    sink_changed: bool,
 }
 
 // SAFETY: the sealed native graph has no owner charges or external objects.
@@ -251,6 +259,16 @@ impl State {
         self.step_ready(stage, head).then_some(head)
     }
 
+    fn enable(&mut self, stage: Option<usize>) -> Option<usize> {
+        let stage = stage?;
+        if self.busy[stage] || self.ready_step(stage).is_none() {
+            return None;
+        }
+        self.busy[stage] = true;
+        self.enabled += 1;
+        Some(stage)
+    }
+
     fn notify(&mut self, wrote_sink: bool) {
         let Some((_, reason)) = self.waiter else {
             return;
@@ -275,12 +293,16 @@ impl State {
 
 impl Shared {
     fn schedule(self: &Arc<Self>, state: &mut State, stage: Option<usize>) {
-        let Some(stage) = stage else { return };
-        if !state.busy[stage] && state.ready_step(stage).is_some() {
-            state.busy[stage] = true;
-            state.enabled += 1;
+        if let Some(stage) = state.enable(stage) {
             tasks::enqueue_flow(self.clone(), stage);
         }
+    }
+
+    fn publish(self: &Arc<Self>, state: &mut State, handoffs: &mut Handoffs) {
+        if let Some(reader) = handoffs.reader.take() {
+            tasks::enqueue_flow(self.clone(), reader);
+        }
+        state.notify(std::mem::take(&mut handoffs.sink_changed));
     }
 
     fn wrote(self: &Arc<Self>, state: &mut State, port: usize) {
@@ -346,6 +368,7 @@ impl Shared {
         mut state: MutexGuard<'a, State>,
         stage: usize,
         head: Head,
+        handoffs: &mut Handoffs,
     ) -> MutexGuard<'a, State> {
         let s = &state.graph.stages[stage];
         if let Head::Entry {
@@ -393,13 +416,17 @@ impl Shared {
             });
             state = self.state.lock().unwrap();
         }
-        let mut wrote_sink = false;
         if !state.stopping {
             state.graph.publish_step(stage, head);
             let s = &state.graph.stages[stage];
             let (output, input, live) = (s.output, s.input, s.live);
-            wrote_sink = state.readers[output].is_none();
-            self.wrote(&mut state, output);
+            let reader = state.readers[output];
+            handoffs.sink_changed |= reader.is_none();
+            if handoffs.reader.is_none() {
+                // Count the reader at the transfer even if its dispatch
+                // waits for the end of this group of entries.
+                handoffs.reader = state.enable(reader);
+            }
             if !live && head != Head::End {
                 for index in 0..state.graph.merges[input].len() {
                     let port = state.graph.merges[input][index];
@@ -409,6 +436,7 @@ impl Shared {
         }
         #[cfg(any(test, feature = "testing"))]
         if let Some((script, domain)) = &self.script {
+            self.publish(&mut state, handoffs);
             drop(state);
             script.pause(PausePoint::Flow {
                 domain: *domain,
@@ -418,7 +446,6 @@ impl Shared {
             });
             state = self.state.lock().unwrap();
         }
-        state.notify(wrote_sink);
         state
     }
 }
@@ -426,14 +453,19 @@ impl Shared {
 impl FlowWork for Shared {
     fn run(self: Arc<Self>, stage: usize) {
         let mut state = self.state.lock().unwrap();
-        for _ in 0..STAGE_BATCH {
-            let Some(head) = state.ready_step(stage) else {
-                break;
-            };
-            // Under the flow lock the successor inherits this job's enabled
-            // unit before the completed step can release it.
-            state = self.run_step(state, stage, head);
+        let mut handoffs = Handoffs::default();
+        'turn: for _ in 0..STAGE_BATCH / HANDOFF_BATCH {
+            for _ in 0..HANDOFF_BATCH {
+                let Some(head) = state.ready_step(stage) else {
+                    break 'turn;
+                };
+                // The successor inherits this job's enabled unit under
+                // the flow lock before the completed step releases it.
+                state = self.run_step(state, stage, head, &mut handoffs);
+            }
+            self.publish(&mut state, &mut handoffs);
         }
+        self.publish(&mut state, &mut handoffs);
         state.busy[stage] = false;
         self.schedule(&mut state, Some(stage));
         state.enabled -= 1;

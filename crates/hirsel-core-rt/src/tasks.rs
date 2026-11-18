@@ -118,7 +118,7 @@ thread_local! { static CURRENT: Local<*mut Task> = const { Local::new(ptr::null_
 enum State {
     Ready,
     Running,
-    Blocked,
+    Waiting,
     /// Parked in a provider operation's W or I. Only that operation's own wakes
     /// (its timer, its token, a cancellation request) move it; `wake` does not.
     Provider,
@@ -142,6 +142,10 @@ pub struct Task {
     owned_context: Option<Context>,
     run: *mut Scheduler,
     ready: *mut Task,
+    waiters: Waiters,
+    waiting_on: *mut Waiters,
+    wait_previous: *mut Task,
+    wait_next: *mut Task,
     timer_next: *mut Task,
     /// Host CLOCK_MONOTONIC nanoseconds.
     timer_deadline: Option<u64>,
@@ -206,6 +210,67 @@ impl Parked {
     }
 }
 
+/// FIFO waiters on one task or channel condition. The owner stays pinned
+/// by every waiter, and registration lasts until a wake or cancellation.
+#[derive(Default)]
+pub(crate) struct Waiters {
+    first: *mut Task,
+    last: *mut Task,
+}
+
+impl Waiters {
+    unsafe fn push(queue: *mut Self, task: *mut Task) {
+        // SAFETY: the active task and the queue are exclusively accessible.
+        unsafe {
+            (*task).waiting_on = queue;
+            (*task).wait_previous = (*queue).last;
+            if (*queue).last.is_null() {
+                (*queue).first = task;
+            } else {
+                (*(*queue).last).wait_next = task;
+            }
+            (*queue).last = task;
+        }
+    }
+
+    unsafe fn remove(task: *mut Task) {
+        // SAFETY: only a registered task can be removed. Its wait pins the queue.
+        unsafe {
+            let queue = (*task).waiting_on;
+            let previous = (*task).wait_previous;
+            let next = (*task).wait_next;
+            if previous.is_null() {
+                (*queue).first = next;
+            } else {
+                (*previous).wait_next = next;
+            }
+            if next.is_null() {
+                (*queue).last = previous;
+            } else {
+                (*next).wait_previous = previous;
+            }
+            (*task).waiting_on = ptr::null_mut();
+            (*task).wait_previous = ptr::null_mut();
+            (*task).wait_next = ptr::null_mut();
+        }
+    }
+
+    /// Ready the registered waiters in park order.
+    ///
+    /// # Safety
+    /// The active commit owns the pinned queue and the scheduling state.
+    pub(crate) unsafe fn wake_all(queue: *mut Self) {
+        // SAFETY: each removal leaves the successor at the head.
+        unsafe {
+            while !(*queue).first.is_null() {
+                let task = (*queue).first;
+                Self::remove(task);
+                (*(*task).run).ready(task);
+            }
+        }
+    }
+}
+
 struct Scheduler {
     deferred: *mut Task,
     deferred_tail: *mut Task,
@@ -226,9 +291,6 @@ struct Scheduler {
     /// request order, taken at the next scheduler turn.
     cancels: Vec<*mut Task>,
     outside_cancels: Vec<*mut Task>,
-    /// Tasks in State::Blocked. Only `checkpoint(true)` blocks a task and only
-    /// `wake` unblocks, readying every one, so a wake with none is a no-op.
-    blocked: usize,
     taped: bool,
     net: *mut hirsel_core_net::Sockets,
     model: Option<hirsel_core_net::model::Model>,
@@ -428,26 +490,14 @@ impl Scheduler {
         unreachable!("ready task has lost its queue");
     }
 
-    #[inline(always)]
-    unsafe fn wake(&mut self) {
-        if self.blocked != 0 {
-            // SAFETY: forwarded caller contract.
-            unsafe { self.wake_blocked() }
-        }
-    }
-    /// Ready every blocked task, in creation-list order.
-    #[inline(never)]
-    unsafe fn wake_blocked(&mut self) {
-        self.blocked = 0;
-        let mut task = self.all;
-        // SAFETY: no task is executing while these single-worker links change.
+    /// A pending request moves only its registered target, and only if the
+    /// cancellation point is allowed to observe it.
+    unsafe fn wake_cancelled(&mut self, task: *mut Task) {
+        // SAFETY: the target's wait and context are pinned until dequeue.
         unsafe {
-            while !task.is_null() {
-                if (*task).state == State::Blocked {
-                    self.remove_timer(task);
-                    self.ready(task);
-                }
-                task = (*task).all;
+            if (*task).state == State::Waiting && cancel_takes_effect(&*(*task).context) {
+                Waiters::remove(task);
+                self.ready(task);
             }
         }
     }
@@ -513,7 +563,7 @@ impl Scheduler {
                         if (*task).state == State::Provider {
                             self.cancels.push(task);
                         }
-                        self.wake();
+                        self.wake_cancelled(task);
                     }
                 }
                 self.tape_inputs();
@@ -621,7 +671,7 @@ impl Scheduler {
                             if (*target).state == State::Provider {
                                 self.wake_operation(target, Wake::Cancel);
                             }
-                            self.wake();
+                            self.wake_cancelled(target);
                         }
                         Turn::Wake(_)
                             if (*target).state == State::Provider
@@ -1509,7 +1559,7 @@ pub(crate) fn before_tape_frame(group: crate::tape::schedule::Group, ending: boo
                     group.fail();
                     return;
                 }
-                _ => checkpoint(false),
+                _ => checkpoint(),
             }
         }
     }
@@ -1559,7 +1609,7 @@ fn replay_boundary(provider_entry: bool) {
                     group.fail();
                     return;
                 }
-                _ => checkpoint(false),
+                _ => checkpoint(),
             }
         }
     }
@@ -1706,7 +1756,7 @@ unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
         if !(*(*task).run).net.is_null() {
             (*(*task).run).poll_net(0);
             if (&(*(*task).run).readies).pending.load(Ordering::Acquire) {
-                checkpoint(false);
+                checkpoint();
             }
         }
     }
@@ -1886,51 +1936,47 @@ pub(crate) fn identity() -> u64 {
 }
 /// # Safety
 /// Called on the active fiber, with no Rust references held to scheduler/task state.
-pub unsafe fn checkpoint(blocked: bool) {
+pub unsafe fn checkpoint() {
     let task = CURRENT.get();
-    // Direct single-task ABI fixtures have no scheduler and never block.
-    if task.is_null() {
-        return;
-    }
     // SAFETY: saving exactly this fiber; idle and task stacks stay mapped.
     unsafe {
-        let run = (*task).run;
-        if blocked {
-            (*task).state = State::Blocked;
-            (*run).blocked += 1;
-        } else {
+        if !task.is_null() {
+            let run = (*task).run;
             (*run).ready(task);
+            hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
         }
-        hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
     }
 }
 
-/// `event` then `wake`, reading the current task once: a channel change that
-/// can unblock peers records its event and then readies every blocked task.
-#[inline(always)]
-pub(crate) fn event_then_wake(kind: u8, object: u64, value: u64) {
+/// # Safety
+/// The active task owns the commit and holds the condition's owner alive
+/// across suspension. No references to scheduler/task state survive the switch.
+pub(crate) unsafe fn park(queue: *mut Waiters) {
     let task = CURRENT.get();
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: the active task exclusively accesses its scheduler between
-    // switches; the sink callback cannot suspend or re-enter.
+    // SAFETY: the condition was checked in this commit and the queue is pinned.
     unsafe {
-        event_for(task, kind, object, value);
-        (*(*task).run).wake();
+        if !task.is_null() {
+            (*task).state = State::Waiting;
+            Waiters::push(queue, task);
+            hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle);
+        }
     }
 }
-#[inline]
-pub(crate) fn wake() {
+
+/// # Safety
+/// The active commit holds the condition's owner alive through the event.
+pub(crate) unsafe fn event_wake_waiters(kind: u8, object: u64, value: u64, queue: *mut Waiters) {
     let task = CURRENT.get();
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: the active task exclusively accesses its scheduler between switches.
+    // SAFETY: recording and waking use the same commit, before any switch.
     unsafe {
-        (*(*task).run).wake();
+        if !task.is_null() {
+            record_event(task, kind, object, value);
+            Waiters::wake_all(queue);
+            poll_event(task, kind, value);
+        }
     }
 }
+
 /// # Safety
 /// Context belongs to this task; primary is available on a normal path.
 #[inline(always)]
@@ -1989,9 +2035,9 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
             abi::task_handover((*task).context);
         }
         before_commit();
-        event(END, (*task).id, (*task).failed as u64);
+        record_event(task, END, (*task).id, (*task).failed as u64);
         (*task).state = State::Ended;
-        (*(*task).run).wake();
+        Waiters::wake_all(&raw mut (*task).waiters);
         hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle);
         std::hint::unreachable_unchecked();
     }
@@ -2028,7 +2074,6 @@ pub unsafe fn run_root(
         readies: Readies::new(),
         cancels: Vec::new(),
         outside_cancels: Vec::new(),
-        blocked: 0,
         taped: false,
         net: ptr::null_mut(),
         model: None,
@@ -2056,6 +2101,10 @@ pub unsafe fn run_root(
         owned_context: None,
         run: &mut run,
         ready: ptr::null_mut(),
+        waiters: Waiters::default(),
+        waiting_on: ptr::null_mut(),
+        wait_previous: ptr::null_mut(),
+        wait_next: ptr::null_mut(),
         timer_next: ptr::null_mut(),
         timer_deadline: None,
         operation: ptr::null_mut(),
@@ -2183,6 +2232,10 @@ unsafe fn spawn_in(
             owned_context: Some(child_context),
             run,
             ready: ptr::null_mut(),
+            waiters: Waiters::default(),
+            waiting_on: ptr::null_mut(),
+            wait_previous: ptr::null_mut(),
+            wait_next: ptr::null_mut(),
             timer_next: ptr::null_mut(),
             timer_deadline: None,
             operation: ptr::null_mut(),
@@ -2300,8 +2353,14 @@ pub unsafe extern "C" fn hirsel_core_cancel(_: *mut Context, task: *mut Task) {
         if (*task).state == State::Provider {
             (*(*task).run).cancels.push(task);
         }
-        event(CANCEL, (*task).id, 0);
-        wake();
+        let source = CURRENT.get();
+        if !source.is_null() {
+            record_event(source, CANCEL, (*task).id, 0);
+        }
+        (*(*task).run).wake_cancelled(task);
+        if !source.is_null() {
+            poll_event(source, CANCEL, 0);
+        }
     }
 }
 unsafe fn retire(task: *mut Task) {
@@ -2353,7 +2412,7 @@ pub unsafe extern "C" fn hirsel_core_join(
             if (*task).state == State::Ended {
                 break;
             }
-            checkpoint(true);
+            park(&raw mut (*task).waiters);
         }
         let failed = (*task).failed != 0;
         let causes = std::mem::take(&mut (*(*task).context).causes);
@@ -2385,7 +2444,7 @@ unsafe fn abandon_begin(context: *mut Context, task: *mut Task) -> *mut crate::c
             if (*task).state == State::Ended {
                 break;
             }
-            checkpoint(true);
+            park(&raw mut (*task).waiters);
         }
         event(JOIN, (*task).id, 2);
         (*task).cursor = 0;
@@ -2592,7 +2651,6 @@ mod ready_routing_laws {
                 readies: Readies::new(),
                 cancels: Vec::new(),
                 outside_cancels: Vec::new(),
-                blocked: 0,
                 taped: false,
                 net: ptr::null_mut(),
                 model: None,
@@ -2629,6 +2687,10 @@ mod ready_routing_laws {
                         owned_context: None,
                         run: &mut run,
                         ready: ptr::null_mut(),
+                        waiters: Waiters::default(),
+                        waiting_on: ptr::null_mut(),
+                        wait_previous: ptr::null_mut(),
+                        wait_next: ptr::null_mut(),
                         timer_next: ptr::null_mut(),
                         timer_deadline: None,
                         operation: &mut operations[i],

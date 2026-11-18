@@ -816,7 +816,7 @@ unsafe extern "C" fn cancel_timer_root(context: *mut Context, _: *mut u8, input:
             0,
         );
         assert!(!spawned.task.is_null());
-        crate::tasks::checkpoint(false);
+        crate::tasks::checkpoint();
         hirsel_core_cancel(context, spawned.task);
         let joined = hirsel_core_join(context, spawned.task, ptr::null_mut(), 123);
         assert_eq!((joined.kind, joined.status), (2, 0));

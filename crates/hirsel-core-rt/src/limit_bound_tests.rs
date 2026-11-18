@@ -232,7 +232,7 @@ fn a_join_result_grows_from_the_joiners_bound_while_its_funder_is_live() {
             assert!(hirsel_core_send(context, sender, (&raw mut list).cast(), 1).transferred);
             hirsel_core_sender_drop(sender);
             while !(*check).get() {
-                checkpoint(false);
+                checkpoint();
             }
             let before = (*context).available();
             hirsel_core_check_cancel(context, 2);

@@ -1,0 +1,27 @@
+// hand-derived stdout: DC
+// P cancels A after A parked in handle cleanup. A waits for C's successful
+// result and drops it under the shield, then observes cancellation.
+resource type Marker:send { out: Stdout }
+drop(m) { result.unwrap(stdout.write(m.out, "D")) }
+type Input:send { tx: Sender[u64], tasks: Tasks, out: Stdout }
+fn child(take out: Stdout) -> Marker waits { result.unwrap(Marker(out: out)) }
+fn abandon(take input: Input) waits {
+    let Input(tx: tx, tasks: tasks, out: out) = take input
+    {
+        result.unwrap(channel.send(tx, 1u64))
+        let h = result.unwrap(task.spawn(tasks, bytes 4096, out, child))
+        let _ = take h
+    }
+    task.check_cancel()
+}
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let mut a = result.unwrap(task.spawn(tasks, bytes 8192, Input(tx: take tx, tasks: tasks, out: out), abandon))
+    let _ = result.unwrap(channel.receive(rx))
+    task.cancel(mut a)
+    match task.join(take a) {
+        Error(Cancelled(take causes)) => { let _ = take causes; result.unwrap(stdout.write(out, "C")) },
+        _ => result.unwrap(stdout.write(out, "?"))
+    }
+    Ok(())
+}

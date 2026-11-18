@@ -1,3 +1,4 @@
+// hand-derived stdout: wPC
 // Cancel a child parked in receive: its join is Cancelled.
 type In:send { rx: Receiver[u64], out: Stdout }
 fn waiter(take s: In) waits {

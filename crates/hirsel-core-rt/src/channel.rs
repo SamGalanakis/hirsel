@@ -25,6 +25,8 @@ pub struct Channel {
     closing_sender: bool,
     receiver: Receiver,
     capacity: usize,
+    send_waiters: tasks::Waiters,
+    receive_waiters: tasks::Waiters,
     head: usize,
     len: usize,
     item: ValueLayout,
@@ -89,6 +91,8 @@ pub unsafe extern "C" fn hirsel_core_channel_new(
             closing_sender: false,
             receiver: Receiver::Open,
             capacity: count,
+            send_waiters: tasks::Waiters::default(),
+            receive_waiters: tasks::Waiters::default(),
             head: 0,
             len: 0,
             item,
@@ -156,7 +160,7 @@ unsafe fn publish(channel: *mut Channel, value: *mut u8) -> u8 {
             (*channel).item.bytes,
         );
         (*channel).len += 1;
-        tasks::event_then_wake(tasks::PUBLISH, (*channel).id, 0);
+        tasks::event_wake_waiters(tasks::PUBLISH, (*channel).id, 0, &raw mut (*channel).receive_waiters);
         0
     }
 }
@@ -212,14 +216,14 @@ pub unsafe extern "C" fn hirsel_core_send(
                         status: 0,
                     };
                 }
-                _ => tasks::checkpoint(true),
+                _ => tasks::park(&raw mut (*channel).send_waiters),
             }
         }
     }
 }
 /// Take the front item into `destination`, or return false when the queue is empty.
-/// The slot it frees may let a parked sender publish, so it wakes every waiter
-/// (CONC-5): `receive` and `try_receive` both take here, so they cannot differ.
+/// A free slot can let any sender on this channel publish. Wake them in park
+/// order so progress also survives the first sender observing cancellation.
 ///
 /// # Safety
 /// Sole receiver borrow and writable T destination.
@@ -242,7 +246,7 @@ unsafe fn take(channel: *mut Channel, destination: *mut u8) -> bool {
             (*channel).head = 0;
         }
         (*channel).len -= 1;
-        tasks::event_then_wake(tasks::RECEIVE, (*channel).id, 0);
+        tasks::event_wake_waiters(tasks::RECEIVE, (*channel).id, 0, &raw mut (*channel).send_waiters);
         true
     }
 }
@@ -283,7 +287,7 @@ pub unsafe extern "C" fn hirsel_core_receive(
                     status: 0,
                 };
             }
-            tasks::checkpoint(true);
+            tasks::park(&raw mut (*channel).receive_waiters);
         }
     }
 }
@@ -324,7 +328,7 @@ pub unsafe extern "C" fn hirsel_core_sender_drop(channel: *mut Channel) {
         tasks::event(tasks::SENDERS, (*channel).id, (*channel).senders);
         if last {
             tasks::before_commit();
-            tasks::event_then_wake(tasks::CLOSE, (*channel).id, 0);
+            tasks::event_wake_waiters(tasks::CLOSE, (*channel).id, 0, &raw mut (*channel).receive_waiters);
             (*channel).closing_sender = false;
             if (*channel).receiver == Receiver::Gone {
                 drop(Box::from_raw(channel));
@@ -340,7 +344,7 @@ unsafe fn receiver_begin(context: *mut Context, channel: *mut Channel) -> *mut H
         (*context).cancel_shield += 1;
         tasks::before_commit();
         (*channel).receiver = Receiver::Cleaning;
-        tasks::event_then_wake(tasks::CLOSE, (*channel).id, 1);
+        tasks::event_wake_waiters(tasks::CLOSE, (*channel).id, 1, &raw mut (*channel).send_waiters);
         (*channel).cursor = 0;
         (*channel).holder.as_mut_ptr()
     }

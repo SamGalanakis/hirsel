@@ -145,7 +145,7 @@ pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) 
         crate::tasks::before_commit();
         crate::tasks::event(hirsel_core_layout::event::STEP_SLICE, 0, SLICE);
         // SAFETY: the step window is installed and no borrow spans the switch.
-        unsafe { crate::tasks::checkpoint(false) };
+        unsafe { crate::tasks::checkpoint() };
     }
     0
 }

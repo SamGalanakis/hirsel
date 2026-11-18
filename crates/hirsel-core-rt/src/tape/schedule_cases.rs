@@ -609,7 +609,7 @@ unsafe extern "C" fn outside_worker(context: *mut Context, _: *mut u8, input: *m
             let mut r = request(SLEEP_UNTIL, 0, sub.1, &[], empty_buffer());
             case.outcome = hirsel_core_host(context, &sub.0, &mut r).status;
         } else {
-            checkpoint(false);
+            checkpoint();
             case.capacity = (*context).current.available();
             let allocation = crate::block::Block::new(&*context, Some(3000), 1, 8);
             assert!(
@@ -649,7 +649,7 @@ unsafe extern "C" fn outside_root(context: *mut Context, _: *mut u8, input: *mut
             if (*case).phase != 0 {
                 break;
             }
-            checkpoint(false);
+            checkpoint();
         }
         if (*case).cancel {
             hirsel_core_cancel(context, child);
@@ -795,14 +795,14 @@ unsafe extern "C" fn actor(context: *mut Context, _: *mut u8, input: *mut u8) ->
                 if grant {
                     hirsel_core_check_cancel(context, 3);
                     if record && site == 11 {
-                        checkpoint(false);
+                        checkpoint();
                     }
                 }
                 let first =
                     hirsel_core_receive(context, actor.channel, NonNull::dangling().as_ptr(), 11);
                 let status = if first.status == 0 {
                     if record {
-                        checkpoint(false);
+                        checkpoint();
                     }
                     hirsel_core_receive(context, actor.channel, NonNull::dangling().as_ptr(), 22)
                         .status
@@ -835,11 +835,11 @@ unsafe extern "C" fn actor(context: *mut Context, _: *mut u8, input: *mut u8) ->
             Scenario::Seal { after_send } => {
                 hirsel_core_check_cancel(context, 1);
                 if record && !after_send {
-                    checkpoint(false);
+                    checkpoint();
                 }
                 hirsel_core_try_send(actor.channel, NonNull::dangling().as_ptr());
                 if record && after_send {
-                    checkpoint(false);
+                    checkpoint();
                 }
                 hirsel_core_sender_drop(actor.channel);
                 0
@@ -994,7 +994,7 @@ unsafe extern "C" fn timeline_root(context: *mut Context, _: *mut u8, input: *mu
         match (*timeline).scenario {
             Scenario::Seal { .. } => {
                 if record {
-                    checkpoint(false);
+                    checkpoint();
                 }
                 (*timeline).result = Some(tape.end(&ending()));
                 (*timeline).before_join = Some(hirsel_core_try_receive(
@@ -1007,7 +1007,7 @@ unsafe extern "C" fn timeline_root(context: *mut Context, _: *mut u8, input: *mu
             }
             Scenario::Closed { site, grant } => {
                 if record && (grant || site == 22) {
-                    checkpoint(false);
+                    checkpoint();
                 }
                 if grant {
                     let source = (*timeline).script.provider();
@@ -1018,11 +1018,11 @@ unsafe extern "C" fn timeline_root(context: *mut Context, _: *mut u8, input: *mu
             Scenario::Wait { between } => {
                 hirsel_core_check_cancel(context, 1);
                 if record && between {
-                    checkpoint(false);
+                    checkpoint();
                 }
                 hirsel_core_check_cancel(context, 2);
                 if record && !between {
-                    checkpoint(false);
+                    checkpoint();
                 }
                 hirsel_core_check_cancel(context, 3);
                 if record {
@@ -1031,7 +1031,7 @@ unsafe extern "C" fn timeline_root(context: *mut Context, _: *mut u8, input: *mu
             }
             Scenario::Latest => {
                 if record {
-                    checkpoint(false);
+                    checkpoint();
                 }
                 held = crate::latest::hirsel_core_latest_read(latest);
                 if record {
@@ -1051,7 +1051,7 @@ unsafe extern "C" fn timeline_root(context: *mut Context, _: *mut u8, input: *mu
                 )
                 .task;
                 if record {
-                    checkpoint(false);
+                    checkpoint();
                 }
                 hirsel_core_join(context, other, ptr::null_mut(), 0);
                 hirsel_core_send(context, sender, NonNull::dangling().as_ptr(), 0);
@@ -1059,7 +1059,7 @@ unsafe extern "C" fn timeline_root(context: *mut Context, _: *mut u8, input: *mu
             }
             Scenario::Arc => {
                 if record {
-                    checkpoint(false);
+                    checkpoint();
                 }
                 (*timeline).arc_unique = Some(crate::counted::try_unwrap(arc_block.unwrap(), true));
             }

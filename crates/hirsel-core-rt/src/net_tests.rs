@@ -539,7 +539,7 @@ unsafe extern "C" fn socket_parent(context: *mut Context, _: *mut u8, input: *mu
             1,
         );
         assert!(!child.task.is_null());
-        checkpoint(false); // Reader has issued and parked before the root returns.
+        checkpoint(); // Reader has issued and parked before the root returns.
         let byte = 42u8;
         assert_eq!(
             libc::send(

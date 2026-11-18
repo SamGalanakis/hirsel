@@ -147,7 +147,7 @@ unsafe extern "C" fn produce(context: *mut Context, _: *mut u8, input: *mut u8) 
         }
         for m in &mut pending {
             if let Some(value) = m {
-                checkpoint(false); // scripted preparation before publication
+                checkpoint(); // scripted preparation before publication
                 let sent = hirsel_core_send(context, p.tx, (value as *mut Message).cast(), 11);
                 failed |= sent.status;
                 if sent.transferred {
@@ -155,7 +155,7 @@ unsafe extern "C" fn produce(context: *mut Context, _: *mut u8, input: *mut u8) 
                 } else {
                     break;
                 }
-                checkpoint(false); // scripted point after queue custody committed
+                checkpoint(); // scripted point after queue custody committed
             }
         }
         for m in pending.iter_mut().rev().flatten() {
@@ -178,7 +178,7 @@ unsafe extern "C" fn relay(context: *mut Context, _: *mut u8, input: *mut u8) ->
                 break;
             }
             let mut m = m.assume_init();
-            checkpoint(false);
+            checkpoint();
             let sent = hirsel_core_send(context, r.tx, (&mut m as *mut Message).cast(), 13);
             failed |= sent.status;
             if !sent.transferred {
@@ -317,7 +317,7 @@ unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> 
         handles[2] = Some(h.task);
         receivers[1] = None;
         for _ in 0..plan.after {
-            checkpoint(false);
+            checkpoint();
         }
         if (1..=3).contains(&plan.cancel) {
             hirsel_core_cancel(context, handles[plan.cancel as usize - 1].unwrap());
@@ -494,7 +494,7 @@ fn scripted_providers_suspend_at_issue_and_delivery_without_losing_issued_result
         unsafe {
             let s = state.cast::<Script>();
             (*s).phase = 1;
-            checkpoint(false);
+            checkpoint();
             (*s).issued += 1;
             (*request).buffer.data.write(7);
             (*request).buffer.len = 1;
@@ -516,7 +516,7 @@ fn scripted_providers_suspend_at_issue_and_delivery_without_losing_issued_result
         unsafe {
             let s = state.cast::<Script>();
             (*s).phase = 2;
-            checkpoint(false);
+            checkpoint();
             (*s).delivered += 1;
         }
         out
@@ -572,7 +572,7 @@ fn scripted_providers_suspend_at_issue_and_delivery_without_losing_issued_result
                 if (*s).phase >= (*s).hold {
                     break;
                 }
-                checkpoint(false);
+                checkpoint();
             }
             hirsel_core_cancel(context, h.task);
             let mut unit = 0u8;

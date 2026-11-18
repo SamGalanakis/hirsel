@@ -161,7 +161,7 @@ fn returned_grant_storage_grows_from_the_finalizers_task_after_hand_back() {
             );
             let old = Block::from_raw(data.assume_init(), 32);
             if input.parent_spends_first {
-                checkpoint(false);
+                checkpoint();
             }
             let before = (*context).available();
             let grown = old.replacement(&*context, Some(64), 64, 8);
@@ -175,7 +175,7 @@ fn returned_grant_storage_grows_from_the_finalizers_task_after_hand_back() {
             drop(old);
             hirsel_core_check_cancel(context, 7);
             if !input.parent_spends_first {
-                checkpoint(false);
+                checkpoint();
             }
             drop(grown);
             hirsel_core_resource_free(input.resource, 0);
@@ -204,7 +204,7 @@ fn returned_grant_storage_grows_from_the_finalizers_task_after_hand_back() {
                 layout::<Input, u64>(8),
                 0,
             );
-            checkpoint(false);
+            checkpoint();
             let spend = Block::new(&*context, Some(8), 8, 8).unwrap();
             assert_eq!(hirsel_core_join(context, a.task, out, 8).kind, 0);
             drop(spend);
@@ -268,7 +268,7 @@ fn handover_order(order: HandoverOrder) -> (u64, Vec<crate::tasks::Event>) {
                 (*input.charged).set(Some(block));
             }
             reservation.handover(current_id());
-            checkpoint(false);
+            checkpoint();
         }
         0
     }
@@ -323,7 +323,7 @@ fn handover_order(order: HandoverOrder) -> (u64, Vec<crate::tasks::Event>) {
             if order == HandoverOrder::AfterCheck {
                 hirsel_core_check_cancel(context, 10);
             }
-            checkpoint(false);
+            checkpoint();
             if order != HandoverOrder::AfterCheck {
                 hirsel_core_check_cancel(context, 10);
             }

@@ -662,16 +662,22 @@ pub fn with_task_stack<R>(bytes: usize, run: impl FnOnce() -> R) -> R {
 enum State {
     Ready,
     Running,
-    Blocked,
+    Waiting(Condition),
     /// Parked in a provider operation's W (native `State::Provider`): only its
     /// timer, readiness or a cancellation that takes effect wakes it, never `wake`.
     Provider,
     Ended,
 }
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Condition {
+    Join(usize),
+    Send(usize),
+    Receive(usize),
+}
 /// A task wait or a provider deadline.
 #[derive(Clone, Copy, Debug)]
 enum Wait {
-    Task,
+    Task(Condition),
     /// A sleep until this clock value.
     Sleep(u64),
     Network(Option<u64>),
@@ -683,7 +689,7 @@ struct Rec {
     /// A cancellation request not yet observed (CONC-7).
     cancel: bool,
     polls: u32,
-    /// While parked in a provider operation: whether a cancellation request may
+    /// While parked: whether a cancellation request may
     /// take effect there (no shield, not finalizing; native `cancels_operation`).
     cancellable: bool,
     /// The operation it parked in failed Cancelled in W.
@@ -699,6 +705,7 @@ struct Sched {
     /// Index 0 is the root; child `i` (handle `TASK_BASE + i`) is `i + 1`.
     tasks: Vec<Rec>,
     ready: VecDeque<usize>,
+    waiting: BTreeMap<Condition, VecDeque<usize>>,
     /// Tasks that used up their polls, run only when `ready` is empty.
     deferred: VecDeque<usize>,
     /// Sleeping tasks by deadline, ties in arrival order (native `insert_timer`).
@@ -1495,8 +1502,8 @@ impl<'m> Machine<'m> {
         }
     }
 
-    /// Switch to the scheduler. With a wait, the running task blocks until a wake
-    /// readies it (native `checkpoint(true)`); without one it goes to the poll
+    /// Switch to the scheduler. With a wait, the running task blocks until its
+    /// condition changes or it can observe cancellation. Otherwise it goes to the poll
     /// queue's tail (native `poll_turn`). It continues when the driver hands the
     /// baton back; its frozen places and footprints stay with it meanwhile.
     fn park(&mut self, wait: Option<Wait>) {
@@ -1512,7 +1519,10 @@ impl<'m> Machine<'m> {
                 s.timers.insert(at, (deadline, k));
             }
             Some(Wait::Network(None)) => self.sched.tasks[k].state = State::Provider,
-            Some(Wait::Task) => self.sched.tasks[k].state = State::Blocked,
+            Some(Wait::Task(condition)) => {
+                self.sched.tasks[k].state = State::Waiting(condition);
+                self.sched.waiting.entry(condition).or_default().push_back(k);
+            }
             None => {
                 self.sched.tasks[k].state = State::Ready;
                 if poll {
@@ -1541,16 +1551,20 @@ impl<'m> Machine<'m> {
 }
 
 impl Machine<'_> {
-    /// Ready every blocked task, newest spawned first (native `wake`); each
-    /// checks again what it waits for when it runs.
-    fn wake(&mut self) {
-        for k in (0..self.sched.tasks.len()).rev() {
-            if self.sched.tasks[k].state == State::Blocked {
+    fn park_task(&mut self, t: &Task, condition: Condition) {
+        self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+        self.park(Some(Wait::Task(condition)));
+    }
+
+    fn wake(&mut self, condition: Condition) {
+        if let Some(waiters) = self.sched.waiting.remove(&condition) {
+            for k in waiters {
                 self.sched.tasks[k].state = State::Ready;
                 self.sched.ready.push_back(k);
             }
         }
     }
+
     /// Record an event of the running task (CONC-10). A poll uses one of the
     /// task's polls; the last one gives a ready peer the turn (native `poll_event`).
     fn event(&mut self, kind: u8, object: u64, value: u64) {
@@ -1590,20 +1604,28 @@ impl Machine<'_> {
         }
         Ok(())
     }
-    /// Request a child's cancellation (CONC-7) and wake every waiter, as native
-    /// `hirsel_core_cancel` does.
+    /// Request a child's cancellation (CONC-7). A shielded child stays parked.
     fn cancel(&mut self, i: usize) {
         let r = &mut self.sched.tasks[i + 1];
         r.cancel = true;
         let id = r.id;
-        if r.state == State::Provider {
-            self.sched.cancels.push(i + 1);
+        match r.state {
+            State::Provider => self.sched.cancels.push(i + 1),
+            State::Waiting(condition) if r.cancellable => {
+                let waiters = self.sched.waiting.get_mut(&condition).unwrap();
+                waiters.retain(|&k| k != i + 1);
+                if waiters.is_empty() {
+                    self.sched.waiting.remove(&condition);
+                }
+                r.state = State::Ready;
+                self.sched.ready.push_back(i + 1);
+            }
+            _ => {}
         }
         self.event(CANCEL, id, 0);
-        self.wake();
     }
     /// A child's body: run it, keep its result or chain for the join, then END
-    /// and wake every waiter (native `start`).
+    /// and wake its joiner (native `start`).
     fn child_main(&mut self, t: &mut Task, f: FuncId, args: &[u64]) {
         let i = t.k - 1;
         let returned = self.call(t, f, args);
@@ -1625,7 +1647,7 @@ impl Machine<'_> {
         let id = self.sched.tasks[t.k].id;
         self.event(END, id, u64::from(status != 0));
         self.sched.tasks[t.k].state = State::Ended;
-        self.wake();
+        self.wake(Condition::Join(i));
     }
     /// The child task a handle names.
     fn child(&self, handle: u64) -> usize {
@@ -2481,7 +2503,7 @@ impl Machine<'_> {
                 t.shield += 1;
                 self.cancel(i);
                 while self.sched.tasks[i + 1].state != State::Ended {
-                    self.park(Some(Wait::Task));
+                    self.park_task(t, Condition::Join(i));
                 }
                 self.event(JOIN, id, 2);
                 let (status, result, r) = {
@@ -2610,7 +2632,7 @@ impl Machine<'_> {
                 self.event(SENDERS, id, senders);
                 if senders == 0 {
                     self.event(CLOSE, id, 0);
-                    self.wake();
+                    self.wake(Condition::Receive(i));
                 }
                 self.chan_freed(i);
                 false
@@ -2634,7 +2656,7 @@ impl Machine<'_> {
                 self.chans[i].receiver = false;
                 t.shield += 1;
                 self.event(CLOSE, self.chans[i].id, 1);
-                self.wake();
+                self.wake(Condition::Send(i));
                 let mut failed = false;
                 // CONC-9: last published first; a failure appends and the rest go on.
                 while let Some(bytes) = self.chans[i].queue.pop_back() {
@@ -2797,19 +2819,18 @@ impl Machine<'_> {
         }
     }
     /// Take channel `i`'s front item into `dest`, or return false when its queue is
-    /// empty. The slot it frees may let a parked sender publish, so it wakes every
-    /// waiter (CONC-5): `receive` and `try_receive` both take here, as native's `take`.
+    /// empty. The slot it frees wakes this channel's senders in park order.
     fn take(&mut self, i: usize, dest: u64) -> bool {
         let Some(bytes) = self.chans[i].queue.pop_front() else {
             return false;
         };
         self.put(dest, &bytes);
         self.event(RECEIVE, self.chan_id(i), 0);
-        self.wake();
+        self.wake(Condition::Send(i));
         true
     }
     /// Put an item on channel `i` unless it is closed (2) or full (1): native
-    /// `publish`, which wakes every waiter on success.
+    /// `publish`, which wakes a receiver parked on this channel.
     fn publish(&mut self, i: usize, value: u64, item: TypeId) -> u64 {
         if !self.chans[i].receiver {
             return 2;
@@ -2821,7 +2842,7 @@ impl Machine<'_> {
         let bytes = self.get(value, n).to_vec();
         self.chans[i].queue.push_back(bytes);
         self.event(PUBLISH, self.chan_id(i), 0);
-        self.wake();
+        self.wake(Condition::Receive(i));
         0
     }
     fn chan_freed(&mut self, i: usize) {
@@ -2978,7 +2999,7 @@ impl Machine<'_> {
                     if self.sched.tasks[i + 1].state == State::Ended {
                         break;
                     }
-                    self.park(Some(Wait::Task));
+                    self.park_task(t, Condition::Join(i));
                 }
                 let status = self.children[i].status;
                 if status == 0 {
@@ -3158,7 +3179,7 @@ impl Machine<'_> {
                             );
                             break vec![0];
                         }
-                        _ => self.park(Some(Wait::Task)),
+                        _ => self.park_task(t, Condition::Send(i)),
                     }
                 }
             }
@@ -3186,7 +3207,7 @@ impl Machine<'_> {
                         );
                         break vec![0];
                     }
-                    self.park(Some(Wait::Task));
+                    self.park_task(t, Condition::Receive(i));
                 }
             }
             RtOp::LatestNew { item } => match self.admit(cur, charge::LATEST_ROOT) {

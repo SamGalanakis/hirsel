@@ -24,9 +24,20 @@ pub(crate) struct Section {
     /// Position of the table's length plus one u32 row offsets, relative to `heap`.
     offsets: u64,
     heap: u64,
-    /// A map's slots: `mask + 1` u64 slots, each the key hash's high word over
-    /// the row number plus one; zero is empty.
-    slots: Option<(u64, u32)>,
+    slots: Option<Slots>,
+}
+
+/// Each slot holds a hash tag and the row number plus one. Zero is empty.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct Slots {
+    offset: u64,
+    mask: u32,
+    compact: bool,
+}
+impl Slots {
+    fn row_bits(self) -> u32 {
+        if self.compact { 16 } else { 32 }
+    }
 }
 
 /// A fixed function of the key bytes: the published slots depend on it, and the
@@ -88,6 +99,19 @@ impl Writer {
                 .max(2)
                 .next_power_of_two();
             let mask = count - 1;
+            let compact = u16::try_from(rows.len()).is_ok();
+            // A compact pair stays in one page and can use the ordinary word reader.
+            let offset = if compact {
+                self.bytes.len().next_multiple_of(8)
+            } else {
+                self.bytes.len()
+            };
+            let index = Slots {
+                offset: offset as u64,
+                mask: mask as u32,
+                compact,
+            };
+            let row_bits = index.row_bits();
             let mut slots = vec![0u64; count];
             for (row, (bytes, &key)) in rows.iter().zip(keys).enumerate() {
                 let hash = key_hash(&bytes[..key]);
@@ -95,13 +119,20 @@ impl Writer {
                 while slots[i] != 0 {
                     i = (i + 1) & mask;
                 }
-                slots[i] = (hash & !0xffff_ffff) | (row as u64 + 1);
+                let tag = hash >> (64 - row_bits);
+                slots[i] = (tag << row_bits) | (row as u64 + 1);
             }
-            let at = self.bytes.len() as u64;
-            for slot in slots {
-                self.bytes.extend_from_slice(&slot.to_le_bytes());
+            self.bytes.resize(offset, 0);
+            if compact {
+                for slot in slots {
+                    self.bytes.extend_from_slice(&(slot as u32).to_le_bytes());
+                }
+            } else {
+                for slot in slots {
+                    self.bytes.extend_from_slice(&slot.to_le_bytes());
+                }
             }
-            (at, mask as u32)
+            index
         });
         self.tables.push(Section {
             offsets,
@@ -378,18 +409,28 @@ impl Source for DiskIndex {
         let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Probe);
         let pages = self.installed()?;
         let section = section(pages, table)?;
-        let (slots, mask) = section
+        let slots = section
             .slots
             .ok_or_else(|| io::Error::other("published table has no key index"))?;
         let hash = key_hash(key);
-        let mut i = hash as u32 & mask;
-        for _ in 0..=mask {
-            let slot = self.u64(pages, slots + 8 * u64::from(i))?;
+        let row_bits = slots.row_bits();
+        let row_mask = (1u64 << row_bits) - 1;
+        let tag = hash >> (64 - row_bits);
+        let mut i = hash as u32 & slots.mask;
+        for _ in 0..=slots.mask {
+            let slot = if slots.compact {
+                let pair = self.u64(pages, slots.offset + 8 * u64::from(i / 2))?;
+                u64::from((pair >> (32 * (i % 2))) as u32)
+            } else {
+                self.u64(pages, slots.offset + 8 * u64::from(i))?
+            };
             if slot == 0 {
                 return Ok(None);
             }
-            if slot >> 32 == hash >> 32 {
-                let row = (slot as u32).checked_sub(1).ok_or_else(|| damaged(pages))?;
+            if slot >> row_bits == tag {
+                let row = ((slot & row_mask) as u32)
+                    .checked_sub(1)
+                    .ok_or_else(|| damaged(pages))?;
                 if row >= table.len {
                     return Err(damaged(pages));
                 }
@@ -398,7 +439,7 @@ impl Source for DiskIndex {
                     return Ok(Some(row));
                 }
             }
-            i = (i + 1) & mask;
+            i = (i + 1) & slots.mask;
         }
         Ok(None)
     }
@@ -574,6 +615,26 @@ mod tests {
             );
         }
         assert!(index.u64(pages, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn a_wide_slot_preserves_a_row_ordinal_above_the_compact_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::image(dir.path()).unwrap();
+        let namespace = ContentHash::of_bytes(b"wide-slot-law");
+        let index = Arc::new(DiskIndex::new(dir.path()).unwrap());
+        let reader = Reader::new(namespace, index.clone());
+        let mut writer = Writer::new(reader);
+        let high_row = u32::from(u16::MAX);
+        let map = writer
+            .map(&(0..=high_row).map(|key| (key, key * 3)).collect())
+            .unwrap();
+        let (sections, _) = writer.finish(&store).unwrap();
+        let hash = store.put(&encode(&sections).unwrap()).unwrap();
+        index.open(hash, hash);
+        assert_eq!(map.get(&0), Some(&0));
+        assert_eq!(map.get(&high_row), Some(&(high_row * 3)));
+        assert_eq!(map.get(&(high_row + 1)), None);
     }
 
     /// Law: lookups racing from several threads on a cold image answer what

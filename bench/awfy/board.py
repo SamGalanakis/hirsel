@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Build and run the matched Hirsel goal board. Keep outputs outside the checkout."""
 import argparse
-from contextlib import contextmanager
-import fcntl
+from contextlib import contextmanager, redirect_stdout
+from decimal import Decimal
+from io import StringIO
 import importlib.util
 import json
 import math
@@ -19,7 +20,8 @@ import time
 import arena
 import build
 import measure
-from measurement_artifacts import check
+import receipt
+from receipt import measurement_slot, write as write_json
 
 ROOT = build.ROOT
 CAP = ROOT / "tools/capped"
@@ -33,38 +35,7 @@ PINS = {
     "langarena": "3c9f84ddaeec834c0631747cb789e8cfd602f993",
 }
 COUNTERS = ("instructions", "cycles")
-EXPECTED = {
-    "AWFY original": (
-        "DeltaBlue", "Richards", "Json", "CD", "Havlak", "Bounce", "List", "Mandelbrot",
-        "NBody", "Permute", "Queens", "Sieve", "Storage", "Towers",
-    ),
-    "AWFY pool/index": ("JsonPool", "StoragePool", "DeltaBlue", "Richards", "CD", "Havlak", "List", "Towers"),
-    "LangArena": tuple(
-        f"{group}::{row}"
-        for group, names in {
-            "Binarytrees": "Obj Arena",
-            "Brainfuck": "Array Recursion",
-            "Matmul": "Single T4 T8 T16",
-            "Base64": "Encode Decode",
-            "Json": "Generate ParseDom ParseMapping",
-            "CSV": "Parse",
-            "Etc": "Sieve TextRaytracer NeuralNet CacheSimulation GameOfLife Words LogParser",
-            "Template": "Regex Parse",
-            "Sort": "Quick Merge Self",
-            "Graph": "BFS DFS AStar",
-            "Hash": "SHA256 CRC32",
-            "Calculator": "Ast Interpreter",
-            "Maze": "Generator BFS AStar",
-            "CLBG": "Fannkuchredux Mandelbrot Nbody Spectralnorm",
-            "Compress": "BWTEncode BWTDecode HuffEncode HuffDecode ArithEncode ArithDecode LZWEncode LZWDecode",
-            "Distance": "Jaro NGram",
-        }.items()
-        for row in names.split()
-    ),
-    "Compile": ("LangArena cold", "LangArena edit"),
-    "Size": ("AWFY original-14 harness",),
-    "Checkbox": ("converge, 64 clients", "memory-subscribed, 64 clients", "memory-unsubscribed, 64 clients"),
-}
+EXPECTED = measure.EXPECTED
 NOTES = (
     "Instructions and cycles count user-space CPU work; seconds measures elapsed time. "
     "Hirsel checks bounds and overflow and admits bytes. Certified images elide Step charging. "
@@ -85,12 +56,6 @@ def load(name, path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def write_json(path, data):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(data, indent=2, default=str) + "\n")
-    temporary.replace(path)
 
 
 def git(directory, *args):
@@ -136,7 +101,10 @@ def ratios(samples, fields):
 class Board:
     def __init__(self, out, commit):
         self.out = out
-        self.report = {"commit": commit, "pins": PINS, "notes": NOTES, "rows": [], "failures": {}}
+        self.report = {"commit": commit, "pins": PINS, "notes": NOTES, "rows": [], "failures": {},
+                       "instruction_receipt": receipt.make_receipt(
+                           f"{suite}/{name}" for suite, goal in measure.SUITES.items() for name in EXPECTED[goal]
+                       )}
 
     def save(self):
         observed = {(row["goal"], row["row"]): row for row in self.report["rows"]}
@@ -169,12 +137,30 @@ class Board:
         missing = [f"{row['goal']}/{row['row']}" for row in expected if row["status"] == "missing"]
         if missing:
             lines += ["", "## Missing rows", "", *[f"- {label}" for label in missing]]
+        comparison = self.report.get("instruction_comparison")
+        if comparison:
+            lines += ["", "## Nightly instruction comparison", "", comparison["status"], "",
+                      *comparison["details"]]
         (self.out / "board.md").write_text("\n".join(lines) + "\n")
 
-    def finish(self):
+    def finish(self, baseline=None):
         self.save()
         print(self.out / "board.md", flush=True)
-        return int(not self.report["complete"])
+        if not self.report["complete"]:
+            return 1
+        status, details = "No prior complete receipt", []
+        if baseline is not None:
+            output = StringIO()
+            try:
+                with redirect_stdout(output):
+                    breached = receipt.compare(baseline, self.out / "board.json", Decimal(2))
+                status = "Instruction regression" if breached else "Within +2% on every row"
+                details = output.getvalue().splitlines()
+            except (KeyError, OSError, ValueError, TypeError, AttributeError, re.error) as error:
+                status, details = "Incomparable", [str(error)]
+        self.report["instruction_comparison"] = {"status": status, "details": details}
+        self.save()
+        return 3 if status == "Instruction regression" else 0
 
     def row(self, goal, name, certified, samples, fields):
         label = f"{goal}/{name}"
@@ -211,20 +197,28 @@ class Board:
             self.save()
 
 
-def runtime_rows(board, goal, directory, rows):
+def runtime_rows(board, suite, directory, upstream, tools):
+    goal = measure.SUITES[suite]
+    rows = measure.runtime_cases(suite, directory, upstream)
+    fixture = receipt.runtime_fixture(suite, directory, upstream)
     samples_dir = board.out / "runtime" / goal
     samples_dir.mkdir(parents=True)
     verified = []
     for index, (name, commands) in enumerate(rows):
-        binary = commands["hirsel"][0][0]
-        certified = native(directory / f"{binary.name}-build.json")
+        row = receipt.runtime_case(suite, name, directory, *commands["hirsel"], fixture, tools)
+        certified = row["certified"]
         samples = {}
         order = ("rust", "hirsel", "goose") if index % 2 == 0 else ("goose", "hirsel", "rust")
         for side in order:
             command, marker = commands[side]
             target = samples_dir / f"{name.replace('::', '-')}-{side}"
-            sample = measure.core_measure.sample(command, target, env=build.capped_env(board.out),
-                                                  cycles=True, cwd=directory)
+            env = build.capped_env(board.out)
+            if side == "hirsel":
+                sample = receipt.observe(row, target, env, cycles=True)
+                board.report["instruction_receipt"]["rows"].append(row)
+                samples[side] = sample
+                continue
+            sample = measure.core_measure.sample(command, target, env=env, cycles=True, cwd=directory)
             output = (target / "stdout").read_bytes().splitlines(keepends=True)
             sample["verified"] = sample["status"] in ("ok", "missing-counter") and any(
                 re.fullmatch(marker, line) for line in output)
@@ -237,11 +231,11 @@ def runtime_rows(board, goal, directory, rows):
     return verified
 
 
-def awfy_rows(board, out, upstream):
+def awfy_rows(board, out, upstream, tools):
     originals = [(name, commands) for name, commands in measure.rows(out, False, upstream) if name != "Hello"]
     if sorted(dict(originals)) != sorted(EXPECTED["AWFY original"]) or len(originals) != 14:
         raise ValueError("the original board requires 14 distinct AWFY rows")
-    verified = runtime_rows(board, "AWFY original", out, originals)
+    verified = runtime_rows(board, "awfy", out, upstream, tools)
     if len(verified) == len(originals):
         result = measure.verified_sizes(out, verified)
         board.row("Size", "AWFY original-14 harness", result["hirsel_certified"][verified[0]],
@@ -253,7 +247,7 @@ def awfy_rows(board, out, upstream):
     pools = list(measure.matched_pool_rows(out, upstream))
     if sorted(dict(pools)) != sorted(EXPECTED["AWFY pool/index"]) or len(pools) != 8:
         raise ValueError("the pool board requires eight distinct AWFY rows")
-    runtime_rows(board, "AWFY pool/index", out, pools)
+    runtime_rows(board, "pool", out, upstream, tools)
 
 
 def cargo(*args):
@@ -270,9 +264,9 @@ def compile_profile(target):
 def compile_commands(out, artifacts):
     target = out / "target"
     executable = out / "hirsel"
-    hirsel = [artifacts["compiler"], "build", *release_flags(artifacts), "--inputs", out / "inputs.json",
-              "--core-product", out / "packages", "--store", out / "store", "--entry", "langarena@1/suite/main",
-              "--dir", out, "--grant", "Stdout", "--grant", "Tasks", "--limit", str(256 << 20), "-o", executable]
+    hirsel = [artifacts["compiler"], "build", *release_flags(artifacts), "--inputs", "inputs.json",
+              "--core-product", "packages", "--store", "store", "--entry", "langarena@1/suite/main",
+              "--dir", ".", "--grant", "Stdout", "--grant", "Tasks", "--limit", str(256 << 20), "-o", "hirsel"]
     return (out / "rust", out / "helper.hirsel", hirsel, cargo("build", "-j1", *compile_profile(target)),
             executable, target / "release/benchmarks")
 
@@ -304,7 +298,7 @@ def prepare_compile(out, artifacts, env):
     return compile_commands(out, artifacts)
 
 
-def compile_rows(board, out, prepared, fixture):
+def compile_rows(board, out, prepared, fixture, tools):
     rust, helper, hirsel, cargo_build, exe, rust_exe = prepared
     env = build.capped_env(out) | {"LD_LIBRARY_PATH": str(build.llvm_path() / "lib")}
     config = out / "fixture.json"
@@ -320,7 +314,9 @@ def compile_rows(board, out, prepared, fixture):
                 path.write_text(body[:offset] + edit + body[offset:])
         samples = {}
         certified = None
-        commands = [("hirsel", hirsel, ROOT, exe), ("rust", cargo_build, rust, rust_exe)]
+        label = f"LangArena {mode}"
+        fixture_id = receipt.fixture_identity(out / "inputs.json", config)
+        commands = [("hirsel", hirsel, out, exe), ("rust", cargo_build, rust, rust_exe)]
         if mode == "edit":
             commands.reverse()
         for side, command, cwd, executable in commands:
@@ -342,7 +338,18 @@ def compile_rows(board, out, prepared, fixture):
                 sample["status"] = "wrong-result"
             elif sample["status"] == "ok" and not sample["seconds"]:
                 sample["status"] = "missing-duration"
-        board.row("Compile", f"LangArena {mode}", certified, samples, ("seconds", *COUNTERS))
+            elif sample["status"] == "ok" and not all(
+                receipt.counter_ready(sample, f"{counter}:u") for counter in COUNTERS
+            ):
+                sample["status"] = "inactive-counter"
+            if side == "hirsel":
+                board.report["instruction_receipt"]["rows"].append({
+                    "key": f"compile/{label}", "suite": "compile", "mode": mode, "certified": certified,
+                    "flags": list(map(str, command[2:])), "argv": list(map(str, command)),
+                    "affinity": sorted(os.sched_getaffinity(0)), "marker": marker + "\n",
+                    "stdout": verify.stdout, "sample": sample, **fixture_id, **tools,
+                })
+        board.row("Compile", label, certified, samples, ("seconds", *COUNTERS))
         if mode == "cold" and not all(sample.get("verified") for sample in samples.values()):
             raise ValueError("cannot measure a warm edit without two verified cold builds")
 
@@ -491,13 +498,6 @@ def prepare_arena(out, args, compiler, artifacts, env):
     return rows
 
 
-@contextmanager
-def measurement_slot(path):
-    with path.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        yield
-
-
 def run_board(board, args):
     out = board.out
     board.report["commit"] = git(ROOT, "rev-parse", "HEAD")
@@ -515,8 +515,7 @@ def run_board(board, args):
         run([sys.executable, ROOT / "core/tools/measurement_artifacts.py", "--threads", "2"],
             env=env, stdout=stdout)
     artifacts = json.loads(artifact_file.read_text())
-    for key in ("compiler", "runtime"):
-        check(Path(artifacts[key]), artifacts)
+    tools = receipt.release_tools(artifacts)
     board.report["toolchain"] = artifacts
     versions = {"awfy_rustc": ["rustc"], "cargo_rustc": ["rustc", "+1.99.0"],
                 "cargo": cargo(), "hirsel_clang": [build.llvm_path() / "bin/clang"],
@@ -552,17 +551,17 @@ def run_board(board, args):
     with measurement_slot(LOCK):
         os.sched_setaffinity(0, {min(MEASURE_CPUS)})
         if awfy_ready:
-            board.attempt("AWFY measurement", awfy_rows, board, awfy, args.awfy)
+            board.attempt("AWFY measurement", awfy_rows, board, awfy, args.awfy, tools)
         if arena_rows:
             def sample_arena():
                 arena.oracle(arena_dir, arena_dir / "rust", arena_rows)
-                return runtime_rows(board, "LangArena", arena_dir, measure.rows(arena_dir, True, None))
+                return runtime_rows(board, "arena", arena_dir, None, tools)
             verified = board.attempt("LangArena runtime", sample_arena)
         else:
             verified = None
         if compile_ready and verified and "CLBG::Spectralnorm" in verified:
             board.attempt("Compile measurement", compile_rows, board, compile_dir, compile_ready,
-                          arena_dir / "one-iteration.json")
+                          arena_dir / "one-iteration.json", tools)
         elif compile_ready:
             board.report["failures"]["Compile measurement"] = "no verified Spectralnorm fixture"
         if checkbox_ready:
@@ -573,6 +572,7 @@ def run_board(board, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("out", type=Path)
+    parser.add_argument("--baseline", type=Path, help="prior complete board.json for +2% instruction triage")
     for name in PINS:
         parser.add_argument(f"--{name}", type=lambda path: Path(path).resolve(), required=True,
                             help=f"clean checkout at {PINS[name]}")
@@ -585,7 +585,7 @@ def main():
     board = Board(out, None)
     board.save()
     board.attempt("Board", run_board, board, args)
-    return board.finish()
+    return board.finish(args.baseline)
 
 
 if __name__ == "__main__":

@@ -140,3 +140,34 @@ counters, CMake, Clang, Rust 1.99.0 with the pinned Cargo dependencies
 available, Node.js, and GNU strip and time. Keep `board.json` and `board.md`
 with the captured logs. An incomplete comparison has no ratio and makes the
 command exit nonzero.
+
+## Paired instruction guard
+
+Use the release build adapters above, or `arena.py` with the Rust one-iteration
+oracle. Run the sampler for each side with the same fixture, row selection, CPU
+and lock. Paths to build directories may differ. Include `--pool-build` for the
+eight matched pool/index rows and `--arena-build` for the 50 LangArena rows.
+Omit `--only` to sample every row in the selected suites.
+
+```sh
+python3 bench/awfy/receipt.py sample "$out/base-samples" --artifacts "$base_toolchain" \
+  --awfy-build "$base_build" --upstream "$awfy" --cpu "$cpu" --lock "$lock" \
+  --only awfy/Mandelbrot
+python3 bench/awfy/receipt.py sample "$out/candidate-samples" --artifacts "$candidate_toolchain" \
+  --awfy-build "$candidate_build" --upstream "$awfy" --cpu "$cpu" --lock "$lock" \
+  --only awfy/Mandelbrot
+python3 bench/awfy/receipt.py compare "$out/base-samples/receipt.json" \
+  "$out/candidate-samples/receipt.json"
+```
+
+The guard requires checked stdout, complete row coverage and instruction
+counters active for at least 99% of their enabled time. It checks the exact
+execution argv and CPU affinity, as well as certification, build flags and the
+release compiler, runtime and fixture hashes. Supply any extra native build
+flags with repeated `--flag=VALUE`. A changed identity exits 2. A comparable
+row above +0.5% exits 1. Use `--threshold PERCENT` to set another limit.
+
+The same command reads two complete `board.json` files. It compares Hirsel
+instructions on the 72 runtime rows and the cold and warm-edit compile rows.
+`board.py --baseline PREVIOUS/board.json` records a nightly +2% triage result
+and uses exit 3 for a comparable regression. An incomplete board exits 1.

@@ -18,6 +18,39 @@ from build import ROOT
 
 
 SIDES = ("hirsel", "rust", "goose")
+SUITES = {"awfy": "AWFY original", "pool": "AWFY pool/index", "arena": "LangArena", "compile": "Compile"}
+EXPECTED = {
+    "AWFY original": (
+        "DeltaBlue", "Richards", "Json", "CD", "Havlak", "Bounce", "List", "Mandelbrot",
+        "NBody", "Permute", "Queens", "Sieve", "Storage", "Towers",
+    ),
+    "AWFY pool/index": ("JsonPool", "StoragePool", "DeltaBlue", "Richards", "CD", "Havlak", "List", "Towers"),
+    "LangArena": tuple(
+        f"{group}::{row}"
+        for group, names in {
+            "Binarytrees": "Obj Arena",
+            "Brainfuck": "Array Recursion",
+            "Matmul": "Single T4 T8 T16",
+            "Base64": "Encode Decode",
+            "Json": "Generate ParseDom ParseMapping",
+            "CSV": "Parse",
+            "Etc": "Sieve TextRaytracer NeuralNet CacheSimulation GameOfLife Words LogParser",
+            "Template": "Regex Parse",
+            "Sort": "Quick Merge Self",
+            "Graph": "BFS DFS AStar",
+            "Hash": "SHA256 CRC32",
+            "Calculator": "Ast Interpreter",
+            "Maze": "Generator BFS AStar",
+            "CLBG": "Fannkuchredux Mandelbrot Nbody Spectralnorm",
+            "Compress": "BWTEncode BWTDecode HuffEncode HuffDecode ArithEncode ArithDecode LZWEncode LZWDecode",
+            "Distance": "Jaro NGram",
+        }.items()
+        for row in names.split()
+    ),
+    "Compile": ("LangArena cold", "LangArena edit"),
+    "Size": ("AWFY original-14 harness",),
+    "Checkbox": ("converge, 64 clients", "memory-subscribed, 64 clients", "memory-unsubscribed, 64 clients"),
+}
 CPU = 16
 LOCK = Path("/tmp/hirsel-langarena-measure.lock")
 HELLO = rb"Hello, world!\n"
@@ -136,6 +169,14 @@ def matched_pool_rows(root, upstream):
                 side: ([root / f"{side}-pool_index", *command[1:]], marker)
                 for side, (command, marker) in commands.items()
             }
+
+
+def runtime_cases(suite, directory, upstream):
+    if suite == "pool":
+        yield from matched_pool_rows(directory, upstream)
+    else:
+        yield from ((name, commands) for name, commands in rows(directory, suite == "arena", upstream)
+                    if name != "Hello")
 
 
 def size_board(build, upstream):

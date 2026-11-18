@@ -137,11 +137,17 @@ def sample(command, directory, compiler_only=False, env=None, *, cycles=False, c
         if len(fields) == 2:
             seconds, rss = fields
     cycle_count = None
+    active_percent = {}
     if perf.exists():
         for line in perf.read_text().splitlines():
             fields = line.split(';')
             if not compiler_only and len(fields) > 2 and fields[2] == 'duration_time' and fields[0].strip().isdigit():
                 seconds = f'{int(fields[0])/1e9:.9f}'
+            if len(fields) > 4 and fields[2] in ('instructions:u', 'cycles:u'):
+                try:
+                    active_percent[fields[2]] = float(fields[4])
+                except ValueError:
+                    pass
             if len(fields) > 2 and fields[2] == 'instructions:u':
                 if fields[0].strip().isdigit():
                     instructions = int(fields[0])
@@ -158,7 +164,7 @@ def sample(command, directory, compiler_only=False, env=None, *, cycles=False, c
         status = 'memory-censored'
     peak = re.search(r'capped: peak (\d+) MiB of', stderr)
     counters = {'cycles': cycle_count} if cycles else {}
-    return dict(status=status, instructions=instructions, seconds=seconds, max_rss_kib=rss, tree_peak_mib=peak[1] if peak else '', wrapper_seconds=f'{elapsed:.6f}', directory=directory, **counters)
+    return dict(status=status, instructions=instructions, pmu_active_percent=active_percent, seconds=seconds, max_rss_kib=rss, tree_peak_mib=peak[1] if peak else '', wrapper_seconds=f'{elapsed:.6f}', directory=directory, **counters)
 
 
 def main():

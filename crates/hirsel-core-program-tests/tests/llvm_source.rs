@@ -912,6 +912,17 @@ fn boxed(s: u64, n: u64, choice: u64) -> u64 {
         else { applyall(Op(apply: halfword), n) }
     }) { Ok(word) => 10000000000u64 + word, Error(e) => e.steps }
 }
+fn triangle(s: u64, z: u64) -> u64 {
+    match (bound steps s {
+        let mut word = 0u64
+        for i in 0u64 .. 5u64 {
+            for j in i * z .. 5u64 {
+                word = (word << 3u64) ^ i ^ (j << 1u64)
+            }
+        }
+        word
+    }) { Ok(n) => 1000 + n, Error(e) => e.steps }
+}
 fn purebits(s: u64, n: u64) -> u64 {
     match (bound steps s {
         let mut crc: u32 = 0xffffffff
@@ -1060,6 +1071,16 @@ fn strided(s: u64, stride: u64) -> u64 {
             limit: 1_000_000,
             injection: None,
         });
+        // A parent reserves a child's most trips from any start; z = 0
+        // runs every child at that bound, so an undercharge shows at s.
+        for z in [0, 1] {
+            cases.push(Case {
+                function: names["triangle"],
+                args: vec![s, z],
+                limit: 1_000_000,
+                injection: None,
+            });
+        }
         cases.push(Case {
             function: names["resetting"],
             args: vec![s],
@@ -1176,6 +1197,7 @@ fn strided(s: u64, stride: u64) -> u64 {
     let exports = [
         "boxed",
         "purebits",
+        "triangle",
         "probe",
         "strided",
         "resetting",

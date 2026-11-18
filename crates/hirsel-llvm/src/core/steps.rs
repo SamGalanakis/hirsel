@@ -93,6 +93,9 @@ pub(super) struct Loop {
     cost: u64,
     exact: bool,
     constant: Option<(u64, u64)>,
+    // Most trips from any unsigned start. A parent may absorb this child at
+    // that bound; its fast copy counts the steps taken and refunds the rest.
+    bound: Option<u64>,
     stride: Stride,
     inclusive: bool,
     offset: u64,
@@ -599,7 +602,7 @@ fn path_cost(
         if !child.cuts.is_empty() {
             return None;
         }
-        let (_, trips) = child.constant?;
+        let trips = child.bound?;
         for &node in &child.nodes {
             state.insert(node, Some(0));
         }
@@ -1131,6 +1134,18 @@ pub(super) fn loops(
             } else {
                 None
             };
+            let bound = constant.map(|(_, trips)| trips).or_else(|| {
+                let Stride::Constant(step) = stride else {
+                    return None;
+                };
+                let gap = constants[limit.index()]?.checked_sub(offset)?;
+                let trips = if inclusive {
+                    (gap / step).checked_add(1)?
+                } else {
+                    gap / step + u64::from(gap % step != 0)
+                };
+                cost.checked_mul(trips).map(|_| trips)
+            });
             let exact = exits.is_empty()
                 && cuts.is_empty()
                 && exact_cost(
@@ -1156,6 +1171,7 @@ pub(super) fn loops(
                 cost,
                 exact,
                 constant,
+                bound,
                 stride,
                 inclusive,
                 offset,

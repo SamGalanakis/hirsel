@@ -3158,7 +3158,10 @@ impl RunPtr {
             let mut dispatch_sample = DispatchSample::default();
             let previous = CURRENT.get();
             let mut direct = ptr::null_mut::<Task>();
-            while (*root.0).state != State::Ended {
+            loop {
+                if (*root.0).state == State::Ended {
+                    break;
+                }
                 let task = if direct.is_null() {
                     if let Some(pool) = pool {
                         while let Some(woken) = pool.pop_flow_wake(0) {

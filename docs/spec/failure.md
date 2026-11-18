@@ -59,12 +59,11 @@ fn put(mut q: List[HostFile], take f: HostFile) -> Result[(), (Capacity, HostFil
 ### FAIL-4: Constructor temporaries
 
 A record or variant construction evaluates its field expressions left to right into
-statement temporaries; a placed literal `T(..) in r` and a resource literal then admit their
-charge. If a field expression fails, the completed temporaries are dropped by the
+statement temporaries; a resource literal then admits its charge. If a field expression fails, the completed temporaries are dropped by the
 statement's cleanup in reverse evaluation order, their finalizers included
 ([T1.1](ownership.md#own-26-the-transition-table)). If the admission fails, nothing is
 cleaned and no finalizer runs: a resource literal hands its fields back in its error, as
-`box.new` hands back its value (T1.3), and a placed literal's error is bare `Capacity`
+`box.new` hands back its value (T1.3)
 ([T1.2](ownership.md#own-26-the-transition-table)).
 
 ```hirsel

@@ -144,8 +144,8 @@ itself and refused by that rule, and a one-variant type named like its variant i
 labelled or all positional. A record is constructed with every field labelled, in
 declaration order, `P(x: 1, y: 2)`, a field with a default
 ([SEM-10](semantics.md#sem-10-codecs)) included; a variant with labels exactly when its payloads are
-labelled; labels appear in no other call. The representation keyword (`stable`, `resource`,
-`scoped`) or its absence is fixed by the definition
+labelled; labels appear in no other call. The representation keyword (`resource`,
+`scoped`), the `@compact` attribute, or their absence is fixed by the definition
 ([OWN-1](ownership.md#own-1-representation-is-declared-once)). A nominal type's identity is
 its definition path; two definitions with equal fields are different types.
 
@@ -225,11 +225,11 @@ later use or between definitions. An unsuffixed number needs an
 expected type ([LANG-3](syntax.md#lang-3-literals)); operands follow
 [LANG-21](#lang-21-operators). There are no implicit conversions except these: `Never` to any type; a
 `View[T]` of a plain `T` to `T` ([OWN-8](ownership.md#own-8-views)); a `Box`, `Rc` or `Arc`
-to its payload, through nested holders, where its own type does not fit (OWN-8); a stable value to its
-view ([OWN-25](ownership.md#own-25-stable-values-are-read-as-views)); `T in a` to `T in r`
+to its payload, through nested holders, where its own type does not fit (OWN-8); a region value to its
+view ([OWN-25](ownership.md#own-25-region-values-are-read-as-views)); `T in a` to `T in r`
 when `a` outlives `r` ([MEM-6](memory.md#mem-6-roots)); an `IndexedSpan[T]` to a
 `SeqSpan[T]`, for reading only, keeping its region, `W` and locator
-([MEM-12](memory.md#mem-12-stable-sequences)), never a `Writer`, a `Child` or a field's
+([MEM-12](memory.md#mem-12-region-sequences)), never a `Writer`, a `Child` or a field's
 declared encoding; and a callable to a callable type it fits ([LANG-13](#lang-13-callables)).
 A conversion applies to an expression whose type is already synthesised, against its
 expected type; it never settles a type parameter, which the steps above fix as written. So
@@ -403,7 +403,7 @@ literal has type `Result[own fn(..) -> R, (Capacity, F)]`, `own[send]` when ever
 `Capacity` nothing is admitted and the error hands every capture back to the caller
 ([T1.2](ownership.md#own-26-the-transition-table)), as `box.new` hands back its value. Its body reads captures as views and
 cannot move, assign or lend them `mut`. An owning closure may capture only a value whose
-type holds no resource, no capability, no view, no scoped value and no stable reference at
+type holds no resource, no capability, no view, no scoped value and no region reference at
 any depth, as its type
 summary records ([OWN-2](ownership.md#own-2-type-summaries)): plain values other than
 capabilities, own values, counted holders of such values, and nothing whose summary may
@@ -568,7 +568,7 @@ installs the result ([OWN-12](ownership.md#own-12-assignment)).
 | index `a[i]` | `a` a `List[T]`, an `Inline[T, n]` or a `FixedSpan[T]`, or a view of one; `i` a `u64` | a place of type `T` |
 
 Indexing reads and assigns as [SEM-4](semantics.md#sem-4-lists),
-[SEM-9](semantics.md#sem-9-inline-arrays) and [MEM-12](memory.md#mem-12-stable-sequences)
+[SEM-9](semantics.md#sem-9-inline-arrays) and [MEM-12](memory.md#mem-12-region-sequences)
 say. No other type is indexable: an index or index assignment on `String`, `Text`, `Map`,
 `SeqSpan`, `IndexedSpan` or any user type is refused here, at the index expression. A
 string is read through `string.as_bytes` or `string.next_scalar`, and a map through

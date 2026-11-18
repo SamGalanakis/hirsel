@@ -47,16 +47,16 @@ flags, is its choice; neither changes what is accepted.
 ### OWN-1: Representation is declared once
 
 A nominal type's declaration fixes the representation of every value of that type, and
-every use inherits it. `type T` is **own**, or plain (OWN-2); `stable type T` is **stable**
-(region data, [MEM-1](memory.md#mem-1-regions)); `resource type T` is a **resource** (affine,
+every use inherits it. `type T` is **own**, or plain (OWN-2); `@compact(W) type T` is
+**region** data ([MEM-2](memory.md#mem-2-region-data)); `resource type T` is a **resource** (affine,
 with a finalizer, [FAIL-11](failure.md#fail-11-resources)); `scoped type T` is scoped
 ([OWN-22](#own-22-scoped-types)). A use never writes a representation; it writes only a
-mode (`view`, `mut`, `take`, `copy`) and a place (`in r`). A type needed in two
+mode (`view`, `mut`, `take`, `copy`). A type needed in two
 representations is two types, such as `String` and `Text`.
 
 ```hirsel
 type Inbox { items: List[String] }            // own
-stable type Name { text: Text }               // stable
+@compact(u32) type Name { text: Text }        // region
 fn first(inbox: Inbox) -> u64 { list.len(inbox.items) }
 ```
 ```hirsel
@@ -72,14 +72,13 @@ Each type declaration publishes one **summary**. This is its whole content:
 - its region parameters and anchors ([MEM-6](memory.md#mem-6-roots), OWN-22);
 - its logical size ([MEM-24](budgets.md#mem-24-logical-charges)), its layout obligations
   ([MEM-9](memory.md#mem-9-compact-types)), whether it is `packed` and `streamable`
-  ([MEM-12](memory.md#mem-12-stable-sequences)), and its declared twin
-  ([MEM-17](memory.md#mem-17-clone));
-- its **holds** set: which of resource, capability, scoped value, stable reference and
+  ([MEM-12](memory.md#mem-12-region-sequences));
+- its **holds** set: which of resource, capability, scoped value, region reference and
   **opaque owner** (a builder, `Causes` or an owning closure: an owner with no copy
   contract) it contains at any depth.
 
 Kind, size and layout read only the fields held inline. The indirections `Box`, `List`,
-`Map`, `Rc`, `Arc`, `Task`, `Sender`, `Receiver`, callables and stable references have a
+`Map`, `Rc`, `Arc`, `Task`, `Sender`, `Receiver`, callables and region references have a
 fixed size and layout that does not read their payload's; inside a compact type, a
 `SeqSpan` or `IndexedSpan` ends the layout the same way, by its header. These parts are computed in
 dependency order and never iterated. A declaration whose computation re-enters a type
@@ -92,7 +91,7 @@ types that name each other through fields, at any depth, form a group, and every
 a group holds the union of what the group's fields hold directly and what the other types
 they name hold. Where a rule needs a type to hold nothing, a type parameter counts as
 holding every category its bounds do not exclude: `plain` excludes resource, scoped value,
-stable reference and opaque owner, but not capability, so `Wrap[T: plain] { item: T }` may hold a
+region reference and opaque owner, but not capability, so `Wrap[T: plain] { item: T }` may hold a
 capability. A generic declaration's summary is stated
 in terms of its parameters and instantiated from the arguments' summaries at each use. A
 parameter that no field **mentions** contributes nothing to it: a field mentions `T` when its
@@ -121,7 +120,7 @@ Every type has exactly one kind. A value is **copyable** when `let` copies it.
 |---|---|---|---|
 | plain | OWN-2 | copies | none |
 | own | `type` with a non-plain field; `Box`, `List`, `String`, `Map`, the builders, `own fn` | moves | fields in reverse declaration order, then its blocks |
-| stable | `stable type`; `Text`, `FixedSpan`, `SeqSpan`, `IndexedSpan`, `SeqIndex` | copies | freed with its region |
+| region | `@compact type` ([MEM-2](memory.md#mem-2-region-data)); `Text`, `FixedSpan`, `SeqSpan`, `IndexedSpan`, `SeqIndex` | copies | freed with its region |
 | resource | `resource type`; `Sender`, `Receiver`, `Task`; capabilities that hold state | moves | finalizer, then fields |
 | counted | `Rc[T]`, `Arc[T]` | moves | release ([MEM-16](memory.md#mem-16-counting)) |
 | scoped | `View[T]`, `Region`, `Dest`, `Writer`, `scoped fn`, `scoped type` | copies when every component is copyable, otherwise moves | cleans each owned component |
@@ -148,17 +147,17 @@ The bounds are:
 - `plain`: exactly the types of plain kind (OWN-2, OWN-3). An own type, `List[T]` and
   `Box[T]` included, never has it, whatever its arguments.
 - `shareable`: plain types, counted types, and own types that declare it and whose fields
-  are shareable; never resources, scoped or stable types, or owning closures. Required of
+  are shareable; never resources, scoped or region types, or owning closures. Required of
   `Rc` and `Arc` payloads.
 - `send`: [CONC-2](tasks.md#conc-2-the-send-bound).
 - `key`: equality and hashing ([SEM-7](semantics.md#sem-7-equality-and-order)).
 - `ordered`: total order (SEM-7).
 - `codec`: the type has a codec ([SEM-10](semantics.md#sem-10-codecs)). Exactly the
   built-in types whose row lists it ([core](core.md#built-in-types)) and the nominal types
-  that declare it have it. So a resource, scoped, stable or counted type, a callable, a
+  that declare it have it. So a resource, scoped, region or counted type, a callable, a
   capability and every type that holds one of these never has it: no row lists them, a
   declaration with such a field is refused at that field, and a `resource`, `scoped` or
-  `stable` definition that declares `codec` is refused at the bound. A plain nominal type
+  `@compact` definition that declares `codec` is refused at the bound. A plain nominal type
   has it only when it declares it. Declaring it lets every module encode the type's fields
   and build its values from decoded bytes, so for an opaque type decoding is a
   construction outside its module that its owner has allowed. With `via`
@@ -175,7 +174,7 @@ The bounds are:
   }` copies and compares, and `fn same[T: float](a: T, b: T) -> bool { a == b }` is refused
   by [LANG-21](language.md#lang-21-operators).
 - `packed`, `streamable`: compact encodings
-  ([MEM-12](memory.md#mem-12-stable-sequences)), computed like `plain`; `streamable` implies
+  ([MEM-12](memory.md#mem-12-region-sequences)), computed like `plain`; `streamable` implies
   `packed`, as MEM-12 defines it.
 
 Plain types are `shareable` and `send` without declaring it. Otherwise a nominal type
@@ -341,8 +340,8 @@ other alias, writes, moves or frees storage the view exposes, a view in a result
 to a `mut` parameter (OWN-20) included; an operation given a view may still change hidden
 bookkeeping that no view exposes: a counted holder's count, a channel's queue, a region's
 bookkeeping, the host. A log's entries ([MEM-29](memory.md#mem-29-append-only-logs)) are such state. Where a plain `T` is expected, a `View[T]` of a
-plain `T` reads as the value. A stable value used where a view is expected is that view
-([OWN-25](#own-25-stable-values-are-read-as-views)).
+plain `T` reads as the value. A region value used where a view is expected is that view
+([OWN-25](#own-25-region-values-are-read-as-views)).
 
 ```hirsel
 type Inbox { items: List[String] }
@@ -423,8 +422,8 @@ which must end before every anchor's scope does: a view whose extent outlives th
 an anchor is refused at the closing `}` of the block whose cleanup would drop the frozen
 place, with the view as a secondary site. A freeze ends on every exit edge of its
 extent, before the owners of the exited blocks are cleaned
-([FAIL-8](failure.md#fail-8-exit-edge-cleanup)). A view of a stable value is anchored to its
-region, not to a place, and freezes nothing: stable storage is never written.
+([FAIL-8](failure.md#fail-8-exit-edge-cleanup)). A view of a region value is anchored to its
+region, not to a place, and freezes nothing: region storage is never written.
 
 ```hirsel
 type Inbox { items: List[String] }
@@ -511,7 +510,7 @@ fn steal(mut xs: List[u64]) -> List[u64] { take xs }       // refused: OWN-11
 
 A **writable place** is a slot that is writable ([OWN-5](#own-5-availability)), or a
 field, tuple component, `List` element, `Inline` element or `Box` payload of a writable place; nothing
-reached through a view, a counted value or a stable value is one. The one exception is
+reached through a view, a counted value or a region value is one. The one exception is
 an `Rc` or `Arc` payload lent by `rc.with_unique` or `arc.with_unique` ([MEM-15](memory.md#mem-15-arc)): it is
 reached as the callback's `mut` parameter, which is a writable slot, and only after the
 count has been found to be 1. `q` must be a writable
@@ -688,7 +687,7 @@ anchors are live and frozen. It may not be:
 
 - a type argument of a user-declared generic (built-in `Option`, `Result` and tuples
   accept it);
-- a field of an own, stable or resource type, refused at the field, or an element of a
+- a field of an own or resource type, refused at the field, or an element of a
   collection;
 - captured by an owning closure, sent, or returned past its anchor.
 
@@ -751,7 +750,7 @@ fn keep(xs: List[String]) -> List[View[String]] { list.new() }  // refused: OWN-
 
 A function that returns a scoped value writes its anchors in the result type: `View[T] in
 p` for one, `R[in a, in b]` for a scoped type with several. Each names a view parameter, a
-`mut` parameter, or a region whose stable values the result reads; a projected formal such
+`mut` parameter, or a region whose region values the result reads; a projected formal such
 as `p.f` is not an anchor. The caller's argument for each stays frozen for the result's
 extent: a view argument's from its evaluation (OWN-10), a `mut` argument's from the call's
 completed return (OWN-11). The result may denote the anchored argument, a part of it (a
@@ -945,16 +944,16 @@ The only conversions between kinds are:
 | `rc.share(h)`, `arc.share(h)` | counted | another holder | MEM-16 |
 | `rc.try_unwrap(take h)`, `arc.try_unwrap(take h)` | counted | own, if the count is 1 | MEM-16 |
 | `rc.with_unique(mut h, f)`, `arc.with_unique(mut h, f)` | counted | the payload lent `mut` to `f`, if the count is 1 | MEM-15 |
-| `clone(x)`, `clone_in(r, x)` | view of own, stable or counted | own, or stable in `r` | [MEM-17](memory.md#mem-17-clone) |
+| `clone(x)`, `clone_in(r, x)` | view of own, region or counted | own; for `clone_in`, region in `r` | [MEM-17](memory.md#mem-17-clone) |
 
 There is no implicit counting, copy-on-write (std's `arc.update` is explicit), inferred
 borrow or inferred uniqueness, and
-no conversion from stable to own in place, from a resource to counted, or from scoped to
+no conversion from region data to own in place, from a resource to counted, or from scoped to
 anything storable.
 
-### OWN-25: Stable values are read as views
+### OWN-25: Region values are read as views
 
-A published stable value is immutable for the life of its region and never moves
+A published region value is immutable for the life of its region and never moves
 ([MEM-5](memory.md#mem-5-publication)). It is read where a view of its type is expected,
 with no `view` written, anchored to its region; a function taking `View[Text]` or an
 unmarked `Text` parameter accepts it. `let` copies its locator, never its bytes.
@@ -979,14 +978,14 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | row | operation | success | failure | owner after failure |
 |---|---|---|---|---|
 | T1.1 | `T(a: take a, b: e)` | fields evaluated left to right into temporaries; value L, stored inline; nothing admitted | `e` fails | earlier temporaries dropped in reverse by statement cleanup; prop |
-| T1.2 | `T(..) in r`, a resource literal, an owning closure | as T1.1, then `chg` (commit) | `e` fails; `Capacity` at `chg` | `e`: as T1.1. `Capacity`: nothing admitted, cleaned or run. A placed literal's error is bare `Capacity`, its fields being copies. A resource literal's error is `(Capacity, F)`, owning `F`: its one field, or the tuple of all its fields in declaration order; with no fields, bare `Capacity`. An owning closure's is `(Capacity, F)`, `F` its one capture or the tuple of its captures in environment order |
+| T1.2 | a resource literal, an owning closure | as T1.1, then `chg` (commit) | `e` fails; `Capacity` at `chg` | `e`: as T1.1. `Capacity`: nothing admitted, cleaned or run. A resource literal's error is `(Capacity, F)`, owning `F`: its one field, or the tuple of all its fields in declaration order; with no fields, bare `Capacity`. An owning closure's is `(Capacity, F)`, `F` its one capture or the tuple of its captures in environment order |
 | T1.3 | `box.new(take x)`, `rc.new(take x)` | as T1.2, then `x` moved into the new node, count 1 for `rc`; no block `x` owns is freed | `Capacity` | the error owns `x` |
 | T1.4 | `arc.new(take x)` | as T1.3; a recorded event ([CONC-10](tasks.md#conc-10-event-order)) | `Capacity`, recorded | the error owns `x` |
 | T1.5 | `clone(x)`, `clone_in(r, x)` | copy L; `chg` per new block; `share` per counted edge | `Capacity` at block k | own blocks copied so far dropped and shares released in reverse, each `ref`; region bytes stay charged until close; `x` untouched |
 | T1.6 | `span.push(mut b, x)` | value moved into the builder | `Capacity` | the error owns the value; the builder unchanged; region bytes stay charged |
-| T1.7 | `finish(take b)` | stable value L | cannot fail | |
+| T1.7 | `finish(take b)` | region value L | cannot fail | |
 | T1.8 | `build_in`, `build_stream_in` | width check, then `chg(n)` (commit), then the writer runs once | `Overflow` or `Capacity` before the writer runs; the writer's `Error` | nothing allocated before commit; after it the `n` bytes stay charged until close and nothing is published |
-| T1.9 | `finish_trim(take b)` | stable value L; `ref(round8(n) − round8(used))` at the allocation's record | cannot fail | |
+| T1.9 | `finish_trim(take b)` | region value L; `ref(round8(n) − round8(used))` at the allocation's record | cannot fail | |
 | T1.10 | `seq.index_in(r, s)` | `chg` (commit), then the table | `Capacity` | nothing allocated; the source unchanged |
 
 **T2 Bindings and views**

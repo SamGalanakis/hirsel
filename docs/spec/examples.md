@@ -11,13 +11,14 @@ informative; the rules they cite are normative. `?` never converts an error
 ## 1. Bounded scratch in a region
 
 A word is copied into a region inside a bound scope. With 64 bytes it fits: the `Text`
-copy of `"hello"` charges 16 (8 count + 5 bytes, rounded up to 8) and the `Word` record 24
-(16 for the `Text` reference + 8). With 8 bytes the `Text` copy is refused, and the scope
-returns that `Capacity` value.
+copy of `"hello"` charges 16 (8 count + 5 bytes, rounded up to 8), and the `Word` record is
+an own value held inline in its slot, built in the caller's place
+([MEM-31](memory.md#mem-31-construction-in-place)), so it charges nothing. With 8 bytes the
+`Text` copy is refused, and the scope returns that `Capacity` value.
 
 ```hirsel
 type AppError = Io(WriteError) | Mem(Capacity)
-stable type Word { text: Text, len: u64 }
+type Word[in r] { text: Text in r, len: u64 }
 
 fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
   match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
@@ -35,9 +36,9 @@ fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
   put(out, buf)
 }
 
-fn word(r: Region, s: String) -> Result[Word in r, Capacity] {
+fn word(r: Region, s: String) -> Result[Word[in r], Capacity] {
   let t = text.copy_in(r, s)?
-  Word(text: t, len: string.byte_len(s)) in r
+  Ok(Word(text: t, len: string.byte_len(s)))
 }
 
 fn measure(s: String, limit: u64) -> Result[u64, Capacity] {
@@ -71,8 +72,8 @@ Refused edits:
 
 - Make the region block's value `w` instead of `w.len`: refused, MEM-7 at 29:7, a value
   whose type mentions `r` leaves its block.
-- Drop the placement `in r` from the literal in `word`: refused, MEM-2 at 22:3, a stable
-  literal needs a region.
+- Drop the region parameter from `Word` (`type Word { text: Text, len: u64 }`): refused,
+  MEM-6 at 2:13, a region field of an own type names its region.
 
 ## 2. Expression tree in one compact blob
 
@@ -84,7 +85,7 @@ needs 45 bytes. In 32 bytes the fourth put (27 + 9 > 32) writes nothing and retu
 
 ```hirsel
 type AppError = Io(WriteError) | Mem(Capacity)
-@compact(u32) stable type Expr = Num(u64) | Add(Link[Expr], Link[Expr])
+@compact(u32) type Expr = Num(u64) | Add(Link[Expr], Link[Expr])
 
 fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
   match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
@@ -534,7 +535,7 @@ would refund 4016 at publication and keep 80.
 
 ```hirsel
 type AppError = Io(WriteError) | Mem(Capacity) | Build(BuildError) | Syntax(u64)
-@compact(u32) stable type Json = Null | False | True | Num(u64) | Str(Text) | Arr(IndexedSpan[Json])
+@compact(u32) type Json = Null | False | True | Num(u64) | Str(Text) | Arr(IndexedSpan[Json])
 
 fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
   match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }

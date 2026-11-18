@@ -1,6 +1,55 @@
 # Memory
 
-## Regions and stable data
+## Memory model: settled
+
+Settled on 2026-11-18 (Sam: "The memory thing seems settled we can go with that - update the
+spec and make sure we do not drift again"). The model is chosen as the clean end-state, not to
+spare existing code. In five lines:
+
+1. **The type decides who frees.** An ordinary `type` is own: one owner, freed when the owner
+   goes away ([OWN-3](ownership.md#own-3-kinds)). Sharing is opt-in and counted (`Rc`, `Arc`),
+   resources stay resources, loans stay loans.
+2. **`@compact(W) type` declares region data** ([MEM-2](#mem-2-region-data)): a document that
+   dies together lives in one region and is freed at once, with no per-node walk. It is the one
+   way to declare region data; there is no `stable` keyword and no `@twin`.
+3. **Construction in place where it keeps custody** ([MEM-31](#mem-31-construction-in-place)):
+   a fresh value returned to the caller or put into a container slot is built in that
+   destination when the destination is known at construction; otherwise it is built locally
+   and moved, and a move never copies out-of-line data.
+4. **Servers get a per-request scratch region**, closed when the handler returns
+   ([HTTP-6](http.md#http-6-the-anchored-request-and-the-read-buffer)).
+5. **Speed is the engine's, not the language's** ([MEM-32](#mem-32-engine-obligations)): a
+   per-task size-class allocator, a demand-sized first region chunk, per-type pools inside a
+   region, and no teardown walk for plain data. Charges stay logical and deterministic
+   ([MEM-24](budgets.md#mem-24-logical-charges)); `Capacity` fails at the same point on every
+   engine.
+
+Rejected, each for a reason that still holds:
+
+- **Region or immutable data by default.** Ordinary mutation, caches and messages that expire
+  one by one become exceptions; a prototype of this default charged 65× to 107× the needed
+  bytes where own charged 1.12× to 7×, and MLKit's inferred regions used from 8% to over 3000%
+  of the space SML/NJ's collected heap used on the same programs.
+- **Build every value in its destination**, a placement read from each binding's later uses
+  with an arena per block. One allocation site can need two lifetimes (a value returned on one
+  path is sent to another task on another); a reference into a block's arena can outlive the
+  slot cleanup of that block or be copied into another task inside plain data; and arena
+  release lists break finalizer order when a return fails.
+- **Region views in place of region values** (`View[T] in r` as the only way to read region
+  data). A view can be no field, element or generic argument, so an own index over a region
+  document (`Map[Text in r, u64]`) cannot be written, or region views become an exempt kind
+  under another name.
+- **A declarable `stable type` beside `@compact`, with `@twin` pairs.** Two ways to say region
+  data; in core, std and the programs every declared region type was compact and no twin was
+  used.
+
+**Reopen condition.** Only a measurement reopens this: matched ports of the AWFY Json and
+Storage benchmarks to an explicit document pool, in Hirsel and in Goose, with the same input,
+output and checksums. If, with every obligation of MEM-32 implemented, Hirsel still runs above
+1.5× Goose's instructions on either, the default is reopened. A new design opinion is not a
+reason to reopen it.
+
+## Regions and region data
 
 ### MEM-1: Regions
 
@@ -25,24 +74,31 @@ fn leak(src: String) -> Region { region r { r } }          // refused: MEM-7
 fn swap(mut r: Region, s: Region) { r = s }                // refused: OWN-11, s is not an anchor of r
 ```
 
-### MEM-2: Placement
+### MEM-2: Region data
 
-A stable value has a type written `T in r`, where `r` is a `Region` value in scope or a
-region parameter (MEM-6). It is created only by a builder (MEM-3, MEM-4), a literal placed
-with `in r`, or a function that takes `r` and returns `T in r`. A placed literal `T(..) in r`
-of a stable type that is not compact evaluates its fields left to right, admits one block in
-`r` and publishes the value; its type is `Result[T in r, Capacity]`
-([T1.2](ownership.md#own-26-the-transition-table)). A stable type's fields are plain, or
-stable (and `Option` and tuples of these) whose regions outlive the value's (MEM-6); a field
-whose type is a type parameter needs the bound `plain`. Own, counted, resource and scoped
-fields are refused, at every depth; a plain capability may be held, as in any plain value.
+Region data is exactly the values of the **region** kind
+([OWN-3](ownership.md#own-3-kinds)): the types declared `@compact(W) type T` (MEM-9) and
+the built-in `Text`, `FixedSpan`, `SeqSpan`, `IndexedSpan` and `SeqIndex`. A region value has
+a type written `T in r`, where `r` is a `Region` value in scope or a region parameter (MEM-6).
+It is created only by a builder (MEM-3, MEM-4), by a core operation that names `r` (such as
+`text.copy_in(r, s)` and `seq.index_in(r, s)`), by `clone_in` (MEM-17), or by a function
+that takes `r` and returns `T in r`. A construction literal of a region type is written only
+inside `dest.put` and `emit` (MEM-4); anywhere else it is refused here. The fields a compact
+type may hold are MEM-9's. An edge from region data to another blob or region is a region
+field of an own type (MEM-6).
 
 ```hirsel
-stable type Span2 { start: u64, end: u64 }
-fn mk(r: Region) -> Result[Span2 in r, Capacity] { Span2(start: 0, end: 1) in r }
+@compact(u32) type Span2 { start: u64, end: u64 }
+fn mk(r: Region) -> Result[Span2 in r, BuildError] {
+  let b = build_in(r, bytes 16, fn(mut d: Dest[Span2]) -> Result[Child[Span2], BuildError] {
+    dest.put(mut d, Span2(start: 0, end: 1))
+  })?
+  Ok(finish(take b))
+}
 ```
 ```hirsel
-stable type Bad { name: String }                            // refused: MEM-2, own field
+@compact(u32) type Span2 { start: u64, end: u64 }
+fn mk(r: Region) -> Span2 in r { Span2(start: 0, end: 1) }   // refused: MEM-2, a literal outside a destination
 ```
 
 ### MEM-3: Builders
@@ -111,7 +167,7 @@ records the root's offset in it. A published compact value is copied into anothe
 to `finish`.
 
 ```hirsel
-@compact(u32) stable type Note { id: u64, body: Text }
+@compact(u32) type Note { id: u64, body: Text }
 fn note(r: Region, s: String) -> Result[Note in r, BuildError] {
   let b = build_in(r, bytes 64, fn(mut d: Dest[Note]) -> Result[Child[Note], BuildError] {
     dest.put(mut d, Note(id: 1, body: s))
@@ -129,7 +185,7 @@ fn build_stream_in[T: streamable](r: Region, bytes n: u64,
     -> Result[Builder[T, in r], BuildError]
 ```
 
-Its root `T` is a stable streamable type: a compact type, which supplies its `W`, or `Text`
+Its root `T` is a streamable region type: a compact type, which supplies its `W`, or `Text`
 or a sequence, encoded with `W = u64`. Both checks read the root's outermost type at the
 call: a type parameter is never compact or a root, whatever its bounds, because no bound
 says so and a generic body uses only its bounds
@@ -204,14 +260,14 @@ fn doc[T: streamable](r: Region, bytes n: u64,
 }
 ```
 ```hirsel
-@compact(u32) stable type J = Null | Arr(SeqSpan[J])
+@compact(u32) type J = Null | Arr(SeqSpan[J])
 fn list[in r](take w: Writer[SeqSpan[J], in r]) -> Result[Child[SeqSpan[J]], BuildError] {
   writer.append(mut w, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Null) })?
   writer.close(take w)
 }
 ```
 ```hirsel
-@compact(u32) stable type J = Null | Arr(SeqSpan[J])
+@compact(u32) type J = Null | Arr(SeqSpan[J])
 fn quiet(f: scoped fn() -> Result[(), BuildError]) -> Result[(), BuildError] {
   match f() { Ok(()) => Ok(()), Error(_) => Ok(()) }
 }
@@ -224,7 +280,7 @@ fn list[in r](take w: Writer[SeqSpan[J], in r]) -> Result[Child[SeqSpan[J]], Bui
 }
 ```
 ```hirsel
-@compact(u32) stable type J = Null | Arr(SeqSpan[J])
+@compact(u32) type J = Null | Arr(SeqSpan[J])
 fn add[in r](mut w: Writer[SeqSpan[J], in r]) -> Result[(), BuildError] {
   let z = { writer.append(mut w, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Null) }) }
   z                                            // refused: MEM-4, the append is in a let initializer, not a returned tail
@@ -233,49 +289,51 @@ fn add[in r](mut w: Writer[SeqSpan[J], in r]) -> Result[(), BuildError] {
 
 ### MEM-5: Publication
 
-A published stable value is immutable for the life of its region and never moves. No
-operation writes it, and there are no cells. Reading a stable value is reading a view of
-it ([OWN-25](ownership.md#own-25-stable-values-are-read-as-views)); `let` copies its locator,
+A published region value is immutable for the life of its region and never moves. No
+operation writes it, and there are no cells. Reading a region value is reading a view of
+it ([OWN-25](ownership.md#own-25-region-values-are-read-as-views)); `let` copies its locator,
 never its bytes.
 
 ```hirsel
 fn f(r: Region, t: Text in r) -> u64 { text.len(t) }
 ```
 ```hirsel
-fn f(r: Region, mut t: Text in r) {}                       // refused: MEM-5, no mut of stable
+fn f(r: Region, mut t: Text in r) {}                       // refused: MEM-5, no mut of region data
 ```
 
 ### MEM-6: Roots
 
-A stable type's stable fields are in the region of the value that holds them, unless the
-declaration names a region parameter: `stable type Token[in src] { text: Text in src }`,
-used as `Token[in s] in r`. An own or resource type with a stable field names a region
-parameter for it (`type Holder[in r] { t: Text in r }`). A parameter written with a bare
-stable type (`t: Text`) accepts a value in any region that outlives the call; a result or
-field with a stable type names its region. A function's region parameters are its `Region`
-parameters and its generics written `in a`, which the argument types fix
-(`fn finish[T, in r](take b: Builder[T, in r]) -> T in r`).
+A compact value's parts are in its own blob (MEM-10). An own or resource type with a region
+field names a region parameter for it: `type Token[in src] { text: Text in src, line: u32 }`.
+A parameter written with a bare region type (`t: Text`) accepts a value in any region that
+outlives the call; a result or field with a region type names its region. A function's region
+parameters are its `Region` parameters and its generics written `in a`, which the argument
+types fix (`fn finish[T, in r](take b: Builder[T, in r]) -> T in r`).
 
 A region `a` **outlives** `r` when `a` is `r`, when `a` is opened in a block that encloses
 `r`'s block, when `a` is a parameter and `r` is opened in the body, when the signature
-declares `where a: r`, or by transitivity. Building `Token[in s] in r` requires `s` to
-outlive `r`. A published `T in a` is usable as `T in r` when `a` outlives `r`, and the
-same holds inside `Option`, tuples and stable type arguments. Each check reads the lexical
-nesting and the signature only.
+declares `where a: r`, or by transitivity. A published `T in a` is usable as `T in r` when
+`a` outlives `r`, and the same holds inside `Option`, tuples and the region arguments of a
+type. Storing a `T in a` into a slot or field typed `T in r` requires `a` to outlive `r`.
+Each check reads the lexical nesting and the signature only.
 
 ```hirsel
-stable type Token[in src] { text: Text in src, line: u32 }
-fn tok(s: Region, t: Text in s) -> Result[u64, Capacity] {
-  region r { let k = (Token(text: t, line: 1) in r)?; Ok(text.len(k.text)) }
+type Token[in src] { text: Text in src, line: u32 }
+fn tok(s: Region, t: Text in s) -> u64 {
+  region r { let k: Token[in r] = Token(text: t, line: 1); text.len(k.text) }
 }
 ```
 ```hirsel
-stable type Token[in src] { text: Text in src, line: u32 }
 type Hidden { text: Text }                                   // refused: MEM-6, no region
+```
+```hirsel
+type Token[in src] { text: Text in src, line: u32 }
 fn tok(t: String) -> Result[(), Capacity] {
   region outer {
-    region inner { let x = text.copy_in(inner, t)?; let k = (Token(text: x, line: 1) in outer)? }
-    Ok(())                                     // refused: MEM-6, inner does not outlive outer
+    let mut k: Option[Token[in outer]] = None
+    region inner { let x = text.copy_in(inner, t)?; k = Some(Token(text: x, line: 1)) }
+                                               // refused: MEM-6, inner does not outlive outer
+    Ok(())
   }
 }
 ```
@@ -303,11 +361,12 @@ are cleaned, all its storage is freed and refunded at once
 ([T5.3](ownership.md#own-26-the-transition-table)). Closing cannot fail. A region cannot be
 reset or reopened; `loop { region r { .. } }` opens a fresh region each iteration.
 
-## Compact stable layout
+## Compact layout
 
 ### MEM-9: Compact types
 
-`@compact(W) stable type T` declares a compact layout, where `W` is `u16`, `u32` or `u64`.
+`@compact(W) type T` declares a compact layout and makes `T` region data (MEM-2), where `W`
+is `u16`, `u32` or `u64`.
 A compact value is one contiguous allocation (a **blob**) of at most `2^b − 1` bytes, where
 `b` is `W`'s bit width, laid out with fields in declaration order, each at the next byte
 with no padding. A compact type's fields are scalars, `bool`, `char`, other compact types
@@ -329,12 +388,12 @@ link encoding of MEM-10; and the blob cap. Private: where a blob sits in its reg
 alignment, region chunking, every non-compact layout and the calling convention.
 
 ```hirsel
-@compact(u32) stable type Entry { id: u64, name: Text, scores: FixedSpan[u32] }
+@compact(u32) type Entry { id: u64, name: Text, scores: FixedSpan[u32] }
 ```
 ```hirsel
-@compact(u32) stable type Bad { owner: String }             // refused: MEM-9, own field
-@compact(u16) stable type Empty {}                          // refused: MEM-9, zero bytes
-@compact(u16) stable type Packed { data: Inline[u8, 4] }    // refused: MEM-9, an Inline field
+@compact(u32) type Bad { owner: String }             // refused: MEM-9, own field
+@compact(u16) type Empty {}                          // refused: MEM-9, zero bytes
+@compact(u16) type Packed { data: Inline[u8, 4] }    // refused: MEM-9, an Inline field
 ```
 
 ### MEM-10: Inline fields and links
@@ -347,15 +406,15 @@ before its parent is put, and every encoding is at least one byte, so every dist
 least 1 and in bounds. Reading a link field through a view of its holder yields a view of
 the target, at the cost of one load and one subtraction with no check; a link is never a
 value apart from its field, and no integer converts to one. A blob that may hold a link is moved or
-copied only whole (MEM-4, MEM-17), so its links stay valid. Edges to other blobs or regions are ordinary
-stable fields of a non-compact type.
+copied only whole (MEM-4, MEM-17), so its links stay valid. Edges to other blobs or regions are region
+fields of an own type (MEM-6).
 
 ```hirsel
-@compact(u32) stable type Expr = Num(i64) | Add(Link[Expr], Link[Expr])
+@compact(u32) type Expr = Num(i64) | Add(Link[Expr], Link[Expr])
 fn eval(e: Expr) -> i64 { match e { Num(n) => n, Add(a, b) => eval(a) + eval(b) } }
 ```
 ```hirsel
-@compact(u32) stable type Expr = Num(i64) | Add(Link[Expr], Link[Expr])
+@compact(u32) type Expr = Num(i64) | Add(Link[Expr], Link[Expr])
 fn keep(e: Expr) -> Link[Expr] { match e { Add(a, _) => a, _ => fail("leaf") } }
                                               // refused: MEM-10, a link is not a value
 ```
@@ -365,7 +424,7 @@ fn keep(e: Expr) -> Link[Expr] { match e { Add(a, _) => a, _ => fail("leaf") } }
 A compact variant value occupies its tag plus its active payload only. Replacing the
 variant of a published value is impossible (MEM-5); a new value is built instead.
 
-### MEM-12: Stable sequences
+### MEM-12: Region sequences
 
 `FixedSpan[T]` holds elements of a plain type `T`. It is a `W`-width count, then the
 elements at a stride of `T`'s logical size; an element's bytes are the encoding of MEM-9
@@ -402,7 +461,7 @@ compact type may contain itself through a sequence, whose header ends its layout
 when every such cycle keeps its type arguments; inline it still may not.
 
 ```hirsel
-@compact(u32) stable type J = Null | Arr(SeqSpan[J])
+@compact(u32) type J = Null | Arr(SeqSpan[J])
 fn count(j: J) -> u64 { match j { Null => 1, Arr(xs) => { let mut n: u64 = 1; for x in xs { n += count(x) }; n } } }
 ```
 ```hirsel
@@ -433,6 +492,42 @@ type Tree { label: String, kids: List[Tree] }
 ```hirsel
 type Chain = End | Link(u64, Chain)                       // refused: OWN-2, use Box[Chain]
 ```
+
+### MEM-31: Construction in place
+
+A value's **inline bytes** are the bytes MEM-13 holds in its owner: a record's fields, a
+variant's payload, and the pointer, length and capacity of a `Box`, `List`, `String` or `Map`,
+never the blocks they point to. An engine writes a fresh value's inline bytes directly into
+its destination, with no temporary of the value and no copy of it, in three cases:
+
+- **Results.** The operand of `return`, or a body's result reached through blocks and `if`
+  and `match` arms, is built in the caller's receiving place. So is a local that every exit
+  of the body that reaches it returns whole.
+- **Container slots.** The element or entry argument of a core operation that stores it into
+  a collection (`list.push`, `list.set`, `map.insert` and the like, [core](core.md)) is built
+  in its slot when that slot exists without a new admission: spare capacity, or the element
+  being set.
+- **Fields.** A literal's field operand that is itself fresh is built inside the literal's
+  own destination.
+
+Any other value is built in a local place and moved. A move copies only inline bytes: the
+blocks a value owns move with their pointer, are never copied, and are never re-admitted, so
+a move never allocates and never fails ([OWN-6](ownership.md#own-6-let-take-and-copy)). The destination's
+owner is the owner the value would have after that move, so building in place never changes
+custody: a result built in the caller's place and then sent from a path that does not return
+it is moved out like any other value.
+
+Nothing a program observes depends on which case applies. Fields are evaluated left to right
+into their owners as [T1.1](ownership.md#own-26-the-transition-table) says; every allocation is
+admitted where its row says; a collection admits its growth after its arguments are evaluated
+and before it commits, and nothing is admitted earlier or speculatively because the
+destination is known; an assignment does not overwrite its old value before its right side
+succeeds ([OWN-12](ownership.md#own-12-assignment)). A failure before completion leaves the
+destination as it was, each survivor with the owner
+[FAIL-7](failure.md#fail-7-one-owner-per-survivor) names, and a pending result is cleaned in
+[FAIL-9](failure.md#fail-9-pending-results)'s order whether or not it was built in place.
+Charges, refusal points, cleanup order and output are therefore the same on every engine;
+only the instructions and the bytes copied differ.
 
 ### MEM-14: Rc
 
@@ -483,7 +578,7 @@ add a holder:
   this task or any other. There are no weak counted references in v1
   ([reserved](reserved.md#not-in-v1)); if they are added, the test must also find none.
 - **`h` is a writable place.** It is lent `mut` ([OWN-11](ownership.md#own-11-call-arguments)),
-  so an `Arc` reached through a view, a stable value or another counted value cannot be
+  so an `Arc` reached through a view, a region value or another counted value cannot be
   passed: an `Arc` field of a shared payload has count 1 and is reachable by every holder of
   the outer node, and is refused here. Inside an outer `with_unique`, the outer payload is
   `f`'s `mut` parameter, so a nested `with_unique(mut p.inner, g)` is accepted.
@@ -564,33 +659,25 @@ fn own_copy(take h: Rc[Node]) -> Result[Node, Capacity] {
 ### MEM-17: clone
 
 `clone(x)` and `clone_in(r, x)` are built-in typing forms. The expected type selects
-their result `U` and what is copied: first `x`'s own type, if it is `U` or `U`'s declared
-**twin**; otherwise the payloads through `Box`, `Rc` and `Arc`, outermost first, the first
-that is `U` or its twin. No match is refused. With no expected type `U` is open, and the
+their result `U` and what is copied: first `x`'s own type, if it is `U`; otherwise the
+payloads through `Box`, `Rc` and `Arc`, outermost first, the first that is `U`. No match is
+refused; a conversion between two types is an explicit operation, such as `text.copy_in`,
+never a clone. With no expected type `U` is open, and the
 call is refused ([LANG-12](language.md#lang-12-generics)): `let k = clone(key)?` is,
 `let k: Bytes = clone(key)?` is not. `clone(x) -> Result[U, Capacity]` makes a
 plain, own or counted `U`: it deep-copies the own parts of the selected value into new
 blocks charged to the current limit and shares its counted edges, a counted root selected
-as `U` included, and keeps the regions of its stable fields. A stable reference (`S in r`),
+as `U` included, and keeps the regions of its region fields. A region reference (`S in r`),
 at the root or as a part, is copied as the reference: the copy shares its block, and
 nothing is allocated for it. `clone_in(r, x) -> Result[U
-in r, Capacity]` makes a stable `U` in `r`. A compact value or sequence is never
+in r, Capacity]` copies a region value `x` into `r`. A compact value or sequence is never
 re-encoded at `U`'s own `W`; which bytes are copied follows its type, with no check at run
 time. A value of a streamable type (MEM-12) is copied as exactly its own bytes at its `W`,
 as the root of a new blob, admitting its length rounded up to 8. Any other compact value,
 which may hold a `Link`, is copied as the whole used blob, keeping the selected value's
 offset. A streamable value is complete once it can be viewed, so it may be cloned while its
 blob is still being written (MEM-4); a value that may hold a link is viewed only in a
-published blob, because `build_stream_in` writes only streamable documents.
-`@twin(P)` on a non-generic declaration names the type `P` it pairs with; the pair is
-symmetric. The two have the same field names in the same order, and each pair of field
-types is identical, a built-in pair (`String` and `Text`; `List[T]` and `FixedSpan[T]`;
-`Box[X]` and a stable reference to `Y` where `X` and `Y` are twins), a declared twin pair, or
-`Option`, `Result` or a tuple of such pairs, component by component. Two variant types pair
-when their arms have the same names in the same order and each pair of arm payloads pairs
-by the same rule. While a declaration's
-fields are checked, its own pair is assumed, so recursive twins check. A stable target
-cannot hold counted fields. Each copied `List`, `String`, `Map` or `Heap` gets capacity
+published blob, because `build_stream_in` writes only streamable documents. Each copied `List`, `String`, `Map` or `Heap` gets capacity
 equal to its length, and each copied `Deque` the least power of two not below its length, 0
 when it is empty. The copy is depth-first: a record's fields in declaration order, a variant's active
 payload, a list's elements in index order and a map's entries in insertion order (key, then
@@ -607,13 +694,11 @@ after this rule's check has passed at the form. Failure is
 [T1.5](ownership.md#own-26-the-transition-table).
 
 ```hirsel
-type Row { name: String, n: u64 }
-@twin(Row) stable type RowS { name: Text, n: u64 }
-fn freeze(r: Region, x: Row) -> Result[RowS in r, Capacity] { clone_in(r, x) }
+fn keep(r: Region, t: Text) -> Result[Text in r, Capacity] { clone_in(r, t) }
 ```
 ```hirsel
-type Row { name: String, n: u64 }
-@twin(Row) stable type RowN { label: Text, n: u64 }          // refused: MEM-17, field names
+fn freeze(r: Region, s: String) -> Result[Text in r, Capacity] { clone_in(r, s) }
+                                                            // refused: MEM-17, String is not Text
 ```
 ```hirsel
 fn dup(r: Region, b: SpanBuilder[u8, in r]) -> Result[SpanBuilder[u8, in r], Capacity] { clone(b) }
@@ -677,7 +762,7 @@ A `Log[E]` is an own, task-local, opaque handle of 8 bytes to a separately admit
   log cleans its entries in append order, then frees and refunds the node.
 
 A `Log[T]` is accepted only where `T` holds no resource, no capability, no view, no scoped
-value and no stable reference at any depth, as its summary records
+value and no region reference at any depth, as its summary records
 ([OWN-2](ownership.md#own-2-type-summaries)), the condition of an owning closure's
 captures ([LANG-14](language.md#lang-14-captures)). Any other `Log[T]` is refused here, at
 `T`; a type parameter may hold a capability, so a `Log` over one is refused outside core's
@@ -701,3 +786,40 @@ fn seen(take l: Log[u64]) -> List[u64] {
   xs
 }
 ```
+
+## Engine obligations
+
+### MEM-32: Engine obligations
+
+Every engine meets these obligations for speed and memory. None of them changes a charge, a
+refund point, a refusal point, cleanup order or output: charges are logical
+([MEM-24](budgets.md#mem-24-logical-charges)), and `Capacity` fails at the same operation on
+every engine. Each obligation is checked by counting the engine's work, never by a program:
+
+- **A size-class allocator per task.** Own blocks (`Box` nodes, collection storage, counted
+  nodes, closure environments) come from the allocating task's allocator, by size class, with
+  no process-wide lock on the allocation or free path. A block freed by another task returns
+  without a process-wide lock too. Count: a loop that allocates and frees blocks of one size
+  class makes no request to the operating system after its first iteration.
+- **A demand-sized first region chunk.** A region's first chunk is sized to its first
+  allocation, rounded up to the allocator's granule, never a fixed size; later chunks grow
+  geometrically. Count: a region whose allocations total `n` bytes reserves at most `2n` bytes
+  plus one granule.
+- **Pools by type inside a region.** A region keeps allocations of one fixed-size type
+  together, so `k` such allocations occupy `k` × their size with no header per allocation,
+  apart from the slack at a chunk's end. Count: reserved bytes minus charged bytes in a
+  region is at most its chunks' end slack.
+- **Regions reuse their storage.** A closing region returns its chunks to its task's
+  allocator, and the next region the task opens takes them first, so a region opened and
+  closed per request or per iteration is a rewind. Count: a loop that opens a region, makes
+  the same allocations in it and closes it makes no request to the operating system after its
+  first iteration.
+- **No teardown walk for plain data.** Dropping a value visits only the parts that have
+  cleanup: storage whose elements are plain (`List[u64]`, `String`, a `Map` of plain keys and
+  values) is freed without visiting its elements, and closing a region frees its chunks
+  without visiting any value in them, because region data has no cleanup. Count: dropping a
+  `List[T]` of plain `T` and length `n`, or closing a region holding `n` values, does work
+  independent of `n`.
+
+Size classes, chunk sizes, pools and their placement are private
+([MEM-9](#mem-9-compact-types), [MEM-13](#mem-13-own-layout)).

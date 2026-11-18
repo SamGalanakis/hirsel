@@ -18,7 +18,7 @@ is `send`. An own or resource type is `send` when it declares the bound
 ([OWN-4](ownership.md#own-4-bounds)) and each field type is `send`; a capability type is
 `send` when its declaration says so ([CAP-2](capabilities.md#cap-2-capabilities-are-opaque)).
 A plain `fn` is `send`; an owning closure is `own[send] fn` when every capture is `send`
-([LANG-13](language.md#lang-13-callables)). Never `send`: `Rc`, stable values, regions,
+([LANG-13](language.md#lang-13-callables)). Never `send`: `Rc`, region values, regions,
 scoped values, builders and task handles. The check reads declarations and capture lists only.
 
 ```hirsel
@@ -241,7 +241,7 @@ fn bump(mut a: Arc[Hits]) { a.n += 1 }                   // refused: OWN-12, not
 bytes, from the current limit, to which it stays charged
 ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), and returns its first handle;
 on `Capacity` the error owns `a`. A handle is a `send` resource, mechanical
-([MEM-24](budgets.md#mem-24-logical-charges)) and neither `shareable` nor stable, so no
+([MEM-24](budgets.md#mem-24-logical-charges)) and neither `shareable` nor region data, so no
 `Arc` holds one. `latest.handle(h)` adds a handle, admits nothing and cannot fail; a handle
 count past `2^64 − 1` is the run stop `LatestHandles`
 ([FAIL-15](failure.md#fail-15-run-stops)).

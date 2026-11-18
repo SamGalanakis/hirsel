@@ -46,7 +46,7 @@ totalOrder.
 
 `char` is a Unicode scalar value; `char.to_u32` and `char.from_u32` (an `Option`, `None` for
 surrogates and values above `0x10FFFF`) convert it. `String` is an opaque own type over
-UTF-8 storage that is always valid; `Text` is its stable twin; `Bytes` is `List[u8]`.
+UTF-8 storage that is always valid; `Text` is the same text as region data, made from a `String` by `text.copy_in`; `Bytes` is `List[u8]`.
 `string.from_utf8` validates a `Bytes` into a `String`, `string.into_bytes` gives its
 owned storage back, copying a static literal into new storage and so returning `Capacity`
 ([core](core.md)), and `string.as_bytes` views it as bytes. `text.as_string(t)` views a `Text` as a `String`
@@ -127,7 +127,7 @@ fn bump(mut m: Map[u64, u64]) -> Option[()] {
 ### SEM-6: Iteration
 
 `for x in e` iterates a range, or a view of a `List`, an `Inline` array, a `FixedSpan`, a
-`SeqSpan` or `IndexedSpan` ([MEM-12](memory.md#mem-12-stable-sequences)) or a `Causes`
+`SeqSpan` or `IndexedSpan` ([MEM-12](memory.md#mem-12-region-sequences)) or a `Causes`
 ([core](core.md)), binding a view of each element from the lowest index. Over a view of a
 `Map` it binds `(View[K], View[V])` for each entry in insertion order. `for take x in e`
 consumes an own `List`, moving each element out from the lowest index, and `for take (k, v)
@@ -180,7 +180,7 @@ fn grow(mut xs: List[u64]) -> Result[(), Capacity] {
 ([OWN-4](ownership.md#own-4-bounds)); any other operand is refused by
 [LANG-21](language.md#lang-21-operators), at the operator. This rule says what equality and
 order mean, and refuses nothing. Integers, `bool`, `char`, unit, `String` and `Text`
-are both. Tuples, `Option`, `Result`, `List`, `Inline` and the stable sequences have a
+are both. Tuples, `Option`, `Result`, `List`, `Inline` and the region sequences have a
 bound when their components do. `Unique` is `key` and not `ordered`
 ([MEM-18](memory.md#mem-18-pools-are-library-code)). A nominal type has a bound when it declares it and its fields have it.
 Equality is structural. Order is numeric for integers and `char`, `false` before `true`,
@@ -225,9 +225,8 @@ form may be a constant ([LANG-20](language.md#lang-20-constants)). A constructio
 interrupted by a failure cleans its completed elements in reverse. `a[i]` is a place, read
 through a view and assigned or replaced like a field, never moved out of (OWN-14); it fails
 with `Bounds` when `i` is not below `n`. `for` iterates it from index 0 (SEM-6). An own
-array is cleaned from index 0. A plain array may be a field of a stable type that is not
-compact (MEM-2); a compact type has no `Inline` field in v1 and uses `FixedSpan`
-([MEM-9](memory.md#mem-9-compact-types)). The length is part of the type, and no code is
+array is cleaned from index 0. Region data holds no `Inline` array: a compact type has no
+`Inline` field in v1 and uses `FixedSpan` ([MEM-9](memory.md#mem-9-compact-types)). The length is part of the type, and no code is
 generic over it in v1.
 
 ```hirsel
@@ -356,7 +355,7 @@ Every decode, whatever its bytes:
   refunded every block it admitted, its work stack included, and the bytes, which it only
   views, are unchanged;
 - builds fresh ownership: the value shares no storage with the bytes and, as no codec type
-  holds one, no capability, resource, view or stable reference.
+  holds one, no capability, resource, view or region reference.
 
 ```hirsel
 pub type Row: codec { id: u64, name: String, pinned: bool = false }

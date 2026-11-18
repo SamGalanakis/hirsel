@@ -48,7 +48,7 @@ and `streamable` are never listed either, since MEM-12 says which types have the
 entry "T's" is the union of its type arguments' holds sets. Tuples, `Option` and `Result`
 take their kind and copyability from OWN-3 and their other bounds componentwise; `Inline`
 takes its kind from `T`. Sizes are logical ([MEM-24](budgets.md#mem-24-logical-charges)). A
-scoped value is never stored in a field of an own, stable or resource type, a collection or
+scoped value is never stored in a field of an own or resource type, a collection or
 an environment (OWN-19), so it has no heap size; a scoped type's own fields
 ([OWN-22](ownership.md#own-22-scoped-types)) and a callable's logical width
 ([LANG-13](language.md#lang-13-callables)) are unaffected.
@@ -70,12 +70,12 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | `Arc[T]` | counted | `shareable`, `send`; `key`, `ordered` when T | 8 | T's |
 | `View[T]` | scoped, copyable | `key`, `ordered` when T | | scoped value, and T's |
 | `Region`, `Dest[T]`, `Writer[T, in r]` | scoped; `Dest` and `Writer` move | none | | scoped value |
-| `Text` | stable | `key`, `ordered` | 16 | stable reference |
-| `FixedSpan[T]`, `SeqSpan[T]`, `IndexedSpan[T]` | stable | `key`, `ordered` when T | 16 | stable reference, and T's |
-| `SeqIndex[T, in a]` | stable | none | 16 | stable reference, and T's |
+| `Text` | region | `key`, `ordered` | 16 | region reference |
+| `FixedSpan[T]`, `SeqSpan[T]`, `IndexedSpan[T]` | region | `key`, `ordered` when T | 16 | region reference, and T's |
+| `SeqIndex[T, in a]` | region | none | 16 | region reference, and T's |
 | `Link[T]` | a compact field only (MEM-10) | none | its holder's `W` | nothing |
 | `Child[T]` | plain | `shareable`, `send`, `key` | 16 | nothing |
-| `SpanBuilder[T, in r]`, `Builder[T, in r]` | own, affine | none | 16 | stable reference, opaque owner |
+| `SpanBuilder[T, in r]`, `Builder[T, in r]` | own, affine | none | 16 | region reference, opaque owner |
 | `Unique` | plain | `shareable`, `send`, `key` | 8 | nothing |
 | `Task[R]` | resource, mechanical | none | 8 | resource, and R's |
 | `Sender[T]`, `Receiver[T]` | resource, mechanical | `send` | 24 | resource |

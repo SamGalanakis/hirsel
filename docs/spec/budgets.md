@@ -145,7 +145,7 @@ record or tuple is the sum of its fields; a variant type, plain or own, is 8 plu
 payload, whatever its layout, a tag kept in a payload's spare values
 ([MEM-13](memory.md#mem-13-own-layout)) included; a value of a declared resource type counts 8 wherever it is held, its fields, cell
 and grant being charged once on its own block; a plain `fn` counts 8, and an `own fn`, a
-`scoped fn` and a reference to a stable value count 16; a compact value held inline counts
+`scoped fn` and a reference to a region value count 16; a compact value held inline counts
 its encoding. Every built-in type's size is in [core](core.md#built-in-types). Words an
 engine adds of its own, such as alignment or an environment's drop recipe, are never
 charged. A charge is computed from the type by these rules and is the same on every target

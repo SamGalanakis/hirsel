@@ -2,8 +2,8 @@
 
 Hirsel is a systems-level, general-purpose language whose primary user is a coding agent.
 It is procedural with value semantics: loops and local mutation, no raw pointers, no
-methods. Every type declares once how its values are represented: own, stable in a
-region, a resource, or plain data. Values are read through lexical views, shared only
+methods. Every type declares once how its values are represented: own, region data, a
+resource, or plain data. Values are read through lexical views, shared only
 through explicit `Rc` and `Arc`, and allocated against limits that fail with an ordinary
 `Capacity` value. Tasks share nothing, and every outside effect arrives through a
 capability parameter.
@@ -26,7 +26,7 @@ These goals decide between designs. A rule that would break one of them is wrong
    alone. An engine lowers each checked definition once; it may call a known callback
    directly, and never checks a body again to do so.
 2. **Representation is declared.** A type's declaration fixes whether its values are
-   plain, own, stable, resource, counted or scoped, and every use inherits it
+   plain, own, region, resource, counted or scoped, and every use inherits it
    ([OWN-1](ownership.md#own-1-representation-is-declared-once)). Costs follow from the
    declaration, not from an analysis.
 3. **Safe.** Accepted programs have no undefined behaviour, no data races, no use after
@@ -95,14 +95,17 @@ and keyed operations. It is unbuilt design.
 | extent, view | [OWN-8](ownership.md#own-8-views) |
 | failure, error, run stop | [FAIL-1](failure.md#fail-1-errors-failures-and-run-stops) |
 | grant | [MEM-27](budgets.md#mem-27-finalizer-grants) |
+| construction in place, inline bytes | [MEM-31](memory.md#mem-31-construction-in-place) |
+| engine obligations | [MEM-32](memory.md#mem-32-engine-obligations) |
 | identity bytes | [PROG-9](programs.md#prog-9-code-descriptors) |
 | hand-over, limit record | [MEM-20](budgets.md#mem-20-limit-records-and-hand-over) |
 | kind | [OWN-3](ownership.md#own-3-kinds) |
 | outlives | [MEM-6](memory.md#mem-6-roots) |
-| packed, streamable | [MEM-12](memory.md#mem-12-stable-sequences) |
+| packed, streamable | [MEM-12](memory.md#mem-12-region-sequences) |
 | pending result | [FAIL-9](failure.md#fail-9-pending-results) |
 | place, slot | [checker state](ownership.md#checker-state) |
 | provider | [CAP-5](capabilities.md#cap-5-provider-operations) |
+| region data, region value | [MEM-2](memory.md#mem-2-region-data) |
 | replay point | [CAP-8](capabilities.md#cap-8-the-replay-point) |
 | reservation | [OWN-11](ownership.md#own-11-call-arguments) |
 | scoped | [OWN-19](ownership.md#own-19-scoped-values) |
@@ -110,7 +113,6 @@ and keyed operations. It is unbuilt design.
 | shield | [CONC-7](tasks.md#conc-7-cancellation-points) |
 | sub-view | [OWN-8](ownership.md#own-8-views) |
 | tape, substitute | [CAP-9](capabilities.md#cap-9-tapes) |
-| twin | [MEM-17](memory.md#mem-17-clone) |
 | type summary | [OWN-2](ownership.md#own-2-type-summaries) |
 | writable | [OWN-5](ownership.md#own-5-availability) |
 | writer | [MEM-4](memory.md#mem-4-sized-destinations) |

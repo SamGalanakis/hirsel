@@ -13,7 +13,7 @@ R14, R15, R18, R19, R21 and R23 are quoted from that audit, and R13 restates its
 with registration; the line after each says where
 v1 meets it.
 
-**R1.** `send` is checked from declarations and capture lists; `Rc`, scoped and stable
+**R1.** `send` is checked from declarations and capture lists; `Rc`, scoped and region
 values are never `send`; every sent block keeps a limit that outlives its holders,
 ultimately the root. *v1:* CONC-2, MEM-20.
 
@@ -34,7 +34,7 @@ consistent events that hand out no view, and counting needs nothing shared. No l
 write, move or free while the view lives ([OWN-8](ownership.md#own-8-views)), through a
 non-locking `get_mut`-style accessor or any other.
 
-**R4.** Own layout and the calling convention are private; only compact stable layout is
+**R4.** Own layout and the calling convention are private; only compact layout is
 declared. A later layout or foreign declaration never reinterprets an existing type.
 *v1:* MEM-9, MEM-13.
 
@@ -95,8 +95,8 @@ bytes into fresh ownership and grants no authority or brands. Stable decoding us
 separate result signature naming its destination root." *v1:* SEM-10: a codec is the one
 dictionary, `Codec[T]` from `codec.of()` for a type with the `codec` bound (OWN-4), and a
 decode returns `Result[Result[T, DecodeError], Capacity]` into fresh ownership holding no
-authority; its schema and the writer's are explicit, resolved by field name. No stable type
-is `codec`, so there is no stable decoding. Eq, Hash and Format dictionaries are not in v1,
+authority; its schema and the writer's are explicit, resolved by field name. No region type
+is `codec`, so there is no region decoding. Eq, Hash and Format dictionaries are not in v1,
 and SEM-5 fixes one equality and hash per key type. An owner replaces a generated codec
 only by `via` a codec type, and no owner writes bytes.
 
@@ -161,7 +161,7 @@ PROG-7, PROG-8.
 **R18.** "Reserve an opaque task-local append capability:
 `append(view Log[E],take E)->Result[(),(Capacity,E)]`; append admits before commit, exposes
 no read/count/clear, and `finish(take Log[E])->OwnedEvents[E]` transfers without
-allocation. E is independently owned inert data, never scoped/stable/resource. This does
+allocation. E is independently owned inert data, never scoped/region/resource. This does
 not allow writes through ordinary frozen views; queries cannot report success after a
 failed tracking append." *v1:* MEM-29: a `Log[E]` is a handle to a separately admitted
 node whose entries no view exposes, `log.finish` returns them as a `List[E]`, and `E` is

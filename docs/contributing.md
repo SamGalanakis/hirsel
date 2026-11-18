@@ -48,6 +48,15 @@ cargo build --workspace
 tools/capped --long --timeout 1800 cargo test -j 2 -p hirsel-core-syntax
 ```
 
+## The memory model is settled
+
+Hirsel's memory model is settled in
+[docs/spec/memory.md](spec/memory.md#memory-model-settled): own by default, `@compact type`
+for region data, construction in place, and speed delivered by the engine. A change, design
+note or review must not propose a different memory default, and must not bring back a
+`stable` keyword, a non-compact region type or `@twin`. Cite that section instead. Only the
+measurement it names reopens the question.
+
 ## Growing inventories: no hand-maintained totals
 
 Do not pin the size of a growing primitive, ledger, registry, provider, test or

@@ -199,7 +199,7 @@ There is one parser (`http1` plus HTTP-4), one framing implementation and one wr
 The loop:
 1. Wait for the head (HTTP-3) under the first-head, idle or head deadline (HTTP-5).
 2. Frame it (HTTP-4) and route it (HTTP-11).
-3. Run the handler inside `bound bytes handler_bytes` (MEM-25), with the anchored `Request` (HTTP-6). The body is read lazily through `Body`.
+3. Run the handler inside `bound bytes handler_bytes` (MEM-25), with the anchored `Request` and the request's scratch region (HTTP-6). The body is read lazily through `Body`.
 4. Carry out the outcome (HTTP-10).
 5. Settle the body (HTTP-7), then keep the connection alive or close it (HTTP-7).
 
@@ -296,6 +296,12 @@ Each phase, and each output unit, has one absolute deadline on the monotonic `Cl
 - `Outcome`, `StreamSpec`, `UpgradeSpec` and a producer's state are `send` types that contain no scoped type (OWN-22). A view cannot be returned in them or captured into them; the checker refuses it.
 - A handler that keeps a field copies it with `http.copy`, charged to its `bound bytes` scope (MEM-25).
 
+**The request scratch region**
+- The connection opens one region per request, inside the handler's `bound bytes` scope, and passes it to the handler as `scratch: Region` (MEM-1). Request-lifetime documents, such as a parsed JSON body, are built there.
+- It closes when the handler returns, on every exit edge (MEM-8): everything in it is freed and refunded at once, with no walk. Its allocations are charged to `handler_bytes` like any other, so no accounting row changes.
+- Nothing in it outlives the request: `Outcome` holds no region data (MEM-7), so a response that keeps request data copies it into own values first.
+- Closing returns the region's chunks to the connection task's allocator, and the next request's region reuses them, so request scratch is a rewind ([MEM-32](memory.md#mem-32-engine-obligations)).
+
 **Compaction**
 - While `req` lives, the read buffer is frozen (OWN-10), and nothing writes it. The connection moves the pipelined tail to the front only between requests.
 
@@ -387,7 +393,7 @@ A handler returns `Outcome = Response(Response) | Stream(StreamSpec) | Upgrade(U
 **Routes**
 - `Router[S]` is an immutable value built by `router.add(mut b, method, pattern, route)` and closed by `router.build(b) -> Result[Router[S], RouteConflict]`.
 - A pattern is literal segments, `{name}` captures of one whole segment, and an optional final `{name...}` that captures the rest. Patterns match HTTP-4 rule 9's decoded segments.
-- A raw handler is `fn(req: Request in buf, mut out: Responder, s: S) -> Result[Outcome, HandlerError] waits`. It holds only the capabilities in `S` and its arguments (CAP-3).
+- A raw handler is `fn(req: Request in buf, scratch: Region, mut out: Responder, s: S) -> Result[Outcome, HandlerError] waits`; `scratch` is the request's scratch region (HTTP-6). It holds only the capabilities in `S` and its arguments (CAP-3).
 
 **Conflicts**
 - Precedence is Go's: the more specific pattern wins.

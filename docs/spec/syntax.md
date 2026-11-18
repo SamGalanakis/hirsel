@@ -30,7 +30,7 @@ The reserved keywords are exactly:
 
 ```text
 fn let mut match if else loop while for in break continue return
-take copy view type stable resource scoped region bound
+take copy view type resource scoped region bound
 pub opaque const where true false bytes
 ```
 
@@ -205,8 +205,7 @@ fn first(a: u64) -> u64 {
 (* files and items *)
 file        = { NL | item, ( END | EOF ) }, EOF ;
 item        = { attribute }, [ "pub", [ "opaque" ] ], ( function | type-def | const-def ) ;
-attribute   = "@", ( "test" | "compact", "(", ( "u16" | "u32" | "u64" ), ")"
-                   | "twin", "(", type-path, ")" ) ;
+attribute   = "@", ( "test" | "compact", "(", ( "u16" | "u32" | "u64" ), ")" ) ;
 const-def   = "const", name, ":", type, "=", expression ;
 function    = "fn", name, fn-header, block ;
 fn-header   = [ generics ], "(", list(parameter), ")", [ "->", type ],
@@ -218,7 +217,7 @@ bounds      = bound-name, { "+", bound-name } ;
 bound-name  = "plain" | "shareable" | "send" | "key" | "ordered" | "integer" | "float"
             | "packed" | "streamable" | "codec" ;
 outlives    = "where", name, ":", name, { ",", name, ":", name } ;
-type-def    = [ "stable" | "resource" | "scoped" ], "type", name, [ generics ],
+type-def    = [ "resource" | "scoped" ], "type", name, [ generics ],
               [ ":", bounds, [ via ] ], [ "grant", "bytes", integer ],
               ( fields | "=", type-rhs | empty ), [ drop ] ;
 fields      = "{", [ field, { entry-sep, field }, [ entry-sep ] ], "}" ;
@@ -263,8 +262,7 @@ bit-and     = shift, { "&", shift } ;
 shift       = additive, { ( "<<" | ">>" ), additive } ;
 additive    = product, { ( "+" | "-" ), product } ;
 product     = prefix, { ( "*" | "/" | "%" ), prefix } ;
-prefix      = ( "-" | "!" | "~" | "take" | "mut" | "copy" | "view" ), prefix | placed ;
-placed      = postfix, [ "in", place ] ;
+prefix      = ( "-" | "!" | "~" | "take" | "mut" | "copy" | "view" ), prefix | postfix ;
 postfix     = primary, { "(", list(argument), ")" | "[", expression, "]"
                        | ".", ( name | digits(digit) ) | "?" } ;
 argument    = [ name, ":" ], expression | "bytes", expression ;
@@ -325,7 +323,7 @@ a type ([OWN-5](ownership.md#own-5-availability)); `let x` alone is refused here
 or `match` subject cannot end in an unparenthesized block. `for` patterns, `let` patterns
 without `else`, and `let`-condition patterns are checked for refutability after parsing
 ([LANG-17](language.md#lang-17-match)). An attribute applies only to its own target:
-`@test` to a function, `@compact` to a `stable type`, `@twin` to a type; a repeated
+`@test` to a function, `@compact` to a `type` that is neither `resource` nor `scoped`; a repeated
 attribute is refused by [LANG-7](language.md#lang-7-names), and an attribute on another item, a representation keyword on an alias,
 and `drop` on a declaration that is not `resource` are refused. A parameter marked `bytes`
 is a byte count of type `u64`, and its argument is written `bytes e`; the mark is part of the

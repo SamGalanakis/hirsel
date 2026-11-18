@@ -57,7 +57,7 @@ fn finish_field(mut h: Head, mut cur: Cursor) {
     cur.state = FieldStart
 }
 
-fn scan_value(c: u8, mut h: Head, mut cur: Cursor) {
+fn scan_value(c: u8, next: u64, mut h: Head, mut cur: Cursor) {
     if c == 13 || c == 10 {
         if c == 13 {
             cur.state = FieldLf
@@ -68,11 +68,11 @@ fn scan_value(c: u8, mut h: Head, mut cur: Cursor) {
         cur.result = Bad
     } else if c == b' ' || c == 9 {
         if cur.state == ValueStart {
-            cur.value_start = cur.offset
-            cur.value_end = cur.offset
+            cur.value_start = next
+            cur.value_end = next
         }
     } else {
-        cur.value_end = cur.offset
+        cur.value_end = next
         cur.state = Value
     }
 }
@@ -124,17 +124,18 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
     if cur.result != Partial {
         return cur.result
     }
-    while cur.offset < 8192 && cur.offset < list.len(b) {
-        let at = cur.offset
+    let limit = order.min(8192, list.len(b))
+    let mut next = cur.offset
+    while next < limit {
+        let at = next
         let c = b[at]
-        cur.examined += 1
-        cur.offset += 1
+        next += 1
         match cur.state {
             Leading => {
                 if c == 13 {
                     cur.state = LeadingLf
                 } else if c == 10 {
-                    cur.line_start = cur.offset
+                    cur.line_start = next
                 } else {
                     if !token(c) {
                         cur.result = Bad
@@ -148,14 +149,14 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                 if c != 10 {
                     cur.result = Bad
                 } else {
-                    cur.line_start = cur.offset
+                    cur.line_start = next
                     cur.state = Leading
                 }
             },
             Method => {
                 if c == b' ' {
                     h.method = Span(start: cur.start, end: at)
-                    cur.start = cur.offset
+                    cur.start = next
                     cur.state = Target
                 } else if !token(c) {
                     cur.result = Bad
@@ -191,7 +192,7 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                 if c == 13 {
                     cur.state = RequestLf
                 } else if c == 10 {
-                    cur.line_end = cur.offset
+                    cur.line_end = next
                     cur.state = FieldStart
                 } else {
                     cur.result = Bad
@@ -199,7 +200,7 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
             },
             RequestLf => {
                 if c == 10 {
-                    cur.line_end = cur.offset
+                    cur.line_end = next
                     cur.state = FieldStart
                 } else {
                     cur.result = Bad
@@ -209,7 +210,7 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                 if c == 13 {
                     cur.state = EndLf
                 } else if c == 10 {
-                    h.end = cur.offset
+                    h.end = next
                     cur.result = Complete
                 } else if h.count == 64 {
                     cur.result = TooLarge
@@ -223,15 +224,15 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
             Name => {
                 if c == b':' {
                     cur.name_end = at
-                    cur.value_start = cur.offset
-                    cur.value_end = cur.offset
+                    cur.value_start = next
+                    cur.value_end = next
                     cur.state = ValueStart
                 } else if !token(c) {
                     cur.result = Bad
                 }
             },
-            ValueStart => scan_value(c, mut h, mut cur),
-            Value => scan_value(c, mut h, mut cur),
+            ValueStart => scan_value(c, next, mut h, mut cur),
+            Value => scan_value(c, next, mut h, mut cur),
             FieldLf => {
                 if c == 10 {
                     finish_field(mut h, mut cur)
@@ -241,7 +242,7 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
             },
             EndLf => {
                 if c == 10 {
-                    h.end = cur.offset
+                    h.end = next
                     cur.result = Complete
                 } else {
                     cur.result = Bad
@@ -249,10 +250,12 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
             }
         }
         if cur.result != Partial {
-            return cur.result
+            break
         }
     }
-    if cur.offset == 8192 {
+    cur.examined += next - cur.offset
+    cur.offset = next
+    if cur.result == Partial && next == 8192 {
         cur.result = TooLarge
     }
     cur.result

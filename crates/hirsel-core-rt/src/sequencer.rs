@@ -64,6 +64,8 @@ impl Lobby {
             let turn = self.turn.load(Ordering::Acquire);
             self.parked.fetch_add(1, Ordering::SeqCst);
             if self.active.load(Ordering::SeqCst) >= ACTIVE {
+                #[cfg(feature = "testing")]
+                PARKS[1].fetch_add(1, Ordering::Relaxed);
                 futex_wait(&self.turn, turn);
             }
             self.parked.fetch_sub(1, Ordering::Relaxed);
@@ -102,14 +104,14 @@ struct Node {
     waiting: AtomicU32,
     /// The predecessor passed the global token with the local one.
     inherited: AtomicBool,
+    /// The cohort of the worker that granted this node the token.
+    from: AtomicU32,
     /// A delegable request, published before the node is enqueued.
     request: AtomicPtr<Request>,
     /// The holder completed the request instead of granting the token.
     served: AtomicBool,
     #[cfg(feature = "testing")]
     released_at: std::sync::atomic::AtomicU64,
-    #[cfg(feature = "testing")]
-    released_l3: std::sync::atomic::AtomicU32,
 }
 
 impl Mcs {
@@ -138,6 +140,8 @@ impl Mcs {
                         .is_ok()
                         || (*node).waiting.load(Ordering::Acquire) == PARKED
                     {
+                        #[cfg(feature = "testing")]
+                        PARKS[0].fetch_add(1, Ordering::Relaxed);
                         futex_wait(&(*node).waiting, PARKED);
                         spins = 0;
                     }
@@ -159,7 +163,7 @@ impl Mcs {
 
     /// # Safety
     /// Node is the current holder's node and was acquired exactly once.
-    unsafe fn release(&self, node: *mut Node, inherited: bool, _measured: bool) {
+    unsafe fn release(&self, node: *mut Node, inherited: bool, from: usize, _measured: bool) {
         // SAFETY: the holder pins the node. Once linked, a successor owns
         // its own node until it has taken and then released the token.
         unsafe {
@@ -183,12 +187,12 @@ impl Mcs {
             }
             #[cfg(feature = "testing")]
             if _measured {
-                (*next).released_l3.store(current_l3(), Ordering::Relaxed);
                 (*next)
                     .released_at
                     .store(crate::os::monotonic_ns(), Ordering::Relaxed);
             }
             (*next).inherited.store(inherited, Ordering::Relaxed);
+            (*next).from.store(from as u32, Ordering::Relaxed);
             grant(next);
         }
     }
@@ -300,12 +304,12 @@ impl Sequencer {
                 if !remote || passes < COHORT_PASSES {
                     c.passes
                         .store(passes + u32::from(remote), Ordering::Relaxed);
-                    c.local.release(node, true, measured);
+                    c.local.release(node, true, cohort, measured);
                     return;
                 }
             }
-            self.global.release(global, false, measured);
-            c.local.release(node, false, measured);
+            self.global.release(global, false, cohort, measured);
+            c.local.release(node, false, cohort, measured);
         }
     }
 }
@@ -346,6 +350,48 @@ pub(crate) fn cohort() -> usize {
     }
 }
 
+/// Queued grants per hand-off affinity decision.
+const AFFINITY_WINDOW: u32 = 64;
+
+/// The home cohort, the one with most of the process's allowed CPUs (the
+/// lowest on a tie), and those CPUs. None when the process runs in one L3.
+fn home() -> Option<&'static (usize, libc::cpu_set_t)> {
+    static HOME: std::sync::OnceLock<Option<(usize, libc::cpu_set_t)>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        // SAFETY: an all-zero cpu_set_t is the empty set.
+        let mut allowed: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        // SAFETY: the set is writable and sized; pid 0 is the calling thread,
+        // which runs with the process's mask until it first moves itself.
+        if unsafe { libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut allowed) } != 0 {
+            return None;
+        }
+        let map = cohort_map();
+        let mut counts = [0usize; COHORTS];
+        // SAFETY: CPU_ISSET reads the initialized set within its size.
+        let allowed_cpus: Vec<usize> = (0..map.len())
+            .filter(|&cpu| unsafe { libc::CPU_ISSET(cpu, &allowed) })
+            .collect();
+        for &cpu in &allowed_cpus {
+            counts[usize::from(map[cpu])] += 1;
+        }
+        if counts.iter().filter(|&&n| n > 0).count() < 2 {
+            return None;
+        }
+        let home = (0..COHORTS).max_by_key(|&c| (counts[c], std::cmp::Reverse(c)))?;
+        // SAFETY: as above.
+        let mut cpus: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        for &cpu in allowed_cpus
+            .iter()
+            .filter(|&&cpu| usize::from(map[cpu]) == home)
+        {
+            // SAFETY: CPU_SET writes within the set's size.
+            unsafe { libc::CPU_SET(cpu, &mut cpus) };
+        }
+        Some((home, cpus))
+    })
+    .as_ref()
+}
+
 /// Outermost acquisitions between re-reads of the worker's CPU. A worker
 /// rarely migrates, and a stale cohort only costs locality.
 const COHORT_RECHECK: u32 = 64;
@@ -371,6 +417,11 @@ unsafe fn grant(node: *mut Node) {
         }
     }
 }
+
+/// Instrumented sample: token-queue parks, lobby parks and idle worker parks.
+#[cfg(feature = "testing")]
+pub(crate) static PARKS: [std::sync::atomic::AtomicU64; 3] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
 fn futex_wait(word: &AtomicU32, expected: u32) {
     // SAFETY: FUTEX_WAIT reads the pinned word and returns at once if it changed.
@@ -420,6 +471,9 @@ pub(crate) struct Owner {
     held: Cell<bool>,
     cohort: Cell<usize>,
     recheck: Cell<u32>,
+    /// Queued grants in the current affinity window, and those from another L3.
+    grants: Cell<u32>,
+    crossed: Cell<u32>,
     /// The outermost commit may be kept for the next one.
     keepable: Cell<bool>,
     /// Commits kept without a release since the last hand-off.
@@ -444,6 +498,8 @@ impl Owner {
             held: Cell::new(false),
             cohort: Cell::new(0),
             recheck: Cell::new(0),
+            grants: Cell::new(0),
+            crossed: Cell::new(0),
             keepable: Cell::new(false),
             kept: Cell::new(0),
             published,
@@ -480,6 +536,10 @@ impl Owner {
                 Acquired::Free => None,
                 Acquired::Queued(stamp) => Some(stamp),
             };
+        if let Some(stamp) = _queued {
+            // SAFETY: the stamped node is this worker's or its cohort's, both pinned.
+            self.count_grant(unsafe { (*stamp).from.load(Ordering::Relaxed) } != cohort as u32);
+        }
         #[cfg(feature = "testing")]
         if let Some(sample) = &self.sample {
             let now = crate::os::monotonic_ns();
@@ -491,13 +551,39 @@ impl Owner {
                 let elapsed = now.saturating_sub(released);
                 sample.handoff.set(sample.handoff.get() + elapsed);
                 sample.transfers.set(sample.transfers.get() + 1);
-                if stamp.released_l3.load(Ordering::Relaxed) != current_l3() {
+                if stamp.from.load(Ordering::Relaxed) != cohort as u32 {
                     sample.cross.set(sample.cross.get() + 1);
                     sample.cross_ns.set(sample.cross_ns.get() + elapsed);
                 }
             }
         }
         true
+    }
+
+    /// Hand-off affinity: a worker whose queued grants mostly come from
+    /// another L3 moves its thread, with the fibers pinned to it, onto the
+    /// home L3, so a domain's commit traffic converges on one L3 (as Linux's
+    /// NUMA balancing moves a task toward the node its faults come from).
+    /// Moving the thread keeps every TLS address a suspended fiber holds.
+    fn count_grant(&self, cross: bool) {
+        let seen = self.grants.get() + 1;
+        let crossed = self.crossed.get() + u32::from(cross);
+        if seen < AFFINITY_WINDOW {
+            self.grants.set(seen);
+            self.crossed.set(crossed);
+            return;
+        }
+        self.grants.set(0);
+        self.crossed.set(0);
+        if 2 * crossed > AFFINITY_WINDOW
+            && let Some((home, cpus)) = home()
+            && self.cohort.get() != *home
+        {
+            // SAFETY: the set is a valid cpu_set_t; 0 names the calling thread.
+            if unsafe { libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), cpus) } == 0 {
+                self.recheck.set(0);
+            }
+        }
     }
 
     /// Serve linked delegated requests, then release. Nested entries made by
@@ -562,7 +648,7 @@ impl Owner {
     pub(crate) fn report(&self, index: usize) {
         if let Some(sample) = &self.sample {
             eprintln!(
-                "sequencer worker={index} commits={} service_ns={} handoffs={} handoff_ns={} cross_l3={} cross_l3_ns={} served={} delegated={}",
+                "sequencer worker={index} commits={} service_ns={} handoffs={} handoff_ns={} cross_l3={} cross_l3_ns={} served={} delegated={} parks={:?}",
                 sample.commits.get(),
                 sample.service.get(),
                 sample.transfers.get(),
@@ -571,6 +657,7 @@ impl Owner {
                 sample.cross_ns.get(),
                 sample.serves.get(),
                 sample.delegated.get(),
+                PARKS.each_ref().map(|n| n.load(Ordering::Relaxed)),
             );
         }
     }
@@ -588,11 +675,6 @@ struct Sample {
     cross_ns: Cell<u64>,
     serves: Cell<u64>,
     delegated: Cell<u64>,
-}
-
-#[cfg(feature = "testing")]
-fn current_l3() -> u32 {
-    current_cohort() as u32
 }
 
 thread_local! {

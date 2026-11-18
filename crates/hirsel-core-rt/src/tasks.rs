@@ -3520,6 +3520,8 @@ impl RunPtr {
                 deadline.saturating_sub(crate::os::monotonic_ns()),
             ));
         } else {
+            #[cfg(feature = "testing")]
+            crate::sequencer::PARKS[2].fetch_add(1, Ordering::Relaxed);
             std::thread::park();
         }
         pool.wake(index);

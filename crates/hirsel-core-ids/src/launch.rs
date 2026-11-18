@@ -1,7 +1,14 @@
 //! Owned, immutable metadata for one launch (docs/spec/launch.md).
 use sha2::{Digest, Sha256};
-use std::io::{self, Read};
-use std::path::Path;
+use std::{
+    fmt,
+    fs::File,
+    io::{self, Read},
+    path::Path,
+};
+
+#[cfg(target_os = "linux")]
+use std::sync::{Arc, LazyLock};
 
 pub const DEFAULT_N_PLACE: u64 = 16 * 1024 * 1024;
 
@@ -11,9 +18,43 @@ pub enum Executable {
     Unavailable(String),
 }
 
+#[cfg(target_os = "linux")]
+type DeferredDigest = LazyLock<Executable, Box<dyn FnOnce() -> Executable + Send>>;
+
+#[derive(Clone)]
+enum Image {
+    Ready(Executable),
+    #[cfg(target_os = "linux")]
+    Deferred(Arc<DeferredDigest>),
+}
+
+impl Image {
+    fn executable(&self) -> &Executable {
+        match self {
+            Self::Ready(executable) => executable,
+            #[cfg(target_os = "linux")]
+            Self::Deferred(digest) => LazyLock::force(digest),
+        }
+    }
+}
+
+impl fmt::Debug for Image {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.executable().fmt(f)
+    }
+}
+
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        self.executable() == other.executable()
+    }
+}
+
+impl Eq for Image {}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Metadata {
-    executable: Executable,
+    executable: Image,
     target: String,
     n_place: u64,
     describe: bool,
@@ -21,14 +62,25 @@ pub struct Metadata {
 
 impl Metadata {
     pub fn native(target: &str, n_place: u64, describe: bool) -> Self {
-        Self::artifact(Path::new("/proc/self/exe"), target, n_place, describe)
+        let file = File::open("/proc/self/exe");
+        #[cfg(target_os = "linux")]
+        if let Ok(file) = &file
+            && let Some(image) = MappedImage::new(file)
+        {
+            let digest: DeferredDigest = LazyLock::new(Box::new(move || {
+                Executable::Digest(Sha256::digest(image.bytes()).into())
+            }));
+            return Self::with_image(Image::Deferred(Arc::new(digest)), target, n_place, describe);
+        }
+        Self::with_image(Image::Ready(read_digest(file)), target, n_place, describe)
     }
 
     pub fn artifact(path: &Path, target: &str, n_place: u64, describe: bool) -> Self {
-        let executable = match std::fs::File::open(path).and_then(hash) {
-            Ok(digest) => Executable::Digest(digest),
-            Err(error) => Executable::Unavailable(error.to_string()),
-        };
+        let executable = read_digest(File::open(path));
+        Self::with_image(Image::Ready(executable), target, n_place, describe)
+    }
+
+    fn with_image(executable: Image, target: &str, n_place: u64, describe: bool) -> Self {
         Self {
             executable,
             target: target.into(),
@@ -48,14 +100,10 @@ impl Metadata {
     }
 
     pub fn embedded(digest: Option<[u8; 32]>, target: &str, n_place: u64, describe: bool) -> Self {
-        Self {
-            executable: digest
-                .map(Executable::Digest)
-                .unwrap_or_else(|| Executable::Unavailable("no executable image supplied".into())),
-            target: target.into(),
-            n_place,
-            describe,
-        }
+        let executable = digest
+            .map(Executable::Digest)
+            .unwrap_or_else(|| Executable::Unavailable("no executable image supplied".into()));
+        Self::with_image(Image::Ready(executable), target, n_place, describe)
     }
 
     pub fn source(target: &str, n_place: u64, describe: bool) -> Self {
@@ -63,13 +111,13 @@ impl Metadata {
     }
 
     pub fn digest(&self) -> &[u8] {
-        match &self.executable {
+        match self.executable.executable() {
             Executable::Digest(bytes) => bytes,
             Executable::Unavailable(_) => &[],
         }
     }
     pub fn unavailable(&self) -> Option<&str> {
-        match &self.executable {
+        match self.executable.executable() {
             Executable::Digest(_) => None,
             Executable::Unavailable(reason) => Some(reason),
         }
@@ -106,7 +154,14 @@ impl Metadata {
     }
 }
 
-fn hash(mut image: std::fs::File) -> io::Result<[u8; 32]> {
+fn read_digest(image: io::Result<File>) -> Executable {
+    match image.and_then(hash) {
+        Ok(digest) => Executable::Digest(digest),
+        Err(error) => Executable::Unavailable(error.to_string()),
+    }
+}
+
+fn hash(mut image: File) -> io::Result<[u8; 32]> {
     let mut hash = Sha256::new();
     let mut scratch = [0; 8192];
     loop {
@@ -115,6 +170,59 @@ fn hash(mut image: std::fs::File) -> io::Result<[u8; 32]> {
             return Ok(hash.finalize().into());
         }
         hash.update(&scratch[..count]);
+    }
+}
+
+// Capture the executable while it is still the launch image. The read-only
+// mapping pins the inode without consuming a descriptor for the whole run.
+#[cfg(target_os = "linux")]
+struct MappedImage(std::ptr::NonNull<[u8]>);
+
+// SAFETY: Linux denies writes to the running executable. The private mapping
+// has one owner and can be hashed and unmapped on the first reader's thread.
+#[cfg(target_os = "linux")]
+unsafe impl Send for MappedImage {}
+
+#[cfg(target_os = "linux")]
+impl MappedImage {
+    /// The file is the descriptor just opened through /proc/self/exe.
+    fn new(file: &File) -> Option<Self> {
+        use std::{os::fd::AsRawFd, ptr::NonNull};
+
+        let len = usize::try_from(file.metadata().ok()?.len()).ok()?;
+        if len == 0 || len > isize::MAX as usize {
+            return None;
+        }
+        // SAFETY: this file is the executing image, and a successful mapping
+        // owns a private, read-only range of its complete reported length.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return None;
+        }
+        let base = NonNull::new(ptr.cast::<u8>())?;
+        Some(Self(NonNull::slice_from_raw_parts(base, len)))
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: the image remains mapped for this owner's lifetime.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for MappedImage {
+    fn drop(&mut self) {
+        // SAFETY: this owner releases its mapping exactly once.
+        unsafe { libc::munmap(self.0.cast().as_ptr(), self.0.len()) };
     }
 }
 

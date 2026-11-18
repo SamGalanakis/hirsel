@@ -440,6 +440,7 @@ dependencies = [
  "bincode",
  "hirsel-guard",
  "hirsel-intern",
+ "libc",
  "rustc-hash",
  "serde",
  "sha2",

@@ -10,7 +10,7 @@ pub type Run: codec + send { stream: Bytes, p: u64, digest: Bytes, version: u64 
 pub type Position: codec + send { stream: Bytes, latest: u64, state: u32, digest: Bytes }
 pub type TaskEvent: codec + send { kind: u32, task: u64, object: u64, value: u64 }
 pub type Wire: codec + send { conn: u64, frame: Bytes }
-pub type Obs: codec + send = Sent(Send) | Got(Reply) | Closed(Close) | Ran(Run) | Pos(Position) | Task(TaskEvent) | Tx(Wire) | Rx(Wire)
+pub type Obs: codec + send = Sent(Send) | Got(Reply) | Closed(Close) | Ran(Run) | Pos(Position) | Task(TaskEvent) | Tx(Wire) | Rx(Wire) | Opened(u64)
 
 pub type Mode: codec = Safety | Liveness | Coverage
 pub type Clause: codec { name: String, mode: Mode, clock: bool, digest: bool, ran: bool }

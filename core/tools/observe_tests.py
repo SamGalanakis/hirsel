@@ -13,7 +13,8 @@ from runner_tests import CALLS, NATIVE_ONLY_CALLS, c_compiler, dir_for, evaluate
 from std_native import ROOT
 
 
-LIVE_CASES = (*(case for case in CALLS if case not in NATIVE_ONLY_CALLS), 'observe_early_then_late')
+UNOBSERVED_CALLS = NATIVE_ONLY_CALLS | {'release_digest', 'ready_after_activation', 'drain_answers_once'}
+LIVE_CASES = (*(case for case in CALLS if case not in UNOBSERVED_CALLS), 'observe_early_then_late')
 CLAUSES = ('J1', 'J2', 'J3', 'J4', 'J5', 'J6')
 
 
@@ -39,7 +40,7 @@ def traced_calls(root, work):
     text = replace(text, 'type Drive: send {', 'type Drive: send { out: Stdout, err: Stderr,')
     text = text.replace('Drive(head:', 'Drive(out: out, err: err, head:')
     text = re.sub(r'(pub fn law_\w+\()', r'\1out: Stdout, err: Stderr, ', text)
-    for name in ('served', 'served_in', 'served_on'):
+    for name in ('served', 'served_in', 'served_on', 'served_with_handles'):
         text = replace(text, f'fn {name}(', f'fn {name}(out: Stdout, err: Stderr, ')
         text = re.sub(rf'(?<!fn )\b{name}\(', f'{name}(out, err, ', text)
     text = replace(text, 'Some(Socket(take cn, take h))',
@@ -75,9 +76,11 @@ def traced_calls(root, work):
     text += '''
 type Conn { id: u64, clock: Clock, out: Stdout, err: Stderr, log: Log[observe.Obs], digests: Map[Bytes, Bytes], link: Transport }
 
-fn observed(d: Drive, take link: Transport) -> Conn {
+fn observed(d: Drive, take link: Transport) -> Conn waits {
     let entries: Result[Log[observe.Obs], Capacity] = log.new()
-    Conn(id: host.mono_ns(d.clock), clock: d.clock, out: d.out, err: d.err,
+    let id = host.mono_ns(d.clock)
+    emit(d.out, Opened(id))
+    Conn(id: id, clock: d.clock, out: d.out, err: d.err,
         log: result.unwrap(take entries), digests: map.new(), link: take link)
 }
 
@@ -101,9 +104,11 @@ fn finish(take cn: Conn, code: u64) -> bool waits {
         },
         Held(take owner) => { runner.fixture_close(take owner); true },
     }
-    emit(out, Closed(observe.Close(conn: id, code: code, at: host.mono_ns(clock))))
-    observe.write_wire_verdicts(err, log.finish(take entries), Closed(observe.Close(conn: id, code: code, at: host.mono_ns(clock))))
-    ended
+    if !ended { return false }
+    let at = host.mono_ns(clock)
+    emit(out, Closed(observe.Close(conn: id, code: code, at: at)))
+    observe.write_wire_verdicts(err, log.finish(take entries), Closed(observe.Close(conn: id, code: code, at: at)))
+    true
 }
 
 pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Tasks, n: Net, r: Random) -> bool waits {
@@ -181,7 +186,10 @@ class CallEvaluator:
             dispatch = ['pub fn main(out: Stdout, err: Stderr, c: Clock, r: Random, tasks: Tasks, n: Net, d: Dir, argv: Args) -> Result[(), Exit] waits {',
                         '    let name = option.unwrap(args.get(argv, 0))', '    let good = false']
             names = dict(Stdout='out', Stderr='err', Clock='c', Random='r', Tasks='tasks', Net='n', Dir='d')
+            selected_cases = {f'law_{case}' for case in (self.args.case or LIVE_CASES)}
             for law, parameters in re.findall(r'pub fn (law_\w+)\(([^)]*)\)', source.read_text()):
+                if law not in selected_cases:
+                    continue
                 arguments = ', '.join(names[p.split(':')[1].strip()] for p in parameters.split(',') if p.strip())
                 dispatch.append(f'        || (name == "{law}" && runner_calls.{law}({arguments}))')
             dispatch += [ '    if good { Ok(()) } else { Error(Exit(status: 1)) }', '}']
@@ -255,7 +263,7 @@ class Codec:
         events = []
         while self.at < len(self.data):
             tag = self.uint(4)
-            e = dict(kind=('Sent', 'Got', 'Closed', 'Ran', 'Pos', 'Task', 'Tx', 'Rx')[tag])
+            e = dict(kind=('Sent', 'Got', 'Closed', 'Ran', 'Pos', 'Task', 'Tx', 'Rx', 'Opened')[tag])
             if tag in (0, 1):
                 e.update(conn=self.uint(), stream=self.blob(), p=self.uint())
                 if tag == 0:
@@ -270,6 +278,8 @@ class Codec:
                 e.update(stream=self.blob(), latest=self.uint(), state=self.uint(4), digest=self.blob())
             elif tag == 5:
                 e.update(event=self.uint(4), task=self.uint(), object=self.uint(), value=self.uint())
+            elif tag == 8:
+                e.update(conn=self.uint())
             else:
                 e.update(conn=self.uint(), frame=self.blob())
             events.append(e)
@@ -306,22 +316,39 @@ class Codec:
 
 
 def shown_key(raw):
+    if not raw:
+        return '(no key)'
     codec = Codec(raw)
     conn, stream, p = codec.uint(), codec.blob(), codec.uint()
     name = str(int.from_bytes(bytes(stream), 'little')) if len(stream) == 8 else bytes(stream).hex()
     return f'(conn {conn}, s{name}, p{p})'
 
 
-def trace(report):
+def trace(report, *, live=False):
     events = Codec(report.get('stdout', [])).events()
-    opened = {e['conn'] for e in events if e['kind'] == 'Sent'}
-    closed = {e['conn'] for e in events if e['kind'] == 'Closed'}
+    opens = [e['conn'] for e in events if e['kind'] == ('Opened' if live else 'Sent')]
+    closes = [e['conn'] for e in events if e['kind'] == 'Closed']
+    opened, closed = set(opens), set(closes)
     complete = report.get('outcome', {}).get('kind') == 'returned' and opened <= closed
+    if live:
+        complete = (complete and bool(opened) and opened == closed
+                    and len(opens) == len(closes) == len(opened)
+                    and all(e['conn'] in opened for e in events if e['kind'] in ('Sent', 'Got')))
     sends = [e for e in events if e['kind'] == 'Sent']
     return dict(header=dict(has_clock=True,
                             has_digest=bool(sends) and all(len(e['digest']) == 32 for e in sends),
                             has_ran=any(e['kind'] == 'Ran' for e in events),
                             complete=complete), obs=events)
+
+
+def live_evidence(case, t, verdicts):
+    opened = {e['conn'] for e in t['obs'] if e['kind'] == 'Opened'}
+    assessed = {v['conn'] for v in verdicts}
+    complete = (t['header']['complete'] and opened == assessed
+                and len(verdicts) == len(opened) * len(CLAUSES))
+    held = {v['clause'] for v in verdicts if v['status'] == 'Held' and v['hits'] > 0}
+    return (complete and all(v['status'] not in ('Failed', 'Incomplete') for v in verdicts)
+            and (case != 'calls_two_streams' or {'J2', 'J3'} <= held))
 
 
 def observed_manifest(root, work):
@@ -447,6 +474,8 @@ def trace_source(t, name, observer):
             value = f'Pos(observe.Position(stream: {blob(e["stream"])}, latest: {e["latest"]}u64, state: {e["state"]}u32, digest: {blob(e["digest"])}))'
         elif kind == 'Task':
             value = f'Task(observe.TaskEvent(kind: {e["event"]}u32, task: {e["task"]}u64, object: {e["object"]}u64, value: {e["value"]}u64))'
+        elif kind == 'Opened':
+            value = f'Opened({e["conn"]}u64)'
         elif kind in ('Tx', 'Rx'):
             value = f'{kind}(observe.Wire(conn: {e["conn"]}u64, frame: {blob(e["frame"])}))'
         else:
@@ -524,11 +553,16 @@ def main():
         for case in cases:
             value, report = calls(m, 'store@1/runner_calls/law_' + case)
             bodies += bool(report.get('outcome'))
-            t = trace(report)
+            try:
+                t = trace(report, live=True)
+                verdicts = Codec(report.get('stderr', [])).assessments()
+            except (ValueError, IndexError) as error:
+                report['decode_error'] = str(error)
+                (args.artifacts / (case + '.log')).write_text(json.dumps(report, indent=2) + '\n')
+                print(f'OBSERVE case={case} passed=False decode={error}', flush=True)
+                rows.append(False)
+                continue
             handoffs.record_visible(t, inventories)
-            verdicts = Codec(report.get('stderr', [])).assessments()
-            if value != 1 and t['obs'] and not verdicts:
-                verdicts = check_trace(evaluator, root, work, t, 'prefix_' + case, 'wire_joins')
             failures = [v for v in verdicts if v['status'] == 'Failed']
             for v in verdicts:
                 if v['status'] == 'Held':
@@ -537,7 +571,7 @@ def main():
                     unavailable.add((v['clause'], v['needs']))
                 elif v['status'] == 'Incomplete':
                     print(f'OBSERVER joins INCOMPLETE pending={v["clause"]}[{v["pending"]}] case={case}', flush=True)
-            good = value == 1 and bool(t['obs']) and not failures
+            good = value == 1 and live_evidence(case, t, verdicts)
             for v in failures:
                 indices = [i for i, e in enumerate(t['obs']) if e.get('conn') == v['conn']] if 'conn' in v else []
                 start, end = (indices[v[k]] if v[k] < len(indices) else v[k] for k in ('start', 'end'))

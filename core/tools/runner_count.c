@@ -17,6 +17,11 @@ static const HirselCoreSourceTable *source_table;
 static uint64_t head_task, publisher_task;
 static int publisher_spawn, observed, marker_send;
 static HirselCoreChannel *marker_channel;
+#if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
+static int place_spawn, permit_create, places, publisher_live;
+static int first_permits, second_permits, place_permits, premature_accept;
+static uint64_t place_task, status_root, phases, permit_id;
+#endif
 static int item_named(uint64_t site, const char *name) {
     uint64_t ordinal = site >> 32;
     if (!source_table || !ordinal || ordinal > source_table->items_len) return 0;
@@ -37,14 +42,26 @@ static int item_named(uint64_t site, const char *name) {
 extern HirselCoreSpawn __real_hirsel_core_spawn(HirselCoreContext *, uint64_t, uint64_t, void *, HirselCoreTaskBody, HirselCoreTaskLayout, uint64_t);
 HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx, uint64_t tasks, uint64_t bytes, void *input, HirselCoreTaskBody body, HirselCoreTaskLayout layout, uint64_t site) {
     publisher_spawn = item_named(site, "start_publisher");
+#if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
+    place_spawn = item_named(site, "start_managed");
+#endif
     HirselCoreSpawn out = __real_hirsel_core_spawn(ctx, tasks, bytes, input, body, layout, site);
     publisher_spawn = 0;
+#if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
+    place_spawn = 0;
+#endif
     return out;
 }
 extern HirselCoreChannelNew __real_hirsel_core_channel_new(HirselCoreContext *, uint64_t, HirselCoreValueLayout, uint64_t);
 HirselCoreChannelNew __wrap_hirsel_core_channel_new(HirselCoreContext *ctx, uint64_t capacity, HirselCoreValueLayout layout, uint64_t site) {
+#if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
+    permit_create = item_named(site, "serve_sockets");
+#endif
     HirselCoreChannelNew out = __real_hirsel_core_channel_new(ctx, capacity, layout, site);
     if (item_named(site, "answer")) marker_channel = out.sender;
+#if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
+    permit_create = 0;
+#endif
     return out;
 }
 extern uint8_t __real_hirsel_core_try_send(HirselCoreChannel *, void *);
@@ -64,6 +81,27 @@ static int too_many_senders;
 #endif
 static void event(void *state, HirselCoreEvent e) {
     (void)state;
+#if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
+    if (e.kind == HIRSEL_CORE_EVENT_SPAWN && place_spawn) {
+        places++;
+        place_task = e.object;
+        phases = 0;
+        permit_id = 0;
+        place_permits = 0;
+    }
+    if (e.kind == HIRSEL_CORE_EVENT_LATEST_PUBLISH && e.task == place_task) {
+        if (phases == 0) status_root = e.object;
+        if (e.object == status_root) phases++;
+    }
+    if (e.kind == HIRSEL_CORE_EVENT_SENDERS && permit_create) permit_id = e.object;
+    if (e.kind == HIRSEL_CORE_EVENT_TRY_SEND && e.value == 0 && permit_id && e.object == permit_id) {
+        if (place_permits++ == 0 && phases != 5) premature_accept++;
+        if (places == 1) first_permits++;
+        if (places == 2) second_permits++;
+    }
+    if (e.kind == HIRSEL_CORE_EVENT_SPAWN && publisher_spawn) publisher_live = 1;
+    if (e.kind == HIRSEL_CORE_EVENT_END && e.object == publisher_task) publisher_live = 0;
+#endif
     if (e.kind == HIRSEL_CORE_EVENT_SPAWN && publisher_spawn) {
         publisher_task = e.object;
         head_task = e.task;
@@ -109,6 +147,25 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
 #endif
     uint8_t status = hirsel_core_run(&cfg, entry);
     hirsel_core_os_process_free(open.process);
+#ifdef READY_BEFORE_ACCEPT
+    if (status) return status;
+    if (places != 3 || publisher_live) {
+        fprintf(stderr, "ready: incomplete place cleanup (%d starts, %d live publishers)\n", places, publisher_live);
+        return 105;
+    }
+    if (first_permits != 1 || second_permits != 0 || place_permits != 0 || premature_accept) {
+        fprintf(stderr, "ready: accept enabled %d times, %d outside Ready\n", first_permits, premature_accept);
+        return 105;
+    }
+    return 0;
+#elif defined(LAG_ADMISSION)
+    if (status) return status;
+    if (places != 2 || first_permits != 2 || second_permits > 1) {
+        fprintf(stderr, "lag: expected two accept permits in the lag case and at most one in the clipped case; saw %d and %d\n", first_permits, second_permits);
+        return 105;
+    }
+    return 0;
+#else
     dprintf(2, "runner_count: try_send %llu, want %llu\n", (unsigned long long)try_sends,
             (unsigned long long)TRY_SENDS);
     if (status) return status;
@@ -131,4 +188,5 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     }
 #endif
     return try_sends == TRY_SENDS ? 0 : 105;
+#endif
 }

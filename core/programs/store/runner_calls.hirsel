@@ -1159,7 +1159,10 @@ fn test_lag_window(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net:
     let before = host.mono_ns(clock)
     result.unwrap(channel.send(stop_to, ()))
     if let Ok(Draining) = channel.receive(phases) {} else { fail("lag: readiness not withdrawn") }
-    let connection = result.unwrap(wire_client.connect(tasks, net, address, clock, random, client_keys(), None, socket))
+    let connection = match wire_client.connect(tasks, net, address, clock, random, client_keys(), None, socket) {
+        Ok(take connected) => take connected,
+        Error(_) => fail("lag: connection refused inside the lag window"),
+    }
     wire_client.send_frame(connection, Call(0u32, 0u64, wire_client.slot(client_keys(), k_write()), 1000u32, u64_arg(43u64)))
     match wire_client.next(connection) {
         Ok(Batch(_, _, _, done)) => {
@@ -1172,6 +1175,18 @@ fn test_lag_window(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net:
     let _ = wire_client.close(take connection)
     if let Ok(Ok(Stopped)) = task.join(take running) {} else { fail("lag: idle place did not stop") }
     if let Ok(_) = wire_client.connect(tasks, net, address, clock, random, client_keys(), None, socket) { fail("lag: accepted a connection after the drain") }
+    let clipped = runner.Stop(lag_ms: 10000u64, grace_ms: 100u64)
+    let (cutting, cut_to, cut_phases, cut_status) = start_managed(tasks, managed_settings(dir, clock, random, tasks, net, policy, address, clipped), false)
+    loop {
+        match channel.receive(cut_phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("lag: clipped place did not become ready") }
+    }
+    result.unwrap(channel.send(cut_to, ()))
+    if let Ok(Draining) = channel.receive(cut_phases) {} else { fail("lag: clipped place did not drain") }
+    host.sleep_until(clock, host.mono_ns(clock) + 100000000u64)
+    if let Ok(_) = wire_client.connect(tasks, net, managed_address(latest.read(cut_status)), clock, random, client_keys(), None, socket) {
+        fail("lag: served a connection past the grace cut")
+    }
+    if let Ok(Ok(Forced(0u64))) = task.join(take cutting) {} else { fail("lag: clipped place did not force at the cut") }
     let mut stopping_policy = take policy_task
     task.cancel(mut stopping_policy)
     let _ = task.join(take stopping_policy)

@@ -65,6 +65,7 @@ CALLS = ('release_digest', 'ready_after_activation', 'drain_answers_once', 'drai
 # compute body; the marker precedes the head's exhaustion slice (kind21). The head's three
 # answers to s0 (the stop, its duplicate, the write) are three Told sends to s0's inbox.
 COUNTS = {'calls_runs_once': (7, 5), 'calls_deadline_hung': (7, 32668)}
+PLACEMENT_OBSERVERS = {'ready_after_activation': 'READY_BEFORE_ACCEPT', 'lag_window': 'LAG_ADMISSION'}
 HUNG_TOLDS = 3
 
 # R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
@@ -969,12 +970,13 @@ def c_compiler(args):
 
 def counting_cc(args, root, work, name):
     """A --cc wrapper that links core/tools/runner_count.c as the program's event sink."""
-    kind, want = COUNTS[name]
-    assert kind == 7, 'runner_count.c counts TRY_SEND'
+    kind, want = COUNTS.get(name, (7, 0))
+    assert kind == 7, 'runner_count.c observes TRY_SEND'
     cc = c_compiler(args)
     support = work / f'count_{name}.o'
     subprocess.run([str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_count.c'),
                     '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want}',
+                    *([f'-D{PLACEMENT_OBSERVERS[name]}'] if name in PLACEMENT_OBSERVERS else []),
                     *(['-DHUNG_BODY_SENDS=32664', f'-DHUNG_TOLDS={HUNG_TOLDS}'] if name == 'calls_deadline_hung' else []),
                     '-o', str(support)], check=True)
     wrapper = work / f'count_{name}-cc'
@@ -1199,7 +1201,7 @@ def main():
                         result=sorted(want ^ selected) or report.get('stderr', ''))
                 for name in selected_calls if r1 else ():
                     definition = f'store@1/runner_calls/test_{name}'
-                    cc = counting_cc(args, root, work, name) if name in COUNTS else None
+                    cc = counting_cc(args, root, work, name) if name in COUNTS or name in PLACEMENT_OBSERVERS else None
                     code, report = native_run(args, engine, base, work / f'store-{engine}-shared', definition, cc)
                     tests = report.get('tests', [])
                     row(engine=engine, law=name,

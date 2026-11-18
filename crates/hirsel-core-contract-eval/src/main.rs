@@ -130,6 +130,7 @@ fn run(
     Ok(json!({"outcome":outcome, "used":report.used,
         "stdout":report.stdout, "stderr":report.stderr,
         "events":report.events.iter().map(|e| [u64::from(e.kind), e.task, e.object, e.value]).collect::<Vec<_>>(),
+        "event_sources":report.events.iter().map(|e| e.source.map(|s| module.items[s.item.index()].to_string())).collect::<Vec<_>>(),
         "checked":{"loans":checked.loans, "instructions":checked.instructions,
                    "task_stack_peak":checked.task_stack_peak, "task_call_depth":checked.task_call_depth}}))
 }

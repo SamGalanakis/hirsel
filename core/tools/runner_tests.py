@@ -7,8 +7,8 @@ core/programs/store/runner_calls.hirsel, and two generated modules, runner_p19 (
 `place` of 1, 100, 1,000 and 10,000 entries, run in two tasks) and runner_l12 (describe across permuted
 registrations, an added A field and a changed R; and ea's code revision, which every
 engine must give alike, PROG-9). Each mutant applies its text changes
-to a copy of runner.hirsel and must turn its law red. Wire session controls run
-on Cranelift; the in-process controls retain the evaluator. L4's high-water
+to a copy of runner.hirsel and must turn its law red. Every control runs on the evaluator
+with its explicit model network grant. L4's high-water
 case builds core/programs/store/runner_rss.hirsel per native backend and compares
 the runtime's exact peak of live backing bytes across its two modes. L20's builds
 core/programs/store/runner_cover.hirsel the same way and compares the live backing bytes
@@ -40,7 +40,7 @@ import shutil
 import subprocess
 import tempfile
 
-from std_native import ROOT, wait_load
+from std_native import MODEL_NET_RULES, ROOT, wait_load
 from store_tests import inputs
 from store_crash_tests import checked, run_crashes
 
@@ -71,6 +71,15 @@ COUNTS = {'calls_runs_once': (7, 6), 'calls_deadline_hung': (7, 32669)}
 PLACEMENT_OBSERVERS = {'ready_after_activation': 'READY_BEFORE_ACCEPT', 'lag_window': 'LAG_ADMISSION'}
 HUNG_TOLDS = 3
 
+# Wire floods retain all 10,000 frames. The evaluator's generic 1B test envelope
+# predates framing. At 1/100 frames, refusals use 8,148,075/20,157,978 steps,
+# session_charge 80,393,142/325,732,340. Extrapolate the 99-frame difference
+# to 10,000, double it for margin, then round up. Entry step bounds stay fixed.
+WIRE_TEST_INSTRUCTIONS = {
+    'store@1/runner_calls/law_calls_refusals': 2_500_000_000,
+    'store@1/runner_calls/law_calls_session_charge': 50_000_000_000,
+}
+
 # R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
 SUBS = ('subs_main', 'subs_reset_keeps_diff', 'rows_normalized', 'projection_isolated', 'subscribe_order', 'retired_without_waiting')
 
@@ -80,6 +89,14 @@ def counted(name, report):
         return True
     kind, want = COUNTS[name]
     events = report.get('events', [])
+    sources = report.get('event_sources', [])
+    if len(sources) != len(events) or any(e[0] == kind and site is None for e, site in zip(events, sources)):
+        return False
+    # Match the body/publisher/compute-marker observation of runner_count.c.
+    # Keep other event kinds in place for the head's slice-order assertion.
+    observed = {'store@1/runner_calls/tally', 'store@1/runner_calls/hung',
+                'store@1/runner_calls/answer', 'store@1/runner/offer'}
+    events = [e for e, site in zip(events, sources) if e[0] != kind or site in observed]
     if sum(1 for e in events if e[0] == kind) != want:
         return False
     if name == 'calls_deadline_hung':
@@ -118,7 +135,7 @@ def charged(args, root, work, engine, module, modes, figure, cc=None, runner=Non
                '--store', str(work / f'store-{name}-{engine}'), '--grant', 'Clock', '--grant', 'Tasks',
                '--grant', 'Random', '--entry', f'store@1/{module}/main',
                '--logical-charge-report', str(charges), '-o', str(binary)]
-    if module == 'runner_rss':
+    if module in ('runner_rss', 'runner_cover'):
         command += ['--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
         if engine == 'llvm':
             command.append('--release')
@@ -138,10 +155,10 @@ def charged(args, root, work, engine, module, modes, figure, cc=None, runner=Non
             command = ['/usr/bin/time', '-f', '%M', '-o', str(peak), *command]
         run = subprocess.run(command, capture_output=True)
         figures[label] = (run.returncode, figure(json.loads(charges.read_text())) if charges.exists() else None)
+        if run.returncode:
+            figures.setdefault('errors', {})[label] = run.stderr.decode(errors='replace')[-2000:]
         if module == 'runner_rss':
             rss[label] = int(peak.read_text().splitlines()[-1])
-            if run.returncode:
-                figures.setdefault('errors', {})[label] = run.stderr.decode(errors='replace')[-2000:]
     if rss:
         figures['rss_kib'] = rss
     return figures, None
@@ -271,7 +288,7 @@ MUTANTS = (
        '                            let PubIn(e: take next) = take ahead\n'
        '                            match take next {\n'
        '                                Subscribed(who, sub, take key, take arg) => {\n'
-       '                                    publish_subscription(mut b, mut joined, who, sub, 0u64, take key, take arg)\n'
+       '                                    publish_subscription(mut b, mut joined, mut owes, who, sub, 0u64, take key, take arg)\n'
        '                                },\n'
        '                                _ => (),\n'
        '                            }\n'
@@ -281,7 +298,7 @@ MUTANTS = (
        '                }\n')],
      'runner', 'subscribe_order'),
     ('subscribe_past_queue',
-     [('                publish_subscription(mut b, mut joined, who, sub, 0u64, take key, take arg)\n',
+     [('                publish_subscription(mut b, mut joined, mut owes, who, sub, 0u64, take key, take arg)\n',
        '                match channel.try_receive(from) {\n'
        '                    Ok(take ahead) => {\n'
        '                        let PubIn(e: take next) = take ahead\n'
@@ -302,59 +319,42 @@ MUTANTS = (
        '                    },\n'
        '                    Error(_) => (),\n'
        '                }\n'
-       '                publish_subscription(mut b, mut joined, who, sub, 0u64, take key, take arg)\n')],
+       '                publish_subscription(mut b, mut joined, mut owes, who, sub, 0u64, take key, take arg)\n')],
      'runner', 'subscribe_order'),
     # L24 (owed_ended_delivered, v2.13): the owner never wakes the publisher, so a waiting
     # Ended needs other traffic; and an owner that wakes it once per session, then never.
     ('owed_ended_waits_for_traffic',
-     [('        let _ = channel.try_send(s.publisher, PubIn(e: Drained))\n', '')],
+     [
+         ('            if let Some(_) = work.head { let _ = channel.try_send(wire_publisher(s), PubIn(e: Drained)) }',
+          ''),
+         ('    let _ = channel.try_send(owner.post, PubIn(e: Drained))',
+          '')
+     ],
      'runner_calls', 'owed_ended_delivered'),
     ('wake_once',
-     [('            run = 0u64\n            match channel.receive(s.inbox) {\n',
-       '            if run <= INBOX {\n                run = 0u64\n            }\n            match channel.receive(s.inbox) {\n'),
-      ('        let _ = channel.try_send(s.publisher, PubIn(e: Drained))\n        run = 0u64\n',
-       '        let _ = channel.try_send(s.publisher, PubIn(e: Drained))\n        run = INBOX + 1u64\n')],
+     [
+         ('    if run == capacity { run = 0u64; true } else { false }',
+          '    if run == capacity { run = capacity + 1u64; true } else { false }')
+     ],
      'runner_calls', 'owed_ended_delivered'),
     # L23 (publisher_never_blocks): the publisher sends to an owner and waits.
     ('publisher_blocks_on_full_session',
-     [('''fn offer(to: Delivery, take e: Event) -> Offered {
-    if let Wire(sender) = to {
-        return match channel.try_send(sender, wire_event(FromRunner(take e))) {
-            Ok(()) => Took,
-            Error(Full(WireEvent(e: FromRunner(take back)))) => Bounced(take back),
-            _ => Shut,
-        }
-    }
-    let sender = match to { Seam(sender) => sender, _ => fail("runner: delivery") }
-    match channel.try_send(sender, take e) {
-        Ok(_) => Took,
-        Error(Full(take x)) => Bounced(take x),
-        Error(Closed(_)) => Shut,
-    }
-}
-''',
-       '''fn offer(to: Delivery, take e: Event) -> Offered waits {
-    if let Wire(sender) = to {
-        return match channel.send(sender, wire_event(FromRunner(take e))) {
-            Ok(()) => Took,
-            _ => Shut,
-        }
-    }
-    let sender = match to { Seam(sender) => sender, _ => fail("runner: delivery") }
-    match channel.send(sender, take e) {
-        Ok(_) => Took,
-        Error(_) => Shut,
-    }
-}
-'''),
-      ('take owes: List[Owe], at: u64) {', 'take owes: List[Owe], at: u64) -> () waits {')],
+     [
+         ('fn offer(to: Sender[WireEvent], take e: Notice) -> Offered {\n    match channel.try_send(to, wire_event(FromRunner(take e))) {\n        Ok(()) => Took,\n        Error(Full(WireEvent(e: FromRunner(take back)))) => Bounced(take back),\n        _ => Shut,\n    }\n}\n',
+          'fn offer(to: Sender[WireEvent], take e: Notice) -> Offered waits {\n    match channel.send(to, wire_event(FromRunner(take e))) {\n        Ok(()) => Took,\n        Error(_) => Shut,\n    }\n}\n'),
+         ('take owes: List[Owe], at: u64) {', 'take owes: List[Owe], at: u64) -> () waits {')
+     ],
      'runner_calls', 'publisher_never_blocks'),
     # L25 (retired_without_waiting, v2.14): a marked session's end sends its Drained and waits
     # for a PubIn slot; the publisher sweeps only after a Released, so a quiet place keeps a
     # dead session; the sweep reads Empty as an end, retiring a live session.
     ('retire_waits_for_slot',
-     [('            let _ = channel.try_send(to_pub, PubIn(e: Drained))\n',
-       '            let _ = channel.send(to_pub, PubIn(e: Drained))\n')],
+     [
+         ('fn wire_finish_owner[C: send](mut service: Service[C], pub_to: Sender[PubIn]) {',
+          'fn wire_finish_owner[C: send](mut service: Service[C], pub_to: Sender[PubIn]) -> () waits {'),
+         ('    if let Some(take left) = (service.finish)(mut service.context) { let _ = channel.try_send(pub_to, take left) }',
+          '    if let Some(take left) = (service.finish)(mut service.context) { let _ = channel.send(pub_to, take left) }')
+     ],
      'runner', 'retired_without_waiting'),
     ('sweep_skipped_when_quiet',
      [('        sweep(mut b.subs, mut joined)\n        settle(', '        settle('),
@@ -378,8 +378,10 @@ MUTANTS = (
        '        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: list.new(), rows: take heard, outcomes: list.new())))\n')],
      'runner_calls', 'subs_wired'),
     ('unsubscribe_ignored',
-     [('            Unsubscribed(who, sub) => if let Some(i) = find(b.subs, who, sub) {\n                let _ = list.remove(mut b.subs, i)\n            },',
-       '            Unsubscribed(_, _) => (),')],
+     [
+         ('                wire_stop_sub(mut s, mut work, sub)',
+          '                let _ = sub')
+     ],
      'runner_calls', 'subs_wired'),
     # L17 (RUNNER-SPEC §8.2, complete_marks_empty): an empty initial result names its sub in
     # no Batch's complete, so the client never learns that sub is current.
@@ -435,10 +437,7 @@ MUTANTS = (
        '    let mut rows: List[KeyedDone] = list.new()\n'
        '    result.unwrap(list.push(mut rows, KeyedDone(stream: take stream, p: p, outcome: take o)))\n'
        '    let e = update(0u64, None, take rows)\n'
-       '    match to {\n'
-       '        Seam(sender) => { let _ = channel.send(sender, take e) },\n'
-       '        Wire(sender) => { let _ = channel.send(sender, wire_event(FromRunner(take e))) },\n'
-       '    }')],
+       '    let _ = channel.send(to, wire_event(FromRunner(take e)))')],
      'runner_calls', 'calls_duplicate'),
     ('release_at_commit_version',
      [('    let d = store.version(store.snapshot(hd.db))', '    let mut d = store.version(store.snapshot(hd.db))'),
@@ -447,61 +446,65 @@ MUTANTS = (
        '        if stream == group[0u64] { d = wv }')],
      'runner_calls', 'calls_group_version'),
     ('queue_outside_account',
-     [('                    result.unwrap(map.insert(mut held, take k, take h))\n                    if hit {',
-       '                    if !hit || list.len(h.owed) > 0u64 {\n'
-       '                        result.unwrap(map.insert(mut held, take k, take h))\n'
-       '                    } else {\n'
-       '                        used -= 1u64\n'
-       '                    }\n'
-       '                    if hit {'),
-      ('        units += if h.forwarded && live == 0u64 { 1u64 } else { live }',
-       '        units += live')],
+     [
+         ('        units += if h.forwarded && live == 0u64 { 1u64 } else { live }',
+          '        units += live')
+     ],
      'runner_calls', 'calls_held_head'),
     ('join_without_digest',
      [('Some(w) => Some((w.p, w.digest == q.digest)),', 'Some(w) => Some((w.p, true)),')],
      'runner_calls', 'calls_joiners'),
     ('session_join_without_digest',
-     [('Some(h) => (false, list.len(h.owed), h.digest == d),', 'Some(h) => (false, list.len(h.owed), true),')],
+     [
+         ('(h.forwarded, h.digest == sent.digest, h.queued)',
+          '(h.forwarded, true, h.queued)'),
+         ('            if digest != store.request_digest(key, arg) { return Some(1008u16) }',
+          '            if false { return Some(1008u16) }')
+     ],
      'runner_calls', 'calls_session_mismatch'),
     ('mismatch_row_in_session',
-     [('                if !same {\n                    return\n                }\n',
-       '                if !same {\n'
-       '                    let Call(stream: take stream, p: p, key: _, arg: _, deadline: _) = take c\n'
-       '                    tell(s.client, last, take stream, p, Refused(RequestMismatch));\n'
-       '                    continue\n'
-       '                }\n')],
+     [
+         ('    if forwarded && !same { return Error(1008u16) }',
+          '    if forwarded && !same { return wire_refused(mut s, mut work, stream, p, RequestMismatch) }'),
+         ('            if digest != store.request_digest(key, arg) { return Some(1008u16) }',
+          '            if false { return Some(1008u16) }')
+     ],
      'runner_calls', 'calls_session_mismatch'),
     ('late_completion_resent',
-     [('                    for _ in 0u64 .. owed {',
-       '                    for _ in 0u64 .. (if owed == 0u64 { 1u64 } else { owed }) {')],
+     [
+         ('        let owed = replace(mut h.owed, list.new())\n        let count = list.len(owed)',
+          '        let mut owed = replace(mut h.owed, list.new())\n        if list.len(owed) == 0u64 { result.unwrap(list.push(mut owed, WireOwed(generation: 0u64))) }\n        let count = list.len(owed)')
+     ],
      'runner_calls', 'calls_one_outcome_per_send'),
     ('one_for_joined',
-     [('                    for _ in 0u64 .. owed {', '                    for _ in 0u64 .. (if owed > 0u64 { 1u64 } else { 0u64 }) {')],
+     [
+         ('        for take owing in owed {\n',
+          '        let mut sent_one = false\n        for take owing in owed {\n            if sent_one { continue }\n            sent_one = true\n')
+     ],
      'runner_calls', 'calls_one_outcome_per_send'),
     ('latest_deadline',
-     [('                        if h.owed[i].generation == t.generation {',
-       '                        if h.owed[list.len(h.owed) - 1u64].generation == t.generation {'),
-      ('            if h.owed[index].generation == tick.generation {',
-       '            if h.owed[list.len(h.owed) - 1u64].generation == tick.generation {')],
+     [
+         ('            if h.owed[index].generation == tick.generation {',
+          '            if h.owed[list.len(h.owed) - 1u64].generation == tick.generation {')
+     ],
      'runner_calls', 'calls_held_head'),
     ('refused_frames_kept',
-     [('    let mut used = 0u64\n', '    let mut used = 0u64\n    let mut kept: List[Bytes] = list.new()\n'),
-      ('                    let Call(stream: take stream, p: p, key: _, arg: _, deadline: _) = take c\n'
-       '                    tell(s.client, last, take stream, p, take o);',
-       '                    let Call(stream: take stream, p: p, key: _, arg: take arg, deadline: _) = take c\n'
-       '                    let _ = list.push(mut kept, take arg)\n'
-       '                    tell(s.client, last, take stream, p, take o);')],
+     [
+         ('    held: Map[Bytes, WireHeld], refusals:',
+          '    kept: List[Bytes], held: Map[Bytes, WireHeld], refusals:'),
+         ('asking: false, pending: None, held: map.new()',
+          'asking: false, pending: None, kept: list.new(), held: map.new()'),
+         ('    if !allowed { return wire_refused(mut s, mut work, stream, p, Overloaded) }',
+          '    result.unwrap(list.push(mut s.kept, result.unwrap(clone(arg))))\n    if !allowed { return wire_refused(mut s, mut work, stream, p, Overloaded) }')
+     ],
      'runner_calls', 'calls_session_charge'),
     ('join_outside_account',
-     [('                let grows = fresh || owing > 0u64', '                let grows = fresh'),
-      ('Some(h) => !h.forwarded || h.queued != 0u64 || list.len(h.owed) != 0u64, _ => true',
-       'Some(h) => !h.forwarded, _ => true')],
+     [
+         ('Some(h) => !h.forwarded || h.queued != 0u64 || list.len(h.owed) != 0u64, _ => true',
+          'Some(h) => !h.forwarded, _ => true')
+     ],
      'runner_calls', 'calls_held_head'),
 )
-
-
-WIRE_MUTANTS = {'publisher_blocks_on_full_session', 'direct_commitless', 'queue_outside_account',
-                'latest_deadline', 'join_outside_account'}
 
 
 def p19_module(path):
@@ -731,7 +734,10 @@ def manifest(root, work, name, runner=None, extra=()):
 
 def evaluate(evaluator, inputs_path, definition):
     wait_load()
-    result = subprocess.run([str(evaluator), str(inputs_path), definition], capture_output=True, text=True)
+    request = dict(manifest=str(inputs_path), entry=definition, model_net=MODEL_NET_RULES)
+    if definition in WIRE_TEST_INSTRUCTIONS:
+        request['instructions'] = WIRE_TEST_INSTRUCTIONS[definition]
+    result = subprocess.run([str(evaluator)], input=json.dumps(request) + '\n', capture_output=True, text=True)
     try:
         report = json.loads(result.stdout)
     except ValueError:
@@ -1090,15 +1096,6 @@ def run_mutants(args, root, work, evaluator, row):
                 passed=None not in seen.values() and not l12_holds(seen))
             continue
         selected = manifest(root, work, 'mutant_' + name, mutated)
-        if name in WIRE_MUTANTS:
-            definition = f'store@1/{module}/test_{law}'
-            code, report = native_run(args, 'cranelift', selected, work / 'mutant-native-store', definition)
-            tests = report.get('tests', [])
-            red = (len(tests) == 1 and tests[0]['definition'] == definition
-                   and tests[0].get('status') in (1, 101) and not tests[0].get('timed_out')
-                   and (tests[0]['status'] == 1 or 'Fail' in tests[0].get('stderr', '')))
-            row(engine='cranelift', mutant=name, law=law, passed=red, result=report)
-            continue
         value, report = evaluate(evaluator, selected,
                                  f'store@1/{module}/law_{law}')
         # Red: the law returns false, or one of its `want` checks fails it (cause Fail only).
@@ -1205,9 +1202,7 @@ def main():
                                      'store@1/runner_p19/law_p19_place_twice')
             row(engine='evaluator', law='p19_place_twice', passed=value == 1, result=report)
         if 'evaluator' in engines and r1:
-            # Socket laws wait for W8a's model network provider. W3d qualifies
-            # their unchanged assertions on both native engines.
-            for name in (n for n in selected_calls if n in ('release_digest', 'drain_answers_once')):
+            for name in selected_calls:
                 value, report = evaluate(evaluator, base, 'store@1/runner_calls/law_' + name)
                 row(engine='evaluator', law=name, passed=value == 1 and counted(name, report), result=report)
             for name in (() if args.part == 'calls' else SUBS):

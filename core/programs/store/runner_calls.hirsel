@@ -294,7 +294,7 @@ const NEVER: u64 = 18446744073709551615u64
 // Each fixture binds one principal. Its connections resume that token, so two
 // connections naming one stream still address the same durable position.
 type Conn = Socket(wire_client.Conn, Task[Result[(), std.wsock.Error]]) | Held(runner.FixtureOwner)
-type Drive: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, policy: ingress.Ingress, token: Bytes }
+type Drive: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, policy: ingress.Ingress, token: Bytes, accepted: Option[Receiver[()]] }
 
 // The malformed-flood laws exercise decoding and retained bytes, not the
 // production 20/s throttle. A one-nanosecond refill keeps their 10,000 probes
@@ -372,14 +372,14 @@ fn served(c: Clock, r: Random, tasks: Tasks, n: Net, f: fn(take Drive) -> () wai
 
 fn served_in(c: Clock, r: Random, tasks: Tasks, n: Net, o: store.Options, f: fn(take Drive) -> () waits) -> bool waits {
     let mut token: Bytes = list.new()
-    served_on(store.memory(c, r, o), c, tasks, n, r, mut token, false, f)
+    served_on(store.memory(c, r, o), c, tasks, n, r, mut token, 0u64, f)
 }
 
-fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: bool, f: fn(take Drive) -> () waits) -> bool waits {
+fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: u64, f: fn(take Drive) -> () waits) -> bool waits {
     served_with_handles(take fresh, c, tasks, n, r, mut token, grouped, f, code.describe(handles))
 }
 
-fn served_with_handles(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: bool, f: fn(take Drive) -> () waits, select: StaticFn[fn(mut store.Db) -> Result[Hd, store.Error] waits]) -> bool waits {
+fn served_with_handles(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: u64, f: fn(take Drive) -> () waits, select: StaticFn[fn(mut store.Db) -> Result[Hd, store.Error] waits]) -> bool waits {
     let mut db = take fresh
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
@@ -391,13 +391,14 @@ fn served_with_handles(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: 
     let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
     result.unwrap(list.append(mut token, ingress.principal(principal)))
     let mut forwarding: Option[Task[()]] = None
-    let to_head = if grouped {
+    let (to_head, grouped_ack) = if grouped != 0u64 {
         let (to, from): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(64u64))
-        let seed = Group(head: take head, from: take from)
+        let (ack, hear): (Sender[()], Receiver[()]) = result.unwrap(channel.new(grouped))
+        let seed = Group(head: take head, from: take from, initial: grouped, accepted: take ack)
         forwarding = Some(result.unwrap(task.spawn(tasks, bytes 65536u64, take seed, group)))
-        take to
-    } else { take head }
-    let d = Drive(head: take to_head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, policy: ingress.share(policy), token: result.unwrap(clone(ingress.principal(principal))))
+        (take to, Some(take hear))
+    } else { (take head, None) }
+    let d = Drive(head: take to_head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, policy: ingress.share(policy), token: result.unwrap(clone(ingress.principal(principal))), accepted: take grouped_ack)
     let driving = match task.spawn(tasks, bytes 33554432u64, take d, f) {
         Ok(take t) => take t,
         Error(_) => return false,
@@ -417,15 +418,22 @@ fn served_with_handles(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: 
     }
 }
 
-// V4's fixture submits its first two independent streams together, after the
-// socket owner has admitted both. Subsequent requests pass through normally.
-type Group: send { head: Sender[runner.Req], from: Receiver[runner.Req] }
+// Hold the initial concurrency group until every socket owner has admitted it.
+// V4 groups two independent streams; H1 groups both equal sends and the mismatch.
+// Subsequent requests pass through normally.
+type Group: send { head: Sender[runner.Req], from: Receiver[runner.Req], initial: u64, accepted: Sender[()] }
 fn group(take g: Group) -> () waits {
-    let first = result.unwrap(channel.receive(g.from))
-    let second = result.unwrap(channel.receive(g.from))
-    result.unwrap(channel.try_send(g.head, take first))
-    result.unwrap(channel.try_send(g.head, take second))
+    let mut initial: List[runner.Req] = list.new()
+    for _ in 0u64 .. g.initial {
+        result.unwrap(list.push(mut initial, result.unwrap(channel.receive(g.from))))
+        let _ = channel.send(g.accepted, ())
+    }
+    for take request in take initial { result.unwrap(channel.try_send(g.head, take request)) }
     loop { match channel.receive(g.from) { Ok(take q) => { let _ = channel.send(g.head, take q) }, Error(_) => return } }
+}
+
+fn accepted(d: Drive) -> () waits {
+    if let Some(hear) = d.accepted { result.unwrap(channel.receive(hear)) }
 }
 
 // two_sessions_two_streams, and C5: each outcome arrives in a frame at its commit's
@@ -544,9 +552,9 @@ pub fn law_calls_session_charge(c: Clock, r: Random, tasks: Tasks, n: Net) -> bo
 
 pub fn law_calls_group_version(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut plain_token: Bytes = list.new()
-    let plain = served_on(store.memory(c, r, store.defaults()), c, tasks, n, r, mut plain_token, true, drive_group)
+    let plain = served_on(store.memory(c, r, store.defaults()), c, tasks, n, r, mut plain_token, 2u64, drive_group)
     let mut subscribed_token: Bytes = list.new()
-    let subscribed = served_on(store.memory(c, r, store.defaults()), c, tasks, n, r, mut subscribed_token, true, drive_group_subscribed)
+    let subscribed = served_on(store.memory(c, r, store.defaults()), c, tasks, n, r, mut subscribed_token, 2u64, drive_group_subscribed)
     plain && subscribed
 }
 
@@ -560,8 +568,11 @@ fn drive_joiners(take d: Drive) -> () waits {
     let s1 = conn(d, 1u64)
     let s2 = conn(d, 1u64)
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
+    accepted(d)
     ask(s1, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
+    accepted(d)
     ask(s2, d.clock, 0u64, 0u64, k_write(), u64_arg(6u64), LATER)
+    accepted(d)
     let a = frame(s0)
     let b = frame(s1)
     want(is(frame(s2).outcome, Refused(RequestMismatch)), "joiners: other bytes at the running position")
@@ -575,7 +586,8 @@ fn drive_joiners(take d: Drive) -> () waits {
 }
 
 pub fn law_calls_joiners(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
-    served(c, r, tasks, n, drive_joiners)
+    let mut token: Bytes = list.new()
+    served_on(store.memory(c, r, store.defaults()), c, tasks, n, r, mut token, 3u64, drive_joiners)
 }
 
 // L21/V2 (join_digest): one session sends p with x, then p with y while p is held. The
@@ -921,6 +933,7 @@ fn drive_owed_ended_delivered(take d: Drive) -> () waits {
 }
 
 pub fn law_owed_ended_delivered(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    if !runner.law_owner_take_wakes() { return false }
     served(c, r, tasks, n, drive_owed_ended_delivered)
 }
 
@@ -1004,14 +1017,14 @@ fn disk_options() -> store.Options {
     o
 }
 
-fn drain_send(to: Sender[runner.HeadInput], stream: String, position: u64, argument: u64) -> Receiver[runner.Event] waits {
-    let (reply_to, reply_from): (Sender[runner.Event], Receiver[runner.Event]) = result.unwrap(channel.new(2u64))
+fn drain_send(to: Sender[runner.HeadInput], stream: String, position: u64, argument: u64) -> Receiver[runner.WireEvent] waits {
+    let (reply_to, reply_from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = result.unwrap(channel.new(2u64))
     let req = runner.head_request(digest_bytes(stream), position, k_write(), u64_arg(argument), take reply_to)
     result.unwrap(channel.send(to, RunRequest(take req)))
     take reply_from
 }
 
-fn drain_answer(from: Receiver[runner.Event], stream: String, position: u64) -> runner.Outcome {
+fn drain_answer(from: Receiver[runner.WireEvent], stream: String, position: u64) -> runner.Outcome {
     let event = match channel.try_receive(from) { Ok(take event) => take event, Error(_) => fail("drain: send got no answer") }
     let received = option.unwrap(runner.head_outcome(take event))
     want(received.stream == digest_bytes(stream) && received.p == position, "drain: answer to wrong send")
@@ -1232,7 +1245,7 @@ pub fn law_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> 
     let dir = result.unwrap(host.mkdtemp(d, mut name))
     let db = result.unwrap(store.open(tasks, dir, c, r, disk_options()))
     let mut token: Bytes = list.new()
-    if !served_on(take db, c, tasks, n, r, mut token, false, drive_recorded) {
+    if !served_on(take db, c, tasks, n, r, mut token, 0u64, drive_recorded) {
         return false
     }
     let mut o = disk_options()
@@ -1433,7 +1446,7 @@ pub fn law_calls_held_head(c: Clock, tasks: Tasks, n: Net, r: Random) -> bool wa
     let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, c, r, fixture_policy(), 1048576u64))
     let mut policy_task = take policy_handle
     let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
-    let d = Drive(head: channel.sender(head), post: channel.sender(post), clock: c, tasks: tasks, net: n, random: r, policy: ingress.share(policy), token: result.unwrap(clone(ingress.principal(principal))))
+    let d = Drive(head: channel.sender(head), post: channel.sender(post), clock: c, tasks: tasks, net: n, random: r, policy: ingress.share(policy), token: result.unwrap(clone(ingress.principal(principal))), accepted: None)
     let s0 = conn(d, 0u64)
     ask(s0, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
     let a = frame(s0)
@@ -1528,7 +1541,7 @@ fn drive_handle_selection(take d: Drive) -> () waits {
 
 pub fn law_l14_handles(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut token: Bytes = list.new()
-    served_with_handles(store.memory(c, r, store.defaults()), c, tasks, n, r, mut token, false, drive_handle_selection, code.describe(choose_handles))
+    served_with_handles(store.memory(c, r, store.defaults()), c, tasks, n, r, mut token, 0u64, drive_handle_selection, code.describe(choose_handles))
 }
 
 @test

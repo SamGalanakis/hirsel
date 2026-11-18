@@ -171,7 +171,7 @@ pub fn law_join_cleanup() -> bool {
     let (closing, closed): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let lease = result.unwrap(WireJoinLease(closing: take closing, publisher: channel.sender(pub_to)))
     let mut joined: List[Joiner] = list.new()
-    result.unwrap(list.push(mut joined, Joiner(who: 7u64, to: Wire(take to), closed: Some(take closed), ended: list.new(), reset: false, mark: None, identity: None)))
+    result.unwrap(list.push(mut joined, Joiner(who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), reset: false, mark: None, identity: None)))
     let _ = take lease
     let mut subs: List[Sub] = list.new()
     let mut waiting: List[Replies] = list.new()
@@ -314,7 +314,7 @@ pub fn law_refused_send_releases_timer(tasks: Tasks, clock: Clock, random: Rando
         let arg: Bytes = list.new()
         let digest = store.request_digest(key, arg)
         let request = Request(caller: None, stream: list.new(), p: p, key: take key, arg: take arg, digest: digest,
-            reply_to: Wire(wire_me(rig.owner)), live: latest.handle(filling.live),
+            reply_to: wire_me(rig.owner), live: latest.handle(filling.live),
             identity: latest.handle(filling.identity), seed: result.unwrap(owner_seed(filling)))
         if let Posted = try_head(rig.owner.head, Req(e: Requested(take request))) {} else { return false }
     }
@@ -424,7 +424,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let mut work = wire_work()
     let (events, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
     let (told, who): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
-    result.unwrap(channel.send(to, PubIn(e: Joined(Join(to: Wire(take events), told: take told, mark: None, closed: None, identity: None)))))
+    result.unwrap(channel.send(to, PubIn(e: Joined(Join(to: take events, told: take told, mark: None, closed: None, identity: None)))))
     owner.joined = Some(result.unwrap(channel.receive(who)))
     owner.publisher = Some(channel.sender(to))
     if let Ok(WireEvent(e: JoinReady)) = channel.receive(inbox) {} else { return false }

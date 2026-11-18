@@ -19,14 +19,18 @@ from std_native import ROOT, wait_load
 
 OBSERVE_MUTANTS = (
     ('digest_dropped_when_owed_zero', (
-        ('type Held { digest: store.RequestDigest, owed: List[Owed] }',
-         'type Held { digest: Option[store.RequestDigest], owed: List[Owed] }'),
-        ('Some(h) => (false, list.len(h.owed), h.digest == d),',
-         'Some(h) => (false, list.len(h.owed), h.digest == None || h.digest == Some(d)),'),
-        ('Held(digest: d, owed: take owed)', 'Held(digest: Some(d), owed: take owed)'),
-        ('                        let _ = list.remove(mut h.owed, i)\n',
-         '                        let _ = list.remove(mut h.owed, i)\n'
-         '                        if list.len(h.owed) == 0u64 { h.digest = None }\n'),
+        ('digest: store.RequestDigest, forwarded: bool, queued: u64, owed: List[WireOwed]',
+         'digest: store.RequestDigest, digest_live: bool, forwarded: bool, queued: u64, owed: List[WireOwed]'),
+        ('digest: sent.digest, forwarded: false,',
+         'digest: sent.digest, digest_live: true, forwarded: false,'),
+        ('digest: digest, forwarded: true,',
+         'digest: digest, digest_live: true, forwarded: true,'),
+        ('(h.forwarded, h.digest == sent.digest, h.queued)',
+         '(h.forwarded, !h.digest_live || h.digest == sent.digest, h.queued)'),
+        ('Some(h) => if h.forwarded { Some(h.digest) }',
+         'Some(h) => if h.forwarded && h.digest_live { Some(h.digest) }'),
+        ('            let _ = list.remove(mut h.owed, index)\n',
+         '            let _ = list.remove(mut h.owed, index)\n            if list.len(h.owed) == 0u64 { h.digest_live = false }\n'),
     )),
 )
 TASK_KINDS = {0, 1, 2, 3, 4}
@@ -131,7 +135,7 @@ pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Ta
     let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
     let d = Drive(out: out, err: err, head: take head, post: runner.post(mail), clock: c,
         tasks: tasks, net: n, random: r, policy: ingress.share(policy),
-        token: result.unwrap(clone(ingress.principal(principal))))
+        token: result.unwrap(clone(ingress.principal(principal))), accepted: None)
     let mut cn = conn(d, 1u64)
     ask(mut cn, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
     ask(mut cn, c, 0u64, 0u64, k_write(), u64_arg(1u64), 50000000u64)
@@ -364,8 +368,8 @@ JOIN_CASES = ('CrossSession', 'AfterAbandoned', 'AfterAbandonedSame')
 def join_manifest(root, work, name, runner=None):
     source = work / (name + '-joins.hirsel')
     source.write_text('\n'.join(
-        f'pub fn law_{case}(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks) -> bool waits {{\n'
-        f'    observe_drive.run_join(out, err, clock, random, tasks, {case})\n}}\n'
+        f'pub fn law_{case}(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {{\n'
+        f'    observe_drive.run_join(out, err, clock, random, tasks, net, {case})\n}}\n'
         for case in JOIN_CASES))
     modules = ('observe', 'fixture', 'positions', 'session', 'observe_drive')
     return manifest(root, work, name, runner, extra=[
@@ -402,8 +406,8 @@ def identity_cases(root, evaluator, work, artifacts, coverage, unavailable, call
 
     original = (root / 'core/programs/store/runner.hirsel').read_text()
     poison = work / 'identity-poison.hirsel'
-    poison.write_text(replace(original, '    let r = placed(s.place, s.n_place)?\n',
-                             '    let r = @observe_syntax_poison\n'))
+    poison.write_text(replace(original, '    let initial: Registry[G, H] = registry()\n',
+                             '    let initial: Registry[G, H] = @observe_syntax_poison\n'))
     poisoned = join_manifest(root, work, 'identity-poison', poison)
     value, report = evaluate(evaluator, poisoned, 'store@1/observe_joins/law_AfterAbandoned')
     bodies += bool(report.get('outcome'))
@@ -477,8 +481,8 @@ def identity_cases(root, evaluator, work, artifacts, coverage, unavailable, call
 
 def deadline_timing(root, evaluator, work, artifacts, coverage, runner=None):
     source = work / ('deadline-timing' + ('-control' if runner else '') + '.hirsel')
-    source.write_text('pub fn law_timing(out: Stdout, err: Stderr, c: Clock, tasks: Tasks) -> bool waits {\n'
-                      '    observe_drive.deadline_join(out, err, c, tasks)\n}\n')
+    source.write_text('pub fn law_timing(out: Stdout, err: Stderr, c: Clock, r: Random, tasks: Tasks, net: Net) -> bool waits {\n'
+                      '    observe_drive.deadline_join(out, err, c, r, tasks, net)\n}\n')
     modules = ('observe', 'fixture', 'positions', 'session', 'observe_drive')
     selected = manifest(root, work, source.stem, runner, extra=[
         *((root / f'core/programs/observe/{module}.hirsel',

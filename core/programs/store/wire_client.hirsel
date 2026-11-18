@@ -160,13 +160,21 @@ pub fn pair[G: send, H: send](tasks: Tasks, n: Net, c: Clock, random: Random,
     place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]],
     keys: List[Bytes], take token: Option[Bytes], q: u64, n_session: u64)
     -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
-    let (l, address) = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16) { Ok(take sockets) => take sockets, Error(e) => return Error(Network(e)) }
-    // Reserve the fixture's service work within its existing 2 MiB seed,
-    // including q = 2, while leaving room in a frame for subscription rows.
     let mut config = runner.wire_defaults(524288u64, 65536u64)
     config.q = q
     config.budget = 65536u64
     config.socket.max_frame = 32768u64
+    pair_config(tasks, n, c, random, policy, head, post, place, keys, take token, config, n_session)
+}
+
+// Cover retention needs one whole initial Batch of 1,954 rows. Its fixture
+// selects the frame bound explicitly, using the same listener and owner.
+pub fn pair_config[G: send, H: send](tasks: Tasks, n: Net, c: Clock, random: Random,
+    policy: ingress.Ingress, head: Sender[runner.Req], post: Sender[runner.PubIn],
+    place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]],
+    keys: List[Bytes], take token: Option[Bytes], config: runner.WireConfig, n_session: u64)
+    -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
+    let (l, address) = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16) { Ok(take sockets) => take sockets, Error(e) => return Error(Network(e)) }
     let seed = Server(listener: take l, tasks: tasks, clock: c, policy: ingress.share(policy), head: channel.sender(head), post: channel.sender(post), config: config, place: place)
     let run: fn(take Server[G, H]) -> Result[(), std.wsock.Error] waits = server
     let mut h = match task.spawn(tasks, bytes n_session, take seed, run) { Ok(take h) => take h, Error((cap, _)) => return Error(Allocation(cap)) }

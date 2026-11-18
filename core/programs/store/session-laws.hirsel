@@ -3,8 +3,8 @@
 // is four payload bytes per encoded byte plus 128 per frame, not a run's peak.
 fn pressure(take c: WireConfig) -> bool {
     let units = 1u64 + c.q
-    let (head, stalled): (Sender[Frame], Receiver[Frame]) = result.unwrap(channel.new(units))
-    let (to, inbox): (Sender[Frame], Receiver[Frame]) = result.unwrap(channel.new(units))
+    let (head, stalled): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(units))
+    let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(units))
     let mut input: Bytes = result.unwrap(list.with_capacity(c.socket.max_frame))
     result.unwrap(std.codec.put_u32(1u32, mut input))
     result.unwrap(std.codec.put_u32(0u32, mut input))
@@ -15,23 +15,23 @@ fn pressure(take c: WireConfig) -> bool {
     while list.len(input) < c.socket.max_frame { result.unwrap(list.push(mut input, 97u8)) }
     for _ in 0u64 .. units {
         let f = result.unwrap(wire_decode(input))
-        if let Error(_) = channel.try_send(head, take f) { return false }
+        if let Error(_) = channel.try_send(head, wire_event(Input(take f, 0u64))) { return false }
     }
     for _ in 0u64 .. units {
         let f = result.unwrap(wire_decode(input))
-        if let Error(_) = channel.try_send(to, take f) { return false }
+        if let Error(_) = channel.try_send(to, wire_event(Input(take f, 0u64))) { return false }
     }
     // A max frame still being assembled, with geometric-growth transient and
     // receive scratch, while neither consumer drains its held requests.
     let assembly: Bytes = result.unwrap(list.with_capacity(401408u64))
-    let full_head = match channel.try_send(head, Unsubscribe(0u32)) { Error(Full(_)) => true, _ => false }
-    let full_inbox = match channel.try_send(to, Unsubscribe(0u32)) { Error(Full(_)) => true, _ => false }
+    let full_head = match channel.try_send(head, wire_event(Input(Unsubscribe(0u32), 0u64))) { Error(Full(_)) => true, _ => false }
+    let full_inbox = match channel.try_send(to, wire_event(Input(Unsubscribe(0u32), 0u64))) { Error(Full(_)) => true, _ => false }
     let mut count = 0u64
     for _ in 0u64 .. units {
-        if let Ok(Call(_, _, _, _, arg)) = channel.try_receive(stalled) {
+        if let Ok(WireEvent(e: Input(Call(_, _, _, _, arg), _))) = channel.try_receive(stalled) {
             if list.len(arg) == c.socket.max_frame - 28u64 { count += 1u64 }
         }
-        if let Ok(Call(_, _, _, _, arg)) = channel.try_receive(inbox) {
+        if let Ok(WireEvent(e: Input(Call(_, _, _, _, arg), _))) = channel.try_receive(inbox) {
             if list.len(arg) == c.socket.max_frame - 28u64 { count += 1u64 }
         }
     }

@@ -1462,9 +1462,9 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 
 **Grants.** A test that uses the fixture needs `Net` (listen and connect on 127.0.0.1), `Tasks`, `Clock` and `Random`, plus `Dir` for `Temp`. It receives them as ordinary capability parameters (PROG-4) and places them in `PlaceConfig`.
 
-**Engines.** The fixture runs on Cranelift and LLVM. The evaluator has no socket model (DECISIONS 2026-11-17, "W3e waits on W8a"). When W8a's model network provider becomes the evaluator's provider, the fixture runs there unchanged. That provider is also how a test gets a controlled network and clock.
+**Engines.** The fixture runs on Cranelift, LLVM and the evaluator. Evaluator fixtures explicitly grant W8a's model network, which supplies their controlled network and virtual clock. Native fixtures use the granted loopback network.
 
-**The runner's own harness.** `runner_calls.hirsel`'s `served` and `served_on` drive the head through the in-process seam, so that the evaluator keeps runner-law coverage. They move onto the fixture when W3e deletes the seam, which waits on W8a. Until then the two exist for different reasons, and no third harness is added.
+**The runner's own harness.** `runner_calls.hirsel`'s `served` and `served_on` drive the head over the wire with `wire_client`, using the production `serve_connection` owner. The evaluator runs those same fixtures on its model network. Subscription-pressure laws additionally hold a joined publisher inbox undrained until their drain step. The in-process client/session seam is deleted.
 
 ### 12.4 Calls this section makes
 

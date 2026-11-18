@@ -624,6 +624,8 @@ pub struct Event {
     pub task: u64,
     pub object: u64,
     pub value: u64,
+    /// Caller anchor for a TRY_SEND, used to distinguish bodies from transport.
+    pub source: Option<Anchor>,
 }
 /// Polls a task may perform before a peer that is ready gets a turn (CONC-10's
 /// fairness; native `POLLS_PER_TURN`).
@@ -1563,6 +1565,7 @@ impl Machine<'_> {
             task,
             object,
             value,
+            source: None,
         });
         if is_poll(kind, value) {
             let r = &mut self.sched.tasks[k];
@@ -3162,7 +3165,10 @@ impl Machine<'_> {
             RtOp::TrySend { item } => {
                 let i = ((a[0] - CHAN_BASE) / 2) as usize;
                 let status = self.publish(i, a[1], item);
+                let source = self.site(t);
+                let event = self.sched.events.len();
                 self.event(TRY_SEND, self.chan_id(i), status);
+                self.sched.events[event].source = source;
                 vec![status]
             }
             RtOp::Receive { .. } => {

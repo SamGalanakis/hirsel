@@ -49,13 +49,12 @@ fn arg(n: u64) -> Bytes {
     a
 }
 
-type D: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, covered: u64 }
+type D: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, policy: ingress.Ingress, covered: u64 }
 
 // The initial Batch of `sub`, whole: it names sub complete and carries `rows` rows.
-fn initial(rx: Receiver[runner.Down], sub: u32, rows: u64) -> () waits {
-    match channel.receive(rx) {
-        Ok(Batched(take b)) => {
-            let runner.KeyedBatch(version: _, complete: take complete, rows: take got, outcomes: _) = take b
+fn initial(cn: wire_client.Conn, sub: u32, rows: u64) -> () waits {
+    match wire_client.next(cn) {
+        Ok(Batch(_, take complete, take got, _)) => {
             if list.len(complete) != 1u64 || complete[0u64] != sub || list.len(got) != rows {
                 fail("runner_cover: an initial Batch not whole")
             }
@@ -66,19 +65,20 @@ fn initial(rx: Receiver[runner.Down], sub: u32, rows: u64) -> () waits {
 }
 
 fn drive(take d: D) -> () waits {
-    let made: Result[(Sender[runner.Down], Receiver[runner.Down]), Capacity] = channel.new(64u64)
-    let (tx, rx) = result.unwrap(take made)
-    let (to, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), 1048576u64, d.head, d.post, take tx, d.clock, 1u64, 2097152u64, false))
-    if let Error(_) = channel.send(to, runner.subscribe(1u32, k_span(), arg(d.covered))) {
-        fail("runner_cover: session gone")
-    }
-    initial(rx, 1u32, d.covered)
-    if let Error(_) = channel.send(to, runner.subscribe(2u32, k_span(), arg(0u64))) {
-        fail("runner_cover: session gone")
-    }
-    initial(rx, 2u32, 0u64)
+    let mut keys: List[Bytes] = list.new()
+    result.unwrap(list.push(mut keys, k_span()))
+    let mut config = runner.wire_defaults(131072u64, 65536u64)
+    config.q = 0u64
+    config.budget = 262144u64
+    config.socket.max_frame = 131072u64
+    let (cn, session) = result.unwrap(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, d.policy,
+        d.head, d.post, code.describe(place), keys, None, config, 2097152u64))
+    wire_client.send_frame(cn, Subscribe(1u32, 0u32, arg(d.covered), None))
+    initial(cn, 1u32, d.covered)
+    wire_client.send_frame(cn, Subscribe(2u32, 0u32, arg(0u64), None))
+    initial(cn, 2u32, 0u64)
     task.check_cancel()
-    let _ = channel.send(to, runner.hang_up())
+    let _ = wire_client.close(take cn)
     let _ = task.join(take session)
 }
 
@@ -95,7 +95,7 @@ fn fill(mut db: store.Db, t: store.Table[u64, u64], from: u64, to: u64) -> () wa
     }
 }
 
-pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args) -> Result[(), Exit] waits {
+pub fn main(clock: Clock, random: Random, tasks: Tasks, net: Net, argv: Args) -> Result[(), Exit] waits {
     let Some(m) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
     let covered = if result.unwrap(std.int.parse_uint(m, 10u32)) == 1u64 { ROWS } else { 10u64 }
     let mut db = store.memory(clock, random, store.defaults())
@@ -114,7 +114,8 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args) -> Result[()
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let mail = result.unwrap(runner.mailbox(4u64))
-    let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, covered: covered)
+    let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
+    let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, net: net, random: random, policy: ingress.share(policy), covered: covered)
     let driving = match task.spawn(tasks, bytes 33554432u64, take d, drive) {
         Ok(take t) => take t,
         Error(_) => return Error(Exit(status: 3)),
@@ -123,7 +124,11 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args) -> Result[()
         Ok(()) => (),
         Error(_) => return Error(Exit(status: 4)),
     }
-    match task.join(take driving) {
+    let driven = task.join(take driving)
+    let mut policy_task = take policy_handle
+    task.cancel(mut policy_task)
+    let _ = task.join(take policy_task)
+    match driven {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 6)),
     }

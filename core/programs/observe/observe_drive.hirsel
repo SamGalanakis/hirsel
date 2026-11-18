@@ -1,13 +1,9 @@
 // The bounded seeded client driver. The target lands after S5b and uses the
-// runner's in-process API; it adds no observer hooks to the runner or store.
+// runner's wire client; it adds no observer hooks to the runner or store.
 pub type Mix: codec + send = Correct | ReuseWhileLive | RecoverNewBytes | NoDirectory | AdvanceOnRefusal
 type Reg = runner.Registry[(), observe_fixture.Handles]
-type Drive: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, out: Stdout, err: Stderr, seed: u64, mix: Mix }
-type Conn {
-    id: u64, clock: Clock, out: Stdout, to: Sender[runner.Event], from: Receiver[runner.Down],
-    task: Task[Result[(), runner.RegisterError]], dog: Task[()]
-}
-type Dog: send { clock: Clock, at: u64, to: Sender[runner.Down] }
+type Drive: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, policy: ingress.Ingress, token: Bytes, out: Stdout, err: Stderr, seed: u64, mix: Mix }
+type Conn { id: u64, clock: Clock, out: Stdout, wire: wire_client.Conn, task: Task[Result[(), std.wsock.Error]] }
 const NEVER: u64 = 18446744073709551615u64
 const LATER: u64 = 10000000000u64
 const N_PLACE: u64 = 1048576u64
@@ -47,54 +43,69 @@ fn emit(out: Stdout, trace: Log[observe.Obs], take e: observe.Obs) -> () waits {
     result.unwrap(log.append(trace, take e))
 }
 
-fn bark(take d: Dog) -> () waits {
-    host.sleep_until(d.clock, d.at)
-    let Dog(clock: _, at: _, to: take to) = take d
-    let _ = channel.send(to, Batched(runner.KeyedBatch(version: NEVER, complete: list.new(), rows: list.new(), outcomes: list.new())))
+fn drive_input(take head: Sender[runner.Req], take post: Sender[runner.PubIn], clock: Clock, random: Random, tasks: Tasks, net: Net, out: Stdout, err: Stderr, seed: u64, mix: Mix) -> (Drive, Task[()]) waits {
+    let mut config = ingress.defaults()
+    config.call_period_ns = 1u64
+    let (policy, take handle) = result.unwrap(ingress.start(tasks, clock, random, config, 1048576u64))
+    let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
+    let d = Drive(head: take head, post: take post, clock: clock, tasks: tasks, net: net, random: random,
+        policy: ingress.share(policy), token: result.unwrap(clone(ingress.principal(principal))),
+        out: out, err: err, seed: seed, mix: mix)
+    (take d, take handle)
 }
 
-fn connect(d: Drive, id: u64) -> Conn {
-    connect_in(d, id, 8u64)
+fn keys() -> List[Bytes] {
+    let mut wanted: List[Bytes] = list.new()
+    result.unwrap(list.push(mut wanted, entry()))
+    wanted
 }
 
-fn connect_in(d: Drive, id: u64, q: u64) -> Conn {
-    let made: Result[(Sender[runner.Down], Receiver[runner.Down]), Capacity] = channel.new(64u64)
-    let (to, from) = result.unwrap(take made)
-    let watch = Dog(clock: d.clock, at: host.mono_ns(d.clock) + 5000000000u64, to: channel.sender(to))
-    let dog = match task.spawn(d.tasks, bytes 65536u64, take watch, bark) {
-        Ok(take t) => take t,
-        Error(_) => fail("observe drive watchdog"),
-    }
-    let (send, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), N_PLACE, d.head, d.post, take to, d.clock, q, 2097152u64, false))
-    Conn(id: id, clock: d.clock, out: d.out, to: take send, from: take from, task: take session, dog: take dog)
+fn connect(d: Drive, id: u64) -> Conn waits {
+    // These histories have at most two live sends per connection. q=1 keeps
+    // that bound inside the original 2 MiB seed with the wire reader included.
+    connect_in(d, id, 1u64)
+}
+
+fn connect_in(d: Drive, id: u64, q: u64) -> Conn waits {
+    let (take wire, take session) = result.unwrap(wire_client.pair(d.tasks, d.net, d.clock, d.random,
+        d.policy, d.head, d.post, code.describe(place), keys(), Some(result.unwrap(clone(d.token))), q, 2097152u64))
+    Conn(id: id, clock: d.clock, out: d.out, wire: take wire, task: take session)
 }
 
 fn ask(c: Conn, trace: Log[observe.Obs], a: observe_fixture.Request, key: Bytes, after: u64) -> () waits {
     let raw = observe_fixture.encoded(a)
     let at = host.mono_ns(c.clock)
-    let deadline = at + after
+    let ms: u32 = int.narrow((after + 999999u64) / 1000000u64)
+    let duration: u64 = int.widen(ms)
+    let deadline = at + duration * 1000000u64
     emit(c.out, trace, Sent(observe.Send(conn: c.id, stream: observe.own(a.stream), p: a.p,
         digest: observe_fixture.digest(key, raw), deadline: deadline, at: at)))
-    let call = runner.Call(stream: observe.own(a.stream), p: a.p, key: observe.own(key), arg: take raw, deadline: deadline)
-    let _ = result.unwrap(channel.send(c.to, runner.ask(take call)))
+    let mut offset = 0u64
+    let stream_number: u32 = int.narrow(result.unwrap(std.codec.take_u64(a.stream, mut offset)))
+    wire_client.send_frame(c.wire, Call(stream_number, a.p, wire_client.slot(keys(), key), ms, take raw))
 }
 
 type Got { version: u64, stream: Bytes, p: u64, outcome: runner.Outcome }
 
-// The same public Down/KeyedBatch seam as runner_calls.frame.
-fn receive(c: Conn) -> Got waits {
-    match channel.receive(c.from) {
-        Ok(Batched(take b)) => {
-            if b.version == NEVER { fail("observe drive: unanswered send") }
-            if list.len(b.rows) != 0u64 || list.len(b.outcomes) != 1u64 { fail("observe drive: one outcome per Batch") }
-            let runner.KeyedBatch(version: v, complete: _, rows: _, outcomes: take os) = take b
-            for take t in os {
-                let runner.KeyedDone(stream: take received_stream, p: p, outcome: take o) = take t
-                return Got(version: v, stream: take received_stream, p: p, outcome: take o)
+// Decode the same runner.Frame as the calls fixture; the request's stream
+// number remains the observer's logical key across its shared-principal sockets.
+fn received(take incoming: runner.Frame) -> Got {
+    match take incoming {
+        Batch(v, _, take rows, take outcomes) => {
+            if list.len(rows) != 0u64 || list.len(outcomes) != 1u64 { fail("observe drive: one outcome per Batch") }
+            for take outcome in take outcomes {
+                let runner.Done(stream: id, p: p, outcome: take o) = take outcome
+                return Got(version: v, stream: stream(int.widen(id)), p: p, outcome: take o)
             }
             fail("observe drive: empty Batch")
         },
-        Ok(_) => fail("observe drive: expected Batch"),
+        _ => fail("observe drive: expected Batch"),
+    }
+}
+
+fn receive(c: Conn) -> Got waits {
+    match wire_client.next(c.wire) {
+        Ok(take f) => received(take f),
         Error(_) => fail("observe drive: client channel closed"),
     }
 }
@@ -121,8 +132,8 @@ fn record_reply(c: Conn, trace: Log[observe.Obs], take f: Got) -> Got waits {
 }
 
 fn close(take c: Conn, trace: Log[observe.Obs]) -> () waits {
-    let _ = channel.send(c.to, runner.hang_up())
-    let Conn(id: id, clock: clock, out: out, to: _, from: _, task: take session, dog: _) = take c
+    let Conn(id: id, clock: clock, out: out, wire: take wire, task: take session) = take c
+    let _ = wire_client.close(take wire)
     let _ = task.join(take session)
     emit(out, trace, Closed(observe.Close(conn: id, code: 1000u64, at: host.mono_ns(clock))))
 }
@@ -197,14 +208,15 @@ fn drive(take d: Drive) -> () waits {
     publish(d.err, log.finish(take trace))
 }
 
-pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, seed: u64, mix: Mix) -> bool waits {
+pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net, seed: u64, mix: Mix) -> bool waits {
     let mut db = store.memory(clock, random, store.defaults())
     let ca: std.codec.Codec[observe_fixture.Request] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let mail = result.unwrap(runner.mailbox(4u64))
-    let input = Drive(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, out: out, err: err, seed: seed, mix: mix)
+    let (take input, take policy_handle) = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, seed, mix)
+    let mut policy_task = take policy_handle
     let body = match task.spawn(tasks, bytes 33554432u64, take input, drive) {
         Ok(take t) => take t,
         Error(_) => return false,
@@ -212,6 +224,8 @@ pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks,
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
     let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.handles), code.describe(observe_fixture.query_handles), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)
+    task.cancel(mut policy_task)
+    let _ = task.join(take policy_task)
     match opened { Ok(()) => (), Error(_) => return false }
     match driven { Ok(()) => true, Error(_) => false }
 }
@@ -222,11 +236,11 @@ type JoinDrive: send { drive: Drive, scenario: JoinCase }
 
 // The original early-then-late observer case retains its 1000 ns timing oracle
 // on the evaluator's virtual Clock. Wire ordering is checked separately.
-pub fn deadline_join(out: Stdout, err: Stderr, clock: Clock, tasks: Tasks) -> bool waits {
+pub fn deadline_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(64u64))
     let mail = result.unwrap(runner.mailbox(64u64))
-    let d = Drive(head: take head, post: runner.post(mail), clock: clock, tasks: tasks,
-        out: out, err: err, seed: 0u64, mix: Correct)
+    let (take d, take policy_handle) = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, 0u64, Correct)
+    let mut policy_task = take policy_handle
     let trace: Log[observe.Obs] = result.unwrap(log.new())
     let cn = connect_in(d, 99u64, 1u64)
     let a = args(0u64, 0u64, 0u64, 0u64)
@@ -235,6 +249,8 @@ pub fn deadline_join(out: Stdout, err: Stderr, clock: Clock, tasks: Tasks) -> bo
     let _ = frame(cn, trace)
     close(take cn, trace)
     join_verdicts(err, log.finish(take trace))
+    task.cancel(mut policy_task)
+    let _ = task.join(take policy_task)
     true
 }
 
@@ -251,23 +267,17 @@ fn join_verdicts(err: Stderr, take events: List[observe.Obs]) -> () waits {
 // A correct session ends after y. A mutant may answer it; record that reply so
 // J1, rather than a driver assertion, diagnoses the identity violation.
 fn mismatch_result(take c: Conn, trace: Log[observe.Obs]) -> () waits {
-    match channel.receive(c.from) {
-        Ok(Batched(take b)) => {
-            if b.version == NEVER {
-                let Conn(id: id, clock: clock, out: out, to: _, from: _, task: take session, dog: _) = take c
-                match task.join(take session) { Ok(Ok(())) => (), _ => fail("observe join: session did not end cleanly") }
-                emit(out, trace, Closed(observe.Close(conn: id, code: 1008u64, at: host.mono_ns(clock))))
-            } else {
-                if list.len(b.rows) != 0u64 || list.len(b.outcomes) != 1u64 { fail("observe join: one outcome per Batch") }
-                let runner.KeyedBatch(version: v, complete: _, rows: _, outcomes: take outcomes) = take b
-                for take answer in outcomes {
-                    let runner.KeyedDone(stream: take received_stream, p: p, outcome: take o) = take answer
-                    let _ = record_reply(c, trace, Got(version: v, stream: take received_stream, p: p, outcome: take o))
-                }
-                close(take c, trace)
-            }
+    match wire_client.next(c.wire) {
+        Ok(take f) => {
+            let _ = record_reply(c, trace, received(take f))
+            close(take c, trace)
         },
-        _ => fail("observe join: expected Batch or watchdog"),
+        Error(_) => {
+            let Conn(id: id, clock: clock, out: out, wire: take wire, task: take session) = take c
+            let _ = wire_client.close(take wire)
+            match task.join(take session) { Ok(Ok(())) => (), _ => fail("observe join: session did not end cleanly") }
+            emit(out, trace, Closed(observe.Close(conn: id, code: 1008u64, at: host.mono_ns(clock))))
+        },
     }
 }
 
@@ -309,14 +319,15 @@ fn drive_join(take input: JoinDrive) -> () waits {
     join_verdicts(d.err, log.finish(take trace))
 }
 
-pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, scenario: JoinCase) -> bool waits {
+pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: JoinCase) -> bool waits {
     let mut db = store.memory(clock, random, store.defaults())
     let ca: std.codec.Codec[observe_fixture.Request] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let mail = result.unwrap(runner.mailbox(4u64))
-    let d = Drive(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, out: out, err: err, seed: 0u64, mix: Correct)
+    let (take d, take policy_handle) = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, 0u64, Correct)
+    let mut policy_task = take policy_handle
     let input = JoinDrive(drive: take d, scenario: scenario)
     let body = match task.spawn(tasks, bytes 33554432u64, take input, drive_join) {
         Ok(take t) => take t,
@@ -325,6 +336,8 @@ pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: T
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
     let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.handles), code.describe(observe_fixture.query_handles), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)
+    task.cancel(mut policy_task)
+    let _ = task.join(take policy_task)
     match opened { Ok(()) => (), Error(_) => return false }
     match driven { Ok(()) => true, Error(_) => false }
 }

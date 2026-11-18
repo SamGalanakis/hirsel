@@ -19,8 +19,8 @@ SESSION = ('W3', 'W4', 'W5')
 def seeded_inputs(root, work, seeds, mix=None):
     source = work / 'observe_seeds.hirsel'
     source.write_text('\n'.join(
-        f'pub fn seed_{seed}(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks) -> bool waits {{\n'
-        f'    observe_drive.run(out, err, clock, random, tasks, {seed}u64, {mix or MIXES[seed % len(MIXES)]})\n}}\n'
+        f'pub fn seed_{seed}(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {{\n'
+        f'    observe_drive.run(out, err, clock, random, tasks, net, {seed}u64, {mix or MIXES[seed % len(MIXES)]})\n}}\n'
         for seed in seeds))
     modules = ('observe', 'fixture', 'positions', 'session', 'observe_drive')
     return manifest(root, work, 'drive', extra=[

@@ -49,6 +49,7 @@ pub(super) fn glue_emitter<'a>(
         failures,
         constants: &[],
         observe_charge: false,
+        receive_loops: Default::default(),
         facts,
         aliases: None,
         caller_site,

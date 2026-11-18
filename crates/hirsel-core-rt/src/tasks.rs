@@ -2318,6 +2318,14 @@ pub(crate) fn before_commit() -> crate::sequencer::Guard {
     crate::sequencer::enter()
 }
 
+/// Only a pool fiber can retain a receive acquisition. Replay has to
+/// dispatch each scalar receive at its own tape gap.
+pub(crate) fn can_fuse_receives() -> bool {
+    let task = CURRENT.get();
+    // SAFETY: CURRENT pins the task while this fiber is executing.
+    unsafe { !task.is_null() && !WORKER.get().is_null() && !(*task).replay }
+}
+
 /// An Arc count commit, which the sole live unit may keep for its next one.
 pub(crate) fn before_arc_commit() -> crate::sequencer::Guard {
     replay_boundary(false);
@@ -2994,7 +3002,7 @@ pub(crate) unsafe fn delegable(request: &Delegated) -> bool {
 /// # Safety
 /// Context belongs to this task; primary is available on a normal path.
 #[inline(always)]
-pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
+pub(crate) unsafe fn cancel_pending(context: *mut Context) -> bool {
     // SAFETY: the operation pins its exclusive, aligned task context. Pending
     // cancellation is the common false condition; shield/grant checks are cold.
     let current = unsafe { NonNull::new_unchecked(context).as_ref() };
@@ -3005,7 +3013,15 @@ pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
         // SAFETY: the active fiber pins the task.
         unsafe { cancel_flag(task) }
     };
-    if cancel_takes_effect(current, requested) {
+    cancel_takes_effect(current, requested)
+}
+
+/// # Safety
+/// Context belongs to this task; primary is available on a normal path.
+#[inline(always)]
+pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
+    // SAFETY: the operation pins the running task and its context.
+    if unsafe { cancel_pending(context) } {
         // SAFETY: this task exclusively owns the observed request and primary.
         unsafe { observe_cancel(context, site) };
         1

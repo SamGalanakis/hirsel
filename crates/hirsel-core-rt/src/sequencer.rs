@@ -473,6 +473,7 @@ fn backoff(spins: &mut u32) {
     }
 }
 const SPIN_LIMIT: u32 = 1 << 16;
+const RECEIVE_RUN_LIMIT: u8 = 8;
 
 /// A worker pins this record on its OS stack. Nested runtime operations use
 /// the current commit without adding themselves to the MCS queue.
@@ -490,6 +491,7 @@ pub(crate) struct Owner {
     keepable: Cell<bool>,
     /// Commits kept without a release since the last hand-off.
     kept: Cell<u32>,
+    receive_run: Cell<u8>,
     published: fn(),
     /// The run's live-unit count; one means this worker runs the only unit.
     units: *const std::sync::atomic::AtomicUsize,
@@ -514,6 +516,7 @@ impl Owner {
             crossed: Cell::new(0),
             keepable: Cell::new(false),
             kept: Cell::new(0),
+            receive_run: Cell::new(0),
             published,
             units,
             #[cfg(feature = "testing")]
@@ -605,6 +608,15 @@ impl Owner {
     /// Serve linked delegated requests, then release. Nested entries made by
     /// a served request reuse the held token.
     fn finish(&self) {
+        let _receives = self.receive_run.replace(0);
+        #[cfg(feature = "testing")]
+        if _receives != 0
+            && let Some(sample) = &self.sample
+        {
+            let mut histogram = sample.receives.get();
+            histogram[usize::from(_receives - 1)] += 1;
+            sample.receives.set(histogram);
+        }
         // A keepable commit by the run's only live unit keeps the token for a
         // bounded run while nobody waits: a requester can only be an idle
         // worker or a timer turn, which wait the same at N=1. The next
@@ -664,7 +676,7 @@ impl Owner {
     pub(crate) fn report(&self, index: usize) {
         if let Some(sample) = &self.sample {
             eprintln!(
-                "sequencer worker={index} commits={} service_ns={} handoffs={} handoff_ns={} cross_l3={} cross_l3_ns={} served={} delegated={} parks={:?}",
+                "sequencer worker={index} commits={} service_ns={} handoffs={} handoff_ns={} cross_l3={} cross_l3_ns={} served={} delegated={} parks={:?} receive_runs={:?}",
                 sample.commits.get(),
                 sample.service.get(),
                 sample.transfers.get(),
@@ -674,6 +686,7 @@ impl Owner {
                 sample.serves.get(),
                 sample.delegated.get(),
                 PARKS.each_ref().map(|n| n.load(Ordering::Relaxed)),
+                sample.receives.get(),
             );
         }
     }
@@ -691,6 +704,7 @@ struct Sample {
     cross_ns: Cell<u64>,
     serves: Cell<u64>,
     delegated: Cell<u64>,
+    receives: Cell<[u64; RECEIVE_RUN_LIMIT as usize]>,
 }
 
 thread_local! {
@@ -730,6 +744,41 @@ pub(crate) fn enter() -> Guard {
         owner.depth.set(depth + 1);
     }
     Guard(owner)
+}
+
+impl Guard {
+    /// Keep this acquisition for bounded, private work in the same fiber.
+    /// The emitter ends it before leaving that work or entering a slow path.
+    #[inline(always)]
+    pub(crate) fn receive_succeeded(self, more: bool) {
+        // SAFETY: the worker is pinned by this guard.
+        if let Some(owner) = unsafe { self.0.as_ref() }
+            && owner.depth.get() == 1
+        {
+            let count = owner.receive_run.get() + 1;
+            owner.receive_run.set(count);
+            if more && count < RECEIVE_RUN_LIMIT {
+                owner.depth.set(0);
+                std::mem::forget(self);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn receives_in_grant() -> u8 {
+    // SAFETY: the test reads its active worker's count.
+    unsafe { OWNER.get().as_ref() }.map_or(0, |owner| owner.receive_run.get())
+}
+
+pub(crate) fn end_receive_run() {
+    // SAFETY: the installed owner is pinned. A nonzero count at this
+    // boundary belongs to the active fiber, outside a runtime commit.
+    if let Some(owner) = unsafe { OWNER.get().as_ref() }
+        && owner.receive_run.get() != 0
+    {
+        owner.finish();
+    }
 }
 
 impl Drop for Guard {

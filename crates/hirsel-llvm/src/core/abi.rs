@@ -423,9 +423,9 @@ impl FunctionEmitter<'_> {
         }
         self.ret(&abi_ty, &r);
     }
-    pub(super) fn call_site(&mut self, site: &CallSite) -> Result<()> {
+    pub(super) fn call_site(&mut self, site: &CallSite, fused_receive: bool) -> Result<()> {
         if let Callee::Runtime(op) = site.callee {
-            return self.runtime_call(op, site);
+            return self.runtime_call(op, site, fused_receive);
         }
         let sig = &self.module.signatures[site.signature.index()];
         let has_status = match site.callee {

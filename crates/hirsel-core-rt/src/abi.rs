@@ -281,6 +281,7 @@ pub unsafe extern "C" fn hirsel_core_resource_free(resource: NonNull<u8>, storag
 /// the emitter immediately abandons this body and propagates after cleanup.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_raise(context: *mut Context, cause: Cause) {
+    crate::sequencer::end_receive_run();
     // SAFETY: compiler failure paths use their obligation cell exactly once.
     unsafe {
         causes::record(&mut *context, cause);

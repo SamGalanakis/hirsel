@@ -123,6 +123,7 @@ pub unsafe extern "C" fn hirsel_core_step_catch(context: *mut Context) -> bool {
 /// Called immediately after a source Step decremented the flushed window to <= 0.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) -> u8 {
+    crate::sequencer::end_receive_run();
     // SAFETY: the engine supplies the exclusively running task's context.
     let ctx = unsafe { &mut *context };
     if ctx.steps < 0

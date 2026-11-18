@@ -63,6 +63,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub testing: bool,
     pub empty_bound: bool,
     pub observe_charge: bool,
+    receive_loops: c::receive_loops::ReceiveLoops,
 }
 
 pub(super) fn emit(
@@ -240,6 +241,7 @@ pub(super) fn emit(
         testing: tables.trace_drops,
         empty_bound: !tables.observe_charge && fast::empty_bound(body),
         observe_charge: tables.observe_charge,
+        receive_loops: c::receive_loops::ReceiveLoops::new(body),
         calls: calls::Calls::new(
             &tables.runtimes,
             signatures,
@@ -253,6 +255,9 @@ pub(super) fn emit(
     for i in order(body) {
         let block = &body.blocks[i];
         f.b.switch_to_block(f.blocks[i]);
+        if f.receive_loops.exit(i) {
+            f.c_call("hirsel_core_receive_loop_end", &[], &[], &[])?;
+        }
         let fill = fills.get(i).copied().flatten();
         let original_index =
             if let Some(fill) = fill {
@@ -622,9 +627,10 @@ impl Function<'_, '_, '_> {
                 self.set(result, v);
             }
             Inst::Call { call } => {
+                let fused_receive = self.receive_loops.call(call);
                 let call = &self.body.calls[call.index()];
                 if let Callee::Runtime(op) = call.callee {
-                    return self.runtime_call(op, call);
+                    return self.runtime_call(op, call, fused_receive);
                 }
                 let signature = &self.signatures[call.signature.index()];
                 let storage = signature

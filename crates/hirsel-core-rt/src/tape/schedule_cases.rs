@@ -2059,7 +2059,8 @@ fn sixteen_worker_recording_replays_at_one_with_exact_refunds_and_exhaustion_sit
 struct FanInReplay {
     store: Store,
     record: bool,
-    sum: u64,
+    fused: bool,
+    values: Vec<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -2106,7 +2107,22 @@ unsafe extern "C" fn fan_in_root(context: *mut Context, out: *mut u8, input: *mu
             &expect(),
         )
         .unwrap();
-        let channel = hirsel_core_channel_new(context, 1, crate::tasks_tests::value::<u64>(8), 20);
+        let fused = (*case).fused;
+        let channel =
+            hirsel_core_channel_new(context, if fused { 64 } else { 1 }, value::<u64>(8), 20);
+        let mut script = Script {
+            waited: BTreeSet::new(),
+            resumed: BTreeSet::new(),
+            calls: 0,
+            pending: false,
+            fault_at: None,
+            manual: false,
+            armed: None,
+        };
+        let clock = fused.then(|| {
+            tape.on_tape(crate::entry::CLOCK, (script.provider(), 0))
+                .unwrap()
+        });
         let mut handles = [std::ptr::null_mut(); 16];
         for (lane, task) in handles.iter_mut().enumerate() {
             let mut job = FanInJob {
@@ -2126,12 +2142,26 @@ unsafe extern "C" fn fan_in_root(context: *mut Context, out: *mut u8, input: *mu
             assert!(!task.is_null());
         }
         hirsel_core_sender_drop(channel.sender);
-        let mut sum = 0;
-        for _ in 0..16 * FAN_IN_ROUNDS {
-            let mut value = 0u64;
-            let got = hirsel_core_receive(context, channel.receiver, (&raw mut value).cast(), 23);
-            assert!(got.transferred);
-            sum += value;
+        let receive = if fused && (*case).record {
+            hirsel_core_receive_in_loop
+        } else {
+            hirsel_core_receive
+        };
+        for half in 0..2 {
+            for _ in 0..8 * FAN_IN_ROUNDS {
+                let mut value = 0u64;
+                let got = receive(context, channel.receiver, (&raw mut value).cast(), 23);
+                assert!(got.transferred);
+                (*case).values.push(value);
+            }
+            hirsel_core_receive_loop_end();
+            if half == 0
+                && let Some((provider, handle)) = clock
+            {
+                let mut request = request(SLEEP_UNTIL, 0, handle, &[], empty_buffer());
+                let outcome = hirsel_core_host(context, &provider, &mut request);
+                assert_eq!((outcome.status, outcome.value), (0, 17));
+            }
         }
         for task in handles {
             let mut result = 0u64;
@@ -2141,10 +2171,29 @@ unsafe extern "C" fn fan_in_root(context: *mut Context, out: *mut u8, input: *mu
             );
         }
         assert_eq!(hirsel_core_receiver_drop(context, channel.receiver), 0);
-        (*case).sum = sum;
         tape.end(&ending()).unwrap();
     }
     0
+}
+
+fn execute_fan_in(fused: bool, record: Option<&[u8]>) -> (FanInReplay, Vec<Event>) {
+    let mut case = FanInReplay {
+        store: Store::default(),
+        record: record.is_none(),
+        fused,
+        values: Vec::with_capacity((16 * FAN_IN_ROUNDS) as usize),
+    };
+    if let Some(bytes) = record {
+        case.store.files.insert(b"t".to_vec(), bytes.to_vec());
+    }
+    let width = if record.is_none() { 16 } else { 1 };
+    let (_, events) = with_workers(width, || {
+        crate::tasks_tests::run(fan_in_root, &raw mut case)
+    });
+    let mut sorted = case.values.clone();
+    sorted.sort_unstable();
+    assert!(sorted.into_iter().eq(1..=16 * FAN_IN_ROUNDS));
+    (case, events)
 }
 
 /// Holders complete waiting senders' and receivers' commits at N=16. Each
@@ -2152,28 +2201,212 @@ unsafe extern "C" fn fan_in_root(context: *mut Context, out: *mut u8, input: *mu
 /// replay, which serves nothing, reproduces the recorded event stream.
 #[test]
 fn sixteen_worker_channel_recording_with_served_commits_replays_at_one() {
-    fn execute(record: Option<&[u8]>) -> (FanInReplay, Vec<Event>) {
-        let mut case = FanInReplay {
-            store: Store::default(),
-            record: record.is_none(),
-            sum: 0,
-        };
-        if let Some(bytes) = record {
-            case.store.files.insert(b"t".to_vec(), bytes.to_vec());
-        }
-        let width = if record.is_none() { 16 } else { 1 };
-        let (_, events) = with_workers(width, || {
-            crate::tasks_tests::run(fan_in_root, &raw mut case)
-        });
-        // The sum of 1 through 16 x 200.
-        assert_eq!(case.sum, 3200 * 3201 / 2);
-        (case, events)
-    }
-    let (recorded, events) = execute(None);
+    let (recorded, events) = execute_fan_in(false, None);
     assert_eq!(
         events.iter().filter(|event| event.kind == RECEIVE).count(),
         3200
     );
-    let (_, replayed) = execute(Some(recorded.store.file()));
+    let (_, replayed) = execute_fan_in(false, Some(recorded.store.file()));
     assert_eq!(replayed, events);
+}
+
+#[test]
+fn fused_receive_recording_replays_item_order_and_interior_wait_at_one() {
+    let (recorded, events) = execute_fan_in(true, None);
+    let (_, mut frames) = frames(recorded.store.file());
+    let mut position = 0;
+    let mut wait = None;
+    for frame in &mut frames {
+        position += gap(frame).map_or(0, |gap| *gap);
+        if matches!(frame, Frame::Wait { task: 0, .. }) {
+            assert!(wait.replace(position).is_none());
+        }
+    }
+    assert!(wait.is_some_and(|at| at > 1600 && at < events.len() as u64));
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, Frame::Wake { task: 0, .. }))
+    );
+    let (replayed, replay_events) = execute_fan_in(true, Some(recorded.store.file()));
+    assert_eq!(recorded.values, replayed.values);
+    assert_eq!(events, replay_events);
+}
+
+/// The sender and receiver are held by the same actor, so the Full result
+/// follows from scalar capacity under any schedule.
+#[test]
+fn receive_loop_releases_only_one_slot_before_the_next_call() {
+    unsafe extern "C" fn root(context: *mut Context, out: *mut u8, _: *mut u8) -> u8 {
+        // SAFETY: root owns both endpoints and every transfer place.
+        unsafe {
+            let channel = hirsel_core_channel_new(context, 2, value::<u64>(8), 30);
+            for mut value in [1u64, 2] {
+                assert_eq!(
+                    hirsel_core_try_send(channel.sender, (&raw mut value).cast()),
+                    0
+                );
+            }
+            let mut item = 0u64;
+            assert!(
+                hirsel_core_receive_in_loop(context, channel.receiver, (&raw mut item).cast(), 31)
+                    .transferred
+            );
+            assert_eq!(item, 1);
+            hirsel_core_receive_loop_end();
+            let mut third = 3u64;
+            let mut fourth = 4u64;
+            assert_eq!(
+                hirsel_core_try_send(channel.sender, (&raw mut third).cast()),
+                0
+            );
+            assert_eq!(
+                hirsel_core_try_send(channel.sender, (&raw mut fourth).cast()),
+                1
+            );
+            for expected in [2, 3] {
+                assert!(
+                    hirsel_core_receive(context, channel.receiver, (&raw mut item).cast(), 32)
+                        .transferred
+                );
+                assert_eq!(item, expected);
+            }
+            hirsel_core_sender_drop(channel.sender);
+            hirsel_core_receiver_drop(context, channel.receiver);
+            out.cast::<u64>().write(item);
+        }
+        0
+    }
+    let script = Arc::new(ScheduleScript::new(0));
+    for workers in [1, 2] {
+        assert_eq!(
+            with_workers(workers, || script.install(|| crate::tasks_tests::run(
+                root,
+                ()
+            )
+            .0)),
+            3
+        );
+    }
+}
+
+#[test]
+fn receive_grant_ends_at_eight_and_closed_initializes_nothing() {
+    unsafe extern "C" fn root(context: *mut Context, out: *mut u8, _: *mut u8) -> u8 {
+        // SAFETY: the channel, destination and task context belong to root.
+        unsafe {
+            let channel = hirsel_core_channel_new(context, 10, value::<u64>(8), 40);
+            for mut value in 1u64..=10 {
+                assert_eq!(
+                    hirsel_core_try_send(channel.sender, (&raw mut value).cast()),
+                    0
+                );
+            }
+            hirsel_core_sender_drop(channel.sender);
+            let mut item = 0u64;
+            for expected in 1..=10 {
+                assert!(
+                    hirsel_core_receive_in_loop(
+                        context,
+                        channel.receiver,
+                        (&raw mut item).cast(),
+                        41
+                    )
+                    .transferred
+                );
+                assert_eq!(item, expected);
+                let retained = match expected {
+                    8 | 10 => 0,
+                    9 => 1,
+                    _ => expected as u8,
+                };
+                assert_eq!(crate::sequencer::receives_in_grant(), retained);
+            }
+            let closed =
+                hirsel_core_receive_in_loop(context, channel.receiver, (&raw mut item).cast(), 42);
+            assert_eq!((closed.transferred, closed.status, item), (false, 0, 10));
+            assert_eq!(crate::sequencer::receives_in_grant(), 0);
+            hirsel_core_receiver_drop(context, channel.receiver);
+            out.cast::<u64>().write(item);
+        }
+        0
+    }
+    assert_eq!(with_workers(2, || crate::tasks_tests::run(root, ()).0), 10);
+}
+
+#[test]
+fn receive_grant_releases_before_exhausted_step_and_rechecks_cancellation() {
+    unsafe extern "C" fn receive(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: root transferred the receiver and keeps the sender live.
+        unsafe {
+            let receiver = input.cast::<*mut Channel>().read();
+            assert!(crate::steps::hirsel_core_step_enter(context, 0));
+            let mut item = 0u64;
+            assert!(
+                hirsel_core_receive_in_loop(context, receiver, (&raw mut item).cast(), 50)
+                    .transferred
+            );
+            assert_eq!((item, crate::sequencer::receives_in_grant()), (1, 1));
+            (*context).steps -= 1;
+            assert_eq!(crate::steps::hirsel_core_step_out(context, 51), 1);
+            assert_eq!(crate::sequencer::receives_in_grant(), 0);
+            let cause = (*context).causes.iter().next().unwrap();
+            assert_eq!((cause.kind(), cause.site), (causes::OUT_OF_TIME, 51));
+            assert!(crate::steps::hirsel_core_step_catch(context));
+            assert!(
+                hirsel_core_receive_in_loop(context, receiver, (&raw mut item).cast(), 52)
+                    .transferred
+            );
+            assert_eq!((item, crate::sequencer::receives_in_grant()), (2, 1));
+
+            // Deliver a request after this call has taken its item, before the next.
+            request_flow_fixture_cancel();
+            let cancelled =
+                hirsel_core_receive_in_loop(context, receiver, (&raw mut item).cast(), 53);
+            assert_eq!(
+                (cancelled.transferred, cancelled.status, item),
+                (false, 1, 2)
+            );
+            assert_eq!(crate::sequencer::receives_in_grant(), 0);
+            assert_eq!(hirsel_core_try_receive(receiver, (&raw mut item).cast()), 0);
+            assert_eq!(item, 3);
+            hirsel_core_receiver_drop(context, receiver);
+        }
+        1
+    }
+    unsafe extern "C" fn root(context: *mut Context, out: *mut u8, _: *mut u8) -> u8 {
+        // SAFETY: root owns the sender and task handle.
+        unsafe {
+            let mut channel = hirsel_core_channel_new(context, 3, value::<u64>(8), 54);
+            for mut item in 1u64..=3 {
+                assert_eq!(
+                    hirsel_core_try_send(channel.sender, (&raw mut item).cast()),
+                    0
+                );
+            }
+            let task = hirsel_core_spawn(
+                context,
+                0,
+                64,
+                (&raw mut channel.receiver).cast(),
+                receive,
+                layout::<*mut Channel>(),
+                55,
+            )
+            .task;
+            let joined = hirsel_core_join(context, task, ptr::null_mut(), 56);
+            let chain = causes::Causes::from_raw(joined.causes);
+            assert_eq!(
+                chain
+                    .iter()
+                    .map(|cause| (cause.kind(), cause.site))
+                    .collect::<Vec<_>>(),
+                [(causes::CANCELLED, 53)]
+            );
+            hirsel_core_sender_drop(channel.sender);
+            out.cast::<u64>().write(0);
+        }
+        0
+    }
+    with_workers(2, || crate::tasks_tests::run(root, ()));
 }

@@ -133,7 +133,12 @@ impl FunctionEmitter<'_> {
         values.push(status);
         values
     }
-    pub(super) fn runtime_call(&mut self, op: RtOp, site: &CallSite) -> Result<()> {
+    pub(super) fn runtime_call(
+        &mut self,
+        op: RtOp,
+        site: &CallSite,
+        fused_receive: bool,
+    ) -> Result<()> {
         let args = site
             .args
             .get(&self.body.pools.args)
@@ -328,6 +333,8 @@ impl FunctionEmitter<'_> {
             RtOp::Send { .. } | RtOp::Receive { .. } => self.native_call(
                 if matches!(op, RtOp::Send { .. }) {
                     "hirsel_core_send"
+                } else if fused_receive {
+                    "hirsel_core_receive_in_loop"
                 } else {
                     "hirsel_core_receive"
                 },

@@ -392,6 +392,43 @@ pub unsafe extern "C" fn hirsel_core_receive(
     }
 }
 
+/// Receive at a source call in a bounded loop of private work. An empty or
+/// cancelled call releases the acquisition before the ordinary scalar recheck.
+///
+/// # Safety
+/// As for hirsel_core_receive. The caller ends the receive run before any
+/// shared operation (except this receive on the same channel), cleanup,
+/// callback, suspension or exit.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_receive_in_loop(
+    context: *mut Context,
+    channel: *mut Channel,
+    destination: *mut u8,
+    site: u64,
+) -> Transfer {
+    // SAFETY: the caller pins the channel and its one result place. There
+    // is no copy, credit fold or event for any later source call.
+    unsafe {
+        if (*channel).capacity > 1 && tasks::can_fuse_receives() {
+            let commit = crate::sequencer::enter();
+            if !tasks::cancel_pending(context) && take(channel, destination) {
+                commit.receive_succeeded((*channel).len != 0);
+                return Transfer {
+                    transferred: true,
+                    status: 0,
+                };
+            }
+        }
+        hirsel_core_receive(context, channel, destination, site)
+    }
+}
+
+/// End the active fiber's bounded receive run at a lowering boundary.
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_receive_loop_end() {
+    crate::sequencer::end_receive_run();
+}
+
 /// # Safety
 /// Sole receiver borrow and writable T destination. Empty and Closed return
 /// immediately; Empty is the deterministic scheduler poll point.

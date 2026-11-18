@@ -226,7 +226,7 @@ pub unsafe extern "C" fn __wrap_hirsel_core_os_run_with_sources(
 /// The runner and entry obey the process ABI. The configuration stays live
 /// through their return.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_test_run_last(
+pub unsafe extern "C" fn hirsel_core_test_run_last_with_runner(
     run: unsafe extern "C" fn(
         *const hirsel_core_rt::process::Config,
         hirsel_core_rt::process::Entry,

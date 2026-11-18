@@ -14,7 +14,7 @@ static void event(void *s, HirselCoreEvent e) {
 }
 uint8_t __real_hirsel_core_run(const HirselCoreProcessConfig*,HirselCoreEntry);
 #ifdef SCRIPTED_SCHEDULER
-extern uint8_t hirsel_core_test_run_last(
+extern uint8_t hirsel_core_test_run_last_with_runner(
     uint8_t (*)(const HirselCoreProcessConfig *, HirselCoreEntry),
     const HirselCoreProcessConfig *, HirselCoreEntry);
 #endif
@@ -33,7 +33,7 @@ uint8_t __wrap_hirsel_core_run(const HirselCoreProcessConfig *input,HirselCoreEn
     uint8_t result;
 #ifdef SCRIPTED_SCHEDULER
     if (getenv("HIRSEL_POLL_LAST") != NULL)
-        result = hirsel_core_test_run_last(__real_hirsel_core_run, &cfg, entry);
+        result = hirsel_core_test_run_last_with_runner(__real_hirsel_core_run, &cfg, entry);
     else
 #endif
         result = __real_hirsel_core_run(&cfg, entry);

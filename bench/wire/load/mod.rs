@@ -1,4 +1,4 @@
-use crate::client::{Client, returned};
+use crate::client::{Client, Socket, returned};
 use crate::codec::{self, Frame, Want};
 use crate::{BITS, CHUNKS, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -216,7 +216,7 @@ pub async fn memory(
     }
     let version = witness.version;
     witness.socket.close(None).await?;
-    let mut sockets = Vec::with_capacity(count);
+    let mut sockets = JoinSet::new();
     let mut setup_error = None;
     for _ in 0..count {
         let result = async {
@@ -228,7 +228,9 @@ pub async fn memory(
         }
         .await;
         match result {
-            Ok(socket) => sockets.push(socket),
+            Ok(socket) => {
+                sockets.spawn(hold_idle(socket));
+            }
             Err(error) => {
                 setup_error = Some(error.to_string());
                 break;
@@ -236,6 +238,9 @@ pub async fn memory(
         }
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
+    while let Some(closed) = sockets.try_join_next() {
+        setup_error.get_or_insert_with(|| closed.unwrap_or_else(|error| error.to_string()));
+    }
     let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
     let smaps = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))?;
     let field = |text: &str, name: &str| -> Result<u64> {
@@ -247,7 +252,7 @@ pub async fn memory(
             .parse()?)
     };
     Ok(json!({
-        "complete": sockets.len() == count,
+        "complete": setup_error.is_none() && sockets.len() == count,
         "connections": sockets.len(), "requested_connections": count, "subscribed": subscribed,
         "setup_error": setup_error, "seeded_chunks": rows, "seed_version": version,
         "server_rss_bytes": field(&smaps, "Rss:")? * 1024,
@@ -256,6 +261,24 @@ pub async fn memory(
         "server_threads": field(&status, "Threads:")?,
         "wall_seconds": wall.elapsed().as_secs_f64(),
     }))
+}
+
+// Service ping/pong while a socket waits for the memory sample.
+async fn hold_idle(mut socket: Socket) -> String {
+    while let Some(message) = socket.next().await {
+        match message {
+            Ok(Message::Ping(_)) => {
+                // Tungstenite queues the Pong on read.
+                if let Err(error) = socket.flush().await {
+                    return error.to_string();
+                }
+            }
+            Ok(Message::Close(frame)) => return format!("idle socket closed: {frame:?}"),
+            Err(error) => return error.to_string(),
+            _ => (),
+        }
+    }
+    String::from("idle socket reached EOF")
 }
 
 async fn caller(
@@ -456,6 +479,27 @@ pub async fn echo(samples: usize) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn idle_socket_answers_ping_and_reports_close() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let peer = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await?;
+            let mut socket = tokio_tungstenite::accept_async(tcp).await?;
+            let payload = vec![1, 2, 3];
+            socket.send(Message::Ping(payload.clone().into())).await?;
+            let pong = socket.next().await.ok_or("socket ended before Pong")??;
+            assert_eq!(pong, Message::Pong(payload.into()));
+            socket.close(None).await?;
+            Ok::<(), crate::Error>(())
+        });
+        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}")).await?;
+        let ended = tokio::time::timeout(Duration::from_secs(2), hold_idle(socket)).await?;
+        peer.await??;
+        assert!(ended.starts_with("idle socket closed"));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn observer_timestamp_survives_a_late_sent_notification() -> Result<()> {
         let (tx, rx) = mpsc::channel(8);

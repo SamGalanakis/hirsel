@@ -956,6 +956,28 @@ pub(crate) fn wait_for_peer_idle_check() {
 
 /// Use the worker's idle stack after publishing a park under its commit.
 /// The dispatcher adopts the token before it inspects or recycles the stack.
+/// The heap of a task that switched out to wait, if it has pages to purge.
+/// # Safety
+/// The dispatcher has just switched out of `task`, which no other worker can
+/// resume until the caller releases its commit.
+unsafe fn waiting_heap<'a>(
+    task: *mut Task,
+    direct: *mut Task,
+) -> Option<&'a std::sync::Arc<crate::task_heap::Heap>> {
+    // SAFETY: the stopped task and its context are pinned, per the contract.
+    unsafe {
+        if !direct.is_null() || !matches!((*task).state, State::Waiting | State::Provider) {
+            return None;
+        }
+        (*task)
+            .context
+            .as_ref()?
+            .heap
+            .get()
+            .filter(|heap| heap.pending())
+    }
+}
+
 unsafe fn switch_to_idle(task: *mut Task) {
     let worker = WORKER.get();
     // SAFETY: the running task is pinned here, and only this worker owns the
@@ -2731,6 +2753,18 @@ pub(crate) fn provider_group() -> Option<crate::tape::schedule::Group> {
     unsafe { task.as_ref().and_then(|t| t.group) }
 }
 
+/// The running task's heap, or null outside a task or before its first block.
+pub(crate) fn current_heap() -> *const crate::task_heap::Heap {
+    let task = CURRENT.get();
+    // SAFETY: CURRENT pins its task and context, or is null outside a task.
+    unsafe {
+        task.as_ref()
+            .and_then(|task| task.context.as_ref())
+            .and_then(|context| context.heap.get())
+            .map_or(ptr::null(), std::sync::Arc::as_ptr)
+    }
+}
+
 pub(crate) fn current_group() -> Option<crate::tape::schedule::Group> {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins its task, or is null outside a task.
@@ -3517,6 +3551,9 @@ impl RunPtr {
                     State::Provider if (*run).wake_operation(task, Wake::Parked) => direct = task,
                     _ => {}
                 }
+                if let Some(heap) = waiting_heap(task, direct) {
+                    heap.purge();
+                }
             }
             #[cfg(feature = "testing")]
             if (*run).measure {
@@ -3611,9 +3648,14 @@ impl RunPtr {
                     State::Provider if (*run).wake_operation(task, Wake::Parked) => direct = task,
                     _ => {}
                 }
+                let purge = waiting_heap(task, direct).cloned();
                 // The outgoing active unit is live across release. This
                 // publishes every receiver's already-counted hand-off first.
                 drop(commit);
+                // A woken task that resumes elsewhere meanwhile waits on the heap lock.
+                if let Some(heap) = purge {
+                    heap.purge();
+                }
                 // The worker-private stock unmaps an excess stack outside the commit.
                 if let Some(stack) = ended {
                     (*worker).stock.recycle_shared(stack, &pool.spare);

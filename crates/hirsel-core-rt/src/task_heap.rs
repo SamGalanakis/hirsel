@@ -4,6 +4,15 @@
 //! retires a queue's last page lazily, a queue keeps at most one empty page,
 //! at its head, with its free list intact: a block that is allocated and
 //! freed alone reuses its slot without resetting the page.
+//!
+//! As mimalloc's `mi_page_extend_free`, a page threads fresh slots onto its
+//! free list one native page at a time, so allocation pops only. A page whose
+//! slots have reached its third native page is spread. When its task parks,
+//! the worker returns the native pages that hold no live slot, as mimalloc's
+//! page reset and jemalloc's dirty-page purge do, and moves the frontier back
+//! to the highest live slot. A heap's first few blocks of a class that has no
+//! page share one native page of a slab per payer and kind (a nursery), so an
+//! idle task's scattered small state does not hold a slab per class.
 mod slabs;
 
 use crate::{abi_layout::own_prefix, limit::Payer};
@@ -23,6 +32,11 @@ const EMPTY_DEDICATED_LIMIT: usize = 8;
 const DEDICATED_PURGE_DELAY: Duration = Duration::from_millis(100);
 const MAX_RETAINED_DEDICATED_BYTES: usize = 4 * 1024 * 1024;
 const SLAB_BINS: usize = size_bin(SLAB / 2) as usize + 1;
+// Blocks of each class a heap places in nurseries before the class gets a page.
+const NURSERY_BLOCKS: u8 = 16;
+const NURSERY_STRIDE: usize = 1024;
+// The most native pages a slab spans.
+const _: () = assert!(SLAB / MIN_PAGE_BYTES <= u16::BITS as usize);
 
 const fn size_bin(stride: usize) -> u8 {
     if stride <= 64 {
@@ -165,6 +179,18 @@ pub(crate) struct Page {
     payer: std::cell::UnsafeCell<Payer>,
     key: std::cell::UnsafeCell<Key>,
     slots: std::cell::UnsafeCell<Slots>,
+    // Survives class changes: it describes the mapping's resident pages.
+    spread: std::cell::UnsafeCell<Spread>,
+}
+
+#[derive(Default)]
+struct Spread {
+    /// Bytes from the header that may be resident.
+    touched: usize,
+    /// `touched` reaches a third native page.
+    spread: bool,
+    /// On the heap's purge list.
+    listed: bool,
 }
 
 enum Backing {
@@ -181,12 +207,21 @@ impl Backing {
     }
 }
 
+/// A slab page's slots below `bump` are live, on the free list, or lost:
+/// a lost slot overlaps a native page in `discarded`, which a purge returned
+/// while no live slot overlapped it. Lost slots rejoin the free list once
+/// the frontier reaches `limit`. A nursery has stride 0, keeps `limit` equal
+/// to `live` so every release takes the slow path, and bumps by bytes.
+/// A release that leaves `watch` or fewer live slots takes the slow path,
+/// where a spread page is purged or listed for purging.
 struct Slots {
     first: NonNull<u8>,
     limit: usize,
     bump: usize,
     live: usize,
     free: *mut u8,
+    discarded: u16,
+    watch: usize,
     #[cfg(feature = "memcheck")]
     checked_bytes: usize,
     previous: Option<PagePointer>,
@@ -249,6 +284,7 @@ impl Page {
             payer: payer.into(),
             key: key.into(),
             slots: Self::slots(start, class).into(),
+            spread: Spread::default().into(),
         };
         if slab {
             let page: PagePointer = start.cast();
@@ -268,6 +304,51 @@ impl Page {
         }
     }
 
+    /// A slab whose first native page bump-allocates blocks of any stride
+    /// for one payer and kind.
+    fn nursery(heap: &Arc<Heap>, payer: Payer, kind: u8) -> PagePointer {
+        let (allocation, start) = slabs::Slab::allocate(Arc::as_ptr(heap).addr());
+        let page: PagePointer = start.cast();
+        let key = Key {
+            payer: payer.record_pointer().addr(),
+            class: Class {
+                stride: 0,
+                align: 8,
+                kind,
+                bin: 0,
+                growable: false,
+            },
+        };
+        // SAFETY: the start of a new slab has room for its aligned descriptor;
+        // blocks start after it.
+        unsafe {
+            page.as_ptr().write(Self {
+                heap: Arc::clone(heap),
+                backing: Backing::Slab {
+                    _allocation: allocation,
+                },
+                payer: payer.into(),
+                key: key.into(),
+                slots: Slots {
+                    first: start.add(size_of::<Self>()),
+                    limit: 0,
+                    bump: 0,
+                    live: 0,
+                    free: ptr::null_mut(),
+                    discarded: 0,
+                    watch: 1,
+                    #[cfg(feature = "memcheck")]
+                    checked_bytes: 0,
+                    previous: None,
+                    next: None,
+                }
+                .into(),
+                spread: Spread::default().into(),
+            });
+        }
+        page
+    }
+
     fn slots(start: NonNull<u8>, class: Class) -> Slots {
         let (first, limit) = if class.fits_slab() {
             let offset = (size_of::<Self>() + class.offset()).next_multiple_of(class.align);
@@ -285,6 +366,8 @@ impl Page {
             bump: 0,
             live: 0,
             free: ptr::null_mut(),
+            discarded: 0,
+            watch: 1,
             #[cfg(feature = "memcheck")]
             checked_bytes: 0,
             previous: None,
@@ -334,6 +417,8 @@ impl Page {
 #[derive(Default)]
 pub(crate) struct Heap {
     locked: AtomicBool,
+    /// `State::listed` is not empty.
+    pending: AtomicBool,
     state: std::cell::UnsafeCell<State>,
 }
 
@@ -367,6 +452,12 @@ struct State {
     ready: [[Option<PagePointer>; SLAB_BINS]; 3],
     empty_slabs: Vec<PagePointer>,
     dedicated: DedicatedCache,
+    /// Spread pages to purge when the task parks.
+    listed: Vec<PagePointer>,
+    /// The nursery that takes new blocks, by payer and kind.
+    nurseries: HashMap<(usize, u8), PagePointer>,
+    /// Nursery placements left per class.
+    nursery_blocks: [[u8; SLAB_BINS]; 3],
 }
 
 #[derive(Default)]
@@ -390,6 +481,9 @@ impl Default for State {
             ready: [[None; SLAB_BINS]; 3],
             empty_slabs: Vec::new(),
             dedicated: DedicatedCache::default(),
+            listed: Vec::new(),
+            nurseries: HashMap::new(),
+            nursery_blocks: [[NURSERY_BLOCKS; SLAB_BINS]; 3],
         }
     }
 }
@@ -669,6 +763,9 @@ impl Heap {
                 && (*page.as_ref().key.get()).class.align == class.align
                 && (*page.as_ref().slots.get()).live + 1 < (*page.as_ref().slots.get()).limit
             {
+                if (*page.as_ref().slots.get()).free.is_null() {
+                    return Self::extend_take(state, page, bytes);
+                }
                 return Self::take(page, class, bytes);
             }
             Self::allocate_slow(heap, state, payer, bytes, align, kind, growable)
@@ -690,23 +787,34 @@ impl Heap {
         unsafe { Self::allocate_slow(heap, state, payer, bytes, align, kind, growable) }
     }
 
+    /// Extend `page`'s empty free list, then take its head. A miss of the
+    /// inline path, called last with the page's own class so the hit
+    /// neither saves registers nor spills its class.
     /// # Safety
-    /// The heap lock is held and `page` has a free slot of `class`.
+    /// As [`Self::take`], with the heap lock held as `state`.
+    #[cold]
+    #[inline(never)]
+    unsafe fn extend_take(mut state: Locked<'_>, page: PagePointer, bytes: usize) -> NonNull<u8> {
+        // SAFETY: the caller's contract; the lock pins the page's key.
+        unsafe {
+            let class = Page::key(page).class;
+            extend(&mut state, page, class);
+            Self::take(page, class, bytes)
+        }
+    }
+
+    /// # Safety
+    /// The heap lock is held and `page`'s free list holds a slot of `class`.
     #[inline(always)]
     unsafe fn take(page: PagePointer, class: Class, bytes: usize) -> NonNull<u8> {
         // SAFETY: the caller owns the page's slots under the heap lock.
         unsafe {
             let slots = &mut *page.as_ref().slots.get();
-            let pointer = if let Some(free) = NonNull::new(slots.free) {
-                #[cfg(feature = "memcheck")]
-                allocation_check::link_access(free, true);
-                slots.free = free.cast::<*mut u8>().read();
-                free
-            } else {
-                let pointer = slots.first.add(slots.bump * class.stride);
-                slots.bump += 1;
-                pointer
-            };
+            let free = NonNull::new_unchecked(slots.free);
+            #[cfg(feature = "memcheck")]
+            allocation_check::link_access(free, true);
+            slots.free = free.cast::<*mut u8>().read();
+            let pointer = free;
             slots.live += 1;
             #[cfg(feature = "memcheck")]
             {
@@ -745,6 +853,13 @@ impl Heap {
             } else {
                 None
             };
+            if ready.is_none()
+                && class.stride <= NURSERY_STRIDE
+                && !growable
+                && let Some(pointer) = Self::nurse(heap, &mut state, payer, class, bytes)
+            {
+                return pointer;
+            }
             let page = if let Some(page) = ready {
                 page
             } else if let Some(page) = state.cached(class) {
@@ -757,6 +872,9 @@ impl Heap {
                 state
                     .dedicated
                     .add_live(page.as_ref().backing.dedicated().writable.get());
+            }
+            if (*page.as_ref().slots.get()).free.is_null() {
+                extend(&mut state, page, class);
             }
             let pointer = Self::take(page, class, bytes);
             let slots = &*page.as_ref().slots.get();
@@ -771,11 +889,86 @@ impl Heap {
         }
     }
 
+    /// Place a block of a class without a page in the payer's nursery,
+    /// while the class has placements left.
+    /// # Safety
+    /// The caller holds the heap lock as `state`.
+    unsafe fn nurse(
+        heap: &Arc<Self>,
+        state: &mut Locked<'_>,
+        payer: Payer,
+        class: Class,
+        bytes: usize,
+    ) -> Option<NonNull<u8>> {
+        let left = &mut state.nursery_blocks[usize::from(class.kind)][usize::from(class.bin)];
+        *left = left.checked_sub(1)?;
+        let key = (payer.record_pointer().addr(), class.kind);
+        let page = *state
+            .nurseries
+            .entry(key)
+            .or_insert_with(|| Page::nursery(heap, payer, class.kind));
+        // SAFETY: the heap lock owns the nursery's slots.
+        unsafe {
+            let slots = &mut *page.as_ref().slots.get();
+            let start = (slots.first.addr().get() + slots.bump).next_multiple_of(class.align);
+            let end = start + class.stride;
+            if end > page.as_ptr().addr() + page_bytes() {
+                // Full: it leaves with its last block.
+                state.nurseries.remove(&key);
+                if slots.live == 0 {
+                    Page::destroy(page);
+                }
+                return None;
+            }
+            slots.bump = end - slots.first.addr().get();
+            slots.live += 1;
+            slots.limit = slots.live;
+            let pointer = slots.first.with_addr(
+                std::num::NonZeroUsize::new_unchecked(start + class.offset()),
+            );
+            #[cfg(feature = "memcheck")]
+            allocation_check::allocated(pointer, bytes, class.kind);
+            #[cfg(not(feature = "memcheck"))]
+            let _ = bytes;
+            #[cfg(any(test, feature = "charge-observation"))]
+            crate::peak::allocated(pointer.as_ptr(), class.stride);
+            Some(pointer)
+        }
+    }
+
+    /// Whether the task's heap has pages to purge while it waits.
+    #[inline]
+    pub(crate) fn pending(&self) -> bool {
+        self.pending.load(Ordering::Relaxed)
+    }
+
+    /// Return the listed pages' native pages that hold no live slot.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn purge(&self) {
+        let mut state = self.lock();
+        self.pending.store(false, Ordering::Relaxed);
+        let mut listed = std::mem::take(&mut state.listed);
+        for page in listed.drain(..) {
+            // SAFETY: listed pages are live slab pages owned by this heap;
+            // close empties the list before destroying any of them.
+            unsafe { purge(page) };
+        }
+        state.listed = listed;
+    }
+
     /// Retire the task's cache; pages with transferred blocks keep their heap
     /// alive and are released by the last free on whichever task owns that block.
     pub(crate) fn close(&self) {
         let mut state = self.lock();
         state.closed = true;
+        state.listed = Vec::new();
+        self.pending.store(false, Ordering::Relaxed);
+        let nurseries = std::mem::take(&mut state.nurseries)
+            .into_values()
+            // SAFETY: the heap lock owns the nurseries' slots.
+            .filter(|&page| unsafe { (*page.as_ref().slots.get()).live == 0 })
+            .collect::<Vec<_>>();
         let spares = std::mem::replace(&mut state.ready, [[None; SLAB_BINS]; 3])
             .into_iter()
             .flatten()
@@ -786,7 +979,7 @@ impl Heap {
         let slabs = std::mem::take(&mut state.empty_slabs);
         let dedicated = std::mem::take(&mut state.dedicated);
         drop(state);
-        for page in spares.into_iter().chain(slabs) {
+        for page in spares.into_iter().chain(slabs).chain(nurseries) {
             // SAFETY: detached from the cache, with no live slots.
             unsafe { Page::destroy(page) };
         }
@@ -900,9 +1093,14 @@ pub(crate) unsafe fn release_page(page: PagePointer, payload: NonNull<u8>) {
         allocation_check::freed(payload, (*page.as_ref().key.get()).class.kind);
         let slots = &mut *page.as_ref().slots.get();
         // A partial page keeps its queue position, and an emptied head stays
-        // as the spare. A closed heap destroys the page at its last slot.
+        // as the spare unless it is spread. A closed heap destroys the page at
+        // its last slot.
         if slots.live != slots.limit
-            && (slots.live > 1 || (slots.previous.is_none() && !state.closed))
+            && (slots.live > slots.watch
+                || (slots.live == 1
+                    && slots.previous.is_none()
+                    && !state.closed
+                    && !(*page.as_ref().spread.get()).spread))
         {
             slots.live -= 1;
             push_free(slots, payload);
@@ -927,6 +1125,174 @@ unsafe fn push_free(slots: &mut Slots, payload: NonNull<u8>) {
     slots.free = payload.as_ptr();
 }
 
+/// Put a spread page on its heap's purge list.
+/// # Safety
+/// The heap lock is held as `state` and owns `page`.
+unsafe fn list(state: &mut Locked<'_>, page: PagePointer) {
+    // SAFETY: the heap lock owns the page's spread record.
+    let spread = unsafe { &mut *page.as_ref().spread.get() };
+    if !spread.listed && !state.closed {
+        spread.listed = true;
+        state.listed.push(page);
+        state.0.pending.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Thread fresh slots onto an empty free list.
+/// # Safety
+/// The heap lock is held as `state`; `page` has a free slot of `class`
+/// and an empty free list.
+#[cold]
+#[inline(never)]
+unsafe fn extend(state: &mut Locked<'_>, page: PagePointer, class: Class) {
+    // SAFETY: the heap lock owns the slots. Every threaded slot lies in the
+    // page's mapping below `limit`.
+    unsafe {
+        let slots = &mut *page.as_ref().slots.get();
+        let stride = class.stride;
+        let header = page.as_ptr().addr();
+        let region = slots.first.addr().get() - class.offset();
+        let native = page_bytes();
+        if slots.bump == slots.limit {
+            // Only lost slots remain, and none of them is live.
+            for index in (0..slots.limit).rev() {
+                let start = region + index * stride - header;
+                if overlaps(slots.discarded, start, stride, native) {
+                    push_free(slots, slots.first.add(index * stride));
+                }
+            }
+            slots.discarded = 0;
+            return;
+        }
+        let start = region + slots.bump * stride;
+        let boundary = (start & !(native - 1)) + native;
+        let count = (boundary - start)
+            .div_ceil(stride)
+            .min(slots.limit - slots.bump);
+        for index in (slots.bump..slots.bump + count).rev() {
+            push_free(slots, slots.first.add(index * stride));
+        }
+        slots.bump += count;
+        if class.fits_slab() {
+            let spread = &mut *page.as_ref().spread.get();
+            let end = region + slots.bump * stride - header;
+            if end > spread.touched {
+                spread.touched = end;
+                if end > 2 * native {
+                    spread.spread = true;
+                    slots.watch = (slots.bump / 8).max(1);
+                    list(state, page);
+                }
+            }
+        }
+    }
+}
+
+/// Whether the slot at `start..start + stride` from the header overlaps a
+/// native page in `mask`.
+fn overlaps(mask: u16, start: usize, stride: usize, native: usize) -> bool {
+    let first = start / native;
+    let last = (start + stride - 1) / native;
+    let span = (u32::MAX >> (31 - (last - first) as u32)) << first;
+    u32::from(mask) & span != 0
+}
+
+/// Return a listed page's native pages that hold no live slot, and lower
+/// its frontier to just past its highest live slot.
+/// # Safety
+/// The heap lock is held, and `page` is a live slab page of this heap.
+unsafe fn purge(page: PagePointer) {
+    // SAFETY: the heap lock owns the slots, free list and spread record.
+    // Free slots are not live, so their native pages may be discarded.
+    unsafe {
+        let spread = &mut *page.as_ref().spread.get();
+        spread.listed = false;
+        let class = Page::key(page).class;
+        let slots = &mut *page.as_ref().slots.get();
+        let native = page_bytes();
+        let header = page.as_ptr().addr();
+        let stride = class.stride;
+        let region = slots.first.addr().get() - class.offset() - header;
+        // Too few free slots to cover a native page: nothing to return.
+        if slots.live != 0 && (slots.bump - slots.live) * stride < native {
+            return;
+        }
+        let mut free = [0_u64; SLAB / 8 / 64];
+        let mut cursor = slots.free;
+        while let Some(slot) = NonNull::new(cursor) {
+            let index = (slot.addr().get() - slots.first.addr().get()) / stride;
+            free[index / 64] |= 1 << (index % 64);
+            #[cfg(feature = "memcheck")]
+            allocation_check::link_access(slot, true);
+            cursor = slot.cast::<*mut u8>().read();
+            #[cfg(feature = "memcheck")]
+            allocation_check::link_access(slot, false);
+        }
+        let is_free = |index: usize| free[index / 64] & (1 << (index % 64)) != 0;
+        // Native pages with a live slot, and the header's.
+        let mut keep = 1_u32;
+        let mut top = 0;
+        if slots.live != 0 {
+            for index in 0..slots.bump {
+                let start = region + index * stride;
+                if is_free(index) || overlaps(slots.discarded, start, stride, native) {
+                    continue;
+                }
+                let (first, last) = (start / native, (start + stride - 1) / native);
+                keep |= (u32::MAX >> (31 - (last - first) as u32)) << first;
+                top = index + 1;
+            }
+        }
+        let live_end = region + top * stride;
+        let mut lost = 0_u32;
+        let mut run: Option<usize> = None;
+        let pages = spread.touched.div_ceil(native).min(SLAB / native);
+        for at in 1..=pages {
+            let returned = at < pages
+                && keep & (1 << at) == 0
+                && u32::from(slots.discarded) & (1 << at) == 0;
+            if at < pages && keep & (1 << at) == 0 && at * native < live_end {
+                lost |= 1 << at;
+            }
+            match (returned, run) {
+                (true, None) => run = Some(at),
+                (false, Some(from)) => {
+                    discard(header + from * native, (at - from) * native);
+                    run = None;
+                }
+                _ => {}
+            }
+        }
+        // Rebuild the free list in address order from free slots that
+        // overlap no returned page.
+        slots.free = ptr::null_mut();
+        for index in (0..top).rev() {
+            if is_free(index) && !overlaps(lost as u16, region + index * stride, stride, native) {
+                push_free(slots, slots.first.add(index * stride));
+            }
+        }
+        slots.bump = top;
+        slots.discarded = lost as u16;
+        spread.touched = (32 - keep.leading_zeros()) as usize * native;
+        spread.spread = spread.touched > 2 * native;
+    }
+}
+
+fn discard(start: usize, bytes: usize) {
+    // SAFETY: whole anonymous native pages of a live slab mapping that hold
+    // no live slot; the allocator rewrites a slot before handing it out.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::madvise(
+            ptr::without_provenance_mut(start),
+            bytes,
+            libc::MADV_DONTNEED,
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (start, bytes);
+}
+
 /// The release that fills a full page's first hole, empties a page or
 /// meets a closed heap.
 /// # Safety
@@ -936,8 +1302,22 @@ unsafe fn push_free(slots: &mut Slots, payload: NonNull<u8>) {
 unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNull<u8>) {
     // SAFETY: the heap lock owns the free list and page lifecycle.
     unsafe {
-        let class = Page::key(page).class;
+        let key = Page::key(page);
+        let class = key.class;
         let slots = &mut *page.as_ref().slots.get();
+        if class.stride == 0 {
+            slots.live -= 1;
+            slots.limit = slots.live;
+            if slots.live == 0 {
+                if !state.closed && state.nurseries.get(&(key.payer, class.kind)) == Some(&page) {
+                    slots.bump = 0;
+                } else {
+                    drop(state);
+                    Page::destroy(page);
+                }
+            }
+            return;
+        }
         let was_full = slots.live == slots.limit;
         slots.live -= 1;
         if state.closed {
@@ -952,6 +1332,21 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
             return;
         }
         push_free(slots, payload);
+        if (*page.as_ref().spread.get()).spread && slots.live <= slots.watch {
+            // The owner purges its listed pages when it parks. Another task's
+            // release may come after that park, so it purges here.
+            if ptr::eq(crate::tasks::current_heap(), state.0) {
+                slots.watch = 1;
+                list(&mut state, page);
+            } else {
+                purge(page);
+                slots.watch = if (*page.as_ref().spread.get()).spread {
+                    (slots.live / 8).max(1)
+                } else {
+                    1
+                };
+            }
+        }
         if slots.live != 0 {
             if was_full {
                 state.link(page, class);
@@ -1128,7 +1523,7 @@ impl Drop for Mapping {
     }
 }
 
-fn page_bytes() -> usize {
+pub(crate) fn page_bytes() -> usize {
     static PAGE: OnceLock<usize> = OnceLock::new();
     *PAGE.get_or_init(|| {
         // SAFETY: sysconf reads the kernel's immutable page size.

@@ -647,6 +647,67 @@ fn cross_task_slots_return_to_the_allocating_heap_and_survive_its_exit() {
     drop((survivor, block));
 }
 
+/// Releasing most slots of a spread page from outside its task purges the
+/// page: native pages without a live slot go back to the host, and the free
+/// list is rebuilt below the highest live slot. A purge that returned a page
+/// under a live slot, or threaded a live or straddling slot, would zero a
+/// survivor or hand out a slot twice.
+#[test]
+fn purged_slab_pages_keep_survivors_and_hand_each_slot_out_once() {
+    const WORDS: usize = 5;
+    let context = Context::new(10_000_000);
+    let page = crate::task_heap::page_bytes();
+    let write = |block: &Block, value: u64| {
+        for word in 0..WORDS {
+            // SAFETY: a live 40-byte block has five aligned writable words.
+            unsafe { block.pointer().cast::<u64>().add(word).write(value + word as u64) };
+        }
+    };
+    let read = |block: &Block, value: u64| {
+        for word in 0..WORDS {
+            // SAFETY: as above.
+            assert_eq!(unsafe { block.pointer().cast::<u64>().add(word).read() }, value + word as u64);
+        }
+    };
+    let fill = |count: u64, base: u64| -> Vec<_> {
+        (0..count)
+            .map(|index| {
+                let block = Block::new(&context, Some(24), 40, 8).unwrap();
+                write(&block, base + 8 * index);
+                block
+            })
+            .collect()
+    };
+    // Survivors straddle every third native-page boundary, so the pages
+    // between them hold no live slot.
+    let mut kept = Vec::new();
+    for (index, block) in fill(6_000, 0).into_iter().enumerate() {
+        let start = block.pointer().addr().get();
+        let boundary = (start + 8 * WORDS - 1) / page;
+        if boundary != start / page && boundary % 3 == 0 {
+            kept.push((8 * index as u64, block));
+        }
+    }
+    assert!(kept.len() > 10);
+    let refill = fill(6_000, 1 << 32);
+    for (value, block) in &kept {
+        read(block, *value);
+    }
+    for (index, block) in refill.iter().enumerate() {
+        read(block, (1 << 32) + 8 * index as u64);
+    }
+    let mut addresses: Vec<_> = kept
+        .iter()
+        .map(|(_, block)| block.pointer().addr().get())
+        .chain(refill.iter().map(|block| block.pointer().addr().get()))
+        .collect();
+    addresses.sort_unstable();
+    addresses.dedup();
+    assert_eq!(addresses.len(), kept.len() + refill.len());
+    drop((kept, refill));
+    assert_eq!(context.available(), 10_000_000);
+}
+
 /// A task heap keeps an emptied page at its class queue head for the next
 /// block. Closing the heap must unmap that page too, or every finished task
 /// that freed its last small block leaks a slab.

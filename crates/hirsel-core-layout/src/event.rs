@@ -27,6 +27,9 @@ pub const TRY_RECEIVE: u8 = 20;
 /// MEM-30: the 65,536th taken source Step under a bound, before scheduling.
 pub const STEP_SLICE: u8 = 21;
 
+/// Value for a blocking PUBLISH or RECEIVE that ends with Closed. A transfer records 0.
+pub const CHANNEL_CLOSED: u64 = 2;
+
 /// Every kind by its header name.
 pub const ALL: [(&str, u8); 21] = [
     ("SPAWN", SPAWN),

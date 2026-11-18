@@ -77,11 +77,13 @@ pub(crate) fn show(path: &Path) -> io::Result<()> {
             at += 1;
             print!("{at} ");
             match frame {
-                Frame::Wait { task } => println!("WAIT task={task}"),
+                Frame::Wait { gap, task } => println!("WAIT gap={gap} task={task}"),
                 Frame::Wake { gap, task } => println!("WAKE gap={gap} task={task}"),
                 Frame::Cancel { gap, task } => println!("CANCEL gap={gap} task={task}"),
                 Frame::Choose { gap, index } => println!("CHOOSE gap={gap} index={index}"),
-                Frame::Grant { kind, args } => println!("GRANT kind={kind} args={args:?}"),
+                Frame::Grant { gap, kind, args } => {
+                    println!("GRANT gap={gap} kind={kind} args={args:?}")
+                }
                 Frame::Issue {
                     task,
                     op,
@@ -103,7 +105,10 @@ pub(crate) fn show(path: &Path) -> io::Result<()> {
                     out.status, out.value, out.error, out.written, out.payload
                 ),
                 Frame::Incarnation(n) => println!("INCARNATION n={n}"),
-                Frame::End(out) => println!("END kind={} outcome={:?}", out.kind, out.outcome),
+                Frame::End { gap, ending } => println!(
+                    "END gap={gap} kind={} outcome={:?}",
+                    ending.kind, ending.outcome
+                ),
             }
         }
     }

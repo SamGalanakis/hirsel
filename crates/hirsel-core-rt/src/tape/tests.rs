@@ -1,7 +1,7 @@
 //! Tape laws (REPLAY-SPEC v2.3 S1, tape format 2). Expected bytes come from
 //! testdata/vectors.py (hand encoding plus system libxxhash, no project code)
 //! and from 1004's model: model-f2-tape.bin is its models_v23.py `T` with the
-//! header's format 2, model-v23-tape.bin its format 1 original; expected
+//! format-2 header and positioned GRANT, model-v23-tape.bin its format 1 original; expected
 //! results from sections 5 and 8.
 use super::*;
 use crate::os::OsProvider;
@@ -565,6 +565,7 @@ fn the_encoder_writes_the_format_2_model_tape_byte_for_byte() {
     let b1 = payload(
         &[
             Frame::Grant {
+                gap: 0,
                 kind: crate::entry::CLOCK,
                 args: None,
             },
@@ -578,7 +579,13 @@ fn the_encoder_writes_the_format_2_model_tape_byte_for_byte() {
         kind: END_RETURNED,
         outcome: Args::of(&5_000u64.to_le_bytes()),
     };
-    let b3 = payload(&[Frame::End(outcome.clone())], &mut e);
+    let b3 = payload(
+        &[Frame::End {
+            gap: 2,
+            ending: outcome.clone(),
+        }],
+        &mut e,
+    );
     let tape = [
         block(&h.tape_id, 0, 0, &h.encode(h.revision).unwrap()),
         block(&h.tape_id, 0, 1, &b1),
@@ -597,7 +604,13 @@ fn the_encoder_writes_the_format_2_model_tape_byte_for_byte() {
     }
     assert_eq!(frames[1], mono(1_000_000_123));
     assert_eq!(frames[2], mono(5_000));
-    assert_eq!(frames[3], Frame::End(outcome));
+    assert_eq!(
+        frames[3],
+        Frame::End {
+            gap: 2,
+            ending: outcome
+        }
+    );
 }
 
 /// Format 2 has no reader for format 1 (gavel 7): 1004's format 1 tape, a
@@ -636,6 +649,7 @@ fn replay_reads_and_allocates_by_block() {
     let mut encoder = Encoder::default();
     let mut start = encoder
         .frame(&Frame::Grant {
+            gap: 0,
             kind: crate::entry::DIR,
             args: None,
         })
@@ -667,7 +681,12 @@ fn replay_reads_and_allocates_by_block() {
         },
     });
     assert!(data.is_empty());
-    let end = encoder.frame(&Frame::End(ending())).0;
+    let end = encoder
+        .frame(&Frame::End {
+            gap: 2,
+            ending: ending(),
+        })
+        .0;
     let header_end = boundaries(HAND)[1];
     let h = header(REVISION);
     let mut samples = [(0, 0, 0); 2];

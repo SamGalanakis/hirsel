@@ -504,12 +504,7 @@ impl FunctionEmitter<'_> {
                     self.cond(&missing, allocated, counted_label);
                     self.block(counted_label);
                     if counted == Counted::Arc {
-                        let memory = Memory {
-                            ordering: Some(Ordering::Monotonic),
-                            ..Memory::aligned(8)
-                        };
-                        self.store_with(&Type::I64, &int(1), &block, &memory);
-                        self.arc_event("hirsel_core_arc_initialized", &[]);
+                        self.initialize_arc(&block);
                     } else {
                         self.store(&Type::I64, &int(1), &block, 8);
                     }

@@ -2526,10 +2526,7 @@ impl Machine<'_> {
                 }
                 let latest = &mut self.latests[i];
                 let (item, root, limit) = (latest.item, latest.root, latest.limit.take().unwrap());
-                let tmp = self.block(8, None, 0, None);
-                self.put(tmp, &root.to_le_bytes());
-                let failed = self.drop_value(t, tmp, item);
-                assert!(!failed, "a shareable root's release failed");
+                self.release_latest_holder(t, root, item);
                 self.refund(limit, charge::LATEST_ROOT);
                 false
             }
@@ -2652,6 +2649,24 @@ impl Machine<'_> {
         t.cells.push((cell.limit, cell.amount));
         t.chain.push(cause);
     }
+    fn release_latest_holder(&mut self, t: &mut Task, node: u64, item: TypeRef) {
+        let place = self.block(8, None, 0, None);
+        self.put(place, &node.to_le_bytes());
+        assert!(
+            !self.drop_value(t, place, item),
+            "a shareable root's release failed"
+        );
+    }
+
+    fn share_counted(&mut self, node: u64, kind: Counted) {
+        self.kind(node, kind);
+        let count = self.load(node, 8) + 1;
+        self.store(node, 8, count);
+        if kind == Counted::Arc {
+            self.event(ARC_SHARE, 0, count);
+        }
+    }
+
     /// MEM-16: drop one holder; at zero clean the payload and free the node. The
     /// payload holds no resource, so nothing here fails or runs user code.
     fn release(&mut self, node: u64, ty: TypeRef) {
@@ -3036,7 +3051,14 @@ impl Machine<'_> {
                     self.check_cancel(t)?;
                     match self.publish(i, a[1], item) {
                         0 => break vec![1],
-                        2 => break vec![0],
+                        2 => {
+                            self.event(
+                                PUBLISH,
+                                self.chan_id(i),
+                                hirsel_core_layout::event::CHANNEL_CLOSED,
+                            );
+                            break vec![0];
+                        }
                         _ => self.park(Some(Wait::Task)),
                     }
                 }
@@ -3055,6 +3077,11 @@ impl Machine<'_> {
                         break vec![1];
                     }
                     if self.chans[i].senders == 0 {
+                        self.event(
+                            RECEIVE,
+                            self.chan_id(i),
+                            hirsel_core_layout::event::CHANNEL_CLOSED,
+                        );
                         break vec![0];
                     }
                     self.park(Some(Wait::Task));
@@ -3084,14 +3111,16 @@ impl Machine<'_> {
             }
             RtOp::LatestPublish => {
                 let l = &mut self.latests[(a[0] - LATEST_BASE) as usize];
-                let (id, old) = (l.id, std::mem::replace(&mut l.root, a[1]));
+                let (id, item, old) = (l.id, l.item, std::mem::replace(&mut l.root, a[1]));
                 self.event(LATEST_PUBLISH, id, 0);
-                vec![old]
+                self.release_latest_holder(t, old, item);
+                vec![]
             }
             RtOp::LatestRead => {
                 let l = &self.latests[(a[0] - LATEST_BASE) as usize];
                 let (id, root) = (l.id, l.root);
                 self.event(LATEST_READ, id, 0);
+                self.share_counted(root, Counted::Arc);
                 vec![root]
             }
             RtOp::TryReceive { .. } => {
@@ -4027,13 +4056,7 @@ impl Machine<'_> {
                 }
             }
             Inst::Share { node, kind } => {
-                let p = vals[node.index()];
-                self.kind(p, kind);
-                let c = self.load(p, 8);
-                self.store(p, 8, c + 1);
-                if kind == Counted::Arc {
-                    self.event(ARC_SHARE, 0, c + 1);
-                }
+                self.share_counted(vals[node.index()], kind);
             }
             Inst::Release { node, ty, kind } => {
                 self.kind(vals[node.index()], kind);

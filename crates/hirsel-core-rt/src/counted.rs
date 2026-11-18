@@ -145,6 +145,7 @@ pub unsafe fn initialize(node: NonNull<u8>, atomic: bool) {
     // SAFETY: node has fresh aligned storage for one count word.
     unsafe {
         if atomic {
+            crate::tasks::before_commit();
             node.cast::<AtomicU64>().as_ptr().write(AtomicU64::new(1));
             crate::tasks::event(crate::tasks::ARC_NEW, 0, 1);
         } else {
@@ -161,6 +162,7 @@ pub unsafe fn share(node: NonNull<u8>, atomic: bool) {
     // SAFETY: a live holder keeps the initialized count word alive.
     unsafe {
         if atomic {
+            crate::tasks::before_commit();
             // One add, as native code shares: a wrap stops the run before any
             // holder reads the wrapped word.
             let old = node
@@ -189,6 +191,7 @@ pub unsafe fn try_unwrap(node: NonNull<u8>, atomic: bool) -> bool {
     // SAFETY: the caller's holder pins the initialized count word.
     unsafe {
         if atomic {
+            crate::tasks::before_commit();
             let unique = node.cast::<AtomicU64>().as_ref().load(Ordering::Acquire) == 1;
             crate::tasks::event(crate::tasks::ARC_UNWRAP, 0, u64::from(unique));
             unique
@@ -206,11 +209,8 @@ pub unsafe fn decrement(node: NonNull<u8>, atomic: bool) -> bool {
     // SAFETY: the transferred holder keeps this node's initialized count alive.
     unsafe {
         if atomic {
-            let last = node
-                .cast::<AtomicU64>()
-                .as_ref()
-                .fetch_sub(1, Ordering::Release)
-                == 1;
+            crate::tasks::before_commit();
+            let last = arc_decrement(node);
             if last {
                 fence(Ordering::Acquire);
             }
@@ -221,6 +221,18 @@ pub unsafe fn decrement(node: NonNull<u8>, atomic: bool) -> bool {
             *count = count.wrapping_sub(1);
             *count == 0
         }
+    }
+}
+
+/// # Safety
+/// Consumes one holder pinned under the Arc event discipline.
+pub(crate) unsafe fn arc_decrement(node: NonNull<u8>) -> bool {
+    // SAFETY: the transferred holder keeps the count alive.
+    unsafe {
+        node.cast::<AtomicU64>()
+            .as_ref()
+            .fetch_sub(1, Ordering::Release)
+            == 1
     }
 }
 
@@ -338,6 +350,19 @@ pub(crate) unsafe fn drain_holder(
         list.stage_holder(holder, step, 0);
         let current = list.take();
         run(context, &mut list, current)
+    }
+}
+
+/// Clean a live value in a stack slot, using its ordinary resumable recipe.
+pub(crate) unsafe fn drain_place(context: *mut Context, place: *mut u8, recipe: Recipe) {
+    let mut list = Worklist::new(0);
+    let mut cursor = 0;
+    // SAFETY: the caller owns the slot until its exact recipe completes.
+    unsafe {
+        while !recipe(context, place, &mut cursor, &mut list) {
+            let current = list.take();
+            run(context, &mut list, current);
+        }
     }
 }
 

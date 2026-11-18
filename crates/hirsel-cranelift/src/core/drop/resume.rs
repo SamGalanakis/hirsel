@@ -473,7 +473,14 @@ impl Glue<'_, '_, '_> {
                             self.release(node, *t, atomic)?;
                             yields = false;
                         } else {
-                            let last = fast::decrement(&mut self.b, node, atomic);
+                            let last = fast::decrement(
+                                &mut self.b,
+                                &mut self.calls,
+                                self.object,
+                                self.ctx,
+                                node,
+                                atomic,
+                            )?;
                             if atomic {
                                 fast::arc_event(
                                     &mut self.b,

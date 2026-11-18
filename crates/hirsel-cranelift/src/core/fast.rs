@@ -356,6 +356,32 @@ pub(super) fn free(
     Ok(())
 }
 
+pub(super) fn branch_on_arc_replay(
+    b: &mut FunctionBuilder<'_>,
+    context: Value,
+    inline: ir::Block,
+    replay: ir::Block,
+) {
+    let gate = b.create_block();
+    b.set_cold_block(replay);
+    let task = b.ins().load(
+        types::I64,
+        Flags::trusted().with_readonly(),
+        context,
+        memory_layout::CONTEXT_EVENTS as i32,
+    );
+    let empty = b.ins().icmp_imm_s(IntCC::Equal, task, 0);
+    b.ins().brif(empty, inline, &[], gate, &[]);
+    b.switch_to_block(gate);
+    let active = b.ins().load(
+        types::I8,
+        Flags::trusted(),
+        task,
+        memory_layout::TASK_ARC_REPLAY as i32,
+    );
+    b.ins().brif(active, replay, &[], inline, &[]);
+}
+
 pub(super) fn arc_event(
     b: &mut FunctionBuilder<'_>,
     calls: &mut calls::Calls<'_>,
@@ -422,6 +448,21 @@ pub(super) fn share(
     let overflow = b.create_block();
     b.set_cold_block(overflow);
     if atomic {
+        let inline = b.create_block();
+        let replay = b.create_block();
+        branch_on_arc_replay(b, context, inline, replay);
+        b.switch_to_block(replay);
+        let atomic = b.ins().iconst(types::I8, 1);
+        calls.c(
+            object,
+            b,
+            "hirsel_core_share",
+            &[P, B],
+            &[],
+            &[node, atomic],
+        )?;
+        b.ins().jump(done, &[]);
+        b.switch_to_block(inline);
         let initial = b.ins().atomic_load(types::I64, Flags::trusted(), node);
         let head = b.create_block();
         let update = b.create_block();
@@ -484,9 +525,32 @@ pub(super) fn share(
     Ok(())
 }
 
-pub(super) fn decrement(b: &mut FunctionBuilder<'_>, node: Value, atomic: bool) -> Value {
+pub(super) fn decrement(
+    b: &mut FunctionBuilder<'_>,
+    calls: &mut calls::Calls<'_>,
+    object: &mut ObjectModule,
+    context: Value,
+    node: Value,
+    atomic: bool,
+) -> Result<Value> {
     let one = b.ins().iconst(types::I64, 1);
     if atomic {
+        let inline = b.create_block();
+        let replay = b.create_block();
+        let done = b.create_block();
+        b.append_block_param(done, types::I8);
+        branch_on_arc_replay(b, context, inline, replay);
+        b.switch_to_block(replay);
+        let last = calls.c(
+            object,
+            b,
+            "hirsel_core_arc_decrement_for_replay",
+            &[P],
+            &[B],
+            &[node],
+        )?[0];
+        b.ins().jump(done, &[last.into()]);
+        b.switch_to_block(inline);
         // SeqCst includes the required Release decrement and Acquire on last.
         let old = b.ins().atomic_rmw(
             types::I64,
@@ -495,7 +559,10 @@ pub(super) fn decrement(b: &mut FunctionBuilder<'_>, node: Value, atomic: bool) 
             node,
             one,
         );
-        b.ins().icmp_imm_s(IntCC::Equal, old, 1)
+        let last = b.ins().icmp_imm_s(IntCC::Equal, old, 1);
+        b.ins().jump(done, &[last.into()]);
+        b.switch_to_block(done);
+        Ok(b.block_params(done)[0])
     } else {
         let old = b.ins().load(
             types::I64,
@@ -510,7 +577,7 @@ pub(super) fn decrement(b: &mut FunctionBuilder<'_>, node: Value, atomic: bool) 
             node,
             memory_layout::NODE_COUNT as i32,
         );
-        b.ins().icmp_imm_s(IntCC::Equal, next, 0)
+        Ok(b.ins().icmp_imm_s(IntCC::Equal, next, 0))
     }
 }
 
@@ -523,7 +590,7 @@ pub(super) fn release(
     atomic: bool,
 ) -> Result<()> {
     let [context, node] = operands;
-    let last = decrement(b, node, atomic);
+    let last = decrement(b, calls, object, context, node, atomic)?;
     if atomic {
         arc_event(
             b,

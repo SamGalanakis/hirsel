@@ -718,37 +718,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.runtime_carrier(result, handle, n)
             }
             Kernel::LatestPublish => {
-                let id = self.runtime_type(types[0], n)?;
                 let handle = self.runtime_handle(vals[0]?, n);
                 let node = self.runtime_handle(vals[1]?, n);
-                let [old, ..] = self.runtime_row(
+                self.runtime_row(
                     RtOp::LatestPublish,
                     &[Arg::Value(handle), Arg::Value(node)],
                     n,
                 )?;
-                // The root now owns the published Arc; the caller owns the old one.
                 self.consume(vals[1], n);
-                self.inst(
-                    Inst::Release {
-                        node: old,
-                        kind: Counted::Arc,
-                        ty: id,
-                    },
-                    n,
-                );
                 None
             }
             Kernel::LatestRead => {
                 let handle = self.runtime_handle(vals[0]?, n);
                 let [node, ..] = self.runtime_row(RtOp::LatestRead, &[Arg::Value(handle)], n)?;
-                // The read's share is the next event after its read event.
-                self.inst(
-                    Inst::Share {
-                        node,
-                        kind: Counted::Arc,
-                    },
-                    n,
-                );
                 self.runtime_carrier(result, node, n)
             }
             Kernel::Send | Kernel::TrySend => {

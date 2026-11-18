@@ -1013,7 +1013,7 @@ impl RtOp {
             RtOp::TryReceive { item } => (vec![V(p), out(item)], vec![u8_]),
             RtOp::LatestNew { .. } => (vec![V(p)], vec![p, u64_]),
             RtOp::LatestHandle | RtOp::LatestRead => (vec![V(p)], vec![p]),
-            RtOp::LatestPublish => (vec![V(p), V(p)], vec![p]),
+            RtOp::LatestPublish => (vec![V(p), V(p)], vec![]),
             RtOp::DestId => (vec![], vec![u64_]),
             RtOp::CompareBytes => (
                 vec![V(p), V(u64_), V(p), V(u64_)],

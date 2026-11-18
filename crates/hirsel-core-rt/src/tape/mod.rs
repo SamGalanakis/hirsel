@@ -559,6 +559,12 @@ impl Tape {
         let mut differs = false;
         let (live, arg) = match mode {
             Mode::Record => {
+                if !matches!(
+                    header.chooser,
+                    format::CHOOSER_FIFO | format::CHOOSER_COMMIT
+                ) {
+                    return Err(OpenError::Unreadable(Fault::Corrupt));
+                }
                 let buffer = header
                     .encode(revision)
                     .map_err(|_| OpenError::Refused(Refusal::HeaderTooLarge))?;
@@ -691,6 +697,7 @@ impl Tape {
         args: Option<Vec<u8>>,
         source: Option<(Provider, u64)>,
     ) -> Result<(Provider, u64, Vec<u8>), Fault> {
+        crate::tasks::before_tape_frame(self.group(), false);
         let mut s = self.cell.state.lock().unwrap();
         if s.generation != self.generation {
             return Err(refuse(Fault::Ended));
@@ -700,25 +707,31 @@ impl Tape {
         if let Some(f) = live.fault {
             return Err(refuse(f));
         }
-        live.own_position();
         let stored = match live.mode {
             Mode::Record => {
-                let rec = live.recorder.as_mut().unwrap();
-                let frame = Frame::Grant {
+                live.write_input(Frame::Grant {
+                    gap: 0,
                     kind,
                     args: args.clone(),
-                };
-                if let Err(e) = rec.frame(&frame) {
-                    live.fault = Some(refuse(Fault::Io(e)));
-                    return Err(Fault::Io(e));
+                });
+                if let Some(fault) = live.fault {
+                    return Err(fault);
                 }
                 args.unwrap_or_default()
             }
             Mode::Replay => {
                 let rep = live.replayer.as_mut().unwrap();
                 let stored = match rep.next() {
-                    Ok(Frame::Grant { kind: k, args }) if k == kind => Ok(args.unwrap_or_default()),
-                    Ok(Frame::End(_)) => Err(rep.diverged(Mismatch::Missing)),
+                    Ok(Frame::Grant { gap, kind: k, args })
+                        if k == kind && live.schedule.at(gap) =>
+                    {
+                        live.schedule.last = live.schedule.events;
+                        Ok(args.unwrap_or_default())
+                    }
+                    Ok(Frame::End { .. }) => Err(rep.diverged(Mismatch::Missing)),
+                    Ok(Frame::Grant { kind: k, .. }) if k == kind => {
+                        Err(rep.diverged(Mismatch::Schedule))
+                    }
                     Ok(
                         Frame::Wake { .. }
                         | Frame::Cancel { .. }
@@ -749,6 +762,7 @@ impl Tape {
     /// `Diverged(Outcome)` at the END frame), and nothing after it. Either
     /// way the tape's handles end here.
     pub fn end(self, ending: &Ending) -> Result<(), Fault> {
+        crate::tasks::before_tape_frame(self.group(), true);
         let result = self.finish(Some(ending));
         std::mem::forget(self);
         result
@@ -779,8 +793,11 @@ impl Tape {
         }
         if let Some(rec) = live.recorder.as_mut() {
             let written = if let Some(e) = end {
-                rec.frame(&Frame::End(e.clone()))
-                    .and_then(|()| rec.close(format::END))
+                rec.frame(&Frame::End {
+                    gap: live.schedule.events - live.schedule.last,
+                    ending: e.clone(),
+                })
+                .and_then(|()| rec.close(format::END))
             } else if rec.buffer.is_empty() {
                 Ok(())
             } else {
@@ -793,8 +810,13 @@ impl Tape {
         }
         if let (Some(ending), Ok(()), Some(rep)) = (end, result, live.replayer.as_mut()) {
             result = match rep.next() {
-                Ok(Frame::End(e)) if e != *ending => Err(rep.diverged(Mismatch::Outcome)),
-                Ok(Frame::End(_)) => rep.next().map_or_else(
+                Ok(Frame::End { gap, .. }) if !live.schedule.at(gap) => {
+                    Err(rep.diverged(Mismatch::Schedule))
+                }
+                Ok(Frame::End { ending: e, .. }) if e != *ending => {
+                    Err(rep.diverged(Mismatch::Outcome))
+                }
+                Ok(Frame::End { .. }) => rep.next().map_or_else(
                     |f| match f {
                         Fault::Diverged(Divergence {
                             kind: Mismatch::Extra,
@@ -877,8 +899,9 @@ unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
         }
         let rep = live.replayer.as_mut().unwrap();
         let result = match rep.peek() {
-            Ok(Frame::Wait { task: t }) if *t == task => {
+            Ok(Frame::Wait { gap, task: t }) if *t == task && live.schedule.at(*gap) => {
                 rep.next().unwrap();
+                live.schedule.last = live.schedule.events;
                 live.waiting.insert(key, task);
                 return Wait {
                     kind: WAIT_PARK,
@@ -907,8 +930,8 @@ unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
         let mut s = cell.state.lock().unwrap();
         let live = s.live.as_mut().unwrap();
         if live.waiting.insert(key, task).is_none() {
-            if let Err(e) = live.recorder.as_mut().unwrap().frame(&Frame::Wait { task }) {
-                live.fault = Some(refuse(Fault::Io(e)));
+            live.write_input(Frame::Wait { gap: 0, task });
+            if live.fault.is_some() {
                 return Wait::default();
             }
         }
@@ -939,6 +962,9 @@ fn pending() -> Step {
 
 unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     let h = r.handle;
+    if schedule::member(cell, generation_of(h)) {
+        crate::tasks::before_commit();
+    }
     let key = r as *mut Request as usize;
     let mut s = cell.state.lock().unwrap();
     if s.generation != generation_of(h) || s.live.is_none() {
@@ -964,8 +990,11 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     let task = schedule::task(cell);
     // SAFETY: forwarded.
     let args = unsafe { canonical(r) };
-    live.own_position();
-    live.schedule.events += 1;
+    // CHOOSE is anchored just before issue. OP/ISSUE then anchors the gap
+    // stream at that same position, before counting the issue.
+    let position = live.schedule.events;
+    live.commit(task, crate::tasks::group_index);
+    live.schedule.last = position;
     if live.mode == Mode::Replay {
         // SAFETY: output is written only into the request's spare carrier.
         return match unsafe { replay(live, generation, ordinal, r, &args) } {
@@ -1117,7 +1146,7 @@ unsafe fn replay(
             object,
             args,
         } => (task, op, object, args, None),
-        Frame::End(_) => return Err(rep.diverged(Mismatch::Missing)),
+        Frame::End { .. } => return Err(rep.diverged(Mismatch::Missing)),
         _ => return Err(rep.diverged(Mismatch::Schedule)),
     };
     if t != task {
@@ -1232,7 +1261,7 @@ unsafe fn complete(state: *mut u8, r: *mut Request, token: u64, why: Option<u8>)
                     && live.schedule.last.checked_add(gap) == Some(live.schedule.events) =>
             {
                 live.schedule.last = live.schedule.events;
-                live.schedule.events += 1;
+                live.delivery(task);
                 // SAFETY: external payload is checked before copying.
                 unsafe {
                     replay_out(
@@ -1297,7 +1326,7 @@ unsafe fn complete(state: *mut u8, r: *mut Request, token: u64, why: Option<u8>)
         task: pending.task,
         out,
     });
-    live.schedule.events += 1;
+    live.delivery(pending.task);
     s.delivering.insert(key, delivery);
     done(answer)
 }

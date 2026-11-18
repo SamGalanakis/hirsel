@@ -45,15 +45,16 @@ void hirsel_core_sender_drop(HirselCoreChannel *);
 uint8_t hirsel_core_receiver_drop(HirselCoreContext *, HirselCoreChannel *);
 bool hirsel_core_receiver_release(HirselCoreContext *, HirselCoreChannel *, HirselCoreWorklist *, uint64_t point);
 /* CONC-13 Latest[T]: one swappable Arc holder. new admits the root (null keeps
-   node with the caller); read returns the root's node for the caller to share;
-   publish installs node and returns the old holder for the caller to release.
+   node with the caller); read returns a new share of the root's Arc.
+   publish installs node and releases the old holder. The Arc event immediately
+   follows the Latest event.
    Events: SENDERS for the handle count, LATEST_PUBLISH, LATEST_READ
    (value 0). None waits, fails or observes cancellation. */
 typedef struct HirselCoreLatest HirselCoreLatest;
 typedef struct { HirselCoreLatest *latest; uint64_t available; } HirselCoreLatestNew;
 HirselCoreLatestNew hirsel_core_latest_new(HirselCoreContext *, void *node, HirselCoreDropRecipe);
 HirselCoreLatest *hirsel_core_latest_handle(HirselCoreLatest *);
-void *hirsel_core_latest_publish(HirselCoreLatest *, void *node);
+void hirsel_core_latest_publish(HirselCoreContext *, HirselCoreLatest *, void *node);
 void *hirsel_core_latest_read(HirselCoreLatest *);
 void hirsel_core_latest_drop(HirselCoreContext *, HirselCoreLatest *);
 bool hirsel_core_latest_release(HirselCoreLatest *, HirselCoreWorklist *, uint64_t point);

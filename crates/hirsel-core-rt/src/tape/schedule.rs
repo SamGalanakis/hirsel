@@ -46,8 +46,30 @@ impl Group {
             .unwrap_or(0);
         Self { task, ..self }
     }
-    pub fn event(self) {
-        self.with(|live| live.schedule.events += 1);
+    pub fn event(self, index: impl FnOnce() -> u64, ended: bool) {
+        self.with(|live| {
+            live.commit(self.task, index);
+            if ended {
+                live.schedule.previous = None;
+            }
+        });
+    }
+    /// Only the active replay dispatcher asks for a turn. WAIT and GRANT
+    /// are consumed at their own call sites, after the named fiber reaches them.
+    pub fn turn(self) -> Turn {
+        self.with(Live::turn).unwrap_or(Turn::Fifo)
+    }
+    pub fn choose(self, task: u64) {
+        self.with(|live| {
+            let rep = live.replayer.as_mut().unwrap();
+            rep.next().unwrap();
+            live.schedule.last = live.schedule.events;
+            live.schedule.selected = Some(task);
+        });
+    }
+    pub fn fifo(self) -> bool {
+        self.with(|live| live.schedule.chooser == format::CHOOSER_FIFO)
+            .unwrap_or(false)
     }
     pub fn replaying(self) -> bool {
         self.with(|live| live.mode == Mode::Replay).unwrap_or(false)
@@ -56,15 +78,7 @@ impl Group {
         self.with(|live| live.fault.is_some()).unwrap_or(true)
     }
     pub fn fail(self) {
-        self.with(|live| {
-            if live.fault.is_none() {
-                let at = live.replayer.as_ref().map_or(1, |r| r.taken + 1);
-                live.fault = Some(refuse(Fault::Diverged(Divergence {
-                    at,
-                    kind: Mismatch::Schedule,
-                })));
-            }
-        });
+        self.with(Live::schedule_fault);
     }
     pub fn wake(self, request: *mut Request) {
         self.with(|live| {
@@ -93,82 +107,22 @@ impl Group {
         })
         .unwrap_or(true)
     }
-    pub fn input(self) -> Option<Input> {
+    pub fn consume_input(self) {
         self.with(|live| {
-            if live.mode != Mode::Replay || live.fault.is_some() {
-                return None;
-            }
-            let rep = live.replayer.as_mut().unwrap();
-            let frame = match rep.peek() {
-                Ok(frame) => frame,
-                Err(f) => {
-                    live.fault = Some(refuse(f));
-                    return None;
-                }
-            };
-            let (gap, input) = match frame {
-                Frame::Wake { gap, task } => (*gap, Input::Wake(*task)),
-                Frame::Cancel { gap, task } => (*gap, Input::Cancel(*task)),
-                Frame::Done { gap, task, .. } => (*gap, Input::Done(*task)),
-                _ => return None,
-            };
-            let Some(position) = live.schedule.last.checked_add(gap) else {
-                live.fault = Some(refuse(Fault::Corrupt));
-                return None;
-            };
-            if position > live.schedule.events {
-                return None;
-            }
-            if position < live.schedule.events {
-                live.fault = Some(refuse(rep.diverged_next(Mismatch::Schedule)));
-                return None;
-            }
-            // DONE is consumed by the tape's resume callback.
-            if !matches!(input, Input::Done(_)) {
-                rep.next().unwrap();
-                live.schedule.last = position;
-            }
-            Some(input)
-        })
-        .flatten()
-    }
-    /// Select among this group's ready tasks, in ready order.
-    pub fn choose(self, count: usize, proposed: usize) -> usize {
-        self.with(|live| {
-            if count < 2 || live.fault.is_some() {
-                return 0;
-            }
-            if live.schedule.chooser == 0 {
-                return 0;
-            }
-            if live.mode == Mode::Record {
-                live.write_input(Frame::Choose {
-                    gap: 0,
-                    index: proposed as u64,
-                });
-                return proposed;
-            }
-            let rep = live.replayer.as_mut().unwrap();
-            match rep.next() {
-                Ok(Frame::Choose { gap, index })
-                    if live.schedule.last.checked_add(gap) == Some(live.schedule.events)
-                        && index < count as u64 =>
-                {
-                    live.schedule.last = live.schedule.events;
-                    index as usize
-                }
-                _ => {
-                    live.fault = Some(refuse(rep.diverged(Mismatch::Schedule)));
-                    0
-                }
-            }
-        })
-        .unwrap_or(0)
+            live.replayer.as_mut().unwrap().next().unwrap();
+            live.schedule.last = live.schedule.events;
+        });
     }
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum Input {
+pub(crate) enum Turn {
+    Fifo,
+    Event(Option<u64>),
+    Choose(u64),
+    Wait(u64),
+    Grant,
+    Finish,
     Wake(u64),
     Cancel(u64),
     Done(u64),
@@ -179,6 +133,8 @@ pub(super) struct Schedule {
     pub last: u64,
     next_task: u64,
     chooser: u8,
+    previous: Option<u64>,
+    selected: Option<u64>,
 }
 impl Schedule {
     pub fn new(chooser: u8) -> Self {
@@ -187,20 +143,108 @@ impl Schedule {
             last: 0,
             next_task: 1,
             chooser,
+            previous: Some(0),
+            selected: None,
         }
+    }
+
+    pub fn at(&self, gap: u64) -> bool {
+        self.last.checked_add(gap) == Some(self.events)
     }
 }
 impl Live {
-    /// Own frames sit at the issue; grants sit at the current coordinate.
-    pub(super) fn own_position(&mut self) -> u64 {
-        let position = self.schedule.events;
-        self.schedule.last = position;
-        position
+    pub(super) fn schedule_fault(&mut self) {
+        if self.fault.is_none() {
+            let at = self.replayer.as_ref().map_or(1, |r| r.taken + 1);
+            self.fault = Some(refuse(Fault::Diverged(Divergence {
+                at,
+                kind: Mismatch::Schedule,
+            })));
+        }
     }
+
+    pub(super) fn turn(&mut self) -> Turn {
+        let Some(rep) = self.replayer.as_mut().filter(|_| self.fault.is_none()) else {
+            return Turn::Fifo;
+        };
+        let event = if self.schedule.chooser == format::CHOOSER_COMMIT {
+            Turn::Event(self.schedule.selected.or(self.schedule.previous))
+        } else {
+            Turn::Fifo
+        };
+        let (gap, turn) = match rep.peek() {
+            Ok(frame) => match *frame {
+                Frame::Wait { gap, task } => (gap, Turn::Wait(task)),
+                Frame::Grant { gap, .. } => (gap, Turn::Grant),
+                Frame::End { gap, .. } => (gap, Turn::Finish),
+                Frame::Wake { gap, task } => (gap, Turn::Wake(task)),
+                Frame::Cancel { gap, task } => (gap, Turn::Cancel(task)),
+                Frame::Done { gap, task, .. } => (gap, Turn::Done(task)),
+                Frame::Choose { gap, index } if self.schedule.chooser == format::CHOOSER_COMMIT => {
+                    (gap, Turn::Choose(index))
+                }
+                Frame::Choose { .. } => {
+                    self.schedule_fault();
+                    return Turn::Fifo;
+                }
+                _ => return event,
+            },
+            Err(f) => {
+                self.fault = Some(refuse(f));
+                return Turn::Fifo;
+            }
+        };
+        match self.schedule.last.checked_add(gap) {
+            Some(position) if position > self.schedule.events => event,
+            Some(position)
+                if position == self.schedule.events && self.schedule.selected.is_none() =>
+            {
+                turn
+            }
+            None => {
+                self.fault = Some(refuse(Fault::Corrupt));
+                Turn::Fifo
+            }
+            Some(_) => {
+                self.schedule_fault();
+                Turn::Fifo
+            }
+        }
+    }
+
+    /// An ISSUE shares exactly the same committer identity as a language event.
+    /// A synchronous outcome then consumes one more position in the same turn.
+    pub(super) fn commit(&mut self, task: u64, index: impl FnOnce() -> u64) {
+        if self.fault.is_some() {
+            return;
+        }
+        if self.schedule.chooser == format::CHOOSER_COMMIT {
+            if self.mode == Mode::Record && self.schedule.previous != Some(task) {
+                self.write_input(Frame::Choose {
+                    gap: 0,
+                    index: index(),
+                });
+            }
+            self.schedule.previous = Some(task);
+            self.schedule.selected = None;
+        }
+        self.schedule.events += 1;
+    }
+
+    pub(super) fn delivery(&mut self, task: u64) {
+        self.schedule.events += 1;
+        self.schedule.previous = Some(task);
+    }
+
     pub(super) fn write_input(&mut self, mut frame: Frame) {
+        if self.fault.is_some() {
+            return;
+        }
         let gap = self.schedule.events - self.schedule.last;
         match &mut frame {
-            Frame::Wake { gap: g, .. }
+            Frame::Wait { gap: g, .. }
+            | Frame::Grant { gap: g, .. }
+            | Frame::Wake { gap: g, .. }
             | Frame::Cancel { gap: g, .. }
             | Frame::Choose { gap: g, .. }
             | Frame::Done { gap: g, .. } => *g = gap,

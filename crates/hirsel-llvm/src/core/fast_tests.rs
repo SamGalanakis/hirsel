@@ -207,7 +207,25 @@ fn counted_hot_paths_are_inline_and_last_release_is_cold() {
     let ir = emit_ir(&module).unwrap();
     assert!(ir.contains("atomicrmw add ptr"));
     assert!(ir.contains("atomicrmw sub ptr"));
-    assert!(!ir.contains("@hirsel_core_counted_init"));
+    for (label, call) in [
+        ("replay_arc_init", "call void @hirsel_core_counted_init"),
+        ("replay_arc_share", "call void @hirsel_core_share"),
+        (
+            "replay_arc_decrement",
+            "call i1 @hirsel_core_arc_decrement_for_replay",
+        ),
+    ] {
+        assert!(ir.lines().any(|line| line.contains(call)), "{call}");
+        let mut current = "";
+        for line in ir.lines() {
+            if line.ends_with(':') {
+                current = line;
+            }
+            if line.contains(call) {
+                assert!(current.starts_with(label), "{current}: {line}");
+            }
+        }
+    }
     assert!(ir.contains("store atomic i64 1"));
     assert!(ir.contains("call void @hirsel_core_arc_initialized(ptr %context)"));
     assert!(ir.contains("call void @hirsel_core_arc_shared"));

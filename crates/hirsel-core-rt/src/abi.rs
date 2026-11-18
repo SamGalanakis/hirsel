@@ -474,6 +474,21 @@ pub unsafe extern "C" fn hirsel_core_try_unwrap(node: NonNull<u8>, atomic: bool)
     // SAFETY: the caller owns a live holder in its provider event.
     unsafe { counted::try_unwrap(node, atomic) }
 }
+/// On replay the dispatcher grants the release before the atomic mutation.
+/// The emitter still fences the last release and reports the completed event.
+/// # Safety
+/// Consumes a live Arc holder under the current task's event discipline.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_arc_decrement_for_replay(node: NonNull<u8>) -> bool {
+    crate::tasks::before_commit();
+    // SAFETY: forwarded.
+    let last = unsafe { counted::arc_decrement(node) };
+    if last {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+    }
+    last
+}
+
 #[repr(C)]
 pub struct Allocation {
     pub pointer: *mut u8,

@@ -161,7 +161,7 @@ cleaned ([T7.7](ownership.md#own-26-the-transition-table)).
 ### CONC-10: Event order
 
 A run has one total order of **events**: spawn, task end, cancellation requests and their
-observation, every `task.check_cancel()`, publication by `send`, every `try_send` decision, delivery by `receive`, every `try_receive` decision, every
+observation, every `task.check_cancel()`, publication by `send`, every `try_send` decision, delivery by `receive`, every `try_receive` decision, the `Closed` outcome of a blocking `send` or `receive`, every
 change of a channel's sender count, `join`, channel close, every `latest.publish` and
 `latest.read` and every change of a `Latest` root's handle count (CONC-13), every slice end ([MEM-30](budgets.md#mem-30-step-bounds)), every refund or hand-over that
 crosses tasks ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), every `Arc`

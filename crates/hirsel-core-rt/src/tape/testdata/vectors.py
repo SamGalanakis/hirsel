@@ -9,7 +9,9 @@ It writes, next to itself:
 - xxh3.bin: 265 rows (u64 length, u64 XXH3_64) over check.hirsel's image, and
   asserts they are check.hirsel's own HASHES;
 - hand-tape.bin: the tape the runtime's Record must write for the scripted run
-  in tape/tests.rs (`scripted_run`), every value chosen here by hand.
+  in tape/tests.rs (`scripted_run`), every value chosen here by hand;
+- grant-gap-tape.bin and model-f2-tape.bin: the positioned grant and wait
+  example and the format-2 port of the two-clock model.
 """
 import ctypes, pathlib, re, struct
 
@@ -70,8 +72,8 @@ class Tape:
             if len(s.buf) >= 65536: s.close()
             s.buf += d
         if len(s.buf) >= 65536: s.close()
-    def grant(s, kind, vector=None):
-        s.put(bytes([7, kind]) + (lb(vector) if kind == ARGS else b''))
+    def grant(s, kind, vector=None, gap=0):
+        s.put(bytes([7]) + vi(gap) + bytes([kind]) + (lb(vector) if kind == ARGS else b''))
     def op(s, op, obj, a, value=0, error=None, written=None, payload=b''):
         head = 3
         f = b''
@@ -89,7 +91,7 @@ class Tape:
         s.put(f, data)
     def end(s, kind, outcome):
         # v2.3 R9: END status 0, the outcome kind, its bytes in args encoding.
-        s.put(bytes([10, 0, kind]) + args(outcome)); s.close(2)
+        s.put(bytes([10, 2, 0, kind]) + args(outcome)); s.close(2)
         return b''.join(s.blocks)
 
 t = Tape()
@@ -119,13 +121,29 @@ FAILED = 1
 (HERE / 'hand-tape.bin').write_bytes(t.end(FAILED, vi(2) + bytes([4]) + lb(b'no data') + bytes([0])))
 print('xxh3.bin rows', len(rows) // 16, 'hand-tape.bin bytes', sum(map(len, t.blocks)), 'blocks', len(t.blocks))
 
-# R17, independently derived coordinates: open 0; event 1; GRANT at 1;
-# event 2; WAIT is structural; WAKE at 2 therefore has gap 2 - 1 = 1.
+# Open at 0, GRANT at 1. WAIT at 2 has gap 2 - 1 = 1.
+# WAKE at 2 follows WAIT without an event, so its gap is 2 - 2 = 0.
 # WAIT is the first task-carrying frame, so it sets T and names task 0.
 g = Tape()
-g.grant(CLOCK)
-g.put(bytes([0x1b, 0]))           # WAIT task 0, no coordinate
+g.grant(CLOCK, gap=1)
+g.put(bytes([0x1b, 1, 0]))        # WAIT gap 1, task 0
 g.task = 0
-g.put(bytes([4, 1]))              # WAKE gap 1, previous task 0
+g.put(bytes([4, 0]))              # WAKE gap 0, previous task 0
 g.op(SLEEP_UNTIL, 1, struct.pack('<Q', 9000), value=17)
 (HERE / 'grant-gap-tape.bin').write_bytes(g.end(FAILED, vi(2) + bytes([4]) + lb(b'no data') + bytes([0])))
+
+# The two-clock model from models_v23.py, with the format-2 header and a
+# positioned GRANT. The grant is at open, so its delta is zero.
+TAPE_ID = bytes(range(16))
+model_header = (struct.pack('<HBB', 2, 2, 2) + TAPE_ID + lb(b'pkg/charge#0001')
+                + bytes(range(32)) + struct.pack('<IQQ', 1, 1024, 0) + b'\0'
+                + lb(b'arg-7') + vi(0))
+first_clock = bytes([0x13, 0, MONO_NS, 1, 0, 0]) + vi(zz(1_000_000_123))
+second_clock = bytes([0x13, 0, MONO_NS, 1, 0, 0]) + vi(zz(5_000))
+model = b''.join([
+    block(0, 0, model_header),
+    block(1, 0, bytes([7, 0, CLOCK]) + first_clock),
+    block(2, 0, second_clock),
+    block(3, 2, bytes([10, 2, 0, 0]) + lb(struct.pack('<Q', 5_000))),
+])
+(HERE / 'model-f2-tape.bin').write_bytes(model)

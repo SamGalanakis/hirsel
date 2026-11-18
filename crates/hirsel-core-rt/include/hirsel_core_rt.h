@@ -126,6 +126,7 @@ void hirsel_core_counted_init(void *node, bool atomic);
 void hirsel_core_share(void *node, bool atomic);
 _Noreturn void hirsel_core_count_overflow(void);
 bool hirsel_core_try_unwrap(void *node, bool atomic);
+bool hirsel_core_arc_decrement_for_replay(void *node);
 HirselCoreAllocation hirsel_core_task_start(HirselCoreContext *);
 HirselCoreAllocation hirsel_core_resource_alloc(const HirselCoreContext *,
     size_t bytes, size_t alignment, uint64_t logical_field_storage, uint64_t grant);

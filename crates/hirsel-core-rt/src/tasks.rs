@@ -133,6 +133,8 @@ pub struct Task {
     /// is the task's refund notification flag. With a sink every hook records,
     /// so it stays set and `recorded_refunds` is the notification flag.
     pub(crate) arc_gate: AtomicBool,
+    pub(crate) replay: bool,
+    latest_pair: bool,
     recorded_refunds: AtomicBool,
     refunds: Option<crate::limit::RefundSubscription>,
     polls_left: u32,
@@ -228,6 +230,8 @@ struct Scheduler {
     model: Option<hirsel_core_net::model::Model>,
     parked: Parked,
 }
+const _: () = assert!(std::mem::offset_of!(Task, replay) == crate::abi_layout::TASK_ARC_REPLAY);
+
 impl Task {
     /// The flag foreign refund publication sets for this task (see `arc_gate`).
     #[inline(always)]
@@ -268,17 +272,41 @@ impl Scheduler {
         }
     }
     unsafe fn pop(&mut self) -> *mut Task {
-        // Pollers wait until the already-runnable peers have had a turn. This
-        // also prevents an adversarial replay chooser alternating two pollers
-        // forever while a third ready task never performs an event.
-        if self.head.is_null() {
-            self.head = std::mem::replace(&mut self.deferred, ptr::null_mut());
-            self.tail = std::mem::replace(&mut self.deferred_tail, ptr::null_mut());
-        }
-        let mut count = 0;
-        let mut at = self.head;
-        // SAFETY: run queue links belong exclusively to the idle scheduler.
+        // SAFETY: only the idle scheduler manipulates the ready queues.
         unsafe {
+            if self.taped {
+                let mut task = self.all;
+                while !task.is_null() {
+                    if let Some(group) = (*task).group
+                        && !group.failed()
+                    {
+                        use crate::tape::schedule::Turn;
+                        let wanted = match group.turn() {
+                            Turn::Wait(id) | Turn::Event(Some(id)) => Some(id),
+                            Turn::Grant | Turn::Finish => Some(0),
+                            _ => None,
+                        };
+                        if let Some(id) = wanted {
+                            let target = self.group_task(group, id);
+                            if !target.is_null() && (*target).state == State::Ready {
+                                return self.unlink_ready(target);
+                            }
+                            if matches!(group.turn(), Turn::Wait(_) | Turn::Grant | Turn::Finish) {
+                                group.fail();
+                            }
+                        }
+                    }
+                    task = (*task).all;
+                }
+            }
+            // The FIFO identity retains the old ready order, including the
+            // deferred queue for pollers.
+            if self.head.is_null() {
+                self.head = std::mem::replace(&mut self.deferred, ptr::null_mut());
+                self.tail = std::mem::replace(&mut self.deferred_tail, ptr::null_mut());
+            }
+            let mut count = 0;
+            let mut at = self.head;
             while !at.is_null() {
                 count += 1;
                 at = (*at).ready;
@@ -286,7 +314,7 @@ impl Scheduler {
             if count == 0 {
                 return ptr::null_mut();
             }
-            let mut choice = self
+            let choice = self
                 .provider
                 .choose
                 .map_or(0, |choose| choose(self.provider.state, count));
@@ -294,35 +322,58 @@ impl Scheduler {
             for _ in 0..choice {
                 selected = (*selected).ready;
             }
-            if let Some(group) = (*selected).group {
-                let mut members = Vec::new();
-                let mut at = self.head;
-                let mut index = 0;
-                while !at.is_null() {
-                    if (*at).group.is_some_and(|g| g.same(group)) {
-                        members.push(index);
-                    }
-                    index += 1;
-                    at = (*at).ready;
+            if let Some(group) = (*selected).group
+                && group.fifo()
+            {
+                selected = self.head;
+                while !(*selected).group.is_some_and(|g| g.same(group)) {
+                    selected = (*selected).ready;
                 }
-                let proposed = members.iter().position(|&i| i == choice).unwrap();
-                choice = members[group.choose(members.len(), proposed)];
             }
-            let mut link = &raw mut self.head;
-            let mut before = ptr::null_mut();
-            for _ in 0..choice {
-                before = *link;
-                link = &raw mut (**link).ready;
-            }
-            let task = *link;
-            *link = (*task).ready;
-            if self.tail == task {
-                self.tail = before;
-            }
-            (*task).ready = ptr::null_mut();
-            task
+            self.unlink_ready(selected)
         }
     }
+
+    unsafe fn group_task(&self, group: crate::tape::schedule::Group, id: u64) -> *mut Task {
+        let mut task = self.all;
+        // SAFETY: scheduler owns the creation list; retired tasks are unlinked.
+        unsafe {
+            while !task.is_null() {
+                if (*task).group.is_some_and(|g| g.same(group) && g.task == id) {
+                    return task;
+                }
+                task = (*task).all;
+            }
+        }
+        ptr::null_mut()
+    }
+
+    unsafe fn unlink_ready(&mut self, task: *mut Task) -> *mut Task {
+        // SAFETY: Ready is queued in one of these two lists; idle owns both.
+        unsafe {
+            for (head, tail) in [
+                (&mut self.head, &mut self.tail),
+                (&mut self.deferred, &mut self.deferred_tail),
+            ] {
+                let mut link = head as *mut *mut Task;
+                let mut before = ptr::null_mut();
+                while !(*link).is_null() {
+                    if *link == task {
+                        *link = (*task).ready;
+                        if *tail == task {
+                            *tail = before;
+                        }
+                        (*task).ready = ptr::null_mut();
+                        return task;
+                    }
+                    before = *link;
+                    link = &raw mut (**link).ready;
+                }
+            }
+        }
+        unreachable!("ready task has lost its queue");
+    }
+
     #[inline(always)]
     unsafe fn wake(&mut self) {
         if self.blocked != 0 {
@@ -483,25 +534,44 @@ impl Scheduler {
                 task = (*task).all;
             }
             for group in groups {
-                while let Some(input) = group.input() {
-                    use crate::tape::schedule::Input;
-                    let id = match input {
-                        Input::Wake(t) | Input::Cancel(t) | Input::Done(t) => t,
+                use crate::tape::schedule::Turn;
+                loop {
+                    let turn = group.turn();
+                    let id = match turn {
+                        Turn::Wake(id) | Turn::Cancel(id) | Turn::Done(id) => id,
+                        Turn::Choose(index) => {
+                            let mut live = Vec::new();
+                            let mut at = self.all;
+                            while !at.is_null() {
+                                if (*at).state != State::Ended
+                                    && let Some(g) = (*at).group
+                                    && g.same(group)
+                                {
+                                    live.push((g.task, at));
+                                }
+                                at = (*at).all;
+                            }
+                            live.sort_unstable_by_key(|&(id, _)| id);
+                            if let Some(&(id, at)) =
+                                usize::try_from(index).ok().and_then(|i| live.get(i))
+                                && (*at).state == State::Ready
+                            {
+                                group.choose(id);
+                            } else {
+                                group.fail();
+                            }
+                            break;
+                        }
+                        _ => break,
                     };
-                    let mut target = self.all;
-                    while !target.is_null()
-                        && !(*target)
-                            .group
-                            .is_some_and(|g| g.same(group) && g.task == id)
-                    {
-                        target = (*target).all;
-                    }
+                    let target = self.group_task(group, id);
                     if target.is_null() {
                         group.fail();
                         break;
                     }
-                    match input {
-                        Input::Cancel(_) if (*target).state != State::Ended => {
+                    match turn {
+                        Turn::Cancel(_) if (*target).state != State::Ended => {
+                            group.consume_input();
                             (*(*target).context)
                                 .cancel_requested
                                 .store(true, Ordering::Release);
@@ -510,16 +580,15 @@ impl Scheduler {
                             }
                             self.wake();
                         }
-                        Input::Wake(_)
+                        Turn::Wake(_)
                             if (*target).state == State::Provider
                                 && (*(*target).operation).phase == Phase::Waiting =>
                         {
-                            if let Some(group) = (*target).group {
-                                group.cancel_wait((*(*target).operation).request);
-                            }
+                            group.consume_input();
+                            group.cancel_wait((*(*target).operation).request);
                             self.runnable(target, Next::Issue);
                         }
-                        Input::Done(_)
+                        Turn::Done(_)
                             if (*target).state == State::Provider
                                 && (*(*target).operation).phase == Phase::Issued =>
                         {
@@ -1370,6 +1439,118 @@ unsafe fn alone(
     }
 }
 
+/// Replay dispatches before the first read or mutation of shared state.
+pub(crate) fn before_commit() {
+    replay_boundary(false);
+}
+
+/// Only a provider entry can reach a taped WAIT without first committing.
+pub(crate) fn before_provider_entry() {
+    replay_boundary(true);
+}
+
+pub(crate) fn before_tape_frame(group: crate::tape::schedule::Group, ending: bool) {
+    let task = CURRENT.get();
+    // SAFETY: CURRENT pins the live opener; checkpoint borrows no task fields.
+    unsafe {
+        if task.is_null() || !(*task).replay || !(*task).group.is_some_and(|g| g.same(group)) {
+            return;
+        }
+        use crate::tape::schedule::Turn;
+        loop {
+            match group.turn() {
+                Turn::Fifo | Turn::Event(None | Some(0)) => return,
+                Turn::Grant if !ending => return,
+                Turn::Finish => return,
+                Turn::Grant => {
+                    group.fail();
+                    return;
+                }
+                _ => checkpoint(false),
+            }
+        }
+    }
+}
+
+fn replay_boundary(provider_entry: bool) {
+    let task = CURRENT.get();
+    // SAFETY: CURRENT pins this task. No scheduler reference is held across a switch.
+    unsafe {
+        if task.is_null() || !(*task).replay {
+            return;
+        }
+        let group = (*task).group.unwrap();
+        use crate::tape::schedule::Turn;
+        if (*task).latest_pair {
+            if !matches!(group.turn(), Turn::Fifo | Turn::Event(Some(_))) {
+                group.fail();
+            }
+            return;
+        }
+        loop {
+            match group.turn() {
+                Turn::Fifo => return,
+                Turn::Event(Some(id)) if id == group.task => return,
+                Turn::Wait(id) if id == group.task && provider_entry => return,
+                Turn::Wait(id) if id == group.task => {
+                    group.fail();
+                    return;
+                }
+                Turn::Grant | Turn::Finish if group.task == 0 => {
+                    if provider_entry {
+                        return;
+                    }
+                    group.fail();
+                    return;
+                }
+                Turn::Event(Some(id))
+                    if (*(*task).run)
+                        .group_task(group, id)
+                        .as_ref()
+                        .is_none_or(|wanted| wanted.state != State::Ready) =>
+                {
+                    group.fail();
+                    return;
+                }
+                Turn::Event(None) => {
+                    group.fail();
+                    return;
+                }
+                _ => checkpoint(false),
+            }
+        }
+    }
+}
+
+unsafe fn live_index(task: *mut Task, group: crate::tape::schedule::Group) -> u64 {
+    let mut index = 0;
+    // SAFETY: the active committer owns its scheduler's creation list.
+    unsafe {
+        let mut at = (*(*task).run).all;
+        while !at.is_null() {
+            if (*at).state != State::Ended
+                && (*at)
+                    .group
+                    .is_some_and(|g| g.same(group) && g.task < group.task)
+            {
+                index += 1;
+            }
+            at = (*at).all;
+        }
+    }
+    index
+}
+
+pub(crate) fn group_index() -> u64 {
+    let task = CURRENT.get();
+    // SAFETY: CURRENT pins the task while a provider issues synchronously.
+    unsafe {
+        task.as_ref()
+            .and_then(|t| t.group)
+            .map_or(0, |g| live_index(task, g))
+    }
+}
+
 /// Record only semantic identifiers, never native addresses. Arc IDs are assigned
 /// by their event stream; zero denotes the operation's implicit current object.
 #[inline(always)]
@@ -1388,7 +1569,9 @@ unsafe fn event_for(task_pointer: *mut Task, kind: u8, object: u64, value: u64) 
     // SAFETY: the running task pins the scheduler through both operations.
     unsafe {
         record_event(task_pointer, kind, object, value);
-        poll_event(task_pointer, kind, value);
+        if !matches!(kind, LATEST_READ | LATEST_PUBLISH) {
+            poll_event(task_pointer, kind, value);
+        }
     }
 }
 
@@ -1417,9 +1600,21 @@ unsafe fn record_event(task_pointer: *mut Task, kind: u8, object: u64, value: u6
                 },
             );
         }
+        let opens_pair = matches!(kind, LATEST_READ | LATEST_PUBLISH);
+        let was_pair = task.latest_pair;
         if let Some(group) = task.group {
-            group.event();
+            if was_pair
+                && task.replay
+                && !matches!(
+                    group.turn(),
+                    crate::tape::schedule::Turn::Fifo | crate::tape::schedule::Turn::Event(Some(_))
+                )
+            {
+                group.fail();
+            }
+            group.event(|| live_index(task_pointer, group), kind == END);
         }
+        (*task_pointer).latest_pair = opens_pair;
     }
 }
 /// Publish the accounting change before a scheduler poll can switch tasks.
@@ -1511,6 +1706,7 @@ unsafe fn poll_turn(task: *mut Task) {
 #[cold]
 #[inline(never)]
 pub(crate) fn capacity_refused(requested: u64, available: u64) -> Capacity {
+    before_commit();
     event(CAPACITY, requested, available);
     Capacity {
         requested,
@@ -1531,7 +1727,13 @@ impl Drop for CallbackTask {
 pub(crate) fn recorded_chooser() -> u8 {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins the scheduler while the tape opens.
-    unsafe { u8::from(!task.is_null() && (*(*task).run).provider.choose.is_some()) }
+    unsafe {
+        if !task.is_null() && (*(*task).run).provider.choose.is_some() {
+            hirsel_tape_format::CHOOSER_COMMIT
+        } else {
+            hirsel_tape_format::CHOOSER_FIFO
+        }
+    }
 }
 pub(crate) fn has_provider_task() -> bool {
     !CURRENT.get().is_null() || !CALLBACK_TASK.get().is_null()
@@ -1608,6 +1810,7 @@ unsafe fn assign_tape(task: *mut Task, group: crate::tape::schedule::Group) {
         (*(*task).run).taped = true;
         (*task).refunds.take();
         (*task).group = Some(group);
+        (*task).replay = group.replaying();
         (*task).refunds = Some(
             (*(*task).context)
                 .current
@@ -1705,6 +1908,7 @@ pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
 unsafe fn observe_cancel(context: *mut Context, site: u64) {
     // SAFETY: the operation entry exclusively owns this task context.
     unsafe {
+        before_commit();
         (*context).cancel_requested.store(false, Ordering::Release);
         causes::record(&mut *context, Cause::new(causes::CANCELLED, site));
         event(CANCELLED, 0, site);
@@ -1715,8 +1919,9 @@ unsafe fn observe_cancel(context: *mut Context, site: u64) {
 /// checkpoint; production pure code never calls it implicitly.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_check_cancel(context: *mut Context, site: u64) -> u8 {
-    // SAFETY: observe entry before allowing any scheduler action.
+    // SAFETY: observe entry in its commit turn.
     unsafe {
+        before_commit();
         if check_cancel(context, site) != 0 {
             return 1;
         }
@@ -1740,6 +1945,7 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
         if (*task).record.is_some() {
             abi::task_handover((*task).context);
         }
+        before_commit();
         event(END, (*task).id, (*task).failed as u64);
         (*task).state = State::Ended;
         (*(*task).run).wake();
@@ -1794,6 +2000,8 @@ pub unsafe fn run_root(
     };
     let mut root = Box::new(Task {
         arc_gate: AtomicBool::new(run.provider.event.is_some()),
+        replay: false,
+        latest_pair: false,
         recorded_refunds: AtomicBool::new(false),
         refunds: None,
         polls_left: POLLS_PER_TURN,
@@ -1902,6 +2110,7 @@ unsafe fn spawn_in(
     // SAFETY: spawn is invoked by the current parent in its exclusive context.
     unsafe {
         crate::process::deny_describe_capability(context);
+        before_commit();
         let mut record =
             match Block::new(&*context, charge::task(layout.result.logical, bytes), 1, 8) {
                 Ok(record) => record,
@@ -1918,6 +2127,8 @@ unsafe fn spawn_in(
         let child_context = abi::task_child(context, &mut record, bytes, id);
         let task = Box::new(Task {
             arc_gate: AtomicBool::new((*run).provider.event.is_some()),
+            replay: false,
+            latest_pair: false,
             recorded_refunds: AtomicBool::new(false),
             refunds: None,
             polls_left: POLLS_PER_TURN,
@@ -1946,7 +2157,8 @@ unsafe fn spawn_in(
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::allocated((&*task as *const Task).cast(), size_of::<Task>());
         let task = Box::into_raw(task);
-        if (*task).group.is_some() {
+        if let Some(group) = (*task).group {
+            (*task).replay = group.replaying();
             (*task).arc_gate.store(true, Ordering::Release);
         }
         (*task).context = (*task).owned_context.as_mut().unwrap();
@@ -2025,6 +2237,7 @@ pub unsafe extern "C" fn hirsel_core_spawn(
 pub unsafe extern "C" fn hirsel_core_cancel(_: *mut Context, task: *mut Task) {
     // SAFETY: parent owns the child's handle and requests without touching its stack.
     unsafe {
+        before_commit();
         if let Some(group) = (*task).group
             && !current_group().is_some_and(|source| source.same(group))
         {
@@ -2082,6 +2295,7 @@ pub unsafe extern "C" fn hirsel_core_join(
     // SAFETY: parent owns task throughout waits, no references survive switches.
     unsafe {
         loop {
+            before_commit();
             if check_cancel(context, site) != 0 {
                 return Join {
                     kind: 0,
@@ -2120,6 +2334,7 @@ unsafe fn abandon_begin(context: *mut Context, task: *mut Task) -> *mut crate::c
         (*context).cancel_shield += 1;
         hirsel_core_cancel(context, task);
         loop {
+            before_commit();
             if (*task).state == State::Ended {
                 break;
             }
@@ -2356,6 +2571,8 @@ mod ready_routing_laws {
                 .map(|i| {
                     Box::new(Task {
                         arc_gate: AtomicBool::new(false),
+                        replay: false,
+                        latest_pair: false,
                         recorded_refunds: AtomicBool::new(false),
                         refunds: None,
                         polls_left: POLLS_PER_TURN,

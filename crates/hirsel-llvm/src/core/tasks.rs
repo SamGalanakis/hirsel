@@ -339,8 +339,8 @@ impl FunctionEmitter<'_> {
             RtOp::LatestRead => self.native_call("hirsel_core_latest_read", &[P], &[p(&args[0])]),
             RtOp::LatestPublish => self.native_call(
                 "hirsel_core_latest_publish",
-                &[P],
-                &[p(&args[0]), p(&args[1])],
+                &[],
+                &[ptr(CONTEXT), p(&args[0]), p(&args[1])],
             ),
             RtOp::TryReceive { .. } => {
                 self.native_call("hirsel_core_try_receive", &[K], &[p(&args[0]), p(&args[1])])

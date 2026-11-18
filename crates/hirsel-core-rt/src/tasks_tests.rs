@@ -228,9 +228,18 @@ fn three_tasks_backpressure_fifo_and_closure_return_every_charge() {
             events.iter().filter(|e| e.kind == PUBLISH).count(),
             2 * n as usize
         );
+        let receives: Vec<_> = events.iter().filter(|e| e.kind == RECEIVE).collect();
+        assert_eq!(receives.len(), 2 * n as usize + 2);
         assert_eq!(
-            events.iter().filter(|e| e.kind == RECEIVE).count(),
+            receives.iter().filter(|e| e.value == 0).count(),
             2 * n as usize
+        );
+        assert_eq!(
+            receives
+                .iter()
+                .filter(|e| e.value == hirsel_core_layout::event::CHANNEL_CLOSED)
+                .count(),
+            2
         );
         assert_eq!(events.iter().filter(|e| e.kind == SPAWN).count(), 3);
     }

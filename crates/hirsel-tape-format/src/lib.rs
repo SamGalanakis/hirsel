@@ -31,6 +31,7 @@ pub const KIND_CALL: u8 = 2;
 pub const MODE_RECORD: u8 = 1;
 pub const MODE_DURABLE: u8 = 2;
 pub const CHOOSER_FIFO: u8 = 0;
+pub const CHOOSER_COMMIT: u8 = 2;
 
 pub const F_ISSUE: u8 = 1;
 pub const F_DONE: u8 = 2;
@@ -256,7 +257,7 @@ impl Header {
         let limit = u64::from_le_bytes(c.fixed()?);
         let bound = u64::from_le_bytes(c.fixed()?);
         let chooser = c.u8()?;
-        if chooser > 1 {
+        if !matches!(chooser, CHOOSER_FIFO | CHOOSER_COMMIT) {
             return Err(Corrupt);
         }
         let arg = c.bytes()?.to_vec();
@@ -579,6 +580,7 @@ impl Out {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Frame {
     Wait {
+        gap: u64,
         task: u64,
     },
     Issue {
@@ -613,11 +615,15 @@ pub enum Frame {
     },
     /// Args carries the whole argument vector, each `varint len + bytes`.
     Grant {
+        gap: u64,
         kind: u8,
         args: Option<Vec<u8>>,
     },
     Incarnation(u64),
-    End(Ending),
+    End {
+        gap: u64,
+        ending: Ending,
+    },
 }
 
 /// Encodes frames with the T bit's previous-task compression. DATA
@@ -647,8 +653,9 @@ impl Encoder {
         let mut out = Vec::new();
         let mut rest = Vec::new();
         match f {
-            Frame::Wait { task } => {
+            Frame::Wait { gap, task } => {
                 out.push(F_WAIT);
+                put_varint(&mut out, *gap);
                 self.task(&mut out, 0, *task);
             }
             Frame::Issue {
@@ -702,8 +709,9 @@ impl Encoder {
                 put_varint(&mut out, *gap);
                 put_varint(&mut out, *index);
             }
-            Frame::Grant { kind, args } => {
+            Frame::Grant { gap, kind, args } => {
                 out.push(F_GRANT);
+                put_varint(&mut out, *gap);
                 out.push(*kind);
                 if *kind == ARGS_KIND {
                     put_bytes(
@@ -716,8 +724,9 @@ impl Encoder {
                 out.push(F_INCARNATION);
                 put_varint(&mut out, *n);
             }
-            Frame::End(e) => {
+            Frame::End { gap, ending: e } => {
                 out.push(F_END);
+                put_varint(&mut out, *gap);
                 out.push(END_COMPLETE);
                 out.push(e.kind);
                 e.outcome.encode(&mut out);
@@ -768,6 +777,7 @@ impl Decoder {
             }
             let frame = match kind {
                 F_WAIT => Frame::Wait {
+                    gap: c.varint()?,
                     task: self.task(head, &mut c)?,
                 },
                 F_ISSUE => {
@@ -835,12 +845,14 @@ impl Decoder {
                     index: c.varint()?,
                 },
                 F_GRANT => {
+                    let gap = c.varint()?;
                     let kind = c.u8()?;
                     if kind > ARGS_KIND {
                         return Err(Corrupt);
                     }
                     let args = (kind == ARGS_KIND).then(|| c.bytes().map(<[u8]>::to_vec));
                     Frame::Grant {
+                        gap,
                         kind,
                         args: args.transpose()?,
                     }
@@ -864,6 +876,7 @@ impl Decoder {
                     f
                 }
                 F_END => {
+                    let gap = c.varint()?;
                     let status = c.u8()?;
                     let kind = c.u8()?;
                     if !end || status != END_COMPLETE || kind > END_CANCELLED {
@@ -873,13 +886,16 @@ impl Decoder {
                     if !c.done() {
                         return Err(Corrupt);
                     }
-                    Frame::End(Ending { kind, outcome })
+                    Frame::End {
+                        gap,
+                        ending: Ending { kind, outcome },
+                    }
                 }
                 _ => return Err(Corrupt),
             };
             frames.push(frame);
         }
-        if end && !matches!(frames.last(), Some(Frame::End(_))) {
+        if end && !matches!(frames.last(), Some(Frame::End { .. })) {
             return Err(Corrupt);
         }
         Ok(frames)

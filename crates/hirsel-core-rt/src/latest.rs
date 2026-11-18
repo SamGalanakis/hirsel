@@ -1,8 +1,8 @@
 //! `Latest[T]` roots (CONC-13): one swappable `Arc[T]` holder shared by its handles.
 //! The root record is the payload of its own admitted block, so the charge is
 //! exactly the bookkeeping it holds. `read` and `publish` are scheduler events
-//! that record no value; they hand the node back to the typed kernel, which
-//! shares it (`read`) or releases the old one (`publish`) as an ordinary `Arc`.
+//! that record no value. The associated Arc share or release commits
+//! immediately after its Latest event, before another task or input.
 //! The last handle's cleanup releases the root through the compiler's
 //! resumable cleanup of the `Arc[T]` place, stored at creation as a channel
 //! stores its item's, on the active drain; the record's refund follows.
@@ -65,6 +65,7 @@ pub unsafe extern "C" fn hirsel_core_latest_new(
             }
         };
         let latest = block.into_raw().as_ptr().cast::<Latest>();
+        tasks::before_commit();
         let id = tasks::identity();
         latest.write(Latest {
             root: node,
@@ -86,6 +87,7 @@ pub unsafe extern "C" fn hirsel_core_latest_new(
 pub unsafe extern "C" fn hirsel_core_latest_handle(latest: *mut Latest) -> *mut Latest {
     // SAFETY: the live handle pins the exact counter through its event.
     unsafe {
+        tasks::before_commit();
         (*latest).handles = (*latest)
             .handles
             .checked_add(1)
@@ -94,28 +96,36 @@ pub unsafe extern "C" fn hirsel_core_latest_handle(latest: *mut Latest) -> *mut 
         latest
     }
 }
-/// Install `node` as the root and return the old root's holder, which the caller
-/// now owns and releases. Never waits, fails or observes cancellation.
+/// Install `node` as the root and release the old holder (CONC-13).
 /// # Safety
-/// A live handle pins the root; the caller transfers the live holder `node`.
+/// The context belongs to this task. A live handle pins the root and the caller
+/// transfers the live holder `node`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_latest_publish(latest: *mut Latest, node: *mut u8) -> *mut u8 {
-    // SAFETY: no suspension between the swap and its event.
+pub unsafe extern "C" fn hirsel_core_latest_publish(
+    context: *mut Context,
+    latest: *mut Latest,
+    node: *mut u8,
+) {
+    // SAFETY: the live handle pins the root and its exact Arc cleanup recipe.
     unsafe {
-        let old = std::mem::replace(&mut (*latest).root, node);
+        tasks::before_commit();
+        let mut old = std::mem::replace(&mut (*latest).root, node);
         tasks::event(tasks::LATEST_PUBLISH, (*latest).id, 0);
-        old
+        counted::drain_place(context, (&raw mut old).cast(), (*latest).clean);
     }
 }
-/// The current root's node, borrowed: the caller shares it before any other event.
+/// Return an owned share of the current root's node (CONC-13).
 /// # Safety
 /// A live handle pins the root.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_latest_read(latest: *mut Latest) -> *mut u8 {
-    // SAFETY: the live handle pins the root holder until the caller's share.
+    // SAFETY: the root holder pins its node through the paired share.
     unsafe {
+        tasks::before_commit();
+        let node = NonNull::new_unchecked((*latest).root);
         tasks::event(tasks::LATEST_READ, (*latest).id, 0);
-        (*latest).root
+        counted::share(node, true);
+        node.as_ptr()
     }
 }
 /// Give up one handle; the last one's cleanup takes over the record, whose
@@ -123,6 +133,7 @@ pub unsafe extern "C" fn hirsel_core_latest_read(latest: *mut Latest) -> *mut u8
 unsafe fn latest_begin(latest: *mut Latest) -> Option<*mut Holder> {
     // SAFETY: the exact handle count pins the record until the last handle.
     unsafe {
+        tasks::before_commit();
         (*latest).handles -= 1;
         tasks::event(tasks::SENDERS, (*latest).id, (*latest).handles);
         ((*latest).handles == 0).then(|| (&raw mut (*latest).handles).cast::<Holder>())

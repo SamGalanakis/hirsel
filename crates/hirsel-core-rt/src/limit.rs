@@ -404,7 +404,13 @@ impl Payer {
         if local && d.handles.get() != 0 {
             let root = self.root();
             // SAFETY: scheduler execution serializes reads of live routing.
-            let live = unsafe { (*root.local()).live };
+            let mut live = unsafe { (*root.local()).live };
+            if bytes != 0 && live.owner != crate::tasks::current_id() {
+                crate::tasks::before_commit();
+                let root = self.root();
+                // SAFETY: an outstanding charge pins the current route.
+                live = unsafe { (*root.local()).live };
+            }
             if live.owner != crate::tasks::current_id() {
                 let publish = || {
                     d.remote
@@ -733,8 +739,8 @@ impl Funding {
         }
     }
 
-    /// Close an unused grant or a cause cell's private reservation.
-    pub fn end(&self) {
+    /// The receiving limit and its task at the current hand-over position.
+    fn handover_destination(&self) -> (Payer, u64) {
         let child = self.payer.get();
         let parent = child
             .forest()
@@ -744,6 +750,16 @@ impl Funding {
             .unwrap()
             .root();
         let owner = parent.forest().record(parent.slot().id).live.owner;
+        (parent, owner)
+    }
+
+    /// Close an unused grant or a cause cell's private reservation.
+    pub fn end(&self) {
+        let (_, owner) = self.handover_destination();
+        if owner != crate::tasks::current_id() {
+            crate::tasks::before_commit();
+        }
+        let (_, owner) = self.handover_destination();
         if owner == crate::tasks::current_id() {
             self.end_id();
         } else {
@@ -756,11 +772,15 @@ impl Funding {
     /// later refunds immediately. Only the recipient completes the ranked union
     /// and applies the unused reservation, at its next event.
     pub(crate) fn handover(&mut self, creator: u64) {
+        let active = self.owner();
+        let (_, owner) = self.handover_destination();
+        if owner != active || creator != active {
+            crate::tasks::before_commit();
+        }
         self.drain();
         let child = self.payer.get();
         let live = child.forest().record(child.slot().id).live;
-        let parent = live.parent.unwrap().root();
-        let owner = child.forest().record(parent.slot().id).live.owner;
+        let (_, owner) = self.handover_destination();
         if owner != live.owner {
             self.transfer();
         } else if creator != live.owner {
@@ -774,14 +794,7 @@ impl Funding {
     fn transfer(&self) {
         let child = self.payer.get();
         let d = child.domain();
-        let parent = child
-            .forest()
-            .record(child.slot().id)
-            .live
-            .parent
-            .unwrap()
-            .root();
-        let owner = child.forest().record(parent.slot().id).live.owner;
+        let (parent, owner) = self.handover_destination();
         let unused = child.forest().record(child.slot().id).available;
         crate::tasks::commit_refund(owner, unused, || {
             let mut remote = d.remote.lock().unwrap();

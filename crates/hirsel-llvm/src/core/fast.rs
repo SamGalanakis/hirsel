@@ -47,6 +47,42 @@ impl FunctionEmitter<'_> {
         };
         self.runtime(name, Type::Void, args, &attrs);
     }
+    fn branch_on_arc_replay(&mut self, inline: Label, replay: Label) {
+        let n = self.counter();
+        let gate = Label::new("arc_replay_gate", n);
+        let events = self.load_native(&CONTEXT, CONTEXT_EVENTS, Type::Ptr);
+        let no_task = self.cmp(Predicate::Eq, &Type::Ptr, &events, &Value::Null);
+        self.likely(&no_task, inline, gate);
+        self.block(gate);
+        let at = self.field_pointer(&events, TASK_ARC_REPLAY);
+        let flag = self.load(&Type::I8, &at, 1);
+        let live = self.cmp(Predicate::Eq, &Type::I8, &flag, &int(0));
+        self.likely(&live, inline, replay);
+    }
+
+    pub(super) fn initialize_arc(&mut self, node: &Value) {
+        let n = self.counter();
+        let inline = Label::new("inline_arc_init", n);
+        let replay = Label::new("replay_arc_init", n);
+        let done = Label::new("arc_init_done", n);
+        self.branch_on_arc_replay(inline, replay);
+        self.block(replay);
+        self.cold_void(
+            "hirsel_core_counted_init",
+            &[ptr(node.clone()), zeroext(Type::I1, true)],
+        );
+        self.br(done);
+        self.block(inline);
+        let memory = Memory {
+            ordering: Some(Ordering::Monotonic),
+            ..Memory::aligned(8)
+        };
+        self.store_with(&Type::I64, &int(1), node, &memory);
+        self.arc_event("hirsel_core_arc_initialized", &[]);
+        self.br(done);
+        self.block(done);
+    }
+
     /// Every inline Arc operation tests the immutable context event word. An
     /// unwrap, which may poll, calls its hook whenever the word is set. New,
     /// share and release also test the word's Task gate byte (TASK_ARC_GATE),
@@ -427,7 +463,18 @@ impl FunctionEmitter<'_> {
         let n = self.counter();
         let stop = Label::new("count_stop", n);
         let retained = Label::new("retained", n);
+        let done = Label::new("arc_share_done", n);
         let next = if atomic {
+            let inline = Label::new("inline_arc_share", n);
+            let replay = Label::new("replay_arc_share", n);
+            self.branch_on_arc_replay(inline, replay);
+            self.block(replay);
+            self.cold_void(
+                "hirsel_core_share",
+                &[ptr(node.clone()), zeroext(Type::I1, true)],
+            );
+            self.br(done);
+            self.block(inline);
             let old = self.emit(Operation::AtomicRmw(
                 Rmw::Add,
                 node,
@@ -450,26 +497,72 @@ impl FunctionEmitter<'_> {
         self.block(retained);
         if atomic {
             self.arc_event("hirsel_core_arc_shared", &[ptr(node.clone())]);
+            self.br(done);
+            self.block(done);
         }
     }
     pub(super) fn unique_node(&mut self, node: &Value, atomic: bool) -> Value {
+        if !atomic {
+            let count = self.load(&Type::I64, node, 8);
+            return self.cmp(Predicate::Eq, &Type::I64, &count, &int(1));
+        }
+        let n = self.counter();
+        let inline = Label::new("inline_arc_unique", n);
+        let replay = Label::new("replay_arc_unique", n);
+        let observed = Label::new("inline_arc_observed", n);
+        let done = Label::new("arc_unique_done", n);
+        self.branch_on_arc_replay(inline, replay);
+        self.block(replay);
+        let runtime = self.runtime(
+            "hirsel_core_try_unwrap",
+            Type::I1,
+            &[ptr(node.clone()), zeroext(Type::I1, true)],
+            &CallAttrs {
+                cold: true,
+                ..CallAttrs::default()
+            },
+        );
+        self.br(done);
+        self.block(inline);
         let memory = Memory {
-            ordering: atomic.then_some(Ordering::Acquire),
+            ordering: Some(Ordering::Acquire),
             ..Memory::aligned(8)
         };
         let count = self.load_with(&Type::I64, node, &memory);
         let unique = self.cmp(Predicate::Eq, &Type::I64, &count, &int(1));
-        if atomic {
-            self.arc_event(
-                "hirsel_core_arc_unwrapped",
-                &[zeroext(Type::I1, unique.clone())],
-            );
-        }
-        unique
+        self.arc_event(
+            "hirsel_core_arc_unwrapped",
+            &[zeroext(Type::I1, unique.clone())],
+        );
+        self.br(observed);
+        self.block(observed);
+        self.br(done);
+        self.block(done);
+        self.emit(Operation::Phi(
+            &Type::I1,
+            &[(runtime, replay), (unique, observed)],
+        ))
     }
     pub(super) fn decrement_node(&mut self, node: &Value, atomic: bool) -> Value {
         let i64 = Type::I64;
         if atomic {
+            let n = self.counter();
+            let inline = Label::new("inline_arc_decrement", n);
+            let replay = Label::new("replay_arc_decrement", n);
+            let done = Label::new("arc_decrement_done", n);
+            self.branch_on_arc_replay(inline, replay);
+            self.block(replay);
+            let runtime = self.runtime(
+                "hirsel_core_arc_decrement_for_replay",
+                Type::I1,
+                &[ptr(node.clone())],
+                &CallAttrs {
+                    cold: true,
+                    ..CallAttrs::default()
+                },
+            );
+            self.br(done);
+            self.block(inline);
             let old = self.emit(Operation::AtomicRmw(
                 Rmw::Sub,
                 node,
@@ -477,7 +570,13 @@ impl FunctionEmitter<'_> {
                 &int(1),
                 Ordering::Release,
             ));
-            self.cmp(Predicate::Eq, &i64, &old, &int(1))
+            let last = self.cmp(Predicate::Eq, &i64, &old, &int(1));
+            self.br(done);
+            self.block(done);
+            self.emit(Operation::Phi(
+                &Type::I1,
+                &[(runtime, replay), (last, inline)],
+            ))
         } else {
             let old = self.load_native(node, NODE_COUNT, Type::I64);
             let next = self.bin(Binary::Sub, &i64, &old, &int(1));

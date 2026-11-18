@@ -474,13 +474,13 @@ impl Function<'_, '_, '_> {
                 1
             }
             RtOp::LatestPublish => {
-                outputs[0] = self.c_call(
+                self.c_call(
                     "hirsel_core_latest_publish",
-                    &[P, P],
-                    &[P],
-                    &[args[0], args[1]],
-                )?[0];
-                1
+                    &[P, P, P],
+                    &[],
+                    &[self.context, args[0], args[1]],
+                )?;
+                0
             }
             RtOp::TryReceive { .. } => {
                 outputs[0] = self.c_call(

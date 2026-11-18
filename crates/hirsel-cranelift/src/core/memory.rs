@@ -235,6 +235,19 @@ impl Function<'_, '_, '_> {
                     self.b.switch_to_block(init);
                     let one = self.b.ins().iconst(types::I64, 1);
                     if count == Counted::Arc {
+                        let inline = self.b.create_block();
+                        let replay = self.b.create_block();
+                        fast::branch_on_arc_replay(&mut self.b, self.context, inline, replay);
+                        self.b.switch_to_block(replay);
+                        let atomic = self.b.ins().iconst(types::I8, 1);
+                        self.c_call(
+                            "hirsel_core_counted_init",
+                            &[Ty::Ptr, boolean],
+                            &[],
+                            &[values[0], atomic],
+                        )?;
+                        self.b.ins().jump(ready, &[]);
+                        self.b.switch_to_block(inline);
                         self.b.ins().atomic_store(
                             cranelift_codegen::ir::MemFlagsData::trusted(),
                             one,
@@ -294,24 +307,41 @@ impl Function<'_, '_, '_> {
             }
             Inst::TryUnwrap { result, node, kind } => {
                 let node = self.get(node);
-                let count = if kind == Counted::Arc {
-                    self.b.ins().atomic_load(
+                let value = if kind == Counted::Arc {
+                    let inline = self.b.create_block();
+                    let replay = self.b.create_block();
+                    let done = self.b.create_block();
+                    self.b.append_block_param(done, types::I8);
+                    fast::branch_on_arc_replay(&mut self.b, self.context, inline, replay);
+                    self.b.switch_to_block(replay);
+                    let atomic = self.b.ins().iconst(types::I8, 1);
+                    let unique = self.c_call(
+                        "hirsel_core_try_unwrap",
+                        &[Ty::Ptr, boolean],
+                        &[boolean],
+                        &[node, atomic],
+                    )?[0];
+                    self.b.ins().jump(done, &[unique.into()]);
+                    self.b.switch_to_block(inline);
+                    let count = self.b.ins().atomic_load(
                         types::I64,
                         cranelift_codegen::ir::MemFlagsData::trusted(),
                         node,
-                    )
+                    );
+                    let unique = self.b.ins().icmp_imm_s(IntCC::Equal, count, 1);
+                    self.arc_event("hirsel_core_arc_unwrapped", &[boolean], &[unique])?;
+                    self.b.ins().jump(done, &[unique.into()]);
+                    self.b.switch_to_block(done);
+                    self.b.block_params(done)[0]
                 } else {
-                    self.b.ins().load(
+                    let count = self.b.ins().load(
                         types::I64,
                         cranelift_codegen::ir::MemFlagsData::trusted(),
                         node,
                         memory_layout::NODE_COUNT as i32,
-                    )
+                    );
+                    self.b.ins().icmp_imm_s(IntCC::Equal, count, 1)
                 };
-                let value = self.b.ins().icmp_imm_s(IntCC::Equal, count, 1);
-                if kind == Counted::Arc {
-                    self.arc_event("hirsel_core_arc_unwrapped", &[boolean], &[value])?;
-                }
                 self.set(result, value);
             }
             Inst::Release { node, kind, ty } => {

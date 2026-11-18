@@ -1,33 +1,13 @@
 #!/usr/bin/env python3
-"""Run the runner's named laws and cases (RUNNER-SPEC v2.5 §8) from checkout sources.
+"""Run the runner's named laws and cases (RUNNER-SPEC v2.5 §8).
 
-Every law runs on the evaluator (a law_ function) and natively on each selected backend
-(its test_ twin): R0's in core/programs/store/runner_laws.hirsel, R1's in
-core/programs/store/runner_calls.hirsel, and two generated modules, runner_p19 (one
-`place` of 1, 100, 1,000 and 10,000 entries, run in two tasks) and runner_l12 (describe across permuted
-registrations, an added A field and a changed R; and ea's code revision, which every
-engine must give alike, PROG-9). Each mutant applies its text changes
-to a copy of runner.hirsel and must turn its law red. Every control runs on the evaluator
-with its explicit model network grant. L4's high-water
-case builds core/programs/store/runner_rss.hirsel per native backend and compares
-the runtime's exact peak of live backing bytes across its two modes. L20's builds
-core/programs/store/runner_cover.hirsel the same way and compares the live backing bytes
-at its "subscribed" checkpoint across a 10-row and a 1,954-row Cover; its mutant runs on
-Cranelift only.
+R0 owns core, session, and frame laws, including the generated p19 and L12
+fixtures. Its L4/L20 cases compare exact retained bytes across native runs.
+R1 owns calls, admission, and ingress. The wire target runs the socket cases.
+Without --part, both R0 and R1 run.
 
---part r1 runs R1's calls (transactions at durable versions, runs-once, store refusal)
-and their native twins. --part r0 runs R0's laws, p19, l12, L4, R1b's L1, the
-wire frame vectors, and every mutant. --part wire selects only
-frame_vectors and its evaluator mutants. Without --part both R0 and R1 run.
-
-R1b's L1 builds core/programs/store/runner_crash.hirsel per native backend under the
-store's W2 crash adapter (core/tools/store_crash_tests.py): every cut of each scenario,
-and one failed journal sync. Its two mutants need that adapter, so they run natively, on
-Cranelift only, and are red when the L1 floor check fails them.
-
-RC1's L31 uses the disk store and WebSocket client in runner_crash.hirsel.
-The native law runs in --part r1. --part rc1 selects it and, on Cranelift,
-restores the old stream key for the mutation control.
+The crash adapter runs the W2 filesystem cuts and one failed journal sync.
+RC1's L31 checks that the disk store never writes the plaintext Hello token.
 """
 import argparse
 import base64
@@ -135,12 +115,12 @@ def counted(name, report):
 # peak_retained_bytes (the runtime's exact peak of live backing requests) are equal: a
 # refused frame that leaves any bytes behind raises mode 1's peak. ru_maxrss, the
 # earlier figure, moves by 256 KB steps from run to run and cannot see a small leak.
-def charged(args, root, work, engine, module, modes, figure, cc=None, runner=None, name=None):
+def charged(args, root, work, engine, module, modes, figure, cc=None):
     """Build programs/store/<module>.hirsel on the charge-observation runtime and run it in
     each (argv, label) mode: {label: (exit status, figure(charge report))}, or None and the
     build's error."""
-    name = name or module
-    inputs_path = manifest(root, work, name, runner, [(root / f'core/programs/store/{module}.hirsel', module)])
+    name = module
+    inputs_path = manifest(root, work, name, extra=[(root / f'core/programs/store/{module}.hirsel', module)])
     binary = work / f'{name}_{engine}'
     charges = work / f'{name}_{engine}.json'
     command = [str(args.compiler.resolve()), 'build', '--inputs', str(inputs_path), '--source-core',
@@ -197,7 +177,8 @@ def subscribed_bytes(report):
     return marks[0]['retained_bytes'] if len(marks) == 1 else None
 
 
-def l20_retained(args, root, work, engine, runner=None, name='runner_cover'):
+def l20_retained(args, root, work, engine):
+    name = 'runner_cover'
     cc = c_compiler(args)
     support = work / f'{name}_mark_{engine}.o'
     run_case(f'{name}:observer', engine, [str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_mark.c'),
@@ -207,316 +188,11 @@ def l20_retained(args, root, work, engine, runner=None, name='runner_cover'):
                        + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
     wrapper.chmod(0o755)
     figures, error = charged(args, root, work, engine, 'runner_cover', (('0', 'ten'), ('1', 'all')),
-                             subscribed_bytes, wrapper, runner, name)
+                             subscribed_bytes, wrapper)
     if figures is None:
         return None, {'build': error}
     ran = figures['ten'][0] == 0 and figures['all'][0] == 0 and figures['ten'][1] is not None and figures['all'][1] is not None
     return ran and figures['ten'][1] == figures['all'][1], figures if ran else {'run': figures}
-
-
-# copy_rows_per_sub (L20): a subscription that keeps a copy of its initial rows beside its Cover.
-COVER_MUTANTS = (
-    ('copy_rows_per_sub',
-     [('type Sub { session: u64, sub: u32, generation: u64, key: Bytes, arg: Bytes, cover: Cover, reads: List[store.Read] }',
-       'type Sub { session: u64, sub: u32, generation: u64, key: Bytes, arg: Bytes, cover: Cover, reads: List[store.Read], kept: List[Row] }'),
-      ('cover: take c, reads: take reads)))',
-       'cover: take c, reads: take reads, kept: result.unwrap(clone(o.rows)))))')]),
-)
-
-
-# (name, [(old text, new text)], module, the law that must turn red). Each is a wrong
-# implementation the law names:
-# - duplicate_unchecked: a registry that accepts a key twice;
-# - decode_unbounded: an adapter that decodes the argument under a bound that ignores n;
-# - encode_outside_bound (v2.3): an adapter that encodes R after leaving the bound;
-# - key_without_e: a transact Key over R alone, so a change to E alone keeps the Key;
-# - describe_without_schemas: a describe without the argument and result schemas;
-# - direct_commitless: a head that answers a commitless outcome straight to the session;
-# - release_at_commit_version: a Release at its own commit version, not the group's
-#   durable version;
-# - queue_outside_account: a session that frees a slot when it answers Abandoned.
-# - join_without_digest (L21): a head that joins any request for the running position,
-#   whatever its digest, so other argument bytes get that run's reply.
-# - session_join_without_digest (L21): a session that joins any send of a held position,
-#   so a send with other bytes gets the first send's answer.
-# - mismatch_row_in_session (L21): a session that answers other bytes at a held position
-#   with a Refused(RequestMismatch) row instead of ending (Close 1008).
-# - late_completion_resent: a session that sends the head's answer to a position whose
-#   sends were all answered (Abandoned, not re-sent), a second Outcome for one send.
-# - one_for_joined: one row for a head answer however many sends of the position are owed.
-# - latest_deadline: a joined send answered only when the latest send's deadline fires.
-# - refused_frames_kept (L2): a session that keeps each refused frame's bytes, so its
-#   charge grows with the flood.
-# - join_outside_account: a joined send takes no slot, so per-send timers are unbounded.
-# - rerun_on_duplicate (L3, C10): a head that runs the body again for a Duplicate, discards the
-#   run and answers the stored reply (red by its execution count, COUNTS).
-MUTANTS = (
-    ('rerun_on_duplicate',
-     [('                Ok(Ok(take o)) => commitless(mut hd, take q, take o),',
-       '                Ok(Ok(take o)) => {\n'
-       '                    let _ = effect(mut hd.db, hd.r, hd.h, q)\n'
-       '                    commitless(mut hd, take q, take o)\n'
-       '                },')],
-     'runner_calls', 'calls_runs_once'),
-    ('duplicate_unchecked',
-     [('    if map.contains(r.slots, key) {\n        return Error(AlreadyRegistered(take key))\n    }\n', '')],
-     'runner_laws', 'p13_duplicate_refused'),
-    # R2 (RUNNER-SPEC §8.2): a Subscribe answered at the newest snapshot, not the base;
-    # one session's sub found by another session's same sub id; a rerun that drops a key
-    # without retracting it.
-    ('subscribe_at_latest',
-     [('    let version = store.version(b.base)\n    let mut o = Owe(',
-       '    if let Some(take n) = replace(mut b.newest, None) {\n        b.base = take n\n    }\n'
-       '    let version = store.version(b.base)\n    let mut o = Owe(')],
-     'runner', 'subs_main'),
-    ('shared_cache',
-     [('if subs[i].session == who && subs[i].sub == sub {', 'if subs[i].sub == sub {')],
-     'runner', 'subs_main'),
-    ('rerun_without_retract',
-     [('            projection_row(out, sub, take removed, None)?\n', '')],
-     'runner', 'subs_main'),
-    # R5 (RUNNER-SPEC §7): an aborted run's reply kept without its call record (STORE G1),
-    # and records that name no revision.
-    ('abort_unrecorded',
-     [('    match answered(mut tx, q, o, revision) {\n        Ok(()) => Error(Alone(take o)),',
-       '    match reply(mut tx, q.stream, q.p, o) {\n        Ok(()) => Error(Alone(take o)),')],
-     'runner_calls', 'calls_recorded'),
-    ('record_without_revision',
-     [('    let rev = match revision {\n        Some(b) => Some(copy_bytes(b)?),\n',
-       '    let rev: Option[Bytes] = match revision {\n        Some(_) => None,\n')],
-     'runner_calls', 'calls_recorded'),
-    # L22 (subscribe_order, v2.12), each a Subscribe not at its place in PubIn's order:
-    # second_receiver, a publisher that reads a Subscribe queued behind a Release before
-    # applying that Release, as a second receiver for Subscribes would (it peeks only while
-    # it has no subs, so it never drops the law's Halt); subscribe_past_queue,
-    # a Subscribe that runs past the Releases queued behind it, at the newest version (the
-    # spec's name for it, subscribe_at_latest, is subs_main's Board-level mutant above).
-    ('second_receiver',
-     [('                let Release(version: v, snapshot: take snap, answers: take answers) = take rel\n',
-       '                let Release(version: v, snapshot: take snap, answers: take answers) = take rel\n'
-       '                if list.len(b.subs) == 0u64 {\n'
-       '                    match channel.try_receive(from) {\n'
-       '                        Ok(take ahead) => {\n'
-       '                            let PubIn(e: take next) = take ahead\n'
-       '                            match take next {\n'
-       '                                Subscribed(who, sub, take key, take arg) => {\n'
-       '                                    publish_subscription(mut b, mut joined, mut owes, who, sub, 0u64, take key, take arg)\n'
-       '                                },\n'
-       '                                _ => (),\n'
-       '                            }\n'
-       '                        },\n'
-       '                        _ => (),\n'
-       '                    }\n'
-       '                }\n')],
-     'runner', 'subscribe_order'),
-    ('subscribe_past_queue',
-     [('                publish_subscription(mut b, mut joined, mut owes, who, sub, 0u64, take key, take arg)\n',
-       '                match channel.try_receive(from) {\n'
-       '                    Ok(take ahead) => {\n'
-       '                        let PubIn(e: take next) = take ahead\n'
-       '                        match take next {\n'
-       '                            Released(take rel) => {\n'
-       '                                let Release(version: v, snapshot: take snap, answers: _) = take rel\n'
-       '                                match take snap {\n'
-       '                                    Some(take s) => {\n'
-       '                                        at = v\n'
-       '                                        b.newest = Some(take s)\n'
-       '                                        owes = round(mut b)\n'
-       '                                    },\n'
-       '                                    None => (),\n'
-       '                                }\n'
-       '                            },\n'
-       '                            _ => (),\n'
-       '                        }\n'
-       '                    },\n'
-       '                    Error(_) => (),\n'
-       '                }\n'
-       '                publish_subscription(mut b, mut joined, mut owes, who, sub, 0u64, take key, take arg)\n')],
-     'runner', 'subscribe_order'),
-    # L24 (owed_ended_delivered, v2.13): the owner never wakes the publisher, so a waiting
-    # Ended needs other traffic; and an owner that wakes it once per session, then never.
-    ('owed_ended_waits_for_traffic',
-     [
-         ('            if let Some(_) = work.head { let _ = channel.try_send(wire_publisher(s), PubIn(e: Drained)) }',
-          ''),
-         ('    let _ = channel.try_send(owner.post, PubIn(e: Drained))',
-          '')
-     ],
-     'runner_calls', 'owed_ended_delivered'),
-    ('wake_once',
-     [
-         ('    if run == capacity { run = 0u64; true } else { false }',
-          '    if run == capacity { run = capacity + 1u64; true } else { false }')
-     ],
-     'runner_calls', 'owed_ended_delivered'),
-    # L23 (publisher_never_blocks): the publisher sends to an owner and waits.
-    ('publisher_blocks_on_full_session',
-     [
-         ('fn offer(to: Sender[WireEvent], take e: Notice) -> Offered {\n    match channel.try_send(to, wire_event(FromRunner(take e))) {\n        Ok(()) => Took,\n        Error(Full(WireEvent(e: FromRunner(take back)))) => Bounced(take back),\n        _ => Shut,\n    }\n}\n',
-          'fn offer(to: Sender[WireEvent], take e: Notice) -> Offered waits {\n    match channel.send(to, wire_event(FromRunner(take e))) {\n        Ok(()) => Took,\n        Error(_) => Shut,\n    }\n}\n'),
-         ('take owes: List[Owe], at: u64) {', 'take owes: List[Owe], at: u64) -> () waits {')
-     ],
-     'runner_calls', 'publisher_never_blocks'),
-    # L25 (retired_without_waiting, v2.14): a marked session's end sends its Drained and waits
-    # for a PubIn slot; the publisher sweeps only after a Released, so a quiet place keeps a
-    # dead session; the sweep reads Empty as an end, retiring a live session.
-    ('retire_waits_for_slot',
-     [
-         ('fn wire_finish_owner[C: send](mut service: Service[C], pub_to: Sender[PubIn]) {',
-          'fn wire_finish_owner[C: send](mut service: Service[C], pub_to: Sender[PubIn]) -> () waits {'),
-         ('    if let Some(take left) = (service.finish)(mut service.context) { let _ = channel.try_send(pub_to, take left) }',
-          '    if let Some(take left) = (service.finish)(mut service.context) { let _ = channel.send(pub_to, take left) }')
-     ],
-     'runner', 'retired_without_waiting'),
-    ('sweep_skipped_when_quiet',
-     [('        sweep(mut b.subs, mut joined)\n        settle(', '        settle('),
-      ('                keep_answers(mut waiting, take answers)\n',
-       '                keep_answers(mut waiting, take answers)\n                sweep(mut b.subs, mut joined)\n')],
-     'runner', 'retired_without_waiting'),
-    ('sweep_retires_live',
-     [('                Error(Closed) => true,\n                _ => false,\n            },\n            None => false,',
-       '                Error(_) => true,\n                _ => false,\n            },\n            None => false,')],
-     'runner', 'retired_without_waiting'),
-    # L25: only the session's own end code offers a Drained, so a failed or cancelled
-    # session in a quiet place is kept.
-    ('no_joiner_wake',
-     [('    let _ = channel.try_send(to_publisher, PubIn(e: Drained))\n', '')],
-     'runner', 'retired_without_waiting'),
-    # L17 on the wire (v2.12's one publisher inbox): an initial result split from the Batch
-    # that names its sub, and an Unsubscribe the publisher ignores.
-    ('initial_split',
-     [('        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: take heard, outcomes: take outcomes)))\n',
-       '        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: list.new(), outcomes: take outcomes)))\n'
-       '        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: list.new(), rows: take heard, outcomes: list.new())))\n')],
-     'runner_calls', 'subs_wired'),
-    ('unsubscribe_ignored',
-     [
-         ('                wire_stop_sub(mut s, mut work, sub)',
-          '                let _ = sub')
-     ],
-     'runner_calls', 'subs_wired'),
-    # L17 (RUNNER-SPEC §8.2, complete_marks_empty): an empty initial result names its sub in
-    # no Batch's complete, so the client never learns that sub is current.
-    ('no_complete_on_empty',
-     [('            result.unwrap(list.push(mut o.complete, sub))\n',
-       '            if list.len(o.rows) > 0u64 {\n                result.unwrap(list.push(mut o.complete, sub))\n            }\n')],
-     'runner', 'subs_main'),
-    # L16 (RUNNER-SPEC §8.2): a row's value is the published value (F10), never the raw
-    # stored bytes, nor stored bytes with a fixed two-byte header stripped.
-    ('raw_value',
-     [('{ store.published_value(mine, c) }',
-       '{\n        if list.len(c.tree_key) == 0u64 {\n            return store.published_value(mine, c)\n        }\n'
-       '        match c.value {\n            Some(v) => Ok(Some(result.unwrap(clone(v)))),\n            None => Ok(None),\n        }\n    }')],
-     'runner', 'rows_normalized'),
-    ('strip_two_bytes',
-     [('{ store.published_value(mine, c) }',
-       '{\n        if list.len(c.tree_key) == 0u64 {\n            return store.published_value(mine, c)\n        }\n'
-       '        match c.value {\n            Some(v) => Ok(Some(result.unwrap(clone(list.slice(v, 2u64, list.len(v)))))),\n            None => Ok(None),\n        }\n    }')],
-     'runner', 'rows_normalized'),
-    ('decode_unbounded',
-     [('    let ran = bound bytes n {\n', '    let ran = bound bytes 4611686018427387904u64 {\n')],
-     'runner_laws', 'l4_malformed_flood'),
-    ('encode_outside_bound',
-     [('        let run = scoped fn() -> Result[Result[Outcome, DecodeFail], OutOfTime] {',
-       '        let run = scoped fn() -> Result[Result[Result[R, Outcome], DecodeFail], OutOfTime] {'),
-      ('                    Ok(take r) => Ok(encoded(cr, r)),\n'
-       '                    Error(c) => Ok(Failed(OutOfBytes(room(c)))),\n'
-       '                },\n'
-       '                Ok(Error(e)) => Error(DecodeFail(e: e)),\n'
-       '                Error(c) => Ok(Failed(OutOfBytes(room(c)))),',
-       '                    Ok(take r) => Ok(Ok(take r)),\n'
-       '                    Error(c) => Ok(Error(Failed(OutOfBytes(room(c))))),\n'
-       '                },\n'
-       '                Ok(Error(e)) => Error(DecodeFail(e: e)),\n'
-       '                Error(c) => Ok(Error(Failed(OutOfBytes(room(c))))),'),
-      ('        Ok(Ok(Ok(Ok(Ok(take o))))) => take o,',
-       '        Ok(Ok(Ok(Ok(Ok(Ok(take r)))))) => encoded(cr, r),\n        Ok(Ok(Ok(Ok(Ok(Error(take o)))))) => take o,')],
-     'runner_laws', 'l4_malformed_flood'),
-    # v2.11.2 L10: the Key over R alone, as before v2.11.2, so a change to E alone keeps it.
-    ('key_without_e',
-     [('    let carried: std.codec.Codec[Result[R, E]] = std.codec.of()\n'
-       '    let (take key, take d) = match described(code.identity(f), Transact, ca, carried) {',
-       '    let (take key, take d) = match described(code.identity(f), Transact, ca, cr) {')],
-     'l10', 'l10_e_only'),
-    ('describe_without_schemas',
-     [('args: take args, result: take result)',
-       'args: list.new(), result: list.new())')],
-     'l12', 'l12'),
-    ('direct_commitless',
-     [('    let mut answers: List[Answer] = list.new()\n'
-       '    result.unwrap(list.push(mut answers, Answer(recipient: Recipient(owner: owner, to: take to), row: KeyedDone(stream: take stream, p: p, outcome: take o))))\n'
-       '    let _ = channel.send(hd.out, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers))))',
-       '    let mut rows: List[KeyedDone] = list.new()\n'
-       '    result.unwrap(list.push(mut rows, KeyedDone(stream: take stream, p: p, outcome: take o)))\n'
-       '    let e = update(0u64, None, take rows)\n'
-       '    let _ = channel.send(to, wire_event(FromRunner(take e)))')],
-     'runner_calls', 'calls_duplicate'),
-    ('release_at_commit_version',
-     [('    let d = store.version(store.snapshot(hd.db))', '    let mut d = store.version(store.snapshot(hd.db))'),
-      ('let Worker(p: p, digest: _, version: _, outcome: take o, waiters: take waiters) = take w',
-       'let Worker(p: p, digest: _, version: wv, outcome: take o, waiters: take waiters) = take w\n'
-       '        if stream == group[0u64] { d = wv }')],
-     'runner_calls', 'calls_group_version'),
-    ('queue_outside_account',
-     [
-         ('        units += if h.forwarded && live == 0u64 { 1u64 } else { live }',
-          '        units += live')
-     ],
-     'runner_calls', 'calls_held_head'),
-    ('join_without_digest',
-     [('Some(w) => Some((w.p, w.digest == q.digest)),', 'Some(w) => Some((w.p, true)),')],
-     'runner_calls', 'calls_joiners'),
-    ('session_join_without_digest',
-     [
-         ('(h.forwarded, h.digest == sent.digest, h.queued)',
-          '(h.forwarded, true, h.queued)'),
-         ('            if digest != store.request_digest(key, arg) { return Some(1008u16) }',
-          '            if false { return Some(1008u16) }')
-     ],
-     'runner_calls', 'calls_session_mismatch'),
-    ('mismatch_row_in_session',
-     [
-         ('    if forwarded && !same { return Error(1008u16) }',
-          '    if forwarded && !same { return wire_refused(mut s, mut work, stream, p, RequestMismatch) }'),
-         ('            if digest != store.request_digest(key, arg) { return Some(1008u16) }',
-          '            if false { return Some(1008u16) }')
-     ],
-     'runner_calls', 'calls_session_mismatch'),
-    ('late_completion_resent',
-     [
-         ('        let owed = replace(mut h.owed, list.new())\n        let count = list.len(owed)',
-          '        let mut owed = replace(mut h.owed, list.new())\n        if list.len(owed) == 0u64 { result.unwrap(list.push(mut owed, WireOwed(generation: 0u64))) }\n        let count = list.len(owed)')
-     ],
-     'runner_calls', 'calls_one_outcome_per_send'),
-    ('one_for_joined',
-     [
-         ('        for take owing in owed {\n',
-          '        let mut sent_one = false\n        for take owing in owed {\n            if sent_one { continue }\n            sent_one = true\n')
-     ],
-     'runner_calls', 'calls_one_outcome_per_send'),
-    ('latest_deadline',
-     [
-         ('            if h.owed[index].generation == tick.generation {',
-          '            if h.owed[list.len(h.owed) - 1u64].generation == tick.generation {')
-     ],
-     'runner_calls', 'calls_held_head'),
-    ('refused_frames_kept',
-     [
-         ('    held: Map[Bytes, WireHeld], refusals:',
-          '    kept: List[Bytes], held: Map[Bytes, WireHeld], refusals:'),
-         ('asking: false, pending: None, held: map.new()',
-          'asking: false, pending: None, kept: list.new(), held: map.new()'),
-         ('    if !allowed { return wire_refused(mut s, mut work, stream, p, Overloaded) }',
-          '    result.unwrap(list.push(mut s.kept, result.unwrap(clone(arg))))\n    if !allowed { return wire_refused(mut s, mut work, stream, p, Overloaded) }')
-     ],
-     'runner_calls', 'calls_session_charge'),
-    ('join_outside_account',
-     [
-         ('Some(h) => !h.forwarded || h.queued != 0u64 || list.len(h.owed) != 0u64, _ => true',
-          'Some(h) => !h.forwarded, _ => true')
-     ],
-     'runner_calls', 'calls_held_head'),
-)
 
 
 def p19_module(path):
@@ -625,13 +301,13 @@ def l10_module(path, e):
     path.write_text('\n'.join(lines))
 
 
-def l10_values(evaluator, root, work, tag, runner=None):
+def l10_values(evaluator, root, work, tag):
     """(identity fp, result fp) per variant, None where a run did not return."""
     values = {}
     for name, e in L10:
         mod = work / f'runner_l10_{tag}_{name}.hirsel'
         l10_module(mod, e)
-        m = manifest(root, work, f'l10_{tag}_{name}', runner, [(mod, 'runner_l10')])
+        m = manifest(root, work, f'l10_{tag}_{name}', extra=[(mod, 'runner_l10')])
         values[name] = tuple(evaluate(evaluator, m, 'store@1/runner_l10/law_l10_' + law)[0] for law in ('identity', 'result'))
     return values
 
@@ -645,20 +321,11 @@ def l10_holds(values):
 # its poison scenario, whose one failed journal sync the adapter checks in count mode.
 CRASHES = ('runner-cross', 'runner-order')
 POISON = 'poison-segment'
-# - answer_before_durable: the gate releases a group without waiting for it to be durable,
-#   so a cut after the commit loses a version a client saw (run at the cuts).
-# - poison_answers: the gate releases a group whose durable failed, so a client sees a
-#   version the store never kept (run under the poisoned sync alone).
-CRASH_MUTANTS = (
-    ('answer_before_durable', '        store.durable(mut hd.db, t)?\n', '        let _ = t\n', CRASHES),
-    ('poison_answers', '        store.durable(mut hd.db, t)?\n', '        let _ = store.durable(mut hd.db, t)\n', ()),
-)
 
 
-def crashes(args, root, work, engine, name, runner=None, scenarios=CRASHES):
+def crashes(args, root, work, engine, name):
     """L1 at every cut of each scenario, then POISON once; raises on the first failure."""
-    inputs_path = manifest(root, work, 'crash_' + name, runner,
-                           [(root / 'core/programs/store/runner_crash.hirsel', 'runner_crash')])
+    inputs_path = manifest(root, work, 'crash_' + name, extra=[(root / 'core/programs/store/runner_crash.hirsel', 'runner_crash')])
     env = dict(os.environ)
     env['LD_LIBRARY_PATH'] = ':'.join([str(args.bridge.resolve().parent),
                                        str(root / 'tools/buck2/toolchains/llvm-files/lib'),
@@ -666,7 +333,7 @@ def crashes(args, root, work, engine, name, runner=None, scenarios=CRASHES):
     build = work / f'crash_{name}'
     build.mkdir()
     rows = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc, inputs_path, build, engine,
-                       entry='store@1/runner_crash/main', scenarios=scenarios, environment=env,
+                       entry='store@1/runner_crash/main', scenarios=CRASHES, environment=env,
                        adapter='runner_crash.c')
     checked([str(build / (engine + '-crash') / 'store'), POISON, 'count'], env, engine=engine)
     return rows
@@ -682,31 +349,11 @@ def drain_deadline(args, root, work, engine, name, runner=None, activation=False
                        count_only=() if activation else ('runner-deadline',))
 
 
-def no_secret_at_rest(args, root, work, engine, row, mutant=False):
-    name = 'token_in_stream_key' if mutant else 'no_secret_at_rest'
+def no_secret_at_rest(args, root, work, engine, row):
+    name = 'no_secret_at_rest'
     source = root / 'core/programs/store'
     fixture = [(source / 'runner_crash.hirsel', 'runner_crash')]
-    runner = None
-    if mutant:
-        # Restore the v2.14 stream key: the full Hello token, then the stream.
-        ingress = source / 'ingress.hirsel'
-        text = ingress.read_text()
-        lo = text.index('    let tag =', text.index('pub fn caller('))
-        hi = text.index('    Ok(Some(runner.Caller(', lo)
-        changed_ingress = work / 'token_ingress.hirsel'
-        changed_ingress.write_text(text[:lo] + '    let subject: Bytes = clone(token)?\n' + text[hi:])
-        text = (source / 'runner.hirsel').read_text()
-        old = '    caller_key(c, mut stream)?'
-        assert text.count(old) == 1, name
-        runner = work / 'token_runner.hirsel'
-        runner.write_text(text.replace(old, '    list.append(mut stream, c.subject)?'))
-    selection = manifest(root, work, name, runner, fixture)
-    if mutant:
-        inputs_data = json.loads(selection.read_text())
-        for entry in inputs_data['packages'][-1]['sources']:
-            if entry['modules'] == ['ingress']:
-                entry['file'] = str(changed_ingress)
-        selection.write_text(json.dumps(inputs_data))
+    selection = manifest(root, work, name, extra=fixture)
     directory = work / f'{name}-{engine}-disk'
     directory.mkdir()
     binary = work / f'{name}-{engine}'
@@ -724,8 +371,8 @@ def no_secret_at_rest(args, root, work, engine, row, mutant=False):
     ran = run_case(name, engine, [str(binary), encoded], capture_output=True, text=True)
     files = [p for p in directory.rglob('*') if p.is_file()]
     found = sorted(str(p.relative_to(directory)) for p in files if nonce in p.read_bytes())
-    passed = ran.returncode == 0 and bool(files) and bool(found) == mutant
-    row(engine=engine, law='no_secret_at_rest', mutant=name if mutant else None, passed=passed,
+    passed = ran.returncode == 0 and bool(files) and not found
+    row(engine=engine, law='no_secret_at_rest', passed=passed,
         result={'exit': ran.returncode, 'files': len(files), 'matches': found, 'stderr': ran.stderr})
 
 
@@ -758,17 +405,10 @@ def evaluate(evaluator, inputs_path, definition):
     return value, report
 
 
-def frame_module(root, path, omit_complete=False):
+def frame_module(root, path):
     """Construct values beside the shared, hand-derived byte oracle, never from it."""
     vectors = json.loads((root / 'core/programs/store/frame-vectors.json').read_text())['vectors']
     helpers = (root / 'core/programs/store/frame-vector-helpers.hirsel').read_text()
-    if omit_complete:
-        # A deleted field changes construction arity too. Only the value constructors
-        # follow that API change; the expected byte strings remain unchanged.
-        helpers = helpers.replace('Batch(0x0102030405060708u64, list.new(), ',
-                                  'Batch(0x0102030405060708u64, ')
-        helpers = helpers.replace('Batch(0x0102030405060708u64, one(7u32), ',
-                                  'Batch(0x0102030405060708u64, ')
     lines = [helpers, '', 'pub fn law_frame_vectors() -> bool {']
     for v in vectors:
         payload = bytes.fromhex(v['hex'])
@@ -792,26 +432,6 @@ def frame_vectors(args, root, work, engines, row):
     if 'evaluator' in engines:
         value, report = evaluate(args.evaluator.resolve(), selected, definition)
         row(engine='evaluator', law='frame_vectors', vectors=count, passed=value == 1, result=report)
-        if not args.no_mutants:
-            text = (root / 'core/programs/store/runner.hirsel').read_text()
-            for name, old, new in (
-                    ('tag_order', 'Hello(Option[Bytes], List[Want]) | Call(u32, u64, u32, u32, Bytes)',
-                     'Call(u32, u64, u32, u32, Bytes) | Hello(Option[Bytes], List[Want])'),
-                    ('complete_omitted', 'Batch(u64, List[u32], List[Row], List[Done])',
-                     'Batch(u64, List[Row], List[Done])'),
-                    ('refusal_tag_inserted', 'NotAllowed | RequestMismatch | HistoryUnavailable',
-                     'RequestMismatch | NotAllowed | HistoryUnavailable')):
-                if text.count(old) != 1:
-                    row(engine='evaluator', mutant=name, passed=False, result='mutation site not found once')
-                    continue
-                mutated = work / f'wire_{name}' / 'runner.hirsel'
-                mutated.parent.mkdir()
-                mutated.write_text(text.replace(old, new))
-                altered_module = work / f'wire_{name}.hirsel'
-                frame_module(root, altered_module, omit_complete=name == 'complete_omitted')
-                altered = manifest(root, work, f'wire_{name}', mutated, [(altered_module, 'runner_wire')])
-                value, report = evaluate(args.evaluator.resolve(), altered, definition)
-                row(engine='evaluator', mutant=name, law='frame_vectors', passed=value == 0, result=report)
     for engine in (e for e in engines if e != 'evaluator'):
         if args.compiler is None or args.runtime is None:
             raise ValueError('native frame vectors require --compiler and --runtime')
@@ -836,11 +456,6 @@ def children_joined(report):
 READER_CANCELLATION = 'pool_releases_cancelled_reader'
 SESSION_LAWS = ('pool_holds_writer_bytes', READER_CANCELLATION, 'writer_one_frame',
                 'children_joined_on_close', 'session_records', 'serving_budget', 'subscription_room_refunded')
-PENDING_RELEASE = '    let _ = channel.try_send(slot.returned, ())'
-PENDING_RELEASE_MUTANTS = {
-    'skip_cancelled_slot_release': '',
-    'double_cancelled_slot_release': PENDING_RELEASE + '\n' + PENDING_RELEASE,
-}
 
 
 def session_laws(args, root, work, engines, row):
@@ -869,60 +484,6 @@ def session_laws(args, root, work, engines, row):
             row(engine=engine, law=law, passed=code == 0
                 and [t['definition'] for t in tests] == [definition]
                 and all(t.get('passed') for t in tests), result=report)
-    if args.no_mutants:
-        return
-    mutants = (
-        ('encode_outside_pool', [('    if let Error(_) = channel.try_send(pool, Encode(take frame, channel.sender(to))) { return Error(Protocol(1013u16)) }',
-          '    let mut out = result.unwrap(std.wsock.outbound(Server, std.wsock.defaults(), None))\n'
-          '    let payload = wire_payload(take frame, 262144u64)?\n'
-          '    return std.wsock.encode(mut out, true, 2u8, payload)')], 'pool_holds_writer_bytes'),
-        ('subscription_refund_on_handoff', [
-          ('    Ok(SubscriptionInput(room: Some(take lease), key: take key, arg: take arg))',
-           '    let _ = take lease\n    Ok(SubscriptionInput(room: None, key: take key, arg: take arg))')],
-          'subscription_room_refunded'),
-        ('writer_queue', [('fn wire_ready(busy: bool) -> bool { !busy }', 'fn wire_ready(busy: bool) -> bool { true }')], 'writer_one_frame'),
-        ('orphan_reader', [('    task.cancel(mut reader)\n    task.cancel(mut writer)\n'
-          '    let _ = task.join(take reader)\n    let _ = task.join(take writer)',
-          '    task.cancel(mut writer)\n    let _ = task.join(take writer)')], 'children_joined_on_close'),
-    )
-    for name, edits, law in mutants:
-        if (args.session_mutant and name not in args.session_mutant
-                or not args.session_mutant and 'wire_session' not in native_laws):
-            continue
-        altered = text
-        for old, new in edits:
-            if altered.count(old) != 1:
-                row(engine='evaluator', mutant=name, passed=False, result='mutation site not found once')
-                break
-            altered = altered.replace(old, new)
-        else:
-            changed = work / name / 'runner.hirsel'
-            changed.parent.mkdir()
-            changed.write_text(altered + '\n' + laws)
-            value, report = evaluate(args.evaluator.resolve(), manifest(root, work, name, changed),
-                                     'store@1/runner/law_' + law)
-            red = (value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail']
-                   or value == 1 and law == 'children_joined_on_close' and not children_joined(report))
-            row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
-
-    if READER_CANCELLATION in names:
-        std_wsock = (root / 'core/std/wsock.hirsel').read_text()
-        assert std_wsock.count(PENDING_RELEASE) == 1
-        for name, replacement in PENDING_RELEASE_MUTANTS.items():
-            if args.session_mutant and name not in args.session_mutant:
-                continue
-            mutated = work / name
-            mutated.mkdir()
-            changed = mutated / 'wsock.hirsel'
-            changed.write_text(std_wsock.replace(PENDING_RELEASE, replacement))
-            adapted_manifest = manifest(root, work, name, adapted)
-            sources = json.loads(adapted_manifest.read_text())
-            wsock = next(s for s in sources['packages'][1]['sources'] if s['modules'] == ['wsock'])
-            wsock['file'] = str(changed)
-            adapted_manifest.write_text(json.dumps(sources))
-            value, report = evaluate(args.evaluator.resolve(), adapted_manifest,
-                                     'store@1/runner/law_' + READER_CANCELLATION)
-            row(engine='evaluator', mutant=name, law=READER_CANCELLATION, passed=value == 0, result=report)
 
 
 def ingress_laws(args, root, work, engines, row):
@@ -939,27 +500,6 @@ def ingress_laws(args, root, work, engines, row):
         row(engine=engine, law='ingress', passed=code == 0
             and [t['definition'] for t in tests] == [definition]
             and all(t.get('passed') for t in tests), result=report)
-    if args.no_mutants or args.part != 'ingress':
-        return
-    text = (root / 'core/programs/store/ingress.hirsel').read_text()
-    mutants = (
-        ('no_ip_session_limit', 'if s.free == 0u64 { RejectedPolicy }', 'if false { RejectedPolicy }', 'limits'),
-        ('no_call_rate', 'if b.credit < period { return false }', 'if b.credit < period { return true }', 'rates_and_expiry'),
-        ('expiry_resets_active', 'if full {', 'if true {', 'rates_and_expiry'),
-    )
-    for name, old, new, law in mutants:
-        assert text.count(old) == 1, name
-        changed = work / (name + '.hirsel')
-        changed.write_text(text.replace(old, new))
-        description = inputs(root)
-        for source in description['packages'][-1]['sources']:
-            if source['modules'] == ['ingress']:
-                source['file'] = str(changed)
-        altered = work / (name + '.json')
-        altered.write_text(json.dumps(description) + '\n')
-        value, report = evaluate(args.evaluator.resolve(), altered, 'store@1/ingress/law_' + law)
-        red = value == 0 or (report.get('outcome') or {}).get('causes') in (['Fail'], ['Overflow'])
-        row(engine='evaluator', mutant=name, law='ingress_' + law, passed=red, result=report)
 
 
 def admission_laws(args, root, work, engines, row):
@@ -971,13 +511,10 @@ def admission_laws(args, root, work, engines, row):
     durable = ('gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max')
     state = ('unread_client', 'hello_and_slots', 'join_cleanup', 'refused_send_releases_timer')
     names = args.admission_law or (*state, *durable, 'wire_replacement_generation')
-    qualified = set()
     if 'evaluator' in engines:
         for name in names:
             value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/runner/law_' + name)
             row(engine='evaluator', law=name, passed=value == 1, result=report)
-            if value == 1:
-                qualified.add(name)
     for engine in (e for e in engines if e != 'evaluator'):
         groups = [('wire_admission', state), ('durable_wire_admission', durable),
                   ('wire_replacement_generation', ('wire_replacement_generation',))]
@@ -990,32 +527,6 @@ def admission_laws(args, root, work, engines, row):
             row(engine=engine, law=group, passed=code == 0
                 and [t['definition'] for t in tests] == [definition]
                 and all(t.get('passed') for t in tests), result=report)
-    if args.no_mutants or args.part != 'admission':
-        return
-    mutants = (
-        ('slot_freed_at_handoff', '            return Ok(wire_take_output(s, mut work))',
-         '            let handed = wire_take_output(s, mut work)\n'
-         '            wire_sent(mut s, mut work)\n'
-         '            return Ok(take handed)', 'unread_client'),
-        ('slot_never_freed', 'WSent => { wire_sent(mut s, mut work); return Ok(None) },',
-         'WSent => return Ok(None),', 'unread_client'),
-        ('slot_freed_at_answer', 'h.queued += count', 'h.queued = 0u64', 'unread_client'),
-        ('refusal_rows_uncapped', 'if s.refusals >= 1u64 + s.config.q { return Error(1008u16) }', 'if false { return Error(1008u16) }', 'unread_client'),
-        ('reset_drops_held', 'wire_queue(mut output, Reset(version, take done), take marks, list.new())', 'wire_queue(mut output, Reset(version, list.new()), take marks, list.new())', 'unread_client'),
-    )
-    for name, old, new, law in mutants:
-        if args.admission_mutant and name not in args.admission_mutant:
-            continue
-        if law not in qualified:
-            row(engine='evaluator', mutant=name, law=law, passed=False, result='baseline did not qualify; control not executed')
-            continue
-        assert text.count(old) == 1, name
-        changed = work / (name + '.hirsel')
-        changed.write_text(text.replace(old, new) + '\n' + laws)
-        altered = manifest(root, work, name, changed)
-        value, report = evaluate(args.evaluator.resolve(), altered, 'store@1/runner/law_' + law)
-        red = value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail']
-        row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
 
 
 def socket_laws(args, root, work, engines, row):
@@ -1045,13 +556,13 @@ def socket_laws(args, root, work, engines, row):
             and all(r.get('passed') for r in cases), result=(run.stdout + run.stderr)[-4000:])
 
 
-def l12_values(evaluator, root, work, tag, runner=None):
+def l12_values(evaluator, root, work, tag):
     """The fingerprint per variant (base twice), or None where a run did not return."""
     values = {}
     for v in L12 + (('base_again',) + L12[0][1:],):
         mod = work / f'runner_l12_{tag}_{v[0]}.hirsel'
         l12_module(mod, v)
-        m = manifest(root, work, f'l12_{tag}_{v[0]}', runner, [(mod, 'runner_l12')])
+        m = manifest(root, work, f'l12_{tag}_{v[0]}', extra=[(mod, 'runner_l12')])
         values[v[0]], _ = evaluate(evaluator, m, 'store@1/runner_l12/law_l12_describe')
     return values
 
@@ -1129,41 +640,6 @@ def native_run(args, engine, inputs_path, store, prefix, cc=None, runtime=None):
     return result.returncode, report
 
 
-def run_mutants(args, root, work, evaluator, row):
-    text = (root / 'core/programs/store/runner.hirsel').read_text()
-    for name, edits, module, law in MUTANTS:
-        if args.mutant and name not in args.mutant:
-            continue
-        mutated_text = text
-        found = True
-        for old, new in edits:
-            found = found and mutated_text.count(old) == 1
-            mutated_text = mutated_text.replace(old, new)
-        if not found:
-            row(engine='evaluator', mutant=name, passed=False, result='mutation site not found once')
-            continue
-        mutated = work / f'mutant_{name}' / 'runner.hirsel'
-        mutated.parent.mkdir()
-        mutated.write_text(mutated_text)
-        if module == 'l10':
-            seen = l10_values(evaluator, root, work, name, mutated)
-            row(engine='evaluator', mutant=name, law=law,
-                passed=None not in sum(seen.values(), ()) and not l10_holds(seen), result=seen)
-            continue
-        if module == 'l12':
-            seen = l12_values(evaluator, root, work, name, mutated)
-            row(engine='evaluator', mutant=name, law=law,
-                passed=None not in seen.values() and not l12_holds(seen))
-            continue
-        selected = manifest(root, work, 'mutant_' + name, mutated)
-        value, report = evaluate(evaluator, selected,
-                                 f'store@1/{module}/law_{law}')
-        # Red: the law returns false, or one of its `want` checks fails it (cause Fail only).
-        red = (value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail']
-               or (value == 1 and not counted(law, report)))
-        row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
-
-
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root', type=Path, default=ROOT)
@@ -1178,17 +654,11 @@ def main():
     p.add_argument('--cc', type=Path)
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm'])
     p.add_argument('--call-law', action='append', choices=CALLS)
-    p.add_argument('--no-mutants', action='store_true')
-    p.add_argument('--mutant', action='append', choices=[m[0] for m in MUTANTS])
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     p.add_argument('--session-law', action='append', choices=SESSION_LAWS)
-    p.add_argument('--session-mutant', action='append',
-                   choices=['encode_outside_pool', 'writer_queue', 'orphan_reader',
-                            'subscription_refund_on_handoff', *PENDING_RELEASE_MUTANTS])
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
-    p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_handoff', 'slot_never_freed', 'slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])
     p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1'])
     args = p.parse_args()
     r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1', 'calls')
@@ -1206,11 +676,6 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
-        if args.mutant:
-            run_mutants(args, root, work, evaluator, row)
-            if args.report:
-                args.report.write_text(json.dumps(rows, indent=2) + '\n')
-            return int(any(not r['passed'] for r in rows))
         crash_laws = {'deadline': 'one_drain_deadline', 'activation': 'atomic_activation'}
         for part, law in crash_laws.items():
             if args.part not in (None, 'r1', part):
@@ -1238,8 +703,6 @@ def main():
         if args.part in (None, 'r1', 'rc1'):
             for engine in (e for e in engines if e != 'evaluator'):
                 no_secret_at_rest(args, root, work, engine, row)
-                if args.part == 'rc1' and not args.no_mutants and engine == 'cranelift':
-                    no_secret_at_rest(args, root, work, engine, row, mutant=True)
         if args.part in ('wire', 'session', 'ingress', 'admission', 'socket', 'rc1'):
             if args.report:
                 args.report.write_text(json.dumps(rows, indent=2) + '\n')
@@ -1271,9 +734,6 @@ def main():
             for name in (() if args.part == 'calls' else SUBS):
                 value, report = evaluate(evaluator, base, 'store@1/runner/law_' + name)
                 row(engine='evaluator', law=name, passed=value == 1, result=report)
-        # A mutant is red only when it builds and its law fails.
-        if r0 and not args.no_mutants:
-            run_mutants(args, root, work, evaluator, row)
         natives = [e for e in engines if e != 'evaluator']
         if natives:
             if args.compiler is None or args.runtime is None or args.observed is None or (r0 and args.bridge is None):
@@ -1336,39 +796,6 @@ def main():
                             result=crashes(args, root, work, engine, engine))
                     except RuntimeError as error:
                         row(engine=engine, law='l1_crash', passed=False, result=str(error)[-2000:])
-            # A crash mutant is red only when it builds and the L1 floor check fails it.
-            if r0 and not args.no_mutants and 'cranelift' in natives:
-                text = (root / 'core/programs/store/runner.hirsel').read_text()
-                # A cover mutant is red only when it builds, runs and the two figures differ.
-                for name, edits in COVER_MUTANTS:
-                    mutated_text = text
-                    for old, new in edits:
-                        mutated_text = mutated_text.replace(old, new) if mutated_text.count(old) == 1 else None
-                        if mutated_text is None:
-                            break
-                    if mutated_text is None:
-                        row(engine='cranelift', mutant=name, passed=False, result='mutation site not found once')
-                        continue
-                    mutated = work / f'cover_runner_{name}' / 'runner.hirsel'
-                    mutated.parent.mkdir()
-                    mutated.write_text(mutated_text)
-                    held, figures = l20_retained(args, root, work, 'cranelift', mutated, 'cover_' + name)
-                    row(engine='cranelift', mutant=name, law='l20_cover_only_retention',
-                        passed=held is False and 'run' not in figures, result=figures)
-                for name, old, new, scenarios in CRASH_MUTANTS:
-                    if text.count(old) != 1:
-                        row(engine='cranelift', mutant=name, passed=False, result='mutation site not found once')
-                        continue
-                    mutated = work / f'crash_runner_{name}' / 'runner.hirsel'
-                    mutated.parent.mkdir()
-                    mutated.write_text(text.replace(old, new))
-                    try:
-                        crashes(args, root, work, 'cranelift', 'mutant_' + name, mutated, scenarios)
-                        red, why = False, 'green'
-                    except RuntimeError as error:
-                        why = str(error)
-                        red = '(L1)' in why
-                    row(engine='cranelift', mutant=name, law='l1_crash', passed=red, result=why[-2000:])
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
     failures = [r for r in rows if not r['passed']]

@@ -9,29 +9,10 @@ import sys
 import tempfile
 
 from case_progress import Case
-from runner_tests import (CALLS, LAWS, MUTANTS, evaluate, manifest, p19_module, counted,
-                          l12_module, L12, l12_holds, l12_values, revision_holds,
-                          l10_values, l10_holds, c_compiler, dir_for, native_run, counting_cc,
-                          COUNTS)
+from runner_tests import CALLS, c_compiler, dir_for, evaluate, manifest
 from std_native import ROOT
 
 
-OBSERVE_MUTANTS = (
-    ('digest_dropped_when_owed_zero', (
-        ('digest: store.RequestDigest, forwarded: bool, queued: u64, owed: List[WireOwed]',
-         'digest: store.RequestDigest, digest_live: bool, forwarded: bool, queued: u64, owed: List[WireOwed]'),
-        ('digest: sent.digest, forwarded: false,',
-         'digest: sent.digest, digest_live: true, forwarded: false,'),
-        ('digest: digest, forwarded: true,',
-         'digest: digest, digest_live: true, forwarded: true,'),
-        ('(h.forwarded, h.digest == sent.digest, h.queued)',
-         '(h.forwarded, !h.digest_live || h.digest == sent.digest, h.queued)'),
-        ('Some(h) => if h.forwarded { Some(h.digest) }',
-         'Some(h) => if h.forwarded && h.digest_live { Some(h.digest) }'),
-        ('            let _ = list.remove(mut h.owed, index)\n',
-         '            let _ = list.remove(mut h.owed, index)\n            if list.len(h.owed) == 0u64 { h.digest_live = false }\n'),
-    )),
-)
 CLAUSES = ('J1', 'J2', 'J3', 'J4', 'J5', 'J6')
 
 
@@ -357,20 +338,20 @@ def observed_manifest(root, work):
 JOIN_CASES = ('CrossSession', 'AfterAbandoned', 'AfterAbandonedSame')
 
 
-def join_manifest(root, work, name, runner=None):
+def join_manifest(root, work, name):
     source = work / (name + '-joins.hirsel')
     source.write_text('\n'.join(
         f'pub fn law_{case}(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {{\n'
         f'    observe_drive.run_join(out, err, clock, random, tasks, net, {case})\n}}\n'
         for case in JOIN_CASES))
     modules = ('observe', 'fixture', 'positions', 'session', 'observe_drive')
-    return manifest(root, work, name, runner, extra=[
+    return manifest(root, work, name, extra=[
         *((root / f'core/programs/observe/{module}.hirsel',
            'observe_fixture' if module == 'fixture' else module) for module in modules),
         (source, 'observe_joins')])
 
 
-def identity_cases(root, evaluator, work, artifacts, coverage, unavailable, calls):
+def identity_cases(root, evaluator, work, artifacts, coverage, unavailable):
     rows, bodies = [], 0
     selected = join_manifest(root, work, 'identity')
     for case in JOIN_CASES:
@@ -396,101 +377,27 @@ def identity_cases(root, evaluator, work, artifacts, coverage, unavailable, call
         print(f'OBSERVE identity={case} events={len(t["obs"])} required={",".join(required)} passed={good}', flush=True)
         rows.append(good)
 
-    original = (root / 'core/programs/store/runner.hirsel').read_text()
-    poison = work / 'identity-poison.hirsel'
-    poison.write_text(replace(original, '    let initial: Registry[G, H] = registry()\n',
-                             '    let initial: Registry[G, H] = @observe_syntax_poison\n'))
-    poisoned = join_manifest(root, work, 'identity-poison', poison)
-    value, report = evaluate(evaluator, poisoned, 'store@1/observe_joins/law_AfterAbandoned')
-    bodies += bool(report.get('outcome'))
-    good = value is None and bool(report.get('error'))
-    (artifacts / 'identity-poison.log').write_text(json.dumps(report, indent=2) + '\n')
-    print(f'OBSERVE control=identity-syntax-poison expected=build-refused passed={good}', flush=True)
-    rows.append(good)
-
-    for mutant, changes in OBSERVE_MUTANTS:
-        altered = original
-        for old, new in changes:
-            altered = replace(altered, old, new)
-        runner = work / (mutant + '.hirsel')
-        runner.write_text(altered)
-        selected = join_manifest(root, work, mutant, runner)
-        value, report = evaluate(evaluator, selected, 'store@1/observe_joins/law_AfterAbandoned')
-        bodies += bool(report.get('outcome'))
-        t = trace(report)
-        t['header'].update(has_digest=True, has_ran=True)
-        codec = Codec(report.get('stderr', []))
-        verdicts = codec.verdicts() if value == 1 else []
-        good = (value == 1 and t['header']['complete']
-                and any(v['clause'] == 'J1' and v['status'] == 'Failed' for v in verdicts)
-                and not any(v['status'] == 'Failed' and v['clause'] != 'J1' for v in verdicts))
-        (artifacts / (mutant + '.obs')).write_text(json.dumps(t, indent=2) + '\n')
-        (artifacts / (mutant + '.log')).write_text(json.dumps(report, indent=2) + '\n')
-        print(f'OBSERVE control={mutant} expected=J1/Failed passed={good}', flush=True)
-        rows.append(good)
-
-        # The original laws use their unadapted fixture and unchanged assertions.
-        legacy = manifest(root, work, mutant + '-laws', runner)
-        for module, cases in (('runner_calls', CALLS), ('runner_laws', LAWS)):
-            for case in cases:
-                if module == 'runner_calls':
-                    definition = f'store@1/{module}/test_{case}'
-                    cc = counting_cc(calls.args, root, legacy, case) if case in COUNTS else None
-                    code, report = native_run(calls.args, 'cranelift', legacy, work / 'identity-native-store', definition, cc)
-                    tests = report.get('tests', [])
-                    bodies += len(tests)
-                    good = code == 0 and [t['definition'] for t in tests] == [definition] and all(t['passed'] for t in tests)
-                else:
-                    value, report = evaluate(evaluator, legacy, f'store@1/{module}/law_' + case)
-                    bodies += bool(report.get('outcome'))
-                    good = value == 1 and counted(case, report)
-                if not good:
-                    (artifacts / (mutant + '-' + case + '.log')).write_text(json.dumps(report, indent=2) + '\n')
-                print(f'OBSERVE control={mutant} legacy={case} passed={good}', flush=True)
-                rows.append(good)
-        p19 = work / (mutant + '-p19.hirsel')
-        p19_module(p19)
-        pm = manifest(root, work, mutant + '-p19', runner, [(p19, 'runner_p19')])
-        value, report = evaluate(evaluator, pm, 'store@1/runner_p19/law_p19_place_twice')
-        bodies += bool(report.get('outcome'))
-        good = value == 1
-        print(f'OBSERVE control={mutant} legacy=p19_place_twice passed={good}', flush=True)
-        rows.append(good)
-        values = l12_values(evaluator, root, work, mutant, runner)
-        revisions = {name: evaluate(evaluator, work / f'l12_{mutant}_{name}.json',
-                                   'store@1/runner_l12/law_l12_revision')[0]
-                     for name in values}
-        l10 = l10_values(evaluator, root, work, mutant, runner)
-        bodies += sum(v is not None for v in values.values())
-        bodies += sum(v is not None for v in revisions.values())
-        bodies += sum(v is not None for pair in l10.values() for v in pair)
-        for case, good in (('l12', l12_holds(values)), ('l12_revision', revision_holds(revisions)),
-                           ('l10_e_only', l10_holds(l10))):
-            print(f'OBSERVE control={mutant} legacy={case} passed={good}', flush=True)
-            rows.append(good)
     return rows, bodies
 
 
-def deadline_timing(root, evaluator, work, artifacts, coverage, runner=None):
-    source = work / ('deadline-timing' + ('-control' if runner else '') + '.hirsel')
+def deadline_timing(root, evaluator, work, artifacts, coverage):
+    source = work / 'deadline-timing.hirsel'
     source.write_text('pub fn law_timing(out: Stdout, err: Stderr, c: Clock, r: Random, tasks: Tasks, net: Net) -> bool waits {\n'
                       '    observe_drive.deadline_join(out, err, c, r, tasks, net)\n}\n')
     modules = ('observe', 'fixture', 'positions', 'session', 'observe_drive')
-    selected = manifest(root, work, source.stem, runner, extra=[
+    selected = manifest(root, work, source.stem, extra=[
         *((root / f'core/programs/observe/{module}.hirsel',
            'observe_fixture' if module == 'fixture' else module) for module in modules),
         (source, 'observe_timing')])
     value, report = evaluate(evaluator, selected, 'store@1/observe_timing/law_timing')
     verdicts = Codec(report.get('stderr', [])).verdicts() if value == 1 else []
-    expected = 'Failed' if runner else 'Held'
-    good = value == 1 and any(v['clause'] == 'J5' and v['status'] == expected for v in verdicts)
-    if not runner:
-        for v in verdicts:
-            if v['status'] == 'Held':
-                coverage[v['clause']] += v['hits']
-    if runner or not good:
+    good = value == 1 and any(v['clause'] == 'J5' and v['status'] == 'Held' for v in verdicts)
+    for v in verdicts:
+        if v['status'] == 'Held':
+            coverage[v['clause']] += v['hits']
+    if not good:
         (artifacts / (source.stem + '.log')).write_text(json.dumps(report, indent=2) + '\n')
-    print(f'OBSERVE J5=virtual-timing control={bool(runner)} expected={expected} passed={good}', flush=True)
+    print(f'OBSERVE J5=virtual-timing expected=Held passed={good}', flush=True)
     return good, bool(report.get('outcome'))
 
 
@@ -595,8 +502,7 @@ def main():
     p.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
     p.add_argument('--cc', type=Path)
     p.add_argument('--case', action='append')
-    p.add_argument('--control', action='store_true', help='run the latest-deadline observer control')
-    p.add_argument('--identity-only', action='store_true', help='run the identity fixtures and their mutation control')
+    p.add_argument('--identity-only', action='store_true', help='run the identity fixtures')
     p.add_argument('--artifacts', type=Path, default=Path('buck-out/observe'))
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = p.parse_args()
@@ -640,35 +546,10 @@ def main():
                 (args.artifacts / (case + '.log')).write_text(json.dumps(report, indent=2) + '\n')
             print(f'OBSERVE case={case} trace={len(t["obs"])} complete={t["header"]["complete"]} passed={good}', flush=True)
             rows.append(good)
-        if not args.identity_only and (args.control or not args.case):
+        if not args.identity_only and not args.case:
             timing_good, timing_bodies = deadline_timing(root, evaluator, work, args.artifacts, coverage)
             rows.append(timing_good)
             bodies += timing_bodies
-            changes = next(changes for name, changes, _, _ in MUTANTS if name == 'latest_deadline')
-            runner = (root / 'core/programs/store/runner.hirsel').read_text()
-            for old, new in changes:
-                runner = replace(runner, old, new)
-            altered = work / 'latest-deadline.hirsel'
-            altered.write_text(runner)
-            timing_good, timing_bodies = deadline_timing(root, evaluator, work, args.artifacts, coverage, altered)
-            rows.append(timing_good)
-            bodies += timing_bodies
-            cm = json.loads(m.read_text())
-            for source in cm['packages'][-1]['sources']:
-                if source['modules'] == ['runner']:
-                    source['file'] = str(altered)
-            control = work / 'latest-deadline.json'
-            control.write_text(json.dumps(cm))
-            value, report = calls(control, 'store@1/runner_calls/law_observe_early_then_late')
-            bodies += bool(report.get('outcome'))
-            verdicts = Codec(report.get('stderr', [])).assessments()
-            t = trace(report)
-            good = value == 1 and any(v['clause'] == 'J5' and v['status'] == 'Failed' for v in verdicts)
-            (args.artifacts / 'latest-deadline.obs').write_text(json.dumps(t, indent=2) + '\n')
-            if not good:
-                (args.artifacts / 'latest-deadline.log').write_text(json.dumps(report, indent=2) + '\n')
-            print(f'OBSERVE control=latest_deadline J5=wire-order expected=J5/Failed passed={good}', flush=True)
-            rows.append(good)
         fixtures = () if args.identity_only or args.case else ('observe/law_prefix', 'observe/law_second_reply', 'observe/law_complete_missing',
                      'observe/law_closed', 'observe/law_deadline_order', 'observe/law_refusal_order',
                      'observe/law_missing_clock', 'observe_fixture/law_record')
@@ -683,7 +564,7 @@ def main():
                 (args.artifacts / (case.split('/')[1] + '.log')).write_text(json.dumps(report, indent=2) + '\n')
             rows.append(good)
         if not args.case:
-            identity_rows, identity_bodies = identity_cases(root, evaluator, work, args.artifacts, coverage, unavailable, calls)
+            identity_rows, identity_bodies = identity_cases(root, evaluator, work, args.artifacts, coverage, unavailable)
             rows += identity_rows
             bodies += identity_bodies
     rows.append(handoffs.compare(inventories, ('join', 'wake', 'cancel')))

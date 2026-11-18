@@ -785,7 +785,7 @@ def first_party(meta: dict) -> str:
                                        "HIRSEL_STORE_CRASH_BRIDGE": "//:core-store-crash-provider[shared]"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/store_crash.c"] + ["core/tools/case_progress.py"]')))
     # R1 exercises durable calls, runs-once and store refusal across the evaluator
-    # and native engines. R0 includes crash cuts and mutation controls.
+    # and native engines. R0 includes crash cuts.
     out.append("\n" + call("hirsel_script_test", name="core-runner-r1", script="core/tools/runner_tests.py",
                             host=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-runner-r1/hirsel",

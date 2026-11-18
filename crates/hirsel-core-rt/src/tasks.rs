@@ -1519,13 +1519,6 @@ impl Scheduler {
             match (*op).state {
                 OperationState::ReadyToIssue | OperationState::ReadyToDeliver(_) => false,
                 OperationState::Waiting => {
-                    if wake == Wake::Cancel {
-                        if let Some(group) = (*task).group {
-                            group.cancel_wait(request);
-                        }
-                        self.runnable(task, OperationState::ReadyToDeliver(None));
-                        return false;
-                    }
                     let starting = wake == Wake::Parked;
                     let w = match (*op).entered.take() {
                         Some(w) => w,
@@ -1537,6 +1530,15 @@ impl Scheduler {
                             (p.wait)(p.state, request, token)
                         }
                     };
+                    // A cancel in W still runs wait at the wake (REPLAY-SPEC §3).
+                    // Cancellation wins even if the callback returns Ready.
+                    if wake == Wake::Cancel {
+                        if let Some(group) = (*task).group {
+                            group.cancel_wait(request);
+                        }
+                        self.runnable(task, OperationState::ReadyToDeliver(None));
+                        return false;
+                    }
                     match w.kind {
                         WAIT_READY if starting => {
                             (*op).state = OperationState::ReadyToIssue;

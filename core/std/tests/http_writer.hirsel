@@ -20,10 +20,11 @@ fn http_response_fields() -> bool {
 // expect: run http_response_wire_head() = true
 fn http_response_wire_head() -> bool {
     let mut out: Bytes = result.unwrap(list.with_capacity(128))
-    let r = result.unwrap(response(204, result.unwrap(b"unexpected"), false))
+    let mut r = result.unwrap(response(204, result.unwrap(b"unexpected"), false))
+    result.unwrap(content_type(mut r, ApplicationJson))
     let mut cache = date_cache()
-    let first = "HTTP/1.0 204 No Content\r\nConnection: keep-alive\r\nDate: Tue, 29 Feb 2000 00:00:00 GMT\r\n\r\n"
-    let next = "HTTP/1.0 204 No Content\r\nConnection: keep-alive\r\nDate: Tue, 29 Feb 2000 00:00:01 GMT\r\n\r\n"
+    let first = "HTTP/1.0 204 No Content\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nDate: Tue, 29 Feb 2000 00:00:00 GMT\r\n\r\n"
+    let next = "HTTP/1.0 204 No Content\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nDate: Tue, 29 Feb 2000 00:00:01 GMT\r\n\r\n"
     let walls =[951782400000u64, 951782400999u64, 951782401000u64, 951782400000u64]
     for i in 0u64 .. 4u64 {
         result.unwrap(response_head(mut out, r, 0, false, walls[i], mut cache))
@@ -47,7 +48,7 @@ fn http_absolute_authority() -> bool {
     if http1.request(raw, mut h) != Complete {
         return false
     }
-    let meta = result.unwrap(request_policy(raw, view h))
+    let (meta, _) = result.unwrap(request_policy(raw, view h))
     let auth = match meta.authority {
         Some(s) => s,
         None => return false,
@@ -73,6 +74,10 @@ fn request_refused(raw: Bytes, status: u16) -> bool {
 // CONNECT and authority-form are 501. Unsupported expectations are 417.
 // expect: run http_request_policy_refusals() = true
 fn http_request_policy_refusals() -> bool {
+    let mixed = result.unwrap(b"POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\nExpect: later\r\nTransfer-Encoding: chunked\r\n\r\n")
+    if !request_refused(mixed, 417) {
+        return false
+    }
     request_refused(result.unwrap(b"GET / HTTP/1.1\r\n\r\n"), 400) && request_refused(result.unwrap(b"GET / HTTP/1.1\r\nHost: a\r\nhost: a\r\n\r\n"), 400) && request_refused(result.unwrap(b"GET http://other/ HTTP/1.1\r\nHost: a:65536\r\n\r\n"), 400) && request_refused(result.unwrap(b"GET http://[1::2::3]/ HTTP/1.1\r\nHost: a\r\n\r\n"), 400) && request_refused(result.unwrap(b"CONNECT a:80 HTTP/1.1\r\nHost: a\r\n\r\n"), 501) && request_refused(result.unwrap(b"GET a:80 HTTP/1.1\r\nHost: a\r\n\r\n"), 501) && request_refused(result.unwrap(b"GET * HTTP/1.1\r\nHost: a\r\n\r\n"), 400) && request_refused(result.unwrap(b"POST / HTTP/1.1\r\nHost: a\r\nExpect: later\r\n\r\n"), 417)
 }
 

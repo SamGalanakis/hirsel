@@ -92,6 +92,31 @@ pub fn header(mut r: Response, take name: Bytes, take value: Bytes) -> Result[()
         r.invalid = true
         return Error(e)
     }
+    push_field(mut r, take name, take value)
+}
+
+/// Media types whose wire spelling is fixed by the library.
+pub type ContentType: key = TextPlain | ApplicationJson
+
+/// Appends a Content-Type whose name and value are valid by construction.
+pub fn content_type(mut r: Response, media: ContentType) -> Result[(), ResponseError] {
+    let name_literal = b"Content-Type"
+    let name = match take name_literal {
+        Ok(take data) => take data,
+        Error(c) => return Error(Allocation(c)),
+    }
+    let literal = match media {
+        TextPlain => b"text/plain",
+        ApplicationJson => b"application/json",
+    }
+    let value = match take literal {
+        Ok(take data) => take data,
+        Error(c) => return Error(Allocation(c)),
+    }
+    push_field(mut r, take name, take value)
+}
+
+fn push_field(mut r: Response, take name: Bytes, take value: Bytes) -> Result[(), ResponseError] {
     match list.push(mut r.fields, ResponseField(name: take name, value: take value)) {
         Ok(()) => Ok(()),
         Error((c, _)) => Error(Allocation(c)),
@@ -482,44 +507,119 @@ type RequestHead {
     close: bool
 }
 
-fn connection_upgrade(b: Bytes, h: View[http1.Head]) -> bool {
-    for i in 0u64 .. h.count {
-        let f = h.fields[i]
-        if http1.equal_ascii(part(b, f.name), string.as_bytes("connection")) && http1.contains(part(b, f.value), string.as_bytes("upgrade")) {
+type RequestField: key = HostField | ExpectField | ConnectionField | UpgradeField | LengthField | EncodingField | OtherField
+
+fn request_field(name: Bytes) -> RequestField {
+    match list.len(name) {
+        4 => if http1.equal_ascii(name, string.as_bytes("host")) {
+            HostField
+        } else {
+            OtherField
+        },
+        6 => if http1.equal_ascii(name, string.as_bytes("expect")) {
+            ExpectField
+        } else {
+            OtherField
+        },
+        7 => if http1.equal_ascii(name, string.as_bytes("upgrade")) {
+            UpgradeField
+        } else {
+            OtherField
+        },
+        10 => if http1.equal_ascii(name, string.as_bytes("connection")) {
+            ConnectionField
+        } else {
+            OtherField
+        },
+        14 => if http1.equal_ascii(name, string.as_bytes("content-length")) {
+            LengthField
+        } else {
+            OtherField
+        },
+        17 => if http1.equal_ascii(name, string.as_bytes("transfer-encoding")) {
+            EncodingField
+        } else {
+            OtherField
+        },
+        _ => OtherField
+    }
+}
+
+type FramingFields {
+    lengths: u64,
+    encodings: u64,
+    length: http1.Span,
+    encoding: http1.Span
+}
+
+fn framing_fields() -> FramingFields {
+    let empty = http1.Span(start: 0, end: 0)
+    FramingFields(lengths: 0, encodings: 0, length: empty, encoding: empty)
+}
+
+fn count_framing(mut fields: FramingFields, kind: RequestField, value: http1.Span) {
+    match kind {
+        LengthField => {
+            fields.lengths += 1
+            fields.length = value
+        },
+        EncodingField => {
+            fields.encodings += 1
+            fields.encoding = value
+        },
+        _ => {}
+    }
+}
+
+fn connection_upgrade(b: Bytes, h: View[http1.Head], connections: u64) -> bool {
+    let mut remaining_fields = connections
+    while remaining_fields != 0 {
+        let i: u64 = int.widen(int.trailing_zeros(remaining_fields))
+        if http1.contains(part(b, h.fields[i].value), string.as_bytes("upgrade")) {
             return true
         }
+        remaining_fields &= remaining_fields - 1
     }
     false
 }
 
-fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[RequestHead, u16] {
+fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[(RequestHead, FramingFields), u16] {
     let verb = part(b, h.method)
     let mut host: Option[http1.Span] = None
     let mut expect = false
     let mut close = false
     let mut keep_alive = false
     let mut upgrade_field = false
+    let mut connections: u64 = 0
+    let mut wire_fields = framing_fields()
     for i in 0u64 .. h.count {
         let f = h.fields[i]
-        let name = part(b, f.name)
-        let value = part(b, f.value)
-        if http1.equal_ascii(name, string.as_bytes("host")) {
-            if host != None || !authority(value) {
-                return Error(400)
-            }
-            host = Some(f.value)
-        } else if http1.equal_ascii(name, string.as_bytes("expect")) {
-            if expect || h.version == 0 || !http1.equal_ascii(value, string.as_bytes("100-continue")) {
-                return Error(417)
-            }
-            expect = true
-        } else if http1.equal_ascii(name, string.as_bytes("connection")) {
-            close = close || http1.contains(value, string.as_bytes("close"))
-            if h.version == 0 && !close {
-                keep_alive = keep_alive || http1.contains(value, string.as_bytes("keep-alive"))
-            }
-        } else if http1.equal_ascii(name, string.as_bytes("upgrade")) {
-            upgrade_field = true
+        let kind = request_field(part(b, f.name))
+        match kind {
+            HostField => {
+                if host != None || !authority(part(b, f.value)) {
+                    return Error(400)
+                }
+                host = Some(f.value)
+            },
+            ExpectField => {
+                if expect || h.version == 0 || !http1.equal_ascii(part(b, f.value), string.as_bytes("100-continue")) {
+                    return Error(417)
+                }
+                expect = true
+            },
+            ConnectionField => {
+                connections |= int.wrapping_shl(1u64, int.narrow(i))
+                let value = part(b, f.value)
+                close = close || http1.contains(value, string.as_bytes("close"))
+                if h.version == 0 && !close {
+                    keep_alive = keep_alive || http1.contains(value, string.as_bytes("keep-alive"))
+                }
+            },
+            UpgradeField => {
+                upgrade_field = true
+            },
+            _ => count_framing(mut wire_fields, kind, f.value)
         }
     }
     if h.version == 1 && host == None {
@@ -574,7 +674,8 @@ fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[RequestHead, u16] {
     } else {
         path_end + 1
     }
-    Ok(RequestHead(authority: host, path: http1.Span(start: start, end: path_end), query: http1.Span(start: query_at, end: end), expect_continue: expect, upgrade_requested: h.version == 1 && upgrade_field && connection_upgrade(b, h), close: close || h.version == 0 && !keep_alive))
+    let head = RequestHead(authority: host, path: http1.Span(start: start, end: path_end), query: http1.Span(start: query_at, end: end), expect_continue: expect, upgrade_requested: h.version == 1 && upgrade_field && connection_upgrade(b, h, connections), close: close || h.version == 0 && !keep_alive)
+    Ok((head, wire_fields))
 }
 
 type TargetError: key = BadTarget | TargetCapacity
@@ -1754,7 +1855,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
             }
         }
         let parsed = view head
-        let policy = match request_policy(input, parsed) {
+        let (policy, fields) = match request_policy(input, parsed) {
             Ok(p) => p,
             Error(status) => {
                 if write_succeeded(reply_error_until(mut writer, status, c, after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {
@@ -1763,7 +1864,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
                 break
             },
         }
-        let framed = framing(input, parsed, cfg.body_max)
+        let framed = frame_fields(input, parsed.version, fields, cfg.body_max)
         let wire: Result[Framing, BodyError] = if policy.upgrade_requested {
             match framed {
                 Ok(Empty) => Ok(Empty),
@@ -2467,27 +2568,22 @@ fn serve_internal[S: shareable + send](take listeners: List[Listener], c: Clock,
 /// HTTP-4 refuses ambiguous framing before interpreting any body bytes.
 /// Ex: `http.framing(bytes, view h, 1048576)`.
 pub fn framing(b: Bytes, h: View[http1.Head], body_max: u64) -> Result[Framing, BodyError] {
-    let mut lengths: u64 = 0
-    let mut encodings: u64 = 0
-    let mut length = http1.Span(start: 0, end: 0)
-    let mut encoding = length
+    let mut fields = framing_fields()
     for i in 0u64 .. h.count {
         let f = h.fields[i]
-        let name = list.slice(b, f.name.start, f.name.end)
-        if http1.equal_ascii(name, string.as_bytes("content-length")) {
-            lengths += 1
-            length = f.value
-        }
-        if http1.equal_ascii(name, string.as_bytes("transfer-encoding")) {
-            encodings += 1
-            encoding = f.value
-        }
+        count_framing(mut fields, request_field(part(b, f.name)), f.value)
     }
+    frame_fields(b, h.version, fields, body_max)
+}
+
+// The connection checks policy first, then interprets the recorded framing spans.
+fn frame_fields(b: Bytes, version: u8, fields: FramingFields, body_max: u64) -> Result[Framing, BodyError] {
+    let FramingFields(lengths: lengths, encodings: encodings, length: length, encoding: encoding) = fields
     if lengths > 0 && encodings > 0 || lengths > 1 {
         return Error(failure(400))
     }
     if encodings > 0 {
-        if h.version == 0 {
+        if version == 0 {
             return Error(failure(400))
         }
         if encodings != 1 || !http1.equal_ascii(list.slice(b, encoding.start, encoding.end), string.as_bytes("chunked")) {

@@ -27,6 +27,7 @@ core@1/args/len
 core@1/box/new
 core@1/box/unbox
 # DECISIONS.md 2026-11-18 (HTTP static bytes)
+core@1/bytebuf/append_inline
 core@1/bytebuf/freeze
 core@1/bytebuf/as_bytes
 core@1/channel/new

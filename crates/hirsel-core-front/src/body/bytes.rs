@@ -98,4 +98,56 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         Some(self.pointer(to, n))
     }
+
+    pub(super) fn inline_byte_count(&self, source: TyId) -> Option<u64> {
+        match self.t.kind(self.bare(source)) {
+            TyKind::Array(byte, count) if *byte == scalar(Scalar::U8) => Some(*count),
+            _ => None,
+        }
+    }
+
+    pub(super) fn append_inline_bytes(
+        &mut self,
+        source_ty: TyId,
+        header: ValueId,
+        source: Option<ValueId>,
+        start: ValueId,
+        end: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let count = self.inline_byte_count(source_ty)?;
+        let u = Ty::Scalar(Scalar::U64);
+        let zero = self.konst(u, 0, n)?;
+        let bound = self.konst(u, count, n)?;
+        let ordered = self.list_compare(CompareOp::Le, start, end, n);
+        let within = self.list_compare(CompareOp::Le, end, bound, n);
+        let valid = self.emit_binary(BinaryOp::BitAnd, BOOL, Some(ordered), Some(within), n)?;
+        if count == 0 {
+            return Some(valid);
+        }
+        let source = source?;
+        let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
+        let length = self.carrier_word(header, carrier, SeqWord::Len, n);
+        let cap = self.carrier_word(header, carrier, SeqWord::Cap, n);
+        let (room, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, cap, length, n);
+        let (bytes, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, end, start, n);
+        let fits = self.list_compare(CompareOp::Le, bytes, room, n);
+        let okay = self.emit_binary(BinaryOp::BitAnd, BOOL, Some(valid), Some(fits), n)?;
+        let nonempty = self.list_compare(CompareOp::Ne, bytes, zero, n);
+        let copying = self.emit_binary(BinaryOp::BitAnd, BOOL, Some(okay), Some(nonempty), n)?;
+        let copy = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.runtime_branch(copying, copy, done, n);
+        self.start(copy);
+        let data = self.carrier_word(header, carrier, SeqWord::Data, n);
+        let byte = PlaceTy::Value(Ty::Scalar(Scalar::U8));
+        let to = self.address(AddressBase::Value(data), &[Step::Byte(length)], byte, n);
+        let from = self.address(AddressBase::Value(source), &[Step::Byte(start)], byte, n);
+        self.inst(Inst::Copy { to, from, bytes }, n);
+        let (len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, length, bytes, n);
+        self.set_carrier_word(header, carrier, SeqWord::Len, len, n);
+        self.jump(done, &[], n);
+        self.start(done);
+        Some(okay)
+    }
 }

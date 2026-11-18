@@ -1003,6 +1003,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
             let path = &p.fns[f].path;
             if missing == 0
+                && path.is_core("bytebuf.append_inline")
+                && self.inline_byte_count(t).is_none()
+            {
+                self.refuse("LANG-11", n, "append_inline requires Inline[u8, N]");
+                return;
+            }
+            if missing == 0
                 && (path.is_core("flow.sink")
                     || path.is_core("flow.stage")
                     || path.is_core("flow.port"))

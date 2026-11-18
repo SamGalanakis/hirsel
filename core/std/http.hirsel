@@ -154,15 +154,11 @@ fn decimal(mut out: Bytes, n: u64, width: u64) -> Result[(), ResponseError] {
             break
         }
     }
-    if 20 - start > list.capacity(out) - list.len(out) {
-        return Error(HeadTooLarge)
+    if bytebuf.append_inline(mut out, digits, start, 20) {
+        Ok(())
+    } else {
+        Error(HeadTooLarge)
     }
-    for i in start .. 20 {
-        if let Error((c, _)) = list.push(mut out, digits[i]) {
-            return Error(Allocation(c))
-        }
-    }
-    Ok(())
 }
 
 // Days since the Unix epoch to a Gregorian civil date, using a March-based
@@ -208,73 +204,76 @@ fn date_field(mut out: Bytes, wall_ms: u64) -> Result[(), ResponseError] {
 type DateCache {
     second: Option[u64],
     length: u64,
-    words: Inline[u64, 6]
+    data: Inline[u8, 48]
 }
 
 fn date_cache() -> DateCache {
-    DateCache(second: None, length: 0, words:[0; 6])
+    DateCache(second: None, length: 0, data:[0; 48])
 }
 
 fn append_date(mut out: Bytes, wall_ms: u64, mut cache: DateCache) -> Result[(), ResponseError] {
     let second = wall_ms / 1000
     if cache.second == Some(second) {
-        if cache.length > list.capacity(out) - list.len(out) {
-            return Error(HeadTooLarge)
+        if bytebuf.append_inline(mut out, cache.data, 0, cache.length) {
+            return Ok(())
         }
-        let whole = cache.length / 8
-        for i in 0u64 .. whole {
-            if let Error(c) = list.put_word_le(mut out, cache.words[i]) {
-                return Error(Allocation(c))
-            }
-        }
-        let mut tail = cache.words[whole]
-        for _ in whole * 8 .. cache.length {
-            if let Error((c, _)) = list.push(mut out, int.narrow(tail & 255)) {
-                return Error(Allocation(c))
-            }
-            tail /= 256
-        }
-        return Ok(())
+        return Error(HeadTooLarge)
     }
     let start = list.len(out)
     date_field(mut out, wall_ms)?
     let n = list.len(out) - start
-    let whole = n / 8
-    for i in 0u64 .. whole {
-        cache.words[i] = list.word_le(out, start + i * 8)
-    }
     // A u64 millisecond timestamp has at most a nine-digit year.
-    let mut tail = 0u64
-    for i in whole * 8 .. n {
-        let byte: u64 = int.widen(out[start + i])
-        tail |= int.wrapping_shl(byte, int.narrow((i % 8) * 8))
+    for i in 0u64 .. n {
+        cache.data[i] = out[start + i]
     }
-    cache.words[whole] = tail
     cache.length = n
     cache.second = Some(second)
     Ok(())
 }
 
-fn reason(status: u16) -> String {
-    if status == 200 {
-        return "OK"
+fn status_line(mut out: Bytes, version: u8, status: u16) -> Result[(), ResponseError] {
+    let line = match status {
+        200 => if version == 0 {
+            "HTTP/1.0 200 OK\r\n"
+        } else {
+            "HTTP/1.1 200 OK\r\n"
+        },
+        204 => if version == 0 {
+            "HTTP/1.0 204 No Content\r\n"
+        } else {
+            "HTTP/1.1 204 No Content\r\n"
+        },
+        304 => if version == 0 {
+            "HTTP/1.0 304 Not Modified\r\n"
+        } else {
+            "HTTP/1.1 304 Not Modified\r\n"
+        },
+        404 => if version == 0 {
+            "HTTP/1.0 404 Not Found\r\n"
+        } else {
+            "HTTP/1.1 404 Not Found\r\n"
+        },
+        405 => if version == 0 {
+            "HTTP/1.0 405 Method Not Allowed\r\n"
+        } else {
+            "HTTP/1.1 405 Method Not Allowed\r\n"
+        },
+        406 => if version == 0 {
+            "HTTP/1.0 406 Not Acceptable\r\n"
+        } else {
+            "HTTP/1.1 406 Not Acceptable\r\n"
+        },
+        _ => {
+            head_text(mut out, if version == 0 {
+                "HTTP/1.0 "
+            } else {
+                "HTTP/1.1 "
+            })?
+            decimal(mut out, int.widen(status), 3)?
+            return head_text(mut out, " \r\n")
+        },
     }
-    if status == 204 {
-        return "No Content"
-    }
-    if status == 304 {
-        return "Not Modified"
-    }
-    if status == 404 {
-        return "Not Found"
-    }
-    if status == 405 {
-        return "Method Not Allowed"
-    }
-    if status == 406 {
-        return "Not Acceptable"
-    }
-    ""
+    head_text(mut out, line)
 }
 
 fn has_body(status: u16) -> bool {
@@ -288,15 +287,7 @@ fn response_head(mut out: Bytes, r: Response, version: u8, close: bool, wall_ms:
         return Error(HeaderInvalid)
     }
     list.clear(mut out)
-    head_text(mut out, if version == 0 {
-        "HTTP/1.0 "
-    } else {
-        "HTTP/1.1 "
-    })?
-    decimal(mut out, int.widen(r.status), 3)?
-    head_text(mut out, " ")?
-    head_text(mut out, reason(r.status))?
-    head_text(mut out, "\r\n")?
+    status_line(mut out, version, r.status)?
     for f in r.fields {
         let name = bytebuf.as_bytes(f.name)
         if !http1.equal_ascii(name, string.as_bytes("date")) {
@@ -1400,16 +1391,11 @@ fn event_stream(value: Bytes) -> bool {
 fn encode_stream(mut out: Bytes, take spec: stream.Spec, c: Clock, version: u8, suppress: bool, at: u64, pre_head: u64, mut cache: DateCache) -> Result[stream.Offer, HandlerError] {
     list.clear(mut out)
     let chunked = version == 1
-    let status = stream.status(spec)
-    head_text(mut out, if chunked {
-        "HTTP/1.1 "
+    status_line(mut out, if chunked {
+        1
     } else {
-        "HTTP/1.0 "
-    })?
-    decimal(mut out, int.widen(status), 3)?
-    head_text(mut out, " ")?
-    head_text(mut out, reason(status))?
-    head_text(mut out, "\r\n")?
+        0
+    }, stream.status(spec))?
     let mut heartbeat = false
     for (name, value) in stream.fields(spec) {
         if http1.equal_ascii(name, string.as_bytes("content-type")) && event_stream(value) {

@@ -170,6 +170,7 @@ fn static_bytes_preserve_budget_law() {
             (names["refund_after_handover"], vec![1]),
             (names["empty_is_free"], vec![]),
             (names["cloned_and_counted"], vec![]),
+            (names["inline_capacity"], vec![]),
         ],
         false,
     );

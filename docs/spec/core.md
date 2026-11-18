@@ -154,6 +154,10 @@ operations it names; nothing else about them may be inferred from an implementat
   drops. `bytebuf.freeze(take b)` transfers the existing charge, length and
   capacity of an owned `Bytes`. `bytebuf.as_bytes(b)` borrows the bytes with
   that length and capacity. `""` is the empty `String` of capacity 0.
+- **Bounded append.** `bytebuf.append_inline(mut out, src, start, end)` takes
+  an `Inline[u8, n]` source. It copies the range `start .. end` when it is in
+  bounds and fits in the destination's spare capacity. It returns false
+  without writing if either check fails. It never grows the destination.
 - **Strings.** `string.into_bytes(take s)` transfers `s`'s owned storage unchanged, with its
   length, capacity and charge; a static `s` is copied into newly admitted storage of capacity
   equal to its length, and on `Capacity` the error returns `s`. `string.from_utf8` returns its

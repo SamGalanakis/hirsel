@@ -9,6 +9,7 @@
 // expect: run refund_after_handover(true) = 890
 // expect: run empty_is_free() = 0
 // expect: run cloned_and_counted() = 18
+// expect: run inline_capacity() = 311
 // expect: size FrozenPair 48
 // expect: size HeapPair 48
 // expect: size FrozenOrShared 32
@@ -115,5 +116,38 @@ fn cloned_and_counted() -> u64 {
     match got {
         Ok(n) => n,
         Error(_) => 9001
+    }
+}
+
+// An exact capacity of three costs eight bytes. After 'a' there are two
+// bytes left, so a three-byte append refuses at this operation and leaves
+// the old prefix untouched. Slice [1,3) then fits and appends 'y', 'z'.
+// The final 311 encodes length 3 and one point for each retained byte check.
+fn inline_capacity() -> u64 {
+    let r = bound bytes 8 {
+        let mut out: Bytes = list.with_capacity(3)?
+        let _ = result.unwrap(list.push(mut out, b'a'))
+        let src: Inline[u8, 3] =[b'x', b'y', b'z']
+        if bytebuf.append_inline(mut out, src, 0, 3) || out != string.as_bytes("a") {
+            8001u64
+        } else if bytebuf.append_inline(mut out, src, 2, 4) || bytebuf.append_inline(mut out, src, 2, 1) || out != string.as_bytes("a") {
+            8002u64
+        } else if bytebuf.append_inline(mut out, src, 1, 3) {
+            list.len(out) * 100 + if out[0] == b'a' {
+                10
+            } else {
+                0
+            } + if out[1] == b'y' && out[2] == b'z' {
+                1
+            } else {
+                0
+            }
+        } else {
+            8003u64
+        }
+    }
+    match r {
+        Ok(n) => n,
+        Error(_) => 9000
     }
 }

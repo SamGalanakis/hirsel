@@ -95,3 +95,32 @@ fn http_segment_boundaries() -> bool {
     let decoded = result.unwrap(segments_of(string.as_bytes("/a%2fb/%C3%A9/")))
     list.len(decoded) == 3 && decoded[0] == "a/b" && decoded[1] == "é" && decoded[2] == "" && bad_path("//") && bad_path("/./") && bad_path("/.%2e/") && bad_path("/%c0%80") && bad_path("/%2")
 }
+
+// A 200 head with an empty body has a 17-byte status line and a 19-byte
+// Content-Length line. The cached Date needs 37 bytes before the final CRLF.
+// A 72-byte buffer refuses before copying Date. A 75-byte buffer fits exactly.
+// expect: run http_cached_date_capacity() = true
+fn http_cached_date_capacity() -> bool {
+    let mut exact: Bytes = result.unwrap(list.with_capacity(75))
+    let mut short: Bytes = result.unwrap(list.with_capacity(72))
+    let r = result.unwrap(response(200, list.new(), false))
+    let mut cache = date_cache()
+    let wall = 951782400000u64
+    let wire = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nDate: Tue, 29 Feb 2000 00:00:00 GMT\r\n\r\n"
+    result.unwrap(response_head(mut exact, r, 1, false, wall, mut cache))
+    if exact != string.as_bytes(wire) {
+        return false
+    }
+    if let Error(HeadTooLarge) = response_head(mut short, r, 1, false, wall + 999, mut cache) {
+        if short != string.as_bytes("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n") {
+            return false
+        }
+    } else {
+        return false
+    }
+    if let Error(HeadTooLarge) = response_head(mut short, r, 1, false, wall + 1000, mut cache) {
+        result.unwrap(response_head(mut exact, r, 1, false, wall, mut cache))
+        return exact == string.as_bytes(wire)
+    }
+    false
+}

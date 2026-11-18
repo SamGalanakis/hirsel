@@ -25,6 +25,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if module == ["bytebuf"] {
             return match name {
+                "append_inline" => Some(
+                    self.append_inline_bytes(types[0], vals[0]?, vals[1], vals[2]?, vals[3]?, n),
+                ),
                 "freeze" => Some(self.freeze_bytes(vals[0]?, result, n)),
                 "as_bytes" => Some(self.view_frozen_bytes(vals[0]?, result, n)),
                 _ => None,

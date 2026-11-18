@@ -4,3 +4,7 @@
 pub fn freeze(take data: Bytes) -> FrozenBytes
 
 pub fn as_bytes(data: FrozenBytes) -> View[Bytes] in data
+
+/// Appends src[start .. end] from Inline[u8, N] when the range and spare
+/// capacity both fit. Returns false with the destination unchanged otherwise.
+pub fn append_inline[A: plain](mut out: Bytes, src: A, start: u64, end: u64) -> bool

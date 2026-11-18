@@ -79,6 +79,7 @@ macro_rules! operations {
 
 operations! {
 
+    ("bytebuf", "append_inline", Lane::Value, "A", "http-b1-1204", false),
     ("bytebuf", "freeze", Lane::Value, "A", "http-b1-1204", false),
     ("bytebuf", "as_bytes", Lane::Value, "A", "http-b1-1204", false),
     ("flow", "new", Lane::Runtime(Kernel::Flow(FlowOp::New)), "B", "mc-f1-1180", false),

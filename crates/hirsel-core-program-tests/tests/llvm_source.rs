@@ -2831,6 +2831,7 @@ fn static_bytes_preserve_budget_law() {
         ("refund_after_handover", vec![1], 890),
         ("empty_is_free", vec![], 0),
         ("cloned_and_counted", vec![], 18),
+        ("inline_capacity", vec![], 311),
     ];
     let runs = cases.each_ref().map(|(name, args, _)| Case {
         function: names[*name],

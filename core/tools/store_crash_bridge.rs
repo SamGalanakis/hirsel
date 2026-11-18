@@ -42,6 +42,8 @@ struct Bridge {
     sync_failure: u8,
     armed: bool,
     failed_syncs: u64,
+    split_syncs: u64,
+    split_at: usize,
     random: u8,
     orphan_end: bool,
 }
@@ -195,6 +197,9 @@ impl Bridge {
                     self.crashed = true;
                     return Self::error(5);
                 }
+                if self.phase == 1 && self.armed && self.sync_failure == 5 && is_segment(&name) {
+                    self.split_at = cursor;
+                }
                 let append = file.mode == 2;
                 let applied = if append {
                     self.apply(Op::Append(&name, &data[..len]))
@@ -272,12 +277,22 @@ impl Bridge {
                     1 => name.starts_with("j-") && !name.ends_with(".end"),
                     2 => name.starts_with("j-") && name.ends_with(".end"),
                     3 => name.starts_with("p-"),
+                    5 if self.phase == 1 && self.armed && is_segment(&name) && !self.crashed => {
+                        self.split_syncs += 1;
+                        self.split_syncs == 2
+                    }
                     _ => false,
                 };
                 if self.phase == 1 && self.armed && matches {
                     self.failed_syncs += 1;
-                    // A failed sync publishes no dirty bytes. A retry on this
-                    // live Db is a test failure, rather than a successful retry.
+                    if self.sync_failure == 5 {
+                        // Only the first seven bytes of B reached storage.
+                        // A's successful sync is the only durable commit.
+                        let torn = self.fs.read(&name).unwrap()[..self.split_at + 7].to_vec();
+                        self.fs.issue(&Op::Write(&name, &torn));
+                        self.fs.issue(&Op::Sync(&name));
+                    }
+                    // A retry on this live Db must never succeed.
                     assert_eq!(self.failed_syncs, 1, "store retried a failed sync");
                     return Self::error(5);
                 }
@@ -352,6 +367,8 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         sync_failure: 0,
         armed: false,
         failed_syncs: 0,
+        split_syncs: 0,
+        split_at: 0,
         random: 1,
         orphan_end: false,
     }))
@@ -468,7 +485,7 @@ pub unsafe extern "C" fn store_crash_floor(p: *mut c_void) -> u64 {
 /// `p` is live and quiescent, and `kind` is 0 (off), 1 (segment), 2 (END), 3 (pack), or 4 (segment write).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn store_crash_sync_failure(p: *mut c_void, kind: u8) {
-    assert!(kind <= 4);
+    assert!(kind <= 5);
     // SAFETY: the C wrapper configures the bridge before starting a run.
     unsafe { (*p.cast::<Bridge>()).sync_failure = kind };
 }

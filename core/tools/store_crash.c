@@ -148,9 +148,9 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     int uncut=!strcmp(raw_cut,"count");
     uint8_t failure=(!strcmp(scenario,"poison-segment") || !strcmp(scenario,"poison-cut"))?1:
         !strcmp(scenario,"poison-end")?2:!strcmp(scenario,"poison-pack")?3:
-        !strcmp(scenario,"poison-write")?4:0;
+        !strcmp(scenario,"poison-write")?4:!strcmp(scenario,"journal-place-split")?5:0;
     int orphan_end=!strcmp(scenario,"orphan-end");
-    if(failure || cancellation.enabled || orphan_end) cut=UINT64_MAX;
+    if((failure && failure!=5) || cancellation.enabled || orphan_end) cut=UINT64_MAX;
     void *state=store_crash_new(cut);
     store_crash_sync_failure(state,failure);
     if(orphan_end) store_crash_orphan_end(state);
@@ -186,8 +186,12 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         if(seed) cfg.scheduler.event=schedule_event;
         status=seed?hirsel_core_test_run_scripted(&cfg,run_entry,seed):hirsel_core_run(&cfg,run_entry);
         if(status) {fprintf(stderr,"store phase %s: status %u\n",phases[phase],status);break;}
-        if(phase==1 && failure && store_crash_failed_syncs(state)!=1) {
+        if(phase==1 && failure && (failure!=5 || uncut) && store_crash_failed_syncs(state)!=1) {
             fprintf(stderr,"named sync failure was not reached\n");status=120;break;
+        }
+        if(phase==1 && failure==5 && store_crash_failed_syncs(state) &&
+            (store_crash_floor(state)!=2 || !store_crash_acked(state))) {
+            fprintf(stderr,"byte split did not settle A as durable and B as failed\n");status=120;break;
         }
         if(phase==1 && cancellation.enabled && !uncut && !cancellation.fired) {
             fprintf(stderr,"cancellation wait was not reached\n");status=120;break;

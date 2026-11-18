@@ -1090,7 +1090,8 @@ fn covered(db: Db, mark: Mark) -> bool {
 
 type PlaceReply[Q, R, A] {
     request: Q,
-    outcome: Result[Outcome[R, A], Error]
+    outcome: Result[Outcome[R, A], Error],
+    ticket: Option[Ticket]
 }
 
 fn place_ticket[R, A](outcome: Result[Outcome[R, A], Error]) -> Option[Ticket] {
@@ -1128,7 +1129,7 @@ pub fn write_place[S, Q, R, A](mut db: Db, mut source: S,
             }
             let ticket = place_ticket(outcome)
             if let Some(t) = ticket { last = Some(t) }
-            result.unwrap(list.push(mut replies, Some(PlaceReply(request: take request, outcome: take outcome))))
+            result.unwrap(list.push(mut replies, Some(PlaceReply(request: take request, outcome: take outcome, ticket: ticket))))
             cut = maybe_checkpoint(mut db)
             if let Error(_) = cut { break }
             if let Some(_) = db.poison { break }
@@ -1138,11 +1139,17 @@ pub fn write_place[S, Q, R, A](mut db: Db, mut source: S,
             pending_request = receive(db, mut source, false)
         }
         let settled = match last { Some(t) => durable(mut db, t), None => healthy(db) }
+        if let Error(Poisoned(_)) = settled {
+            // A cut can latch poison before durable takes journal acks.
+            // Apply any already queued prefix without retrying an I/O.
+            let _ = journal_poll(mut db)
+        }
+        let acked_sequence = db.journaled
         for i in 0u64 .. list.len(replies) {
             let pending = option.unwrap(list.set(mut replies, i, None))
-            let PlaceReply(request: take request, outcome: take outcome) = take pending
-            if let Some(t) = place_ticket(outcome) {
-                if disk && !covered(db, t.mark) {
+            let PlaceReply(request: take request, outcome: take outcome, ticket: ticket) = take pending
+            if let Some(Ticket(store: _, open: _, mark: Journal(sequence))) = ticket {
+                if disk && sequence > acked_sequence {
                     deliver(mut source, take request, Error(Poisoned(option.unwrap(db.poison))))
                     continue
                 }
@@ -10494,10 +10501,22 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
     let mut end_name = take initial_name
     let mut deferred: Option[JournalMsg] = None
     loop {
-        let held = replace(mut deferred, None)
-        let mut next_message = match take held {
-            Some(take msg) => Some(take msg),
-            None => match channel.receive(receive) { Ok(take msg) => Some(take msg), Error(_) => None }
+        let mut next_message = replace(mut deferred, None)
+        if let None = next_message {
+            if groups != 0 {
+                // A cap or Barrier can end a group without probing the queue.
+                match channel.try_receive(receive) {
+                    Ok(take msg) => { next_message = Some(take msg) },
+                    Error(Empty) => {
+                        journal_write_end(d, id, seq, end, mut end_file_slot, mut end_bytes, mut binding, mut end_name)?
+                        groups = 0
+                    },
+                    Error(Closed) => {}
+                }
+            }
+            if let None = next_message {
+                next_message = match channel.receive(receive) { Ok(take msg) => Some(take msg), Error(_) => None }
+            }
         }
         list.clear(mut buffer)
         let mut frames = 0u64
@@ -11033,6 +11052,41 @@ fn journal_test_place(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), (
     if journal_law_place(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
+fn journal_place_idle_turn(take signal: Receiver[()]) waits {
+    result.unwrap(channel.receive(signal))
+}
+
+fn journal_place_idle(d: Dir, tasks: Tasks, mut db: Db, take rows: Table[u64, u64], out: Option[Stdout]) -> Result[bool, Error] waits {
+    let mut place = JournalPlace(rows: take rows, out: out, requests: journal_place_requests(1), delivered: 0, committed: 0)
+    write_place(mut db, mut place, journal_place_receive, journal_place_put, journal_place_deliver)?
+    // Give the ready journal task a scheduler turn with its sender still open.
+    let (wake, signal): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
+    let turn = result.unwrap(task.spawn(tasks, bytes 4096, take signal, journal_place_idle_turn))
+    result.unwrap(channel.send(wake, ()))
+    result.unwrap(task.join(take turn))
+    let boundary = disk_end(d, db.store, db.file_seq)?
+    // HEADER (72) + empty COMMIT with DATA section (42) + the put's
+    // overhead (9), table-prefixed u64 key (12), and schema-tagged row (10).
+    Ok(place.delivered == 1 && place.committed == 1 && boundary == Some(145u64))
+}
+
+pub fn journal_law_place_idle(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = journal_crash_options()
+    options.group_commits = 1
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    let ticket = result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(durable(mut db, ticket))
+    let rows = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let good = result.unwrap(journal_place_idle(d, tasks, mut db, take rows, None))
+    result.unwrap(close(take db))
+    good
+}
+
+@test
+fn journal_test_place_idle(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_place_idle(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
 fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: String) -> bool waits {
     let pack = scenario == "poison-pack"
     if !pack { result.unwrap(stdout.write(out, "ARM")) }
@@ -11078,8 +11132,25 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
 }
 
 fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, scenario: String) -> Result[(), Error] waits {
-    let mut db = open(tasks, d, c, r, journal_crash_options())?
+    let mut options = journal_crash_options()
+    if scenario == "journal-place-idle" { options.group_commits = 1 }
+    if scenario == "journal-place-split" { options.group_bytes = 100 }
+    let mut db = open(tasks, d, c, r, options)?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if scenario == "journal-place-idle" {
+        if !journal_place_idle(d, tasks, mut db, take t, Some(out))? { fail("exact-cap reply left a stale END while idle") }
+        return close(take db)
+    }
+    if scenario == "journal-place-split" {
+        result.unwrap(stdout.write(out, "ARM"))
+        let mut place = JournalPlace(rows: t, out: Some(out), requests: journal_place_requests(2), delivered: 0, committed: 0)
+        let served = write_place(mut db, mut place, journal_place_receive, journal_place_put, journal_place_deliver)
+        if !journal_is_poisoned(take served) || !journal_is_poisoned(close(take db)) {
+            fail("byte split lost the journal's first error")
+        }
+        if place.delivered == 2 && place.committed == 1 { return Ok(()) }
+        return Error(Poisoned(Other(125)))
+    }
     if scenario == "journal-place" {
         let mut place = JournalPlace(rows: t, out: Some(out), requests: journal_place_requests(6), delivered: 0, committed: 0)
         write_place(mut db, mut place, journal_place_receive, journal_place_put, journal_place_deliver)?
@@ -11130,7 +11201,7 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let sh = shape(t)
     let head = db.heads[0].head
-    let last = if scenario == "orphan-end" || scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" { 2u64 } else if scenario == "journal" { 8u64 } else { 7u64 }
+    let last = if scenario == "orphan-end" || scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" || scenario == "journal-place-idle" || scenario == "journal-place-split" { 2u64 } else if scenario == "journal" { 8u64 } else { 7u64 }
     if head < 1 || head > last || head < minimum { return Ok(false) }
     // The independent W2 provider returns wall_ms=phase: genesis0, writes1.
     // Every replayed write must retain1; recovery itself runs under clock2.

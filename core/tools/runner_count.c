@@ -14,6 +14,7 @@
 // body/publisher/compute-marker observation by attributing their tasks and the
 // marker's channel from native source sites. Count the lease wake on the head inbox.
 static const HirselCoreSourceTable *source_table;
+static const char source_dir[] = SOURCE_MANIFEST_DIR "/";
 static uint64_t head_task, publisher_task, retiring_task;
 static int publisher_spawn, observed, marker_send, retirement_send;
 static HirselCoreChannel *marker_channel, *head_channel;
@@ -27,14 +28,30 @@ static int item_named(uint64_t site, const char *name) {
     if (!source_table || !ordinal || ordinal > source_table->items_len) return 0;
     HirselCoreSourceItem item = source_table->items[ordinal - 1];
     if (item.file >= source_table->files_len) return 0;
-    HirselCoreView source = source_table->files[item.file].source;
-    size_t offset = item.file_offset;
-    if (offset >= source.len) return 0;
-    for (size_t i = offset; i + 3 < source.len && i < offset + 32; i++) {
-        if (!memcmp(source.data + i, "fn ", 3)) {
-            size_t n = strlen(name), at = i + 3;
-            return at + n < source.len && !memcmp(source.data + at, name, n)
-                && (source.data[at+n] == '(' || source.data[at+n] == '[');
+    // Compact positions retain byte coordinates but omit declaration text.
+    // Source names are relative to the fixture manifest.
+    HirselCoreView path = source_table->files[item.file].path;
+    if (!path.len) return 0;
+    size_t prefix_len = path.data[0] == '/' ? 0 : sizeof(source_dir) - 1;
+    char filename[prefix_len + path.len + 1];
+    memcpy(filename, source_dir, prefix_len);
+    memcpy(filename + prefix_len, path.data, path.len);
+    filename[prefix_len + path.len] = '\0';
+    FILE *file = fopen(filename, "rb");
+    if (!file) return 0;
+    enum { PREFIX = 32 };
+    size_t n = strlen(name);
+    char source[PREFIX + 3 + n];
+    size_t len = 0;
+    if (fseek(file, item.file_offset, SEEK_SET) == 0) {
+        len = fread(source, 1, sizeof(source), file);
+    }
+    fclose(file);
+    for (size_t i = 0; i + 3 < len && i < PREFIX; i++) {
+        if (!memcmp(source + i, "fn ", 3)) {
+            size_t at = i + 3;
+            return at + n < len && !memcmp(source + at, name, n)
+                && (source[at+n] == '(' || source[at+n] == '[');
         }
     }
     return 0;

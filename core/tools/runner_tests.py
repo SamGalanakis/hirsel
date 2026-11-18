@@ -1024,14 +1024,16 @@ def c_compiler(args):
                        if 'LLVM_SYS_231_PREFIX' in os.environ else Path(shutil.which('cc')))
 
 
-def counting_cc(args, root, work, name):
+def counting_cc(args, root, inputs_path, name):
     """A --cc wrapper that links core/tools/runner_count.c as the program's event sink."""
     kind, want = COUNTS.get(name, (7, 0))
     assert kind == 7, 'runner_count.c observes TRY_SEND'
     cc = c_compiler(args)
+    work = inputs_path.parent.absolute()
     support = work / f'count_{name}.o'
     subprocess.run([str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_count.c'),
                     '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want}',
+                    f'-DSOURCE_MANIFEST_DIR={json.dumps(str(work), ensure_ascii=False)}',
                     *([f'-D{PLACEMENT_OBSERVERS[name]}'] if name in PLACEMENT_OBSERVERS else []),
                     *(['-DHUNG_BODY_SENDS=32664', f'-DHUNG_TOLDS={HUNG_TOLDS}'] if name == 'calls_deadline_hung' else []),
                     '-o', str(support)], check=True)
@@ -1255,7 +1257,7 @@ def main():
                         result=sorted(want ^ selected) or report.get('stderr', ''))
                 for name in selected_calls if r1 else ():
                     definition = f'store@1/runner_calls/test_{name}'
-                    cc = counting_cc(args, root, work, name) if name in COUNTS or name in PLACEMENT_OBSERVERS else None
+                    cc = counting_cc(args, root, base, name) if name in COUNTS or name in PLACEMENT_OBSERVERS else None
                     runtime = args.schedule_runtime if name == 'calls_deadline_hung' else args.runtime
                     if runtime is None:
                         p.error('calls_deadline_hung requires --schedule-runtime')

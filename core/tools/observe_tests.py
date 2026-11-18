@@ -443,7 +443,7 @@ def identity_cases(root, evaluator, work, artifacts, coverage, unavailable, call
             for case in cases:
                 if module == 'runner_calls':
                     definition = f'store@1/{module}/test_{case}'
-                    cc = counting_cc(calls.args, root, work, case) if case in COUNTS else None
+                    cc = counting_cc(calls.args, root, legacy, case) if case in COUNTS else None
                     code, report = native_run(calls.args, 'cranelift', legacy, work / 'identity-native-store', definition, cc)
                     tests = report.get('tests', [])
                     bodies += len(tests)

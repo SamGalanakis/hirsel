@@ -183,6 +183,17 @@ async function session_limit_503() {
   assert.equal(await upgradeStatus(), 503);
 }
 
+async function owner_limit_503() {
+  for (let owner = 0; owner < 10000; owner++) {
+    try {
+      await welcome(none, []);
+    } catch (error) {
+      throw new Error(`only ${owner} owners welcomed`, {cause: error});
+    }
+  }
+  assert.equal(await upgradeStatus(), 503);
+}
+
 async function principal_limit_1013() {
   for (let i = 0; i < 10; i++) {
     const client = await welcome(none, []);
@@ -217,7 +228,7 @@ async function call_rate_overloaded() {
   assert.equal(results.filter(({outcome}) => outcome.tag === 'Refused').length, 1);
 }
 
-const laws = {toggle_smoke, bit_pixels, toggle_no_rerun, session_limit_503, principal_limit_1013, call_rate_overloaded};
+const laws = {toggle_smoke, bit_pixels, toggle_no_rerun, session_limit_503, owner_limit_503, principal_limit_1013, call_rate_overloaded};
 try {
   assert(laws[name], `unknown law: ${name}`);
   await laws[name]();

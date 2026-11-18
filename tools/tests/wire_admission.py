@@ -2,10 +2,12 @@
 """W3c laws over real sockets, with independent codec and store-version oracles."""
 import argparse
 import json
+import os
 from pathlib import Path
 import socket
 import struct
 import subprocess
+from tempfile import TemporaryDirectory
 import time
 import traceback
 
@@ -287,6 +289,42 @@ def request_mismatch_wire():
         assert answer[:3] == ('batch', 4, [1]) and len(answer[3]) == 1 and answer[3][0][2] == u32(7) and answer[4] == [], answer
 
 
+def resend_same_p():
+    def snapshot():
+        reader, _ = welcomed(('read',))
+        with reader:
+            reader.sendall(frame(2, u32(2) + u32(1) + u32(0) + blob(u32(0)) + u32(0)))
+            value = receive(reader)
+            assert value[0] == 'batch' and value[2] == [1] and value[4] == [], value
+            return value[1], [row[2] for row in value[3]]
+
+    peer, principal = welcomed(('put',))
+    request_bytes = frame(2, call(0, 0, arg=u32(7)))
+    before = snapshot()
+    assert before[1] == [], before
+    with peer:
+        peer.sendall(request_bytes[:-1])
+        peer.shutdown(socket.SHUT_WR)
+        # Reader stops without obtaining a complete application message.
+        assert receive(peer)[:2] == ('close', 1001)
+    assert snapshot() == before
+
+    peer, _ = welcomed(('put',), principal)
+    with peer:
+        peer.sendall(request_bytes)
+        assert peer.recv(1) == b'', 'the write cut did not occur before the outcome reached the client'
+    committed = snapshot()
+    assert committed == (before[0] + 2, [u32(7)]), (before, committed)
+
+    peer, _ = welcomed(('put',), principal)
+    with peer:
+        peer.sendall(request_bytes)
+        done(peer, (0, 0, ('returned', u32(0) + u64(committed[0]))), committed[0])
+        peer.sendall(frame(2, call(0, 0, arg=u32(8))))
+        done(peer, (0, 0, ('refused', 6)), committed[0])
+    assert snapshot() == committed
+
+
 def history_below_latest():
     s, _ = welcomed(('put',))
     with s:
@@ -349,7 +387,7 @@ def faulted_owner_releases_slot():
 
 
 CASES = {f.__name__: f for f in (hello_order, slot_out_of_range, gone_slot_v5, second_hello_closes,
-         session_limit_503, principal_limit_1013, call_rate_overloaded, request_mismatch_wire, held_request_mismatch, hello_deadline, resume_unknown,
+         session_limit_503, principal_limit_1013, call_rate_overloaded, request_mismatch_wire, resend_same_p, held_request_mismatch, hello_deadline, resume_unknown,
          history_below_latest, reply_over_done_max, faulted_owner_releases_slot, welcome_with_small_budget)}
 
 
@@ -360,8 +398,16 @@ def main():
     p.add_argument('--report', type=Path)
     args = p.parse_args()
     rows = []
-    for name in args.case or CASES:
-        process = subprocess.Popen([str(args.server.resolve()), name], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    selected = args.case or CASES
+    for name in selected:
+        temporary = TemporaryDirectory(prefix='wire-cut-') if name == 'resend_same_p' else None
+        environment = None
+        if temporary:
+            shim = Path(temporary.name) / 'socket.so'
+            fixture = Path(__file__).resolve().parents[2] / 'core/tools/std_socket.c'
+            subprocess.run(['cc', '-shared', '-fPIC', '-DWIRE_CUT_OUTCOME', str(fixture), '-ldl', '-o', str(shim)], check=True)
+            environment = os.environ | {'LD_PRELOAD': str(shim)}
+        process = subprocess.Popen([str(args.server.resolve()), name], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=environment)
         try:
             wait_ready(process, 18094)
             TRACE.clear()
@@ -381,6 +427,8 @@ def main():
             traceback.print_exc()
         finally:
             stop_process(process)
+            if temporary:
+                temporary.cleanup()
             stderr = process.stderr.read().decode(errors='replace')
             if stderr:
                 print(stderr[-3000:], flush=True)

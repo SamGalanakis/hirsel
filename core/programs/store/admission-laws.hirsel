@@ -449,19 +449,20 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let mut work = wire_work()
     let (events, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
     let (told, who): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
-    result.unwrap(channel.send(to, PubIn(e: Joined(Join(to: take events, told: take told, mark: None, closed: None, identity: None)))))
+    let (closing, closed): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    result.unwrap(channel.send(to, PubIn(e: Joined(Join(to: take events, told: take told, mark: None, closed: Some(take closed), identity: None)))))
     owner.joined = Some(result.unwrap(channel.receive(who)))
     owner.publisher = Some(channel.sender(to))
     if let Ok(WireEvent(e: JoinReady)) = channel.receive(inbox) {} else { return false }
 
-    wire_subscribed(mut owner, mut work, 10u32, query_key(code.describe(q1)), no_arg())
+    wire_subscribed(mut owner, mut work, 10u32, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg()))
     wire_deliver_content(mut owner, mut work, inbox)
     let _ = transport_receive(mut owner, mut work)
 
     let sub = 8u32
-    wire_subscribed(mut owner, mut work, sub, query_key(code.describe(q1)), no_arg())
+    wire_subscribed(mut owner, mut work, sub, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg()))
     wire_deliver_content(mut owner, mut work, inbox)
-    wire_subscribed(mut owner, mut work, sub, query_key(code.describe(qf)), no_arg())
+    wire_subscribed(mut owner, mut work, sub, SubscriptionInput(room: None, key: query_key(code.describe(qf)), arg: no_arg()))
     let old_initial_discarded = match transport_receive(mut owner, mut work) { None => true, _ => false }
     wire_deliver_content(mut owner, mut work, inbox)
     let new_initial = transport_receive(mut owner, mut work)
@@ -472,7 +473,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let version = store.version(snapshot)
     result.unwrap(channel.send(to, PubIn(e: Released(Release(version: version, snapshot: Some(take snapshot), answers: list.new())))))
     let stale = result.unwrap(channel.receive(inbox))
-    wire_subscribed(mut owner, mut work, sub, query_key(code.describe(q1)), no_arg())
+    wire_subscribed(mut owner, mut work, sub, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg()))
     if let WireEvent(e: FromRunner(take old_end)) = take stale {
         result.unwrap(wire_step(mut owner, mut work, WRunner(take old_end)))
     } else { return false }
@@ -486,8 +487,8 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let stale_end_discarded = other_sub_kept && wire_initial_count(renewed, sub, 2u64)
 
     // The old complete can still be in the owner inbox when a replacement arrives.
-    wire_subscribed(mut owner, mut work, 3u32, query_key(code.describe(q1)), no_arg())
-    wire_subscribed(mut owner, mut work, 3u32, list.new(), no_arg())
+    wire_subscribed(mut owner, mut work, 3u32, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg()))
+    wire_subscribed(mut owner, mut work, 3u32, SubscriptionInput(room: None, key: list.new(), arg: no_arg()))
     wire_deliver_content(mut owner, mut work, inbox)
     wire_deliver_content(mut owner, mut work, inbox)
     let stale_complete_discarded = match transport_receive(mut owner, mut work) {
@@ -499,6 +500,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let mut policy_handle = take policy_task
     task.cancel(mut policy_handle)
     let _ = task.join(take policy_handle)
+    let _ = take closing
     let _ = take requests
     result.unwrap(store.close(take db))
     old_initial_discarded && replacement_published && stale_end_discarded && stale_complete_discarded

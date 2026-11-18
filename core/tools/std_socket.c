@@ -16,3 +16,26 @@ int accept4(int fd, struct sockaddr *address, socklen_t *length, int flags) {
     }
     return accepted;
 }
+
+#ifdef WIRE_CUT_OUTCOME
+#include <errno.h>
+#include <stdatomic.h>
+#include <string.h>
+
+static atomic_bool cut;
+
+// The first complete outcome-only Batch was built from a durable answer.
+// Fail before writing any of its bytes so the owner cannot observe Sent.
+ssize_t send(int fd, const void *buffer, size_t length, int flags) {
+    ssize_t (*real_send)(int, const void *, size_t, int) = dlsym(RTLD_NEXT, "send");
+    const unsigned char *bytes = buffer;
+    if (length >= 26 && bytes[0] == 0x82 && bytes[1] < 126
+        && memcmp(bytes + 2, "\x06\0\0\0", 4) == 0
+        && memcmp(bytes + 14, "\0\0\0\0\0\0\0\0\x01\0\0\0", 12) == 0
+        && !atomic_exchange(&cut, 1)) {
+        errno = EPIPE;
+        return -1;
+    }
+    return real_send(fd, buffer, length, flags);
+}
+#endif

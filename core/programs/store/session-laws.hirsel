@@ -22,9 +22,36 @@ pub fn law_pool_holds_writer_bytes(tasks: Tasks, clock: Clock) -> bool waits {
     before_write && during_write && bytes_sent == 18u64 && other_bytes == 18u64 && list.len(third) == 18u64
 }
 
+pub fn law_serving_budget() -> bool {
+    let config = wire_defaults(65536u64, 1048576u64)
+    let total = match serving_bytes(config, 10000u64) { Ok(n) => n, Error(_) => return false }
+    if total != 1125122048u64 { return false }
+    if let Ok(_) = serving_bytes(config, 10001u64) { return false }
+    let mut excessive = config
+    excessive.n_pool = 0xffffffffffffffffu64
+    if let Error(_) = serving_bytes(excessive, 10000u64) { true } else { false }
+}
+
+pub fn law_subscription_room_refunded() -> bool {
+    let mut quota = result.unwrap(subscription_room(400u64, 2u64))
+    let (to, from): (Sender[SubscriptionInput], Receiver[SubscriptionInput]) = result.unwrap(channel.new(1u64))
+    let arg: Bytes = result.unwrap(list.with_capacity(128u64))
+    let first = result.unwrap(subscription_hold(mut quota, list.new(), take arg))
+    result.unwrap(channel.try_send(to, take first))
+    let same_size: Bytes = result.unwrap(list.with_capacity(128u64))
+    let refused = match subscription_hold(mut quota, list.new(), take same_size) {
+        Error(Capacity(requested: 192u64, available: 120u64)) => true,
+        _ => false,
+    }
+    let _ = result.unwrap(channel.try_receive(from))
+    let after_drop: Bytes = result.unwrap(list.with_capacity(128u64))
+    let readmitted = match subscription_hold(mut quota, list.new(), take after_drop) { Ok(_) => true, _ => false }
+    refused && readmitted
+}
+
 @test
 fn test_wire_session(tasks: Tasks, clock: Clock) -> Result[(), ()] waits {
-    if law_session_records(tasks) && law_pool_holds_writer_bytes(tasks, clock) && law_writer_one_frame() && law_children_joined_on_close(tasks) { Ok(()) } else { Error(()) }
+    if law_serving_budget() && law_subscription_room_refunded() && law_session_records(tasks) && law_pool_holds_writer_bytes(tasks, clock) && law_writer_one_frame() && law_children_joined_on_close(tasks) { Ok(()) } else { Error(()) }
 }
 
 pub fn law_writer_one_frame() -> bool {

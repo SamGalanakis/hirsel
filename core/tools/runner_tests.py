@@ -829,7 +829,7 @@ def session_laws(args, root, work, engines, row):
     adapted.parent.mkdir()
     adapted.write_text(text + '\n' + laws)
     selected = manifest(root, work, 'session', adapted)
-    names = args.session_law or ('pool_holds_writer_bytes', 'writer_one_frame', 'children_joined_on_close', 'session_records')
+    names = args.session_law or ('pool_holds_writer_bytes', 'writer_one_frame', 'children_joined_on_close', 'session_records', 'serving_budget', 'subscription_room_refunded')
     if 'evaluator' in engines:
         for name in names:
             value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/runner/law_' + name)
@@ -849,6 +849,10 @@ def session_laws(args, root, work, engines, row):
           '    let mut out = result.unwrap(std.wsock.outbound(Server, std.wsock.defaults(), None))\n'
           '    let payload = wire_payload(take frame, 262144u64)?\n'
           '    return std.wsock.encode(mut out, true, 2u8, payload)')], 'pool_holds_writer_bytes'),
+        ('subscription_refund_on_handoff', [
+          ('    Ok(SubscriptionInput(room: Some(take lease), key: take key, arg: take arg))',
+           '    let _ = take lease\n    Ok(SubscriptionInput(room: None, key: take key, arg: take arg))')],
+          'subscription_room_refunded'),
         ('writer_queue', [('fn wire_ready(busy: bool) -> bool { !busy }', 'fn wire_ready(busy: bool) -> bool { true }')], 'writer_one_frame'),
         ('orphan_reader', [('    task.cancel(mut reader)\n    task.cancel(mut writer)\n'
           '    let _ = task.join(take reader)\n    let _ = task.join(take writer)',
@@ -970,7 +974,7 @@ def admission_laws(args, root, work, engines, row):
 def socket_laws(args, root, work, engines, row):
     names = {'hello_order', 'slot_out_of_range', 'gone_slot_v5', 'second_hello_closes',
              'session_limit_503', 'principal_limit_1013', 'call_rate_overloaded',
-             'request_mismatch_wire', 'held_request_mismatch', 'hello_deadline', 'resume_unknown', 'history_below_latest', 'reply_over_done_max', 'faulted_owner_releases_slot', 'welcome_with_small_budget'}
+             'request_mismatch_wire', 'resend_same_p', 'held_request_mismatch', 'hello_deadline', 'resume_unknown', 'history_below_latest', 'reply_over_done_max', 'faulted_owner_releases_slot', 'welcome_with_small_budget'}
     for engine in (e for e in engines if e != 'evaluator'):
         output = work / ('socket-' + engine)
         command = [sys.executable, str(root / 'tools/tests/wire_build.py'),
@@ -1132,8 +1136,8 @@ def main():
     p.add_argument('--mutant', action='append', choices=[m[0] for m in MUTANTS])
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
-    p.add_argument('--session-law', action='append', choices=['pool_holds_writer_bytes', 'writer_one_frame', 'children_joined_on_close', 'session_records'])
-    p.add_argument('--session-mutant', action='append', choices=['encode_outside_pool', 'writer_queue', 'orphan_reader'])
+    p.add_argument('--session-law', action='append', choices=['pool_holds_writer_bytes', 'writer_one_frame', 'children_joined_on_close', 'session_records', 'serving_budget', 'subscription_room_refunded'])
+    p.add_argument('--session-mutant', action='append', choices=['encode_outside_pool', 'writer_queue', 'orphan_reader', 'subscription_refund_on_handoff'])
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
     p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_handoff', 'slot_never_freed', 'slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])

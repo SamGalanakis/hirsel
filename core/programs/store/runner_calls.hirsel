@@ -1108,8 +1108,10 @@ fn run_managed(take job: ManagedRun) -> Result[runner.Ended, runner.StartError] 
 fn managed_address(status: runner.Status) -> Addr { option.unwrap(status.addr) }
 
 fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, policy: ingress.Ingress, listen: Addr, stop: runner.Stop) -> runner.PlaceConfig[(), Hd] {
+    let mut wire = runner.wire_defaults(65536u64, N_PLACE)
+    wire.n_pool = 4194304u64
     runner.PlaceConfig(backing: Disk(dir, disk_options()), place: code.describe(place), n_place: N_PLACE,
-        handles: code.describe(create_managed_data), query_handles: code.describe(query_handles), session: runner.wire_defaults(65536u64, N_PLACE), max_sessions: 1u64,
+        handles: code.describe(create_managed_data), query_handles: code.describe(query_handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), policy: ingress.share(policy), n_publisher: 1048576u64, listen: listen,
         net: net, tasks: tasks, clock: clock, random: random, stop: stop)
 }

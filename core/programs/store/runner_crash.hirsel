@@ -511,8 +511,10 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     let (policy, policy_handle) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
     let (stop, stopping): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
+    let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+    wire.n_pool = 4194304u64
     let settings = runner.PlaceConfig(backing: Disk(d, existing), place: code.describe(place), n_place: N_PLACE, handles: code.describe(handles), query_handles: code.describe(query_handles),
-        session: runner.wire_defaults(131072u64, N_PLACE), max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
+        session: wire, max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
     let seed = DeadlinePlace(config: take settings, stop: take stopping, status: result.unwrap(runner.status_root()), watch: take watch)
@@ -540,6 +542,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
     let status = result.unwrap(runner.status_root())
     let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+    wire.n_pool = 4194304u64
     wire.socket.max_frame = 65536u64
     let config = runner.PlaceConfig(backing: Disk(d, options()), place: code.describe(place), n_place: N_PLACE, handles: code.describe(handles), query_handles: code.describe(query_handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,

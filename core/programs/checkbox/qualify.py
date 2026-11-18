@@ -14,7 +14,7 @@ from wire_process import stop_process
 
 BROWSER = {"canvas_click", "browser_ticks"}
 WIRE = {
-    "bit_pixels", "toggle_smoke", "toggle_no_rerun", "session_limit_503",
+    "bit_pixels", "toggle_smoke", "toggle_no_rerun", "session_limit_503", "owner_limit_503",
     "principal_limit_1013", "call_rate_overloaded",
 }
 SDK_MUTANTS = {"resend_new_p", "skip_resubscribe_after_reset", "clear_on_first_batch"}
@@ -34,6 +34,8 @@ SERVER_EDITS = {
                              "        let _ = list.remove(mut live_rows, 0u64)\n"
                              "    }\n"
                              "    let requested = wire_rows_size(live_rows)"),
+    "old_owner_limit": ("main", "config, store.runner.WIRE_OWNER_LIMIT, take proxies",
+                        "config, 1024u64, take proxies"),
     "no_ip_session_limit": ("ingress", "if s.free == 0u64 { RejectedPolicy } else {",
                             "if false { RejectedPolicy } else {"),
     "no_principal_rate": ("ingress", "if s.mint_count >= c.mint_burst { false } else {", "if false { false } else {"),
@@ -48,6 +50,7 @@ MUTANT_CASES = {
     "range_in_board": "toggle_no_rerun",
     "no_publish_to_others": "browser_ticks",
     "drop_row_on_coalesce": "converge",
+    "old_owner_limit": "owner_limit_503",
     "no_ip_session_limit": "session_limit_503",
     "no_principal_rate": "principal_limit_1013",
     "no_call_rate": "call_rate_overloaded",
@@ -102,7 +105,7 @@ def qualify(compiler, work, case, mutant, clients, toggles, pace, seed):
     executable = build(compiler, work, web, listen, source, store)
     prepare_web(compiler, executable, web)
     overrides = []
-    if case in ("toggle_no_rerun", "converge"):
+    if case in ("toggle_no_rerun", "converge", "owner_limit_503"):
         overrides = ["--per-ip-sessions", "20000", "--per-ip-new-principals", "20000"]
         print("per_ip_sessions=20000 per_ip_new_principals=20000/min", flush=True)
     if case in BROWSER:

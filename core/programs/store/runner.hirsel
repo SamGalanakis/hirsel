@@ -191,7 +191,12 @@ fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receive
     let (head_to, inbox_head) = match take head_mail { Ok(take pair) => take pair, Error(cap) => return Error(Full(cap)) }
     let finish_mail: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
     let (finish_to, finish_from) = match take finish_mail { Ok(take pair) => take pair, Error(cap) => return Error(Full(cap)) }
-    let serve_mail: Result[(Sender[ServeInput], Receiver[ServeInput]), Capacity] = channel.new(serve_inbox_capacity(limit))
+    let serving_total = match serving_bytes(session_config, limit) { Ok(total) => total, Error(cap) => return Error(Full(cap)) }
+    let serve_slots = serve_inbox_capacity(limit)
+    // The supervisor allocates this channel before the serving task starts.
+    // OwnerReady has the largest message: its tag, id and two senders cost 64 B.
+    let serving_reserve = serving_total - (64u64 + serve_slots * 64u64)
+    let serve_mail: Result[(Sender[ServeInput], Receiver[ServeInput]), Capacity] = channel.new(serve_slots)
     let (serve_to, inbox_serve) = match take serve_mail { Ok(take pair) => take pair, Error(cap) => return Error(Full(cap)) }
     let initial: Option[DrainWindow] = None
     let root = match arc.new(initial) { Ok(take root) => take root, Error((cap, _)) => return Error(Full(cap)) }
@@ -258,9 +263,8 @@ fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receive
                     let serving_config = ServePlace(listener: take listener, config: session_config, tasks: tasks, clock: clock, policy: take ingress_policy,
                         max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, place: place,
                         head: channel.sender(head_to), inbox: take from_serve, to: channel.sender(serve_to), events: channel.sender(to), drain: latest.handle(drain))
-                    let reserve = int.saturating_add(int.saturating_mul(limit, int.saturating_add(session_bytes(session_config), 8192u64)), int.saturating_add(session_config.n_pool, 2097152u64))
                     let run: fn(take ServePlace[G, H]) -> () waits = run_serve_place
-                    serving = match task.spawn(tasks, bytes reserve, take serving_config, run) {
+                    serving = match task.spawn(tasks, bytes serving_reserve, take serving_config, run) {
                         Ok(take handle) => Some(take handle), Error((cap, _)) => { start_failure = Some(Full(cap)); let _ = channel.try_send(head_to, HeadClose); continue },
                     }
                 }
@@ -911,7 +915,14 @@ pub fn query[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(s
 
 // ---- The publisher's subscriptions (G2, G3). A subscription keeps its Cover and read set at
 // the base, never its rows (F4): rows are enumerated from the snapshots the publisher holds.
-type Sub { session: u64, sub: u32, generation: u64, key: Bytes, arg: Bytes, cover: Cover, reads: List[store.Read] }
+// Fields drop in reverse order: return the room after freeing the argument and key.
+pub opaque type SubscriptionInput: send { room: Option[SubscriptionLease], key: Bytes, arg: Bytes }
+
+resource type SubscriptionLease: send { refund: Sender[u64], charge: u64 } drop(lease) {
+    let _ = channel.try_send(lease.refund, lease.charge)
+}
+
+type Sub { session: u64, sub: u32, generation: u64, input: SubscriptionInput, cover: Cover, reads: List[store.Read] }
 
 // What one step owes one session: at `version`, the subs whose whole initial result it
 // carries, its rows and its Ended subs; or, with `reset`, a Reset and nothing else.
@@ -961,7 +972,7 @@ fn run_query[G: send, H: send](r: Registry[G, H], h: H, s: store.Snapshot, key: 
 
 fn rerun_query[G: send, H: send](b: Board[G, H], newest: store.Snapshot, i: u64, rows: Log[Row]) -> Queried {
     let sub = b.subs[i]
-    run_query(b.r, b.h, newest, sub.key, sub.arg, b.base, Some(view sub.cover), sub.sub, rows)
+    run_query(b.r, b.h, newest, sub.input.key, sub.input.arg, b.base, Some(view sub.cover), sub.sub, rows)
 }
 
 fn projection_error(take e: store.Error) -> Queried {
@@ -1005,10 +1016,10 @@ fn cover_rows(s: store.Snapshot, c: Cover, sub: u32, out: Log[Row]) -> Result[()
 
 // G3: the query runs at the base, and its whole result goes in one owe naming it complete.
 fn at_base[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, take key: Bytes, take arg: Bytes) -> Owe {
-    at_base_generation(mut b, who, sub, 0u64, take key, take arg)
+    at_base_generation(mut b, who, sub, 0u64, SubscriptionInput(room: None, key: take key, arg: take arg))
 }
 
-fn at_base_generation[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, generation: u64, take key: Bytes, take arg: Bytes) -> Owe {
+fn at_base_generation[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, generation: u64, take input: SubscriptionInput) -> Owe {
     if let Some(i) = find(b.subs, who, sub) {
         let _ = list.remove(mut b.subs, i)
     }
@@ -1021,13 +1032,13 @@ fn at_base_generation[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, 
             return take o
         },
     }
-    match run_query(b.r, b.h, b.base, key, arg, b.base, None, sub, rows) {
+    match run_query(b.r, b.h, b.base, input.key, input.arg, b.base, None, sub, rows) {
         Covered(take v) => {
             let Viewed(cover: take c, reads: take reads) = take v
             o.rows = read_rows(take rows)
             stamp_rows(mut o.generations, sub, generation)
             result.unwrap(list.push(mut o.complete, sub))
-            result.unwrap(list.push(mut b.subs, Sub(session: who, sub: sub, generation: generation, key: take key, arg: take arg, cover: take c, reads: take reads)))
+            result.unwrap(list.push(mut b.subs, Sub(session: who, sub: sub, generation: generation, input: take input, cover: take c, reads: take reads)))
         },
         Stopped(take why) => result.unwrap(list.push(mut o.ended, (sub, generation, take why))),
         Lost(_) => {
@@ -1198,7 +1209,7 @@ fn round[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
             },
         }
         if !read_hit(b.subs[i].reads, d) {
-            match project_changes(b.r, b.subs[i].key, d, b.subs[i].cover, sub, rows) {
+            match project_changes(b.r, b.subs[i].input.key, d, b.subs[i].cover, sub, rows) {
                 Ok(()) => {
                     for take row in read_rows(take rows) {
                         result.unwrap(list.push(mut owes[k].rows, take row))
@@ -1293,7 +1304,7 @@ pub opaque type Release: send {
 // without selection, which v1 lacks.
 pub opaque type PubIn: send { e: ToPub }
 
-type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, Bytes, Bytes) | WireSubscribed(u64, u32, u64, Bytes, Bytes) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained
+type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, Bytes, Bytes) | WireSubscribed(u64, u32, u64, SubscriptionInput) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained
 
 // A session's join, on its first Subscribe: where its content goes, and where the
 // publisher answers with the id it mints for the session.
@@ -1938,8 +1949,8 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
             },
             Subscribed(who, sub, take key, take arg) =>
                 publish_subscription(mut b, mut joined, mut owes, who, sub, 0u64, take key, take arg),
-            WireSubscribed(who, sub, generation, take key, take arg) =>
-                publish_subscription(mut b, mut joined, mut owes, who, sub, generation, take key, take arg),
+            WireSubscribed(who, sub, generation, take input) =>
+                publish_wire_subscription(mut b, mut joined, mut owes, who, sub, generation, take input),
             Unsubscribed(who, sub) => if let Some(i) = find(b.subs, who, sub) {
                 let _ = list.remove(mut b.subs, i)
             },
@@ -1954,9 +1965,13 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
 }
 
 fn publish_subscription[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe], who: u64, sub: u32, generation: u64, take key: Bytes, take arg: Bytes) {
+    publish_wire_subscription(mut b, mut joined, mut owes, who, sub, generation, SubscriptionInput(room: None, key: take key, arg: take arg))
+}
+
+fn publish_wire_subscription[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe], who: u64, sub: u32, generation: u64, take input: SubscriptionInput) {
     if let Some(i) = joiner(joined, who) {
         unend(mut joined[i].ended, sub)
-        result.unwrap(list.push(mut owes, at_base_generation(mut b, who, sub, generation, take key, take arg)))
+        result.unwrap(list.push(mut owes, at_base_generation(mut b, who, sub, generation, take input)))
     }
 }
 
@@ -3024,7 +3039,7 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
     }
     let PubIn(e: take second) = take subscribing
     let subscribed = match take second {
-        WireSubscribed(who, sub, _, _, _) => who == 7u64 && sub == 1u32,
+        WireSubscribed(who, sub, _, _) => who == 7u64 && sub == 1u32,
         _ => false,
     }
     let live = match channel.try_receive(m) {
@@ -3037,7 +3052,7 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
     if end == 1u64 {
         if let Error(_) = channel.send(inbox, wire_event(Input(Subscribe(3u32, 0u32, no_arg(), None), 0u64))) { return false }
         let generation = match channel.receive(from) {
-            Ok(take x) => { let PubIn(e: take e) = take x; match take e { WireSubscribed(7u64, 3u32, g, _, _) => g, _ => return false } },
+            Ok(take x) => { let PubIn(e: take e) = take x; match take e { WireSubscribed(7u64, 3u32, g, _) => g, _ => return false } },
             _ => return false,
         }
         for _ in 0u64 .. 2u64 {
@@ -3345,6 +3360,10 @@ fn test_rows_normalized(c: Clock, r: Random) -> Result[(), ()] waits {
 }
 
 pub const WIRE_OWNER_LIMIT: u64 = 10000u64
+pub const WIRE_OWNER_FLOOR: u64 = 65536u64
+const WIRE_OWNER_TASK_BYTES: u64 = 320u64
+const WIRE_OVERHEAD: u64 = 67108864u64
+const WIRE_SESSION_CEILING: u64 = 16777216u64
 pub const WIRE_POOL_BYTES: u64 = 384u64 * 1024u64 * 1024u64
 pub type WireConfig: send { n_pool: u64, max_subs: u64, socket: std.wsock.Config, q: u64, budget: u64, n_service: u64, n_place: u64, site: Option[std.wsock.Site] }
 
@@ -3360,8 +3379,25 @@ fn wire_outcome_reserve(c: WireConfig) -> u64 {
     (1u64 + c.q) * (DONE_MAX + 36u64)
 }
 
+fn wire_service_job_bytes(c: WireConfig) -> u64 {
+    c.n_place + c.n_service + 6u64 * c.socket.max_frame + 32768u64
+}
+
+fn wire_variable_peak(c: WireConfig) -> u64 {
+    let m = c.socket.max_frame
+    let units = 1u64 + c.q
+    // Read credits bound typed inbox/deferred values. Head positions retain
+    // a key and argument each, both at most one frame, plus stream and caller.
+    let input = units * (4u64 * m + 128u64) + units * (2u64 * m + 256u64)
+    let transport = wire_round(3u64 * m / 2u64) + 2u64 * wire_round(m + 14u64)
+    let retained = c.n_place + 4u64 * m + 2u64 * c.budget + wire_outcome_reserve(c)
+    input + transport + retained + wire_service_job_bytes(c) + 32768u64
+}
+
 fn wire_configuration(c: WireConfig) -> bool {
-    if c.q > 4u64 || c.socket.max_frame > 262144u64 || c.socket.pending_max > 1024u64 || c.budget > 1048576u64 || c.max_subs == 0u64 || c.n_pool == 0u64 || c.n_pool > WIRE_POOL_BYTES { return false }
+    if c.q > 4u64 || c.socket.max_frame > 262144u64 || c.socket.pending_max > 1024u64 || c.budget > 1048576u64 || c.max_subs == 0u64
+        || c.n_pool == 0u64 || c.n_pool > WIRE_POOL_BYTES || c.n_service > WIRE_SESSION_CEILING || c.n_place > WIRE_SESSION_CEILING { return false }
+    if wire_variable_peak(c) > WIRE_SESSION_CEILING { return false }
     // Welcome has a 21-byte principal and a digest of at most 32 bytes.
     // The launch target belongs to this run, so its size is known at serve.
     let welcome = 89u64 + launch_word(3u64, 0u64)
@@ -3405,16 +3441,19 @@ pub fn dispatch[C: send](mut service: Service[C], take frame: Frame) -> Result[O
 
 pub fn writer_bytes() -> u64 { 4096u64 }
 
-// Records are charge-v1: Reader is 309 (8+24+8+Decoder's 245+8+16),
-// ReadClosed holds Control's 133 plus Reader, so WireEvent is 450.
-// The writer handoff's Bytes is 24; a read credit is ().
-// Children return (), costing 288 each; owner task returns Result<(), Error>
-// (Error's largest Capacity payload 16, plus two variant tags = 32).
-pub fn session_bytes(c: WireConfig) -> u64 {
-    let units = 1u64 + c.q
-    let channels = 64u64 + units * 450u64 + 64u64 + 24u64 + 64u64
-    let outcomes = wire_outcome_reserve(c)
-    reader_bytes() + writer_bytes() + 576u64 + channels + outcomes + c.n_service + 32768u64 + 4384u64 + wire_round(3u64 * units * 100u64)
+// The owner result has charge-v1 size 32. Its 320-byte task
+// record is part of the floor, which also covers its child tasks.
+pub fn serving_bytes(c: WireConfig, owners: u64) -> Result[u64, Capacity] {
+    if owners > WIRE_OWNER_LIMIT { return Error(Capacity(requested: owners, available: WIRE_OWNER_LIMIT)) }
+    let floors = owners * WIRE_OWNER_FLOOR
+    // Use less supervisor room when a caller deliberately serves fewer owners.
+    let metadata = 2097152u64 + owners * 6711u64
+    let overhead = if metadata < WIRE_OVERHEAD { metadata } else { WIRE_OVERHEAD }
+    let fixed = overhead + floors
+    match int.checked_add(fixed, c.n_pool) {
+        Some(total) => Ok(total),
+        None => Error(Capacity(requested: c.n_pool, available: 0xffffffffffffffffu64 - fixed)),
+    }
 }
 
 pub opaque type WireEvent: send { e: WireInput }
@@ -3504,9 +3543,7 @@ fn start_wire_pool[C: send](tasks: Tasks, c: WireConfig, clock: Clock, n: u64) -
     let (to, inbox) = match take allocation_inbox { Ok(take pair) => take pair, Error(cap) => return Error(cap) }
     // Registry construction may reserve n_place. Hello key growth is bounded
     // by the wire payload, rounded identities and the list of Bytes handles.
-    let service_bytes = int.saturating_add(int.saturating_add(c.n_place, c.n_service), 6u64 * c.socket.max_frame + 32768u64)
-    let ceiling = if service_bytes < 16777216u64 { service_bytes } else { 16777216u64 }
-    let pool = WirePool(inbox: take inbox, config: c.socket, clock: clock, tasks: tasks, service_bytes: ceiling)
+    let pool = WirePool(inbox: take inbox, config: c.socket, clock: clock, tasks: tasks, service_bytes: wire_service_job_bytes(c))
     let run: fn(take WirePool[C]) -> () waits = wire_pool
     match task.spawn(tasks, bytes n, take pool, run) {
         Ok(take handle) => Ok((take to, take handle)),
@@ -3705,7 +3742,7 @@ pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded
     let boxed = match box.new(take service) { Ok(take accepted) => take accepted, Error((cap, _)) => return Error(cap) }
     let x = WireOwner(upgraded: take upgraded, service: take boxed, publisher: channel.sender(to_publisher), config: c, clock: clock, tasks: tasks, managed: None)
     let run: fn(take WireOwner[C]) -> Result[(), std.wsock.Error] waits = wire_connection_owner
-    let allowance = if wire_configuration(c) { session_bytes(c) + 16777216u64 + 524288u64 } else { 0u64 }
+    let allowance = if wire_configuration(c) { WIRE_OWNER_FLOOR - WIRE_OWNER_TASK_BYTES + WIRE_SESSION_CEILING + 524288u64 } else { 0u64 }
     match task.spawn(tasks, bytes allowance, take x, run) {
         Ok(take h) => Ok(take h),
         Error((cap, _)) => Error(cap),
@@ -3716,7 +3753,7 @@ fn wire_connection_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.
     if !wire_configuration(x.config) { return Error(Configuration) }
     let mut abandoned = 0u64
     let c = x.config
-    let pool_bytes = if c.n_pool < 16777216u64 { c.n_pool } else { 16777216u64 }
+    let pool_bytes = if c.n_pool < WIRE_SESSION_CEILING { c.n_pool } else { WIRE_SESSION_CEILING }
     let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(x.tasks, c, x.clock, pool_bytes)
     let (to, take holding) = match take allocated {
         Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)),
@@ -4301,8 +4338,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                     policy: match policy { Some(rules) => Some(ingress.share(rules)), _ => None }, service: take boxed, publisher: channel.sender(pub_to), c: config,
                     clock: clock, tasks: tasks, control: take control, completion: take completion, allocation: channel.sender(allocation))
                 let run: fn(take WireAccept[C]) -> Result[(), std.wsock.Error] waits = wire_accepted
-                let reserve = session_bytes(config) + if let Some(_) = lifecycle { 4096u64 } else { 0u64 }
-                match task.spawn(tasks, bytes reserve, take job, run) {
+                match task.spawn(tasks, bytes (WIRE_OWNER_FLOOR - WIRE_OWNER_TASK_BYTES), take job, run) {
                     Ok(take handle) => result.unwrap(map.insert(mut owners, id, SessionTask(handle: take handle, wake: None))),
                     Error((_, take back)) => {
                         let WireAccept(socket: take refused, ..) = take back
@@ -4325,11 +4361,15 @@ fn start_socket_refusal(tasks: Tasks, take socket: Socket, clock: Clock, at: u64
 
 fn serve_ingress[C: send](take listener: Listener, tasks: Tasks, clock: Clock, to_publisher: Sender[PubIn], c: WireConfig, max_sessions: u64, take proxies: List[std.wsock.Prefix], take policy: Option[ingress.Ingress], make: scoped[view] fn() -> Service[C]) -> Result[(), std.wsock.Error] waits {
     if max_sessions == 0u64 || max_sessions > WIRE_OWNER_LIMIT || !wire_configuration(c) { return Error(Configuration) }
-    let messages: Result[(Sender[ServeInput], Receiver[ServeInput]), Capacity] = channel.new(serve_inbox_capacity(max_sessions))
-    let (to, inbox) = match take messages { Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)) }
-    let transport = ServeTransport(listener: take listener, config: c, tasks: tasks, clock: clock, policy: take policy,
-        limit: max_sessions, proxies: take proxies, publisher: channel.sender(to_publisher), inbox: take inbox, to: take to)
-    match serve_sockets(take transport, None, make) { Ok(_) => Ok(()), Error(problem) => Error(problem) }
+    let required = match serving_bytes(c, max_sessions) { Ok(total) => total, Error(cap) => return Error(Allocation(cap)) }
+    let served: Result[Result[(), std.wsock.Error], Capacity] = bound bytes required {
+        let messages: Result[(Sender[ServeInput], Receiver[ServeInput]), Capacity] = channel.new(serve_inbox_capacity(max_sessions))
+        let (to, inbox) = match take messages { Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)) }
+        let transport = ServeTransport(listener: take listener, config: c, tasks: tasks, clock: clock, policy: take policy,
+            limit: max_sessions, proxies: take proxies, publisher: channel.sender(to_publisher), inbox: take inbox, to: take to)
+        match serve_sockets(take transport, None, make) { Ok(_) => Ok(()), Error(problem) => Error(problem) }
+    }
+    match take served { Ok(take ended) => take ended, Error(cap) => Error(Allocation(cap)) }
 }
 
 fn limited_reply(take b: Bytes) -> Outcome {
@@ -4405,7 +4445,7 @@ pub fn prepare[G: send, H: send](r: Registry[G, H], a: Admitted, take want: Call
 }
 
 // The wire owner owns this state. Policy tasks answer only through its inbox.
-type WireOwed: send { generation: u64 }
+type WireOwed: send { generation: u64, reply: Bytes }
 
 pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], timers: Map[u64, Task[()]], output: List[WireOutput], sending: List[WireMark], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64 }
 
@@ -4477,13 +4517,41 @@ fn try_head(head: WireHead, take req: Req) -> HeadOffer {
     }
 }
 
+type SubscriptionRoom: send {
+    to: Sender[u64], from: Receiver[u64], slots: u64, limit: u64, held: u64, used: u64,
+}
+
+fn subscription_room(limit: u64, max_subs: u64) -> Result[SubscriptionRoom, Capacity] {
+    let possible = int.saturating_sub(limit, 64u64) / 8u64
+    let wanted = int.saturating_add(max_subs, 1u64)
+    let slots = if wanted < possible { wanted } else { possible }
+    if slots == 0u64 { return Error(Capacity(requested: 72u64, available: limit)) }
+    let (to, from): (Sender[u64], Receiver[u64]) = channel.new(slots)?
+    Ok(SubscriptionRoom(to: take to, from: take from, slots: slots, limit: limit - (64u64 + slots * 8u64), held: 0u64, used: 0u64))
+}
+
+fn subscription_hold(mut quota: SubscriptionRoom, take key: Bytes, take arg: Bytes) -> Result[SubscriptionInput, Capacity] {
+    while let Ok(charge) = channel.try_receive(quota.from) {
+        quota.held -= charge
+        quota.used -= 1u64
+    }
+    // Include the lease record. One refund fits for every issued lease.
+    let charge = wire_round(list.capacity(key)) + wire_round(list.capacity(arg)) + 64u64
+    let available = quota.limit - quota.held
+    if quota.used == quota.slots || charge > available { return Error(Capacity(requested: charge, available: available)) }
+    let lease = result.capacity_only(SubscriptionLease(refund: channel.sender(quota.to), charge: charge))?
+    quota.held += charge
+    quota.used += 1u64
+    Ok(SubscriptionInput(room: Some(take lease), key: take key, arg: take arg))
+}
+
 pub opaque type WireSession[G: send, H: send]: send {
     registry: Registry[G, H], place: Option[StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]]], policy: ingress.Ingress, head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, target: String,
     source: Ip, me: Option[Sender[WireEvent]], publisher: Option[Sender[PubIn]], caller: Option[Caller], welcome_token: Option[Bytes],
     phase: u8, wants: List[Want], entries: List[Bytes], placing: u64,
     asking: bool, pending: Option[WirePending],
     held: Map[Bytes, WireHeld], refusals: u64, last: u64, generation: u64,
-    joined: Option[u64], joining: Option[Receiver[u64]], join_lease: Option[WireJoinLease], marked: bool, mark: Option[Sender[()]], subscription: Option[(u32, Bytes, Bytes)], sub_generation: u64, subs: List[(u32, u64)], pub_subs: List[u32], reset_seen: bool
+    joined: Option[u64], joining: Option[Receiver[u64]], join_lease: Option[WireJoinLease], marked: bool, mark: Option[Sender[()]], subscription: Option[(u32, SubscriptionInput)], subscription_room: Option[SubscriptionRoom], sub_generation: u64, subs: List[(u32, u64)], pub_subs: List[u32], reset_seen: bool
 }
 
 pub fn wire_service[G: send, H: send](take reg: Registry[G, H], policy: ingress.Ingress, head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H]] {
@@ -4498,7 +4566,7 @@ fn wire_service_with_head[G: send, H: send](take reg: Registry[G, H], policy: in
     let context = WireSession(registry: take reg, place: None, policy: ingress.share(policy), head: take head, clock: clock, tasks: tasks, config: config, target: take target,
         source: V4(0u32), me: None, publisher: None, caller: None, welcome_token: None, phase: 0u8, wants: list.new(), entries: list.new(), placing: 0u64,
         asking: false, pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64,
-        joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false)
+        joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false)
     Service(context: take context, step: wire_step, ready: wire_can_read, allocate: wire_service_allocate, finish: wire_finish, check: wire_check_live)
 }
 
@@ -4609,7 +4677,9 @@ fn wire_output_charge(f: Frame, reserved: bool) -> u64 {
 }
 
 fn wire_queued_bytes(output: List[WireOutput]) -> u64 {
-    let mut size = 0u64
+    // WireOutput's charge-v1 size is Frame (88), two Lists (24 each)
+    // and the external flag (1).
+    let mut size = wire_round(137u64 * list.capacity(output))
     for o in output { size += wire_output_charge(o.frame, list.len(o.marks) != 0u64) }
     size
 }
@@ -4678,6 +4748,7 @@ fn wire_reset_rows[G: send, H: send](mut s: WireSession[G, H], mut output: List[
     let _ = replace(mut s.join_lease, None)
     s.joined = None
     let _ = replace(mut s.joining, None)
+    let _ = replace(mut s.subscription, None)
     wire_queue(mut output, Reset(version, take done), take marks, list.new())
     Ok(())
 }
@@ -4708,14 +4779,24 @@ fn wire_current_output(active: List[(u32, u64)], take output: WireOutput) -> Opt
     } else {
         if wire_drop_stale(mut generations, active) {
             if let Batch(version, take complete, take rows, take done) = take f {
-                let mut live_complete: List[u32] = list.new()
-                let mut live_rows: List[Row] = list.new()
-                for sub in complete {
-                    if let Some(_) = sub_generation(generations, sub) { result.unwrap(list.push(mut live_complete, sub)) }
+                let mut live_complete = take complete
+                let mut kept = 0u64
+                for index in 0u64 .. list.len(live_complete) {
+                    if let Some(_) = sub_generation(generations, live_complete[index]) {
+                        list.swap(mut live_complete, kept, index)
+                        kept += 1u64
+                    }
                 }
-                for take row in take rows {
-                    if let Some(_) = sub_generation(generations, row.sub) { result.unwrap(list.push(mut live_rows, take row)) }
+                while list.len(live_complete) > kept { let _ = list.pop(mut live_complete) }
+                let mut live_rows = take rows
+                kept = 0u64
+                for index in 0u64 .. list.len(live_rows) {
+                    if let Some(_) = sub_generation(generations, live_rows[index].sub) {
+                        list.swap(mut live_rows, kept, index)
+                        kept += 1u64
+                    }
                 }
+                while list.len(live_rows) > kept { let _ = list.pop(mut live_rows) }
                 if list.len(live_complete) == 0u64 && list.len(live_rows) == 0u64 && list.len(done) == 0u64 { return None }
                 return Some(WireOutput(frame: Batch(version, take live_complete, take live_rows, take done), marks: take marks, generations: take generations, external: external))
             }
@@ -4726,13 +4807,17 @@ fn wire_current_output(active: List[(u32, u64)], take output: WireOutput) -> Opt
 }
 
 fn wire_prune_output[G: send, H: send](mut s: WireSession[G, H], mut output: List[WireOutput], retired: Option[u32]) {
-    let all = replace(mut output, list.new())
-    for take queued in take all {
+    let mut kept = 0u64
+    for index in 0u64 .. list.len(output) {
+        let empty = WireOutput(frame: Reset(0u64, list.new()), marks: list.new(), generations: list.new(), external: false)
+        let queued = list.set(mut output, index, take empty)
         if !queued.external { if let Ended(sub, _) = queued.frame { if retired == Some(sub) { continue } } }
         if let Some(take current) = wire_current_output(s.subs, take queued) {
-            result.unwrap(list.push(mut output, take current))
+            let _ = list.set(mut output, kept, take current)
+            kept += 1u64
         }
     }
+    while list.len(output) > kept { let _ = list.pop(mut output) }
 }
 
 fn wire_take_output[G: send, H: send](s: WireSession[G, H], mut work: WireWork) -> Option[Frame] {
@@ -4769,7 +4854,7 @@ fn wire_begin_policy[G: send, H: send](mut s: WireSession[G, H], mut work: WireW
     }
 }
 
-pub type ServicePlan: send = NoAction | PlanRefusal(u32, u64, Refusal) | PlannedCall(Send, Admitted, u32) | PlannedUpdate(List[WireOutput], List[u64]) | PlannedSubscribe(u32, Bytes, Bytes) | SubscriptionRefusal(u32, Outcome) | ResumeReset
+pub type ServicePlan: send = NoAction | PlanRefusal(u32, u64, Refusal) | PlannedCall(Send, Admitted, u32, Bytes, Option[Outcome]) | PlannedUpdate(List[WireOutput], List[u64]) | PlannedSubscribe(u32, SubscriptionInput) | SubscriptionRefusal(u32, Outcome) | ResumeReset
 
 fn wire_plan_call[G: send, H: send](s: WireSession[G, H], take pending: WirePending, allowed: bool) -> Result[ServicePlan, u16] {
     let WirePending(stream: stream, p: p, slot: slot, deadline: deadline_ms, arg: take arg, at: at, grows: _) = take pending
@@ -4792,13 +4877,21 @@ fn wire_plan_call[G: send, H: send](s: WireSession[G, H], take pending: WirePend
     let context = admitted(take caller, take entries, at, host.mono_ns(s.clock), s.config.budget, s.config.socket.max_frame)
     let want = CallWant(key: take key, stream: stream, p: p, arg: take arg, deadline_ms: deadline_ms)
     match prepare(s.registry, context, take want) {
-        Ok(take sent) => Ok(PlannedCall(take sent, take context, stream)),
+        Ok(take sent) => {
+            let reply_room: Result[Bytes, Capacity] = list.with_capacity(DONE_MAX)
+            let backing = match take reply_room { Ok(take held) => take held, Error(_) => return Ok(PlanRefusal(stream, p, Overloaded)) }
+            let computed: Option[Outcome] = match map.get(s.registry.slots, sent.key) {
+                Some(Compute(_)) => Some(call(s.registry, sent.key, sent.arg)),
+                _ => None,
+            }
+            Ok(PlannedCall(take sent, take context, stream, take backing, take computed))
+        },
         Error(take why) => Ok(PlanRefusal(stream, p, take why)),
     }
 }
 
 fn wire_apply_plan[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, take plan: ServicePlan) -> Result[(), u16] {
-    let (take sent, take context, stream) = match take plan {
+    let (take sent, take context, stream, take reply, take computed) = match take plan {
         NoAction => return Ok(()),
         PlanRefusal(stream, p, take why) => return wire_refused(mut s, mut work, stream, p, take why),
         PlannedUpdate(take output, take completed) => {
@@ -4806,13 +4899,14 @@ fn wire_apply_plan[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
             for id in completed { let _ = map.remove(mut work.timers, id) }
             return Ok(())
         },
-        PlannedSubscribe(sub, take key, take arg) => return wire_apply_subscribe(mut s, mut work, sub, take key, take arg),
+        PlannedSubscribe(sub, take input) => return wire_apply_subscribe(mut s, mut work, sub, take input),
         SubscriptionRefusal(sub, take why) => { wire_end(mut s, mut work.output, sub, take why); return Ok(()) },
         ResumeReset => {
             let version = s.last
             return wire_reset_rows(mut s, mut work.output, version, list.new(), list.new())
         },
-        PlannedCall(take prepared, take caller_context, stream) => (take prepared, take caller_context, stream),
+        PlannedCall(take prepared, take caller_context, stream, take reply, take computed) =>
+            (take prepared, take caller_context, stream, take reply, take computed),
     }
     let p = sent.p
     let k = slot_key(sent.stream, p)
@@ -4823,7 +4917,10 @@ fn wire_apply_plan[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
     if !durable {
         let is_compute = match map.get(s.registry.slots, sent.key) { Some(Compute(_)) => true, _ => false }
         if !is_compute { return wire_refused(mut s, mut work, stream, p, NotAllowed) }
-        let outcome = call(s.registry, sent.key, sent.arg)
+        let outcome = match take computed {
+            Some(take result) => take result,
+            None => return wire_refused(mut s, mut work, stream, p, NotAllowed),
+        }
         if wire_cut(work, s.clock) { work.abandoned += 1u64; return Ok(()) }
         let held = WireHeld(stream: stream, p: p, digest: sent.digest, forwarded: false, queued: queued + 1u64, owed: list.new())
         result.unwrap(map.insert(mut s.held, result.unwrap(clone(k)), take held))
@@ -4848,7 +4945,9 @@ fn wire_apply_plan[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
     let until = match work.deadline { Some(cut) => if cut < sent.deadline { cut } else { sent.deadline }, None => sent.deadline }
     let timing = WireDeadline(clock: s.clock, at: until, to: take to, stream: result.unwrap(clone(sent.stream)), p: p, generation: s.generation)
     let h = match task.spawn(s.tasks, bytes 4096u64, take timing, wire_deadline) { Ok(take h) => take h, Error(_) => return wire_refused(mut s, mut work, stream, p, Overloaded) }
-    let owed = WireOwed(generation: s.generation)
+    if let Error(_) = map.reserve(mut work.timers, 1u64) { return wire_refused(mut s, mut work, stream, p, Overloaded) }
+    if let Error(_) = map.reserve(mut s.held, 1u64) { return wire_refused(mut s, mut work, stream, p, Overloaded) }
+    let owed = WireOwed(generation: s.generation, reply: take reply)
     if forwarded {
         let mut held = option.unwrap(map.remove(mut s.held, k))
         result.unwrap(list.push(mut held.owed, take owed))
@@ -4861,13 +4960,13 @@ fn wire_apply_plan[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
         }
         let Admitted(caller: take principal, ..) = take context
         let request = Request(caller: Some(take principal), stream: take named, p: position, key: take entry, arg: take argument, digest: digest, reply_to: wire_me(s), live: take live, identity: take identity, seed: take seed)
+        let mut sends: List[WireOwed] = list.new()
+        if let Error(_) = list.push(mut sends, take owed) { return wire_refused(mut s, mut work, stream, p, Overloaded) }
         match try_head(s.head, Req(e: Requested(take request))) {
             Posted => (),
             InboxFull => return wire_refused(mut s, mut work, stream, p, Overloaded),
             InboxClosed => return Error(1011u16),
         }
-        let mut sends: List[WireOwed] = list.new()
-        result.unwrap(list.push(mut sends, take owed))
         result.unwrap(map.insert(mut s.held, take k, WireHeld(stream: stream, p: p, digest: digest, forwarded: true, queued: queued, owed: take sends)))
     }
     result.unwrap(map.insert(mut work.timers, s.generation, take h))
@@ -4881,26 +4980,37 @@ fn wire_end[G: send, H: send](mut s: WireSession[G, H], mut output: List[WireOut
     wire_queue(mut output, Ended(sub, take outcome), list.new(), take generations)
 }
 
-fn wire_subscribed[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, sub: u32, take key: Bytes, take arg: Bytes) {
+fn wire_subscribed[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, sub: u32, take input: SubscriptionInput) {
     let who = option.unwrap(s.joined)
     let to_pub = wire_publisher(s)
     s.sub_generation += 1u64
     let generation = s.sub_generation
-    let sent = channel.try_send(to_pub, PubIn(e: WireSubscribed(who, sub, generation, take key, take arg)))
-    if let Error(_) = take sent { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return }
     let mut index = 0u64
     while index < list.len(s.subs) && s.subs[index].0 != sub { index += 1u64 }
+    if index == list.len(s.subs) {
+        if let Error(_) = list.reserve(mut s.subs, 1u64) {
+            wire_end(mut s, mut work.output, sub, Refused(Overloaded))
+            return
+        }
+    }
+    let registered = list.contains(s.pub_subs, sub)
+    if !registered {
+        if let Error(_) = list.reserve(mut s.pub_subs, 1u64) {
+            wire_end(mut s, mut work.output, sub, Refused(Overloaded))
+            return
+        }
+    }
+    let sent = channel.try_send(to_pub, PubIn(e: WireSubscribed(who, sub, generation, take input)))
+    if let Error(_) = take sent { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return }
     if index == list.len(s.subs) {
         result.unwrap(list.push(mut s.subs, (sub, generation)))
     } else {
         s.subs[index] = (sub, generation)
     }
-    let mut registered = false
-    for id in s.pub_subs { if id == sub { registered = true } }
     if !registered { result.unwrap(list.push(mut s.pub_subs, sub)) }
 }
 
-fn wire_plan_subscribe[G: send, H: send](s: WireSession[G, H], sub: u32, slot: u32, take arg: Bytes, take resume: Option[Bytes]) -> Result[ServicePlan, u16] {
+fn wire_plan_subscribe[G: send, H: send](mut s: WireSession[G, H], sub: u32, slot: u32, take arg: Bytes, take resume: Option[Bytes]) -> Result[ServicePlan, u16] {
     if s.phase != 3u8 { return Error(1008u16) }
     if let Some(_) = resume { return Ok(ResumeReset) }
     let index: u64 = int.widen(slot)
@@ -4918,15 +5028,28 @@ fn wire_plan_subscribe[G: send, H: send](s: WireSession[G, H], sub: u32, slot: u
     if !registered && list.len(s.pub_subs) >= s.config.max_subs { return Ok(SubscriptionRefusal(sub, Refused(NotAllowed))) }
     let refused = match map.get(s.registry.checks, key) { Some(check) => check(arg), _ => { let no_refusal: Option[Refusal] = None; no_refusal } }
     if let Some(take why) = take refused { return Ok(SubscriptionRefusal(sub, Refused(take why))) }
-    Ok(PlannedSubscribe(sub, take key, take arg))
+    if let None = s.subscription_room {
+        let limit = int.saturating_sub(WIRE_SESSION_CEILING, wire_variable_peak(s.config))
+        match subscription_room(limit, s.config.max_subs) {
+            Ok(take quota) => { s.subscription_room = Some(take quota) },
+            Error(_) => return Ok(SubscriptionRefusal(sub, Refused(Overloaded))),
+        }
+    }
+    let mut quota = option.unwrap(replace(mut s.subscription_room, None))
+    let held = subscription_hold(mut quota, take key, take arg)
+    s.subscription_room = Some(take quota)
+    match take held {
+        Ok(take input) => Ok(PlannedSubscribe(sub, take input)),
+        Error(_) => Ok(SubscriptionRefusal(sub, Refused(Overloaded))),
+    }
 }
 
-fn wire_apply_subscribe[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, sub: u32, take key: Bytes, take arg: Bytes) -> Result[(), u16] {
+fn wire_apply_subscribe[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, sub: u32, take input: SubscriptionInput) -> Result[(), u16] {
     if wire_admission_closed(work, s.clock) {
         wire_end(mut s, mut work.output, sub, Refused(Overloaded))
         return Ok(())
     }
-    if let Some(_) = s.joined { wire_subscribed(mut s, mut work, sub, take key, take arg); return Ok(()) }
+    if let Some(_) = s.joined { wire_subscribed(mut s, mut work, sub, take input); return Ok(()) }
     let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
     let (told, hear) = match take made { Ok(take pair) => take pair, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
     let close_channel: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
@@ -4950,7 +5073,7 @@ fn wire_apply_subscribe[G: send, H: send](mut s: WireSession[G, H], mut work: Wi
     // A fresh join can wait for its id while an old terminal frame is queued.
     wire_prune_output(mut s, mut work.output, Some(sub))
     s.joining = Some(take hear)
-    s.subscription = Some((sub, take key, take arg))
+    s.subscription = Some((sub, take input))
     Ok(())
 }
 
@@ -5047,8 +5170,16 @@ fn wire_answer[G: send, H: send](mut s: WireSession[G, H], mut completed: List[u
         let count = list.len(owed)
         h.queued += count
         for take owing in owed {
-            if let Error(_) = list.push(mut completed, owing.generation) { return Error(1013u16) }
-            let outcome: Outcome = result.unwrap(clone(told.outcome))
+            let WireOwed(generation: generation, reply: take backing) = take owing
+            if let Error(_) = list.push(mut completed, generation) { return Error(1013u16) }
+            let outcome = match told.outcome {
+                Returned(payload) => {
+                    let mut reply = take backing
+                    if let Error(_) = list.append(mut reply, payload) { return Error(1013u16) }
+                    Returned(take reply)
+                },
+                _ => result.unwrap(clone(told.outcome)),
+            }
             result.unwrap(list.push(mut done, Done(stream: h.stream, p: h.p, outcome: take outcome)))
             result.unwrap(list.push(mut marks, Unit(result.unwrap(clone(key)))))
         }
@@ -5087,7 +5218,7 @@ fn wire_service_allocate[G: send, H: send](mut s: WireSession[G, H], take alloca
                 None => Ok(NoAction),
             }
         },
-        ValidateSubscribe(sub, slot, take arg, take resume) => wire_plan_subscribe(s, sub, slot, take arg, take resume),
+        ValidateSubscribe(sub, slot, take arg, take resume) => wire_plan_subscribe(mut s, sub, slot, take arg, take resume),
         DeliverUpdate(take delivery) => {
             let DeliveryJob(update: take published, output: take previous, drain: take drain) = take delivery
             let mut output = take previous
@@ -5147,7 +5278,7 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
                 if wire_admission_closed(work, s.clock) {
                     wire_end(mut s, mut work.output, sub, Refused(Overloaded))
                 } else {
-                    let planned = wire_plan_subscribe(s, sub, slot, take arg, take resume)?
+                    let planned = wire_plan_subscribe(mut s, sub, slot, take arg, take resume)?
                     wire_apply_plan(mut s, mut work, take planned)?
                 }
             },
@@ -5181,7 +5312,7 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
             if let Some(who) = received {
                 let _ = replace(mut s.joining, None)
                 s.joined = Some(who)
-                if let Some((sub, take key, take arg)) = replace(mut s.subscription, None) { wire_subscribed(mut s, mut work, sub, take key, take arg) }
+                if let Some((sub, take ready_sub)) = replace(mut s.subscription, None) { wire_subscribed(mut s, mut work, sub, take ready_sub) }
             }
             if !writable { return Ok(None) }
             if s.phase == 4u8 { s.phase = 3u8 }
@@ -5267,6 +5398,7 @@ fn wire_stop_sub[G: send, H: send](mut s: WireSession[G, H], mut output: List[Wi
     if list.len(s.subs) == 0u64 {
         let _ = replace(mut s.join_lease, None)
         let _ = replace(mut s.joining, None)
+        let _ = replace(mut s.subscription, None)
         s.joined = None
         let _ = replace(mut s.pub_subs, list.new())
         return

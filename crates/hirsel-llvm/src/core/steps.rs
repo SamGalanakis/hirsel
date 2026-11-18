@@ -1465,21 +1465,28 @@ impl FunctionEmitter<'_> {
                 self.anchor = row.anchor;
                 self.debug_location = location(row.anchor);
                 if block == plan.header {
-                    let condition = if full {
-                        let Terminator::Branch { condition, .. } = self.body.terminators[block]
-                        else {
-                            unreachable!()
-                        };
-                        let condition = self.numeric(condition);
-                        self.cmp(Predicate::Ne, &Type::I8, &condition, &int(0))
+                    let Terminator::Branch { condition, .. } = self.body.terminators[block] else {
+                        unreachable!()
+                    };
+                    let condition = self.numeric(condition);
+                    let in_range = self.cmp(Predicate::Ne, &Type::I8, &condition, &int(0));
+                    if full {
+                        let yes = self.edge_label(plan.yes);
+                        self.cond(&in_range, yes, done);
+                        self.emit_edge(yes, plan.yes);
                     } else {
                         let index = self.step_word(plan.index);
                         let limit = self.load(&Type::I64, &Value::Local(window.end), 8);
-                        self.cmp(Predicate::Ult, &Type::I64, &index, &limit)
-                    };
-                    let yes = self.edge_label(plan.yes);
-                    self.cond(&condition, yes, done);
-                    self.emit_edge(yes, plan.yes);
+                        let within_chunk = self.cmp(Predicate::Ult, &Type::I64, &index, &limit);
+                        let iteration = Label::new("step_chunk_iteration", n);
+                        self.cond(&within_chunk, iteration, done);
+                        self.block(iteration);
+                        // The partial quota ends before the original loop does.
+                        // Preserve the source bound for accesses in its body.
+                        self.runtime_void("llvm.assume", &[arg(Type::I1, in_range)]);
+                        let to = self.edge(plan.yes);
+                        self.br(to);
+                    }
                 } else {
                     let old = plan
                         .cuts

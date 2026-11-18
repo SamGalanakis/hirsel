@@ -5,3 +5,17 @@ pub fn rejected(s: store.Snapshot) -> bool {
     })
     false
 }
+
+// PROG-2: an opaque Tx cannot expose metadata by projection either.
+pub fn read_opaque_tx(tx: store.Tx) -> u64 {
+    tx.info.id.version
+}
+
+// A plain opaque record has the same boundary, even as a temporary.
+pub fn read_opaque_digest(digest: store.RequestDigest) -> u8 {
+    digest.b[0]
+}
+
+pub fn read_temporary_digest(key: Bytes, args: Bytes) -> u8 {
+    store.request_digest(key, args).b[0]
+}

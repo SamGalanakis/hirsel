@@ -515,6 +515,9 @@ impl Cx<'_, '_, '_> {
         let name = self.token_text(n);
         let (found, stable) = match self.t.kind(inner).clone() {
             TyKind::Adt(d, args) => {
+                if self.require_visible_fields(d, n).is_err() {
+                    return (ERROR, None);
+                }
                 let decl = &self.p.decls[d.index()];
                 let stable = decl.repr == Repr::Stable;
                 let found = match &decl.body {

@@ -423,6 +423,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         result
     }
+    /// PROG-2: only the defining module can access an opaque type's fields.
+    pub(super) fn require_visible_fields(&mut self, d: DeclId, n: NodeId) -> Result<(), ()> {
+        let decl = &self.p.decls[d.index()];
+        if decl.opaque && decl.site.module != self.p.modules[self.at.module as usize].id {
+            let name = &decl.path.0.name;
+            self.refuse(
+                "PROG-2",
+                n,
+                format!("`{name}` is opaque outside its module"),
+            );
+            return Err(());
+        }
+        Ok(())
+    }
+
     /// Step `at` to its field `name`; through a view, a field that is not plain reads
     /// as a view (OWN-8).
     pub(super) fn field(&mut self, at: &mut At, name: &str, n: NodeId) -> Result<(), ()> {
@@ -455,6 +470,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut stable = false;
         let found = match self.t.kind(inner).clone() {
             TyKind::Adt(d, args) => {
+                self.require_visible_fields(d, n)?;
                 let decl = &self.p.decls[d.index()];
                 stable = decl.repr == Repr::Stable;
                 match &decl.body {

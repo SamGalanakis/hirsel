@@ -65,6 +65,13 @@ def main():
         if args.compiler is not None:
             for control in ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused', 'index_rows_write_refused'):
                 negative = inputs(args.root.resolve())
+                if control == 'look_info_refused':
+                    # Check the fields of an opaque Tx before that change ships.
+                    store = negative['packages'][-1]['sources'][0]
+                    opaque_tx = work / 'store-with-opaque-tx.hirsel'
+                    source = Path(store['file']).read_text()
+                    opaque_tx.write_text(source.replace('pub scoped type Tx {', 'pub opaque scoped type Tx {', 1))
+                    store['file'] = str(opaque_tx)
                 negative['packages'][-1]['sources'].append(dict(
                     file=str(args.root.resolve() / ('core/programs/store/' + control + '.hirsel')),
                     modules=[control], signatures=False))
@@ -75,12 +82,17 @@ def main():
                                          '--json'], capture_output=True, text=True)
                 report = json.loads(result.stdout)
                 ds = report.get('diagnostics', [])
-                expected_rule, expected_message = {
-                    'index_rows_escape_refused': ('LANG-13', 'scoped[view] fn results with anchors are reserved'),
-                    'index_rows_write_refused': ('OWN-10', 'a place of `tx` is viewed'),
-                }.get(control, ('OWN-5', '`tx` is not writable'))
-                good = (result.returncode == 1 and report.get('accepted') is False and len(ds) == 1
-                        and ds[0].get('rule') == expected_rule and ds[0].get('message') == expected_message
+                expected = {
+                    'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
+                    'index_rows_write_refused': [('OWN-10', 'a place of `tx` is viewed')],
+                    'look_info_refused': [('OWN-5', '`tx` is not writable'),
+                                          ('PROG-2', '`Tx` is opaque outside its module'),
+                                          ('PROG-2', '`RequestDigest` is opaque outside its module'),
+                                          ('PROG-2', '`RequestDigest` is opaque outside its module')],
+                }.get(control, [('OWN-5', '`tx` is not writable')])
+                actual = [(d.get('rule'), d.get('message')) for d in ds]
+                good = (result.returncode == 1 and report.get('accepted') is False
+                        and sorted(actual) == sorted(expected)
                         and not report.get('incomplete') and not report.get('resources'))
                 rows.append(dict(engine='checker', law=control, passed=good, result=report))
                 print(f'checker {control}: {"PASS" if good else "FAIL"}', flush=True)

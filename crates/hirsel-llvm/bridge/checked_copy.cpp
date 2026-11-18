@@ -417,6 +417,97 @@ static bool stepWord(Instruction &I, Value *Context, const DataLayout &DL) {
   int64_t Offset = 0;
   return GetPointerBaseWithConstantOffset(P, Offset, DL) == Context && Offset == 16;
 }
+// A full copy into a private slot can disappear once SROA sees the read-only
+// call's field loads. Limit early inlining to slots dedicated to that call.
+static bool hasSnapshotArgument(CallInst &Call, const DataLayout &DL) {
+  Function &Target = *Call.getCalledFunction();
+  for (Argument &Arg : Target.args()) {
+    unsigned I = Arg.getArgNo();
+    if (!Arg.getType()->isPointerTy() || !Arg.onlyReadsMemory()) continue;
+    auto *Slot = dyn_cast<AllocaInst>(Call.getArgOperand(I));
+    if (!Slot || !Slot->isStaticAlloca() || !Slot->hasNUses(2)) continue;
+    auto Bytes = Slot->getAllocationSize(DL);
+    // Leave small copies to the ordinary inliner.
+    if (!Bytes || Bytes->isScalable() || Bytes->getFixedValue() < 32) continue;
+    for (User *U : Slot->users()) {
+      auto *Copy = dyn_cast<MemCpyInst>(U);
+      if (!Copy || Copy->getRawDest() != Slot || Copy->isVolatile() ||
+          Copy->getParent() != Call.getParent() || !Copy->comesBefore(&Call)) continue;
+      auto *Length = dyn_cast<ConstantInt>(Copy->getLength());
+      if (Length && Length->equalsInt(Bytes->getFixedValue())) return true;
+    }
+  }
+  return false;
+}
+
+extern "C" void hirsel_llvm_inline_snapshot_calls(void *Raw) {
+  auto &M = *static_cast<Module *>(Raw);
+  for (Function &F : M) {
+    if (F.isDeclaration()) continue;
+    DominatorTree DT(F);
+    LoopInfo LI(DT);
+    SmallVector<CallInst *, 8> Calls;
+    for (BasicBlock &BB : F) if (LI.getLoopFor(&BB))
+      for (Instruction &I : BB) if (auto *Call = dyn_cast<CallInst>(&I)) {
+        Function *Target = Call->getCalledFunction();
+        if (!Target || Target == &F || Target->isDeclaration() ||
+            Call->hasFnAttr(Attribute::NoInline) ||
+            Target->hasFnAttribute(Attribute::NoInline) ||
+            !hasSnapshotArgument(*Call, M.getDataLayout())) continue;
+        Calls.push_back(Call);
+      }
+    unsigned Budget = 2048;
+    for (CallInst *Call : Calls) {
+      unsigned Cost = Call->getCalledFunction()->getInstructionCount();
+      if (Cost > Budget) continue;
+      InlineFunctionInfo Info;
+      if (InlineFunction(*Call, Info, true).isSuccess()) Budget -= Cost;
+    }
+  }
+}
+
+// Select an immediate multiply for byte strides that otherwise require an
+// x86 LEA and a shift. Keep address arithmetic visible until after IR passes.
+extern "C" void hirsel_llvm_lower_x86_index_strides(void *Raw) {
+  auto &M = *static_cast<Module *>(Raw);
+  if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return;
+  const auto &DL = M.getDataLayout();
+  if (DL.getIndexSizeInBits(0) != 64) return;
+  for (Function &F : M) for (BasicBlock &BB : F) {
+    for (auto I = BB.begin(); I != BB.end();) {
+      auto *GEP = dyn_cast<GetElementPtrInst>(&*I++);
+      if (!GEP || GEP->getPointerAddressSpace() != 0 || GEP->getType()->isVectorTy()) continue;
+      SmallMapVector<Value *, APInt, 4> Terms;
+      APInt Offset(64, 0);
+      if (!GEP->collectOffset(DL, 64, Terms, Offset) || Terms.size() != 1) continue;
+      auto [Index, Scale] = Terms.front();
+      if (!Index->getType()->isIntegerTy(64)) continue;
+      if (Scale.isOne()) {
+        auto *Mul = dyn_cast<BinaryOperator>(Index);
+        if (!Mul || Mul->getOpcode() != Instruction::Mul) continue;
+        auto *C = dyn_cast<ConstantInt>(Mul->getOperand(1));
+        if (!C) continue;
+        Index = Mul->getOperand(0);
+        Scale = C->getValue();
+      }
+      uint64_t Stride = Scale.getZExtValue();
+      if (Stride < 48 || Stride > INT32_MAX || Stride % 3 ||
+          !isPowerOf2_64(Stride / 3)) continue;
+      IRBuilder<> B(GEP);
+      B.SetCurrentDebugLocation(GEP->getDebugLoc());
+      auto *Word = B.getInt64Ty();
+      auto *Ty = FunctionType::get(Word, {Word}, false);
+      auto *Multiply = InlineAsm::get(Ty, "imulq $$" + std::to_string(Stride) + ", $1, $0",
+                                      "=r,r,~{flags}", false);
+      Value *Bytes = B.CreateCall(Multiply, {Index});
+      if (!Offset.isZero()) Bytes = B.CreateAdd(Bytes, ConstantInt::get(M.getContext(), Offset));
+      auto *Address = B.CreateGEP(B.getInt8Ty(), GEP->getPointerOperand(), Bytes);
+      GEP->replaceAllUsesWith(Address);
+      GEP->eraseFromParent();
+    }
+  }
+}
+
 // Metering expands tiny helpers with checked slow paths before the ordinary
 // inliner prices them. Revisit direct loop calls after O3 has simplified those
 // paths, sharing one finite expansion budget across introduced helper calls.

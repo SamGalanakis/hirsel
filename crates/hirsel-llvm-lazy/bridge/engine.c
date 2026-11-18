@@ -22,6 +22,8 @@ extern void hirsel_llvm_mark_loop_callbacks(void *module);
 extern void hirsel_llvm_inline_loop_callbacks(void *module);
 extern void hirsel_llvm_inline_recursive_leaves(void *module);
 extern void hirsel_llvm_finish_reads(void *module, void *machine);
+extern void hirsel_llvm_inline_snapshot_calls(void *module);
+extern void hirsel_llvm_lower_x86_index_strides(void *module);
 extern void hirsel_llvm_share_cold_sites(void *module);
 extern void hirsel_llvm_share_cold_step_sync(void *module, void *machine);
 extern void hirsel_llvm_reuse_step_flags(void *module);
@@ -661,6 +663,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             ? "globaldce,function(sroa),hotcoldsplit,default<O3>"
             : "function(sroa),hotcoldsplit,default<O3>";
         hirsel_llvm_fixed_width_checks(module);
+        hirsel_llvm_inline_snapshot_calls(module);
         LLVMErrorRef e = LLVMRunPasses(module, pipeline, machine, options);
         if (!e) {
             hirsel_llvm_mark_loop_callbacks(module);
@@ -679,6 +682,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         }
         if (!e) {
             hirsel_llvm_finish_reads(module, machine);
+            hirsel_llvm_lower_x86_index_strides(module);
             hirsel_llvm_reuse_step_flags(module);
             hirsel_llvm_share_cold_sites(module);
             hirsel_cold_failure_edges(module, context);

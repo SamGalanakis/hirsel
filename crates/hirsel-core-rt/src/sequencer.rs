@@ -35,7 +35,9 @@ pub(crate) struct Sequencer {
 /// spinning in the token queue (capping active spinners: Dice's Malthusian
 /// locks, CNA). A token queue longer than this only adds spinning threads
 /// that preempt the holder; it cannot raise the serial commit rate.
-const ACTIVE: u32 = 10;
+const ACTIVE: u32 = 3;
+/// Reads of the admitted count a full lobby makes before it parks.
+const LOBBY_SPINS: u32 = 512;
 
 #[repr(align(64))]
 #[derive(Default)]
@@ -49,8 +51,14 @@ struct Lobby {
 
 impl Lobby {
     fn enter(&self) {
+        let mut spins = 0;
         loop {
             let active = self.active.load(Ordering::Relaxed);
+            if active >= ACTIVE && spins < LOBBY_SPINS {
+                spins += 1;
+                std::hint::spin_loop();
+                continue;
+            }
             if active < ACTIVE {
                 if self
                     .active
@@ -69,6 +77,7 @@ impl Lobby {
                 futex_wait(&self.turn, turn);
             }
             self.parked.fetch_sub(1, Ordering::Relaxed);
+            spins = 0;
         }
     }
 

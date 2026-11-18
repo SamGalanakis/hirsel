@@ -835,6 +835,16 @@ def children_joined(report):
             and max(cancellations) < min(joins))
 
 
+READER_CANCELLATION = 'pool_releases_cancelled_reader'
+SESSION_LAWS = ('pool_holds_writer_bytes', READER_CANCELLATION, 'writer_one_frame',
+                'children_joined_on_close', 'session_records', 'serving_budget', 'subscription_room_refunded')
+PENDING_RELEASE = '    let _ = channel.try_send(slot.returned, ())'
+PENDING_RELEASE_MUTANTS = {
+    'skip_cancelled_slot_release': '',
+    'double_cancelled_slot_release': PENDING_RELEASE + '\n' + PENDING_RELEASE,
+}
+
+
 def session_laws(args, root, work, engines, row):
     text = (root / 'core/programs/store/runner.hirsel').read_text()
     laws = (root / 'core/programs/store/session-laws.hirsel').read_text()
@@ -842,19 +852,25 @@ def session_laws(args, root, work, engines, row):
     adapted.parent.mkdir()
     adapted.write_text(text + '\n' + laws)
     selected = manifest(root, work, 'session', adapted)
-    names = args.session_law or ('pool_holds_writer_bytes', 'writer_one_frame', 'children_joined_on_close', 'session_records', 'serving_budget', 'subscription_room_refunded')
+    names = args.session_law or SESSION_LAWS
     if 'evaluator' in engines:
         for name in names:
             value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/runner/law_' + name)
             holds = value == 1 and (name != 'children_joined_on_close' or children_joined(report))
             row(engine='evaluator', law=name, passed=holds, result=report)
+    native_laws = []
+    if any(name != READER_CANCELLATION for name in names):
+        native_laws.append('wire_session')
+    if READER_CANCELLATION in names:
+        native_laws.append(READER_CANCELLATION)
     for engine in (e for e in engines if e != 'evaluator'):
-        definition = 'store@1/runner/test_wire_session'
-        code, report = native_run(args, engine, selected, work / f'session-store-{engine}', definition)
-        tests = report.get('tests', [])
-        row(engine=engine, law='wire_session', passed=code == 0
-            and [t['definition'] for t in tests] == [definition]
-            and all(t.get('passed') for t in tests), result=report)
+        for law in native_laws:
+            definition = 'store@1/runner/test_' + law
+            code, report = native_run(args, engine, selected, work / f'session-store-{engine}', definition)
+            tests = report.get('tests', [])
+            row(engine=engine, law=law, passed=code == 0
+                and [t['definition'] for t in tests] == [definition]
+                and all(t.get('passed') for t in tests), result=report)
     if args.no_mutants:
         return
     mutants = (
@@ -872,7 +888,8 @@ def session_laws(args, root, work, engines, row):
           '    task.cancel(mut writer)\n    let _ = task.join(take writer)')], 'children_joined_on_close'),
     )
     for name, edits, law in mutants:
-        if args.session_mutant and name not in args.session_mutant:
+        if (args.session_mutant and name not in args.session_mutant
+                or not args.session_mutant and 'wire_session' not in native_laws):
             continue
         altered = text
         for old, new in edits:
@@ -889,6 +906,25 @@ def session_laws(args, root, work, engines, row):
             red = (value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail']
                    or value == 1 and law == 'children_joined_on_close' and not children_joined(report))
             row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
+
+    if READER_CANCELLATION in names:
+        std_wsock = (root / 'core/std/wsock.hirsel').read_text()
+        assert std_wsock.count(PENDING_RELEASE) == 1
+        for name, replacement in PENDING_RELEASE_MUTANTS.items():
+            if args.session_mutant and name not in args.session_mutant:
+                continue
+            mutated = work / name
+            mutated.mkdir()
+            changed = mutated / 'wsock.hirsel'
+            changed.write_text(std_wsock.replace(PENDING_RELEASE, replacement))
+            adapted_manifest = manifest(root, work, name, adapted)
+            sources = json.loads(adapted_manifest.read_text())
+            wsock = next(s for s in sources['packages'][1]['sources'] if s['modules'] == ['wsock'])
+            wsock['file'] = str(changed)
+            adapted_manifest.write_text(json.dumps(sources))
+            value, report = evaluate(args.evaluator.resolve(), adapted_manifest,
+                                     'store@1/runner/law_' + READER_CANCELLATION)
+            row(engine='evaluator', mutant=name, law=READER_CANCELLATION, passed=value == 0, result=report)
 
 
 def ingress_laws(args, root, work, engines, row):
@@ -1149,8 +1185,10 @@ def main():
     p.add_argument('--mutant', action='append', choices=[m[0] for m in MUTANTS])
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
-    p.add_argument('--session-law', action='append', choices=['pool_holds_writer_bytes', 'writer_one_frame', 'children_joined_on_close', 'session_records', 'serving_budget', 'subscription_room_refunded'])
-    p.add_argument('--session-mutant', action='append', choices=['encode_outside_pool', 'writer_queue', 'orphan_reader', 'subscription_refund_on_handoff'])
+    p.add_argument('--session-law', action='append', choices=SESSION_LAWS)
+    p.add_argument('--session-mutant', action='append',
+                   choices=['encode_outside_pool', 'writer_queue', 'orphan_reader',
+                            'subscription_refund_on_handoff', *PENDING_RELEASE_MUTANTS])
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
     p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_handoff', 'slot_never_freed', 'slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])

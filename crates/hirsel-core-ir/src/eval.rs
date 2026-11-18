@@ -1521,7 +1521,11 @@ impl<'m> Machine<'m> {
             Some(Wait::Network(None)) => self.sched.tasks[k].state = State::Provider,
             Some(Wait::Task(condition)) => {
                 self.sched.tasks[k].state = State::Waiting(condition);
-                self.sched.waiting.entry(condition).or_default().push_back(k);
+                self.sched
+                    .waiting
+                    .entry(condition)
+                    .or_default()
+                    .push_back(k);
             }
             None => {
                 self.sched.tasks[k].state = State::Ready;

@@ -160,7 +160,12 @@ unsafe fn publish(channel: *mut Channel, value: *mut u8) -> u8 {
             (*channel).item.bytes,
         );
         (*channel).len += 1;
-        tasks::event_wake_waiters(tasks::PUBLISH, (*channel).id, 0, &raw mut (*channel).receive_waiters);
+        tasks::event_wake_waiters(
+            tasks::PUBLISH,
+            (*channel).id,
+            0,
+            &raw mut (*channel).receive_waiters,
+        );
         0
     }
 }
@@ -246,7 +251,12 @@ unsafe fn take(channel: *mut Channel, destination: *mut u8) -> bool {
             (*channel).head = 0;
         }
         (*channel).len -= 1;
-        tasks::event_wake_waiters(tasks::RECEIVE, (*channel).id, 0, &raw mut (*channel).send_waiters);
+        tasks::event_wake_waiters(
+            tasks::RECEIVE,
+            (*channel).id,
+            0,
+            &raw mut (*channel).send_waiters,
+        );
         true
     }
 }
@@ -328,7 +338,12 @@ pub unsafe extern "C" fn hirsel_core_sender_drop(channel: *mut Channel) {
         tasks::event(tasks::SENDERS, (*channel).id, (*channel).senders);
         if last {
             tasks::before_commit();
-            tasks::event_wake_waiters(tasks::CLOSE, (*channel).id, 0, &raw mut (*channel).receive_waiters);
+            tasks::event_wake_waiters(
+                tasks::CLOSE,
+                (*channel).id,
+                0,
+                &raw mut (*channel).receive_waiters,
+            );
             (*channel).closing_sender = false;
             if (*channel).receiver == Receiver::Gone {
                 drop(Box::from_raw(channel));
@@ -344,7 +359,12 @@ unsafe fn receiver_begin(context: *mut Context, channel: *mut Channel) -> *mut H
         (*context).cancel_shield += 1;
         tasks::before_commit();
         (*channel).receiver = Receiver::Cleaning;
-        tasks::event_wake_waiters(tasks::CLOSE, (*channel).id, 1, &raw mut (*channel).send_waiters);
+        tasks::event_wake_waiters(
+            tasks::CLOSE,
+            (*channel).id,
+            1,
+            &raw mut (*channel).send_waiters,
+        );
         (*channel).cursor = 0;
         (*channel).holder.as_mut_ptr()
     }

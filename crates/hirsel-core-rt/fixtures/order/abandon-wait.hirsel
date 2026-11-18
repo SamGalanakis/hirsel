@@ -4,7 +4,7 @@
 resource type Marker:send { out: Stdout }
 drop(m) { result.unwrap(stdout.write(m.out, "D")) }
 type Input:send { tx: Sender[u64], tasks: Tasks, out: Stdout }
-fn child(take out: Stdout) -> Marker waits { result.unwrap(Marker(out: out)) }
+fn child(take out: Stdout) -> Marker { result.unwrap(Marker(out: out)) }
 fn abandon(take input: Input) waits {
     let Input(tx: tx, tasks: tasks, out: out) = take input
     {

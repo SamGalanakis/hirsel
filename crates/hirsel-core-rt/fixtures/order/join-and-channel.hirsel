@@ -8,7 +8,7 @@ fn receive(take input: Input) waits {
         Ok(_) => result.unwrap(stdout.write(out, "?"))
     }
 }
-fn close(take tx: Sender[u64]) -> u64 waits {
+fn close(take tx: Sender[u64]) -> u64 {
     { let _ = take tx }
     7u64
 }

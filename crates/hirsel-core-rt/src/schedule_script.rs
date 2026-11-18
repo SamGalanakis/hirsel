@@ -36,6 +36,8 @@ pub enum PausePoint {
         sender_domain: u64,
         receiver_domain: u64,
     },
+    /// A driver has captured this operation's arm and has yet to apply it.
+    ReadinessTaken { token: u64 },
     /// A mark or terminal forwarded by an empty stage has these boundaries too.
     Flow {
         domain: u64,

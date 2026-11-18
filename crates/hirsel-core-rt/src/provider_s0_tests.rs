@@ -530,6 +530,53 @@ fn s0_resume_pending_again_stays_in_i() {
     assert_eq!(rec.count(1, Cb::Deliver), 1);
 }
 
+/// Two driver turns capture the same arm. The second wins and rearms on
+/// Pending while the first is paused. Only the new arm can produce DONE.
+#[test]
+fn an_old_readiness_cannot_resume_a_rearmed_operation() {
+    use crate::schedule_script::PausePoint;
+    use std::sync::{Barrier, Mutex};
+
+    const TOKEN: u64 = 47;
+    let arms = Mutex::new(WaitArms::default());
+    arms.lock().unwrap().insert(TOKEN, ());
+    let taken = Arc::new(Barrier::new(2));
+    let rearmed = Arc::new(Barrier::new(2));
+    let script = ScheduleScript::new(0).with_pause_hook({
+        let taken = taken.clone();
+        let rearmed = rearmed.clone();
+        move |point| {
+            assert_eq!(point, PausePoint::ReadinessTaken { token: TOKEN });
+            taken.wait();
+            rearmed.wait();
+        }
+    });
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let ready = arms.lock().unwrap().capture(vec![TOKEN, TOKEN]);
+            script.pause(PausePoint::ReadinessTaken { token: TOKEN });
+            assert_eq!(ready.len(), 1);
+            assert!(arms.lock().unwrap().take_captured(ready[0]).is_none());
+        });
+        taken.wait();
+        let resumed = {
+            let mut arms = arms.lock().unwrap();
+            let ready = arms.capture(vec![TOKEN]);
+            let resumed = ready.first().and_then(|&arm| arms.take_captured(arm));
+            // The winning resume answered Pending.
+            arms.insert(TOKEN, ());
+            resumed
+        };
+        rearmed.wait();
+        assert_eq!(resumed, Some(()));
+    });
+    let mut arms = arms.lock().unwrap();
+    let ready = arms.capture(vec![TOKEN]);
+    let produced = arms.take_captured(ready[0]).map(|()| done(7).outcome.value);
+    assert_eq!(produced, Some(7));
+    assert!(arms.capture(vec![TOKEN]).is_empty());
+}
+
 // ---- F1: callbacks at the wake, outside any task ----
 
 fn ready_both_on_second_issue(rec: &mut Rec, _: u64, _: u64, _: usize) -> Step {

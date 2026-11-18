@@ -181,24 +181,65 @@ thread_local! {
     static ROUTE_WAKES: Local<usize> = const { Local::new(0) };
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ReadyArm {
+    token: u64,
+    identity: u64,
+}
+
+struct Arm<T> {
+    task: T,
+    identity: u64,
+    last_turn: u64,
+}
+
 #[derive(Default)]
-struct Parked {
+pub(crate) struct WaitArms<T> {
     live: std::collections::HashMap<
         ReadyToken,
-        *mut Task,
+        Arm<T>,
         std::hash::BuildHasherDefault<std::hash::DefaultHasher>,
     >,
+    next_identity: u64,
+    turn: u64,
 }
-impl Parked {
-    fn insert(&mut self, token: u64, task: *mut Task) {
-        self.live.insert(ReadyToken(token), task);
+
+impl<T> WaitArms<T> {
+    pub(crate) fn insert(&mut self, token: u64, task: T) {
+        let identity = self.next_identity;
+        self.next_identity = identity.checked_add(1)
+            .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
+        self.live.insert(ReadyToken(token), Arm { task, identity, last_turn: 0 });
     }
-    fn take(&mut self, token: u64) -> Option<*mut Task> {
-        self.live.remove(&ReadyToken(token))
+
+    pub(crate) fn capture(&mut self, tokens: Vec<u64>) -> Vec<ReadyArm> {
+        self.turn = self.turn.checked_add(1)
+            .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
+        tokens.into_iter().filter_map(|token| {
+            let arm = self.live.get_mut(&ReadyToken(token))?;
+            if arm.last_turn == self.turn {
+                return None;
+            }
+            arm.last_turn = self.turn;
+            Some(ReadyArm { token, identity: arm.identity })
+        }).collect()
     }
+
+    pub(crate) fn take_captured(&mut self, ready: ReadyArm) -> Option<T> {
+        use std::collections::hash_map::Entry;
+        match self.live.entry(ReadyToken(ready.token)) {
+            Entry::Occupied(arm) if arm.get().identity == ready.identity => Some(arm.remove().task),
+            _ => None,
+        }
+    }
+
+    fn remove(&mut self, token: u64) {
+        self.live.remove(&ReadyToken(token));
+    }
+
     #[cfg(test)]
-    fn peek(&self, token: u64) -> Option<*mut Task> {
-        self.live.get(&ReadyToken(token)).copied()
+    fn peek(&self, token: u64) -> Option<&T> {
+        self.live.get(&ReadyToken(token)).map(|arm| &arm.task)
     }
 }
 
@@ -341,7 +382,7 @@ struct Scheduler {
     tapes: Tapes,
     net: *mut hirsel_core_net::Sockets,
     model: Option<hirsel_core_net::model::Model>,
-    parked: Parked,
+    parked: WaitArms<*mut Task>,
 }
 const _: () = assert!(std::mem::offset_of!(Task, replay) == crate::abi_layout::TASK_ARC_REPLAY);
 
@@ -607,16 +648,18 @@ impl Scheduler {
             }
             if self.readies.pending.swap(false, Ordering::Acquire) {
                 let tokens = std::mem::take(&mut *self.readies.lock());
-                // Deactivate the whole turn before callbacks: a resume can repark
-                // the same operation, but a duplicate from this turn cannot wake it again.
-                let mut ready = Vec::new();
-                for token in tokens {
-                    if let Some(task) = self.parked.take(token) {
-                        ready.push(task);
+                // Capture one identity per token before callbacks. A task may
+                // re-arm the same token before a captured readiness is applied.
+                for ready in self.parked.capture(tokens) {
+                    #[cfg(any(test, feature = "testing"))]
+                    if let Some(script) = &self.script {
+                        script.pause(crate::schedule_script::PausePoint::ReadinessTaken {
+                            token: ready.token,
+                        });
                     }
-                }
-                for task in ready {
-                    self.wake_operation(task, Wake::Ready);
+                    if let Some(task) = self.parked.take_captured(ready) {
+                        self.wake_operation(task, Wake::Ready);
+                    }
                 }
             }
             if self.timers.is_null() {
@@ -720,7 +763,8 @@ impl Scheduler {
 
     fn has_outside_wait(&self) -> bool {
         // SAFETY: each entry points to its pinned provider operation.
-        self.parked.live.values().any(|&task| unsafe {
+        self.parked.live.values().any(|arm| unsafe {
+            let task = arm.task;
             !(*task)
                 .group
                 .is_some_and(|group| group.drives_replay((*(*task).operation).provider))
@@ -817,7 +861,7 @@ impl Scheduler {
     unsafe fn runnable(&mut self, task: *mut Task, state: OperationState) {
         // SAFETY: the task is parked; its operation frame is pinned.
         unsafe {
-            self.parked.take((*(*task).operation).token);
+            self.parked.remove((*(*task).operation).token);
             self.remove_timer(task);
             (*(*task).operation).state = state;
             self.ready(task);
@@ -2066,7 +2110,7 @@ pub unsafe fn run_root(
         tapes: Tapes::default(),
         net: ptr::null_mut(),
         model: None,
-        parked: Parked::default(),
+        parked: WaitArms::default(),
     };
     let registered = Registered(run.readies.clone());
     WAITERS
@@ -2631,7 +2675,7 @@ mod ready_routing_laws {
                 tapes: Tapes::default(),
                 net: ptr::null_mut(),
                 model: None,
-                parked: Parked::default(),
+                parked: WaitArms::default(),
             };
             let mut context = Context::new(1 << 20);
             let layout = ValueLayout {

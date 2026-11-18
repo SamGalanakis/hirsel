@@ -15,6 +15,19 @@ export function seeded(seed) {
   };
 }
 
+function mutate(name, file, text) {
+  if (file !== 'client') return text;
+  const edits = {
+    resend_new_p: ['pending.attempts++;', 'if (pending.attempts > 0) pending.p++; pending.attempts++;'],
+    skip_resubscribe_after_reset: ['this.publish(); await this.subscribeAll();', 'this.publish();'],
+    clear_on_first_batch: ['complete.includes(sub.id)) changed.set', '(complete.includes(sub.id) || !sub.complete)) changed.set'],
+  };
+  assert(edits[name], `unknown client mutant ${name}`);
+  const [before, after] = edits[name];
+  assert.equal(text.split(before).length, 2, name);
+  return text.replace(before, after);
+}
+
 class Board {
   bits = new Uint8Array(125000);
   version = -1n;
@@ -147,7 +160,7 @@ function transport(Frame, failure, {faultAt, resetProbe = false} = {}) {
 }
 
 export async function converge(origin, generated, {
-  clients: count = 64, toggles = 1000, pace = 10, seed = 14059,
+  clients: count = 64, toggles = 1000, pace = 10, seed = 14059, mutant,
 } = {}) {
   assert(Number.isInteger(count) && count >= 2);
   assert(Number.isInteger(toggles) && toggles >= 3);
@@ -158,7 +171,7 @@ export async function converge(origin, generated, {
   const {Frame} = await imported('frame.js');
   const {keys, values} = await imported('codec.js');
   const {want, identity, bind} = await imported('entries.js');
-  const runtime = await loadRuntime();
+  const runtime = await loadRuntime(mutant && ((file, text) => mutate(mutant, file, text)));
   const state = await mkdtemp(join(tmpdir(), 'checkbox-converge-'));
   const failure = {};
   const live = [];
@@ -250,6 +263,6 @@ export async function converge(origin, generated, {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [origin, generated, clients = '64', toggles = '1000', pace = '10', seed = '14059'] = process.argv.slice(2);
-  await converge(origin, generated, {clients: +clients, toggles: +toggles, pace: +pace, seed: +seed});
+  const [origin, generated, clients = '64', toggles = '1000', pace = '10', seed = '14059', mutant] = process.argv.slice(2);
+  await converge(origin, generated, {clients: +clients, toggles: +toggles, pace: +pace, seed: +seed, mutant});
 }

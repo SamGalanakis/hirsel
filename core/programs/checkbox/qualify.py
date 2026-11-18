@@ -17,6 +17,7 @@ WIRE = {
     "bit_pixels", "toggle_smoke", "toggle_no_rerun", "session_limit_503",
     "principal_limit_1013", "call_rate_overloaded",
 }
+SDK_MUTANTS = {"resend_new_p", "skip_resubscribe_after_reset", "clear_on_first_batch"}
 SERVER_EDITS = {
     "bit_order_msb": ("main", "1u8 << int.narrow(i.index & 7u32)", "128u8 >> int.narrow(i.index & 7u32)"),
     "unchecked_u32_arg": ("main", "if i < 1000000 {", "if true {"),
@@ -84,6 +85,8 @@ def qualify(compiler, work, case, mutant, clients, toggles, pace, seed):
         law = ["wire-laws.mjs", case, origin, web]
     else:
         law = ["converge.mjs", origin, web, clients, toggles, pace, seed]
+        if mutant in SDK_MUTANTS:
+            law.append(mutant)
     with subprocess.Popen(command(executable, listen, overrides), cwd=ROOT) as server:
         try:
             wait_for_listener(server, listen)
@@ -96,13 +99,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hirsel", type=Path, required=True)
     parser.add_argument("--scratch", type=Path)
-    parser.add_argument("--mutant", choices=sorted(SERVER_EDITS))
+    parser.add_argument("--mutant", choices=sorted(SDK_MUTANTS | SERVER_EDITS.keys()))
     parser.add_argument("--clients", default=64, type=int)
     parser.add_argument("--toggles", default=1000, type=int)
     parser.add_argument("--pace", default=10, type=float)
     parser.add_argument("--seed", default=14059, type=int)
     parser.add_argument("case", choices=sorted(BROWSER | WIRE | {"converge"}))
     args = parser.parse_args()
+    if args.mutant in SDK_MUTANTS and args.case != "converge":
+        parser.error(f"{args.mutant} requires converge")
     with TemporaryDirectory(prefix="checkbox-", dir=args.scratch) as directory:
         return qualify(args.hirsel.resolve(), Path(directory), args.case, args.mutant,
                        args.clients, args.toggles, args.pace, args.seed)

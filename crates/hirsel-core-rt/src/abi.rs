@@ -72,13 +72,8 @@
 //! atomic u64 value 1 before publication; Rc initialization stores ordinary u64 1.
 //! The immutable u64 event word is at context+CONTEXT_EVENTS (8). Zero means
 //! no scheduler; otherwise it is the pinned Task pointer used by the
-//! context-first hooks. After each inline Arc operation, test events != 0 and
-//! call arc_unwrapped(context, unique) on the cold side, and
-//! arc_initialized/shared/released(context, ...) only when the Task's
-//! acquire-loaded TASK_ARC_GATE byte is nonzero. Without a sink those three
-//! hooks only deliver the owner's pending refunds (MEM-20), which must reach
-//! the task's next event, so the byte is set while the run records and
-//! otherwise exactly while a refund is pending. An unwrap may poll.
+//! context-first hooks. A scheduled Arc operation calls its completion hook
+//! to fold posted credits (MEM-20) and record its event. An unwrap may poll.
 //! The root sets the word before execution;
 //! each child inherits recording and installs its own pointer before publication.
 //! It cannot change until that task's run ends. Hooks never read task TLS.
@@ -399,7 +394,7 @@ fn count_arc_hook() {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_arc_initialized(context: *const Context) {
     count_arc_hook();
-    // SAFETY: caller's event gate pins this task and sink through the callback.
+    // SAFETY: caller's event word pins this task and sink through the callback.
     unsafe {
         crate::tasks::event_in(context, crate::tasks::ARC_NEW, 0, 1);
     }
@@ -423,7 +418,7 @@ pub unsafe extern "C" fn hirsel_core_arc_shared(context: *const Context, node: *
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_arc_released(context: *const Context, last: bool) {
     count_arc_hook();
-    // SAFETY: the event gate pins this immutable task/sink until completion.
+    // SAFETY: the event word pins this immutable task/sink until completion.
     unsafe {
         crate::tasks::event_in(context, crate::tasks::ARC_RELEASE, 0, u64::from(last));
     }
@@ -434,7 +429,7 @@ pub unsafe extern "C" fn hirsel_core_arc_released(context: *const Context, last:
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_arc_unwrapped(context: *const Context, unique: bool) {
     count_arc_hook();
-    // SAFETY: the event gate pins this immutable task/sink until completion.
+    // SAFETY: the event word pins this immutable task/sink until completion.
     unsafe {
         crate::tasks::event_in(context, crate::tasks::ARC_UNWRAP, 0, u64::from(unique));
     }

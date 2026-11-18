@@ -6,6 +6,7 @@ use std::{collections::BTreeSet, ptr::NonNull, sync::Arc};
 
 struct Script {
     waited: BTreeSet<u64>,
+    resumed: BTreeSet<u64>,
     calls: usize,
     pending: bool,
     fault_at: Option<u8>,
@@ -53,6 +54,7 @@ impl Script {
             }
             if s.pending {
                 hirsel_core_ready(token);
+                hirsel_core_ready(token);
                 pending()
             } else {
                 done(Outcome {
@@ -61,10 +63,13 @@ impl Script {
                 })
             }
         }
-        unsafe extern "C" fn resume(s: *mut u8, _: *mut Request, _: u64) -> Step {
+        unsafe extern "C" fn resume(s: *mut u8, _: *mut Request, token: u64) -> Step {
             // SAFETY: synchronous run-local script.
-            unsafe {
-                (*s.cast::<Script>()).calls += 1;
+            let s = unsafe { &mut *s.cast::<Script>() };
+            s.calls += 1;
+            if s.pending && s.resumed.insert(token) {
+                hirsel_core_ready(token);
+                return pending();
             }
             done(Outcome {
                 value: 17,
@@ -215,6 +220,7 @@ fn run_case(bytes: Option<&[u8]>, chooser: u8, pending: bool, fault_case: bool) 
         store: Store::default(),
         script: Script {
             waited: BTreeSet::new(),
+            resumed: BTreeSet::new(),
             calls: 0,
             pending,
             fault_at: (fault_case && bytes.is_none()).then_some(2),
@@ -320,6 +326,22 @@ pub(super) fn run() {
             assert_eq!(replayed.received, recorded.received);
             assert_eq!(replayed.observed, recorded.observed);
             let (header, all) = frames(bytes);
+            // Each of the two W→I operations has one wake. Each Pending
+            // re-arm disappears, leaving one DONE per issued task.
+            let wakes: Vec<_> = all.iter().filter_map(|frame| match frame {
+                Frame::Wake { task, .. } => Some(*task),
+                _ => None,
+            }).collect();
+            let dones: BTreeSet<_> = all.iter().filter_map(|frame| match frame {
+                Frame::Done { task, .. } => Some(*task),
+                _ => None,
+            }).collect();
+            assert_eq!(wakes.len(), 2);
+            assert_eq!(wakes.into_iter().collect::<BTreeSet<_>>(), BTreeSet::from([1, 2]));
+            assert_eq!(all.iter().filter(|frame| matches!(frame, Frame::Done { .. })).count(), usize::from(pending) * 2);
+            if pending {
+                assert_eq!(dones, BTreeSet::from([1, 2]));
+            }
             if chooser == 0 {
                 assert!(!all.iter().any(|f| matches!(f, Frame::Choose { .. })));
             }
@@ -397,6 +419,7 @@ fn overlapping_open() {
             let case = &mut **input.cast::<*mut Case>();
             let mut script = Script {
                 waited: BTreeSet::new(),
+                resumed: BTreeSet::new(),
                 calls: 0,
                 pending: false,
                 fault_at: None,
@@ -483,6 +506,7 @@ fn grant_gap_vector() {
     let mut store = Store::default();
     let mut script = Script {
         waited: BTreeSet::new(),
+        resumed: BTreeSet::new(),
         calls: 0,
         pending: false,
         fault_at: None,
@@ -1090,6 +1114,7 @@ fn timeline(scenario: Scenario, chooser: u8, bytes: Option<&[u8]>) -> Timeline {
         store: Store::default(),
         script: Script {
             waited: BTreeSet::new(),
+            resumed: BTreeSet::new(),
             calls: 0,
             pending: false,
             fault_at: None,

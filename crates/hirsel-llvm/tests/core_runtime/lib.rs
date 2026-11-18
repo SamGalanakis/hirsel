@@ -126,7 +126,7 @@ pub unsafe extern "C" fn hirsel_core_test_run_events(
 }
 
 /// Set a process fixture's allowance after real task startup, preserving the
-/// payer domain registered with the scheduler's refund notification flag.
+/// payer domain and its owner inbox.
 /// # Safety
 /// Context is live and exclusively owned by the fixture entry.
 #[unsafe(no_mangle)]
@@ -219,4 +219,23 @@ pub unsafe extern "C" fn __wrap_hirsel_core_os_run_with_sources(
     // SAFETY: the process is still owned here and the run has ended.
     unsafe { hirsel_core_os_process_free(opened.process) };
     status
+}
+
+
+/// Run a linked native fixture with T1's last-runnable schedule.
+/// # Safety
+/// The runner and entry obey the process ABI. The configuration stays live
+/// through their return.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_run_last(
+    run: unsafe extern "C" fn(
+        *const hirsel_core_rt::process::Config,
+        hirsel_core_rt::process::Entry,
+    ) -> u8,
+    config: *const hirsel_core_rt::process::Config,
+    entry: hirsel_core_rt::process::Entry,
+) -> u8 {
+    let script = std::sync::Arc::new(hirsel_core_rt::schedule_script::ScheduleScript::last());
+    // SAFETY: the link wrapper supplies the real process runner and its live operands.
+    script.install(|| unsafe { run(config, entry) })
 }

@@ -74,10 +74,7 @@ impl FunctionEmitter<'_> {
         self.block(done);
     }
 
-    /// Every inline Arc operation tests the immutable context event word. An
-    /// unwrap, which may poll, calls its hook whenever the word is set. New,
-    /// share and release also test the word's Task gate byte (TASK_ARC_GATE),
-    /// which the runtime sets while recording or while a refund is pending.
+    /// A scheduled Arc operation folds posted credits and records its event.
     pub(super) fn arc_event(&mut self, name: &str, arguments: &[CArg]) {
         let n = self.counter();
         let at = self.field_pointer(&CONTEXT, CONTEXT_EVENTS);
@@ -89,25 +86,7 @@ impl FunctionEmitter<'_> {
         let empty = self.cmp(Predicate::Eq, &Type::I64, &events, &int(0));
         let done = Label::new("arc_event_done", n);
         let call = Label::new("arc_event_call", n);
-        if name == "hirsel_core_arc_unwrapped" {
-            self.likely(&empty, done, call);
-        } else {
-            let gate = Label::new("arc_event_gate", n);
-            self.likely(&empty, done, gate);
-            self.block(gate);
-            let task = self.cast(Cast::IntToPtr, &Type::I64, &events, &Type::Ptr);
-            let at = self.field_pointer(&task, TASK_ARC_GATE);
-            let work = self.load_with(
-                &Type::I8,
-                &at,
-                &Memory {
-                    ordering: Some(Ordering::Acquire),
-                    ..Memory::aligned(1)
-                },
-            );
-            let idle = self.cmp(Predicate::Eq, &Type::I8, &work, &int(0));
-            self.likely(&idle, done, call);
-        }
+        self.likely(&empty, done, call);
         self.block(call);
         let mut args = vec![ptr(CONTEXT)];
         args.extend_from_slice(arguments);

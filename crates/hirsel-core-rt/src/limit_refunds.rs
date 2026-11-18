@@ -14,9 +14,8 @@ pub(super) struct Inbox {
     reaping: Cell<bool>,
     next_reap: Cell<Option<NonNull<Inbox>>>,
     pending: AtomicBool,
-    // Both fields below are read or written only under Domain.remote.
+    // Only Domain.remote reads or writes the dirty list.
     head: UnsafeCell<Option<NonNull<Slot>>>,
-    signals: Vec<RefundSignal>,
 }
 #[cfg(test)]
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -27,7 +26,6 @@ pub(super) struct InboxSnapshot {
     pending: bool,
     head: Option<usize>,
     next_reap: Option<u64>,
-    signals: Vec<bool>,
 }
 impl Inbox {
     // Only the table lease changes these counts: one per initialized live record
@@ -41,11 +39,6 @@ impl Inbox {
             pending: self.pending(),
             head: unsafe { (*self.head.get()).map(|p| p.as_ref().id) },
             next_reap: self.next_reap.get().map(|p| unsafe { p.as_ref().owner }),
-            signals: self
-                .signals
-                .iter()
-                .map(|p| unsafe { p.0.as_ref().load(Ordering::Acquire) })
-                .collect(),
         }
     }
     pub(super) fn retain(&self) {
@@ -67,23 +60,11 @@ impl Inbox {
     }
     fn notify(&self) {
         self.pending.store(true, Ordering::Release);
-        for signal in &self.signals {
-            // SAFETY: the mailbox lock pins registrations through notification.
-            unsafe { signal.0.as_ref().store(true, Ordering::Release) };
-        }
     }
     fn clear(&self) {
         self.pending.store(false, Ordering::Release);
-        for signal in &self.signals {
-            // SAFETY: the same lock excludes unregistering these pinned flags.
-            unsafe { signal.0.as_ref().store(false, Ordering::Relaxed) };
-        }
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct RefundSignal(NonNull<AtomicBool>);
-// SAFETY: registrations pin atomic task flags; the domain mutex excludes removal.
-unsafe impl Send for RefundSignal {}
 
 pub(super) struct Remote {
     pub(super) retired: bool,
@@ -111,7 +92,6 @@ impl Remote {
                 next_reap: Cell::new(None),
                 pending: AtomicBool::new(self.unassigned.is_some()),
                 head: UnsafeCell::new(None),
-                signals: Vec::new(),
             })
         });
         NonNull::from(&mut **inbox)
@@ -125,7 +105,7 @@ impl Remote {
             let inbox = unsafe { inbox.as_ref() };
             head = inbox.next_reap.take();
             inbox.reaping.set(false);
-            if inbox.references.get() == 0 && inbox.signals.is_empty() {
+            if inbox.references.get() == 0 {
                 let owner = inbox.owner;
                 self.inboxes.remove(&owner);
             }
@@ -261,46 +241,8 @@ impl Remote {
             Some(slot)
         }
     }
-    pub(super) fn subscribe(
-        &mut self,
-        domain: NonNull<Domain>,
-        owner: u64,
-        signal: NonNull<AtomicBool>,
-    ) -> RefundSubscription {
-        let mut inbox = self.inbox(owner);
-        // SAFETY: registration owns the pinned signal and the domain mutex.
-        unsafe {
-            signal
-                .as_ref()
-                .store(inbox.as_ref().pending(), Ordering::Release);
-            inbox.as_mut().signals.push(RefundSignal(signal));
-        }
-        RefundSubscription {
-            domain,
-            inbox,
-            signal: RefundSignal(signal),
-        }
-    }
-}
-/// Remove a task's registration before its Context and pinned flag can die.
-pub(crate) struct RefundSubscription {
-    domain: NonNull<Domain>,
-    inbox: NonNull<Inbox>,
-    signal: RefundSignal,
-}
-impl Drop for RefundSubscription {
-    fn drop(&mut self) {
-        // SAFETY: the task still owns its Context, retaining the domain/inbox.
-        let domain = unsafe { self.domain.as_ref() };
-        let mut remote = domain.remote.lock().unwrap();
-        // SAFETY: that mutex exclusively owns registration mutation.
-        unsafe {
-            self.inbox
-                .as_mut()
-                .signals
-                .retain(|signal| *signal != self.signal);
-            self.inbox.as_ref().schedule(domain);
-        };
-        remote.reap(domain);
+    #[cfg(test)]
+    pub(super) fn pending_for(&self, owner: u64) -> bool {
+        self.inboxes.get(&owner).is_some_and(|inbox| inbox.pending())
     }
 }

@@ -765,7 +765,7 @@ fn inline_arc_count_operations_publish_the_same_events_as_runtime_entries() {
         unsafe {
             let node = Block::graph(&*context, Some(16), 16, 8).unwrap().into_raw();
             node.cast::<AtomicU64>().as_ptr().write(AtomicU64::new(1));
-            if arc_gate(context) {
+            if (*context).events != 0 {
                 hirsel_core_arc_initialized(context);
             }
             let count = node.cast::<AtomicU64>().as_ref();
@@ -773,11 +773,11 @@ fn inline_arc_count_operations_publish_the_same_events_as_runtime_entries() {
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
                 .unwrap();
             assert_eq!(old, 1);
-            if arc_gate(context) {
+            if (*context).events != 0 {
                 hirsel_core_arc_shared(context, node.as_ptr());
             }
             let last = count.fetch_sub(1, Ordering::Release) == 1;
-            if arc_gate(context) {
+            if (*context).events != 0 {
                 hirsel_core_arc_released(context, last);
             }
             let unique = count.load(Ordering::Acquire) == 1;
@@ -788,7 +788,7 @@ fn inline_arc_count_operations_publish_the_same_events_as_runtime_entries() {
             if last {
                 fence(Ordering::Acquire);
             }
-            if arc_gate(context) {
+            if (*context).events != 0 {
                 hirsel_core_arc_released(context, last);
             }
             crate::block::free(node, 16);
@@ -815,21 +815,10 @@ fn inline_arc_count_operations_publish_the_same_events_as_runtime_entries() {
     );
 }
 
-/// The emitted gate for Arc new, share and release (abi_layout TASK_ARC_GATE).
-/// # Safety
-/// Context is live and its event word, when nonzero, pins its running Task.
-unsafe fn arc_gate(context: *const Context) -> bool {
-    // SAFETY: caller contract.
-    unsafe {
-        let task = (*context).events as *const Task;
-        !task.is_null() && (*task).arc_gate.load(std::sync::atomic::Ordering::Acquire)
-    }
-}
 #[test]
 fn a_quiet_arc_event_delivers_a_refund_published_while_its_task_runs() {
     // MEM-20: an admission sees the refunds ordered before its task's latest
-    // event. Without a sink, Arc new/share/release still deliver them, so the
-    // emitted gate must be set while one is pending and clear once delivered.
+    // event, including an Arc share in a run with no tape or trace sink.
     struct Node(std::ptr::NonNull<u8>);
     // SAFETY: the node holds only immutable data and its atomic count.
     unsafe impl Send for Node {}
@@ -840,7 +829,6 @@ fn a_quiet_arc_event_delivers_a_refund_published_while_its_task_runs() {
             let start = (*context).available();
             let node = Block::graph(&*context, Some(16), 16, 8).unwrap().into_raw();
             hirsel_core_counted_init(node, true);
-            assert!(!arc_gate(context), "nothing to record or deliver");
             let node = Node(node);
             std::thread::spawn(move || {
                 let node = node;
@@ -850,13 +838,11 @@ fn a_quiet_arc_event_delivers_a_refund_published_while_its_task_runs() {
             .join()
             .unwrap();
             let published = (*context).available();
-            assert!(arc_gate(context), "a published refund opens the gate");
             let other = AtomicU64::new(2);
-            if arc_gate(context) {
+            if (*context).events != 0 {
                 hirsel_core_arc_shared(context, (&other as *const AtomicU64).cast());
             }
             other.fetch_sub(1, Ordering::Relaxed);
-            assert!(!arc_gate(context), "delivery closes the gate");
             out.cast::<u64>().write(u64::from(
                 published != start && (*context).available() == start,
             ));
@@ -884,7 +870,7 @@ fn a_quiet_arc_event_delivers_a_refund_published_while_its_task_runs() {
     assert_eq!(result, 1, "the share delivered exactly the node's charge");
 }
 #[test]
-fn event_gate_enables_poll_hooks_without_a_sink_and_children_inherit_the_gate() {
+fn scheduled_arc_hooks_also_run_without_a_sink_and_in_children() {
     unsafe extern "C" fn child(context: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
         // SAFETY: parent transfers one expected recording bit and owns result.
         unsafe {
@@ -899,15 +885,15 @@ fn event_gate_enables_poll_hooks_without_a_sink_and_children_inherit_the_gate() 
         let node = AtomicU64::new(1);
         // SAFETY: exact emitted count/gate sequence under the scheduler turn.
         unsafe {
-            if arc_gate(context) {
+            if (*context).events != 0 {
                 hirsel_core_arc_initialized(context);
             }
             node.fetch_add(1, Ordering::Relaxed);
-            if arc_gate(context) {
+            if (*context).events != 0 {
                 hirsel_core_arc_shared(context, (&node as *const AtomicU64).cast());
             }
             let last = node.fetch_sub(1, Ordering::Release) == 1;
-            if arc_gate(context) {
+            if (*context).events != 0 {
                 hirsel_core_arc_released(context, last);
             }
             let unique = node.load(Ordering::Acquire) == 1;
@@ -952,12 +938,12 @@ fn event_gate_enables_poll_hooks_without_a_sink_and_children_inherit_the_gate() 
     assert_eq!(context.events, 0);
     assert_eq!(
         ARC_HOOK_CALLS.get(),
-        1,
-        "a quiet no-sink run enters only the Arc hook that may poll"
+        4,
+        "all four scheduled Arc commits use their completion hooks"
     );
     let (result, events) = run(root, ());
     assert_eq!(result, 1);
-    assert_eq!(ARC_HOOK_CALLS.get(), 5);
+    assert_eq!(ARC_HOOK_CALLS.get(), 8);
     let arc: Vec<_> = events
         .iter()
         .filter(|e| (ARC_NEW..=ARC_UNWRAP).contains(&e.kind))

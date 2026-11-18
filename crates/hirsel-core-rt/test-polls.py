@@ -24,7 +24,8 @@ def low_load():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', required=True, type=Path)
-    parser.add_argument('--runtime', required=True, type=Path)
+    parser.add_argument('--runtime', required=True, type=Path,
+                        help='the //:core-native-runtime-fixture-pic archive')
     parser.add_argument('--before', type=Path)
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--only', nargs='+', default=['full', 'check', 'arc', 'capacity', 'latest', 'latest-order', 'steps'])
@@ -37,7 +38,7 @@ def main():
     # clang `-cc1` compile of the recorder it adds to the link.
     wrapper.write_text('#!/usr/bin/env python3\nimport os,sys\na=sys.argv[1:]\n'
                        'if "--version" not in a:\n a += ' + repr([
-                           str(FIXTURES / 'recorder.c'), '-I', str(ROOT / 'crates/hirsel-core-rt/include'),
+                           str(FIXTURES / 'recorder.c'), '-DSCRIPTED_SCHEDULER', '-I', str(ROOT / 'crates/hirsel-core-rt/include'),
                            '-Wl,--wrap=hirsel_core_run']) + '\nos.execvp("clang",["clang",*a])\n')
     wrapper.chmod(0o755)
     core = dict(name='core', version='1')
@@ -56,7 +57,7 @@ def main():
             inputs = folder / 'inputs.json'
             inputs.write_text(json.dumps(template))
             binary = folder / 'program'
-            command = [str(args.compiler.resolve()), 'build', '--inputs', str(inputs), '--entry', 'app@1/main/main',
+            command = [str(args.compiler.resolve()), 'build', '--source-core', '--inputs', str(inputs), '--entry', 'app@1/main/main',
                        '--backend', engine, '--runtime', str(args.runtime.resolve()), '--grant', 'Tasks', '--store',
                        str(folder / 'store'), '--cc', str(wrapper), '--json', '-o', str(binary)]
             if engine == 'llvm':
@@ -69,8 +70,8 @@ def main():
                 raise RuntimeError(f'{kind}/{engine}: build {build.returncode}: {build.stdout[-3000:]!r} {build.stderr!r}')
             trace = folder / 'trace'
             env = dict(os.environ, HIRSEL_POLL_TRACE=str(trace))
-            if kind == 'steps':
-                env['HIRSEL_POLL_FIRST'] = '1'
+            if kind != 'steps':
+                env['HIRSEL_POLL_LAST'] = '1'
             record = subprocess.run([str(binary)], capture_output=True, env=env, timeout=5)
             replay = subprocess.run([str(binary)], capture_output=True, env=dict(env, HIRSEL_POLL_REPLAY='1'), timeout=5)
             plain = subprocess.run([str(binary)], capture_output=True, timeout=5)
@@ -96,7 +97,7 @@ def main():
 
                 step_counts(events)
                 last = folder / 'trace-last'
-                last_env = dict(os.environ, HIRSEL_POLL_TRACE=str(last))
+                last_env = dict(os.environ, HIRSEL_POLL_TRACE=str(last), HIRSEL_POLL_LAST='1')
                 record = subprocess.run([str(binary)], capture_output=True, env=last_env, timeout=5)
                 replay = subprocess.run([str(binary)], capture_output=True,
                                         env=dict(last_env, HIRSEL_POLL_REPLAY='1'), timeout=5)
@@ -113,7 +114,7 @@ def main():
                 latest = [e for e in events if int(e[1]) in (KIND['LATEST_PUBLISH'], KIND['LATEST_READ'])]
                 assert latest and all(e[-1] == '0' for e in latest), latest
                 first = folder / 'trace-first'
-                env = dict(os.environ, HIRSEL_POLL_TRACE=str(first), HIRSEL_POLL_FIRST='1')
+                env = dict(os.environ, HIRSEL_POLL_TRACE=str(first))
                 record = subprocess.run([str(binary)], capture_output=True, env=env, timeout=5)
                 replay = subprocess.run([str(binary)], capture_output=True, env=dict(env, HIRSEL_POLL_REPLAY='1'), timeout=5)
                 assert (record.returncode, replay.returncode) == (0, 0), (kind, engine, record, replay)

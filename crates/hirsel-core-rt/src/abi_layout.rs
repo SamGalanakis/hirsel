@@ -21,8 +21,7 @@ pub const MAIN_RESULT_KIND: i32 = 0;
 pub const MAIN_RESULT_EXIT: i32 = 1;
 pub const CONTEXT_EVENTS: usize = 8;
 pub const CONTEXT_STEPS: usize = 16;
-pub const TASK_ARC_GATE: usize = 0;
-pub const TASK_ARC_REPLAY: usize = 1;
+pub const TASK_ARC_REPLAY: usize = 0;
 pub const LIMIT_AVAILABLE: usize = 0;
 pub const LIMIT_OUTSTANDING: usize = 8;
 pub const REGION_CURSOR: usize = 0;
@@ -91,11 +90,8 @@ pub const fn own_prefix(kind: u8) -> usize {
 
 // Arc count mutations are inline under the scheduler's event turn. After the
 // operation, with released before last-release glue, call the context-first
-// cold hook when task = context[CONTEXT_EVENTS] != 0: hirsel_core_arc_unwrapped
-// always (it may poll), hirsel_core_arc_initialized/shared/released only when
-// the acquire byte task[TASK_ARC_GATE] is nonzero. The runtime keeps that byte
-// set while the run records, and otherwise exactly while the task has a refund
-// to deliver (MEM-20). Their trace kinds are hirsel_core_layout::event's ARC_*.
+// hook when task = context[CONTEXT_EVENTS] != 0. The hook folds the owner's
+// posted credits and records the event. Trace kinds are layout::event::ARC_*.
 
 // Each allocation page owns a payer identity. Its outstanding charges keep the
 // original slot alive across scope exit. Free resolves the payer before its

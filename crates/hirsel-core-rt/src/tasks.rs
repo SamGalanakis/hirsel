@@ -124,19 +124,11 @@ enum State {
     Provider,
     Ended,
 }
-/// The first byte is the emitted Arc gate (TASK_ARC_GATE), which generated
-/// code reaches through `Context::events`.
+/// The first byte makes taped replay use the runtime Arc commit path.
 #[repr(C)]
 pub struct Task {
-    /// Nonzero while an Arc new, share or release hook has work. Without a
-    /// sink the only work is delivering this task's refunds (MEM-20), so this
-    /// is the task's refund notification flag. With a sink every hook records,
-    /// so it stays set and `recorded_refunds` is the notification flag.
-    pub(crate) arc_gate: AtomicBool,
     pub(crate) replay: bool,
     latest_pair: bool,
-    recorded_refunds: AtomicBool,
-    refunds: Option<crate::limit::RefundSubscription>,
     polls_left: u32,
     context: *mut Context,
     owned_context: Option<Context>,
@@ -298,17 +290,6 @@ struct Scheduler {
 }
 const _: () = assert!(std::mem::offset_of!(Task, replay) == crate::abi_layout::TASK_ARC_REPLAY);
 
-impl Task {
-    /// The flag foreign refund publication sets for this task (see `arc_gate`).
-    #[inline(always)]
-    fn refund_flag(&self, recording: bool) -> &AtomicBool {
-        if recording {
-            &self.recorded_refunds
-        } else {
-            &self.arc_gate
-        }
-    }
-}
 #[cfg(test)]
 pub(crate) unsafe fn task_stack(task: *const Task) -> Option<usize> {
     // SAFETY: the test owns the live task handle and the task is off-CPU.
@@ -675,15 +656,15 @@ impl Scheduler {
                         }
                         Turn::Wake(_)
                             if (*target).state == State::Provider
-                                && (*(*target).operation).phase == Phase::Waiting =>
+                                && matches!((*(*target).operation).state, OperationState::Waiting) =>
                         {
                             group.consume_input();
                             group.cancel_wait((*(*target).operation).request);
-                            self.runnable(target, Next::Issue);
+                            self.runnable(target, OperationState::ReadyToIssue);
                         }
                         Turn::Done(_)
                             if (*target).state == State::Provider
-                                && (*(*target).operation).phase == Phase::Issued =>
+                                && matches!((*(*target).operation).state, OperationState::Issued { .. }) =>
                         {
                             self.wake_operation(target, Wake::Ready);
                         }
@@ -699,7 +680,7 @@ impl Scheduler {
                         if (*target).group.is_some_and(|g| g.same(group))
                             && (*target).state == State::Provider
                         {
-                            self.runnable(target, Next::Deliver(crate::tape::REFUSED));
+                            self.runnable(target, OperationState::ReadyToDeliver(Some(crate::tape::REFUSED)));
                         }
                         target = (*target).all;
                     }
@@ -791,13 +772,12 @@ impl Scheduler {
         }
     }
 
-    unsafe fn runnable(&mut self, task: *mut Task, next: Next) {
+    unsafe fn runnable(&mut self, task: *mut Task, state: OperationState) {
         // SAFETY: the task is parked; its operation frame is pinned.
         unsafe {
             self.parked.take((*(*task).operation).token);
             self.remove_timer(task);
-            (*(*task).operation).phase = Phase::Runnable;
-            (*(*task).operation).next = next;
+            (*(*task).operation).state = state;
             self.ready(task);
         }
     }
@@ -818,84 +798,70 @@ impl Scheduler {
             // A request that may not take effect now changes nothing: no wait,
             // no abort, no issue skipped. It stays pending for the task's next
             // cancellation point (CONC-7, FAIL-11, CONC-8).
-            if wake == Wake::Cancel && !cancels_operation(task) {
+            let op = (*task).operation;
+            if wake == Wake::Cancel && !(*op).observes_cancel {
                 return false;
             }
             let _callback = CallbackTask::new(task);
-            let op = (*task).operation;
             let p = (*op).provider;
             let (request, token) = ((*op).request, (*op).token);
-            match (*op).phase {
-                // Queued or running: its issue has not been called yet, or its
-                // outcome is decided. A ready taken now has nothing to report;
-                // readies the provider gives while issue runs are taken after
-                // the operation parks in I.
-                Phase::Runnable => false,
-                Phase::Entry | Phase::Waiting => {
+            match (*op).state {
+                OperationState::ReadyToIssue | OperationState::ReadyToDeliver(_) => false,
+                OperationState::Waiting => {
+                    if wake == Wake::Cancel {
+                        if let Some(group) = (*task).group {
+                            group.cancel_wait(request);
+                        }
+                        self.runnable(task, OperationState::ReadyToDeliver(None));
+                        return false;
+                    }
+                    let starting = wake == Wake::Parked;
                     let w = match (*op).entered.take() {
                         Some(w) => w,
                         None => {
                             #[cfg(test)]
-                            if (*op).phase == Phase::Entry {
+                            if starting {
                                 FIRST_WAITS.set((FIRST_WAITS.get().0, FIRST_WAITS.get().1 + 1));
                             }
                             (p.wait)(p.state, request, token)
                         }
                     };
-                    if wake == Wake::Cancel {
-                        // W -> C (CONC-7): the request fails the operation and
-                        // issue is never called, whatever wait answered.
-                        if let Some(group) = (*task).group {
-                            group.cancel_wait(request);
-                        }
-                        self.runnable(task, Next::Cancelled);
-                        return false;
-                    }
                     match w.kind {
+                        WAIT_READY if starting => {
+                            (*op).state = OperationState::ReadyToIssue;
+                            return true;
+                        }
                         WAIT_READY => {
-                            if (*op).phase == Phase::Entry {
-                                self.parked.take(token);
-                                (*op).phase = Phase::Runnable;
-                                (*op).next = Next::Issue;
-                                return true;
-                            }
                             if let Some(group) = (*task).group {
                                 group.wake(request);
                             }
-                            self.runnable(task, Next::Issue);
+                            self.runnable(task, OperationState::ReadyToIssue);
                             return false;
                         }
                         WAIT_UNTIL => {
-                            (*op).phase = Phase::Waiting;
                             self.remove_timer(task);
                             self.insert_timer(task, w.deadline_ns);
                         }
-                        WAIT_PARK => {
-                            (*op).phase = Phase::Waiting;
-                            self.remove_timer(task);
-                        }
+                        WAIT_PARK => self.remove_timer(task),
                         _ => crate::process::stop(b"Provider"),
                     }
                     self.parked.insert(token, task);
-                    if wake == Wake::Parked {
+                    if starting {
                         self.settle(task);
                     }
                     false
                 }
-                Phase::Issued => {
+                OperationState::Issued { .. } => {
                     match wake {
                         Wake::Parked => self.settle(task),
                         Wake::Ready => {
                             let step = (p.resume)(p.state, request, token);
                             self.stepped(task, step);
                         }
-                        Wake::Cancel => {
-                            let outcome = (p.abort)(p.state, request, token, ABORT_CANCEL);
-                            self.runnable(task, Next::Deliver(outcome));
-                        }
-                        Wake::Timer => {
-                            let outcome = (p.abort)(p.state, request, token, ABORT_DEADLINE);
-                            self.runnable(task, Next::Deliver(outcome));
+                        Wake::Cancel | Wake::Timer => {
+                            let reason = if wake == Wake::Cancel { ABORT_CANCEL } else { ABORT_DEADLINE };
+                            let outcome = (p.abort)(p.state, request, token, reason);
+                            self.runnable(task, OperationState::ReadyToDeliver(Some(outcome)));
                         }
                     }
                     false
@@ -910,11 +876,11 @@ impl Scheduler {
         // SAFETY: as wake_operation.
         unsafe {
             match step.kind {
-                STEP_DONE => self.runnable(task, Next::Deliver(step.outcome)),
+                STEP_DONE => self.runnable(task, OperationState::ReadyToDeliver(Some(step.outcome))),
                 STEP_PENDING => {
                     self.parked.insert((*(*task).operation).token, task);
                     self.remove_timer(task);
-                    (*(*task).operation).deadline = step.deadline_ns;
+                    (*(*task).operation).state = OperationState::Issued { deadline: step.deadline_ns };
                     if step.deadline_ns != 0 {
                         self.insert_timer(task, step.deadline_ns);
                     }
@@ -930,54 +896,38 @@ impl Scheduler {
         // SAFETY: as wake_operation.
         unsafe {
             let op = (*task).operation;
-            if cancels_operation(task) {
+            if (*op).observes_cancel && (*(*task).context).cancel_requested.load(Ordering::Acquire) {
                 self.wake_operation(task, Wake::Cancel);
-                if (*op).phase == Phase::Runnable {
-                    return;
-                }
             }
-            if (*op).phase == Phase::Issued
-                && (*op).deadline != 0
+            if let OperationState::Issued { deadline } = (*op).state
+                && deadline != 0
                 && (*task).timer_deadline.is_none()
             {
-                self.insert_timer(task, (*op).deadline);
+                self.insert_timer(task, deadline);
             }
         }
     }
 }
 
-/// A provider operation in W or I. It lives in the driver's frame on the task's
-/// stack, and the scheduler reaches it through `Task::operation` while parked.
+/// One provider operation, stored on its task's pinned stack. Each transition
+/// owns the right to issue, resume, abort or deliver through this state.
 pub(crate) struct Operation {
     provider: crate::provider::Provider,
     request: *mut crate::provider::Request,
     token: u64,
-    phase: Phase,
-    /// The deadline of the step that left the operation in I; 0 is none.
-    deadline: u64,
-    next: Next,
-    /// Entry only: the first `wait`'s answer, Until or Park, which the task
-    /// called itself before parking; None makes the scheduler call it (the
-    /// test-only scheduler-switch path).
+    state: OperationState,
+    /// A parked fiber cannot change its shield or operation kind.
+    observes_cancel: bool,
+    /// The first W answer when the fiber called wait before it parked.
     entered: Option<crate::provider::Wait>,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    /// Parked after its first wait answered Until or Park; the scheduler
-    /// applies that answer before any pop.
-    Entry,
-    /// W after Until or Park.
-    Waiting,
-    /// I after a Pending issue or resume.
-    Issued,
-    /// Not parked: running its issue or deliver, or queued to.
-    Runnable,
-}
 #[derive(Clone, Copy)]
-enum Next {
-    Issue,
-    Cancelled,
-    Deliver(crate::provider::Outcome),
+enum OperationState {
+    Waiting,
+    ReadyToIssue,
+    Issued { deadline: u64 },
+    /// A missing outcome is the unissued operation's cancellation.
+    ReadyToDeliver(Option<crate::provider::Outcome>),
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Wake {
@@ -990,17 +940,6 @@ enum Wake {
 use crate::provider::{
     ABORT_CANCEL, ABORT_DEADLINE, STEP_DONE, STEP_PENDING, Step, WAIT_PARK, WAIT_READY, WAIT_UNTIL,
 };
-/// Whether a cancellation request reaches this parked operation now: the one
-/// decision `take_wakes` (W and I) and `settle` ask, and `check_cancel` (the
-/// entry and every other cancellation point) asks for the task.
-unsafe fn cancels_operation(task: *mut Task) -> bool {
-    // SAFETY: a parked task's context and its operation's request are pinned
-    // and not running.
-    unsafe {
-        crate::provider::cancellation_point((*(*(*task).operation).request).operation)
-            && cancel_takes_effect(&*(*task).context)
-    }
-}
 /// Whether a cancellation request takes effect on this task now. A finalizer
 /// and a shielded region observe none (CONC-7, tasks.md:129; FAIL-11,
 /// failure.md:173; CONC-8, tasks.md:140): under either the request stays
@@ -1338,9 +1277,13 @@ unsafe fn parked(
         provider: *provider,
         request,
         token,
-        phase: Phase::Entry,
-        deadline: 0,
-        next: Next::Issue,
+        state: OperationState::Waiting,
+        // SAFETY: the current fiber owns the context and the request.
+        observes_cancel: unsafe {
+            crate::provider::cancellation_point((*request).operation)
+                && (*(*task).context).cancel_shield == 0
+                && (*(*task).context).finalizing == 0
+        },
         entered: None,
     };
     // SAFETY: the frame outlives every park; the scheduler clears no field.
@@ -1358,17 +1301,18 @@ unsafe fn parked(
         let produced = loop {
             let step = match step.take() {
                 Some(step) => step,
-                None => match op.next {
-                    Next::Issue => (op.provider.issue)(op.provider.state, request, token),
-                    Next::Cancelled => break None,
-                    Next::Deliver(outcome) => break Some(outcome),
+                None => match op.state {
+                    OperationState::ReadyToIssue => (op.provider.issue)(op.provider.state, request, token),
+                    OperationState::ReadyToDeliver(outcome) => break outcome,
+                    _ => unreachable!("resumed provider operation has no next action"),
                 },
             };
             match step.kind {
                 STEP_DONE => break Some(step.outcome),
                 STEP_PENDING => {
-                    op.phase = Phase::Issued;
-                    op.deadline = step.deadline_ns;
+                    op.state = OperationState::Issued {
+                        deadline: step.deadline_ns,
+                    };
                     (*task).operation = &mut op;
                     park_operation(task);
                 }
@@ -1399,9 +1343,10 @@ unsafe fn park_operation(task: *mut Task) {
     // SAFETY: the active task switches to its scheduler, which reads the
     // operation before any other task runs.
     unsafe {
-        (*(*task).run)
-            .parked
-            .insert((*(*task).operation).token, task);
+        let op = (*task).operation;
+        if matches!((*op).state, OperationState::Issued { .. }) {
+            (*(*task).run).parked.insert((*op).token, task);
+        }
         (*task).state = State::Provider;
         hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle);
     }
@@ -1674,14 +1619,7 @@ unsafe fn record_event(task_pointer: *mut Task, kind: u8, object: u64, value: u6
     unsafe {
         let task = NonNull::new_unchecked(task_pointer).as_ref();
         let run = NonNull::new_unchecked(task.run).as_ref();
-        // Without a sink the gate is the refund flag, so a quiet event reads
-        // one byte; with one the gate stays set and the flag is separate.
-        if task.arc_gate.load(Ordering::Acquire)
-            && ((run.provider.event.is_none() && task.group.is_none())
-                || task.recorded_refunds.load(Ordering::Acquire))
-        {
-            drain_refunds(task_pointer);
-        }
+        (*task.context).current.drain();
         if let Some(event) = run.provider.event {
             event(
                 run.provider.state,
@@ -1735,17 +1673,6 @@ pub(crate) fn poll_after_refund() {
 pub(crate) unsafe fn event_in(context: *const Context, kind: u8, object: u64, value: u64) {
     // SAFETY: the emitted gate proves the word is this running task.
     unsafe { event_for((*context).events as *mut Task, kind, object, value) }
-}
-/// Empty event paths read only the pinned task flag; all mailbox traversal,
-/// locking and flag reset belong to this cold, non-suspending path.
-#[cold]
-#[inline(never)]
-unsafe fn drain_refunds(task: *mut Task) {
-    // SAFETY: this task owns execution; subscription keeps its atomic flag
-    // registered until before its Context can release the payer domain.
-    unsafe {
-        (*(*task).context).current.drain_notified();
-    }
 }
 /// The one trigger for the spec's no-effect poll family. Record the result
 /// before scheduling; never observe cancellation or change that result here.
@@ -1901,15 +1828,8 @@ unsafe fn assign_tape(task: *mut Task, group: crate::tape::schedule::Group) {
     // SAFETY: caller exclusively owns this task before publication or execution.
     unsafe {
         (*(*task).run).taped = true;
-        (*task).refunds.take();
         (*task).group = Some(group);
         (*task).replay = group.replaying();
-        (*task).refunds = Some(
-            (*(*task).context)
-                .current
-                .subscribe_refunds(NonNull::from(&(*task).recorded_refunds)),
-        );
-        (*task).arc_gate.store(true, Ordering::Release);
     }
 }
 
@@ -2091,11 +2011,8 @@ pub unsafe fn run_root(
         clean: None,
     };
     let mut root = Box::new(Task {
-        arc_gate: AtomicBool::new(run.provider.event.is_some()),
         replay: false,
         latest_pair: false,
-        recorded_refunds: AtomicBool::new(false),
-        refunds: None,
         polls_left: POLLS_PER_TURN,
         context,
         owned_context: None,
@@ -2135,9 +2052,6 @@ pub unsafe fn run_root(
     unsafe {
         ptr::copy_nonoverlapping(argument, root.input.as_ptr(), input_bytes);
         let root_pointer: *mut Task = &mut *root;
-        root.refunds = Some((*context).current.subscribe_refunds(NonNull::from(
-            root.refund_flag(run.provider.event.is_some()),
-        )));
         (*context).events = root_pointer.expose_provenance();
         root.sp = root
             .stack
@@ -2222,11 +2136,8 @@ unsafe fn spawn_in(
         let id = (*run).id();
         let child_context = abi::task_child(context, &mut record, bytes, id);
         let task = Box::new(Task {
-            arc_gate: AtomicBool::new((*run).provider.event.is_some()),
             replay: false,
             latest_pair: false,
-            recorded_refunds: AtomicBool::new(false),
-            refunds: None,
             polls_left: POLLS_PER_TURN,
             context: ptr::null_mut(),
             owned_context: Some(child_context),
@@ -2259,12 +2170,8 @@ unsafe fn spawn_in(
         let task = Box::into_raw(task);
         if let Some(group) = (*task).group {
             (*task).replay = group.replaying();
-            (*task).arc_gate.store(true, Ordering::Release);
         }
         (*task).context = (*task).owned_context.as_mut().unwrap();
-        (*task).refunds = Some((*(*task).context).current.subscribe_refunds(NonNull::from(
-            (*task).refund_flag((*run).provider.event.is_some() || (*task).group.is_some()),
-        )));
         (*(*task).context).events = if (*(*task).context).events != 0 {
             task.expose_provenance()
         } else {
@@ -2374,8 +2281,6 @@ unsafe fn retire(task: *mut Task) {
         }
         *link = (*task).all;
         let mut owner = Box::from_raw(task);
-        // Unregister under the mailbox mutex before either flag or Context dies.
-        drop(owner.refunds.take());
         // Ended context returns unused primary before record/result refunds.
         drop(owner.owned_context.take());
         drop(owner.record.take());
@@ -2668,20 +2573,16 @@ mod ready_routing_laws {
                     provider,
                     request: &mut request,
                     token: i as u64 + 1,
-                    phase: Phase::Issued,
-                    deadline: 0,
-                    next: Next::Issue,
+                    state: OperationState::Issued { deadline: 0 },
+                    observes_cancel: false,
                     entered: None,
                 })
                 .collect();
             let mut tasks: Vec<_> = (0..n)
                 .map(|i| {
                     Box::new(Task {
-                        arc_gate: AtomicBool::new(false),
                         replay: false,
                         latest_pair: false,
-                        recorded_refunds: AtomicBool::new(false),
-                        refunds: None,
                         polls_left: POLLS_PER_TURN,
                         context: &mut context,
                         owned_context: None,
@@ -2760,7 +2661,7 @@ mod ready_routing_laws {
                         }
                 );
             }
-            if let Next::Deliver(outcome) = operations[selected].next {
+            if let OperationState::ReadyToDeliver(Some(outcome)) = operations[selected].state {
                 // SAFETY: selected operation's task is now runnable for this one delivery.
                 unsafe {
                     (provider.deliver)(provider.state, &mut request, outcome);
@@ -2786,7 +2687,7 @@ mod ready_routing_laws {
                 assert_eq!(counters[0], 3);
                 assert!(run.parked.live.is_empty());
                 for i in [0, 2] {
-                    if let Next::Deliver(outcome) = operations[i].next {
+                    if let OperationState::ReadyToDeliver(Some(outcome)) = operations[i].state {
                         unsafe {
                             (provider.deliver)(provider.state, &mut request, outcome);
                         }
@@ -2802,7 +2703,7 @@ mod ready_routing_laws {
                 assert_eq!((keys[0] >> 2) as u32, (replacement >> 2) as u32);
                 assert!(replacement >> 34 > keys[0] >> 34);
                 operations[0].token = 4;
-                operations[0].phase = Phase::Issued;
+                operations[0].state = OperationState::Issued { deadline: 0 };
                 tasks[0].state = State::Provider;
                 run.parked.insert(4, &mut *tasks[0]);
                 sockets.arm(replacement, false, 4).unwrap();

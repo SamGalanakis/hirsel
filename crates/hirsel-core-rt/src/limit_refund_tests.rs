@@ -36,66 +36,52 @@ fn dirty_inbox_aggregates_bytes_and_zero_pins_among_many_clean_records() {
 }
 
 #[test]
-fn owner_notifications_and_handover_preserve_the_next_owner_event() {
+fn owner_inboxes_and_handover_preserve_the_next_owner_event() {
     let root = Funding::root(64);
     let child = root.reserve(32).unwrap();
     child.task_owner(1);
     let mut context = Context::with_funding(child);
-    let root_signal = AtomicBool::new(false);
-    let child_signal = AtomicBool::new(false);
-    // SAFETY: subscriptions end before their pinned stack flags and live funding.
-    let _root_subscription = unsafe { root.subscribe_refunds(NonNull::from(&root_signal)) };
-    // SAFETY: same lifetime/custody rule; child uses owner 1 despite caller 0.
-    let _child_subscription = unsafe {
-        context
-            .current
-            .subscribe_refunds(NonNull::from(&child_signal))
+    let pending = |owner| {
+        root.payer.get().domain().remote.lock().unwrap().pending_for(owner)
     };
     drop(Block::new(&context, Some(8), 8, 8).unwrap());
-    assert!(!root_signal.load(Ordering::Acquire));
-    assert!(child_signal.load(Ordering::Acquire));
+    assert!(!pending(0));
+    assert!(pending(1));
     root.drain();
     assert_eq!((root.available(), context.available()), (32, 24));
     context.current.handover(1);
     assert_eq!(root.available(), 32); // The hand-over credit awaits the recipient event.
-    assert!(root_signal.load(Ordering::Acquire));
-    assert!(!child_signal.load(Ordering::Acquire));
+    assert!(pending(0));
+    assert!(!pending(1));
     root.drain();
     assert_eq!(root.available(), 64);
-    assert!(!root_signal.load(Ordering::Acquire));
+    assert!(!pending(0));
 }
 
 #[test]
-fn foreign_thread_routing_and_owner_reassignment_leave_no_stale_signal() {
+fn foreign_thread_routing_and_owner_reassignment_leave_no_stale_post() {
     let root = Funding::root(64);
     let child = root.reserve(32).unwrap();
     child.task_owner(1);
     let context = Context::with_funding(child);
-    let root_signal = AtomicBool::new(false);
-    let child_signal = AtomicBool::new(false);
-    // SAFETY: both flags stay pinned until their subscriptions leave scope.
-    let _root_subscription = unsafe { root.subscribe_refunds(NonNull::from(&root_signal)) };
-    // SAFETY: owner registration borrows the same live domain and pinned flag.
-    let _child_subscription = unsafe {
-        context
-            .current
-            .subscribe_refunds(NonNull::from(&child_signal))
+    let pending = |owner| {
+        root.payer.get().domain().remote.lock().unwrap().pending_for(owner)
     };
     let foreign = Foreign(vec![Block::new(&context, Some(8), 8, 8).unwrap()]);
     std::thread::spawn(move || foreign.release())
         .join()
         .unwrap();
-    assert!(root_signal.load(Ordering::Acquire));
+    assert!(pending(0));
     root.drain(); // Routes the OS-thread publication, but cannot deliver owner 1.
-    assert!(!root_signal.load(Ordering::Acquire));
-    assert!(child_signal.load(Ordering::Acquire));
+    assert!(!pending(0));
+    assert!(pending(1));
     assert_eq!(context.available(), 24);
     context.current.task_owner(0);
     assert_eq!(context.available(), 24); // Reassignment routes; it never refunds.
-    assert!(root_signal.load(Ordering::Acquire));
+    assert!(pending(0));
     root.drain();
     assert_eq!(context.available(), 32);
-    assert!(!root_signal.load(Ordering::Acquire));
+    assert!(!pending(0));
     context.current.end();
     assert_eq!(root.available(), 64);
 }
@@ -230,6 +216,8 @@ fn returned_grant_storage_grows_from_the_finalizers_task_after_hand_back() {
 enum HandoverOrder {
     BeforeCheck,
     AfterCheck,
+    BeforeShare,
+    AfterShare,
     RefundBeforeEnd,
 }
 
@@ -320,15 +308,26 @@ fn handover_order(order: HandoverOrder) -> (u64, Vec<crate::tasks::Event>) {
                 None
             };
             let held = Block::new(&*context, Some((*context).available()), 1, 8).unwrap();
-            if order == HandoverOrder::AfterCheck {
-                hirsel_core_check_cancel(context, 10);
+            let share = matches!(order, HandoverOrder::BeforeShare | HandoverOrder::AfterShare);
+            let after = matches!(order, HandoverOrder::AfterCheck | HandoverOrder::AfterShare);
+            let commit = || {
+                if share {
+                    let count = std::sync::atomic::AtomicU64::new(1);
+                    count.fetch_add(1, Ordering::Relaxed);
+                    hirsel_core_arc_shared(context, (&raw const count).cast());
+                } else {
+                    hirsel_core_check_cancel(context, 10);
+                }
+            };
+            if after {
+                commit();
             }
             checkpoint();
-            if order != HandoverOrder::AfterCheck {
-                hirsel_core_check_cancel(context, 10);
+            if !after {
+                commit();
             }
             let first = Block::new(&*context, Some(8), 8, 8);
-            let correct = if order == HandoverOrder::AfterCheck {
+            let correct = if after {
                 matches!(
                     first,
                     Err(Capacity {
@@ -383,6 +382,31 @@ fn handover_is_visible_at_the_next_event_before_the_child_ends() {
                     || (e.task == 0 && matches!(e.kind, CHECK_CANCEL | CAPACITY))
             })
             .map(|e| (e.kind, e.value))
+            .collect();
+        assert_eq!(prefix, want);
+    }
+}
+
+#[test]
+fn private_arc_share_folds_only_credits_posted_before_it() {
+    use crate::tasks::{ARC_SHARE, CAPACITY, REFUND, SPAWN};
+    for (order, want) in [
+        (HandoverOrder::BeforeShare, vec![(REFUND, 8), (ARC_SHARE, 2)]),
+        (
+            HandoverOrder::AfterShare,
+            vec![(ARC_SHARE, 2), (REFUND, 8), (CAPACITY, 0)],
+        ),
+    ] {
+        let (paid, events) = handover_order(order);
+        assert_eq!(paid, 1);
+        let child = events.iter().find(|event| event.kind == SPAWN).unwrap().object;
+        let prefix: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                (event.task == child && event.kind == REFUND && event.value == 8)
+                    || (event.task == 0 && matches!(event.kind, ARC_SHARE | CAPACITY))
+            })
+            .map(|event| (event.kind, event.value))
             .collect();
         assert_eq!(prefix, want);
     }

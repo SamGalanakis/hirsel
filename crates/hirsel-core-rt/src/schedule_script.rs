@@ -91,8 +91,8 @@ impl ScheduleScript {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn last() -> Self {
+    /// Prefer the last runnable task at each dispatch.
+    pub fn last() -> Self {
         Self {
             prefer_last: true,
             ..Self::new(0)

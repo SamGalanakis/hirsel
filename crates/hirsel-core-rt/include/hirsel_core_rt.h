@@ -17,7 +17,6 @@ void hirsel_core_memory_checkpoint(const uint8_t *name, size_t len);
 #define HIRSEL_CORE_CONTEXT_CURRENT_LIMIT 0
 #define HIRSEL_CORE_CONTEXT_EVENTS 8
 #define HIRSEL_CORE_CONTEXT_STEPS 16
-#define HIRSEL_CORE_TASK_ARC_GATE 0
 #define HIRSEL_CORE_LIMIT_AVAILABLE 0
 #define HIRSEL_CORE_LIMIT_OUTSTANDING 8
 #define HIRSEL_CORE_REGION_CURSOR 0
@@ -107,13 +106,9 @@ typedef bool (*HirselCoreDropRecipe)(HirselCoreContext *, void *payload, uint64_
 typedef struct { HirselCoreDropRecipe recipe; uint64_t charge, payload_offset; } HirselCoreFixedDescriptor;
 typedef struct { uint64_t back, cursor, a, b, index; } HirselCoreFixedPoint;
 bool hirsel_core_release(HirselCoreContext *, void *, const HirselCoreFixedDescriptor *, uint64_t site);
-/* Inline Arc completion hooks. With task = ctx[CONTEXT_EVENTS] != 0, call
-   unwrapped always, and initialized/shared/released only when the acquire
-   byte task[TASK_ARC_GATE] is nonzero: set while recording, otherwise exactly
-   while the task has a refund to deliver.
-   The event word/sink are immutable during a run. No TLS read on the taken path.
-   No status/admission/suspension/count mutation.
-   Scheduler owns the event turn across mutation and hook; release precedes glue. */
+/* Inline Arc completion hooks. Call with ctx[CONTEXT_EVENTS] != 0.
+   The event word and sink are pinned for the run. The hook folds owner
+   credits and records the operation. Release precedes last-release glue. */
 void hirsel_core_arc_initialized(const HirselCoreContext *);
 void hirsel_core_arc_shared(const HirselCoreContext *, const void *node); /* loads completed new count */
 void hirsel_core_arc_released(const HirselCoreContext *, bool last);

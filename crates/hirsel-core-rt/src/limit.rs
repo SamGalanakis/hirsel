@@ -7,7 +7,6 @@
 use crate::Capacity;
 #[path = "limit_refunds.rs"]
 mod refunds;
-pub(crate) use refunds::RefundSubscription;
 use refunds::{Inbox, Remote};
 use std::{
     cell::{Cell, UnsafeCell},
@@ -613,25 +612,8 @@ impl Funding {
             self.drain_notified();
         }
     }
-    /// # Safety
-    /// The task flag is pinned until the subscription is dropped; the task's
-    /// Context retains this domain until after unregistering.
-    pub(crate) unsafe fn subscribe_refunds(
-        &self,
-        signal: NonNull<AtomicBool>,
-    ) -> RefundSubscription {
-        let domain = self.payer.get().slot().domain;
-        let payer = self.payer.get().canonical();
-        let owner = payer.forest().record(payer.slot().id).live.owner;
-        // SAFETY: the live Context pins the domain and the task pins its flag.
-        unsafe { domain.as_ref() }
-            .remote
-            .lock()
-            .unwrap()
-            .subscribe(domain, owner, signal)
-    }
-    /// Owner-event delivery only. Notifications, routing and unregistering share
-    /// the domain mutex. A union may move the current representative.
+    /// Owner-event delivery only. Routing and folding share the domain mutex.
+    /// A union may move the current representative.
     #[cold]
     pub(crate) fn drain_notified(&self) {
         self.drain_pending();

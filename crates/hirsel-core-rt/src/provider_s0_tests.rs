@@ -503,23 +503,23 @@ fn s0_c_ready_then_resume_delivers_done() {
 }
 fn pending_then_ready_twice(_: &mut Rec, _: u64, token: u64, _: usize) -> Step {
     hirsel_core_ready(token);
+    hirsel_core_ready(token);
     pending(0)
 }
-fn resume_pending_once(_: &mut Rec, _: u64, token: u64, nth: usize) -> Step {
-    if nth == 0 {
-        hirsel_core_ready(token);
-        pending(0)
-    } else {
-        done(7)
-    }
+fn resume_pending_once(_: &mut Rec, _: u64, _: u64, nth: usize) -> Step {
+    if nth == 0 { pending(0) } else { done(7) }
 }
-/// Resume answering Pending again stays in I; a ready given from inside issue
-/// or resume, before the operation parks, is taken after it parks.
+/// A duplicate in this turn cannot resume the re-armed operation. The same
+/// token readied in a later turn is a new probe and can deliver its result.
 #[test]
 fn s0_resume_pending_again_stays_in_i() {
     unsafe fn body(context: *mut Context, rec: *mut Rec) {
         unsafe {
             let task = spawn(context, rec, 1, READ);
+            yield_turn(context);
+            assert_eq!((*rec).count(1, Cb::Resume), 1);
+            assert_eq!((*rec).count(1, Cb::Deliver), 0);
+            hirsel_core_ready((*rec).token(1));
             assert!(!join(context, task));
         }
     }
@@ -852,40 +852,80 @@ fn s0_pending_cancel_then_deadline_is_one_abort() {
 /// W: Cancelled, never issued.
 #[test]
 fn s0_cancel_precedes_a_later_ready_in_w() {
-    unsafe fn body(context: *mut Context, rec: *mut Rec) {
+    unsafe fn body<const READY_FIRST: bool>(context: *mut Context, rec: *mut Rec) {
         unsafe {
             let task = spawn(context, rec, 1, READ);
             yield_turn(context);
             assert_eq!((*rec).count(1, Cb::Wait), 1);
+            let token = (*rec).token(1);
+            if READY_FIRST {
+                hirsel_core_ready(token);
+            }
             hirsel_core_cancel(context, task);
+            if !READY_FIRST {
+                hirsel_core_ready(token);
+            }
+            assert!(join(context, task));
+        }
+    }
+    for body in [body::<false> as unsafe fn(*mut Context, *mut Rec), body::<true>] {
+        let mut rec = Rec::new(park_first, done0, never);
+        run(&mut rec, false, body);
+        assert_eq!(rec.count(1, Cb::Issue), 0, "a cancelled W never issues");
+        assert_eq!(rec.count(1, Cb::Deliver), 0);
+        assert_eq!(rec.result(1).0.status, 1, "Cancelled");
+    }
+}
+/// The same in I: abort(Cancel) decides the outcome, resume never runs.
+#[test]
+fn s0_cancel_precedes_a_later_ready_in_i() {
+    unsafe fn body<const READY_FIRST: bool>(context: *mut Context, rec: *mut Rec) {
+        unsafe {
+            let task = spawn(context, rec, 1, READ);
+            yield_turn(context);
+            assert_eq!((*rec).count(1, Cb::Issue), 1);
+            let token = (*rec).token(1);
+            if READY_FIRST {
+                hirsel_core_ready(token);
+            }
+            hirsel_core_cancel(context, task);
+            if !READY_FIRST {
+                hirsel_core_ready(token);
+            }
+            assert!(join(context, task));
+        }
+    }
+    for body in [body::<false> as unsafe fn(*mut Context, *mut Rec), body::<true>] {
+        let mut rec = Rec::new(ready, pending_forever, done0);
+        run(&mut rec, false, body);
+        assert_eq!(rec.count(1, Cb::Abort(ABORT_CANCEL)), 1);
+        assert_eq!(rec.count(1, Cb::Resume), 0);
+        assert_eq!(rec.result(1).0.value, ABORTED);
+    }
+}
+
+/// Once a WAKE has moved W to ready-to-issue, cancellation can first take
+/// effect at the next cancellation point, after the operation's delivery.
+#[test]
+fn s0_cancel_after_taken_wake_allows_issue() {
+    unsafe fn body(context: *mut Context, rec: *mut Rec) {
+        unsafe {
+            let task = spawn(context, rec, 1, READ);
+            yield_turn(context);
             hirsel_core_ready((*rec).token(1));
+            checkpoint();
+            assert_eq!((*rec).count(1, Cb::Wait), 2);
+            assert_eq!((*rec).count(1, Cb::Issue), 0);
+            hirsel_core_cancel(context, task);
             assert!(join(context, task));
         }
     }
     let mut rec = Rec::new(park_first, done0, never);
     run(&mut rec, false, body);
-    assert_eq!(rec.count(1, Cb::Issue), 0, "a cancelled W never issues");
-    assert_eq!(rec.count(1, Cb::Deliver), 0);
-    assert_eq!(rec.result(1).0.status, 1, "Cancelled");
-}
-/// The same in I: abort(Cancel) decides the outcome, resume never runs.
-#[test]
-fn s0_cancel_precedes_a_later_ready_in_i() {
-    unsafe fn body(context: *mut Context, rec: *mut Rec) {
-        unsafe {
-            let task = spawn(context, rec, 1, READ);
-            yield_turn(context);
-            assert_eq!((*rec).count(1, Cb::Issue), 1);
-            hirsel_core_cancel(context, task);
-            hirsel_core_ready((*rec).token(1));
-            assert!(join(context, task));
-        }
-    }
-    let mut rec = Rec::new(ready, pending_forever, done0);
-    run(&mut rec, false, body);
-    assert_eq!(rec.count(1, Cb::Abort(ABORT_CANCEL)), 1);
-    assert_eq!(rec.count(1, Cb::Resume), 0);
-    assert_eq!(rec.result(1).0.value, ABORTED);
+    assert_eq!(rec.count(1, Cb::Issue), 1);
+    assert_eq!(rec.count(1, Cb::Deliver), 1);
+    let (outcome, check) = rec.result(1);
+    assert_eq!((outcome.status, outcome.value, check), (0, 1, 1));
 }
 
 // ---- what a cancelled operation consumed ----

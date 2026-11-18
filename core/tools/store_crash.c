@@ -19,6 +19,8 @@ extern uint64_t store_crash_floor(void *);
 extern void store_crash_sync_failure(void *, uint8_t);
 extern uint64_t store_crash_failed_syncs(void *);
 extern void store_crash_free(void *);
+extern void store_crash_orphan_end(void *);
+extern uint8_t store_crash_crashed(void *);
 extern uint8_t hirsel_core_test_run_scripted(const HirselCoreProcessConfig *, HirselCoreEntry, uint64_t);
 _Static_assert(sizeof(HirselCoreHostOutcome)==32, "provider outcome ABI");
 
@@ -147,18 +149,22 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     uint8_t failure=(!strcmp(scenario,"poison-segment") || !strcmp(scenario,"poison-cut"))?1:
         !strcmp(scenario,"poison-end")?2:!strcmp(scenario,"poison-pack")?3:
         !strcmp(scenario,"poison-write")?4:0;
-    if(failure || cancellation.enabled) cut=UINT64_MAX;
+    int orphan_end=!strcmp(scenario,"orphan-end");
+    if(failure || cancellation.enabled || orphan_end) cut=UINT64_MAX;
     void *state=store_crash_new(cut);
     store_crash_sync_failure(state,failure);
+    if(orphan_end) store_crash_orphan_end(state);
     HirselCoreProvider provider={state,ready,issue,resume,cancel,deliver};
     HirselCoreEntryGrant caps[16]; uint64_t grants[16];
     for(size_t i=0;i<input->parameters_len;i++) {
         uint8_t kind=input->parameters[i].kind;
         caps[i]=(HirselCoreEntryGrant){kind,&provider,kind==0?7:0}; grants[i]=i+1;
     }
-    static const char *phases[]={"init","write","read"};
+    static const char *phases[]={"init","write","read","reopen"};
+    static const uint64_t orphan_order[]={0,1,3,2};
     uint8_t status=0;
-    for(uint64_t phase=0;phase<3;phase++) {
+    for(uint64_t run=0;run<(orphan_end?4:3);run++) {
+        uint64_t phase=orphan_end?orphan_order[run]:run;
         store_crash_phase(state,phase);
         cancellation.phase=phase;
         hold.enabled=phase==1 && !strcmp(scenario,"journal-ack");
@@ -186,7 +192,10 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         if(phase==1 && cancellation.enabled && !uncut && !cancellation.fired) {
             fprintf(stderr,"cancellation wait was not reached\n");status=120;break;
         }
-        if(phase==1 && uncut && !store_crash_acked(state)) {
+        if(orphan_end && (phase==1 || phase==3) && !store_crash_crashed(state)) {
+            fprintf(stderr,"orphan END crash was not reached in phase %s\n",phases[phase]);status=120;break;
+        }
+        if(phase==1 && uncut && !orphan_end && !store_crash_acked(state)) {
             fprintf(stderr,"uncut store run did not acknowledge its checkpoint\n");status=120;break;
         }
     }

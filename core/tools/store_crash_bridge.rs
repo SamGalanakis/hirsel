@@ -43,6 +43,7 @@ struct Bridge {
     armed: bool,
     failed_syncs: u64,
     random: u8,
+    orphan_end: bool,
 }
 impl Bridge {
     fn exists(&self, name: &str) -> bool {
@@ -185,6 +186,15 @@ impl Bridge {
                     assert_eq!(self.failed_syncs, 1, "store retried a failed write");
                     return Self::error(5);
                 }
+                if self.orphan_end && self.phase == 3 && is_segment(&name) {
+                    // The second crash keeps the reused segment name and
+                    // only the beginning of its new header.
+                    self.fs.issue(&Op::Write(&name, &data[..24]));
+                    self.fs.issue(&Op::Sync(&name));
+                    self.fs.persist_name(&name);
+                    self.crashed = true;
+                    return Self::error(5);
+                }
                 let append = file.mode == 2;
                 let applied = if append {
                     self.apply(Op::Append(&name, &data[..len]))
@@ -283,7 +293,18 @@ impl Bridge {
                         Outcome::default()
                     };
                 }
+                let first_crash = self.orphan_end
+                    && self.phase == 1
+                    && self.files[&handle].mode == 1
+                    && name.starts_with("j-")
+                    && name.ends_with(".end");
                 if self.apply(Op::Sync(&name)) {
+                    if first_crash {
+                        // Both inode syncs have finished. Only the END name
+                        // survives the first crash, before the directory sync.
+                        self.fs.persist_name(&name);
+                        self.crashed = true;
+                    }
                     Outcome::default()
                 } else {
                     Self::error(5)
@@ -311,6 +332,10 @@ impl Bridge {
     }
 }
 
+fn is_segment(name: &str) -> bool {
+    name.starts_with("j-") && !name.ends_with(".end")
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
     Box::into_raw(Box::new(Bridge {
@@ -328,6 +353,7 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         armed: false,
         failed_syncs: 0,
         random: 1,
+        orphan_end: false,
     }))
     .cast()
 }
@@ -340,7 +366,7 @@ pub unsafe extern "C" fn store_crash_phase(p: *mut c_void, phase: u64) {
     // SAFETY: the C run wrapper owns p through its three synchronous runs.
     let bridge = unsafe { &mut *p.cast::<Bridge>() };
     assert!(bridge.files.is_empty(), "run leaked provider file handles");
-    if phase == 2 {
+    if phase >= 2 {
         bridge.fs.restart();
         bridge.locks.clear();
         bridge.crashed = false;
@@ -390,6 +416,14 @@ pub unsafe extern "C" fn store_crash_op(
         };
         bridge.issue(op, mode, handle, path, bytes, len)
     }
+}
+
+/// # Safety
+/// `p` is live and exclusively owned by the wrapper before the first run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_orphan_end(p: *mut c_void) {
+    // SAFETY: the wrapper configures the bridge before starting any callbacks.
+    unsafe { (*p.cast::<Bridge>()).orphan_end = true };
 }
 
 /// # Safety

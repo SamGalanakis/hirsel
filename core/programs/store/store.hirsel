@@ -8739,6 +8739,12 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskD
     let live = capacity(state_account(state))?
     if live > options.resident_limit { return Error(Full(Capacity(requested: live, available: options.resident_limit))) }
     let seq = last_seq + 1
+    // A crash can keep only the successor's END name. Make its removal
+    // durable before a torn header from this open could inherit that END.
+    let orphan_end = capacity(disk_path("j-", seq, ".end"))?
+    let _ = disk_remove_optional(d, orphan_end)?
+    // NotFound also needs the fence if an interrupted open already unlinked it.
+    disk_io(host.sync_dir(d))?
     let (take segment, take end_file) = disk_new_segment(d, loaded.store, seq, last_end)?
     let startup = DiskStartup(store: loaded.store, state: take state, live: live, next_node: next_node, next_table: loaded.manifest.next_table, generation: loaded.manifest.generation, cut_first: loaded.manifest.first_live, seq: seq, segment: take segment, end_file: take end_file)
     Ok((take startup, take loaded))
@@ -10981,12 +10987,12 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let sh = shape(t)
     let head = db.heads[0].head
-    let last = if scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" { 2u64 } else if scenario == "journal" { 8u64 } else { 7u64 }
+    let last = if scenario == "orphan-end" || scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" { 2u64 } else if scenario == "journal" { 8u64 } else { 7u64 }
     if head < 1 || head > last || head < minimum { return Ok(false) }
     // The independent W2 provider returns wall_ms=phase: genesis0, writes1.
     // Every replayed write must retain1; recovery itself runs under clock2.
     // The fixture CALL frame at head 8 takes the previous at + 1.
-    if db.heads[0].at != (if head == 1 { 0u64 } else if head == 8 { 2u64 } else { 1u64 }) { return Ok(false) }
+    if db.heads[0].at != (if head == 1 || scenario == "orphan-end" { 0u64 } else if head == 8 { 2u64 } else { 1u64 }) { return Ok(false) }
     if scenario == "journal" {
         let b = main_branch(db)
         match recorded(db, b, 8)? {
@@ -11010,8 +11016,33 @@ pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args,
     if phase == "init" {
         let mut db = result.unwrap(open(tasks, d, c, r, journal_crash_options()))
         result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+        if scenario == "orphan-end" {
+            let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+            let written = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, 0, 10) }))
+            match take written {
+                Committed(done) => result.unwrap(durable(mut db, done.ticket)),
+                _ => fail("orphan END predecessor did not commit")
+            }
+        }
         result.unwrap(close(take db))
         Ok(())
+    } else if scenario == "orphan-end" {
+        if phase == "read" {
+            // Both crashes happened during successor creation. The predecessor's
+            // acknowledged value survives, and the incomplete successor is absent.
+            return match journal_crash_read(d, c, r, tasks, 2, scenario) {
+                Ok(true) => Ok(()),
+                Error(Corrupt(fault)) => match fault.why {
+                    Header => Error(Exit(status: 34)),
+                    _ => Error(Exit(status: 33))
+                },
+                _ => Error(Exit(status: 33))
+            }
+        }
+        return match open(tasks, d, c, r, journal_crash_options()) {
+            Error(Io(Other(125))) => Ok(()),
+            _ => Error(Exit(status: 32))
+        }
     } else if phase == "write" {
         if scenario == "journal-cancel" {
             let input = JournalCancelInput(d: d, c: c, r: r, tasks: tasks, out: out)

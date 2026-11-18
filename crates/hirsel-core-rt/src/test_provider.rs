@@ -79,6 +79,13 @@ pub mod crash {
             }
         }
 
+        /// Persist one directory entry before a crash, leaving unrelated
+        /// directory operations volatile.
+        pub fn persist_name(&mut self, name: &str) {
+            self.durable_names
+                .insert(name.to_owned(), self.live_names[name]);
+        }
+
         pub fn restart(&mut self) {
             self.live_names = self.durable_names.clone();
             self.live_data = self.durable_data.clone();

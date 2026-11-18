@@ -15,6 +15,16 @@ pub fn round[F: float](x: F) -> F
 
 pub fn round_even[F: float](x: F) -> F
 
+pub fn eq[F: float](a: F, b: F) -> bool
+
+pub fn lt[F: float](a: F, b: F) -> bool
+
+pub fn le[F: float](a: F, b: F) -> bool
+
+pub fn gt[F: float](a: F, b: F) -> bool
+
+pub fn ge[F: float](a: F, b: F) -> bool
+
 pub fn total_order[F: float](a: F, b: F) -> Order
 
 pub fn to_int[F: float, I: integer](x: F) -> Result[I, FloatError]

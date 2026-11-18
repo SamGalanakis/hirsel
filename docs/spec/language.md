@@ -479,7 +479,8 @@ integers or `char`, names, `_`, tuples and variants with labelled or positional 
 `..` for remaining fields. A literal pattern matches exactly when `scrutinee == literal` is
 true, and is refused here wherever that `==` would be refused
 ([LANG-21](#lang-21-operators)). Floats are not `key`, so a float literal is never a
-pattern; compare with `float.total_order`. `let p = e` needs an irrefutable pattern; `let p = e else { .. }`
+pattern. Use `float.total_order` for total ordering, or `float.eq`, `float.lt`, `float.le`,
+`float.gt` and `float.ge` for IEEE 754 comparisons. `let p = e` needs an irrefutable pattern; `let p = e else { .. }`
 takes a refutable one, and its `else` block has type `Never`. `if let` and `while let` take
 refutable patterns. Arms of an owned scrutinee bind by
 [OWN-15](ownership.md#own-15-match-on-an-owned-value).

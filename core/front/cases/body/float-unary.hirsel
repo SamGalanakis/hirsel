@@ -50,6 +50,24 @@
 //   floor(0x7ff8000000000001) = 0x7ff8000000000000: a NaN operand: canonical NaN
 //   sqrt32(0x40000000) = 0x3fb504f3: nearest f32 to sqrt 2 (arith.core)
 //   sqrt32(0xc0000000) = 0x7fc00000: the f32 canonical NaN
+// IEEE 754 quiet comparisons. Each call returns a mask with bits for eq, lt, le, gt,
+// and ge in that order. An unordered pair gives 0, equal gives 21, less gives 6,
+// and greater gives 24. The pairs cover NaN on either side, signed zeros,
+// infinities in both directions, and the least positive and negative subnormals.
+// expect: run compare64(9221120237041090560,0) = 0
+// expect: run compare64(0,9221120237041090560) = 0
+// expect: run compare64(9223372036854775808,0) = 21
+// expect: run compare64(18442240474082181120,9218868437227405312) = 6
+// expect: run compare64(9218868437227405312,18442240474082181120) = 24
+// expect: run compare64(1,0) = 24
+// expect: run compare64(9223372036854775809,0) = 6
+// expect: run compare32(2143289344,0) = 0
+// expect: run compare32(0,2143289344) = 0
+// expect: run compare32(2147483648,0) = 21
+// expect: run compare32(4286578688,2139095040) = 6
+// expect: run compare32(2139095040,4286578688) = 24
+// expect: run compare32(1,0) = 24
+// expect: run compare32(2147483649,0) = 6
 fn sqrt(b: u64) -> u64 {
     float.to_bits64(float.sqrt(float.from_bits64(b)))
 }
@@ -80,4 +98,66 @@ fn round_even(b: u64) -> u64 {
 
 fn sqrt32(b: u32) -> u32 {
     float.to_bits32(float.sqrt(float.from_bits32(b)))
+}
+
+fn compare64(a_bits: u64, b_bits: u64) -> u8 {
+    let a = float.from_bits64(a_bits)
+    let b = float.from_bits64(b_bits)
+    let eq: u8 = if float.eq(a, b) {
+        1
+    } else {
+        0
+    }
+    let lt: u8 = if float.lt(a, b) {
+        2
+    } else {
+        0
+    }
+    let le: u8 = if float.le(a, b) {
+        4
+    } else {
+        0
+    }
+    let gt: u8 = if float.gt(a, b) {
+        8
+    } else {
+        0
+    }
+    let ge: u8 = if float.ge(a, b) {
+        16
+    } else {
+        0
+    }
+    eq | lt | le | gt | ge
+}
+
+fn compare32(a_bits: u32, b_bits: u32) -> u8 {
+    let a = float.from_bits32(a_bits)
+    let b = float.from_bits32(b_bits)
+    let eq: u8 = if float.eq(a, b) {
+        1
+    } else {
+        0
+    }
+    let lt: u8 = if float.lt(a, b) {
+        2
+    } else {
+        0
+    }
+    let le: u8 = if float.le(a, b) {
+        4
+    } else {
+        0
+    }
+    let gt: u8 = if float.gt(a, b) {
+        8
+    } else {
+        0
+    }
+    let ge: u8 = if float.ge(a, b) {
+        16
+    } else {
+        0
+    }
+    eq | lt | le | gt | ge
 }

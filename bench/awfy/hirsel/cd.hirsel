@@ -10,8 +10,6 @@ const RADIUS: f64 = 1.0
 
 const VOXEL: f64 = RADIUS * 2.0
 
-const INF_BITS: u64 = 0x7ff0000000000000
-
 type V2 {
     x: f64,
     y: f64
@@ -45,46 +43,29 @@ type BucketMap {
     motions: List[List[Motion]]
 }
 
-fn magnitude_bits(a: f64) -> u64 {
-    float.to_bits64(a) & 0x7fffffffffffffff
-}
-
 fn zero(a: f64) -> bool {
-    magnitude_bits(a) == 0
+    float.eq(a, 0.0)
 }
 
 fn less(a: f64, b: f64) -> bool {
-    let a_bits = magnitude_bits(a)
-    let b_bits = magnitude_bits(b)
-    if a_bits > INF_BITS || b_bits > INF_BITS || (a_bits == 0 && b_bits == 0) {
-        return false
-    }
-    float.total_order(a, b) == Less
+    float.lt(a, b)
 }
 
 fn at_most(a: f64, b: f64) -> bool {
-    let a_bits = magnitude_bits(a)
-    let b_bits = magnitude_bits(b)
-    if a_bits > INF_BITS || b_bits > INF_BITS {
-        return false
-    }
-    if a_bits == 0 && b_bits == 0 {
-        return true
-    }
-    float.total_order(a, b) != Greater
+    float.le(a, b)
 }
 
 fn compare_numbers(a: f64, b: f64) -> Order {
-    if zero(a) && zero(b) {
+    if float.eq(a, b) {
         return Equal
     }
-    if magnitude_bits(a) > INF_BITS {
+    if float.lt(a, b) {
         return Less
     }
-    if magnitude_bits(b) > INF_BITS {
+    if float.gt(a, b) || float.eq(a, a) {
         return Greater
     }
-    float.total_order(a, b)
+    Less
 }
 
 fn compare_voxels(a: V2, b: V2) -> Order {

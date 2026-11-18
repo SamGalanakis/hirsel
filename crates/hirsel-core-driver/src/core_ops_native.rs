@@ -1539,8 +1539,8 @@ fn run_lines_native(backend: Backend, case: &str) {
     main += "  Ok(())\n}\n";
     ordered_case(backend, &format!("{case}\n{main}"));
 }
-/// core.md "Floats": the unary float operations, bit for bit, on each engine.
-fn float_unary(backend: Backend) {
+/// core.md "Floats": the unary float operations and IEEE comparison predicates.
+fn float_contract(backend: Backend) {
     run_lines_native(
         backend,
         include_str!("../../../core/front/cases/body/float-unary.hirsel"),
@@ -1549,12 +1549,12 @@ fn float_unary(backend: Backend) {
 #[test]
 #[ignore = "explicit native integration target"]
 fn float_unary_cranelift() {
-    float_unary(Backend::Cranelift);
+    float_contract(Backend::Cranelift);
 }
 #[test]
 #[ignore = "explicit native integration target"]
 fn float_unary_llvm() {
-    float_unary(Backend::Llvm);
+    float_contract(Backend::Llvm);
 }
 /// FORM #97: a NaN reaches `to_bits` and `total_order` as the canonical NaN after each
 /// path that only moves bits (memory, growth, parameters, results, indirect calls,

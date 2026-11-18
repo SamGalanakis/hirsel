@@ -151,10 +151,15 @@ core@1/deque/slots_view
 core@1/dest/put
 core@1/float/abs
 core@1/float/ceil
+core@1/float/eq
 core@1/float/floor
 core@1/float/from_bits32
 core@1/float/from_bits64
 core@1/float/from_int
+core@1/float/ge
+core@1/float/gt
+core@1/float/le
+core@1/float/lt
 core@1/float/mul_add
 core@1/float/narrow
 core@1/float/round

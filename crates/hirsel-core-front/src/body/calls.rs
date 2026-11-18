@@ -2061,6 +2061,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return Some(result);
             }
             "to_int" => return self.float_to_int(result_ty, tys[1], operand, n),
+            "eq" | "lt" | "le" | "gt" | "ge" => {
+                let op = match name {
+                    "eq" => CompareOp::Eq,
+                    "lt" => CompareOp::Lt,
+                    "le" => CompareOp::Le,
+                    "gt" => CompareOp::Gt,
+                    _ => CompareOp::Ge,
+                };
+                return Some(self.numeric_compare(op, operand, vals[1]?, n));
+            }
             "total_order" => return self.float_total_order(result_ty, operand, vals[1]?, n),
             "sqrt" | "abs" | "floor" | "ceil" | "trunc" | "round" | "round_even" => {
                 use hirsel_core_ir::ScalarUnaryOp as U;

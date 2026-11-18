@@ -26,7 +26,7 @@ pub fn mandelbrot(size: u64) -> bool {
                 zi = 2.0 * zr * zi + ci
                 zrzr = zr * zr
                 zizi = zi * zi
-                if let Greater = float.total_order(zrzr + zizi, 4.0) {
+                if float.gt(zrzr + zizi, 4.0) {
                     escape = 1
                 }
                 step += 1

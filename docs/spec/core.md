@@ -249,8 +249,14 @@ operations it names; nothing else about them may be inferred from an implementat
   value. A NaN operand gives the canonical NaN; `sqrt` of a value below zero gives the
   canonical NaN, `sqrt(-0.0)` is `-0.0` and `sqrt` of `+∞` is `+∞`; `abs` clears the sign;
   the rounding operations return zeros and infinities unchanged and keep the sign of a zero
-  result, so `float.floor(-0.5)` is `-1.0` and `float.ceil(-0.5)` is `-0.0`. No other float
-  operation is in core: `sin`, `cos`, `exp`, `ln`, `pow`, `min`, `max` and the rest are not
+  result, so `float.floor(-0.5)` is `-1.0` and `float.ceil(-0.5)` is `-0.0`.
+  The predicates `float.eq`, `float.lt`, `float.le`, `float.gt` and `float.ge` each take
+  two operands of the same type `F: float` and return `bool`. They implement IEEE 754
+  `compareQuietEqual`, `compareQuietLess`, `compareQuietLessEqual`, `compareQuietGreater`
+  and `compareQuietGreaterEqual`, respectively. All five return `false` if either operand
+  is NaN. Negative and positive zero compare equal, and negative and positive infinity
+  are below and above every finite value, respectively.
+  No other float operation is in core: `sin`, `cos`, `exp`, `ln`, `pow`, `min`, `max` and the rest are not
   correctly rounded on every target, or not one IEEE operation, and are library code over
   these.
 - **Host.** A path is resolved relative to its `Dir` and may not leave it, through every

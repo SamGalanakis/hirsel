@@ -1379,6 +1379,12 @@ fn corpus() {
 }
 
 #[test]
+fn float_contract() {
+    let failures = run_case(&root().join("cases/body/float-unary.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
 fn literal_aggregate_call_inference() {
     for case in ["generic-instances", "call-undetermined"] {
         let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));

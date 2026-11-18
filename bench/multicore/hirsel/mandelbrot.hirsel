@@ -8,7 +8,7 @@ fn inside(cr: f64, ci: f64) -> bool {
     for _ in 0u64 .. 50 {
         let rr = zr * zr
         let ii = zi * zi
-        if float.total_order(rr + ii, 4.0) == Greater { return false }
+        if float.gt(rr + ii, 4.0) { return false }
         zi = (zr + zr) * zi + ci
         zr = rr - ii + cr
     }

@@ -40,7 +40,8 @@ included, has one bit pattern: `0x7fc00000` for `f32`,
 `OutOfRange` as its error; conversions from integers to floats and from `f64` to `f32`
 round to nearest even. [core](core.md) lists every numeric conversion. `%` is integer-only.
 Floats are neither `key` nor `ordered`; `float.total_order` orders them by IEEE 754
-totalOrder.
+totalOrder. The predicates `float.eq`, `float.lt`, `float.le`, `float.gt` and `float.ge`
+perform the IEEE 754 quiet comparisons described in [core](core.md#contracts-the-signatures-do-not-state).
 
 ### SEM-3: Text
 

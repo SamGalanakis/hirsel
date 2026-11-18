@@ -89,7 +89,13 @@ head and seed-zero XXH3-64 bound to store identity, role, sequence, offset,
 head bytes 0–8 and payload. Unknown optional frames are checked and skipped.
 
 A disk `run` publishes and hands its frame to the journal task. `durable` waits
-for a synced prefix; grouping changes I/O only. END records identify synced
+for a synced prefix. `write_place` serves a request source on the sole writer.
+It waits for the first request, probes for ready requests, and runs each as a
+separate main-branch transaction. It delivers results in request order after
+the durability wait. Each result keeps its own value and ticket. A journal
+failure leaves covered results deliverable and fails uncovered tickets.
+The source's delivery callback owns the request and can drop a disconnected
+client's reply. Grouping changes I/O only. END records identify synced
 boundaries, while recovery stops at a torn last tail. `checkpoint` rotates
 before taking its cut, writes only new nodes, and publishes the manifest after
 packs are synced and named. Capacity refuses a cut without poisoning or ending

@@ -30,8 +30,9 @@ them in a std HTTP route table and builds the JSON document in the request's
 scratch region. Each server serializes JSON per request. For storage, each
 server sends one request to an in-process counter owner over loopback and gets
 the updated value back after durability.
-Hirsel uses a place-store read transaction, a write transaction and
-`store.durable`. Hyper+Axum and Go use one SQLite read transaction and one
+Hirsel uses a place-store read transaction and one write transaction per
+request. `store.write_place` delivers replies after the journal sync covers
+their commits. Hyper+Axum and Go use one SQLite read transaction and one
 write transaction with WAL and synchronous=FULL. All trial databases live on
 the same filesystem. The store route includes a short-lived local connection
 in every implementation.

@@ -13,6 +13,14 @@ type PlaceJob: send {
     ready: Sender[()]
 }
 
+type CounterSource {
+    listener: Listener,
+    clock: Clock,
+    table: store.store.Table[u64, u64],
+    shape: store.store.Shape[u64, u64],
+    buffer: Bytes
+}
+
 fn put_counter(mut db: store.store.Db, table: store.store.Table[u64, u64], value: u64) waits {
     let written = result.unwrap(store.store.run(mut db, None, fn(mut tx: store.store.Tx) -> Result[(), store.store.Error] {
         store.store.put(mut tx, table, 1u64, value)
@@ -33,6 +41,44 @@ fn get_counter(db: store.store.Db, shape: store.store.Shape[u64, u64]) -> u64 {
     }
 }
 
+fn receive_counter(db: store.store.Db, mut source: CounterSource, wait: bool) -> Option[(Socket, u64)] waits {
+    let until = if wait { Never } else { At(source.clock, host.mono_ns(source.clock)) }
+    match host.accept(mut source.listener, until) {
+        Ok((take socket, _)) => Some((take socket, get_counter(db, source.shape) + 1)),
+        Error(_) => None
+    }
+}
+
+fn increment_counter(mut tx: store.store.Tx, source: CounterSource, request: (Socket, u64)) -> Result[u64, store.store.Error] {
+    let value = request.1
+    store.store.put(mut tx, source.table, 1u64, value)?
+    Ok(value)
+}
+
+fn deliver_counter(mut source: CounterSource, take request: (Socket, u64), take outcome: Result[store.store.Outcome[u64, store.store.Error], store.store.Error]) waits {
+    if let Ok(Committed(done)) = outcome {
+        let (take socket, _) = take request
+        let value = done.value
+        list.clear(mut source.buffer)
+        let mut rest = value
+        for _ in 0u64 .. 8u64 {
+            result.unwrap(list.push(mut source.buffer, int.narrow(rest & 255)))
+            rest /= 256
+        }
+        let (reader, writer) = net.split(take socket)
+        let mut output = take writer
+        let deadline = int.saturating_add(host.mono_ns(source.clock), 5000000000u64)
+        let mut sent = 0u64
+        while sent < 8 && host.mono_ns(source.clock) < deadline {
+            match host.send_pair(mut output, list.slice(source.buffer, sent, 8), string.as_bytes(""), At(source.clock, deadline)) {
+                Ok(0) => break,
+                Ok(n) => { sent += n },
+                Error(_) => break,
+            }
+        }
+    }
+}
+
 fn place_writer(take job: PlaceJob) waits {
     let PlaceJob(dir: dir, clock: clock, random: random, tasks: tasks, listener: take listener, ready: take ready) = take job
     let mut db = result.unwrap(store.store.open(tasks, dir, clock, random, store.store.defaults()))
@@ -42,36 +88,12 @@ fn place_writer(take job: PlaceJob) waits {
     let table = result.unwrap(store.store.table(mut db, "counter", std.codec.key_u64(), codec))
     let shape = store.store.shape(table)
     put_counter(mut db, table, 0)
+    let mut source = CounterSource(listener: take listener, clock: clock, table: table, shape: shape, buffer: result.unwrap(list.with_capacity(8)))
     result.unwrap(channel.send(ready, ()))
-    let mut accepting = take listener
-    let mut buffer: Bytes = result.unwrap(list.with_capacity(8))
-    loop {
-        match host.accept(mut accepting, Never) {
-            Ok((take socket, _)) => {
-                let value = get_counter(db, shape) + 1
-                put_counter(mut db, table, value)
-                list.clear(mut buffer)
-                let mut rest = value
-                for _ in 0u64 .. 8u64 {
-                    result.unwrap(list.push(mut buffer, int.narrow(rest & 255)))
-                    rest /= 256
-                }
-                let (reader, writer) = net.split(take socket)
-                let mut output = take writer
-                let deadline = int.saturating_add(host.mono_ns(clock), 5000000000u64)
-                let mut sent = 0u64
-                while sent < 8 && host.mono_ns(clock) < deadline {
-                    match host.send_pair(mut output, list.slice(buffer, sent, 8), string.as_bytes(""), At(clock, deadline)) {
-                        Ok(0) => break,
-                        Ok(n) => { sent += n },
-                        Error(_) => break,
-                    }
-                }
-            },
-            Error(_) => break,
-        }
-    }
-    result.unwrap(store.store.close(take db))
+    let written = store.store.write_place(mut db, mut source, receive_counter, increment_counter, deliver_counter)
+    let closed = store.store.close(take db)
+    result.unwrap(take written)
+    result.unwrap(take closed)
 }
 
 fn place_increment(place: PlaceEndpoint, deadline: u64) -> Result[Option[Bytes], std.http.ResponseError] waits {

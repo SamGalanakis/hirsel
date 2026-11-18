@@ -816,6 +816,12 @@ fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply
     journal_poll(mut db)?
     healthy(db)?
     let i = branch_index(db, b)?
+    let outcome = append_transaction(mut db, i, steps, keep_reply, body)
+    maybe_checkpoint(mut db)?
+    take outcome
+}
+
+fn append_transaction[R, A](mut db: Db, i: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let wall = host.wall_ms(db.clock)
     let outcome: Result[Outcome[R, A], Error] = match stage(mut db, i, wall, steps, keep_reply, body) {
         Over(take o) => Ok(take o),
@@ -827,6 +833,10 @@ fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply
             let _ = channel.send(sender, Frame(take raw, db.frame_seq))
         }
     }
+    take outcome
+}
+
+fn maybe_checkpoint(mut db: Db) -> Result[(), Error] waits {
     if list.len(db.disk) != 0 && db.file_end - 72 >= db.disk[0].options.checkpoint_bytes {
         if let Ok(take s) = current_state(db) {
             match disk_begin_cut(mut db, take s) {
@@ -836,7 +846,7 @@ fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply
             }
         }
     }
-    take outcome
+    Ok(())
 }
 
 // A body whose commit the admission bound decides (section 1.11): one that
@@ -1076,6 +1086,74 @@ fn covered(db: Db, mark: Mark) -> bool {
         Journal(n) => db.journaled >= n,
         Cut(n) => db.checkpointed >= n
     }
+}
+
+type PlaceReply[Q, R, A] {
+    request: Q,
+    outcome: Result[Outcome[R, A], Error]
+}
+
+fn place_ticket[R, A](outcome: Result[Outcome[R, A], Error]) -> Option[Ticket] {
+    match outcome {
+        Ok(Committed(done)) => Some(done.ticket),
+        Ok(Aborted(undone)) => undone.ticket,
+        _ => None
+    }
+}
+
+// `receive` blocks for the first request and probes for subsequent ready
+// requests. One transaction runs per request. Delivery owns the request and
+// outcome, so a disconnected client can drop its reply locally.
+pub fn write_place[S, Q, R, A](mut db: Db, mut source: S,
+    receive: fn(Db, mut S, bool) -> Option[Q] waits,
+    body: fn(mut Tx, S, Q) -> Result[R, A],
+    deliver: fn(mut S, take Q, take Result[Outcome[R, A], Error]) waits
+) -> Result[(), Error] waits {
+    let disk = list.len(db.disk) != 0
+    let max_frames: u64 = if disk { int.widen(db.disk[0].options.group_commits) } else { 1 }
+    let max_bytes: u64 = if disk { int.widen(db.disk[0].options.group_bytes) } else { 0 }
+    let mut replies: List[Option[PlaceReply[Q, R, A]]] = capacity(list.with_capacity(max_frames))?
+    while let Some(take first) = receive(db, mut source, true) {
+        let mut pending_request = Some(take first)
+        let mut last: Option[Ticket] = None
+        let start = db.acked_bytes + db.inflight
+        let mut cut: Result[(), Error] = Ok(())
+        while let Some(take request) = replace(mut pending_request, None) {
+            let polled = journal_poll(mut db)
+            let outcome: Result[Outcome[R, A], Error] = match take polled {
+                Error(take e) => Error(take e),
+                Ok(()) => append_transaction(mut db, 0, None, None, scoped fn(mut tx: Tx) -> Result[R, A] {
+                    body(mut tx, source, request)
+                })
+            }
+            let ticket = place_ticket(outcome)
+            if let Some(t) = ticket { last = Some(t) }
+            result.unwrap(list.push(mut replies, Some(PlaceReply(request: take request, outcome: take outcome))))
+            cut = maybe_checkpoint(mut db)
+            if let Error(_) = cut { break }
+            if let Some(_) = db.poison { break }
+            // The journal separates a frame that crosses the byte bound
+            // from the preceding group before writing either group.
+            if list.len(replies) == max_frames || db.acked_bytes + db.inflight - start >= max_bytes { break }
+            pending_request = receive(db, mut source, false)
+        }
+        let settled = match last { Some(t) => durable(mut db, t), None => healthy(db) }
+        for i in 0u64 .. list.len(replies) {
+            let pending = option.unwrap(list.set(mut replies, i, None))
+            let PlaceReply(request: take request, outcome: take outcome) = take pending
+            if let Some(t) = place_ticket(outcome) {
+                if disk && !covered(db, t.mark) {
+                    deliver(mut source, take request, Error(Poisoned(option.unwrap(db.poison))))
+                    continue
+                }
+            }
+            deliver(mut source, take request, take outcome)
+        }
+        list.clear(mut replies)
+        settled?
+        cut?
+    }
+    Ok(())
 }
 
 pub fn close(take db: Db) -> Result[(), Error] waits {
@@ -10896,6 +10974,65 @@ fn journal_is_poisoned[T](take response: Result[T, Error]) -> bool {
     match take response { Error(Poisoned(Other(125))) => true, _ => false }
 }
 
+type JournalPlace {
+    rows: Table[u64, u64],
+    out: Option[Stdout],
+    requests: Receiver[u64],
+    delivered: u64,
+    committed: u64
+}
+
+fn journal_place_receive(db: Db, mut place: JournalPlace, wait: bool) -> Option[u64] waits {
+    if wait {
+        match channel.receive(place.requests) { Ok(key) => Some(key), Error(_) => None }
+    } else {
+        match channel.try_receive(place.requests) { Ok(key) => Some(key), Error(_) => None }
+    }
+}
+
+fn journal_place_requests(count: u64) -> Receiver[u64] waits {
+    let (send, requests): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(count))
+    for key in 0u64 .. count { result.unwrap(channel.send(send, key)) }
+    take requests
+}
+
+fn journal_place_put(mut tx: Tx, place: JournalPlace, key: u64) -> Result[u64, Error] {
+    let value = key + 10
+    put(mut tx, place.rows, key, value)?
+    Ok(value)
+}
+
+fn journal_place_deliver(mut place: JournalPlace, take key: u64, take outcome: Result[Outcome[u64, Error], Error]) waits {
+    if key != place.delivered { fail("place delivered out of order") }
+    place.delivered += 1
+    match take outcome {
+        Ok(Committed(done)) => {
+            if done.value != key + 10 { fail("place returned another request's value") }
+            place.committed += 1
+            if let Some(out) = place.out { journal_note(out, key + 2) }
+        },
+        Error(Poisoned(Other(125))) => {},
+        _ => fail("unexpected place outcome")
+    }
+}
+
+pub fn journal_law_place(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let options = journal_crash_options()
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    let table_ticket = result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(durable(mut db, table_ticket))
+    let rows = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let mut place = JournalPlace(rows: rows, out: None, requests: journal_place_requests(6), delivered: 0, committed: 0)
+    result.unwrap(write_place(mut db, mut place, journal_place_receive, journal_place_put, journal_place_deliver))
+    result.unwrap(close(take db))
+    place.delivered == 6 && place.committed == 6
+}
+
+@test
+fn journal_test_place(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_place(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
 fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: String) -> bool waits {
     let pack = scenario == "poison-pack"
     if !pack { result.unwrap(stdout.write(out, "ARM")) }
@@ -10943,6 +11080,12 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
 fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, scenario: String) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, journal_crash_options())?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if scenario == "journal-place" {
+        let mut place = JournalPlace(rows: t, out: Some(out), requests: journal_place_requests(6), delivered: 0, committed: 0)
+        write_place(mut db, mut place, journal_place_receive, journal_place_put, journal_place_deliver)?
+        if place.delivered != 6 || place.committed != 6 { fail("place did not deliver all requests") }
+        return close(take db)
+    }
     if scenario == "poison-cut" {
         result.unwrap(stdout.write(out, "ARM"))
         let pending = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, 0, 10) })?

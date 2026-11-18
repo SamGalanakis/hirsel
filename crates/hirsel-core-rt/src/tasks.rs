@@ -280,13 +280,20 @@ struct Tapes {
 impl Tapes {
     fn open(&mut self, group: Group) {
         let opened = self.next_open;
-        self.next_open = opened.checked_add(1)
+        self.next_open = opened
+            .checked_add(1)
             .unwrap_or_else(|| crate::process::stop(b"TapeSlots"));
-        self.live.push(LiveTape { group, opened, members: 0 });
+        self.live.push(LiveTape {
+            group,
+            opened,
+            members: 0,
+        });
     }
 
     fn membership(&mut self, group: Group) -> Option<&mut usize> {
-        self.live.iter_mut().find(|entry| entry.group.same(group))
+        self.live
+            .iter_mut()
+            .find(|entry| entry.group.same(group))
             .map(|entry| &mut entry.members)
     }
 
@@ -297,8 +304,15 @@ impl Tapes {
     }
 
     fn seal_deadlock(&mut self) -> Option<([u8; 16], crate::tape::Fault)> {
-        self.live.drain(..)
-            .filter_map(|entry| entry.group.seal_deadlock().err().map(|fault| (entry.opened, fault)))
+        self.live
+            .drain(..)
+            .filter_map(|entry| {
+                entry
+                    .group
+                    .seal_deadlock()
+                    .err()
+                    .map(|fault| (entry.opened, fault))
+            })
             .min_by_key(|(opened, _)| *opened)
             .map(|(_, fault)| fault)
     }
@@ -707,7 +721,9 @@ impl Scheduler {
     fn has_outside_wait(&self) -> bool {
         // SAFETY: each entry points to its pinned provider operation.
         self.parked.live.values().any(|&task| unsafe {
-            !(*task).group.is_some_and(|group| group.drives_replay((*(*task).operation).provider))
+            !(*task)
+                .group
+                .is_some_and(|group| group.drives_replay((*(*task).operation).provider))
         })
     }
 
@@ -716,10 +732,17 @@ impl Scheduler {
             let tape = u128::from_be_bytes(id);
             let verdict = match fault {
                 crate::tape::Fault::Diverged(divergence) => {
-                    format!("Replay tape {tape:032x}: Diverged({:?}) at {}", divergence.kind, divergence.at)
+                    format!(
+                        "Replay tape {tape:032x}: Diverged({:?}) at {}",
+                        divergence.kind, divergence.at
+                    )
                 }
-                crate::tape::Fault::Truncated(at) => format!("Replay tape {tape:032x}: Truncated at {at}"),
-                crate::tape::Fault::Damaged(block) => format!("Replay tape {tape:032x}: Damaged block {block}"),
+                crate::tape::Fault::Truncated(at) => {
+                    format!("Replay tape {tape:032x}: Truncated at {at}")
+                }
+                crate::tape::Fault::Damaged(block) => {
+                    format!("Replay tape {tape:032x}: Damaged block {block}")
+                }
                 crate::tape::Fault::Corrupt => format!("Replay tape {tape:032x}: Corrupt"),
                 fault => format!("Tape {tape:032x}: {fault}"),
             };

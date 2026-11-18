@@ -784,93 +784,97 @@ impl Tape {
 }
 
 fn finish(cell: &'static Cell, expected_generation: u32, seal: Seal<'_>) -> Result<(), Fault> {
-        let mut s = cell.state.lock().unwrap();
-        if s.generation != expected_generation {
-            return Err(Fault::Ended);
+    let mut s = cell.state.lock().unwrap();
+    if s.generation != expected_generation {
+        return Err(Fault::Ended);
+    }
+    let generation = s.generation;
+    let mut live = s.live.take().unwrap();
+    s.generation = generation
+        .checked_add(1)
+        .unwrap_or_else(|| crate::process::stop(b"TapeSlots"));
+    for (i, o) in live.objects.iter().enumerate() {
+        if let (true, Some(inner)) = (o.open_file, o.inner) {
+            s.orphans.insert(handle(generation, i + 1), inner);
         }
-        let generation = s.generation;
-        let mut live = s.live.take().unwrap();
-        s.generation = generation
-            .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"TapeSlots"));
-        for (i, o) in live.objects.iter().enumerate() {
-            if let (true, Some(inner)) = (o.open_file, o.inner) {
-                s.orphans.insert(handle(generation, i + 1), inner);
-            }
-        }
-        drop(s);
-        let deadlock = matches!(seal, Seal::Deadlock).then(|| Ending::deadlock(live.schedule.events));
-        let end = match seal {
-            Seal::Unsealed => None,
-            Seal::Explicit(ending) => Some(ending),
-            Seal::Deadlock => deadlock.as_ref(),
+    }
+    drop(s);
+    let deadlock = matches!(seal, Seal::Deadlock).then(|| Ending::deadlock(live.schedule.events));
+    let end = match seal {
+        Seal::Unsealed => None,
+        Seal::Explicit(ending) => Some(ending),
+        Seal::Deadlock => deadlock.as_ref(),
+    };
+    let mut result = live.fault.map_or(Ok(()), Err);
+    if matches!(seal, Seal::Explicit(_))
+        && result.is_ok()
+        && (!live.waiting.is_empty() || !live.pending.is_empty())
+    {
+        result = Err(Fault::Diverged(Divergence {
+            at: live.replayer.as_ref().map_or(1, |r| r.taken + 1),
+            kind: Mismatch::Schedule,
+        }));
+    }
+    if let Some(rec) = live.recorder.as_mut() {
+        let written = if let Some(e) = end {
+            rec.frame(&Frame::End {
+                gap: live.schedule.events - live.schedule.last,
+                ending: e.clone(),
+            })
+        } else if rec.buffer.is_empty() {
+            Ok(())
+        } else {
+            rec.close(0)
         };
-        let mut result = live.fault.map_or(Ok(()), Err);
-        if matches!(seal, Seal::Explicit(_))
-            && result.is_ok()
-            && (!live.waiting.is_empty() || !live.pending.is_empty())
-        {
-            result = Err(Fault::Diverged(Divergence {
-                at: live.replayer.as_ref().map_or(1, |r| r.taken + 1),
-                kind: Mismatch::Schedule,
-            }));
+        let closed = rec.sink.close();
+        if result.is_ok() {
+            result = written.and(closed).map_err(Fault::Io);
         }
-        if let Some(rec) = live.recorder.as_mut() {
-            let written = if let Some(e) = end {
-                rec.frame(&Frame::End {
-                    gap: live.schedule.events - live.schedule.last,
-                    ending: e.clone(),
-                })
-            } else if rec.buffer.is_empty() {
-                Ok(())
-            } else {
-                rec.close(0)
-            };
-            let closed = rec.sink.close();
-            if result.is_ok() {
-                result = written.and(closed).map_err(Fault::Io);
+    }
+    if let (Some(ending), Ok(()), Some(rep)) = (end, result, live.replayer.as_mut()) {
+        result = match rep.next() {
+            Ok(Frame::End { gap, .. }) if !live.schedule.at(gap) => {
+                Err(rep.diverged(Mismatch::Schedule))
             }
-        }
-        if let (Some(ending), Ok(()), Some(rep)) = (end, result, live.replayer.as_mut()) {
-            result = match rep.next() {
-                Ok(Frame::End { gap, .. }) if !live.schedule.at(gap) => {
-                    Err(rep.diverged(Mismatch::Schedule))
-                }
-                Ok(Frame::End { ending: e, .. }) if e != *ending => {
-                    let kind = if deadlock.is_some() { Mismatch::Schedule } else { Mismatch::Outcome };
-                    Err(rep.diverged(kind))
-                }
-                Ok(Frame::End { .. }) => rep.next().map_or_else(
-                    |f| match f {
-                        Fault::Diverged(Divergence {
-                            kind: Mismatch::Extra,
-                            ..
-                        }) => Ok(()),
-                        f => Err(f),
-                    },
-                    |_| Err(Fault::Corrupt),
-                ),
-                Ok(
-                    Frame::Wake { .. }
-                    | Frame::Cancel { .. }
-                    | Frame::Done { .. }
-                    | Frame::Choose { .. }
-                    | Frame::Wait { .. },
-                ) => Err(rep.diverged(Mismatch::Schedule)),
-                Ok(_) => Err(rep.diverged(if deadlock.is_some() {
+            Ok(Frame::End { ending: e, .. }) if e != *ending => {
+                let kind = if deadlock.is_some() {
                     Mismatch::Schedule
                 } else {
-                    Mismatch::Extra
-                })),
-                Err(f) => Err(f),
-            };
-        }
-        if let Some(rep) = live.replayer.as_mut() {
-            let closed = rep.source.close().map_err(Fault::Io);
-            result = result.and(closed);
-        }
-        FREE.with_borrow_mut(|f| f.push(cell));
-        result
+                    Mismatch::Outcome
+                };
+                Err(rep.diverged(kind))
+            }
+            Ok(Frame::End { .. }) => rep.next().map_or_else(
+                |f| match f {
+                    Fault::Diverged(Divergence {
+                        kind: Mismatch::Extra,
+                        ..
+                    }) => Ok(()),
+                    f => Err(f),
+                },
+                |_| Err(Fault::Corrupt),
+            ),
+            Ok(
+                Frame::Wake { .. }
+                | Frame::Cancel { .. }
+                | Frame::Done { .. }
+                | Frame::Choose { .. }
+                | Frame::Wait { .. },
+            ) => Err(rep.diverged(Mismatch::Schedule)),
+            Ok(_) => Err(rep.diverged(if deadlock.is_some() {
+                Mismatch::Schedule
+            } else {
+                Mismatch::Extra
+            })),
+            Err(f) => Err(f),
+        };
+    }
+    if let Some(rep) = live.replayer.as_mut() {
+        let closed = rep.source.close().map_err(Fault::Io);
+        result = result.and(closed);
+    }
+    FREE.with_borrow_mut(|f| f.push(cell));
+    result
 }
 impl Drop for Tape {
     fn drop(&mut self) {

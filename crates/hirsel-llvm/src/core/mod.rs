@@ -549,6 +549,7 @@ fn emit_module(
         let mut e = FunctionEmitter {
             function: Some(FuncId(i as u32)),
             append_fast,
+            outline_byte_growth: None,
             shadow_callee,
             caller_site: Value::Local(Local::CALLER_SITE),
             debug_location: function_debug.map(|d| d.location(None)),
@@ -1251,6 +1252,7 @@ struct FunctionEmitter<'a> {
     abi: abi::Return,
     has_status: bool,
     append_fast: bool,
+    outline_byte_growth: Option<bool>,
     shadow_callee: Option<FuncId>,
     failures: &'a failure::Failures,
     constants: &'a [Option<u64>],

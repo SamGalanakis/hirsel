@@ -1,9 +1,13 @@
-//! One threshold test and the classic triple per site. Large buffers call the
-//! shared runtime replacement; no accounting/realloc implementation is cloned.
+//! Byte buffers share their cold growth path. Other sequences keep the
+//! inline small-buffer replacement and call the runtime for large buffers.
 use super::memory_layout::*;
 use super::storage::{Payer, zeroext};
 use super::*;
 use hirsel_core_layout::{FieldTy, field_size};
+
+// Large writers repeat the entire allocation and refund path at each site.
+// Keep the inline small-buffer path in functions with fewer growth sites.
+const OUTLINE_BYTE_GROWTH_SITES: usize = 10;
 
 impl FunctionEmitter<'_> {
     #[allow(clippy::too_many_arguments)]
@@ -27,6 +31,24 @@ impl FunctionEmitter<'_> {
         let i64 = Type::I64;
         let stride = field_size(&self.module.types, self.recipes, item).0;
         let dispatch = stride != 0;
+        let outlined = matches!(item.as_ref(), FieldTy::Scalar(Scalar::U8))
+            && *self.outline_byte_growth.get_or_insert_with(|| {
+                self.body
+                    .insts
+                    .iter()
+                    .filter(|inst| {
+                        let Inst::Grow { carrier, .. } = inst else {
+                            return false;
+                        };
+                        let ty = self.body.addresses[carrier.index()].ty;
+                        matches!(
+                            hirsel_core_ir::sequence_edge(&self.module.types, ty),
+                            Some(FieldTy::Seq(item)) if matches!(item.as_ref(), FieldTy::Scalar(Scalar::U8))
+                        )
+                    })
+                    .nth(OUTLINE_BYTE_GROWTH_SITES - 1)
+                    .is_some()
+            });
         let n = self.counter();
         let done = Label::new("grow_done", n);
         let refused_label = Label::new("grow_refused", n);
@@ -34,21 +56,21 @@ impl FunctionEmitter<'_> {
         let native_refused = Label::new("grow_native_refused", n);
         let native = if dispatch {
             let cap = self.load_native(at, 16, Type::I64);
-            let large = self.cmp(
-                Predicate::Uge,
-                &i64,
-                &cap,
-                &int(GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride)),
-            );
-            let native_label = Label::new("grow_native", n);
-            let classic = Label::new("grow_classic", n);
-            self.cond(&large, native_label, classic);
-            self.block(native_label);
-            let kind =
-                match hirsel_core_layout::cleanup_class(&self.module.types, self.recipes, &edge) {
-                    Some(hirsel_core_layout::Cleanup::Terminal) => NATIVE_PLAIN,
-                    _ => NATIVE_GRAPH,
-                };
+            let classic = if outlined {
+                None
+            } else {
+                let large = self.cmp(
+                    Predicate::Uge,
+                    &i64,
+                    &cap,
+                    &int(GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride)),
+                );
+                let native_label = Label::new("grow_native", n);
+                let classic = Label::new("grow_classic", n);
+                self.cond(&large, native_label, classic);
+                self.block(native_label);
+                Some(classic)
+            };
             let over = overflow.map_or(FALSE, |v| {
                 let flag = self.numeric(v);
                 self.cmp(Predicate::Ne, &Type::I8, &flag, &int(0))
@@ -62,22 +84,52 @@ impl FunctionEmitter<'_> {
             self.store_native(&shadow, 8, Type::I64, &length);
             self.store_native(&shadow, 16, Type::I64, &cap);
             let grown = Type::structure([Type::Ptr, Type::I64]);
-            let pair = self.intrinsic(
-                "hirsel_core_grow",
-                grown.clone(),
-                &[
-                    ptr(CONTEXT),
-                    ptr(shadow.clone()),
-                    word(size.clone()),
-                    word(int(align)),
-                    word(charge.clone()),
-                    word(capacity.clone()),
-                    word(moved.clone()),
-                    word(refund.clone()),
-                    zeroext(Type::I1, over),
-                    zeroext(Type::I8, int(kind)),
-                ],
-            );
+            let pair = if outlined {
+                self.call_declared(
+                    "hirsel_core_grow_bytes",
+                    grown.clone(),
+                    &[
+                        ptr(CONTEXT),
+                        ptr(shadow.clone()),
+                        word(size.clone()),
+                        word(charge.clone()),
+                        word(capacity.clone()),
+                        word(moved.clone()),
+                        word(refund.clone()),
+                        zeroext(Type::I1, over),
+                    ],
+                    FnAttrs::default(),
+                    &CallAttrs {
+                        cold: true,
+                        ..CallAttrs::default()
+                    },
+                )
+            } else {
+                let kind = match hirsel_core_layout::cleanup_class(
+                    &self.module.types,
+                    self.recipes,
+                    &edge,
+                ) {
+                    Some(hirsel_core_layout::Cleanup::Terminal) => NATIVE_PLAIN,
+                    _ => NATIVE_GRAPH,
+                };
+                self.intrinsic(
+                    "hirsel_core_grow",
+                    grown.clone(),
+                    &[
+                        ptr(CONTEXT),
+                        ptr(shadow.clone()),
+                        word(size.clone()),
+                        word(int(align)),
+                        word(charge.clone()),
+                        word(capacity.clone()),
+                        word(moved.clone()),
+                        word(refund.clone()),
+                        zeroext(Type::I1, over),
+                        zeroext(Type::I8, int(kind)),
+                    ],
+                )
+            };
             let block = self.extract(&grown, &pair, 0);
             let room = self.extract(&grown, &pair, 1);
             let present = self.cmp(Predicate::Ne, &Type::Ptr, &block, &Value::Null);
@@ -96,6 +148,23 @@ impl FunctionEmitter<'_> {
             self.br(done);
             self.block(native_refused);
             self.runtime_void("llvm.lifetime.end.p0", &[ptr(shadow)]);
+            let Some(classic) = classic else {
+                let status = self.call_declared(
+                    "hirsel_core_allocation_status",
+                    Type::I8,
+                    &[ptr(CONTEXT), ptr(Value::Null)],
+                    FnAttrs::default(),
+                    &CallAttrs {
+                        cold: true,
+                        ..CallAttrs::default()
+                    },
+                );
+                let failed = self.cmp(Predicate::Ne, &Type::I8, &status, &int(0));
+                self.branch_failure(&failed, fail, Some(6));
+                self.br(done);
+                self.block(done);
+                return (block, room);
+            };
             self.br(refused_label);
             self.block(classic);
             Some((block, room))

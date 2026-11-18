@@ -12,6 +12,8 @@ extern Answer BODY(HirselCoreContext*,uint64_t,uint64_t);
 static uint64_t grows;
 HirselCoreGrowth __real_hirsel_core_grow(const HirselCoreContext*,void*,size_t,size_t,uint64_t,uint64_t,size_t,uint64_t,bool,uint8_t);
 HirselCoreGrowth __wrap_hirsel_core_grow(const HirselCoreContext*c,void*p,size_t b,size_t a,uint64_t k,uint64_t n,size_t m,uint64_t r,bool o,uint8_t t) {grows++;return __real_hirsel_core_grow(c,p,b,a,k,n,m,r,o,t);}
+HirselCoreGrowth __real_hirsel_core_grow_bytes(const HirselCoreContext*,void*,size_t,uint64_t,uint64_t,size_t,uint64_t,bool);
+HirselCoreGrowth __wrap_hirsel_core_grow_bytes(const HirselCoreContext*c,void*p,size_t b,uint64_t k,uint64_t n,size_t m,uint64_t r,bool o) {grows++;return __real_hirsel_core_grow_bytes(c,p,b,k,n,m,r,o);}
 static uint64_t count(int fd) {uint64_t v[3];assert(read(fd,v,sizeof(v))==sizeof(v));assert(v[1]==v[2]);return v[0];}
 int main(void) {
  HirselCoreContext *ctx=hirsel_core_context_new(UINT64_MAX);assert(hirsel_core_task_start(ctx).pointer);hirsel_core_task_bind(ctx);

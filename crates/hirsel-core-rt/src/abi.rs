@@ -47,6 +47,8 @@
 //! refund drain is introduced. Emitters call this shared entry from
 //! abi_layout::GROW_CALL_MIN_PAYLOAD_BYTES of old native payload upward;
 //! small buffers retain the classic inline triple. kind is PLAIN or GRAPH.
+//! LLVM byte sequences use the cold `hirsel_core_grow_bytes` entry, which
+//! keeps the same replacement policy on each side of the threshold.
 //!
 //! Contexts are task-owned. Allocation pointers, sizes, alignment and remaining
 //! logical charges are trusted emitter operands. None may be stale. Provider
@@ -1221,6 +1223,42 @@ pub unsafe extern "C" fn hirsel_core_grow(
     match unsafe {
         crate::growth::grow(
             &*context, carrier, bytes, align, charge, capacity, moved, refund, overflow, kind,
+        )
+    } {
+        Ok(pointer) => Growth {
+            pointer: pointer.as_ptr(),
+            available: 0,
+        },
+        Err(capacity) => Growth {
+            pointer: ptr::null_mut(),
+            available: capacity.available,
+        },
+    }
+}
+
+/// The byte-sequence growth path, with the same admission and refund as
+/// `hirsel_core_grow`. Small backings take allocate/copy/free.
+/// # Safety
+/// The consuming byte-sequence carrier is exclusively owned and has nonzero
+/// capacity. The size, charges and moved bytes are the exact FORM operands.
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_grow_bytes(
+    context: *const Context,
+    carrier: *mut u8,
+    bytes: usize,
+    charge: u64,
+    capacity: u64,
+    moved: usize,
+    refund: u64,
+    overflow: bool,
+) -> Growth {
+    // SAFETY: the emitter provides a live context and the exclusive carrier.
+    match unsafe {
+        crate::growth::grow_bytes(
+            &*context, carrier, bytes, charge, capacity, moved, refund, overflow,
         )
     } {
         Ok(pointer) => Growth {

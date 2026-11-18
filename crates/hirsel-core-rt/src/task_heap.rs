@@ -2,6 +2,8 @@
 //! page queues, a class keeps only pages that can supply a block. The task
 //! owns the queue even if it resumes on a different worker.
 use crate::{abi_layout::own_prefix, limit::Payer};
+use std::cell::Cell;
+use std::collections::VecDeque;
 use std::ptr::{self, NonNull};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -9,6 +11,8 @@ const SLAB: usize = 64 * 1024;
 const HEADER_BACK: usize = 4096;
 const GROWTH_RESERVE_FACTOR: usize = 8;
 const MIN_GROWTH_RESERVATION: usize = 256 * 1024;
+// Each cached reservation keeps its header resident even after discarding its payload.
+const EMPTY_DEDICATED_LIMIT: usize = 8;
 const SLAB_BINS: usize = size_bin(SLAB / 2) as usize + 1;
 
 const fn size_bin(stride: usize) -> u8 {
@@ -57,7 +61,8 @@ impl Class {
         own_prefix(self.kind).next_multiple_of(self.align)
     }
     fn fits_slab(self) -> bool {
-        !self.growable && (self.bin as usize) < SLAB_BINS
+        // A dedicated mapping would cost a header page for a sub-page payload.
+        (self.bin as usize) < SLAB_BINS && (!self.growable || self.stride <= page_bytes())
     }
 }
 
@@ -154,7 +159,7 @@ impl Page {
     }
 
     unsafe fn reuse(page: PagePointer, payer: Payer, key: Key) {
-        // SAFETY: the caller owns the heap mutex and an empty page of matching extent.
+        // SAFETY: the caller holds the heap mutex and verified the empty page fits.
         unsafe {
             page.as_ref().payer.get().write(payer);
             page.as_ref().key.get().write(key);
@@ -181,7 +186,7 @@ struct State {
     closed: bool,
     ready: [[Option<PagePointer>; SLAB_BINS]; 3],
     empty_slabs: Vec<PagePointer>,
-    empty_large: Vec<Option<PagePointer>>,
+    empty_dedicated: VecDeque<PagePointer>,
 }
 
 impl Default for State {
@@ -190,7 +195,7 @@ impl Default for State {
             closed: false,
             ready: [[None; SLAB_BINS]; 3],
             empty_slabs: Vec::new(),
-            empty_large: Vec::new(),
+            empty_dedicated: VecDeque::new(),
         }
     }
 }
@@ -253,33 +258,54 @@ impl State {
         if class.fits_slab() {
             return self.empty_slabs.pop();
         }
-        let mut link = self.empty_large.get_mut(usize::from(class.bin))?;
-        while let Some(page) = *link {
-            // SAFETY: the heap owns these empty mappings and their links.
-            let slots = unsafe { &mut *page.as_ref().slots.get() };
-            // Large mappings have this bin's exact stride and a fixed
-            // payload offset. Any mapping with sufficient alignment works.
-            if slots.first.addr().get() & (class.align - 1) == 0 {
-                *link = slots.next.take();
-                return Some(page);
+        // Use the smallest reservation that fits so a later large request can
+        // take a larger one. The last occupant's logical size is irrelevant.
+        let (index, _) = self
+            .empty_dedicated
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &page)| {
+                // SAFETY: the heap owns these empty pages and their mappings.
+                let page = unsafe { page.as_ref() };
+                let payload = unsafe { (*page.slots.get()).first };
+                let extent = page.backing.extent(payload);
+                (extent >= class.stride && payload.addr().get() & (class.align - 1) == 0)
+                    .then_some((index, extent))
+            })
+            .min_by_key(|&(_, extent)| extent)?;
+        let page = self.empty_dedicated.swap_remove_back(index).unwrap();
+        // SAFETY: the page has been taken off the cache and has no live slots.
+        unsafe {
+            let header = page.as_ref();
+            let payload = (*header.slots.get()).first;
+            if header.backing.extend(payload, class.stride) {
+                Some(page)
+            } else {
+                Page::destroy(page);
+                None
             }
-            link = &mut slots.next;
         }
-        None
     }
 
-    fn recycle(&mut self, page: PagePointer, class: Class) {
+    fn recycle(&mut self, page: PagePointer, class: Class) -> Option<PagePointer> {
         if class.fits_slab() {
             self.empty_slabs.push(page);
-        } else {
-            let bin = usize::from(class.bin);
-            if bin >= self.empty_large.len() {
-                self.empty_large.resize(bin + 1, None);
-            }
-            let head = self.empty_large[bin].replace(page);
-            // SAFETY: this one-slot page is empty and never joins the ready list.
-            unsafe { (*page.as_ref().slots.get()).next = head };
+            return None;
         }
+        // SAFETY: the heap owns this empty page. The payload starts on a
+        // native page boundary, after the header and any ownership prefix.
+        let header = unsafe { page.as_ref() };
+        let payload = unsafe { (*header.slots.get()).first };
+        if !header.backing.discard_payload(payload) {
+            return Some(page);
+        }
+        let evicted = if self.empty_dedicated.len() == EMPTY_DEDICATED_LIMIT {
+            self.empty_dedicated.pop_front()
+        } else {
+            None
+        };
+        self.empty_dedicated.push_back(page);
+        evicted
     }
 }
 
@@ -350,20 +376,15 @@ impl Heap {
         state.closed = true;
         state.ready = [[None; SLAB_BINS]; 3];
         let slabs = std::mem::take(&mut state.empty_slabs);
-        let large = std::mem::take(&mut state.empty_large);
+        let dedicated = std::mem::take(&mut state.empty_dedicated);
         drop(state);
         for page in slabs {
             // SAFETY: detached from the cache, with no live slots.
             unsafe { Page::destroy(page) };
         }
-        for mut current in large {
-            while let Some(page) = current {
-                // SAFETY: the detached list contains only empty pages.
-                unsafe {
-                    current = (*page.as_ref().slots.get()).next;
-                    Page::destroy(page);
-                }
-            }
+        for page in dedicated {
+            // SAFETY: detached from the cache, with no live slots.
+            unsafe { Page::destroy(page) };
         }
     }
 }
@@ -421,10 +442,7 @@ pub(crate) unsafe fn try_grow_in_place(
         }
         let key = Page::key(page);
         let class = Class::for_block(bytes, align, kind, true);
-        if !header
-            .backing
-            .extend(payload, key.class.stride, class.stride)
-        {
+        if !header.backing.extend(payload, class.stride) {
             return false;
         }
         header.key.get().write(Key { class, ..key });
@@ -468,7 +486,10 @@ pub(crate) unsafe fn release(payload: NonNull<u8>) {
             if !was_full {
                 state.unlink(page, key.class);
             }
-            state.recycle(page, key.class);
+            if let Some(retired) = state.recycle(page, key.class) {
+                drop(state);
+                Page::destroy(retired);
+            }
         } else {
             #[cfg(feature = "memcheck")]
             allocation_check::link_access(payload, true);
@@ -486,6 +507,9 @@ pub(crate) unsafe fn release(payload: NonNull<u8>) {
 struct Mapping {
     base: NonNull<u8>,
     len: usize,
+    // Dedicated payload bytes made writable. A live slot's sole owner or the
+    // empty cache under the heap mutex can update this extent.
+    writable: Cell<usize>,
 }
 impl Mapping {
     const WRITABLE: libc::c_int = libc::PROT_READ | libc::PROT_WRITE;
@@ -553,7 +577,11 @@ impl Mapping {
             if right != 0 {
                 libc::munmap(base.add(len).as_ptr().cast(), right);
             }
-            let mapping = Self { base, len };
+            let mapping = Self {
+                base,
+                len,
+                writable: Cell::new(bytes),
+            };
             if space != bytes
                 && libc::mprotect(base.as_ptr().cast(), headroom + bytes, Self::WRITABLE) != 0
             {
@@ -563,26 +591,56 @@ impl Mapping {
         }
     }
 
-    fn extend(&self, payload: NonNull<u8>, old_bytes: usize, new_bytes: usize) -> bool {
-        let page = page_bytes();
-        let available = self.len - (payload.addr().get() - self.base.addr().get());
-        let Some(end) = new_bytes.checked_next_multiple_of(page) else {
+    fn extent(&self, payload: NonNull<u8>) -> usize {
+        self.len - (payload.addr().get() - self.base.addr().get())
+    }
+
+    fn extend(&self, payload: NonNull<u8>, bytes: usize) -> bool {
+        let Some(end) = bytes.checked_next_multiple_of(page_bytes()) else {
             return false;
         };
-        if end > available {
+        let start = self.writable.get();
+        if end <= start {
+            return true;
+        }
+        if end > self.extent(payload) {
             return false;
         }
-        let start = old_bytes.next_multiple_of(page);
-        // SAFETY: both offsets are within this reserved mapping. Only the
-        // additional whole pages need their protection changed.
-        end <= start
-            || unsafe {
-                libc::mprotect(
-                    payload.add(start).as_ptr().cast(),
-                    end - start,
-                    Self::WRITABLE,
-                ) == 0
-            }
+        // SAFETY: these whole pages are in this reserved mapping, beyond its
+        // writable extent. Only the live slot owner or empty cache can extend.
+        if unsafe {
+            libc::mprotect(
+                payload.add(start).as_ptr().cast(),
+                end - start,
+                Self::WRITABLE,
+            )
+        } != 0
+        {
+            return false;
+        }
+        self.writable.set(end);
+        true
+    }
+
+    fn discard_payload(&self, payload: NonNull<u8>) -> bool {
+        let bytes = self.writable.get();
+        // SAFETY: only empty dedicated mappings reach here, and this range
+        // consists of whole anonymous payload pages past the mapping header.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::madvise(payload.as_ptr().cast(), bytes, libc::MADV_DONTNEED) == 0
+        }
+        #[cfg(not(target_os = "linux"))]
+        unsafe {
+            libc::mmap(
+                payload.as_ptr().cast(),
+                bytes,
+                Self::WRITABLE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+                -1,
+                0,
+            ) != libc::MAP_FAILED
+        }
     }
 }
 impl Drop for Mapping {

@@ -621,3 +621,91 @@ fn cross_task_slots_return_to_the_allocating_heap_and_survive_its_exit() {
     assert_eq!(unsafe { survivor.pointer().cast::<u64>().read() }, 17);
     drop((survivor, block));
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn repeated_sequence_growth_keeps_peak_rss_bounded() {
+    const CHILD: &str = "REPEATED_SEQUENCE_GROWTH_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = crate::test_process::command()
+            .args([
+                "--exact",
+                "tests::repeated_sequence_growth_keeps_peak_rss_bounded",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child output: {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+
+    let peak_kib = || {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+    };
+    #[repr(C)]
+    struct Carrier {
+        data: *mut u8,
+        len: u64,
+        capacity: u64,
+    }
+
+    const START: usize = 16 * 1024;
+    const END: usize = 128 * 1024;
+    let context = Context::new((START + END) as u64);
+    let document = || {
+        let payer = context.payer();
+        crate::block::admit_storage(payer, Some(START as u64)).unwrap();
+        let heap = context.heap.get_or_init(std::sync::Arc::default);
+        let initial = crate::task_heap::Heap::allocate(heap, payer, START, 8, PLAIN, true);
+        let mut carrier = Carrier {
+            data: initial.as_ptr(),
+            len: 0,
+            capacity: START as u64,
+        };
+        // SAFETY: the fixture owns the sequence backing and passes its exact
+        // charge and layout. The initialized prefix is empty.
+        unsafe {
+            let grown = crate::growth::grow(
+                &context,
+                (&raw mut carrier).cast(),
+                END,
+                8,
+                END as u64,
+                END as u64,
+                0,
+                START as u64,
+                false,
+                PLAIN,
+            )
+            .unwrap();
+            grown.as_ptr().write_bytes(0x5a, END);
+            std::hint::black_box(grown);
+            crate::block::free(grown, END as u64);
+        }
+        assert_eq!(context.available(), (START + END) as u64);
+    };
+    document();
+    let first = peak_kib();
+    for _ in 0..64 {
+        document();
+    }
+    let repeated = peak_kib();
+    assert!(
+        repeated - first <= 16 * END / 1024,
+        "peak RSS grew by {} document sizes",
+        (repeated - first) * 1024 / END
+    );
+}

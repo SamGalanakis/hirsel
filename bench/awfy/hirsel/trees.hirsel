@@ -1,7 +1,7 @@
 // AWFY JavaScript storage.js and towers.js.
-type Tree = Leaf(List[Option[Box[Tree]]]) | Branch(List[Box[Tree]])
+type Tree = Leaf(List[Option[Box[Tree]]]) | Branch(List[Tree])
 
-fn build_tree(depth: u64, mut seed: u32, mut count: u32) -> Result[Box[Tree], Capacity] {
+fn build_tree(depth: u64, mut seed: u32, mut count: u32) -> Result[Tree, Capacity] {
     count += 1
     if depth == 1 {
         let size: u64 = int.widen(next_random(mut seed) % 10 + 1)
@@ -11,15 +11,15 @@ fn build_tree(depth: u64, mut seed: u32, mut count: u32) -> Result[Box[Tree], Ca
             let leaf: Option[Box[Tree]] = None
             result.capacity_only(list.push(mut leaves, take leaf))?
         }
-        return result.capacity_only(box.new(Leaf(take leaves)))
+        return Ok(Leaf(take leaves))
     }
-    let branch_list: Result[List[Box[Tree]], Capacity] = list.with_capacity(4)
+    let branch_list: Result[List[Tree], Capacity] = list.with_capacity(4)
     let mut branches = branch_list?
     for _ in 0u64 .. 4 {
         let child = build_tree(depth - 1, mut seed, mut count)?
         result.capacity_only(list.push(mut branches, take child))?
     }
-    result.capacity_only(box.new(Branch(take branches)))
+    Ok(Branch(take branches))
 }
 
 fn next_random(mut seed: u32) -> u32 {

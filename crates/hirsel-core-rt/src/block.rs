@@ -107,11 +107,17 @@ pub(crate) fn allocate(
     align: usize,
     kind: u8,
 ) -> Result<NonNull<u8>, Capacity> {
+    admit_storage(payer, charge)?;
+    Ok(allocate_admitted(context, payer, bytes, align, kind))
+}
+
+#[inline]
+pub(crate) fn admit_storage(payer: Payer, charge: Option<u64>) -> Result<(), Capacity> {
     payer.admit(charge)?;
     if charge == Some(0) {
         payer.pin_zero();
     }
-    Ok(allocate_admitted(context, payer, bytes, align, kind))
+    Ok(())
 }
 
 #[inline]
@@ -128,6 +134,7 @@ pub(crate) fn allocate_admitted(
         bytes,
         align,
         kind,
+        false,
     )
 }
 /// # Safety

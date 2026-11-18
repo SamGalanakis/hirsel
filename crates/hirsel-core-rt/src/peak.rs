@@ -190,6 +190,18 @@ pub(crate) fn allocated(pointer: *const u8, bytes: usize) {
         }
     });
 }
+pub(crate) fn resized(pointer: *const u8, bytes: usize) {
+    ACTIVE.with(|active| {
+        for o in active.borrow_mut().iter_mut().rev() {
+            if let Some(size) = o.allocations.get_mut(&pointer.addr()) {
+                o.current.retained = o.current.retained - *size as u64 + bytes as u64;
+                *size = bytes;
+                o.sample();
+                break;
+            }
+        }
+    });
+}
 pub(crate) fn deallocated(pointer: *const u8) {
     ACTIVE.with(|active| {
         // A nested host run can release backing allocated by an enclosing run.

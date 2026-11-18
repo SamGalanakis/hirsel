@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 const SLAB: usize = 64 * 1024;
 const HEADER_BACK: usize = 4096;
+const GROWTH_RESERVE_FACTOR: usize = 8;
+const MIN_GROWTH_RESERVATION: usize = 256 * 1024;
 const SLAB_BINS: usize = size_bin(SLAB / 2) as usize + 1;
 
 const fn size_bin(stride: usize) -> u8 {
@@ -26,9 +28,10 @@ struct Class {
     align: usize,
     kind: u8,
     bin: u8,
+    growable: bool,
 }
 impl Class {
-    fn for_block(bytes: usize, align: usize, kind: u8) -> Self {
+    fn for_block(bytes: usize, align: usize, kind: u8, growable: bool) -> Self {
         let align = align.max(8);
         let offset = own_prefix(kind)
             .checked_next_multiple_of(align)
@@ -47,16 +50,14 @@ impl Class {
             align,
             kind,
             bin: size_bin(stride),
+            growable,
         }
     }
     fn offset(self) -> usize {
         own_prefix(self.kind).next_multiple_of(self.align)
     }
     fn fits_slab(self) -> bool {
-        (self.bin as usize) < SLAB_BINS
-    }
-    fn large_bin(self) -> usize {
-        usize::from(self.bin) - SLAB_BINS
+        !self.growable && (self.bin as usize) < SLAB_BINS
     }
 }
 
@@ -82,6 +83,8 @@ struct Slots {
     bump: usize,
     live: usize,
     free: *mut u8,
+    #[cfg(feature = "memcheck")]
+    checked_bytes: usize,
     previous: Option<PagePointer>,
     next: Option<PagePointer>,
 }
@@ -89,7 +92,8 @@ struct Slots {
 impl Page {
     // SAFETY for all page operations: the mapping and a live block or the
     // heap retain the page. Slot and slot-link changes own the heap mutex;
-    // key and payer only change when the page has no live blocks.
+    // payer and key are installed on empty pages. A one-slot page can
+    // also change class while its sole owner grows the live slot.
     unsafe fn key(page: PagePointer) -> Key {
         unsafe { *page.as_ref().key.get() }
     }
@@ -97,11 +101,15 @@ impl Page {
     fn new(heap: &Arc<Heap>, payer: Payer, key: Key) -> PagePointer {
         let class = key.class;
         let (backing, header) = if class.fits_slab() {
-            let (map, start) = Mapping::aligned(SLAB, SLAB, 0);
+            let (map, start) = Mapping::aligned(SLAB, SLAB, 0, false);
             (map, start)
         } else {
-            let (map, payload) =
-                Mapping::aligned(class.stride, class.align.max(SLAB), page_bytes());
+            let (map, payload) = Mapping::aligned(
+                class.stride,
+                class.align.max(SLAB),
+                page_bytes(),
+                class.growable,
+            );
             // SAFETY: this mapping reserves a full native page before payload.
             (map, unsafe { payload.sub(HEADER_BACK) })
         };
@@ -138,6 +146,8 @@ impl Page {
             bump: 0,
             live: 0,
             free: ptr::null_mut(),
+            #[cfg(feature = "memcheck")]
+            checked_bytes: 0,
             previous: None,
             next: None,
         }
@@ -243,7 +253,7 @@ impl State {
         if class.fits_slab() {
             return self.empty_slabs.pop();
         }
-        let mut link = self.empty_large.get_mut(class.large_bin())?;
+        let mut link = self.empty_large.get_mut(usize::from(class.bin))?;
         while let Some(page) = *link {
             // SAFETY: the heap owns these empty mappings and their links.
             let slots = unsafe { &mut *page.as_ref().slots.get() };
@@ -262,7 +272,7 @@ impl State {
         if class.fits_slab() {
             self.empty_slabs.push(page);
         } else {
-            let bin = class.large_bin();
+            let bin = usize::from(class.bin);
             if bin >= self.empty_large.len() {
                 self.empty_large.resize(bin + 1, None);
             }
@@ -280,8 +290,9 @@ impl Heap {
         bytes: usize,
         align: usize,
         kind: u8,
+        growable: bool,
     ) -> NonNull<u8> {
-        let class = Class::for_block(bytes, align, kind);
+        let class = Class::for_block(bytes, align, kind, growable);
         let key = Key {
             payer: payer.record_pointer().addr(),
             class,
@@ -322,7 +333,10 @@ impl Heap {
                 state.link(page, class);
             }
             #[cfg(feature = "memcheck")]
-            allocation_check::allocated(pointer, bytes, kind);
+            {
+                slots.checked_bytes = bytes;
+                allocation_check::allocated(pointer, bytes, kind);
+            }
             #[cfg(any(test, feature = "charge-observation"))]
             crate::peak::allocated(pointer.as_ptr(), class.stride);
             pointer
@@ -383,6 +397,50 @@ pub(crate) unsafe fn kind(payload: NonNull<u8>) -> u8 {
 }
 
 /// # Safety
+/// The caller owns the live buffer exclusively and has already admitted the
+/// full new charge. The layout describes the same element type and kind.
+pub(crate) unsafe fn try_grow_in_place(
+    heap: &Arc<Heap>,
+    payload: NonNull<u8>,
+    payer: Payer,
+    bytes: usize,
+    align: usize,
+    kind: u8,
+) -> bool {
+    // Dedicated one-slot pages have slab-aligned payloads. A live page
+    // stays off the heap's lists, so its sole owner can extend it directly.
+    if payload.addr().get() & (SLAB - 1) != 0 {
+        return false;
+    }
+    // SAFETY: the unique live slot pins the header, mapping and payer.
+    unsafe {
+        let page = page_of(payload);
+        let header = page.as_ref();
+        if !Arc::ptr_eq(heap, &header.heap) || *header.payer.get() != payer {
+            return false;
+        }
+        let key = Page::key(page);
+        let class = Class::for_block(bytes, align, kind, true);
+        if !header
+            .backing
+            .extend(payload, key.class.stride, class.stride)
+        {
+            return false;
+        }
+        header.key.get().write(Key { class, ..key });
+        #[cfg(feature = "memcheck")]
+        {
+            let slots = &mut *header.slots.get();
+            allocation_check::resized(payload, slots.checked_bytes, bytes, kind);
+            slots.checked_bytes = bytes;
+        }
+        #[cfg(any(test, feature = "charge-observation"))]
+        crate::peak::resized(payload.as_ptr(), class.stride);
+        true
+    }
+}
+
+/// # Safety
 /// The caller transfers the unique, cleaned slot after its logical refund.
 pub(crate) unsafe fn release(payload: NonNull<u8>) {
     // SAFETY: the slot pins its header and the page's heap while live.
@@ -430,35 +488,57 @@ struct Mapping {
     len: usize,
 }
 impl Mapping {
-    fn aligned(bytes: usize, align: usize, headroom: usize) -> (Self, NonNull<u8>) {
-        let page = page_bytes();
+    const WRITABLE: libc::c_int = libc::PROT_READ | libc::PROT_WRITE;
+
+    fn aligned(bytes: usize, align: usize, headroom: usize, reserve: bool) -> (Self, NonNull<u8>) {
         let bytes = bytes
-            .checked_next_multiple_of(page)
+            .checked_next_multiple_of(page_bytes())
             .unwrap_or_else(host_memory);
-        let len = bytes.checked_add(headroom).unwrap_or_else(host_memory);
-        let extra = if align > page { align } else { 0 };
-        let total = len.checked_add(extra).unwrap_or_else(host_memory);
+        if reserve
+            && let Some(space) = bytes.checked_mul(GROWTH_RESERVE_FACTOR)
+            && let Some(mapping) =
+                Self::try_aligned(bytes, space.max(MIN_GROWTH_RESERVATION), align, headroom)
+        {
+            return mapping;
+        }
+        Self::try_aligned(bytes, bytes, align, headroom).unwrap_or_else(host_memory)
+    }
+
+    fn try_aligned(
+        bytes: usize,
+        space: usize,
+        align: usize,
+        headroom: usize,
+    ) -> Option<(Self, NonNull<u8>)> {
+        let len = space.checked_add(headroom)?;
+        let extra = if align > page_bytes() { align } else { 0 };
+        let total = len.checked_add(extra)?;
         if total > isize::MAX as usize {
-            host_memory::<()>();
+            return None;
         }
         #[cfg(test)]
         MAP_REQUESTS.with(|count| count.set(count.get() + 1));
-        // SAFETY: new anonymous private writable mapping; no address is replaced.
+        let protection = if space == bytes {
+            Self::WRITABLE
+        } else {
+            libc::PROT_NONE
+        };
+        // SAFETY: reserve an anonymous private mapping without replacing any address.
         let raw = unsafe {
             libc::mmap(
                 ptr::null_mut(),
                 total,
-                libc::PROT_READ | libc::PROT_WRITE,
+                protection,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
                 -1,
                 0,
             )
         };
         if raw == libc::MAP_FAILED {
-            host_memory::<()>();
+            return None;
         }
-        // SAFETY: a successful NULL-hint mapping is non-null. Trimming aligns
-        // the payload and leaves only whole switched-out OS pages unassigned.
+        // SAFETY: a successful NULL-hint mapping is non-null. Trim to align the
+        // payload, then make only the initial extent and header writable.
         unsafe {
             let raw = NonNull::new_unchecked(raw.cast::<u8>());
             let payload = raw.add(headroom).map_addr(|address| {
@@ -473,8 +553,36 @@ impl Mapping {
             if right != 0 {
                 libc::munmap(base.add(len).as_ptr().cast(), right);
             }
-            (Self { base, len }, payload)
+            let mapping = Self { base, len };
+            if space != bytes
+                && libc::mprotect(base.as_ptr().cast(), headroom + bytes, Self::WRITABLE) != 0
+            {
+                return None;
+            }
+            Some((mapping, payload))
         }
+    }
+
+    fn extend(&self, payload: NonNull<u8>, old_bytes: usize, new_bytes: usize) -> bool {
+        let page = page_bytes();
+        let available = self.len - (payload.addr().get() - self.base.addr().get());
+        let Some(end) = new_bytes.checked_next_multiple_of(page) else {
+            return false;
+        };
+        if end > available {
+            return false;
+        }
+        let start = old_bytes.next_multiple_of(page);
+        // SAFETY: both offsets are within this reserved mapping. Only the
+        // additional whole pages need their protection changed.
+        end <= start
+            || unsafe {
+                libc::mprotect(
+                    payload.add(start).as_ptr().cast(),
+                    end - start,
+                    Self::WRITABLE,
+                ) == 0
+            }
     }
 }
 impl Drop for Mapping {
@@ -522,6 +630,21 @@ mod allocation_check {
             0,
             MALLOCLIKE_BLOCK,
             [start(pointer, kind), bytes.max(1) + own_prefix(kind), 0, 0],
+        );
+    }
+
+    pub(super) fn resized(pointer: NonNull<u8>, old: usize, new: usize, kind: u8) {
+        const RESIZEINPLACE_BLOCK: u64 = 0x130b;
+        let prefix = own_prefix(kind);
+        valgrind_request(
+            0,
+            RESIZEINPLACE_BLOCK,
+            [
+                start(pointer, kind),
+                old.max(1) + prefix,
+                new.max(1) + prefix,
+                0,
+            ],
         );
     }
 

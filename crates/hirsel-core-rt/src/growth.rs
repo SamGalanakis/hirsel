@@ -1,6 +1,6 @@
 //! One native growth boundary shared by all emitted sequence sites. Physical
 //! reuse changes neither full-new admission nor install-before-original-refund.
-use crate::{Capacity, Context, block};
+use crate::{Capacity, Context, block, task_heap};
 use std::ptr::NonNull;
 
 /// # Safety
@@ -22,14 +22,17 @@ pub(crate) unsafe fn grow(
 ) -> Result<NonNull<u8>, Capacity> {
     // SAFETY: the consuming carrier owns its data pointer and the live slot.
     let old = unsafe { NonNull::new_unchecked(carrier.cast::<*mut u8>().read()) };
-    let replacement = block::allocate(
-        context,
-        context.payer(),
-        (!overflow).then_some(charge),
-        bytes,
-        align,
-        kind,
-    )?;
+    let payer = context.payer();
+    block::admit_storage(payer, (!overflow).then_some(charge))?;
+    // SAFETY: the caller owns the only live carrier. In-place storage remains
+    // billed to the same payer, with the old charge refunded after installation.
+    let heap = context.heap.get_or_init(std::sync::Arc::default);
+    if unsafe { task_heap::try_grow_in_place(heap, old, payer, bytes, align, kind) } {
+        unsafe { carrier.add(16).cast::<u64>().write(capacity) };
+        payer.settle_in(context, refund);
+        return Ok(old);
+    }
+    let replacement = task_heap::Heap::allocate(heap, payer, bytes, align, kind, true);
     // SAFETY: the new slot is disjoint and large enough for the retained
     // elements. Install the carrier before publishing the old payer's refund.
     unsafe {

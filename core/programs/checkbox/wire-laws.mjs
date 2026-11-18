@@ -189,7 +189,9 @@ async function principal_limit_1013() {
     client.socket.close();
   }
   const refused = await raw(none, []);
-  assert.deepEqual(await refused.next(), {tag: 'Close', value: 1013});
+  const answer = await refused.next();
+  assert.equal(answer.tag, 'Close');
+  assert.equal(answer.value, 1013);
 }
 
 async function call_rate_overloaded() {

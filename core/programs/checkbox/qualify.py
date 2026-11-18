@@ -27,7 +27,23 @@ SERVER_EDITS = {
     "no_publish_to_others": ("runner", "        let has_content = next.reset",
                              "        if list.len(rows) == 0u64 && list.len(next.complete) == 0u64 { next.rows = list.new() }\n"
                              "        let has_content = next.reset"),
+    "no_ip_session_limit": ("ingress", "if s.free == 0u64 { RejectedPolicy } else {",
+                            "if false { RejectedPolicy } else {"),
+    "no_principal_rate": ("ingress", "if s.mint_count >= c.mint_burst { false } else {", "if false { false } else {"),
+    "no_call_rate": ("ingress", "take_credit(mut b, now, c.call_burst, c.call_period_ns)",
+                     "true"),
+}
 
+
+MUTANT_CASES = {
+    "bit_order_msb": "bit_pixels",
+    "unchecked_u32_arg": "toggle_smoke",
+    "range_in_board": "toggle_no_rerun",
+    "no_publish_to_others": "browser_ticks",
+    "no_ip_session_limit": "session_limit_503",
+    "no_principal_rate": "principal_limit_1013",
+    "no_call_rate": "call_rate_overloaded",
+    **dict.fromkeys(SDK_MUTANTS, "converge"),
 }
 
 
@@ -58,6 +74,8 @@ def scratch_sources(work, case, mutant):
     if mutant in SERVER_EDITS:
         module, before, after = SERVER_EDITS[mutant]
         changed[module] = replace(changed.get(module, paths[module].read_text()), before, after)
+        if mutant == "no_ip_session_limit":
+            changed[module] = replace(changed[module], "s.free -= 1u64", "s.free = int.saturating_sub(s.free, 1u64)")
     for module, text in changed.items():
         paths[module] = work / (module + ".hirsel")
         paths[module].write_text(text)
@@ -99,15 +117,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hirsel", type=Path, required=True)
     parser.add_argument("--scratch", type=Path)
-    parser.add_argument("--mutant", choices=sorted(SDK_MUTANTS | SERVER_EDITS.keys()))
+    parser.add_argument("--mutant", choices=sorted(MUTANT_CASES))
     parser.add_argument("--clients", default=64, type=int)
     parser.add_argument("--toggles", default=1000, type=int)
     parser.add_argument("--pace", default=10, type=float)
     parser.add_argument("--seed", default=14059, type=int)
     parser.add_argument("case", choices=sorted(BROWSER | WIRE | {"converge"}))
     args = parser.parse_args()
-    if args.mutant in SDK_MUTANTS and args.case != "converge":
-        parser.error(f"{args.mutant} requires converge")
+    if args.mutant and args.case != MUTANT_CASES[args.mutant]:
+        parser.error(f"{args.mutant} requires {MUTANT_CASES[args.mutant]}")
     with TemporaryDirectory(prefix="checkbox-", dir=args.scratch) as directory:
         return qualify(args.hirsel.resolve(), Path(directory), args.case, args.mutant,
                        args.clients, args.toggles, args.pace, args.seed)

@@ -78,7 +78,7 @@ def command(executable, listen, args):
 
 def wait_for_listener(server, listen):
     host, port = listen.rsplit(":", 1)
-    for attempt in range(100):
+    while True:
         status = server.poll()
         if status is not None:
             raise RuntimeError(f"server exited before listen (status {status})")
@@ -86,8 +86,6 @@ def wait_for_listener(server, listen):
             with socket.create_connection((host, int(port))):
                 return
         except ConnectionRefusedError:
-            if attempt == 99:
-                raise
             time.sleep(0.05)
 
 

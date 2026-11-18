@@ -1,6 +1,7 @@
 //! Guarded task stacks. Both native emitters and Rust probe large frames.
 //! Non-suspending foreign OS calls run on a separate guarded host stack.
 //! Language code never runs on the launcher's stack.
+use crate::retention::{RETENTION, Retained};
 use std::{cell::Cell, ptr::NonNull, sync::OnceLock};
 const USABLE: usize = 64 << 10;
 thread_local! {
@@ -57,11 +58,8 @@ pub(crate) struct Stack {
 }
 impl Stack {
     pub(crate) fn new() -> Self {
-        Self::with_bytes(USABLE)
-    }
-    pub(crate) fn with_bytes(bytes: usize) -> Self {
         let page_bytes = page();
-        let len = page_bytes + bytes;
+        let len = page_bytes + USABLE;
         // SAFETY: fresh inaccessible private mapping, then enable only its usable pages.
         unsafe {
             let raw = libc::mmap(
@@ -77,7 +75,7 @@ impl Stack {
             }
             if libc::mprotect(
                 raw.cast::<u8>().add(page_bytes).cast(),
-                bytes,
+                USABLE,
                 libc::PROT_READ | libc::PROT_WRITE,
             ) != 0
             {
@@ -125,6 +123,23 @@ impl Drop for Stack {
         }
     }
 }
+#[derive(Default)]
+pub(crate) struct Stock {
+    idle: Vec<(Stack, Retained<'static>)>,
+}
+
+impl Stock {
+    pub(crate) fn take(&mut self) -> Stack {
+        self.idle.pop().map_or_else(Stack::new, |(stack, _)| stack)
+    }
+
+    pub(crate) fn recycle(&mut self, stack: Stack) {
+        if let Some(held) = RETENTION.retain(stack.len) {
+            self.idle.push((stack, held));
+        }
+    }
+}
+
 struct Alternate {
     stack: Stack,
     previous: libc::stack_t,

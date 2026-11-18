@@ -4,7 +4,7 @@ use crate::{
     Capacity, Context, abi_tasks as abi,
     block::Block,
     causes::{self, Cause, Causes, Cell},
-    fiber::Stack,
+    fiber::{Stack, Stock},
 };
 use hirsel_core_layout::charge;
 use std::{
@@ -148,7 +148,7 @@ pub struct Task {
     state: State,
     id: u64,
     group: Option<crate::tape::schedule::Group>,
-    stack: Stack,
+    stack: Option<Stack>,
     sp: *mut u8,
     body: Body,
     input: Storage,
@@ -207,10 +207,7 @@ impl Parked {
 struct Scheduler {
     deferred: *mut Task,
     deferred_tail: *mut Task,
-    // The guarded foreign-call stack is needed only when a run issues a host
-    // operation. Keeping it lazy avoids committing its startup pages for the
-    // ordinary, host-free path.
-    host: Option<Stack>,
+    stacks: Stock,
     idle: *mut u8,
     head: *mut Task,
     tail: *mut Task,
@@ -231,7 +228,6 @@ struct Scheduler {
     model: Option<hirsel_core_net::model::Model>,
     parked: Parked,
 }
-const HOST_STACK_BYTES: usize = 64 << 10;
 impl Task {
     /// The flag foreign refund publication sets for this task (see `arc_gate`).
     #[inline(always)]
@@ -243,6 +239,12 @@ impl Task {
         }
     }
 }
+#[cfg(test)]
+pub(crate) unsafe fn task_stack(task: *const Task) -> Option<usize> {
+    // SAFETY: the test owns the live task handle and the task is off-CPU.
+    unsafe { (*task).stack.as_ref().map(|stack| stack.bounds().0) }
+}
+
 impl Scheduler {
     fn id(&mut self) -> u64 {
         let next = self.next;
@@ -1736,7 +1738,7 @@ pub unsafe fn run_root(
     let mut run = Scheduler {
         deferred: ptr::null_mut(),
         deferred_tail: ptr::null_mut(),
-        host: None,
+        stacks: Stock::default(),
         idle: ptr::null_mut(),
         head: ptr::null_mut(),
         tail: ptr::null_mut(),
@@ -1780,7 +1782,7 @@ pub unsafe fn run_root(
         state: State::Ready,
         id: 0,
         group: None,
-        stack: Stack::new(),
+        stack: Some(run.stacks.take()),
         sp: ptr::null_mut(),
         body,
         input: Storage::new(input_bytes, 16),
@@ -1809,6 +1811,8 @@ pub unsafe fn run_root(
         (*context).events = root_pointer.expose_provenance();
         root.sp = root
             .stack
+            .as_ref()
+            .unwrap()
             .prepare(start, root_pointer.cast(), ptr::null_mut());
         run.all = root_pointer;
         run.ready(root_pointer);
@@ -1832,13 +1836,17 @@ pub unsafe fn run_root(
             CURRENT.set(task);
             (*task).state = State::Running;
             abi::task_resume((*task).context);
-            crate::fiber::guard((*task).stack.bounds());
+            crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
             hirsel_stack::switch(&mut run.idle, (*task).sp);
             crate::steps::settle(&mut *(*task).context);
             crate::fiber::guard((0, 0));
             CURRENT.set(previous);
-            if (*task).state == State::Provider && run.wake_operation(task, Wake::Parked) {
-                direct = task;
+            match (*task).state {
+                // Only the scheduler can move an ended stack to stock. The body
+                // exits after its last provider call has delivered or aborted.
+                State::Ended => run.stacks.recycle((*task).stack.take().unwrap()),
+                State::Provider if run.wake_operation(task, Wake::Parked) => direct = task,
+                _ => {}
             }
         }
         if root.failed == 0 {
@@ -1901,7 +1909,7 @@ unsafe fn spawn_in(
             state: State::Ready,
             id,
             group: group.map(|group| group.child()),
-            stack: Stack::new(),
+            stack: Some((*run).stacks.take()),
             sp: ptr::null_mut(),
             body,
             input: Storage::new(layout.input.bytes, layout.input.align),
@@ -1928,7 +1936,11 @@ unsafe fn spawn_in(
             0
         };
         ptr::copy_nonoverlapping(input, (*task).input.as_ptr(), layout.input.bytes);
-        (*task).sp = (*task).stack.prepare(start, task.cast(), ptr::null_mut());
+        (*task).sp = (*task)
+            .stack
+            .as_ref()
+            .unwrap()
+            .prepare(start, task.cast(), ptr::null_mut());
         (*run).all = task;
         (*run).ready(task);
         event(SPAWN, (*task).id, bytes);
@@ -2209,13 +2221,12 @@ pub(crate) unsafe fn host_operation(
             saved: ptr::null_mut(),
             result: std::mem::MaybeUninit::uninit(),
         };
-        let host = (*run)
-            .host
-            .get_or_insert_with(|| Stack::with_bytes(HOST_STACK_BYTES));
+        let host = (*run).stacks.take();
         let target = host.prepare(invoke, (&mut call as *mut Call).cast(), ptr::null_mut());
         crate::fiber::guard(host.bounds());
         hirsel_stack::switch(&mut call.saved, target);
-        crate::fiber::guard((*task).stack.bounds());
+        crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
+        (*run).stacks.recycle(host);
         call.result.assume_init()
     }
 }
@@ -2283,7 +2294,7 @@ mod ready_routing_laws {
             let mut run = Scheduler {
                 deferred: ptr::null_mut(),
                 deferred_tail: ptr::null_mut(),
-                host: None,
+                stacks: Stock::default(),
                 idle: ptr::null_mut(),
                 head: ptr::null_mut(),
                 tail: ptr::null_mut(),
@@ -2336,7 +2347,7 @@ mod ready_routing_laws {
                         state: State::Provider,
                         id: i as u64,
                         group: None,
-                        stack: Stack::new(),
+                        stack: Some(Stack::new()),
                         sp: ptr::null_mut(),
                         body: no_body,
                         input: Storage::new(0, 1),

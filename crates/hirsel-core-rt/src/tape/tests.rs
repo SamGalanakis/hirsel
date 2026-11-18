@@ -5,6 +5,7 @@
 //! results from sections 5 and 8.
 use super::*;
 use crate::os::OsProvider;
+use std::collections::VecDeque;
 use std::{cell::Cell as Shared, io::Read};
 
 /// The code revision the tests open tapes as.

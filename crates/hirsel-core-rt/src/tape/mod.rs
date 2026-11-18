@@ -23,13 +23,12 @@ mod schedule_cases;
 #[cfg(test)]
 mod tests;
 
-use crate::provider::*;
-use format::*;
-use std::{
-    collections::{BTreeMap, VecDeque},
-    ptr,
-    sync::Mutex,
+use crate::{
+    provider::*,
+    retention::{RETENTION, Retained},
 };
+use format::*;
+use std::{collections::BTreeMap, ptr, sync::Mutex};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mode {
@@ -181,14 +180,17 @@ struct Recorder {
     tape_id: [u8; 16],
     encoder: Encoder,
     buffer: Vec<u8>,
+    retained_buffer: Option<Retained<'static>>,
     seq: u64,
 }
 
 struct Replayer {
     source: ProviderFile,
     blocks: Blocks,
+    retained_block: Option<Retained<'static>>,
     decoder: Decoder,
-    frames: VecDeque<Frame>,
+    frames: std::vec::IntoIter<Frame>,
+    lookahead: Option<Frame>,
     /// Frames taken so far: the position the next divergence names.
     taken: u64,
 }
@@ -406,11 +408,13 @@ impl Recorder {
     /// 64 KiB between frames, never inside one.
     fn frame(&mut self, f: &Frame) -> Result<(), IoError> {
         let (head, rest) = self.encoder.frame(f);
+        self.retained_buffer = None;
         self.buffer.extend_from_slice(&head);
         for d in rest {
             if self.buffer.len() >= CLOSE_AT {
                 self.close(0)?;
             }
+            self.retained_buffer = None;
             self.buffer.extend_from_slice(&d);
         }
         if self.buffer.len() >= CLOSE_AT {
@@ -422,36 +426,54 @@ impl Recorder {
         let b = block(&self.tape_id, flags, self.seq, &self.buffer);
         self.seq += 1;
         self.buffer.clear();
+        if self.retained_buffer.is_none() && self.buffer.capacity() != 0 {
+            self.retained_buffer = RETENTION.retain(self.buffer.capacity());
+            if self.retained_buffer.is_none() {
+                self.buffer = Vec::new();
+            }
+        }
         self.encoder.new_block();
         self.sink.write(&b)
     }
 }
 
 impl Replayer {
-    fn peek(&mut self) -> Result<&Frame, Fault> {
-        if self.frames.is_empty() {
-            let frame = self.next()?;
-            self.taken -= 1;
-            self.frames.push_front(frame);
+    fn keep_block_storage(&mut self) {
+        self.retained_block = RETENTION.retain(self.blocks.buffer_capacity());
+        if self.retained_block.is_none() {
+            self.blocks.discard_buffer();
         }
-        Ok(self.frames.front().unwrap())
+    }
+
+    fn peek(&mut self) -> Result<&Frame, Fault> {
+        if self.lookahead.is_none() {
+            self.lookahead = Some(self.next()?);
+            self.taken -= 1;
+        }
+        Ok(self.lookahead.as_ref().unwrap())
     }
     fn next(&mut self) -> Result<Frame, Fault> {
         loop {
-            if let Some(f) = self.frames.pop_front() {
+            if let Some(f) = self.lookahead.take().or_else(|| self.frames.next()) {
+                if self.frames.as_slice().is_empty() {
+                    self.frames = Default::default();
+                }
                 self.taken += 1;
                 return Ok(f);
             }
             let at = self.taken + 1;
-            match self.blocks.next(|bytes| self.source.read(bytes)) {
-                Err(ReadError::Format(s)) => return Err(Fault::stopped(s, at)),
-                Err(ReadError::Source(e)) => return Err(Fault::Io(e)),
-                Ok(None) => return Err(self.diverged_next(Mismatch::Extra)),
-                Ok(Some((flags, payload))) => {
-                    let frames = self.decoder.block(payload, flags & END != 0)?;
-                    self.frames.extend(frames);
-                }
-            }
+            self.retained_block = None;
+            let decoded = match self.blocks.next(|bytes| self.source.read(bytes)) {
+                Err(ReadError::Format(s)) => Err(Fault::stopped(s, at)),
+                Err(ReadError::Source(e)) => Err(Fault::Io(e)),
+                Ok(None) => Err(self.diverged_next(Mismatch::Extra)),
+                Ok(Some((flags, payload))) => self
+                    .decoder
+                    .block(payload, flags & END != 0)
+                    .map_err(Fault::from),
+            };
+            self.keep_block_storage();
+            self.frames = decoded?.into_iter();
         }
     }
     /// A divergence at the frame `next` returned last.
@@ -547,6 +569,7 @@ impl Tape {
                     tape_id: header.tape_id,
                     encoder: Encoder::default(),
                     buffer,
+                    retained_buffer: None,
                     seq: 0,
                 };
                 recorder.close(0).map_err(OpenError::Io)?;
@@ -598,12 +621,18 @@ impl Tape {
                     objects: vec![],
                     clocks: BTreeMap::new(),
                     recorder: None,
-                    replayer: Some(Replayer {
-                        source,
-                        blocks,
-                        decoder: Decoder::default(),
-                        frames: VecDeque::new(),
-                        taken: 0,
+                    replayer: Some({
+                        let mut replay = Replayer {
+                            source,
+                            blocks,
+                            retained_block: None,
+                            decoder: Decoder::default(),
+                            frames: Default::default(),
+                            lookahead: None,
+                            taken: 0,
+                        };
+                        replay.keep_block_storage();
+                        replay
                     }),
                 };
                 (live, stored.arg)

@@ -367,6 +367,16 @@ impl Blocks {
         ))
     }
 
+    /// Allocation that can be retained for the next block after its payload is consumed.
+    pub fn buffer_capacity(&self) -> usize {
+        self.bytes.capacity()
+    }
+
+    /// Release storage between blocks without changing the read position.
+    pub fn discard_buffer(&mut self) {
+        self.bytes = Vec::new();
+    }
+
     /// Read the next checked block, or confirm EOF after END.
     pub fn next<E>(
         &mut self,

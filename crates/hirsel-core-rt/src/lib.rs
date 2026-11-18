@@ -31,6 +31,7 @@ pub mod peak;
 pub mod process;
 pub mod provider;
 pub mod region;
+mod retention;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
 pub mod steps;

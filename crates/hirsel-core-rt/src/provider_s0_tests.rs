@@ -47,6 +47,7 @@ struct Rec {
     /// The program-visible result of each job: (site, outcome, then
     /// check_cancel's answer right after the operation).
     results: Vec<(u64, Outcome, u8)>,
+    stacks: Vec<Option<usize>>,
 }
 const ABORTED: u64 = 0xab07;
 const TIMED_OUT: u64 = 0x7173;
@@ -86,6 +87,7 @@ impl Rec {
             issue,
             resume,
             results: vec![],
+            stacks: vec![],
         }
     }
     fn note(&mut self, cb: Cb, request: *mut Request, token: u64) -> usize {
@@ -401,6 +403,52 @@ fn s0_c_pending_then_cancel_aborts_and_the_request_stays() {
     assert_eq!(rec.count(1, Cb::Resume), 0);
     assert_eq!(rec.count(1, Cb::Deliver), 1);
 }
+/// End a sibling while the issued operation is parked, then request the
+/// provider task's end. Only its abort followed by END can release its stack.
+#[test]
+fn s0_pending_frame_keeps_its_stack_until_abort() {
+    fn issue(_: &mut Rec, site: u64, _: u64, _: usize) -> Step {
+        if site == 1 { pending(0) } else { done(site) }
+    }
+    unsafe fn body(context: *mut Context, rec: *mut Rec) {
+        // SAFETY: the root owns each child handle and pins the recording provider.
+        unsafe {
+            let waiting = spawn(context, rec, 1, READ);
+            let first = task_stack(waiting);
+            yield_turn(context);
+            let parked = task_stack(waiting);
+            (*rec).stacks.extend([first, parked]);
+            if parked.is_none() {
+                // Stop the control before it could resume on the released stack.
+                return;
+            }
+            let sibling = spawn(context, rec, 2, READ);
+            (*rec).stacks.push(task_stack(sibling));
+            assert!(!join(context, sibling));
+            hirsel_core_cancel(context, waiting);
+            assert!(join(context, waiting));
+            let after_abort = spawn(context, rec, 3, READ);
+            (*rec).stacks.push(task_stack(after_abort));
+            assert!(!join(context, after_abort));
+        }
+    }
+    let mut rec = Rec::new(ready, issue, never);
+    run(&mut rec, false, body);
+    let first = rec.stacks[0].unwrap();
+    assert_eq!(
+        rec.stacks[1],
+        Some(first),
+        "the pending frame owns its stack"
+    );
+    assert_ne!(
+        rec.stacks[2],
+        Some(first),
+        "the sibling cannot take that stack"
+    );
+    assert_eq!(rec.stacks[3], Some(first), "END makes the stack reusable");
+    assert_eq!(rec.result(1).0.value, ABORTED);
+}
+
 fn pending_1ms(_: &mut Rec, _: u64, _: u64, _: usize) -> Step {
     pending(crate::os::monotonic_ns() + 1_000_000)
 }

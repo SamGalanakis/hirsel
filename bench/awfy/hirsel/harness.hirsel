@@ -3,6 +3,22 @@ pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
     let Some(name) = args.get(argv, 0) else {
         return Error(Exit(status: 2))
     }
+    let (outer, inner) = iterations(argv)?
+    for _ in 0 .. outer {
+        match run(name, inner) {
+            Ok(true) => {},
+            Ok(false) => return Error(Exit(status: 1)),
+            Error(_) => return Error(Exit(status: 3)),
+        }
+        match stdout.write(out, "verified\n") {
+            Ok(()) => {},
+            Error(_) => return Error(Exit(status: 4)),
+        }
+    }
+    Ok(())
+}
+
+pub fn iterations(argv: Args) -> Result[(u64, u64), Exit] {
     let Some(outer_arg) = args.get(argv, 1) else {
         return Error(Exit(status: 2))
     }
@@ -22,61 +38,7 @@ pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
     if outer == 0 || inner == 0 {
         return Error(Exit(status: 2))
     }
-    if name == "JsonPool" || name == "StoragePool" {
-        return run_pool(out, name, outer, inner)
-    }
-    for _ in 0 .. outer {
-        match run(name, inner) {
-            Ok(true) => {},
-            Ok(false) => return Error(Exit(status: 1)),
-            Error(_) => return Error(Exit(status: 3)),
-        }
-        match stdout.write(out, "verified\n") {
-            Ok(()) => {},
-            Error(_) => return Error(Exit(status: 4)),
-        }
-    }
-    Ok(())
-}
-
-fn run_pool(out: Stdout, name: String, outer: u64, inner: u64) -> Result[(), Exit] waits {
-    let json = name == "JsonPool"
-    let expected = if json { 156u64 } else { 5461u64 }
-    for _ in 0 .. outer {
-        let mut checksum = 0u64
-        for _ in 0 .. inner {
-            let observed = if json { json_pool.benchmark(rap.document()) } else { trees_pool.benchmark() }
-            match observed {
-                Ok(value) => { checksum = value },
-                Error(_) => return Error(Exit(status: 3)),
-            }
-            if checksum != expected {
-                break
-            }
-        }
-        let verified = checksum == expected
-        let line = match pool_line(verified, checksum) {
-            Ok(take line) => line,
-            Error(_) => return Error(Exit(status: 3)),
-        }
-        match stdout.write(out, line) {
-            Ok(()) => {},
-            Error(_) => return Error(Exit(status: 4)),
-        }
-        if !verified {
-            return Error(Exit(status: 1))
-        }
-    }
-    Ok(())
-}
-
-fn pool_line(verified: bool, checksum: u64) -> Result[String, Capacity] {
-    let mut line = string.new()
-    let prefix = if verified { "verified checksum=" } else { "failed checksum=" }
-    string.push(mut line, prefix)?
-    string.push_u64(mut line, checksum)?
-    string.push(mut line, "\n")?
-    Ok(take line)
+    Ok((outer, inner))
 }
 
 fn repeat(inner: u64, check: scoped fn() -> Result[bool, Capacity]) -> Result[bool, Capacity] {

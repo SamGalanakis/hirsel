@@ -1,0 +1,50 @@
+pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(name) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let (outer, inner) = harness.iterations(argv)?
+    if name != "JsonPool" && name != "StoragePool" {
+        return Error(Exit(status: 2))
+    }
+    run_pool(out, name, outer, inner)
+}
+
+fn run_pool(out: Stdout, name: String, outer: u64, inner: u64) -> Result[(), Exit] waits {
+    let json = name == "JsonPool"
+    let expected = if json { 156u64 } else { 5461u64 }
+    for _ in 0 .. outer {
+        let mut checksum = 0u64
+        for _ in 0 .. inner {
+            let observed = if json { json_pool.benchmark(rap.document()) } else { trees_pool.benchmark() }
+            match observed {
+                Ok(value) => { checksum = value },
+                Error(_) => return Error(Exit(status: 3)),
+            }
+            if checksum != expected {
+                break
+            }
+        }
+        let verified = checksum == expected
+        let line = match pool_line(verified, checksum) {
+            Ok(take line) => line,
+            Error(_) => return Error(Exit(status: 3)),
+        }
+        match stdout.write(out, line) {
+            Ok(()) => {},
+            Error(_) => return Error(Exit(status: 4)),
+        }
+        if !verified {
+            return Error(Exit(status: 1))
+        }
+    }
+    Ok(())
+}
+
+fn pool_line(verified: bool, checksum: u64) -> Result[String, Capacity] {
+    let mut line = string.new()
+    let prefix = if verified { "verified checksum=" } else { "failed checksum=" }
+    string.push(mut line, prefix)?
+    string.push_u64(mut line, checksum)?
+    string.push(mut line, "\n")?
+    Ok(take line)
+}

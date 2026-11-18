@@ -119,9 +119,28 @@ def pool_rows(root, upstream):
             continue
         marker = f"verified checksum={checksums[name]}\n".encode()
         for side in ("hirsel", "goose"):
-            binary, _, outer, inner = commands[side][0]
-            commands[side] = ([binary, name + "Pool", outer, inner], marker)
+            _, _, outer, inner = commands[side][0]
+            commands[side] = ([root / f"{side}-pools", name + "Pool", outer, inner], marker)
         yield name, commands
+
+
+def size_board(build, upstream):
+    """Verify the original AWFY inputs and compare each fresh harness once."""
+    originals = [(name, commands) for name, commands in rows(build, False, upstream) if name != "Hello"]
+    if len(originals) != 14 or len({name for name, _ in originals}) != 14:
+        raise ValueError("the size board requires the 14 original AWFY workloads")
+    env = {**os.environ, "HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "1"}
+    for name, commands in originals:
+        for side, (command, marker) in commands.items():
+            run = subprocess.run([ROOT / "tools/capped", *command], cwd=build,
+                                 env=env, stdout=subprocess.PIPE, check=True)
+            if not any(re.fullmatch(marker, line) for line in run.stdout.splitlines(keepends=True)):
+                raise ValueError(f"{side} did not verify {name}")
+    # One executable per side. Pool and index variants have their own rows.
+    sizes = {side: stripped_size(build / f"{side}-harness") for side in SIDES}
+    return {"verified_workloads": [name for name, _ in originals], "stripped_bytes": sizes,
+            "hirsel_over_rust": sizes["hirsel"] / sizes["rust"],
+            "hirsel_over_goose": sizes["hirsel"] / sizes["goose"]}
 
 
 def write_results(out, results):
@@ -140,6 +159,8 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--arena", action="store_true")
     mode.add_argument("--pool", action="store_true", help="sample only the matched Json and Storage pools")
+    mode.add_argument("--size-board", action="store_true",
+                      help="verify fresh original-14 harnesses and compare their stripped sizes once")
     parser.add_argument("--sides", nargs="+", choices=SIDES, default=SIDES,
                         help="reuse unchanged comparison samples when measuring another toolchain")
     parser.add_argument("--upstream", type=Path)
@@ -151,6 +172,13 @@ def main():
     if out.is_relative_to(ROOT):
         parser.error("use an evidence directory outside the repo")
     out.mkdir(parents=True, exist_ok=False)
+    if args.size_board:
+        if args.only or set(args.sides) != set(SIDES):
+            parser.error("the size board requires all original workloads on all three sides")
+        result = size_board(args.build.resolve(), args.upstream.resolve())
+        write_results(out, result)
+        print(json.dumps(result, indent=2))
+        return 0
     os.sched_setaffinity(0, {CPU})
     os.environ.update(HIRSEL_MEMORY_LIMIT="2G", HIRSEL_JOBS="1")
     upstream = args.upstream.resolve() if args.upstream else None

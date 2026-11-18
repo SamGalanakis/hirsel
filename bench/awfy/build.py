@@ -82,9 +82,9 @@ def main():
     parser.add_argument("out", type=Path)
     parser.add_argument("--upstream", type=Path, required=True, help="pinned AWFY checkout")
     parser.add_argument("--artifacts", type=Path, help="JSON from core/tools/measurement_artifacts.py")
-    parser.add_argument("--hirsel-entries", nargs="+", default=["hello", "harness"])
-    parser.add_argument("--goose-entries", choices=["hello", "harness"], nargs="+",
-                        default=["hello", "harness"])
+    parser.add_argument("--hirsel-entries", nargs="+", default=["hello", "harness", "pools"])
+    parser.add_argument("--goose-entries", choices=["hello", "harness", "pools"], nargs="+",
+                        default=["hello", "harness", "pools"])
     parser.add_argument("--goose", type=Path, help="Goose release compiler")
     parser.add_argument("--rust", type=Path, help="Resid's bench/v2/t1-awfy/rust directory")
     args = parser.parse_args()

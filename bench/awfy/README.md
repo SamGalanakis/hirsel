@@ -51,9 +51,21 @@ line is the greeting. For AWFY it follows one complete checked outer iteration.
 GNU strip reports the size of the full executable after stripping. AWFY tasks
 share one suite binary per language. Each Hello uses a separate binary.
 
+## Original AWFY size board
+
+Build into a fresh output directory with the three release toolchains above.
+Run `measure.py "$out/build" "$out/size-board" --upstream "$awfy" --size-board`
+on the lane's assigned CPUs. It verifies the same 14 names, inputs and expected
+results on all three harnesses, then uses GNU `strip --strip-all` on each complete
+executable. Report one Hirsel/Rust ratio and one Hirsel/Goose ratio for the
+harnesses. Each ratio uses a single pair of binaries. A per-row size geomean
+requires separately built, matched standalone executables. Report pool and
+index variants separately and state whether the compiler proved that Step
+charging could be elided for each Hirsel image.
+
 ## Matched document pools
 
-The AWFY harnesses also accept `JsonPool` and `StoragePool`. Both use
+The separate Hirsel and Goose pool harnesses accept `JsonPool` and `StoragePool`. Both use
 one document owner per inner iteration. Their append-only collections hold
 fixed-size descriptors and typed, one-based links. Links never leave the
 document's construction and verification, and collection indexing checks

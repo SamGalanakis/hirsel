@@ -15,7 +15,10 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
+
+from case_progress import Case
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_NET_RULES = ('Connect 127.0.0.0/8 1-65535', 'Listen 127.0.0.0/8 0-65535')
@@ -196,13 +199,23 @@ class Evaluator:
     def __init__(self, binary):
         self.binary = binary
         self.errors = tempfile.TemporaryFile()
+        self.active_case = None
         self.process = subprocess.Popen([str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=self.errors)
+                                        stderr=subprocess.PIPE)
+        self.stderr_reader = threading.Thread(target=self.read_errors)
+        self.stderr_reader.start()
+
+    def read_errors(self):
+        with self.process.stderr as errors:
+            while chunk := errors.read1(8192):
+                self.errors.write(chunk)
+                if progress := self.active_case:
+                    progress.output(errors, chunk)
 
     def __enter__(self):
         return self
 
-    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, sdk_compiler=None, sdk_native_options=None, network=False):
+    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, sdk_compiler=None, sdk_native_options=None, network=False, progress=None):
         request = dict(manifest=str(manifest), entry=entry, program_entry=program_entry)
         if instructions is not None:
             request["instructions"] = instructions
@@ -212,23 +225,36 @@ class Evaluator:
             request.update(sdk_out=str(sdk_out), sdk_describe=str(sdk_describe))
         if sdk_compiler is not None:
             request.update(sdk_compiler=str(sdk_compiler), sdk_native_options=sdk_native_options)
-        try:
-            self.process.stdin.write(json.dumps(request).encode() + b'\n')
-            self.process.stdin.flush()
-            line = self.process.stdout.readline()
-        except BrokenPipeError:
-            line = b''
-        if not line:
-            status = self.process.wait()
-            self.errors.seek(0)
-            return subprocess.CompletedProcess([str(self.binary)], status or 1, b'', self.errors.read())
-        return subprocess.CompletedProcess([str(self.binary)], 0, line, b'')
+        with (contextlib.nullcontext(progress) if progress else Case(entry, 'evaluator')) as active:
+            self.active_case = active
+            line = bytearray()
+            try:
+                with contextlib.suppress(BrokenPipeError):
+                    self.process.stdin.write(json.dumps(request).encode() + b'\n')
+                    self.process.stdin.flush()
+                    while chunk := self.process.stdout.peek(8192):
+                        line_end = chunk.find(b'\n') + 1
+                        read = self.process.stdout.read(line_end or len(chunk))
+                        active.output(self.process.stdout, read)
+                        line.extend(read)
+                        if line_end:
+                            break
+                    active.end_stream(self.process.stdout)
+                if line:
+                    return subprocess.CompletedProcess([str(self.binary)], 0, bytes(line), b'')
+                status = self.process.wait()
+                self.stderr_reader.join()
+                self.errors.seek(0)
+                return subprocess.CompletedProcess([str(self.binary)], status or 1, b'', self.errors.read())
+            finally:
+                self.active_case = None
 
     def __exit__(self, *exc):
         with contextlib.suppress(BrokenPipeError):
             self.process.stdin.close()
         self.process.stdout.close()
         self.process.wait()
+        self.stderr_reader.join()
         self.errors.close()
 
 
@@ -382,13 +408,15 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
         raise ValueError('evaluator laws require --evaluator <hirsel-core-contract-eval>')
     # Private stores are shared across cases only for immutable checked/native products.
     # Each case's host state is fresh and its executable is removed after observation.
-    with tempfile.TemporaryDirectory(prefix='hirsel-std-native-') as temporary, contextlib.ExitStack() as processes:
+    with (tempfile.TemporaryDirectory(prefix='hirsel-std-native-') as temporary,
+          contextlib.ExitStack() as processes, contextlib.ExitStack() as active):
         work = Path(temporary)
         protocol_codec = None
         resident = processes.enter_context(Evaluator(evaluator)) if 'evaluator' in engines or frame_codegen else None
         for engine in engines:
             started = time.monotonic()
             for index, case in enumerate(contracts):
+                active.close()
                 # Preserve the historical automatic evaluator-only runs for native
                 # selections; ordinary laws run here only when explicitly selected.
                 if engine == 'evaluator' and 'evaluator' not in requested_engines and not case.evaluator_only:
@@ -409,6 +437,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     save_row(rows, row, output)
                     continue
                 evaluating = engine == 'evaluator'
+                progress = active.enter_context(Case(case.name, engine))
                 scratch = work / f'{engine}-{index}'
                 scratch.mkdir()
                 host = scratch / 'host'
@@ -453,7 +482,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         native_options = ['--runtime', str(runtime)] if compiler and runtime else None
                         if native_options and cc:
                             native_options += ['--cc', str(cc)]
-                        built = resident.evaluate(probe_inputs, 'store@1/tests/codec_frames/ts_frame_schema',
+                        built = resident.evaluate(probe_inputs, 'store@1/tests/codec_frames/ts_frame_schema', progress=progress,
                                                   sdk_out=generated, sdk_describe=description_file,
                                                   sdk_compiler=compiler if native_options else None,
                                                   sdk_native_options=native_options)
@@ -473,7 +502,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         program += f'import * as entries from {json.dumps(module.with_name("entries.js").resolve().as_uri())};'
                     arguments = 'c,frame,entries' if frame else 'c'
                     program += f'console.log(JSON.stringify(await {law}({arguments})));'
-                    partner = subprocess.run([str(node), '--input-type=module', '--eval', program], capture_output=True, text=True)
+                    partner = progress.run([str(node), '--input-type=module', '--eval', program], capture_output=True, text=True)
                     if partner.returncode:
                         row.update(ran=True, passed=False, cause='TypeScript codec: ' + partner.stderr, seconds=0, instruction_budget=0)
                         save_row(rows, row, output)
@@ -500,9 +529,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 if evaluating:
                     law_started = time.monotonic()
                     if model_network(case):
-                        result = resident.evaluate(inputs, entry, network=True)
+                        result = resident.evaluate(inputs, entry, network=True, progress=progress)
                     else:
-                        result = resident.evaluate(inputs, entry)
+                        result = resident.evaluate(inputs, entry, progress=progress)
                     row['ran'], row['cause'] = evaluator_observation(case, result)
                     try:
                         row['revision'] = json.loads(result.stdout).get('revision')
@@ -521,7 +550,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                     reference.extend(['--grant', capability])
                         if cc:
                             reference.extend(['--cc', str(cc)])
-                        built = subprocess.run(reference, capture_output=True, cwd=host)
+                        built = progress.run(reference, capture_output=True, cwd=host)
                         try:
                             product = json.loads(built.stdout)
                         except ValueError:
@@ -593,7 +622,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     extra = []
                     for source, defines, wrapped in scripts:
                         support = scratch / source.replace('.c', '.o')
-                        built = subprocess.run([actual, '-c', '-fPIC', str(root / 'core/tools' / source),
+                        built = progress.run([actual, '-c', '-fPIC', str(root / 'core/tools' / source),
                                                 '-I' + str(root / 'crates/hirsel-core-rt/include'),
                                                 *defines, '-o', str(support)], capture_output=True)
                         if built.returncode:
@@ -603,7 +632,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     linker.chmod(0o755)
                 if linker:
                     command.extend(['--cc', str(linker)])
-                result = subprocess.run(command, cwd=host, capture_output=True)
+                result = progress.run(command, cwd=host, capture_output=True)
                 row['ran'], row['cause'] = test_observation(case, result, entry)
                 row['passed'] = row['cause'] is None
                 if row['cause']:

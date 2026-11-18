@@ -23,17 +23,17 @@ class Walker(unittest.TestCase):
             def missing_node(argv, **kwargs):
                 self.assertEqual(argv[0], 'node')
                 raise FileNotFoundError('node')
-            with patch('std_native.subprocess.run', side_effect=missing_node), contextlib.redirect_stdout(io.StringIO()):
+            with patch('std_native.Case.run', side_effect=missing_node), contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaises(FileNotFoundError):
                     run(root, root / 'compiler', root / 'runtime', cases, ['cranelift'], None, [])
             failure = subprocess.CompletedProcess(['node'], 1, '', 'codec assertion failed')
-            with patch('std_native.subprocess.run', return_value=failure), contextlib.redirect_stdout(io.StringIO()):
+            with patch('std_native.Case.run', return_value=failure), contextlib.redirect_stdout(io.StringIO()):
                 rows = run(root, root / 'compiler', root / 'runtime', cases, ['cranelift'], None, [])
             self.assertEqual(len(rows), 1)
             self.assertFalse(rows[0]['passed'])
             self.assertIn('codec assertion failed', rows[0]['cause'])
             empty = subprocess.CompletedProcess(['node'], 0, '{"cases":0}', '')
-            with patch('std_native.subprocess.run', return_value=empty), contextlib.redirect_stdout(io.StringIO()):
+            with patch('std_native.Case.run', return_value=empty), contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaisesRegex(ValueError, 'zero cases'):
                     run(root, root / 'compiler', root / 'runtime', cases, ['cranelift'], None, [])
 
@@ -69,12 +69,12 @@ class Walker(unittest.TestCase):
                     self.binary = binary
                 def __enter__(self):
                     return self
-                def evaluate(self, inputs, entry):
+                def evaluate(self, inputs, entry, **options):
                     return compiler([str(self.binary), str(inputs), entry])
                 def __exit__(self, *exc):
                     pass
             with (patch('std_native.Evaluator', Resident),
-                  patch('std_native.subprocess.run', side_effect=compiler),
+                  patch('std_native.Case.run', side_effect=compiler),
                   patch('std_native.os.getloadavg', return_value=(64, 64, 64)),
                   patch('std_native.time.sleep', side_effect=AssertionError('test waited for host load')),
                   contextlib.redirect_stdout(io.StringIO())):
@@ -85,7 +85,7 @@ class Walker(unittest.TestCase):
             self.assertTrue(all(r['ran'] and r['passed'] for r in rows))
             self.assertTrue(rows[0]['revision_matches'])
             build_revision = [8]
-            with patch('std_native.Evaluator', Resident), patch('std_native.subprocess.run', side_effect=compiler), contextlib.redirect_stdout(io.StringIO()):
+            with patch('std_native.Evaluator', Resident), patch('std_native.Case.run', side_effect=compiler), contextlib.redirect_stdout(io.StringIO()):
                 mismatch = run(root, root / 'compiler', root / 'runtime', cases,
                                ['evaluator'], None, [], evaluator=root / 'evaluator', compare_revisions=True)
             self.assertFalse(mismatch[0]['passed'])
@@ -144,7 +144,7 @@ class Walker(unittest.TestCase):
                             status=101 if failed else 0, stdout='', stderr='Bounds at 3\n' if failed else '')
                 return subprocess.CompletedProcess(command, int(failed), json.dumps(dict(tests=[test])).encode(), b'')
             cases = discover(root, [])
-            with patch('std_native.subprocess.run', side_effect=compiler), contextlib.redirect_stdout(io.StringIO()):
+            with patch('std_native.Case.run', side_effect=compiler), contextlib.redirect_stdout(io.StringIO()):
                 rows = run(root, root / 'compiler', root / 'runtime', cases, ['cranelift', 'llvm'], None, [])
             self.assertEqual(len(commands), 4)
             self.assertEqual(len(rows), 2 * len(cases))

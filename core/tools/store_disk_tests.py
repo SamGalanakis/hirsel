@@ -6,9 +6,9 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
 import tempfile
 
+from case_progress import run_case
 from std_native import ROOT, Evaluator
 from store_tests import inputs
 from store_crash_tests import run_crashes
@@ -79,7 +79,7 @@ def main():
                     command.append('--release')
                 if args.cc:
                     command += ['--cc', str(args.cc.resolve())]
-                result = subprocess.run(command, capture_output=True, text=True)
+                result = run_case('store@1/store/disk_test_', engine, command, capture_output=True, text=True)
                 try:
                     report = json.loads(result.stdout)
                 except ValueError:
@@ -94,7 +94,7 @@ def main():
                 large = list(command)
                 large[large.index('--filter') + 1] = 'store@1/store/disk_pack_bound'
                 large[large.index('--limit') + 1] = str(512 * 1024 * 1024)
-                result = subprocess.run(large, capture_output=True, text=True)
+                result = run_case('store@1/store/disk_pack_bound', engine, large, capture_output=True, text=True)
                 try:
                     report = json.loads(result.stdout)
                 except ValueError:

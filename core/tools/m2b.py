@@ -30,6 +30,7 @@ cases have no case function and no `used`; they compare stdout only.
 Example: m2b.py --compiler hirsel --evaluator hirsel-core-contract-eval --runtime libhirsel_core_rt.a
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -38,6 +39,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+
+from case_progress import Case, run_case
 
 ROOT = Path(__file__).resolve().parents[2]
 ENGINES = ('evaluator', 'cranelift', 'llvm')
@@ -110,7 +113,8 @@ def probe_source(main_source, package, names):
 
 def evaluate(evaluator, manifest_file, entry, case):
     path = f"{entry['package']['name']}@{entry['package']['version']}/{entry['module']}/case_{case['name']}"
-    run = subprocess.run([str(evaluator), str(manifest_file), path], capture_output=True)
+    run = run_case(f'{entry["workload"]}/{case["name"]}', 'evaluator',
+                   [str(evaluator), str(manifest_file), path], capture_output=True)
     try:
         report = json.loads(run.stdout)
     except ValueError:
@@ -141,7 +145,7 @@ def build(compiler, runtime, cc, manifest_file, entry, engine, scratch, spool=No
         command.append('--release')
     if cc:
         command.extend(['--cc', str(cc)])
-    result = subprocess.run(command, cwd=ROOT, capture_output=True)
+    result = run_case(f'{entry["workload"]}:build', engine, command, cwd=ROOT, capture_output=True)
     (scratch / f'build-{engine}.json').write_bytes(result.stdout)
     if result.returncode:
         try:
@@ -214,9 +218,9 @@ def empty(spool):
         spool.mkdir()
 
 
-def native(binary, case, spool=None):
+def native(binary, case, spool=None, engine='cranelift'):
     empty(spool)
-    run = subprocess.run([str(binary), case['name']], capture_output=True)
+    run = run_case(case['name'], engine, [str(binary), case['name']], capture_output=True)
     words = run.stdout.decode(errors='replace').split()
     if run.returncode or run.stderr or len(words) != 3 or not all(w.isdigit() for w in words):
         return f"exit {run.returncode}, stdout {run.stdout!r}, stderr {run.stderr[-300:]!r}; expected {case['value']} and used"
@@ -228,13 +232,20 @@ def native(binary, case, spool=None):
     return None
 
 
-def pair(server, client, case, spool):
+def pair(server, client, case, spool, engine):
     """One request between two processes: the server starts first, the client's reply ends it."""
     empty(spool)
-    serving = subprocess.Popen([str(server), *case.get('server_args', ['serve'])],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    run = subprocess.run([str(client), *case.get('client_args', [case['name']])], capture_output=True)
-    out, err = serving.communicate()
+    with Case(case['name'], engine) as progress, ThreadPoolExecutor(max_workers=2) as readers:
+        serving = subprocess.Popen([str(server), *case.get('server_args', ['serve'])],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = bytearray(), bytearray()
+        out_done = readers.submit(progress.collect, serving.stdout, stdout.extend)
+        err_done = readers.submit(progress.collect, serving.stderr, stderr.extend)
+        run = progress.run([str(client), *case.get('client_args', [case['name']])], capture_output=True)
+        serving.wait()
+        out_done.result()
+        err_done.result()
+        out, err = bytes(stdout), bytes(stderr)
     want, served = f"{case['value']}\n".encode(), f"{case['server_value']}\n".encode()
     if run.returncode or run.stdout != want or run.stderr:
         return f'client exit {run.returncode}, stdout {run.stdout!r}, stderr {run.stderr[-300:]!r}; expected {want!r}'
@@ -329,9 +340,9 @@ def main():
                     elif engine == 'evaluator':
                         failure = evaluate(args.evaluator, manifest_file, entry, case)
                     elif entry.get('pair'):
-                        failure = pair(server, client, case, spool)
+                        failure = pair(server, client, case, spool, engine)
                     else:
-                        failure = native(binary, case, spool)
+                        failure = native(binary, case, spool, engine)
                     red = case.get('red', {}).get(engine)
                     label = f'{workload}/{case["name"]} {engine}'
                     if isinstance(red, dict) and stop:
@@ -342,8 +353,8 @@ def main():
                         # row turns when the gap closes or when something else breaks.
                         gives = dict(case, value=red['gives'], used=red.get('used', case['used']))
                         wrong = (evaluate(args.evaluator, manifest_file, entry, gives) if engine == 'evaluator'
-                                 else pair(server, client, gives, spool) if entry.get('pair')
-                                 else native(binary, gives, spool))
+                                 else pair(server, client, gives, spool, engine) if entry.get('pair')
+                                 else native(binary, gives, spool, engine))
                         failure = None if wrong else f"gives {red['gives']} as the gap says"
                         if wrong:
                             unexpected.append(f"{label}: red row expects {red['gives']}: {wrong}")

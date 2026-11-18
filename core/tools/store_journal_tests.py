@@ -6,9 +6,9 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
 import tempfile
 
+from case_progress import run_case
 from std_native import ROOT, Evaluator
 from store_tests import inputs
 from store_crash_tests import checked, run_crashes
@@ -26,28 +26,28 @@ FAILURES = ('poison-segment', 'poison-end', 'poison-pack', 'poison-write', 'pois
 def provider_checks(executable, engine, env):
     rows = []
     for scenario in FAILURES:
-        checked([str(executable), scenario, 'count'], env)
+        checked([str(executable), scenario, 'count'], env, engine=engine)
         rows.append(dict(scenario=scenario, passed=True))
     print(f'{engine}: {len(FAILURES)} named I/O failure laws passed', flush=True)
-    count = checked([str(executable), 'journal-cancel', 'count'], env)
+    count = checked([str(executable), 'journal-cancel', 'count'], env, engine=engine)
     match = re.fullmatch(r'cuts ([0-9]+)\n', count.stdout)
     if match is None or int(match[1]) == 0:
         raise RuntimeError('cancellation inventory executed no wait entries')
     waits = int(match[1])
     for cut in range(waits):
-        checked([str(executable), 'journal-cancel', str(cut)], env)
+        checked([str(executable), 'journal-cancel', str(cut)], env, engine=engine)
     rows.append(dict(cancellation_wait_entries=waits, passed=True))
     print(f'{engine}: {waits}/{waits} cancellation wait entries passed', flush=True)
     # L24 (iv)(a): syncs held for one writer turn; every schedule must finish.
-    checked([str(executable), 'journal-ack', 'count'], env)
+    checked([str(executable), 'journal-ack', 'count'], env, engine=engine)
     for seed in range(1, 33):
-        checked([str(executable), 'journal-ack', 'count', str(seed)], env)
+        checked([str(executable), 'journal-ack', 'count', str(seed)], env, engine=engine)
     rows.append(dict(scenario='journal-ack', schedules=33, passed=True))
     print(f'{engine}: journal-ack held syncs passed 33 schedules', flush=True)
     for scenario in ('journal-group', 'journal-rotate'):
         hashes = set()
         for seed in range(1, 33):
-            result = checked([str(executable), scenario, 'count', str(seed)], env)
+            result = checked([str(executable), scenario, 'count', str(seed)], env, engine=engine)
             match = re.fullmatch(r'cuts [0-9]+\nevents ([0-9]+)\n', result.stdout)
             if match is None:
                 raise RuntimeError(f'schedule {seed} emitted no event hash: {result.stdout!r}')
@@ -112,7 +112,7 @@ def main():
                 command.append('--release')
             if args.cc:
                 command += ['--cc', str(args.cc.resolve())]
-            result = subprocess.run(command, capture_output=True, text=True, env=env)
+            result = run_case('store@1/store/journal_test_', engine, command, capture_output=True, text=True, env=env)
             try:
                 report = json.loads(result.stdout)
             except ValueError:
@@ -127,7 +127,7 @@ def main():
             # L29 simultaneously retains sixteen MiB of rows and the maximum
             # frame, plus replay buffers and the two reserved task roots.
             large[large.index('--limit') + 1] = str(512 * 1024 * 1024)
-            result = subprocess.run(large, capture_output=True, text=True, env=env)
+            result = run_case('store@1/store/journal_frame_', engine, large, capture_output=True, text=True, env=env)
             try:
                 report = json.loads(result.stdout)
             except ValueError:

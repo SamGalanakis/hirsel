@@ -6,9 +6,10 @@ import os
 import re
 from pathlib import Path
 import shutil
-import subprocess
 import tempfile
 import unittest
+
+from case_progress import Case
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -21,9 +22,12 @@ def main():
     compiler = args.compiler.resolve()
 
     class LibraryModes(unittest.TestCase):
+        def setUp(self):
+            self.progress = self.enterContext(Case(self._testMethodName, "cli"))
+
         def test_help_uses_the_parser_catalogue(self):
             def cli(*arguments):
-                return subprocess.run([str(compiler), *arguments], cwd=ROOT, capture_output=True, text=True)
+                return self.progress.run([str(compiler), *arguments], cwd=ROOT, capture_output=True, text=True)
             general = cli('help')
             self.assertEqual(general.returncode, 0, general.stderr)
             for arguments in [(), ('--help',), ('-h',)]:
@@ -46,22 +50,22 @@ def main():
                 work = Path(temporary)
                 for library in [False, True]:
                     app = work / ('library' if library else 'application')
-                    new = subprocess.run([str(compiler), 'new', str(app), *(['--lib'] if library else [])],
+                    new = self.progress.run([str(compiler), 'new', str(app), *(['--lib'] if library else [])],
                                          cwd=ROOT, capture_output=True, text=True)
                     self.assertEqual(new.returncode, 0, new.stderr)
-                    check = subprocess.run([str(compiler), 'check', str(app), '--json'], cwd=ROOT, capture_output=True, text=True)
+                    check = self.progress.run([str(compiler), 'check', str(app), '--json'], cwd=ROOT, capture_output=True, text=True)
                     self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
                     self.assertTrue(json.loads(check.stdout)['accepted'])
                     for engine in ['cranelift', 'llvm']:
-                        build = subprocess.run([str(compiler), 'build', str(app), '--runtime', str(runtime),
+                        build = self.progress.run([str(compiler), 'build', str(app), '--runtime', str(runtime),
                                                 '--backend', engine, '-o', str(work / 'program'), '--json'],
                                                cwd=ROOT, capture_output=True, text=True)
                         self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
                         self.assertIsNotNone(json.loads(build.stdout)['native'])
-                        run = subprocess.run([str(work / 'program')], capture_output=True)
+                        run = self.progress.run([str(work / 'program')], capture_output=True)
                         self.assertEqual((run.returncode, run.stdout, run.stderr), (0, b'', b''))
                     original = (app / 'main.hirsel').read_bytes()
-                    again = subprocess.run([str(compiler), 'new', str(app)], cwd=ROOT, capture_output=True)
+                    again = self.progress.run([str(compiler), 'new', str(app)], cwd=ROOT, capture_output=True)
                     self.assertEqual(again.returncode, 2)
                     self.assertEqual((app / 'main.hirsel').read_bytes(), original)
 
@@ -70,7 +74,7 @@ def main():
             with tempfile.TemporaryDirectory(prefix='hirsel-lines-') as temporary:
                 work = Path(temporary)
                 app = work / 'app'
-                created = subprocess.run([str(compiler), 'new', str(app)], cwd=ROOT, capture_output=True)
+                created = self.progress.run([str(compiler), 'new', str(app)], cwd=ROOT, capture_output=True)
                 self.assertEqual(created.returncode, 0)
                 for engine in ['cranelift', 'llvm']:
                     for release in [False, True]:
@@ -79,7 +83,7 @@ def main():
                             flags = ['--release'] if release else []
                             if choice is not None:
                                 flags += ['--debug-lines', choice]
-                            result = subprocess.run([str(compiler), 'build', str(app), '--runtime', str(runtime),
+                            result = self.progress.run([str(compiler), 'build', str(app), '--runtime', str(runtime),
                                                      '--backend', engine, '--store', str(work / 'store'),
                                                      '-o', str(work / 'program'), '--json', *flags],
                                                     cwd=ROOT, capture_output=True, text=True)
@@ -88,11 +92,11 @@ def main():
                             self.assertEqual(native['debug_lines'], expected)
                             self.assertEqual(native['compiled'] == 0, expected in seen)
                             seen.add(expected)
-                refused = subprocess.run([str(compiler), 'build', str(app), '--debug-lines', 'maybe'],
+                refused = self.progress.run([str(compiler), 'build', str(app), '--debug-lines', 'maybe'],
                                          cwd=ROOT, capture_output=True, text=True)
                 self.assertEqual(refused.returncode, 2)
                 self.assertIn('--debug-lines expects on or off', refused.stderr)
-            explained = subprocess.run([str(compiler), 'explain', 'debug-lines', '--json'],
+            explained = self.progress.run([str(compiler), 'explain', 'debug-lines', '--json'],
                                        cwd=ROOT, capture_output=True, text=True)
             self.assertEqual(explained.returncode, 0, explained.stderr)
             policy = json.loads(explained.stdout)
@@ -105,7 +109,7 @@ def main():
             with tempfile.TemporaryDirectory(prefix='hirsel-entry-object-') as temporary:
                 work = Path(temporary)
                 app = work / 'app'
-                self.assertEqual(subprocess.run([str(compiler), 'new', str(app)], cwd=ROOT, capture_output=True).returncode, 0)
+                self.assertEqual(self.progress.run([str(compiler), 'new', str(app)], cwd=ROOT, capture_output=True).returncode, 0)
                 calls, cc = work / 'calls.jsonl', work / 'link-only'
                 cc.write_text('#!/usr/bin/python3\nimport json,os,pathlib,sys\n'
                     + 'args=sys.argv[1:]\n'
@@ -119,12 +123,12 @@ def main():
                     + 'os.execv(' + repr(str(real_cc)) + ',[' + repr(str(real_cc)) + ',*args])\n')
                 cc.chmod(0o755)
                 for engine in ['cranelift', 'llvm']:
-                    result = subprocess.run([str(compiler), 'build', str(app), '--runtime', str(runtime),
+                    result = self.progress.run([str(compiler), 'build', str(app), '--runtime', str(runtime),
                         '--backend', engine, '--cc', str(cc), '--store', str(work / engine),
                         '-o', str(work / 'program'), '--json'], cwd=ROOT, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertTrue(json.loads(result.stdout)['native']['linked'])
-                    ran = subprocess.run([str(work / 'program')], capture_output=True)
+                    ran = self.progress.run([str(work / 'program')], capture_output=True)
                     self.assertEqual((ran.returncode, ran.stdout, ran.stderr), (0, b'', b''))
                 # Direct linking invokes the pinned link editor itself.  The
                 # configured cc is only a compatibility input for recipe
@@ -142,7 +146,7 @@ def main():
                 installed = root / 'hirsel'
                 shutil.copy2(compiler, installed)
                 def invoke(executable, *arguments, expected=0):
-                    result = subprocess.run([str(executable), *arguments], cwd=work, capture_output=True, text=True)
+                    result = self.progress.run([str(executable), *arguments], cwd=work, capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                     return result
                 invoke(compiler, 'std-product', '--runtime', str(runtime), expected=2)
@@ -200,12 +204,12 @@ def main():
                 # The built compiler installs itself: a copy elsewhere would find the
                 # test environment's LD_LIBRARY_PATH (the pinned tree's lib/, the deb
                 # libLLVM) before its RPATH's engine library.
-                install = subprocess.run([str(compiler), 'std-product', '--install', str(root), '--runtime', str(runtime)],
+                install = self.progress.run([str(compiler), 'std-product', '--install', str(root), '--runtime', str(runtime)],
                                          cwd=work, capture_output=True, text=True)
                 self.assertEqual(install.returncode, 0, install.stdout + install.stderr)
                 clean = {'PATH': str(decoy) + ':/usr/bin:/bin', 'HOME': str(home)}
                 def invoke(*arguments, expected=0, cwd=work):
-                    result = subprocess.run([str(installed), *arguments], cwd=cwd, env=clean, capture_output=True, text=True)
+                    result = self.progress.run([str(installed), *arguments], cwd=cwd, env=clean, capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                     return result
                 app = work / 'app'
@@ -237,7 +241,7 @@ def main():
                 # with it none of the deb library's z3, ICU, libxml2, libedit, libffi,
                 # zstd or libbsd: the loader's own record of what it initialised.
                 trace = work / 'loader'
-                traced = subprocess.run([str(installed), 'build', str(app), '--backend', 'llvm', '--release',
+                traced = self.progress.run([str(installed), 'build', str(app), '--backend', 'llvm', '--release',
                                          '--store', str(work / 'traced-store'), '-o', str(work / 'traced'), '--json'],
                                         cwd=work, env=clean | {'LD_DEBUG': 'libs', 'LD_DEBUG_OUTPUT': str(trace)},
                                         capture_output=True, text=True)
@@ -267,7 +271,7 @@ def main():
                 original = 'pub fn main()->Result[(),Exit]{Ok(())}\n'
                 main.write_text(original)
                 def fmt(*arguments):
-                    return subprocess.run([str(compiler), 'fmt', *arguments, str(package)], cwd=ROOT, capture_output=True, text=True)
+                    return self.progress.run([str(compiler), 'fmt', *arguments, str(package)], cwd=ROOT, capture_output=True, text=True)
                 check = fmt('--check')
                 self.assertEqual(check.returncode, 1, check.stderr)
                 self.assertEqual(check.stdout.splitlines(), [str(main)])
@@ -291,7 +295,7 @@ def main():
 
         def test_explain_reads_the_current_specification_catalogue(self):
             def explain(*arguments):
-                return subprocess.run([str(compiler), 'explain', *arguments], cwd=ROOT, capture_output=True, text=True)
+                return self.progress.run([str(compiler), 'explain', *arguments], cwd=ROOT, capture_output=True, text=True)
             result = explain('LANG-7', '--json')
             self.assertEqual(result.returncode, 0, result.stderr)
             rule = json.loads(result.stdout)
@@ -320,7 +324,7 @@ def main():
             with tempfile.TemporaryDirectory(prefix='hirsel-cross-record-') as temporary:
                 work = Path(temporary)
                 app = work / 'app'
-                self.assertEqual(subprocess.run([str(compiler), 'new', str(app)], cwd=ROOT, capture_output=True).returncode, 0)
+                self.assertEqual(self.progress.run([str(compiler), 'new', str(app)], cwd=ROOT, capture_output=True).returncode, 0)
                 emulator = work / 'qemu'
                 selected_root = work / 'sysroot'
                 selected_root.symlink_to(sysroot, target_is_directory=True)
@@ -334,7 +338,7 @@ def main():
                            '--runtime', str(runtime), '--cc', str(arm / 'bin/aarch64-none-linux-gnu-gcc'),
                            '--emulator', str(emulator), '--sysroot', str(selected_root), '--json', '-o', str(work / 'program')]
                 def run():
-                    return subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+                    return self.progress.run(command, cwd=ROOT, capture_output=True, text=True)
                 first = run()
                 self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
                 self.assertEqual((work / 'program').read_bytes()[18:20], (183).to_bytes(2, 'little'))
@@ -385,7 +389,7 @@ def main():
                          dependencies=[core_id, std_id])])))
 
                 def invoke(command, options, store):
-                    result = subprocess.run([str(compiler), command, *options, '--store', str(store), '--json'],
+                    result = self.progress.run([str(compiler), command, *options, '--store', str(store), '--json'],
                                             cwd=ROOT, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, f'{command} {options}: {result.stdout}\n{result.stderr}')
                     product = json.loads(result.stdout)
@@ -414,7 +418,7 @@ def main():
                     print('image: accepted, zero diagnostics', flush=True)
                 # Structural exclusion must not conceal a refusal in library code.
                 (libraries / 'std' / 'user_refused.hirsel').write_text('pub fn bad() -> u64 { true }\n')
-                result = subprocess.run([str(compiler), 'check', str(app), '--libraries', str(libraries),
+                result = self.progress.run([str(compiler), 'check', str(app), '--libraries', str(libraries),
                                          '--store', str(work / 'bad-source'), '--json'],
                                         cwd=ROOT, capture_output=True, text=True)
                 product = json.loads(result.stdout)

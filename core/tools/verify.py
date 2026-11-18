@@ -4,8 +4,9 @@ import argparse
 import difflib
 import json
 from pathlib import Path
-import subprocess
 import sys
+
+from case_progress import run_case
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = 'x86_64-unknown-linux-gnu'
@@ -19,7 +20,8 @@ def verify(binary_dir, selected=None):
         for case in json.loads((directory/'cases.json').read_text()):
             for layout in case.get('layouts', ('idiomatic', 'matched')):
                 binary = binary_dir / f'{directory.name}-{layout}'
-                result = subprocess.run([str(binary), str(directory/case['input']), case['variant']], capture_output=True)
+                result = run_case(f'{directory.name}/{case["name"]}/{layout}', 'native',
+                                  [str(binary), str(directory/case['input']), case['variant']], capture_output=True)
                 expected = directory / 'EXPECTED' / case['name']
                 want_out = expected.with_suffix('.stdout').read_bytes()
                 want_err = expected.with_suffix('.stderr').read_bytes()

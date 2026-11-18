@@ -10,13 +10,13 @@ import os
 from pathlib import Path
 import re
 import shlex
-import subprocess
+from case_progress import run_case
 
 SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'branches', 'migrate')
 
 
-def checked(command, env=None):
-    result = subprocess.run(command, capture_output=True, text=True, env=env)
+def checked(command, env=None, *, engine, case=None):
+    result = run_case(case or ' '.join(command[1:]), engine, command, capture_output=True, text=True, env=env)
     if result.returncode:
         raise RuntimeError(f'{shlex.join(map(str, command))}\n{result.stdout}\n{result.stderr}')
     return result
@@ -25,13 +25,13 @@ def checked(command, env=None):
 def run_cuts(executable, engine, env=None, scenarios=SCENARIOS):
     rows = []
     for scenario in scenarios:
-        result = checked([str(executable), scenario, 'count'], env)
+        result = checked([str(executable), scenario, 'count'], env, engine=engine)
         match = re.fullmatch(r'cuts ([0-9]+)\n', result.stdout)
         if match is None or int(match[1]) == 0:
             raise RuntimeError(f'{scenario}: no mutation count: {result.stdout!r}')
         count = int(match[1])
         for cut in range(count + 1):
-            checked([str(executable), scenario, str(cut)], env)
+            checked([str(executable), scenario, str(cut)], env, engine=engine)
         rows.append(dict(scenario=scenario, mutations=count, cuts=count + 1, passed=True))
         print(f'{engine} crash {scenario}: {count + 1}/{count + 1} cuts passed', flush=True)
     return rows
@@ -70,7 +70,7 @@ def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
         command += ['--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
     if engine == 'llvm-release' or (engine == 'llvm' and adapter == 'runner_crash.c'):
         command.append('--release')
-    result = checked(command, environment)
+    result = checked(command, environment, engine=engine, case=f'{entry}:build')
     report = json.loads(result.stdout)
     if not report.get('accepted') or not report.get('native', {}).get('linked'):
         raise RuntimeError(result.stdout)
@@ -78,6 +78,6 @@ def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
     env['LD_LIBRARY_PATH'] = str(bridge.resolve().parent) + ':' + env.get('LD_LIBRARY_PATH', '')
     rows = run_cuts(executable, engine, env, scenarios)
     for scenario in count_only:
-        checked([str(executable), scenario, 'count'], env)
+        checked([str(executable), scenario, 'count'], env, engine=engine)
         rows.append(dict(scenario=scenario, passed=True))
     return rows

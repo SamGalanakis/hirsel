@@ -5,9 +5,9 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
 import tempfile
-import time
+
+from case_progress import run_case
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -26,8 +26,6 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hirsel-recursion-') as tmp:
         directory = Path(tmp)
         def run(name, source, build=False):
-            while float(Path('/proc/loadavg').read_text().split()[0]) > 32:
-                time.sleep(5)
             path = directory / (name + '.hirsel')
             path.write_text(source)
             package = dict(name='growth', version='1')
@@ -47,7 +45,7 @@ def main():
             if build:
                 command += ['--entry', 'growth@1/types/main', '--backend', 'cranelift',
                             '--runtime', str(args.runtime), '-o', str(directory / 'unused-program')]
-            observed = subprocess.run(command, capture_output=True, env=os.environ | {
+            observed = run_case(name, 'cranelift' if build else 'checker', command, capture_output=True, env=os.environ | {
                 'HIRSEL_MEMORY_LIMIT': '256M', 'HIRSEL_JOBS': '1'}, cwd=ROOT)
             stdout, stderr = observed.stdout.decode(), observed.stderr.decode()
             print(name, 'exit', observed.returncode, stderr.strip(), flush=True)

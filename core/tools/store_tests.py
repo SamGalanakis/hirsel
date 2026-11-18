@@ -6,9 +6,9 @@ import os
 from pathlib import Path
 import shlex
 import shutil
-import subprocess
 import tempfile
 
+from case_progress import run_case
 from std_native import ROOT
 
 
@@ -77,7 +77,7 @@ def main():
                     modules=[control], signatures=False))
                 rejected = work / (control + '.json')
                 rejected.write_text(json.dumps(negative))
-                result = subprocess.run([str(args.compiler.resolve()), 'check', '--inputs', str(rejected),
+                result = run_case(control, 'checker', [str(args.compiler.resolve()), 'check', '--inputs', str(rejected),
                                          '--source-core', '--source-std', '--store', str(work / control),
                                          '--json'], capture_output=True, text=True)
                 report = json.loads(result.stdout)
@@ -101,7 +101,7 @@ def main():
                 if args.evaluator is None:
                     p.error('evaluator backend requires --evaluator')
                 for name in BYTE_LAWS:
-                    result = subprocess.run([str(args.evaluator.resolve()), str(manifest),
+                    result = run_case(name, engine, [str(args.evaluator.resolve()), str(manifest),
                                              'store@1/store/law_' + name], capture_output=True, text=True)
                     try:
                         report = json.loads(result.stdout)
@@ -123,7 +123,7 @@ def main():
                     command.append('--release')
                 if args.cc:
                     command += ['--cc', str(args.cc.resolve())]
-                result = subprocess.run(command, capture_output=True, text=True)
+                result = run_case('store@1/store/test_', engine, command, capture_output=True, text=True)
                 try:
                     report = json.loads(result.stdout)
                 except ValueError:
@@ -140,7 +140,7 @@ def main():
                 boundary = list(command)
                 boundary[boundary.index('--filter') + 1] = 'store@1/store/frame_size_boundary'
                 boundary[boundary.index('--limit') + 1] = str(128 * 1024 * 1024)
-                result = subprocess.run(boundary, capture_output=True, text=True)
+                result = run_case('frame_size_boundary', engine, boundary, capture_output=True, text=True)
                 try:
                     report = json.loads(result.stdout)
                 except ValueError:
@@ -156,7 +156,7 @@ def main():
                 cc = args.cc or (Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang'
                                  if 'LLVM_SYS_231_PREFIX' in os.environ else Path(shutil.which('cc')))
                 support = work / 'schedule.o'
-                subprocess.run([str(cc), '-c', '-fPIC', str(args.root / 'core/tools/std_schedule.c'),
+                run_case('follow_schedules:observer', engine, [str(cc), '-c', '-fPIC', str(args.root / 'core/tools/std_schedule.c'),
                                 '-I' + str(args.root / 'crates/hirsel-core-rt/include'), '-DSEEDS=32',
                                 '-o', str(support)], check=True)
                 wrapper = work / 'scheduled-cc'
@@ -169,7 +169,7 @@ def main():
                     del scheduled[at:at + 2]
                 scheduled[scheduled.index('--filter') + 1] = 'store@1/store/follow_schedules'
                 scheduled += ['--cc', str(wrapper)]
-                result = subprocess.run(scheduled, capture_output=True, text=True)
+                result = run_case('follow_schedules', engine, scheduled, capture_output=True, text=True)
                 try:
                     report = json.loads(result.stdout)
                 except ValueError:

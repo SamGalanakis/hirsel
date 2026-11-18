@@ -37,9 +37,9 @@ import os
 import sys
 from pathlib import Path
 import shutil
-import subprocess
 import tempfile
 
+from case_progress import run_case
 from std_native import MODEL_NET_RULES, ROOT
 from store_tests import inputs
 from store_crash_tests import checked, run_crashes
@@ -154,7 +154,7 @@ def charged(args, root, work, engine, module, modes, figure, cc=None, runner=Non
             command.append('--release')
     if cc or args.cc:
         command += ['--cc', str(cc or args.cc.resolve())]
-    built = subprocess.run(command, capture_output=True, text=True)
+    built = run_case(f'{name}:build', engine, command, capture_output=True, text=True)
     if built.returncode != 0:
         return None, built.stderr[-2000:]
     figures = {}
@@ -165,7 +165,7 @@ def charged(args, root, work, engine, module, modes, figure, cc=None, runner=Non
         if module == 'runner_rss':
             peak = work / f'{name}_{engine}_{label}.rss'
             command = ['/usr/bin/time', '-f', '%M', '-o', str(peak), *command]
-        run = subprocess.run(command, capture_output=True)
+        run = run_case(f'{name}:{label}', engine, command, capture_output=True)
         figures[label] = (run.returncode, figure(json.loads(charges.read_text())) if charges.exists() else None)
         if run.returncode:
             figures.setdefault('errors', {})[label] = run.stderr.decode(errors='replace')[-2000:]
@@ -200,7 +200,7 @@ def subscribed_bytes(report):
 def l20_retained(args, root, work, engine, runner=None, name='runner_cover'):
     cc = c_compiler(args)
     support = work / f'{name}_mark_{engine}.o'
-    subprocess.run([str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_mark.c'),
+    run_case(f'{name}:observer', engine, [str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_mark.c'),
                     '-I' + str(root / 'crates/hirsel-core-rt/include'), '-o', str(support)], check=True)
     wrapper = work / f'{name}_mark_{engine}-cc'
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
@@ -668,7 +668,7 @@ def crashes(args, root, work, engine, name, runner=None, scenarios=CRASHES):
     rows = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc, inputs_path, build, engine,
                        entry='store@1/runner_crash/main', scenarios=scenarios, environment=env,
                        adapter='runner_crash.c')
-    checked([str(build / (engine + '-crash') / 'store'), POISON, 'count'], env)
+    checked([str(build / (engine + '-crash') / 'store'), POISON, 'count'], env, engine=engine)
     return rows
 
 def drain_deadline(args, root, work, engine, name, runner=None, activation=False):
@@ -718,10 +718,10 @@ def no_secret_at_rest(args, root, work, engine, row, mutant=False):
                '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
     if args.cc:
         command += ['--cc', str(args.cc.resolve())]
-    checked(command, os.environ)
+    checked(command, os.environ, engine=engine, case=f'{name}:build')
     nonce = os.urandom(16)
     encoded = base64.b64encode(b'anon:' + nonce).decode('ascii')
-    ran = subprocess.run([str(binary), encoded], capture_output=True, text=True)
+    ran = run_case(name, engine, [str(binary), encoded], capture_output=True, text=True)
     files = [p for p in directory.rglob('*') if p.is_file()]
     found = sorted(str(p.relative_to(directory)) for p in files if nonce in p.read_bytes())
     passed = ran.returncode == 0 and bool(files) and bool(found) == mutant
@@ -747,7 +747,8 @@ def evaluate(evaluator, inputs_path, definition):
     request = dict(manifest=str(inputs_path), entry=definition, model_net=MODEL_NET_RULES)
     if definition in WIRE_TEST_INSTRUCTIONS:
         request['instructions'] = WIRE_TEST_INSTRUCTIONS[definition]
-    result = subprocess.run([str(evaluator)], input=json.dumps(request) + '\n', capture_output=True, text=True)
+    result = run_case(f'{definition} [{inputs_path.stem}]', 'evaluator', [str(evaluator)],
+                      input=json.dumps(request) + '\n', capture_output=True, text=True)
     try:
         report = json.loads(result.stdout)
     except ValueError:
@@ -1028,12 +1029,12 @@ def socket_laws(args, root, work, engines, row):
                    '--admission-only', '--backend', engine, '--output', str(output)]
         if args.cc:
             command += ['--cc', str(args.cc.resolve())]
-        built = subprocess.run(command, cwd=root, capture_output=True, text=True)
+        built = run_case('wire_socket_build', engine, command, cwd=root, capture_output=True, text=True)
         if built.returncode:
             row(engine=engine, law='wire_socket_build', passed=False, result=(built.stdout + built.stderr)[-4000:])
             continue
         report = output / 'laws.json'
-        run = subprocess.run([sys.executable, str(root / 'tools/tests/wire_admission.py'),
+        run = run_case('wire_socket_selection', engine, [sys.executable, str(root / 'tools/tests/wire_admission.py'),
                               '--server', str(output / ('admission-' + engine)), '--report', str(report)],
                              cwd=root, capture_output=True, text=True)
         cases = json.loads(report.read_text()) if report.is_file() else []
@@ -1088,7 +1089,7 @@ def counting_cc(args, root, inputs_path, name):
     cc = c_compiler(args)
     work = inputs_path.parent.absolute()
     support = work / f'count_{name}.o'
-    subprocess.run([str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_count.c'),
+    run_case(f'{name}:observer', 'cc', [str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_count.c'),
                     '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want}',
                     f'-DSOURCE_MANIFEST_DIR={json.dumps(str(work), ensure_ascii=False)}',
                     *([f'-D{PLACEMENT_OBSERVERS[name]}'] if name in PLACEMENT_OBSERVERS else []),
@@ -1120,7 +1121,7 @@ def native_run(args, engine, inputs_path, store, prefix, cc=None, runtime=None):
         command.append('--release')
     if cc or args.cc:
         command += ['--cc', str(cc or args.cc.resolve())]
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = run_case(f'{prefix} [{inputs_path.stem}]', engine, command, capture_output=True, text=True)
     try:
         report = json.loads(result.stdout)
     except ValueError:

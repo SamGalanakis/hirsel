@@ -6,10 +6,10 @@ import os
 from pathlib import Path
 import re
 import shlex
-import subprocess
 import sys
 import tempfile
 
+from case_progress import Case, run_case
 from runner_tests import (CALLS, LAWS, MUTANTS, evaluate, manifest, p19_module, counted,
                           l12_module, L12, l12_holds, l12_values, revision_holds,
                           l10_values, l10_holds, c_compiler, dir_for, native_run, counting_cc,
@@ -187,7 +187,7 @@ class CallEvaluator:
         self.binaries = {}
         cc = c_compiler(args)
         support = work / 'observe-events.o'
-        subprocess.run([str(cc), '-c', '-fPIC', str(root / 'core/tools/observe_events.c'),
+        run_case('observe_events:observer', 'cranelift', [str(cc), '-c', '-fPIC', str(root / 'core/tools/observe_events.c'),
                         '-I' + str(root / 'crates/hirsel-core-rt/include'), '-o', str(support)], check=True)
         self.cc = work / 'observe-cc'
         self.cc.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
@@ -197,6 +197,10 @@ class CallEvaluator:
     def __call__(self, inputs_path, definition):
         if not definition.startswith('store@1/runner_calls/'):
             return evaluate(self.args.evaluator, inputs_path, definition)
+        with Case(f'{definition} [{inputs_path.stem}]', 'cranelift') as progress:
+            return self.native(inputs_path, definition, progress)
+
+    def native(self, inputs_path, definition, progress):
         if inputs_path not in self.binaries:
             m = json.loads(inputs_path.read_text())
             sources = m['packages'][-1]['sources']
@@ -223,11 +227,11 @@ class CallEvaluator:
                        '--grant', 'Stdout', '--grant', 'Stderr', '--grant', 'Clock', '--grant', 'Random', '--grant', 'Tasks',
                        '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535',
                        '--dir', str(dir_for(store))]
-            built = subprocess.run(command, capture_output=True, text=True)
+            built = progress.run(command, capture_output=True, text=True)
             if built.returncode:
                 return None, dict(error=built.stderr, command=command)
             self.binaries[inputs_path] = binary
-        run = subprocess.run([str(self.binaries[inputs_path]), definition.rsplit('/', 1)[1]], capture_output=True)
+        run = progress.run([str(self.binaries[inputs_path]), definition.rsplit('/', 1)[1]], capture_output=True)
         return (1 if run.returncode == 0 else 0 if run.returncode == 1 else None,
                 dict(outcome=dict(kind='returned' if run.returncode in (0, 1) else 'failed'),
                      stdout=list(run.stdout), stderr=list(run.stderr) if run.returncode in (0, 1) else [],

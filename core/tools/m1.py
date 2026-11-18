@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import tempfile
 
+from case_progress import Case, run_case
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -145,7 +147,7 @@ class IncompleteWorkload(AssertionError):
     """The artifact did not demonstrate execution of the selected workload."""
 
 
-def compare_case(binary, directory, case, scratch, timeout=None, runner=()):
+def compare_case(binary, directory, case, scratch, timeout=None, runner=(), engine='native'):
     """Each run owns an isolated directory. Only explicit outputs may remain."""
     work = scratch / case['name']
     work.mkdir()
@@ -160,8 +162,10 @@ def compare_case(binary, directory, case, scratch, timeout=None, runner=()):
         shutil.copyfile(directory / source, destination)
     before = files_below(work)
     try:
-        result = subprocess.run([*runner, str(binary), case['input'], case['variant']], cwd=work,
-                                env={**os.environ, **case.get('env', {})}, capture_output=True, timeout=timeout)
+        with Case(f'{directory.name}/{case["name"]}', engine) as progress:
+            run = progress.run if timeout is None else subprocess.run
+            result = run([*runner, str(binary), case['input'], case['variant']], cwd=work,
+                         env={**os.environ, **case.get('env', {})}, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired as error:
         return f'hang after {timeout:g}s: stdout {error.stdout or b""!r}, stderr {error.stderr or b""!r}'
     expected = directory / 'EXPECTED' / case['name']
@@ -235,7 +239,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                     command.extend(['--target', target])
                 if cc:
                     command.extend(['--cc', str(cc)])
-                build = subprocess.run(command, cwd=root, capture_output=True)
+                build = run_case(f'{name}:build', engine, command, cwd=root, capture_output=True)
                 row = dict(program=entry['workload'], variant=entry['variant'], engine=engine,
                            checked=False, artifact_linked=False, built=False, passed=0, cases=len(cases), first_failure=None,
                            stopped=None, case_outcomes=[])
@@ -268,7 +272,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                 for case in cases:
                     try:
                         failure = compare_case(binary, corpus, case, scratch,
-                                               (case_timeouts or {}).get(entry['workload'] + '/' + case['name']), runner)
+                                               (case_timeouts or {}).get(entry['workload'] + '/' + case['name']), runner, engine)
                     except IncompleteWorkload as error:
                         row['built'] = False
                         row['passed'] = 0
@@ -293,7 +297,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
         for engine in engines if include_libraries else ():
             command = [str(compiler), 'image', '--inputs', str(library_manifest), '--store',
                        str(store / 'canonical-image'), '--json']
-            result = subprocess.run(command, cwd=root, capture_output=True)
+            result = run_case('canonical-library-image', engine, command, cwd=root, capture_output=True)
             row = dict(program='core + std fully checked; canonical image accepted', variant='libraries', engine=engine,
                        checked=False, built=False, passed=0, cases=0, first_failure=None, stopped=None)
             rows.append(row)

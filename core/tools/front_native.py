@@ -11,6 +11,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+from case_progress import Case
+
 ROOT = Path(__file__).resolve().parents[2]
 NAMES = ['args-empty', 'args-len', 'args-print', 'args-returned-views', 'args-values',
          'clocks', 'host-close-cancel', 'host-read', 'host-wait-cancel', 'host', 'host-rename-sleep', 'sleep-peer', 'sleep-cancel', 'parent-failure',
@@ -77,27 +79,28 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
                 command.extend(['--cc', str(cc)])
             row = dict(case=name, target=target, built=False, ran=False, passed=False, failure=None)
             try:
-                built = subprocess.run(command, cwd=root, capture_output=True)
-                product = json.loads(built.stdout)
-                if built.returncode or not product.get('accepted') or not product.get('native'):
-                    raise ValueError(f'build exit {built.returncode}: {product}; {built.stderr.decode(errors="replace")}')
-                row['built'] = True
-                arguments = ['alpha', 'beta', ''] if name in ('args-values', 'args-print', 'args-returned-views') else []
-                run_command = ([str(emulator), '-L', str(sysroot)] if emulator else []) + [str(binary), *arguments]
-                writer = None
-                stdout, stderr = subprocess.PIPE, subprocess.PIPE
-                if name in ('stdout-closed', 'stderr-closed'):
-                    reader, writer = os.pipe()
-                    os.close(reader)
-                    if name == 'stdout-closed':
-                        stdout = writer
-                    else:
-                        stderr = writer
-                try:
-                    result = subprocess.run(run_command, cwd=scratch, stdout=stdout, stderr=stderr)
-                finally:
-                    if writer is not None:
-                        os.close(writer)
+                with Case(name, backend) as progress:
+                    built = progress.run(command, cwd=root, capture_output=True)
+                    product = json.loads(built.stdout)
+                    if built.returncode or not product.get('accepted') or not product.get('native'):
+                        raise ValueError(f'build exit {built.returncode}: {product}; {built.stderr.decode(errors="replace")}')
+                    row['built'] = True
+                    arguments = ['alpha', 'beta', ''] if name in ('args-values', 'args-print', 'args-returned-views') else []
+                    run_command = ([str(emulator), '-L', str(sysroot)] if emulator else []) + [str(binary), *arguments]
+                    writer = None
+                    stdout, stderr = subprocess.PIPE, subprocess.PIPE
+                    if name in ('stdout-closed', 'stderr-closed'):
+                        reader, writer = os.pipe()
+                        os.close(reader)
+                        if name == 'stdout-closed':
+                            stdout = writer
+                        else:
+                            stderr = writer
+                    try:
+                        result = progress.run(run_command, cwd=scratch, stdout=stdout, stderr=stderr)
+                    finally:
+                        if writer is not None:
+                            os.close(writer)
                 row['ran'] = True
                 want_stdout = b'alphabeta' if name in ('args-print', 'args-returned-views') else b'out' if name == 'streams' else b'PS' if name == 'sleep-peer' else b'C' if name == 'sleep-cancel' else b'F' if name == 'parent-failure' else b''
                 want_stderr = b'err' if name == 'streams' else b''

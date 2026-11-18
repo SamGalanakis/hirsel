@@ -423,21 +423,18 @@ pub(super) fn numeric(s: Scalar) -> bool {
 
 /// An integer token's digits (with prefix) and its suffix (LANG-3).
 pub(crate) fn int_suffix(text: &str) -> (&str, Option<Scalar>) {
-    for s in [
-        Scalar::U8,
-        Scalar::U16,
-        Scalar::U32,
-        Scalar::U64,
-        Scalar::I8,
-        Scalar::I16,
-        Scalar::I32,
-        Scalar::I64,
-    ] {
-        if let Some(d) = text.strip_suffix(s.name()) {
-            return (d, Some(s));
-        }
-    }
-    (text, None)
+    let scalar = match text.as_bytes() {
+        [.., b'u', b'8'] => Scalar::U8,
+        [.., b'u', b'1', b'6'] => Scalar::U16,
+        [.., b'u', b'3', b'2'] => Scalar::U32,
+        [.., b'u', b'6', b'4'] => Scalar::U64,
+        [.., b'i', b'8'] => Scalar::I8,
+        [.., b'i', b'1', b'6'] => Scalar::I16,
+        [.., b'i', b'3', b'2'] => Scalar::I32,
+        [.., b'i', b'6', b'4'] => Scalar::I64,
+        _ => return (text, None),
+    };
+    (&text[..text.len() - scalar.name().len()], Some(scalar))
 }
 pub(crate) fn float_suffix(text: &str) -> (&str, Option<Scalar>) {
     for s in [Scalar::F32, Scalar::F64] {
@@ -449,18 +446,40 @@ pub(crate) fn float_suffix(text: &str) -> (&str, Option<Scalar>) {
 }
 /// The magnitude an integer token's digits spell, or None past u128.
 pub(crate) fn int_magnitude(digits: &str) -> Option<u128> {
-    let (radix, digits) = match digits.get(..2) {
-        Some("0x") => (16, &digits[2..]),
-        Some("0o") => (8, &digits[2..]),
-        Some("0b") => (2, &digits[2..]),
-        _ => (10, digits),
+    let (radix, digits) = match digits.as_bytes() {
+        [b'0', b'x', rest @ ..] => (16, rest),
+        [b'0', b'o', rest @ ..] => (8, rest),
+        [b'0', b'b', rest @ ..] => (2, rest),
+        digits => (10, digits),
     };
+    // At most 16 hexadecimal digits fit in u64. The byte length bounds the
+    // digit count in every radix, including when the input has separators.
+    if digits.len() <= 16 {
+        magnitude_digits::<false>(radix, digits)
+    } else {
+        magnitude_digits::<true>(radix, digits)
+    }
+}
+
+fn magnitude_digits<const CHECK_OVERFLOW: bool>(radix: u128, digits: &[u8]) -> Option<u128> {
     let mut value = 0u128;
     let mut any = false;
-    for digit in digits.chars().filter(|&c| c != '_') {
-        value = value
-            .checked_mul(radix as u128)?
-            .checked_add(digit.to_digit(radix)? as u128)?;
+    for &byte in digits {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            b'_' => continue,
+            _ => return None,
+        } as u128;
+        if digit >= radix {
+            return None;
+        }
+        value = if CHECK_OVERFLOW {
+            value.checked_mul(radix)?.checked_add(digit)?
+        } else {
+            u128::from(value as u64 * radix as u64 + digit as u64)
+        };
         any = true;
     }
     any.then_some(value)

@@ -8,6 +8,9 @@ use crate::schedule_script::{FlowStep, PausePoint, ScheduleScript, StepBoundary}
 
 type Graph = Reference<Plain, Ring>;
 
+// Yield the dispatcher to other jobs even if a producer keeps this stage ready.
+const STAGE_BATCH: usize = 64;
+
 pub(super) struct Parallel {
     shared: Arc<Shared>,
     _charges: Vec<crate::block::Block>,
@@ -24,12 +27,20 @@ struct State {
     /// The stage that produces each port, and the stage that reads it.
     writers: Vec<Option<usize>>,
     readers: Vec<Option<usize>>,
-    /// Exactly one queued or executing step for a stage at a time. A
-    /// prepared item awaiting credit is idle and leaves its head in place.
+    /// Exactly one queued or executing job per stage. A prepared item
+    /// awaiting credit is idle and leaves its head in place.
     busy: Vec<bool>,
     enabled: usize,
     stopping: bool,
-    waiter: Option<FlowWaiter>,
+    waiter: Option<(FlowWaiter, WaitFor)>,
+}
+
+#[derive(Clone, Copy)]
+enum WaitFor {
+    Credit { port: usize, key: u64 },
+    Sink(usize),
+    Drain,
+    Stop,
 }
 
 // SAFETY: the sealed native graph has no owner charges or external objects.
@@ -102,7 +113,7 @@ impl Parallel {
                 Push::Order => Err(PushError::Order(value)),
                 Push::Closed => Err(PushError::Closed(value)),
                 Push::Full => {
-                    let Some(again) = self.shared.wait(state) else {
+                    let Some(again) = self.shared.wait(state, WaitFor::Credit { port, key }) else {
                         return Err(PushError::Stalled(value));
                     };
                     state = again;
@@ -138,10 +149,10 @@ impl Parallel {
         let mut state = self.shared.state.lock().unwrap();
         let sink = state.graph.index(sink)?;
         loop {
-            match state.head(sink) {
+            match state.next_head(sink) {
                 Head::End => return Ok(Pull::End),
                 Head::Stalled => {
-                    let Some(again) = self.shared.wait(state) else {
+                    let Some(again) = self.shared.wait(state, WaitFor::Sink(sink)) else {
                         return Ok(Pull::Stalled);
                     };
                     state = again;
@@ -153,9 +164,7 @@ impl Parallel {
                         self.shared.freed(&mut state, port);
                         return Ok(Pull::Item(key, index, ()));
                     }
-                    if entry == Entry::Terminal(Terminal::Dropped) {
-                        return Ok(Pull::Dropped(index, key));
-                    }
+                    return Ok(Pull::Dropped(index, key));
                 }
             }
         }
@@ -178,7 +187,7 @@ impl Parallel {
                 }
             }
             let failure = state.graph.stages.iter().find_map(|stage| stage.failure);
-            let Some(again) = self.shared.wait(state) else {
+            let Some(again) = self.shared.wait(state, WaitFor::Drain) else {
                 return failure.map_or(Ok(()), Err);
             };
             state = again;
@@ -190,7 +199,7 @@ impl Drop for Parallel {
     fn drop(&mut self) {
         let mut state = self.shared.state.lock().unwrap();
         state.stopping = true;
-        while let Some(again) = self.shared.wait(state) {
+        while let Some(again) = self.shared.wait(state, WaitFor::Stop) {
             state = again;
         }
     }
@@ -199,6 +208,22 @@ impl Drop for Parallel {
 impl State {
     fn head(&self, merge: usize) -> Head {
         merge_head(&self.graph.ports, &self.graph.merges[merge])
+    }
+
+    fn next_head(&mut self, sink: usize) -> Head {
+        loop {
+            let head = self.head(sink);
+            let Head::Entry {
+                index,
+                entry: entry @ (Entry::Mark | Entry::Terminal(Terminal::End)),
+                ..
+            } = head
+            else {
+                return head;
+            };
+            let port = self.graph.merges[sink][index];
+            self.graph.ports[port].take(entry);
+        }
     }
 
     fn step_ready(&self, stage: usize, head: Head) -> bool {
@@ -217,8 +242,32 @@ impl State {
         }
     }
 
-    fn notify(&mut self) {
-        if let Some(waiter) = self.waiter.take() {
+    fn ready_step(&self, stage: usize) -> Option<Head> {
+        let s = &self.graph.stages[stage];
+        if self.stopping || !s.live {
+            return None;
+        }
+        let head = self.head(s.input);
+        self.step_ready(stage, head).then_some(head)
+    }
+
+    fn notify(&mut self, wrote_sink: bool) {
+        let Some((_, reason)) = self.waiter else {
+            return;
+        };
+        if self.enabled == 0
+            || match reason {
+                WaitFor::Credit { port, key } => {
+                    self.graph.ports[port].push_status(key) != Push::Full
+                }
+                // Consuming a mark or End terminal frees no credit and
+                // needs no owner turn. Wake for the next visible answer.
+                WaitFor::Sink(sink) => wrote_sink && self.next_head(sink) != Head::Stalled,
+                WaitFor::Drain => wrote_sink,
+                WaitFor::Stop => false,
+            }
+        {
+            let (waiter, _) = self.waiter.take().unwrap();
             waiter.wake();
         }
     }
@@ -227,12 +276,7 @@ impl State {
 impl Shared {
     fn schedule(self: &Arc<Self>, state: &mut State, stage: Option<usize>) {
         let Some(stage) = stage else { return };
-        let s = &state.graph.stages[stage];
-        if !state.stopping
-            && !state.busy[stage]
-            && s.live
-            && state.step_ready(stage, state.head(s.input))
-        {
+        if !state.busy[stage] && state.ready_step(stage).is_some() {
             state.busy[stage] = true;
             state.enabled += 1;
             tasks::enqueue_flow(self.clone(), stage);
@@ -254,11 +298,17 @@ impl Shared {
         }
     }
 
-    fn wait<'a>(&'a self, mut state: MutexGuard<'a, State>) -> Option<MutexGuard<'a, State>> {
+    fn wait<'a>(
+        &'a self,
+        mut state: MutexGuard<'a, State>,
+        reason: WaitFor,
+    ) -> Option<MutexGuard<'a, State>> {
         if state.enabled == 0 {
             return None;
         }
-        state.waiter = Some(FlowWaiter::current());
+        // The failed operation and waiter registration share the flow lock
+        // with publication, including when a wake precedes the actual park.
+        state.waiter = Some((FlowWaiter::current(), reason));
         drop(state);
         #[cfg(any(test, feature = "testing"))]
         if let Some((script, domain)) = &self.script {
@@ -266,13 +316,6 @@ impl Shared {
         }
         tasks::park_flow();
         Some(self.state.lock().unwrap())
-    }
-
-    fn retire(self: &Arc<Self>, state: &mut State, stage: usize) {
-        state.busy[stage] = false;
-        self.schedule(state, Some(stage));
-        state.enabled -= 1;
-        state.notify();
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -298,17 +341,13 @@ impl Shared {
             _ => FlowStep::Terminal,
         }
     }
-}
-
-impl FlowWork for Shared {
-    fn run(self: Arc<Self>, stage: usize) {
-        let mut state = self.state.lock().unwrap();
-        if state.stopping {
-            self.retire(&mut state, stage);
-            return;
-        }
+    fn run_step<'a>(
+        self: &'a Arc<Self>,
+        mut state: MutexGuard<'a, State>,
+        stage: usize,
+        head: Head,
+    ) -> MutexGuard<'a, State> {
         let s = &state.graph.stages[stage];
-        let head = state.head(s.input);
         if let Head::Entry {
             index,
             key,
@@ -334,10 +373,9 @@ impl FlowWork for Shared {
             let s = &mut state.graph.stages[stage];
             s.body = Some(body);
             s.prepared = Some(value);
-        }
-        if state.stopping || !state.step_ready(stage, head) {
-            self.retire(&mut state, stage);
-            return;
+            if state.stopping || !state.step_ready(stage, head) {
+                return state;
+            }
         }
         #[cfg(any(test, feature = "testing"))]
         let step = Self::step_kind(&state, stage, head);
@@ -355,10 +393,12 @@ impl FlowWork for Shared {
             });
             state = self.state.lock().unwrap();
         }
+        let mut wrote_sink = false;
         if !state.stopping {
             state.graph.publish_step(stage, head);
             let s = &state.graph.stages[stage];
             let (output, input, live) = (s.output, s.input, s.live);
+            wrote_sink = state.readers[output].is_none();
             self.wrote(&mut state, output);
             if !live && head != Head::End {
                 for index in 0..state.graph.merges[input].len() {
@@ -378,6 +418,25 @@ impl FlowWork for Shared {
             });
             state = self.state.lock().unwrap();
         }
-        self.retire(&mut state, stage);
+        state.notify(wrote_sink);
+        state
+    }
+}
+
+impl FlowWork for Shared {
+    fn run(self: Arc<Self>, stage: usize) {
+        let mut state = self.state.lock().unwrap();
+        for _ in 0..STAGE_BATCH {
+            let Some(head) = state.ready_step(stage) else {
+                break;
+            };
+            // Under the flow lock the successor inherits this job's enabled
+            // unit before the completed step can release it.
+            state = self.run_step(state, stage, head);
+        }
+        state.busy[stage] = false;
+        self.schedule(&mut state, Some(stage));
+        state.enabled -= 1;
+        state.notify(false);
     }
 }

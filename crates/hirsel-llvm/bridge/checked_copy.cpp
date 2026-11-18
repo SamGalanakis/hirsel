@@ -6,6 +6,7 @@
 #undef _GLIBCXX_USE_PTHREAD_MUTEX_CLOCKLOCK
 #undef _GLIBCXX_USE_PTHREAD_RWLOCK_CLOCKLOCK
 #endif
+#include "forward_reads.h"
 #include "loop_version.h"
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/AliasAnalysis.h>
@@ -321,7 +322,7 @@ static bool versionReadLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
 }
 }
 
-extern "C" void hirsel_llvm_guard_read_loops(void *Raw, void *Machine) noexcept {
+extern "C" void hirsel_llvm_finish_reads(void *Raw, void *Machine) noexcept {
   auto &M = *static_cast<Module *>(Raw);
   runLoopPass(static_cast<TargetMachine *>(Machine), [&](PassBuilder &PB, FunctionAnalysisManager &FAM) {
     FunctionPassManager Clean;
@@ -342,7 +343,9 @@ extern "C" void hirsel_llvm_guard_read_loops(void *Raw, void *Machine) noexcept 
         if (!Changed) break;
         FAM.invalidate(F, PreservedAnalyses::none());
       }
-      if (!Done.empty()) Clean.run(F, FAM);
+      const bool Forwarded = hirsel_llvm::forwardSnapshotReads(F, FAM);
+      if (Forwarded) FAM.invalidate(F, PreservedAnalyses::none());
+      if (Forwarded || !Done.empty()) Clean.run(F, FAM);
     }
   });
 }

@@ -22,7 +22,11 @@ fn main() {
     );
     println!("cargo:rerun-if-env-changed=LLVM_SYS_231_PREFIX");
     let copy_source = shared.join("checked_copy.cpp");
-    for source in [&copy_source, &shared.join("loop_version.h")] {
+    for source in [
+        &copy_source,
+        &shared.join("forward_reads.h"),
+        &shared.join("loop_version.h"),
+    ] {
         println!("cargo:rerun-if-changed={}", source.display());
     }
     let copy_object = out.join("checked_copy.o");

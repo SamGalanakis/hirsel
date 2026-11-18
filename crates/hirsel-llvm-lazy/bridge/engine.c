@@ -20,7 +20,7 @@ extern void hirsel_llvm_promote_development_slots(void *module);
 extern void hirsel_llvm_mark_loop_callbacks(void *module);
 extern void hirsel_llvm_inline_loop_callbacks(void *module);
 extern void hirsel_llvm_inline_recursive_leaves(void *module);
-extern void hirsel_llvm_guard_read_loops(void *module, void *machine);
+extern void hirsel_llvm_finish_reads(void *module, void *machine);
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
@@ -662,7 +662,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
                 machine, options);
         }
         if (!e) {
-            hirsel_llvm_guard_read_loops(module, machine);
+            hirsel_llvm_finish_reads(module, machine);
             hirsel_cold_failure_edges(module, context);
         }
         LLVMDisposePassBuilderOptions(options);

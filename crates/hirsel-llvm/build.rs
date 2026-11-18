@@ -17,6 +17,10 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest.join("bridge/loop_version.h").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest.join("bridge/forward_reads.h").display()
+    );
     let sysroot = prefix.join("sysroot");
     assert!(
         sysroot.join("usr/include/c++/13/vector").is_file(),

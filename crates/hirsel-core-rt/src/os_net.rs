@@ -416,9 +416,16 @@ unsafe fn finish(request: &Request, n: &mut NetworkRequest, outcome: Outcome) ->
         ..Step::default()
     }
 }
+/// A network deadline in the scheduler's host CLOCK_MONOTONIC domain. On the OS
+/// clock it is the program deadline plus the provider's epoch, as `sleep_wait`
+/// converts it, with no clock read; the caller's fresh read decides expiry. A
+/// substituted clock translates by its own reading, saturating at now.
 unsafe fn pending_deadline(n: &NetworkRequest) -> Option<u64> {
     unsafe {
         n.until.map(|(p, clock, at)| {
+            if crate::os::owns(&p) {
+                return crate::os::epoch(p.state).saturating_add(at);
+            }
             let mut r = Request {
                 operation: MONO_NS,
                 mode: 0,

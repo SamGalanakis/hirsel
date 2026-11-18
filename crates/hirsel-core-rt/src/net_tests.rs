@@ -316,6 +316,39 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 );
                 assert_eq!(timeout.error.tag, 6, "expired silent recv");
                 assert_eq!(input.len, 0);
+                // A future deadline on the run's clock fires no earlier than
+                // that clock reaches it (program time, not host time).
+                let now = crate::host_ops::hirsel_core_host_op(
+                    context,
+                    crate::provider::MONO_NS,
+                    clock,
+                    std::ptr::null_mut(),
+                    0,
+                    8,
+                )
+                .value;
+                let wait = 20_000_000;
+                let timeout = hirsel_core_host_recv_bounded(
+                    context,
+                    s.value,
+                    &mut input,
+                    u64::MAX,
+                    1,
+                    clock,
+                    now + wait,
+                    8,
+                );
+                let after = crate::host_ops::hirsel_core_host_op(
+                    context,
+                    crate::provider::MONO_NS,
+                    clock,
+                    std::ptr::null_mut(),
+                    0,
+                    8,
+                )
+                .value;
+                assert_eq!(timeout.error.tag, 6, "silent recv times out");
+                assert!(after >= now + wait, "fired {} ns early", now + wait - after);
                 hirsel_core_socket_drop(context, c.written);
                 assert_eq!(
                     hirsel_core_host_recv_bounded(

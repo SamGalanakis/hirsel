@@ -96,10 +96,14 @@ pub unsafe extern "C" fn hirsel_core_launch_target(
 
 /// # Safety
 /// Context/config remain pinned for the run.
+#[inline(always)]
 pub(crate) unsafe fn deny_describe_capability(context: *const Context) {
-    // SAFETY: metadata belongs to this live context's launch.
-    if unsafe { hirsel_core_launch_word(context, 5, 0) } != 0 {
-        stop(b"DescribeCapability");
+    // SAFETY: the launch owner pins Config and its immutable metadata.
+    unsafe {
+        let run = (*context).run;
+        if !run.is_null() && !(*run).launch.is_null() && (*(*run).launch).describe() {
+            stop(b"DescribeCapability");
+        }
     }
 }
 

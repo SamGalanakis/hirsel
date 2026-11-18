@@ -2023,7 +2023,7 @@ impl Calls for OsCalls {
 /// `provider_s0_tests::s0_os_callbacks_by_identity_match_the_pointer_calls`
 /// compares both forms with a forwarding wrapper.
 #[inline(always)]
-fn own_callbacks(identical: bool) -> bool {
+pub(crate) fn own_callbacks(identical: bool) -> bool {
     #[cfg(test)]
     {
         let direct = identical && OS_DIRECT.get();

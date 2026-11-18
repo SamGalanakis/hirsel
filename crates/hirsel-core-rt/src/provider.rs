@@ -129,6 +129,39 @@ pub unsafe extern "C" fn hirsel_core_host(
     unsafe { drive(context, provider, request, None) }
 }
 
+/// A clock read (WALL_MS or MONO_NS). On the OS provider this call form runs
+/// its `wait`, `issue` and `deliver` bodies directly: a clock read never waits,
+/// parks or is a cancellation point, so it takes no token and no pending state,
+/// and reads on the task's stack (`os::clock`). Every other provider takes
+/// `drive`. Either form passes the same entry and replay boundary (CAP-5, CAP-8).
+/// # Safety
+/// Same contract as `hirsel_core_host`, for a clock request.
+#[inline(always)]
+pub(crate) unsafe fn clock(
+    context: *mut Context,
+    provider: *const Provider,
+    request: *mut Request,
+) -> Outcome {
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        if !crate::os::owns(&*provider) {
+            return drive(context, provider, request, None);
+        }
+        crate::process::deny_describe_capability(context);
+        let _commit = crate::tasks::before_provider_entry();
+        #[cfg(test)]
+        crate::os::probe::note_outside(crate::os::probe::WAIT, request, 0);
+        let outcome = crate::os::clock((*provider).state, request);
+        #[cfg(test)]
+        {
+            let answer = crate::os::probe::answer(&outcome);
+            crate::os::probe::note(crate::os::probe::ISSUE, request, answer);
+            crate::os::probe::note(crate::os::probe::DELIVER, request, answer);
+        }
+        outcome
+    }
+}
+
 /// `Outcome.status` of an operation its provider refused before issue: a tape
 /// that has ended or faulted (CAP-9). `drive` records the cause `Tape` at the
 /// operation's site and fails it with status 1.

@@ -22,6 +22,18 @@ pub(crate) fn set_stop_fd(fd: i32) -> i32 {
 pub(crate) fn guard(bounds: (usize, usize)) {
     GUARD.set(bounds);
 }
+/// Whether the current stack has `bytes` above its guard page. A thread with
+/// no guarded stack current (a launcher or worker thread's own stack) has room.
+#[inline(always)]
+pub(crate) fn room(bytes: usize) -> bool {
+    let (_, end) = GUARD.get();
+    let here = 0u8;
+    std::hint::black_box(&here as *const u8)
+        .addr()
+        .wrapping_sub(end)
+        >= bytes
+        || end == 0
+}
 pub(crate) fn arm() {
     PREVIOUS.get_or_init(|| {
         // SAFETY: initialized sigaction structures and a signal-compatible handler.

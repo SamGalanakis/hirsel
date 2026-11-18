@@ -266,20 +266,6 @@ impl OsProvider {
                 // collisions, so no directory or carrier bytes were changed.
                 return Err(io::Error::from_raw_os_error(libc::EAGAIN));
             }
-            WALL_MS => {
-                let mut now = libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: 0,
-                };
-                // SAFETY: valid writable timespec for the host wall clock.
-                if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) } != 0 {
-                    crate::process::stop(b"Clock");
-                }
-                out.value = u64::try_from(
-                    i128::from(now.tv_sec) * 1000 + i128::from(now.tv_nsec) / 1_000_000,
-                )
-                .unwrap_or_else(|_| crate::process::stop(b"Clock"));
-            }
             SLEEP_UNTIL => {
                 // Waiting is owned by the scheduler; issue completes at once.
             }
@@ -317,17 +303,91 @@ impl OsProvider {
                 request.buffer.len += filled;
                 out.written = filled as u64;
             }
-            MONO_NS => {
-                out.value = self.monotonic_ns();
-            }
             _ => unreachable!(),
         }
         Ok(out)
     }
+}
 
-    fn monotonic_ns(&self) -> u64 {
-        monotonic_ns().saturating_sub(self.epoch)
+/// Host CLOCK_MONOTONIC at the OS provider's construction: its mono_ns and its
+/// sleep and network deadlines count from it.
+/// # Safety
+/// State is a live OsProvider.
+#[inline(always)]
+pub(crate) unsafe fn epoch(state: *mut u8) -> u64 {
+    // SAFETY: forwarded; epoch is immutable after construction.
+    unsafe { (*state.cast::<OsProvider>()).epoch }
+}
+
+/// Whether `provider` calls the OS provider's own `wait`, `issue` and `deliver`,
+/// so a call form may run their bodies directly (CAP-5). A recorder that
+/// replaces any of them is never the OS provider. Test builds can force the
+/// pointer calls (`tasks::own_callbacks`).
+#[inline(always)]
+pub(crate) fn owns(provider: &Provider) -> bool {
+    crate::tasks::own_callbacks(
+        std::ptr::fn_addr_eq(provider.wait, WAIT)
+            && std::ptr::fn_addr_eq(provider.issue, ISSUE)
+            && std::ptr::fn_addr_eq(provider.deliver, crate::provider::DELIVER),
+    )
+}
+
+/// Stack a clock read may use on the current stack. `clock_gettime` is a vDSO
+/// leaf whose frame is a few hundred bytes; below this much room the read runs
+/// on the host stack instead.
+const CLOCK_ROOM: usize = 4096;
+
+/// The OS provider's WALL_MS and MONO_NS: one vDSO read, on the caller's stack
+/// when the guard leaves `CLOCK_ROOM`, never switching stacks otherwise.
+/// # Safety
+/// State is the run's live OsProvider; request is a pinned clock request.
+#[inline(always)]
+pub(crate) unsafe fn clock(state: *mut u8, request: *mut Request) -> Outcome {
+    // SAFETY: forwarded.
+    unsafe {
+        if crate::fiber::room(CLOCK_ROOM)
+            && let Some(outcome) = read_clock(state, (*request).operation)
+        {
+            return outcome;
+        }
+        crate::tasks::host_operation(state, request, clock_on_stack)
     }
+}
+/// A clock read that failed, or had no room, stops (`Clock`) on the host stack.
+unsafe extern "C" fn clock_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
+    // SAFETY: forwarded.
+    unsafe { read_clock(state, (*request).operation) }
+        .unwrap_or_else(|| crate::process::stop(b"Clock"))
+}
+#[inline(always)]
+unsafe fn read_clock(state: *mut u8, operation: u8) -> Option<Outcome> {
+    let (clock, wall) = if operation == WALL_MS {
+        (libc::CLOCK_REALTIME, true)
+    } else {
+        (libc::CLOCK_MONOTONIC, false)
+    };
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid writable timespec for a host clock.
+    if unsafe { libc::clock_gettime(clock, &mut now) } != 0 {
+        return None;
+    }
+    let value = if wall {
+        u64::try_from(i128::from(now.tv_sec) * 1000 + i128::from(now.tv_nsec) / 1_000_000).ok()?
+    } else {
+        let ns = u64::try_from(now.tv_sec)
+            .ok()?
+            .checked_mul(1_000_000_000)?
+            .checked_add(u64::try_from(now.tv_nsec).ok()?)?;
+        // SAFETY: forwarded.
+        ns.saturating_sub(unsafe { epoch(state) })
+    };
+    Some(Outcome {
+        value,
+        ..Outcome::default()
+    })
 }
 
 fn monotonic_clock_ns() -> io::Result<u64> {
@@ -381,8 +441,7 @@ unsafe fn sleep_wait(state: *mut u8, request: &Request) -> Wait {
     // SAFETY: forwarded.
     unsafe {
         let deadline = request.buffer.data.cast::<u64>().read_unaligned();
-        let epoch = (*state.cast::<OsProvider>()).epoch;
-        let at = epoch.saturating_add(deadline);
+        let at = epoch(state).saturating_add(deadline);
         if at <= monotonic_ns() {
             Wait::default()
         } else {
@@ -393,10 +452,22 @@ unsafe fn sleep_wait(state: *mut u8, request: &Request) -> Wait {
         }
     }
 }
+/// `issue` as a provider callback, for recognising the OS provider's own.
+pub(crate) const ISSUE: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step = issue;
 /// Files and clocks finish immediately; sockets may park after a not-ready attempt.
 /// # Safety
 /// As `wait`.
 pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) -> Step {
+    if unsafe { matches!((*request).operation, WALL_MS | MONO_NS) } {
+        let outcome = unsafe { clock(state, request) };
+        #[cfg(test)]
+        probe::note(probe::ISSUE, request, probe::answer(&outcome));
+        return Step {
+            kind: STEP_DONE,
+            outcome,
+            deadline_ns: 0,
+        };
+    }
     if unsafe {
         matches!(
             (*request).operation,
@@ -438,11 +509,19 @@ pub(crate) mod probe {
             | outcome.written << 48
     }
     pub(crate) fn note(callback: u8, request: *const Request, answer: u64) {
+        record(callback, request, answer, crate::tasks::in_task());
+    }
+    /// A note for a `wait` a direct call form runs in place of the callback,
+    /// which the scheduler always calls with no task current.
+    pub(crate) fn note_outside(callback: u8, request: *const Request, answer: u64) {
+        record(callback, request, answer, false);
+    }
+    fn record(callback: u8, request: *const Request, answer: u64, in_task: bool) {
         CALLS.with_borrow_mut(|calls| {
             if let Some(calls) = calls {
                 // SAFETY: the callback's pinned request.
                 let (operation, site) = unsafe { ((*request).operation, (*request).site) };
-                calls.push((callback, operation, site, crate::tasks::in_task(), answer));
+                calls.push((callback, operation, site, in_task, answer));
             }
         });
     }

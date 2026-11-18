@@ -60,6 +60,8 @@ pub unsafe extern "C" fn hirsel_core_host_op(
                 }
                 if op == OPEN {
                     hirsel_core_host_file_open(context, provider, &mut request)
+                } else if matches!(op, WALL_MS | MONO_NS) {
+                    crate::provider::clock(context, provider, &mut request)
                 } else {
                     let mut result = hirsel_core_host(context, provider, &mut request);
                     if op == MKDTEMP && result.status == 0 && result.error == IoError::OK {

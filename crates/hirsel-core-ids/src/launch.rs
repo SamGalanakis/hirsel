@@ -133,6 +133,11 @@ impl Metadata {
     }
 
     /// Private runner transport: scalars and bytes, without program allocation.
+    /// Whether this launch describes its capabilities instead of running.
+    #[inline(always)]
+    pub fn describe(&self) -> bool {
+        self.describe
+    }
     pub fn word(&self, field: u64, index: u64) -> u64 {
         let byte = |bytes: &[u8]| {
             usize::try_from(index)
@@ -148,7 +153,7 @@ impl Metadata {
             2 => byte(self.digest()),
             3 => self.target.len() as u64,
             4 => byte(self.target.as_bytes()),
-            5 => u64::from(self.describe),
+            5 => u64::from(self.describe()),
             _ => 0,
         }
     }

@@ -351,7 +351,7 @@ fn http_router_dispatch(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     result.unwrap(router.add(mut routes, "GET", "/item/{id}", router.raw(capture_reply)))
     result.unwrap(router.add(mut routes, "GET", "/item/static", router.raw(static_reply)))
     result.unwrap(router.add(mut routes, "HEAD", "/item/head", router.raw(explicit_head)))
-    result.unwrap(router.add(mut routes, "POST", "/item/static", router.Route(handler: static_reply, body_max: Some(1), upgrade_bytes: None)))
+    result.unwrap(router.add(mut routes, "POST", "/item/static", router.Route(handler: static_reply, body_max: Some(1), upgrade_bytes: None, stream_bytes: None)))
     result.unwrap(router.add(mut routes, "GET", "/other/a%2Fb", router.raw(static_reply)))
     result.unwrap(router.add(mut routes, "GET", "/other/{id}", router.raw(capture_reply)))
     result.unwrap(router.add(mut routes, "GET", "/files/{rest...}", router.raw(tail_reply)))
@@ -421,7 +421,7 @@ fn http_upgrade_handoff(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     cfg.http_max = 1
     cfg.state_max = 64
     let mut routes: router.Builder[EchoState] = router.builder()
-    result.unwrap(router.add(mut routes, "GET", "/echo", router.Route(handler: upgrade_route, body_max: None, upgrade_bytes: Some(4096))))
+    result.unwrap(router.add(mut routes, "GET", "/echo", router.Route(handler: upgrade_route, body_max: None, upgrade_bytes: Some(4096), stream_bytes: None)))
     result.unwrap(router.add(mut routes, "GET", "/plain", router.raw(static_reply)))
     let (server, addr) = listen_with_routes(n, c, tasks, take cfg, result.unwrap(router.build(take routes)))
     if !route_wire(n, c, addr, string.as_bytes("GET /echo HTTP/1.1\r\nHost: a\r\nConnection: Upgrade\r\nUpgrade: echo\r\nContent-Length: 1\r\n\r\nx"), 400, "0", "", string.as_bytes("")) {
@@ -457,6 +457,88 @@ fn http_upgrade_handoff(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     host.sleep_until(c, after_ms(host.mono_ns(c), 6))
     let tail = string.as_bytes("GET /echo HTTP/1.1\r\nHost: a\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\nxyz")
     route_wire(n, c, addr, tail, 101, "", "", string.as_bytes("ok"))
+}
+
+fn next_stream_item(mut index: u64) -> Result[Option[Bytes], Capacity] {
+    index += 1
+    if index == 1 {
+        Ok(Some(b"one"?))
+    } else if index == 2 {
+        Ok(Some(b"two"?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn stream_items(take seed: stream.Seed) waits {
+    stream.produce(take seed, next_stream_item)
+}
+
+fn stream_route(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
+    let room = stream.Bounds(event_max: 128, producer_bytes: 4096, producer_steps: 256)
+    Ok(Stream(stream.spec(req, 200, room, 0u64, stream_items)?))
+}
+
+// HTTP-10 and §2. The finite producer changes its decoded state between
+// events. HTTP/1.1 chunks each event and terminates with a zero chunk.
+// HTTP/1.0 sends the same body, delimited by close.
+// expect: run http_raw_stream(network) = true
+fn http_raw_stream(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut cfg = test_config()
+    cfg.streams_max = 1
+    cfg.out_cap = 256
+    cfg.state_max = 64
+    cfg.heartbeat_ms = 10
+    cfg.lease_ms = 40
+    let mut routes: router.Builder[EchoState] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/items", router.Route(handler: stream_route, body_max: None, upgrade_bytes: None, stream_bytes: Some(32768))))
+    let (server, addr) = listen_with_routes(n, c, tasks, take cfg, result.unwrap(router.build(take routes)))
+    if !route_wire(n, c, addr, string.as_bytes("GET /items HTTP/1.1\r\nHost: a\r\n\r\n"), 200, "", "", string.as_bytes("3\r\none\r\n3\r\ntwo\r\n0\r\n\r\n")) {
+        return false
+    }
+    host.sleep_until(c, after_ms(host.mono_ns(c), 6))
+    if !route_wire(n, c, addr, string.as_bytes("GET /items HTTP/1.0\r\n\r\n"), 200, "", "", string.as_bytes("onetwo")) {
+        return false
+    }
+    host.sleep_until(c, after_ms(host.mono_ns(c), 6))
+    route_wire(n, c, addr, string.as_bytes("HEAD /items HTTP/1.1\r\nHost: a\r\n\r\n"), 200, "", "", string.as_bytes(""))
+}
+
+fn stalled_item(mut index: u64) -> Result[Option[Bytes], Capacity] waits {
+    let waiting: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1)
+    let (tx, rx) = waiting?
+    let _ = channel.receive(rx)
+    let _ = channel.try_send(tx, ())
+    Ok(None)
+}
+
+fn stalled_stream(take seed: stream.Seed) waits {
+    stream.produce(take seed, stalled_item)
+}
+
+fn heartbeat_route(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
+    let room = stream.Bounds(event_max: 128, producer_bytes: 4096, producer_steps: 256)
+    let mut spec = stream.spec(req, 200, room, 0u64, stalled_stream)?
+    let name = result.unwrap(b"Content-Type")
+    let value = result.unwrap(b"text/event-stream")
+    stream.header(mut spec, take name, take value)?
+    Ok(Stream(take spec))
+}
+
+// §2. An empty source wait may run longer than the lease. Heartbeats are
+// separate output units and do not move the lease set at commit.
+// expect: run http_stream_lease(network) = true
+fn http_stream_lease(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut cfg = test_config()
+    cfg.streams_max = 1
+    cfg.out_cap = 256
+    cfg.state_max = 64
+    cfg.heartbeat_ms = 5
+    cfg.lease_ms = 12
+    let mut routes: router.Builder[EchoState] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/live", router.Route(handler: heartbeat_route, body_max: None, upgrade_bytes: None, stream_bytes: Some(32768))))
+    let (server, addr) = listen_with_routes(n, c, tasks, take cfg, result.unwrap(router.build(take routes)))
+    route_wire(n, c, addr, string.as_bytes("GET /live HTTP/1.1\r\nHost: a\r\n\r\n"), 200, "", "", string.as_bytes("3\r\n:\n\n\r\n3\r\n:\n\n\r\n0\r\n\r\n"))
 }
 
 // L5. When ignoring a one-byte body the next head is preserved. An unread
@@ -685,7 +767,7 @@ fn http_handler_starts_after_commit(n: Net, c: Clock, tasks: Tasks) -> bool wait
 }
 
 // L6. The live handler scope reserves its whole 4096 B. The connection has
-// only 1216 B of spare J and hand-off allowance, so the 128-byte writer
+// only 1272 B of spare J and hand-off allowance, so the 128-byte writer
 // cannot grow to hold this 2048-byte body. Direct sends must still finish.
 // expect: run http_large_body_fits_connection(network) = true
 fn http_large_body_fits_connection(n: Net, c: Clock, tasks: Tasks) -> bool waits {

@@ -15,8 +15,9 @@ Build `routes` with [router](router.md). A raw handler receives an anchored
 view of shared state. The region's allocations
 count against `handler_bytes` and the region closes when the handler exits.
 Copy data into owned values to keep it in a reply. The handler returns
-`Reply(Response)`, `Upgrade(Spec)` or an error. Use the upgrade module
-to encode the argument and start the protocol after the 101. [Upgrade](upgrade.md)
+`Reply(Response)`, `Stream(Spec)`, `Upgrade(Spec)` or an error.
+Streams and upgrades transfer the socket to a task admitted by the
+supervisor. [Streams](stream.md) · [Upgrade](upgrade.md)
 One task parses, routes, handles and writes each request in turn.
 
 `method`, `target`, `path`, `query` and `field` borrow request bytes.

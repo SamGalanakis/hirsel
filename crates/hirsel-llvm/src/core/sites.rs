@@ -158,10 +158,17 @@ pub(super) fn debug_plan(
             });
         }
     }
-    let Some(&first_file) = files.values().next() else {
+    if files.is_empty() && module.functions.iter().all(|f| f.body.is_none()) {
         return module.functions.iter().map(|_| None).collect();
-    };
-    let unit = node(Metadata::CompileUnit { file: first_file });
+    }
+    // Generated adapters have no source positions of their own. Give them
+    // an artificial scope so LLVM can describe source code inlined into them.
+    let generated_file = node(Metadata::File {
+        filename: "<generated>".into(),
+    });
+    let unit = node(Metadata::CompileUnit {
+        file: files.values().next().copied().unwrap_or(generated_file),
+    });
     let flag = |key: &str, value| Metadata::Tuple {
         distinct: false,
         items: vec![
@@ -189,8 +196,8 @@ pub(super) fn debug_plan(
                 .flatten()
                 .next()
                 .copied()
-                .or_else(|| body.blocks.iter().find_map(|b| b.anchor))?;
-            let file = files[&first.item.0];
+                .or_else(|| body.blocks.iter().find_map(|b| b.anchor));
+            let file = first.map_or(generated_file, |anchor| files[&anchor.item.0]);
             let base = symbol(module, FuncId(i as u32));
             let name = module.instances[function.instance.index()]
                 .definition
@@ -213,7 +220,10 @@ pub(super) fn debug_plan(
                 column: 0,
                 scope,
             });
-            let mut scopes = std::collections::BTreeMap::from([(first.item.0, scope)]);
+            let mut scopes = first
+                .into_iter()
+                .map(|anchor| (anchor.item.0, scope))
+                .collect::<std::collections::BTreeMap<_, _>>();
             let mut locations = std::collections::BTreeMap::new();
             for anchor in body
                 .inst_anchors

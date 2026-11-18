@@ -151,4 +151,58 @@ mod tests {
         };
         assert_eq!(component_lines(&loaded), component_lines(&maps()));
     }
+    #[test]
+    fn release_generated_caller_keeps_inlined_source_locations() {
+        let module = hirsel_core_ir::text::parse(
+            r#"core v1
+item i0 = app@1/main/scale
+sig g0 = (u64) -> (u64)
+inst n0 = app@1/main/adapter [] []
+inst n1 = app@1/main/scale [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+  v1: u64 = call f1 g0 (v0)
+  return v1
+}
+fn f1 = n1 g0 {
+b0(v0: u64):
+  v1: u64 = const 3
+  v2: u64 = mul v0, v1 at i0 18..23
+  return v2
+}
+"#,
+        )
+        .unwrap();
+        let program = super::emit_program_parts(
+            &[super::Unit::Core {
+                module: &module,
+                facts: &hirsel_core_ir::roles::Facts::new(&module),
+                observe_charge: false,
+                debug_lines: true,
+            }],
+            &[core::symbol(&module, hirsel_core_ir::FuncId(0))],
+            hirsel_core_layout::Target::X86_64Linux,
+            1,
+            true,
+            &mut |_, _, _| false,
+        )
+        .unwrap();
+        let [bytes] = program.objects.try_into().unwrap();
+        let object = core::finish_native_object(
+            bytes,
+            hirsel_core_ids::ContentHash::of_bytes(b"release line table"),
+            true,
+        )
+        .unwrap();
+        let debug = object.debug.unwrap();
+        let scale = hirsel_core_ids::DefPath::from_full("app@1/main/scale").unwrap();
+        assert!(
+            debug.sequences.iter().flat_map(|s| &s.rows).any(|row| {
+                row.source.is_some_and(|location| {
+                    debug.items[location.item as usize] == scale && location.start == 18
+                })
+            }),
+            "release code lost the inlined multiplication at byte 18"
+        );
+    }
 }

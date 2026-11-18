@@ -688,7 +688,8 @@ impl Pool {
         self.readies.wake_poller();
     }
 
-    fn pop(&self, index: usize) -> Option<TaskPtr> {
+    /// `batch` is the thief's reusable steal storage; it is empty between calls.
+    fn pop(&self, index: usize, batch: &mut Vec<TaskPtr>) -> Option<TaskPtr> {
         if let Some(task) = self.queues[index].lock().unwrap().pop() {
             return Some(task);
         }
@@ -716,13 +717,17 @@ impl Pool {
             }
             if let Some(first) = victim.local.pop_front() {
                 let count = victim.local.len() / 2;
-                let batch: Vec<_> = victim.local.drain(..count).collect();
+                batch.extend(victim.local.drain(..count));
                 #[cfg(feature = "testing")]
                 if self.measure {
                     self.sample.stolen.fetch_add(1 + count, Ordering::Relaxed);
                 }
                 drop(victim);
-                self.queues[index].lock().unwrap().local.extend(batch);
+                self.queues[index]
+                    .lock()
+                    .unwrap()
+                    .local
+                    .extend(batch.drain(..));
                 return Some(first);
             }
             // A LIFO task usually runs next on its own worker, which keeps
@@ -888,6 +893,8 @@ struct Worker {
     #[cfg(feature = "testing")]
     dispatch_sample: DispatchSample,
     outbox: Vec<Delivery>,
+    /// Steal storage, reused so a steal does not allocate.
+    stolen: Vec<TaskPtr>,
     #[cfg(any(test, feature = "testing"))]
     script: Option<Arc<crate::schedule_script::ScheduleScript>>,
 }
@@ -3257,6 +3264,7 @@ impl RunPtr {
             #[cfg(feature = "testing")]
             dispatch_sample: DispatchSample::default(),
             outbox: Vec::new(),
+            stolen: Vec::with_capacity(LOCAL_QUEUE / 2),
             #[cfg(any(test, feature = "testing"))]
             script: pool.script.clone(),
         };
@@ -3450,7 +3458,7 @@ impl RunPtr {
                     if (*root.0).state == State::Ended {
                         return;
                     }
-                    let Some(task) = pool.pop((*worker).index) else {
+                    let Some(task) = pool.pop((*worker).index, &mut (*worker).stolen) else {
                         drop(commit);
                         self.park_worker(pool, root, (*worker).index);
                         continue;

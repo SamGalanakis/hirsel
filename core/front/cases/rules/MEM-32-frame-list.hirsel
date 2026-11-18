@@ -254,3 +254,92 @@ fn escape_lent(n: u64) -> u64 {
         Error(_) => 1
     }
 }
+
+// OWN-7: a mutable callee may grow the list. After the callee pushes 20 values, the caller reads
+// every retained element. The 32-slot buffer holds 256 of the 1000 bytes, so
+// the live probe sees 744 and the probe after caller drop sees all 1000.
+fn lent_contents() -> u64 {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 100))
+    let err = push_all(mut xs, 20)
+    if err != 0 || list.len(xs) != 21 || xs[0] != 100 {
+        return 1
+    }
+    for i in 0u64 .. 20 {
+        if xs[i + 1] != i {
+            return 2
+        }
+    }
+    room()
+}
+
+fn lent_growth() -> u64 {
+    let r = bound bytes 1000 {
+        let remaining = lent_contents()
+        remaining * 10000 + room()
+    }
+    match r {
+        Ok(v) => v,
+        Error(_) => 0
+    }
+}
+
+// expect: run lent_growth() = 7441000
+// Taking a lent place directly is refused by OWN-11, but OWN-13 lets replace
+// return its old value. The old 4-slot buffer stays live across the caller's
+// return and a second use of its stack. Its value is 91 and its charge is 32.
+fn extract(mut xs: List[u64]) -> List[u64] {
+    replace(mut xs, list.new())
+}
+
+fn replaced() -> List[u64] {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 91))
+    extract(mut xs)
+}
+
+fn read_replaced() -> u64 {
+    let xs = replaced()
+    let _ = local(5)
+    xs[0] * 10000 + room()
+}
+
+fn lent_replace() -> u64 {
+    let r = bound bytes 1000 {
+        let live = read_replaced()
+        live * 10000 + room()
+    }
+    match r {
+        Ok(v) => v,
+        Error(_) => 0
+    }
+}
+
+// expect: run lent_replace() = 9109681000
+fn produce(take tx: Sender[u64]) waits {
+    result.unwrap(channel.send(tx, 99))
+}
+
+fn push_then_receive(mut xs: List[u64], rx: Receiver[u64]) waits {
+    result.unwrap(list.push(mut xs, 100))
+    let n = result.unwrap(channel.receive(rx))
+    result.unwrap(list.reserve(mut xs, 17))
+    result.unwrap(list.push(mut xs, n))
+}
+
+// The first push fills the fourth slot before receive. Reserve after wake asks
+// for 21 slots and growth copies all four values. The caller checks all five.
+fn lent_park(tasks: Tasks) -> u64 waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, take tx, produce))
+    let mut xs: List[u64] = list.new()
+    let _ = push_all(mut xs, 3)
+    push_then_receive(mut xs, rx)
+    result.unwrap(task.join(take h))
+    if list.len(xs) == 5 && xs[0] == 0 && xs[1] == 1 && xs[2] == 2 && xs[3] == 100 && xs[4] == 99 {
+        list.capacity(xs)
+    } else {
+        0
+    }
+}
+// expect: run lent_park(1) = 21

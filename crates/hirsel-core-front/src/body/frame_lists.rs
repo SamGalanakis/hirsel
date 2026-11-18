@@ -7,7 +7,10 @@
 //! escapes. `let mut x = list.new()` in a body without a `bound` scope, outside a
 //! closure, gets a frame slot when every use of `x` is one of:
 //! - `mut x` as the first argument of a core `list` operation the front expands in
-//!   place (`push`, `pop`, `set`, `swap`, `clear`, `fill`, `append`, `reserve`);
+//!   place (`push`, `pop`, `set`, `swap`, `clear`, `reserve`);
+//! - `mut x` as the first argument of `list.append` outside a loop. Bulk
+//!   appends inside a loop and `fill` can move straight to the heap. Keep
+//!   their frame-growth arms out of the loops that use the resulting carrier.
 //! - the base of an index, `x[i]`;
 //! - a bare argument of a call of a function, which is a view (OWN-7);
 //! - the source of a viewing `for`, or `view x`;
@@ -28,14 +31,12 @@ use super::*;
 pub(super) const FRAME_LIST_BYTES: u64 = 128;
 
 /// The core `list` operations that may take a frame-backed list as `mut`.
-const IN_PLACE: [&str; 8] = [
+const IN_PLACE: [&str; 6] = [
     "list.push",
     "list.pop",
     "list.set",
     "list.swap",
     "list.clear",
-    "list.fill",
-    "list.append",
     "list.reserve",
 ];
 
@@ -90,14 +91,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .filter(|&&p| p != u32::MAX)
                 .map(|&p| NodeId(p))
         };
-        let in_closure = |mut n: NodeId| {
+        let enclosed_by = |mut n: NodeId, kinds: &[NodeKind]| {
             while let Some(p) = up(n) {
-                if matches!(self.kind(p), NodeKind::Closure | NodeKind::ScopedClosure) {
+                if kinds.contains(&self.kind(p)) {
                     return true;
                 }
                 n = p;
             }
             false
+        };
+        let in_closure = |n| enclosed_by(n, &[NodeKind::Closure, NodeKind::ScopedClosure]);
+        let in_loop = |n| {
+            enclosed_by(
+                n,
+                &[
+                    NodeKind::Loop,
+                    NodeKind::While,
+                    NodeKind::For,
+                    NodeKind::ForTake,
+                ],
+            )
         };
         let mut found = HashSet::default();
         for s in lets {
@@ -129,7 +142,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             && args.get(1) == Some(&p)
                             && self.core_fn_at(args[0]).is_some_and(|f| {
                                 let g = &self.p.fns[f];
-                                g.body.is_none() && IN_PLACE.iter().any(|op| g.path.is_core(op))
+                                g.body.is_none()
+                                    && (IN_PLACE.iter().any(|op| g.path.is_core(op))
+                                        || (g.path.is_core("list.append") && !in_loop(c)))
                             })
                     }),
                     _ => false,

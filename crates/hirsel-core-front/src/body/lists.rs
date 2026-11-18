@@ -936,9 +936,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.new_block(&[]),
         );
         let publish = if direct { self.new_block(&[]) } else { store };
-        self.list_branch(full, grow_block, publish, n);
-        self.start(grow_block);
         let cold = self.is_full_test(Some(full));
+        let yes = self.edge(grow_block, &[]);
+        self.b.edges[yes.index()].cold = cold;
+        let no = self.edge(publish, &[]);
+        self.end(
+            Terminator::Branch {
+                condition: full,
+                yes,
+                no,
+            },
+            Some(n),
+        );
+        self.start(grow_block);
         // A frame list grows here: `grow`'s body would free its frame bytes.
         let grown = if self.frame_list(header).is_some() {
             let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;

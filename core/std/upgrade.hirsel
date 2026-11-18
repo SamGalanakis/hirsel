@@ -124,7 +124,8 @@ pub fn read(mut s: Socket, mut into: Bytes, until: Until) -> Result[u64, NetErro
         }
         return Ok(size)
     }
-    host.recv(mut s.reader, mut into, end)
+    let max = list.capacity(into)
+    host.recv_bounded(mut s.reader, mut into, max, end)
 }
 
 pub fn write(mut s: Socket, data: Bytes, until: Until) -> Result[u64, NetError] waits {

@@ -334,9 +334,9 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                     Err(e) => Err(e),
                 }
             }
-            RECV | SEND_PAIR => {
+            RECV_BOUNDED | SEND_PAIR => {
                 let b = &mut request.buffer;
-                let receiving = request.operation == RECV;
+                let receiving = request.operation == RECV_BOUNDED;
                 let tail = (!receiving).then(|| &*n.send_tail);
                 if (receiving && b.len >= b.capacity)
                     || tail.is_some_and(|tail| b.len == 0 && tail.len == 0)
@@ -443,7 +443,7 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
         let request = &mut *request;
         let n = &mut *request.path.cast_mut().cast::<NetworkRequest>();
         let drained = first
-            && request.operation == RECV
+            && request.operation == RECV_BOUNDED
             && request.buffer.len < request.buffer.capacity
             && (*n.sockets).read_drained(request.handle);
         let deadline = if drained {

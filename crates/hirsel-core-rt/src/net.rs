@@ -232,6 +232,7 @@ unsafe fn owned_op(
     key: u64,
     operand: *mut Buffer,
     send_tail: *const Buffer,
+    max_receive: u64,
     until_kind: u8,
     clock: u64,
     deadline_ns: u64,
@@ -246,21 +247,26 @@ unsafe fn owned_op(
             backlog: 0,
             connecting: None,
         };
+        let mut buffer = if operand.is_null() {
+            empty_buffer()
+        } else {
+            *operand
+        };
+        if op == RECV_BOUNDED {
+            let max = usize::try_from(max_receive).unwrap_or(usize::MAX);
+            buffer.capacity = buffer.capacity.min(buffer.len.saturating_add(max));
+        }
         let mut request = Request {
             operation: op,
             mode: 0,
             handle: key,
             path: (&mut network as *mut NetworkRequest).cast(),
             path_len: size_of::<NetworkRequest>(),
-            buffer: if operand.is_null() {
-                empty_buffer()
-            } else {
-                *operand
-            },
+            buffer,
             site,
         };
         let outcome = hirsel_core_host(context, (*(*context).run).provider, &mut request);
-        if op == RECV {
+        if op == RECV_BOUNDED {
             (*operand).len = request.buffer.len;
         }
         AddressOutcome::new(outcome, network.address)
@@ -284,6 +290,7 @@ pub unsafe extern "C" fn hirsel_core_host_accept(
             key,
             ptr::null_mut(),
             ptr::null(),
+            0,
             until_kind,
             clock,
             deadline_ns,
@@ -292,13 +299,15 @@ pub unsafe extern "C" fn hirsel_core_host_accept(
     }
 }
 /// # Safety
-/// Live read half, mutable caller buffer and optional Clock designation.
+/// A live read half and optional Clock designation from this run, with an
+/// exclusively borrowed carrier pinned and writable through delivery.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_host_recv(
+pub unsafe extern "C" fn hirsel_core_host_recv_bounded(
     context: *mut Context,
     key: u64,
     operand: *mut Buffer,
+    max_receive: u64,
     until_kind: u8,
     clock: u64,
     deadline_ns: u64,
@@ -307,10 +316,11 @@ pub unsafe extern "C" fn hirsel_core_host_recv(
     unsafe {
         owned_op(
             context,
-            RECV,
+            RECV_BOUNDED,
             key,
             operand,
             ptr::null(),
+            max_receive,
             until_kind,
             clock,
             deadline_ns,
@@ -344,6 +354,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_pair(
             key,
             prefix.cast_mut(),
             tail,
+            0,
             until_kind,
             clock,
             deadline_ns,

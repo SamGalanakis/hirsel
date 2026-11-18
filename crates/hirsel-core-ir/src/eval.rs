@@ -1731,11 +1731,11 @@ impl Machine<'_> {
                 }
             }
             HostOp::Accept => Operation::Accept(a[0]),
-            HostOp::Recv => Operation::Recv(a[0]),
+            HostOp::RecvBounded => Operation::Recv(a[0]),
             HostOp::SendPair => Operation::Send(a[0]),
             _ => unreachable!(),
         };
-        let (input, data, len, cap) = if matches!(op, HostOp::Recv | HostOp::SendPair) {
+        let (input, data, len, cap) = if matches!(op, HostOp::RecvBounded | HostOp::SendPair) {
             self.carrier(a[1])
         } else {
             (vec![], 0, 0, 0)
@@ -1748,18 +1748,18 @@ impl Machine<'_> {
         let until = match op {
             HostOp::Connect => 5,
             HostOp::Accept => 1,
-            HostOp::SendPair => 3,
+            HostOp::SendPair | HostOp::RecvBounded => 3,
             _ => 2,
         };
         let deadline = (op != HostOp::Listen && a[until] != 0).then(|| a[until + 2]);
+        let spare = if op == HostOp::RecvBounded {
+            cap.saturating_sub(len).min(a[2]) as usize
+        } else {
+            0
+        };
         let token = t.k as u64 + 1;
         let reply = loop {
-            if let Some(r) = model.attempt_parts(
-                operation,
-                [&input, &tail],
-                cap.saturating_sub(len) as usize,
-                token,
-            ) {
+            if let Some(r) = model.attempt_parts(operation, [&input, &tail], spare, token) {
                 break r;
             }
             if deadline.is_some_and(|at| at <= model.now()) {
@@ -1783,7 +1783,7 @@ impl Machine<'_> {
             if matches!(op, HostOp::Connect | HostOp::Listen | HostOp::Accept) {
                 self.world.network.sockets.adopt_model(&model, value);
             }
-            if op == HostOp::Recv {
+            if op == HostOp::RecvBounded {
                 if !bytes.is_empty() {
                     self.put(data + len, &bytes);
                 }
@@ -1819,7 +1819,11 @@ impl Machine<'_> {
             self.check_cancel(t)?;
         }
         Ok(match op {
-            HostOp::Connect | HostOp::Listen | HostOp::Accept | HostOp::Recv | HostOp::SendPair => {
+            HostOp::Connect
+            | HostOp::Listen
+            | HostOp::Accept
+            | HostOp::RecvBounded
+            | HostOp::SendPair => {
                 return self.network_host(t, op, a);
             }
             HostOp::NetSplit => {

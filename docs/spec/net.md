@@ -14,9 +14,14 @@ Core declares these provider operations, each `waits`:
 pub fn connect(n: Net, a: Addr, until: Until) -> Result[Socket, NetError] waits
 pub fn listen(n: Net, a: Addr, backlog: u16) -> Result[(Listener, Addr), NetError] waits
 pub fn accept(mut l: Listener, until: Until) -> Result[(Socket, Addr), NetError] waits
-pub fn recv(mut r: ReadHalf, mut buf: Bytes, until: Until) -> Result[u64, NetError] waits
+pub fn recv_bounded(mut r: ReadHalf, mut buf: Bytes, max_receive: u64, until: Until) -> Result[u64, NetError] waits
 pub fn send_pair(mut w: WriteHalf, prefix: Bytes, tail: Bytes, until: Until) -> Result[u64, NetError] waits
 ```
+
+Receive appends at most `max_receive` bytes and cannot exceed the caller's
+spare capacity. Send attempts the concatenation of its two borrowed slices
+and returns the number of prefix bytes committed across both. Each operation
+keeps one absolute deadline through readiness retries.
 
 W1a declares these entries. A denied address returns `Denied` before issue or
 any OS call. Every admitted provider call currently returns `Other(38)`;

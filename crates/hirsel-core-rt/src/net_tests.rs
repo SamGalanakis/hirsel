@@ -230,23 +230,25 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                         .value,
                     6
                 );
-                let mut bytes = [0; 3];
+                let mut bytes = [0; 6];
                 let mut input = carrier(&mut bytes, 0);
-                // Ready wins even when the operation's deadline is already past.
-                let got = hirsel_core_host_recv(context, s.value, &mut input, 1, clock, 0, 6);
+                // The bounded receive appends only the requested prefix even
+                // when the whole payload is ready at an expired deadline.
+                let got =
+                    hirsel_core_host_recv_bounded(context, s.value, &mut input, 3, 1, clock, 0, 6);
                 assert_eq!(
                     (got.error, got.value, input.len, input.capacity),
-                    (IoError::OK, 3, 3, 3)
+                    (IoError::OK, 3, 3, 6)
                 );
-                assert_eq!(&bytes, b"abc");
-                input.len = 0;
-                let got = hirsel_core_host_recv(context, s.value, &mut input, 1, clock, 0, 7);
+                assert_eq!(&bytes, b"abc\0\0\0");
+                let got =
+                    hirsel_core_host_recv_bounded(context, s.value, &mut input, 3, 1, clock, 0, 7);
                 assert_eq!(
-                    (got.error, got.value),
-                    (IoError::OK, 3),
+                    (got.error, got.value, input.len, input.capacity),
+                    (IoError::OK, 3, 6, 6),
                     "partial recv needs no fresh edge"
                 );
-                assert_eq!(&bytes, b"def");
+                assert_eq!(&bytes, b"abcdef");
                 // A borrowed static carrier has no spare storage even with a nonzero length.
                 let mut borrowed = [0xa5; 2];
                 let mut view = Buffer {
@@ -254,12 +256,31 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                     len: 2,
                     capacity: 0,
                 };
-                let out = hirsel_core_host_recv(context, s.value, &mut view, 0, 0, 0, 7);
+                let out = hirsel_core_host_recv_bounded(
+                    context,
+                    s.value,
+                    &mut view,
+                    u64::MAX,
+                    0,
+                    0,
+                    0,
+                    7,
+                );
                 assert_eq!((out.error, out.value), (IoError::OK, 0));
                 assert_eq!((view.len, view.capacity, borrowed), (2, 0, [0xa5; 2]));
                 // Full buffer and empty send issue/deliver without touching the host.
                 assert_eq!(
-                    hirsel_core_host_recv(context, s.value, &mut input, 0, 0, 0, 7).value,
+                    hirsel_core_host_recv_bounded(
+                        context,
+                        s.value,
+                        &mut input,
+                        u64::MAX,
+                        0,
+                        0,
+                        0,
+                        7
+                    )
+                    .value,
                     0
                 );
                 input.len = 0;
@@ -278,7 +299,16 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                     0
                 );
                 crate::os_net::ATTEMPTS.set(0);
-                let timeout = hirsel_core_host_recv(context, s.value, &mut input, 1, clock, 0, 8);
+                let timeout = hirsel_core_host_recv_bounded(
+                    context,
+                    s.value,
+                    &mut input,
+                    u64::MAX,
+                    1,
+                    clock,
+                    0,
+                    8,
+                );
                 assert_eq!(
                     crate::os_net::ATTEMPTS.get(),
                     1,
@@ -288,7 +318,17 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 assert_eq!(input.len, 0);
                 hirsel_core_socket_drop(context, c.written);
                 assert_eq!(
-                    hirsel_core_host_recv(context, s.value, &mut input, 0, 0, 0, 9).value,
+                    hirsel_core_host_recv_bounded(
+                        context,
+                        s.value,
+                        &mut input,
+                        u64::MAX,
+                        0,
+                        0,
+                        0,
+                        9
+                    )
+                    .value,
                     0
                 );
                 for key in [c.value, s.value, s.written, listener] {
@@ -394,7 +434,16 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 assert!(reset);
                 let mut bytes = [0; 8];
                 let mut input = carrier(&mut bytes, 0);
-                let got = hirsel_core_host_recv(context, split.value, &mut input, 0, 0, 0, 3);
+                let got = hirsel_core_host_recv_bounded(
+                    context,
+                    split.value,
+                    &mut input,
+                    u64::MAX,
+                    0,
+                    0,
+                    0,
+                    3,
+                );
                 assert_eq!(
                     (got.error, got.value),
                     (IoError::OK, 6),
@@ -403,9 +452,18 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 assert_eq!(&bytes[..6], b"queued");
                 input.len = 0;
                 assert_eq!(
-                    hirsel_core_host_recv(context, split.value, &mut input, 0, 0, 0, 4)
-                        .error
-                        .tag,
+                    hirsel_core_host_recv_bounded(
+                        context,
+                        split.value,
+                        &mut input,
+                        u64::MAX,
+                        0,
+                        0,
+                        0,
+                        4
+                    )
+                    .error
+                    .tag,
                     5
                 );
                 assert_eq!(
@@ -558,7 +616,8 @@ unsafe extern "C" fn socket_reader(context: *mut Context, _: *mut u8, input: *mu
         let scenario = input.cast::<*mut SocketScenario>().read();
         let mut bytes = [0u8; 8];
         let mut b = carrier(&mut bytes, 0);
-        let out = hirsel_core_host_recv(context, (*scenario).key, &mut b, 0, 0, 0, 1);
+        let out =
+            hirsel_core_host_recv_bounded(context, (*scenario).key, &mut b, u64::MAX, 0, 0, 0, 1);
         (*scenario).error = out.error.tag;
         (*scenario).appended = b.len;
         (*scenario).sticky = (*context)

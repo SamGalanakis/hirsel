@@ -11,13 +11,14 @@ fn wire(n: Net, c: Clock) -> u64 waits {
     let mut sr = sr0
     let sent = result.unwrap(host.send_pair(mut cw, string.as_bytes("a"), string.as_bytes("bc"), Never))
     let mut input: Bytes = result.unwrap(list.with_capacity(3))
-    let received = result.unwrap(host.recv(mut sr, mut input, At(c, 0)))
+    let first = result.unwrap(host.recv_bounded(mut sr, mut input, 2, At(c, 0)))
+    let tail = result.unwrap(host.recv_bounded(mut sr, mut input, 1, At(c, 0)))
     let address_ok = match peer.ip { V4(2130706433u32) => 1u64, _ => 0u64 }
     let mut empty: Bytes = result.unwrap(list.with_capacity(1))
-    let timed_out = match host.recv(mut sr, mut empty, At(c, 0)) { Error(TimedOut) => 1u64, _ => 0u64 }
+    let timed_out = match host.recv_bounded(mut sr, mut empty, 1, At(c, 0)) { Error(TimedOut) => 1u64, _ => 0u64 }
     release_write(take cw)
-    let ended = result.unwrap(host.recv(mut sr, mut empty, Never))
-    if local_address.port != 0 && peer.port != 0 && sent == 3 && received == 3 && input[0] == 97u8 && input[2] == 99u8 && ended == 0 {
+    let ended = result.unwrap(host.recv_bounded(mut sr, mut empty, 1, Never))
+    if local_address.port != 0 && peer.port != 0 && sent == 3 && first == 2 && tail == 1 && input[0] == 97u8 && input[2] == 99u8 && ended == 0 {
         40 + address_ok + timed_out
     } else { 0 }
 }

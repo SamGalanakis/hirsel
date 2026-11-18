@@ -45,8 +45,19 @@ unsafe extern "C" fn wire(context: *mut Context, _: *mut u8, input: *mut u8) -> 
             len: 0,
             capacity: 3,
         };
+        let zero = hirsel_core_host_recv_bounded(context, server.value, &mut buffer, 0, 0, 0, 0, 7);
+        assert_eq!((zero.error, zero.value, buffer.len), (IoError::OK, 0, 0));
         while buffer.len < 3 {
-            let r = hirsel_core_host_recv(context, server.value, &mut buffer, 0, 0, 0, 7);
+            let r = hirsel_core_host_recv_bounded(
+                context,
+                server.value,
+                &mut buffer,
+                u64::MAX,
+                0,
+                0,
+                0,
+                7,
+            );
             assert_eq!(r.error, IoError::OK);
             assert!(r.value > 0);
         }
@@ -57,7 +68,16 @@ unsafe extern "C" fn wire(context: *mut Context, _: *mut u8, input: *mut u8) -> 
             len: 0,
             capacity: 1,
         };
-        let r = hirsel_core_host_recv(context, server.value, &mut buffer, 1, 2, 100, 8);
+        let r = hirsel_core_host_recv_bounded(
+            context,
+            server.value,
+            &mut buffer,
+            u64::MAX,
+            1,
+            2,
+            100,
+            8,
+        );
         assert_eq!((r.error.tag, buffer.len), (6, 0));
         assert_eq!(
             fixture.model.now(),
@@ -113,7 +133,16 @@ unsafe extern "C" fn wire(context: *mut Context, _: *mut u8, input: *mut u8) -> 
                 blocked: false,
             },
         );
-        let r = hirsel_core_host_recv(context, server.value, &mut buffer, 1, 2, 300, 11);
+        let r = hirsel_core_host_recv_bounded(
+            context,
+            server.value,
+            &mut buffer,
+            u64::MAX,
+            1,
+            2,
+            300,
+            11,
+        );
         assert_eq!(
             (r.error.tag, r.value, byte),
             (0, 1, b'x'),
@@ -123,7 +152,17 @@ unsafe extern "C" fn wire(context: *mut Context, _: *mut u8, input: *mut u8) -> 
         hirsel_core_socket_drop(context, client.written);
         buffer.len = 0;
         assert_eq!(
-            hirsel_core_host_recv(context, server.value, &mut buffer, 0, 0, 0, 12).value,
+            hirsel_core_host_recv_bounded(
+                context,
+                server.value,
+                &mut buffer,
+                u64::MAX,
+                0,
+                0,
+                0,
+                12
+            )
+            .value,
             0
         );
         for key in [client.value, server.value, server.written, l.value] {
@@ -138,8 +177,21 @@ unsafe extern "C" fn wire(context: *mut Context, _: *mut u8, input: *mut u8) -> 
 }
 #[test]
 fn model_native_provider_uses_virtual_timers_with_and_without_scheduler() {
-    for scheduled in [false, true] {
+    let mut recorded =
+        std::collections::BTreeMap::<_, Vec<hirsel_core_net::model::Decision>>::new();
+    for (scheduled, replaying) in [(false, false), (true, false), (true, true)] {
+        let prefix = if replaying {
+            recorded
+                .iter()
+                .map(|(&kind, choices)| {
+                    (kind, choices.iter().map(|choice| choice.selected).collect())
+                })
+                .collect()
+        } else {
+            Default::default()
+        };
         let model = Model::new(Config {
+            prefix,
             queue_bytes: 4,
             max_prefix: 1,
             latency_ns: 3,
@@ -224,5 +276,10 @@ fn model_native_provider_uses_virtual_timers_with_and_without_scheduler() {
             files.close_all(&mut context);
         }
         assert!(files.sockets.is_empty());
+        if replaying {
+            assert_eq!(fixture.model.decisions(), recorded);
+        } else if scheduled {
+            recorded = fixture.model.decisions();
+        }
     }
 }

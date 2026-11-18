@@ -43,7 +43,7 @@ fn narrow(n: Net) -> u64 waits {
     }
 }
 fn halves(take s: Socket) { let (r, w) = net.split(take s) }
-fn read(mut r: ReadHalf, mut b: Bytes, c: Clock) waits { let _ = host.recv(mut r, mut b, At(c, 1)) }
+fn read(mut r: ReadHalf, mut b: Bytes, c: Clock) waits { let _ = host.recv_bounded(mut r, mut b, 1, At(c, 1)) }
 fn write(mut w: WriteHalf, b: Bytes) waits { let _ = host.send_pair(mut w, b, string.as_bytes(""), Never) }
 fn accepting(mut l: Listener) waits { let _ = host.accept(mut l, Never) }
 "#,

@@ -4083,7 +4083,7 @@ mod ready_routing_laws {
                 deliver,
             };
             let mut request = Request {
-                operation: RECV,
+                operation: RECV_BOUNDED,
                 mode: 0,
                 handle: 0,
                 path: ptr::null(),

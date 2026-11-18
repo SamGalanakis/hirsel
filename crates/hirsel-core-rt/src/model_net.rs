@@ -30,7 +30,7 @@ impl ModelProvider {
 fn modeled(op: u8) -> bool {
     matches!(
         op,
-        CONNECT | LISTEN | ACCEPT | RECV | SEND_PAIR | MONO_NS | WALL_MS | SLEEP_UNTIL
+        CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR | MONO_NS | WALL_MS | SLEEP_UNTIL
     )
 }
 /// # Safety
@@ -99,7 +99,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             CONNECT => Operation::Connect(address),
             LISTEN => Operation::Listen(address, n.backlog),
             ACCEPT => Operation::Accept(r.handle),
-            RECV => Operation::Recv(r.handle),
+            RECV_BOUNDED => Operation::Recv(r.handle),
             SEND_PAIR => Operation::Send(r.handle),
             _ => unreachable!(),
         };
@@ -131,7 +131,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                     lo: reply.address.lo,
                     port: reply.address.port,
                 };
-                if r.operation == RECV && !reply.bytes.is_empty() {
+                if r.operation == RECV_BOUNDED && !reply.bytes.is_empty() {
                     std::ptr::copy_nonoverlapping(
                         reply.bytes.as_ptr(),
                         r.buffer.data.add(r.buffer.len),

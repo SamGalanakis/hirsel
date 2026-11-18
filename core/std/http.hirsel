@@ -829,22 +829,12 @@ pub fn clamp_deadline(signal: Option[DrainSignal], own: u64) -> u64 {
     }
 }
 
-// recv appends into spare capacity. Reserve the leading space in the
-// existing scratch when a phase may read fewer than 8192 bytes.
-fn receive(mut r: ReadHalf, mut scratch: Bytes, n: u64, c: Clock, deadline: u64) -> Result[u64, NetError] waits {
-    list.clear(mut scratch)
-    let _ = list.fill(mut scratch, 8192 - n, 0u8)
-    host.recv(mut r, mut scratch, At(c, deadline))
+fn receive_head(mut r: ReadHalf, mut b: Bytes, c: Clock, deadline: u64, cfg: Config) -> Result[u64, NetError] waits {
+    let allowance = order.min(8192, cfg.pipeline_max + 1)
+    host.recv_bounded(mut r, mut b, allowance, At(c, deadline))
 }
 
-fn receive_head(mut r: ReadHalf, mut b: Bytes, mut scratch: Bytes, c: Clock, deadline: u64, cfg: Config) -> Result[u64, NetError] waits {
-    let allowance = order.min(8192, order.min(cfg.pipeline_max + 1, list.capacity(b) - list.len(b)))
-    let n = receive(mut r, mut scratch, allowance, c, deadline)?
-    let _ = list.append(mut b, list.slice(scratch, 8192 - allowance, 8192 - allowance + n))
-    Ok(n)
-}
-
-fn read_head(mut r: ReadHalf, mut b: Bytes, mut scratch: Bytes, mut h: http1.Head, c: Clock, first: bool, start: u64, cfg: Config, inbox: Sender[ConnectionSignal], slot: u64, signal: Option[DrainSignal]) -> HeadResult waits {
+fn read_head(mut r: ReadHalf, mut b: Bytes, mut h: http1.Head, c: Clock, first: bool, start: u64, cfg: Config, inbox: Sender[ConnectionSignal], slot: u64, signal: Option[DrainSignal]) -> HeadResult waits {
     let mut deadline = after_ms(start, cfg.first_head_ms)
     if !first {
         if list.len(b) == 0 {
@@ -852,7 +842,7 @@ fn read_head(mut r: ReadHalf, mut b: Bytes, mut scratch: Bytes, mut h: http1.Hea
             if host.mono_ns(c) >= idle {
                 return Rejected(408)
             }
-            match receive_head(mut r, mut b, mut scratch, c, idle, cfg) {
+            match receive_head(mut r, mut b, c, idle, cfg) {
                 Ok(0) => return PeerClosed,
                 Ok(_) => {},
                 Error(TimedOut) => return Rejected(408),
@@ -893,7 +883,7 @@ fn read_head(mut r: ReadHalf, mut b: Bytes, mut scratch: Bytes, mut h: http1.Hea
                 431
             })
         }
-        match receive_head(mut r, mut b, mut scratch, c, until, cfg) {
+        match receive_head(mut r, mut b, c, until, cfg) {
             Ok(0) => return if list.len(b) == 0 {
                 PeerClosed
             } else {
@@ -1045,8 +1035,9 @@ fn refill_body(mut b: Body, max: u64, deadline: u64, timeout_status: u16) -> Res
     if host.mono_ns(b.clock) >= until {
         return Error(body_fault(mut b, timeout_status))
     }
-    b.scratch_at = 8192 - max
-    match receive(mut b.reader, mut b.scratch, max, b.clock, until) {
+    list.clear(mut b.scratch)
+    b.scratch_at = 0
+    match host.recv_bounded(mut b.reader, mut b.scratch, max, At(b.clock, until)) {
         Ok(0) => match body_eof(mut b.decoder) {
             Ok(()) => Ok(()),
             Error(e) => {
@@ -1721,7 +1712,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
         // Only the parsed field prefix is visible to request consumers.
         // A fresh cursor supplies the other request offsets before Ready.
         head.count = 0
-        match read_head(mut reader, mut input, mut scratch, mut head, c, first, start, cfg, inbox, slot, signal) {
+        match read_head(mut reader, mut input, mut head, c, first, start, cfg, inbox, slot, signal) {
             PeerClosed => break,
             Rejected(status) => {
                 if write_succeeded(reply_error_until(mut writer, status, c, after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {

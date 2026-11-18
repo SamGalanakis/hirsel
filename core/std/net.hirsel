@@ -1,4 +1,4 @@
-// NET-7 graceful TCP end, composed from existing ownership and host.recv.
+// NET-7 graceful TCP end, composed from existing ownership and host.recv_bounded.
 pub type FinishError: send = Allocation(Capacity) | Network(NetError)
 
 fn release_write(take w: WriteHalf) {}
@@ -20,7 +20,7 @@ pub fn finish(take w: WriteHalf, take r: ReadHalf, c: Clock, deadline_ns: u64) -
             return Error(Network(TimedOut))
         }
         list.clear(mut scratch)
-        match host.recv(mut input, mut scratch, At(c, deadline_ns)) {
+        match host.recv_bounded(mut input, mut scratch, 8192, At(c, deadline_ns)) {
             Ok(0) => return Ok(()),
             Ok(_) => {},
             Error(error) => return Error(Network(error))

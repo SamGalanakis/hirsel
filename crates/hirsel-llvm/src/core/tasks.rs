@@ -69,7 +69,7 @@ impl FunctionEmitter<'_> {
             HostOp::Connect
             | HostOp::Listen
             | HostOp::Accept
-            | HostOp::Recv
+            | HostOp::RecvBounded
             | HostOp::SendPair
             | HostOp::NetNarrow
             | HostOp::NetSplit => {

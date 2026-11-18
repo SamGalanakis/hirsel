@@ -42,6 +42,6 @@ pub fn listen(n: Net, a: Addr, backlog: u16) -> Result[(Listener, Addr), NetErro
 
 pub fn accept(mut l: Listener, until: Until) -> Result[(Socket, Addr), NetError] waits
 
-pub fn recv(mut r: ReadHalf, mut buf: Bytes, until: Until) -> Result[u64, NetError] waits
+pub fn recv_bounded(mut r: ReadHalf, mut buf: Bytes, max_receive: u64, until: Until) -> Result[u64, NetError] waits
 
 pub fn send_pair(mut w: WriteHalf, prefix: Bytes, tail: Bytes, until: Until) -> Result[u64, NetError] waits

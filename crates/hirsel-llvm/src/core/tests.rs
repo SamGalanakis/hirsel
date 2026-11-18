@@ -2226,7 +2226,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             HostOp::Connect => &["u64", "u8", "u64", "u64", "u16", "u8", "u64", "u64"],
             HostOp::Listen => &["u64", "u8", "u64", "u64", "u16", "u16"],
             HostOp::Accept => &["u64", "u8", "u64", "u64"],
-            HostOp::Recv => &["u64", "ptr", "u8", "u64", "u64"],
+            HostOp::RecvBounded => &["u64", "ptr", "u64", "u8", "u64", "u64"],
             HostOp::SendPair => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
             HostOp::NetNarrow => &["u64", "u8", "u8", "u64", "u64", "u8", "u16", "u16"],
             HostOp::NetSplit => &["u64"],

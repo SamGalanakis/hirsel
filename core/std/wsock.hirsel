@@ -603,7 +603,8 @@ pub fn read(mut r: Reader, deadline: Until) -> Result[websocket.Event, Error] wa
         }
         list.clear(mut r.input)
         r.cursor = 0
-        match host.recv(mut r.half, mut r.input, deadline) {
+        let max = list.capacity(r.input)
+        match host.recv_bounded(mut r.half, mut r.input, max, deadline) {
             Ok(0) => return Error(Eof),
             Ok(_) => {},
             Error(e) => return Error(Network(e))
@@ -720,7 +721,8 @@ pub fn server_with(take socket: Socket, take slot: Pending, peer: Ip, ingress: L
             },
             Waiting => {}
         }
-        match host.recv(mut input_half, mut input, deadline) {
+        let max = list.capacity(input)
+        match host.recv_bounded(mut input_half, mut input, max, deadline) {
             Ok(0) => return Error(Eof),
             Ok(_) => {},
             Error(e) => return Error(Network(e))
@@ -775,7 +777,8 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
             Failed(code) => return Error(Http(code)),
             Pending => {}
         }
-        match host.recv(mut input_half, mut input, deadline) {
+        let max = list.capacity(input)
+        match host.recv_bounded(mut input_half, mut input, max, deadline) {
             Ok(0) => return Error(Eof),
             Ok(_) => {},
             Error(e) => return Error(Network(e))

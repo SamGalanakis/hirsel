@@ -196,7 +196,7 @@ fn monitor(take job: Monitor) -> ReadHalf waits {
     let mut remaining = limit
     loop {
         list.clear(mut buffer)
-        match host.recv(mut reader, mut buffer, Never) {
+        match host.recv_bounded(mut reader, mut buffer, 64, Never) {
             Ok(n) => {
                 if n == 0 || n > remaining {
                     break

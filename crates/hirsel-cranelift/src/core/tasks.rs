@@ -256,7 +256,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::Connect
                     | HostOp::Listen
                     | HostOp::Accept
-                    | HostOp::Recv
+                    | HostOp::RecvBounded
                     | HostOp::SendPair
                     | HostOp::NetNarrow
                     | HostOp::NetSplit => (null, no_mode),
@@ -267,7 +267,7 @@ impl Function<'_, '_, '_> {
                     HostOp::Connect
                     | HostOp::Listen
                     | HostOp::Accept
-                    | HostOp::Recv
+                    | HostOp::RecvBounded
                     | HostOp::SendPair
                     | HostOp::NetNarrow
                     | HostOp::NetSplit => {

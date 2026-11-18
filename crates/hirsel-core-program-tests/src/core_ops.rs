@@ -423,8 +423,9 @@ fn wire_socket_model_carries_addresses_deadlines_and_bytes_on_evaluator() {
             crate::wire_socket::SOURCE.to_owned()
         } else {
             crate::wire_socket::SOURCE
-                .replace("mut input, At(c, 0)", "mut input, Never")
-                .replace("mut empty, At(c, 0)", "mut empty, At(c, 100)")
+                .replace("mut input, 2, At(c, 0)", "mut input, 2, Never")
+                .replace("mut input, 1, At(c, 0)", "mut input, 1, Never")
+                .replace("mut empty, 1, At(c, 0)", "mut empty, 1, At(c, 100)")
         };
         let (program, names) = crate::SourceProgram::lower(&source, None);
         let model = Model::new(Config {
@@ -432,7 +433,7 @@ fn wire_socket_model_carries_addresses_deadlines_and_bytes_on_evaluator() {
             prefix: [
                 (Choice::Send, vec![2]),
                 (Choice::Delivery, vec![2, 2]),
-                (Choice::Receive, vec![2]),
+                (Choice::Receive, vec![1, 0]),
             ]
             .into(),
             ..Config::default()
@@ -467,9 +468,9 @@ fn reader(take x: Input) -> (u64, ReadHalf) waits {
     let Input(r: r0) = take x
     let mut r = r0
     let mut empty: Bytes = list.new()
-    let zero = result.unwrap(host.recv(mut r, mut empty, Never))
+    let zero = result.unwrap(host.recv_bounded(mut r, mut empty, 0, Never))
     let mut b: Bytes = result.unwrap(list.with_capacity(1))
-    let signal = match host.recv(mut r, mut b, Never) { Error(Aborted) => if list.len(b) == 0 && zero == 0 { 7u64 } else { 0u64 }, _ => 0u64 }
+    let signal = match host.recv_bounded(mut r, mut b, 1, Never) { Error(Aborted) => if list.len(b) == 0 && zero == 0 { 7u64 } else { 0u64 }, _ => 0u64 }
     (signal, take r)
 }
 fn f(n: Net, c: Clock, tasks: Tasks) -> u64 waits {
@@ -488,7 +489,7 @@ fn f(n: Net, c: Clock, tasks: Tasks) -> u64 waits {
     let (signal, r0) = result.unwrap(task.join(take h))
     let mut r = r0
     let mut b: Bytes = result.unwrap(list.with_capacity(1))
-    let received = result.unwrap(host.recv(mut r, mut b, At(c, 0)))
+    let received = result.unwrap(host.recv_bounded(mut r, mut b, 1, At(c, 0)))
     if signal == 7 && sent == 1 && received == 1 && b[0] == 120u8 { 7u64 } else { 0u64 }
 }
 "#;

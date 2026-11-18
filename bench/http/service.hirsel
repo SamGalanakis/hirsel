@@ -88,7 +88,7 @@ fn place_increment(place: PlaceEndpoint, deadline: u64) -> Result[Option[Bytes],
         Error(c) => return Error(Allocation(c)),
     }
     while list.len(payload) < 8 {
-        match host.recv(mut input, mut payload, At(place.clock, deadline)) {
+        match host.recv_bounded(mut input, mut payload, 8, At(place.clock, deadline)) {
             Ok(0) => return Ok(None),
             Ok(_) => {},
             Error(_) => return Ok(None),

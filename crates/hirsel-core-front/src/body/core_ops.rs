@@ -340,7 +340,7 @@ operations! {
     ("host", "connect", Lane::Runtime(Kernel::Net(HostOp::Connect)), "B", "wire-w1a-1063", false),
     ("host", "listen", Lane::Runtime(Kernel::Net(HostOp::Listen)), "B", "wire-w1a-1063", false),
     ("host", "accept", Lane::Runtime(Kernel::Net(HostOp::Accept)), "B", "wire-w1a-1063", false),
-    ("host", "recv", Lane::Runtime(Kernel::Net(HostOp::Recv)), "B", "wire-w1a-1063", false),
+    ("host", "recv_bounded", Lane::Runtime(Kernel::Net(HostOp::RecvBounded)), "B", "wire-w1a-1063", false),
     ("host", "send_pair", Lane::Runtime(Kernel::Net(HostOp::SendPair)), "B", "wire-w1a-1063", false),
     ("net", "narrow", Lane::Runtime(Kernel::Net(HostOp::NetNarrow)), "B", "wire-w1a-1063", false),
     ("net", "split", Lane::Runtime(Kernel::Net(HostOp::NetSplit)), "B", "wire-w1a-1063", false),
@@ -2994,7 +2994,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let u = Ty::Scalar(Scalar::U64);
         let key = if matches!(
             op,
-            HostOp::Accept | HostOp::Recv | HostOp::SendPair | HostOp::NetSplit
+            HostOp::Accept | HostOp::RecvBounded | HostOp::SendPair | HostOp::NetSplit
         ) {
             self.runtime_key(vals[0]?, n)
         } else {
@@ -3040,15 +3040,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             HostOp::Accept => {
                 operands.extend(self.net_until(self.p.fns[f].params[1].ty, vals[1]?, n)?)
             }
-            HostOp::Recv | HostOp::SendPair => {
-                operands.push(vals[1]?);
-                let until = if op == HostOp::SendPair {
-                    operands.push(vals[2]?);
-                    3
-                } else {
-                    2
-                };
-                operands.extend(self.net_until(self.p.fns[f].params[until].ty, vals[until]?, n)?);
+            HostOp::RecvBounded | HostOp::SendPair => {
+                operands.extend([vals[1]?, vals[2]?]);
+                operands.extend(self.net_until(self.p.fns[f].params[3].ty, vals[3]?, n)?);
             }
             HostOp::NetSplit => {}
             _ => unreachable!(),
@@ -3070,7 +3064,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ok,
             n,
             |cx, to, ty| {
-                if op == HostOp::NetNarrow || matches!(op, HostOp::Recv | HostOp::SendPair) {
+                if op == HostOp::NetNarrow || matches!(op, HostOp::RecvBounded | HostOp::SendPair) {
                     cx.runtime_case_payload(to, 0, ty, Some(value), n);
                 } else if op == HostOp::Connect {
                     if let Some(at) =

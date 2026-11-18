@@ -110,7 +110,8 @@ fn client_head(mut r: ReadHalf, mut received: Bytes, c: Clock, deadline: u64) ->
             Partial => {},
             _ => return 0,
         }
-        match host.recv(mut r, mut received, At(c, deadline)) {
+        let max = list.capacity(received)
+        match host.recv_bounded(mut r, mut received, max, At(c, deadline)) {
             Ok(0) => return 0,
             Ok(_) => {},
             Error(_) => return 0,
@@ -120,7 +121,8 @@ fn client_head(mut r: ReadHalf, mut received: Bytes, c: Clock, deadline: u64) ->
 
 fn client_end(mut r: ReadHalf, mut received: Bytes, until: Until) -> bool waits {
     loop {
-        match host.recv(mut r, mut received, until) {
+        let max = list.capacity(received)
+        match host.recv_bounded(mut r, mut received, max, until) {
             Ok(0) => return true,
             Ok(_) => {},
             Error(_) => return false,

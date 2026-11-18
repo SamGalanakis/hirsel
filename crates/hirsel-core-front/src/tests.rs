@@ -1141,9 +1141,10 @@ fn aggregate_constants_publish_values_and_use_read_only_tables() {
         hirsel_core_ir::Inst::Store { .. } | hirsel_core_ir::Inst::Copy { .. }
     )));
     assert_eq!(emitter.module.statics.len(), 1);
+    let recipes = hirsel_core_layout::compute(&emitter.module.types).unwrap();
     assert_eq!(
         emitter.module.statics[0]
-            .native(&emitter.module.types, &emitter.recipes)
+            .native(&emitter.module.types, &recipes)
             .1,
         (0u16..8)
             .flat_map(|i| (i * 3).to_le_bytes())

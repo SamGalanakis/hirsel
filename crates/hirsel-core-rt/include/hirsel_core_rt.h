@@ -152,6 +152,7 @@ static inline HirselCoreCause hirsel_core_cause_new(uint8_t kind, uint64_t site)
 typedef struct HirselCoreCauseCell HirselCoreCauseCell;
 /* Transfers the inline String backing; capacity zero owns no storage. */
 void hirsel_core_raise(HirselCoreContext *, HirselCoreCause);
+void hirsel_core_raise_builtin(HirselCoreContext *, uint8_t kind, uint64_t site);
 void hirsel_core_raise_string(HirselCoreContext *, uint64_t site,
     uint8_t *data, uint64_t len, uint64_t capacity);
 HirselCoreCauseCell *hirsel_core_causes_take(HirselCoreContext *);

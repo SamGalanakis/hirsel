@@ -9,10 +9,13 @@
 #include "forward_reads.h"
 #include "loop_version.h"
 #include <map>
+#include <memory>
 #include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/ValueTracking.h>
+#include <llvm/Analysis/LoopInfo.h>
+#include <llvm/IR/Dominators.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Transforms/Utils/Local.h>
 #include <llvm/Transforms/Utils/PromoteMemToReg.h>
@@ -696,12 +699,63 @@ static void shareStepWindows(Module &M, Function &Step) {
   }
 }
 
+// A built-in cause is a constant: zero words around its kind and site. SysV
+// passes it by value, so every raise copies 32 bytes onto the outgoing stack.
+// Pass the kind and site in registers instead, after the IR pipeline: a
+// cheaper raise seen by O3 changes inlining and unswitching, and Etc::Sieve's
+// marking loop then spills its index (+51% instructions). Raises inside a loop
+// keep the copy; their argument registers change greedy allocation of the hot
+// loop around them (StoragePool's fill counter moves to a spilled r8, +0.68%).
+static void scalarRaises(Module &M) {
+  auto *Raise = M.getFunction("hirsel_core_raise");
+  if (!Raise) return;
+  auto &Context = M.getContext();
+  auto *Word = Type::getInt64Ty(Context);
+  auto *Kind = Type::getInt8Ty(Context);
+  FunctionCallee Builtin = M.getOrInsertFunction(
+      "hirsel_core_raise_builtin",
+      FunctionType::get(Type::getVoidTy(Context), {Raise->getArg(0)->getType(), Kind, Word}, false));
+  SmallVector<CallInst *, 64> Calls;
+  for (auto &Use : Raise->uses())
+    if (auto *Call = dyn_cast<CallInst>(Use.getUser()); Call && Call->isCallee(&Use))
+      Calls.push_back(Call);
+  SmallPtrSet<GlobalVariable *, 32> Causes;
+  DenseMap<Function *, std::unique_ptr<LoopInfo>> Loops;
+  for (auto *Call : Calls) {
+    auto &Info = Loops[Call->getFunction()];
+    if (!Info) Info = std::make_unique<LoopInfo>(DominatorTree(*Call->getFunction()));
+    if (Info->getLoopFor(Call->getParent())) continue;
+    auto *Cause = dyn_cast<GlobalVariable>(Call->getArgOperand(1));
+    if (!Cause || !Cause->isConstant() || !Cause->hasInitializer() ||
+        Cause->isExternallyInitialized())
+      continue;
+    auto *Init = dyn_cast<ConstantStruct>(Cause->getInitializer());
+    if (!Init || Init->getNumOperands() != 3 || !Init->getOperand(0)->isNullValue()) continue;
+    auto *KindWord = dyn_cast<ConstantInt>(Init->getOperand(1));
+    auto *Site = Init->getOperand(2);
+    if (!KindWord || Site->getType() != Word) continue;
+    IRBuilder<> Builder(Call);
+    auto *Scalar = Builder.CreateCall(
+        Builtin, {Call->getArgOperand(0),
+                  ConstantInt::get(Kind, KindWord->getZExtValue() & 0xff), Site});
+    Scalar->setCallingConv(Call->getCallingConv());
+    Scalar->setAttributes(Call->getAttributes().removeParamAttributes(Context, 1));
+    Scalar->addParamAttr(1, Attribute::ZExt);
+    Scalar->copyMetadata(*Call);
+    Call->eraseFromParent();
+    Causes.insert(Cause);
+  }
+  for (auto *Cause : Causes)
+    if (Cause->use_empty()) Cause->eraseFromParent();
+}
+
 // Inlining and Step versioning can copy the same source Step many times. On
 // x86-64 a relocated source position costs a ten-byte movabs at each copy.
 // Share that load on the slow edge once it pays for a separate function.
-extern "C" void hirsel_llvm_share_step_sites(void *Raw) {
+extern "C" void hirsel_llvm_share_cold_sites(void *Raw) {
   auto &M = *static_cast<Module *>(Raw);
   if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return;
+  scalarRaises(M);
   auto *Step = M.getFunction("hirsel_core_step_out");
   if (!Step) return;
   shareStepWindows(M, *Step);

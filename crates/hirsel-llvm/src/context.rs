@@ -264,14 +264,14 @@ impl<'context> Module<'context> {
                         module: LLVMModuleRef,
                         machine: LLVMTargetMachineRef,
                     );
-                    fn hirsel_llvm_share_step_sites(module: LLVMModuleRef);
+                    fn hirsel_llvm_share_cold_sites(module: LLVMModuleRef);
                     fn hirsel_llvm_cold_failure_edges(
                         module: LLVMModuleRef,
                         context: LLVMContextRef,
                     );
                 }
                 hirsel_llvm_finish_reads(self.raw, machine.raw);
-                hirsel_llvm_share_step_sites(self.raw);
+                hirsel_llvm_share_cold_sites(self.raw);
                 hirsel_llvm_cold_failure_edges(self.raw, self.context.raw);
             }
             LLVMDisposePassBuilderOptions(options);

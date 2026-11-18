@@ -333,6 +333,18 @@ pub unsafe extern "C" fn hirsel_core_raise(context: *mut Context, cause: Cause) 
         causes::record(&mut *context, cause);
     }
 }
+/// Record a built-in cause with no owned message in the current prepaid cell.
+/// # Safety
+/// The caller owns the task context and its unused obligation cell. The kind
+/// is a built-in kind other than Fail, and cleanup follows the same contract
+/// as for `hirsel_core_raise`.
+#[cold]
+#[inline(never)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_raise_builtin(context: *mut Context, kind: u8, site: u64) {
+    // SAFETY: the caller supplies the live context and unused obligation.
+    unsafe { hirsel_core_raise(context, Cause::new(kind, site)) };
+}
 /// Deliver the current chain by ownership transfer, without admission/allocation.
 /// # Safety
 /// Context is live and exclusively used by its task after cleanup.

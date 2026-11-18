@@ -1,0 +1,370 @@
+// AWFY JavaScript havlak.js. Each graph owns its nodes and uses block numbers
+// and DFS ordinals for links. The finder builds the loop forest in reverse DFS order.
+const UNVISITED: u64 = 2147483647
+
+const MAX_NON_BACK_PREDS: u64 = 32768
+
+type Block {
+    incoming: List[u64],
+    outgoing: List[u64],
+    present: bool
+}
+
+type Graph {
+    blocks: List[Block],
+    edges: List[(u64, u64)]
+}
+
+fn create_node(mut graph: Graph, name: u64) -> Result[(), Capacity] {
+    while list.len(graph.blocks) <= name {
+        result.capacity_only(list.push(mut graph.blocks, Block(incoming: list.new(), outgoing: list.new(), present: false)))?
+    }
+    graph.blocks[name].present = true
+    Ok(())
+}
+
+fn add_edge(mut graph: Graph, from: u64, to: u64) -> Result[(), Capacity] {
+    create_node(mut graph, from)?
+    create_node(mut graph, to)?
+    result.capacity_only(list.push(mut graph.blocks[from].outgoing, to))?
+    result.capacity_only(list.push(mut graph.blocks[to].incoming, from))?
+    result.capacity_only(list.push(mut graph.edges, (from, to)))
+}
+
+fn straight(mut graph: Graph, from: u64, count: u64) -> Result[u64, Capacity] {
+    for i in 0 .. count {
+        add_edge(mut graph, from + i, from + i + 1)?
+    }
+    Ok(from + count)
+}
+
+fn diamond(mut graph: Graph, start: u64) -> Result[u64, Capacity] {
+    add_edge(mut graph, start, start + 1)?
+    add_edge(mut graph, start, start + 2)?
+    add_edge(mut graph, start + 1, start + 3)?
+    add_edge(mut graph, start + 2, start + 3)?
+    Ok(start + 3)
+}
+
+fn base_loop(mut graph: Graph, from: u64) -> Result[u64, Capacity] {
+    let header = straight(mut graph, from, 1)?
+    let first = diamond(mut graph, header)?
+    let second_start = straight(mut graph, first, 1)?
+    let second = diamond(mut graph, second_start)?
+    let footer = straight(mut graph, second, 1)?
+    add_edge(mut graph, second, second_start)?
+    add_edge(mut graph, first, header)?
+    add_edge(mut graph, footer, from)?
+    straight(mut graph, footer, 1)
+}
+
+fn build_cfg(mut graph: Graph) -> Result[(), Capacity] {
+    let mut n = 2u64
+    for _ in 0u64 .. 10 {
+        create_node(mut graph, n + 1)?
+        add_edge(mut graph, 2, n + 1)?
+        n += 1
+        for _ in 0u64 .. 10 {
+            let top = n
+            n = straight(mut graph, n, 1)?
+            for _ in 0u64 .. 5 {
+                n = base_loop(mut graph, n)?
+            }
+            let bottom = straight(mut graph, n, 1)?
+            add_edge(mut graph, n, top)?
+            n = bottom
+        }
+        add_edge(mut graph, n, 1)?
+    }
+    Ok(())
+}
+
+type SimpleLoop {
+    blocks: List[u64],
+    children: List[u64],
+    parent: Option[u64],
+    root: bool,
+    reducible: bool,
+    depth: u64,
+    nesting: u64
+}
+
+fn append_unique(mut items: List[u64], n: u64) -> Result[(), Capacity] {
+    if contains(items, n) {
+        Ok(())
+    } else {
+        result.capacity_only(list.push(mut items, n))
+    }
+}
+
+fn contains(items: List[u64], target: u64) -> bool {
+    for item in items {
+        if item == target {
+            return true
+        }
+    }
+    false
+}
+
+fn new_loop(mut loops: List[SimpleLoop], block: Option[u64], reducible: bool) -> Result[u64, Capacity] {
+    let mut blocks: List[u64] = list.new()
+    if let Some(node) = block {
+        result.capacity_only(list.push(mut blocks, node))?
+    }
+    let index = list.len(loops)
+    let value = SimpleLoop(blocks: take blocks, children: list.new(), parent: None, root: block == None, reducible: reducible, depth: 0, nesting: 0)
+    result.capacity_only(list.push(mut loops, take value))?
+    Ok(index)
+}
+
+fn set_parent(mut loops: List[SimpleLoop], child: u64, parent: u64) -> Result[(), Capacity] {
+    loops[child].parent = Some(parent)
+    append_unique(mut loops[parent].children, child)
+}
+
+fn nesting(mut loops: List[SimpleLoop], index: u64, depth: u64) {
+    loops[index].depth = depth
+    let children = list.len(loops[index].children)
+    for i in 0 .. children {
+        let child = loops[index].children[i]
+        nesting(mut loops, child, depth + 1)
+        let level = loops[child].nesting + 1
+        if level > loops[index].nesting {
+            loops[index].nesting = level
+        }
+    }
+}
+
+fn nest_forest(mut loops: List[SimpleLoop]) -> Result[(), Capacity] {
+    for i in 0 .. list.len(loops) {
+        if !loops[i].root && loops[i].parent == None {
+            set_parent(mut loops, i, 0)?
+        }
+    }
+    nesting(mut loops, 0, 0)
+    Ok(())
+}
+
+type Class: key = Top | NonHeader | Reducible | SelfLoop | Irreducible | Dead
+
+type UnionNode {
+    parent: u64,
+    block: Option[u64],
+    loop_id: Option[u64],
+    ordinal: u64
+}
+
+type Finder {
+    incoming: List[List[u64]],
+    back: List[List[u64]],
+    number: numbers.Dictionary,
+    header: List[u64],
+    kind: List[Class],
+    last: List[u64],
+    nodes: List[UnionNode]
+}
+
+fn new_finder(size: u64) -> Result[Finder, Capacity] {
+    let mut f = Finder(incoming: list.new(), back: list.new(), number: numbers.new()?, header: list.new(), kind: list.new(), last: list.new(), nodes: list.new())
+    for _ in 0 .. size {
+        let incoming: List[u64] = list.new()
+        let back: List[u64] = list.new()
+        result.capacity_only(list.push(mut f.incoming, take incoming))?
+        result.capacity_only(list.push(mut f.back, take back))?
+    }
+    let zero = 0u64
+    list.fill(mut f.header, size, zero)?
+    list.fill(mut f.kind, size, Top)?
+    list.fill(mut f.last, size, zero)?
+    list.fill(mut f.nodes, size, UnionNode(parent: 0, block: None, loop_id: None, ordinal: 0))?
+    Ok(take f)
+}
+
+type Frame {
+    block: u64,
+    ordinal: u64,
+    edge: u64
+}
+
+fn enter(mut f: Finder, mut path: List[Frame], block: u64, ordinal: u64) -> Result[(), Capacity] {
+    f.nodes[ordinal] = UnionNode(parent: ordinal, block: Some(block), loop_id: None, ordinal: ordinal)
+    numbers.put(mut f.number, block, ordinal)?
+    result.capacity_only(list.push(mut path, Frame(block: block, ordinal: ordinal, edge: 0)))
+}
+
+fn dfs(graph: Graph, mut f: Finder) -> Result[(), Capacity] {
+    let mut path: List[Frame] = list.new()
+    let mut last = 0u64
+    enter(mut f, mut path, 0, last)?
+    while list.len(path) != 0 {
+        let head = list.len(path) - 1
+        let frame = path[head]
+        let targets = graph.blocks[frame.block].outgoing
+        if frame.edge == list.len(targets) {
+            f.last[frame.ordinal] = last
+            let _ = list.pop(mut path)
+        } else {
+            let target = targets[frame.edge]
+            path[head].edge += 1
+            if numbers.get(f.number, target) == Some(UNVISITED) {
+                last += 1
+                enter(mut f, mut path, target, last)?
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ancestor(f: Finder, w: u64, v: u64) -> bool {
+    w <= v && v <= f.last[w]
+}
+
+fn find_set(mut f: Finder, start: u64) -> Result[u64, Capacity] {
+    let mut path: List[u64] = list.new()
+    let mut node = start
+    while node != f.nodes[node].parent {
+        let parent = f.nodes[node].parent
+        if parent != f.nodes[parent].parent {
+            result.capacity_only(list.push(mut path, node))?
+        }
+        node = parent
+    }
+    // The reference relinks to the starting node's parent.
+    let parent = f.nodes[start].parent
+    for i in path {
+        f.nodes[i].parent = parent
+    }
+    Ok(node)
+}
+
+fn identify_edges(graph: Graph, mut f: Finder, size: u64) -> Result[(), Capacity] {
+    for w in 0 .. size {
+        f.header[w] = 0
+        f.kind[w] = NonHeader
+        if let Some(block) = f.nodes[w].block {
+            for pred in graph.blocks[block].incoming {
+                let v = option.unwrap(numbers.get(f.number, pred))
+                if v != UNVISITED {
+                    if ancestor(f, w, v) {
+                        result.capacity_only(list.push(mut f.back[w], v))?
+                    } else {
+                        append_unique(mut f.incoming[w], v)?
+                    }
+                }
+            }
+        } else {
+            f.kind[w] = Dead
+        }
+    }
+    Ok(())
+}
+
+fn process_header(mut f: Finder, mut loops: List[SimpleLoop], w: u64, block: u64) -> Result[bool, Capacity] {
+    let mut pool: List[u64] = list.new()
+    for j in 0 .. list.len(f.back[w]) {
+        let v = f.back[w][j]
+        if v == w {
+            f.kind[w] = SelfLoop
+        } else {
+            let root = find_set(mut f, v)?
+            result.capacity_only(list.push(mut pool, root))?
+        }
+    }
+    let mut work: List[u64] = list.new()
+    list.append(mut work, pool)?
+    if list.len(pool) != 0 {
+        f.kind[w] = Reducible
+    }
+    let mut cursor = 0u64
+    while cursor < list.len(work) {
+        let x = f.nodes[work[cursor]].ordinal
+        if list.len(f.incoming[x]) > MAX_NON_BACK_PREDS {
+            return Ok(false)
+        }
+        let mut i = 0u64
+        while i < list.len(f.incoming[x]) {
+            let pred = f.incoming[x][i]
+            let root = find_set(mut f, pred)?
+            let y = f.nodes[root].ordinal
+            if !ancestor(f, w, y) {
+                f.kind[w] = Irreducible
+                append_unique(mut f.incoming[w], y)?
+            } else if y != w && !contains(pool, root) {
+                result.capacity_only(list.push(mut work, root))?
+                result.capacity_only(list.push(mut pool, root))?
+            }
+            i += 1
+        }
+        cursor += 1
+    }
+    if list.len(pool) > 0 || f.kind[w] == SelfLoop {
+        let loop_id = new_loop(mut loops, Some(block), f.kind[w] != Irreducible)?
+        f.nodes[w].loop_id = Some(loop_id)
+        for node in pool {
+            let ordinal = f.nodes[node].ordinal
+            f.header[ordinal] = w
+            f.nodes[node].parent = w
+            if let Some(child) = f.nodes[node].loop_id {
+                set_parent(mut loops, child, loop_id)?
+            } else {
+                append_unique(mut loops[loop_id].blocks, option.unwrap(f.nodes[node].block))?
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn find_loops(graph: Graph, mut loops: List[SimpleLoop]) -> Result[(), Capacity] {
+    let size = list.len(graph.blocks)
+    let mut f = new_finder(size)?
+    for i in 0 .. size {
+        if graph.blocks[i].present {
+            numbers.put(mut f.number, i, UNVISITED)?
+        }
+    }
+    dfs(graph, mut f)?
+    identify_edges(graph, mut f, size)?
+    f.header[0] = 0
+    let mut w = size
+    while w > 0 {
+        w -= 1
+        if let Some(block) = f.nodes[w].block {
+            if !process_header(mut f, mut loops, w, block)? {
+                return Ok(())
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn benchmark(size: u64) -> Result[bool, Capacity] {
+    let expected = match size {
+        1 => 1605u64,
+        15 => 1647u64,
+        150 => 2052u64,
+        1500 => 6102u64,
+        15000 => 46602u64,
+        _ => return Ok(false),
+    }
+    let mut graph = Graph(blocks: list.new(), edges: list.new())
+    let mut loops: List[SimpleLoop] = list.new()
+    let _ = new_loop(mut loops, None, true)?
+    create_node(mut graph, 0)?
+    let _ = base_loop(mut graph, 0)?
+    create_node(mut graph, 1)?
+    add_edge(mut graph, 0, 2)?
+    for _ in 0 .. size {
+        find_loops(graph, mut loops)?
+    }
+    build_cfg(mut graph)?
+    find_loops(graph, mut loops)?
+    let mut extra = 0u64
+    for _ in 0u64 .. 50 {
+        let mut other: List[SimpleLoop] = list.new()
+        let _ = new_loop(mut other, None, true)?
+        find_loops(graph, mut other)?
+        extra += list.len(other)
+    }
+    nest_forest(mut loops)?
+    Ok(extra > 0 && list.len(loops) == expected && list.len(graph.blocks) == 5213)
+}

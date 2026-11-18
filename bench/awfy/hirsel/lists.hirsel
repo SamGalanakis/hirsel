@@ -1,0 +1,71 @@
+// AWFY JavaScript list.js. All returned views refer to the original lists.
+type Element {
+    value: u64,
+    next: Option[Box[Element]]
+}
+
+fn make_list(size: u64) -> Result[Option[Box[Element]], Capacity] {
+    if size == 0 {
+        return Ok(None)
+    }
+    let rest = make_list(size - 1)?
+    let element = Element(value: size, next: take rest)
+    Ok(Some(result.capacity_only(box.new(take element))?))
+}
+
+fn next[in a](element: View[Element] in a) -> Option[View[Element]] in a {
+    match element.next {
+        Some(node) => Some(node),
+        None => None,
+    }
+}
+
+fn length[in a](element: View[Element] in a) -> u64 {
+    match next(element) {
+        Some(rest) => 1 + length(rest),
+        None => 1,
+    }
+}
+
+fn shorter[in a](x: Option[View[Element]] in a, y: Option[View[Element]] in a) -> bool {
+    let mut left: Option[View[Element]] in x = x
+    let mut right: Option[View[Element]] in y = y
+    while let Some(y_node) = right {
+        let Some(x_node) = left else {
+            return true
+        }
+        left = next(x_node)
+        right = next(y_node)
+    }
+    false
+}
+
+fn tail[in a](x: Option[View[Element]] in a, y: Option[View[Element]] in a, z: Option[View[Element]] in a) -> Option[View[Element]] in a {
+    if shorter(y, x) {
+        match (x, y, z) {
+            (Some(a_node), Some(b_node), Some(c_node)) => tail(tail(next(a_node), y, z), tail(next(b_node), z, x), tail(next(c_node), x, y)),
+            _ => None,
+        }
+    } else {
+        z
+    }
+}
+
+type Lists {
+    x: Option[Box[Element]],
+    y: Option[Box[Element]],
+    z: Option[Box[Element]]
+}
+
+pub fn list_benchmark() -> Result[u64, Capacity] {
+    let inputs = Lists(x: make_list(15)?, y: make_list(10)?, z: make_list(6)?)
+    match inputs {
+        Lists(x: Some(x), y: Some(y), z: Some(z)) => {
+            match tail(Some(view x), Some(view y), Some(view z)) {
+                Some(node) => Ok(length(node)),
+                None => Ok(0),
+            }
+        },
+        _ => Ok(0),
+    }
+}

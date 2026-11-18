@@ -1,0 +1,110 @@
+// AWFY runs one verified inner loop per outer iteration.
+pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(name) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(outer_arg) = args.get(argv, 1) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(inner_arg) = args.get(argv, 2) else {
+        return Error(Exit(status: 2))
+    }
+    let parsed_outer: Result[u64, ParseError] = int.parse(outer_arg)
+    let outer = match parsed_outer {
+        Ok(n) => n,
+        Error(_) => return Error(Exit(status: 2)),
+    }
+    let parsed_inner: Result[u64, ParseError] = int.parse(inner_arg)
+    let inner = match parsed_inner {
+        Ok(n) => n,
+        Error(_) => return Error(Exit(status: 2)),
+    }
+    if outer == 0 || inner == 0 {
+        return Error(Exit(status: 2))
+    }
+    for _ in 0 .. outer {
+        match run(name, inner) {
+            Ok(true) => {},
+            Ok(false) => return Error(Exit(status: 1)),
+            Error(_) => return Error(Exit(status: 3)),
+        }
+        match stdout.write(out, "verified\n") {
+            Ok(()) => {},
+            Error(_) => return Error(Exit(status: 4)),
+        }
+    }
+    Ok(())
+}
+
+fn repeat(inner: u64, check: scoped fn() -> Result[bool, Capacity]) -> Result[bool, Capacity] {
+    for _ in 0 .. inner {
+        if !check()? {
+            return Ok(false)
+        }
+    }
+    Ok(true)
+}
+
+fn run(name: String, inner: u64) -> Result[bool, Capacity] {
+    if name == "CD" {
+        return cd.benchmark(inner)
+    }
+    if name == "Bounce" {
+        return repeat(inner, fn() -> Result[bool, Capacity] {
+            Ok(small.bounce() == 1331)
+        })
+    }
+    if name == "DeltaBlue" {
+        return deltablue.benchmark(inner)
+    }
+    if name == "Havlak" {
+        return havlak.benchmark(inner)
+    }
+    if name == "Json" {
+        return repeat(inner, fn() -> Result[bool, Capacity] {
+            json_parse.benchmark(rap.document())
+        })
+    }
+    if name == "List" {
+        return repeat(inner, fn() -> Result[bool, Capacity] {
+            Ok(lists.list_benchmark()? == 10)
+        })
+    }
+    if name == "Mandelbrot" {
+        return Ok(numeric.mandelbrot(inner))
+    }
+    if name == "NBody" {
+        return Ok(numeric.nbody(inner))
+    }
+    if name == "Permute" {
+        return repeat(inner, fn() -> Result[bool, Capacity] {
+            Ok(small.permute() == 8660)
+        })
+    }
+    if name == "Queens" {
+        return repeat(inner, fn() -> Result[bool, Capacity] {
+            Ok(small.queens())
+        })
+    }
+    if name == "Richards" {
+        return repeat(inner, fn() -> Result[bool, Capacity] {
+            richards.benchmark()
+        })
+    }
+    if name == "Sieve" {
+        return repeat(inner, fn() -> Result[bool, Capacity] {
+            Ok(small.sieve() == 669)
+        })
+    }
+    if name == "Storage" {
+        return repeat(inner, fn() -> Result[bool, Capacity] {
+            Ok(trees.storage()? == 5461)
+        })
+    }
+    if name == "Towers" {
+        return repeat(inner, fn() -> Result[bool, Capacity] {
+            Ok(trees.towers_benchmark()? == 8191)
+        })
+    }
+    Ok(false)
+}

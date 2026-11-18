@@ -1,0 +1,245 @@
+// AWFY Richards from the JavaScript reference. Task and packet IDs are
+// indices into their respective arenas.
+const IDLE: u64 = 0
+
+const WORKER: u64 = 1
+
+const HANDLER_A: u64 = 2
+
+const HANDLER_B: u64 = 3
+
+const DEVICE_A: u64 = 4
+
+const DEVICE_B: u64 = 5
+
+type Packet {
+    link: Option[u64],
+    identity: u64,
+    is_work: bool,
+    datum: u64,
+    data: Inline[u64, 4]
+}
+
+type Action = Device(Option[u64]) | Handler(Option[u64], Option[u64]) | Idle(u64, u64) | Worker(u64, u64)
+
+type TaskControl {
+    link: Option[u64],
+    identity: u64,
+    priority: u64,
+    input: Option[u64],
+    packet_pending: bool,
+    waiting: bool,
+    holding: bool,
+    action: Action
+}
+
+type Scheduler {
+    packets: List[Packet],
+    tasks: List[TaskControl],
+    table: Inline[u64, 6],
+    head: Option[u64],
+    current: u64,
+    current_identity: u64,
+    queue_count: u64,
+    hold_count: u64
+}
+
+fn append(mut s: Scheduler, p: u64, queue: Option[u64]) -> Option[u64] {
+    s.packets[p].link = None
+    let Some(head) = queue else {
+        return Some(p)
+    }
+    let mut last = head
+    while let Some(next) = s.packets[last].link {
+        last = next
+    }
+    s.packets[last].link = Some(p)
+    Some(head)
+}
+
+fn create_packet(mut s: Scheduler, link: Option[u64], identity: u64, is_work: bool) -> Result[u64, Capacity] {
+    let index = list.len(s.packets)
+    result.capacity_only(list.push(mut s.packets, Packet(link: link, identity: identity, is_work: is_work, datum: 0, data:[0; 4])))?
+    Ok(index)
+}
+
+fn create_task(mut s: Scheduler, identity: u64, priority: u64, input: Option[u64], waiting: bool, action: Action) -> Result[(), Capacity] {
+    let index = list.len(s.tasks)
+    result.capacity_only(list.push(mut s.tasks, TaskControl(link: s.head, identity: identity, priority: priority, input: input, packet_pending: input != None, waiting: waiting, holding: false, action: action)))?
+    s.head = Some(index)
+    s.table[identity] = index
+    Ok(())
+}
+
+fn hold_self(mut s: Scheduler) -> Option[u64] {
+    s.hold_count += 1
+    s.tasks[s.current].holding = true
+    s.tasks[s.current].link
+}
+
+fn mark_waiting(mut s: Scheduler) -> Option[u64] {
+    s.tasks[s.current].waiting = true
+    Some(s.current)
+}
+
+fn release(mut s: Scheduler, identity: u64) -> Option[u64] {
+    let t = s.table[identity]
+    s.tasks[t].holding = false
+    Some(if s.tasks[t].priority > s.tasks[s.current].priority {
+        t
+    } else {
+        s.current
+    })
+}
+
+fn queue_packet(mut s: Scheduler, p: u64) -> Option[u64] {
+    let t = s.table[s.packets[p].identity]
+    s.queue_count += 1
+    s.packets[p].link = None
+    s.packets[p].identity = s.current_identity
+    let input = s.tasks[t].input
+    if input == None {
+        s.tasks[t].input = Some(p)
+        s.tasks[t].packet_pending = true
+        if s.tasks[t].priority > s.tasks[s.current].priority {
+            return Some(t)
+        }
+    } else {
+        let extended = append(mut s, p, input)
+        s.tasks[t].input = extended
+    }
+    Some(s.current)
+}
+
+fn run_device(mut s: Scheduler, t: u64, message: Option[u64], pending: Option[u64]) -> Option[u64] {
+    if let Some(p) = message {
+        s.tasks[t].action = Device(Some(p))
+        return hold_self(mut s)
+    }
+    if let Some(p) = pending {
+        s.tasks[t].action = Device(None)
+        return queue_packet(mut s, p)
+    }
+    mark_waiting(mut s)
+}
+
+fn run_handler(mut s: Scheduler, t: u64, message: Option[u64], work_in: Option[u64], device_in: Option[u64]) -> Option[u64] {
+    let mut work = work_in
+    let mut device = device_in
+    if let Some(p) = message {
+        if s.packets[p].is_work {
+            work = append(mut s, p, work)
+        } else {
+            device = append(mut s, p, device)
+        }
+    }
+    s.tasks[t].action = Handler(work, device)
+    let Some(work_packet) = work else {
+        return mark_waiting(mut s)
+    }
+    let n = s.packets[work_packet].datum
+    if n >= 4 {
+        s.tasks[t].action = Handler(s.packets[work_packet].link, device)
+        return queue_packet(mut s, work_packet)
+    }
+    let Some(device_packet) = device else {
+        return mark_waiting(mut s)
+    }
+    s.tasks[t].action = Handler(work, s.packets[device_packet].link)
+    s.packets[device_packet].datum = s.packets[work_packet].data[n]
+    s.packets[work_packet].datum = n + 1
+    queue_packet(mut s, device_packet)
+}
+
+fn run_idle(mut s: Scheduler, t: u64, control: u64, count: u64) -> Option[u64] {
+    let remaining = count - 1
+    if remaining == 0 {
+        s.tasks[t].action = Idle(control, remaining)
+        return hold_self(mut s)
+    }
+    if (control & 1) == 0 {
+        s.tasks[t].action = Idle(control / 2, remaining)
+        release(mut s, DEVICE_A)
+    } else {
+        s.tasks[t].action = Idle((control / 2) ^ 53256, remaining)
+        release(mut s, DEVICE_B)
+    }
+}
+
+fn run_worker(mut s: Scheduler, t: u64, message: Option[u64], dest: u64, count: u64) -> Option[u64] {
+    let Some(p) = message else {
+        return mark_waiting(mut s)
+    }
+    let target = if dest == HANDLER_A {
+        HANDLER_B
+    } else {
+        HANDLER_A
+    }
+    let mut letter = count
+    s.packets[p].identity = target
+    s.packets[p].datum = 0
+    for i in 0u64 .. 4 {
+        letter += 1
+        if letter > 26 {
+            letter = 1
+        }
+        s.packets[p].data[i] = 65 + letter - 1
+    }
+    s.tasks[t].action = Worker(target, letter)
+    queue_packet(mut s, p)
+}
+
+fn run_task(mut s: Scheduler, t: u64) -> Option[u64] {
+    let mut message: Option[u64] = None
+    if s.tasks[t].packet_pending && s.tasks[t].waiting && !s.tasks[t].holding {
+        let p = option.unwrap(s.tasks[t].input)
+        let link = s.packets[p].link
+        s.tasks[t].input = link
+        s.tasks[t].packet_pending = link != None
+        s.tasks[t].waiting = false
+        s.tasks[t].holding = false
+        message = Some(p)
+    }
+    match s.tasks[t].action {
+        Device(pending) => run_device(mut s, t, message, pending),
+        Handler(work, device) => run_handler(mut s, t, message, work, device),
+        Idle(control, count) => run_idle(mut s, t, control, count),
+        Worker(dest, count) => run_worker(mut s, t, message, dest, count),
+    }
+}
+
+fn schedule(mut s: Scheduler) {
+    let mut current = s.head
+    while let Some(t) = current {
+        if s.tasks[t].holding || (!s.tasks[t].packet_pending && s.tasks[t].waiting) {
+            current = s.tasks[t].link
+        } else {
+            s.current = t
+            s.current_identity = s.tasks[t].identity
+            current = run_task(mut s, t)
+        }
+    }
+}
+
+fn packet_chain(mut s: Scheduler, count: u64, identity: u64, is_work: bool) -> Result[Option[u64], Capacity] {
+    let mut head: Option[u64] = None
+    for _ in 0 .. count {
+        head = Some(create_packet(mut s, head, identity, is_work)?)
+    }
+    Ok(head)
+}
+
+pub fn benchmark() -> Result[bool, Capacity] {
+    let mut s = Scheduler(packets: list.new(), tasks: list.new(), table:[0; 6], head: None, current: 0, current_identity: 0, queue_count: 0, hold_count: 0)
+    create_task(mut s, IDLE, 0, None, false, Idle(1, 10000))?
+    let worker = packet_chain(mut s, 2, WORKER, true)?
+    create_task(mut s, WORKER, 1000, worker, true, Worker(HANDLER_A, 0))?
+    let first = packet_chain(mut s, 3, DEVICE_A, false)?
+    create_task(mut s, HANDLER_A, 2000, first, true, Handler(None, None))?
+    let second = packet_chain(mut s, 3, DEVICE_B, false)?
+    create_task(mut s, HANDLER_B, 3000, second, true, Handler(None, None))?
+    create_task(mut s, DEVICE_A, 4000, None, true, Device(None))?
+    create_task(mut s, DEVICE_B, 5000, None, true, Device(None))?
+    schedule(mut s)
+    Ok(s.queue_count == 23246 && s.hold_count == 9297)
+}

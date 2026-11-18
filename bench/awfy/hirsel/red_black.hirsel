@@ -1,0 +1,236 @@
+// The CD red-black tree (AWFY JavaScript cd.js). Link zero represents nil.
+// Keys and values are stored at link index minus one.
+type Links {
+    children: Inline[u64, 2],
+    parent: u64,
+    red: bool
+}
+
+pub type Tree[K: plain, V: plain] {
+    root: u64,
+    links: List[Links],
+    entries: List[(K, V)]
+}
+
+pub fn new[K: plain, V: plain]() -> Result[Tree[K, V], Capacity] {
+    let mut links: List[Links] = list.new()
+    result.capacity_only(list.push(mut links, Links(children:[0, 0], parent: 0, red: false)))?
+    Ok(Tree(root: 0, links: take links, entries: list.new()))
+}
+
+fn minimum(links: List[Links], start: u64) -> u64 {
+    let mut current = start
+    while links[current].children[0] != 0 {
+        current = links[current].children[0]
+    }
+    current
+}
+
+pub fn first[K: plain, V: plain](tree: Tree[K, V]) -> u64 {
+    minimum(tree.links, tree.root)
+}
+
+pub fn next[K: plain, V: plain](tree: Tree[K, V], start: u64) -> u64 {
+    let right = tree.links[start].children[1]
+    if right != 0 {
+        return minimum(tree.links, right)
+    }
+    let mut node = start
+    let mut parent = tree.links[node].parent
+    while parent != 0 && node == tree.links[parent].children[1] {
+        node = parent
+        parent = tree.links[node].parent
+    }
+    parent
+}
+
+pub fn entry[K: plain, V: plain](tree: Tree[K, V], index: u64) -> (K, V) {
+    copy tree.entries[index - 1]
+}
+
+pub fn find[K: plain, V: plain](tree: Tree[K, V], key: K, compare: scoped fn(K, K) -> Order) -> u64 {
+    let mut node = tree.root
+    while node != 0 {
+        let (stored, _) = entry(tree, node)
+        match compare(key, stored) {
+            Less => {
+                node = tree.links[node].children[0]
+            },
+            Greater => {
+                node = tree.links[node].children[1]
+            },
+            Equal => return node,
+        }
+    }
+    0
+}
+
+fn attach(mut links: List[Links], mut root: u64, parent: u64, old: u64, replacement: u64) {
+    if parent == 0 {
+        root = replacement
+    } else {
+        let side = if links[parent].children[0] == old {
+            0u64
+        } else {
+            1u64
+        }
+        links[parent].children[side] = replacement
+    }
+}
+
+fn rotate(mut links: List[Links], mut root: u64, node: u64, side: u64) {
+    let other = 1 - side
+    let child = links[node].children[other]
+    let middle = links[child].children[side]
+    let parent = links[node].parent
+    links[node].children[other] = middle
+    if middle != 0 {
+        links[middle].parent = node
+    }
+    links[child].parent = parent
+    attach(mut links, mut root, parent, node, child)
+    links[child].children[side] = node
+    links[node].parent = child
+}
+
+fn balance_insert(mut links: List[Links], mut root: u64, inserted: u64) {
+    let mut node = inserted
+    while node != root && links[links[node].parent].red {
+        let parent = links[node].parent
+        let grandparent = links[parent].parent
+        let side = if links[grandparent].children[0] == parent {
+            0u64
+        } else {
+            1u64
+        }
+        let uncle = links[grandparent].children[1 - side]
+        if links[uncle].red {
+            links[parent].red = false
+            links[uncle].red = false
+            links[grandparent].red = true
+            node = grandparent
+        } else {
+            if node == links[parent].children[1 - side] {
+                node = parent
+                rotate(mut links, mut root, node, side)
+            }
+            let p = links[node].parent
+            let g = links[p].parent
+            links[p].red = false
+            links[g].red = true
+            rotate(mut links, mut root, g, 1 - side)
+        }
+    }
+    links[root].red = false
+}
+
+pub fn put[K: plain, V: plain](mut tree: Tree[K, V], key: K, value: V, compare: scoped fn(K, K) -> Order) -> Result[Option[V], Capacity] {
+    let mut node = tree.root
+    let mut parent = 0u64
+    let mut side = 0u64
+    while node != 0 {
+        parent = node
+        let (stored, old) = entry(tree, node)
+        match compare(key, stored) {
+            Less => {
+                side = 0
+            },
+            Greater => {
+                side = 1
+            },
+            Equal => {
+                tree.entries[node - 1] = (key, copy value)
+                return Ok(Some(copy old))
+            },
+        }
+        node = tree.links[node].children[side]
+    }
+    let index = list.len(tree.links)
+    list.reserve(mut tree.entries, 1)?
+    list.reserve(mut tree.links, 1)?
+    result.capacity_only(list.push(mut tree.entries, (key, copy value)))?
+    result.capacity_only(list.push(mut tree.links, Links(children:[0, 0], parent: parent, red: true)))?
+    if parent == 0 {
+        tree.root = index
+    } else {
+        tree.links[parent].children[side] = index
+    }
+    balance_insert(mut tree.links, mut tree.root, index)
+    Ok(None)
+}
+
+fn balance_delete(mut links: List[Links], mut root: u64, replacement: u64, parent: u64) {
+    let mut node = replacement
+    let mut p = parent
+    while node != root && !links[node].red {
+        let side = if links[p].children[0] == node {
+            0u64
+        } else {
+            1u64
+        }
+        let other = 1 - side
+        let mut sibling = links[p].children[other]
+        if links[sibling].red {
+            links[sibling].red = false
+            links[p].red = true
+            rotate(mut links, mut root, p, side)
+            sibling = links[p].children[other]
+        }
+        if !links[links[sibling].children[side]].red && !links[links[sibling].children[other]].red {
+            links[sibling].red = true
+            node = p
+            p = links[node].parent
+        } else {
+            if !links[links[sibling].children[other]].red {
+                let near = links[sibling].children[side]
+                links[near].red = false
+                links[sibling].red = true
+                rotate(mut links, mut root, sibling, other)
+                sibling = links[p].children[other]
+            }
+            links[sibling].red = links[p].red
+            links[p].red = false
+            let far = links[sibling].children[other]
+            links[far].red = false
+            rotate(mut links, mut root, p, side)
+            node = root
+        }
+    }
+    links[node].red = false
+}
+
+pub fn remove[K: plain, V: plain](mut tree: Tree[K, V], key: K, compare: scoped fn(K, K) -> Order) {
+    let target = find(tree, key, compare)
+    if target == 0 {
+        return
+    }
+    let removed = if tree.links[target].children[0] == 0 || tree.links[target].children[1] == 0 {
+        target
+    } else {
+        next(tree, target)
+    }
+    let left = tree.links[removed].children[0]
+    let replacement = if left != 0 {
+        left
+    } else {
+        tree.links[removed].children[1]
+    }
+    let parent = tree.links[removed].parent
+    if replacement != 0 {
+        tree.links[replacement].parent = parent
+    }
+    attach(mut tree.links, mut tree.root, parent, removed, replacement)
+    if !tree.links[removed].red {
+        balance_delete(mut tree.links, mut tree.root, replacement, parent)
+    }
+    if removed != target {
+        let inherited = tree.links[target]
+        tree.links[removed] = inherited
+        for child in inherited.children {
+            if child != 0 {
+                tree.links[child].parent = removed
+            }
+        }
+        attach(mut tree.links, mut tree.root, inherited.parent, target, removed)
+    }
+}

@@ -1,0 +1,6 @@
+pub fn main(out: Stdout) -> Result[(), Exit] waits {
+    match stdout.write(out, "Hello, world!\n") {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 1)),
+    }
+}

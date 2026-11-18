@@ -1,0 +1,91 @@
+// AWFY JavaScript storage.js and towers.js.
+type Tree = Leaf(List[Option[Box[Tree]]]) | Branch(List[Box[Tree]])
+
+fn build_tree(depth: u64, mut seed: u32, mut count: u32) -> Result[Box[Tree], Capacity] {
+    count += 1
+    if depth == 1 {
+        let size: u64 = int.widen(next_random(mut seed) % 10 + 1)
+        let bought: Result[List[Option[Box[Tree]]], Capacity] = list.with_capacity(size)
+        let mut leaves = bought?
+        for _ in 0 .. size {
+            let leaf: Option[Box[Tree]] = None
+            result.capacity_only(list.push(mut leaves, take leaf))?
+        }
+        return result.capacity_only(box.new(Leaf(take leaves)))
+    }
+    let branch_list: Result[List[Box[Tree]], Capacity] = list.with_capacity(4)
+    let mut branches = branch_list?
+    for _ in 0u64 .. 4 {
+        let child = build_tree(depth - 1, mut seed, mut count)?
+        result.capacity_only(list.push(mut branches, take child))?
+    }
+    result.capacity_only(box.new(Branch(take branches)))
+}
+
+fn next_random(mut seed: u32) -> u32 {
+    small.next_random(mut seed)
+}
+
+pub fn storage() -> Result[u32, Capacity] {
+    let mut count = 0u32
+    let mut seed = 74755u32
+    let tree = build_tree(7, mut seed, mut count)?
+    Ok(count)
+}
+
+type Disk {
+    size: u64,
+    next: Option[Box[Disk]]
+}
+
+type Towers {
+    piles: Inline[Option[Box[Disk]], 3],
+    moves: u32
+}
+
+fn pop(mut towers: Towers, pile: u64) -> Box[Disk] {
+    let top = replace(mut towers.piles[pile], None)
+    let mut disk = option.unwrap(take top)
+    towers.piles[pile] = replace(mut disk.next, None)
+    take disk
+}
+
+fn push(mut towers: Towers, pile: u64, take owned_disk: Box[Disk]) -> bool {
+    let mut disk = take owned_disk
+    if let Some(top) = towers.piles[pile] {
+        if disk.size >= top.size {
+            return false
+        }
+    }
+    disk.next = replace(mut towers.piles[pile], None)
+    towers.piles[pile] = Some(take disk)
+    true
+}
+
+fn move_disks(mut towers: Towers, n: u64, from: u64, to: u64) -> bool {
+    if n == 1 {
+        let disk = pop(mut towers, from)
+        let moved = push(mut towers, to, take disk)
+        towers.moves += 1
+        return moved
+    }
+    let other = 3 - from - to
+    move_disks(mut towers, n - 1, from, other) && move_disks(mut towers, 1, from, to) && move_disks(mut towers, n - 1, other, to)
+}
+
+pub fn towers_benchmark() -> Result[u32, Capacity] {
+    let mut towers = Towers(piles:[None, None, None], moves: 0)
+    let mut disks = 14u64
+    while disks > 0 {
+        disks -= 1
+        let disk = result.capacity_only(box.new(Disk(size: disks, next: None)))?
+        if !push(mut towers, 0, take disk) {
+            return Ok(0)
+        }
+    }
+    if move_disks(mut towers, 13, 0, 1) {
+        Ok(towers.moves)
+    } else {
+        Ok(0)
+    }
+}

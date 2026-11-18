@@ -43,8 +43,8 @@ class Sweep(unittest.TestCase):
     def test_zero_and_ignored_only_selections_are_red(self):
         for name, details in (
             ('core-driver-native', 'test skipped ... ignored\n'),
-            ('test-land', 'Ran 0 tests in 0.0s\nOK\n'),
-            ('test-land', 'Ran 1 test in 0.0s\nOK (skipped=1)\n'),
+            ('core-native-laws-cranelift', 'Ran 0 tests in 0.0s\nOK\n'),
+            ('core-native-laws-cranelift', 'Ran 1 test in 0.0s\nOK (skipped=1)\n'),
         ):
             with self.subTest(name=name, details=details):
                 row = SWEEP['summarize']([(name, result(details))], name)
@@ -59,7 +59,7 @@ class Sweep(unittest.TestCase):
         self.assertEqual(row['targets'][0]['details'], details)
 
     def test_missing_results_and_wrong_suite_are_red(self):
-        self.assertEqual(SWEEP['summarize']([], 'test-land')['errors'], ['test-land: no test results'])
+        self.assertEqual(SWEEP['summarize']([], 'core-native-laws-cranelift')['errors'], ['core-native-laws-cranelift: no test results'])
         self.assertTrue(SWEEP['summarize']([('other', result(RUST))], 'core-driver-native')['errors'])
 
     def test_only_native_receives_the_serial_libtest_argument(self):

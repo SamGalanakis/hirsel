@@ -16,9 +16,8 @@ at its "subscribed" checkpoint across a 10-row and a 1,954-row Cover; its mutant
 Cranelift only.
 
 --part r1 runs R1's calls (transactions at durable versions, runs-once, store refusal)
-and their native twins: the land gate's part. --part r0 runs the rest, which runs after
-the push: R0's laws, p19, l12, L4, R1b's L1, the wire frame vectors, and every mutant
-(a mutant qualifies a law, not the runner a change lands). --part wire selects only
+and their native twins. --part r0 runs R0's laws, p19, l12, L4, R1b's L1, the
+wire frame vectors, and every mutant. --part wire selects only
 frame_vectors and its evaluator mutants. Without --part both R0 and R1 run.
 
 R1b's L1 builds core/programs/store/runner_crash.hirsel per native backend under the

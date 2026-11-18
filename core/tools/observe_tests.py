@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-push observers. Gate fixtures are adapted only in this test's private manifest."""
+"""Observer tests use law fixtures adapted in this test's private manifest."""
 import argparse
 import json
 import os

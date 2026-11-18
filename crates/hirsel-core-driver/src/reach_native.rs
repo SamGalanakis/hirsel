@@ -672,7 +672,7 @@ fn reach_code_identity_follows_the_program() {
 
 /// A flipped byte in any section of the reach record is a miss: the build
 /// walks again, equals the first, and writes the record afresh. A section
-/// with no bytes has its head length flipped. Land target: core-driver-native.
+/// with no bytes has its head length flipped. Buck target: core-driver-native.
 #[test]
 #[ignore = "explicit native integration target"]
 fn reach_flipped_section_byte_is_a_miss() {
@@ -705,7 +705,7 @@ fn reach_flipped_section_byte_is_a_miss() {
 /// stored: a walk refused at its instance limit publishes none, and an
 /// output that cannot be written after the link leaves the record, which the
 /// next build then uses as a hit. Oracle: a fresh store's record bytes.
-/// Land target: core-driver-native.
+/// Buck target: core-driver-native.
 #[test]
 #[ignore = "explicit native integration target"]
 fn reach_record_only_for_a_complete_walk_and_kept_past_an_output_failure() {
@@ -754,7 +754,7 @@ fn copy_store(from: &Path, to: &Path) {
 
 /// An edit's writer dies after each of its renames in turn: whatever it left
 /// (objects, debug rows, instance records, the reach record), the next build
-/// is a fresh store's and writes the fresh record. Land target:
+/// is a fresh store's and writes the fresh record. Buck target:
 /// core-driver-native.
 #[test]
 #[ignore = "explicit native integration target"]

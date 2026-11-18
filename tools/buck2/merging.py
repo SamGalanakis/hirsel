@@ -2,15 +2,12 @@
 two changes that each add to one of them conflict without disagreeing.
 
 Git runs this as the `hirsel` merge driver for the paths .gitattributes names
-(bootstrap.py installs the driver in the clone's config), so a lane's own
-rebase and tools/land's batch rebase merge them alike; tools/land also
-resolves a conflict in one with `resolve` where the driver is not installed.
+(bootstrap.py installs the driver in the clone's config).
 
 - third-party/NOTICES.md is append-only: hunks where both sides only add
   lines keep main's lines, then the change's;
 - module declarations use a three-way set merge:
   either side's removal wins and both sides' additions survive;
-- known-failures rows merge by identity, keeping the newer row.
 
 Anything else, or a hunk that both sides edit differently, stays a conflict:
 the driver then leaves git's usual conflict markers.
@@ -28,7 +25,6 @@ APPEND_ONLY = ('third-party/NOTICES.md',)
 # Whole-line identities, without key or ordering semantics. Keep this in sync
 # with the independent-line patterns in .gitattributes.
 LINE_SETS = ('crates/*/tests/*/modules.rs',)
-LEDGER = 'tools/known-failures.tsv'
 DRIVER = 'hirsel'
 
 
@@ -41,7 +37,7 @@ def line_set(path: str) -> bool:
 
 
 def resolvable(path: str) -> bool:
-    return line_set(path) or path == LEDGER or path in APPEND_ONLY
+    return line_set(path) or path in APPEND_ONLY
 
 
 def resolve(path: str, base: str | None, ours: str | None, theirs: str | None) -> str | None:
@@ -51,8 +47,6 @@ def resolve(path: str, base: str | None, ours: str | None, theirs: str | None) -
     if ours is None or theirs is None or not resolvable(path):
         return None
     try:
-        if path == LEDGER:
-            return merge_ledger(base or '', ours, theirs)
         if line_set(path):
             return merge_line_set(base or '', ours, theirs)
         return line_merge(base or '', ours, theirs, appended)
@@ -63,7 +57,7 @@ def resolve(path: str, base: str | None, ours: str | None, theirs: str | None) -
 def merge_line_set(base: str, ours: str, theirs: str) -> str:
     """(base & ours & theirs) | (ours - base) | (theirs - base).
 
-    Use the removal rule from sorted_stretch over the whole file: Git's hunk
+    Merge the whole file so Git's hunk
     boundaries must not decide whether a deleted row returns. Keep ours' order,
     then theirs' new lines; these lists have no ordering semantics.
     """
@@ -71,48 +65,6 @@ def merge_line_set(base: str, ours: str, theirs: str) -> str:
     removed = (set(ancestor) - set(left)) | (set(ancestor) - set(right))
     lines = dict.fromkeys(line for line in left + right if line not in removed)
     return ''.join(line + '\n' for line in lines)
-
-
-def merge_ledger(base: str, ours: str, theirs: str) -> str:
-    """Merge known-failure rows by their exact first tab-separated field."""
-    def rows(text):
-        entries = {}
-        for line in text.splitlines():
-            if not line.strip() or line.startswith('#'):
-                continue
-            identity = line.split('\t', 1)[0]
-            if identity in entries:
-                raise Conflict('duplicate ledger identity')
-            entries[identity] = line
-        return entries
-
-    def row_date(row):
-        fields = row.split('\t')
-        return fields[3] if len(fields) > 3 else ''
-
-    ancestor, left, right = (rows(text) for text in (base, ours, theirs))
-    comments = [line for line in ours.splitlines() if line.startswith('#')]
-    merged = []
-    for identity in sorted(ancestor.keys() | left.keys() | right.keys()):
-        old, a, b = (entries.get(identity) for entries in (ancestor, left, right))
-        if a == b:
-            value = a
-        elif a == old:
-            value = b
-        elif b == old:
-            value = a
-        elif a is None:
-            value = b
-        elif b is None:
-            value = a
-        else:
-            # Two different rows for one identity: the newer date wins, and a
-            # tie takes theirs, the change's side in a rebase — the later of
-            # the two.
-            value = b if row_date(b) >= row_date(a) else a
-        if value is not None:
-            merged.append(value)
-    return ''.join(line + '\n' for line in comments + merged)
 
 
 def line_merge(base: str, ours: str, theirs: str, stretch) -> str:

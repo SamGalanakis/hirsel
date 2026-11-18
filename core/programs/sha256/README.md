@@ -35,4 +35,4 @@ and exclude compilation.
 Run the SHA-256 laws with the existing contract walker, `--filter sha256
 --backend all`, and the compiler, runtime, evaluator and pinned Clang paths.
 These laws enter the evaluator law suite and both native sweep suites through
-ordinary test discovery; the reduced land gate does not run these native laws.
+ordinary test discovery.

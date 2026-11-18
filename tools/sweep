@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the scheduled core native + land-tool sweep; retain dated /tmp results."""
+"""Run the scheduled native sweep; retain dated /tmp results."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
@@ -18,13 +18,12 @@ SUITES = (
     ('llvm-arm-front', 'core-llvm-aarch64-front', []),
     ('llvm-arm-std', 'core-llvm-aarch64-std', []),
     ('llvm-arm-m1', 'core-llvm-aarch64-m1', []),
-    ('land', 'test-land', []),
     ('laws-cranelift', 'core-native-laws-cranelift', []),
     ('laws-llvm', 'core-native-laws-llvm', []),
     ('m2b-host', 'core-m2b-host', []),
 )
 # Python unittest harnesses: their bodies are unittest's count, not libtest lines.
-UNITTEST_SUITES = {'test-land', 'core-native-laws-cranelift', 'core-native-laws-llvm'}
+UNITTEST_SUITES = {'core-native-laws-cranelift', 'core-native-laws-llvm'}
 
 
 # Script gates that print their own body count: m2b.py's workloads and
@@ -82,8 +81,7 @@ def execute(suite, base, event_logs):
     label, target, arguments = suite
     events = Path(str(base) + f'-{label}.pb.zst')
     log = Path(str(base) + f'-{label}.log')
-    command = [str(ROOT / '.buck2/bin/buck2'), 'test', '--event-log', str(events),
-               '-c', 'hirsel.clippy=true', '-c', 'hirsel.full=true', '//:' + target]
+    command = [str(ROOT / '.buck2/bin/buck2'), 'test', '--event-log', str(events), '//:' + target]
     if arguments:
         command += ['--', *arguments]
     waited = wait_load()

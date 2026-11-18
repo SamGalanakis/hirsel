@@ -169,20 +169,6 @@ class ReportOnly(unittest.TestCase):
             self.assertEqual(json.loads(row)['ceilings'], {})
 
 
-class MeasurementFloor(unittest.TestCase):
-    def test_land_does_not_lower_below_the_observation_and_residual(self):
-        from cost_ceilings import lower
-        saved = dict(product=dict(fixed_std_instructions=200))
-        changes = lower(saved, dict(product=dict(fixed_std_instructions=100)),
-                        floors=dict(product=dict(fixed_std_instructions=110)))
-        self.assertEqual(saved['product']['fixed_std_instructions'], 110)
-        self.assertEqual(changes[0]['value'], 110)
-        # A pre-existing lower ceiling remains red rather than being raised.
-        self.assertEqual(lower(saved, dict(product=dict(fixed_std_instructions=90)),
-                               floors=dict(product=dict(fixed_std_instructions=120))), [])
-        self.assertEqual(saved['product']['fixed_std_instructions'], 110)
-
-
 class ProcessCeiling(unittest.TestCase):
     def test_startup_regression_fails_when_driver_cost_is_unchanged(self):
         metrics = {'instructions': 10000, 'stages': [{'name': 'check/lower', 'instructions': 5000}]}

@@ -12,8 +12,8 @@ CPU_CLASSES (tools/buck2/action_sizes_from_log.py), the std precheck
 `cpu_class=fast`; every other compile, test run and gate shard runs on any worker.
 
 Hirsel lanes queue remote compiles and tests at priority 50, below the pool's
-ordinary lane class (100), and main runs at 40. Only tools/land uses 150,
-above ordinary lanes. Warming work at 0 never gets a reserved worker.
+ordinary lane class (100), and main runs at 40. Warming work at 0 never
+gets a reserved worker.
 The scheduler merges identical
 actions and keeps the first submitter's: a test run once sent at 0 held later
 gates' runs of the same digest at 0 for up to 113 minutes. The scheduler reads the REAPI execution policy's priority, which Buck2 sends from a
@@ -21,21 +21,15 @@ gates' runs of the same digest at 0 for up to 113 minutes. The scheduler reads t
 `default_executor` (`test_executor`) for its run. The priority is not a platform
 property, so it is not part of an action key.
 
-`-c hirsel.priority=N` sets it for one invocation, accepting 0-99 or the land
-value in priorities.bzl. tools/land builds and tests at that value:
-its batch is the one serial step every lane waits on, and at 50 its few
-hundred compiles queued behind the gates' test runs for 85-94% of each build
-(2026-10-20). An action a gate already queued keeps the gate's 50 (the
-merge rule above); the batch's own combinations are new digests.
+`-c hirsel.priority=N` sets it for one invocation, accepting 0 through 99.
 """
 
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS", "POOL_BUDGETS", "SPECIAL_REQUESTS")
-load(":priorities.bzl", "LAND_PRIORITY")
 load(":test_sizes.bzl", "TEST_REQUESTS", "TEST_GUARD_LIMITS")
 
 PRIORITY = int(read_root_config("hirsel", "priority", "50"))
-if (PRIORITY < 0 or PRIORITY > 99) and PRIORITY != LAND_PRIORITY:
-    fail("hirsel.priority must be from 0 to 99 for lanes, or exactly {} for tools/land".format(LAND_PRIORITY))
+if PRIORITY < 0 or PRIORITY > 99:
+    fail("hirsel.priority must be from 0 to 99")
 
 # A pool test binary's request, `[cpu, memory_kb, cpu_class]`, is measured
 # from the workers' usage logs (TEST_REQUESTS, test_sizes_from_usage.py): one

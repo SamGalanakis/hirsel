@@ -33,7 +33,7 @@ copyright-bearing files (`native_text_rule`) and the texts of the C and C++
 runtimes it links statically, copied from the build host's Ubuntu packages
 into `licenses/`.
 
-`//:gate-distribution-notices` (land acceptance) fails when a crate Cargo.lock
+`//:gate-distribution-notices` fails when a crate Cargo.lock
 reaches from the shipped workspace packages has no row, when a native row is
 not its llvm-23.lock pin, when a vendored text changed, or when the built
 installation has a file no `files` class covers or a native file that is not

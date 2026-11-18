@@ -62,7 +62,7 @@ inactivity timeout, and each sample has a 15-minute execution limit.
 `instructions tokio --check` and `instructions hyper --check` each check three
 byte-identical replies without Callgrind. Run the arithmetic and profile-reader
 tests with `python3 -m unittest discover -s bench/micro/http -p 'test_*.py'`.
-These isolated benchmarks and Python tests have no Buck consumer or land-gate
+These isolated benchmarks and Python tests have no Buck
 target; run them directly when changing this workload.
 
 - ADAPTED Goose `bench/run_bench.py:1-25`: its common-output check prevents

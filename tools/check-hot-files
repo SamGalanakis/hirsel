@@ -1,36 +1,11 @@
 #!/usr/bin/env python3
 """Check the independent line lists that Git merges as three-way line sets."""
 
-from datetime import date
 from pathlib import Path
 import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def known_failures(path):
-    """The known-failures rows: four tab-separated nonempty fields, a unique
-    identity first and an ISO date last. Returns a problem or None."""
-    found = set()
-    for number, line in enumerate(path.read_text().splitlines(), 1):
-        if not line.strip() or line.startswith('#'):
-            continue
-        fields = line.split('\t')
-        if len(fields) != 4:
-            return f'{path}:{number}: expected 4 tab-separated columns, got {len(fields)}'
-        if any(not value.strip() for value in fields):
-            return f'{path}:{number}: empty required field {next(i + 1 for i, value in enumerate(fields) if not value.strip())}'
-        if fields[0] in found:
-            return f'{path}:{number}: duplicate identity {fields[0]!r}'
-        try:
-            if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', fields[3]):
-                raise ValueError
-            date.fromisoformat(fields[3])
-        except ValueError:
-            return f'{path}:{number}: date must be a valid YYYY-MM-DD, got {fields[3]!r}'
-        found.add(fields[0])
-    return None
 
 
 def check(root=ROOT):
@@ -54,12 +29,6 @@ def check(root=ROOT):
             attributed = i > 0 and lines[i - 1].startswith('#[')
             if match and not attributed and path.with_name(match[1] + '.rs').is_file():
                 errors.append(f'{path.with_name("main.rs")}: put mod {match[1]}; in modules.rs')
-    try:
-        problem = known_failures(root / 'tools/known-failures.tsv')
-    except OSError as error:
-        problem = f'{error.filename}: {error.strerror}'
-    if problem:
-        errors.append(problem)
     return errors
 
 

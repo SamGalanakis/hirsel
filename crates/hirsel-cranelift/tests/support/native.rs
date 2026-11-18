@@ -780,7 +780,7 @@ fn link_run_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Vec<u64>
     } else {
         // Native fixtures must turn a stuck runtime/child into an ordinary
         // red test.  Without a bound, Buck retries a signal-terminated test
-        // indefinitely and a land appears hung.
+        // indefinitely.
         let mut command = Command::new("sh");
         command.args([
             "-c",

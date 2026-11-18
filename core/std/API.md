@@ -48,7 +48,7 @@ the seed's, read through one name. No extension declares a core member's name.
 
 The generated [operation index](API-INDEX.md) lists every module and operation.
 Module contracts live in [api/](api/), one file per module named `<module>.md`.
-Add or update a module contract there; land regenerates the index and its links.
+Add or update a module contract there; regenerate the index and its links with `python3 core/tools/std_api_index.py --write`.
 
 ## Reading a contract
 

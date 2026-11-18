@@ -763,7 +763,7 @@ mod tests {
     /// locked and otherwise starts again. Bugs: the scratch directory,
     /// reopened by path, was gone (NotFound, seen as
     /// `parallel_builds_launch_at_once` failing in a shared store); a writer
-    /// that skipped the check would hold an unlinked directory. Land target:
+    /// that skipped the check would hold an unlinked directory. Buck target:
     /// hirsel-core-driver unittest.
     #[test]
     fn a_sweep_before_the_lock_leaves_the_writer_a_live_temporary() {

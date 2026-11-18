@@ -7,9 +7,7 @@ Changed new-language sources are checked, never rewritten. Refusal/gap fixtures
 are excluded by explicit expectation comments to preserve diagnostic coordinates.
 """
 
-import argparse
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -17,8 +15,6 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 BUCK2 = ROOT / '.buck2/bin/buck2'
-# The configuration tools/land runs Buck2 with, so the daemon keeps one state.
-CONFIG = os.environ.get('HIRSEL_BUCK2_CONFIG', '').split()
 RUSTFMT = ROOT / 'tools/buck2/toolchains/rust-files/bin/rustfmt'
 
 
@@ -32,12 +28,11 @@ def is_refusal_fixture(path):
     return bool(FIXTURE_EXPECTATION.search((ROOT / path).read_text(errors='replace')))
 
 
-def changed_cases(base=None):
+def changed_cases():
     """Branch, index, worktree and new cases; never sweep unrelated main debt."""
     def git(*args):
         return subprocess.check_output(['git', *args], cwd=ROOT).decode('utf-8', 'surrogateescape')
-    if base is None:
-        base = git('merge-base', 'HEAD', 'origin/main').strip()
+    base = git('merge-base', 'HEAD', 'origin/main').strip()
     paths = set(git('diff', '--name-only', '--diff-filter=ACMR', '-z', base, '--', *SOURCE_ROOTS).split('\0'))
     paths.update(git('ls-files', '--others', '--exclude-standard', '-z', '--', *SOURCE_ROOTS).split('\0'))
     return sorted(path for path in paths if Path(path).suffix == '.hirsel'
@@ -52,7 +47,7 @@ def check_cases(paths):
     if synced.returncode:
         return synced.returncode
     target = 'root//:hirsel-core-syntax-bin-hirsel-core-syntax'
-    built = subprocess.run([str(BUCK2), 'build', *CONFIG, '--show-json-output', target],
+    built = subprocess.run([str(BUCK2), 'build', '--show-json-output', target],
                            cwd=ROOT, capture_output=True, text=True)
     if built.returncode:
         print(built.stdout + built.stderr, file=sys.stderr, end='')
@@ -68,12 +63,10 @@ def check_cases(paths):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--base', default=os.environ.get('HIRSEL_FMT_BASE'), help='compare changed cases to this tree (land supplies the batch base)')
-    args, rustfmt_flags = parser.parse_known_args()
+    rustfmt_flags = sys.argv[1:]
     query = 'kind("^rust_(library|binary)$", root//:)'
     attributes = json.loads(subprocess.run(
-        [str(BUCK2), 'uquery', *CONFIG, query,
+        [str(BUCK2), 'uquery', query,
          '--output-attribute', 'crate_root', '--output-attribute', 'edition'],
         cwd=ROOT, check=True, capture_output=True, text=True).stdout)
     if not attributes:
@@ -82,8 +75,7 @@ def main():
     for target in attributes.values():
         roots.setdefault(target['edition'], set()).add(target['crate_root'])
         # rustfmt does not follow include!. Check each declared module as a
-        # root, with its harness's edition. The pure declaration list's syntax
-        # is checked by check-hot-files; its union-merged order is immaterial.
+        # root, with its harness's edition. Declaration order is immaterial.
         registry = Path(target['crate_root']).with_name('modules.rs')
         if (ROOT / registry).is_file() and registry.parts[:1] == ('crates',):
             for line in (ROOT / registry).read_text().splitlines():
@@ -96,7 +88,7 @@ def main():
     for edition, files in sorted(roots.items()):
         command = [str(RUSTFMT), '--edition', edition, *rustfmt_flags, *sorted(files)]
         status = subprocess.run(command, cwd=ROOT).returncode or status
-    return status or check_cases(changed_cases(args.base))
+    return status or check_cases(changed_cases())
 
 
 if __name__ == '__main__':

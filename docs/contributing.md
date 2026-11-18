@@ -1,6 +1,6 @@
 # Contributing to Hirsel
 
-This page covers building, testing and landing changes to the compiler,
+This page covers building, testing and pushing changes to the compiler,
 runtime, libraries and documentation. For writing Hirsel programs, see
 [building and running programs](building.md).
 
@@ -19,7 +19,7 @@ runtime, libraries and documentation. For writing Hirsel programs, see
 - `bench/` holds the benchmark programs and their reference implementations.
 - `tools/` holds the Buck2 build (`tools/buck2/`), the pinned LLVM toolchain
   (`tools/native-toolchain/`), the installation bundle (`tools/toolchain-dist/`) and
-  the land and test tools.
+  the test tools.
 
 ## Toolchains
 
@@ -119,9 +119,8 @@ within their measured reservations.
 Hirsel builds and tests with Buck2. Cargo manifests and `Cargo.lock` stay
 the source of truth: the BUCK files and the other build inputs
 `tools/buck2/sync.py` derives are gitignored, and no change commits them
-(`tools/buck2/README.md`, Generated files). `prepare.py` and `tools/land`
-regenerate them when the tree changed; before a bare `.buck2/bin/buck2` after an
-edit or a rebase, run `python3 tools/buck2/sync.py --if-stale`. The toolchains
+(`tools/buck2/README.md`, Generated files). Before running Buck2 after
+an edit or rebase, run `python3 tools/buck2/sync.py --if-stale`. The toolchains
 (Rust, the pinned LLVM, Buck2 and its prelude) come in hermetically.
 
 ```sh
@@ -138,49 +137,23 @@ by a host hook (`tools/buck2/README.md`); without one `prepare.py` fails, and
 explicitly opts into running tests on the invoking host. More target names are in
 [tools/buck2/README.md](../tools/buck2/README.md).
 
-## Testing and landing
+## Testing and pushing to main
 
-While iterating, run the one test that shows the change, by name, with
-`tools/test-filter`. Before landing, `tools/affected` runs every target that
-consumes the files the change touches, in one `buck2 test`. Run
-`.buck2/bin/buck2 kill` in your worktree when you finish and before any wait
-longer than a few minutes: idle daemons retain substantial memory on the shared
-host.
+Fetch and rebase on `origin/main`, then build what changed. Run the one
+test that proves the change, using `tools/test-filter` for a named Rust test.
+Run `python3 tools/buck2/fmt.py`, commit any formatting changes, and push with
+`git push origin HEAD:main`. If main moved, fetch, rebase, build and push again.
 
 A crate's own tests are `//:hirsel-<crate>-unittest` (and `-test-<name>` for its
 integration tests). The native and milestone targets run real programs through
 the driver on both engines and both targets: `//:core-driver-native-pool` and
 `-openat2`, `//:core-m1-cranelift`, `//:core-m1-llvm`, `//:core-llvm-aarch64-m1`,
 `//:core-m2b`, `//:core-native-laws-cranelift` and `-llvm`, and
-`//:land-core-library-modes`, which installs a copied bundle and drives every
-command in a clean environment. `tools/land` names the full acceptance set
-(`CORE_ACCEPTANCE`); `tools/sweep` runs the longer suites on a schedule.
+`//:core-library-modes`, which installs a copied bundle and runs each
+command in a clean environment. `tools/sweep` runs the longer suites on a schedule.
 
 A change to LLVM emission must carry the matching Cranelift change.
 
-### Known failures
-
-Failures main is known to have are listed in `tools/known-failures.tsv` (one
-tab-separated row each: test id, reason, owner, date). An id is a test
-target or a binary and case
-(`hirsel-core-driver-unittest::native::tests::scalar_core_instances_match_closed_bodies`).
-`tools/consumers` classifies a red the list explains as known. If you
-encounter a failure your change did not cause, add a row and push that row
-straight to main. Remove the row when fixing the failure.
-
-### Landing
-
-[Landing a lane](landing.md) describes `tools/land` and `tools/land-run`: the FIFO
-queue, the batch, the checks it runs and what it refuses.
-
-No change commits a generated file, so no rebase conflicts on one: land
-refuses a change that force-adds a gitignored build file, with
-the commands that drop it. The files contributors commonly add to merge with
-`tools/buck2/merging.py`, the `hirsel` merge driver `.gitattributes` names:
-rows both sides append to `third-party/NOTICES.md` are both kept, and the sorted
-ratchet and expectation lists keep the entries either side adds and drop those
-either side removes ([hot files](hot-files.md)). Resolve any other conflict by hand.
-
-`tools/main-stall-alarm` appends to `alarms.log` in `$HIRSEL_MAIN_RUNS` when main
-gets no commit for 40 minutes while contributor worktrees are moving; it can run
-from a repository maintenance loop.
+Regenerate ignored build files with `python3 tools/buck2/sync.py --if-stale`
+and keep them out of commits. See [concurrent registrations](hot-files.md)
+for the Git merge driver used by notices and test module lists.

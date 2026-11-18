@@ -9,7 +9,6 @@ diagnostic fails the stage here; warnings are printed and pass, as under Cargo.
 
 import argparse
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -22,9 +21,7 @@ ERROR = re.compile(r'^error(\[[A-Za-z0-9_:-]+\])?:', re.MULTILINE)
 
 ROOT = Path(__file__).resolve().parents[2]
 BUCK2 = ROOT / '.buck2/bin/buck2'
-# The configuration tools/land runs Buck2 with, plus the Clippy twins.
-CONFIG = os.environ.get('HIRSEL_BUCK2_CONFIG', '').split() + ['-c', 'hirsel.clippy=true']
-# Every Clippy twin; tools/land (CLIPPY_TWINS) builds their reports with the workspace.
+CONFIG = ['-c', 'hirsel.clippy=true']
 QUERY = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$", root//:))'
 
 

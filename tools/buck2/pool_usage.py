@@ -14,7 +14,7 @@ CPUs x wall and memory x wall, and uses its CPU time and PSS peak x wall (an
 upper bound). The report prints the pool's reserved CPU-hours by repository,
 the repository's share of them, and its reserved and used CPU-hours and
 GiB-hours per lane and per target, a test target's shards as one row.
-Compressed gate/land logs are retained across worktrees (event_logs.py) and
+Compressed Buck2 event logs are retained across worktrees (event_logs.py) and
 automatically joined for target attribution and repeated action-key evidence.
 It also sums execution wall seconds and CPU seconds per action category;
 queueing is excluded. With --events (exported Buck2 JSONL logs), uniquely

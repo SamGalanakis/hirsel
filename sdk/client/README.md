@@ -50,6 +50,6 @@ the fourth `call()` argument are removed when a matching outcome row arrives;
 `onPrediction` runs after the complete Batch has been applied.
 
 The scripted laws run as part of `store.codec_frames:ts_frame_vectors` in
-`//:land-core-evaluator`. They use the generated Frame codec and independent
+`//:core-evaluator`. They use the generated Frame codec and independent
 STORE P1-P3 fixtures. Real `serve` crash/reconnect qualification is deferred to
 W3e; these laws make no claim about that integration.

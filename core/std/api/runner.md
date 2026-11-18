@@ -171,10 +171,9 @@ closure is never shareable, so every task that runs entries runs `place` itself.
 Laws and cases: `core/programs/store/runner_laws.hirsel` (R0),
 `core/programs/store/runner_calls.hirsel` (R1) and
 `core/programs/store/runner_crash.hirsel` (R1b, native only), run by
-`core/tools/runner_tests.py` on the evaluator, Cranelift and LLVM: R1 in the land gate
-(`//:core-runner-r1`), and R0 and R1b after the push (`//:core-runner-r0`).
+`core/tools/runner_tests.py` on the evaluator, Cranelift and LLVM: R1 in `//:core-runner-r1`, and R0 and R1b in `//:core-runner-r0`.
 The hand-derived `frame_vectors` law and its `tag_order`, `complete_omitted` and
-`refusal_tag_inserted` mutants run with R0 after the push, or alone with
+`refusal_tag_inserted` mutants run with R0, or alone with
 `//:core-runner-wire`. The byte
 fixtures in `core/programs/store/frame-vectors.json` are frozen against
 RUNNER-SPEC v2.11.4's R2 contract and Outcome/Refusal tags, including F9-F12.

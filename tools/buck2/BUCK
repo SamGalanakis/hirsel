@@ -152,7 +152,6 @@ export_file(name = "runtime_parts.py", src = "runtime_parts.py", visibility = ["
 export_file(name = "sync.py", src = "sync.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "prepare.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "cargo_units.py", mode = "reference", visibility = ["PUBLIC"])
-export_file(name = "consumer_results.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "action_sizes_from_log.py", src = "action_sizes_from_log.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "test_sizes_from_usage.py", src = "test_sizes_from_usage.py", mode = "reference", visibility = ["PUBLIC"])
 
@@ -169,14 +168,12 @@ host_transition(
 
 export_file(name = "workspace-metadata.json", mode = "reference", visibility = ["PUBLIC"])
 
-# Source inputs of the landing race regression test.
+# Python sources shared by tool tests.
 [export_file(name = tool, src = tool, mode = "reference", visibility = ["PUBLIC"]) for tool in [
     "event_logs.py",
     "generated.py",
     "merging.py",
-    "clippy.py",
     "fmt.py",
-    "run_failures.py",
     "rust_environment.py",
 ]]
 
@@ -186,7 +183,6 @@ export_file(name = "workspace-metadata.json", mode = "reference", visibility = [
     "test_requirements.bzl",
     "test_sizes.bzl",
     "exec_sizes.bzl",
-    "priorities.bzl",
 ]]
 
 export_file(name = "private_native_inputs.py", visibility = ["PUBLIC"])

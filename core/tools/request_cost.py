@@ -2,7 +2,7 @@
 
 The suite edit inserts `let _ = 0u8` in dispatch on an unedited store; the
 signature edit makes `helper.named` public.
-This module is used by both the design experiment and the front land gate.
+This module is used by both the design experiment and the front cost check.
 """
 import copy
 import json

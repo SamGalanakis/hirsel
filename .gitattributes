@@ -3,8 +3,5 @@
 # changes that each add to one.
 third-party/NOTICES.md merge=hirsel
 
-# Pure independent lines: declarations and ledger rows have no ordering semantics.
-# Three-way set merge preserves removals as well as concurrent additions.
-# tools/check-hot-files rejects duplicates before landing.
+# Test module declarations merge as sets, preserving removals and additions.
 crates/*/tests/*/modules.rs merge=hirsel
-tools/known-failures.tsv merge=hirsel

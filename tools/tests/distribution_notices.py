@@ -272,7 +272,6 @@ class Repository(unittest.TestCase):
 if __name__ == '__main__':
     import argparse
     import sys
-    # Land acceptance runs every suite with --test-threads 1; these tests run serially.
     parser = argparse.ArgumentParser()
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
     parser.add_argument('--present', nargs='*')

@@ -1,4 +1,4 @@
-"""Shared, bounded Buck2 event history for landing, main's hourly run and pool audits."""
+"""Shared, bounded Buck2 event history for build tools and pool audits."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 import csv

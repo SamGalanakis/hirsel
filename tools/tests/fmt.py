@@ -48,7 +48,7 @@ else:
         buck.chmod(0o755)
         rustfmt.chmod(0o755)
         for active in [patch.object(fmt, 'ROOT', self.root), patch.object(fmt, 'BUCK2', buck),
-                       patch.object(fmt, 'RUSTFMT', rustfmt), patch.object(fmt, 'CONFIG', [])]:
+                       patch.object(fmt, 'RUSTFMT', rustfmt)]:
             active.start()
             self.addCleanup(active.stop)
 
@@ -65,10 +65,10 @@ else:
         with patch.object(sys, 'argv', ['fmt.py', *args]), contextlib.redirect_stdout(io.StringIO()):
             return fmt.main()
 
-    def test_noncanonical_changed_case_fails_both_lane_and_land_check_modes(self):
+    def test_noncanonical_changed_case_fails_with_and_without_check(self):
         case = self.write('core/front/cases/case.hirsel', 'fn f(){1}')
         before = case.read_bytes()
-        for args in [[], ['--check', '--base', self.base]]:
+        for args in [[], ['--check']]:
             with self.subTest(args=args):
                 self.assertEqual(self.run_fmt(*args), 1)
                 self.assertEqual(case.read_bytes(), before, 'case diagnostics must not move during a check')

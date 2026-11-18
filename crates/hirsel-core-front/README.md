@@ -35,8 +35,8 @@ unfinished. This guard records today's work; it does not certify completion.
 For local evidence, run `./crates/hirsel-core-front/check-cost.py --compiler <release-hirsel-core>
 --request-compiler <release-request-cost> --out <new-directory>`.
 Manifest membership stays fixed. The tool counts actual source lines for each run.
-Observations, including denominators and completion findings, go to the land log
-and the ticket event. The committed JSON contains ceilings and policy only.
+The tool reports observations, denominators and completion findings. The
+committed JSON contains ceilings and policy.
 
 The driver's `check_cost` example enables this crate's `cost-profile` feature only
 through a dev dependency. `check_cost <inputs.json> <new-store> <output.json>
@@ -46,31 +46,10 @@ changed inlining remain diagnostic overhead. Use the ordinary driver for savings
 Omit `--profile` to export CoreIR, outcomes and definition keys for comparison.
 The feature and all scopes are absent from production compiler units.
 
-Land is the only writer of `cost-ceilings.json` and `front-cost-ceilings.json`.
-In the merged tree it lowers a cell to its measured margin when that margin is
-smaller. New cells start at their observation plus 2%. Source costs round up to
-100 instructions per line; front-stage costs round to 100 instructions before
-normalizing by tokens. Integer image counts retain their one-event minimum
-margin. A rise leaves the ceiling unchanged and is reported against the tickets
-in the measured tree. The fixed finished-process budget remains 60,000 per line.
-The absolute core-check-index-912 residual allowances apply only to source
-comparison cells; the budget and product requests use their full process cost.
-
-Do not edit either ceiling file or record observations in the repository.
-An increase needs an explicit reviewed request at
-`tools/cost-ceiling-requests/<lane>.json`, for example:
-
-```json
-{
-  "file": "crates/hirsel-core-front/front-cost-ceilings.json",
-  "cell": ["corpora", "m1", "instructions_per_token", "parse"],
-  "previous": 100,
-  "value": 120,
-  "reason": "Explain the newly supported work and the reviewed increase."
-}
-```
-
-Land checks the requested previous value, applies the increase, records its
-reason in the ticket's event, and consumes the request in its generated commit.
-The fixed budget cannot be raised through this mechanism. Cost rows are
-report-only in land; missing counters and tool crashes still refuse the push.
+Both cost checks compare measurements against the committed ceiling files.
+Proposed ceilings use a 2% margin. Source costs round up to 100 instructions
+per line, and front-stage costs round to 100 instructions before normalizing
+by tokens. Integer image counts use a minimum margin of one event. The fixed
+finished-process budget is 60,000 instructions per line. The absolute
+core-check-index-912 residual allowances apply to source comparisons. The
+finished budget and product requests use their full process cost.

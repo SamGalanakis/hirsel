@@ -58,4 +58,4 @@ law's reservations. The hand-written codec derives identities from PROG-9 and
 fingerprints from SEM-10 schema bytes; store versions and reply sizes are fixed
 by the spec. `--case` selects individual laws. The shared runner harness's
 `--part admission` checks the exact outcome reserve and Reset retention on all
-engines. core-runner-r1 selects those state laws during land acceptance.
+engines. `//:core-runner-r1` runs those state laws.

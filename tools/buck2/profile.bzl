@@ -56,7 +56,7 @@ PANIC_ABORT = select({
 
 # [profile.checked] inherits release, with the oracles' assertions and overflow
 # checks restored, at opt-level 1: the tests' compiler and libraries are rebuilt
-# on every lane edit and land, and O1 compiles them in 27% less CPU while the
+# on every lane edit, and O1 compiles them in 27% less CPU while the
 # tests run about 13% slower (pool-use-717). Shipped and timed code is release or
 # runtime, never checked. Host code keeps its canonical dev configuration.
 CHECKED_FLAGS = RELEASE_FLAGS + ["-Copt-level=1", "-Cdebug-assertions=yes", "-Coverflow-checks=yes"]

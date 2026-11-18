@@ -33,12 +33,9 @@ class HotFiles(unittest.TestCase):
         self.registry.parent.mkdir(parents=True)
         self.registry.write_text('mod first;\n')
         self.registry.with_name('main.rs').write_text('include!("modules.rs");\n')
-        (self.root / 'tools').mkdir()
-        self.ledger = self.root / 'tools/known-failures.tsv'
-        self.ledger.write_text('first\treason\towner\t2026-10-22\n')
         (self.root / '.gitattributes').write_text((ROOT / '.gitattributes').read_text())
         driver = self.root / 'tools/buck2/merging.py'
-        driver.parent.mkdir()
+        driver.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / 'tools/buck2/merging.py', driver)
         merging.install(self.root)
         self.commit('base')
@@ -51,55 +48,47 @@ class HotFiles(unittest.TestCase):
         self.git('add', '-A')
         self.git('commit', '-qm', message)
 
-    def lane(self, name, row_id=None):
+    def lane(self, name):
         self.git('checkout', '-qb', name, 'main')
         with self.registry.open('a') as out:
             out.write(f'mod {name};\n')
         self.registry.with_name(name + '.rs').write_text('#[test]\nfn passes() {}\n')
-        with self.ledger.open('a') as out:
-            out.write(f'{row_id or name}\treason\towner\t2026-10-22\n')
         self.commit(name)
 
-    def check_both_orders(self, expected_modules, expected_ids):
+    def check_both_orders(self, expected_modules):
         for first, second in [('alpha', 'beta'), ('beta', 'alpha')]:
             for operation in ['merge', 'rebase']:
                 with self.subTest(first=first, second=second, operation=operation):
                     self.git('checkout', '-q', '-B', 'proof', second)
                     self.git(operation, first)
                     self.assertEqual(set(self.registry.read_text().splitlines()), expected_modules)
-                    self.assertEqual({row.split('\t')[0] for row in self.ledger.read_text().splitlines()},
-                                     expected_ids)
                     self.assertEqual(CHECK(self.root), [])
 
     def delete_first(self, name):
         self.git('checkout', '-qb', name, 'main')
         self.registry.write_text('')
-        self.ledger.write_text('')
         self.commit(name)
 
     def test_add_against_add(self):
         self.lane('alpha')
         self.lane('beta')
-        self.check_both_orders({'mod first;', 'mod alpha;', 'mod beta;'}, {'first', 'alpha', 'beta'})
+        self.check_both_orders({'mod first;', 'mod alpha;', 'mod beta;'})
 
     def test_delete_against_add(self):
         self.delete_first('alpha')
         self.lane('beta')
-        self.check_both_orders({'mod beta;'}, {'beta'})
+        self.check_both_orders({'mod beta;'})
 
     def test_delete_against_delete(self):
         self.delete_first('alpha')
         self.delete_first('beta')
-        self.check_both_orders(set(), set())
+        self.check_both_orders(set())
 
-    def test_duplicate_declarations_and_ledger_identities_are_rejected(self):
+    def test_duplicate_declarations_are_rejected(self):
         with self.registry.open('a') as out:
             out.write('mod first;\n')
-        with self.ledger.open('a') as out:
-            out.write('first\tanother reason\tother owner\t2026-10-22\n')
         errors = '\n'.join(CHECK(self.root))
         self.assertIn('duplicate line', errors)
-        self.assertIn('duplicate identity', errors)
 
     def test_formatting_checks_module_bodies_without_sorting_declarations(self):
         self.registry.write_text('mod zed;\nmod alpha;\n')
@@ -108,6 +97,7 @@ class HotFiles(unittest.TestCase):
         fmt = runpy.run_path(str(ROOT / 'tools/buck2/fmt.py'))['main']
         query = {'example': {'crate_root': 'crates/example/tests/it/main.rs', 'edition': '2024'}}
         with patch.dict(fmt.__globals__, ROOT=self.root), \
+                patch.object(sys, 'argv', ['fmt.py']), \
                 patch('subprocess.run', side_effect=[SimpleNamespace(stdout=json.dumps(query)),
                                                      SimpleNamespace(returncode=0)]) as run:
             self.assertEqual(fmt(), 0)

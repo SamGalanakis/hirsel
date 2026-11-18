@@ -15,9 +15,8 @@ changes. When the hook is missing or fails, an existing remote
 `.buckconfig.local` is kept; with no remote configuration at all, prepare.py
 fails. A changed `.buckconfig.local` stops the checkout's running Buck2 daemon:
 a daemon builds its remote-execution client once, at start, so one started
-before the file was written would send every action to no engine. Running everything on this host is only ever chosen with `--local`: an
-unattended caller (tools/land) that silently fell back to it
-would redo every compile, test and toolchain unpack here.
+before the file was written would send every action to no engine. Running
+everything on this host requires `--local`.
 """
 from pathlib import Path
 import os
@@ -79,21 +78,6 @@ def main():
         # The daemon launches executors outside the project root. The shared
         # timeout stays in .buckconfig; only this checkout's path is local.
         configure_test_executor(ROOT)
-        text = local.read_text()
-        # The daemon reads its remote client's settings from config files when
-        # it starts, never from `-c`: a caller allowed a wider share of the
-        # pool than .buckconfig's per-checkout ceiling (tools/land) names it
-        # in $HIRSEL_BUCK2_RE_CONCURRENCY, and the change restarts the daemon.
-        text = re.sub(r'(?m)^execution_concurrency_limit\s*=.*\n?', '', text)
-        if limit := os.environ.get('HIRSEL_BUCK2_RE_CONCURRENCY', ''):
-            if not limit.isdecimal() or int(limit) < 1:
-                print(f'prepare: HIRSEL_BUCK2_RE_CONCURRENCY must be a positive integer, not {limit!r}',
-                      file=sys.stderr)
-                return 1
-            text = re.sub(r'(?m)^\[buck2_re_client\][ \t]*(?:\n|$)',
-                          lambda m: f'[buck2_re_client]\nexecution_concurrency_limit = {int(limit)}\n',
-                          text, count=1)
-        local.write_text(text)
     if (local.read_bytes() if local.is_file() else None) != before:
         subprocess.run([str(ROOT / '.buck2/bin/buck2'), 'kill'], cwd=ROOT, capture_output=True)
     return status

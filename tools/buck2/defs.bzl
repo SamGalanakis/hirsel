@@ -324,40 +324,6 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
         _suite(name = name, tests = host_targets + [":" + name + "-shard-1"])
 
-def hirsel_source_audit(name, binary, cwd, data, args = []):
-    """Run existing source-audit bodies without native execution inputs."""
-    _rust_test(
-        name = name,
-        harness = ":" + binary + "-harness",
-        test_binary = binary,
-        cwd = cwd,
-        data = data,
-        args = args,
-        request = _request(binary),
-        pool = False,
-        exec_compatible_with = ["root//tools/buck2:host"],
-        visibility = ["PUBLIC"],
-    )
-
-def hirsel_core_cranelift_test(name, case, data):
-    """A named native acceptance body, sharing the existing CoreIR harness."""
-    binary = "hirsel-cranelift-test-core_native"
-    _rust_test(
-        name = name,
-        harness = "//:" + binary + "-harness",
-        args = [case, "--exact", "--nocapture"],
-        data = data,
-        files_env = {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-native-runtime-fixture-pic"},
-        llvm = "root//tools/buck2/native-toolchain:llvm",
-        llvm_libraries = "toolchains//:llvm-libraries",
-        cwd = "crates/hirsel-cranelift",
-        test_binary = binary,
-        request = _request(binary),
-        exec_compatible_with = _test_platform(binary),
-        pool = not TESTS_ON_HOST,
-        visibility = ["PUBLIC"],
-    )
-
 def _rust_test_impl(ctx):
     binaries = dict(ctx.attrs.bin_exes)
     binaries.update(ctx.attrs.release_bin_exes)
@@ -411,8 +377,7 @@ def _rust_test_impl(ctx):
         env["HIRSEL_REPLAY_FIXTURE_OUT"] = cmd_args(fixture.as_output())
         ctx.actions.run(command, env = env, category = "deadline_replay_fixture")
         return [DefaultInfo(default_output = fixture)]
-    # Everything the run reads, built without running it: tools/land compiles a
-    # test's binaries and inputs in the same build as the workspace.
+    # Inputs can be built independently of running the test.
     sub_targets = {"inputs": [DefaultInfo(default_output = ctx.attrs.harness[DefaultInfo].default_outputs[0],
                                           other_outputs = inputs)]}
     return [
@@ -464,10 +429,6 @@ _rust_test = rule(
     },
 )
 
-# Full-gate script checks are test targets only under `-c hirsel.full=true`,
-# so `buck2 test //...` never starts one.
-FULL_GATE = read_root_config("hirsel", "full", "false") == "true"
-
 def _script_binary_impl(ctx):
     return [DefaultInfo(default_output = ctx.attrs.script), RunInfo(args = cmd_args(ctx.attrs.script))]
 
@@ -489,17 +450,11 @@ _test_suite = rule(impl = _test_suite_impl, attrs = {
 def _suite(name, tests, **kwargs):
     _test_suite(name = name, tests = tests, inputs = [test + "[inputs]" for test in tests], **kwargs)
 
-def hirsel_test_suite(name, tests):
-    """A name that runs exactly `tests`: a target name main's tools/land still lists."""
-    _suite(name = name, tests = tests, visibility = ["PUBLIC"])
-
-def hirsel_script_test(name, script, data, full = True, args = [], bin_exes = {}, front_observer_bin_exes = {}, production = False, files_env = {}, host = False, native_tools = False):
+def hirsel_script_test(name, script, data, args = [], bin_exes = {}, front_observer_bin_exes = {}, production = False, files_env = {}, host = False, native_tools = False):
     """A script harness with the same hermetic inputs as native Rust tests.
     `files_env` names further input files as environment variables. `host`
     runs it on the invoking host, never the pool: for a tool built there.
     """
-    if full and not FULL_GATE:
-        return
     binary = name + "-script"
     _script_binary(name = binary, script = script)
     _rust_test(

@@ -72,7 +72,7 @@ class TestExecutor(unittest.TestCase):
             actual = namespace['command']([
                 '--executor-fd', '7', '--orchestrator-fd', '8',
                 '--buck-trace-id', 'trace', '--config-entry', 'host=linux',
-                '--config-entry', 'config=hirsel.full=true',
+                '--config-entry', 'config=hirsel.tests=focus',
                 '--', 'ignored', '--buck-test-info', 'ignored',
                 '--env', 'FIXTURE=value', '--test-arg=--exact', '--test-arg=case',
             ], root)
@@ -88,7 +88,7 @@ class CpuRequests(unittest.TestCase):
     def platforms(self, mode, priority=None):
         source_dir = ROOT / 'tools/buck2'
         paths = {name: Path(os.environ.get('HIRSEL_TEST_' + name.upper(), source_dir / (name + '.bzl')))
-                 for name in ('platforms', 'test_requirements', 'test_sizes', 'exec_sizes', 'priorities')}
+                 for name in ('platforms', 'test_requirements', 'test_sizes', 'exec_sizes')}
         config = {'tests': mode, 'remote_properties': 'kiln_executor_runtime=fixture-runtime'}
         if priority is not None:
             config['priority'] = str(priority)
@@ -110,8 +110,8 @@ class CpuRequests(unittest.TestCase):
         exec(paths['platforms'].read_text(), namespace)
         return namespace
 
-    def test_priority_bounds_and_land_exception_reach_the_executors(self):
-        for priority in (None, 0, 40, 50, 99, 150):
+    def test_priority_bounds_reach_the_executors(self):
+        for priority in (None, 0, 40, 50, 99):
             with self.subTest(priority=priority):
                 module = self.platforms('pool', priority)
                 expected = 50 if priority is None else priority
@@ -130,8 +130,8 @@ class CpuRequests(unittest.TestCase):
                     constraints=[], budgets={'pool_1_1048576|1|1048576|': Budget()},
                     host=Budget())))
                 self.assertEqual(platforms[0]['executor_config']['priority'], expected)
-        for priority in (-1, 100, 149, 151):
-            with self.subTest(priority=priority), self.assertRaisesRegex(ValueError, '0 to 99.*150'):
+        for priority in (-1, 100, 150):
+            with self.subTest(priority=priority), self.assertRaisesRegex(ValueError, '0 to 99'):
                 self.platforms('pool', priority)
 
 

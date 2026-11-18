@@ -47,7 +47,7 @@ class Contract:
     package: str = "std"
     evaluator_only: str | None = None
     # `// engine-fact: <fact>` before the law: an engine states <fact> to its code
-    # generator on the strength of this law, so land runs it natively on every engine.
+    # generator on the strength of this law, so the native suites run it on each engine.
     engine_fact: str | None = None
     # `// schedule: seeds N [max_events M]` before the law: the native run repeats the
     # law under N seeded schedules (core/tools/std_schedule.c).

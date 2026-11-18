@@ -6,8 +6,8 @@ compiler from exec through its answer, then an acknowledged disable excludes
 optional time-metrics formatting and writing. Startup and publication remain
 counted. No /usr/bin/time process is counted. Wall and child peak RSS come from
 the capped harness. Native residual is 12 instructions; proposed ceilings keep
-both the existing 2% allowance and at least that absolute residual. Land clamps
-lowerings to those measurement floors. The finished budget remains 60000.
+both the existing 2% allowance and at least that absolute residual. The
+finished budget remains 60000.
 """
 import argparse
 import copy
@@ -281,7 +281,7 @@ def main():
     parser.add_argument('--report-only', action='store_true', help='report ceiling findings; tool errors still fail')
     args = parser.parse_args()
     ceilings = json.loads(args.ceilings.read_text())
-    ceilings['policy'] = ceilings.get('policy', 'Cost regressions are report-only; land owns ceiling changes.')
+    ceilings['policy'] = ceilings.get('policy', 'Compare observations against the committed ceilings.')
     if args.out:
         args.out.mkdir(parents=True, exist_ok=False)
         run(args.compiler.resolve(), args.out.resolve(), ceilings, args.request_compiler.resolve(), args.report_only)

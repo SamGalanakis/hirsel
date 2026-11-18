@@ -13,8 +13,8 @@ No lane commits a generated file, so no rebase can conflict on one
 - **Build inputs are gitignored and generated on demand.** `sync.py` writes the
   root and `third-party/` `BUCK`, `third-party/Cargo.{toml,lock}` and `lib.rs`,
   `exec_sizes.bzl`, `test_sizes.bzl`, `workspace-metadata.json` and
-  `tools/native-toolchain/pins.bzl`. `bootstrap.py` (so `prepare.py`),
-  and `tools/land` run `sync.py --if-stale`. Generation has two parts, third-party dependencies
+  `tools/native-toolchain/pins.bzl`. `bootstrap.py` runs `sync.py --if-stale`.
+  Generation has two parts, third-party dependencies
   (Cargo metadata, then Reindeer) and the first-party inventory (Cargo
   metadata, then source inspection), and a stamp in `.buck2/` records each
   part's outputs and every file, existence test and glob it read. `--if-stale`
@@ -32,12 +32,9 @@ No lane commits a generated file, so no rebase can conflict on one
   byte-identical to the committed ones they replace, so every action key, and
   so remote execution and its cache, is unchanged.
 - **Files many lanes add to merge themselves.** `.gitattributes` gives
-  `third-party/NOTICES.md`, the `modules.rs` registries and
-  `tools/known-failures.tsv` the `hirsel` merge driver, which `bootstrap.py` installs in the clone's config: appended rows
-  and entries either side adds stay, entries either side removes go, and only
-  two sides changing one entry stays a conflict. Lanes' own rebases and land's
-  batch rebase merge them alike.
-- `tools/known-failures.tsv` stays hand-edited, direct to main.
+  `third-party/NOTICES.md` and the `modules.rs` registries the `hirsel` merge
+  driver, which `bootstrap.py` installs. The driver keeps notice additions from
+  both sides. For module declarations it also preserves removals.
 
 ## Setup per checkout or worktree
 
@@ -62,8 +59,7 @@ the `[buck2_re_client]` endpoint, instance and TLS identity, and
 pool's workers match. When the hook is missing or fails, an existing remote
 `.buckconfig.local` is kept; without one `prepare.py` fails and names the
 missing hook. Only `prepare.py --local` writes `hirsel.execution = local`,
-which runs every action on this host, so an unattended `tools/land` never
-silently redoes the pool's work here.
+which runs every action on this host.
 
 Toolchain preparation runs on the pool like any compile: the third-party crate
 `http_archive`s, the `native_toolchain_unpack`s and the `link_kit`
@@ -82,8 +78,8 @@ library, front-end case and program roots (`SOURCE_ROOTS`) with the candidate's
 `hirsel-core-syntax` formatter, and never rewrites them. Refusal and gap fixtures
 (an `// expect: refuse|gap|resource` comment) are input bytes and excluded. The
 selection includes branch commits since the merge-base with `origin/main`, staged
-and unstaged changes and untracked files; the land screen supplies its batch base
-explicitly. A Rust-only change needs no formatter build.
+and unstaged changes and untracked files. A Rust-only change needs no
+formatter build.
 
 ## Stale outputs
 
@@ -93,7 +89,7 @@ cleaning promotes the oldest inactive outputs until projected free space
 recovers, keeping anything accessed within one hour. Active artifacts stay
 protected, including under disk pressure. Lanes never delete another lane's
 `buck-out`. The policy is initialized at daemon startup; an existing daemon
-needs a restart. Gate and land stop their own daemon when finished.
+needs a restart.
 
 The settings were checked against the exact `pins.json` source commit
 [`6507dd157a6f81a810c48583edf1758dd0c337c5`](https://github.com/facebook/buck2/tree/6507dd157a6f81a810c48583edf1758dd0c337c5),
@@ -128,10 +124,8 @@ are relative to that commit:
   after a daemon restart begins inactive (`deferred/artifact_tree.rs`).
   `MaterializerSender::send` cancels a cleaning
   scan before processing new materializer work (`deferred.rs`).
-- `tools/land` and `prepare.py` do not override these
-  keys. `--materializations none` controls requested final outputs, not the
-  deferred-write prerequisite. The host remote-config hook writes only
-  `[buck2_re_client]` and `[hirsel]`, leaving this `[buck2]` policy intact.
+- `--materializations none` controls which final outputs Buck places on disk.
+  The host remote-config hook writes only `[buck2_re_client]` and `[hirsel]`.
 
 Six hours preserves recent rebase outputs without retaining days of hashes;
 hourly scans bound the delay, and six minutes gives an initial build time to
@@ -191,12 +185,11 @@ export CARGO_BUILD_JOBS=4 HIRSEL_JOBS=4 RUST_TEST_THREADS=4
 .buck2/bin/buck2 test //:core-driver-native-openat2   # bodies that need the host's openat2, on this host
 python3 tools/buck2/sync.py --if-stale            # the generated build files, after any edit or rebase
 tools/affected                                    # every target the change can affect
-tools/land-run /tmp/<lane>-land.log               # rebase, check, push (docs/landing.md)
+python3 tools/buck2/fmt.py                       # format before pushing
 ```
 
-[Landing and race retries](../../docs/landing.md) describes the exact-tree checks,
-conservative incoming-crate selection and unbounded retries with jitter.
-Every attempted tree passes build, Clippy and fmt; no retry skips a check.
+See [contributing](../../docs/contributing.md#testing-and-pushing-to-main)
+for the steps to push a change.
 
 Builds use Buck2's default isolation dir, `v2`: never pass
 `--isolation-dir` (or pass only `--isolation-dir v2`) and leave
@@ -268,7 +261,7 @@ runner without binfmt registration. The ARM C dependencies and linker use the
 pinned cross GCC sysroot; host tool dependencies remain x86. Real-file bodies
 execute their openat2 precondition and fail if it is unavailable.
 
-The LLVM pin check is `//:gate-native-toolchain-pin` under `-c hirsel.full=true`;
+The LLVM pin check is `//:gate-native-toolchain-pin`;
 the standalone tool proof is `//tools/buck2/native-toolchain:proof` (see
 [the native toolchain](../native-toolchain/README.md)).
 
@@ -388,9 +381,7 @@ the aggregate holds both for the workspace build and the toolchain bundle.
   tests at priority 50, below the pool's ordinary lane class (100), above
   its warming class (0), which gets no reserved worker. The scheduler merges
   identical actions at the first submitter's priority. `-c hirsel.priority=N`
-  accepts 0-99, or exactly the land value defined in `priorities.bzl`.
-  Only tools/land uses 150, so the serial batch every lane waits on queues
-  above ordinary lane work across projects. A test run carries its
+  accepts 0 through 99. A test run carries its
   own executor (`test_executor` in `platforms.bzl`): Buck2 runs tests with it,
   not with their platform's. The priority is not part of an action key. The
   platforms also include the invoking host for an explicit
@@ -401,7 +392,7 @@ the aggregate holds both for the workspace build and the toolchain bundle.
   assertions and overflow checks. Every first-party library and binary, test
   harnesses and the executables they launch (`CARGO_BIN_EXE` subprocesses)
   build once in it, so
-  the land's workspace build and the tests share every action. Integration
+  builds and tests share compilation actions. Integration
   test crates (`tests/`) compile their own code at opt-level 0 over O3
   libraries (`_test_crate_flags` in defs.bzl); unit test crates are the
   library and keep O3. `//tools/buck2:release` is `[profile.release]`. There
@@ -501,10 +492,9 @@ CPU-hours and GiB-hours per lane and target over the last N hours.
 
 It also sums execution wall seconds and CPU seconds per action category,
 excluding queue time. For rustc compile/link phases and target names, it joins
-the shared retained Buck2 event logs. `tools/land` retains its
-compressed `.pb.zst` logs, including failed runs, under
-`$HIRSEL_BUCK2_LOG_DIR` (default `~/.cache/hirsel-buck2/event-logs`, shared across
-worktrees). The full suite's helpers use the same recorder. Rotation keeps at
+the shared retained Buck2 event logs. The recorder stores compressed
+`.pb.zst` logs, including failed runs, under `$HIRSEL_BUCK2_LOG_DIR`
+(default `~/.cache/hirsel-buck2/event-logs`, shared across worktrees). Rotation keeps at
 most three days and 4 GiB, oldest first; running writers and audit readers keep
 their files locked until finished, so active logs may temporarily exceed the
 size bound. A new run rotates completed logs after it finishes.
@@ -564,9 +554,8 @@ exceeded the former 256 MiB reservation repeatedly. There is no fixed
 512 MiB anonymous-memory surcharge. special_requests in the same evidence
 sizes precheck, Clippy and native observation from their own measured peaks.
 
-Priority and lane attribution do not enter the action digest. An action
-already queued at 50 keeps 50 when land joins it; new land digests queue at
-150, without preempting running work. Dependency
+Priority and lane attribution do not enter the action digest. An action keeps
+the first submitter's priority when a later invocation requests it. Dependency
 symlink trees are assembled in the daemon by the pinned prelude overlay,
 without remote compile-sized helper actions. Clippy twins share ordinary
 dependencies.

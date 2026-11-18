@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-"""Select affected Buck2 targets, or classify a completed consumer event log.
+"""Select affected Buck2 targets.
 
 Default stdout remains a target list for `buck2 test $(tools/consumers ...)`.
 Selection reasons go to stderr; --reasons puts target/reason columns on stdout.
---classify LOG reads Buck's .pb.zst or decoded JSONL without running tests.
-Exact known matches cite their selector, diagnostic, caps and existing evidence
-on stderr; stdout retains only new/uncertain results. Classification is read-only.
 """
 import argparse
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -181,22 +177,12 @@ def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIM
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('paths', nargs='*')
+    parser.add_argument('paths', nargs='+')
     parser.add_argument('--reasons', action='store_true', help='print target/reason columns on stdout')
-    parser.add_argument('--classify', metavar='LOG', nargs='+', help='classify completed Buck event logs')
-    parser.add_argument('--known-failures', type=Path, default=ROOT / 'tools/known-failures.tsv')
     parser.add_argument('--limit', type=int, default=LIMIT,
                         help=f'keep the nearest N affected targets (default {LIMIT}; 0 keeps all)')
     args = parser.parse_args()
     try:
-        if args.classify:
-            if args.paths or args.reasons:
-                raise ValueError('--classify cannot be combined with paths or --reasons')
-            sys.path.insert(0, str(ROOT / 'tools/buck2'))
-            from consumer_results import report
-            return report(args.classify, args.known_failures)
-        if not args.paths:
-            raise ValueError('supply changed paths or --classify LOG')
         paths = []
         seeds = set()
         for argument in args.paths:

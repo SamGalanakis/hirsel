@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent front-stage land gate. Nested image costs never sum into phase totals."""
+"""Measure front-stage costs against their ceilings. Nested image costs never sum into phase totals."""
 import argparse
 import hashlib
 import json

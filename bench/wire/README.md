@@ -115,8 +115,8 @@ replaced with bounded per-connection arrivals to preserve one in-flight Call
 per stream. Echo measures the generator separately. Goose has no implemented
 network benchmark to adopt.
 
-These standalone tests are run by the commands above. The root land gate does
-not select them automatically. The hand-derived vectors catch field/tag/order
+Run these standalone tests with the commands above. The hand-derived vectors
+catch field/tag/order
 mistakes; the independent XOR and durable version oracles catch lost rows and
 duplicate effects; fault injection checks that a failed sync emits nothing; the
 synthetic timing test catches omitted scheduling delay and answer/observer

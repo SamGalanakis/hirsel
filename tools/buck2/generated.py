@@ -1,12 +1,10 @@
-"""The repository's generated files, with separate tracked and ignored owners.
+"""Track freshness of generated Buck2 build inputs.
 
 BUILD_INPUTS are what sync.py derives from the Cargo workspace and the
 committed measurements and pins. They are gitignored and generated on demand:
-bootstrap.py writes them, and every entry point that runs Buck2 (prepare.py,
-tools/land, tools/sweep) regenerates the parts whose inputs changed since they
-were generated (`sync.py --if-stale`). Without them a bare `.buck2/bin/buck2`
-reads the committed BUCK.unsynced stubs and fails with one line saying to run
-sync.py. tools/land refuses a lane change that touches one.
+bootstrap.py writes them, and `sync.py --if-stale` regenerates the parts
+whose inputs changed. Without them Buck2 reads the committed BUCK.unsynced
+stubs, which direct contributors to sync.py.
 
 The stamp records, for each part of the build inputs, what its generation
 read (`Reads`: file contents, existence tests and glob matches, including the
@@ -35,12 +33,6 @@ PARTS = {
                     'tools/buck2/workspace-metadata.json', 'tools/native-toolchain/pins.bzl'),
 }
 BUILD_INPUTS = tuple(sorted(path for outputs in PARTS.values() for path in outputs))
-# Tracked documents are regenerated after every successful rebase and included
-# in the candidate commit. Unlike BUILD_INPUTS, these remain tracked on main.
-DOCUMENTS = {'core/std/API-INDEX.md': ('core/tools/std_api_index.py', '--write')}
-COST_CEILINGS = ('crates/hirsel-core-front/cost-ceilings.json',
-                 'crates/hirsel-core-front/front-cost-ceilings.json')
-REGENERATED = (*BUILD_INPUTS, *DOCUMENTS)
 STAMP = '.buck2/sync-stamp.json'
 SYNC_HINT = 'run python3 tools/buck2/sync.py'
 
@@ -181,27 +173,3 @@ def require(root: Path) -> None:
     if synced is not None and synced.returncode:
         lines = [line for line in (synced.stdout + synced.stderr).splitlines() if line.strip()]
         raise SystemExit('cannot generate the Buck2 build files (tools/buck2/sync.py)\n' + '\n'.join(lines[-20:]))
-
-
-def lane_written(paths) -> list[str]:
-    """The generated files among the paths a lane change writes (adds or
-    edits): no lane commits them."""
-    return sorted(path for path in paths if path in (*BUILD_INPUTS, *COST_CEILINGS))
-
-
-def refusal(paths) -> list[str]:
-    """Why a lane change touching generated files is refused, with how to drop
-    them; empty when it touches none."""
-    touched = lane_written(paths)
-    if not touched:
-        return []
-    if costs := sorted(set(touched) & set(COST_CEILINGS)):
-        return [f'land owns measured cost ceilings: {", ".join(costs)}',
-                'Drop the ceilings diff. Measurements and savings are written by land; '
-                'request increases through a reviewed tools/cost-ceiling-requests/<lane>.json.']
-    return [f'the change touches generated files, which no lane commits: {", ".join(touched)}',
-            'sync.py regenerates the '
-            'gitignored build files on demand. Drop them from the change:',
-            f'  git rm -q --cached {" ".join(touched)}',
-            '  git commit --amend --no-edit',
-            'then tools/land.']

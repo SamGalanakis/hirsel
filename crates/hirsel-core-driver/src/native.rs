@@ -1293,6 +1293,10 @@ fn direct_link(
     let directory = tempfile::tempdir_in(parent.unwrap_or(Path::new(".")))?;
     let mut process = crate::tool_inputs::tool_command(&recipe.linker);
     process.current_dir(directory.path());
+    if optimize {
+        // Keep the executable's code revision even when no tape reads it.
+        process.args(["--gc-sections", "--undefined=hirsel_code_revision"]);
+    }
     let mut inserted = false;
     for argument in &recipe.args {
         if argument == crate::tool_inputs::INPUT_MARKER {
@@ -1451,10 +1455,9 @@ fn link_objects(
     revision: ContentHash,
     revisions: impl FnOnce() -> Result<BTreeMap<Identity, ContentHash>, NativeStop>,
 ) -> Result<Linked, NativeStop> {
-    // Development links use lld's cheap string-merging mode. Release keeps
-    // the linker default; this spelling is part of the executable key below.
+    // The executable key includes the mode-specific lld options.
     let link_mode = if options.optimize {
-        "release-link-defaults"
+        "release-link-gc-sections"
     } else {
         "development-link-O0"
     };

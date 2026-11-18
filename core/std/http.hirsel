@@ -482,7 +482,7 @@ type RequestHead {
     close: bool
 }
 
-fn connection_upgrade(b: Bytes, h: http1.Head) -> bool {
+fn connection_upgrade(b: Bytes, h: View[http1.Head]) -> bool {
     for i in 0u64 .. h.count {
         let f = h.fields[i]
         if http1.equal_ascii(part(b, f.name), string.as_bytes("connection")) && http1.contains(part(b, f.value), string.as_bytes("upgrade")) {
@@ -492,7 +492,7 @@ fn connection_upgrade(b: Bytes, h: http1.Head) -> bool {
     false
 }
 
-fn request_policy(b: Bytes, h: http1.Head) -> Result[RequestHead, u16] {
+fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[RequestHead, u16] {
     let verb = part(b, h.method)
     let mut host: Option[http1.Span] = None
     let mut expect = false
@@ -1322,7 +1322,7 @@ fn encode_stream(mut out: Bytes, take spec: stream.Spec, c: Clock, version: u8, 
     Ok(stream.prepare(take spec, out, chunked, heartbeat, suppress, at, pre_head))
 }
 
-fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, frame: Framing, take request_body: Body in input, mut out: Bytes, cfg: Config, routes: router.Router[S], state: S, mut cache: DateCache) -> (Step, Option[Body]) in input waits {
+fn handle[S: shareable + send](input: Bytes, h: View[http1.Head], meta: RequestHead, frame: Framing, take request_body: Body in input, mut out: Bytes, cfg: Config, routes: router.Router[S], state: S, mut cache: DateCache) -> (Step, Option[Body]) in input waits {
     let mut b = take request_body
     let step = 'exchange: {
         let outcome = bound bytes cfg.handler_bytes {
@@ -1366,7 +1366,7 @@ fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, f
                     b.decoder.state = Finished
                     b.decoder.remaining = 0
                 }
-                let req = Request(input: view input, head: view h, meta: meta, segments: take normalized, route: view entry.pattern, inline_body: inline, deadline: b.handler_deadline, stop: share_signal(b.stop), state_max: cfg.state_max, out_cap: cfg.out_cap)
+                let req = Request(input: view input, head: h, meta: meta, segments: take normalized, route: view entry.pattern, inline_body: inline, deadline: b.handler_deadline, stop: share_signal(b.stop), state_max: cfg.state_max, out_cap: cfg.out_cap)
                 let handler = entry.route.handler
                 let handled = if let Some(limit) = entry.route.steps {
                     let limited = bound steps limit {
@@ -1753,7 +1753,8 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
                 break
             }
         }
-        let policy = match request_policy(input, head) {
+        let parsed = view head
+        let policy = match request_policy(input, parsed) {
             Ok(p) => p,
             Error(status) => {
                 if write_succeeded(reply_error_until(mut writer, status, c, after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {
@@ -1762,7 +1763,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
                 break
             },
         }
-        let framed = framing(input, head, cfg.body_max)
+        let framed = framing(input, parsed, cfg.body_max)
         let wire: Result[Framing, BodyError] = if policy.upgrade_requested {
             match framed {
                 Ok(Empty) => Ok(Empty),
@@ -1784,7 +1785,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
         list.clear(mut scratch)
         let (reuse, input_at, scratch_at, offer) = {
             let initial = Body(input: view input, input_at: head.end, reader: take reader, writer: take writer, scratch: take scratch, scratch_at: 0, decoder: decoder(frame, head, cfg.body_max), head_max: cfg.head_max, fields_max: cfg.fields_max, clock: c, stop: share_signal(signal), body_deadline: after_ms(completed, cfg.body_ms), handler_deadline: after_ms(completed, cfg.handler_ms), write_ms: cfg.write_ms, pipeline_max: cfg.pipeline_max, expect_continue: policy.expect_continue, fault: None, output_failed: false)
-            let (step, remaining) = handle(input, head, policy, frame, take initial, mut out, cfg, routes, state, mut date)
+            let (step, remaining) = handle(input, parsed, policy, frame, take initial, mut out, cfg, routes, state, mut date)
             let mut body = match take remaining {
                 Some(take resumed) => take resumed,
                 None => return completed_replies,
@@ -2464,8 +2465,8 @@ fn serve_internal[S: shareable + send](take listeners: List[Listener], c: Clock,
 
 /// Selects a request body boundary from the already parsed Head. No allocation.
 /// HTTP-4 refuses ambiguous framing before interpreting any body bytes.
-/// Ex: `http.framing(bytes, h, 1048576)`.
-pub fn framing(b: Bytes, h: http1.Head, body_max: u64) -> Result[Framing, BodyError] {
+/// Ex: `http.framing(bytes, view h, 1048576)`.
+pub fn framing(b: Bytes, h: View[http1.Head], body_max: u64) -> Result[Framing, BodyError] {
     let mut lengths: u64 = 0
     let mut encodings: u64 = 0
     let mut length = http1.Span(start: 0, end: 0)

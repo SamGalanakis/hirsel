@@ -3,30 +3,19 @@
 use std::{
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, MutexGuard, TryLockError},
 };
+
+const POLL_BATCH: i32 = 128;
 
 pub struct Poller {
     epoll: OwnedFd,
     wake: OwnedFd,
-    polling: AtomicBool,
+    events: Mutex<Vec<libc::epoll_event>>,
 }
 
-struct PollTurn<'a>(&'a AtomicBool);
-impl Drop for PollTurn<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
-
-/// One kernel turn, before socket identities are resolved by the registry.
-pub struct PollEvents {
-    events: [libc::epoll_event; 128],
-    len: usize,
-}
+/// The initialized prefix of one kernel turn, held until registry dispatch.
+pub struct PollEvents<'a>(MutexGuard<'a, Vec<libc::epoll_event>>);
 fn checked(rc: i32) -> io::Result<i32> {
     if rc < 0 {
         Err(io::Error::last_os_error())
@@ -48,7 +37,7 @@ impl Poller {
         let poller = Arc::new(Self {
             epoll,
             wake,
-            polling: AtomicBool::new(false),
+            events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
         });
         poller.ctl(
             libc::EPOLL_CTL_ADD,
@@ -67,26 +56,27 @@ impl Poller {
         checked(unsafe { libc::epoll_ctl(self.epoll.as_raw_fd(), op, fd, &mut event) })?;
         Ok(())
     }
-    fn try_turn(&self) -> Option<PollTurn<'_>> {
-        self.polling
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .ok()
-            .map(|_| PollTurn(&self.polling))
+    fn try_turn(&self) -> Option<MutexGuard<'_, Vec<libc::epoll_event>>> {
+        match self.events.try_lock() {
+            Ok(events) => Some(events),
+            Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Poisoned(events)) => Some(events.into_inner()),
+        }
     }
 
-    /// Try the driver token. A busy token returns immediately, even if the
-    /// token holder is waiting for I/O. A zero timeout is a nonblocking turn.
-    pub fn poll(&self, timeout_ms: i32) -> io::Result<Option<PollEvents>> {
-        let Some(_turn) = self.try_turn() else {
+    /// Try the driver token. A busy token returns immediately while another
+    /// worker polls or dispatches. A zero timeout is a nonblocking turn.
+    pub fn poll(&self, timeout_ms: i32) -> io::Result<Option<PollEvents<'_>>> {
+        let Some(mut events) = self.try_turn() else {
             return Ok(None);
         };
-        let mut events = [libc::epoll_event { events: 0, u64: 0 }; 128];
-        // SAFETY: epoll owns its descriptor and the fixed array is writable.
+        events.clear();
+        // SAFETY: epoll owns its descriptor and events has POLL_BATCH spare slots.
         let count = unsafe {
             libc::epoll_wait(
                 self.epoll.as_raw_fd(),
                 events.as_mut_ptr(),
-                events.len() as i32,
+                POLL_BATCH,
                 timeout_ms,
             )
         };
@@ -94,10 +84,12 @@ impl Poller {
             return Ok(None);
         }
         let len = checked(count)? as usize;
-        if events[..len].iter().any(|event| event.u64 == u64::MAX) {
+        // SAFETY: epoll_wait initialized exactly this prefix of the buffer.
+        unsafe { events.set_len(len) };
+        if events.iter().any(|event| event.u64 == u64::MAX) {
             self.drain();
         }
-        Ok(Some(PollEvents { events, len }))
+        Ok(Some(PollEvents(events)))
     }
 
     pub fn wake(&self) {
@@ -282,9 +274,19 @@ impl Sockets {
     }
     /// An edge names a live socket. A direction's waiter still retries its
     /// syscall before committing a result, including after stale readiness.
-    pub fn dispatch(&mut self, identity: u64, flags: u32, mut ready: impl FnMut(u64)) {
+    pub fn dispatch(&mut self, identity: u64, flags: u32, ready: impl FnMut(u64)) {
+        Self::dispatch_edge(&mut self.slots, &mut self.waiting, identity, flags, ready);
+    }
+
+    fn dispatch_edge(
+        slots: &mut [Slot],
+        waiting: &mut usize,
+        identity: u64,
+        flags: u32,
+        mut ready: impl FnMut(u64),
+    ) {
         let index = identity as u32 as usize;
-        let Some(slot) = self.slots.get_mut(index) else {
+        let Some(slot) = slots.get_mut(index) else {
             return;
         };
         if slot.generation != (identity >> 32) as u32 {
@@ -299,19 +301,19 @@ impl Sockets {
             r.read_drained = false;
             r.read_terminal |= terminal;
             if let Some(token) = r.waiters[0].take() {
-                self.waiting -= 1;
+                *waiting -= 1;
                 ready(token);
             }
         }
         if (failed || flags & libc::EPOLLOUT as u32 != 0)
             && let Some(token) = r.waiters[1].take()
         {
-            self.waiting -= 1;
+            *waiting -= 1;
             ready(token);
         }
     }
-    /// Poll only returned registrations. The token covers the kernel poll,
-    /// while the caller has exclusive access to the socket registry.
+    /// Poll only returned registrations while holding the driver token
+    /// and exclusive access to the socket registry.
     pub fn poll(&mut self, timeout_ms: i32, ready: impl FnMut(u64)) -> io::Result<usize> {
         if timeout_ms == 0 && self.waiting == 0 {
             return Ok(0);
@@ -322,18 +324,32 @@ impl Sockets {
         let Some(events) = poller.poll(timeout_ms)? else {
             return Ok(0);
         };
-        Ok(self.dispatch_polled(events, ready))
+        Ok(Self::dispatch_batch(
+            &mut self.slots,
+            &mut self.waiting,
+            events,
+            ready,
+        ))
     }
 
     /// Apply a poll from this registry's driver. Closing or reusing a slot
     /// invalidates any edge still in a worker's poll batch.
-    pub fn dispatch_polled(&mut self, events: PollEvents, mut ready: impl FnMut(u64)) -> usize {
-        for event in &events.events[..events.len] {
+    pub fn dispatch_polled(&mut self, events: PollEvents<'_>, ready: impl FnMut(u64)) -> usize {
+        Self::dispatch_batch(&mut self.slots, &mut self.waiting, events, ready)
+    }
+
+    fn dispatch_batch(
+        slots: &mut [Slot],
+        waiting: &mut usize,
+        events: PollEvents<'_>,
+        mut ready: impl FnMut(u64),
+    ) -> usize {
+        for event in events.0.iter() {
             if event.u64 != u64::MAX {
-                self.dispatch(event.u64, event.events, &mut ready);
+                Self::dispatch_edge(slots, waiting, event.u64, event.events, &mut ready);
             }
         }
-        events.len
+        events.0.len()
     }
 
     pub fn release(&mut self, key: u64) {
@@ -431,8 +447,12 @@ mod tests {
         drop(held);
         assert!(busy);
         let events = driver.poll(0).unwrap().unwrap();
+        assert!(driver.poll(0).unwrap().is_none());
         let mut tokens = Vec::new();
         sockets.dispatch_polled(events, |token| tokens.push(token));
         assert_eq!(tokens, [17]);
+
+        let events = driver.poll(0).unwrap().unwrap();
+        assert_eq!(sockets.dispatch_polled(events, |_| unreachable!()), 0);
     }
 }

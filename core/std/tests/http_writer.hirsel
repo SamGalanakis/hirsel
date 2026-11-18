@@ -47,7 +47,7 @@ fn http_absolute_authority() -> bool {
     if http1.request(raw, mut h) != Complete {
         return false
     }
-    let meta = result.unwrap(request_policy(raw, h))
+    let meta = result.unwrap(request_policy(raw, view h))
     let auth = match meta.authority {
         Some(s) => s,
         None => return false,
@@ -63,7 +63,7 @@ fn request_refused(raw: Bytes, status: u16) -> bool {
     if http1.request(raw, mut h) != Complete {
         return false
     }
-    match request_policy(raw, h) {
+    match request_policy(raw, view h) {
         Error(s) => s == status,
         Ok(_) => false,
     }

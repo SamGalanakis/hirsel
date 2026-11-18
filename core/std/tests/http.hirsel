@@ -3,7 +3,7 @@
 // All refusals close. Successful request framing alone does not force close.
 fn frame_case(raw: Bytes, limit: u64, expected: Result[http.Framing, http.BodyError]) -> bool {
     let mut h = http1.head()
-    http1.request(raw, mut h) == Complete && http.framing(raw, h, limit) == expected
+    http1.request(raw, mut h) == Complete && http.framing(raw, view h, limit) == expected
 }
 
 fn refused(status: u16) -> Result[http.Framing, http.BodyError] {
@@ -146,7 +146,7 @@ fn body_split(head: Bytes, wire: Bytes, limit: u64, expected_status: u16, expect
         return false
     }
     let before = h
-    let frame = result.unwrap(http.framing(head, h, limit))
+    let frame = result.unwrap(http.framing(head, view h, limit))
     let mut d = http.decoder(frame, h, limit)
     let mut out: Bytes = list.new()
     let mut used: u64 = 0

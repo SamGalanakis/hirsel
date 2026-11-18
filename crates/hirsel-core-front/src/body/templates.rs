@@ -1029,11 +1029,14 @@ impl Emitter {
         mut ty: TyId,
     ) {
         crate::cost_scope!("query", "generic type names");
-        while let TyKind::Anchored(x, _) | TyKind::View(x) = *t.kind(ty) {
-            ty = x;
-        }
         if !has_param(t, ty) {
             return;
+        }
+        while let TyKind::Anchored(x, _) | TyKind::View(x) = *t.kind(ty) {
+            ty = x;
+            if !has_param(t, ty) {
+                return;
+            }
         }
         let row = crate::decls::with_layout_name(&p.decls, t, ty, |name| {
             self.types.get(name.as_ref()).copied()

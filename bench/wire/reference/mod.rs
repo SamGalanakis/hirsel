@@ -5,7 +5,7 @@ use crate::codec::{self, Bad, Done, Entry, Frame, Outcome, Refusal, Row, Want};
 use crate::{BITS, CHUNKS, IMAGE_BYTES, MAX_FRAME, Result, flip};
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -23,6 +23,7 @@ use tokio_tungstenite::tungstenite::{
 const WAL_MAGIC: &[u8] = b"WIREW7\0\x01";
 const RECORD: usize = 41;
 const OUTBOX: usize = 4;
+const MAX_SUBS: usize = 128;
 type Principal = [u8; 16];
 type Stream = (Principal, u32);
 
@@ -185,6 +186,11 @@ impl Wal {
                 return Ok((Outcome::Refused(Refusal::HistoryUnavailable), false));
             }
             if p == saved.p {
+                // There is one callable entry and its only valid argument encoding is
+                // the four-byte bit index. The persisted bit identifies that request.
+                if bit != saved.bit {
+                    return Ok((Outcome::Refused(Refusal::RequestMismatch), false));
+                }
                 return Ok((
                     Outcome::Returned(vec![0, 0, 0, 0, u8::from(saved.value)]),
                     false,
@@ -405,6 +411,11 @@ impl Head {
                                     id,
                                     Frame::Ended(sub, Outcome::Refused(Refusal::NoEntry)),
                                 ));
+                            } else if peer.subs.len() == MAX_SUBS && !peer.subs.contains(&sub) {
+                                controls.push((
+                                    id,
+                                    Frame::Ended(sub, Outcome::Refused(Refusal::NotAllowed)),
+                                ));
                             } else if !arg.is_empty() {
                                 controls.push((
                                     id,
@@ -608,13 +619,9 @@ pub async fn serve(
     Ok(stats)
 }
 
-struct PrincipalWindow {
-    since: std::time::Instant,
-    count: u32,
-}
 struct Ingress {
     ip: std::net::IpAddr,
-    principals: Arc<Mutex<HashMap<std::net::IpAddr, PrincipalWindow>>>,
+    principals: Arc<Mutex<HashMap<std::net::IpAddr, VecDeque<tokio::time::Instant>>>>,
     pending: OwnedSemaphorePermit,
     limits: Limits,
     rates: Rates,
@@ -688,20 +695,18 @@ async fn session(
         None => {
             let admitted = {
                 let mut windows = ingress.principals.lock().unwrap();
-                let w = windows
-                    .entry(ingress.ip)
-                    .or_insert_with(|| PrincipalWindow {
-                        since: std::time::Instant::now(),
-                        count: 0,
-                    });
-                if w.since.elapsed() >= Duration::from_secs(60) {
-                    w.since = std::time::Instant::now();
-                    w.count = 0;
+                let now = tokio::time::Instant::now();
+                let mints = windows.entry(ingress.ip).or_default();
+                while mints
+                    .front()
+                    .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
+                {
+                    mints.pop_front();
                 }
-                if w.count >= ingress.limits.per_ip_new_principals {
+                if mints.len() >= ingress.limits.per_ip_new_principals as usize {
                     false
                 } else {
-                    w.count += 1;
+                    mints.push_back(now);
                     true
                 }
             };
@@ -716,7 +721,14 @@ async fn session(
             rand::random()
         }
         Some(b) if b.len() == 21 && b.starts_with(b"anon:") => b[5..].try_into()?,
-        _ => return Err("principal must be anon: followed by 16 random bytes".into()),
+        _ => {
+            ws.close(Some(CloseFrame {
+                code: CloseCode::Again,
+                reason: "invalid principal".into(),
+            }))
+            .await?;
+            return Ok(());
+        }
     };
     drop(ingress.pending);
     let mut token = b"anon:".to_vec();
@@ -734,11 +746,11 @@ async fn session(
     ))
     .await?;
     let mut slots = Vec::new();
-    for want in requested {
+    for (index, want) in requested.into_iter().enumerate() {
         let slot = wants.iter().position(|w| *w == want);
         slots.push(slot);
         let entry = match slot {
-            Some(i) => Entry::Ready(i as u32),
+            Some(_) => Entry::Ready(index.try_into()?),
             None => Entry::Gone,
         };
         ws.send(Message::Binary(codec::encode(&Frame::Placed(entry)).into()))
@@ -959,8 +971,18 @@ mod tests {
         let mut wal = Wal::open(&path)?;
         assert_eq!(wal.bitmap[124999], 128);
         assert_eq!(wal.version, 1);
-        assert_eq!(wal.toggle([7; 16], 3, 0, 0)?, (o, false));
+        assert_eq!(wal.toggle([7; 16], 3, 0, 999_999)?, (o, false));
+        assert_eq!(
+            wal.toggle([7; 16], 3, 0, 0)?,
+            (Outcome::Refused(Refusal::RequestMismatch), false)
+        );
+        assert_eq!(wal.version, 1);
         assert_eq!(wal.file.metadata()?.len(), 8 + RECORD as u64);
+        assert!(wal.toggle([7; 16], 3, 1, 0)?.1);
+        assert_eq!(
+            wal.toggle([7; 16], 3, 0, 999_999)?,
+            (Outcome::Refused(Refusal::HistoryUnavailable), false)
+        );
         Ok(())
     }
     #[test]

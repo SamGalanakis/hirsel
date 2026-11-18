@@ -386,7 +386,8 @@ pub fn law_deadline_order() -> bool {
 }
 
 pub fn law_refusal_order() -> bool {
-    let mut s = state()
+    // A wire abandonment before the remaining send's deadline is a violation.
+    let mut s = wire_state()
     step(mut s, sent(1000u64))
     step(mut s, sent(2000u64))
     step(mut s, got(1u64, ObsRefused(ObsOverloaded)))

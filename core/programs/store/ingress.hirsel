@@ -366,6 +366,7 @@ pub fn law_retirement_steps(random: Random) -> bool {
     let mut c = defaults()
     c.buckets_max = 4u64
     c.sessions = 1u64
+    c.mint_burst = 1u64
     let mut state = result.unwrap(new_book(c))
     for i in 1u32 .. 5u32 { if !call_allowed(mut state, source_key(V4(i)), 0u64) { return false } }
     // All four are now full. One maintenance step removes exactly one, not a pass.
@@ -384,6 +385,15 @@ pub fn law_retirement_steps(random: Random) -> bool {
     let _ = take lease
     retire(mut state, 600000000000u64)
     if map.len(state.sources) != 0u64 || deque.len(state.source_order) != 0u64 { return false }
+    let now = 600000000000u64
+    let session = match open_source(mut state, source, now) { Opened(take l) => take l, _ => return false }
+    if let Bound(_) = bind(mut state, source, None, now, random) {} else { return false }
+    let _ = take session
+    retire(mut state, now + 1u64)
+    // All leases have returned, but this source has spent its mint for the window.
+    if let RejectedPolicy = bind(mut state, source, None, now + 1u64, random) {} else { return false }
+    retire(mut state, now + c.mint_window_ns)
+    if let Bound(_) = bind(mut state, source, None, now + c.mint_window_ns, random) {} else { return false }
     // Performance fixtures may raise the configured quotas. Maintenance stays bounded.
     c.sessions = 64u64
     c.mint_burst = 20u64

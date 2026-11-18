@@ -15,6 +15,7 @@ from std_native import wait_load
 ROOT = Path(__file__).resolve().parents[2]
 LINE = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.\n"
 SIZE = len(LINE) * 65536
+READ_OUTPUT = b'65536 4128768\n'
 
 
 def checked(command, **kwargs):
@@ -32,6 +33,9 @@ def reused_reference(rows, key, size, opt):
     count = row.get('instructions')
     if type(count) is not int or count <= 0:
         raise ValueError(f'{key}: reused Rust sample has no instruction count')
+    if key.endswith('/read/rust') and (row.get('output_bytes') != len(READ_OUTPUT)
+            or row.get('output_sha256') != hashlib.sha256(READ_OUTPUT).hexdigest()):
+        raise ValueError(f'{key}: reused Rust sample has wrong read output')
     return row | dict(instructions_per_byte=count / size)
 
 
@@ -40,7 +44,7 @@ def observe_output(output, operation, write_lines):
     digest = hashlib.sha256()
     if operation == 'read':
         data = output.read()
-        if data != b'65536 4128768\n':
+        if data != READ_OUTPUT:
             raise ValueError(f'wrong read output: {data[:256]!r}; no ratio')
         digest.update(data)
         return dict(output_bytes=len(data), output_sha256=digest.hexdigest())

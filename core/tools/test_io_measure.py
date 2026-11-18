@@ -1,3 +1,4 @@
+import hashlib
 import io
 import unittest
 from io_measure import LINE, observe_output, reused_reference
@@ -12,6 +13,18 @@ class IoMeasure(unittest.TestCase):
                 reused_reference(rows, 'llvm/write/rust', size, opt)
         with self.assertRaisesRegex(ValueError, 'size/profile differs'):
             reused_reference(rows, 'missing', 64, '3')
+
+    def test_reused_read_requires_the_exact_output(self):
+        good, wrong = b'65536 4128768\n', b'65536 4128769\n'
+        key = 'llvm/read/rust'
+        size = 65536 * 64
+        sample = dict(input_bytes=size, rust_opt_level=3, instructions=8192, output_bytes=len(good))
+        accepted = sample | dict(output_sha256=hashlib.sha256(good).hexdigest())
+        rejected = sample | dict(output_sha256=hashlib.sha256(wrong).hexdigest())
+        self.assertEqual(reused_reference({key: accepted}, key, size, '3')['output_sha256'],
+                         accepted['output_sha256'])
+        with self.assertRaisesRegex(ValueError, 'wrong read output'):
+            reused_reference({key: rejected}, key, size, '3')
 
     def test_write_oracle_checks_complete_output(self):
         count = 16385  # Cross the bounded comparison chunk.

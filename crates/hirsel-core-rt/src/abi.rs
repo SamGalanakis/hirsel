@@ -417,6 +417,10 @@ pub unsafe extern "C" fn hirsel_core_arc_shared(context: *const Context, node: *
 /// As for arc_initialized; last exactly describes the completed decrement.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_arc_released(context: *const Context, last: bool) {
+    // The outlined release has already recorded its event.
+    if unsafe { (*((*context).events as *const crate::tasks::Task)).arc_runtime } {
+        return;
+    }
     count_arc_hook();
     // SAFETY: the event word pins this immutable task/sink until completion.
     unsafe {
@@ -473,13 +477,8 @@ pub unsafe extern "C" fn hirsel_core_try_unwrap(node: NonNull<u8>, atomic: bool)
 /// Consumes a live Arc holder under the current task's event discipline.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_arc_decrement_for_replay(node: NonNull<u8>) -> bool {
-    crate::tasks::before_commit();
-    // SAFETY: forwarded.
-    let last = unsafe { counted::arc_decrement(node) };
-    if last {
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-    }
-    last
+    // SAFETY: the runtime path decides and records the release in one commit.
+    unsafe { counted::decrement(node, true) }
 }
 
 #[repr(C)]
@@ -563,6 +562,7 @@ pub unsafe extern "C" fn hirsel_core_free(pointer: NonNull<u8>, charge: u64) {
 /// Context is live and exclusively used by its task.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_limit_enter(context: *mut Context, bytes: u64) -> Allocation {
+    let _commit = crate::sequencer::enter();
     // SAFETY: caller owns this context; no operation between selecting and
     // consuming the free-list head can suspend or invoke a provider.
     unsafe {

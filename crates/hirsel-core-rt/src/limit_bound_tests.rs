@@ -22,9 +22,10 @@ fn snapshot(context: &Context) -> Vec<String> {
     for id in 0..f.length {
         let s = f.slot(id);
         let r = f.record(id);
+        let balance = unsafe { &*f.balance(id) };
         rows.push(format!(
             "{id}: available={} outstanding={} refs={} parent={:?} rank={} owner={} capacity={} lexical={:?} inbox={:?} free={:?} occupied={} pending={} zeros={} next={:?}",
-            r.available, r.outstanding, r.refs, r.parent, r.rank, r.live.owner, r.live.capacity,
+            balance.available, balance.outstanding, r.refs, r.parent, r.rank, r.live.owner, r.live.capacity,
             r.live.parent.map(|p| p.slot().id),
             r.occupied.then(|| unsafe { r.live.inbox.as_ref().debug_state() }),
             slot_id(r.next_free), r.occupied, s.pending.load(Ordering::Relaxed),
@@ -33,7 +34,10 @@ fn snapshot(context: &Context) -> Vec<String> {
     }
     rows.push(format!(
         "active={:?} reap={:?} remote={:?}",
-        unsafe { d.active_inbox.get().as_ref().debug_state() },
+        BOUND
+            .get()
+            .filter(|binding| std::ptr::eq(binding.domain.as_ptr(), d))
+            .map(|binding| unsafe { binding.inbox.as_ref().debug_state() }),
         d.reap_inboxes
             .get()
             .map(|p| unsafe { p.as_ref().debug_state() }),
@@ -45,8 +49,9 @@ fn snapshot(context: &Context) -> Vec<String> {
 fn exit(context: &mut Context, general: bool) {
     if general {
         context.bound_depth -= 1;
-        let r = unsafe { &*context.current.raw_local() };
-        if r.refs == 1 && r.available == r.live.capacity {
+        let balance = unsafe { &*context.current.raw_local() };
+        let r = unsafe { &*context.current.payer.get().links() };
+        if r.refs == 1 && balance.available == r.live.capacity {
             context.current.exit();
         } else {
             context.current.exit_general();

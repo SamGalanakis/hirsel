@@ -3,7 +3,6 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 const LANES: u64 = 16;
-const QUEUE: usize = 64;
 
 async fn spawn_chain(rounds: u64) -> u64 {
     let mut lanes = JoinSet::new();
@@ -35,9 +34,9 @@ async fn spawn_join(rounds: u64) -> (u64, u64) {
     (sum, completed)
 }
 
-async fn ping_pong(rounds: u64) -> (u64, u64) {
-    let (send, mut requests) = mpsc::channel(1);
-    let (reply, mut responses) = mpsc::channel(1);
+async fn ping_pong(rounds: u64, batch: usize) -> (u64, u64) {
+    let (send, mut requests) = mpsc::channel(batch);
+    let (reply, mut responses) = mpsc::channel(batch);
     let worker = tokio::spawn(async move {
         for _ in 0..rounds {
             reply
@@ -48,10 +47,15 @@ async fn ping_pong(rounds: u64) -> (u64, u64) {
     });
     let mut sum = 0;
     let mut completed = 0;
-    for i in 0..rounds {
-        send.send(i).await.unwrap();
-        sum += responses.recv().await.unwrap();
-        completed += 1;
+    while completed < rounds {
+        let count = (rounds - completed).min(batch as u64);
+        for i in 0..count {
+            send.send(completed + i).await.unwrap();
+        }
+        for _ in 0..count {
+            sum += responses.recv().await.unwrap();
+        }
+        completed += count;
     }
     worker.await.unwrap();
     (sum, completed)
@@ -76,8 +80,8 @@ async fn yield_many(rounds: u64) -> u64 {
     sum
 }
 
-async fn fan_in(rounds: u64) -> u64 {
-    let (send, mut receive) = mpsc::channel(QUEUE);
+async fn fan_in(rounds: u64, capacity: usize) -> u64 {
+    let (send, mut receive) = mpsc::channel(capacity);
     let mut lanes = JoinSet::new();
     for lane in 0..LANES {
         let send = send.clone();
@@ -110,9 +114,11 @@ fn main() {
         match args[1].as_str() {
             "spawn_join" => spawn_join(rounds).await,
             "spawn_chain" => (spawn_chain(rounds).await, 0),
-            "ping_pong" => ping_pong(rounds).await,
+            "ping_pong" => ping_pong(rounds, 1).await,
+            "ping_pong_burst" => ping_pong(rounds, 64).await,
             "yield_many" => (yield_many(rounds).await, 0),
-            "fan_in" => (fan_in(rounds).await, 0),
+            "fan_in" => (fan_in(rounds, 64).await, 0),
+            "fan_in_cap1" => (fan_in(rounds, 1).await, 0),
             case => panic!("unknown workload: {case}"),
         }
     });

@@ -14,14 +14,13 @@ pub(crate) fn layout<X, R>(result: u64) -> TaskLayout {
         result: value::<R>(result),
     }
 }
+unsafe extern "C" fn collect_event(state: *mut u8, event: Event) {
+    // SAFETY: the run pins this vector and serializes every event callback.
+    unsafe { (&mut *state.cast::<Vec<Event>>()).push(event) };
+}
+
 pub(crate) fn run<X: Copy>(body: Body, mut input: X) -> (u64, Vec<Event>) {
     let mut events = Vec::<Event>::new();
-    unsafe extern "C" fn event(state: *mut u8, event: Event) {
-        // SAFETY: run pins this exclusively accessed test event vector.
-        unsafe {
-            (&mut *state.cast::<Vec<Event>>()).push(event);
-        }
-    }
     let mut context = Context::new(1 << 20);
     causes::task_start(&mut context).unwrap();
     let available = context.available();
@@ -38,7 +37,7 @@ pub(crate) fn run<X: Copy>(body: Body, mut input: X) -> (u64, Vec<Event>) {
                 8,
                 SchedulerProvider {
                     state: (&mut events as *mut Vec<Event>).cast(),
-                    event: Some(event),
+                    event: Some(collect_event),
                     ..SchedulerProvider::default()
                 }
             ),
@@ -101,6 +100,167 @@ unsafe extern "C" fn spawn_join(context: *mut Context, destination: *mut u8, _: 
 fn spawn_admits_once_join_admits_nothing_and_refusal_returns_input() {
     assert_eq!(run(spawn_join, ()).0, 42);
 }
+#[test]
+fn two_workers_spawning_and_joining_holds_the_same_result_and_charge() {
+    assert_eq!(with_workers(2, || run(spawn_join, ()).0), 42);
+}
+#[test]
+fn two_worker_handoff_survives_terminal_recheck_during_publication_pause() {
+    use crate::schedule_script::{PausePoint, ScheduleScript};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    unsafe extern "C" fn child(_: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: the supervisor pins its task until this child has ended.
+        unsafe {
+            let supervisor = input.cast::<*const Task>().read();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !task_waits_for_join(supervisor) {
+                assert!(Instant::now() < deadline, "supervisor did not park in join");
+                std::thread::yield_now();
+            }
+            out.cast::<u64>().write(42);
+        }
+        0
+    }
+
+    unsafe extern "C" fn supervisor(context: *mut Context, out: *mut u8, _: *mut u8) -> u8 {
+        // SAFETY: the supervisor moves its live identity and owns the join.
+        unsafe {
+            let mut task = (*context).events as *const Task;
+            let h = hirsel_core_spawn(
+                context,
+                0,
+                0,
+                (&raw mut task).cast(),
+                child,
+                layout::<*const Task, u64>(8),
+                1,
+            );
+            assert!(!h.task.is_null());
+            let joined = hirsel_core_join(context, h.task, out, 2);
+            assert_eq!((joined.kind, joined.status), (0, 0));
+        }
+        0
+    }
+
+    let handoffs = Arc::new(AtomicUsize::new(0));
+    let observed = handoffs.clone();
+    let script = Arc::new(ScheduleScript::new(0).with_pause_hook(move |point| {
+        if matches!(point, PausePoint::Handoff { .. })
+            && observed.fetch_add(1, Ordering::Relaxed) == 1
+        {
+            // Spawn was the first hand-off. Here the ended child is handing
+            // the last runnable unit to its parked supervisor.
+            wait_for_peer_idle_check();
+        }
+    }));
+    assert_eq!(
+        script.install(|| with_workers(2, || run(supervisor, ()).0)),
+        42
+    );
+    assert_eq!(handoffs.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn vacant_slot_hits_and_misses_preserve_charges_events_and_refusal_site() {
+    unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+        use crate::Capacity;
+        // SAFETY: the root owns its scopes and reads the copied warm-up flag.
+        unsafe {
+            const REFUSAL_SITE: u64 = 18;
+            let warm = input.cast::<bool>().read();
+            if warm {
+                assert!(!hirsel_core_limit_enter(context, 32).pointer.is_null());
+                hirsel_core_limit_exit(context);
+            }
+            assert_eq!(
+                crate::limit::Funding::vacant_count(),
+                if warm { 16 } else { 0 }
+            );
+            let before = (*context).available();
+            assert!(!hirsel_core_limit_enter(context, 32).pointer.is_null());
+            let block = Block::new(&*context, Some(24), 24, 8).unwrap();
+            assert_eq!((*context).available(), 8);
+            let refused = hirsel_core_limit_enter(context, 9);
+            assert!(refused.pointer.is_null());
+            assert_eq!(
+                refused.capacity,
+                Capacity {
+                    requested: 9,
+                    available: 8
+                }
+            );
+            drop(block);
+            assert_eq!((*context).available(), 32);
+            hirsel_core_limit_exit(context);
+            assert_eq!((*context).available(), before);
+            causes::record(
+                &mut *context,
+                causes::Cause::new(causes::CAPACITY, REFUSAL_SITE),
+            );
+        }
+        1
+    }
+
+    fn execute(mut warm: bool) -> (u64, Vec<Event>) {
+        let mut context = Context::new(1024);
+        causes::task_start(&mut context).unwrap();
+        let available = context.available();
+        let mut events = Vec::new();
+        // SAFETY: the test pins the root, its argument and the event sink.
+        let failed = with_workers(2, || unsafe {
+            run_root(
+                &mut context,
+                root,
+                (&raw mut warm).cast(),
+                ptr::null_mut(),
+                size_of::<bool>(),
+                0,
+                SchedulerProvider {
+                    state: (&raw mut events).cast(),
+                    event: Some(collect_event),
+                    ..SchedulerProvider::default()
+                },
+            )
+        });
+        assert_eq!(failed, 1);
+        assert_eq!(context.available(), available);
+        let cause = context.causes.iter().next().unwrap();
+        assert_eq!(cause.kind(), causes::CAPACITY);
+        (cause.site, events)
+    }
+
+    let miss = execute(false);
+    let hit = execute(true);
+    assert_eq!(hit, miss);
+    assert_eq!(
+        hit,
+        (
+            18,
+            vec![
+                Event {
+                    kind: CAPACITY,
+                    task: 0,
+                    object: 9,
+                    value: 8
+                },
+                Event {
+                    kind: END,
+                    task: 0,
+                    object: 0,
+                    value: 1
+                },
+            ]
+        )
+    );
+}
+
 #[derive(Clone, Copy)]
 struct Producer {
     tx: *mut Channel,

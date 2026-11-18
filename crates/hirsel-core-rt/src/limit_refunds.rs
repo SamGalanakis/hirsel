@@ -194,7 +194,7 @@ impl Remote {
             unsafe {
                 head = *slot.as_ref().next_pending.get();
                 let payer = Payer(slot).root();
-                let inbox = (*payer.local()).live.inbox;
+                let inbox = (*payer.links()).live.inbox;
                 Self::push(inbox, slot);
                 inbox.as_ref().notify();
             }
@@ -212,7 +212,7 @@ impl Remote {
             unsafe {
                 head = *slot.as_ref().next_pending.get();
                 let payer = Payer(slot).root();
-                let target = (*payer.local()).live.inbox;
+                let target = (*payer.links()).live.inbox;
                 Self::push(target, slot);
                 target.as_ref().notify();
             }

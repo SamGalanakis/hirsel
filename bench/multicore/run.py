@@ -33,6 +33,7 @@ SIZES = {
     "yield_many": 12500,
     "fan_in": 12500,
 }
+S8_SIZES = {"fan_in_cap1": 12500, "ping_pong_burst": 100000}
 S0_SIZES = {
     "matmul_t16": 4,
     "spawn_join": 10000,
@@ -72,7 +73,7 @@ def expected(case, fasta, standard=False):
                 if hashlib.file_digest(file, "sha256").hexdigest() != STANDARD_FASTA_SHA:
                     raise ValueError(f"{fasta} does not match the standard FASTA input")
         return STANDARD_OUTPUT[case]
-    n = SIZES[case]
+    n = (SIZES | S8_SIZES)[case]
     if case == "mandelbrot":
         return STANDARD_OUTPUT[case]
     if case == "spectralnorm":
@@ -100,7 +101,7 @@ def expected(case, fasta, standard=False):
         queries = [str(len(re.findall(b"(?=" + query + b")", bases))).encode() + b"\t" + query
                    for query in QUERIES]
         return counts, b"\n".join(queries) + b"\n"
-    if case in {"spawn_chain", "yield_many", "fan_in"}:
+    if case in {"spawn_chain", "yield_many", "fan_in", "fan_in_cap1"}:
         n *= 16
     return digest(f"{n * (n + 1) // 2}\n".encode())
 
@@ -166,7 +167,7 @@ def sample_command(bins, case, language, width, size, s0=False):
 def applicable(case, s0=False):
     if case in {"matmul_t16", "arc_pair"}:
         return ("Hirsel", "Rust")
-    if s0:
+    if s0 or case in S8_SIZES:
         return ("Hirsel", "Tokio")
     if case == "yield_many":
         return ("Tokio", "Go")
@@ -175,7 +176,7 @@ def applicable(case, s0=False):
     return ("Hirsel", "Tokio", "Go", "Goose")
 
 
-def observe(bins, out, case, language, width, size, wanted, kernel, s0=False):
+def observe(bins, out, case, language, width, size, wanted, kernel, s0=False, test_pool=False):
     command = sample_command(bins, case, language, width, size, s0)
     if not command[0].is_file():
         return {"status": "missing-binary"}
@@ -191,6 +192,10 @@ def observe(bins, out, case, language, width, size, wanted, kernel, s0=False):
         "GOMAXPROCS": str(width),
         "RAYON_NUM_THREADS": str(width),
     }
+    if test_pool:
+        env["HIRSEL_S8_STATS"] = "1"
+        if language == "Hirsel":
+            env["HIRSEL_S8_WORKERS"] = str(width)
     launch = [ROOT / "tools/capped", "perf", "stat", "-x", ";", "-e",
               "instructions:u,duration_time", "-o", perf, "--", "/usr/bin/time",
               "-f", "%M", "-o", rss, *command]
@@ -207,6 +212,11 @@ def observe(bins, out, case, language, width, size, wanted, kernel, s0=False):
             (directory / "stdout").unlink(missing_ok=True)
         row["status"] = f"exit:{result.returncode}"
         return row
+    if test_pool and language == "Hirsel" and width > 1:
+        receipt = f"pool workers={width} "
+        if not any(line.startswith(receipt) for line in (directory / "stderr").read_text().splitlines()):
+            row["status"] = "missing-test-pool-receipt"
+            return row
     return validate_sample(directory, case, wanted, cpus, kernel)
 
 
@@ -336,12 +346,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", type=Path, help="binaries and FASTA from build.py")
     parser.add_argument("--out", type=Path, help="new evidence directory outside the repository")
-    parser.add_argument("--case", nargs="+", choices=SIZES | S0_SIZES)
+    parser.add_argument("--case", nargs="+", choices=SIZES | S0_SIZES | S8_SIZES)
     parser.add_argument("--workers", nargs="+", type=int, choices=WIDTHS)
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--languages", nargs="+", choices=LANGUAGES)
     selection.add_argument("--standard-rust", action="store_true", help="measure published Rust data inputs")
     parser.add_argument("--s0", action="store_true", help="validate both fields and measure only the S0 fixtures")
+    parser.add_argument("--test-pool", action="store_true", help="select workers and collect counters from an S8 test-pool archive")
     parser.add_argument("--read", nargs="+", type=Path, help="render existing sample JSON files")
     args = parser.parse_args()
     if args.read:
@@ -359,6 +370,8 @@ def main():
             parser.error("the requested CPUs must be in the caller's affinity")
         sizes = S0_SIZES if args.s0 else STANDARD_RUST_SIZES if args.standard_rust else SIZES
         languages = ("Rust",) if args.standard_rust else args.languages or LANGUAGES
+        if args.test_pool and not (args.s0 or args.standard_rust):
+            sizes = sizes | S8_SIZES
         cases = tuple(dict.fromkeys(args.case or sizes))
         if any(case not in sizes for case in cases):
             parser.error("the requested workload is outside the selected suite")
@@ -373,7 +386,7 @@ def main():
                 for language in applicable(case, args.s0):
                     if language not in languages:
                         continue
-                    result = observe(bins, out, case, language, width, size, oracles[case], kernel, args.s0)
+                    result = observe(bins, out, case, language, width, size, oracles[case], kernel, args.s0, args.test_pool)
                     rows.append(result | {"case": case, "language": language, "width": width, "size": size})
                     print(f"{case} {language} {width}: {result['status']}", file=sys.stderr, flush=True)
                     (out / "samples.json").write_text(json.dumps(rows, indent=2) + "\n")

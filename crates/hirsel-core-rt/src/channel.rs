@@ -81,7 +81,7 @@ pub unsafe extern "C" fn hirsel_core_channel_new(
         let bytes = count
             .checked_mul(item.bytes)
             .unwrap_or_else(|| crate::process::stop(b"HostMemory"));
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         let id = tasks::identity();
         let channel = Box::into_raw(Box::new(Channel {
             holder: std::mem::MaybeUninit::uninit(),
@@ -116,7 +116,7 @@ pub unsafe extern "C" fn hirsel_core_channel_new(
 pub unsafe extern "C" fn hirsel_core_channel_sender(channel: *mut Channel) -> *mut Channel {
     // SAFETY: the live sender pins the exact counter through its event.
     unsafe {
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         (*channel).senders = (*channel)
             .senders
             .checked_add(1)
@@ -176,9 +176,9 @@ unsafe fn publish(channel: *mut Channel, value: *mut u8) -> u8 {
 pub unsafe extern "C" fn hirsel_core_try_send(channel: *mut Channel, value: *mut u8) -> u8 {
     // SAFETY: no suspension or outside access between deciding and committing.
     unsafe {
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         let result = publish(channel, value);
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         tasks::event(tasks::TRY_SEND, (*channel).id, result as u64);
         result
     }
@@ -196,7 +196,7 @@ pub unsafe extern "C" fn hirsel_core_send(
     // SAFETY: sender and pending input are pinned by the suspended caller.
     unsafe {
         loop {
-            tasks::before_commit();
+            let _commit = tasks::before_commit();
             if tasks::check_cancel(context, site) != 0 {
                 return Transfer {
                     transferred: false,
@@ -273,7 +273,7 @@ pub unsafe extern "C" fn hirsel_core_receive(
     // SAFETY: receiver keeps the queue alive across each suspension.
     unsafe {
         loop {
-            tasks::before_commit();
+            let _commit = tasks::before_commit();
             if tasks::check_cancel(context, site) != 0 {
                 return Transfer {
                     transferred: false,
@@ -312,7 +312,7 @@ pub unsafe extern "C" fn hirsel_core_try_receive(
 ) -> u8 {
     // SAFETY: receiver pins the channel and destination for this call.
     unsafe {
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         let status = if take(channel, destination) {
             0
         } else if (*channel).senders == 0 {
@@ -320,7 +320,7 @@ pub unsafe extern "C" fn hirsel_core_try_receive(
         } else {
             1
         };
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         tasks::event(tasks::TRY_RECEIVE, (*channel).id, status as u64);
         status
     }
@@ -331,13 +331,13 @@ pub unsafe extern "C" fn hirsel_core_try_receive(
 pub unsafe extern "C" fn hirsel_core_sender_drop(channel: *mut Channel) {
     // SAFETY: exact live sender count, with receiver retaining storage during cleanup.
     unsafe {
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         (*channel).senders -= 1;
         let last = (*channel).senders == 0;
         (*channel).closing_sender = last;
         tasks::event(tasks::SENDERS, (*channel).id, (*channel).senders);
         if last {
-            tasks::before_commit();
+            let _commit = tasks::before_commit();
             tasks::event_wake_waiters(
                 tasks::CLOSE,
                 (*channel).id,
@@ -357,7 +357,7 @@ unsafe fn receiver_begin(context: *mut Context, channel: *mut Channel) -> *mut H
     // SAFETY: the caller transfers the sole receiver.
     unsafe {
         (*context).cancel_shield += 1;
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         (*channel).receiver = Receiver::Cleaning;
         tasks::event_wake_waiters(
             tasks::CLOSE,
@@ -396,6 +396,7 @@ unsafe fn receiver_step(context: *mut Context, holder: *mut Holder, list: *mut W
             (*channel).cursor = 0;
             (*channel).len = newest;
         }
+        let _commit = crate::sequencer::enter();
         (*channel).receiver = Receiver::Gone;
         if (*channel).senders == 0 && !(*channel).closing_sender {
             drop(Box::from_raw(channel));

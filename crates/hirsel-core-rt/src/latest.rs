@@ -65,7 +65,7 @@ pub unsafe extern "C" fn hirsel_core_latest_new(
             }
         };
         let latest = block.into_raw().as_ptr().cast::<Latest>();
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         let id = tasks::identity();
         latest.write(Latest {
             root: node,
@@ -87,7 +87,7 @@ pub unsafe extern "C" fn hirsel_core_latest_new(
 pub unsafe extern "C" fn hirsel_core_latest_handle(latest: *mut Latest) -> *mut Latest {
     // SAFETY: the live handle pins the exact counter through its event.
     unsafe {
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         (*latest).handles = (*latest)
             .handles
             .checked_add(1)
@@ -108,7 +108,7 @@ pub unsafe extern "C" fn hirsel_core_latest_publish(
 ) {
     // SAFETY: the live handle pins the root and its exact Arc cleanup recipe.
     unsafe {
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         let mut old = std::mem::replace(&mut (*latest).root, node);
         tasks::event(tasks::LATEST_PUBLISH, (*latest).id, 0);
         counted::drain_place(context, (&raw mut old).cast(), (*latest).clean);
@@ -121,7 +121,7 @@ pub unsafe extern "C" fn hirsel_core_latest_publish(
 pub unsafe extern "C" fn hirsel_core_latest_read(latest: *mut Latest) -> *mut u8 {
     // SAFETY: the root holder pins its node through the paired share.
     unsafe {
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         let node = NonNull::new_unchecked((*latest).root);
         tasks::event(tasks::LATEST_READ, (*latest).id, 0);
         counted::share(node, true);
@@ -133,10 +133,11 @@ pub unsafe extern "C" fn hirsel_core_latest_read(latest: *mut Latest) -> *mut u8
 unsafe fn latest_begin(latest: *mut Latest) -> Option<*mut Holder> {
     // SAFETY: the exact handle count pins the record until the last handle.
     unsafe {
-        tasks::before_commit();
+        let _commit = tasks::before_commit();
         (*latest).handles -= 1;
-        tasks::event(tasks::SENDERS, (*latest).id, (*latest).handles);
-        ((*latest).handles == 0).then(|| (&raw mut (*latest).handles).cast::<Holder>())
+        let remaining = (*latest).handles;
+        tasks::event(tasks::SENDERS, (*latest).id, remaining);
+        (remaining == 0).then(|| (&raw mut (*latest).handles).cast::<Holder>())
     }
 }
 /// Release the root's holder, then refund the record.

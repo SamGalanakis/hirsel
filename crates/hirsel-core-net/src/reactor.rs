@@ -23,7 +23,7 @@ impl Drop for PollTurn<'_> {
 }
 
 /// One kernel turn, before socket identities are resolved by the registry.
-struct PollEvents {
+pub struct PollEvents {
     events: [libc::epoll_event; 128],
     len: usize,
 }
@@ -76,7 +76,7 @@ impl Poller {
 
     /// Try the driver token. A busy token returns immediately, even if the
     /// token holder is waiting for I/O. A zero timeout is a nonblocking turn.
-    fn poll(&self, timeout_ms: i32) -> io::Result<Option<PollEvents>> {
+    pub fn poll(&self, timeout_ms: i32) -> io::Result<Option<PollEvents>> {
         let Some(_turn) = self.try_turn() else {
             return Ok(None);
         };
@@ -347,7 +347,7 @@ impl Sockets {
 
     /// Apply a poll from this registry's driver. A re-arm between collection
     /// and dispatch invalidates the old kernel identity.
-    fn dispatch_polled(
+    pub fn dispatch_polled(
         &mut self,
         events: PollEvents,
         mut ready: impl FnMut(u64),

@@ -212,7 +212,7 @@ fn frozen_prefixes_match_the_emitter_contract() {
     );
     assert_eq!(std::mem::offset_of!(Context, events), CONTEXT_EVENTS);
     assert_eq!(
-        std::mem::offset_of!(crate::tasks::Task, replay),
+        std::mem::offset_of!(crate::tasks::Task, arc_runtime),
         TASK_ARC_REPLAY
     );
     assert_eq!(

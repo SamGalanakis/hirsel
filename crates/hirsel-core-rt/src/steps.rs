@@ -131,7 +131,8 @@ pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) 
         ctx.steps = 0;
         let mut cause = causes::Cause::new(causes::OUT_OF_TIME, site);
         cause.message.data = std::ptr::without_provenance_mut(current.id as usize);
-        causes::record(ctx, cause);
+        // SAFETY: the failed step owns the active obligation's primary cell.
+        unsafe { causes::record(ctx, cause) };
         return 1;
     }
     let slice_end = ctx.step_slice_tail == 0;
@@ -142,7 +143,7 @@ pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) 
     };
     install_window(ctx, slice);
     if slice_end {
-        crate::tasks::before_commit();
+        let _commit = crate::tasks::before_commit();
         crate::tasks::event(hirsel_core_layout::event::STEP_SLICE, 0, SLICE);
         // SAFETY: the step window is installed and no borrow spans the switch.
         unsafe { crate::tasks::checkpoint() };

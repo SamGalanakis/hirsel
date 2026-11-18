@@ -1884,3 +1884,179 @@ fn replay_schedule_fault(bytes: &[u8], chooser: u8, case: &str, at: Option<u64>)
         assert_eq!(position.parse::<u64>().unwrap(), at, "{case}");
     }
 }
+
+struct PoolReplay {
+    store: Store,
+    barrier: Option<std::sync::Barrier>,
+    observations: [(u64, u64); 16],
+}
+
+#[derive(Clone, Copy)]
+struct PoolJob {
+    barrier: *const std::sync::Barrier,
+    index: u64,
+}
+
+unsafe extern "C" fn pool_replay_child(context: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: each child owns its input, bound and result. In record mode the
+    // supervisor retains the shared barrier until it has joined every child.
+    unsafe {
+        let job = input.cast::<PoolJob>().read();
+        if let Some(barrier) = job.barrier.as_ref() {
+            barrier.wait();
+        }
+        assert_eq!((*context).available(), 64);
+        assert!(
+            !crate::abi::hirsel_core_limit_enter(context, 32)
+                .pointer
+                .is_null()
+        );
+        let block = crate::block::Block::new(&*context, Some(24), 24, 8).unwrap();
+        assert_eq!((*context).available(), 8);
+        let failed = job.index % 2 == 1;
+        if failed {
+            let refusal = crate::abi::hirsel_core_limit_enter(context, 9);
+            assert!(refusal.pointer.is_null());
+            assert_eq!(
+                (refusal.capacity.requested, refusal.capacity.available),
+                (9, 8)
+            );
+        }
+        drop(block);
+        crate::abi::hirsel_core_limit_exit(context);
+        assert_eq!((*context).available(), 64);
+        if failed {
+            causes::record(
+                &mut *context,
+                causes::Cause::new(causes::CAPACITY, 101 + job.index),
+            );
+            return 1;
+        }
+        out.cast::<u64>().write(2 * job.index + 3);
+    }
+    0
+}
+
+unsafe extern "C" fn pool_replay_root(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: root owns the case's tape store and writes its observations
+    // only after moving results and cause lists out of joined children.
+    unsafe {
+        let case = input.cast::<*mut PoolReplay>().read();
+        let barrier = (*case).barrier.as_ref().map_or(std::ptr::null(), |b| b);
+        let mode = if barrier.is_null() {
+            Mode::Replay
+        } else {
+            Mode::Record
+        };
+        let mut header = header(REVISION);
+        header.kind = KIND_RUN;
+        header.chooser = format::CHOOSER_COMMIT;
+        let (tape, _) = Tape::open(
+            REVISION,
+            (*case).store.dir(),
+            b"t",
+            mode,
+            &header,
+            &expect(),
+        )
+        .unwrap();
+        let before = (*context).available();
+        let mut handles = [std::ptr::null_mut(); 16];
+        for (index, task) in handles.iter_mut().enumerate() {
+            let mut job = PoolJob {
+                barrier,
+                index: index as u64,
+            };
+            *task = hirsel_core_spawn(
+                context,
+                0,
+                64,
+                (&raw mut job).cast(),
+                pool_replay_child,
+                crate::tasks_tests::layout::<PoolJob, u64>(8),
+                11,
+            )
+            .task;
+            assert!(!task.is_null());
+        }
+        for (index, task) in handles.into_iter().enumerate() {
+            let mut result = 0u64;
+            let joined = hirsel_core_join(context, task, (&raw mut result).cast(), 12);
+            assert_eq!(joined.status, 0);
+            let chain = causes::Causes::from_raw(joined.causes);
+            let refusal = if let Some(cause) = chain.iter().next() {
+                assert_eq!(joined.kind, 1);
+                assert_eq!(cause.kind(), causes::CAPACITY);
+                cause.site
+            } else {
+                assert_eq!(joined.kind, 0);
+                0
+            };
+            (*case).observations[index] = (result, refusal);
+        }
+        assert_eq!((*context).available(), before);
+        tape.end(&ending()).unwrap();
+    }
+    0
+}
+
+#[test]
+fn sixteen_worker_recording_replays_at_one_with_exact_refunds_and_exhaustion_sites() {
+    fn execute(recorded: Option<&[u8]>) -> (PoolReplay, Vec<Event>) {
+        let mut case = PoolReplay {
+            store: Store::default(),
+            barrier: recorded.is_none().then(|| std::sync::Barrier::new(16)),
+            observations: [(0, 0); 16],
+        };
+        if let Some(bytes) = recorded {
+            case.store.files.insert(b"t".to_vec(), bytes.to_vec());
+        }
+        let width = if recorded.is_none() { 16 } else { 1 };
+        let (_, events) = with_workers(width, || {
+            // The tasks harness uses a u64 result slot.
+            unsafe extern "C" fn root(context: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
+                unsafe {
+                    out.cast::<u64>().write(0);
+                    pool_replay_root(context, out, input)
+                }
+            }
+            crate::tasks_tests::run(root, &raw mut case)
+        });
+        for (index, &(value, site)) in case.observations.iter().enumerate() {
+            let index = index as u64;
+            assert_eq!(
+                (value, site),
+                if index % 2 == 0 {
+                    (2 * index + 3, 0)
+                } else {
+                    (0, 101 + index)
+                }
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| {
+                        event.kind == REFUND
+                            && event.task == index + 1
+                            && event.object == 0
+                            && event.value == 64
+                    })
+                    .count(),
+                1,
+                "child {index} returns its 64-byte reservation exactly once"
+            );
+        }
+        (case, events)
+    }
+
+    let (recorded, events) = execute(None);
+    let (header, frames) = frames(recorded.store.file());
+    assert_eq!(header.chooser, format::CHOOSER_COMMIT);
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, Frame::Choose { .. }))
+    );
+    let (_, replayed) = execute(Some(recorded.store.file()));
+    assert_eq!(replayed, events);
+}

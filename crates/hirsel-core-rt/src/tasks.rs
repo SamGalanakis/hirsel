@@ -1,4 +1,4 @@
-//! Single-worker cooperative tasks. Queue links, wait state and result storage
+//! Native tasks and their pinned-fiber dispatchers. Queue links, wait state and result storage
 //! are prepaid at spawn. Only blocking or explicit checkpoints switch stacks.
 use crate::{
     Capacity, Context, abi_tasks as abi,
@@ -10,10 +10,11 @@ use hirsel_core_layout::charge;
 use std::{
     alloc::{Layout, alloc, dealloc},
     cell::Cell as Local,
+    collections::{BTreeMap, VecDeque},
     ptr::{self, NonNull},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -138,13 +139,19 @@ enum State {
 /// The first byte makes taped replay use the runtime Arc commit path.
 #[repr(C)]
 pub struct Task {
-    pub(crate) replay: bool,
+    pub(crate) arc_runtime: bool,
+    cancel: AtomicBool,
+    replay: bool,
     latest_pair: bool,
     polls_left: u32,
     context: *mut Context,
     owned_context: Option<Context>,
     run: *mut Scheduler,
     ready: *mut Task,
+    domain: u64,
+    worker: Option<usize>,
+    #[cfg(feature = "testing")]
+    enqueued_at: u64,
     waiters: Waiters,
     waiting_on: *mut Waiters,
     wait_previous: *mut Task,
@@ -324,15 +331,18 @@ impl Waiters {
     ///
     /// # Safety
     /// The active commit owns the pinned queue and the scheduling state.
-    pub(crate) unsafe fn wake_all(queue: *mut Self) {
+    pub(crate) unsafe fn wake_all(queue: *mut Self) -> usize {
+        let mut count = 0;
         // SAFETY: each removal leaves the successor at the head.
         unsafe {
             while !(*queue).first.is_null() {
                 let task = (*queue).first;
                 Self::remove(task);
                 (*(*task).run).ready(task);
+                count += 1;
             }
         }
+        count
     }
 }
 
@@ -391,7 +401,326 @@ impl Tapes {
     }
 }
 
+const RESIDUAL_DOMAIN: u64 = 0;
+const LOCAL_QUEUE: usize = 256;
+const LIFO_TURNS: u8 = 3;
+
+#[derive(Clone, Copy)]
+struct TaskPtr(*mut Task);
+// SAFETY: a published pointer is a sole queue unit; the dispatcher may
+// access Task metadata only in its commit, and only the pinned worker runs it.
+unsafe impl Send for TaskPtr {}
+
+struct Delivery {
+    task: TaskPtr,
+    worker: Option<usize>,
+    deferred: bool,
+}
+
+#[derive(Default)]
+struct Domain {
+    sequencer: crate::sequencer::Sequencer,
+    ready: AtomicUsize,
+    handoffs: AtomicUsize,
+}
+
+struct WorkerQueue {
+    pinned: VecDeque<TaskPtr>,
+    deferred: VecDeque<TaskPtr>,
+    lifo: Option<TaskPtr>,
+    lifo_turns: u8,
+    local: VecDeque<TaskPtr>,
+}
+impl WorkerQueue {
+    fn new() -> Self {
+        Self {
+            pinned: VecDeque::new(),
+            deferred: VecDeque::new(),
+            lifo: None,
+            lifo_turns: 0,
+            local: VecDeque::with_capacity(LOCAL_QUEUE),
+        }
+    }
+
+    fn pop(&mut self) -> Option<TaskPtr> {
+        if let Some(task) = self.pinned.pop_front() {
+            return Some(task);
+        }
+        if self.lifo_turns < LIFO_TURNS
+            && let Some(task) = self.lifo.take()
+        {
+            self.lifo_turns += 1;
+            return Some(task);
+        }
+        self.lifo_turns = 0;
+        self.local
+            .pop_front()
+            .or_else(|| self.lifo.take())
+            .or_else(|| self.deferred.pop_front())
+    }
+}
+
+struct Pool {
+    registry: Mutex<()>,
+    domains: BTreeMap<u64, Arc<Domain>>,
+    queues: Vec<Mutex<WorkerQueue>>,
+    injector: Mutex<VecDeque<TaskPtr>>,
+    threads: Vec<OnceLock<std::thread::Thread>>,
+    readies: Arc<Readies>,
+    funding: crate::limit::CacheDomain,
+    units: AtomicUsize,
+    measure: bool,
+    #[cfg(feature = "testing")]
+    sample: PoolSample,
+    #[cfg(test)]
+    idle_checks: AtomicUsize,
+    #[cfg(any(test, feature = "testing"))]
+    script: Option<Arc<crate::schedule_script::ScheduleScript>>,
+}
+impl Pool {
+    fn new(workers: usize, readies: Arc<Readies>, funding: crate::limit::CacheDomain) -> Self {
+        Self {
+            registry: Mutex::default(),
+            domains: BTreeMap::from([(RESIDUAL_DOMAIN, Arc::new(Domain::default()))]),
+            queues: (0..workers)
+                .map(|_| Mutex::new(WorkerQueue::new()))
+                .collect(),
+            injector: Mutex::default(),
+            threads: (0..workers).map(|_| OnceLock::new()).collect(),
+            readies,
+            funding,
+            units: AtomicUsize::new(1),
+            measure: measurement_enabled(),
+            #[cfg(feature = "testing")]
+            sample: PoolSample::default(),
+            #[cfg(test)]
+            idle_checks: AtomicUsize::new(0),
+            #[cfg(any(test, feature = "testing"))]
+            script: crate::schedule_script::installed(),
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    fn report_domain_lookup(&self) {
+        use std::hint::black_box;
+        const TRIALS: usize = 100_000;
+        let direct = &self.domains[&RESIDUAL_DOMAIN];
+        let start = crate::os::monotonic_ns();
+        for _ in 0..TRIALS {
+            black_box(black_box(direct));
+        }
+        let direct_ns = crate::os::monotonic_ns() - start;
+        let start = crate::os::monotonic_ns();
+        for _ in 0..TRIALS {
+            black_box(&black_box(&self.domains)[&black_box(RESIDUAL_DOMAIN)]);
+        }
+        let keyed_ns = crate::os::monotonic_ns() - start;
+        eprintln!("domain_lookup trials={TRIALS} direct_ns={direct_ns} keyed_ns={keyed_ns}");
+    }
+
+    fn wake_workers(&self) {
+        for thread in self.threads.iter().filter_map(OnceLock::get) {
+            thread.unpark();
+        }
+        self.readies.wake_poller();
+    }
+
+    fn publish(&self, source: usize, deliveries: &mut Vec<Delivery>) {
+        if deliveries.is_empty() {
+            return;
+        }
+        let mut unpinned = false;
+        for delivery in deliveries.drain(..) {
+            if let Some(worker) = delivery.worker {
+                let mut queue = self.queues[worker].lock().unwrap();
+                if delivery.deferred {
+                    queue.deferred.push_back(delivery.task);
+                } else {
+                    queue.pinned.push_back(delivery.task);
+                }
+                drop(queue);
+                if let Some(thread) = self.threads[worker].get() {
+                    thread.unpark();
+                }
+            } else {
+                unpinned = true;
+                let mut queue = self.queues[source].lock().unwrap();
+                if let Some(previous) = queue.lifo.replace(delivery.task) {
+                    if queue.local.len() >= LOCAL_QUEUE {
+                        let mut injector = self.injector.lock().unwrap();
+                        injector.extend(queue.local.drain(..LOCAL_QUEUE / 2));
+                    }
+                    queue.local.push_back(previous);
+                }
+            }
+        }
+        if unpinned {
+            self.wake_workers();
+        } else {
+            self.readies.wake_poller();
+        }
+    }
+
+    fn pop(&self, index: usize) -> Option<TaskPtr> {
+        if let Some(task) = self.queues[index].lock().unwrap().pop() {
+            return Some(task);
+        }
+        if let Some(task) = self.injector.lock().unwrap().pop_front() {
+            return Some(task);
+        }
+        for offset in 1..self.queues.len() {
+            let other = (index + offset) % self.queues.len();
+            let Ok(mut victim) = self.queues[other].try_lock() else {
+                continue;
+            };
+            if let Some(first) = victim.local.pop_front() {
+                let count = victim.local.len() / 2;
+                let batch: Vec<_> = victim.local.drain(..count).collect();
+                #[cfg(feature = "testing")]
+                if self.measure {
+                    self.sample.stolen.fetch_add(1 + count, Ordering::Relaxed);
+                }
+                drop(victim);
+                self.queues[index].lock().unwrap().local.extend(batch);
+                return Some(first);
+            }
+            if let Some(task) = victim.lifo.take() {
+                #[cfg(feature = "testing")]
+                if self.measure {
+                    self.sample.stolen.fetch_add(1, Ordering::Relaxed);
+                }
+                return Some(task);
+            }
+        }
+        None
+    }
+}
+
+#[cfg(feature = "testing")]
+#[derive(Default)]
+struct PoolSample {
+    stolen: AtomicUsize,
+    items: AtomicUsize,
+    channel_wakes: AtomicUsize,
+}
+
+#[cfg(feature = "testing")]
+#[derive(Default)]
+struct DispatchSample {
+    tasks: usize,
+    nanoseconds: u64,
+}
+
+#[cfg(feature = "testing")]
+impl DispatchSample {
+    /// # Safety
+    /// The dispatch turn owns the newly dequeued task.
+    unsafe fn take(&mut self, task: *mut Task) {
+        let enqueued = unsafe { std::mem::take(&mut (*task).enqueued_at) };
+        if enqueued != 0 {
+            self.tasks += 1;
+            self.nanoseconds += crate::os::monotonic_ns().saturating_sub(enqueued);
+        }
+    }
+
+    fn report(&self, index: usize) {
+        eprintln!(
+            "dispatch worker={index} first_runs={} nanoseconds={}",
+            self.tasks, self.nanoseconds
+        );
+    }
+}
+
+fn measurement_enabled() -> bool {
+    #[cfg(feature = "testing")]
+    return std::env::var_os("HIRSEL_S8_STATS").is_some_and(|value| value == "1");
+    #[cfg(not(feature = "testing"))]
+    return false;
+}
+
+struct Worker {
+    index: usize,
+    pool: *const Pool,
+    idle: *mut u8,
+    stock: Stock,
+    #[cfg(feature = "testing")]
+    dispatch_sample: DispatchSample,
+    outbox: Vec<Delivery>,
+    #[cfg(any(test, feature = "testing"))]
+    script: Option<Arc<crate::schedule_script::ScheduleScript>>,
+}
+
+thread_local! {
+    static WORKER: Local<*mut Worker> = const { Local::new(ptr::null_mut()) };
+}
+
+fn publish_deliveries() {
+    // SAFETY: a worker pins its pool and only it mutates the outbox. The
+    // sequencer has just been released. Receiver units are already counted.
+    unsafe {
+        let worker = &mut *WORKER.get();
+        #[cfg(any(test, feature = "testing"))]
+        if !worker.outbox.is_empty()
+            && let Some(script) = &worker.script
+        {
+            script.pause(crate::schedule_script::PausePoint::Handoff {
+                sender_domain: RESIDUAL_DOMAIN,
+                receiver_domain: RESIDUAL_DOMAIN,
+            });
+        }
+        (*worker.pool).publish(worker.index, &mut worker.outbox);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn wait_for_peer_idle_check() {
+    // SAFETY: called by the T1 pause on the sender's dispatcher.
+    let pool = unsafe { &*(*WORKER.get()).pool };
+    let before = pool.idle_checks.load(Ordering::Acquire);
+    pool.wake_workers();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while pool.idle_checks.load(Ordering::Acquire) == before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "peer never rechecked quiescence"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// Use the worker's idle stack after publishing a park under its commit.
+/// The dispatcher adopts the token before it inspects or recycles the stack.
+unsafe fn switch_to_idle(task: *mut Task) {
+    let worker = WORKER.get();
+    // SAFETY: the running task is pinned here, and only this worker owns the
+    // idle stack. N=1 keeps the existing direct switch.
+    unsafe {
+        if worker.is_null() {
+            hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle);
+        } else {
+            let _commit = crate::sequencer::enter();
+            crate::sequencer::to_dispatcher(|| {
+                hirsel_stack::switch(&raw mut (*task).sp, (*worker).idle);
+            });
+        }
+    }
+}
+
+fn worker_stock(run: *mut Scheduler) -> *mut Stock {
+    let worker = WORKER.get();
+    // SAFETY: both alternatives are pinned and only this OS thread uses
+    // the chosen stock. Raw address formation creates no shared borrow.
+    unsafe {
+        if worker.is_null() {
+            &raw mut (*run).stacks
+        } else {
+            &raw mut (*worker).stock
+        }
+    }
+}
+
 struct Scheduler {
+    pool: Option<NonNull<Pool>>,
     deferred: *mut Task,
     deferred_tail: *mut Task,
     stacks: Stock,
@@ -409,6 +738,8 @@ struct Scheduler {
     readies: Arc<Readies>,
     ready_tokens: Vec<u64>,
     ready_arms: Vec<ReadyArm>,
+    #[cfg(feature = "testing")]
+    measure: bool,
     /// Cancellation requests for tasks parked in a provider operation, in
     /// request order, taken at the next scheduler turn.
     cancels: Vec<*mut Task>,
@@ -418,12 +749,27 @@ struct Scheduler {
     model: Option<hirsel_core_net::model::Model>,
     parked: WaitArms<*mut Task>,
 }
-const _: () = assert!(std::mem::offset_of!(Task, replay) == crate::abi_layout::TASK_ARC_REPLAY);
+const _: () =
+    assert!(std::mem::offset_of!(Task, arc_runtime) == crate::abi_layout::TASK_ARC_REPLAY);
 
 #[cfg(test)]
 pub(crate) unsafe fn task_stack(task: *const Task) -> Option<usize> {
     // SAFETY: the test owns the live task handle and the task is off-CPU.
     unsafe { (*task).stack.as_ref().map(|stack| stack.bounds().0) }
+}
+
+#[cfg(test)]
+pub(crate) unsafe fn task_waits_for_provider(task: *const Task) -> bool {
+    let _commit = crate::sequencer::enter();
+    // SAFETY: the fixture owns this live handle throughout the check.
+    unsafe { (*task).state == State::Provider }
+}
+
+#[cfg(test)]
+pub(crate) unsafe fn task_waits_for_join(task: *const Task) -> bool {
+    let _commit = crate::sequencer::enter();
+    // SAFETY: the child runs while its supervisor is live.
+    unsafe { (*task).state == State::Waiting }
 }
 
 impl Scheduler {
@@ -439,6 +785,10 @@ impl Scheduler {
         // SAFETY: scheduler owns task; only unqueued tasks can enter the run queue.
         unsafe {
             (*task).state = State::Ready;
+            if self.pool.is_some() {
+                self.publish(task, false);
+                return;
+            }
             (*task).ready = ptr::null_mut();
             if self.tail.is_null() {
                 self.head = task;
@@ -448,6 +798,24 @@ impl Scheduler {
             self.tail = task;
         }
     }
+    unsafe fn publish(&self, task: *mut Task, deferred: bool) {
+        // SAFETY: the active worker holds the task's domain commit, its pool
+        // and TLS outbox are pinned, and the task has no other ready unit.
+        unsafe {
+            let pool = self.pool.unwrap().as_ref();
+            let worker = &mut *WORKER.get();
+            let domain = &pool.domains[&(*task).domain];
+            domain.ready.fetch_add(1, Ordering::Relaxed);
+            domain.handoffs.fetch_add(1, Ordering::Relaxed);
+            pool.units.fetch_add(1, Ordering::Relaxed);
+            worker.outbox.push(Delivery {
+                task: TaskPtr(task),
+                worker: (*task).worker,
+                deferred,
+            });
+        }
+    }
+
     unsafe fn pop(&mut self) -> *mut Task {
         // SAFETY: only the idle scheduler manipulates the ready queues.
         unsafe {
@@ -596,7 +964,9 @@ impl Scheduler {
     unsafe fn wake_cancelled(&mut self, task: *mut Task) {
         // SAFETY: the target's wait and context are pinned until dequeue.
         unsafe {
-            if (*task).state == State::Waiting && cancel_takes_effect(&*(*task).context) {
+            if (*task).state == State::Waiting
+                && cancel_takes_effect(&*(*task).context, cancel_flag(task))
+            {
                 Waiters::remove(task);
                 self.ready(task);
             }
@@ -649,7 +1019,7 @@ impl Scheduler {
     /// already woken the operation, and a later request applies at the task's
     /// next cancellation point (CONC-7). Readiness before timers is the network
     /// rule that readiness wins a tie with a deadline (net-proposal-999 D3).
-    unsafe fn take_wakes(&mut self) {
+    unsafe fn capture_wakes(&mut self, captured: &mut Vec<ReadyArm>) {
         // SAFETY: idle owns every task and operation frame.
         if !self.tapes.live.is_empty() {
             // SAFETY: idle owns tasks; retirement removes queued requests.
@@ -658,9 +1028,7 @@ impl Scheduler {
                     if let Some(group) = (*task).group
                         && group.cancel(None)
                     {
-                        (*(*task).context)
-                            .cancel_requested
-                            .store(true, Ordering::Release);
+                        cancel_flag(task).store(true, Ordering::Release);
                         if (*task).state == State::Provider {
                             self.cancels.push(task);
                         }
@@ -680,31 +1048,26 @@ impl Scheduler {
                     }
                 }
             }
-            if self.readies.pending.swap(false, Ordering::Acquire) {
-                std::mem::swap(&mut self.ready_tokens, &mut *self.readies.lock());
-                let mut captured = std::mem::take(&mut self.ready_arms);
-                // Capture one identity per token before callbacks. A task may
-                // re-arm the same token before a captured readiness is applied.
-                self.parked
-                    .capture(self.ready_tokens.drain(..), &mut captured);
-                if self.ready_tokens.capacity() > RETAINED_READY_CAPACITY {
-                    self.ready_tokens = Vec::new();
-                }
-                for ready in captured.drain(..) {
-                    #[cfg(any(test, feature = "testing"))]
-                    if let Some(script) = &self.script {
-                        script.pause(crate::schedule_script::PausePoint::ReadinessTaken {
-                            token: ready.token,
-                        });
-                    }
-                    if let Some(task) = self.parked.take_captured(ready) {
-                        self.wake_operation(task, Wake::Ready);
-                    }
-                }
-                if captured.capacity() <= RETAINED_READY_CAPACITY {
-                    self.ready_arms = captured;
-                }
+        }
+        if self.readies.pending.swap(false, Ordering::Acquire) {
+            std::mem::swap(&mut self.ready_tokens, &mut *self.readies.lock());
+            self.parked.capture(self.ready_tokens.drain(..), captured);
+            if self.ready_tokens.capacity() > RETAINED_READY_CAPACITY {
+                self.ready_tokens = Vec::new();
             }
+        }
+    }
+
+    unsafe fn apply_ready(&mut self, ready: ReadyArm) {
+        if let Some(task) = self.parked.take_captured(ready) {
+            // SAFETY: the captured identity still names this parked frame.
+            unsafe { self.wake_operation(task, Wake::Ready) };
+        }
+    }
+
+    unsafe fn take_timers(&mut self) {
+        // SAFETY: this turn owns the timer list and pinned operation frames.
+        unsafe {
             if self.timers.is_null() {
                 return;
             }
@@ -731,6 +1094,27 @@ impl Scheduler {
                 (*task).timer_next = ptr::null_mut();
                 self.wake_operation(task, Wake::Timer);
             }
+        }
+    }
+
+    unsafe fn take_wakes(&mut self) {
+        // SAFETY: the cooperative scheduler owns this whole dispatch turn.
+        unsafe {
+            let mut captured = std::mem::take(&mut self.ready_arms);
+            self.capture_wakes(&mut captured);
+            for ready in captured.drain(..) {
+                #[cfg(any(test, feature = "testing"))]
+                if let Some(script) = &self.script {
+                    script.pause(crate::schedule_script::PausePoint::ReadinessTaken {
+                        token: ready.token,
+                    });
+                }
+                self.apply_ready(ready);
+            }
+            if captured.capacity() <= RETAINED_READY_CAPACITY {
+                self.ready_arms = captured;
+            }
+            self.take_timers();
         }
     }
 
@@ -766,9 +1150,7 @@ impl Scheduler {
                     match turn {
                         Turn::Cancel(_) if (*target).state != State::Ended => {
                             group.consume_input();
-                            (*(*target).context)
-                                .cancel_requested
-                                .store(true, Ordering::Release);
+                            cancel_flag(target).store(true, Ordering::Release);
                             if (*target).state == State::Provider {
                                 self.wake_operation(target, Wake::Cancel);
                             }
@@ -1033,8 +1415,7 @@ impl Scheduler {
         // SAFETY: as wake_operation.
         unsafe {
             let op = (*task).operation;
-            if (*op).observes_cancel && (*(*task).context).cancel_requested.load(Ordering::Acquire)
-            {
+            if (*op).observes_cancel && cancel_flag(task).load(Ordering::Acquire) {
                 self.wake_operation(task, Wake::Cancel);
             }
             if let OperationState::Issued { deadline } = (*op).state
@@ -1080,16 +1461,28 @@ enum Wake {
 use crate::provider::{
     ABORT_CANCEL, ABORT_DEADLINE, STEP_DONE, STEP_PENDING, Step, WAIT_PARK, WAIT_READY, WAIT_UNTIL,
 };
+/// # Safety
+/// A live task pins this flag. For a parallel task it lives outside the
+/// exclusively mutable Context, so cancellation need not borrow any of it.
+unsafe fn cancel_flag<'a>(task: *const Task) -> &'a AtomicBool {
+    // SAFETY: the caller pins the task and requests never borrow its Context.
+    unsafe {
+        if (*(*task).run).pool.is_some() {
+            &(*task).cancel
+        } else {
+            &(*(*task).context).cancel_requested
+        }
+    }
+}
+
 /// Whether a cancellation request takes effect on this task now. A finalizer
 /// and a shielded region observe none (CONC-7, tasks.md:129; FAIL-11,
 /// failure.md:173; CONC-8, tasks.md:140): under either the request stays
 /// pending and changes nothing, and it takes effect at the first cancellation
 /// point after both end. A deadline is not cancellation and is not shielded.
 #[inline(always)]
-fn cancel_takes_effect(context: &Context) -> bool {
-    context.cancel_requested.load(Ordering::Acquire)
-        && context.finalizing == 0
-        && context.cancel_shield == 0
+fn cancel_takes_effect(context: &Context, requested: &AtomicBool) -> bool {
+    requested.load(Ordering::Acquire) && context.finalizing == 0 && context.cancel_shield == 0
 }
 
 /// Readiness tokens from `hirsel_core_ready`, which may run on any thread.
@@ -1097,6 +1490,7 @@ struct Readies {
     tokens: Mutex<Vec<u64>>,
     pending: AtomicBool,
     worker: std::thread::Thread,
+    peers: Mutex<Vec<std::thread::Thread>>,
     net: Mutex<Option<Arc<hirsel_core_net::Poller>>>,
     model: Mutex<Option<hirsel_core_net::model::Model>>,
 }
@@ -1106,6 +1500,7 @@ impl Readies {
             tokens: Mutex::new(Vec::new()),
             pending: AtomicBool::new(false),
             worker: std::thread::current(),
+            peers: Mutex::default(),
             net: Mutex::new(None),
             model: Mutex::new(None),
         })
@@ -1117,6 +1512,12 @@ impl Readies {
         self.lock().push(token);
         self.pending.store(true, Ordering::Release);
         self.worker.unpark();
+        for peer in self.peers.lock().unwrap().iter() {
+            peer.unpark();
+        }
+        self.wake_poller();
+    }
+    fn wake_poller(&self) {
         if let Some(net) = self.net.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             net.wake();
         }
@@ -1490,7 +1891,7 @@ unsafe fn park_operation(task: *mut Task) {
             (*(*task).run).parked.insert((*op).token, task);
         }
         (*task).state = State::Provider;
-        hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle);
+        switch_to_idle(task);
     }
 }
 /// An operation with no scheduler (a direct ABI caller, or run teardown): no
@@ -1620,16 +2021,23 @@ unsafe fn alone(
 }
 
 /// Replay dispatches before the first read or mutation of shared state.
-pub(crate) fn before_commit() {
+pub(crate) fn before_commit() -> crate::sequencer::Guard {
     replay_boundary(false);
+    crate::sequencer::enter()
 }
 
 /// Only a provider entry can reach a taped WAIT without first committing.
-pub(crate) fn before_provider_entry() {
+pub(crate) fn before_provider_entry() -> crate::sequencer::Guard {
     replay_boundary(true);
+    crate::sequencer::enter()
 }
 
-pub(crate) fn before_tape_frame(group: crate::tape::schedule::Group, ending: bool) {
+pub(crate) fn before_tape_frame(group: Group, ending: bool) -> crate::sequencer::Guard {
+    tape_boundary(group, ending);
+    crate::sequencer::enter()
+}
+
+fn tape_boundary(group: Group, ending: bool) {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins the live opener; checkpoint borrows no task fields.
     unsafe {
@@ -1746,6 +2154,7 @@ pub(crate) fn event(kind: u8, object: u64, value: u64) {
 /// Task is the running task, so it pins its scheduler and sink.
 #[inline(always)]
 unsafe fn event_for(task_pointer: *mut Task, kind: u8, object: u64, value: u64) {
+    let _commit = crate::sequencer::enter();
     // SAFETY: the running task pins the scheduler through both operations.
     unsafe {
         record_event(task_pointer, kind, object, value);
@@ -1822,9 +2231,16 @@ pub(crate) unsafe fn event_in(context: *const Context, kind: u8, object: u64, va
 unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
     // SAFETY: this synchronous poll only queues tokens, never invokes task callbacks.
     unsafe {
-        if !(*(*task).run).net.is_null() {
+        if !(*(*task).run).net.is_null()
+            && ((*(*task).run).pool.is_none() || hirsel_core_layout::event::is_poll(kind, value))
+        {
             (*(*task).run).poll_net(0);
-            if (&(*(*task).run).readies).pending.load(Ordering::Acquire) {
+            if (*(*task).run)
+                .readies
+                .as_ref()
+                .pending
+                .load(Ordering::Acquire)
+            {
                 checkpoint();
             }
         }
@@ -1850,6 +2266,17 @@ unsafe fn poll_turn(task: *mut Task) {
     unsafe {
         (*task).polls_left = POLLS_PER_TURN;
         let run = (*task).run;
+        if let Some(pool) = (*run).pool {
+            // SAFETY: the active commit pins the worker and its run.
+            if pool.as_ref().units.load(Ordering::Relaxed) > 1
+                || (*run).readies.as_ref().pending.load(Ordering::Acquire)
+            {
+                (*task).state = State::Ready;
+                (*run).publish(task, true);
+                switch_to_idle(task);
+            }
+            return;
+        }
         if !(*run).head.is_null() || !(*run).deferred.is_null() {
             (*task).state = State::Ready;
             (*task).ready = ptr::null_mut();
@@ -1859,7 +2286,7 @@ unsafe fn poll_turn(task: *mut Task) {
                 (*(*run).deferred_tail).ready = task;
             }
             (*run).deferred_tail = task;
-            hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
+            switch_to_idle(task);
         }
     }
 }
@@ -1868,7 +2295,7 @@ unsafe fn poll_turn(task: *mut Task) {
 #[cold]
 #[inline(never)]
 pub(crate) fn capacity_refused(requested: u64, available: u64) -> Capacity {
-    before_commit();
+    let _commit = before_commit();
     event(CAPACITY, requested, available);
     Capacity {
         requested,
@@ -1886,12 +2313,18 @@ impl Drop for CallbackTask {
         CALLBACK_TASK.set(self.0);
     }
 }
+pub(crate) fn parallel() -> bool {
+    !WORKER.get().is_null()
+}
+
 pub(crate) fn recorded_chooser() -> u8 {
     #[cfg(any(test, feature = "testing"))]
     {
         let task = CURRENT.get();
         // SAFETY: CURRENT pins the scheduler while the tape opens.
-        if unsafe { !task.is_null() && (*(*task).run).script.is_some() } {
+        if unsafe {
+            !task.is_null() && ((*(*task).run).script.is_some() || (*(*task).run).pool.is_some())
+        } {
             return hirsel_tape_format::CHOOSER_COMMIT;
         }
     }
@@ -1958,6 +2391,7 @@ fn poll_timeout(deadline: Option<u64>) -> i32 {
 }
 
 pub(crate) fn attach_tape(group: Group) {
+    let _commit = crate::sequencer::enter();
     let task = CURRENT.get();
     if !task.is_null() {
         // SAFETY: CURRENT pins the active task and run through the membership move.
@@ -1972,11 +2406,13 @@ pub(crate) fn attach_tape(group: Group) {
             *tapes.membership(group).unwrap() += 1;
             (*task).group = Some(group);
             (*task).replay = group.replaying();
+            (*task).arc_runtime |= (*task).replay;
         }
     }
 }
 
 pub(crate) fn detach_tape(group: Group) {
+    let _commit = crate::sequencer::enter();
     let task = CURRENT.get();
     if !task.is_null() {
         // SAFETY: the active task owns the inventory through the tape close.
@@ -2002,6 +2438,7 @@ pub(crate) fn flow_script() -> Option<(Arc<crate::schedule_script::ScheduleScrip
     let Some(task) = (unsafe { task.as_ref() }) else {
         return installed().map(|script| (script, UNTAPED));
     };
+    let _commit = crate::sequencer::enter();
     let run = unsafe { &mut *task.run };
     let script = run.script.clone()?;
     let Some(group) = task.group else {
@@ -2028,18 +2465,20 @@ pub(crate) fn identity() -> u64 {
     if task.is_null() {
         return 0;
     }
+    let _commit = crate::sequencer::enter();
     unsafe { (*(*task).run).id() }
 }
 /// # Safety
 /// Called on the active fiber, with no Rust references held to scheduler/task state.
 pub unsafe fn checkpoint() {
+    let _commit = crate::sequencer::enter();
     let task = CURRENT.get();
     // SAFETY: saving exactly this fiber; idle and task stacks stay mapped.
     unsafe {
         if !task.is_null() {
             let run = (*task).run;
             (*run).ready(task);
-            hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
+            switch_to_idle(task);
         }
     }
 }
@@ -2048,13 +2487,14 @@ pub unsafe fn checkpoint() {
 /// The active task owns the commit and holds the condition's owner alive
 /// across suspension. No references to scheduler/task state survive the switch.
 pub(crate) unsafe fn park(queue: *mut Waiters) {
+    let _commit = crate::sequencer::enter();
     let task = CURRENT.get();
     // SAFETY: the condition was checked in this commit and the queue is pinned.
     unsafe {
         if !task.is_null() {
             (*task).state = State::Waiting;
             Waiters::push(queue, task);
-            hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle);
+            switch_to_idle(task);
         }
     }
 }
@@ -2062,12 +2502,24 @@ pub(crate) unsafe fn park(queue: *mut Waiters) {
 /// # Safety
 /// The active commit holds the condition's owner alive through the event.
 pub(crate) unsafe fn event_wake_waiters(kind: u8, object: u64, value: u64, queue: *mut Waiters) {
+    let _commit = crate::sequencer::enter();
     let task = CURRENT.get();
     // SAFETY: recording and waking use the same commit, before any switch.
     unsafe {
         if !task.is_null() {
             record_event(task, kind, object, value);
-            Waiters::wake_all(queue);
+            let _wakes = Waiters::wake_all(queue);
+            #[cfg(feature = "testing")]
+            if matches!(kind, PUBLISH | RECEIVE)
+                && let Some(pool) = (*(*task).run).pool
+                && pool.as_ref().measure
+            {
+                let sample = &pool.as_ref().sample;
+                sample.channel_wakes.fetch_add(_wakes, Ordering::Relaxed);
+                if kind == RECEIVE {
+                    sample.items.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             poll_event(task, kind, value);
         }
     }
@@ -2080,7 +2532,14 @@ pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
     // SAFETY: the operation pins its exclusive, aligned task context. Pending
     // cancellation is the common false condition; shield/grant checks are cold.
     let current = unsafe { NonNull::new_unchecked(context).as_ref() };
-    if cancel_takes_effect(current) {
+    let task = CURRENT.get();
+    let requested = if task.is_null() {
+        &current.cancel_requested
+    } else {
+        // SAFETY: the active fiber pins the task.
+        unsafe { cancel_flag(task) }
+    };
+    if cancel_takes_effect(current, requested) {
         // SAFETY: this task exclusively owns the observed request and primary.
         unsafe { observe_cancel(context, site) };
         1
@@ -2093,8 +2552,13 @@ pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
 unsafe fn observe_cancel(context: *mut Context, site: u64) {
     // SAFETY: the operation entry exclusively owns this task context.
     unsafe {
-        before_commit();
-        (*context).cancel_requested.store(false, Ordering::Release);
+        let _commit = before_commit();
+        let task = CURRENT.get();
+        if task.is_null() {
+            (*context).cancel_requested.store(false, Ordering::Release);
+        } else {
+            cancel_flag(task).store(false, Ordering::Release);
+        }
         causes::record(&mut *context, Cause::new(causes::CANCELLED, site));
         event(CANCELLED, 0, site);
     }
@@ -2106,7 +2570,7 @@ unsafe fn observe_cancel(context: *mut Context, site: u64) {
 pub unsafe extern "C" fn hirsel_core_check_cancel(context: *mut Context, site: u64) -> u8 {
     // SAFETY: observe entry in its commit turn.
     unsafe {
-        before_commit();
+        let _commit = before_commit();
         if check_cancel(context, site) != 0 {
             return 1;
         }
@@ -2130,7 +2594,7 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
         if (*task).record.is_some() {
             abi::task_handover((*task).context);
         }
-        before_commit();
+        let _commit = before_commit();
         record_event(task, END, (*task).id, (*task).failed as u64);
         (*task).state = State::Ended;
         if let Some(group) = (*task).group
@@ -2139,9 +2603,43 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
             *members -= 1;
         }
         Waiters::wake_all(&raw mut (*task).waiters);
-        hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle);
+        switch_to_idle(task);
         std::hint::unreachable_unchecked();
     }
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static WORKER_COUNT: Local<usize> = const { Local::new(1) };
+}
+
+fn worker_count() -> usize {
+    #[cfg(all(feature = "testing", not(test)))]
+    if let Some(width) = std::env::var_os("HIRSEL_S8_WORKERS") {
+        return width
+            .to_str()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| crate::process::stop(b"TestWorkerCount"));
+    }
+    #[cfg(any(test, feature = "testing"))]
+    return WORKER_COUNT.get();
+    #[cfg(not(any(test, feature = "testing")))]
+    return 1;
+}
+
+/// Run a native test fixture with a fixed number of workers.
+#[cfg(any(test, feature = "testing"))]
+pub fn with_workers<R>(workers: usize, f: impl FnOnce() -> R) -> R {
+    assert_ne!(workers, 0);
+    struct Restore(usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            WORKER_COUNT.set(self.0);
+        }
+    }
+    let _restore = Restore(WORKER_COUNT.replace(workers));
+    f()
 }
 
 /// Execute a root on the same guarded stack discipline as its children.
@@ -2156,8 +2654,10 @@ pub unsafe fn run_root(
     result_bytes: usize,
     provider: SchedulerProvider,
 ) -> u8 {
+    let workers = worker_count();
     crate::fiber::arm();
     let mut run = Scheduler {
+        pool: None,
         deferred: ptr::null_mut(),
         deferred_tail: ptr::null_mut(),
         stacks: Stock::default(),
@@ -2175,6 +2675,8 @@ pub unsafe fn run_root(
         readies: Readies::new(),
         ready_tokens: Vec::new(),
         ready_arms: Vec::new(),
+        #[cfg(feature = "testing")]
+        measure: measurement_enabled(),
         cancels: Vec::new(),
         outside_cancels: Vec::new(),
         tapes: Tapes::default(),
@@ -2182,6 +2684,12 @@ pub unsafe fn run_root(
         model: None,
         parked: WaitArms::default(),
     };
+    let pool = (workers > 1).then(|| {
+        // SAFETY: the caller pins the root context through worker teardown.
+        let funding = unsafe { (*context).current.cache_domain() };
+        Box::new(Pool::new(workers, run.readies.clone(), funding))
+    });
+    run.pool = pool.as_deref().map(NonNull::from);
     let registered = Registered(run.readies.clone());
     WAITERS
         .lock()
@@ -2194,6 +2702,8 @@ pub unsafe fn run_root(
         clean: None,
     };
     let mut root = Box::new(Task {
+        arc_runtime: false,
+        cancel: AtomicBool::new(false),
         replay: false,
         latest_pair: false,
         polls_left: POLLS_PER_TURN,
@@ -2201,6 +2711,10 @@ pub unsafe fn run_root(
         owned_context: None,
         run: &mut run,
         ready: ptr::null_mut(),
+        domain: RESIDUAL_DOMAIN,
+        worker: None,
+        #[cfg(feature = "testing")]
+        enqueued_at: 0,
         waiters: Waiters::default(),
         waiting_on: ptr::null_mut(),
         wait_previous: ptr::null_mut(),
@@ -2242,37 +2756,72 @@ pub unsafe fn run_root(
             .unwrap()
             .prepare(start, root_pointer.cast(), ptr::null_mut());
         run.all = root_pointer;
-        run.ready(root_pointer);
-        let previous = CURRENT.get();
-        let mut direct = ptr::null_mut::<Task>();
-        loop {
-            if root.state == State::Ended {
-                break;
+        if let Some(pool) = pool.as_deref() {
+            root.arc_runtime = true;
+            root.worker = Some(0);
+            root.state = State::Ready;
+            let domain = &pool.domains[&root.domain];
+            domain.ready.store(1, Ordering::Relaxed);
+            domain.handoffs.store(1, Ordering::Relaxed);
+            pool.queues[0]
+                .lock()
+                .unwrap()
+                .pinned
+                .push_back(TaskPtr(root_pointer));
+            run_workers(RunPtr(&mut run), TaskPtr(root_pointer), pool);
+            #[cfg(feature = "testing")]
+            if pool.measure {
+                pool.report_domain_lookup();
+                eprintln!(
+                    "pool workers={} stolen={} channel_items={} channel_wakes={}",
+                    workers,
+                    pool.sample.stolen.load(Ordering::Relaxed),
+                    pool.sample.items.load(Ordering::Relaxed),
+                    pool.sample.channel_wakes.load(Ordering::Relaxed),
+                );
             }
-            let task = if direct.is_null() {
-                run.take_wakes();
-                let task = run.pop();
-                if task.is_null() {
-                    run.idle();
-                    continue;
+        } else {
+            run.ready(root_pointer);
+            #[cfg(feature = "testing")]
+            let mut dispatch_sample = DispatchSample::default();
+            let previous = CURRENT.get();
+            let mut direct = ptr::null_mut::<Task>();
+            loop {
+                if root.state == State::Ended {
+                    break;
                 }
-                task
-            } else {
-                std::mem::replace(&mut direct, ptr::null_mut())
-            };
-            CURRENT.set(task);
-            (*task).state = State::Running;
-            abi::task_resume((*task).context);
-            crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
-            hirsel_stack::switch(&mut run.idle, (*task).sp);
-            crate::fiber::guard((0, 0));
-            CURRENT.set(previous);
-            match (*task).state {
-                // Only the scheduler can move an ended stack to stock. The body
-                // exits after its last provider call has delivered or aborted.
-                State::Ended => run.stacks.recycle((*task).stack.take().unwrap()),
-                State::Provider if run.wake_operation(task, Wake::Parked) => direct = task,
-                _ => {}
+                let task = if direct.is_null() {
+                    run.take_wakes();
+                    let task = run.pop();
+                    if task.is_null() {
+                        run.idle();
+                        continue;
+                    }
+                    task
+                } else {
+                    std::mem::replace(&mut direct, ptr::null_mut())
+                };
+                #[cfg(feature = "testing")]
+                dispatch_sample.take(task);
+                CURRENT.set(task);
+                (*task).state = State::Running;
+                abi::task_resume((*task).context);
+                crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
+                hirsel_stack::switch(&mut run.idle, (*task).sp);
+                crate::fiber::guard((0, 0));
+                crate::limit::Funding::unbind();
+                CURRENT.set(previous);
+                match (*task).state {
+                    // Only the scheduler can move an ended stack to stock. The body
+                    // exits after its last provider call has delivered or aborted.
+                    State::Ended => run.stacks.recycle((*task).stack.take().unwrap()),
+                    State::Provider if run.wake_operation(task, Wake::Parked) => direct = task,
+                    _ => {}
+                }
+            }
+            #[cfg(feature = "testing")]
+            if run.measure {
+                dispatch_sample.report(0);
             }
         }
         if root.failed == 0 {
@@ -2282,6 +2831,219 @@ pub unsafe fn run_root(
         drop(registered);
         root.failed
     }
+}
+
+#[derive(Clone, Copy)]
+struct RunPtr(*mut Scheduler);
+// SAFETY: the run is scoped and pinned. The residual sequencer serializes
+// changes to this Scheduler; only a fiber's owner can execute its stack.
+unsafe impl Send for RunPtr {}
+
+impl RunPtr {
+    fn worker(self, root: TaskPtr, pool: &Pool, index: usize, stop_fd: i32) {
+        crate::fiber::arm();
+        let previous_fd = crate::fiber::set_stop_fd(stop_fd);
+        pool.threads[index].set(std::thread::current()).unwrap();
+        if index != 0 {
+            pool.readies
+                .peers
+                .lock()
+                .unwrap()
+                .push(std::thread::current());
+        }
+        let domain = pool.domains[&RESIDUAL_DOMAIN].clone();
+        let mut owner =
+            crate::sequencer::Owner::new(&domain.sequencer, publish_deliveries, pool.measure);
+        let mut worker = Worker {
+            index,
+            pool,
+            idle: ptr::null_mut(),
+            stock: Stock::default(),
+            #[cfg(feature = "testing")]
+            dispatch_sample: DispatchSample::default(),
+            outbox: Vec::new(),
+            #[cfg(any(test, feature = "testing"))]
+            script: pool.script.clone(),
+        };
+        let previous = WORKER.replace(&mut worker);
+        // SAFETY: scoped workers pin all operands. The root remains alive
+        // until after every worker has returned its vacant-slot lease.
+        unsafe {
+            crate::sequencer::install(&mut owner, || {
+                pool.funding.lease_vacant();
+                self.dispatch(root, &raw mut worker);
+                let stats = crate::limit::Funding::return_vacant();
+                if pool.measure {
+                    eprintln!(
+                        "slots worker={} transfers={} leased={} returned={} peak={} returned_at_exit={}",
+                        index,
+                        stats.transfers,
+                        stats.leased,
+                        stats.returned,
+                        stats.peak,
+                        stats.at_exit,
+                    );
+                }
+            });
+        }
+        #[cfg(feature = "testing")]
+        if pool.measure {
+            worker.dispatch_sample.report(index);
+            owner.report(index);
+        }
+        WORKER.set(previous);
+        crate::fiber::set_stop_fd(previous_fd);
+    }
+
+    /// # Safety
+    /// The calling OS thread owns this Worker, and scoped startup pins run
+    /// and root until all dispatchers return.
+    unsafe fn dispatch(self, root: TaskPtr, worker: *mut Worker) {
+        // SAFETY: shared run mutations take the domain commit. Task stack
+        // access stays on its physical worker after the first dispatch.
+        unsafe {
+            let run = self.0;
+            let pool = &*(*worker).pool;
+            let mut captured = Vec::new();
+            let mut direct = ptr::null_mut::<Task>();
+            loop {
+                #[allow(unused_mut)]
+                let mut commit = crate::sequencer::enter();
+                if (*root.0).state == State::Ended {
+                    return;
+                }
+                let task = if direct.is_null() {
+                    (*run).capture_wakes(&mut captured);
+                    for ready in captured.drain(..) {
+                        #[cfg(any(test, feature = "testing"))]
+                        if let Some(script) = &pool.script {
+                            // Keep the captured input in flight across the test pause.
+                            pool.units.fetch_add(1, Ordering::Relaxed);
+                            drop(commit);
+                            script.pause(crate::schedule_script::PausePoint::ReadinessTaken {
+                                token: ready.token,
+                            });
+                            commit = crate::sequencer::enter();
+                            pool.units.fetch_sub(1, Ordering::Relaxed);
+                        }
+                        (*run).apply_ready(ready);
+                    }
+                    if captured.capacity() > RETAINED_READY_CAPACITY {
+                        captured = Vec::new();
+                    }
+                    (*run).take_timers();
+                    if (*root.0).state == State::Ended {
+                        return;
+                    }
+                    let Some(task) = pool.pop((*worker).index) else {
+                        drop(commit);
+                        self.park_worker(pool, root);
+                        continue;
+                    };
+                    let domain = &pool.domains[&(*task.0).domain];
+                    domain.ready.fetch_sub(1, Ordering::Relaxed);
+                    domain.handoffs.fetch_sub(1, Ordering::Relaxed);
+                    task.0
+                } else {
+                    std::mem::replace(&mut direct, ptr::null_mut())
+                };
+                #[cfg(feature = "testing")]
+                (*worker).dispatch_sample.take(task);
+                (*task).worker.get_or_insert((*worker).index);
+                (*task).state = State::Running;
+                CURRENT.set(task);
+                abi::task_resume((*task).context);
+                crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
+                drop(commit);
+                hirsel_stack::switch(&raw mut (*worker).idle, (*task).sp);
+                crate::fiber::guard((0, 0));
+                let commit = crate::sequencer::enter();
+                crate::limit::Funding::unbind();
+                CURRENT.set(ptr::null_mut());
+                match (*task).state {
+                    State::Ended => {
+                        (*worker).stock.recycle((*task).stack.take().unwrap());
+                        if task == root.0 {
+                            pool.wake_workers();
+                        }
+                    }
+                    State::Provider if (*run).wake_operation(task, Wake::Parked) => direct = task,
+                    _ => {}
+                }
+                // The outgoing active unit is live across release. This
+                // publishes every receiver's already-counted hand-off first.
+                drop(commit);
+                if direct.is_null() {
+                    let _commit = crate::sequencer::enter();
+                    pool.units.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    /// # Safety
+    /// The caller is a registered worker and owns none of the run's locks.
+    unsafe fn park_worker(self, pool: &Pool, root: TaskPtr) {
+        // SAFETY: recheck under registry exclusion then the residual lock.
+        let (deadline, poller) = unsafe {
+            let _registry = pool.registry.lock().unwrap();
+            let _commit = crate::sequencer::enter();
+            let run = &mut *self.0;
+            if (*root.0).state == State::Ended {
+                return;
+            }
+            let deadline = run.timers.as_ref().and_then(|task| task.timer_deadline);
+            if run.readies.pending.load(Ordering::Acquire) {
+                return;
+            }
+            if pool.units.load(Ordering::Relaxed) == 0
+                && pool.domains.values().all(|domain| {
+                    domain.ready.load(Ordering::Relaxed) == 0
+                        && domain.handoffs.load(Ordering::Relaxed) == 0
+                })
+                && deadline.is_none()
+                && !run.has_outside_wait()
+            {
+                run.stop_quiescent();
+            }
+            #[cfg(test)]
+            pool.idle_checks.fetch_add(1, Ordering::Release);
+            let poller = run.readies.net.lock().unwrap().clone();
+            (deadline, poller)
+        };
+        if let Some(poller) = poller
+            && let Some(events) = poller
+                .poll(poll_timeout(deadline))
+                .unwrap_or_else(|_| crate::process::stop(b"HostPoll"))
+        {
+            let _commit = crate::sequencer::enter();
+            // SAFETY: the commit owns the socket registry and the poll batch
+            // belongs to this run's driver. Re-armed tags are filtered there.
+            unsafe {
+                let run = &mut *self.0;
+                if let Some(net) = run.net.as_mut() {
+                    net.dispatch_polled(events, |token| run.readies.push(token))
+                        .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+                }
+            }
+        } else if let Some(deadline) = deadline {
+            std::thread::park_timeout(Duration::from_nanos(
+                deadline.saturating_sub(crate::os::monotonic_ns()),
+            ));
+        } else {
+            std::thread::park();
+        }
+    }
+}
+
+fn run_workers(run: RunPtr, root: TaskPtr, pool: &Pool) {
+    let stop_fd = crate::fiber::stop_fd();
+    std::thread::scope(|scope| {
+        for index in 1..pool.queues.len() {
+            scope.spawn(move || run.worker(root, pool, index, stop_fd));
+        }
+        run.worker(root, pool, 0, stop_fd);
+    });
 }
 
 #[repr(C)]
@@ -2303,7 +3065,7 @@ unsafe fn spawn_in(
     // SAFETY: spawn is invoked by the current parent in its exclusive context.
     unsafe {
         crate::process::deny_describe_capability(context);
-        before_commit();
+        let _commit = before_commit();
         let mut record =
             match Block::new(&*context, charge::task(layout.result.logical, bytes), 1, 8) {
                 Ok(record) => record,
@@ -2319,6 +3081,8 @@ unsafe fn spawn_in(
         let id = (*run).id();
         let child_context = abi::task_child(context, &mut record, bytes, id);
         let task = Box::new(Task {
+            arc_runtime: false,
+            cancel: AtomicBool::new(false),
             replay: false,
             latest_pair: false,
             polls_left: POLLS_PER_TURN,
@@ -2326,6 +3090,10 @@ unsafe fn spawn_in(
             owned_context: Some(child_context),
             run,
             ready: ptr::null_mut(),
+            domain: RESIDUAL_DOMAIN,
+            worker: None,
+            #[cfg(feature = "testing")]
+            enqueued_at: 0,
             waiters: Waiters::default(),
             waiting_on: ptr::null_mut(),
             wait_previous: ptr::null_mut(),
@@ -2337,7 +3105,7 @@ unsafe fn spawn_in(
             state: State::Ready,
             id,
             group: group.map(|group| group.child()),
-            stack: Some((*run).stacks.take()),
+            stack: Some((*worker_stock(run)).take()),
             sp: ptr::null_mut(),
             body,
             input: Storage::new(layout.input.bytes, layout.input.align),
@@ -2351,8 +3119,10 @@ unsafe fn spawn_in(
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::allocated((&*task as *const Task).cast(), size_of::<Task>());
         let task = Box::into_raw(task);
+        (*task).arc_runtime = (*run).pool.is_some();
         if let Some(group) = (*task).group {
             (*task).replay = group.replaying();
+            (*task).arc_runtime |= (*task).replay;
             if let Some(members) = (*run).tapes.membership(group) {
                 *members += 1;
             }
@@ -2370,6 +3140,10 @@ unsafe fn spawn_in(
             .unwrap()
             .prepare(start, task.cast(), ptr::null_mut());
         (*run).all = task;
+        #[cfg(feature = "testing")]
+        if (*run).measure {
+            (*task).enqueued_at = crate::os::monotonic_ns();
+        }
         (*run).ready(task);
         event(SPAWN, (*task).id, bytes);
         Spawned { task, available: 0 }
@@ -2397,6 +3171,7 @@ pub unsafe extern "C" fn hirsel_core_spawn(
 ) -> Spawn {
     // SAFETY: generated operands belong to the active parent and run.
     unsafe {
+        let _commit = crate::sequencer::enter();
         let group = if tasks & crate::host_file::DYNAMIC_GRANT != 0 {
             (*(*context).host_files).registry.grant_group(tasks)
         } else if tasks == 0 && (*context).run.is_null() {
@@ -2430,7 +3205,7 @@ pub unsafe extern "C" fn hirsel_core_spawn(
 pub unsafe extern "C" fn hirsel_core_cancel(_: *mut Context, task: *mut Task) {
     // SAFETY: parent owns the child's handle and requests without touching its stack.
     unsafe {
-        before_commit();
+        let _commit = before_commit();
         if let Some(group) = (*task).group
             && !current_group().is_some_and(|source| source.same(group))
         {
@@ -2440,9 +3215,7 @@ pub unsafe extern "C" fn hirsel_core_cancel(_: *mut Context, task: *mut Task) {
             event(CANCEL, (*task).id, 0);
             return;
         }
-        (*(*task).context)
-            .cancel_requested
-            .store(true, Ordering::Release);
+        cancel_flag(task).store(true, Ordering::Release);
         if (*task).state == State::Provider {
             (*(*task).run).cancels.push(task);
         }
@@ -2457,6 +3230,7 @@ pub unsafe extern "C" fn hirsel_core_cancel(_: *mut Context, task: *mut Task) {
     }
 }
 unsafe fn retire(task: *mut Task) {
+    let _commit = crate::sequencer::enter();
     // SAFETY: task ended, is not queued, and its sole handle is being consumed.
     unsafe {
         let run = (*task).run;
@@ -2491,8 +3265,8 @@ pub unsafe extern "C" fn hirsel_core_join(
 ) -> Join {
     // SAFETY: parent owns task throughout waits, no references survive switches.
     unsafe {
-        loop {
-            before_commit();
+        let _commit = loop {
+            let commit = before_commit();
             if check_cancel(context, site) != 0 {
                 return Join {
                     kind: 0,
@@ -2501,10 +3275,10 @@ pub unsafe extern "C" fn hirsel_core_join(
                 };
             }
             if (*task).state == State::Ended {
-                break;
+                break commit;
             }
             park(&raw mut (*task).waiters);
-        }
+        };
         let failed = (*task).failed != 0;
         let causes = std::mem::take(&mut (*(*task).context).causes);
         let cancelled = causes
@@ -2531,7 +3305,7 @@ unsafe fn abandon_begin(context: *mut Context, task: *mut Task) -> *mut crate::c
         (*context).cancel_shield += 1;
         hirsel_core_cancel(context, task);
         loop {
-            before_commit();
+            let _commit = before_commit();
             if (*task).state == State::Ended {
                 break;
             }
@@ -2656,12 +3430,12 @@ pub(crate) unsafe fn host_operation(
             saved: ptr::null_mut(),
             result: std::mem::MaybeUninit::uninit(),
         };
-        let host = (*run).stacks.take();
+        let host = (*worker_stock(run)).take();
         let target = host.prepare(invoke, (&mut call as *mut Call).cast(), ptr::null_mut());
         crate::fiber::guard(host.bounds());
         hirsel_stack::switch(&mut call.saved, target);
         crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
-        (*run).stacks.recycle(host);
+        (*worker_stock(run)).recycle(host);
         call.result.assume_init()
     }
 }
@@ -2727,6 +3501,7 @@ mod ready_routing_laws {
                 site: 0,
             };
             let mut run = Scheduler {
+                pool: None,
                 deferred: ptr::null_mut(),
                 deferred_tail: ptr::null_mut(),
                 stacks: Stock::default(),
@@ -2742,6 +3517,8 @@ mod ready_routing_laws {
                 readies: Readies::new(),
                 ready_tokens: Vec::new(),
                 ready_arms: Vec::new(),
+                #[cfg(feature = "testing")]
+                measure: false,
                 cancels: Vec::new(),
                 outside_cancels: Vec::new(),
                 tapes: Tapes::default(),
@@ -2769,6 +3546,8 @@ mod ready_routing_laws {
             let mut tasks: Vec<_> = (0..n)
                 .map(|i| {
                     Box::new(Task {
+                        arc_runtime: false,
+                        cancel: AtomicBool::new(false),
                         replay: false,
                         latest_pair: false,
                         polls_left: POLLS_PER_TURN,
@@ -2776,6 +3555,10 @@ mod ready_routing_laws {
                         owned_context: None,
                         run: &mut run,
                         ready: ptr::null_mut(),
+                        domain: RESIDUAL_DOMAIN,
+                        worker: None,
+                        #[cfg(feature = "testing")]
+                        enqueued_at: 0,
                         waiters: Waiters::default(),
                         waiting_on: ptr::null_mut(),
                         wait_previous: ptr::null_mut(),

@@ -199,7 +199,7 @@ unsafe fn address_op(
         };
         let mut network = NetworkRequest {
             address,
-            sockets: &mut (*(*context).host_files).sockets,
+            sockets: &raw mut (*(*context).host_files).sockets,
             until: deadline(context, until_kind, clock, deadline_ns),
             backlog,
             connecting: None,
@@ -235,7 +235,7 @@ unsafe fn owned_op(
     unsafe {
         let mut network = NetworkRequest {
             address: Address::default(),
-            sockets: &mut (*(*context).host_files).sockets,
+            sockets: &raw mut (*(*context).host_files).sockets,
             until: deadline(context, until_kind, clock, deadline_ns),
             backlog: 0,
             connecting: None,
@@ -346,6 +346,7 @@ pub unsafe extern "C" fn hirsel_core_net_split(
     key: u64,
     _site: u64,
 ) -> Outcome {
+    let _commit = crate::sequencer::enter();
     unsafe {
         let (read, write) = (*(*context).host_files).sockets.split(key);
         Outcome {
@@ -359,6 +360,7 @@ pub unsafe extern "C" fn hirsel_core_net_split(
 /// Consumes one live socket, directional half or listener carrier exactly once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64) {
+    let _commit = crate::sequencer::enter();
     unsafe {
         (*(*context).host_files).sockets.release(key);
     }

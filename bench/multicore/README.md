@@ -129,6 +129,29 @@ shared suite for cross-language comparisons at identical inputs.
 
 For S1's current-thread Tokio threshold, use the existing current-thread
 reference. Arc, Matmul, runner throughput and replay use their dedicated
-measurements. In today's Hirsel build, width changes the affinity of a
-single-worker runtime. At S8 the caller must supply the test-pool build.
-At S9 the runtime can use the selected affinity to choose its worker count.
+measurements. The shipping archive uses one worker.
+
+## S8 test pool
+
+Build the release driver and `//:hirsel-core-rt-test-pool-archives`. Pass
+the archive for your architecture to `build.py --s0 --runtime` and use
+`run.py --test-pool` to select the runtime width. The runner retains raw
+counters in each sample's stderr. For example, measure 200,000 transfers
+from 16 producers and the nested spawn workload at width 16.
+
+```sh
+taskset -c 0-11,16-27 ./bench/multicore/run.py --test-pool \
+  --bins "$benchmark_bins" --out "$new_evidence_directory" \
+  --case fan_in fan_in_cap1 ping_pong ping_pong_burst spawn_chain \
+  --workers 16 --languages Hirsel Tokio
+```
+
+The sequencer reports time holding its token and time from publication to
+acquisition on queued hand-offs. Divide their sums by token acquisitions
+for cost per acquisition, and by twice the fan-in item count for cost per
+channel commit including scheduler work. Channel wakes count waiting fibers
+made runnable by sends and receives. The pool reports stolen queue entries
+and vacant-slot transfers. Each worker reports its peak cached vacancies
+and the number it returns at exit. Add `--s0` with `matmul_t16` or
+`arc_pair` for the Rust comparisons. Matmul reports first dispatch count and
+total submit-to-dispatch time per worker in both runtimes.

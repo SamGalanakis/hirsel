@@ -198,6 +198,10 @@ pub(crate) struct ReadyArm {
     identity: u64,
 }
 
+// A network poll can return 128 events, each with a read and a write waiter.
+// Larger batches still drain in full, but release their backing after the turn.
+const RETAINED_READY_CAPACITY: usize = 256;
+
 struct Arm<T> {
     task: T,
     identity: u64,
@@ -231,25 +235,26 @@ impl<T> WaitArms<T> {
         );
     }
 
-    pub(crate) fn capture(&mut self, tokens: Vec<u64>) -> Vec<ReadyArm> {
+    pub(crate) fn capture(
+        &mut self,
+        tokens: impl IntoIterator<Item = u64>,
+        captured: &mut Vec<ReadyArm>,
+    ) {
         self.turn = self
             .turn
             .checked_add(1)
             .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
-        tokens
-            .into_iter()
-            .filter_map(|token| {
-                let arm = self.live.get_mut(&ReadyToken(token))?;
-                if arm.last_turn == self.turn {
-                    return None;
-                }
-                arm.last_turn = self.turn;
-                Some(ReadyArm {
-                    token,
-                    identity: arm.identity,
-                })
+        captured.extend(tokens.into_iter().filter_map(|token| {
+            let arm = self.live.get_mut(&ReadyToken(token))?;
+            if arm.last_turn == self.turn {
+                return None;
+            }
+            arm.last_turn = self.turn;
+            Some(ReadyArm {
+                token,
+                identity: arm.identity,
             })
-            .collect()
+        }));
     }
 
     pub(crate) fn take_captured(&mut self, ready: ReadyArm) -> Option<T> {
@@ -402,6 +407,8 @@ struct Scheduler {
     #[cfg(any(test, feature = "testing"))]
     script_groups: Vec<crate::tape::schedule::Group>,
     readies: Arc<Readies>,
+    ready_tokens: Vec<u64>,
+    ready_arms: Vec<ReadyArm>,
     /// Cancellation requests for tasks parked in a provider operation, in
     /// request order, taken at the next scheduler turn.
     cancels: Vec<*mut Task>,
@@ -674,10 +681,16 @@ impl Scheduler {
                 }
             }
             if self.readies.pending.swap(false, Ordering::Acquire) {
-                let tokens = std::mem::take(&mut *self.readies.lock());
+                std::mem::swap(&mut self.ready_tokens, &mut *self.readies.lock());
+                let mut captured = std::mem::take(&mut self.ready_arms);
                 // Capture one identity per token before callbacks. A task may
                 // re-arm the same token before a captured readiness is applied.
-                for ready in self.parked.capture(tokens) {
+                self.parked
+                    .capture(self.ready_tokens.drain(..), &mut captured);
+                if self.ready_tokens.capacity() > RETAINED_READY_CAPACITY {
+                    self.ready_tokens = Vec::new();
+                }
+                for ready in captured.drain(..) {
                     #[cfg(any(test, feature = "testing"))]
                     if let Some(script) = &self.script {
                         script.pause(crate::schedule_script::PausePoint::ReadinessTaken {
@@ -687,6 +700,9 @@ impl Scheduler {
                     if let Some(task) = self.parked.take_captured(ready) {
                         self.wake_operation(task, Wake::Ready);
                     }
+                }
+                if captured.capacity() <= RETAINED_READY_CAPACITY {
+                    self.ready_arms = captured;
                 }
             }
             if self.timers.is_null() {
@@ -2157,6 +2173,8 @@ pub unsafe fn run_root(
         #[cfg(any(test, feature = "testing"))]
         script_groups: Vec::new(),
         readies: Readies::new(),
+        ready_tokens: Vec::new(),
+        ready_arms: Vec::new(),
         cancels: Vec::new(),
         outside_cancels: Vec::new(),
         tapes: Tapes::default(),
@@ -2722,6 +2740,8 @@ mod ready_routing_laws {
                 script: None,
                 script_groups: Vec::new(),
                 readies: Readies::new(),
+                ready_tokens: Vec::new(),
+                ready_arms: Vec::new(),
                 cancels: Vec::new(),
                 outside_cancels: Vec::new(),
                 tapes: Tapes::default(),

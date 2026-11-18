@@ -618,7 +618,8 @@ fn an_old_readiness_cannot_resume_a_rearmed_operation() {
     });
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let ready = arms.lock().unwrap().capture(vec![TOKEN, TOKEN]);
+            let mut ready = Vec::new();
+            arms.lock().unwrap().capture([TOKEN, TOKEN], &mut ready);
             script.pause(PausePoint::ReadinessTaken { token: TOKEN });
             assert_eq!(ready.len(), 1);
             assert!(arms.lock().unwrap().take_captured(ready[0]).is_none());
@@ -626,7 +627,8 @@ fn an_old_readiness_cannot_resume_a_rearmed_operation() {
         taken.wait();
         let resumed = {
             let mut arms = arms.lock().unwrap();
-            let ready = arms.capture(vec![TOKEN]);
+            let mut ready = Vec::new();
+            arms.capture([TOKEN], &mut ready);
             let resumed = ready.first().and_then(|&arm| arms.take_captured(arm));
             // The winning resume answered Pending.
             arms.insert(TOKEN, ());
@@ -636,10 +638,14 @@ fn an_old_readiness_cannot_resume_a_rearmed_operation() {
         assert_eq!(resumed, Some(()));
     });
     let mut arms = arms.lock().unwrap();
-    let ready = arms.capture(vec![TOKEN]);
-    let produced = arms.take_captured(ready[0]).map(|()| done(7).outcome.value);
+    let mut ready = Vec::new();
+    arms.capture([TOKEN], &mut ready);
+    let produced = arms
+        .take_captured(ready.pop().unwrap())
+        .map(|()| done(7).outcome.value);
     assert_eq!(produced, Some(7));
-    assert!(arms.capture(vec![TOKEN]).is_empty());
+    arms.capture([TOKEN], &mut ready);
+    assert!(ready.is_empty());
 }
 
 // ---- F1: callbacks at the wake, outside any task ----

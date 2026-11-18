@@ -80,11 +80,13 @@ fn advance(input: Bytes, mut c: Cursor) {
 }
 
 fn skip_whitespace(input: Bytes, mut c: Cursor) {
-    let mut current = byte(input, c)
-    while current == 32 || current == 9 || current == 10 || current == 13 {
+    while whitespace(byte(input, c)) {
         advance(input, mut c)
-        current = byte(input, c)
     }
+}
+
+fn whitespace(b: u8) -> bool {
+    b == 32 || b == 9 || b == 10 || b == 13
 }
 
 fn consume(input: Bytes, mut c: Cursor, expected: u8) -> bool {
@@ -152,9 +154,8 @@ fn read_string(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Text, E
     let mut start = c.index
     let decoded_start = list.len(doc.decoded)
     let mut decoded = false
-    let mut ch = byte(input, c)
-    while ch != 34 {
-        if ch == 92 {
+    while byte(input, c) != 34 {
+        if byte(input, c) == 92 {
             decoded = true
             result.map_err(list.append(mut doc.decoded, list.slice(input, start, c.index)), memory)?
             advance(input, mut c)
@@ -173,12 +174,12 @@ fn read_string(mut doc: Document, input: Bytes, mut c: Cursor) -> Result[Text, E
             advance(input, mut c)
             start = c.index
         } else {
-            if ch < 32 {
+            if byte(input, c) < 32 {
                 return Error(Syntax)
             }
-            advance(input, mut c)
+            c.index += 1
+            c.column += 1
         }
-        ch = byte(input, c)
     }
     let range = if decoded {
         result.map_err(list.append(mut doc.decoded, list.slice(input, start, c.index)), memory)?

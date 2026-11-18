@@ -166,7 +166,8 @@ impl Parser<'_> {
                 start = self.index;
             } else {
                 assert!(self.byte() >= 32, "invalid JSON string");
-                self.advance();
+                self.index += 1;
+                self.column += 1;
             }
         }
         let end = self.index;

@@ -50,11 +50,13 @@ fn advance(input: const u8[:], c: Cursor&) {
 }
 
 fn skip_whitespace(input: const u8[:], c: Cursor&) {
-    var current = byte(input, c);
-    while current == 32 || current == 9 || current == 10 || current == 13 {
+    while whitespace(byte(input, c)) {
         advance(input, c);
-        current = byte(input, c);
     }
+}
+
+fn whitespace(b: u8) -> bool {
+    return b == 32 || b == 9 || b == 10 || b == 13;
 }
 
 fn consume(input: const u8[:], c: Cursor&, expected: u8) -> bool {
@@ -103,9 +105,8 @@ fn read_string(doc: Document&, input: const u8[:], c: Cursor&) -> Text {
     var start = c.index;
     let decoded_start = doc.decoded.len;
     var decoded = false;
-    var ch = byte(input, c);
-    while ch != 34 {
-        if ch == 92 {
+    while byte(input, c) != 34 {
+        if byte(input, c) == 92 {
             decoded = true;
             doc.decoded.append(input[start..c.index]);
             advance(input, c);
@@ -120,10 +121,10 @@ fn read_string(doc: Document&, input: const u8[:], c: Cursor&) -> Text {
             advance(input, c);
             start = c.index;
         } else {
-            if ch < 32 { abort("invalid JSON string"); }
-            advance(input, c);
+            if byte(input, c) < 32 { abort("invalid JSON string"); }
+            c.index += 1;
+            c.column += 1;
         }
-        ch = byte(input, c);
     }
     var range = text_range(start, c.index, false);
     if decoded {

@@ -17,6 +17,8 @@ struct Node {
     waiting: AtomicBool,
     #[cfg(feature = "testing")]
     released_at: std::sync::atomic::AtomicU64,
+    #[cfg(feature = "testing")]
+    released_l3: std::sync::atomic::AtomicU32,
 }
 
 impl Sequencer {
@@ -32,8 +34,9 @@ impl Sequencer {
             let predecessor = self.tail.swap(node, Ordering::AcqRel);
             if !predecessor.is_null() {
                 (*predecessor).next.store(node, Ordering::Release);
+                let mut spins = 0u32;
                 while (*node).waiting.load(Ordering::Acquire) {
-                    std::hint::spin_loop();
+                    backoff(&mut spins);
                 }
             }
             !predecessor.is_null()
@@ -55,16 +58,18 @@ impl Sequencer {
                 {
                     return;
                 }
+                let mut spins = 0u32;
                 loop {
                     next = (*node).next.load(Ordering::Acquire);
                     if !next.is_null() {
                         break;
                     }
-                    std::hint::spin_loop();
+                    backoff(&mut spins);
                 }
             }
             #[cfg(feature = "testing")]
             if _measured {
+                (*next).released_l3.store(current_l3(), Ordering::Relaxed);
                 (*next)
                     .released_at
                     .store(crate::os::monotonic_ns(), Ordering::Relaxed);
@@ -73,6 +78,20 @@ impl Sequencer {
         }
     }
 }
+
+/// Spin briefly, then yield the CPU: a waiter that shares its CPU with the
+/// holder or a preempted enqueuer would otherwise spin out its whole time
+/// slice before the token can move (parking_lot's SpinWait shape).
+#[inline(always)]
+fn backoff(spins: &mut u32) {
+    if *spins < SPIN_LIMIT {
+        *spins += 1;
+        std::hint::spin_loop();
+    } else {
+        std::thread::yield_now();
+    }
+}
+const SPIN_LIMIT: u32 = 1 << 10;
 
 /// A worker pins this record on its OS stack. Nested runtime operations use
 /// the current commit without adding themselves to the MCS queue.
@@ -107,10 +126,13 @@ impl Owner {
             sample.started.set(now);
             if _queued {
                 let released = self.node.released_at.load(Ordering::Relaxed);
-                sample
-                    .handoff
-                    .set(sample.handoff.get() + now.saturating_sub(released));
+                let elapsed = now.saturating_sub(released);
+                sample.handoff.set(sample.handoff.get() + elapsed);
                 sample.transfers.set(sample.transfers.get() + 1);
+                if self.node.released_l3.load(Ordering::Relaxed) != current_l3() {
+                    sample.cross.set(sample.cross.get() + 1);
+                    sample.cross_ns.set(sample.cross_ns.get() + elapsed);
+                }
             }
         }
     }
@@ -133,11 +155,13 @@ impl Owner {
     pub(crate) fn report(&self, index: usize) {
         if let Some(sample) = &self.sample {
             eprintln!(
-                "sequencer worker={index} commits={} service_ns={} handoffs={} handoff_ns={}",
+                "sequencer worker={index} commits={} service_ns={} handoffs={} handoff_ns={} cross_l3={} cross_l3_ns={}",
                 sample.commits.get(),
                 sample.service.get(),
                 sample.transfers.get(),
                 sample.handoff.get(),
+                sample.cross.get(),
+                sample.cross_ns.get(),
             );
         }
     }
@@ -151,6 +175,29 @@ struct Sample {
     service: Cell<u64>,
     transfers: Cell<u64>,
     handoff: Cell<u64>,
+    cross: Cell<u64>,
+    cross_ns: Cell<u64>,
+}
+
+/// The measuring host's L3 id for the calling CPU, from sysfs.
+#[cfg(feature = "testing")]
+fn current_l3() -> u32 {
+    static L3: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    let ids = L3.get_or_init(|| {
+        (0..1024)
+            .map_while(|cpu| {
+                std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{cpu}/cache/index3/id"))
+                    .ok()
+                    .map(|id| id.trim().parse().unwrap_or(0))
+            })
+            .collect()
+    });
+    // SAFETY: sched_getcpu has no preconditions.
+    let cpu = unsafe { libc::sched_getcpu() };
+    usize::try_from(cpu)
+        .ok()
+        .and_then(|cpu| ids.get(cpu).copied())
+        .unwrap_or(u32::MAX)
 }
 
 thread_local! {
@@ -217,11 +264,38 @@ pub(crate) fn to_dispatcher<R>(switch: impl FnOnce() -> R) -> R {
     };
     let depth = owner.depth.replace(0);
     let result = switch();
-    if depth != 0 {
+    // A dispatcher that resumes this stack hands over its held token.
+    if depth != 0 && !owner.held.replace(true) {
         // SAFETY: the suspending stack resumed on the same worker.
         owner.acquire();
-        owner.held.set(true);
     }
     owner.depth.set(depth);
     result
+}
+
+/// Switch from the dispatcher into a fiber, handing it the dispatcher's
+/// outermost commit. A suspended fiber resumes inside its own commit and keeps
+/// the token; a fresh fiber releases it in `release_handed`.
+pub(crate) fn to_fiber<R>(commit: Guard, switch: impl FnOnce() -> R) -> R {
+    let at = commit.0;
+    std::mem::forget(commit);
+    // SAFETY: the installed worker is live across the synchronous switch.
+    if let Some(owner) = unsafe { at.as_ref() } {
+        debug_assert_eq!(owner.depth.get(), 1);
+        owner.depth.set(0);
+    }
+    switch()
+}
+
+/// A fresh fiber's first instruction: release a token its dispatcher handed over.
+pub(crate) fn release_handed() {
+    let at = OWNER.get();
+    // SAFETY: install pins the current worker and its sequencer on this thread.
+    if let Some(owner) = unsafe { at.as_ref() }
+        && owner.depth.get() == 0
+        && owner.held.replace(false)
+    {
+        owner.release();
+        (owner.published)();
+    }
 }

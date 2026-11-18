@@ -195,6 +195,7 @@ pub unsafe extern "C" fn hirsel_core_send(
 ) -> Transfer {
     // SAFETY: sender and pending input are pinned by the suspended caller.
     unsafe {
+        let mut _resumed = None;
         loop {
             let _commit = tasks::before_commit();
             if tasks::check_cancel(context, site) != 0 {
@@ -221,7 +222,7 @@ pub unsafe extern "C" fn hirsel_core_send(
                         status: 0,
                     };
                 }
-                _ => tasks::park(&raw mut (*channel).send_waiters),
+                _ => _resumed = Some(tasks::park(&raw mut (*channel).send_waiters)),
             }
         }
     }
@@ -272,6 +273,7 @@ pub unsafe extern "C" fn hirsel_core_receive(
 ) -> Transfer {
     // SAFETY: receiver keeps the queue alive across each suspension.
     unsafe {
+        let mut _resumed = None;
         loop {
             let _commit = tasks::before_commit();
             if tasks::check_cancel(context, site) != 0 {
@@ -297,7 +299,7 @@ pub unsafe extern "C" fn hirsel_core_receive(
                     status: 0,
                 };
             }
-            tasks::park(&raw mut (*channel).receive_waiters);
+            _resumed = Some(tasks::park(&raw mut (*channel).receive_waiters));
         }
     }
 }

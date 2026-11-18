@@ -128,6 +128,18 @@ pub(crate) struct Stock {
     idle: Vec<(Stack, Retained<'static>)>,
 }
 
+/// Worker stock moves this many idle stacks to or from the pool's spare list.
+const SPARE_BATCH: usize = 16;
+
+/// Idle stacks shared by a pool's workers. A fiber that ends on a thief
+/// returns its stack here, so the spawning worker refills instead of mapping.
+#[derive(Default)]
+pub(crate) struct Spare(std::sync::Mutex<Vec<(Stack, Retained<'static>)>>);
+
+// SAFETY: an idle stack holds no live frame or thread-local address; only its
+// mapping moves between workers.
+unsafe impl Send for Stack {}
+
 impl Stock {
     pub(crate) fn take(&mut self) -> Stack {
         self.idle.pop().map_or_else(Stack::new, |(stack, _)| stack)
@@ -136,6 +148,26 @@ impl Stock {
     pub(crate) fn recycle(&mut self, stack: Stack) {
         if let Some(held) = RETENTION.retain(stack.len) {
             self.idle.push((stack, held));
+        }
+    }
+
+    pub(crate) fn take_shared(&mut self, spare: &Spare) -> Stack {
+        if self.idle.is_empty() {
+            let mut shared = spare.0.lock().unwrap();
+            let start = shared.len().saturating_sub(SPARE_BATCH);
+            self.idle.extend(shared.drain(start..));
+        }
+        self.take()
+    }
+
+    pub(crate) fn recycle_shared(&mut self, stack: Stack, spare: &Spare) {
+        self.recycle(stack);
+        if self.idle.len() > 2 * SPARE_BATCH {
+            spare
+                .0
+                .lock()
+                .unwrap()
+                .extend(self.idle.drain(..SPARE_BATCH));
         }
     }
 }

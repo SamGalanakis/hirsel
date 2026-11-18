@@ -428,6 +428,8 @@ struct WorkerQueue {
     pinned: VecDeque<TaskPtr>,
     deferred: VecDeque<TaskPtr>,
     lifo: Option<TaskPtr>,
+    /// A thief passed over the current LIFO task once.
+    lifo_seen: bool,
     lifo_turns: u8,
     local: VecDeque<TaskPtr>,
 }
@@ -437,6 +439,7 @@ impl WorkerQueue {
             pinned: VecDeque::new(),
             deferred: VecDeque::new(),
             lifo: None,
+            lifo_seen: false,
             lifo_turns: 0,
             local: VecDeque::with_capacity(LOCAL_QUEUE),
         }
@@ -466,6 +469,9 @@ struct Pool {
     queues: Vec<Mutex<WorkerQueue>>,
     injector: Mutex<VecDeque<TaskPtr>>,
     threads: Vec<OnceLock<std::thread::Thread>>,
+    sleepers: Mutex<Vec<usize>>,
+    sleeping: AtomicUsize,
+    spare: crate::fiber::Spare,
     readies: Arc<Readies>,
     funding: crate::limit::CacheDomain,
     units: AtomicUsize,
@@ -487,6 +493,9 @@ impl Pool {
                 .collect(),
             injector: Mutex::default(),
             threads: (0..workers).map(|_| OnceLock::new()).collect(),
+            sleepers: Mutex::default(),
+            sleeping: AtomicUsize::new(0),
+            spare: crate::fiber::Spare::default(),
             readies,
             funding,
             units: AtomicUsize::new(1),
@@ -525,11 +534,63 @@ impl Pool {
         self.readies.wake_poller();
     }
 
+    /// Wake one parked worker for newly stealable work, as Tokio's
+    /// `notify_parked` does. The fence pairs with `sleep`'s.
+    fn notify_one(&self) {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.sleeping.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        let sleeper = self.sleepers.lock().unwrap().pop();
+        if let Some(index) = sleeper {
+            self.sleeping.fetch_sub(1, Ordering::SeqCst);
+            if let Some(thread) = self.threads[index].get() {
+                thread.unpark();
+            }
+        }
+    }
+
+    /// Register before the last look at stealable work, so a publisher that
+    /// misses the work's consumer finds it here instead.
+    fn sleep(&self, index: usize) {
+        let mut sleepers = self.sleepers.lock().unwrap();
+        if !sleepers.contains(&index) {
+            sleepers.push(index);
+            self.sleeping.fetch_add(1, Ordering::SeqCst);
+        }
+        drop(sleepers);
+        std::sync::atomic::fence(Ordering::SeqCst);
+    }
+
+    fn wake(&self, index: usize) {
+        let mut sleepers = self.sleepers.lock().unwrap();
+        if let Some(at) = sleepers.iter().position(|&i| i == index) {
+            sleepers.swap_remove(at);
+            self.sleeping.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn has_work(&self, index: usize) -> bool {
+        let own = self.queues[index].lock().unwrap();
+        if !own.pinned.is_empty()
+            || !own.deferred.is_empty()
+            || own.lifo.is_some()
+            || !own.local.is_empty()
+        {
+            return true;
+        }
+        drop(own);
+        !self.injector.lock().unwrap().is_empty()
+            || self.queues.iter().any(|queue| {
+                let queue = queue.lock().unwrap();
+                !queue.local.is_empty() || queue.lifo.is_some()
+            })
+    }
+
     fn publish(&self, source: usize, deliveries: &mut Vec<Delivery>) {
         if deliveries.is_empty() {
             return;
         }
-        let mut unpinned = false;
         for delivery in deliveries.drain(..) {
             if let Some(worker) = delivery.worker {
                 let mut queue = self.queues[worker].lock().unwrap();
@@ -543,8 +604,8 @@ impl Pool {
                     thread.unpark();
                 }
             } else {
-                unpinned = true;
                 let mut queue = self.queues[source].lock().unwrap();
+                queue.lifo_seen = false;
                 if let Some(previous) = queue.lifo.replace(delivery.task) {
                     if queue.local.len() >= LOCAL_QUEUE {
                         let mut injector = self.injector.lock().unwrap();
@@ -552,13 +613,11 @@ impl Pool {
                     }
                     queue.local.push_back(previous);
                 }
+                drop(queue);
+                self.notify_one();
             }
         }
-        if unpinned {
-            self.wake_workers();
-        } else {
-            self.readies.wake_poller();
-        }
+        self.readies.wake_poller();
     }
 
     fn pop(&self, index: usize) -> Option<TaskPtr> {
@@ -584,12 +643,19 @@ impl Pool {
                 self.queues[index].lock().unwrap().local.extend(batch);
                 return Some(first);
             }
-            if let Some(task) = victim.lifo.take() {
-                #[cfg(feature = "testing")]
-                if self.measure {
-                    self.sample.stolen.fetch_add(1, Ordering::Relaxed);
+            // A LIFO task usually runs next on its own worker, which keeps
+            // a spawn-and-join child local. It becomes stealable once a thief
+            // has passed it over, so a busy owner cannot strand it.
+            if victim.lifo.is_some() {
+                if victim.lifo_seen {
+                    #[cfg(feature = "testing")]
+                    if self.measure {
+                        self.sample.stolen.fetch_add(1, Ordering::Relaxed);
+                    }
+                    victim.lifo_seen = false;
+                    return victim.lifo.take();
                 }
-                return Some(task);
+                victim.lifo_seen = true;
             }
         }
         None
@@ -2483,11 +2549,13 @@ pub unsafe fn checkpoint() {
     }
 }
 
+/// The returned guard keeps the resumed commit through the caller's retry,
+/// so a woken waiter rechecks its condition without a second acquisition.
 /// # Safety
 /// The active task owns the commit and holds the condition's owner alive
 /// across suspension. No references to scheduler/task state survive the switch.
-pub(crate) unsafe fn park(queue: *mut Waiters) {
-    let _commit = crate::sequencer::enter();
+pub(crate) unsafe fn park(queue: *mut Waiters) -> crate::sequencer::Guard {
+    let commit = crate::sequencer::enter();
     let task = CURRENT.get();
     // SAFETY: the condition was checked in this commit and the queue is pinned.
     unsafe {
@@ -2497,6 +2565,7 @@ pub(crate) unsafe fn park(queue: *mut Waiters) {
             switch_to_idle(task);
         }
     }
+    commit
 }
 
 /// # Safety
@@ -2583,6 +2652,7 @@ pub unsafe extern "C" fn hirsel_core_check_cancel(context: *mut Context, site: u
 
 unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
     let task = first.cast::<Task>();
+    crate::sequencer::release_handed();
     // SAFETY: start owns this fiber. The body cleans its input/temporaries;
     // its result is initialized only on status zero.
     unsafe {
@@ -2591,9 +2661,12 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
             (*task).result.as_ptr(),
             (*task).input.as_ptr(),
         );
-        if (*task).record.is_some() {
+        // The hand-over and END share one hold of the token.
+        let _handover = (*task).record.is_some().then(|| {
+            let commit = crate::sequencer::enter();
             abi::task_handover((*task).context);
-        }
+            commit
+        });
         let _commit = before_commit();
         record_event(task, END, (*task).id, (*task).failed as u64);
         (*task).state = State::Ended;
@@ -2937,7 +3010,7 @@ impl RunPtr {
                     }
                     let Some(task) = pool.pop((*worker).index) else {
                         drop(commit);
-                        self.park_worker(pool, root);
+                        self.park_worker(pool, root, (*worker).index);
                         continue;
                     };
                     let domain = &pool.domains[&(*task.0).domain];
@@ -2954,15 +3027,17 @@ impl RunPtr {
                 CURRENT.set(task);
                 abi::task_resume((*task).context);
                 crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
-                drop(commit);
-                hirsel_stack::switch(&raw mut (*worker).idle, (*task).sp);
+                crate::sequencer::to_fiber(commit, || {
+                    hirsel_stack::switch(&raw mut (*worker).idle, (*task).sp);
+                });
                 crate::fiber::guard((0, 0));
                 let commit = crate::sequencer::enter();
                 crate::limit::Funding::unbind();
                 CURRENT.set(ptr::null_mut());
+                let mut ended = None;
                 match (*task).state {
                     State::Ended => {
-                        (*worker).stock.recycle((*task).stack.take().unwrap());
+                        ended = (*task).stack.take();
                         if task == root.0 {
                             pool.wake_workers();
                         }
@@ -2973,9 +3048,14 @@ impl RunPtr {
                 // The outgoing active unit is live across release. This
                 // publishes every receiver's already-counted hand-off first.
                 drop(commit);
+                // The worker-private stock unmaps an excess stack outside the commit.
+                if let Some(stack) = ended {
+                    (*worker).stock.recycle_shared(stack, &pool.spare);
+                }
+                // Retiring the unit after publication needs no commit: a peer's
+                // quiescence check that reads zero also sees every counted delivery.
                 if direct.is_null() {
-                    let _commit = crate::sequencer::enter();
-                    pool.units.fetch_sub(1, Ordering::Relaxed);
+                    pool.units.fetch_sub(1, Ordering::Release);
                 }
             }
         }
@@ -2983,20 +3063,27 @@ impl RunPtr {
 
     /// # Safety
     /// The caller is a registered worker and owns none of the run's locks.
-    unsafe fn park_worker(self, pool: &Pool, root: TaskPtr) {
+    unsafe fn park_worker(self, pool: &Pool, root: TaskPtr, index: usize) {
+        pool.sleep(index);
+        if pool.has_work(index) {
+            pool.wake(index);
+            return;
+        }
         // SAFETY: recheck under registry exclusion then the residual lock.
         let (deadline, poller) = unsafe {
             let _registry = pool.registry.lock().unwrap();
             let _commit = crate::sequencer::enter();
             let run = &mut *self.0;
             if (*root.0).state == State::Ended {
+                pool.wake(index);
                 return;
             }
             let deadline = run.timers.as_ref().and_then(|task| task.timer_deadline);
             if run.readies.pending.load(Ordering::Acquire) {
+                pool.wake(index);
                 return;
             }
-            if pool.units.load(Ordering::Relaxed) == 0
+            if pool.units.load(Ordering::Acquire) == 0
                 && pool.domains.values().all(|domain| {
                     domain.ready.load(Ordering::Relaxed) == 0
                         && domain.handoffs.load(Ordering::Relaxed) == 0
@@ -3033,6 +3120,7 @@ impl RunPtr {
         } else {
             std::thread::park();
         }
+        pool.wake(index);
     }
 }
 
@@ -3055,6 +3143,7 @@ struct Spawned {
 /// Layout is emitter-produced. Input is initialized X and moves only on success;
 /// body consumes it and initializes R only on success. Handle stays with parent.
 unsafe fn spawn_in(
+    stack: &mut Option<Stack>,
     context: *mut Context,
     bytes: u64,
     input: *mut u8,
@@ -3105,7 +3194,7 @@ unsafe fn spawn_in(
             state: State::Ready,
             id,
             group: group.map(|group| group.child()),
-            stack: Some((*worker_stock(run)).take()),
+            stack: stack.take(),
             sp: ptr::null_mut(),
             body,
             input: Storage::new(layout.input.bytes, layout.input.align),
@@ -3171,6 +3260,38 @@ pub unsafe extern "C" fn hirsel_core_spawn(
 ) -> Spawn {
     // SAFETY: generated operands belong to the active parent and run.
     unsafe {
+        // The stock is worker-private, so a fresh stack is mapped outside the
+        // commit, and a refused spawn returns it after release.
+        let stock = worker_stock((*CURRENT.get()).run);
+        let worker = WORKER.get();
+        let mut stack = Some(if worker.is_null() {
+            (*stock).take()
+        } else {
+            (*stock).take_shared(&(*(*worker).pool).spare)
+        });
+        let spawn = spawn_committed(context, tasks, bytes, input, body, layout, site, &mut stack);
+        if let Some(stack) = stack {
+            (*stock).recycle(stack);
+        }
+        spawn
+    }
+}
+
+/// # Safety
+/// As for `hirsel_core_spawn`; stack is taken only by a successful spawn.
+#[allow(clippy::too_many_arguments)]
+unsafe fn spawn_committed(
+    context: *mut Context,
+    tasks: u64,
+    bytes: u64,
+    input: *mut u8,
+    body: Body,
+    layout: TaskLayout,
+    site: u64,
+    stack: &mut Option<Stack>,
+) -> Spawn {
+    // SAFETY: the caller passes its generated operands through unchanged.
+    unsafe {
         let _commit = crate::sequencer::enter();
         let group = if tasks & crate::host_file::DYNAMIC_GRANT != 0 {
             (*(*context).host_files).registry.grant_group(tasks)
@@ -3190,7 +3311,7 @@ pub unsafe extern "C" fn hirsel_core_spawn(
                 status: 1,
             };
         }
-        let spawned = spawn_in(context, bytes, input, body, layout, group);
+        let spawned = spawn_in(stack, context, bytes, input, body, layout, group);
         Spawn {
             task: spawned.task,
             available: spawned.available,
@@ -3265,6 +3386,7 @@ pub unsafe extern "C" fn hirsel_core_join(
 ) -> Join {
     // SAFETY: parent owns task throughout waits, no references survive switches.
     unsafe {
+        let mut _resumed = None;
         let _commit = loop {
             let commit = before_commit();
             if check_cancel(context, site) != 0 {
@@ -3277,7 +3399,7 @@ pub unsafe extern "C" fn hirsel_core_join(
             if (*task).state == State::Ended {
                 break commit;
             }
-            park(&raw mut (*task).waiters);
+            _resumed = Some(park(&raw mut (*task).waiters));
         };
         let failed = (*task).failed != 0;
         let causes = std::mem::take(&mut (*(*task).context).causes);
@@ -3304,12 +3426,13 @@ unsafe fn abandon_begin(context: *mut Context, task: *mut Task) -> *mut crate::c
     unsafe {
         (*context).cancel_shield += 1;
         hirsel_core_cancel(context, task);
+        let mut _resumed = None;
         loop {
             let _commit = before_commit();
             if (*task).state == State::Ended {
                 break;
             }
-            park(&raw mut (*task).waiters);
+            _resumed = Some(park(&raw mut (*task).waiters));
         }
         event(JOIN, (*task).id, 2);
         (*task).cursor = 0;

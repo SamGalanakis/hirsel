@@ -147,7 +147,8 @@ taskset -c 0-11,16-27 ./bench/multicore/run.py --test-pool \
 ```
 
 The sequencer reports time holding its token and time from publication to
-acquisition on queued hand-offs. Divide their sums by token acquisitions
+acquisition on queued hand-offs. It also counts the queued hand-offs whose predecessor
+released on another L3 cache and their time. Divide their sums by token acquisitions
 for cost per acquisition, and by twice the fan-in item count for cost per
 channel commit including scheduler work. Channel wakes count waiting fibers
 made runnable by sends and receives. The pool reports stolen queue entries

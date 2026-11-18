@@ -541,6 +541,88 @@ fn http_stream_lease(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     route_wire(n, c, addr, string.as_bytes("GET /live HTTP/1.1\r\nHost: a\r\n\r\n"), 200, "", "", string.as_bytes("3\r\n:\n\n\r\n3\r\n:\n\n\r\n0\r\n\r\n"))
 }
 
+type AssetServer: send {
+    listener: Listener,
+    c: Clock,
+    tasks: Tasks,
+    entries: assets.Manifest
+}
+
+fn asset_reply(req: http.Request, scratch: Region, mut out: http.Responder, state: assets.Manifest) -> Result[http.Outcome, http.HandlerError] {
+    Ok(Reply(assets.respond(req, state)?))
+}
+
+fn serve_asset_law(take job: AssetServer) waits {
+    let AssetServer(listener: take listener, c: clock, tasks: tasks, entries: take state) = take job
+    let mut listeners: List[Listener] = result.unwrap(list.with_capacity(1))
+    result.unwrap(list.push(mut listeners, take listener))
+    let mut routes: router.Builder[assets.Manifest] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/{path...}", router.raw(asset_reply)))
+    let mut cfg = test_config()
+    cfg.out_cap = 512
+    result.unwrap(http.serve(take listeners, clock, tasks, take cfg, result.unwrap(router.build(take routes)), take state))
+}
+
+fn gzip_hello() -> Bytes {
+    result.unwrap(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xcb\x48\xcd\xc9\xc9\x07\x00\x86\xa6\x10\x36\x05\x00\x00\x00")
+}
+
+fn identity_tag() -> String {
+    "\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\""
+}
+
+fn gzip_tag() -> String {
+    "\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\""
+}
+
+fn asset_manifest() -> assets.Manifest {
+    let identity = result.unwrap(assets.representation(Identity, result.unwrap(b"hello"), result.unwrap(string.from(identity_tag()))))
+    let gzip = result.unwrap(assets.representation(Gzip, gzip_hello(), result.unwrap(string.from(gzip_tag()))))
+    let mut formats: List[assets.Representation] = result.unwrap(list.with_capacity(2))
+    result.unwrap(list.push(mut formats, take identity))
+    result.unwrap(list.push(mut formats, take gzip))
+    let mut names: List[String] = result.unwrap(list.with_capacity(1))
+    result.unwrap(list.push(mut names, result.unwrap(string.from("index.html"))))
+    let item = assets.Entry(path: take names, fingerprint: result.unwrap(string.from("index-2cf24dba.html")), media_type: result.unwrap(string.from("text/html")), formats: take formats)
+    let mut entries: List[assets.Entry] = result.unwrap(list.with_capacity(1))
+    result.unwrap(list.push(mut entries, take item))
+    assets.manifest(take entries)
+}
+
+fn asset_field(raw: Bytes, h: http1.Head, name: String, expected: String) -> bool {
+    for i in 0u64 .. h.count {
+        let f = h.fields[i]
+        if http1.equal_ascii(list.slice(raw, f.name.start, f.name.end), string.as_bytes(name)) {
+            return list.slice(raw, f.value.start, f.value.end) == string.as_bytes(expected)
+        }
+    }
+    expected == ""
+}
+
+fn asset_wire(n: Net, c: Clock, addr: Addr, request: String, status: u16, tag: String, cache: String, coding: String, length: String, payload: Bytes) -> bool waits {
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut input = take r
+    let mut output = take w
+    let until = At(c, after_ms(host.mono_ns(c), 90))
+    let mut received: Bytes = result.unwrap(list.with_capacity(768))
+    if !client_send(mut output, string.as_bytes(request), until) || !client_end(mut input, mut received, until) {
+        return false
+    }
+    let mut h = http1.head()
+    http1.response(received, mut h) == Complete && h.status == status && asset_field(received, h, "ETag", tag) && asset_field(received, h, "Cache-Control", cache) && asset_field(received, h, "Content-Encoding", coding) && asset_field(received, h, "Content-Length", length) && asset_field(received, h, "Vary", "Accept-Encoding") && list.slice(received, h.end, list.len(received)) == payload
+}
+
+// HTTP-14. The gzip tag validates only gzip, while the original name is
+// revalidated and the fingerprinted alias is immutable. HEAD does not send
+// the representation body and Range does not change GET's status or bytes.
+// expect: run http_asset_validators(network) = true
+fn http_asset_validators(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let job = AssetServer(listener: take listener, c: c, tasks: tasks, entries: asset_manifest())
+    let server = result.unwrap(task.spawn(tasks, bytes 262144, take job, serve_asset_law))
+    asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nRange: bytes=0-1\r\n\r\n", 200, identity_tag(), "no-cache", "", "5", string.as_bytes("hello")) && asset_wire(n, c, addr, "GET /index-2cf24dba.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: \"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\"\r\n\r\n", 200, gzip_tag(), "public, max-age=31536000, immutable", "gzip", "25", gzip_hello()) && asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: W/\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\"\r\n\r\n", 304, gzip_tag(), "no-cache", "gzip", "", string.as_bytes("")) && asset_wire(n, c, addr, "HEAD /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip;q=0\r\n\r\n", 200, identity_tag(), "no-cache", "", "5", string.as_bytes(""))
+}
+
 // L5. When ignoring a one-byte body the next head is preserved. An unread
 // 24-byte body is over the 16-byte drain limit. An invalid chunk caught by the
 // handler also closes, even though the handler returns a 200.

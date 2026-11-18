@@ -1,0 +1,290 @@
+pub type Coding: key + send = Identity | Gzip | Brotli
+
+pub opaque type Representation: shareable + send {
+    coding: Coding,
+    body: Arc[Bytes],
+    etag: String
+}
+
+pub fn representation(coding: Coding, take body: Bytes, take etag: String) -> Result[Representation, Capacity] {
+    let stored = result.capacity_only(arc.new(take body))?
+    Ok(Representation(coding: coding, body: take stored, etag: take etag))
+}
+
+pub type Entry: shareable + send {
+    path: List[String],
+    fingerprint: String,
+    media_type: String,
+    formats: List[Representation]
+}
+
+pub opaque type Manifest: shareable + send {
+    entries: List[Entry]
+}
+
+pub fn manifest(take entries: List[Entry]) -> Manifest {
+    Manifest(entries: take entries)
+}
+
+fn name_kind(item: Entry, requested: List[String]) -> u8 {
+    let n = list.len(requested)
+    if n == 0 || n != list.len(item.path) {
+        return 0
+    }
+    for i in 0u64 .. n - 1 {
+        if requested[i] != item.path[i] {
+            return 0
+        }
+    }
+    if requested[n - 1] == item.fingerprint {
+        2
+    } else if requested[n - 1] == item.path[n - 1] {
+        1
+    } else {
+        0
+    }
+}
+
+type Qualities {
+    identity: Option[u16],
+    gzip: Option[u16],
+    brotli: Option[u16],
+    wildcard: Option[u16]
+}
+
+fn ows(c: u8) -> bool {
+    c == b' ' || c == b'\t'
+}
+
+fn trim(raw: Bytes) -> View[Bytes] in raw {
+    let mut from: u64 = 0
+    let mut end = list.len(raw)
+    while from < end && ows(raw[from]) {
+        from += 1
+    }
+    while from < end && ows(raw[end - 1]) {
+        end -= 1
+    }
+    list.slice(raw, from, end)
+}
+
+fn weight(parameter: Bytes) -> Option[u16] {
+    let p = trim(parameter)
+    let n = list.len(p)
+    if n < 3 || n > 7 || (p[0] != b'q' && p[0] != b'Q') || p[1] != b'=' || (p[2] != b'0' && p[2] != b'1') {
+        return None
+    }
+    let whole = p[2] == b'1'
+    let mut value: u16 = if whole {
+        1000
+    } else {
+        0
+    }
+    if n == 3 {
+        return Some(value)
+    }
+    if p[3] != b'.' {
+        return None
+    }
+    let mut factor: u16 = 100
+    for i in 4u64 .. n {
+        let digit = p[i]
+        if !int.is_ascii_digit(digit) || whole && digit != b'0' {
+            return None
+        }
+        let d: u16 = int.widen(digit - b'0')
+        value += factor * d
+        factor /= 10
+    }
+    Some(value)
+}
+
+fn higher(current: Option[u16], proposed: u16) -> Option[u16] {
+    match current {
+        Some(existing) => Some(order.max(existing, proposed)),
+        None => Some(proposed),
+    }
+}
+
+fn accept(mut q: Qualities, raw: Bytes) {
+    let n = list.len(raw)
+    let mut from: u64 = 0
+    while from < n {
+        let mut end = from
+        while end < n && raw[end] != b',' {
+            end += 1
+        }
+        let mut semicolon = from
+        while semicolon < end && raw[semicolon] != b';' {
+            semicolon += 1
+        }
+        let coding = trim(list.slice(raw, from, semicolon))
+        let item = if semicolon == end {
+            Some(1000u16)
+        } else {
+            weight(list.slice(raw, semicolon + 1, end))
+        }
+        if let Some(amount) = item {
+            if http1.equal_ascii(coding, string.as_bytes("gzip")) {
+                q.gzip = higher(q.gzip, amount)
+            } else if http1.equal_ascii(coding, string.as_bytes("br")) {
+                q.brotli = higher(q.brotli, amount)
+            } else if http1.equal_ascii(coding, string.as_bytes("identity")) {
+                q.identity = higher(q.identity, amount)
+            } else if coding == string.as_bytes("*") {
+                q.wildcard = higher(q.wildcard, amount)
+            }
+        }
+        from = end + 1
+    }
+}
+
+fn qualities(req: http.Request) -> Qualities {
+    let mut q = Qualities(identity: None, gzip: None, brotli: None, wildcard: None)
+    let name = string.as_bytes("Accept-Encoding")
+    let mut i: u64 = 0
+    while let Some(raw) = http.field_at(req, name, i) {
+        accept(mut q, raw)
+        i += 1
+    }
+    q
+}
+
+fn assigned(q: Option[u16], fallback: u16) -> u16 {
+    match q {
+        Some(value) => value,
+        None => fallback,
+    }
+}
+
+fn quality(q: Qualities, coding: Coding) -> (u16, u8) {
+    let any = assigned(q.wildcard, 0)
+    match coding {
+        Identity => (assigned(q.identity, if q.wildcard == Some(0u16) {
+            0
+        } else {
+            1000
+        }), 0u8),
+        Gzip => (assigned(q.gzip, any), 1u8),
+        Brotli => (assigned(q.brotli, any), 2u8),
+    }
+}
+
+fn choose(item: Entry, q: Qualities) -> Option[View[Representation]] in item {
+    let n = list.len(item.formats)
+    let mut best = n
+    let mut highest: u16 = 0
+    let mut priority: u8 = 0
+    for i in 0u64 .. n {
+        let (value, prefer) = quality(q, item.formats[i].coding)
+        if value > highest || value != 0 && value == highest && prefer > priority {
+            best = i
+            highest = value
+            priority = prefer
+        }
+    }
+    list.get(item.formats, best)
+}
+
+fn matches_tag(raw: Bytes, expected: Bytes) -> bool {
+    let input = trim(raw)
+    if input == string.as_bytes("*") {
+        return true
+    }
+    let mut at: u64 = 0
+    let n = list.len(input)
+    while at < n {
+        if ows(input[at]) || input[at] == b',' {
+            at += 1
+            continue
+        }
+        if n - at >= 2 && input[at] == b'W' && input[at + 1] == b'/' {
+            at += 2
+        }
+        if at == n || input[at] != b'"' {
+            return false
+        }
+        let from = at
+        at += 1
+        while at < n && input[at] != b'"' {
+            at += 1
+        }
+        if at == n {
+            return false
+        }
+        at += 1
+        let matched = list.slice(input, from, at) == expected
+        while at < n && ows(input[at]) {
+            at += 1
+        }
+        if at != n && input[at] != b',' {
+            return false
+        }
+        if matched {
+            return true
+        }
+    }
+    false
+}
+
+fn unchanged(req: http.Request, etag: String) -> bool {
+    let name = string.as_bytes("If-None-Match")
+    let expected = string.as_bytes(etag)
+    let mut i: u64 = 0
+    while let Some(raw) = http.field_at(req, name, i) {
+        if matches_tag(raw, expected) {
+            return true
+        }
+        i += 1
+    }
+    false
+}
+
+fn owned(s: String) -> Result[Bytes, http.HandlerError] {
+    match http.copy_bytes(string.as_bytes(s)) {
+        Ok(take b) => Ok(take b),
+        Error(e) => Error(Allocation(e)),
+    }
+}
+
+fn field(mut reply: http.Response, name: String, value: String) -> Result[(), http.HandlerError] {
+    http.header(mut reply, owned(name)?, owned(value)?)
+}
+
+fn file_reply(req: http.Request, item: Entry, immutable: bool) -> Result[http.Response, http.HandlerError] {
+    let Some(selected) = choose(item, qualities(req)) else {
+        let mut unavailable = http.response(406, list.new(), false)?
+        field(mut unavailable, "Vary", "Accept-Encoding")?
+        return Ok(take unavailable)
+    }
+    let mut reply = if unchanged(req, selected.etag) {
+        http.response(304, list.new(), false)?
+    } else {
+        http.response_shared(200, arc.share(selected.body), false)?
+    }
+    field(mut reply, "ETag", selected.etag)?
+    field(mut reply, "Content-Type", item.media_type)?
+    field(mut reply, "Vary", "Accept-Encoding")?
+    field(mut reply, "Cache-Control", if immutable {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    })?
+    match selected.coding {
+        Identity => {},
+        Gzip => field(mut reply, "Content-Encoding", "gzip")?,
+        Brotli => field(mut reply, "Content-Encoding", "br")?,
+    }
+    Ok(take reply)
+}
+
+pub fn respond(req: http.Request, files: Manifest) -> Result[http.Response, http.HandlerError] {
+    let path = http.segments(req)
+    for item in files.entries {
+        let kind = name_kind(item, path)
+        if kind != 0 {
+            return file_reply(req, item, kind == 2)
+        }
+    }
+    http.response(404, list.new(), false)
+}

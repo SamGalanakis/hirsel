@@ -17,10 +17,12 @@ type ResponseField: send {
     value: Bytes
 }
 
+type ResponseBody: send = OwnedBody(Bytes) | SharedBody(Arc[Bytes])
+
 pub opaque type Response: send {
     status: u16,
     fields: List[ResponseField],
-    body: Bytes,
+    body: ResponseBody,
     close: bool,
     invalid: bool
 }
@@ -31,10 +33,25 @@ pub type HandlerError = ResponseError
 
 /// Builds a final response. Only the connection may send informational statuses.
 pub fn response(status: u16, take body: Bytes, close: bool) -> Result[Response, ResponseError] {
+    response_with(status, OwnedBody(take body), close)
+}
+
+pub fn response_shared(status: u16, take body: Arc[Bytes], close: bool) -> Result[Response, ResponseError] {
+    response_with(status, SharedBody(take body), close)
+}
+
+fn response_with(status: u16, take body: ResponseBody, close: bool) -> Result[Response, ResponseError] {
     if status < 200 || status > 599 {
         return Error(StatusInvalid)
     }
     Ok(Response(status: status, fields: list.new(), body: take body, close: close, invalid: false))
+}
+
+fn response_body(r: Response) -> View[Bytes] in r {
+    match r.body {
+        OwnedBody(data) => view data,
+        SharedBody(data) => list.slice(data, 0, list.len(data)),
+    }
 }
 
 fn reserved_field(name: Bytes) -> bool {
@@ -224,6 +241,9 @@ fn reason(status: u16) -> String {
     if status == 405 {
         return "Method Not Allowed"
     }
+    if status == 406 {
+        return "Not Acceptable"
+    }
     ""
 }
 
@@ -257,7 +277,7 @@ fn response_head(mut out: Bytes, r: Response, version: u8, close: bool, wall_ms:
     }
     if has_body(r.status) {
         head_text(mut out, "Content-Length: ")?
-        decimal(mut out, list.len(r.body), 1)?
+        decimal(mut out, list.len(response_body(r)), 1)?
         head_text(mut out, "\r\n")?
     }
     if close {
@@ -692,16 +712,27 @@ pub fn query(r: Request) -> View[Bytes] in r {
 }
 
 pub fn field(r: Request, name: Bytes) -> Option[View[Bytes]] in r {
+    field_at(r, name, 0)
+}
+
+pub fn field_at(r: Request, name: Bytes, index: u64) -> Option[View[Bytes]] in r {
     if http1.equal_ascii(name, string.as_bytes("host")) {
+        if index != 0 {
+            return None
+        }
         return match r.meta.authority {
             Some(s) => Some(part(r.input, s)),
             None => None,
         }
     }
+    let mut remaining = index
     for i in 0u64 .. r.head.count {
         let f = r.head.fields[i]
         if http1.equal_ascii(part(r.input, f.name), name) {
-            return Some(part(r.input, f.value))
+            if remaining == 0 {
+                return Some(part(r.input, f.value))
+            }
+            remaining -= 1
         }
     }
     None
@@ -1120,11 +1151,12 @@ fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress
     if suppress || !has_body(r.status) {
         return FinalReply(write_succeeded(write_wire(mut b.writer, out, string.as_bytes(""), b.clock, write_end)))
     }
-    if list.len(r.body) <= list.capacity(out) - list.len(out) {
-        let _ = list.append(mut out, r.body)
+    let payload = response_body(r)
+    if list.len(payload) <= list.capacity(out) - list.len(out) {
+        let _ = list.append(mut out, payload)
         return FinalReply(write_succeeded(write_wire(mut b.writer, out, string.as_bytes(""), b.clock, write_end)))
     }
-    FinalReply(write_succeeded(write_wire(mut b.writer, out, r.body, b.clock, write_end)))
+    FinalReply(write_succeeded(write_wire(mut b.writer, out, payload, b.clock, write_end)))
 }
 
 fn route_response[S: shareable + send](routes: router.Router[S], decoded: List[String], options_star: bool) -> Result[Response, HandlerError] {

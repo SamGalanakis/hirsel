@@ -1682,12 +1682,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
     /// How a value of `ty` is carried in this body.
     fn rep(&mut self, ty: TyId) -> Result<Rep, &'static str> {
-        if let Some(&r) = self.reps.get(&ty) {
-            return r;
+        if let Some(scalar) = scalar_kind(ty) {
+            return Ok(Rep::Scalar(Ty::Scalar(scalar)));
         }
-        let r = self.e.rep(self.p, &mut self.t, ty);
-        self.reps.insert(ty, r);
-        r
+        *self
+            .reps
+            .entry(ty)
+            .or_insert_with(|| self.e.rep(self.p, &mut self.t, ty))
     }
     /// How a value of `ty` is carried, or the gap that says why it is not built: an
     /// emit step never ends on a representation without naming it (FORM #120).

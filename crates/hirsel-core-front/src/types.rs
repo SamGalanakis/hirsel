@@ -291,7 +291,11 @@ pub const ERROR: TyId = TyId(0);
 pub const NEVER: TyId = TyId(1);
 pub const UNIT: TyId = TyId(2);
 pub fn scalar(s: Scalar) -> TyId {
-    TyId(3 + Scalar::ALL.iter().position(|&x| x == s).unwrap() as u32)
+    TyId(BOOL.0 + Scalar::ALL.iter().position(|&x| x == s).unwrap() as u32)
+}
+/// The fixed scalar identities assigned by `Types::new`.
+pub(crate) fn scalar_kind(ty: TyId) -> Option<Scalar> {
+    Scalar::ALL.get(ty.0.wrapping_sub(BOOL.0) as usize).copied()
 }
 pub const BOOL: TyId = TyId(3);
 pub const HOLE: TyId = TyId(3 + Scalar::ALL.len() as u32);

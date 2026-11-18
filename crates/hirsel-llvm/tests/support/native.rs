@@ -382,6 +382,11 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
             .args(["-Xlinker", "-rpath", "-Xlinker"])
             .arg(&runtime);
     }
+    for symbol in ["hirsel_core_free_value", "hirsel_core_block_payer"] {
+        if bindings.contains(&format!("__wrap_{symbol}")) {
+            compiler.arg(format!("-Wl,--wrap={symbol}"));
+        }
+    }
     output(
         compiler
             .args(["-std=c11", "-O0", "-fPIC", "-pie", "-Wl,-z,text", "-I"])

@@ -1,0 +1,15 @@
+type Node {
+    a: u64,
+    b: u64,
+    c: u64
+}
+
+fn sum(n: u64) -> u64 {
+    let node = result.unwrap(box.new(Node(a: n, b: n + 1, c: n + 2)));
+    node.a + node.b + node.c
+}
+
+fn twice() -> u64 {
+    sum(3) + sum(7)
+}
+// expect: run twice() = 36

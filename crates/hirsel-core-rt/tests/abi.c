@@ -16,17 +16,15 @@ int main(void) {
     assert(*room == 2048);
     assert(hirsel_core_task_start(context).pointer);
     assert(*room == 1760);
-    /* Exact emitted own sequence: admission, native allocator, payer store. */
+    /* Exact emitted own sequence: admission followed by page allocation. */
     uint64_t *outstanding = (uint64_t *)((unsigned char *)limit + HIRSEL_CORE_LIMIT_OUTSTANDING);
     assert(*room >= 8);
     *room -= 8; *outstanding += 8;
-    unsigned char *base = hirsel_core_native_alloc(16, 8);
-    *(void **)base = limit;
-    uint64_t *inline_own = (uint64_t *)(base + HIRSEL_CORE_PLAIN_PREFIX_BYTES);
+    uint64_t *inline_own = hirsel_core_alloc_admitted(context, limit, 8, 8, HIRSEL_CORE_NATIVE_PLAIN);
+    assert(hirsel_core_block_payer(inline_own) == limit);
     *inline_own = 42;
     assert(*inline_own == 42);
-    hirsel_core_native_free(base);
-    hirsel_core_refund(limit, 8);
+    hirsel_core_free_value(context, inline_own, 8);
     assert(*room == 1760);
     HirselCoreAllocation entered = hirsel_core_limit_enter(context, 128);
     assert(entered.pointer);

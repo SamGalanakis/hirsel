@@ -1923,7 +1923,7 @@ impl Machine<'_> {
     }
     fn block(&mut self, size: u64, limit: Option<Limit>, charge: u64, res: Option<Res>) -> u64 {
         // An admitted block the host cannot provide is a run stop, as for
-        // `hirsel_core_native_alloc`, never `Capacity`: a refusal is the limit's
+        // `hirsel_core_alloc_admitted`, never `Capacity`: a refusal is the limit's
         // (give the run `limit N`).
         assert!(
             size <= HOST_BYTES,

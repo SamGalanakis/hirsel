@@ -415,9 +415,12 @@ mod tests {
         };
         let mut context = Context::new(128);
         let run = Run::start(&context);
-        let shared = block::allocate(context.payer(), Some(16), 16, 8, block::PLAIN).unwrap();
-        let unique = block::allocate(context.payer(), Some(16), 16, 8, block::PLAIN).unwrap();
-        let parent = block::allocate(context.payer(), Some(40), 48, 8, block::PLAIN).unwrap();
+        let shared =
+            block::allocate(&context, context.payer(), Some(16), 16, 8, block::PLAIN).unwrap();
+        let unique =
+            block::allocate(&context, context.payer(), Some(16), 16, 8, block::PLAIN).unwrap();
+        let parent =
+            block::allocate(&context, context.payer(), Some(40), 48, 8, block::PLAIN).unwrap();
         // SAFETY: initialize fresh counted storage and transfer three shared
         // holders and the only unique holder into the four-field parent.
         unsafe {
@@ -432,13 +435,12 @@ mod tests {
                 fields.add(i).write(child.as_ptr());
             }
         }
-        // Charges are 16+16+40. Each prefix adds 8 native bytes, and the
-        // parent's spare word 8 more, uncharged.
+        // Charges are 16+16+40. The parent's spare word adds eight native bytes.
         assert_eq!(
             figures(),
             Figures {
                 charged: 72,
-                retained: 104,
+                retained: 80,
                 slack: 0
             }
         );
@@ -452,7 +454,7 @@ mod tests {
             figures(),
             Figures {
                 charged: 16,
-                retained: 24,
+                retained: 16,
                 slack: 0
             }
         );
@@ -476,14 +478,14 @@ mod tests {
             figures(),
             Figures {
                 charged: 48,
-                retained: 25 + 65,
+                retained: 24 + 64,
                 slack: 0
             }
         );
         context.limit_enter(200).unwrap();
         let survivor = crate::block::Block::new(&context, Some(24), 17, 8).unwrap();
         assert_eq!(figures().charged, 248);
-        assert_eq!(figures().retained, 115);
+        assert_eq!(figures().retained, 112);
         context.limit_exit();
         assert_eq!(figures().charged, 72);
         drop((plain, graph, survivor));
@@ -554,7 +556,8 @@ mod tests {
         for kind in [crate::block::PLAIN, crate::block::GRAPH] {
             let context = Context::new(4096);
             let run = Run::start(&context);
-            let old = crate::block::allocate(context.payer(), Some(1024), 1024, 8, kind).unwrap();
+            let old = crate::block::allocate(&context, context.payer(), Some(1024), 1024, 8, kind)
+                .unwrap();
             let mut carrier = [old.as_ptr().addr() as u64, 1, 1024];
             // SAFETY: exclusive live sequence backing and carrier, exact charges
             // and initialized prefix; the byte to transfer is initialized here.
@@ -575,12 +578,16 @@ mod tests {
                 .unwrap()
             };
             assert_eq!(carrier, [replacement.as_ptr().addr() as u64, 1, 2048]);
-            let prefix = crate::block::prefix(kind) as u64;
+            let (old_slot, new_slot) = if kind == crate::block::PLAIN {
+                (1024, 2048)
+            } else {
+                (1280, 2560)
+            };
             assert_eq!(
                 figures(),
                 Figures {
                     charged: 2048,
-                    retained: 2048 + prefix,
+                    retained: new_slot,
                     slack: 0
                 }
             );
@@ -595,47 +602,10 @@ mod tests {
             assert_eq!(LAST.get(), 3072);
             LAST_REPORT.with(|json| {
                 let json = json.borrow();
-                let expected = format!("\"peak_retained_bytes\":{}", 2048 + prefix);
+                let expected = format!("\"peak_retained_bytes\":{}", old_slot + new_slot);
                 assert!(json.contains(&expected));
             });
         }
-    }
-    #[test]
-    fn native_reallocation_replaces_one_backing_without_changing_charge() {
-        let context = Context::new(1000);
-        let run = Run::start(&context);
-        let base =
-            crate::allocator::allocate(std::alloc::Layout::from_size_align(2048, 8).unwrap());
-        // SAFETY: exclusive live native backing, ordinary alignment, valid grow.
-        let grown = unsafe {
-            base.as_ptr().write(42);
-            base.as_ptr().add(2047).write(91);
-            crate::allocator::reallocate_ordinary(base.as_ptr(), 4096)
-        };
-        // SAFETY: realloc preserves the complete old payload on success.
-        unsafe {
-            assert_eq!(grown.as_ptr().read(), 42);
-            assert_eq!(grown.as_ptr().add(2047).read(), 91);
-        }
-        assert_eq!(
-            figures(),
-            Figures {
-                charged: 0,
-                retained: 4096,
-                slack: 0
-            }
-        );
-        // SAFETY: the consumed old base is never freed, only its replacement.
-        unsafe {
-            crate::allocator::deallocate_raw(grown.as_ptr());
-        }
-        assert_eq!(figures(), Figures::default());
-        drop(run);
-        LAST_REPORT.with(|json| {
-            let json = json.borrow();
-            assert!(json.contains("\"peak_root_reserved_bytes\":0"));
-            assert!(json.contains("\"peak_retained_bytes\":4096"));
-        });
     }
     #[test]
     fn phase_peaks_reset_and_report_keeps_exact_labels_and_end_figures() {
@@ -680,7 +650,7 @@ mod tests {
             assert_eq!(figures().charged, 16 + 32 + 64);
             assert_eq!(
                 figures().retained,
-                32 + size_of::<crate::causes::Cell>() as u64
+                24 + size_of::<crate::causes::Cell>() as u64
                     + size_of::<crate::causes::Resource>() as u64
             );
             crate::causes::resource_free(resource, 16);
@@ -693,7 +663,7 @@ mod tests {
         let outer = Context::new(1000);
         let outer_run = Run::start(&outer);
         let block = crate::block::Block::new(&outer, Some(40), 40, 8).unwrap();
-        assert_eq!(figures().retained, 48);
+        assert_eq!(figures().retained, 40);
         let inner = Context::new(200);
         let inner_run = Run::start(&inner);
         drop(block);

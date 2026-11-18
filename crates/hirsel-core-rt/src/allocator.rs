@@ -3,14 +3,6 @@
 use std::alloc::Layout;
 use std::ptr::NonNull;
 #[inline]
-pub(crate) fn allocate(layout: Layout) -> NonNull<u8> {
-    let pointer = allocate_raw(layout);
-    #[cfg(any(test, feature = "charge-observation"))]
-    crate::peak::allocated(pointer.as_ptr(), layout.size());
-    pointer
-}
-
-#[inline]
 pub(crate) fn allocate_raw(layout: Layout) -> NonNull<u8> {
     // SAFETY: positive Layout, with the corresponding backend retained until free.
     let pointer = unsafe {
@@ -39,16 +31,6 @@ pub(crate) fn allocate_raw(layout: Layout) -> NonNull<u8> {
     NonNull::new(pointer).unwrap_or_else(|| crate::process::stop(b"HostMemory"))
 }
 /// # Safety
-/// Original native base, exclusively owned, allocated by this backend.
-#[inline]
-pub(crate) unsafe fn deallocate_raw(pointer: *mut u8) {
-    #[cfg(any(test, feature = "charge-observation"))]
-    crate::peak::deallocated(pointer);
-    // SAFETY: original base from this backend.
-    unsafe { deallocate_untracked(pointer) };
-}
-
-/// # Safety
 /// Original exclusively owned base from allocate_raw.
 #[inline]
 pub(crate) unsafe fn deallocate_untracked(pointer: *mut u8) {
@@ -63,31 +45,6 @@ pub(crate) unsafe fn deallocate_untracked(pointer: *mut u8) {
             libc::free(pointer.cast());
         }
     }
-}
-
-/// # Safety
-/// Exclusive ordinary-aligned live base from this backend and a valid positive
-/// native extent. A null result stops the run without releasing the old block.
-#[inline]
-pub(crate) unsafe fn reallocate_ordinary(base: *mut u8, bytes: usize) -> NonNull<u8> {
-    // SAFETY: caller supplies the allocator's original live ordinary base.
-    let raw = unsafe {
-        #[cfg(feature = "mimalloc")]
-        {
-            libmimalloc_sys::mi_realloc(base.cast(), bytes).cast()
-        }
-        #[cfg(not(feature = "mimalloc"))]
-        {
-            libc::realloc(base.cast(), bytes).cast()
-        }
-    };
-    let pointer = NonNull::new(raw).unwrap_or_else(|| crate::process::stop(b"HostMemory"));
-    #[cfg(any(test, feature = "charge-observation"))]
-    {
-        crate::peak::deallocated(base);
-        crate::peak::allocated(pointer.as_ptr(), bytes);
-    }
-    pointer
 }
 
 #[cfg(test)]

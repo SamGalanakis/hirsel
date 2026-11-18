@@ -168,10 +168,9 @@ fn own_fast_paths_and_zero_charge_and_large_alignment_fallbacks_agree() {
     wf::module(&module).unwrap();
     let mut cases = Vec::new();
     let on = emit_ir_with_facts(&module, false, true).unwrap();
-    assert!(on.contains("call nonnull ptr @hirsel_core_native_alloc_ordinary"));
-    assert!(on.contains("getelementptr inbounds i8"));
+    assert!(on.contains("call nonnull ptr @hirsel_core_alloc_admitted"));
     let off = emit_ir_with_facts(&module, false, false).unwrap();
-    assert!(off.contains("call ptr @hirsel_core_native_alloc_ordinary"));
+    assert!(off.contains("call ptr @hirsel_core_alloc_admitted"));
     assert!(!off.contains("nonnull"));
     assert!(!off.contains("inbounds"));
     for function in 0..7 {

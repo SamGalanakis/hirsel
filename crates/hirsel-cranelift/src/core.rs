@@ -102,7 +102,6 @@ pub(super) struct Tables<'a> {
     descriptors: &'a [Option<cranelift_module::DataId>],
     glues: &'a drop::Glues,
     task_entries: &'a task_entry::Glues,
-    allocators: &'a [fast::Allocator],
     trace_drops: bool,
     observe_charge: bool,
     debug: bool,
@@ -417,7 +416,6 @@ fn emit(
         drop::Glues::declare(&mut object, input, layouts)?
     };
     let task_entries = task_entry::Glues::declare(&mut object, input)?;
-    let allocators = fast::declare_allocators(&mut object, input, layouts)?;
     let tables = Tables {
         input,
         layouts,
@@ -427,7 +425,6 @@ fn emit(
         descriptors: &descriptors,
         glues: &glues,
         task_entries: &task_entries,
-        allocators: &allocators,
         trace_drops,
         observe_charge,
         debug: options.debug_lines,
@@ -469,9 +466,6 @@ fn emit(
     }
     glues.emit(&mut object, &tables, observer, &mut scratch)?;
     task_entries.emit(&mut object, &tables, observer, &mut scratch)?;
-    for allocator in &allocators {
-        fast::emit_allocator(&mut object, &tables, allocator, observer, &mut scratch)?;
-    }
     let _write = observer.enter("object_write");
     tables.site_constants.borrow().define(&mut object)?;
     let mut product = object.finish();

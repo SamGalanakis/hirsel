@@ -38,7 +38,7 @@ impl FunctionEmitter<'_> {
                 Predicate::Uge,
                 &i64,
                 &cap,
-                &int(GROW_REALLOC_MIN_PAYLOAD_BYTES.div_ceil(stride)),
+                &int(GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride)),
             );
             let native_label = Label::new("grow_native", n);
             let classic = Label::new("grow_classic", n);

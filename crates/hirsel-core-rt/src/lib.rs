@@ -36,6 +36,7 @@ mod retention;
 mod standalone_allocator;
 pub mod steps;
 pub mod tape;
+mod task_heap;
 pub mod tasks;
 #[cfg(feature = "testing")]
 pub mod test_provider;
@@ -80,6 +81,7 @@ pub struct Context {
     pub(crate) step_bounds: Vec<steps::Bound>,
     pub(crate) step_slice_tail: u64,
     pub(crate) regions: region::RegionCache,
+    pub(crate) heap: std::cell::OnceCell<std::sync::Arc<task_heap::Heap>>,
 }
 
 impl Context {
@@ -98,6 +100,7 @@ impl Context {
             step_bounds: Vec::new(),
             step_slice_tail: steps::SLICE,
             regions: region::RegionCache::default(),
+            heap: std::cell::OnceCell::new(),
             run: std::ptr::null(),
             cancel_requested: AtomicBool::new(false),
             cancel_shield: 0,
@@ -202,6 +205,9 @@ impl Drop for Context {
     fn drop(&mut self) {
         while self.bound_depth != 0 {
             self.limit_exit();
+        }
+        if let Some(heap) = self.heap.get() {
+            heap.close();
         }
     }
 }

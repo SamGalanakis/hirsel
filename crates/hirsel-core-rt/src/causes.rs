@@ -308,6 +308,7 @@ pub unsafe fn resource_new(
     align: usize,
 ) -> Result<std::ptr::NonNull<u8>, Capacity> {
     let block = Block::paid(
+        context,
         context.payer(),
         charge::resource(storage, grant),
         bytes,
@@ -445,12 +446,12 @@ pub(crate) unsafe fn resource_step(
 /// # Safety
 /// The caller owns a live block and has moved or cleaned all fields. A resource
 /// has not begun finalization, and `charge` is its complete remaining charge.
-pub unsafe fn free_value(pointer: std::ptr::NonNull<u8>, charge: u64) {
+pub unsafe fn free_value(context: &Context, pointer: std::ptr::NonNull<u8>, charge: u64) {
     // SAFETY: the caller owns the block and its initialized allocation metadata.
     unsafe {
         let resource = block::resource(pointer);
         if resource.is_null() {
-            block::free(pointer, charge);
+            block::free_in(context, pointer, charge);
         } else {
             let storage = charge - 32 - (*resource).grant.as_ref().unwrap().available();
             resource_free(pointer, storage);

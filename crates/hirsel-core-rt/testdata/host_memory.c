@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <unistd.h>
 
@@ -9,17 +10,16 @@
 static uint8_t (*const bodies[])(HirselCoreContext *, void *, uint64_t@@SITE_PARAMETER@@) = {
     @@SYMBOLS@@
 };
-static uint8_t *realloc_payload;
-static uint64_t *realloc_carrier;
-void *__real_realloc(void *, size_t);
-void *__wrap_realloc(void *base, size_t bytes) {
-    void *result = __real_realloc(base, bytes);
-    if (!result && realloc_payload) {
-        /* A real malloc refusal leaves the old payload and the uncommitted
-           carrier intact before the runtime reports its no-cleanup stop. */
-        assert(realloc_payload[0] == 42);
-        assert(realloc_carrier[0] == (uintptr_t)realloc_payload);
-        assert(realloc_carrier[1] == 1 && realloc_carrier[2] == 16384);
+static uint8_t *old_payload;
+static uint64_t *old_carrier;
+void *__real_mmap(void *, size_t, int, int, int, off_t);
+void *__wrap_mmap(void *address, size_t bytes, int protection, int flags, int fd, off_t offset) {
+    void *result = __real_mmap(address, bytes, protection, flags, fd, offset);
+    if (result == MAP_FAILED && old_payload) {
+        /* A refused physical mapping leaves the uncommitted carrier intact. */
+        assert(old_payload[0] == 42);
+        assert(old_carrier[0] == (uintptr_t)old_payload);
+        assert(old_carrier[1] == 1 && old_carrier[2] == 16384);
     }
     return result;
 }
@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
         carrier[0] = (uintptr_t)buffer.pointer; carrier[1] = 1; carrier[2] = 16384;
         argument = carrier; body = 7;
         if (mode == 9) assert(hirsel_core_limit_enter(ctx, bytes).pointer);
-        realloc_payload = buffer.pointer; realloc_carrier = carrier;
+        old_payload = buffer.pointer; old_carrier = carrier;
     }
     struct rlimit denied = {0, 0};
     assert(setrlimit(RLIMIT_CORE, &denied) == 0);

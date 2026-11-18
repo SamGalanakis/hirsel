@@ -45,29 +45,18 @@
 //! carrier and backing. The caller applies allocation_status for a grant refusal.
 //! Native host refusal stops HostMemory102 without cleanup. No new event or
 //! refund drain is introduced. Emitters call this shared entry from
-//! abi_layout::GROW_REALLOC_MIN_PAYLOAD_BYTES of old native payload upward;
+//! abi_layout::GROW_CALL_MIN_PAYLOAD_BYTES of old native payload upward;
 //! small buffers retain the classic inline triple. kind is PLAIN or GRAPH.
 //!
 //! Contexts are task-owned. Allocation pointers, sizes, alignment and remaining
 //! logical charges are trusted emitter operands. None may be stale. Provider
 //! operations serialize Arc operations and cross-task refunds in event order.
 
-//! Inline contract: compare charge with current_limit.available, subtract on
-//! success and add it to outstanding. A plain block's only native word is its
-//! payer pointer at payload-8. Native allocation kind is 0 plain, 1 graph or 2
-//! resource; fixed blocks are plain. Payload offset is align_up(prefix_bytes, max(alignment,8)); native
-//! size is offset+max(bytes,1). The payer word tags its low five bits: kind in
-//! bits 0..1; bits 2..4 encode log2(max(alignment,8))-3. Index 7 stores the
-//! alignment in one extra word before the prefix. Generic free takes pointer
-//! and charge; it decodes this word and calls the native allocator's free.
-//! If lowering proves the current payer stays unchanged from admission to free,
-//! it may refund that record directly, skipping the native payer lookup. Otherwise
-//! compare the RAW payer word to current before stripping tags or resolving
-//! forwarding records. On equality and nonzero charge, refund current directly;
-//! on mismatch use refund(original_payer, charge). Native tags can only cause a
-//! false negative. refund_in(context, original_payer, charge) exposes the same
-//! context-aware path to C. Outstanding bytes prevent a slot from being reused,
-//! and current is canonical, including after scope handover or grant completion.
+//! Inline admission compares the charge with the current limit before debiting.
+//! The physical allocator records the payer once per native page. Fast callers
+//! pass the payer directly after debit. Free settles the original payer before
+//! returning the cleaned slot to its allocating task. Only GRAPH and resource
+//! blocks reserve implicit cleanup storage by the payload.
 //!
 //! Region fast allocation compares its payer with current_limit, admits once,
 //! adds charge and bumps a matching size/alignment pool if its chunk has room.
@@ -543,8 +532,15 @@ pub unsafe extern "C" fn hirsel_core_alloc(
     kind: u8,
 ) -> Allocation {
     // SAFETY: the emitter supplies a live context.
-    let payer = unsafe { (*context).payer() };
-    match crate::block::allocate(payer, (!overflow).then_some(charge), bytes, align, kind) {
+    let context = unsafe { &*context };
+    match crate::block::allocate(
+        context,
+        context.payer(),
+        (!overflow).then_some(charge),
+        bytes,
+        align,
+        kind,
+    ) {
         Ok(p) => Allocation {
             pointer: p.as_ptr(),
             capacity: Capacity {
@@ -687,53 +683,39 @@ pub unsafe extern "C" fn hirsel_core_task_bind(context: *const Context) {
     }
 }
 
-/// Physical backend for emitted own allocation after logical admission. Returns
-/// nonnull native base; host OOM is a run stop, no Capacity or failure status.
-/// The emitter adds the payload offset and writes its one payer word.
-/// # Safety
-/// Nonzero valid native layout, from trusted lowering, already logically admitted.
+/// Allocate physical backing after a positive charge was admitted inline.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_native_alloc(bytes: usize, align: usize) -> *mut u8 {
-    if align > 16 {
-        return native_alloc_aligned(bytes, align);
-    }
-    // SAFETY: this branch has the ordinary backend alignment contract.
-    unsafe { hirsel_core_native_alloc_ordinary(bytes) }
-}
-
-/// Physical backend for a compile-time native alignment at most 16. Returns a
-/// nonnull base or stops as HostMemory, with no admission, event or failure status.
-/// Emitters select this entry instead of passing a known ordinary alignment.
 /// # Safety
-/// Positive valid native size, already logically admitted, alignment at most 16.
-#[inline]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_native_alloc_ordinary(bytes: usize) -> *mut u8 {
-    // SAFETY: malloc/mi_malloc provide at least 16-byte native alignment. The
-    // emitter's valid nonzero size also forms a Layout at alignment 1, and the
-    // backend's actual alignment satisfies its request. Alignment 1 avoids
-    // rounding an already valid near-isize::MAX size up again. Logical charge
-    // and native prefix operands remain the emitter's original values.
-    let layout = unsafe { std::alloc::Layout::from_size_align_unchecked(bytes, 1) };
-    crate::allocator::allocate(layout).as_ptr()
-}
-#[cold]
-#[inline(never)]
-fn native_alloc_aligned(bytes: usize, align: usize) -> *mut u8 {
-    // SAFETY: the emitter supplies the same valid over-aligned native layout.
-    let layout = unsafe { std::alloc::Layout::from_size_align_unchecked(bytes, align) };
-    crate::allocator::allocate(layout).as_ptr()
-}
-
-/// Physical backend after emitted cleanup/refund, no admission or status.
-/// # Safety
-/// Base is the unique live result of native_alloc with these exact operands.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_native_free(base: *mut u8) {
-    // SAFETY: emitter transfers the original matching native allocation base.
+/// Live task context and payer with the block's outstanding charge. Size,
+/// alignment and kind are the trusted native operands.
+pub unsafe extern "C" fn hirsel_core_alloc_admitted(
+    context: *const Context,
+    payer: *mut crate::limit::LimitRecord,
+    bytes: usize,
+    align: usize,
+    kind: u8,
+) -> *mut u8 {
+    // SAFETY: caller owns the task and the positive admission pins the payer.
     unsafe {
-        crate::allocator::deallocate_raw(base);
+        crate::block::allocate_admitted(
+            &*context,
+            crate::limit::Payer::from_current(payer),
+            bytes,
+            align,
+            kind,
+        )
+        .as_ptr()
     }
+}
+
+/// # Safety
+/// The live block pins its original payer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_block_payer(
+    block: NonNull<u8>,
+) -> *mut crate::limit::LimitRecord {
+    // SAFETY: the block owns a live slot in its allocation page.
+    unsafe { crate::block::funding(block).record_pointer() }
 }
 
 /// Move a String into the current prepaid cause cell and record Fail. The
@@ -784,10 +766,14 @@ pub unsafe extern "C" fn hirsel_core_allocation_status(
 /// The block is exclusively owned, all fields have moved or been cleaned, and a
 /// resource has not begun finalization. Charge is its remaining logical charge.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_free_value(pointer: NonNull<u8>, charge: u64) {
+pub unsafe extern "C" fn hirsel_core_free_value(
+    context: *const Context,
+    pointer: NonNull<u8>,
+    charge: u64,
+) {
     // SAFETY: the emitter supplies the live block with the contract above.
     unsafe {
-        causes::free_value(pointer, charge);
+        causes::free_value(&*context, pointer, charge);
     }
 }
 
@@ -802,7 +788,14 @@ pub unsafe fn inline_own_alloc(
     bytes: usize,
     align: usize,
 ) -> Result<NonNull<u8>, Capacity> {
-    allocate(context.payer(), charge, bytes, align, crate::block::PLAIN)
+    allocate(
+        context,
+        context.payer(),
+        charge,
+        bytes,
+        align,
+        crate::block::PLAIN,
+    )
 }
 /// Rust instruction shim for emitted plain-own refund and physical deallocation.
 /// # Safety
@@ -813,12 +806,12 @@ pub unsafe fn inline_own_free(
     context: &Context,
     pointer: NonNull<u8>,
     charge: u64,
-    bytes: usize,
-    align: usize,
+    _bytes: usize,
+    _align: usize,
 ) {
     // SAFETY: the emitter transfers the exclusively owned block and native operands.
     unsafe {
-        crate::block::free_in(context, pointer, charge, bytes, align);
+        crate::block::free_in(context, pointer, charge);
     }
 }
 
@@ -903,7 +896,7 @@ pub unsafe fn inline_own_free_current(
             (*context.limit_record()).available.wrapping_add(charge);
         (*context.limit_record()).outstanding =
             (*context.limit_record()).outstanding.wrapping_sub(charge);
-        crate::block::deallocate_plain(pointer, bytes, align);
+        crate::task_heap::release(pointer);
     }
 }
 

@@ -128,7 +128,7 @@ fn check_abi(
         .arg(directory.join("input.o"))
         .arg(archive)
         .args([
-            "-Wl,--wrap=realloc",
+            "-Wl,--wrap=mmap",
             "-lgcc_s",
             "-lpthread",
             "-ldl",
@@ -148,7 +148,7 @@ fn check_abi(
     let large = if aarch64 { 1u64 << 60 } else { 64 << 20 };
     let invalid_layout = 1u64 << 63;
     let cases = [
-        ("consuming native realloc", 8, large),
+        ("consuming fresh backing", 8, large),
         ("consuming foreign fallback", 9, large),
         ("consuming invalid layout", 8, invalid_layout),
         ("ordinary inline", 0, large),

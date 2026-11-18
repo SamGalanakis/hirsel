@@ -87,7 +87,7 @@ fn counted_chain_releases_with_constant_stack_and_no_admission() {
     let mut head = ptr::null_mut();
     for _ in 0..100_000 {
         // Count, one child word and the spare: 24 native bytes, 16 charged.
-        let node = block::allocate(ctx.payer(), Some(16), 24, 8, block::PLAIN).unwrap();
+        let node = block::allocate(&ctx, ctx.payer(), Some(16), 24, 8, block::PLAIN).unwrap();
         // SAFETY: a freshly allocated count/payload pair receives its sole child.
         unsafe {
             counted::initialize(node, false);
@@ -244,7 +244,7 @@ fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
     TRACE.with(|t| *t.borrow_mut() = Vec::with_capacity(4));
     let mut ctx = Context::new(128);
     let make = |id, left, right| {
-        let node = block::allocate(ctx.payer(), Some(32), 40, 8, block::PLAIN).unwrap();
+        let node = block::allocate(&ctx, ctx.payer(), Some(32), 40, 8, block::PLAIN).unwrap();
         // SAFETY: fresh node receives its count and completely initialized payload.
         unsafe {
             counted::initialize(node, false);
@@ -388,14 +388,14 @@ fn fixed_frames_and_buffer_frames_share_one_nonrecursive_worklist() {
     let mut ctx = Context::new(8_000_000);
     let mut head: Option<NonNull<u8>> = None;
     for _ in 0..100_000 {
-        let node = block::allocate(ctx.payer(), Some(24), 40, 8, block::PLAIN).unwrap();
+        let node = block::allocate(&ctx, ctx.payer(), Some(24), 40, 8, block::PLAIN).unwrap();
         // SAFETY: a fresh counted holder receives a one-element GRAPH buffer
         // holding the previous node, or an empty static carrier.
         unsafe {
             counted::initialize(node, false);
             let carrier = node.as_ptr().add(NODE_PAYLOAD).cast::<u64>();
             if let Some(child) = head {
-                let data = block::allocate(ctx.payer(), Some(8), 8, 8, block::GRAPH).unwrap();
+                let data = block::allocate(&ctx, ctx.payer(), Some(8), 8, 8, block::GRAPH).unwrap();
                 data.as_ptr().cast::<*mut u8>().write(child.as_ptr());
                 carrier.write(data.as_ptr() as u64);
                 carrier.add(1).write(1);
@@ -459,7 +459,7 @@ fn finished_points_free_without_resuming_and_deep_failures_reach_the_root() {
     let mut ctx = Context::new(1_600);
     let mut head = ptr::null_mut::<u8>();
     for id in 0..100u64 {
-        let node = block::allocate(ctx.payer(), Some(16), 24, 8, block::PLAIN).unwrap();
+        let node = block::allocate(&ctx, ctx.payer(), Some(16), 24, 8, block::PLAIN).unwrap();
         // SAFETY: a fresh node receives its count, child and id.
         unsafe {
             counted::initialize(node, false);

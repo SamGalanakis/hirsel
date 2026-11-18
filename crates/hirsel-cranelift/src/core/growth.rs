@@ -39,7 +39,7 @@ impl Function<'_, '_, '_> {
             let large = self.b.ins().icmp_imm_s(
                 IntCC::UnsignedGreaterThanOrEqual,
                 cap,
-                memory_layout::GROW_REALLOC_MIN_PAYLOAD_BYTES.div_ceil(stride) as i64,
+                memory_layout::GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride) as i64,
             );
             let native = self.b.create_block();
             self.b.ins().brif(large, native, &[], classic, &[]);

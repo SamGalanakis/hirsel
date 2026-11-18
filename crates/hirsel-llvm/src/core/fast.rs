@@ -1,9 +1,5 @@
 //! Frozen runtime-prefix fast paths. Only allocation/refill, nonlocal payers,
 //! compound resource construction and last-holder cleanup cross the C ABI.
-// The shared abi_layout.rs documents the runtime raw-payer equality sequence:
-// refund current directly on exact word equality, otherwise resolve the original
-// payer. Outstanding bytes pin the original slot across exit/re-entry. Native
-// tag bits may cause a safe slow-path false negative. No offset changes.
 use super::memory_layout::*;
 use super::storage::{Payer, zeroext};
 use super::*;
@@ -11,11 +7,6 @@ use super::*;
 /// `void core_release_last_N_{rc,arc}(ptr context, ptr node)`.
 pub(super) fn release_last_signature() -> FnSig {
     FnSig::plain(Type::Void, [Type::Ptr, Type::Ptr])
-}
-
-/// The negated byte offset of a prefix field behind a payload.
-fn back(bytes: usize) -> i64 {
-    -(bytes as i64)
 }
 
 impl FunctionEmitter<'_> {
@@ -166,17 +157,24 @@ impl FunctionEmitter<'_> {
         let room = self.select(&Type::I64, &fits, &int(0), &available);
         (admitted, room)
     }
-    /// A native allocator entry: it returns a base or stops.
-    fn native_alloc(&mut self, name: &str, args: &[Value]) -> Value {
+    fn allocate_admitted(&mut self, payer: Value, bytes: Value, align: u64, kind: u8) -> Value {
+        let name = "hirsel_core_alloc_admitted";
         let sig = FnSig {
             nonnull: self.facts,
-            ..FnSig::plain(Type::Ptr, args.iter().map(|_| Type::I64))
+            params: vec![
+                Type::Ptr.into(),
+                Type::Ptr.into(),
+                Type::I64.into(),
+                Type::I64.into(),
+                Parameter::extended(Type::I8, Extension::Zero),
+            ],
+            ..FnSig::plain(Type::Ptr, [])
         };
         self.items.declare(name, sig.clone(), FnAttrs::default());
         self.call(
             &sig,
             &Value::global(name.to_owned()),
-            args,
+            &[CONTEXT, payer, bytes, int(align), int(kind)],
             &CallAttrs::default(),
         )
     }
@@ -200,26 +198,17 @@ impl FunctionEmitter<'_> {
             }
             return Some(self.fast_region(region, charge, bytes, align));
         }
-        if align > 512 {
-            return None;
-        }
         let i64 = Type::I64;
-        let prefix = own_prefix(native_kind) as u64;
-        let alignment = align.max(8);
-        let offset = prefix.next_multiple_of(alignment);
-        let maximum = ((i64::MAX as u64) & !(alignment - 1)) - offset;
         let n = self.counter();
         let payer = self.current_payer();
         let overflow = overflow.map_or(FALSE, |v| {
             let flag = self.numeric(v);
             self.cmp(Predicate::Ne, &Type::I8, &flag, &int(0))
         });
-        let sized = self.cmp(Predicate::Ule, &i64, bytes, &int(maximum));
         let eligible = if overflow == FALSE {
-            sized
+            true.into()
         } else {
-            let exact = self.bin(Binary::Xor, &Type::I1, &overflow, &true.into());
-            self.bin(Binary::And, &Type::I1, &sized, &exact)
+            self.bin(Binary::Xor, &Type::I1, &overflow, &true.into())
         };
         let admit = Label::new("admit", n);
         let slow_label = Label::new("allocation_slow", n);
@@ -250,21 +239,7 @@ impl FunctionEmitter<'_> {
         }
         self.block(allocate);
         self.admit_balance(&payer, charge, &available);
-        let zero = self.cmp(Predicate::Eq, &i64, bytes, &int(0));
-        let nonzero = self.select(&i64, &zero, &int(1), bytes);
-        let native_bytes = self.bin(Binary::Add, &i64, &nonzero, &int(offset));
-        let base = if alignment <= 16 {
-            self.native_alloc("hirsel_core_native_alloc_ordinary", &[native_bytes])
-        } else {
-            self.native_alloc("hirsel_core_native_alloc", &[native_bytes, int(alignment)])
-        };
-        // The native allocator returns a base or stops. The admitted native
-        // extent contains this payload offset; it cannot yield a null payload.
-        let payload = self.gep(&Type::I8, &base, &int(offset), self.facts);
-        let tag = ((alignment.trailing_zeros() - 3) << 2) | u32::from(native_kind);
-        let tagged = self.offset(&payer, tag);
-        let header = self.offset(&payload, back(OWN_PAYER_BACK));
-        self.store(&Type::Ptr, &tagged, &header, 8);
+        let payload = self.allocate_admitted(payer, bytes.clone(), align, native_kind);
         self.br(done);
         if self.test_hooks {
             self.block(refused);
@@ -398,64 +373,11 @@ impl FunctionEmitter<'_> {
         ));
         (pointer, room)
     }
-    /// Return `charge` to the current payer's balance.
-    fn refund(&mut self, current: &Value, charge: &Value) {
-        let i64 = Type::I64;
-        let available = self.load_native(current, LIMIT_AVAILABLE, Type::I64);
-        let restored = self.bin(Binary::Add, &i64, &available, charge);
-        self.store_native(current, LIMIT_AVAILABLE, Type::I64, &restored);
-        let outstanding = self.load_native(current, LIMIT_OUTSTANDING, Type::I64);
-        let remaining = self.bin(Binary::Sub, &i64, &outstanding, charge);
-        self.store_native(current, LIMIT_OUTSTANDING, Type::I64, &remaining);
-    }
     pub(super) fn free_block(&mut self, pointer: &Value, charge: &Value) {
-        let (i1, i64) = (Type::I1, Type::I64);
-        let n = self.counter();
-        let at = self.offset(pointer, back(OWN_PAYER_BACK));
-        let tagged = self.load(&Type::Ptr, &at, 8);
-        let word_value = self.cast(Cast::PtrToInt, &Type::Ptr, &tagged, &i64);
-        let current = self.current_payer();
-        let current_word = self.cast(Cast::PtrToInt, &Type::Ptr, &current, &i64);
-        // Exact raw equality with the canonical current pointer, optionally its
-        // ordinary GRAPH tag, proves both local custody and the native layout.
-        let tag = self.bin(Binary::Xor, &i64, &word_value, &current_word);
-        let ordinary = self.cmp(
-            Predicate::Ule,
-            &i64,
-            &tag,
-            &int(OWN_ORDINARY_MAX_TAG as u64),
-        );
-        let positive = self.cmp(Predicate::Ne, &i64, charge, &int(0));
-        let fast = self.bin(Binary::And, &i1, &ordinary, &positive);
-        let local = Label::new("free_local", n);
-        let slow = Label::new("free_slow", n);
-        let freed = Label::new("freed", n);
-        self.likely(&fast, local, slow);
-        self.block(local);
-        self.refund(&current, charge);
-        let plain = self.cmp(
-            Predicate::Eq,
-            &i64,
-            &tag,
-            &int(OWN_ORDINARY_PLAIN_TAG as u64),
-        );
-        let offset = self.select(
-            &i64,
-            &plain,
-            &int(PLAIN_PREFIX_BYTES as u64),
-            &int(GRAPH_PREFIX_BYTES as u64),
-        );
-        let neg = self.bin(Binary::Sub, &i64, &int(0), &offset);
-        let base = self.offset_by(pointer, &neg);
-        self.runtime_void("hirsel_core_native_free", &[ptr(base)]);
-        self.br(freed);
-        self.block(slow);
-        self.cold_void(
+        self.runtime_void(
             "hirsel_core_free_value",
-            &[ptr(pointer.clone()), word(charge.clone())],
+            &[ptr(CONTEXT), ptr(pointer.clone()), word(charge.clone())],
         );
-        self.br(freed);
-        self.block(freed);
     }
     /// Share adds one holder in a single read-modify-write; a count that wraps
     /// past `2^64 - 1` stops the run (FAIL-15 CountOverflow) before any holder

@@ -318,13 +318,9 @@ fn emitted_own_sequence_refunds_current_foreign_and_handed_over_payers() {
     // SAFETY: we retain the block while settling, then release its physical base.
     unsafe {
         let block = inline_own_alloc(&ctx, Some(8), 8, 8).unwrap();
-        let word = block
-            .as_ptr()
-            .sub(8)
-            .cast::<*mut crate::limit::LimitRecord>()
-            .read();
-        hirsel_core_refund_in(&ctx, word, 8);
-        hirsel_core_native_free(block.as_ptr().sub(8));
+        let payer = hirsel_core_block_payer(block);
+        hirsel_core_refund_in(&ctx, payer, 8);
+        crate::task_heap::release(block);
     }
     assert_eq!(ctx.available(), 128);
 }
@@ -465,21 +461,9 @@ fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
 }
 
 #[test]
-fn ordinary_native_words_and_balances_match_the_inline_contract() {
-    use crate::abi_layout::*;
+fn page_funding_and_balances_match_the_inline_contract() {
     let ctx = Context::new(4096);
-    for (kind, prefix, tag) in [
-        (
-            crate::block::PLAIN,
-            PLAIN_PREFIX_BYTES,
-            OWN_ORDINARY_PLAIN_TAG,
-        ),
-        (
-            crate::block::GRAPH,
-            GRAPH_PREFIX_BYTES,
-            OWN_ORDINARY_GRAPH_TAG,
-        ),
-    ] {
+    for kind in [crate::block::PLAIN, crate::block::GRAPH] {
         for bytes in [0, 1, 128, 512] {
             let charge = hirsel_core_layout::charge::seq(bytes, 1).unwrap();
             // SAFETY: exact native layout and charge, exclusive cleaned payload.
@@ -493,26 +477,11 @@ fn ordinary_native_words_and_balances_match_the_inline_contract() {
                     false,
                     kind,
                 );
-                assert!(!allocation.pointer.is_null());
-                let raw = allocation
-                    .pointer
-                    .sub(OWN_PAYER_BACK)
-                    .cast::<usize>()
-                    .read();
-                assert_eq!(raw ^ ctx.limit_record().addr(), tag);
-                assert!(tag <= OWN_ORDINARY_MAX_TAG);
+                let pointer = std::ptr::NonNull::new(allocation.pointer).unwrap();
+                assert_eq!(hirsel_core_block_payer(pointer), ctx.limit_record());
+                assert_eq!(crate::task_heap::kind(pointer), kind);
                 assert_eq!(ctx.available(), 4096 - charge);
-                if charge != 0 {
-                    let record = &mut *ctx.limit_record();
-                    record.available += charge;
-                    record.outstanding -= charge;
-                    hirsel_core_native_free(allocation.pointer.sub(prefix));
-                } else {
-                    hirsel_core_free_value(
-                        std::ptr::NonNull::new_unchecked(allocation.pointer),
-                        charge,
-                    );
-                }
+                hirsel_core_free_value(&ctx, pointer, charge);
                 assert_eq!(ctx.available(), 4096);
             }
         }
@@ -520,21 +489,24 @@ fn ordinary_native_words_and_balances_match_the_inline_contract() {
 }
 
 #[test]
-fn leaf_buffer_growth_preserves_plain_prefix_and_installs_current_payer() {
+fn leaf_buffer_growth_preserves_plain_kind_and_installs_current_payer() {
     let mut context = Context::new(128);
     let original = crate::block::Block::new(&context, Some(8), 8, 8).unwrap();
     // SAFETY: fixture owns eight fresh writable payload bytes.
     unsafe { original.pointer().as_ptr().write_bytes(17, 8) };
     context.limit_enter(24).unwrap();
     let grown = original.replacement(&context, Some(24), 24, 8).unwrap();
-    // SAFETY: both allocations are live and their payer words precede payloads.
+    // SAFETY: both allocations pin their page metadata.
     unsafe {
-        assert_eq!(crate::block::funding(grown.pointer()).native_tag(), 0);
         assert_eq!(
-            crate::block::funding(grown.pointer()).record_pointer(),
+            hirsel_core_block_payer(grown.pointer()),
             context.limit_record()
         );
-        assert_eq!(crate::block::funding(original.pointer()).native_tag(), 0);
+        assert_eq!(crate::task_heap::kind(grown.pointer()), crate::block::PLAIN);
+        assert_eq!(
+            crate::task_heap::kind(original.pointer()),
+            crate::block::PLAIN
+        );
         std::ptr::copy_nonoverlapping(original.pointer().as_ptr(), grown.pointer().as_ptr(), 8);
         assert_eq!(grown.pointer().as_ptr().read(), 17);
     }
@@ -568,4 +540,63 @@ fn the_header_numbers_every_event_kind_as_the_table_does() {
     published.sort();
     table.sort();
     assert_eq!(published, table);
+}
+
+#[test]
+fn same_size_own_blocks_reuse_mappings_and_pack_small_slots() {
+    use crate::task_heap::MAP_REQUESTS;
+    let context = Context::new(1_000_000);
+    let before = MAP_REQUESTS.with(std::cell::Cell::get);
+    let mut requests_after_first = 0;
+    for iteration in 0..3 {
+        let blocks: Vec<_> = (0..6_000)
+            .map(|_| Block::new(&context, Some(24), 24, 8).unwrap())
+            .collect();
+        let first = blocks[0].pointer().addr().get();
+        let second = blocks[1].pointer().addr().get();
+        assert_eq!(second - first, 24);
+        drop(blocks);
+        assert_eq!(context.available(), 1_000_000);
+        let requests = MAP_REQUESTS.with(std::cell::Cell::get);
+        if iteration == 0 {
+            assert!(requests > before);
+            requests_after_first = requests;
+        } else {
+            assert_eq!(requests, requests_after_first);
+        }
+    }
+}
+
+#[test]
+fn cross_task_slots_return_to_the_allocating_heap_and_survive_its_exit() {
+    use crate::task_heap::MAP_REQUESTS;
+    let context = Context::new(4096);
+    let block = Block::new(&context, Some(24), 24, 8).unwrap();
+    let original = block.pointer().as_ptr().expose_provenance();
+    let mut requests = MAP_REQUESTS.with(std::cell::Cell::get);
+    // SAFETY: the child receives the only owning pointer and its exact charge.
+    std::mem::forget(block);
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let pointer =
+                std::ptr::NonNull::new(std::ptr::with_exposed_provenance_mut(original)).unwrap();
+            // SAFETY: this child now owns the slot and its original charge.
+            drop(unsafe { Block::from_raw(pointer, 24) });
+        });
+    });
+    context.current.drain();
+    assert_eq!(context.available(), 4096);
+    let block = Block::new(&context, Some(24), 24, 8).unwrap();
+    assert_eq!(block.pointer().addr().get(), original);
+    assert_eq!(MAP_REQUESTS.with(std::cell::Cell::get), requests);
+    let survivor = Block::new(&context, Some(32), 131_072, 8192).unwrap();
+    assert_eq!(survivor.pointer().addr().get() % 8192, 0);
+    requests += 1;
+    assert_eq!(MAP_REQUESTS.with(std::cell::Cell::get), requests);
+    // SAFETY: the still-live large allocation has this aligned writable word.
+    unsafe { survivor.pointer().cast::<u64>().write(17) };
+    drop(context);
+    // SAFETY: the transferred payload keeps its physical mapping alive.
+    assert_eq!(unsafe { survivor.pointer().cast::<u64>().read() }, 17);
+    drop((survivor, block));
 }

@@ -31,16 +31,8 @@ void hirsel_core_memory_checkpoint(const uint8_t *name, size_t len);
 #define HIRSEL_CORE_REGION_STRIDE 64
 #define HIRSEL_CORE_NODE_COUNT 0
 #define HIRSEL_CORE_NODE_PAYLOAD 8
-#define HIRSEL_CORE_OWN_PAYER_BACK 8
-#define HIRSEL_CORE_OWN_TAG_MASK 31
-#define HIRSEL_CORE_OWN_KIND_MASK 3
-#define HIRSEL_CORE_OWN_ALIGNMENT_SHIFT 2
-#define HIRSEL_CORE_OWN_ORDINARY_PLAIN_TAG 0
-#define HIRSEL_CORE_OWN_ORDINARY_GRAPH_TAG 1
-#define HIRSEL_CORE_OWN_ORDINARY_MAX_TAG HIRSEL_CORE_OWN_ORDINARY_GRAPH_TAG
-#define HIRSEL_CORE_PLAIN_PREFIX_BYTES 8
-#define HIRSEL_CORE_GRAPH_PREFIX_BYTES 48
-#define HIRSEL_CORE_RESOURCE_PREFIX_BYTES 16
+#define HIRSEL_CORE_GRAPH_PREFIX_BYTES 40
+#define HIRSEL_CORE_RESOURCE_PREFIX_BYTES 8
 #define HIRSEL_CORE_FIXED_DESCRIPTOR_RECIPE 0
 #define HIRSEL_CORE_FIXED_DESCRIPTOR_CHARGE 8
 #define HIRSEL_CORE_FIXED_DESCRIPTOR_PAYLOAD_OFFSET 16
@@ -176,13 +168,12 @@ void hirsel_core_refund(HirselCoreLimitRecord *original_payer, uint64_t nonzero_
 /* Context-aware refund: compare raw payer word with current, direct when equal;
    otherwise use original-payer lookup. No status/admission/allocation. */
 void hirsel_core_refund_in(const HirselCoreContext *, HirselCoreLimitRecord *original_payer, uint64_t bytes);
-void *hirsel_core_native_alloc(size_t native_bytes, size_t native_alignment);
-/* Compile-time alignment <=16, positive valid size: nonnull base or HostMemory;
-   no admission, event or failure status. */
-void *hirsel_core_native_alloc_ordinary(size_t native_bytes);
-void hirsel_core_native_free(void *base);
+/* Physical backing for a block already admitted by the current task. */
+void *hirsel_core_alloc_admitted(const HirselCoreContext *, HirselCoreLimitRecord *, size_t bytes,
+    size_t alignment, uint8_t kind);
+HirselCoreLimitRecord *hirsel_core_block_payer(void *);
 uint8_t hirsel_core_allocation_status(const HirselCoreContext *, void *);
-void hirsel_core_free_value(void *, uint64_t);
+void hirsel_core_free_value(const HirselCoreContext *, void *, uint64_t);
 /* Recipe borrows its descriptor from the still-live parent frame. */
 bool hirsel_core_release_buffer(HirselCoreContext *, void *buffer, uint64_t charge, void *carrier, HirselCoreDropRecipe, uint64_t site);
 bool hirsel_core_resource_release(HirselCoreContext *, void *resource, HirselCoreDropRecipe, uint64_t storage, uint64_t site);

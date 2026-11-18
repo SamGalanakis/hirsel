@@ -3,15 +3,14 @@
 Memory operations for FORM v1, independent of the old runtime. Emitters supply
 portable `charge-v1` charges and native layout operands separately. Logical
 refusal returns `Capacity`; physical host exhaustion is a FAIL-15 run stop.
-The native malloc/mimalloc paths and unrepresentable physical layouts stop with
+The native mapping and malloc paths and unrepresentable physical layouts stop with
 status 102 and exactly `run stop: HostMemory\n`. Stops bypass cleanup, causes and
 join delivery. Destination identity exhaustion uses `run stop: DestinationIds\n`;
 all names share the same process stop path (FAIL-15, PROG-3).
 
 The shipping standalone archives select `standalone`: Rust bookkeeping
 Box/Vec/maps/String use a System allocator wrapper that stops on a null
-allocation, zeroed allocation or reallocation. Payload malloc/mi_malloc does
-not pass through it. The embeddable rlib, unit/native fixtures, hirsel_guard
+allocation, zeroed allocation or reallocation. Payload backing does not pass through it. The embeddable rlib, unit/native fixtures, hirsel_guard
 and mimalloc comparison executables keep their host allocator and are outside
 this standalone bookkeeping-OOM claim. Cargo standalone archive builds must
 select `--features standalone`; never enable it when another Rust crate owns
@@ -28,21 +27,10 @@ Capacity-zero data may point to read-only static bytes at any length. Cleanup
 skips that buffer; growth admits from current, copies length bytes and never
 frees it. Raw allocation/free/refund entries take owned blocks, not carriers.
 
-FORM's consuming `grow` keeps full-new-charge admission before the old refund.
-Only an owned Terminal or Dynamic sequence buffer can reach it. Both emitters
-read `GROW_REALLOC_MIN_PAYLOAD_BYTES` from `src/abi_layout.rs`: reuse begins at
-2048 OLD native payload bytes (capacity times native stride, prefix excluded).
-Below that threshold, or with a foreign/forwarded payer or alignment above 16,
-the original allocate/copy/install/free sequence remains. The large path is one
-shared `hirsel_core_grow` call returning pointer/room in registers. Local reuse
-calls malloc's realloc or mi_realloc on the native base, restores the same prefix,
-installs the carrier, then refunds the exact old charge to its original payer.
-Capacity leaves everything intact; a native realloc refusal stops HostMemory
-without cleanup. No owner event or remote-refund delivery is introduced.
-The observed retained metric counts one replacement backing request, while
-logical peak still includes the full old and new reservations. Default archives
-contain no observation hooks. The measured crossover for the shared helper is
-recorded in [GROWTH-CROSSOVER.md](GROWTH-CROSSOVER.md).
+FORM's consuming `grow` admits the full replacement charge against the old
+payer, copies the live elements, installs the carrier, then settles that
+payer's old charge. A refusal leaves the carrier intact. Large buffers call a
+shared entry. Small buffers inline the same allocation and copy sequence.
 
 Each task has a paged limit table and a direct current-record pointer. Admission,
 refund and scope operations use ordinary task-local loads and stores. Outstanding
@@ -52,20 +40,13 @@ that pin, reserves the bound once and sets current. A no-survivor exit returns
 unused room and the record without union bookkeeping. Survivor handover and
 page growth use cold paths; ordinary scope entry allocates no heap record.
 
-Plain blocks have one native payer word. FORM #84 derives terminal owning edges
-from each concrete cleanup recipe: childless Boxes, scalar/plain sequence and Map
-buffers, and counted payloads of the same kind use this short prefix. Count and
-payload offsets stay the same. Terminal children free in place, including inside
-a counted parent's worklist; they never borrow a dormant frame. Generic producers
-derive the property after substitution and growth preserves that property.
-Fixed nonleaf blocks use a 32-byte prefix: next, immutable descriptor,
-cursor and payer. The descriptor shares the concrete mechanical recipe, portable
-charge and payload offset across all blocks of that shape. Dynamic buffers and
-callable environments keep the 48-byte frame because their continuation depends
-on the live carrier or capture shape. One intrusive worklist resumes either frame
-without recursion or an external stack; resources reserve a state pointer. The
-allocator takes a native kind; kind and alignment tag the payer word so generic
-free needs only pointer and charge. These tags never affect logical charges. No legacy ABI is retained.
+Each task owns size-class queues and recycles empty pages. A page groups one
+payer and native class, including alignment and cleanup storage. Plain slots
+contain only the payload. Fixed nonleaf blocks use spare words within or after
+the payload for resumable cleanup. Dynamic buffers keep a 40-byte frame, and
+resources reserve a state pointer. The page records the payer and native kind.
+A transferred block keeps its page and allocating heap alive until its last
+free. A task-local lock serializes queue operations and foreign returns.
 
 Regions bump within nonmoving pools keyed by native size and alignment. The
 first chunk rounds the request to a granule. Each pool grows geometrically
@@ -91,10 +72,8 @@ event.
 Guard bounds cache the immutable page extent when each stack is mapped, so a
 normal scheduler switch performs no sysconf page-size query.
 
-System allocation is the default. The optional `mimalloc` backend uses native
-malloc/free for ordinary alignment and aligned allocation above 16 bytes. The
-measurement driver compares both backends, retaining Rust's upstream MiMalloc
-wrapper as its Rust baseline. `MEASUREMENTS.md` records costs and limitations.
+The optional `mimalloc` backend supplies region-chunk backing. Own blocks use
+the same task allocator in every shipping archive.
 
 Buck target `//:hirsel-core-rt-archives` builds x86-64 and AArch64 archives with
 normal Cargo dependencies and no old-runtime feature matrix. Rust fixtures run
@@ -165,16 +144,10 @@ The scheduler holds its event turn across the count operation and hook.
 Acceptance builds enable memcheck to register alternate stacks; Rust tests do so
 automatically. Normal archives carry no Valgrind stack-registration work.
 
-Own fast paths can retain the current payer as a compiler fact. If no operation
-can change that record between allocation and free, the emitter refunds it
-directly and skips prefix lookup/comparison, as inline_own_free_current shows.
-Otherwise inline_own_free compares the raw payer word with current before
-masking tags or following a record. Equal words refund current directly. On a
-mismatch, original-payer lookup strips tags and follows forwarding records.
-Tags can cause only a false negative. Outstanding bytes prevent reuse of the
-stored slot through exit/re-entry, and current is canonical. The C entry
-hirsel_core_refund_in(context,payer,bytes) uses the same fast path. Both preserve MEM-20/MEM-26.
-Canonical admission and the plain/align8 prefix store need no tag mask.
+Own free obtains the original payer from the block's page. The runtime refunds
+the current record directly on pointer equality, or follows forwarding and
+the existing remote refund path. It then returns the slot to its allocating
+task.
 
 FORM #50 provider rows use `hirsel_core_host_op(context, op, handle, operand,
 mode, site)`, with HostOp codes 0..17 (including sync and sync_dir). Operand points to a String/Bytes carrier;
@@ -230,21 +203,11 @@ bound cache pin inbox metadata; zero-pin inboxes enter an intrusive reap list
 and are removed under the next local mailbox lock. Metadata therefore follows
 live records and task registrations rather than historical task IDs.
 
-Ordinary emitted allocation tests a dynamic overflow flag's value, then admits a
-positive charge directly from the canonical current record. A null Like uses
-current; a nonnull Like does so only when its untagged payer equals current.
-Real overflow, shortage, zero charge and foreign Like use hirsel_core_alloc
-once, preserving refusal events and original-payer funding. Test injection probes
-only a fitting admission, without double-counting a cold-path attempt.
-
-Ordinary free compares the raw word with current, allowing only native plain or
-GRAPH tags at the ordinary alignment. That proves both refund target and prefix
-size; it refunds directly and frees the selected native base. Other layouts and
-payers retain free_value and the owner-event mailbox rules. abi_layout.rs is the
-shared definition; no source variant/niche tag is involved. The physical native
-allocator splits over-alignment into a cold helper. Its ordinary branch retains
-the same malloc/mi_malloc calls and their at-least-16-byte returned alignment;
-its size-only Layout does not round an already valid size up again.
+Ordinary emitted allocation checks the overflow operand and admits positive
+charges against the current record. For a nonnull Like, it reads the payer
+from the owning page first. Real overflow, shortage, zero charge and foreign
+Like use `hirsel_core_alloc` once. Test injection probes a fitting admission
+without double-counting a cold-path attempt.
 
 Reserved append qualification uses `core/tools/memory_append.py --builder
 <release-hot_loops> --runtime <shipping-archive> --out <fresh-directory> --check`.

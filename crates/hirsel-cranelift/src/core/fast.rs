@@ -1,9 +1,5 @@
 //! Frozen runtime prefixes supply the common path. Calls own identity changes,
 //! physical exhaustion and last-release traversal. No compiler output is checked.
-// The shared abi_layout.rs documents the runtime raw-payer equality sequence:
-// refund current directly on exact word equality, otherwise resolve the original
-// payer. Outstanding bytes pin the original slot across exit/re-entry. Native
-// tag bits may cause a safe slow-path false negative. No offset changes.
 use super::function::Function;
 use super::*;
 use cranelift_codegen::ir::{MemFlagsData as Flags, Value, condcodes::IntCC};
@@ -89,30 +85,8 @@ impl Function<'_, '_, '_> {
         self.b.append_block_param(done, types::I64);
         self.b.append_block_param(done, types::I64);
         let payer = self.current_limit();
-        let alignment = align.max(8);
-        let prefix = memory_layout::own_prefix(native_kind) as u64;
-        let offset = prefix.next_multiple_of(alignment);
-        let one = self.b.ins().iconst(types::I64, 1);
-        let nonzero_size = self.b.ins().umax(size, one);
-        let offset_value = self.b.ins().iconst(types::I64, offset as i64);
-        let native_size = self.b.ins().iadd(nonzero_size, offset_value);
-        let too_large = self.b.ins().icmp_imm_s(
-            IntCC::UnsignedGreaterThan,
-            nonzero_size,
-            if alignment <= 512 {
-                (i64::MAX as u64 - (alignment - 1) - offset) as i64
-            } else {
-                0
-            },
-        );
         let overflow = overflow.unwrap_or_else(|| self.b.ins().iconst(types::I8, 0));
-        let fallback = self.b.ins().bor(too_large, overflow);
-        let fallback = if alignment > 512 {
-            self.b.ins().iconst(types::I8, 1)
-        } else {
-            fallback
-        };
-        self.b.ins().brif(fallback, slow, &[], fast, &[]);
+        self.b.ins().brif(overflow, slow, &[], fast, &[]);
         self.b.switch_to_block(fast);
         let available = self.load_word(payer, memory_layout::LIMIT_AVAILABLE);
         // Wrapping charge-1 < available combines positive charge and room.
@@ -142,26 +116,20 @@ impl Function<'_, '_, '_> {
         self.b.ins().jump(done, &[null.into(), available.into()]);
         self.b.switch_to_block(allocate);
         self.debit(payer, charge, available)?;
-        let native_kind = u64::from(native_kind);
-        let tag = native_kind
-            | (u64::from(alignment.trailing_zeros() - 3) << memory_layout::OWN_ALIGNMENT_SHIFT);
-        let tagged = self.b.ins().bor_imm_s(payer, tag as i64);
-        let output = self.calls.storage(&mut self.b, 8);
-        let id = self
-            .allocators
-            .iter()
-            .find(|a| a.align == alignment && a.offset == offset)
-            .unwrap()
-            .function;
-        let allocator = self.calls.reference(self.object, &mut self.b, id);
-        self.b.ins().call(allocator, &[native_size, tagged, output]);
-        let pointer = self.b.ins().load(types::I64, Flags::trusted(), output, 0);
+        let align_value = self.b.ins().iconst(types::I64, align as i64);
+        let native = self.b.ins().iconst(types::I8, i64::from(native_kind));
+        let pointer = self.c_call(
+            "hirsel_core_alloc_admitted",
+            &[P, P, U, U, K],
+            &[P],
+            &[self.context, payer, size, align_value, native],
+        )?[0];
         let zero = self.b.ins().iconst(types::I64, 0);
         self.b.ins().jump(done, &[pointer.into(), zero.into()]);
         self.b.switch_to_block(slow);
         let reserved = self.b.ins().iconst(types::I64, 0);
         let align_value = self.b.ins().iconst(types::I64, align as i64);
-        let native = self.b.ins().iconst(types::I8, native_kind as i64);
+        let native = self.b.ins().iconst(types::I8, i64::from(native_kind));
         let values = self.c_call(
             "hirsel_core_alloc",
             &[P, P, U, U, U, B, K],
@@ -272,8 +240,6 @@ impl Function<'_, '_, '_> {
     }
 }
 
-/// Canonical-current plain/GRAPH blocks with ordinary alignment have raw words
-/// current|0 and current|1. All other layouts and payers use the existing ABI.
 pub(super) fn free(
     b: &mut FunctionBuilder<'_>,
     calls: &mut calls::Calls<'_>,
@@ -282,83 +248,14 @@ pub(super) fn free(
     pointer: Value,
     charge: Value,
 ) -> Result<()> {
-    let done = b.create_block();
-    let local = b.create_block();
-    let slow = b.create_block();
-    b.set_cold_block(slow);
-    let raw = b.ins().load(
-        types::I64,
-        Flags::trusted(),
-        pointer,
-        -(memory_layout::OWN_PAYER_BACK as i32),
-    );
-    let current = b.ins().load(
-        types::I64,
-        Flags::trusted(),
-        context,
-        memory_layout::CONTEXT_CURRENT_LIMIT as i32,
-    );
-    let tag = b.ins().bxor(raw, current);
-    let ordinary = b.ins().icmp_imm_s(
-        IntCC::UnsignedLessThanOrEqual,
-        tag,
-        memory_layout::OWN_ORDINARY_MAX_TAG as i64,
-    );
-    let positive = b.ins().icmp_imm_s(IntCC::NotEqual, charge, 0);
-    let fast = b.ins().band(ordinary, positive);
-    b.ins().brif(fast, local, &[], slow, &[]);
-    b.switch_to_block(local);
-    let available = b.ins().load(
-        types::I64,
-        Flags::trusted(),
-        current,
-        memory_layout::LIMIT_AVAILABLE as i32,
-    );
-    let outstanding = b.ins().load(
-        types::I64,
-        Flags::trusted(),
-        current,
-        memory_layout::LIMIT_OUTSTANDING as i32,
-    );
-    let available = b.ins().iadd(available, charge);
-    let outstanding = b.ins().isub(outstanding, charge);
-    b.ins().store(
-        Flags::trusted(),
-        available,
-        current,
-        memory_layout::LIMIT_AVAILABLE as i32,
-    );
-    b.ins().store(
-        Flags::trusted(),
-        outstanding,
-        current,
-        memory_layout::LIMIT_OUTSTANDING as i32,
-    );
-    let plain = b.ins().icmp_imm_s(
-        IntCC::Equal,
-        tag,
-        memory_layout::OWN_ORDINARY_PLAIN_TAG as i64,
-    );
-    let plain_base = b
-        .ins()
-        .iadd_imm_s(pointer, -(memory_layout::PLAIN_PREFIX_BYTES as i64));
-    let graph_base = b
-        .ins()
-        .iadd_imm_s(pointer, -(memory_layout::GRAPH_PREFIX_BYTES as i64));
-    let base = b.ins().select(plain, plain_base, graph_base);
-    calls.c(object, b, "hirsel_core_native_free", &[P], &[], &[base])?;
-    b.ins().jump(done, &[]);
-    b.switch_to_block(slow);
     calls.c(
         object,
         b,
         "hirsel_core_free_value",
-        &[P, U],
+        &[P, P, U],
         &[],
-        &[pointer, charge],
+        &[context, pointer, charge],
     )?;
-    b.ins().jump(done, &[]);
-    b.switch_to_block(done);
     Ok(())
 }
 
@@ -660,136 +557,4 @@ pub(super) fn empty_bound(body: &Body) -> bool {
         }
     }
     enters == 1 && exits == 1
-}
-
-// Admission stays inline. PreserveAll moves register saves to physical allocation
-// so a rare host call does not force the enclosing loop's values into spill slots.
-// That convention has no register results; reuse the caller's ABI scratch word.
-fn allocator_signature() -> ir::Signature {
-    let mut signature = ir::Signature::new(cranelift_codegen::isa::CallConv::PreserveAll);
-    signature
-        .params
-        .extend((0..3).map(|_| AbiParam::new(types::I64)));
-    signature
-}
-pub(super) struct Allocator {
-    align: u64,
-    offset: u64,
-    function: cranelift_module::FuncId,
-}
-pub(super) fn declare_allocators(
-    object: &mut ObjectModule,
-    input: &c::Module,
-    layouts: &[hirsel_core_layout::Recipe],
-) -> Result<Vec<Allocator>> {
-    let mut allocators: Vec<Allocator> = Vec::new();
-    for body in input.functions.iter().filter_map(|f| f.body.as_ref()) {
-        for inst in &body.insts {
-            let (kind, align) = match inst {
-                Inst::Alloc {
-                    kind: kind @ (AllocKind::Own { .. } | AllocKind::Environment { .. }),
-                    align,
-                    place: AllocPlace::Current | AllocPlace::Like(_),
-                    ..
-                } => (kind.clone(), *align),
-                Inst::Grow { carrier, align, .. } => {
-                    let Some(edge) =
-                        c::sequence_edge(&input.types, body.addresses[carrier.index()].ty)
-                    else {
-                        continue;
-                    };
-                    (AllocKind::Own { edge: edge.clone() }, *align)
-                }
-                _ => continue,
-            };
-            {
-                let kind = &kind;
-                let align = align.max(8);
-                let native_kind = match kind.cleanup(&input.types, layouts) {
-                    Some(
-                        hirsel_core_layout::Cleanup::Terminal | hirsel_core_layout::Cleanup::Fixed,
-                    ) => memory_layout::NATIVE_PLAIN,
-                    _ => memory_layout::NATIVE_GRAPH,
-                };
-                let prefix = memory_layout::own_prefix(native_kind) as u64;
-                let offset = prefix.next_multiple_of(align);
-                if allocators
-                    .iter()
-                    .any(|a| a.align == align && a.offset == offset)
-                {
-                    continue;
-                }
-                let function = object
-                    .declare_function(
-                        &format!("hirsel.core.allocate.{align}.{offset}"),
-                        Linkage::Local,
-                        &allocator_signature(),
-                    )
-                    .map_err(error)?;
-                allocators.push(Allocator {
-                    align,
-                    offset,
-                    function,
-                });
-            }
-        }
-    }
-    Ok(allocators)
-}
-pub(super) fn emit_allocator(
-    object: &mut ObjectModule,
-    tables: &Tables<'_>,
-    allocator: &Allocator,
-    observer: &impl profile::Observer,
-    scratch: &mut Compilation,
-) -> Result<()> {
-    let build = observer.enter("build_glue");
-    let context = &mut scratch.codegen;
-    object.clear_context(context);
-    context.func.signature = allocator_signature();
-    let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
-    let entry = b.create_block();
-    b.append_block_params_for_function_params(entry);
-    b.switch_to_block(entry);
-    let args = [
-        b.block_params(entry)[0],
-        b.block_params(entry)[1],
-        b.block_params(entry)[2],
-    ];
-    let mut calls = calls::Calls::new(&tables.runtimes, tables.signatures, 0);
-    let base = if allocator.align <= 16 {
-        calls.c(
-            object,
-            &mut b,
-            "hirsel_core_native_alloc_ordinary",
-            &[U],
-            &[P],
-            &[args[0]],
-        )?[0]
-    } else {
-        let alignment = b.ins().iconst(types::I64, allocator.align as i64);
-        calls.c(
-            object,
-            &mut b,
-            "hirsel_core_native_alloc",
-            &[U, U],
-            &[P],
-            &[args[0], alignment],
-        )?[0]
-    };
-    let pointer = b.ins().iadd_imm_s(base, allocator.offset as i64);
-    b.ins().store(
-        Flags::trusted(),
-        args[1],
-        pointer,
-        -(memory_layout::OWN_PAYER_BACK as i32),
-    );
-    b.ins().store(Flags::trusted(), pointer, args[2], 0);
-    b.ins().return_(&[]);
-    b.seal_all_blocks();
-    b.finalize(object.target_config());
-    drop(build);
-    observer
-        .define(object, allocator.function, context)
-        .map_err(error)
 }

@@ -248,17 +248,23 @@ fn handover_order(order: HandoverOrder) -> (u64, Vec<crate::tasks::Event>) {
         charged: *const Cell<Option<NonNull<u8>>>,
     }
 
-    unsafe extern "C" fn child(_: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    unsafe extern "C" fn child(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
         // SAFETY: C owns the passed reservation; the refund target and slot are joined before P exits.
         unsafe {
             let input = input.cast::<ChildInput>().read();
             let mut reservation = Box::from_raw(input.reservation);
             reservation.task_owner(current_id());
             if !input.charged.is_null() {
-                let block =
-                    Block::paid(reservation.payer.get(), Some(8), 8, 8, crate::block::PLAIN)
-                        .unwrap()
-                        .into_raw();
+                let block = Block::paid(
+                    &*context,
+                    reservation.payer.get(),
+                    Some(8),
+                    8,
+                    8,
+                    crate::block::PLAIN,
+                )
+                .unwrap()
+                .into_raw();
                 (*input.charged).set(Some(block));
             }
             reservation.handover(current_id());

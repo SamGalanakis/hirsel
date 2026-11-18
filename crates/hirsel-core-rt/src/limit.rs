@@ -289,14 +289,7 @@ impl Payer {
     #[inline(always)]
     fn slot(self) -> &'static Slot {
         // SAFETY: a local handle, structural edge or outstanding bytes pin this slot.
-        unsafe { &*self.0.as_ptr().map_addr(|v| v & !31) }
-    }
-    pub(crate) fn native_tag(self) -> usize {
-        self.0.as_ptr().addr() & 31
-    }
-    pub(crate) fn with_tag(self, tag: usize) -> Self {
-        // SAFETY: tagging preserves slot provenance; slot() strips these five bits.
-        Self(unsafe { NonNull::new_unchecked(self.0.as_ptr().map_addr(|v| (v & !31) | tag)) })
+        unsafe { &*self.0.as_ptr() }
     }
     #[inline(always)]
     fn domain(self) -> &'static Domain {
@@ -345,7 +338,7 @@ impl Payer {
         let injected = payer.injected();
         #[cfg(not(any(test, feature = "testing")))]
         let injected = false;
-        // SAFETY: admission takes a canonical, untagged live payer under the
+        // SAFETY: admission takes a canonical live payer under the
         // task's exclusive custody. Block words canonicalize before admission.
         let r = unsafe { &mut *payer.0.as_ptr().cast::<LimitRecord>() };
         match bytes {
@@ -380,8 +373,8 @@ impl Payer {
             self.settle(bytes);
         }
     }
-    /// A raw word match proves this is the canonical current record. Tags can
-    /// only cause a false negative; the slow path strips them and follows unions.
+    /// A pointer match proves this is the canonical current record. The slow
+    /// path follows unions.
     #[inline(always)]
     pub(crate) fn settle_in(self, context: &crate::Context, bytes: u64) {
         if bytes != 0 && self.0.as_ptr().cast::<LimitRecord>() == context.limit_record() {

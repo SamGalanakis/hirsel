@@ -791,10 +791,11 @@ fn seen(take l: Log[u64]) -> List[u64] {
 
 ### MEM-32: Engine obligations
 
-Every engine meets these obligations for speed and memory. None of them changes a charge, a
-refund point, a refusal point, cleanup order or output: charges are logical
-([MEM-24](budgets.md#mem-24-logical-charges)), and `Capacity` fails at the same operation on
-every engine. Each obligation is checked by counting the engine's work, never by a program:
+Charged bytes are semantic and identical on every engine, including the reference evaluator
+([MEM-24](budgets.md#mem-24-logical-charges)). The physical layout and work count obligations
+below bind native engines only. Refund points, refusal points, cleanup order and output agree
+across engines. `Capacity` fails at the same operation on every engine. Each physical
+obligation is checked by counting the native engine's work, never by a program:
 
 - **A size-class allocator per task.** Own blocks (`Box` nodes, collection storage, counted
   nodes, closure environments) come from the allocating task's allocator, by size class, with

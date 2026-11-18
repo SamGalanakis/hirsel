@@ -12,10 +12,8 @@ fn native_refusal_child() {
         }
     }
     let _cleanup = Cleanup;
-    let realloc = std::env::var_os("HIRSEL_TEST_REALLOC_NATIVE").is_some();
-    let base =
-        realloc.then(|| super::allocate(std::alloc::Layout::from_size_align(2048, 8).unwrap()));
     let ordinary = std::env::var_os("HIRSEL_TEST_ORDINARY_NATIVE_ALLOC").is_some();
+    let context = ordinary.then(|| crate::Context::new(8));
     let denied = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -30,15 +28,12 @@ fn native_refusal_child() {
     let bytes = 1usize << 60;
     #[cfg(not(target_arch = "aarch64"))]
     let bytes = 64 << 20;
-    if let Some(base) = base {
-        // SAFETY: exclusive ordinary native allocation; this real refusal stops.
-        std::hint::black_box(unsafe { super::reallocate_ordinary(base.as_ptr(), bytes) });
-    } else if ordinary {
-        // SAFETY: valid positive native size, ordinary alignment; this physical
-        // refusal ends the run, so there is no returned payload to publish.
-        std::hint::black_box(unsafe { crate::abi::hirsel_core_native_alloc_ordinary(bytes) });
+    if let Some(context) = context {
+        // The language limit admits eight logical bytes. The physical mapping
+        // then stops the run without returning a pointer or running cleanup.
+        std::hint::black_box(crate::block::Block::new(&context, Some(8), bytes, 8));
     } else {
-        std::hint::black_box(super::allocate(
+        std::hint::black_box(super::allocate_raw(
             std::alloc::Layout::from_size_align(bytes, 8).unwrap(),
         ));
     }
@@ -46,7 +41,7 @@ fn native_refusal_child() {
 }
 #[test]
 fn fail15_native_allocator_refusal_is_a_reported_run_stop_without_cleanup() {
-    for mode in 0..3 {
+    for ordinary in [false, true] {
         let mut child = crate::test_process::command();
         child.args([
             "--ignored",
@@ -54,13 +49,10 @@ fn fail15_native_allocator_refusal_is_a_reported_run_stop_without_cleanup() {
             "allocator::stop_tests::native_refusal_child",
             "--test-threads=1",
         ]);
-        if mode == 1 {
+        if ordinary {
             child.env("HIRSEL_TEST_ORDINARY_NATIVE_ALLOC", "1");
         } else {
             child.env_remove("HIRSEL_TEST_ORDINARY_NATIVE_ALLOC");
-        }
-        if mode == 2 {
-            child.env("HIRSEL_TEST_REALLOC_NATIVE", "1");
         }
         let output = child.output().unwrap();
         assert_eq!(

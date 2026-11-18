@@ -219,11 +219,8 @@ struct Arm<T> {
 
 #[derive(Default)]
 pub(crate) struct WaitArms<T> {
-    live: std::collections::HashMap<
-        ReadyToken,
-        Arm<T>,
-        std::hash::BuildHasherDefault<std::hash::DefaultHasher>,
-    >,
+    // Only runtime-issued tokens become keys. Providers can submit lookups.
+    live: std::collections::HashMap<ReadyToken, Arm<T>, foldhash::fast::RandomState>,
     next_identity: u64,
     turn: u64,
 }
@@ -4193,6 +4190,13 @@ mod ready_routing_laws {
                 keys.push(key);
                 peers.push(peer);
             }
+            // Registration queues writable edges even though every arm waits
+            // for a read. Drain these before making the selected socket ready.
+            while sockets
+                .poll(0, |_| panic!("readable before a peer wrote"))
+                .unwrap()
+                != 0
+            {}
             run.net = &mut sockets;
             assert!(run.parked.peek(1).is_some());
             let selected = if n == 3 { 1 } else { n - 1 };

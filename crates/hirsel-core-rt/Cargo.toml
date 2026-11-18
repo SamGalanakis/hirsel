@@ -17,6 +17,7 @@ charge-observation = []
 mimalloc = ["dep:libmimalloc-sys"]
 
 [dependencies]
+foldhash = { version = "0.2.0", default-features = false }
 hirsel-core-net = { path = "../hirsel-core-net" }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-stack = { path = "../hirsel-stack" }

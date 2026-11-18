@@ -528,6 +528,7 @@ name = "hirsel-core-rt"
 version = "0.1.0"
 dependencies = [
  "bumpalo",
+ "foldhash",
  "hirsel-core-ids",
  "hirsel-core-layout",
  "hirsel-core-net",

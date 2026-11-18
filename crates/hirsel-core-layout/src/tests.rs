@@ -54,7 +54,7 @@ fn u(s: Scalar) -> FieldTy {
 }
 
 /// Bug: padding leaks into the logical charge, or a field is not aligned to its width.
-/// `{a: u8, b: u64, c: u16}`: a@0, b@8 (aligned), c@16; size 24 (align 8); logical
+/// `{a: u8, b: u64, c: u16}`: b@0, c@8, a@10; size 16 (align 8); logical
 /// 1 + 8 + 2 = 11, a Box of it charges round8(11) = 16.
 #[test]
 fn own_record_aligns_natively_and_charges_logically() {
@@ -71,7 +71,7 @@ fn own_record_aligns_natively_and_charges_logically() {
     let f = fixed(&r[0]);
     assert_eq!(
         (f.offsets[0].clone(), f.size, f.align),
-        (vec![0, 8, 16], 24, 8)
+        (vec![10, 0, 8], 16, 8)
     );
     assert_eq!(r[0].logical_size, Some(11));
     assert_eq!(charge::boxed(11), Some(16));
@@ -80,7 +80,7 @@ fn own_record_aligns_natively_and_charges_logically() {
 
 /// Bug: own variants not reserving the largest payload, or the tag overlapping it.
 /// `None | Some(u64) | Pair(u8, u32)`: tag u8@0; payload starts at 8 (max align 8);
-/// Some.v@8; Pair: u8@8, u32@12; size 16. Logical (MEM-24: 8 plus the largest
+/// Some.v@8; Pair: u32@8, u8@12; size 16. Logical (MEM-24: 8 plus the largest
 /// payload, whatever the tag width) = 8 + max(0, 8, 5) = 16.
 #[test]
 fn own_variant_reserves_the_largest_payload_after_its_tag() {
@@ -106,7 +106,7 @@ fn own_variant_reserves_the_largest_payload_after_its_tag() {
             encoding: Encoding::Direct,
         })
     );
-    assert_eq!(f.offsets, vec![vec![], vec![8], vec![8, 12]]);
+    assert_eq!(f.offsets, vec![vec![], vec![8], vec![12, 8]]);
     assert_eq!((f.size, r[0].logical_size), (16, Some(16)));
 }
 
@@ -483,7 +483,7 @@ fn charge_v1_matches_the_spec_table() {
 /// Bug: a resource is laid out inline in its holder, so its cause cell and grant
 /// (FAIL-10, MEM-27) have no block to live in, or a resource without a finalizer or
 /// owned fields gets no cleanup and its block, cell and grant are never refunded.
-/// `Temp { id: u64 }` held as `{a: u8, t: Temp}`: t is a block pointer @8, size 16.
+/// `Temp { id: u64 }` held as `{a: u8, t: Temp}`: t is a block pointer @0, size 16.
 #[test]
 fn a_resource_is_a_cleaned_block_its_holder_points_to() {
     let r = compute(&[
@@ -499,7 +499,7 @@ fn a_resource_is_a_cleaned_block_its_holder_points_to() {
     ])
     .unwrap();
     assert!(r[0].drop.is_some(), "a bare resource still needs cleanup");
-    assert_eq!((fixed(&r[1]).offsets[0][1], fixed(&r[1]).size), (8, 16));
+    assert_eq!((fixed(&r[1]).offsets[0][1], fixed(&r[1]).size), (0, 16));
     let fields = &r[1]
         .drop
         .as_ref()
@@ -509,8 +509,8 @@ fn a_resource_is_a_cleaned_block_its_holder_points_to() {
 }
 
 /// Bug: an inline array laid out or charged as one element, at the wrong stride, or
-/// not aligned to its element (SEM-9). `{a: u8, xs: Inline[u32, 3], b: u16}`: a @0,
-/// xs @4 (align 4) for 12 bytes, b @16, size 18 → 20; logical 1 + 12 + 2 = 15. An
+/// not aligned to its element (SEM-9). `{a: u8, xs: Inline[u32, 3], b: u16}`: xs @0
+/// (align 4) for 12 bytes, b @12, a @14, size 15 rounded to 16; logical 1 + 12 + 2 = 15. An
 /// array of a record needing cleanup needs cleanup; of resources or in a compact
 /// type it is refused.
 #[test]
@@ -526,8 +526,8 @@ fn inline_arrays_hold_n_elements_without_a_block() {
         ],
     )])
     .unwrap();
-    assert_eq!(fixed(&r[0]).offsets[0], [0, 4, 16]);
-    assert_eq!((fixed(&r[0]).size, r[0].logical_size), (20, Some(15)));
+    assert_eq!(fixed(&r[0]).offsets[0], [14, 0, 12]);
+    assert_eq!((fixed(&r[0]).size, r[0].logical_size), (16, Some(15)));
     assert!(r[0].plain);
     let owner = record(
         "O",
@@ -560,25 +560,24 @@ fn inline_arrays_hold_n_elements_without_a_block() {
     assert!(matches!(compute(&[bad]), Err(LayoutError::Field { .. })));
 }
 
-/// Bug: the two engines' Map glue disagree on where a key or value sits in an entry
-/// slot, or on the stride, so cleanup frees through the wrong word. Entry: hash @0,
-/// state @8, key at its alignment from 16, value at its alignment after the key,
-/// stride rounded to max(8, key align, value align).
-/// `Map[u8, u64]`: key 16, value 24, stride 32. `Map[String, u16]`: key 16 (24
-/// bytes), value 40, 42 -> stride 48. `Map[u16, u8]`: key 16, value 18, 19 -> 24.
+/// Map cleanup uses the same entry offsets and stride as the front's tuple.
+/// For u8/u64, hash @0, state @8, value @16, key @24, stride 32.
+/// For String/u16, the 24-byte key comes first, state @32, value @40, stride 48.
+/// For u16/u8, the two words come first, key @16, value @18, stride 24.
 #[test]
-fn map_entries_place_key_then_value_after_hash_and_state() {
+fn map_entries_share_the_own_tuple_layout() {
     let s = || FieldTy::Seq(Box::new(u(Scalar::U8)));
     let e = |k, v| map_entry(&[], &[], &k, &v);
-    let want = |stride, key, value| MapEntry {
+    let want = |stride, state, key, value| MapEntry {
         stride,
         align: 8,
+        state,
         key,
         value,
     };
-    assert_eq!(e(u(Scalar::U8), u(Scalar::U64)), want(32, 16, 24));
-    assert_eq!(e(s(), u(Scalar::U16)), want(48, 16, 40));
-    assert_eq!(e(u(Scalar::U16), u(Scalar::U8)), want(24, 16, 18));
+    assert_eq!(e(u(Scalar::U8), u(Scalar::U64)), want(32, 8, 24, 16));
+    assert_eq!(e(s(), u(Scalar::U16)), want(48, 32, 0, 40));
+    assert_eq!(e(u(Scalar::U16), u(Scalar::U8)), want(24, 8, 16, 18));
 }
 
 /// MEM-12: sequence headers terminate inline containment. J = Null | Arr(Seq[J])
@@ -1047,8 +1046,8 @@ fn several_dataful_cases_share_one_niche_without_touching_it() {
 /// still reads, or a shared array record's offsets move with the element, so the
 /// drain recovers an interior base (ATTACK-rev2). Hand-derived from FAIL-8's
 /// reverse field order:
-/// - Node: Binary yields r@16 (op's word 0 and r's vacated word free; l@8 and the
-///   tag@24 live), then l@8. Assignment yields v@0 while name@8..32 (with the
+/// - Node: Binary yields r@8 (its vacated word and op's word @16 free; l@0 and the
+///   tag@24 live), then l@0. Assignment yields v@0 while name@8..32 (with the
 ///   cap niche) is still to clean; a terminal String is freed from its pointer
 ///   and capacity, so its length word @16 is free. No spares: 32 native bytes,
 ///   a 48-byte chunk with the 8-byte payer word. Only Binary's l is last: after
@@ -1120,7 +1119,7 @@ fn suspended_frames_avoid_live_words_and_unfinished_arrays() {
     assert_eq!(
         f.points,
         [
-            at(1, 0, 16, None, false),
+            at(1, 8, 16, None, false),
             at(2, 0, 8, None, true),
             at(1, 0, 16, None, false)
         ]
@@ -1211,4 +1210,101 @@ fn cleanup_classes_follow_what_cleaning_the_block_drops() {
     ] {
         assert_eq!(cleanup_class(&shapes, &r, &edge), want, "{edge:?}");
     }
+}
+
+/// Both aligned words come before the two-byte scalar and the bool. The bool
+/// therefore lends its 1-byte niche at offset 18. The equivalent compact row
+/// puts the bool first and occupies exactly 19 bytes.
+#[test]
+fn field_order_moves_an_own_niche_and_keeps_compact_order() {
+    let fields = vec![
+        field("flag", u(Scalar::Bool)),
+        field("first", u(Scalar::U64)),
+        field("code", u(Scalar::U16)),
+        field("second", u(Scalar::U64)),
+    ];
+    let shapes = [
+        record("Own", Repr::Own, fields.clone()),
+        option("Option[Own]", FieldTy::Inline(TypeRef(0))),
+        record("Compact", Repr::Compact(Width::U16), fields),
+    ];
+    let r = compute(&shapes).unwrap();
+    let own = fixed(&r[0]);
+    assert_eq!(
+        (own.size, own.align, own.offsets[0].as_slice()),
+        (24, 8, &[18, 0, 16, 8][..])
+    );
+    let option = fixed(&r[1]);
+    let tag = option.tag.unwrap();
+    assert_eq!(
+        (option.size, tag.offset, tag.width, case_word(&tag, 0)),
+        (24, 18, 1, Some(2))
+    );
+    assert_eq!([0, 1, 2].map(|word| case_of(&tag, word)), [1, 1, 0]);
+    let Layout::Compact(compact) = &r[2].layout else {
+        panic!("compact record")
+    };
+    let compact = compact.declared();
+    assert_eq!(compact.fixed_extent, Some(19));
+    assert_eq!(
+        compact.fields[0].iter().map(|f| f.pos).collect::<Vec<_>>(),
+        [Pos::At(0), Pos::At(1), Pos::At(9), Pos::At(11)],
+    );
+}
+
+/// A String's spare capacity values are at byte 16 of its 24-byte carrier.
+/// Ordinary sorting leaves the capacity at 16 and Variable cannot fit. Moving
+/// Assignment's String after its Box puts capacity at 24 and Variable fits.
+#[test]
+fn own_payload_moves_its_niche_carrier_to_keep_the_smaller_variant() {
+    let string = || FieldTy::Seq(Box::new(u(Scalar::U8)));
+    let shapes = [variant(
+        "Node",
+        Repr::Own,
+        vec![
+            (
+                "Assignment",
+                vec![
+                    field("name", string()),
+                    field("value", FieldTy::Box(TypeRef(0))),
+                ],
+            ),
+            ("Variable", vec![field("name", string())]),
+        ],
+    )];
+    let r = compute(&shapes).unwrap();
+    let payload = fixed(&r[0]);
+    assert_eq!((payload.size, payload.align), (32, 8));
+    assert_eq!(payload.offsets, [vec![8, 0], vec![0]]);
+    let tag = payload.tag.unwrap();
+    assert_eq!((tag.offset, tag.width), (24, 8));
+    assert_eq!(case_word(&tag, 0), None);
+    assert_eq!(case_word(&tag, 1), Some(1 << 63));
+    assert_eq!(case_of(&tag, 0), 0);
+    assert_eq!(case_of(&tag, 1 << 63), 1);
+    assert_eq!(r[0].logical_size, Some(40));
+}
+
+/// With two Strings, the original carrier is chosen at offset 16. The other
+/// case needs 32 bytes and fits before the niche only when that carrier moves
+/// last. Switching to the other String's niche would keep the tag at 16.
+#[test]
+fn moving_a_niche_carrier_keeps_its_niche_on_a_tie() {
+    let string = || FieldTy::Seq(Box::new(u(Scalar::U8)));
+    let shapes = [variant(
+        "PairOrWords",
+        Repr::Own,
+        vec![
+            ("Pair", vec![field("a", string()), field("b", string())]),
+            (
+                "Words",
+                vec![field("xs", FieldTy::Array(Box::new(u(Scalar::U64)), 4))],
+            ),
+        ],
+    )];
+    let r = compute(&shapes).unwrap();
+    let layout = fixed(&r[0]);
+    let tag = layout.tag.unwrap();
+    assert_eq!((layout.size, tag.offset, tag.width), (48, 40, 8));
+    assert_eq!(layout.offsets, [vec![24, 0], vec![0]]);
 }

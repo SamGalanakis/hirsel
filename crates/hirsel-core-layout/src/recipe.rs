@@ -1,10 +1,12 @@
 //! Layout recipes: computed once per declared shape (ARCH "Runtime and layout").
 //!
-//! Own, resource, fixed-layout region blocks and scoped types get a native fixed layout: declaration
-//! order, natural alignment, a variant tag of the smallest of u8/u16/u32 at offset 0
-//! and a payload union after it (MEM-13 leaves this private; both engines use this
-//! one recipe so they agree). Compact types get the byte-aligned blob layout of
-//! MEM-9..12: positions are either constant or "after variable field j, plus k".
+//! Own, resource, fixed-layout region blocks and scoped types use native offsets
+//! and either direct or niche variant tags. Own fields are placed by decreasing
+//! alignment and size. A variant payload may move its niche carrier to fit
+//! other cases around the tag. Compact types use the byte-aligned blob layout
+//! of MEM-9..12 with constant or relative field positions.
+
+use std::cmp::Reverse;
 
 use crate::shape::{
     Body, Carried, Field, FieldTy, FuncRef, Handle, Repr, Scalar, Shape, Ty, TypeRef, Width,
@@ -187,7 +189,7 @@ pub struct Fixed {
     pub size: u64,
     pub align: u64,
     pub tag: Option<Tag>,
-    /// Field byte offsets from the value's start: one row for a record, one per case.
+    /// Byte offsets indexed by declaration order: one row for a record, one per case.
     pub offsets: Vec<Vec<u64>>,
     /// The spare values of the type, for a variant that holds it (the one with the
     /// most, ties to the lowest offset).
@@ -613,28 +615,50 @@ fn err(shape: &Shape, f: &Field, why: &'static str) -> LayoutError {
     }
 }
 
-/// Field offsets of `row` laid out from `start`, and where the row ends.
+/// Own fields are ordered by alignment, size, then declaration ordinal.
+fn field_order(repr: Repr, measured: &[(u64, u64, u64)]) -> Vec<usize> {
+    let mut order: Vec<_> = (0..measured.len()).collect();
+    if repr == Repr::Own {
+        order.sort_unstable_by_key(|&i| {
+            let (size, align, _) = measured[i];
+            (Reverse(align), Reverse(size), i)
+        });
+    }
+    order
+}
+
+/// Offsets remain indexed by declaration ordinal in every recipe.
+fn place_in_order(
+    measured: &[(u64, u64, u64)],
+    order: &[usize],
+    start: u64,
+) -> Result<(Vec<u64>, u64), (usize, u128)> {
+    let mut off = start;
+    let mut offsets = vec![0; measured.len()];
+    for &i in order {
+        let (size, align, _) = measured[i];
+        off = checked_align_up(off, align).ok_or_else(|| (i, wide_align_up(off.into(), align)))?;
+        offsets[i] = off;
+        off = off
+            .checked_add(size)
+            .ok_or_else(|| (i, u128::from(off) + u128::from(size)))?;
+    }
+    Ok((offsets, off))
+}
+
 fn place_row(
     shape: &Shape,
     row: &[Field],
-    m: &[(u64, u64, u64)],
+    measured: &[(u64, u64, u64)],
     start: u64,
 ) -> Result<(Vec<u64>, u64), LayoutError> {
-    let mut off = start;
-    let mut offsets = Vec::with_capacity(m.len());
-    for (&(size, a, _), f) in m.iter().zip(row.iter()) {
-        let range = |bytes| LayoutError::NativeRange {
+    place_in_order(measured, &field_order(shape.repr, measured), start).map_err(|(i, bytes)| {
+        LayoutError::NativeRange {
             ty: shape.name.clone(),
-            field: f.name.clone(),
+            field: row[i].name.clone(),
             bytes,
-        };
-        off = checked_align_up(off, a).ok_or_else(|| range(wide_align_up(off.into(), a)))?;
-        offsets.push(off);
-        off = off
-            .checked_add(size)
-            .ok_or_else(|| range(u128::from(off) + u128::from(size)))?;
-    }
-    Ok((offsets, off))
+        }
+    })
 }
 
 /// The niche with the most spare values among `fields` at `offsets` (ties to the
@@ -644,9 +668,9 @@ fn best_niche<'r>(
     fields: &[Field],
     offsets: &[u64],
     get: &dyn Fn(TypeRef) -> &'r Recipe,
-) -> Option<Niche> {
-    let mut best: Option<Niche> = None;
-    for (f, &at) in fields.iter().zip(offsets) {
+) -> Option<(usize, Niche)> {
+    let mut best: Option<(usize, Niche)> = None;
+    for (i, (f, &at)) in fields.iter().zip(offsets).enumerate() {
         if let Some(n) = field_niche(shapes, &f.ty, get) {
             let n = Niche {
                 offset: at + n.offset,
@@ -654,10 +678,10 @@ fn best_niche<'r>(
             };
             let better = match best {
                 None => true,
-                Some(b) => n.count > b.count || (n.count == b.count && n.offset < b.offset),
+                Some((_, b)) => n.count > b.count || (n.count == b.count && n.offset < b.offset),
             };
             if better {
-                best = Some(n);
+                best = Some((i, n));
             }
         }
     }
@@ -740,7 +764,7 @@ fn niche_layout(
         return Ok(None);
     }
     let (row, end) = place_row(shape, rows[d], &measured[d], 0)?;
-    let Some(niche) = best_niche(shapes, rows[d], &row, &get) else {
+    let Some((_, niche)) = best_niche(shapes, rows[d], &row, &get) else {
         return Ok(None);
     };
     let first = if d == 0 { 1 } else { 0 };
@@ -780,26 +804,10 @@ fn niche_layout(
     Ok(Some((offsets, end, tag, rest)))
 }
 
-/// The fields of `row` placed from 0 in the order `order` (indices into `row`):
-/// offsets in `row`'s order and the end, or `None` past the address range.
-fn place_in_order(m: &[(u64, u64, u64)], order: &[usize]) -> Option<(Vec<u64>, u64)> {
-    let mut offsets = vec![0; m.len()];
-    let mut off = 0u64;
-    for &i in order {
-        let (size, a, _) = m[i];
-        off = checked_align_up(off, a)?;
-        offsets[i] = off;
-        off = off.checked_add(size)?;
-    }
-    Some((offsets, off))
-}
-
-/// rustc's niche filling for a variant with several dataful cases: the largest case
-/// is laid out untagged around its best niche, and every other case fits wholly
-/// before that niche or wholly after it, within the largest case's size. Tried with
-/// the largest case's fields in declaration order, with its niche-carrying field
-/// last and with it first; taken only when strictly smaller than the tagged layout,
-/// so no variant grows.
+/// Lay out the largest case around its best niche. Each other case must fit
+/// wholly before or after the niche word. Try the normal order first, then the
+/// niche carrier first and last. Prefer the smallest enclosing size and keep
+/// the first candidate on a tie. A niche must beat the direct tag on size.
 #[allow(clippy::type_complexity)]
 fn several_dataful(
     shapes: &[Shape],
@@ -822,33 +830,30 @@ fn several_dataful(
     let width = tag_width(rows.len());
     let tagged_align = align.max(width);
     let start = align_up(width, tagged_align);
-    let mut tagged = start;
-    for (m, fields) in measured.iter().zip(rows) {
-        tagged = tagged.max(place_row(shape, fields, m, start)?.1);
-    }
-    let tagged = align_up(tagged, tagged_align);
-    let mut largest: Option<(usize, u64)> = None;
+    let orders: Vec<_> = measured
+        .iter()
+        .map(|m| field_order(shape.repr, m))
+        .collect();
+    let mut largest: Option<(usize, Vec<u64>, u64)> = None;
     for &r in dataful {
-        let Some((_, end)) = place_in_order(&measured[r], &(0..rows[r].len()).collect::<Vec<_>>())
-        else {
+        let Ok((offsets, end)) = place_in_order(&measured[r], &orders[r], 0) else {
             return Ok(None);
         };
-        if largest.is_none_or(|(_, e)| end > e) {
-            largest = Some((r, end));
+        if largest.as_ref().is_none_or(|(_, _, e)| end > *e) {
+            largest = Some((r, offsets, end));
         }
     }
-    let (d, _) = largest.unwrap();
-    let identity: Vec<usize> = (0..rows[d].len()).collect();
-    let (declared, _) = place_in_order(&measured[d], &identity).unwrap();
-    let Some(carrier) = best_niche(shapes, rows[d], &declared, &get).and_then(|n| {
-        declared
-            .iter()
-            .zip(&measured[d])
-            .position(|(&at, &(size, _, _))| n.offset >= at && n.offset < at + size.max(1))
-    }) else {
+    let (d, ordinary, end) = largest.unwrap();
+    // The tagged payload starts at an aligned offset for every field.
+    let tagged = start
+        .checked_add(end)
+        .and_then(|end| checked_align_up(end, tagged_align));
+    let order = &orders[d];
+    let Some((carrier, niche)) = best_niche(shapes, rows[d], &ordinary, &get) else {
         return Ok(None);
     };
-    let others: Vec<usize> = identity.iter().copied().filter(|&i| i != carrier).collect();
+    let relative = niche.offset - ordinary[carrier];
+    let others: Vec<usize> = order.iter().copied().filter(|&i| i != carrier).collect();
     let niche_last: Vec<usize> = others.iter().copied().chain([carrier]).collect();
     let niche_first: Vec<usize> = [carrier]
         .into_iter()
@@ -862,12 +867,22 @@ fn several_dataful(
     };
     let used = (last - first + 1) as u64;
     let mut best: Option<(u64, Vec<Vec<u64>>, u64, Niche)> = None;
-    'order: for order in [identity, niche_last, niche_first] {
-        let Some((row, end)) = place_in_order(&measured[d], &order) else {
+    let candidates = if shape.repr == Repr::Own {
+        [order.as_slice(), &niche_first, &niche_last]
+    } else {
+        [order.as_slice(), &niche_last, &niche_first]
+    };
+    'order: for order in candidates {
+        let Ok((row, end)) = place_in_order(&measured[d], order, 0) else {
             continue;
         };
-        let Some(niche) = best_niche(shapes, rows[d], &row, &get) else {
-            continue;
+        let niche = if shape.repr == Repr::Own {
+            Niche {
+                offset: row[carrier] + relative,
+                ..niche
+            }
+        } else {
+            best_niche(shapes, rows[d], &row, &get).unwrap().1
         };
         if niche.count < used {
             continue;
@@ -881,18 +896,25 @@ fn several_dataful(
                 offsets.push(row.clone());
                 continue;
             }
-            let (before, before_end) = place_row(shape, rows[r], m, 0)?;
+            let Ok((before, before_end)) = place_in_order(m, &orders[r], 0) else {
+                continue 'order;
+            };
             if before_end <= niche.offset {
                 offsets.push(before);
                 continue;
             }
-            let (after, after_end) = place_row(shape, rows[r], m, niche.offset + niche.width)?;
+            let Ok((after, after_end)) = place_in_order(m, &orders[r], niche.offset + niche.width)
+            else {
+                continue 'order;
+            };
             if after_end > size {
                 continue 'order;
             }
             offsets.push(after);
         }
-        if size < tagged && best.as_ref().is_none_or(|(s, ..)| size < *s) {
+        if tagged.is_none_or(|tagged| size < tagged)
+            && best.as_ref().is_none_or(|(s, ..)| size < *s)
+        {
             best = Some((size, offsets, end, niche));
         }
     }
@@ -976,7 +998,8 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, 
                 rows.first().copied().unwrap_or(&[]),
                 offsets.first().map_or(&[][..], |o| &o[..]),
                 &get,
-            ),
+            )
+            .map(|(_, niche)| niche),
         };
         let tag = width.map(|width| Tag {
             offset: 0,
@@ -1132,10 +1155,9 @@ fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
 
 /// One `Map[K, V]` entry slot. The carrier is {entries, slots, capacity} (u64
 /// each): `slots` entries were inserted since the storage was made, in insertion
-/// order, at `entries + i × stride`. An entry is a u64 hash at 0, a u64 state at 8
-/// (1 live, 0 removed: `map.remove` cleans nothing there later and keeps the
-/// order of the rest, SEM-5), then the key and the value at their natural
-/// alignment. Growth copies the live entries in order, so `slots` restarts at the
+/// order, at `entries + i × stride`. The entry tuple holds a u64 hash, a u64
+/// state (1 live, 0 removed), the key and the value. The removed entry's key
+/// and value have already been cleaned (SEM-5). Growth copies the live entries in order, so `slots` restarts at the
 /// live count. The live count and the lookup index follow the `capacity` entries
 /// in the same block, private to the map operations; cleanup reads only entries
 /// and charges never count them (MEM-24: an entry is charged key + value + 16).
@@ -1143,22 +1165,28 @@ fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
 pub struct MapEntry {
     pub stride: u64,
     pub align: u64,
+    pub state: u64,
     pub key: u64,
     pub value: u64,
 }
 
 pub fn map_entry(shapes: &[Shape], recipes: &[Recipe], k: &FieldTy, v: &FieldTy) -> MapEntry {
-    let up = |n: u64, a: u64| n.div_ceil(a) * a;
-    let (ks, ka, _) = field_size(shapes, recipes, k);
-    let (vs, va, _) = field_size(shapes, recipes, v);
-    let key = up(16, ka);
-    let value = up(key + ks, va);
-    let align = 8.max(ka).max(va);
+    let word = (8, 8, 8);
+    let measured = [
+        word,
+        word,
+        field_size(shapes, recipes, k),
+        field_size(shapes, recipes, v),
+    ];
+    let align = measured.iter().map(|&(_, align, _)| align).max().unwrap();
+    let (offsets, end) = place_in_order(&measured, &field_order(Repr::Own, &measured), 0)
+        .expect("the front accepts the map-entry row");
     MapEntry {
-        stride: up(value + vs, align),
+        stride: align_up(end, align),
         align,
-        key,
-        value,
+        state: offsets[1],
+        key: offsets[2],
+        value: offsets[3],
     }
 }
 

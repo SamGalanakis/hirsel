@@ -280,11 +280,11 @@ impl Glue<'_, '_, '_> {
         let len = self.load(carrier, 8);
         let cursor = self.load(slot, 0);
         let rank = self.icon(0);
-        let (plan, stride, map) = match field {
+        let (plan, stride, state) = match field {
             FieldTy::Seq(e) => (
                 plan_field(self.tables, e)?,
                 field_size(&self.tables.input.types, self.tables.layouts, e).0,
-                false,
+                None,
             ),
             FieldTy::Map(k, v) => {
                 let entry = hirsel_core_layout::map_entry(
@@ -299,13 +299,13 @@ impl Glue<'_, '_, '_> {
                         (entry.value, plan_field(self.tables, v)?),
                     ]),
                     entry.stride,
-                    true,
+                    Some(entry.state),
                 )
             }
             _ => unreachable!(),
         };
         if plan.count() != 0 {
-            self.resume_array(&plan, [base, rank, cursor, slot, list, len], stride, map)?;
+            self.resume_array(&plan, [base, rank, cursor, slot, list, len], stride, state)?;
         }
         Ok(())
     }
@@ -314,7 +314,7 @@ impl Glue<'_, '_, '_> {
         p: &Plan,
         traversal: [Value; 6],
         stride: u64,
-        map: bool,
+        state: Option<u64>,
     ) -> Result<()> {
         let [base, rank, cursor, slot, list, len] = traversal;
         let delta = self.b.ins().isub(cursor, rank);
@@ -337,10 +337,11 @@ impl Glue<'_, '_, '_> {
         let at = self.b.ins().iadd(base, off);
         let off = self.b.ins().imul_imm_s(i, p.count() as i64);
         let r = self.b.ins().iadd(rank, off);
-        if map {
+        if let Some(offset) = state {
             let live = self.b.create_block();
             let skip = self.b.create_block();
-            let state = self.load(at, 8);
+            let state_at = self.at(at, offset);
+            let state = self.load(state_at, 0);
             self.b.ins().brif(state, live, &[], skip, &[]);
             self.b.switch_to_block(live);
             self.resume(p, at, r, cursor, slot, list)?;
@@ -570,7 +571,7 @@ impl Glue<'_, '_, '_> {
             Plan::Array(n, stride, p) if p.count() != 0 => {
                 let len = self.icon(*n);
                 let outer = self.rank.take();
-                self.resume_array(p, [base, rank, cursor, slot, list, len], *stride, false)?;
+                self.resume_array(p, [base, rank, cursor, slot, list, len], *stride, None)?;
                 self.rank = outer;
             }
             Plan::Array(..) => {}

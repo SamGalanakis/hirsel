@@ -2611,7 +2611,7 @@ impl Machine<'_> {
                 let mut failed = false;
                 for i in 0..slots {
                     let entry = block + i * e.stride;
-                    if self.load(entry + 8, 8) == 1 {
+                    if self.load(entry + e.state, 8) == 1 {
                         failed |= self.drop_field(t, entry + e.key, k);
                         failed |= self.drop_field(t, entry + e.value, v);
                     }

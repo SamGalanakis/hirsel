@@ -8,7 +8,7 @@ struct Entries<'a> {
     stride: u64,
     logical: u64,
     fields: Vec<(u64, &'a FieldTy)>,
-    map: bool,
+    state: Option<u64>,
 }
 impl<'a> Entries<'a> {
     fn new(module: &Module, recipes: &[hirsel_core_layout::Recipe], field: &'a FieldTy) -> Self {
@@ -19,7 +19,7 @@ impl<'a> Entries<'a> {
                     stride,
                     logical,
                     fields: vec![(0, e)],
-                    map: false,
+                    state: None,
                 }
             }
             FieldTy::Map(k, v) => {
@@ -31,7 +31,7 @@ impl<'a> Entries<'a> {
                     stride: layout.stride,
                     logical,
                     fields: vec![(layout.key, k), (layout.value, v)],
-                    map: true,
+                    state: Some(layout.state),
                 }
             }
             _ => unreachable!(),
@@ -219,8 +219,8 @@ pub(super) fn glue(
             e.store(&i64, &next, &cursor_at, 0);
             let buffer = e.load(&Type::Ptr, &payload, 1);
             let entry = e.gep(&Type::bytes(entries.stride), &buffer, &index, false);
-            if entries.map {
-                let state = e.carrier_word(&entry, 8);
+            if let Some(state) = entries.state {
+                let state = e.carrier_word(&entry, state);
                 let live = e.cmp(Predicate::Eq, &i64, &state, &int(1));
                 let live_label = Label::plain("live");
                 let removed = Label::plain("removed");

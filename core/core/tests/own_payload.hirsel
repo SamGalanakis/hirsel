@@ -1,0 +1,27 @@
+type LayoutValue {
+    flag: bool,
+    count: u64,
+    code: u16
+}
+
+type LayoutPayload = LayoutAssignment(String, Box[LayoutValue]) | LayoutVariable(String)
+
+// expect: run own_payload_projects_and_clones() = true
+fn own_payload_projects_and_clones() -> bool {
+    let original_box = result.unwrap(box.new(LayoutValue(flag: true, count: 42, code: 3)))
+    let assignment = LayoutAssignment("alpha", take original_box)
+    let copied: LayoutPayload = result.unwrap(clone(assignment))
+    let variable = LayoutVariable("beta")
+    match copied {
+        LayoutAssignment(name, copied_box) => {
+            if string.byte_len(name) != 5 || !copied_box.flag || copied_box.count != 42 || copied_box.code != 3 {
+                return false
+            }
+        },
+        LayoutVariable(_) => return false,
+    }
+    match variable {
+        LayoutAssignment(_, _) => false,
+        LayoutVariable(name) => string.byte_len(name) == 4,
+    }
+}

@@ -3,7 +3,7 @@
 // expect: accept
 // expect: run fresh() = 4
 // expect: run no_growth() = 9
-// expect: run current_payer() = 4
+// expect: run current_payer() = true
 // expect: run failed_growth() = 13231
 // expect: run refunded_growth() = 46408
 // expect: run padded() = 47216
@@ -32,15 +32,15 @@ fn no_growth() -> u64 {
     }
 }
 
-fn current_payer() -> u64 {
+// MEM-26 charges the replacement's 32 bytes to the current bound.
+fn current_payer() -> bool {
     let mut xs: List[u64] = result.unwrap(list.with_capacity(1))
     let r = bound bytes 0 {
-        reserve(mut xs, 2)?;
-        list.capacity(xs)
+        reserve(mut xs, 2)?
     }
     match r {
-        Ok(n) => n,
-        Error(e) => e.requested + 1000
+        Ok(()) => false,
+        Error(e) => e.requested == 32 && e.available == 0 && list.capacity(xs) == 1
     }
 }
 

@@ -68,7 +68,7 @@ fn list_growth(backend: Backend) {
     for (cases, check, exit, limit) in [
         (
             include_str!("../../../core/front/cases/body/list-reserve.hirsel"),
-            "fresh()==4u64 && no_growth()==9u64 && current_payer()==4u64 && failed_growth()==13231u64 && refunded_growth()==46408u64 && padded()==47216u64 && static_contents()==97100u64 && static_capacity()==408u64 && count_overflow()==18446744073709551615u64",
+            "fresh()==4u64 && no_growth()==9u64 && current_payer() && failed_growth()==13231u64 && refunded_growth()==46408u64 && padded()==47216u64 && static_contents()==97100u64 && static_capacity()==408u64 && count_overflow()==18446744073709551615u64",
             0,
             1_048_576,
         ),

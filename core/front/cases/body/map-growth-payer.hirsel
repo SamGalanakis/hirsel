@@ -1,17 +1,26 @@
-// An existing Map grows against its storage payer, even inside an empty bound.
-// expect: run existing_payer() = 5
-// A cap0 Map's first allocation uses the current empty bound and returns128/0.
+// MEM-26 charges both the first allocation and growth to the current bound.
+// expect: run existing_payer() = true
 // expect: run first_payer() = 12800
-fn existing_payer() -> u64 {
+fn existing_payer() -> bool {
     let mut m: Map[u64, u64] = map.new()
     for i in 0u64 .. 4u64 {
         result.unwrap(map.insert(mut m, i, i))
     }
-    let r: Result[(), Capacity] = bound bytes 0 {
-        result.unwrap(map.insert(mut m, 4, 4))
+    let r: Result[bool, Capacity] = bound bytes 0 {
+        match map.insert(mut m, 4, 40) {
+            Error((c, (k, v))) => c.requested == 256 && c.available == 0 && k == 4 && v == 40,
+            Ok(()) => false
+        }
     }
-    result.unwrap(r)
-    map.len(m)
+    if !result.unwrap(r) || map.len(m) != 4 {
+        return false
+    }
+    for i in 0u64 .. 4u64 {
+        if option.unwrap(map.get(m, i)) != i {
+            return false
+        }
+    }
+    true
 }
 
 fn first_payer() -> u64 {

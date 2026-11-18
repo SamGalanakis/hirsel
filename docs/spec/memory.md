@@ -601,10 +601,10 @@ add a holder:
   other holder. A run stop ends the run without cleanup
   ([FAIL-15](failure.md#fail-15-run-stops)).
 - **Charges follow the existing rules.** The node stays charged to the limit that created
-  it (CONC-11). Growing a collection in the payload charges the limit its storage's record
-  leads to ([MEM-26](budgets.md#mem-26-growth-keeps-the-limit)), which may be another
-  task's or its parent's; a charge or refund that crosses tasks is already an event
-  ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)).
+  it (CONC-11). Growing a collection in the payload charges the current limit and refunds
+  the old storage to the limit its record leads to
+  ([MEM-26](budgets.md#mem-26-growth-charges-the-current-limit)). A refund that crosses
+  tasks is an event ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)).
 
 A write through `f` is not an event: once the test has found the count 1, no other task
 reaches the payload (CONC-10's rule), and every earlier read by another task is ordered

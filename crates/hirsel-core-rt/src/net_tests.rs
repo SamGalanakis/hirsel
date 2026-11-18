@@ -485,8 +485,10 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
     }
 }
 
-use crate::channel::{Channel, hirsel_core_channel_new, hirsel_core_receiver_drop,
-    hirsel_core_sender_drop, hirsel_core_try_send, hirsel_core_try_receive};
+use crate::channel::{
+    Channel, hirsel_core_channel_new, hirsel_core_receiver_drop, hirsel_core_sender_drop,
+    hirsel_core_try_receive, hirsel_core_try_send,
+};
 
 struct SocketScenario {
     key: u64,
@@ -512,7 +514,10 @@ unsafe extern "C" fn socket_reader(context: *mut Context, _: *mut u8, input: *mu
         (*scenario).done = true;
         for sender in (*scenario).publish {
             if !sender.is_null() {
-                assert_eq!(hirsel_core_try_send(sender, ptr::NonNull::dangling().as_ptr()), 0);
+                assert_eq!(
+                    hirsel_core_try_send(sender, ptr::NonNull::dangling().as_ptr()),
+                    0
+                );
                 hirsel_core_sender_drop(sender);
             }
         }
@@ -568,9 +573,15 @@ unsafe extern "C" fn socket_parent(context: *mut Context, _: *mut u8, input: *mu
             second_receiver = second.receiver;
             let mut receiver = first.receiver;
             poller = hirsel_core_spawn(
-                context, 0, 512, (&raw mut receiver).cast(), socket_poller,
-                crate::tasks_tests::layout::<*mut Channel, u8>(0), 1,
-            ).task;
+                context,
+                0,
+                512,
+                (&raw mut receiver).cast(),
+                socket_poller,
+                crate::tasks_tests::layout::<*mut Channel, u8>(0),
+                1,
+            )
+            .task;
             assert!(!poller.is_null());
         }
         let child = hirsel_core_spawn(

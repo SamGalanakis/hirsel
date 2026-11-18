@@ -207,22 +207,38 @@ pub(crate) struct WaitArms<T> {
 impl<T> WaitArms<T> {
     pub(crate) fn insert(&mut self, token: u64, task: T) {
         let identity = self.next_identity;
-        self.next_identity = identity.checked_add(1)
+        self.next_identity = identity
+            .checked_add(1)
             .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
-        self.live.insert(ReadyToken(token), Arm { task, identity, last_turn: 0 });
+        self.live.insert(
+            ReadyToken(token),
+            Arm {
+                task,
+                identity,
+                last_turn: 0,
+            },
+        );
     }
 
     pub(crate) fn capture(&mut self, tokens: Vec<u64>) -> Vec<ReadyArm> {
-        self.turn = self.turn.checked_add(1)
+        self.turn = self
+            .turn
+            .checked_add(1)
             .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
-        tokens.into_iter().filter_map(|token| {
-            let arm = self.live.get_mut(&ReadyToken(token))?;
-            if arm.last_turn == self.turn {
-                return None;
-            }
-            arm.last_turn = self.turn;
-            Some(ReadyArm { token, identity: arm.identity })
-        }).collect()
+        tokens
+            .into_iter()
+            .filter_map(|token| {
+                let arm = self.live.get_mut(&ReadyToken(token))?;
+                if arm.last_turn == self.turn {
+                    return None;
+                }
+                arm.last_turn = self.turn;
+                Some(ReadyArm {
+                    token,
+                    identity: arm.identity,
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn take_captured(&mut self, ready: ReadyArm) -> Option<T> {

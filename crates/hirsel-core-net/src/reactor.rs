@@ -429,7 +429,6 @@ impl Drop for Sockets {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,13 +445,18 @@ mod tests {
         let held = driver.try_turn().unwrap();
         peer.write_all(b"x").unwrap();
         let busy = std::thread::scope(|scope| {
-            scope.spawn(|| driver.poll(0).unwrap().is_none()).join().unwrap()
+            scope
+                .spawn(|| driver.poll(0).unwrap().is_none())
+                .join()
+                .unwrap()
         });
         drop(held);
         assert!(busy);
         let events = driver.poll(0).unwrap().unwrap();
         let mut tokens = Vec::new();
-        sockets.dispatch_polled(events, |token| tokens.push(token)).unwrap();
+        sockets
+            .dispatch_polled(events, |token| tokens.push(token))
+            .unwrap();
         assert_eq!(tokens, [17]);
     }
 }

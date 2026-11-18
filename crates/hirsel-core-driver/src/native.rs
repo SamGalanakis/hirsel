@@ -1940,11 +1940,7 @@ mod tests {
             .unwrap()
         );
         let built = product.build(&entry, &options).unwrap();
-        // A development build compiles one unit per reached instance. A
-        // release build optimises the program whole and then generates each
-        // out-of-line definition the shared parts cache lacks, so its count
-        // follows what the optimiser leaves out of line; the edit below is
-        // its law.
+        // A development build compiles one unit per reached instance.
         if !options.optimize {
             assert_eq!(built.compiled, 3);
         }
@@ -1954,8 +1950,29 @@ mod tests {
             .check(source_request(&edited, dir.path()), &mut Meter::new(false))
             .unwrap();
         let built = product.build(&entry, &options).unwrap();
-        assert_eq!(built.compiled, 1);
         run_clean(&built.executable, 1);
+        if options.optimize {
+            // Release counts the definitions left out of line after optimization.
+            assert!(
+                built.compiled > 0,
+                "the edited record needs new release code"
+            );
+
+            // A fresh native store has to link using the shared release parts.
+            let store =
+                std::mem::replace(&mut options.store, dir.path().join("another-record-native"));
+            let output = std::mem::replace(
+                &mut options.output,
+                dir.path().join("another-record-program"),
+            );
+            let reused = product.build(&entry, &options).unwrap();
+            options.store = store;
+            options.output = output;
+            assert_eq!((reused.compiled, reused.linked), (0, true));
+            run_clean(&reused.executable, 1);
+        } else {
+            assert_eq!(built.compiled, 1);
+        }
         let source = "pub fn main() -> Result[(), Exit] { Ok(()) }\n";
         let product = driver
             .check(source_request(source, dir.path()), &mut Meter::new(false))

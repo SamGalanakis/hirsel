@@ -227,7 +227,7 @@ fn tape_schedule_engines() {
     let mut script = Vec::new();
     writeln!(
         script,
-        "#!/bin/sh\nexec {} \"$@\" {} -I {} -Wl,--wrap=hirsel_core_run",
+        "#!/bin/sh\nexec {} \"$@\" {} -I {} -Wl,--wrap=hirsel_core_os_run_with_sources",
         quote(&cc),
         quote(&c),
         quote(&root.join("crates/hirsel-core-rt/include"))
@@ -254,6 +254,9 @@ fn tape_schedule_engines() {
         options.directories = vec![grant.to_str().unwrap().into()];
         options.grant_mask = (1 << 2) | (1 << 9);
         options.link = Link::Driver(linker.clone());
+        options.runtime = root.join(
+            std::env::var_os("HIRSEL_CORE_RT_SCRIPTED_ARCHIVE").expect("scripted runtime archive"),
+        );
         let built = product
             .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)
             .unwrap();

@@ -793,6 +793,7 @@ def first_party(meta: dict) -> str:
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                                       "HIRSEL_CORE_RT_SCRIPTED_ARCHIVE": "//:core-scripted-runtime-pic",
                                        "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives",
                                        "HIRSEL_STORE_CRASH_BRIDGE": "//:core-store-crash-provider[shared]"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_count.c", "core/tools/store_crash_tests.py", "core/tools/runner_crash.c"]')))

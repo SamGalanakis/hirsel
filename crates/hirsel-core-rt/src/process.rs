@@ -144,6 +144,18 @@ pub unsafe extern "C" fn hirsel_core_test_run_scripted(
     script.install(|| unsafe { hirsel_core_run(config, entry) })
 }
 
+/// Run a native fixture that always prefers the last runnable task.
+///
+/// # Safety
+/// The configuration, entry, and callback state remain live through the run.
+#[cfg(feature = "testing")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_run_last(config: *const Config, entry: Entry) -> u8 {
+    let script = std::sync::Arc::new(crate::schedule_script::ScheduleScript::last());
+    // SAFETY: the native fixture pins the configuration and entry for this call.
+    script.install(|| unsafe { hirsel_core_run(config, entry) })
+}
+
 /// # Safety
 /// Config, entry and all borrowed grants/arguments remain live through the run.
 /// The generated entry thunk returns only after cleanup on every exit edge.

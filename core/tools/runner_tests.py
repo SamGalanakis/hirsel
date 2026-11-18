@@ -1049,9 +1049,10 @@ def dir_for(store):
     return host
 
 
-def native_run(args, engine, inputs_path, store, prefix, cc=None):
+def native_run(args, engine, inputs_path, store, prefix, cc=None, runtime=None):
+    runtime = runtime or args.runtime
     command = [str(args.compiler.resolve()), 'test', '--inputs', str(inputs_path), '--source-core',
-               '--source-std', '--backend', engine, '--runtime', str(args.runtime.resolve()),
+               '--source-std', '--backend', engine, '--runtime', str(runtime.resolve()),
                '--store', str(store), '--json', '--filter', prefix,
                '--limit', str(64 * 1024 * 1024), '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random',
                '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535',
@@ -1110,6 +1111,7 @@ def main():
     p.add_argument('--compiler', type=Path)
     p.add_argument('--evaluator', type=Path, required=True)
     p.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
+    p.add_argument('--schedule-runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_SCRIPTED_ARCHIVE'))
     p.add_argument('--observed', type=Path,
                    default=Path(os.environ['HIRSEL_CORE_RT_OBSERVED_ARCHIVES']) / 'x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
                    if 'HIRSEL_CORE_RT_OBSERVED_ARCHIVES' in os.environ else None)
@@ -1254,7 +1256,10 @@ def main():
                 for name in selected_calls if r1 else ():
                     definition = f'store@1/runner_calls/test_{name}'
                     cc = counting_cc(args, root, work, name) if name in COUNTS or name in PLACEMENT_OBSERVERS else None
-                    code, report = native_run(args, engine, base, work / f'store-{engine}-shared', definition, cc)
+                    runtime = args.schedule_runtime if name == 'calls_deadline_hung' else args.runtime
+                    if runtime is None:
+                        p.error('calls_deadline_hung requires --schedule-runtime')
+                    code, report = native_run(args, engine, base, work / f'store-{engine}-shared', definition, cc, runtime)
                     tests = report.get('tests', [])
                     row(engine=engine, law=name,
                         passed=code == 0 and [t['definition'] for t in tests] == [definition]

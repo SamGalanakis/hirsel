@@ -33,16 +33,21 @@ static HirselCoreHostOutcome script_abort(void *s,HirselCoreHostRequest *r,uint6
 static HirselCoreHostOutcome script_deliver(void *s,HirselCoreHostRequest *r,HirselCoreHostOutcome o) {
     (void)s;(void)r;return o;
 }
-static size_t lifo(void *s,size_t n) {(void)s;return n-1;}
-uint8_t __real_hirsel_core_run(const HirselCoreProcessConfig *,HirselCoreEntry);
-uint8_t __wrap_hirsel_core_run(const HirselCoreProcessConfig *original,HirselCoreEntry entry) {
-    HirselCoreProcessConfig cfg=*original;
+extern uint8_t hirsel_core_test_run_last(const HirselCoreProcessConfig *,HirselCoreEntry);
+uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
+    const HirselCoreView *names,const HirselCoreSourceTable *sources,HirselCoreEntry entry) {
+    (void)names;
+    HirselCoreOpenProcess open=hirsel_core_os_process_new(input);
+    if(!open.process)return HIRSEL_CORE_NOT_STARTED;
+    hirsel_core_os_process_set_sources(open.process,sources);
+    HirselCoreProcessConfig cfg=*hirsel_core_os_process_config(open.process);
     HirselCoreEntryGrant grants[16];
     if(cfg.capabilities_len>16)abort();
     memcpy(grants,cfg.capabilities,cfg.capabilities_len*sizeof *grants);
     HirselCoreProvider script={0,script_wait,script_issue,script_resume,script_abort,script_deliver};
     for(size_t i=0;i<cfg.capabilities_len;i++)if(grants[i].kind==2)grants[i].provider=&script;
     cfg.capabilities=grants;
-    cfg.scheduler.choose=lifo;
-    return __real_hirsel_core_run(&cfg,entry);
+    uint8_t status=hirsel_core_test_run_last(&cfg,entry);
+    hirsel_core_os_process_free(open.process);
+    return status;
 }

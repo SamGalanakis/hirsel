@@ -137,10 +137,7 @@ static void event(void *state, HirselCoreEvent e) {
 #endif
 }
 #ifdef HUNG_BODY_SENDS
-static size_t choose(void *state, size_t runnable) {
-    (void)state;
-    return runnable - 1;
-}
+extern uint8_t hirsel_core_test_run_last(const HirselCoreProcessConfig *, HirselCoreEntry);
 #endif
 uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     const HirselCoreView *names, const HirselCoreSourceTable *sources, HirselCoreEntry entry) {
@@ -152,9 +149,10 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     HirselCoreProcessConfig cfg = *hirsel_core_os_process_config(open.process);
     cfg.scheduler.event = event;
 #ifdef HUNG_BODY_SENDS
-    cfg.scheduler.choose = choose;
-#endif
+    uint8_t status = hirsel_core_test_run_last(&cfg, entry);
+#else
     uint8_t status = hirsel_core_run(&cfg, entry);
+#endif
     hirsel_core_os_process_free(open.process);
 #ifdef READY_BEFORE_ACCEPT
     if (status) return status;

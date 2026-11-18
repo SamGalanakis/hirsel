@@ -3,7 +3,7 @@
 //! main's cleanup. Grant closure cannot allocate, admit or fail.
 use crate::{
     Context,
-    os::OsProvider,
+    os::{DirectoryOperations, OsProvider, hirsel_core_os_directory_ops},
     process::{Config, View},
     provider::{Buffer, IoError, Provider},
 };
@@ -133,6 +133,8 @@ pub struct OsConfig {
     pub net_rules_len: usize,
     /// Executable target, emitted by the linker for either native backend.
     pub target: View,
+    /// Installed by the native linker for a launch with directory grants.
+    pub directory_ops: *const DirectoryOperations,
 }
 pub struct OsProcess {
     pub(crate) sources: *const crate::abi_sites::SourceTable,
@@ -194,6 +196,7 @@ impl OsProcess {
     unsafe fn new(
         input: &OsConfig,
         probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
+        directory_ops: Option<&DirectoryOperations>,
     ) -> Result<Box<Self>, StartupError> {
         // SAFETY: copy launcher input before acquiring any program grant.
         unsafe {
@@ -242,11 +245,10 @@ impl OsProcess {
                 None
             };
             let mut dirs = Vec::new();
-            if !describe_mode {
+            if !describe_mode && let Some(operations) = directory_ops {
                 for index in 0..input.directories_len {
-                    dirs.push(os.grant(Path::new(OsStr::from_bytes(bytes(
-                        *input.directories.add(index),
-                    ))))?);
+                    let path = Path::new(OsStr::from_bytes(bytes(*input.directories.add(index))));
+                    dirs.push((operations.grant)(&mut os, path)?);
                 }
             }
             let views = args
@@ -272,7 +274,7 @@ impl OsProcess {
                 data: net_storage.as_ptr(),
                 len: net_storage.len(),
             });
-            let provider = Box::new(os.provider());
+            let provider = Box::new(os.provider_with(directory_ops.map(|ops| ops.issue)));
             let provider_pointer = &*provider as *const Provider;
             let mut metadata = Vec::new();
             if describe_mode {
@@ -380,7 +382,13 @@ impl OsProcess {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_process_new(config: *const OsConfig) -> OpenProcess {
     // SAFETY: constructor copies/pins all configuration before returning its owner.
-    match unsafe { OsProcess::new(&*config, OsProvider::probe_directory) } {
+    match unsafe {
+        OsProcess::new(
+            &*config,
+            OsProvider::probe_directory,
+            Some(&hirsel_core_os_directory_ops),
+        )
+    } {
         Ok(process) => OpenProcess {
             process: Box::into_raw(process),
             error: IoError::OK,
@@ -452,7 +460,8 @@ pub unsafe extern "C" fn hirsel_core_os_run(
 /// Named OS entry with a borrowed current-source table (FORM #91).
 /// # Safety
 /// Input/name/entry contracts are os_run's; sources follows
-/// abi_sites::hirsel_core_os_process_set_sources through reporting.
+/// abi_sites::hirsel_core_os_process_set_sources through reporting. The native
+/// linker supplies a live `directory_ops` table when configuring directory grants.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_run_with_sources(
     input: *const OsConfig,
@@ -462,12 +471,14 @@ pub unsafe extern "C" fn hirsel_core_os_run_with_sources(
 ) -> u8 {
     // SAFETY: all configuration and source storage is pinned by the caller.
     unsafe {
+        let operations = (*input).directory_ops.as_ref();
         run_with_sources_and_probe(
             &*input,
             parameter_names,
             sources,
             entry,
-            OsProvider::probe_directory,
+            |os, handle| (operations.unwrap().probe)(os, handle),
+            operations,
         )
     }
 }
@@ -479,7 +490,16 @@ unsafe fn run_with_probe(
     probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
 ) -> u8 {
     // SAFETY: original entry supplies no source table.
-    unsafe { run_with_sources_and_probe(input, names, std::ptr::null(), entry, probe) }
+    unsafe {
+        run_with_sources_and_probe(
+            input,
+            names,
+            std::ptr::null(),
+            entry,
+            probe,
+            Some(&hirsel_core_os_directory_ops),
+        )
+    }
 }
 unsafe fn run_with_sources_and_probe(
     input: &OsConfig,
@@ -487,9 +507,10 @@ unsafe fn run_with_sources_and_probe(
     sources: *const crate::abi_sites::SourceTable,
     entry: crate::process::Entry,
     probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
+    directory_ops: Option<&DirectoryOperations>,
 ) -> u8 {
     // SAFETY: input tables are borrowed from the OS entry's configuration.
-    match unsafe { OsProcess::new(input, probe) } {
+    match unsafe { OsProcess::new(input, probe, directory_ops) } {
         Ok(mut process) => {
             // SAFETY: table is borrowed until this call completes reporting.
             unsafe { crate::abi_sites::hirsel_core_os_process_set_sources(&mut *process, sources) };

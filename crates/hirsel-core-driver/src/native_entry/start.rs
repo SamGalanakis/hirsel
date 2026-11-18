@@ -56,6 +56,20 @@ pub(super) fn emit(
     let target_data = data::bytes(f.object, None, triple.as_bytes().to_vec(), 1)?;
     let target = f.address(target_data);
     let target_len = f.constant(triple.len() as u64);
+    let directory_ops = if plan.directories.is_empty() {
+        f.constant(0)
+    } else {
+        let operations = f
+            .object
+            .declare_data(
+                "hirsel_core_os_directory_ops",
+                Linkage::Import,
+                false,
+                false,
+            )
+            .map_err(error)?;
+        f.address(operations)
+    };
     for (offset, value) in [
         (abi::OS_CONFIG_ROOT_LIMIT, limit),
         (abi::OS_CONFIG_ARGS, args),
@@ -70,6 +84,7 @@ pub(super) fn emit(
         (abi::OS_CONFIG_NET_RULES_LEN, net_rules_len),
         (abi::OS_CONFIG_TARGET, target),
         (abi::OS_CONFIG_TARGET_LEN, target_len),
+        (abi::OS_CONFIG_DIRECTORY_OPS, directory_ops),
     ] {
         f.store(value, config, offset);
     }

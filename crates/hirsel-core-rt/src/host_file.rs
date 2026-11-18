@@ -3,6 +3,7 @@
 use crate::{Context, provider::*};
 use std::{
     collections::BTreeMap,
+    mem::ManuallyDrop,
     ptr,
     sync::{Arc, Mutex},
 };
@@ -34,11 +35,43 @@ unsafe impl Send for Vector {}
 #[derive(Default)]
 struct Entries {
     next: u64,
-    live: BTreeMap<u64, File>,
+    live: Option<Resources<File>>,
     grants: BTreeMap<u64, Arc<File>>,
-    tapes: BTreeMap<u64, Arc<crate::tape::Tape>>,
+    tapes: Option<Resources<Arc<crate::tape::Tape>>>,
     vectors: BTreeMap<u64, Vector>,
 }
+/// Install cleanup together with the first owned resource. A run that never
+/// publishes this kind carries neither its close path nor its map destructor.
+struct Resources<T> {
+    values: ManuallyDrop<BTreeMap<u64, T>>,
+    close: unsafe fn(&mut BTreeMap<u64, T>, *mut Context),
+    drop_values: fn(&mut ManuallyDrop<BTreeMap<u64, T>>),
+}
+
+impl<T> Resources<T> {
+    fn new(close: unsafe fn(&mut BTreeMap<u64, T>, *mut Context)) -> Self {
+        Self {
+            values: ManuallyDrop::new(BTreeMap::new()),
+            close,
+            drop_values: |values| {
+                // SAFETY: Drop owns the map and invokes this once.
+                unsafe { ManuallyDrop::drop(values) }
+            },
+        }
+    }
+
+    unsafe fn close(&mut self, context: *mut Context) {
+        // SAFETY: the run owns the registry and pins the context through cleanup.
+        unsafe { (self.close)(&mut self.values, context) }
+    }
+}
+
+impl<T> Drop for Resources<T> {
+    fn drop(&mut self) {
+        (self.drop_values)(&mut self.values)
+    }
+}
+
 impl Entries {
     fn id(&mut self) -> u64 {
         self.next += 1;
@@ -64,18 +97,33 @@ impl Registry {
     pub(crate) fn tape(&self, tape: crate::tape::Tape) -> u64 {
         let mut registry = self.0.lock().unwrap();
         let id = registry.id();
-        registry.tapes.insert(id, Arc::new(tape));
+        registry
+            .tapes
+            .get_or_insert_with(|| Resources::new(close_tapes))
+            .values
+            .insert(id, Arc::new(tape));
         id
     }
     /// # Safety
     /// The caller borrows the sole-owned tape handle for the entire borrow.
     pub(crate) unsafe fn tape_ref(&self, key: u64) -> &crate::tape::Tape {
-        let tape = Arc::as_ptr(&self.0.lock().unwrap().tapes[&key]);
+        let tape = Arc::as_ptr(&self.0.lock().unwrap().tapes.as_ref().unwrap().values[&key]);
         // SAFETY: the Arc stays in the table while this key is borrowed.
         unsafe { &*tape }
     }
     pub(crate) fn untape(&self, key: u64) -> crate::tape::Tape {
-        Arc::into_inner(self.0.lock().unwrap().tapes.remove(&key).unwrap()).unwrap()
+        Arc::into_inner(
+            self.0
+                .lock()
+                .unwrap()
+                .tapes
+                .as_mut()
+                .unwrap()
+                .values
+                .remove(&key)
+                .unwrap(),
+        )
+        .unwrap()
     }
     /// Pin a substitute Args vector and return its handle.
     pub(crate) fn vector(&self, bytes: Vec<Vec<u8>>) -> u64 {
@@ -107,14 +155,26 @@ impl Registry {
     fn insert(&self, file: File) -> u64 {
         let mut registry = self.0.lock().unwrap();
         let id = registry.id();
-        registry.live.insert(id, file);
+        registry
+            .live
+            .get_or_insert_with(|| Resources::new(close_files))
+            .values
+            .insert(id, file);
         id
     }
     fn file(&self, key: u64) -> File {
-        self.0.lock().unwrap().live[&key]
+        self.0.lock().unwrap().live.as_ref().unwrap().values[&key]
     }
     fn take_file(&self, key: u64) -> File {
-        self.0.lock().unwrap().live.remove(&key).unwrap()
+        self.0
+            .lock()
+            .unwrap()
+            .live
+            .as_mut()
+            .unwrap()
+            .values
+            .remove(&key)
+            .unwrap()
     }
     fn insert_grant(&self, file: File) -> u64 {
         let mut registry = self.0.lock().unwrap();
@@ -162,15 +222,29 @@ impl Files {
     pub(crate) unsafe fn close_all(&mut self, context: *mut Context) {
         // A tape still open writes its buffered frames through its Dir's
         // provider, which outlives this teardown (section 8: as a crash).
-        while let Some((_, tape)) = self.registry.0.get_mut().unwrap().tapes.pop_last() {
-            drop(tape);
+        if let Some(tapes) = &mut self.registry.0.get_mut().unwrap().tapes {
+            // SAFETY: the run's Context and providers remain pinned.
+            unsafe { tapes.close(context) };
         }
         self.sockets = hirsel_core_net::Sockets::default();
         self.net_grants.get_mut().unwrap().clear();
-        while let Some((_, file)) = self.registry.0.get_mut().unwrap().live.pop_last() {
-            // SAFETY: removed sole ownership before calling the pinned provider.
-            unsafe { close(context, file) };
+        if let Some(files) = &mut self.registry.0.get_mut().unwrap().live {
+            // SAFETY: the run's Context and providers remain pinned.
+            unsafe { files.close(context) };
         }
+    }
+}
+
+fn close_tapes(tapes: &mut BTreeMap<u64, Arc<crate::tape::Tape>>, _: *mut Context) {
+    while let Some((_, tape)) = tapes.pop_last() {
+        drop(tape);
+    }
+}
+
+unsafe fn close_files(files: &mut BTreeMap<u64, File>, context: *mut Context) {
+    while let Some((_, file)) = files.pop_last() {
+        // SAFETY: removed sole ownership before calling the pinned provider.
+        unsafe { close(context, file) };
     }
 }
 
@@ -194,7 +268,12 @@ unsafe fn close(context: *mut Context, file: File) {
     // driver's C check and W/I cancellation do not apply under the shield.
     unsafe {
         (*context).cancel_shield += 1;
-        let _ = hirsel_core_host(context, &file.provider, &mut close_request(file.handle, 0));
+        let _ = drive(
+            context,
+            &file.provider,
+            &mut close_request(file.handle, 0),
+            None,
+        );
         (*context).cancel_shield -= 1;
     }
 }

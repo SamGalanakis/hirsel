@@ -14,6 +14,12 @@ pub struct Poller {
     epoll: OwnedFd,
     wake: OwnedFd,
     events: Mutex<Vec<libc::epoll_event>>,
+    operations: &'static PollOperations,
+}
+
+struct PollOperations {
+    poll: for<'a> fn(&'a Poller, i32) -> io::Result<Option<PollEvents<'a>>>,
+    wake: fn(&Poller),
 }
 
 /// The initialized prefix of one kernel turn, held until registry dispatch.
@@ -40,6 +46,10 @@ impl Poller {
             epoll,
             wake,
             events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
+            operations: &PollOperations {
+                poll: Self::poll_epoll,
+                wake: Self::wake_epoll,
+            },
         });
         poller.ctl(
             libc::EPOLL_CTL_ADD,
@@ -69,6 +79,12 @@ impl Poller {
     /// Try the driver token. A busy token returns immediately while another
     /// worker polls or dispatches. A zero timeout is a nonblocking turn.
     pub fn poll(&self, timeout_ms: i32) -> io::Result<Option<PollEvents<'_>>> {
+        (self.operations.poll)(self, timeout_ms)
+    }
+
+    // The optional operations are installed with the native poller, so a
+    // scheduler that can never construct one does not link this syscall path.
+    fn poll_epoll(&self, timeout_ms: i32) -> io::Result<Option<PollEvents<'_>>> {
         let Some(mut events) = self.try_turn() else {
             return Ok(None);
         };
@@ -95,6 +111,10 @@ impl Poller {
     }
 
     pub fn wake(&self) {
+        (self.operations.wake)(self);
+    }
+
+    fn wake_epoll(&self) {
         let one = 1u64;
         loop {
             // SAFETY: nonblocking eventfd, readable eight-byte counter.

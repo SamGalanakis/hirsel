@@ -298,7 +298,7 @@ impl Function<'_, '_, '_> {
                         &[self.context, args[0], args[1], site],
                     )?,
                     _ => self.c_call(
-                        "hirsel_core_host_op",
+                        op.io_symbol(),
                         &[P, K, U, P, K, U],
                         &[U, K, Ty::Scalar(Scalar::U32), U, K],
                         &[self.context, code, args[0], operand, mode, site],

@@ -136,6 +136,7 @@ fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
         parameters_len: parameters.len(),
         net_rules: std::ptr::null(),
         net_rules_len: 0,
+        directory_ops: std::ptr::null(),
         target: View {
             data: target.as_ptr(),
             len: target.len(),
@@ -214,6 +215,7 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
     ];
     let net_rule = hirsel_core_net::Rule::parse("Connect 0.0.0.0/0 0-65535").unwrap();
     let config = OsConfig {
+        directory_ops: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,
@@ -323,6 +325,7 @@ fn c_constructor_refuses_missing_grants_bad_descriptors_and_invalid_argv_before_
         index: 0,
     }];
     let config = OsConfig {
+        directory_ops: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,
@@ -410,6 +413,7 @@ fn c_u64_capability_operands_feed_host_requests_and_ok_is_initialized() {
         index: 0,
     }];
     let config = OsConfig {
+        directory_ops: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,
@@ -592,6 +596,7 @@ fn broken_pipe_child() {
             index: 0,
         }];
         let config = OsConfig {
+            directory_ops: std::ptr::null(),
             target: crate::process::View {
                 data: std::ptr::null(),
                 len: 0,

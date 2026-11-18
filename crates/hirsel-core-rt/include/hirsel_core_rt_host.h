@@ -56,6 +56,7 @@ HirselCoreHostOutcome hirsel_core_host(HirselCoreContext *, const HirselCoreProv
    and capacity never change. Capacity 0 borrows storage (even if len > 0).
    No row admits or grows/frees carrier storage. Null operand for no operand. */
 HirselCoreHostOutcome hirsel_core_host_op(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
+HirselCoreHostOutcome hirsel_core_host_io(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_rename(HirselCoreContext *, uint64_t handle, HirselCoreBuffer *from, HirselCoreBuffer *to, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_sleep_until(HirselCoreContext *, uint64_t handle, uint64_t deadline_ns, uint64_t site);
 /* HostFile (FORM #47): u64 provider handle; no cell, grant or charge.
@@ -136,6 +137,8 @@ uint64_t hirsel_core_capability_handle(const HirselCoreContext *, uint64_t);
 /* NET-6 configuration. dir: 0 Connect, 1 Listen; family: 0 V4, 1 V6. */
 typedef struct { uint8_t dir, family; uint64_t hi, lo; uint8_t bits; uint16_t first, last; } HirselCoreNetRule;
 typedef struct { const HirselCoreNetRule *data; size_t len; } HirselCoreNetRules;
+typedef struct HirselCoreDirectoryOperations HirselCoreDirectoryOperations;
+extern const HirselCoreDirectoryOperations hirsel_core_os_directory_ops;
 typedef struct {
     uint64_t root_limit;
     const HirselCoreView *args;
@@ -149,6 +152,8 @@ typedef struct {
     const HirselCoreNetRule *net_rules;
     size_t net_rules_len;
     HirselCoreView target;
+    /* Set to &hirsel_core_os_directory_ops for a sourced launch with directories. */
+    const HirselCoreDirectoryOperations *directory_ops;
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;

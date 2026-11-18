@@ -10,7 +10,25 @@ use std::{
 };
 pub(crate) const TEMP_ATTEMPTS: usize = 128;
 
+pub(crate) type IssueFile = unsafe extern "C" fn(*mut u8, *mut Request) -> Outcome;
+
+/// Operations required by an OS directory grant. The generated launcher
+/// names this table only when it supplies directory paths.
+pub struct DirectoryOperations {
+    pub(crate) grant: fn(&mut OsProvider, &Path) -> io::Result<u64>,
+    pub(crate) probe: fn(&OsProvider, u64) -> io::Result<()>,
+    pub(crate) issue: IssueFile,
+}
+
+#[unsafe(no_mangle)]
+pub static hirsel_core_os_directory_ops: DirectoryOperations = DirectoryOperations {
+    grant: OsProvider::grant,
+    probe: OsProvider::probe_directory,
+    issue: issue_file,
+};
+
 pub struct OsProvider {
+    issue_file: Option<IssueFile>,
     /// Host CLOCK_MONOTONIC at construction: mono_ns and sleep deadlines count from it.
     epoch: u64,
     directories: BTreeMap<u64, OwnedFd>,
@@ -27,6 +45,7 @@ impl OsProvider {
     }
     pub fn new(stdout: OwnedFd, stderr: OwnedFd) -> Self {
         Self {
+            issue_file: None,
             epoch: monotonic_ns(),
             directories: BTreeMap::new(),
             files: BTreeMap::new(),
@@ -64,6 +83,11 @@ impl OsProvider {
         id
     }
     pub fn provider(&mut self) -> Provider {
+        self.provider_with(Some(issue_file))
+    }
+
+    pub(crate) fn provider_with(&mut self, issue_file: Option<IssueFile>) -> Provider {
+        self.issue_file = issue_file;
         Provider {
             state: (self as *mut Self).cast(),
             wait,
@@ -73,7 +97,7 @@ impl OsProvider {
             deliver,
         }
     }
-    fn execute(&mut self, request: &mut Request) -> io::Result<Outcome> {
+    fn execute_file(&mut self, request: &mut Request) -> io::Result<Outcome> {
         let mut out = Outcome::default();
         // SAFETY: emitter/provider ABI pins these buffers and exact extents.
         let path = if request.path_len == 0 {
@@ -111,19 +135,11 @@ impl OsProvider {
                     out.value = n as u64;
                 }
             }
-            WRITE | STDOUT | STDERR => {
-                let fd = match request.operation {
-                    STDOUT => self.stdout.as_raw_fd(),
-                    STDERR => self.stderr.as_raw_fd(),
-                    _ => self.files[&request.handle].as_raw_fd(),
-                };
-                // SAFETY: the caller pins the readable input bytes through delivery.
-                let bytes = if request.buffer.len == 0 {
-                    &[]
-                } else {
-                    unsafe { std::slice::from_raw_parts(request.buffer.data, request.buffer.len) }
-                };
-                return Ok(write_all(fd, bytes));
+            WRITE => {
+                return Ok(write_request(
+                    self.files[&request.handle].as_raw_fd(),
+                    request,
+                ));
             }
             CLOSE => {
                 let fd = self.files.remove(&request.handle).unwrap().into_raw_fd();
@@ -266,9 +282,6 @@ impl OsProvider {
                 // collisions, so no directory or carrier bytes were changed.
                 return Err(io::Error::from_raw_os_error(libc::EAGAIN));
             }
-            SLEEP_UNTIL => {
-                // Waiting is owned by the scheduler; issue completes at once.
-            }
             SYNC => {
                 let fd = self.files[&request.handle].as_raw_fd();
                 // fdatasync makes file contents and the metadata required to
@@ -280,28 +293,6 @@ impl OsProvider {
                 let fd = self.directories[&request.handle].as_raw_fd();
                 // fsync on a directory persists its entry updates.
                 syscall(unsafe { libc::fsync(fd) } as isize)?;
-            }
-            RANDOM => {
-                let mut filled = 0usize;
-                while filled < request.buffer.capacity.saturating_sub(request.buffer.len) {
-                    let spare = request.buffer.capacity - request.buffer.len - filled;
-                    // SAFETY: the carrier owns writable spare capacity and the
-                    // syscall is bounded to that exact extent.
-                    let n = unsafe {
-                        libc::getrandom(
-                            request.buffer.data.add(request.buffer.len + filled).cast(),
-                            spare,
-                            0,
-                        )
-                    };
-                    let n = syscall(n as isize)? as usize;
-                    if n == 0 {
-                        return Err(io::Error::from_raw_os_error(libc::EIO));
-                    }
-                    filled += n;
-                }
-                request.buffer.len += filled;
-                out.written = filled as u64;
             }
             _ => unreachable!(),
         }
@@ -544,14 +535,70 @@ unsafe extern "C" fn abort(_: *mut u8, request: *mut Request, token: u64, reason
 }
 unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: a provider operation exclusively owns the adapter during issue.
-    match unsafe { (&mut *state.cast::<OsProvider>()).execute(&mut *request) } {
-        Ok(out) => out,
-        Err(error) => Outcome {
-            error: IoError::from_errno(error.raw_os_error().unwrap_or(libc::EIO)),
-            ..Outcome::default()
-        },
+    let os = unsafe { &mut *state.cast::<OsProvider>() };
+    let request = unsafe { &mut *request };
+    match request.operation {
+        STDOUT => write_request(os.stdout.as_raw_fd(), request),
+        STDERR => write_request(os.stderr.as_raw_fd(), request),
+        // Waiting is owned by the scheduler; issue completes at once.
+        SLEEP_UNTIL => Outcome::default(),
+        RANDOM => request_outcome(random(request)),
+        _ => {
+            let issue_file = os.issue_file.unwrap();
+            // SAFETY: the directory provider was installed before the run issued this request.
+            unsafe { issue_file(state, request) }
+        }
     }
 }
+
+unsafe extern "C" fn issue_file(state: *mut u8, request: *mut Request) -> Outcome {
+    // SAFETY: forwarded caller contract.
+    request_outcome(unsafe { (&mut *state.cast::<OsProvider>()).execute_file(&mut *request) })
+}
+
+fn request_outcome(result: io::Result<Outcome>) -> Outcome {
+    result.unwrap_or_else(|error| Outcome {
+        error: IoError::from_errno(error.raw_os_error().unwrap_or(libc::EIO)),
+        ..Outcome::default()
+    })
+}
+
+fn write_request(fd: i32, request: &Request) -> Outcome {
+    let bytes = if request.buffer.len == 0 {
+        &[]
+    } else {
+        // SAFETY: the caller pins the readable input bytes through delivery.
+        unsafe { std::slice::from_raw_parts(request.buffer.data, request.buffer.len) }
+    };
+    write_all(fd, bytes)
+}
+
+fn random(request: &mut Request) -> io::Result<Outcome> {
+    let mut filled = 0usize;
+    while filled < request.buffer.capacity.saturating_sub(request.buffer.len) {
+        let spare = request.buffer.capacity - request.buffer.len - filled;
+        // SAFETY: the carrier owns writable spare capacity and the
+        // syscall is bounded to that exact extent.
+        let n = unsafe {
+            libc::getrandom(
+                request.buffer.data.add(request.buffer.len + filled).cast(),
+                spare,
+                0,
+            )
+        };
+        let n = syscall(n as isize)? as usize;
+        if n == 0 {
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
+        filled += n;
+    }
+    request.buffer.len += filled;
+    Ok(Outcome {
+        written: filled as u64,
+        ..Outcome::default()
+    })
+}
+
 fn syscall(rc: isize) -> io::Result<isize> {
     if rc < 0 {
         Err(io::Error::last_os_error())

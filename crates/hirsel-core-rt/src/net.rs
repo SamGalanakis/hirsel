@@ -164,7 +164,26 @@ pub(crate) const DENIED: Outcome = Outcome {
     status: 0,
 };
 
-pub(crate) unsafe fn permitted(request: &Request, handle: u64) -> bool {
+/// Check an address before issue. A tape records the denial for its inner grant
+/// and delivers it at its ordinary provider boundary.
+pub(crate) unsafe fn authorize(provider: &Provider, request: &mut Request) -> bool {
+    if !matches!(request.operation, CONNECT | LISTEN) {
+        return true;
+    }
+    // SAFETY: CONNECT and LISTEN carry the Net adapter's pinned extension.
+    unsafe {
+        if !crate::tape::owns(provider) {
+            return permitted(request, request.handle);
+        }
+        if let Some((_, handle)) = crate::tape::source(provider, request.handle) {
+            let denied = !permitted(request, handle);
+            (*request.path.cast_mut().cast::<NetworkRequest>()).denied = denied;
+        }
+    }
+    true
+}
+
+unsafe fn permitted(request: &Request, handle: u64) -> bool {
     // SAFETY: network adapters pin the scalar address and the grant's Rules.
     unsafe {
         let address = &(*request.path.cast::<NetworkRequest>()).address;

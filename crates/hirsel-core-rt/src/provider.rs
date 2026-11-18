@@ -126,7 +126,11 @@ pub unsafe extern "C" fn hirsel_core_host(
     request: *mut Request,
 ) -> Outcome {
     // SAFETY: forwarded caller contract.
-    unsafe { drive(context, provider, request, None) }
+    unsafe {
+        drive_with(context, provider, request, None, |provider, request| {
+            crate::net::authorize(provider, request)
+        })
+    }
 }
 
 /// A clock read (WALL_MS or MONO_NS). On the OS provider this call form runs
@@ -189,6 +193,18 @@ pub(crate) unsafe fn drive(
     request: *mut Request,
     issued: Option<&mut Option<Outcome>>,
 ) -> Outcome {
+    // SAFETY: forwarded, for operations that need no Net authorization.
+    unsafe { drive_with(context, provider, request, issued, |_, _| true) }
+}
+
+#[inline(always)]
+unsafe fn drive_with(
+    context: *mut Context,
+    provider: *const Provider,
+    request: *mut Request,
+    issued: Option<&mut Option<Outcome>>,
+    authorize: impl FnOnce(&Provider, &mut Request) -> bool,
+) -> Outcome {
     // SAFETY: exclusively borrowed task context/request for this operation.
     unsafe {
         crate::process::deny_describe_capability(context);
@@ -210,18 +226,8 @@ pub(crate) unsafe fn drive(
                 return CANCELLED;
             }
         }
-        if matches!(operation, CONNECT | LISTEN) {
-            if crate::tape::owns(&*provider) {
-                if let Some((_, handle)) = crate::tape::source(&*provider, (*request).handle) {
-                    (*(*request)
-                        .path
-                        .cast_mut()
-                        .cast::<crate::net::NetworkRequest>())
-                    .denied = !crate::net::permitted(&*request, handle);
-                }
-            } else if !crate::net::permitted(&*request, (*request).handle) {
-                return crate::net::DENIED;
-            }
+        if !authorize(&*provider, &mut *request) {
+            return crate::net::DENIED;
         }
         let outcome = crate::tasks::provider_operation(context, &*provider, request, issued);
         if outcome.status == STATUS_REFUSED {

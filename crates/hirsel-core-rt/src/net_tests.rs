@@ -59,6 +59,7 @@ fn net_laws_child() {
         parameters_len: 0,
         net_rules: rules.as_ptr(),
         net_rules_len: rules.len(),
+        directory_ops: std::ptr::null(),
         target: crate::process::View {
             data: b"test-target".as_ptr(),
             len: 11,

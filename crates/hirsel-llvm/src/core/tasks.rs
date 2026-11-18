@@ -110,7 +110,7 @@ impl FunctionEmitter<'_> {
                 ],
             ),
             _ => self.native_call(
-                "hirsel_core_host_op",
+                op.io_symbol(),
                 &results,
                 &[
                     ptr(CONTEXT),

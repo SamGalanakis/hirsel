@@ -23,6 +23,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             return self.slots_value(name, types[0], vals, result, n);
         }
+        if module == ["bytebuf"] {
+            return match name {
+                "freeze" => Some(self.freeze_bytes(vals[0]?, result, n)),
+                "as_bytes" => Some(self.view_frozen_bytes(vals[0]?, result, n)),
+                _ => None,
+            };
+        }
         if module == ["map"] {
             return self.map_value(name, types, vals, result, n);
         }

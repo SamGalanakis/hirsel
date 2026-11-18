@@ -339,6 +339,17 @@ impl FunctionEmitter<'_> {
         align: u64,
         overflow: Option<ValueId>,
     ) -> (Value, Value) {
+        if matches!(
+            kind,
+            AllocKind::Own {
+                edge: FieldTy::FrozenBytes
+            }
+        ) {
+            return self.allocation(
+                "hirsel_core_admit_frozen_bytes",
+                &[ptr(CONTEXT), word(charge.clone())],
+            );
+        }
         // The prefix follows the block's cleanup class (crate docs,
         // "Cleanup classes"): terminal blocks carry only the payer word.
         let native_kind = match kind.cleanup(&self.module.types, self.recipes) {

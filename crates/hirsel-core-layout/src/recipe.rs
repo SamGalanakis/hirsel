@@ -696,7 +696,9 @@ pub fn field_niche<'r>(
         FieldTy::RegionRef(t) if !matches!(shapes[t.index()].repr, Repr::Compact(_)) => {
             n(0, POINTER, 0, 1)
         }
-        FieldTy::Seq(_) | FieldTy::Map(..) => n(16, 8, 1 << 63, (1 << 63) - 1),
+        FieldTy::Seq(_) | FieldTy::Map(..) | FieldTy::FrozenBytes => {
+            n(16, 8, 1 << 63, (1 << 63) - 1)
+        }
         FieldTy::Scalar(crate::shape::Scalar::Bool) => n(0, 1, 2, 254),
         FieldTy::Scalar(crate::shape::Scalar::Char) => n(0, 4, 0x11_0000, (1 << 32) - 0x11_0000),
         FieldTy::Inline(t) => match (shapes[t.index()].repr, &get(*t).layout) {
@@ -1097,7 +1099,7 @@ fn measure<'r>(
             | Handle::Flow,
         ) => (POINTER, POINTER, 8),
         FieldTy::Handle(Handle::Sender | Handle::Receiver) => (POINTER, POINTER, 24),
-        FieldTy::Seq(_) | FieldTy::Map(..) => (SEQ_CARRIER, POINTER, 24),
+        FieldTy::Seq(_) | FieldTy::Map(..) | FieldTy::FrozenBytes => (SEQ_CARRIER, POINTER, 24),
         FieldTy::OwnFn => (CLOSURE_CARRIER, POINTER, 16),
         FieldTy::Text
         | FieldTy::FixedSpan(_)
@@ -1241,6 +1243,7 @@ pub fn cleanup_class(shapes: &[Shape], recipes: &[Recipe], edge: &FieldTy) -> Op
                 Cleanup::Terminal
             }
         }
+        FieldTy::FrozenBytes => Cleanup::Terminal,
         FieldTy::Seq(e) if !drops(shapes, e, &drop) => Cleanup::Terminal,
         FieldTy::Map(k, v) if !drops(shapes, k, &drop) && !drops(shapes, v, &drop) => {
             Cleanup::Terminal
@@ -1255,6 +1258,7 @@ pub fn cleanup_class(shapes: &[Shape], recipes: &[Recipe], edge: &FieldTy) -> Op
 fn drops(shapes: &[Shape], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool {
     match ty {
         FieldTy::Seq(e) => !zero_sized(shapes, e, &mut vec![]),
+        FieldTy::FrozenBytes => true,
         FieldTy::Inline(t) => !matches!(shapes[t.index()].repr, Repr::Compact(_)) && drop(*t),
         FieldTy::Box(_)
         | FieldTy::Rc(_)

@@ -156,3 +156,21 @@ int main(void) {{ assert(hirsel_core_run(wire_config(),entry)==0); return 0; }}
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn static_bytes_preserve_budget_law() {
+    let source = include_str!("../../../core/front/cases/rules/MEM-28-static-bytes.hirsel");
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    execute(
+        &program,
+        &[
+            (names["literal_refusal"], vec![0]),
+            (names["literal_refusal"], vec![1]),
+            (names["refund_after_handover"], vec![0]),
+            (names["refund_after_handover"], vec![1]),
+            (names["empty_is_free"], vec![]),
+            (names["cloned_and_counted"], vec![]),
+        ],
+        false,
+    );
+}

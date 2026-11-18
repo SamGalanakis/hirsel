@@ -157,6 +157,7 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::Inline(t) => format!("t{}", t.0),
         FieldTy::Box(t) => format!("box t{}", t.0),
         FieldTy::Seq(e) => format!("seq {}", field_ty(e)),
+        FieldTy::FrozenBytes => "frozen_bytes".into(),
         FieldTy::Rc(t) => format!("rc t{}", t.0),
         FieldTy::Arc(t) => format!("arc t{}", t.0),
         FieldTy::RegionRef(t) => format!("region_ref t{}", t.0),
@@ -980,6 +981,10 @@ impl<'a> Line<'a> {
             "locator" => {
                 self.next()?;
                 FieldTy::Locator(boxed(self)?)
+            }
+            "frozen_bytes" => {
+                self.next()?;
+                FieldTy::FrozenBytes
             }
             "seq" | "fixed" | "seqspan" | "indexed" => {
                 let w = self.next()?;

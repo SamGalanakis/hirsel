@@ -1,0 +1,6 @@
+/// Transfers the existing storage and charge into a read-only owner.
+/// A byte literal checked against Result[FrozenBytes, Capacity] instead
+/// uses static storage with the same charge as an ordinary byte literal.
+pub fn freeze(take data: Bytes) -> FrozenBytes
+
+pub fn as_bytes(data: FrozenBytes) -> View[Bytes] in data

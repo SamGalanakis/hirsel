@@ -1,7 +1,7 @@
 # Core library
 
 The core library is source: one file per core module under
-[`core/core/`](../../core/core/), 29 files. Each file is a module ([LANG-7](language.md#lang-7-names))
+[`core/core/`](../../core/core/). Each file is a module ([LANG-7](language.md#lang-7-names))
 of the package `core`, which differs from any other package in one power: a function there
 may end at its header, and is then provided by the implementation. A core function with a
 body is ordinary code under the ordinary rules. Either way its contract is its header and
@@ -23,6 +23,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `int`, `float`, `char` | [int](../../core/core/int.hirsel), [float](../../core/core/float.hirsel), [char](../../core/core/char.hirsel) | SEM-1 to SEM-3 |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
+| `bytebuf` | [bytebuf](../../core/core/bytebuf.hirsel) | MEM-21, MEM-28 |
 | `deque` | [deque](../../core/core/deque.hirsel) | Deques and heaps, MEM-24 |
 | `heap` | [heap](../../core/core/heap.hirsel) | Deques and heaps, MEM-24 |
 | `seq`, `indexed`, `writer` | [seq](../../core/core/seq.hirsel), [indexed](../../core/core/indexed.hirsel), [writer](../../core/core/writer.hirsel) | MEM-4, MEM-12 |
@@ -62,6 +63,7 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | `Inline[T, n]` | T's kind (plain or own) | `shareable`, `send`, `key`, `ordered` when T | n × size(T) | T's |
 | `Never` | plain | `shareable`, `send`, `key`, `ordered` | 0 | nothing |
 | `String` | own | `shareable`, `send`, `key`, `ordered`, `codec` | 24 | nothing |
+| `FrozenBytes` | own | `shareable`, `send` | 24 | nothing |
 | `List[T]` | own | `shareable`, `send`, `key`, `ordered`, `codec` when T | 24 | T's |
 | `Map[K, V]` | own | `shareable`, `send`, `codec` when K and V | 24 | K's and V's |
 | `Deque[T]` | own | `shareable`, `send` when T | 32 | T's |
@@ -146,7 +148,12 @@ operations it names; nothing else about them may be inferred from an implementat
   (`list.set`, `xs[i] = x`), so an own `List` that has elements always owns its storage:
   capacity 0 means length 0, and no `List` is static. A byte-string literal (`b".."`,
   `br#".."#`) therefore has type `Result[Bytes, Capacity]`: it admits its length as
-  `List[u8]` storage and copies its bytes. `""` is the empty `String` of capacity 0.
+  `List[u8]` storage and copies its bytes. When the expected type is
+  `Result[FrozenBytes, Capacity]`, the literal uses read-only static storage.
+  It admits the same charge, in the same limit, and refunds it when the owner
+  drops. `bytebuf.freeze(take b)` transfers the existing charge, length and
+  capacity of an owned `Bytes`. `bytebuf.as_bytes(b)` borrows the bytes with
+  that length and capacity. `""` is the empty `String` of capacity 0.
 - **Strings.** `string.into_bytes(take s)` transfers `s`'s owned storage unchanged, with its
   length, capacity and charge; a static `s` is copied into newly admitted storage of capacity
   equal to its length, and on `Capacity` the error returns `s`. `string.from_utf8` returns its

@@ -671,6 +671,66 @@ pub unsafe extern "C" fn hirsel_core_admit(
     }
 }
 
+/// Admit a nonempty static byte literal's logical charge. The odd token
+/// names the original payer, which the outstanding charge keeps alive.
+///
+/// # Safety
+/// Context is live and task-exclusive. Charge is positive and rounded as for Bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_admit_frozen_bytes(
+    context: *const Context,
+    charge: u64,
+) -> Allocation {
+    // SAFETY: the emitter supplies the live task context.
+    let payer = unsafe { (*context).payer() };
+    match payer.admit(Some(charge)) {
+        Ok(()) => Allocation {
+            pointer: std::ptr::with_exposed_provenance_mut(
+                payer.record_pointer().expose_provenance() | 1,
+            ),
+            capacity: Capacity {
+                requested: 0,
+                available: 0,
+            },
+        },
+        Err(capacity) => Allocation {
+            pointer: ptr::null_mut(),
+            capacity,
+        },
+    }
+}
+
+/// Drop one initialized FrozenBytes carrier, refunding its original payer.
+///
+/// # Safety
+/// The emitter owns this live carrier exclusively, in a live task context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_drop_frozen_bytes(
+    context: *const Context,
+    carrier: *const u8,
+) {
+    // SAFETY: all three carrier words are initialized. The carrier can be inline
+    // in an aggregate and need not have Rust's pointer alignment.
+    let capacity = unsafe { carrier.add(16).cast::<u64>().read_unaligned() };
+    if capacity == 0 {
+        return;
+    }
+    let charge = capacity.next_multiple_of(8);
+    // SAFETY: the tag distinguishes a payer token from a doubled heap length.
+    let metadata = unsafe { carrier.add(8).cast::<usize>().read_unaligned() };
+    if metadata & 1 != 0 {
+        let record = std::ptr::with_exposed_provenance_mut(metadata & !1);
+        let payer = crate::limit::Payer::from_current(record);
+        // SAFETY: this live carrier's outstanding charge pins the payer.
+        payer.settle_in(unsafe { &*context }, charge);
+    } else {
+        // SAFETY: nonzero heap capacity owns a live, uniquely held block.
+        let pointer =
+            unsafe { std::ptr::NonNull::new_unchecked(carrier.cast::<*mut u8>().read_unaligned()) };
+        unsafe { crate::block::free_in(&*context, pointer, charge) };
+    }
+}
+
 /// Admit frame storage and publish its backing record for mutating callees.
 /// # Safety
 /// The task and the slot (payload plus allocation link) are live and exclusive.

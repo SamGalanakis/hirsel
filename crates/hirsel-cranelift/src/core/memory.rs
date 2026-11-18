@@ -156,7 +156,20 @@ impl Function<'_, '_, '_> {
                 // Allocation = {pointer, Capacity{requested,available}}, a C
                 // struct of three words. On refusal only the pointer is null;
                 // there is no guessed function status or call to the old runtime.
-                let values = if let AllocPlace::Frame(frame) = place {
+                let values = if matches!(
+                    kind,
+                    AllocKind::Own {
+                        edge: hirsel_core_layout::FieldTy::FrozenBytes
+                    }
+                ) {
+                    let r = self.c_call(
+                        "hirsel_core_admit_frozen_bytes",
+                        &[p, u],
+                        &[p, u, u],
+                        &[ctx, charge],
+                    )?;
+                    [r[0], r[1], r[2]]
+                } else if let AllocPlace::Frame(frame) = place {
                     let frame = self.get(frame);
                     let overflow = overflow.map(|v| self.get(v));
                     let values = self.frame_admit(frame, charge, overflow)?;

@@ -151,6 +151,7 @@ fn plan_field(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy, at: u64) -> No
             yields: Some(false),
         },
         FieldTy::Inline(t) => plan_type(shapes, recipes, *t, at),
+        FieldTy::FrozenBytes => whole(crate::SEQ_CARRIER),
         FieldTy::Seq(_) if crate::storage_free(shapes, ty) => Node::Empty,
         FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) => Node::Leaf {
             at,

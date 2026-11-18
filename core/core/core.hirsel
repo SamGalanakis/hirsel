@@ -20,6 +20,8 @@ pub opaque type List[T]
 
 pub type Bytes = List[u8]
 
+pub opaque type FrozenBytes
+
 pub type Deque[T] = deque.Deque[T]
 
 pub type Heap[T: ordered] = heap.Heap[T]

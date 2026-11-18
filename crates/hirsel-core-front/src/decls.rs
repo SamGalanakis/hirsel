@@ -183,6 +183,7 @@ pub enum Role {
     Socket,
     Flow,
     FlowEndpoint,
+    FrozenBytes,
 }
 impl Role {
     fn of(path: &DefPath) -> Option<Role> {
@@ -197,6 +198,7 @@ impl Role {
             "Latest" => Role::Latest,
             "List" => Role::List,
             "String" => Role::String,
+            "FrozenBytes" => Role::FrozenBytes,
             "Text" => Role::Text,
             "Map" => Role::Map,
             "Region" => Role::Region,
@@ -235,6 +237,7 @@ impl Role {
             Role::Box
             | Role::List
             | Role::String
+            | Role::FrozenBytes
             | Role::Map
             | Role::SpanBuilder
             | Role::Builder
@@ -2742,6 +2745,7 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                 let declared = match decl.role {
                     Some(Role::List) => meet(args) & (KEY | ORDERED | SHAREABLE | SEND | CODEC),
                     Some(Role::String) => KEY | ORDERED | SHAREABLE | SEND | CODEC,
+                    Some(Role::FrozenBytes) => SHAREABLE | SEND,
                     Some(Role::Text) => KEY | ORDERED,
                     Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan) => {
                         meet(args) & (KEY | ORDERED)

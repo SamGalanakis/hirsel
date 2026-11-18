@@ -43,6 +43,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 mod admission;
 mod anchors;
 mod builtins;
+mod bytes;
 mod callable_abi;
 mod calls;
 mod cleanup;

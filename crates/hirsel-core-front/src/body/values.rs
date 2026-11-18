@@ -116,7 +116,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
         )
     }
-    fn byte_string(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
+    fn byte_string(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let p = self.p;
         let (Some(bytes), Some(result), Some(list), Some(cap)) = (
             quoted_bytes(self.token_text(n), true),
@@ -126,8 +126,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ) else {
             return self.gap_ty(n, "byte string literal form is not built");
         };
-        let list = self.t.mk(TyKind::Adt(list, vec![scalar(Scalar::U8)]));
         let cap = self.t.mk(TyKind::Adt(cap, vec![]));
+        let frozen = want
+            .filter(|w| w.payload == 0)
+            .and_then(|w| match self.t.kind(w.ty) {
+                TyKind::Adt(r, args)
+                    if *r == result
+                        && args[1] == cap
+                        && matches!(self.t.kind(args[0]), TyKind::Adt(d, _)
+                            if self.p.decls[d.index()].role == Some(Role::FrozenBytes)) =>
+                {
+                    Some(args[0])
+                }
+                _ => None,
+            });
+        let list = frozen.unwrap_or_else(|| self.t.mk(TyKind::Adt(list, vec![scalar(Scalar::U8)])));
+        let frozen = frozen.is_some();
         let ty = self.t.mk(TyKind::Adt(result, vec![list, cap]));
         let (id, list_id, cap_id) = match (self.rep(ty), self.rep(list), self.rep(cap)) {
             (Ok(Rep::Place(a)), Ok(Rep::Place(b)), Ok(Rep::Place(c))) => (a, b, c),
@@ -146,8 +160,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         else {
             return (ty, None);
         };
-        // Ok: the carrier {storage, length, capacity = length}.
-        let ok = |cx: &mut Self, block: ValueId| {
+        // Both carriers have the same capacity and occupy three words.
+        let ok = |cx: &mut Self, data: ValueId, payer: Option<ValueId>| {
             cx.inst(
                 Inst::SetCase {
                     address: to,
@@ -161,28 +175,40 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 PlaceTy::Declared(list_id),
                 n,
             );
-            for (k, value) in [block, length, length].into_iter().enumerate() {
+            let fields = [
+                (data, Ty::Ptr),
+                payer.map_or((length, u64t), |payer| (payer, Ty::Ptr)),
+                (length, u64t),
+            ];
+            for (k, (value, word_ty)) in fields.into_iter().enumerate() {
                 let Some(offset) = cx.konst(u64t, 8 * k as u64, n) else {
                     return;
                 };
                 let at = cx.address(
                     AddressBase::Address(carrier),
                     &[Step::Byte(offset)],
-                    PlaceTy::Value(if k == 0 { Ty::Ptr } else { u64t }),
+                    PlaceTy::Value(word_ty),
                     n,
                 );
                 cx.inst(Inst::Store { address: at, value }, n);
             }
         };
         if bytes.is_empty() {
-            ok(self, null);
+            ok(self, null, None);
         } else {
             let Some(charge) = self.konst(u64t, len.next_multiple_of(8), n) else {
                 return (ty, None);
             };
-            // MEM-24: `List[u8]` storage of capacity `len`, charged rounded up to 8; the
-            // block is that rounded size so the bytes go in as whole words.
+            // MEM-24: both carriers admit a List[u8] of capacity len, rounded
+            // up to eight. The heap block uses the rounded size for word stores.
             let block = self.value(Ty::Ptr);
+            let Some(size) = (if frozen {
+                self.konst(u64t, 0, n)
+            } else {
+                Some(charge)
+            }) else {
+                return (ty, None);
+            };
             let available = self.value(u64t);
             self.inst(
                 Inst::Alloc {
@@ -190,12 +216,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     available,
                     region_entry: None,
                     kind: AllocKind::Own {
-                        edge: FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
+                        edge: if frozen {
+                            FieldTy::FrozenBytes
+                        } else {
+                            FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8)))
+                        },
                     },
                     place: AllocPlace::Current,
                     charge,
                     overflow: None,
-                    size: charge,
+                    size,
                     align: 8,
                     fail: None,
                 },
@@ -226,26 +256,39 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(n),
             );
             self.start(yes);
-            // The bytes as little-endian words (memory.md: scalars are little-endian),
-            // the last one zero-padded inside the rounded block.
-            for (k, word) in bytes.chunks(8).enumerate() {
-                let mut w = [0u8; 8];
-                w[..word.len()].copy_from_slice(word);
-                let (Some(offset), Some(value)) = (
-                    self.konst(u64t, 8 * k as u64, n),
-                    self.konst(u64t, u64::from_le_bytes(w), n),
-                ) else {
-                    return (ty, None);
-                };
-                let at = self.address(
-                    AddressBase::Value(block),
-                    &[Step::Byte(offset)],
-                    PlaceTy::Value(u64t),
+            if frozen {
+                let data = self.e.static_bytes(&bytes);
+                let value = self.value(Ty::Ptr);
+                self.inst(
+                    Inst::ReadStatic {
+                        result: value,
+                        data,
+                    },
                     n,
                 );
-                self.inst(Inst::Store { address: at, value }, n);
+                ok(self, value, Some(block));
+            } else {
+                // The bytes as little-endian words (memory.md: scalars are little-endian),
+                // the last one zero-padded inside the rounded block.
+                for (k, word) in bytes.chunks(8).enumerate() {
+                    let mut w = [0u8; 8];
+                    w[..word.len()].copy_from_slice(word);
+                    let (Some(offset), Some(value)) = (
+                        self.konst(u64t, 8 * k as u64, n),
+                        self.konst(u64t, u64::from_le_bytes(w), n),
+                    ) else {
+                        return (ty, None);
+                    };
+                    let at = self.address(
+                        AddressBase::Value(block),
+                        &[Step::Byte(offset)],
+                        PlaceTy::Value(u64t),
+                        n,
+                    );
+                    self.inst(Inst::Store { address: at, value }, n);
+                }
+                ok(self, block, None);
             }
-            ok(self, block);
             self.jump(join, &[], n);
             // Error: `Capacity { requested, available }`.
             self.start(no);
@@ -420,7 +463,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 (s, bits)
             }
-            Some(TokenKind::Bytes) => return self.byte_string(n),
+            Some(TokenKind::Bytes) => return self.byte_string(n, want),
             Some(TokenKind::String) => return self.static_literal(n, want),
             _ => return self.gap_ty(n, "literal form is not built"),
         };

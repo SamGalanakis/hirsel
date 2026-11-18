@@ -1156,6 +1156,12 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             )?;
             if let AllocKind::Own { edge } = kind {
                 use hirsel_core_layout::FieldTy as F;
+                if matches!(edge, F::FrozenBytes) {
+                    need(
+                        matches!(place, AllocPlace::Current) && overflow.is_none(),
+                        || "static bytes admit a fixed charge against the current payer".into(),
+                    )?;
+                }
                 let types = &c.m.types;
                 need(refs_ok(edge, types.len()), || {
                     format!("allocation edge {edge:?} names an unknown type")
@@ -1163,7 +1169,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 need(
                     matches!(
                         edge,
-                        F::Box(_) | F::Rc(_) | F::Arc(_) | F::Seq(_) | F::Map(..)
+                        F::Box(_) | F::Rc(_) | F::Arc(_) | F::Seq(_) | F::Map(..) | F::FrozenBytes
                     ),
                     || format!("allocation edge {edge:?} is not an own block's edge"),
                 )?;

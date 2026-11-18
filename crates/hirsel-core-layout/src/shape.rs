@@ -245,6 +245,9 @@ pub enum FieldTy {
     /// `Text`, `FixedSpan(e)`, `SeqSpan(e)`, `IndexedSpan(e)`, or `Inline(c)` of a
     /// compact `c`; that target is the recipe hash, equality and order read.
     Locator(Box<FieldTy>),
+    /// Read-only Bytes storage. The third word is capacity, with the usual
+    /// sequence niches. The second word is a doubled length or an odd payer token.
+    FrozenBytes,
 }
 
 impl FieldTy {
@@ -273,7 +276,8 @@ impl FieldTy {
             | FieldTy::OwnFn
             | FieldTy::Borrow
             | FieldTy::Handle(_)
-            | FieldTy::Text => {}
+            | FieldTy::Text
+            | FieldTy::FrozenBytes => {}
         }
     }
 }

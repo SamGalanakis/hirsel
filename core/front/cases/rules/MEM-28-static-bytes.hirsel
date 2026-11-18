@@ -1,0 +1,119 @@
+// Nine bytes cost 16 in either carrier. At a limit of 15 the first literal
+// refuses with requested=16 and available=15, before the one-byte literal.
+// At a limit of 16 that charge survives handing the payer over to the parent.
+// A second byte allocation refuses with requested=8 and available=0 until the
+// first owner's drop, after which a nine-byte allocation fits again.
+// expect: run literal_refusal(false) = 1615
+// expect: run literal_refusal(true) = 1615
+// expect: run refund_after_handover(false) = 890
+// expect: run refund_after_handover(true) = 890
+// expect: run empty_is_free() = 0
+// expect: run cloned_and_counted() = 18
+// expect: size FrozenPair 48
+// expect: size HeapPair 48
+// expect: size FrozenOrShared 32
+// expect: size HeapOrShared 32
+type FrozenPair {
+    first: FrozenBytes,
+    second: FrozenBytes
+}
+
+type HeapPair {
+    first: Bytes,
+    second: Bytes
+}
+
+type FrozenOrShared = Frozen(FrozenBytes) | SharedFrozen(Arc[Bytes])
+
+type HeapOrShared = Heap(Bytes) | SharedHeap(Arc[Bytes])
+
+fn make(frozen: bool) -> Result[FrozenBytes, Capacity] {
+    if frozen {
+        return b"abcdefghi"
+    }
+    let heap: Result[Bytes, Capacity] = b"abcdefghi"
+    match take heap {
+        Ok(take b) => Ok(bytebuf.freeze(take b)),
+        Error(c) => Error(c),
+    }
+}
+
+fn literal_refusal(frozen: bool) -> u64 {
+    let got = bound bytes 15 {
+        let b = make(frozen)?
+        let one = b"x"?
+        list.len(bytebuf.as_bytes(b)) + list.len(one)
+    }
+    match got {
+        Ok(n) => n,
+        Error(c) => c.requested * 100 + c.available,
+    }
+}
+
+fn inspect(frozen: bool) -> Result[u64, Capacity] {
+    let before = {
+        let escaped = (bound bytes 16 {
+            make(frozen)
+        })??
+        let b = bytebuf.as_bytes(escaped)
+        let len = list.len(b)
+        let same = list.capacity(b) == 9 && b[8] == b'i'
+        let refusal = match b"x" {
+            Error(e) => e.requested * 100 + e.available,
+            Ok(_) => 5000,
+        }
+        if same {
+            refusal + 10 * len
+        } else {
+            6000
+        }
+    }
+    let again = b"123456789"?
+    Ok(before + list.len(again) - 9)
+}
+
+fn refund_after_handover(frozen: bool) -> u64 {
+    match (bound bytes 16 {
+        inspect(frozen)
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 7000,
+    }
+}
+
+fn empty_is_free() -> u64 {
+    let got = bound bytes 0 {
+        let literal: Result[FrozenBytes, Capacity] = b""
+        let b = result.unwrap(take literal)
+        list.len(bytebuf.as_bytes(b))
+    }
+    match got {
+        Ok(n) => n,
+        Error(_) => 8000
+    }
+}
+
+// A nine-byte clone costs 16. The original and clone plus an Arc holding the
+// original cost 16 + 16 + (8 + 24) = 64. The Arc's last release refunds the
+// literal, and the clone drops independently. Another 64-byte buffer then fits.
+fn cloned_and_counted() -> u64 {
+    let got = bound bytes 64 {
+        let length = {
+            let original = make(true)?
+            let attempt: Result[FrozenBytes, Capacity] = clone(original)
+            let copied = attempt?
+            let held = result.unwrap(arc.new(take original))
+            list.len(bytebuf.as_bytes(held)) + list.len(bytebuf.as_bytes(copied))
+        }
+        let proof: Bytes = list.with_capacity(64)?
+        if list.capacity(proof) == 64 {
+            length
+        } else {
+            9000
+        }
+    }
+    match got {
+        Ok(n) => n,
+        Error(_) => 9001
+    }
+}

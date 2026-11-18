@@ -2554,6 +2554,20 @@ impl Machine<'_> {
                 t.shield -= 1;
                 failed
             }
+            FieldTy::FrozenBytes => {
+                let capacity = self.load(at + 16, 8);
+                if capacity != 0 {
+                    let meta = self.load(at + 8, 8);
+                    let block = if meta & 1 == 0 {
+                        self.load(at, 8)
+                    } else {
+                        meta & !1
+                    };
+                    let size = (meta & 1 != 0).then_some(0);
+                    self.free_as(block, charge::seq(capacity, 1), size, "frozen bytes");
+                }
+                false
+            }
             FieldTy::Seq(element) => {
                 let block = self.load(at, 8);
                 let length = self.load(at + 8, 8);
@@ -4003,6 +4017,17 @@ impl Machine<'_> {
                         slot.lent_size = Some(vals[size.index()]);
                         slot.class = Some(kind.cleanup(&self.m.types, &self.recipes));
                         (vals[result.index()], vals[available.index()]) = (p, 0);
+                    }
+                    Ok(())
+                        if matches!(
+                            kind,
+                            AllocKind::Own {
+                                edge: FieldTy::FrozenBytes
+                            }
+                        ) =>
+                    {
+                        let receipt = self.block(0, Some(l), n, None);
+                        (vals[result.index()], vals[available.index()]) = (receipt | 1, 0);
                     }
                     Ok(()) => {
                         let res = match kind {

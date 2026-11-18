@@ -2819,3 +2819,27 @@ fn metered(s: u64, n: u64, cap: u64) -> u64 {
         ));
     }
 }
+
+#[test]
+fn static_bytes_preserve_budget_law() {
+    let source = include_str!("../../../core/front/cases/rules/MEM-28-static-bytes.hirsel");
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let cases = [
+        ("literal_refusal", vec![0], 1615),
+        ("literal_refusal", vec![1], 1615),
+        ("refund_after_handover", vec![0], 890),
+        ("refund_after_handover", vec![1], 890),
+        ("empty_is_free", vec![], 0),
+        ("cloned_and_counted", vec![], 18),
+    ];
+    let runs = cases.each_ref().map(|(name, args, _)| Case {
+        function: names[*name],
+        args: args.clone(),
+        limit: 4096,
+        injection: None,
+    });
+    for (report, (_, _, expected)) in execute(&program, &runs).iter().zip(cases) {
+        assert_eq!(report.outcome, eval::Outcome::Returned(vec![expected]));
+        assert_eq!(report.used, 0);
+    }
+}

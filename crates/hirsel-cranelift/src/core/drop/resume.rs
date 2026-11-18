@@ -103,7 +103,7 @@ fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
         ),
         FieldTy::Handle(hirsel_core_layout::Handle::Capability) => Plan::Empty,
         // Cleaned whole by ordinary glue in one step that never yields.
-        FieldTy::Handle(_) => Plan::Leaf(t.clone()),
+        FieldTy::Handle(_) | FieldTy::FrozenBytes => Plan::Leaf(t.clone()),
         // Its environment, when present, is staged from its descriptor.
         FieldTy::OwnFn => Plan::Leaf(t.clone()),
         FieldTy::Text
@@ -140,7 +140,8 @@ impl Glue<'_, '_, '_> {
             | FieldTy::Fn
             | FieldTy::Borrow
             | FieldTy::View(_)
-            | FieldTy::Locator(_) => true,
+            | FieldTy::Locator(_)
+            | FieldTy::FrozenBytes => true,
             _ => false,
         }
     }
@@ -415,7 +416,7 @@ impl Glue<'_, '_, '_> {
                         self.b.switch_to_block(handed);
                     }
                     // A handle is released whole in place.
-                    FieldTy::Handle(_) => {
+                    FieldTy::Handle(_) | FieldTy::FrozenBytes => {
                         self.field(base, field)?;
                         yields = false;
                     }

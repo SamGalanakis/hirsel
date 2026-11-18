@@ -13,11 +13,11 @@ fn failure(status: u16) -> BodyError {
 }
 
 type ResponseField: send {
-    name: Bytes,
-    value: Bytes
+    name: FrozenBytes,
+    value: FrozenBytes
 }
 
-type ResponseBody: send = OwnedBody(Bytes) | SharedBody(Arc[Bytes])
+type ResponseBody: send = OwnedBody(FrozenBytes) | SharedBody(Arc[Bytes])
 
 pub opaque type Response: send {
     status: u16,
@@ -33,6 +33,11 @@ pub type HandlerError = ResponseError
 
 /// Builds a final response. Only the connection may send informational statuses.
 pub fn response(status: u16, take body: Bytes, close: bool) -> Result[Response, ResponseError] {
+    response_frozen(status, bytebuf.freeze(take body), close)
+}
+
+/// Builds a response with an immutable payload.
+pub fn response_frozen(status: u16, take body: FrozenBytes, close: bool) -> Result[Response, ResponseError] {
     response_with(status, OwnedBody(take body), close)
 }
 
@@ -49,7 +54,7 @@ fn response_with(status: u16, take body: ResponseBody, close: bool) -> Result[Re
 
 fn response_body(r: Response) -> View[Bytes] in r {
     match r.body {
-        OwnedBody(data) => view data,
+        OwnedBody(data) => bytebuf.as_bytes(data),
         SharedBody(data) => list.slice(data, 0, list.len(data)),
     }
 }
@@ -92,7 +97,7 @@ pub fn header(mut r: Response, take name: Bytes, take value: Bytes) -> Result[()
         r.invalid = true
         return Error(e)
     }
-    push_field(mut r, take name, take value)
+    push_field(mut r, bytebuf.freeze(take name), bytebuf.freeze(take value))
 }
 
 /// Media types whose wire spelling is fixed by the library.
@@ -100,12 +105,12 @@ pub type ContentType: key = TextPlain | ApplicationJson
 
 /// Appends a Content-Type whose name and value are valid by construction.
 pub fn content_type(mut r: Response, media: ContentType) -> Result[(), ResponseError] {
-    let name_literal = b"Content-Type"
+    let name_literal: Result[FrozenBytes, Capacity] = b"Content-Type"
     let name = match take name_literal {
         Ok(take data) => take data,
         Error(c) => return Error(Allocation(c)),
     }
-    let literal = match media {
+    let literal: Result[FrozenBytes, Capacity] = match media {
         TextPlain => b"text/plain",
         ApplicationJson => b"application/json",
     }
@@ -116,7 +121,7 @@ pub fn content_type(mut r: Response, media: ContentType) -> Result[(), ResponseE
     push_field(mut r, take name, take value)
 }
 
-fn push_field(mut r: Response, take name: Bytes, take value: Bytes) -> Result[(), ResponseError] {
+fn push_field(mut r: Response, take name: FrozenBytes, take value: FrozenBytes) -> Result[(), ResponseError] {
     match list.push(mut r.fields, ResponseField(name: take name, value: take value)) {
         Ok(()) => Ok(()),
         Error((c, _)) => Error(Allocation(c)),
@@ -293,10 +298,11 @@ fn response_head(mut out: Bytes, r: Response, version: u8, close: bool, wall_ms:
     head_text(mut out, reason(r.status))?
     head_text(mut out, "\r\n")?
     for f in r.fields {
-        if !http1.equal_ascii(f.name, string.as_bytes("date")) {
-            append_head(mut out, f.name)?
+        let name = bytebuf.as_bytes(f.name)
+        if !http1.equal_ascii(name, string.as_bytes("date")) {
+            append_head(mut out, name)?
             head_text(mut out, ": ")?
-            append_head(mut out, f.value)?
+            append_head(mut out, bytebuf.as_bytes(f.value))?
             head_text(mut out, "\r\n")?
         }
     }

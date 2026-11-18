@@ -210,6 +210,17 @@ impl<T: TyRead> Shapes<'_, T> {
                         let body = record(vec![("bytes", bytes)]);
                         return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
+                    Some(Role::FrozenBytes) => {
+                        let body = record(vec![("bytes", FieldTy::FrozenBytes)]);
+                        return self.fill(
+                            r,
+                            ty,
+                            LRepr::Own,
+                            body,
+                            None,
+                            Some(FieldTy::FrozenBytes),
+                        );
+                    }
                     Some(Role::List) => {
                         let items = FieldTy::Seq(Box::new(self.field(args[0])?));
                         let held = Some(items.clone());
@@ -569,6 +580,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::Arc) => FieldTy::Arc(self.shape(args[0])?),
                 Some(Role::List) => FieldTy::Seq(Box::new(self.field(args[0])?)),
                 Some(Role::String) => FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
+                Some(Role::FrozenBytes) => FieldTy::FrozenBytes,
                 Some(Role::Map) => FieldTy::Inline(self.shape(ty)?),
                 Some(Role::Log | Role::StaticFn | Role::FlowEndpoint) => {
                     FieldTy::Scalar(Scalar::U64)

@@ -878,6 +878,14 @@ impl Glue<'_, '_, '_> {
             // SEM-4: a List of a zero-sized element has no storage to clean.
             FieldTy::Seq(_) if hirsel_core_layout::storage_free(&self.tables.input.types, t) => {}
             FieldTy::Seq(_) | FieldTy::Map(..) => self.release_buffer(at, t)?,
+            FieldTy::FrozenBytes => {
+                self.call(
+                    "hirsel_core_drop_frozen_bytes",
+                    &[P, P],
+                    &[],
+                    &[self.ctx, at],
+                )?;
+            }
             FieldTy::Handle(
                 h @ (hirsel_core_layout::Handle::HostFile
                 | hirsel_core_layout::Handle::Tape

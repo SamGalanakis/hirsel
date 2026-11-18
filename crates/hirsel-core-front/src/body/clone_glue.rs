@@ -83,7 +83,8 @@ impl Derive<'_> {
                 | FieldTy::OwnFn
                 | FieldTy::Borrow
                 | FieldTy::Handle(_)
-                | FieldTy::Text => false,
+                | FieldTy::Text
+                | FieldTy::FrozenBytes => false,
             }
         }
         if row(&self.module.types, ty.0, &mut vec![], allow_hooks) {
@@ -175,6 +176,7 @@ impl Derive<'_> {
     fn owns(&self, field: &FieldTy, seen: &mut Vec<u32>) -> bool {
         match field {
             FieldTy::Seq(_)
+            | FieldTy::FrozenBytes
             | FieldTy::Box(_)
             | FieldTy::Rc(_)
             | FieldTy::Arc(_)
@@ -322,9 +324,31 @@ impl Derive<'_> {
                     kind: counted(field),
                 });
             }
-            FieldTy::Seq(item) => {
-                let len_at = c.offset(from, 8);
-                let len = c.read(len_at, Ty::Scalar(Scalar::U64));
+            FieldTy::Seq(_) | FieldTy::FrozenBytes => {
+                let u = Ty::Scalar(Scalar::U64);
+                let byte = FieldTy::Scalar(Scalar::U8);
+                let (item, len) = if let FieldTy::Seq(item) = field {
+                    let at = c.offset(from, 8);
+                    (&**item, c.read(at, u))
+                } else {
+                    let at = c.offset(from, 8);
+                    let meta = c.read(at, u);
+                    let one = c.constant(1);
+                    let tag = c.binary(BinaryOp::BitAnd, meta, one);
+                    let zero = c.constant(0);
+                    let static_data = c.compare(CompareOp::Ne, tag, zero);
+                    let (static_len, heap_len, join) = (c.block(&[]), c.block(&[]), c.block(&[u]));
+                    c.branch(static_data, static_len, heap_len);
+                    c.start(static_len);
+                    let at = c.offset(from, 16);
+                    let len = c.read(at, u);
+                    c.jump(join, &[len]);
+                    c.start(heap_len);
+                    let len = c.binary(BinaryOp::Shr, meta, one);
+                    c.jump(join, &[len]);
+                    c.start(join);
+                    (&byte, c.params(join)[0])
+                };
                 let zero = c.constant(0);
                 let empty = c.compare(CompareOp::Eq, len, zero);
                 let (none, some, done) = (c.block(&[]), c.block(&[]), c.block(&[]));
@@ -339,6 +363,10 @@ impl Derive<'_> {
                 store(c, to, null);
                 let cap = c.offset(to, 16);
                 store(c, cap, zero);
+                if matches!(field, FieldTy::FrozenBytes) {
+                    let meta = c.offset(to, 8);
+                    store(c, meta, zero);
+                }
                 c.jump(done, &[]);
                 c.start(some);
                 // The block holds `len` native strides and is charged `len` logical
@@ -346,12 +374,21 @@ impl Derive<'_> {
                 let k = c.constant(self.size_of(item));
                 let bytes = c.mul(len, k);
                 let charge = self.seq_charge(c, item, len);
-                let block = alloc_kind(c, self.allocation_kind(field), charge, bytes, fail);
+                let kind = AllocKind::Own {
+                    edge: FieldTy::Seq(Box::new(item.clone())),
+                };
+                let block = alloc_kind(c, kind, charge, bytes, fail);
                 let old = c.read(from, Ty::Ptr);
                 copy_value(c, block, old, bytes);
                 store(c, to, block);
                 let cap = c.offset(to, 16);
                 store(c, cap, len);
+                if matches!(field, FieldTy::FrozenBytes) {
+                    let meta = c.offset(to, 8);
+                    let two = c.constant(2);
+                    let length = c.mul(len, two);
+                    store(c, meta, length);
+                }
                 if self.owns(item, &mut vec![]) {
                     // A refusal inside drops the elements already copied, then the block.
                     let undo = c.block(&[Ty::Scalar(Scalar::U64); 3]);
@@ -492,7 +529,14 @@ impl Derive<'_> {
                     ty: TypeId(t.0),
                 });
             }
-            FieldTy::Seq(item) => {
+            FieldTy::Seq(_) | FieldTy::FrozenBytes => {
+                // A completed FrozenBytes clone owns heap backing.
+                let byte = FieldTy::Scalar(Scalar::U8);
+                let item = if let FieldTy::Seq(item) = field {
+                    &**item
+                } else {
+                    &byte
+                };
                 let block = c.read(at, Ty::Ptr);
                 let cap_at = c.offset(at, 16);
                 let cap = c.read(cap_at, Ty::Scalar(Scalar::U64));

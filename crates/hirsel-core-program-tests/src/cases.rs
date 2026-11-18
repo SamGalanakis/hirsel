@@ -129,7 +129,8 @@ fn concrete_rows_reaching_rigid(module: &Module) -> Vec<(String, String)> {
             | FieldTy::OwnFn
             | FieldTy::Borrow
             | FieldTy::Handle(_)
-            | FieldTy::Text => {}
+            | FieldTy::Text
+            | FieldTy::FrozenBytes => {}
         }
     }
     let mut found = vec![];
@@ -1967,5 +1968,11 @@ fn step_bounds_rules() {
     failures.extend(run_case(
         &root().join("../../crates/hirsel-core-rt/fixtures/order/step-bounds.hirsel"),
     ));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn static_bytes_preserve_budget_law() {
+    let failures = run_case(&root().join("cases/rules/MEM-28-static-bytes.hirsel"));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

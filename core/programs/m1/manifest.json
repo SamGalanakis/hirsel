@@ -32,6 +32,13 @@
           "signatures": true
         },
         {
+          "file": "core/core/bytebuf.hirsel",
+          "modules": [
+            "bytebuf"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/core/channel.hirsel",
           "modules": [
             "channel"

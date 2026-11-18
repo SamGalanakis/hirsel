@@ -347,6 +347,13 @@ impl FunctionEmitter<'_> {
                 None
             }
             FieldTy::Seq(_) | FieldTy::Map(_, _) => self.release_collection(field, p),
+            FieldTy::FrozenBytes => {
+                self.runtime_void(
+                    "hirsel_core_drop_frozen_bytes",
+                    &[ptr(CONTEXT), ptr(p.clone())],
+                );
+                None
+            }
             FieldTy::OwnFn => {
                 let at = self.offset(p, 8);
                 let environment = self.load(&Type::Ptr, &at, 1);
@@ -524,7 +531,8 @@ pub(super) fn mechanical_count(
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
         | FieldTy::Seq(_)
-        | FieldTy::Map(_, _) => 1,
+        | FieldTy::Map(_, _)
+        | FieldTy::FrozenBytes => 1,
         FieldTy::Inline(t) => {
             let Some(drop) = &recipes[t.index()].drop else {
                 return Ok(0);
@@ -731,6 +739,7 @@ impl FunctionEmitter<'_> {
                 self.br(Label::plain("resume"));
             }
             FieldTy::Seq(_) | FieldTy::Map(_, _) => self.enqueue_collection(field, p),
+            FieldTy::FrozenBytes => self.clean_whole(field, p)?,
             FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
                 let node = self.load(&Type::Ptr, p, 1);
                 let logical = held_logical(self.module, self.recipes, t.index());
@@ -870,7 +879,8 @@ impl FunctionEmitter<'_> {
             | FieldTy::Fn
             | FieldTy::Borrow
             | FieldTy::View(_)
-            | FieldTy::Locator(_) => true,
+            | FieldTy::Locator(_)
+            | FieldTy::FrozenBytes => true,
             _ => false,
         }
     }

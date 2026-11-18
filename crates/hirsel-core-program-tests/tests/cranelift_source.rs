@@ -3,6 +3,7 @@
 const NATIVE_TARGET: &str = "x86_64-unknown-linux-gnu";
 hirsel_guard::install!();
 include!("support/cranelift_source.rs");
+include!("support/flow.rs");
 #[test]
 fn every_front_end_run_case_matches_evaluator() {
     check_front_end_run_cases();
@@ -25,11 +26,7 @@ fn growth_shadow_copies_back_data_and_capacity() {
 
 #[test]
 fn native_flow_pipeline_returns_42_and_refunds_the_owner() {
-    let source = concat!(
-        include_str!("../../../core/front/cases/body/flow-native-pipeline.hirsel"),
-        include_str!("../../../core/front/cases/body/flow-owner-laws.hirsel"),
-    );
-    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(FLOW_SOURCE, None);
     let scratch = Scratch::new();
     fs::write(
         scratch.0.join("input.o"),
@@ -38,28 +35,7 @@ fn native_flow_pipeline_returns_42_and_refunds_the_owner() {
     .unwrap();
     let mut declarations = String::new();
     let mut cases = String::new();
-    for name in [
-        "pipe",
-        "thermometer",
-        "zero_sized",
-        "handled_capacity",
-        "unhandled_capacity",
-        "equal_keys",
-        "frontier",
-        "failure_frontiers",
-        "closed_timing",
-        "dead_credit",
-        "per_port_credit",
-        "error_priority",
-        "seal",
-        "finish_failure",
-        "last_mark",
-        "empty_stage",
-        "forwarded_failure",
-        "advance_through_stage",
-        "copied_end",
-        "finish_drains_full_sink",
-    ] {
+    for name in FLOW_CASES {
         let symbol = program
             .identity(program.functions[names[name].index()].instance)
             .symbol();
@@ -78,9 +54,8 @@ fn native_flow_pipeline_returns_42_and_refunds_the_owner() {
 #include <assert.h>
 #include "hirsel_core_rt.h"
 {sites}
-extern HirselCoreContext *hirsel_core_test_context_new(uint64_t);
 extern uint64_t hirsel_core_test_available(const HirselCoreContext *);
-extern void hirsel_core_test_flow_run(bool, uint8_t *, void (*)(uint8_t *));
+extern void hirsel_core_test_flow_run(size_t, bool, uint8_t, uint64_t, uint8_t *, void (*)(HirselCoreContext *, uint8_t *));
 typedef struct {{ uint64_t value; uint8_t status; }} FlowResult;
 typedef FlowResult (*Case)(HirselCoreContext *, uint64_t);
 {declarations}
@@ -92,8 +67,7 @@ static void check(HirselCoreContext *ctx, const char *name, Case run) {{
     assert(r.status==0 && r.value==42);
     assert(hirsel_core_test_available(ctx)==start);
 }}
-static void cases(uint8_t *state) {{
-    HirselCoreContext *ctx=hirsel_core_test_context_new(4000);
+static void cases(HirselCoreContext *ctx, uint8_t *state) {{
 {cases}
     FlowResult rejected = {foreign}(ctx,0);
     assert(rejected.status==1);
@@ -101,11 +75,13 @@ static void cases(uint8_t *state) {{
     assert(cause && hirsel_core_cause_kind(hirsel_core_cause_value(cause))==1);
     assert(!hirsel_core_cause_next(cause));
     hirsel_core_causes_drop(cause);
-    hirsel_core_context_free(ctx);
 }}
 int main(void) {{
-    hirsel_core_test_flow_run(false,0,cases);
-    hirsel_core_test_flow_run(true,0,cases);
+    hirsel_core_test_flow_run(1,false,0,4000,0,cases);
+    hirsel_core_test_flow_run(1,true,0,4000,0,cases);
+    for (uint8_t pause=0; pause<4; ++pause) {{
+        hirsel_core_test_flow_run(16,false,pause,4000,0,cases);
+    }}
     return 0;
 }}
 "#,

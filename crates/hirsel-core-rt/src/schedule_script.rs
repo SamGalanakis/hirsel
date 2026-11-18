@@ -38,6 +38,10 @@ pub enum PausePoint {
     },
     /// A driver has captured this operation's arm and has yet to apply it.
     ReadinessTaken { token: u64 },
+    /// The stage has reserved the item but has yet to enter its transform.
+    FlowCall { domain: u64, stage: usize },
+    /// A flow operation has registered its owner before yielding the worker.
+    FlowWait { domain: u64 },
     /// A mark or terminal forwarded by an empty stage has these boundaries too.
     Flow {
         domain: u64,
@@ -130,6 +134,10 @@ impl ScheduleScript {
     pub fn with_pause_hook(mut self, hook: impl Fn(PausePoint) + Send + Sync + 'static) -> Self {
         self.pause = Some(Box::new(hook));
         self
+    }
+
+    pub(crate) fn has_pause_hook(&self) -> bool {
+        self.pause.is_some()
     }
 
     /// Call at the chosen boundary, outside the dispatcher lock.

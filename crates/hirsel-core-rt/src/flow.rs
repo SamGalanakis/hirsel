@@ -1,6 +1,8 @@
 //! The owner-driven CONC-14 reference. A merge sees FIFO positions, including
 //! the marks between items. Taking an item is the only operation that frees a slot.
 mod native;
+#[cfg(test)]
+pub(crate) use native::fixtures;
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::atomic::{AtomicU64, Ordering},
@@ -214,10 +216,12 @@ pub struct Failure {
     pub halt: Halt,
 }
 
+type Transform<T> = Box<dyn FnMut(u64, &T) -> Result<Option<T>, Halt>>;
+
 struct Stage<T> {
     input: usize,
     output: usize,
-    body: Box<dyn FnMut(u64, &T) -> Result<Option<T>, Halt>>,
+    body: Option<Transform<T>>,
     /// Only an item awaiting its output credit needs a prepared result. The
     /// input head is still present until that step can commit.
     prepared: Option<Result<Option<T>, Halt>>,
@@ -423,7 +427,7 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
         self.stages.push(Stage {
             input,
             output,
-            body: Box::new(move |key, input| {
+            body: Some(Box::new(move |key, input| {
                 crate::tasks::private_flow_step(|| {
                     stage.current.bind();
                     // SAFETY: the reference exclusively owns this context, and no
@@ -443,7 +447,7 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
                         }
                     }
                 })
-            }),
+            })),
             prepared: None,
             live: true,
             failure: None,
@@ -466,9 +470,9 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
                 entry: Entry::Item,
             } => {
                 let slots = &self.ports[input[index]].slots;
-                let prepared = stage
-                    .prepared
-                    .get_or_insert_with(|| slots.value(|value| (stage.body)(key, value)));
+                let prepared = stage.prepared.get_or_insert_with(|| {
+                    slots.value(|value| (stage.body.as_mut().unwrap())(key, value))
+                });
                 if matches!(prepared, Ok(Some(_)))
                     && self.ports[stage.output].push_status(key) == Push::Full
                 {
@@ -482,21 +486,32 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
     }
 
     fn step(&mut self, stage: usize, head: Head) {
+        self.take_step(stage, head);
+        self.publish_step(stage, head);
+    }
+
+    fn take_step(&mut self, stage: usize, head: Head) -> Option<usize> {
+        let Head::Entry { index, entry, .. } = head else {
+            return None;
+        };
+        let port = self.merges[self.stages[stage].input][index];
+        self.ports[port].take(entry);
+        (entry == Entry::Item).then_some(port)
+    }
+
+    fn publish_step(&mut self, stage: usize, head: Head) {
         let s = &mut self.stages[stage];
         let input = &self.merges[s.input];
+        let output = &mut self.ports[s.output];
         let (key, entry) = match head {
             Head::End => {
-                self.ports[s.output].end();
+                output.end();
                 s.live = false;
                 return;
             }
-            Head::Entry { index, key, entry } => {
-                self.ports[input[index]].take(entry);
-                (key, entry)
-            }
+            Head::Entry { key, entry, .. } => (key, entry),
             Head::Stalled => unreachable!("a stalled merge has no step"),
         };
-        let output = &mut self.ports[s.output];
         match entry {
             Entry::Mark => output.advance(key),
             Entry::Terminal(Terminal::End) => {}

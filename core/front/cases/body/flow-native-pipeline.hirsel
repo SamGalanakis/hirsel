@@ -193,3 +193,37 @@ fn unhandled_capacity() -> u64 waits {
         Ok(()) => 5
     }
 }
+
+fn pipe_10000() -> u64 waits {
+    let mut f = flow.new()
+    let (sink, out): (Sink[u64], Into[u64]) = result.unwrap(flow.sink(mut f))
+    let first = result.unwrap(flow.stage(mut f, out, 4, bytes 0, steps 1000, 0, code.describe(double)))
+    let second = result.unwrap(flow.stage(mut f, first, 4, bytes 0, steps 1000, 0, code.describe(double)))
+    let third = result.unwrap(flow.stage(mut f, second, 4, bytes 0, steps 1000, 0, code.describe(double)))
+    let port = result.unwrap(flow.port(mut f, third, 4))
+    let mut key = 1u64
+    while key <= 10000 {
+        match flow.push(mut f, port, key, key * 7) {
+            Ok => (),
+            _ => return 1
+        }
+        match flow.next(mut f, sink) {
+            Item(key: seen_key, from: 0, x: value) => {
+                if seen_key != key || value != key * 56 {
+                    return 2
+                }
+            },
+            _ => return 3
+        }
+        key = key + 1
+    }
+    flow.end(mut f, port)
+    match flow.next(mut f, sink) {
+        End => (),
+        _ => return 4
+    }
+    match flow.finish(take f) {
+        Ok(()) => 42,
+        Error(_) => 5
+    }
+}

@@ -2,8 +2,9 @@ const FLOW_SOURCE: &str = concat!(
     include_str!("../../../../core/front/cases/body/flow-native-pipeline.hirsel"),
     include_str!("../../../../core/front/cases/body/flow-owner-laws.hirsel"),
 );
-const FLOW_CASES: [&str; 20] = [
+const FLOW_CASES: [&str; 21] = [
     "pipe",
+    "pipe_10000",
     "thermometer",
     "zero_sized",
     "handled_capacity",

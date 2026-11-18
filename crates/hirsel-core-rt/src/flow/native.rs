@@ -4,6 +4,14 @@ use super::*;
 use crate::{Context, causes, tasks::Storage};
 use hirsel_core_layout::flow::Op;
 
+#[path = "parallel.rs"]
+mod parallel;
+use parallel::Parallel;
+
+#[cfg(test)]
+#[path = "fixtures.rs"]
+pub(crate) mod fixtures;
+
 type Transform = unsafe extern "C" fn(
     *mut Context,
     *const u8,
@@ -164,7 +172,28 @@ impl Fifo<Plain> for Ring {
     }
 }
 
-type NativeFlow = Reference<Plain, Ring>;
+enum NativeFlow {
+    Reference(Reference<Plain, Ring>),
+    Parallel(Parallel),
+}
+
+impl NativeFlow {
+    fn seal(&mut self) {
+        if let Self::Reference(reference) = self
+            && !reference.sealed
+            && crate::tasks::flow_parallel()
+        {
+            *self = Self::Parallel(Parallel::new(std::mem::take(reference)));
+        }
+    }
+
+    fn reference(&mut self) -> Result<&mut Reference<Plain, Ring>, WireError> {
+        match self {
+            Self::Reference(reference) => Ok(reference),
+            Self::Parallel(_) => Err(WireError::Started),
+        }
+    }
+}
 
 fn wire(result: Result<Endpoint, WireError>) -> [u64; 4] {
     match result {
@@ -193,13 +222,18 @@ pub unsafe extern "C" fn hirsel_core_flow(
     unsafe {
         let command = Op::ALL[command as usize];
         if command == Op::New {
-            let flow = Box::new(NativeFlow::default());
+            let flow = Box::new(NativeFlow::Reference(Reference::default()));
             output.write([0, Box::into_raw(flow).expose_provenance() as u64, 0, 0]);
             return 0;
         }
         if command == Op::Finish {
-            let owned = Box::from_raw(flow.cast::<NativeFlow>());
-            let result = match owned.finish() {
+            let mut owned = Box::from_raw(flow.cast::<NativeFlow>());
+            owned.seal();
+            let finish = match *owned {
+                NativeFlow::Reference(reference) => reference.finish(),
+                NativeFlow::Parallel(parallel) => parallel.finish(),
+            };
+            let result = match finish {
                 Ok(()) => [0, 0, 0, 0],
                 Err(error) => [1, error.stage as u64, error.key, error.halt as u64],
             };
@@ -208,6 +242,9 @@ pub unsafe extern "C" fn hirsel_core_flow(
         }
         let ctx = &mut *context;
         let flow = &mut *flow.cast::<NativeFlow>();
+        if matches!(command, Op::Push | Op::Advance | Op::End | Op::Next) {
+            flow.seal();
+        }
         let word = |i| args.add(i).read();
         let endpoint = || Endpoint(word(0));
         let foreign = |ctx: &mut Context| {
@@ -216,62 +253,64 @@ pub unsafe extern "C" fn hirsel_core_flow(
         };
         let response = match command {
             Op::New | Op::Finish => unreachable!(),
-            Op::Sink => wire(flow.sink()),
-            Op::Port => wire(flow.port_with_size(
-                ctx,
-                endpoint(),
-                word(1) as u32,
-                word(2),
-                host_size(word(3)),
-            )),
+            Op::Sink => wire(flow.reference().and_then(Reference::sink)),
+            Op::Port => wire(flow.reference().and_then(|flow| {
+                flow.port_with_size(ctx, endpoint(), word(1) as u32, word(2), host_size(word(3)))
+            })),
             Op::Stage => {
                 let output_size = word(7);
                 let code = std::ptr::with_exposed_provenance(word(9) as usize);
                 let adapter: Transform = std::mem::transmute(word(10) as usize);
-                wire(flow.stage_with_size(
-                    ctx,
-                    endpoint(),
-                    word(1) as u32,
-                    StageCharge {
-                        output: word(8),
-                        working: word(2),
-                        state: word(6),
-                        item_steps: word(3),
-                    },
-                    host_size(output_size),
-                    || {
-                        let mut state = Plain::copy(
-                            word(5),
-                            std::ptr::with_exposed_provenance(word(4) as usize),
-                        );
-                        move |stage: &mut Context, key, value: &Plain| {
-                            let out = Plain::new(output_size);
-                            let mut present = 0u8;
-                            let status = adapter(
-                                stage,
-                                code,
-                                state.address(),
-                                key,
-                                value.at,
-                                out.at,
-                                &mut present,
-                                site,
+                wire(flow.reference().and_then(|flow| {
+                    flow.stage_with_size(
+                        ctx,
+                        endpoint(),
+                        word(1) as u32,
+                        StageCharge {
+                            output: word(8),
+                            working: word(2),
+                            state: word(6),
+                            item_steps: word(3),
+                        },
+                        host_size(output_size),
+                        || {
+                            let mut state = Plain::copy(
+                                word(5),
+                                std::ptr::with_exposed_provenance(word(4) as usize),
                             );
-                            if status != 0 {
-                                Err(Halt::Failed)
-                            } else {
-                                Ok((present != 0).then_some(out))
+                            move |stage: &mut Context, key, value: &Plain| {
+                                let out = Plain::new(output_size);
+                                let mut present = 0u8;
+                                let status = adapter(
+                                    stage,
+                                    code,
+                                    state.address(),
+                                    key,
+                                    value.at,
+                                    out.at,
+                                    &mut present,
+                                    site,
+                                );
+                                if status != 0 {
+                                    Err(Halt::Failed)
+                                } else {
+                                    Ok((present != 0).then_some(out))
+                                }
                             }
-                        }
-                    },
-                ))
+                        },
+                    )
+                }))
             }
             Op::Push => {
                 let item = Plain::span(
                     std::ptr::with_exposed_provenance_mut(word(2) as usize),
                     host_size(word(3)),
                 );
-                let result = match flow.push(endpoint(), word(1), item) {
+                let pushed = match flow {
+                    NativeFlow::Reference(reference) => reference.push(endpoint(), word(1), item),
+                    NativeFlow::Parallel(parallel) => parallel.push(endpoint(), word(1), item),
+                };
+                let result = match pushed {
                     Ok(()) => 0,
                     Err(PushError::Ended(_)) => 1,
                     Err(PushError::Order(_)) => 2,
@@ -282,27 +321,51 @@ pub unsafe extern "C" fn hirsel_core_flow(
                 [result, 0, 0, 0]
             }
             Op::Advance => {
-                if flow.advance(endpoint(), word(1)).is_err() {
+                let advanced = match flow {
+                    NativeFlow::Reference(reference) => reference.advance(endpoint(), word(1)),
+                    NativeFlow::Parallel(parallel) => parallel.advance(endpoint(), word(1)),
+                };
+                if advanced.is_err() {
                     return foreign(ctx);
                 }
                 [0; 4]
             }
             Op::End => {
-                if flow.end(endpoint()).is_err() {
+                let ended = match flow {
+                    NativeFlow::Reference(reference) => reference.end(endpoint()),
+                    NativeFlow::Parallel(parallel) => parallel.end(endpoint()),
+                };
+                if ended.is_err() {
                     return foreign(ctx);
                 }
                 [0; 4]
             }
-            Op::Next => match flow.next(endpoint()) {
-                Ok(Pull::Item(key, from, item)) => {
-                    item.write(std::ptr::with_exposed_provenance_mut(word(1) as usize));
-                    [0, key, from as u64, 0]
+            Op::Next => {
+                let write = |item: &Plain| {
+                    item.write(std::ptr::with_exposed_provenance_mut(word(1) as usize))
+                };
+                let pulled = match flow {
+                    NativeFlow::Reference(reference) => {
+                        reference.next(endpoint()).map(|pull| match pull {
+                            Pull::Item(key, from, item) => {
+                                write(&item);
+                                Pull::Item(key, from, ())
+                            }
+                            Pull::Dropped(from, at) => Pull::Dropped(from, at),
+                            Pull::End => Pull::End,
+                            Pull::Stalled => Pull::Stalled,
+                        })
+                    }
+                    NativeFlow::Parallel(parallel) => parallel.next(endpoint(), write),
+                };
+                match pulled {
+                    Ok(Pull::Item(key, from, ())) => [0, key, from as u64, 0],
+                    Ok(Pull::Dropped(from, at)) => [1, at, from as u64, 0],
+                    Ok(Pull::End) => [2, 0, 0, 0],
+                    Ok(Pull::Stalled) => [3, 0, 0, 0],
+                    Err(Foreign) => return foreign(ctx),
                 }
-                Ok(Pull::Dropped(from, at)) => [1, at, from as u64, 0],
-                Ok(Pull::End) => [2, 0, 0, 0],
-                Ok(Pull::Stalled) => [3, 0, 0, 0],
-                Err(Foreign) => return foreign(ctx),
-            },
+            }
         };
         output.write(response);
         0
@@ -322,17 +385,77 @@ pub unsafe extern "C" fn hirsel_core_flow_drop(flow: *mut u8) {
 #[cfg(feature = "testing")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_test_flow_run(
+    workers: usize,
     lazy: bool,
+    pause: u8,
+    bytes: u64,
     state: *mut u8,
-    body: unsafe extern "C" fn(*mut u8),
+    body: unsafe extern "C" fn(*mut Context, *mut u8),
 ) {
-    use crate::schedule_script::{FlowMode, ScheduleScript};
+    use crate::schedule_script::{FlowMode, FlowStep, PausePoint, ScheduleScript, StepBoundary};
+
+    #[derive(Clone, Copy)]
+    struct Call {
+        state: *mut u8,
+        body: unsafe extern "C" fn(*mut Context, *mut u8),
+    }
+    unsafe extern "C" fn invoke(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: run_root copies Call into aligned storage on entry.
+        unsafe {
+            let call = input.cast::<Call>().read();
+            (call.body)(context, call.state);
+        }
+        0
+    }
+
     let mode = if lazy {
         FlowMode::Lazy
     } else {
         FlowMode::Eager
     };
-    let script = std::sync::Arc::new(ScheduleScript::new(0).with_flow_mode(mode));
-    // SAFETY: the fixture owns the callback and its pinned input.
-    script.install(|| unsafe { body(state) });
+    let script = std::sync::Arc::new(ScheduleScript::new(0).with_flow_mode(mode).with_pause_hook(
+        move |point| {
+            if matches!(
+                (pause, point),
+                (0, PausePoint::Flow { .. })
+                    | (
+                        1,
+                        PausePoint::Flow {
+                            boundary: StepBoundary::After,
+                            ..
+                        }
+                    )
+                    | (
+                        2,
+                        PausePoint::Flow {
+                            step: FlowStep::Mark | FlowStep::Terminal,
+                            boundary: StepBoundary::Before,
+                            ..
+                        }
+                    )
+                    | (3, PausePoint::FlowCall { .. })
+            ) {
+                std::thread::yield_now();
+            }
+        },
+    ));
+    let mut context = Context::new(bytes);
+    causes::task_start(&mut context).unwrap();
+    let mut call = Call { state, body };
+    script.install(|| {
+        crate::tasks::with_workers(workers, || {
+            // SAFETY: the root and callback state are pinned until the workers join.
+            unsafe {
+                crate::tasks::run_root(
+                    &mut context,
+                    invoke,
+                    (&raw mut call).cast(),
+                    std::ptr::null_mut(),
+                    size_of::<Call>(),
+                    0,
+                    crate::tasks::SchedulerProvider::default(),
+                )
+            }
+        })
+    });
 }

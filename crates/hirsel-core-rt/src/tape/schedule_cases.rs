@@ -285,7 +285,11 @@ fn frames(mut bytes: &[u8]) -> (Header, Vec<Frame>) {
 
 #[test]
 fn flow_items_leave_only_owner_events_in_the_tape() {
-    use crate::flow::{Pull, Reference, StageCharge};
+    use crate::flow::{
+        Pull,
+        fixtures::{FlowFixture, add_one},
+    };
+    use crate::tasks::{with_replay_stages, with_workers};
 
     struct FlowRun {
         store: Store,
@@ -301,42 +305,26 @@ fn flow_items_leave_only_owner_events_in_the_tape() {
             let (tape, _) =
                 Tape::open(REVISION, run.store.dir(), b"t", run.mode, &h, &expect()).unwrap();
             assert_eq!(hirsel_core_check_cancel(context, 1), 0);
-            let mut flow = Reference::<u64>::default();
-            let sink = flow.sink().unwrap();
+            let flow = FlowFixture::new(context);
+            let sink = flow.sink();
             let mut to = sink;
             for _ in 0..3 {
-                to = flow
-                    .stage(
-                        &*context,
-                        to,
-                        4,
-                        StageCharge {
-                            output: 8,
-                            working: 0,
-                            state: 0,
-                            item_steps: 1000,
-                        },
-                        |stage, _, value| {
-                            assert_eq!(hirsel_core_check_cancel(stage, 9), 0);
-                            Ok(Some(*value + 1))
-                        },
-                    )
-                    .unwrap();
+                to = flow.stage(to, add_one);
             }
-            let port = flow.port(&*context, to, 4, 8).unwrap();
-            for key in 1..=1000 {
-                flow.push(port, key, key).unwrap();
-                assert_eq!(flow.next(sink), Ok(Pull::Item(key, 0, key + 3)));
+            let port = flow.port(to);
+            for key in 1..=10_000 {
+                flow.push(port, key, key * 7);
+                assert_eq!(flow.next(sink), Pull::Item(key, 0, key * 7 + 3));
             }
-            flow.end(port).unwrap();
-            assert_eq!(flow.next(sink), Ok(Pull::End));
+            flow.end(port);
+            assert_eq!(flow.next(sink), Pull::End);
             assert_eq!(flow.finish(), Ok(()));
             assert_eq!(hirsel_core_check_cancel(context, 2), 0);
             run.end = Some(tape.end(&ending()));
         }
         0
     }
-    let run = |bytes: Option<&[u8]>| {
+    let run = |workers, bytes: Option<&[u8]>| {
         let mut run = FlowRun {
             store: Store::default(),
             mode: if bytes.is_some() {
@@ -355,7 +343,7 @@ fn flow_items_leave_only_owner_events_in_the_tape() {
         causes::task_start(&mut context).unwrap();
         let mut input = &mut run as *mut FlowRun;
         // SAFETY: the owner receives the same pinned fixture state until it returns.
-        let status = unsafe {
+        let execute = || unsafe {
             run_root(
                 &mut context,
                 owner,
@@ -366,19 +354,26 @@ fn flow_items_leave_only_owner_events_in_the_tape() {
                 SchedulerProvider::default(),
             )
         };
+        let status = if bytes.is_some() {
+            with_replay_stages(workers, execute)
+        } else {
+            with_workers(workers, execute)
+        };
         assert_eq!(status, 0);
         assert_eq!(run.end, Some(Ok(())));
         run
     };
-    let record = run(None);
-    assert_eq!(
-        frames(record.store.file()).1,
-        [Frame::End {
-            gap: 2,
-            ending: ending()
-        }]
-    );
-    run(Some(record.store.file()));
+    for (record_workers, replay_workers) in [(1, 8), (16, 1)] {
+        let record = run(record_workers, None);
+        assert_eq!(
+            frames(record.store.file()).1,
+            [Frame::End {
+                gap: 2,
+                ending: ending()
+            }]
+        );
+        run(replay_workers, Some(record.store.file()));
+    }
 }
 fn encode(header: &Header, frames: &[Frame]) -> Vec<u8> {
     let mut out = block(

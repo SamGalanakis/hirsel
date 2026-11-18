@@ -131,6 +131,8 @@ enum State {
     Ready,
     Running,
     Waiting,
+    /// A private flow is still computing the answer. Cancellation only sets the flag.
+    Flow,
     /// Parked in a provider operation's W or I. Only that operation's own wakes
     /// (its timer, its token, a cancellation request) move it; `wake` does not.
     Provider,
@@ -426,6 +428,7 @@ struct Domain {
 
 struct WorkerQueue {
     pinned: VecDeque<TaskPtr>,
+    flow_wakes: VecDeque<TaskPtr>,
     deferred: VecDeque<TaskPtr>,
     lifo: Option<TaskPtr>,
     /// A thief passed over the current LIFO task once.
@@ -437,6 +440,7 @@ impl WorkerQueue {
     fn new() -> Self {
         Self {
             pinned: VecDeque::new(),
+            flow_wakes: VecDeque::new(),
             deferred: VecDeque::new(),
             lifo: None,
             lifo_seen: false,
@@ -468,6 +472,7 @@ struct Pool {
     domains: BTreeMap<u64, Arc<Domain>>,
     queues: Vec<Mutex<WorkerQueue>>,
     injector: Mutex<VecDeque<TaskPtr>>,
+    flow: Mutex<VecDeque<FlowJob>>,
     threads: Vec<OnceLock<std::thread::Thread>>,
     sleepers: Mutex<Vec<usize>>,
     sleeping: AtomicUsize,
@@ -475,6 +480,8 @@ struct Pool {
     readies: Arc<Readies>,
     funding: crate::limit::CacheDomain,
     units: AtomicUsize,
+    serial_replay: bool,
+    stop_flow_workers: AtomicBool,
     measure: bool,
     #[cfg(feature = "testing")]
     sample: PoolSample,
@@ -484,7 +491,12 @@ struct Pool {
     script: Option<Arc<crate::schedule_script::ScheduleScript>>,
 }
 impl Pool {
-    fn new(workers: usize, readies: Arc<Readies>, funding: crate::limit::CacheDomain) -> Self {
+    fn new(
+        workers: usize,
+        readies: Arc<Readies>,
+        funding: crate::limit::CacheDomain,
+        serial_replay: bool,
+    ) -> Self {
         Self {
             registry: Mutex::default(),
             domains: BTreeMap::from([(RESIDUAL_DOMAIN, Arc::new(Domain::default()))]),
@@ -492,13 +504,16 @@ impl Pool {
                 .map(|_| Mutex::new(WorkerQueue::new()))
                 .collect(),
             injector: Mutex::default(),
+            flow: Mutex::default(),
             threads: (0..workers).map(|_| OnceLock::new()).collect(),
             sleepers: Mutex::default(),
             sleeping: AtomicUsize::new(0),
             spare: crate::fiber::Spare::default(),
             readies,
             funding,
-            units: AtomicUsize::new(1),
+            units: AtomicUsize::new(usize::from(!serial_replay)),
+            serial_replay,
+            stop_flow_workers: AtomicBool::new(false),
             measure: measurement_enabled(),
             #[cfg(feature = "testing")]
             sample: PoolSample::default(),
@@ -574,13 +589,15 @@ impl Pool {
         let own = self.queues[index].lock().unwrap();
         if !own.pinned.is_empty()
             || !own.deferred.is_empty()
+            || !own.flow_wakes.is_empty()
             || own.lifo.is_some()
             || !own.local.is_empty()
         {
             return true;
         }
         drop(own);
-        !self.injector.lock().unwrap().is_empty()
+        !self.flow.lock().unwrap().is_empty()
+            || !self.injector.lock().unwrap().is_empty()
             || self.queues.iter().any(|queue| {
                 let queue = queue.lock().unwrap();
                 !queue.local.is_empty() || queue.lifo.is_some()
@@ -616,6 +633,31 @@ impl Pool {
                 drop(queue);
                 self.notify_one();
             }
+        }
+        self.readies.wake_poller();
+    }
+
+    fn pop_flow_wake(&self, index: usize) -> Option<TaskPtr> {
+        self.queues[index].lock().unwrap().flow_wakes.pop_front()
+    }
+
+    fn run_flow_job(&self) -> bool {
+        let job = self.flow.lock().unwrap().pop_front();
+        let Some(job) = job else { return false };
+        // SAFETY: the dispatcher owns this worker's TLS slot, with no active commit.
+        unsafe {
+            crate::sequencer::install(ptr::null_mut(), || job.flow.run(job.stage));
+        }
+        let was_last = self.units.fetch_sub(1, Ordering::AcqRel) == 1;
+        if was_last && self.serial_replay {
+            self.wake_flow_owner(0);
+        }
+        true
+    }
+
+    fn wake_flow_owner(&self, index: usize) {
+        if let Some(thread) = self.threads[index].get() {
+            thread.unpark();
         }
         self.readies.wake_poller();
     }
@@ -659,6 +701,100 @@ impl Pool {
             }
         }
         None
+    }
+}
+
+pub(crate) trait FlowWork: Send + Sync {
+    fn run(self: Arc<Self>, stage: usize);
+}
+
+struct FlowJob {
+    flow: Arc<dyn FlowWork>,
+    stage: usize,
+}
+
+/// Count a stage before publishing it. An in-flight predecessor or the owner
+/// still owns its unit until every successor has taken one.
+pub(crate) fn enqueue_flow(flow: Arc<dyn FlowWork>, stage: usize) {
+    // SAFETY: the owner or a stage is running on a scoped pool worker.
+    let pool = unsafe { &*(*WORKER.get()).pool };
+    pool.units.fetch_add(1, Ordering::AcqRel);
+    pool.flow.lock().unwrap().push_back(FlowJob { flow, stage });
+    pool.notify_one();
+    pool.readies.wake_poller();
+}
+
+pub(crate) struct FlowWaiter {
+    task: TaskPtr,
+    worker: usize,
+}
+impl FlowWaiter {
+    pub(crate) fn current() -> Self {
+        // SAFETY: the calling owner runs on its pinned pool worker.
+        Self {
+            task: TaskPtr(CURRENT.get()),
+            worker: unsafe { (*WORKER.get()).index },
+        }
+    }
+
+    pub(crate) fn wake(self) {
+        // SAFETY: the owner pins its task and the run until it is resumed.
+        // Only the pinned worker consumes the mailbox, after its own switch.
+        let pool = unsafe { &*(*WORKER.get()).pool };
+        pool.units.fetch_add(1, Ordering::AcqRel);
+        pool.queues[self.worker]
+            .lock()
+            .unwrap()
+            .flow_wakes
+            .push_back(self.task);
+        pool.wake_flow_owner(self.worker);
+    }
+}
+
+/// The caller registered a waiter while holding the flow lock and released
+/// that lock. Its mailbox can be woken before or after this switch.
+pub(crate) fn park_flow() {
+    let _commit = crate::sequencer::enter();
+    let task = CURRENT.get();
+    // SAFETY: the active owner's stack is pinned to this worker.
+    unsafe {
+        (*task).state = State::Flow;
+        switch_to_idle(task);
+    }
+}
+
+/// A transform cannot suspend. It borrows a guarded stack for one call and
+/// returns it before the stage can publish its result or release its unit.
+pub(crate) fn call_flow<F: FnOnce() -> R, R>(body: F) -> R {
+    struct Call<F, R> {
+        body: Option<F>,
+        result: Option<R>,
+        saved: *mut u8,
+    }
+    unsafe extern "C" fn start<F: FnOnce() -> R, R>(first: *mut u8, _: *mut u8) -> ! {
+        // SAFETY: the dispatcher pins the call frame until this switch returns.
+        unsafe {
+            let call = first.cast::<Call<F, R>>();
+            (*call).result = Some((*call).body.take().unwrap()());
+            hirsel_stack::switch(&mut ptr::null_mut(), (*call).saved);
+            std::hint::unreachable_unchecked()
+        }
+    }
+    // SAFETY: this is the worker's dispatcher, and only it uses its stock.
+    unsafe {
+        let worker = WORKER.get();
+        let stack = (*worker).stock.take();
+        let mut call = Call {
+            body: Some(body),
+            result: None,
+            saved: ptr::null_mut(),
+        };
+        let target = stack.prepare(start::<F, R>, (&raw mut call).cast(), ptr::null_mut());
+        crate::fiber::guard(stack.bounds());
+        hirsel_stack::switch(&raw mut call.saved, target);
+        crate::fiber::guard((0, 0));
+        (*worker).stock.recycle(stack);
+        call.result.unwrap()
     }
 }
 
@@ -1196,13 +1332,10 @@ impl Scheduler {
                         Turn::Wake(id) | Turn::Cancel(id) | Turn::Done(id) => id,
                         Turn::Choose(index) => {
                             let live = self.live_group_tasks(group);
-                            if let Some(&(id, at)) =
-                                usize::try_from(index).ok().and_then(|i| live.get(i))
-                                && (*at).state == State::Ready
-                            {
-                                group.choose(id);
-                            } else {
-                                group.fail();
+                            match usize::try_from(index).ok().and_then(|i| live.get(i)) {
+                                Some(&(id, at)) if (*at).state == State::Ready => group.choose(id),
+                                Some(&(_, at)) if (*at).state == State::Flow => {}
+                                _ => group.fail(),
                             }
                             break;
                         }
@@ -1307,7 +1440,7 @@ impl Scheduler {
         }
     }
 
-    fn idle(&mut self) {
+    fn idle(&mut self, flow_pending: bool) {
         if self.readies.pending.load(Ordering::Acquire) || !self.cancels.is_empty() {
             return;
         }
@@ -1319,6 +1452,7 @@ impl Scheduler {
             if !self.readies.pending.load(Ordering::Acquire)
                 && self.now() == now
                 && deadline.is_none_or(|at| at > now)
+                && !flow_pending
             {
                 self.stop_quiescent();
             }
@@ -1337,7 +1471,7 @@ impl Scheduler {
                 }
             }
             None => {
-                if !self.has_outside_wait() {
+                if !self.has_outside_wait() && !flow_pending {
                     self.stop_quiescent();
                 }
                 if !self.net.is_null() {
@@ -2133,6 +2267,7 @@ fn replay_boundary(provider_entry: bool) {
         if task.is_null() || !(*task).replay {
             return;
         }
+        let _commit = crate::sequencer::enter();
         let group = (*task).group.unwrap();
         use crate::tape::schedule::Turn;
         if (*task).latest_pair {
@@ -2161,7 +2296,9 @@ fn replay_boundary(provider_entry: bool) {
                     if (*(*task).run)
                         .group_task(group, id)
                         .as_ref()
-                        .is_none_or(|wanted| wanted.state != State::Ready) =>
+                        .is_none_or(|wanted| {
+                            !matches!(wanted.state, State::Ready | State::Flow)
+                        }) =>
                 {
                     group.fail();
                     return;
@@ -2380,6 +2517,16 @@ impl Drop for CallbackTask {
     }
 }
 pub(crate) fn parallel() -> bool {
+    // SAFETY: the thread-local worker pins its pool.
+    unsafe {
+        WORKER
+            .get()
+            .as_ref()
+            .is_some_and(|worker| !(*worker.pool).serial_replay)
+    }
+}
+
+pub(crate) fn flow_parallel() -> bool {
     !WORKER.get().is_null()
 }
 
@@ -2521,6 +2668,12 @@ pub(crate) fn flow_script() -> Option<(Arc<crate::schedule_script::ScheduleScrip
     Some((script, domain as u64))
 }
 /// Whether a task is running on this thread (tests assert where callbacks run).
+#[cfg(test)]
+pub(crate) fn request_flow_fixture_cancel() {
+    // SAFETY: the test hook is on the owner's active stack.
+    unsafe { cancel_flag(CURRENT.get()).store(true, Ordering::Release) };
+}
+
 #[cfg(test)]
 pub(crate) fn in_task() -> bool {
     !CURRENT.get().is_null()
@@ -2683,10 +2836,15 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
 
 #[cfg(any(test, feature = "testing"))]
 thread_local! {
-    static WORKER_COUNT: Local<usize> = const { Local::new(1) };
+    static WORKER_COUNT: Local<usize> = const { Local::new(0) };
+    static REPLAY_STAGES: Local<bool> = const { Local::new(false) };
 }
 
 fn worker_count() -> usize {
+    #[cfg(any(test, feature = "testing"))]
+    if WORKER_COUNT.get() != 0 {
+        return WORKER_COUNT.get();
+    }
     #[cfg(all(feature = "testing", not(test)))]
     if let Some(width) = std::env::var_os("HIRSEL_S8_WORKERS") {
         return width
@@ -2695,10 +2853,7 @@ fn worker_count() -> usize {
             .filter(|&n| n > 0)
             .unwrap_or_else(|| crate::process::stop(b"TestWorkerCount"));
     }
-    #[cfg(any(test, feature = "testing"))]
-    return WORKER_COUNT.get();
-    #[cfg(not(any(test, feature = "testing")))]
-    return 1;
+    1
 }
 
 /// Run a native test fixture with a fixed number of workers.
@@ -2713,6 +2868,27 @@ pub fn with_workers<R>(workers: usize, f: impl FnOnce() -> R) -> R {
     }
     let _restore = Restore(WORKER_COUNT.replace(workers));
     f()
+}
+
+/// Replay a single domain on its reference dispatcher while the other
+/// workers run only untaped flow stages.
+#[cfg(any(test, feature = "testing"))]
+pub fn with_replay_stages<R>(workers: usize, f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REPLAY_STAGES.set(self.0);
+        }
+    }
+    let _restore = Restore(REPLAY_STAGES.replace(true));
+    with_workers(workers, f)
+}
+
+fn replay_stages() -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    return REPLAY_STAGES.get();
+    #[cfg(not(any(test, feature = "testing")))]
+    false
 }
 
 /// Execute a root on the same guarded stack discipline as its children.
@@ -2760,9 +2936,17 @@ pub unsafe fn run_root(
     let pool = (workers > 1).then(|| {
         // SAFETY: the caller pins the root context through worker teardown.
         let funding = unsafe { (*context).current.cache_domain() };
-        Box::new(Pool::new(workers, run.readies.clone(), funding))
+        Box::new(Pool::new(
+            workers,
+            run.readies.clone(),
+            funding,
+            replay_stages(),
+        ))
     });
-    run.pool = pool.as_deref().map(NonNull::from);
+    run.pool = pool
+        .as_deref()
+        .filter(|pool| !pool.serial_replay)
+        .map(NonNull::from);
     let registered = Registered(run.readies.clone());
     WAITERS
         .lock()
@@ -2829,7 +3013,7 @@ pub unsafe fn run_root(
             .unwrap()
             .prepare(start, root_pointer.cast(), ptr::null_mut());
         run.all = root_pointer;
-        if let Some(pool) = pool.as_deref() {
+        if let Some(pool) = pool.as_deref().filter(|pool| !pool.serial_replay) {
             root.arc_runtime = true;
             root.worker = Some(0);
             root.state = State::Ready;
@@ -2855,46 +3039,11 @@ pub unsafe fn run_root(
             }
         } else {
             run.ready(root_pointer);
-            #[cfg(feature = "testing")]
-            let mut dispatch_sample = DispatchSample::default();
-            let previous = CURRENT.get();
-            let mut direct = ptr::null_mut::<Task>();
-            loop {
-                if root.state == State::Ended {
-                    break;
-                }
-                let task = if direct.is_null() {
-                    run.take_wakes();
-                    let task = run.pop();
-                    if task.is_null() {
-                        run.idle();
-                        continue;
-                    }
-                    task
-                } else {
-                    std::mem::replace(&mut direct, ptr::null_mut())
-                };
-                #[cfg(feature = "testing")]
-                dispatch_sample.take(task);
-                CURRENT.set(task);
-                (*task).state = State::Running;
-                abi::task_resume((*task).context);
-                crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
-                hirsel_stack::switch(&mut run.idle, (*task).sp);
-                crate::fiber::guard((0, 0));
-                crate::limit::Funding::unbind();
-                CURRENT.set(previous);
-                match (*task).state {
-                    // Only the scheduler can move an ended stack to stock. The body
-                    // exits after its last provider call has delivered or aborted.
-                    State::Ended => run.stacks.recycle((*task).stack.take().unwrap()),
-                    State::Provider if run.wake_operation(task, Wake::Parked) => direct = task,
-                    _ => {}
-                }
-            }
-            #[cfg(feature = "testing")]
-            if run.measure {
-                dispatch_sample.report(0);
+            let run = RunPtr(&mut run);
+            if let Some(pool) = pool.as_deref() {
+                run_workers(run, TaskPtr(root_pointer), pool);
+            } else {
+                run.dispatch_serial(TaskPtr(root_pointer), ptr::null_mut());
             }
         }
         if root.failed == 0 {
@@ -2924,9 +3073,6 @@ impl RunPtr {
                 .unwrap()
                 .push(std::thread::current());
         }
-        let domain = pool.domains[&RESIDUAL_DOMAIN].clone();
-        let mut owner =
-            crate::sequencer::Owner::new(&domain.sequencer, publish_deliveries, pool.measure);
         let mut worker = Worker {
             index,
             pool,
@@ -2939,33 +3085,118 @@ impl RunPtr {
             script: pool.script.clone(),
         };
         let previous = WORKER.replace(&mut worker);
-        // SAFETY: scoped workers pin all operands. The root remains alive
-        // until after every worker has returned its vacant-slot lease.
-        unsafe {
-            crate::sequencer::install(&mut owner, || {
-                pool.funding.lease_vacant();
-                self.dispatch(root, &raw mut worker);
-                let stats = crate::limit::Funding::return_vacant();
-                if pool.measure {
-                    eprintln!(
-                        "slots worker={} transfers={} leased={} returned={} peak={} returned_at_exit={}",
-                        index,
-                        stats.transfers,
-                        stats.leased,
-                        stats.returned,
-                        stats.peak,
-                        stats.at_exit,
-                    );
+        if pool.serial_replay {
+            // SAFETY: the run and worker stay pinned until the scoped workers join.
+            unsafe {
+                if index == 0 {
+                    self.dispatch_serial(root, &raw mut worker);
+                    pool.stop_flow_workers.store(true, Ordering::Release);
+                    pool.wake_workers();
+                } else {
+                    while !pool.stop_flow_workers.load(Ordering::Acquire) {
+                        if !pool.run_flow_job() {
+                            pool.sleep(index);
+                            if !pool.stop_flow_workers.load(Ordering::Acquire)
+                                && pool.flow.lock().unwrap().is_empty()
+                            {
+                                std::thread::park();
+                            }
+                            pool.wake(index);
+                        }
+                    }
                 }
-            });
-        }
-        #[cfg(feature = "testing")]
-        if pool.measure {
-            worker.dispatch_sample.report(index);
-            owner.report(index);
+            }
+        } else {
+            let domain = &pool.domains[&RESIDUAL_DOMAIN];
+            let mut owner =
+                crate::sequencer::Owner::new(&domain.sequencer, publish_deliveries, pool.measure);
+            // SAFETY: scoped workers pin all operands. The root remains alive
+            // until after every worker has returned its vacant-slot lease.
+            unsafe {
+                crate::sequencer::install(&mut owner, || {
+                    pool.funding.lease_vacant();
+                    self.dispatch(root, &raw mut worker);
+                    let stats = crate::limit::Funding::return_vacant();
+                    if pool.measure {
+                        eprintln!(
+                            "slots worker={} transfers={} leased={} returned={} peak={} returned_at_exit={}",
+                            index,
+                            stats.transfers,
+                            stats.leased,
+                            stats.returned,
+                            stats.peak,
+                            stats.at_exit,
+                        );
+                    }
+                });
+            }
+            #[cfg(feature = "testing")]
+            if pool.measure {
+                worker.dispatch_sample.report(index);
+                owner.report(index);
+            }
         }
         WORKER.set(previous);
         crate::fiber::set_stop_fd(previous_fd);
+    }
+
+    /// The reference dispatcher exclusively owns the run. Flow workers may
+    /// publish a wake but never read task state or take a domain turn.
+    unsafe fn dispatch_serial(self, root: TaskPtr, worker: *mut Worker) {
+        // SAFETY: only this thread reads or writes task and scheduler state.
+        unsafe {
+            let run = self.0;
+            let pool = worker.as_ref().map(|worker| &*worker.pool);
+            let idle = if worker.is_null() {
+                &raw mut (*run).idle
+            } else {
+                &raw mut (*worker).idle
+            };
+            #[cfg(feature = "testing")]
+            let mut dispatch_sample = DispatchSample::default();
+            let previous = CURRENT.get();
+            let mut direct = ptr::null_mut::<Task>();
+            while (*root.0).state != State::Ended {
+                let task = if direct.is_null() {
+                    if let Some(pool) = pool {
+                        while let Some(woken) = pool.pop_flow_wake(0) {
+                            (*run).ready(woken.0);
+                            pool.units.fetch_sub(1, Ordering::AcqRel);
+                        }
+                    }
+                    (*run).take_wakes();
+                    let task = (*run).pop();
+                    if task.is_null() {
+                        let flow_pending =
+                            pool.is_some_and(|pool| pool.units.load(Ordering::Acquire) != 0);
+                        (*run).idle(flow_pending);
+                        continue;
+                    }
+                    task
+                } else {
+                    std::mem::replace(&mut direct, ptr::null_mut())
+                };
+                #[cfg(feature = "testing")]
+                dispatch_sample.take(task);
+                CURRENT.set(task);
+                (*task).state = State::Running;
+                abi::task_resume((*task).context);
+                crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
+                hirsel_stack::switch(idle, (*task).sp);
+                crate::fiber::guard((0, 0));
+                crate::limit::Funding::unbind();
+                CURRENT.set(previous);
+                match (*task).state {
+                    State::Ended => (*worker_stock(self.0)).recycle((*task).stack.take().unwrap()),
+                    State::Provider if (*run).wake_operation(task, Wake::Parked) => direct = task,
+                    _ => {}
+                }
+            }
+            #[cfg(feature = "testing")]
+            if (*run).measure {
+                dispatch_sample.report(0);
+            }
+        }
     }
 
     /// # Safety
@@ -2980,12 +3211,21 @@ impl RunPtr {
             let mut captured = Vec::new();
             let mut direct = ptr::null_mut::<Task>();
             loop {
+                let mut flow_wake = None;
+                if direct.is_null() {
+                    flow_wake = pool.pop_flow_wake((*worker).index);
+                    if flow_wake.is_none() && pool.run_flow_job() {
+                        continue;
+                    }
+                }
                 #[allow(unused_mut)]
                 let mut commit = crate::sequencer::enter();
                 if (*root.0).state == State::Ended {
                     return;
                 }
-                let task = if direct.is_null() {
+                let task = if let Some(woken) = flow_wake {
+                    woken.0
+                } else if direct.is_null() {
                     (*run).capture_wakes(&mut captured);
                     for ready in captured.drain(..) {
                         #[cfg(any(test, feature = "testing"))]

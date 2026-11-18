@@ -14,7 +14,7 @@
 // expect: run poisoned(9) = 91
 // expect: run poisoned(10) = 2
 @compact(u16)
-stable type Packet {
+type Packet {
     flag: bool,
     text: Text
 }

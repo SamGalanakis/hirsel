@@ -54,9 +54,8 @@ impl CorpusManifest {
     /// then mode. A source's name is its path relative to the manifest in
     /// `root` (what a request's key holds), else its path, so the order is
     /// the same however the manifest spells the paths. Files of one module
-    /// are traversed in this order, so it decides what they mean together
-    /// (which twin pairs with which); every producer that checks, images or
-    /// keys sources normalises first, and path-free stamps are taken after it.
+    /// are traversed in this order. Every producer that checks, images or keys
+    /// sources normalises first and takes path-free stamps in traversal order.
     pub fn normalise(&mut self, root: Option<&Path>) {
         self.packages.sort_by(|a, b| a.package.cmp(&b.package));
         let name = |file: &Path| root.and_then(|root| manifest_name(root, file).ok());

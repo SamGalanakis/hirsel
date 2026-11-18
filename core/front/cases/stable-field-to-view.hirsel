@@ -1,12 +1,12 @@
 // expect: accept
 // OWN-25: reading a stable field yields a view while keeping the holder's region.
 @compact(u32)
-stable type Value {
+type Value {
     n: u8
 }
 
 @compact(u32)
-stable type Member {
+type Member {
     value: Value
 }
 

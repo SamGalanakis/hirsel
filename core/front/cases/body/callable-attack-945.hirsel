@@ -1,4 +1,4 @@
-stable type Stamp {
+@compact(u32) type Stamp {
     n: u64
 }
 
@@ -12,7 +12,7 @@ fn listed_region() -> u64 {
         }
         let change = scoped fn() {
             p = scoped fn() -> u64 {
-                let x = result.unwrap(Stamp(n: 1) in r)
+                let x = result.unwrap(make_stamp(r, 1))
                 x.n
             }
         }
@@ -32,7 +32,7 @@ fn unlisted_region() -> u64 {
             }
             let change = scoped fn() {
                 p = scoped fn() -> u64 {
-                    let x = result.unwrap(Stamp(n: 1) in other)
+                    let x = result.unwrap(make_stamp(other, 1))
                     x.n
                 }
             }
@@ -94,4 +94,14 @@ fn unanchored_anchor(take n: List[u64], take m: List[u64]) -> u64 {
 
 pub fn main() -> Result[(), Exit] {
     Ok(())
+}
+
+fn make_stamp(r: Region, n: u64) -> Result[Stamp in r, Capacity] {
+    match build_in(r, bytes 8, fn(mut d: Dest[Stamp]) -> Result[Child[Stamp], BuildError] {
+        dest.put(mut d, Stamp(n: n))
+    }) {
+        Ok(take built) => Ok(finish(take built)),
+        Error(Capacity(capacity)) => Error(capacity),
+        Error(Overflow) => fail("fixed document size"),
+    }
 }

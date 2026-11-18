@@ -186,7 +186,7 @@ fn f1 = n1 g0 {
 b0(v0: u64):
   v1: ptr = region_open
   v2: u64 = const 8
-  v3: ptr, v4: u64 = alloc stable v2 align 8 charge v2 in v1
+  v3: ptr, v4: u64 = alloc region v2 align 8 charge v2 in v1
   address a0
   store a0, v0
   v5: u64 = const 128

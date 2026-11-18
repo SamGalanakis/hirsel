@@ -18,7 +18,7 @@ fn need(ok: bool, msg: impl FnOnce() -> String) -> R {
 fn refs_ok(f: &hirsel_core_layout::FieldTy, n: usize) -> bool {
     use hirsel_core_layout::FieldTy as F;
     match f {
-        F::Inline(t) | F::Box(t) | F::Rc(t) | F::Arc(t) | F::Stable(t) | F::Link(t) => {
+        F::Inline(t) | F::Box(t) | F::Rc(t) | F::Arc(t) | F::RegionRef(t) | F::Link(t) => {
             t.index() < n
         }
         F::Seq(e) | F::FixedSpan(e) | F::SeqSpan(e) | F::IndexedSpan(e) | F::Array(e, _) => {
@@ -1136,7 +1136,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             // Region storage is stable and stable storage is in a region (crate docs,
             // "Cleanup classes"); an own block names the edge that will own it.
             need(
-                matches!(kind, AllocKind::Stable) == matches!(place, AllocPlace::Region(_)),
+                matches!(kind, AllocKind::Region) == matches!(place, AllocPlace::Region(_)),
                 || "stable storage is exactly the storage allocated in a region".into(),
             )?;
             if let AllocKind::Own { edge } = kind {

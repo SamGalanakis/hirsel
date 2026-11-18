@@ -4,7 +4,7 @@
 // expect: accept
 // Native main checks17; evaluator key fixtures pin the hashes independently.
 @compact(u16)
-stable type Doc: key {
+type Doc: key {
     text: Text
 }
 

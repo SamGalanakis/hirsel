@@ -636,7 +636,7 @@ pub enum AllocKind {
     Environment { ty: TypeRef },
     /// Region storage (MEM-1): freed when its region closes, never by an edge. Only
     /// `in` a region, and every region allocation is stable.
-    Stable,
+    Region,
     /// A resource block: `charge` covers its storage, its cause cell and `grant`.
     Resource { grant: u64 },
 }
@@ -660,7 +660,7 @@ impl AllocKind {
         match self {
             AllocKind::Own { edge } => cleanup_class(shapes, recipes, edge),
             AllocKind::Environment { .. } => Some(Cleanup::Fixed),
-            AllocKind::Stable => None,
+            AllocKind::Region => None,
             AllocKind::Resource { .. } => Some(Cleanup::Resource),
         }
     }

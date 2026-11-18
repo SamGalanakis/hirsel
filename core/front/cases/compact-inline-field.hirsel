@@ -1,3 +1,7 @@
-// expect: refuse MEM-9 at 3:33
+// expect: refuse MEM-9 at 3:26
 // MEM-9: an inline array is not a compact field, even with plain elements.
-@compact(u16) stable type Bad { data: Inline[u8, 4] }
+@compact(u16) type Bad { data: Inline[u8, 4] }
+
+@compact(u32) type CrossRegion[in a] { text: Text in a }
+// expect: refuse MEM-9 at 5:40
+// expect: compared MEM-9 at 5:40 | region | plain data or region data in the enclosing blob

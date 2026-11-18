@@ -103,7 +103,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if self.text_like(t) || self.word_like(t) || self.is_text(t) {
                     return Ok(());
                 }
-                if decl.role.is_some() {
+                if decl.role.is_some() || decl.compact.is_some() {
                     return Err(NOT);
                 }
                 let fields: Vec<TyId> = match &decl.body {
@@ -183,7 +183,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.scalars(x, y, join, eq_only, n);
             }
             TyKind::Adt(d, args) => {
-                // A stable value's place holds its block pointer; its fields, which
+                // A region value's place holds its block pointer; its fields, which
                 // SEM-7 compares, are in the block (MEM-5, FORM #115).
                 let (a, b) = match self.rep(t) {
                     Ok(Rep::Place(id)) if self.e.by_block(id) => (

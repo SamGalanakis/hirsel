@@ -138,7 +138,7 @@ fn closure_rows_differ_in_every_layout_field_and_import_unchanged() {
             Box::new(move |m| {
                 let r = &mut m.types[probe.index()].repr;
                 *r = if *r == Repr::Own {
-                    Repr::Stable
+                    Repr::Region
                 } else {
                     Repr::Own
                 };
@@ -189,7 +189,7 @@ fn closure_rows_differ_in_every_layout_field_and_import_unchanged() {
             "holder",
             Box::new(move |m| {
                 edit_field(m, root, |ty| match ty {
-                    FieldTy::Box(t) => Some(FieldTy::Stable(*t)),
+                    FieldTy::Box(t) => Some(FieldTy::RegionRef(*t)),
                     _ => None,
                 })
             }),
@@ -324,30 +324,6 @@ fn root(take g: Guard[u64]) -> u64 { hold(take g) }\n";
         }
     }
     assert!(rigid > 0, "hold's unit holds its template's rigid rows");
-}
-
-/// CloneIn's second argument. Law: copying one type into two stable types is two
-/// glue instances, even within one body. Oracle: the source's two targets.
-#[test]
-fn clone_in_glue_is_one_instance_per_target() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = "stable type Row { n: u64 }\n\
-@twin(Row) stable type RowS { n: u64 }\n\
-fn root(r: Region, x: Row, y: Row) -> u64 {\n\
-    let s: Result[RowS in r, Capacity] = clone_in(r, x)\n\
-    let t: Result[Row in r, Capacity] = clone_in(r, y)\n\
-    1u64\n\
-}\n";
-    let product = check(source, dir.path(), &mut Driver::default());
-    let glue: Vec<_> = snapshot(&product, "app@1/main/root")
-        .into_keys()
-        .filter(|k| k.definition == DefPath::core("core.$clone_in"))
-        .collect();
-    let [a, b] = &glue[..] else {
-        panic!("{glue:?}")
-    };
-    assert_eq!(a.closures[0], b.closures[0]);
-    assert_ne!(a.closures[1], b.closures[1]);
 }
 
 const UNIVERSE: &str = "type Inner { a: u64 }\n\

@@ -68,9 +68,6 @@ fn bind_all(d: &mut Declared, b: &mut impl Bind) -> Option<()> {
             DeclBody::Alias(_) => {}
         }
         if let Some(extra) = &mut decl.extra {
-            if let Some((_, site)) = &mut extra.twin {
-                b.site(site)?;
-            }
             if let Some(codec) = &mut extra.codec {
                 if let Some(via) = &mut codec.via {
                     b.node(decl.at, &mut via.node)?;

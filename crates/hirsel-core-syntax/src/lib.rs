@@ -95,7 +95,6 @@ impl Span {
 pub enum NodeKind {
     Function,
     TypeDecl,
-    StableType,
     ResourceType,
     ScopedType,
     Constant,
@@ -152,7 +151,6 @@ pub enum NodeKind {
     Index,
     Projection,
     Try,
-    Placement,
     Unary,
     Binary,
     BindPattern,
@@ -289,7 +287,6 @@ impl ResolutionSize {
             | NodeKind::OwnCallableType
             | NodeKind::Block
             | NodeKind::TypeDecl
-            | NodeKind::StableType
             | NodeKind::ResourceType
             | NodeKind::ScopedType
             | NodeKind::Arm

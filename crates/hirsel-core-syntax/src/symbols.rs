@@ -45,7 +45,6 @@ pub mod sym {
     pub const COPY: Symbol = Symbol(15);
     pub const VIEW: Symbol = Symbol(16);
     pub const TYPE: Symbol = Symbol(17);
-    pub const STABLE: Symbol = Symbol(18);
     pub const RESOURCE: Symbol = Symbol(19);
     pub const SCOPED: Symbol = Symbol(20);
     pub const REGION: Symbol = Symbol(21);
@@ -107,7 +106,6 @@ pub mod sym {
     pub const UNDERSCORE: Symbol = Symbol(77);
     pub const DROP: Symbol = Symbol(78);
     pub const COMPACT: Symbol = Symbol(79);
-    pub const TWIN: Symbol = Symbol(80);
     pub const TEST: Symbol = Symbol(81);
     pub const GRANT: Symbol = Symbol(82);
     pub const OWN: Symbol = Symbol(83);
@@ -162,7 +160,7 @@ impl<'de> serde::Deserialize<'de> for Symbols {
             wire.strings
                 .own_iter()
                 .enumerate()
-                .filter(|(i, _)| base + *i != 0)
+                .filter(|(_, s)| !s.is_empty())
                 .map(|(i, s)| (s.clone(), Symbol((base + i) as u32))),
         );
         Ok(Self {
@@ -193,7 +191,7 @@ impl Default for Symbols {
             Arc::from("copy"),
             Arc::from("view"),
             Arc::from("type"),
-            Arc::from("stable"),
+            Arc::from(""), // Unused terminal ID.
             Arc::from("resource"),
             Arc::from("scoped"),
             Arc::from("region"),
@@ -255,7 +253,7 @@ impl Default for Symbols {
             Arc::from("_"),
             Arc::from("drop"),
             Arc::from("compact"),
-            Arc::from("twin"),
+            Arc::from(""), // Unused terminal ID.
             Arc::from("test"),
             Arc::from("grant"),
             Arc::from("own"),
@@ -304,6 +302,7 @@ impl Default for Symbols {
                 .iter()
                 .enumerate()
                 .skip(1)
+                .filter(|(_, s)| !s.is_empty())
                 .map(|(i, s)| (s.clone(), Symbol(i as u32)))
                 .collect(),
             strings: strings.into(),
@@ -403,7 +402,6 @@ fn fixed_symbol(text: &str) -> Option<Symbol> {
         "copy" => sym::COPY,
         "view" => sym::VIEW,
         "type" => sym::TYPE,
-        "stable" => sym::STABLE,
         "resource" => sym::RESOURCE,
         "scoped" => sym::SCOPED,
         "region" => sym::REGION,
@@ -417,7 +415,6 @@ fn fixed_symbol(text: &str) -> Option<Symbol> {
         "bytes" => sym::BYTES,
         "drop" => sym::DROP,
         "compact" => sym::COMPACT,
-        "twin" => sym::TWIN,
         "test" => sym::TEST,
         "grant" => sym::GRANT,
         "own" => sym::OWN,
@@ -478,7 +475,6 @@ pub fn keyword_symbol(s: Symbol) -> bool {
             | sym::COPY
             | sym::VIEW
             | sym::TYPE
-            | sym::STABLE
             | sym::RESOURCE
             | sym::SCOPED
             | sym::REGION

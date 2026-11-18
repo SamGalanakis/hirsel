@@ -1,5 +1,5 @@
 //! MEM-9..12 compact values, read through their locators. A compact value, a `Text`
-//! and a stable sequence are each held as a locator `{blob @0, at @8}` (16 bytes): the
+//! and a region sequence are each held as a locator `{blob @0, at @8}` (16 bytes): the
 //! blob records its `W` in bytes as a word at byte 8, and `at` is the byte where the
 //! value's encoding starts. A field is found by skipping the fields before it, at a cost
 //! fixed by their types (MEM-12); a view of a compact value is its locator, copied.
@@ -17,7 +17,7 @@ impl Cx<'_, '_, '_> {
     pub(super) fn compact_adt(&self, ty: TyId) -> Option<(DeclId, Vec<TyId>)> {
         match self.t.kind(self.bare(ty)) {
             TyKind::Adt(d, args)
-                if self.p.decls[d.index()].repr == Repr::Stable
+                if self.p.decls[d.index()].repr == Repr::Region
                     && self.p.decls[d.index()].compact.is_some() =>
             {
                 Some((*d, args.clone()))
@@ -484,7 +484,7 @@ impl Cx<'_, '_, '_> {
         }
     }
     /// A value of `ty` is held as a locator into a blob: a compact value, `Text` or a
-    /// stable sequence.
+    /// region sequence.
     pub(super) fn is_locator(&self, ty: TyId) -> bool {
         self.compact_adt(ty).is_some()
             || matches!(
@@ -496,7 +496,7 @@ impl Cx<'_, '_, '_> {
             )
     }
     /// A field of a temporary, such as a call result (OWN-8): the base is evaluated
-    /// once and read in place. Through a view, or in a stable value, a field that is
+    /// once and read in place. Through a view, or in a region value, a field that is
     /// not plain reads as a view.
     pub(super) fn temporary_field(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
         let (mut base, mut value) = self.expr(self.kids(n)[0], None);
@@ -519,7 +519,7 @@ impl Cx<'_, '_, '_> {
                     return (ERROR, None);
                 }
                 let decl = &self.p.decls[d.index()];
-                let stable = decl.repr == Repr::Stable;
+                let stable = decl.repr == Repr::Region;
                 let found = match &decl.body {
                     DeclBody::Record(fs) => fs
                         .iter()

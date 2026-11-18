@@ -7,7 +7,7 @@
 // count (W = 4) and three u32s (12): 18 bytes fit in 18 and overflow 17. P is u8 + u32,
 // 5 bytes packed (8 in a List), so F is count 4 + 2 * 5 + k 1 = 15 bytes.
 @compact(u32)
-stable type E {
+type E {
     id: u16,
     xs: FixedSpan[u32]
 }
@@ -18,7 +18,7 @@ type P {
 }
 
 @compact(u32)
-stable type F {
+type F {
     ps: FixedSpan[P],
     k: u8
 }
@@ -56,7 +56,7 @@ fn make_f(r: Region, n: u64, ps: List[P]) -> Result[F in r, BuildError] {
     match build_stream_in(r, bytes n, fn(take w: Writer[F, in r]) -> Result[Child[F], BuildError] {
         emit(take w, F(ps: ps, k: 3))
     }) {
-        Ok(take b) => Ok(finish(take b)),
+        Ok(take built) => Ok(finish(take built)),
         Error(e) => Error(e),
     }
 }

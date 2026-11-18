@@ -29,12 +29,12 @@ fn code[T: ordered](a: T, b: T) -> u64 {
 }
 
 @compact(u16)
-stable type Doc: key + ordered {
+type Doc: key + ordered {
     text: Text
 }
 
 @compact(u16)
-stable type Tag: ordered = Low(u64) | High(u8)
+type Tag: ordered = Low(u64) | High(u8)
 
 fn write_doc[in r](take w: Writer[Doc, in r], s: String) -> Result[Child[Doc], BuildError] {
     emit(take w, Doc(text: emit(fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {

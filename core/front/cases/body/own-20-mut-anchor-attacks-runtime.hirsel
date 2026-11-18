@@ -93,7 +93,7 @@ fn region_use() -> Result[u64, Capacity] {
 
 // 31: a compact locator keeps its width through the `mut` wrapper.
 @compact(u16)
-stable type Node {
+type Node {
     text: Text,
 }
 

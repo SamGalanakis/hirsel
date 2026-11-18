@@ -95,10 +95,10 @@ fn item_source_and_anchor_start_at_the_first_significant_token() {
 
 #[test]
 fn formatter_canonical_blocks_lists_and_attributes() {
-    let text = "@twin( B ) type A{x:u64,y: (u64,u64)}\nfn f [T](x:T)->T{let mut y:T=x; if true {y}else{ x }}";
+    let text = "@compact(u32) type A{x:u64,y: (u64,u64)}\nfn f [T](x:T)->T{let mut y:T=x; if true {y}else{ x }}";
     assert_eq!(
         formatted(text, ParseMode::Source),
-        "@twin(B)\ntype A {\n    x: u64,\n    y: (u64, u64)\n}\n\nfn f[T](x: T) -> T {\n    let mut y: T = x;\n    if true {\n        y\n    } else {\n        x\n    }\n}\n"
+        "@compact(u32)\ntype A {\n    x: u64,\n    y: (u64, u64)\n}\n\nfn f[T](x: T) -> T {\n    let mut y: T = x;\n    if true {\n        y\n    } else {\n        x\n    }\n}\n"
     );
     assert_eq!(
         formatted(
@@ -395,14 +395,14 @@ fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
 #[test]
 fn new_forms_have_written_nodes() {
     let f = good(
-        "stable type P[in r] { x: u64 }\nfn f[in r](x: P in r) -> u64 where r: r { let mut y: u64; region a { bound bytes 8 { bound steps 10 { loop { break (x, 1).0 } } } } }\n",
+        "@compact(u32) type P[in r] { x: u64 }\nfn f[in r](x: P in r) -> u64 where r: r { let mut y: u64; region a { bound bytes 8 { bound steps 10 { loop { break (x, 1).0 } } } } }\n",
     );
     let kinds: Vec<_> = f
         .items()
         .flat_map(|i| i.tree.nodes.iter().map(|n| n.kind))
         .collect();
     for k in [
-        NodeKind::StableType,
+        NodeKind::Attribute,
         NodeKind::RegionGeneric,
         NodeKind::Anchor,
         NodeKind::Outlives,
@@ -482,10 +482,10 @@ fn signature_mode_is_explicit_and_diagnostics_are_machine_readable() {
 #[test]
 fn revised_callable_summaries_and_projection_tokenization() {
     let f = good(
-        "@twin(Stable) type Own {}\nstable type Stable {}\nresource type R { x: u64 } drop(r) {}\nfn f(g: own[send] fn(take u64) -> u64 waits, p: ((u64, u64), u64)) -> u64 { p.0.1 }\n",
+        "@compact(u32) type P { x: u64 }\nresource type R { x: u64 } drop(r) {}\nfn f(g: own[send] fn(take u64) -> u64 waits, p: ((u64, u64), u64)) -> u64 { p.0.1 }\n",
     );
     assert!(
-        f.item(3)
+        f.item(2)
             .tree
             .nodes
             .iter()
@@ -907,7 +907,7 @@ fn nesting_budget_has_an_exact_boundary_and_a_located_tool_message() {
 fn iterative_attributes_paths_and_postfixes_do_not_spend_nesting_budget() {
     for text in [
         format!("{}type T {{}}", "@test ".repeat(100_000)),
-        format!("@twin({}T) type T {{}}", "m.".repeat(100_000)),
+        format!("type T = {}T", "m.".repeat(100_000)),
         format!("fn f() {{ x{} }}", ".field".repeat(100_000)),
         format!("fn f() {{ x{} }}", "()".repeat(100_000)),
     ] {
@@ -917,7 +917,7 @@ fn iterative_attributes_paths_and_postfixes_do_not_spend_nesting_budget() {
         assert_eq!(p.syntax.text(), text);
     }
     let text = format!(
-        "@twin({}T{}) type T {{}}",
+        "@compact({}u32{}) type T {{}}",
         "(".repeat(100_000),
         ")".repeat(100_000)
     );
@@ -937,11 +937,7 @@ fn prog_7_expected_tokens_and_names_include_the_compared_facts() {
             "u8",
             "u16, u32 or u64 compact width",
         ),
-        (
-            "@unknown fn f() {}",
-            "unknown",
-            "test, compact or twin attribute",
-        ),
+        ("@unknown fn f() {}", "unknown", "test or compact attribute"),
         (
             "type T = A(x: u64, u64) | B",
             "positional payload",

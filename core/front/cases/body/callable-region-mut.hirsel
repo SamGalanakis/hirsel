@@ -11,12 +11,13 @@ fn invoke(cb: fn(mut Region) -> u64) -> u64 {
 
 // expect: run item() = 7
 // expect: run literal() = 11
-stable type Stamp {
+@compact(u32)
+type Stamp {
     n: u64
 }
 
 fn read(mut r: Region) -> u64 {
-    let s = result.unwrap(Stamp(n: 7) in r);
+    let s = result.unwrap(make_stamp(r, 7));
     s.n
 }
 
@@ -26,7 +27,7 @@ fn item() -> u64 {
 
 fn literal() -> u64 {
     invoke(fn(mut r: Region) -> u64 {
-        let s = result.unwrap(Stamp(n: 11) in r);
+        let s = result.unwrap(make_stamp(r, 11));
         s.n
     })
 }
@@ -36,5 +37,15 @@ pub fn main() -> Result[(), Exit] {
         Ok(())
     } else {
         Error(Exit(status: 1))
+    }
+}
+
+fn make_stamp(r: Region, n: u64) -> Result[Stamp in r, Capacity] {
+    match build_in(r, bytes 8, fn(mut d: Dest[Stamp]) -> Result[Child[Stamp], BuildError] {
+        dest.put(mut d, Stamp(n: n))
+    }) {
+        Ok(take built) => Ok(finish(take built)),
+        Error(Capacity(capacity)) => Error(capacity),
+        Error(Overflow) => fail("fixed document size"),
     }
 }

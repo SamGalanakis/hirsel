@@ -641,7 +641,7 @@ impl Substitution<'_> {
     }
     /// The template field `ty` at the instance's arguments, written as a source row
     /// writes it (FORM #109): a row held inline whose type a holder writes otherwise
-    /// (a parameter's scalar, list, box, stable value, ..) becomes its `held` field,
+    /// (a parameter's scalar, list, box, region value, ..) becomes its `held` field,
     /// without the locator in a compact context (`compact`: a compact row's own
     /// fields, or a span's elements), so one name is one closure.
     fn field(&mut self, ty: &FieldTy, compact: bool) -> FieldTy {
@@ -651,7 +651,7 @@ impl Substitution<'_> {
                 let id = row(id, self);
                 match self.module.types[id.index()].held.clone() {
                     Some(FieldTy::Locator(x)) if compact => *x,
-                    Some(FieldTy::Stable(x)) if compact => FieldTy::Inline(x),
+                    Some(FieldTy::RegionRef(x)) if compact => FieldTy::Inline(x),
                     Some(held) => held,
                     None => FieldTy::Inline(id),
                 }
@@ -659,7 +659,7 @@ impl Substitution<'_> {
             FieldTy::Box(id) => FieldTy::Box(row(id, self)),
             FieldTy::Rc(id) => FieldTy::Rc(row(id, self)),
             FieldTy::Arc(id) => FieldTy::Arc(row(id, self)),
-            FieldTy::Stable(id) => FieldTy::Stable(row(id, self)),
+            FieldTy::RegionRef(id) => FieldTy::RegionRef(row(id, self)),
             FieldTy::Link(id) => FieldTy::Link(row(id, self)),
             FieldTy::Seq(x) => FieldTy::Seq(Box::new(self.field(x, false))),
             FieldTy::Array(x, n) => FieldTy::Array(Box::new(self.field(x, false)), *n),
@@ -975,7 +975,7 @@ fn fill(
                 *grant = s.module.types[ty.index()].grant;
                 hirsel_core_layout::charge::resource(logical, *grant)
             }
-            AllocKind::Stable => logical.checked_add(7).map(|n| n & !7),
+            AllocKind::Region => logical.checked_add(7).map(|n| n & !7),
             _ => unreachable!("only typed resource and region constructors use block relocation"),
         };
         allocation_constants.insert(*charge, amount.unwrap_or(u64::MAX));

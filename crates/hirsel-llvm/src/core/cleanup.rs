@@ -377,7 +377,7 @@ impl FunctionEmitter<'_> {
                 None
             }
             FieldTy::Scalar(_)
-            | FieldTy::Stable(_)
+            | FieldTy::RegionRef(_)
             | FieldTy::Fn
             | FieldTy::Borrow
             | FieldTy::View(_)
@@ -543,7 +543,7 @@ pub(super) fn mechanical_count(
         FieldTy::Handle(_) | FieldTy::OwnFn => 1,
         FieldTy::Scalar(_)
         | FieldTy::Fn
-        | FieldTy::Stable(_)
+        | FieldTy::RegionRef(_)
         | FieldTy::Borrow
         | FieldTy::View(_)
         | FieldTy::Locator(_)
@@ -860,7 +860,7 @@ impl FunctionEmitter<'_> {
             FieldTy::Inline(t) => self.recipes[t.index()].drop.is_none(),
             FieldTy::Array(e, _) => self.flat(e),
             FieldTy::Scalar(_)
-            | FieldTy::Stable(_)
+            | FieldTy::RegionRef(_)
             | FieldTy::Fn
             | FieldTy::Borrow
             | FieldTy::View(_)

@@ -944,7 +944,7 @@ impl Glue<'_, '_, '_> {
                 self.failed = self.b.block_params(done)[0];
             }
             FieldTy::Scalar(_)
-            | FieldTy::Stable(_)
+            | FieldTy::RegionRef(_)
             | FieldTy::Fn
             | FieldTy::Borrow
             | FieldTy::View(_)
@@ -1049,7 +1049,7 @@ impl Glue<'_, '_, '_> {
             FieldTy::Inline(t) => self.tables.layouts[t.index()].drop.is_some(),
             FieldTy::Array(e, n) => *n != 0 && self.element_needs_drop(e),
             FieldTy::Scalar(_)
-            | FieldTy::Stable(_)
+            | FieldTy::RegionRef(_)
             | FieldTy::Fn
             | FieldTy::Borrow
             | FieldTy::View(_)

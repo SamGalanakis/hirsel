@@ -2,7 +2,8 @@
 // same reroot operation as a direct call. The adapter's physical signature is fixed.
 // expect: accept
 // expect: run run() = 1
-stable type Doc {
+@compact(u32)
+type Doc {
     value: u64
 }
 

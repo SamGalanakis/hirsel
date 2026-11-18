@@ -4,7 +4,7 @@
 // expect: run sum() = 6
 // expect: run tail() = 3
 @compact(u32)
-stable type N {
+type N {
     v: u64,
     next: Option[Link[N]]
 }

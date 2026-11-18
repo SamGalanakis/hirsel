@@ -534,10 +534,9 @@ impl NameIndex {
         let kind = match root.kind {
             NodeKind::Function => DefinitionKind::Function,
             NodeKind::Constant => DefinitionKind::Constant,
-            NodeKind::TypeDecl
-            | NodeKind::StableType
-            | NodeKind::ResourceType
-            | NodeKind::ScopedType => DefinitionKind::Type,
+            NodeKind::TypeDecl | NodeKind::ResourceType | NodeKind::ScopedType => {
+                DefinitionKind::Type
+            }
             NodeKind::CloneHook => DefinitionKind::Clone,
             _ => return,
         };

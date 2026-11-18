@@ -3,7 +3,7 @@
 // Type-only mentions do not create runtime captures; expression uses do.
 // expect: run checked() = 65
 @compact(u16)
-stable type Doc {
+type Doc {
     value: u64
 }
 

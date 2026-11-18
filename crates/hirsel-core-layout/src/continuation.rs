@@ -202,7 +202,7 @@ fn plan_field(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy, at: u64) -> No
             yields: Some(false),
         },
         FieldTy::Scalar(_)
-        | FieldTy::Stable(_)
+        | FieldTy::RegionRef(_)
         | FieldTy::Fn
         | FieldTy::Borrow
         | FieldTy::View(_)

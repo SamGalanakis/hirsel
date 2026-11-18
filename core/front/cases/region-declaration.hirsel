@@ -1,6 +1,7 @@
 // expect: accept
 // MEM-6: a region generic anchors the stable field, and is retained in its type.
-stable type Token {
+@compact(u32)
+type Token {
     n: u64
 }
 
@@ -12,5 +13,5 @@ type Nested[in r] {
     value: Option[Token in r]
 }
 // expect: kind Holder own
-// expect: holds Holder stable
+// expect: holds Holder region
 // expect: field-root Holder value r

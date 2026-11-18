@@ -1620,10 +1620,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.refuse("MEM-4", n, "a Writer is never captured");
         } else if owning {
             if self.capture_holds(original.ty)
-                & (crate::H_RESOURCE | crate::H_CAPABILITY | crate::H_SCOPED | crate::H_STABLE)
+                & (crate::H_RESOURCE | crate::H_CAPABILITY | crate::H_SCOPED | crate::H_REGION)
                 != 0
             {
-                self.refuse("LANG-14",n,"an owning closure capture holds a resource, capability, scoped value or stable reference");
+                self.refuse("LANG-14",n,"an owning closure capture holds a resource, capability, scoped value or region reference");
             } else if !self.copies(original.ty)
                 && matches!(
                     original.origin,
@@ -1726,7 +1726,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             depth: if owning { 0 } else { original.depth },
             ..original
         });
-        if kind(&self.p.decls, &self.t, original.ty, &self.params) == Kind::Stable {
+        if kind(&self.p.decls, &self.t, original.ty, &self.params) == Kind::Region {
             self.parameter_anchors(slot, original.ty, Mode::View, slot);
         } else if self.anchor_tracked(original.ty) {
             let fact = self.anchor_root(Place::whole(slot));
@@ -1804,7 +1804,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             TyKind::Param(i) => crate::param_holds(self.params[*i as usize]),
             TyKind::View(_) => crate::H_SCOPED,
             TyKind::Region(_) => crate::H_SCOPED,
-            TyKind::Anchored(x, _) => self.capture_holds(*x) | crate::H_STABLE,
+            TyKind::Anchored(x, _) => self.capture_holds(*x) | crate::H_REGION,
             TyKind::Tuple(xs) => xs.iter().fold(0, |h, &x| h | self.capture_holds(x)),
             TyKind::Array(x, _) => self.capture_holds(*x),
             TyKind::Adt(d, args) => {

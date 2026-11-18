@@ -16,14 +16,14 @@ use std::collections::BTreeSet;
 ///   (`lookups`);
 /// - the compiler, core and package namespaces (`environment`);
 /// - and one field per form whose lowering reads beyond its resolved names,
-///   present only for bodies that name that form: `twins` and `siblings`.
+///   present only for bodies that name that form: `siblings`.
 ///
 /// A new read of a table over all functions, types, instances or modules, or of
 /// an item found by a path lowering builds itself, gets a field here (or a
 /// `hirsel_core_front::SIBLING_READS` row) in the same change. This is a list,
 /// not a recorded per-body read set, because the key is computed before the body
 /// is lowered: a recorded set would have to be stored with each record and its
-/// inputs re-hashed on every lookup (a second key phase on every hit), and two
+/// inputs re-hashed on every lookup (a second key phase on every hit), and some
 /// forms read beyond their names (see the reuse-history-fault-1031 audit).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DefinitionKey {
@@ -33,11 +33,6 @@ pub struct DefinitionKey {
     pub signatures: ContentHash,
     pub lookups: ContentHash,
     pub environment: ContentHash,
-    /// The program's twin declarations (`Keys::twins`), for a body that names
-    /// `core.clone` or `core.clone_in`: MEM-17's selection finds an untwinned
-    /// type's twin among every declaration (`twin_of`), not among the names
-    /// the body resolves.
-    pub twins: Option<ContentHash>,
     /// The closures of the items lowering calls by a path it builds beside a
     /// callee the body names (`hirsel_core_front::SIBLING_READS`): `list.grow`
     /// beside `list.push`, std's built-in codec makers beside `codec.of`.
@@ -260,24 +255,12 @@ pub(crate) struct Keys {
     prelude_reads: std::cell::OnceCell<ContentHash>,
     /// The forms whose lowering reads a program input beyond their names
     /// (see `DefinitionKey`), by definition, as the index holds them.
-    forms: Vec<(DefinitionId, Form)>,
+    forms: Vec<(DefinitionId, usize)>,
+    siblings: Vec<Siblings>,
     /// `forms`' definitions as a bit set, tested for every name of every body.
     form_bits: Vec<u64>,
-    /// The twin pairs MEM-17's selection chooses from, in program order: the
-    /// image's, then each request declaration's path and its `@twin` target.
-    twins: ContentHash,
-    /// Each sibling-read callee's reads (`sibling_reads`), memoised.
-    siblings: Vec<Siblings>,
 }
 /// What a form's lowering reads beyond its names.
-#[derive(Clone, Copy)]
-enum Form {
-    /// `core.clone` and `core.clone_in`: the program's twin pairs.
-    Clone,
-    /// A `hirsel_core_front::SIBLING_READS` callee: the `Siblings` at this
-    /// index of `Keys::siblings`.
-    Siblings(usize),
-}
 /// One `hirsel_core_front::SIBLING_READS` callee: its row, its module, and
 /// the hash of its siblings' closures once a body names it.
 struct Siblings {
@@ -285,22 +268,10 @@ struct Siblings {
     module: ModuleId,
     hash: std::cell::OnceCell<ContentHash>,
 }
-/// Each form of `Form` the index holds, in every version of its package, and
-/// the sibling reads its `Form::Siblings` entries index.
-fn forms(index: &NameIndex) -> (Vec<(DefinitionId, Form)>, Vec<Siblings>) {
-    let rows = [
-        ("core", "core", "clone", Form::Clone),
-        ("core", "core", "clone_in", Form::Clone),
-    ]
-    .into_iter()
-    .chain(
-        hirsel_core_front::SIBLING_READS
-            .iter()
-            .enumerate()
-            .map(|(row, &(p, m, n, _))| (p, m, n, Form::Siblings(row))),
-    );
+/// Each core operation whose lowering resolves sibling definitions.
+fn forms(index: &NameIndex) -> (Vec<(DefinitionId, usize)>, Vec<Siblings>) {
     let (mut forms, mut siblings) = (vec![], vec![]);
-    for (package, module, name, form) in rows {
+    for (row, &(package, module, name, _)) in hirsel_core_front::SIBLING_READS.iter().enumerate() {
         let (Some(package), Some(module), Some(name)) = (
             index.symbols.find(package),
             index.symbols.find(module),
@@ -314,18 +285,12 @@ fn forms(index: &NameIndex) -> (Vec<(DefinitionId, Form)>, Vec<Siblings>) {
                 .and_then(|m| index.definition(m, name).map(|id| (m, id)))
             {
                 let (module, id) = id;
-                let form = match form {
-                    Form::Siblings(row) => {
-                        siblings.push(Siblings {
-                            row,
-                            module,
-                            hash: Default::default(),
-                        });
-                        Form::Siblings(siblings.len() - 1)
-                    }
-                    form => form,
-                };
-                forms.push((id, form));
+                forms.push((id, siblings.len()));
+                siblings.push(Siblings {
+                    row,
+                    module,
+                    hash: Default::default(),
+                });
             }
         }
     }
@@ -415,7 +380,6 @@ impl Keys {
         let mut keys = Self::with_modules(index, Headers::default(), shape.modules);
         let mut anchors = image_anchors.cloned().unwrap_or_default();
         let mut hooks = vec![];
-        let mut twins = vec![];
         for ((m, rows), digests) in modules.iter().zip(resolutions).zip(shape.headers) {
             for (ordinal, ((item, resolution), digest)) in
                 m.syntax.items().zip(rows).zip(digests).enumerate()
@@ -431,7 +395,6 @@ impl Keys {
                             NodeKind::Function
                                 | NodeKind::Constant
                                 | NodeKind::TypeDecl
-                                | NodeKind::StableType
                                 | NodeKind::ResourceType
                                 | NodeKind::ScopedType
                                 | NodeKind::CloneHook
@@ -469,16 +432,6 @@ impl Keys {
                 }
                 if index.get(definition).kind == DefinitionKind::Clone {
                     hooks.push((definition, reads.clone()));
-                }
-                if let Some(attribute) = twin_attribute(item) {
-                    for name in &resolution.names {
-                        let at = item.tree.node(name.node).origin.span.start;
-                        if attribute.contains(&at)
-                            && let Target::Definition(target) = name.target
-                        {
-                            twins.push((path.clone(), index.definition_path(target)));
-                        }
-                    }
                 }
                 anchors.insert((m.source, ordinal as u32), path.clone());
                 headers.names.insert(path, definition);
@@ -519,7 +472,6 @@ impl Keys {
         keys.headers = headers;
         keys.anchors = anchors;
         keys.environment = shape.environment;
-        keys.twins = ContentHash::of_parts("hirsel.key-twins.v1", [&encode(&(image, twins))?[..]]);
         (keys.forms, keys.siblings) = forms(index);
         if let Some(last) = keys.forms.iter().map(|f| f.0.0 as usize).max() {
             keys.form_bits = vec![0; last / 64 + 1];
@@ -552,7 +504,6 @@ impl Keys {
             prelude_reads: Default::default(),
             forms: vec![],
             form_bits: vec![],
-            twins: ContentHash::default(),
             siblings: vec![],
         }
     }
@@ -896,7 +847,7 @@ impl Keys {
             })?;
         let module = module.id;
         let pending = self.signature_start(index, module, own, resolution);
-        // The forms (see `Form`) among the definitions the body names.
+        // The forms among the definitions the body names.
         let mut named = vec![];
         let signatures = {
             hirsel_core_front::cost_scope!("key work", "signature closure");
@@ -931,16 +882,13 @@ impl Keys {
         // Program inputs a body's lowering reads beyond its resolved names'
         // closures, each keyed only for the bodies that name the form that
         // reads it.
-        let (mut twins, mut siblings) = (None, vec![]);
-        for &(_, form) in self
+        let mut siblings = vec![];
+        for &(_, sibling) in self
             .forms
             .iter()
             .filter(|f| named.contains(&(f.0.0 as usize)))
         {
-            match form {
-                Form::Clone => twins = Some(self.twins),
-                Form::Siblings(k) => siblings.push(self.sibling_reads(index, k)?),
-            }
+            siblings.push(self.sibling_reads(index, sibling)?);
         }
         siblings.sort_unstable();
         siblings.dedup();
@@ -949,7 +897,6 @@ impl Keys {
             signatures,
             lookups,
             environment: self.environment,
-            twins,
             // One callee's hash is its own; several are hashed together.
             siblings: match siblings[..] {
                 [] => None,
@@ -1107,14 +1054,6 @@ impl Keys {
 }
 /// The item-relative end of the header: a function's body block start, else
 /// the item's end. Node spans are item-relative.
-/// The span of an item's `@twin(P)` attribute: the one attribute with a child.
-fn twin_attribute(item: Item<'_>) -> Option<std::ops::Range<u32>> {
-    item.tree.children(item.root).iter().find_map(|&c| {
-        let n = item.tree.node(c);
-        (n.kind == NodeKind::Attribute && !item.tree.children(c).is_empty())
-            .then(|| n.origin.span.start..n.origin.span.end)
-    })
-}
 fn header_end(item: Item<'_>) -> usize {
     if !matches!(
         item.tree.node(item.root).kind,

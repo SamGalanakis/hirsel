@@ -7,7 +7,7 @@
 // element 2 by walking the sequence (100000*2). The
 // append callback names the builder's `s` through its enclosing callback.
 @compact(u16)
-stable type J = Null | Num(u64) | Str(Text) | Arr(IndexedSpan[J])
+type J = Null | Num(u64) | Str(Text) | Arr(IndexedSpan[J])
 
 fn item[in r](take x: Writer[J, in r], k: u64, s: String) -> Result[Child[J], BuildError] {
     if k == 1 {

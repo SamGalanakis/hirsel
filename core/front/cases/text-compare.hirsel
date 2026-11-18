@@ -5,7 +5,7 @@
 // SEM-7: Text orders bytewise, then by length, like String. "abc" < "abd" by the third
 // byte, "ab" < "abc" as a prefix, "abc" == "abc", and "b" > "abc" by the first byte.
 @compact(u32)
-stable type P {
+type P {
     a: Text,
     b: Text
 }

@@ -22,9 +22,9 @@ fn fixed(layouts: &[Recipe], id: TypeId) -> Result<&Fixed> {
         )),
     }
 }
-/// A resource or stable value is held as a pointer to its block (MEM-5, MEM-24).
+/// A resource or region value is held as a pointer to its block (MEM-5, MEM-24).
 fn by_block(input: &c::Module, id: TypeId) -> bool {
-    matches!(input.types[id.index()].repr, Repr::Resource | Repr::Stable)
+    matches!(input.types[id.index()].repr, Repr::Resource | Repr::Region)
 }
 fn held<'a>(input: &c::Module, id: TypeId) -> At<'a> {
     if by_block(input, id) {

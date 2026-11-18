@@ -1,0 +1,14 @@
+// expect: refuse LANG-5 at 7:1
+// expect: refuse LANG-5 at 9:1
+// expect: refuse LANG-5 at 10:2
+// expect: refuse MEM-2 at 11:42
+type Own { n: u64 }
+
+stable
+type Boundary { n: u64 }
+stable type Obsolete { n: u64 }
+@twin(Own) type Other { n: u64 }
+fn placed(r: Region) { let _ = Own(n: 1) in r }
+// expect: compared LANG-5 at 7:1 | stable | type
+// expect: compared LANG-5 at 9:1 | stable | type
+// expect: compared LANG-5 at 10:2 | twin | test or compact attribute

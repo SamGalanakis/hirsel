@@ -244,7 +244,7 @@ impl<T: TyRead> Shapes<'_, T> {
                         let held = Some(FieldTy::Scalar(Scalar::U64));
                         return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
-                    // Compact text or a span held as a value: a stable reference to
+                    // Compact text or a span held as a value: a region reference to
                     // compact data in its region (core.md), plain. The locator names
                     // what it locates (FORM #63), so key, equality and order read it.
                     Some(
@@ -335,9 +335,9 @@ impl<T: TyRead> Shapes<'_, T> {
                 if decl.summary.cycle {
                     return None;
                 }
-                // A compact stable value is held like `Text`: its locator of the
+                // A compact value is held like `Text`: its locator of the
                 // compact row (FORM #65), which every compact context names instead.
-                if decl.repr == Repr::Stable && decl.compact.is_some() {
+                if decl.repr == Repr::Region {
                     let at = FieldTy::Locator(Box::new(FieldTy::Inline(self.compact(ty)?)));
                     let held = Some(at.clone());
                     return self.fill(r, ty, LRepr::Own, record(vec![("at", at)]), None, held);
@@ -357,7 +357,7 @@ impl<T: TyRead> Shapes<'_, T> {
                     Repr::Own => LRepr::Own,
                     Repr::Resource => LRepr::Resource,
                     Repr::Scoped => LRepr::Scoped,
-                    Repr::Stable => LRepr::Stable,
+                    Repr::Region => unreachable!("region values have a compact or built-in layout"),
                 };
                 let body = self.body(decl, &args, false)?;
                 // A body module names the function row once the emitter has one.
@@ -376,14 +376,13 @@ impl<T: TyRead> Shapes<'_, T> {
                     self.shapes[r.index()].codec = self.structural_codec(r, d, ty, &args);
                 }
                 self.shapes[r.index()].grant = decl.grant;
-                let held = (decl.repr == Repr::Stable).then_some(FieldTy::Stable(r));
-                (repr, body, finalizer, held)
+                (repr, body, finalizer, None)
             }
             _ => return None,
         };
         self.fill(r, ty, repr, body, finalizer, held)
     }
-    /// The compact row of the compact stable type `ty` (FORM #65), named
+    /// The compact row of the compact type `ty` (FORM #65), named
     /// `compact <canonical>`: its fields encoded in the blob (MEM-9).
     fn compact(&mut self, ty: TyId) -> Option<TypeRef> {
         let name = format!(
@@ -424,11 +423,11 @@ impl<T: TyRead> Shapes<'_, T> {
         self.shapes[r.index()].body = body;
         Some(r)
     }
-    /// The row a compact context names for `ty`: a compact stable type's compact row.
+    /// The row a compact context names for `ty`: a compact type's compact row.
     fn compact_or_shape(&mut self, ty: TyId) -> Option<TypeRef> {
         match *self.types.kind(ty) {
             TyKind::Adt(d, _)
-                if self.decls[d.index()].repr == Repr::Stable
+                if self.decls[d.index()].repr == Repr::Region
                     && self.decls[d.index()].compact.is_some() =>
             {
                 self.compact(ty)
@@ -533,7 +532,7 @@ impl<T: TyRead> Shapes<'_, T> {
             self.of,
             Shape {
                 name,
-                repr: LRepr::Stable,
+                repr: LRepr::Region,
                 carried: Carried::Address,
                 body: record(vec![("seq", seq), ("count", FieldTy::Scalar(Scalar::U64))]),
                 finalizer: None,
@@ -605,9 +604,9 @@ impl<T: TyRead> Shapes<'_, T> {
                         FieldTy::Locator(Box::new(span))
                     }
                 }
-                // A SeqIndex is held by its table block, a stable value in its region
+                // A SeqIndex is held by its table block, a fixed-layout region value
                 // (MEM-12, FORM M14).
-                Some(Role::SeqIndex) => FieldTy::Stable(self.seq_index_block(ty, args[0])?),
+                Some(Role::SeqIndex) => FieldTy::RegionRef(self.seq_index_block(ty, args[0])?),
                 Some(Role::Link) if compact => FieldTy::Link(self.compact_or_shape(args[0])?),
                 // A view field is the viewed type's own bytes, cleaned by nobody (FORM #56).
                 Some(Role::View) => view_field(self.field_in(args[0], compact)?),
@@ -633,7 +632,7 @@ impl<T: TyRead> Shapes<'_, T> {
                         _ => FieldTy::Inline(self.shape(ty)?),
                     }
                 }
-                None if self.decls[d.index()].repr == Repr::Stable
+                None if self.decls[d.index()].repr == Repr::Region
                     && self.decls[d.index()].compact.is_some() =>
                 {
                     let k = FieldTy::Inline(self.compact(ty)?);
@@ -642,9 +641,6 @@ impl<T: TyRead> Shapes<'_, T> {
                     } else {
                         FieldTy::Locator(Box::new(k))
                     }
-                }
-                None if !compact && self.decls[d.index()].repr == Repr::Stable => {
-                    FieldTy::Stable(self.shape(ty)?)
                 }
                 None => FieldTy::Inline(self.shape(ty)?),
             },
@@ -788,7 +784,7 @@ pub(crate) fn recipes(p: &mut Program) {
         let ty = s.types.intern(TyKind::Adt(crate::DeclId(d as u32), vec![]));
         let mark = s.shapes.len();
         // A compact declaration's recipe is its compact row's (FORM #65).
-        let row = if decl.repr == Repr::Stable && decl.compact.is_some() {
+        let row = if decl.repr == Repr::Region {
             s.shape(ty).and_then(|_| s.compact(ty))
         } else {
             s.shape(ty)
@@ -846,8 +842,6 @@ pub(crate) fn recipes(p: &mut Program) {
                     "OWN-2"
                 } else if decl.compact.is_some() {
                     "MEM-9"
-                } else if decl.repr == Repr::Stable {
-                    "MEM-2"
                 } else if matches!(error, LayoutError::Cycle { .. }) {
                     "OWN-2"
                 } else {

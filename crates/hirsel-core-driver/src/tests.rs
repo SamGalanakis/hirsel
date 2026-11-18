@@ -3022,30 +3022,13 @@ fn resolution_edges_rebuild_like_fresh() {
     }
 }
 
-/// A body's lowering reads program inputs beyond the names it resolves, and its
-/// key holds each (`DefinitionKey`): MEM-17 finds an untwinned type's twin among
-/// every declaration (`twins`), `codec.of[u64]` calls std's `of_u64` by a
-/// path it builds (`siblings`), and a closed `List[u64]` row's codec hook is
-/// std's `of_list` (`signatures`, beside the prelude). Each edit, checked over
-/// the base's store, reports and publishes what an empty store does. Oracle:
-/// the fresh check, whose verdict is hand-derived (without its twin annotation,
-/// RowS cannot be cloned as Row; std without `of_u64` builds no
-/// codec of u64; without `of_list` a list row has no codec hook). A refused
-/// rival is a negative history: removing it must not keep its cached body refusal
-/// in the now-valid program. Red on a key
-/// without one of them: the stored record of `thaw`, `c` or `l` was reused.
+/// Reuse keys include the codec makers selected during lowering and the implicit
+/// codec hooks on closed rows. After an edit, the cached check must match a fresh one.
 #[test]
 fn program_inputs_rebuild_bodies_like_fresh() {
-    const ROW: &str = "type Row { n: u64 }\n";
-    const THAW: &str = "@twin(Row) stable type RowS { n: u64 }\nfn thaw(s: RowS) -> Result[Row, Capacity] { clone(s) }\n";
     const CODEC: &str = "fn c() -> std.codec.Codec[u64] { std.codec.of() }\n";
     const LIST: &str = "fn l(take xs: List[u64]) -> List[u64] { xs }\n";
     const TUPLE: &str = "fn pair() -> (u64, u64) { (1u64, 2u64) }\n";
-    let one = format!("{ROW}{THAW}");
-    let unpaired = format!("{ROW}{}", THAW.replace("@twin(Row) ", ""));
-    // The invalid history is still an input: its cached body refusal must not leak
-    // into a later valid program. Both twin claims themselves are refused by MEM-17.
-    let rival = format!("{ROW}@twin(Row) stable type RowT {{ n: u64 }}\n{THAW}");
     let libraries = tempfile::tempdir().unwrap();
     let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     // Copies of core and std whose std lacks one maker: `of_u64`, or `of_list`.
@@ -3080,30 +3063,6 @@ fn program_inputs_rebuild_bodies_like_fresh() {
     let no_list = without("of_list", '[');
     let no_schema = without("schema_of", '[');
     let cases = [
-        (
-            "the twin annotation leaves",
-            (&shipped, &one),
-            (&shipped, &unpaired),
-            false,
-        ),
-        (
-            "the twin annotation returns",
-            (&shipped, &unpaired),
-            (&shipped, &one),
-            true,
-        ),
-        (
-            "the refused rival leaves",
-            (&shipped, &rival),
-            (&shipped, &one),
-            true,
-        ),
-        (
-            "the refused rival arrives",
-            (&shipped, &one),
-            (&shipped, &rival),
-            false,
-        ),
         (
             "std's u64 maker leaves",
             (&shipped, &CODEC.to_owned()),
@@ -3153,23 +3112,9 @@ fn program_inputs_rebuild_bodies_like_fresh() {
                 .check(request, &mut Meter::new(false))
                 .unwrap()
         };
-        let prior = check(base, "incremental");
+        check(base, "incremental");
         let built = check(edit, "incremental");
         let fresh = check(edit, "fresh");
-        let refused_rival = match case {
-            "the refused rival leaves" => Some(&prior),
-            "the refused rival arrives" => Some(&fresh),
-            _ => None,
-        };
-        if let Some(rival) = refused_rival {
-            assert!(
-                rival
-                    .diagnostics
-                    .iter()
-                    .any(|d| d.rule == "MEM-17" && d.message.contains("already has declared twin")),
-                "{case}: the rival itself must be refused at its declaration"
-            );
-        }
         assert_eq!(
             fresh.accepted() && fresh.incomplete.is_empty(),
             accepted,

@@ -965,7 +965,7 @@ fn packed_iteration_uses_one_cursor_for_variable_records() {
             ] {
                 let span = if indexed { "IndexedSpan" } else { "SeqSpan" };
                 let source = format!(
-                    "@compact(u16) stable type Row {{ tag: u8, ys: SeqSpan[u64] }}\nfn f(xs: {span}[Row]) -> u64 {{ let mut s: u64 = 0; for row in xs {{ let tag = row.tag; let ys = row.ys; {body} }}; s }}"
+                    "@compact(u16) type Row {{ tag: u8, ys: SeqSpan[u64] }}\nfn f(xs: {span}[Row]) -> u64 {{ let mut s: u64 = 0; for row in xs {{ let tag = row.tag; let ys = row.ys; {body} }}; s }}"
                 );
                 let (index, inputs) = program_inputs(&source);
                 let p = Program::declare(&index, &inputs);

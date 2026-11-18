@@ -3,7 +3,7 @@
 // gives its field the field's type, so seq.len's T is fixed by ys; typing the field
 // as an error left T open and falsely refused LANG-12.
 @compact(u16)
-stable type J = Null | Num(u64) | Arr(IndexedSpan[J])
+type J = Null | Num(u64) | Arr(IndexedSpan[J])
 
 fn inner(xs: IndexedSpan[J]) -> u64 {
     match indexed.get(xs, 0) {

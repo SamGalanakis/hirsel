@@ -12,9 +12,8 @@ type B {
 
 type Choice = Left(u64) | Right(u64)
 
-@twin(A)
 @compact(u16)
-stable type AS {
+type AS {
     x: u64,
     y: u64
 }

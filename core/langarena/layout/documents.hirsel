@@ -2,10 +2,10 @@
 // Construct, scan/select, discard a whole batch. Input is borrowed static UTF-8;
 // both ordinary and compact paths copy it, and unknown-size construction runs once.
 @compact(u32)
-stable type Item = Flag(bool) | Name(Text) | Scores(FixedSpan[u64])
+type Item = Flag(bool) | Name(Text) | Scores(FixedSpan[u64])
 
 @compact(u32)
-stable type Batch {
+type Batch {
     items: IndexedSpan[Item]
 }
 

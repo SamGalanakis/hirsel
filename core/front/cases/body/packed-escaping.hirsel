@@ -2,7 +2,7 @@
 // expect: accept
 // expect: run run() = 211313031
 @compact(u16)
-stable type Bundle {
+type Bundle {
     sequential: SeqSpan[(u8, u64)],
     indexed: IndexedSpan[(u8, u64)]
 }

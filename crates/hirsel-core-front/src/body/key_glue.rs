@@ -12,12 +12,6 @@ pub enum KeyOp {
     Ordered(CompareOp),
     /// `$clone[T](from, to) -> (requested, available)`: MEM-17's own copy.
     Clone,
-    /// `$clone_in[T, U](from, r) -> (block, requested, available)`: MEM-17's copy of a
-    /// `T` into a new stable `U` in `r`; `U` is the row named here.
-    CloneIn(u32),
-    /// `$clone_twin[S, U](from, to) -> (requested, available)`: MEM-17's own copy of a
-    /// stable `S` as its declared twin `U`, the row named here.
-    CloneTwin(u32),
     /// `$encode[T](from, blob, at)`: MEM-9's packed encoding of a plain `T` written at
     /// byte `at` of `blob` (a span builder's push in a rigid body, MEM-12).
     Encode,
@@ -37,8 +31,6 @@ impl KeyOp {
             Self::Ordered(CompareOp::Ge) => "order.$ge",
             Self::Ordered(_) => unreachable!("ordered predicates"),
             Self::Clone => "core.$clone",
-            Self::CloneIn(_) => "core.$clone_in",
-            Self::CloneTwin(_) => "core.$clone_twin",
             Self::Encode => "span.$encode",
             Self::NeedsDrop => "core.$needs_drop",
         })
@@ -68,7 +60,6 @@ impl KeyOp {
             Self::Fold => params.push(Param::Value(Ty::Scalar(Scalar::U64))),
             Self::Equal | Self::Order | Self::Ordered(_) => params.push(view(ty)),
             Self::Clone => params.push(out(ty)),
-            Self::CloneTwin(u) => params.push(out(TypeId(u))),
             Self::Encode => {
                 params.extend([Param::Value(Ty::Ptr), Param::Value(Ty::Scalar(Scalar::U64))]);
                 return Signature {
@@ -78,17 +69,8 @@ impl KeyOp {
                     never: false,
                 };
             }
-            Self::CloneIn(_) => {
-                params.push(Param::Value(Ty::Ptr));
-                return Signature {
-                    params,
-                    results: vec![Ty::Ptr, Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::U64)],
-                    dest: None,
-                    never: false,
-                };
-            }
         }
-        if matches!(self, Self::Clone | Self::CloneTwin(_)) {
+        if self == Self::Clone {
             return Signature {
                 params,
                 results: vec![Ty::Scalar(Scalar::U64); 2],
@@ -269,7 +251,7 @@ impl KeyOp {
     /// stay addresses.
     pub(super) fn abi(self) -> scalar_abi::SignatureAbi {
         let (params, result) = match self {
-            Self::Clone | Self::CloneIn(_) | Self::CloneTwin(_) => (vec![false; 2], false),
+            Self::Clone => (vec![false; 2], false),
             Self::NeedsDrop => (vec![], true),
             Self::Encode => (vec![false; 3], false),
             Self::Equal | Self::Order | Self::Ordered(_) => (vec![true; 2], true),
@@ -298,7 +280,7 @@ pub(super) fn signature_id(module: &mut Module, sig: Signature) -> SigId {
 
 /// The core path (module, name) of every glue operation [`KeyOp::named`] reads:
 /// the core operations a body reaches without a declaration (W5's inventory).
-pub const GLUE_OPERATIONS: [(&str, &str); 13] = [
+pub const GLUE_OPERATIONS: [(&str, &str); 11] = [
     ("map", "$key_hash"),
     ("map", "$key_fold"),
     ("map", "$key_equal"),
@@ -308,21 +290,19 @@ pub const GLUE_OPERATIONS: [(&str, &str); 13] = [
     ("order", "$gt"),
     ("order", "$ge"),
     ("core", "$clone"),
-    ("core", "$clone_in"),
-    ("core", "$clone_twin"),
     ("span", "$encode"),
     ("core", "$needs_drop"),
 ];
 
 impl KeyOp {
     /// The glue operation instance row `key` names, if it is glue: its argument rows
-    /// are the operation's type and, for a clone into another type, that type.
+    /// name the operation's type.
     pub fn of(key: &InstanceKey) -> Option<(Self, TypeId)> {
-        let op = Self::named(&key.definition, || key.arguments.get(1).map(|u| u.0))?;
+        let op = Self::named(&key.definition)?;
         Some((op, *key.arguments.first()?))
     }
-    /// The operation `definition` names, with `second` its second type argument.
-    fn named(definition: &DefPath, second: impl Fn() -> Option<u32>) -> Option<Self> {
+    /// The operation `definition` names,.
+    fn named(definition: &DefPath) -> Option<Self> {
         let d = &definition.0;
         if d.package.name != "core" || !d.name.starts_with('$') {
             return None;
@@ -337,8 +317,6 @@ impl KeyOp {
             ([m], "$gt") if m == "order" => Self::Ordered(CompareOp::Gt),
             ([m], "$ge") if m == "order" => Self::Ordered(CompareOp::Ge),
             ([m], "$clone") if m == "core" => Self::Clone,
-            ([m], "$clone_in") if m == "core" => Self::CloneIn(second()?),
-            ([m], "$clone_twin") if m == "core" => Self::CloneTwin(second()?),
             ([m], "$encode") if m == "span" => Self::Encode,
             ([m], "$needs_drop") if m == "core" => Self::NeedsDrop,
             _ => return None,
@@ -350,7 +328,7 @@ impl KeyOp {
 /// arguments' closures alone ([`super::templates::materialize_glue`]), with no
 /// published definition.
 pub fn is_glue(definition: &DefPath) -> bool {
-    KeyOp::named(definition, || Some(0)).is_some() || super::codec_glue::is_glue(definition)
+    KeyOp::named(definition).is_some() || super::codec_glue::is_glue(definition)
 }
 
 fn scalar_row(module: &Module, ty: TypeId) -> Option<Scalar> {
@@ -587,13 +565,9 @@ pub(super) struct Derive<'a> {
 impl Derive<'_> {
     /// The row of `op` at `ty` in `module`, added signature-only when it is missing.
     fn row(module: &mut Module, ty: TypeId, op: KeyOp) -> FuncId {
-        let mut arguments = vec![ty];
-        if let KeyOp::CloneIn(u) | KeyOp::CloneTwin(u) = op {
-            arguments.push(TypeId(u));
-        }
         let key = InstanceKey {
             definition: op.definition(),
-            arguments,
+            arguments: vec![ty],
             dictionaries: vec![],
         };
         if let Some(i) = module
@@ -651,10 +625,10 @@ impl Derive<'_> {
         }
         let mut ps = c.params(BlockId(0));
         // A key operation's value parameter is the place of the value as held (FORM
-        // #115): a stable value's place holds its block pointer, and its fields are in
+        // #115): a region value's place holds its block pointer, and its fields are in
         // the block (MEM-5). Reading it here, not at the caller, makes a generic body's
         // rigid `T` and a concrete caller pass the same thing.
-        if self.module.types[ty.index()].repr == LRepr::Stable {
+        if self.module.types[ty.index()].repr == LRepr::Region {
             let values = match op {
                 KeyOp::Fold => 1,
                 KeyOp::Equal | KeyOp::Order | KeyOp::Ordered(_) => 2,
@@ -671,13 +645,6 @@ impl Derive<'_> {
             self.active.pop();
             return Ok(row);
         }
-        if let KeyOp::CloneTwin(u) = op {
-            self.clone_twin_function(&mut c, ty, TypeId(u), ps[0], ps[1])?;
-            order_instructions(&mut c.body);
-            self.module.functions[row.index()].body = Some(c.body);
-            self.active.pop();
-            return Ok(row);
-        }
         if op == KeyOp::Encode {
             let all = c.body.blocks[0]
                 .params
@@ -687,13 +654,6 @@ impl Derive<'_> {
             self.encode_type(&mut c, ty, all[0], all[1], all[2])?;
             let returns = PoolRange::push(&mut c.body.pools.values, []);
             c.end(Terminator::Return(returns));
-            order_instructions(&mut c.body);
-            self.module.functions[row.index()].body = Some(c.body);
-            self.active.pop();
-            return Ok(row);
-        }
-        if let KeyOp::CloneIn(u) = op {
-            self.clone_in_function(&mut c, ty, TypeId(u), ps[0], ps[1])?;
             order_instructions(&mut c.body);
             self.module.functions[row.index()].body = Some(c.body);
             self.active.pop();
@@ -726,7 +686,7 @@ impl Derive<'_> {
                 let b = c.read(ps[1], Ty::Scalar(scalar));
                 c.compare(op, a, b)
             }
-            KeyOp::Clone | KeyOp::CloneIn(_) | KeyOp::CloneTwin(_) | KeyOp::Encode => {
+            KeyOp::Clone | KeyOp::Encode => {
                 unreachable!("clones and encodings return above")
             }
             KeyOp::Order | KeyOp::Ordered(_) => {
@@ -1194,7 +1154,7 @@ impl Derive<'_> {
             }
             FieldTy::View(inner) => self.order_field(c, inner, a, b, different)?,
             FieldTy::Locator(target) => self.order_located(c, target, a, b, different)?,
-            FieldTy::Stable(t) => {
+            FieldTy::RegionRef(t) => {
                 let x = c.read(a, Ty::Ptr);
                 let y = c.read(b, Ty::Ptr);
                 self.order_type(c, TypeId(t.0), x, y, different)?;
@@ -1378,8 +1338,8 @@ impl Derive<'_> {
                 let at = c.address(data, PlaceTy::Declared(TypeId(t.0)));
                 self.call(c, f, &[Arg::Address(at), Arg::Value(h)])
             }
-            // The field is the stable value's place; its Fold reads the block pointer.
-            FieldTy::Stable(t) => {
+            // The field is the region value's place; its Fold reads the block pointer.
+            FieldTy::RegionRef(t) => {
                 let f = self.function(TypeId(t.0), KeyOp::Fold)?;
                 let at = c.address(p, PlaceTy::Declared(TypeId(t.0)));
                 self.call(c, f, &[Arg::Address(at), Arg::Value(h)])
@@ -1889,7 +1849,7 @@ impl Derive<'_> {
                 let on = self.call(c, f, &[Arg::Address(x), Arg::Address(y)]);
                 c.require(on, no);
             }
-            FieldTy::Stable(t) => {
+            FieldTy::RegionRef(t) => {
                 let x = c.read(a, Ty::Ptr);
                 let y = c.read(b, Ty::Ptr);
                 self.equal_type(c, TypeId(t.0), x, y, no)?;
@@ -2291,7 +2251,7 @@ mod tests {
         // record streams its fields into h, rather than finishing a child hash.
         // Located Text matches String. Spans at W2/4/8 match List[7,9],
         // without count/trailer components; a trailing i8(-1) pins cursor advance.
-        // Native stable references stream their payload, never their address.
+        // Native region references stream their payload, never their address.
         let vectors = [
             (
                 "type t0 = own \"word\" { n:u64 }",
@@ -2460,7 +2420,7 @@ mod tests {
                 0x173f672017fdd65,
             ),
             (
-                "type t0 = own \"reference\" { at:stable t1 }\ntype t1 = stable \"Native\" { a:u64, b:u64 }",
+                "type t0 = own \"reference\" { at:region_ref t1 }\ntype t1 = region \"Native\" { a:u64, b:u64 }",
                 "static d0 = align 8 hex 07000000000000000900000000000000",
                 vec![(0, "ptr", "static d0")],
                 None,
@@ -2644,8 +2604,8 @@ mod located_order_tests {
         b[0] = 127;
         b[8..16].copy_from_slice(&1u64.to_le_bytes());
         vectors.push((
-            "stable t1".into(),
-            r#"type t1 = stable "NativeStable" { first:i8, next:u64 }"#.into(),
+            "region_ref t1".into(),
+            r#"type t1 = region "NativeStable" { first:i8, next:u64 }"#.into(),
             2,
             a,
             8,
@@ -2708,8 +2668,8 @@ mod located_order_tests {
         vectors.push(("locator t1".into(), types.into(), 4, a, 2, b, 0));
         let native = [7u64.to_le_bytes(), 9u64.to_le_bytes()].concat();
         vectors.push((
-            "stable t1".into(),
-            "type t1 = stable \"NativeStable\" { first:u64, next:u64 }".into(),
+            "region_ref t1".into(),
+            "type t1 = region \"NativeStable\" { first:u64, next:u64 }".into(),
             2,
             native.clone(),
             8,
@@ -2717,7 +2677,7 @@ mod located_order_tests {
             0,
         ));
         for (field, types, aw, a, bw, b, want) in vectors {
-            let native_reference = field == "stable t1";
+            let native_reference = field == "region_ref t1";
             let hex = |width, value: &[u8]| {
                 if native_reference {
                     value.iter().map(|b| format!("{b:02x}")).collect()

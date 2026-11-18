@@ -31,11 +31,11 @@ impl FunctionEmitter<'_> {
         };
         f
     }
-    /// A resource or stable value is held as a pointer to its block (MEM-5, MEM-24).
+    /// A resource or region value is held as a pointer to its block (MEM-5, MEM-24).
     fn by_block(&self, t: TypeId) -> bool {
         matches!(
             self.module.types[t.index()].repr,
-            Repr::Resource | Repr::Stable
+            Repr::Resource | Repr::Region
         )
     }
     fn kind_of(&self, t: TypeId) -> At {

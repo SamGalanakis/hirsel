@@ -1,12 +1,12 @@
-// FORM #115: the standing proof that a generic body at a stable T (MEM-5) carries the
-// 8-byte holder and charges it as 16 (budgets.md) through every move shape and the List
+// FORM #115: the standing proof that a generic body at a region T (MEM-5) carries the
+// locator and charges it as 16 (budgets.md) through every move shape and the List
 // and Deque kernels, on the evaluator and both engines (`native: run` lines are
 // engine-only: Deque bodies are not in the evaluator's harness). Equality, order and
-// hash at a stable T are generic-stable-keys.hirsel.
+// hash at a region T are generic-stable-keys.hirsel.
 // T is instantiated at `Span3 in r` (block 24 logical), at `Holder` (a record holding
 // one: 16 + 8 = 24 logical, 16 stored) and at `Option[Span3 in r]`.
 // Oracles: values are read back from the blocks; each charge equals the charge of a
-// plain twin of the same logical size (P16 for a stable reference, P24 for Holder,
+// plain type of the same logical size (P16 for a region reference, P24 for Holder,
 // Option[P16] for the Option), and List's is hand-derived (reserve 5 => 5 * size).
 // A block-for-holder slip at any site shows as 24 where 16 is due, or as bytes past
 // the holder.
@@ -21,7 +21,8 @@
 // expect: run list_charge() = 1
 // native: run deque_rt() = 615
 // native: run deque_charge() = 1
-stable type Span3 {
+@compact(u32)
+type Span3 {
     a: u64,
     b: u64,
     c: u64
@@ -68,7 +69,7 @@ fn cell[T](take x: T) -> T {
 
 fn moved() -> u64 {
     region r {
-        match Span3(a: 1, b: 2, c: 3) in r {
+        match make_span3(r, 1, 2, 3) {
             Ok(s) => sum3(keep(s)),
             Error(_) => 0
         }
@@ -77,7 +78,7 @@ fn moved() -> u64 {
 
 fn optioned() -> u64 {
     region r {
-        match Span3(a: 1, b: 2, c: 3) in r {
+        match make_span3(r, 1, 2, 3) {
             Ok(s) => match wrap(s) {
                 Some(t) => sum3(t),
                 None => 0
@@ -89,7 +90,7 @@ fn optioned() -> u64 {
 
 fn celled() -> u64 {
     region r {
-        match Span3(a: 1, b: 2, c: 3) in r {
+        match make_span3(r, 1, 2, 3) {
             Ok(s) => sum3(cell(s)),
             Error(_) => 0
         }
@@ -98,7 +99,7 @@ fn celled() -> u64 {
 
 fn held() -> u64 {
     region r {
-        match Span3(a: 1, b: 2, c: 3) in r {
+        match make_span3(r, 1, 2, 3) {
             Ok(s) => {
                 let h = keep(cell(Holder(s: s, k: 7)))
                 sum3(h.s) + h.k
@@ -126,7 +127,7 @@ fn popped[T](mut xs: List[T]) -> Option[T] {
 // Pushes (1, 2, 3) then (4, 5, 6), swaps, pops (1, 2, 3): 6 * 10 + 2 pushes.
 fn listed() -> u64 {
     region r {
-        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 4, b: 5, c: 6) in r) {
+        match (make_span3(r, 1, 2, 3), make_span3(r, 4, 5, 6)) {
             (Ok(s), Ok(t)) => {
                 let mut xs: List[Span3 in r] = list.new()
                 let n = put(mut xs, s) + put(mut xs, t)
@@ -145,7 +146,7 @@ fn listed() -> u64 {
 // first: (6 + 7) * 8 + 2 pushes + 1 left = 107.
 fn listed_held() -> u64 {
     region r {
-        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 4, b: 5, c: 6) in r) {
+        match (make_span3(r, 1, 2, 3), make_span3(r, 4, 5, 6)) {
             (Ok(s), Ok(t)) => {
                 let mut xs: List[Holder[in r]] = list.new()
                 let n = put(mut xs, Holder(s: s, k: 7)) + put(mut xs, Holder(s: t, k: 9))
@@ -163,7 +164,7 @@ fn listed_held() -> u64 {
 // An Option of one: pushes None then Some((4, 5, 6)); pops Some: 15.
 fn listed_option() -> u64 {
     region r {
-        match Span3(a: 4, b: 5, c: 6) in r {
+        match make_span3(r, 4, 5, 6) {
             Ok(t) => {
                 let mut xs: List[Option[Span3 in r]] = list.new()
                 let _ = put(mut xs, None) + put(mut xs, wrap(t))
@@ -220,7 +221,7 @@ fn list_charge() -> u64 {
 // Back is (1, 2, 3), front (4, 5, 6): 6 * 100 + 15.
 fn deque_rt() -> u64 {
     region r {
-        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 4, b: 5, c: 6) in r) {
+        match (make_span3(r, 1, 2, 3), make_span3(r, 4, 5, 6)) {
             (Ok(s), Ok(t)) => {
                 let mut d: Deque[Span3 in r] = deque.new()
                 let _ = deque.push_back(mut d, s)
@@ -235,11 +236,11 @@ fn deque_rt() -> u64 {
     }
 }
 
-// A first push grows the ring from 0 to 1 slot (deque.hirsel grow): 16 at a stable
+// A first push grows the ring from 0 to 1 slot (deque.hirsel grow): 16 at a region
 // reference, as at P16.
 fn deque_charge() -> u64 {
     region r {
-        match Span3(a: 1, b: 2, c: 3) in r {
+        match make_span3(r, 1, 2, 3) {
             Ok(s) => {
                 let mut d: Deque[Span3 in r] = deque.new()
                 let mut e: Deque[P16] = deque.new()
@@ -263,5 +264,15 @@ fn deque_charge() -> u64 {
             },
             Error(_) => 0
         }
+    }
+}
+
+fn make_span3(r: Region, a: u64, b: u64, c: u64) -> Result[Span3 in r, Capacity] {
+    match build_in(r, bytes 24, fn(mut d: Dest[Span3]) -> Result[Child[Span3], BuildError] {
+        dest.put(mut d, Span3(a: a, b: b, c: c))
+    }) {
+        Ok(take built) => Ok(finish(take built)),
+        Error(Capacity(capacity)) => Error(capacity),
+        Error(Overflow) => fail("fixed document size"),
     }
 }

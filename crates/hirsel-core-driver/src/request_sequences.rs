@@ -1135,20 +1135,6 @@ pub fn value()->u8{hidden()}"###)), src("main", "main.hirsel", false, lit(r###"p
         check(vec![
             core(vec![]),
             pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn bad()->u8{1u8}"###)), src("b", "b.hirsel", false, lit(r###"fn bad()->u8{false}"###))])])]),
-        seq("reverse_twin", vec![
-        check(vec![
-            core(vec![]),
-            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type A { n:u64 }"###)), src("aa", "aa.hirsel", false, lit(r###"pub type C { n:u64 }"###)), src("b", "b.hirsel", false, lit(r###"@twin(a.A) pub type B { n:u64 }"###)), src("p", "p.hirsel", false, lit(r###"@twin(q.Q) pub type P { x:a.A }"###)), src("q", "q.hirsel", false, lit(r###"pub type Q { x:b.B }"###))])]),
-        check(vec![
-            core(vec![]),
-            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type A { n:u64 }"###)), src("aa", "aa.hirsel", false, lit(r###"@twin(a.A) pub type C { n:u64 }"###)), src("b", "b.hirsel", false, lit(r###"@twin(a.A) pub type B { n:u64 }"###)), src("p", "p.hirsel", false, lit(r###"@twin(q.Q) pub type P { x:a.A }"###)), src("q", "q.hirsel", false, lit(r###"pub type Q { x:b.B }"###))])])]),
-        seq("reverse_twin_order", vec![
-        check(vec![
-            core(vec![]),
-            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type A { n:u64 }"###)), src("aa", "aa.hirsel", false, lit(r###"@twin(a.A) pub type C { n:u64 }"###)), src("b", "b.hirsel", false, lit(r###"@twin(a.A) pub type B { n:u64 }"###)), src("p", "p.hirsel", false, lit(r###"@twin(q.Q) pub type P { x:a.A }"###)), src("q", "q.hirsel", false, lit(r###"pub type Q { x:b.B }"###))])]),
-        check(vec![
-            core(vec![]),
-            pkg("app", &["core"], vec![src("q", "q.hirsel", false, lit(r###"pub type Q { x:b.B }"###)), src("p", "p.hirsel", false, lit(r###"@twin(q.Q) pub type P { x:a.A }"###)), src("b", "b.hirsel", false, lit(r###"@twin(a.A) pub type B { n:u64 }"###)), src("aa", "aa.hirsel", false, lit(r###"@twin(a.A) pub type C { n:u64 }"###)), src("a", "a.hirsel", false, lit(r###"pub type A { n:u64 }"###))])])]),
         seq("same_module_file_tie", vec![
         check(vec![
             core(vec![]),
@@ -1195,13 +1181,6 @@ fn f(){law()}"###))])])]),
         check(vec![
             core(vec![]),
             pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn f(){b.law()}"###)), src("b", "b.hirsel", false, lit(r###"@test pub fn law(){}"###))])])]),
-        seq("twin_body", vec![
-        check(vec![
-            core(vec![]),
-            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type A { n:u64 }"###)), src("b", "b.hirsel", false, lit(r###""###)), src("p", "p.hirsel", false, lit(r###"fn f(x:a.A){let _=clone(x)}"###))])]),
-        check(vec![
-            core(vec![]),
-            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type A { n:u64 }"###)), src("b", "b.hirsel", false, lit(r###"@twin(a.A) pub type B { n:u64 }"###)), src("p", "p.hirsel", false, lit(r###"fn f(x:a.A){let _=clone(x)}"###))])])]),
         seq("two_body_refusals_order", vec![
         check(vec![
             core(vec![]),
@@ -1461,15 +1440,15 @@ pub fn f()->u8{1u8}"###)), src("b", "b.hirsel", false, lit(r###"pub const Y:a.R=
             pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type R{x:u8}
 pub const X:R=b.Y
 pub fn f()->u8{2u8}"###)), src("b", "b.hirsel", false, lit(r###"pub const Y:a.R=a.R(x:7u8)"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.X.x))}"###))])])]),
-        seq("twin_current_owner", vec![
+        seq("referenced_type_current_owner", vec![
         build(vec![
             core(vec![]),
             pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type A{x:u8}
-pub fn f()->u8{1u8}"###)), src("b", "b.hirsel", false, lit(r###"@twin(a.A) pub type B{x:u8}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###))])]),
+pub fn f()->u8{1u8}"###)), src("b", "b.hirsel", false, lit(r###"pub type B{x:a.A}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###))])]),
         build(vec![
             core(vec![]),
             pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type A{x:u8}
-pub fn f()->u8{7u8}"###)), src("b", "b.hirsel", false, lit(r###"@twin(a.A) pub type B{x:u8}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###))])])]),
+pub fn f()->u8{7u8}"###)), src("b", "b.hirsel", false, lit(r###"pub type B{x:a.A}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###))])])]),
         seq("decl_count_fallback", vec![
         build(vec![
             core(vec![]),
@@ -1621,16 +1600,9 @@ fn tuple_sequences() -> Vec<Seq> {
             .collect();
         check(vec![core(vec![]), pkg("app", &["core"], sources)])
     };
-    // core/ordering enumerates A,C,B,P,Q both times; the file names alone set
-    // the traversal, and the traversal decides which twin pairs with which.
-    let ordering = |label: &str, names: [usize; 5]| {
-        let texts = [
-            "pub type A{n:u64}",
-            "@twin(A) pub type C{n:u64}",
-            "@twin(A) pub type B{n:u64}",
-            "@twin(Q) pub type P{x:A}",
-            "pub type Q{x:B}",
-        ];
+    // Reversing two files changes the order of declaration rows in the image.
+    let ordering = |label: &str, names: [usize; 2]| {
+        let texts = ["pub type A{n:u64}", "pub type B{m:u32}"];
         let sources = texts
             .iter()
             .zip(names)
@@ -1656,14 +1628,12 @@ fn tuple_sequences() -> Vec<Seq> {
         }
     };
     vec![
-        // Q,P,B,C,A is accepted; the same bytes renamed to traverse A,C,B,P,Q
-        // are refused fresh, so a package record keyed by modules alone serves
-        // the first order's acceptance.
+        // Package reuse must publish the same root as a fresh check in either order.
         seq(
             "product_order",
             vec![
-                ordering("a", [4, 3, 2, 1, 0]),
-                ordering("b", [0, 1, 2, 3, 4]),
+                ordering("a", [1, 0]),
+                ordering("b", [0, 1]),
             ],
         ),
         seq(
@@ -1936,9 +1906,8 @@ const GATES: &[(&str, Gate)] = &[
     ("publish_uncommitted_second", Gate::Fast),
     ("reach_to_full", Gate::Fallback),
     ("reexport_alias", Gate::Fallback),
+    ("referenced_type_current_owner", Gate::Fast),
     ("repair_one_body_refusal", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
-    ("reverse_twin", Gate::Fallback),
-    ("reverse_twin_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("ring", Gate::Fast),
     ("root_limit", Gate::Fast),
     ("root_missing", Gate::Fast), // v3.2: fast; the declared record does not live under the check root
@@ -1953,8 +1922,6 @@ const GATES: &[(&str, Gate)] = &[
     ("test_header_flip", Gate::Fallback),
     ("test_signature_before_reference_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("test_signature_reference_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
-    ("twin_body", Gate::Fallback),
-    ("twin_current_owner", Gate::Fast),
     ("two_body_refusals_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("unchanged_body_refusal", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("unpublished_temp", Gate::Fast),

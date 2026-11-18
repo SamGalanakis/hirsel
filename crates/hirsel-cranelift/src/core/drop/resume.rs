@@ -91,7 +91,7 @@ fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
             Plan::Leaf(t.clone())
         }
         FieldTy::Scalar(_)
-        | FieldTy::Stable(_)
+        | FieldTy::RegionRef(_)
         | FieldTy::Fn
         | FieldTy::Borrow
         | FieldTy::View(_)
@@ -136,7 +136,7 @@ impl Glue<'_, '_, '_> {
             FieldTy::Inline(t) => self.tables.layouts[t.index()].drop.is_none(),
             FieldTy::Array(e, _) => self.flat(e),
             FieldTy::Scalar(_)
-            | FieldTy::Stable(_)
+            | FieldTy::RegionRef(_)
             | FieldTy::Fn
             | FieldTy::Borrow
             | FieldTy::View(_)

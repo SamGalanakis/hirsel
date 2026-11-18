@@ -1471,25 +1471,6 @@ fn ordered_stable_cranelift() {
 fn ordered_stable_llvm() {
     ordered_stable(Backend::Llvm);
 }
-/// MEM-2/MEM-5: a placed stable value is held as a pointer to its region block, inline in a
-/// Result payload, a record field and a list element alike; the values are the case's run lines.
-fn stable_placement(backend: Backend) {
-    let source = format!(
-        "{}\npub fn main() -> Result[(), Exit] {{ if sum() == 15 && picked() == 7 && nested() == 12 && refused() == 16 && listed() == 41 && widened() == 64 {{ Ok(()) }} else {{ Error(Exit(status: 1)) }} }}\n",
-        include_str!("../../../core/front/cases/body/stable-placement.hirsel")
-    );
-    ordered_case(backend, &source);
-}
-#[test]
-#[ignore = "explicit native integration target"]
-fn stable_placement_cranelift() {
-    stable_placement(Backend::Cranelift);
-}
-#[test]
-#[ignore = "explicit native integration target"]
-fn stable_placement_llvm() {
-    stable_placement(Backend::Llvm);
-}
 /// Run a front case natively: `main` checks each `// expect: run f(args) = v` line of the
 /// case, so both engines meet the case's own hand-derived values; exit status i + 1 names
 /// the first line that differs.
@@ -1636,7 +1617,7 @@ fn clone_counted_cranelift() {
 fn clone_counted_llvm() {
     clone_counted(Backend::Llvm);
 }
-/// MEM-17: clone_in makes stable twins in a region, on each engine.
+/// MEM-17: clone_in copies region values into another region, on each engine.
 fn clone_in(backend: Backend) {
     run_lines_native(
         backend,
@@ -1652,23 +1633,6 @@ fn clone_in_cranelift() {
 #[ignore = "explicit native integration target"]
 fn clone_in_llvm() {
     clone_in(Backend::Llvm);
-}
-/// MEM-17: clone copies a stable value into its own twin, on each engine.
-fn clone_twin(backend: Backend) {
-    run_lines_native(
-        backend,
-        include_str!("../../../core/front/cases/body/clone-twin.hirsel"),
-    );
-}
-#[test]
-#[ignore = "explicit native integration target"]
-fn clone_twin_cranelift() {
-    clone_twin(Backend::Cranelift);
-}
-#[test]
-#[ignore = "explicit native integration target"]
-fn clone_twin_llvm() {
-    clone_twin(Backend::Llvm);
 }
 /// MEM-10: an optional link field is put and read, on each engine.
 fn compact_option_link(backend: Backend) {

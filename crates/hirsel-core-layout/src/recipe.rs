@@ -1,6 +1,6 @@
 //! Layout recipes: computed once per declared shape (ARCH "Runtime and layout").
 //!
-//! Own, resource, stable and scoped types get a native fixed layout: declaration
+//! Own, resource, fixed-layout region blocks and scoped types get a native fixed layout: declaration
 //! order, natural alignment, a variant tag of the smallest of u8/u16/u32 at offset 0
 //! and a payload union after it (MEM-13 leaves this private; both engines use this
 //! one recipe so they agree). Compact types get the byte-aligned blob layout of
@@ -532,7 +532,7 @@ fn carries(shapes: &[Shape], shape: &Shape) -> bool {
 }
 
 /// The one scalar word a variant row's bytes are, when they are exactly one (FORM
-/// #78): such a row is carried as that word. Own and stable variants only.
+/// #78): such a row is carried as that word. Own and fixed-layout region variants only.
 ///
 /// - Every case fieldless: the direct tag, `u8`, `u16` or `u32` by case count.
 /// - One case holding one field and every other case fieldless, where that field is a
@@ -548,7 +548,7 @@ pub fn word(shapes: &[Shape], shape: &Shape) -> Option<Scalar> {
 /// [`word`] and the spare values its word still has.
 fn spare_word(shapes: &[Shape], shape: &Shape) -> Option<(Scalar, u64)> {
     use Scalar::{U8, U16, U32};
-    if !matches!(shape.repr, Repr::Own | Repr::Stable) {
+    if !matches!(shape.repr, Repr::Own | Repr::Region) {
         return None;
     }
     let Body::Variant(cases) = &shape.body else {
@@ -588,7 +588,7 @@ fn field_word(shapes: &[Shape], ty: &FieldTy) -> Option<(Scalar, u64)> {
         FieldTy::Inline(t) => {
             let shape = &shapes[t.index()];
             match &shape.body {
-                Body::Record(fields) if matches!(shape.repr, Repr::Own | Repr::Stable) => {
+                Body::Record(fields) if matches!(shape.repr, Repr::Own | Repr::Region) => {
                     match fields.as_slice() {
                         [f] => field_word(shapes, &f.ty),
                         _ => None,
@@ -664,7 +664,7 @@ fn best_niche<'r>(
 /// The spare values of a fixed-layout field of type `ty`, from the field's start: the
 /// one table of them (MEM-13 keeps it private).
 ///
-/// - `Box`, `Rc`, `Arc` and a stable reference: a null pointer.
+/// - `Box`, `Rc`, `Arc` and a region reference: a null pointer.
 /// - `List`, `String`, `Bytes` and `Map`: a capacity of 2^63 to 2^64 - 2. Storage of
 ///   2^63 elements never fits the address space, and a zero-sized element's list
 ///   holds 2^64 - 1 (SEM-4), so no carrier holds one. (The data pointer is no niche:
@@ -690,7 +690,7 @@ pub fn field_niche<'r>(
     };
     match ty {
         FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) => n(0, POINTER, 0, 1),
-        FieldTy::Stable(t) if !matches!(shapes[t.index()].repr, Repr::Compact(_)) => {
+        FieldTy::RegionRef(t) if !matches!(shapes[t.index()].repr, Repr::Compact(_)) => {
             n(0, POINTER, 0, 1)
         }
         FieldTy::Seq(_) | FieldTy::Map(..) => n(16, 8, 1 << 63, (1 << 63) - 1),
@@ -1024,7 +1024,7 @@ fn measure<'r>(
     ty: &FieldTy,
     get: &dyn Fn(TypeRef) -> &'r Recipe,
 ) -> Result<(u64, u64, u64), &'static str> {
-    let stable = holder == Repr::Stable;
+    let stable = holder == Repr::Region;
     Ok(match ty {
         FieldTy::Scalar(s) => (s.size(), s.size(), s.size()),
         FieldTy::Inline(t) => {
@@ -1032,8 +1032,8 @@ fn measure<'r>(
             if matches!(inner.repr, Repr::Compact(_)) {
                 return Err("a compact value lives only in a blob");
             }
-            if stable && inner.repr != Repr::Stable && !get(*t).plain {
-                return Err("a stable type's fields are plain or stable (MEM-2)");
+            if stable && inner.repr != Repr::Region && !get(*t).plain {
+                return Err("a region block holds only plain or region data");
             }
             if inner.repr == Repr::Resource {
                 // A resource value is a pointer to its block, which carries the
@@ -1055,10 +1055,10 @@ fn measure<'r>(
                 _ => return Err("an inline array larger than 2^64 - 1 bytes"),
             }
         }
-        FieldTy::Stable(t) if matches!(shapes[t.index()].repr, Repr::Compact(_)) => {
+        FieldTy::RegionRef(t) if matches!(shapes[t.index()].repr, Repr::Compact(_)) => {
             return Err("a reference to compact data is a locator");
         }
-        FieldTy::Stable(_) => (POINTER, POINTER, 16),
+        FieldTy::RegionRef(_) => (POINTER, POINTER, 16),
         FieldTy::Locator(target) if locates(shapes, target) => (2 * POINTER, POINTER, 16),
         FieldTy::Locator(_) => {
             return Err("a locator names compact data: Text, a span or a compact type");
@@ -1079,7 +1079,7 @@ fn measure<'r>(
             }
             _ => measure(shapes, Repr::Own, t, get)?,
         },
-        _ if stable => return Err("a stable type's fields are plain or stable (MEM-2)"),
+        _ if stable => return Err("a region block holds only plain or region data"),
         FieldTy::Box(_)
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
@@ -1106,7 +1106,7 @@ fn measure<'r>(
 /// SEM-9: an inline array's element is plain or own, never a resource or scoped.
 fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
     match ty {
-        FieldTy::Inline(t) => matches!(shapes[t.index()].repr, Repr::Own | Repr::Stable),
+        FieldTy::Inline(t) => matches!(shapes[t.index()].repr, Repr::Own | Repr::Region),
         FieldTy::Array(e, _) => array_element(shapes, e),
         FieldTy::Borrow
         | FieldTy::View(_)

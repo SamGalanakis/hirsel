@@ -5,7 +5,7 @@
 // tag is one byte; the Text header is W = 4 bytes and 'é' is two UTF-8 bytes: 7 bytes
 // fit in 7 and overflow 6. The text's length reads back as its byte count, 2.
 @compact(u32)
-stable type J = Null | Num(u64) | Str(Text) | Arr(IndexedSpan[J])
+type J = Null | Num(u64) | Str(Text) | Arr(IndexedSpan[J])
 
 fn w_text[in r](take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
     writer.scalar(mut t, 'é')?

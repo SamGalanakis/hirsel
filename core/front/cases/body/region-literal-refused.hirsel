@@ -1,0 +1,6 @@
+// MEM-2: building a compact value as an ordinary literal is refused.
+@compact(u32)
+type Token { n: u64 }
+
+fn outside(r: Region) -> Token in r { Token(n: 1) }
+// expect: refuse MEM-2 at 5:39

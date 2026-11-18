@@ -2,7 +2,8 @@
 // Two direct and two function-valued calls each return requested=1;
 // two callback invocations each read one byte, for a total of six.
 // expect: run checked() = 6
-stable type Doc {
+@compact(u32)
+type Doc {
     value: u64
 }
 

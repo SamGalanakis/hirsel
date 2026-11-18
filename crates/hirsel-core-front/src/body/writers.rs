@@ -1011,13 +1011,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let result = subst(&mut self.t, g.result, tys);
         match (module, name) {
             ("core", "clone") => self.clone_value(tys[0], tys[1], vals[0]?, result, n),
-            ("core", "clone_in") => {
-                let u = match self.t.kind(tys[1]) {
-                    TyKind::Anchored(u, _) => *u,
-                    _ => tys[1],
-                };
-                self.clone_in_value(tys[0], u, vals[0]?, vals[1]?, result, n)
-            }
+            ("core", "clone_in") => self.clone_region_value(tys[1], vals[0]?, vals[1]?, result, n),
             ("core", "build_in") => {
                 let fty = subst(&mut self.t, g.params[2].ty, tys);
                 self.build_in(tys[0], vals[0]?, vals[1]?, fty, vals[2]?, result, n)
@@ -1128,6 +1122,129 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
     }
+    /// Copy the selected encoding at its original width. Only streamable
+    /// values can be extracted from a blob without invalidating internal links.
+    fn clone_region_value(
+        &mut self,
+        ty: TyId,
+        region: ValueId,
+        from: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64t = Ty::Scalar(Scalar::U64);
+        let ty = self.bare(ty);
+        let head = self.u64k(HEAD, n)?;
+        let is_index = matches!(self.role_of(ty), Some((Role::SeqIndex, _)));
+        let (source, start, bytes, locator) = if is_index {
+            // An index holds a reference to the same sequence and its own offset table.
+            let index = self.get_word(AddressBase::Value(from), 0, Ty::Ptr, n)?;
+            let count = self.get_word(AddressBase::Value(index), 16, u64t, n)?;
+            let eight = self.u64k(8, n)?;
+            let slots = self.mul(count, eight, n);
+            (index, self.u64k(0, n)?, self.add_k(slots, 24, n)?, None)
+        } else {
+            let (blob, offset, w) = self.locator(from, n)?;
+            if has_bounds(&self.p.decls, &self.t, ty, &self.params) & crate::STREAMABLE != 0 {
+                let end = self.skip(blob, offset, w, ty, n)?;
+                (
+                    blob,
+                    offset,
+                    self.word_op(BinaryOp::Sub, end, offset, n),
+                    Some((head, w)),
+                )
+            } else {
+                let used = self.get_word(AddressBase::Value(blob), 0, u64t, n)?;
+                (blob, head, used, Some((offset, w)))
+            }
+        };
+        let charge = self.round8(bytes, n)?;
+        let size = if is_index {
+            bytes
+        } else {
+            self.add(bytes, head, n)
+        };
+        let rid = self.place_row(result, "a built-in result without a place is not built", n)?;
+        let to = self.new_slot(PlaceTy::Declared(rid), n);
+        let block = self.value(Ty::Ptr);
+        let available = self.value(u64t);
+        let fail = self.fail_to(n);
+        self.inst(
+            Inst::Alloc {
+                result: block,
+                available,
+                region_entry: None,
+                kind: AllocKind::Region,
+                place: AllocPlace::Region(region),
+                charge,
+                overflow: None,
+                size,
+                align: 8,
+                fail,
+            },
+            n,
+        );
+        let null = self.konst(Ty::Ptr, 0, n)?;
+        let admitted = self.test(CompareOp::Ne, block, null, n);
+        let (yes, refused, join) = (
+            self.new_block(&[]),
+            self.new_block(&[]),
+            self.new_block(&[]),
+        );
+        self.branch(admitted, yes, refused, n);
+        self.start(refused);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        self.capacity_at(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 1, field: 0 }],
+            charge,
+            available,
+            n,
+        )?;
+        self.jump(join, &[], n);
+        self.start(yes);
+        let byte = PlaceTy::Value(Ty::Scalar(Scalar::U8));
+        let from = self.address(AddressBase::Value(source), &[Step::Byte(start)], byte, n);
+        let steps = [Step::Byte(head)];
+        let data = self.address(
+            AddressBase::Value(block),
+            if is_index { &[] } else { &steps },
+            byte,
+            n,
+        );
+        self.inst(
+            Inst::Copy {
+                to: data,
+                from,
+                bytes,
+            },
+            n,
+        );
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        let ok = [Step::CaseField { case: 0, field: 0 }];
+        self.put_word(AddressBase::Address(to), &ok, 0, block, n)?;
+        if let Some((offset, w)) = locator {
+            self.put_word(AddressBase::Value(block), &[], 0, bytes, n)?;
+            self.put_word(AddressBase::Value(block), &[], 8, w, n)?;
+            self.put_word(AddressBase::Address(to), &ok, 8, offset, n)?;
+        }
+        self.jump(join, &[], n);
+        self.start(join);
+        Some(self.pointer(to, n))
+    }
+
     /// The frame a `mut` or viewed writer argument's place holds.
     fn read_writer(&mut self, place: ValueId, n: NodeId) -> Option<ValueId> {
         self.get_word(AddressBase::Value(place), 0, Ty::Ptr, n)
@@ -1268,7 +1385,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 result: blob,
                 available,
                 region_entry,
-                kind: AllocKind::Stable,
+                kind: AllocKind::Region,
                 place: AllocPlace::Region(region),
                 charge,
                 overflow: Some(huge),
@@ -2218,7 +2335,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 result: block,
                 available,
                 region_entry: None,
-                kind: AllocKind::Stable,
+                kind: AllocKind::Region,
                 place: AllocPlace::Region(region),
                 charge: size,
                 overflow: None,

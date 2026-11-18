@@ -1,4 +1,4 @@
-stable type Stamp949 {
+@compact(u32) type Stamp949 {
     n: u64
 }
 
@@ -10,7 +10,7 @@ fn listed_param949(r: Region) -> u64 {
     }
     let change = scoped fn() {
         p = scoped fn() -> u64 {
-            let x = result.unwrap(Stamp949(n: 7) in r)
+            let x = result.unwrap(make_stamp949(r, 7))
             x.n
         }
     }
@@ -26,7 +26,7 @@ fn parameter_region949b(r: Region) -> u64 {
     }
     let change = scoped fn() {
         p = scoped fn() -> u64 {
-            let x = result.unwrap(Stamp949(n: 8) in r)
+            let x = result.unwrap(make_stamp949(r, 8))
             x.n
         }
     }
@@ -57,7 +57,7 @@ fn unlisted_param949(r: Region, other: Region) -> u64 {
     }
     let change = scoped fn() {
         p = scoped fn() -> u64 {
-            let x = result.unwrap(Stamp949(n: 8) in other)
+            let x = result.unwrap(make_stamp949(other, 8))
             x.n
         }
     }
@@ -75,7 +75,7 @@ fn nested_unlisted949(r: Region) -> u64 {
         }
         let change = scoped fn() {
             p = scoped fn() -> u64 {
-                let x = result.unwrap(Stamp949(n: 9) in other)
+                let x = result.unwrap(make_stamp949(other, 9))
                 x.n
             }
         }
@@ -86,4 +86,14 @@ fn nested_unlisted949(r: Region) -> u64 {
 
 pub fn main() -> Result[(), Exit] {
     Ok(())
+}
+
+fn make_stamp949(r: Region, n: u64) -> Result[Stamp949 in r, Capacity] {
+    match build_in(r, bytes 8, fn(mut d: Dest[Stamp949]) -> Result[Child[Stamp949], BuildError] {
+        dest.put(mut d, Stamp949(n: n))
+    }) {
+        Ok(take built) => Ok(finish(take built)),
+        Error(Capacity(capacity)) => Error(capacity),
+        Error(Overflow) => fail("fixed document size"),
+    }
 }

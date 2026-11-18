@@ -10,7 +10,7 @@
 // expect: run stray_root() = fail Bounds
 // expect: run stray_link() = fail Bounds
 @compact(u32)
-stable type Expr = Num(i64) | Add(Link[Expr], Link[Expr]) | Zero
+type Expr = Num(i64) | Add(Link[Expr], Link[Expr]) | Zero
 
 fn eval(e: Expr) -> i64 {
     match e {

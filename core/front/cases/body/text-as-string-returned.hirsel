@@ -9,7 +9,7 @@
 // expect: run go(1) = 1
 // expect: run go(2) = 3
 @compact(u32)
-stable type P {
+type P {
     a: Text,
     b: Text
 }

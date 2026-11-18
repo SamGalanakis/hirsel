@@ -147,7 +147,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 self.declare(b, ty, binding, origin, pat);
                 self.bind_descriptor(b, v);
-                if matches!(kind, Kind::Scoped | Kind::Stable) {
+                if matches!(kind, Kind::Scoped | Kind::Region) {
                     let mut initial = self.anchor_expression(value);
                     if anchors.is_some() {
                         let captures = self.capture_anchors(v);

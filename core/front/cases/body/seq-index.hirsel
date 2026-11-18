@@ -9,7 +9,7 @@
 // 8 * 3) = 48 bytes, so index_in returns Capacity requested 48; it charges nothing,
 // so a second attempt sees the same available (+1).
 @compact(u16)
-stable type J = Num(u64) | Str(Text) | Arr(SeqSpan[J])
+type J = Num(u64) | Str(Text) | Arr(SeqSpan[J])
 
 fn num(j: J) -> u64 {
     match j {

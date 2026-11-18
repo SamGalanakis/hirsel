@@ -322,7 +322,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn pattern_field_ty(&mut self, ty: TyId, case: Option<u32>, i: usize) -> TyId {
         if let TyKind::Anchored(inner, root) = *self.t.kind(ty) {
             let ft = self.pattern_field_ty(inner, case, i);
-            return if self.type_kind(ft) == Kind::Stable
+            return if self.type_kind(ft) == Kind::Region
                 && !matches!(self.t.kind(ft), TyKind::Anchored(..))
             {
                 self.t.mk(TyKind::Anchored(ft, root))
@@ -499,7 +499,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => at.ty,
             };
             if !matches!(self.t.kind(ty), TyKind::Anchored(..))
-                && self.type_kind(ty) == Kind::Stable
+                && self.type_kind(ty) == Kind::Region
             {
                 // A bare stable parameter is a view for this call. Payloads retain
                 // that view's anchor even when its region is not named in the type.

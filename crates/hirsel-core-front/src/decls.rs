@@ -83,19 +83,19 @@ pub fn bound_names(b: u16) -> String {
 pub const H_RESOURCE: u8 = 1;
 pub const H_CAPABILITY: u8 = 2;
 pub const H_SCOPED: u8 = 4;
-pub const H_STABLE: u8 = 8;
+pub const H_REGION: u8 = 8;
 /// An owner without a copy contract (OWN-2).
 pub const H_OPAQUE: u8 = 16;
 
 /// What a rigid type parameter may hold (OWN-2): every category its bounds do not
-/// exclude. `plain` and `shareable` exclude resources, scoped values and stable
+/// exclude. `plain` and `shareable` exclude resources, scoped values and region
 /// references. `codec` excludes all five held categories, including capabilities.
 pub fn param_holds(bounds: u16) -> u8 {
-    let all = H_RESOURCE | H_CAPABILITY | H_SCOPED | H_STABLE | H_OPAQUE;
+    let all = H_RESOURCE | H_CAPABILITY | H_SCOPED | H_REGION | H_OPAQUE;
     if bounds & CODEC != 0 {
         0
     } else if bounds & (PLAIN | SHAREABLE) != 0 {
-        all & !(H_RESOURCE | H_SCOPED | H_STABLE | H_OPAQUE)
+        all & !(H_RESOURCE | H_SCOPED | H_REGION | H_OPAQUE)
     } else {
         all
     }
@@ -106,7 +106,7 @@ pub fn param_holds(bounds: u16) -> u8 {
 pub enum Kind {
     Plain,
     Own,
-    Stable,
+    Region,
     Resource,
     Counted,
     Scoped,
@@ -119,7 +119,7 @@ impl Kind {
         match self {
             Kind::Plain => "plain",
             Kind::Own => "own",
-            Kind::Stable => "stable",
+            Kind::Region => "region",
             Kind::Resource => "resource",
             Kind::Counted => "counted",
             Kind::Scoped => "scoped",
@@ -132,7 +132,7 @@ impl Kind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Repr {
     Own,
-    Stable,
+    Region,
     Resource,
     Scoped,
 }
@@ -239,7 +239,7 @@ impl Role {
             Role::Rc | Role::Arc => Kind::Counted,
             Role::View | Role::Region | Role::Dest | Role::Writer => Kind::Scoped,
             Role::Text | Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan | Role::SeqIndex => {
-                Kind::Stable
+                Kind::Region
             }
             Role::Capability
             | Role::Args
@@ -341,8 +341,6 @@ pub struct TypeDecl {
 }
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct DeclExtra {
-    /// `@twin(P)` (MEM-17): the paired type as written and its attribute site.
-    pub twin: Option<(TyId, Site)>,
     /// SEM-10 schema-only declarations, absent from value layout.
     pub codec: Option<Box<crate::codec_decls::CodecDecl>>,
 }
@@ -355,9 +353,6 @@ impl TypeDecl {
             .get_or_insert_default()
             .codec
             .get_or_insert_default()
-    }
-    pub fn twin(&self) -> Option<&(TyId, Site)> {
-        self.extra.as_ref().and_then(|e| e.twin.as_ref())
     }
     /// What the declaration's own type may hold with its parameters rigid (OWN-2): its
     /// fields' categories, and each parameter named in them per [`param_holds`].
@@ -551,15 +546,14 @@ impl Program<'_> {
                                     ));
                                 }
                                 if bit == CODEC
-                                    && matches!(
-                                        root.kind,
-                                        NodeKind::ResourceType
-                                            | NodeKind::StableType
-                                            | NodeKind::ScopedType
-                                    )
+                                    && (compact.is_some()
+                                        || matches!(
+                                            root.kind,
+                                            NodeKind::ResourceType | NodeKind::ScopedType
+                                        ))
                                 {
                                     self.refusals.push(refusal("OWN-4", self.site(at, b),
-                                        "a resource, stable or scoped definition cannot declare codec"));
+                                        "a resource, region or scoped definition cannot declare codec"));
                                 }
                                 declared |= bit;
                             }
@@ -568,10 +562,7 @@ impl Program<'_> {
                         NodeKind::Literal
                             if matches!(
                                 root.kind,
-                                NodeKind::TypeDecl
-                                    | NodeKind::StableType
-                                    | NodeKind::ResourceType
-                                    | NodeKind::ScopedType
+                                NodeKind::TypeDecl | NodeKind::ResourceType | NodeKind::ScopedType
                             ) =>
                         {
                             grant = literal_length(item, c).unwrap_or_else(|| {
@@ -627,7 +618,6 @@ impl Program<'_> {
                 }
                 let repr = match root.kind {
                     NodeKind::TypeDecl => Repr::Own,
-                    NodeKind::StableType => Repr::Stable,
                     NodeKind::ResourceType => Repr::Resource,
                     NodeKind::ScopedType => Repr::Scoped,
                     NodeKind::Function => {
@@ -696,6 +686,13 @@ impl Program<'_> {
                     f
                 });
                 let role = Role::of(&path);
+                let repr = if repr == Repr::Own
+                    && (compact.is_some() || role.is_some_and(|r| r.kind() == Kind::Region))
+                {
+                    Repr::Region
+                } else {
+                    repr
+                };
                 let structural = is_core_prelude(&path, &["Option", "Result"]);
                 self.decls.push(TypeDecl {
                     path: path.clone(),
@@ -715,7 +712,6 @@ impl Program<'_> {
                     compact,
                     extra: (declared & CODEC != 0).then(|| {
                         Box::new(DeclExtra {
-                            twin: None,
                             codec: Some(Box::default()),
                         })
                     }),
@@ -950,7 +946,7 @@ impl Program<'_> {
                             .to_owned();
                         let tnode = item.tree.children(f)[0];
                         let ty = self.lower_ty(at, tnode, &generics);
-                        let ty = if self.decls[d.index()].repr == Repr::Stable {
+                        let ty = if self.decls[d.index()].repr == Repr::Region {
                             self.default_field_root(ty, &generics)
                         } else {
                             ty
@@ -1012,7 +1008,7 @@ impl Program<'_> {
                             labelled = label.is_some();
                             let tnode = item.tree.children(p)[0];
                             let ty = self.lower_ty(at, tnode, &generics);
-                            let ty = if self.decls[d.index()].repr == Repr::Stable {
+                            let ty = if self.decls[d.index()].repr == Repr::Region {
                                 self.default_field_root(ty, &generics)
                             } else {
                                 ty
@@ -1043,14 +1039,6 @@ impl Program<'_> {
                         }
                     }
                     body = DeclBody::Variant(cases);
-                }
-                NodeKind::Attribute
-                    if item.tree.token_text(item.text, n.token.unwrap()) == "twin" =>
-                {
-                    let path = item.tree.children(c)[0];
-                    let ty = self.lower_ty(at, path, &[]);
-                    let site = self.site(at, c);
-                    self.decls[d.index()].extra.get_or_insert_default().twin = Some((ty, site));
                 }
                 NodeKind::TypePath
                 | NodeKind::TypeArguments
@@ -1092,7 +1080,7 @@ impl Program<'_> {
         let stable = match self.types.kind(ty) {
             TyKind::Adt(d, _) => {
                 let decl = &self.decls[d.index()];
-                decl.repr == Repr::Stable || decl.role.is_some_and(|r| r.kind() == Kind::Stable)
+                decl.repr == Repr::Region || decl.role.is_some_and(|r| r.kind() == Kind::Region)
             }
             TyKind::Param(i) => generics[*i as usize].bounds & ENCODED != 0,
             _ => false,
@@ -1729,7 +1717,6 @@ impl Program<'_> {
         self.holds();
         self.check_declared_bounds();
         self.check_codec_declarations();
-        self.check_twins();
         let pending = std::mem::take(&mut self.pending);
         for p in pending {
             match p {
@@ -1850,7 +1837,7 @@ impl Program<'_> {
             Some(r) => Some(r.kind()),
             None => match decl.repr {
                 Repr::Own => Some(Kind::Plain),
-                Repr::Stable => Some(Kind::Stable),
+                Repr::Region => Some(Kind::Region),
                 Repr::Resource => Some(Kind::Resource),
                 Repr::Scoped => Some(Kind::Scoped),
             },
@@ -2117,16 +2104,16 @@ impl Program<'_> {
                     | Role::SeqSpan
                     | Role::IndexedSpan
                     | Role::SeqIndex,
-                ) => H_STABLE,
+                ) => H_REGION,
                 // A builder and `Causes` are owners with no copy contract (OWN-2); a
                 // builder also holds its region's stable blob.
-                Some(Role::SpanBuilder | Role::Builder) => H_STABLE | H_OPAQUE,
+                Some(Role::SpanBuilder | Role::Builder) => H_REGION | H_OPAQUE,
                 Some(Role::Causes | Role::Log) => H_OPAQUE,
                 Some(_) => 0,
                 None => match decl.repr {
                     Repr::Resource => H_RESOURCE,
                     Repr::Scoped => H_SCOPED,
-                    Repr::Stable => H_STABLE,
+                    Repr::Region => H_REGION,
                     Repr::Own => 0,
                 },
             };
@@ -2190,7 +2177,7 @@ impl Program<'_> {
             let params: Vec<u16> = decl.generics.iter().map(|g| g.bounds | declared).collect();
             let mut out = vec![];
             let forbidden = if decl.repr != Repr::Own { SHAREABLE } else { 0 }
-                | if matches!(decl.repr, Repr::Stable | Repr::Scoped) {
+                | if matches!(decl.repr, Repr::Region | Repr::Scoped) {
                     SEND
                 } else {
                     0
@@ -2205,7 +2192,7 @@ impl Program<'_> {
                 let b = bound_names(declared & forbidden);
                 let repr = match decl.repr {
                     Repr::Own => "own",
-                    Repr::Stable => "stable",
+                    Repr::Region => "region",
                     Repr::Resource => "resource",
                     Repr::Scoped => "scoped",
                 };
@@ -2218,29 +2205,27 @@ impl Program<'_> {
                     .with_comparison(b, format!("{repr} type without {}", bound_names(forbidden))),
                 );
             }
-            if decl.compact.is_some() && decl.repr != Repr::Stable {
+            if decl.compact.is_some()
+                && (decl.repr != Repr::Region || matches!(decl.body, DeclBody::Alias(_)))
+            {
                 out.push(refusal(
                     "MEM-9",
                     decl.site,
-                    "compact layout requires a stable declaration",
+                    "compact layout applies only to an unmodified record or variant declaration",
                 ));
             }
             for f in decl.all_fields() {
-                if decl.repr == Repr::Stable
-                    && !stable_field(&self.decls, &self.types, f.ty, &params)
+                if decl.repr == Repr::Region
+                    && !region_field(&self.decls, &self.types, f.ty, &params)
                 {
                     let found = kind(&self.decls, &self.types, f.ty, &params).keyword();
                     out.push(
                         refusal(
-                            if decl.compact.is_some() {
-                                "MEM-9"
-                            } else {
-                                "MEM-2"
-                            },
+                            "MEM-9",
                             f.site,
-                            "a stable field is plain or stable",
+                            "a compact field holds plain data or data in its enclosing blob",
                         )
-                        .with_comparison(found, "plain or stable"),
+                        .with_comparison(found, "plain data or region data in the enclosing blob"),
                     );
                 } else if decl.repr != Repr::Scoped
                     && kind(&self.decls, &self.types, f.ty, &params) == Kind::Scoped
@@ -2254,11 +2239,11 @@ impl Program<'_> {
                         .with_comparison(canonical(&self.decls, &self.types, f.ty), "not scoped"),
                     );
                 }
-                if decl.repr != Repr::Stable && unrooted_stable(&self.decls, &self.types, f.ty) {
+                if decl.repr != Repr::Region && unrooted_region(&self.decls, &self.types, f.ty) {
                     out.push(refusal(
                         "MEM-6",
                         f.site,
-                        "a stored stable field names its region",
+                        "a stored region field names its region",
                     ));
                 }
                 let have = has_bounds(&self.decls, &self.types, f.ty, &params);
@@ -2295,77 +2280,11 @@ impl Program<'_> {
         }
     }
 
-    /// `@twin(P)` (MEM-17): a non-generic declaration pairs with the non-generic `P`,
-    /// symmetrically, when their fields (or arms and payloads) have the same names in
-    /// the same order and each pair of types pairs.
-    fn check_twins(&mut self) {
-        let mut claimed = rustc_hash::FxHashMap::<DeclId, (DeclId, Site)>::default();
-        let mut prefix_loaded = false;
-        for d in self.decls.base_len()..self.decls.len() {
-            let Some((ty, site)) = self.decls[d].twin().copied() else {
-                continue;
-            };
-            if let TyKind::Adt(target, xs) = self.types.kind(ty) {
-                if xs.is_empty() {
-                    let target = *target;
-                    if target.index() < self.decls.base_len() && !prefix_loaded {
-                        for first in 0..self.decls.base_len() {
-                            if let Some((ty, site)) = self.decls[first].twin().copied()
-                                && let TyKind::Adt(target, xs) = self.types.kind(ty)
-                                && xs.is_empty()
-                            {
-                                claimed.insert(*target, (DeclId(first as u32), site));
-                            }
-                        }
-                        prefix_loaded = true;
-                    }
-                    if let Some(&(first, first_site)) = claimed.get(&target) {
-                        let mut r = refusal(
-                            "MEM-17",
-                            site,
-                            format!(
-                                "type `{}` already has declared twin `{}`",
-                                self.decls[target.index()].path,
-                                self.decls[first.index()].path,
-                            ),
-                        );
-                        r.causal.push(first_site);
-                        self.refusals.push(r);
-                        continue;
-                    }
-                    claimed.insert(target, (DeclId(d as u32), site));
-                }
-            }
-            let why = match self.types.kind(ty) {
-                TyKind::Error => continue,
-                TyKind::Adt(e, xs) if xs.is_empty() && self.decls[e.index()].role.is_none() => {
-                    let e = *e;
-                    let other = self.decls[e.index()].twin().map(|(t, _)| *t);
-                    if !self.decls[d].generics.is_empty() {
-                        Some("a twin declaration is not generic".to_owned())
-                    } else if e.index() == d {
-                        Some("a type is not its own twin".to_owned())
-                    } else if other.is_some_and(
-                        |t| !matches!(self.types.kind(t), TyKind::Adt(x, _) if x.index() == d),
-                    ) {
-                        Some("the twin names another twin".to_owned())
-                    } else {
-                        twin_decls(&self.decls, &self.types, DeclId(d as u32), e).err()
-                    }
-                }
-                _ => Some("a twin is a declared non-generic type".to_owned()),
-            };
-            if let Some(why) = why {
-                self.refusals.push(refusal("MEM-17", site, why));
-            }
-        }
-    }
-
     fn check_signatures(&mut self) {
         for f in self.fns.base_len()..self.fns.len() {
             let fd = &self.fns[f];
             let params: Vec<u16> = fd.generics.iter().map(|g| g.bounds).collect();
-            if unrooted_stable(&self.decls, &self.types, fd.result) {
+            if unrooted_region(&self.decls, &self.types, fd.result) {
                 self.refusals.push(refusal(
                     "MEM-6",
                     fd.result_site,
@@ -2374,7 +2293,7 @@ impl Program<'_> {
             }
             for p in &fd.params {
                 if p.mode == Mode::Mut
-                    && kind(&self.decls, &self.types, p.ty, &params) == Kind::Stable
+                    && kind(&self.decls, &self.types, p.ty, &params) == Kind::Region
                 {
                     self.refusals.push(
                         refusal("MEM-5", p.site, "stable data cannot be mutated")
@@ -2448,120 +2367,6 @@ impl Tarjan<'_> {
                 self.out[m] = h;
             }
         }
-    }
-}
-
-/// The declared twin of `d`, either way round (MEM-17: the pair is symmetric).
-pub fn twin_of(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, d: DeclId) -> Option<DeclId> {
-    let named = |x: DeclId| match decls[x.index()].twin().map(|(ty, _)| t.kind(*ty)) {
-        Some(TyKind::Adt(e, xs)) if xs.is_empty() => Some(*e),
-        _ => None,
-    };
-    named(d).or_else(|| {
-        (0..decls.len())
-            .map(|i| DeclId(i as u32))
-            .find(|&x| named(x) == Some(d))
-    })
-}
-
-fn unanchored(t: &impl TyRead, ty: TyId) -> TyId {
-    match t.kind(ty) {
-        TyKind::Anchored(x, _) => *x,
-        _ => ty,
-    }
-}
-
-/// Whether declarations `a` and `b` pair as twins, assuming they do while their own
-/// fields are checked (so recursive twins check); `Err` names the first mismatch.
-fn twin_decls(
-    decls: &crate::Rows<TypeDecl>,
-    t: &impl TyRead,
-    a: DeclId,
-    b: DeclId,
-) -> Result<(), String> {
-    let pair_fields = |x: &[FieldDecl], y: &[FieldDecl]| -> Result<(), String> {
-        if x.len() != y.len() || x.iter().zip(y).any(|(f, g)| f.name != g.name) {
-            return Err("twins have the same field names in the same order".to_owned());
-        }
-        for (f, g) in x.iter().zip(y) {
-            if !twin_tys(decls, t, (a, b), f.ty, g.ty) {
-                return Err(format!("field `{}` has no paired type", f.name));
-            }
-        }
-        Ok(())
-    };
-    match (&decls[a.index()].body, &decls[b.index()].body) {
-        (DeclBody::Record(x), DeclBody::Record(y)) => pair_fields(x, y),
-        (DeclBody::Variant(x), DeclBody::Variant(y)) => {
-            if x.len() != y.len() || x.iter().zip(y).any(|(c, k)| c.name != k.name) {
-                return Err("twins have the same arm names in the same order".to_owned());
-            }
-            x.iter()
-                .zip(y)
-                .try_for_each(|(c, k)| pair_fields(&c.fields, &k.fields))
-        }
-        _ => Err("twins are both records or both variant types".to_owned()),
-    }
-}
-
-/// MEM-17's pairing of two field types: identical, a built-in pair, a declared (or
-/// assumed) twin pair, or `Option`, `Result` or a tuple of pairs, component by component.
-fn twin_tys(
-    decls: &crate::Rows<TypeDecl>,
-    t: &impl TyRead,
-    assumed: (DeclId, DeclId),
-    x: TyId,
-    y: TyId,
-) -> bool {
-    let (x, y) = (unanchored(t, x), unanchored(t, y));
-    if x == y {
-        return true;
-    }
-    let twins = |p: DeclId, q: DeclId| {
-        assumed == (p, q) || assumed == (q, p) || twin_of(decls, t, p) == Some(q)
-    };
-    match (t.kind(x), t.kind(y)) {
-        (TyKind::Tuple(xs), TyKind::Tuple(ys)) => {
-            xs.len() == ys.len()
-                && xs
-                    .iter()
-                    .zip(ys)
-                    .all(|(&p, &q)| twin_tys(decls, t, assumed, p, q))
-        }
-        (TyKind::Adt(p, xs), TyKind::Adt(q, ys)) => {
-            let (dp, dq) = (&decls[p.index()], &decls[q.index()]);
-            let pair = |r: Role, s: Role| {
-                (dp.role == Some(r) && dq.role == Some(s))
-                    || (dp.role == Some(s) && dq.role == Some(r))
-            };
-            if pair(Role::String, Role::Text) {
-                return true;
-            }
-            if pair(Role::List, Role::FixedSpan) {
-                return unanchored(t, xs[0]) == unanchored(t, ys[0]);
-            }
-            if p == q && dp.structural {
-                return xs
-                    .iter()
-                    .zip(ys)
-                    .all(|(&a, &b)| twin_tys(decls, t, assumed, a, b));
-            }
-            // `Box[X]` and a stable reference to `Y`, where `X` and `Y` are twins.
-            let boxed = |r: &TypeDecl, args: &[TyId], s: DeclId| {
-                r.role == Some(Role::Box)
-                    && decls[s.index()].repr == Repr::Stable
-                    && matches!(t.kind(unanchored(t, args[0])), TyKind::Adt(b, _) if twins(*b, s))
-            };
-            if boxed(dp, xs, *q) || boxed(dq, ys, *p) {
-                return true;
-            }
-            xs.is_empty()
-                && ys.is_empty()
-                && dp.role.is_none()
-                && dq.role.is_none()
-                && twins(*p, *q)
-        }
-        _ => false,
     }
 }
 
@@ -2710,7 +2515,7 @@ fn kind_row(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, row: &TyKind, params
         TyKind::Region(_) => Kind::Scoped,
         TyKind::Anchored(x, _) => {
             let k = kind(decls, t, *x, params);
-            if k == Kind::Generic { Kind::Stable } else { k }
+            if k == Kind::Generic { Kind::Region } else { k }
         }
         TyKind::Array(x, _) => kind(decls, t, *x, params),
         TyKind::View(_) => Kind::Scoped,
@@ -2727,7 +2532,7 @@ fn kind_row(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, row: &TyKind, params
                 return r.kind();
             }
             match decl.repr {
-                Repr::Stable => Kind::Stable,
+                Repr::Region => Kind::Region,
                 Repr::Resource => Kind::Resource,
                 Repr::Scoped => Kind::Scoped,
                 Repr::Own => {
@@ -2752,7 +2557,7 @@ fn kind_row(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, row: &TyKind, params
 pub fn copyable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> bool {
     let row = t.kind(ty);
     match kind_row(decls, t, row, params) {
-        Kind::Plain | Kind::Stable => true,
+        Kind::Plain | Kind::Region => true,
         Kind::Scoped => match row {
             TyKind::Anchored(x, _) => copyable(decls, t, *x, params),
             TyKind::View(_) => true,
@@ -2810,7 +2615,7 @@ fn missing_codec_declarations(
                                 "`{name}` has a {} representation, which cannot be codec",
                                 match decl.repr {
                                     Repr::Own => "own",
-                                    Repr::Stable => "stable",
+                                    Repr::Region => "region",
                                     Repr::Resource => "resource",
                                     Repr::Scoped => "scoped",
                                 }
@@ -2924,7 +2729,7 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                     }
                 };
                 let declared = match decl.repr {
-                    Repr::Stable => declared & !(SEND | SHAREABLE | CODEC),
+                    Repr::Region => declared & !(SEND | SHAREABLE | CODEC),
                     Repr::Scoped => declared & !(SEND | SHAREABLE | KEY | ORDERED | CODEC),
                     // SEM-7: a resource is never compared, whatever it declares.
                     Repr::Resource => declared & !(KEY | ORDERED | CODEC),
@@ -3331,10 +3136,10 @@ pub(crate) fn stable_parameter(
         (TyKind::Adt(a, xs), TyKind::Adt(b, ys)) => {
             xs == ys
                 && ((a == b
-                    && (decls[b.index()].repr == Repr::Stable
+                    && (decls[b.index()].repr == Repr::Region
                         || decls[b.index()]
                             .role
-                            .is_some_and(|r| r.kind() == Kind::Stable)))
+                            .is_some_and(|r| r.kind() == Kind::Region)))
                     || decls[a.index()].role == Some(Role::IndexedSpan)
                         && decls[b.index()].role == Some(Role::SeqSpan))
         }
@@ -3470,31 +3275,32 @@ fn derive_encoding(
     }
 }
 
-fn stable_field(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> bool {
+fn region_field(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> bool {
     let row = t.kind(ty);
     match row {
-        TyKind::Tuple(xs) => xs.iter().all(|&x| stable_field(decls, t, x, params)),
+        TyKind::Anchored(_, root) if t.kind(*root) != &TyKind::Region(Root::Enclosing) => false,
+        TyKind::Tuple(xs) => xs.iter().all(|&x| region_field(decls, t, x, params)),
         TyKind::Adt(d, xs) if is_core_prelude(&decls[d.index()].path, &["Option"]) => {
-            xs.iter().all(|&x| stable_field(decls, t, x, params))
+            xs.iter().all(|&x| region_field(decls, t, x, params))
         }
-        _ => matches!(kind_row(decls, t, row, params), Kind::Plain | Kind::Stable),
+        _ => matches!(kind_row(decls, t, row, params), Kind::Plain | Kind::Region),
     }
 }
-fn unrooted_stable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> bool {
+fn unrooted_region(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
         TyKind::Anchored(_, _) => false,
-        TyKind::Tuple(xs) => xs.iter().any(|&x| unrooted_stable(decls, t, x)),
+        TyKind::Tuple(xs) => xs.iter().any(|&x| unrooted_region(decls, t, x)),
         TyKind::Adt(d, xs) => {
             let decl = &decls[d.index()];
-            decl.repr == Repr::Stable
-                || decl.role.is_some_and(|r| r.kind() == Kind::Stable)
+            decl.repr == Repr::Region
+                || decl.role.is_some_and(|r| r.kind() == Kind::Region)
                 || decl
                     .summary
                     .bound_params
                     .iter()
-                    .any(|&i| unrooted_stable(decls, t, xs[i as usize]))
+                    .any(|&i| unrooted_region(decls, t, xs[i as usize]))
         }
-        TyKind::Array(x, _) => unrooted_stable(decls, t, *x),
+        TyKind::Array(x, _) => unrooted_region(decls, t, *x),
         _ => false,
     }
 }

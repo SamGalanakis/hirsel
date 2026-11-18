@@ -60,14 +60,8 @@ type P {
     k: u64
 }
 
-@twin(P)
-stable type PS {
-    v: f64,
-    k: u64
-}
-
 @compact(u32)
-stable type C {
+type C {
     v: f64,
     k: u64
 }
@@ -208,20 +202,23 @@ fn channeled(b: u64, neg: bool) -> u64 waits {
     float.to_bits64(result.unwrap(channel.receive(rx)))
 }
 
-// A field of a stable twin made by clone_in.
+// The field passes through an own clone and is observed after a region build.
 fn cloned(b: u64, neg: bool) -> u64 {
     let x = P(v: nan(b, neg), k: 1)
+    let copied: Result[P, Capacity] = clone(x)
     region r {
-        let c: Result[PS in r, Capacity] = clone_in(r, x)
-        match c {
-            Ok(s) => float.to_bits64(s.v),
-            Error(_) => 0
+        match copied {
+            Ok(p) => match build_sized(r, p.v, 16) {
+                Ok(c) => float.to_bits64(c.v),
+                Error(_) => 0,
+            },
+            Error(_) => 0,
         }
     }
 }
 
-fn build(r: Region, x: f64) -> Result[C in r, BuildError] {
-    let c = build_in(r, bytes 64, fn(mut d: Dest[C]) -> Result[Child[C], BuildError] {
+fn build_sized(r: Region, x: f64, n: u64) -> Result[C in r, BuildError] {
+    let c = build_in(r, bytes n, fn(mut d: Dest[C]) -> Result[Child[C], BuildError] {
         dest.put(mut d, C(v: x, k: 1))
     })?
     Ok(finish(take c))
@@ -230,7 +227,7 @@ fn build(r: Region, x: f64) -> Result[C in r, BuildError] {
 // A compact field: written as IEEE bytes into the blob and read back (MEM-9).
 fn compacted(b: u64, neg: bool) -> u64 {
     region r {
-        match build(r, nan(b, neg)) {
+        match build_sized(r, nan(b, neg), 64) {
             Ok(c) => float.to_bits64(c.v),
             Error(_) => 0
         }

@@ -313,7 +313,8 @@ fn sub_view() -> u64 {
 }
 
 // A stable holder beside a `mut` list: [1] then 5 is length 2, so 10 + 2, and sum 6.
-stable type Span2 {
+@compact(u32)
+type Span2 {
     start: u64,
     end: u64
 }
@@ -325,7 +326,7 @@ fn mix(s: Span2, mut xs: List[u64]) -> u64 {
 
 fn stable_holder() -> u64 {
     region r {
-        match Span2(start: 5, end: 10) in r {
+        match make_span2(r, 5, 10) {
             Ok(s) => {
                 let mut xs: List[u64] = list.new()
                 result.unwrap(list.push(mut xs, 1))
@@ -611,5 +612,15 @@ fn cold_mut_anchor() -> u64 {
         list.len(v) * 1000 + v[0] + z
     } else {
         0
+    }
+}
+
+fn make_span2(r: Region, start: u64, end: u64) -> Result[Span2 in r, Capacity] {
+    match build_in(r, bytes 16, fn(mut d: Dest[Span2]) -> Result[Child[Span2], BuildError] {
+        dest.put(mut d, Span2(start: start, end: end))
+    }) {
+        Ok(take built) => Ok(finish(take built)),
+        Error(Capacity(capacity)) => Error(capacity),
+        Error(Overflow) => fail("fixed document size"),
     }
 }

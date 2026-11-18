@@ -184,9 +184,9 @@ pub enum Repr {
     Own,
     /// `resource type`: own, cleaned exactly once, finalizer optional (FAIL-11).
     Resource,
-    /// `stable type`: published in a region, immutable, natively laid out like own.
-    Stable,
-    /// `@compact(W) stable type`: one byte-aligned blob (MEM-9..12).
+    /// Fixed-layout region storage for a sequence index.
+    Region,
+    /// `@compact(W) type`: one byte-aligned blob (MEM-9..12).
     Compact(Width),
     /// A scoped record (OWN-19): lives in a frame, never stored or returned.
     Scoped,
@@ -204,8 +204,8 @@ pub enum FieldTy {
     Seq(Box<FieldTy>),
     Rc(TypeRef),
     Arc(TypeRef),
-    /// A reference to a published stable value of this type (logically 16, MEM-24).
-    Stable(TypeRef),
+    /// A reference to a published region value of this type (logically 16, MEM-24).
+    RegionRef(TypeRef),
     /// `Inline[T, n]` (SEM-9): `n` values of a plain or own `T` held inline, with no
     /// block. Its size is `n` times `T`'s; it charges nothing of its own; it is
     /// cleaned from index 0 up. (`Region` is never a field: it is scoped and never
@@ -253,7 +253,7 @@ impl FieldTy {
             | FieldTy::Box(id)
             | FieldTy::Rc(id)
             | FieldTy::Arc(id)
-            | FieldTy::Stable(id)
+            | FieldTy::RegionRef(id)
             | FieldTy::Link(id) => *id = f(*id),
             FieldTy::Seq(ty)
             | FieldTy::Array(ty, _)
@@ -319,9 +319,9 @@ pub struct Shape {
     pub grant: u64,
     /// How a holder writes a field of this row's type when that is not
     /// `Inline(this row)` (`Scalar` for a scalar, `Seq` for a list, `Box` for a box,
-    /// `Stable` for a stable value, ..): the one encoding a substituted generic row
+    /// `RegionRef` for a region value, ..): the one encoding a substituted generic row
     /// writes at its arguments, so one name is one closure (FORM #109). A compact
-    /// context reads it without its `Locator`, and a `Stable` as `Inline`.
+    /// context reads it without its `Locator`, and a `RegionRef` as `Inline`.
     pub held: Option<FieldTy>,
 }
 

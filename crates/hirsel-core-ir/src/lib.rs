@@ -29,7 +29,7 @@
 //! **FORM v1b (frozen at spec revision 4):**
 //! - Variants: `case` reads a variant place's case number (`u32`), `set_case`
 //!   writes it, and `case c f` address steps reach a case's payload. Own, resource,
-//!   stable and scoped variants; `Option` and `Result` are ordinary variant rows of
+//!   fixed-layout region and scoped variants; `Option` and `Result` are ordinary variant rows of
 //!   the type table, one per instantiation. The tag's place and width stay private
 //!   (MEM-13): a producer never names the tag bytes. A variant may keep its other
 //!   cases in spare values of its largest case's payload (a niche,
@@ -45,7 +45,7 @@
 //!   goes from index 0 up.
 //! - Regions (`region_open`, `region_close`, `alloc .. in`). A region handle is a
 //!   value and never a field (MEM-1).
-//! - Stable and scoped records, compact records and active-size compact variants
+//! - Fixed-layout region blocks and scoped records, compact records and active-size compact variants
 //!   (MEM-9..11), links (MEM-10), `Text` (`W` count, then bytes) and `FixedSpan`
 //!   (`W` count, then elements at a fixed stride) (MEM-12), with the charges
 //!   `charge::standalone` and `charge::span_builder` (MEM-24). Span builders are
@@ -178,18 +178,18 @@
 //! - **Blob**: a region block of a 16-byte engine header (used bytes at 0,
 //!   written at finish; W in bytes at 8) then the data, charged round8(n) and
 //!   never the header (MEM-24). Data offsets below are from the block pointer.
-//! - **Locator**: a view of, or stable reference to, compact data is
+//! - **Locator**: a view of, or region reference to, compact data is
 //!   `{blob ptr, at}` (`FieldTy::Locator(target)`, 16 bytes, align 8, logically
-//!   16, whatever the target); `Stable` of a compact type is refused. The row
+//!   16, whatever the target); `RegionRef` of a compact type is refused. The row
 //!   names what it locates as a compact field type, `locator text`, `locator
 //!   fixed e`, `locator seqspan e`, `locator indexedspan e` or `locator tN` of a
 //!   compact `tN`, and layout refuses any other target. That target is the only
 //!   recipe hash, equality and order read; nothing is parsed from a name. A
-//!   standalone `Text` or span is `{at: locator X}`, a `SeqIndex` is a stable
+//!   standalone `Text` or span is `{at: locator X}`, a `SeqIndex` is a region
 //!   reference (8 bytes native, logically 16) to one region block {`locator
 //!   seqspan e` @0, count u64 @16, u64 offsets @24, W-free from the span's data
 //!   start} (MEM-12; it has no `key` or `ordered` role, so nothing hashes or
-//!   compares it), and a compact stable type held in a non-compact holder is
+//!   compares it), and a compact type held in a non-compact holder is
 //!   `locator tN`. A template row `Locator($i)` or
 //!   `View($i)` is materialized by substitution alone; the layout never depends
 //!   on the target. An `IndexedSpan` reads and iterates as a `SeqSpan` with the
@@ -271,7 +271,7 @@
 //!   has `Option[T]`'s layout and no cleanup.
 //! - **A view field** of a scoped type is `FieldTy::View(T's field type)`: `T`'s
 //!   size, alignment and logical size, cleaned by nobody, refused outside scoped
-//!   holders (core.md: scoped values are never stored in own, stable or resource
+//!   holders (core.md: scoped values are never stored in own, region or resource
 //!   fields or collections). A view of a view-typed field is those same bytes
 //!   again. A view of compact data is its locator (Compact data), so
 //!   `FieldTy::View(Inline(C))` of a compact `C` is laid out as a `Locator`.
@@ -686,7 +686,7 @@
 //! `alloc for <edge>` (`AllocKind::Own { edge }`), where the edge is a `box`,
 //! `rc`, `arc`, `seq` or `map` field type. An `own fn` environment is `alloc env
 //! tN` (its `ownfn` edge names no row, so the block names its own). Region
-//! storage is `alloc stable` (no edge cleans it) and a resource block is `alloc
+//! storage is `alloc region` (no edge cleans it) and a resource block is `alloc
 //! resource grant N`.
 //! Everything else about the block is derived from that edge and the module's
 //! recipes, never stored: `hirsel_core_layout::cleanup_class(shapes, recipes,
@@ -1006,7 +1006,7 @@
 //! `{ 0: u64 }`, and only the first is `value u64`. By value: every scalar type
 //! (integers, `bool`, `char`, `f32`, `f64`) as itself; a plain function, `Region` and
 //! `Writer` as `ptr`; a capability, `Args`, `Unique` and `Site` as a `u64` word; a
-//! `View[T]` as `T`; and an own or stable variant whose bytes are one word (FORM #78)
+//! `View[T]` as `T`; and an own or fixed-layout region variant whose bytes are one word (FORM #78)
 //! as that word. A variant is one word when all its cases are fieldless (the tag, `u8`,
 //! `u16` or `u32`), or when one case holds one field, every other case is fieldless and
 //! the field leaves spare values for them: a `bool` (`u8`), a `char` (`u32`), a

@@ -300,8 +300,8 @@ fn plain_elements_are_packed_and_only_packed_types_are_elements() {
     );
     let by_ptr = record(
         "H",
-        Repr::Stable,
-        vec![field("c", FieldTy::Stable(TypeRef(0)))],
+        Repr::Region,
+        vec![field("c", FieldTy::RegionRef(TypeRef(0)))],
     );
     assert!(matches!(
         compute(&[blob.clone(), by_ptr]),
@@ -310,7 +310,7 @@ fn plain_elements_are_packed_and_only_packed_types_are_elements() {
     let located = |t: FieldTy| {
         record(
             "H",
-            Repr::Stable,
+            Repr::Region,
             vec![field("c", FieldTy::Locator(Box::new(t)))],
         )
     };
@@ -395,7 +395,7 @@ fn representation_refusals() {
         compute(&[bad_compact]),
         Err(LayoutError::Field { .. })
     ));
-    let bad_stable = record("S", Repr::Stable, vec![field("c", FieldTy::Rc(TypeRef(0)))]);
+    let bad_stable = record("S", Repr::Region, vec![field("c", FieldTy::Rc(TypeRef(0)))]);
     assert!(matches!(
         compute(&[bad_stable]),
         Err(LayoutError::Field { .. })
@@ -416,11 +416,11 @@ fn representation_refusals() {
     ));
     let empty = record("E", Repr::Compact(Width::U16), vec![]);
     assert!(matches!(compute(&[empty]), Err(LayoutError::Empty { .. })));
-    // MEM-2: a plain own record is a legal field of a stable type; a String is not.
+    // MEM-2: a plain own record is a legal field of a region block; a String is not.
     let pair = record("P", Repr::Own, vec![field("a", u(Scalar::U64))]);
     let ok = record(
         "S",
-        Repr::Stable,
+        Repr::Region,
         vec![field("p", FieldTy::Inline(TypeRef(0)))],
     );
     assert!(compute(&[pair.clone(), ok]).is_ok());
@@ -431,7 +431,7 @@ fn representation_refusals() {
     );
     let bad = record(
         "S",
-        Repr::Stable,
+        Repr::Region,
         vec![field("q", FieldTy::Inline(TypeRef(0)))],
     );
     assert!(matches!(compute(&[s, bad]), Err(LayoutError::Field { .. })));

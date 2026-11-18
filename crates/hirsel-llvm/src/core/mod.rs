@@ -497,7 +497,7 @@ fn emit_module(
             PlaceTy::Declared(t)
                 if matches!(
                     module.types[t.index()].repr,
-                    hirsel_core_layout::Repr::Resource | hirsel_core_layout::Repr::Stable
+                    hirsel_core_layout::Repr::Resource | hirsel_core_layout::Repr::Region
                 ) =>
             {
                 8
@@ -587,7 +587,7 @@ fn emit_module(
         let destination = sig.dest.filter(|_| sig.results.is_empty()).and_then(|t| {
             use hirsel_core_layout::{Layout, Repr};
             match (module.types[t.index()].repr, &recipes[t.index()].layout) {
-                (Repr::Resource | Repr::Stable, _) | (_, Layout::Fixed(_)) => {
+                (Repr::Resource | Repr::Region, _) | (_, Layout::Fixed(_)) => {
                     let (bytes, _) = e.place_layout(PlaceTy::Declared(t));
                     matches!(bytes, 1..=16).then_some(bytes)
                 }

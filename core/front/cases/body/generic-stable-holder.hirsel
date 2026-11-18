@@ -1,16 +1,16 @@
-// MEM-5, MEM-24: a stable value is held as its block's pointer, so a generic body
-// instantiated at a stable T copies the 8-byte holder, and a logical size counts
-// the holder as a `Stable` field (16), exactly as the same body written at the
-// concrete type does (stable-placement.hirsel, widened()).
+// A generic body copies the region locator. A region reference counts 16 logical
+// bytes independently of the encoded payload size (MEM-24).
 // expect: accept
 // expect: run kept() = 15
 // expect: run widened() = 64
-stable type Span2 {
+@compact(u32)
+type Span2 {
     start: u64,
     end: u64
 }
 
-stable type Span3 {
+@compact(u32)
+type Span3 {
     a: u64,
     b: u64,
     c: u64
@@ -23,7 +23,7 @@ fn keep[T](take x: T) -> T {
 
 fn kept() -> u64 {
     region r {
-        match Span2(start: 5, end: 10) in r {
+        match make_span2(r, 5, 10) {
             Ok(s) => {
                 let t = keep(s)
                 t.start + t.end
@@ -49,5 +49,15 @@ fn widened() -> u64 {
     region r {
         let mut xs: List[Span3 in r] = list.new()
         asked(mut xs)
+    }
+}
+
+fn make_span2(r: Region, start: u64, end: u64) -> Result[Span2 in r, Capacity] {
+    match build_in(r, bytes 16, fn(mut d: Dest[Span2]) -> Result[Child[Span2], BuildError] {
+        dest.put(mut d, Span2(start: start, end: end))
+    }) {
+        Ok(take built) => Ok(finish(take built)),
+        Error(Capacity(capacity)) => Error(capacity),
+        Error(Overflow) => fail("fixed document size"),
     }
 }

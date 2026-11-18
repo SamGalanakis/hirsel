@@ -1,7 +1,7 @@
 // A closure's invocation Region roots belong to its header, not its enclosing function.
 // expect: run checked() = 68
 @compact(u16)
-stable type Doc {
+type Doc {
     value: u64
 }
 

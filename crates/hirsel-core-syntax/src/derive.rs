@@ -73,10 +73,7 @@ pub fn declaration_of(syntax: &SyntaxFile, item: usize) -> Option<(usize, Span)>
     let (_, name) = named(&syntax.item(item))?;
     let declared = derived_from(name)?;
     syntax.items().enumerate().find_map(|(i, other)| {
-        if !matches!(
-            syntax.tree.node(other.root).kind,
-            NodeKind::TypeDecl | NodeKind::StableType
-        ) {
+        if !matches!(syntax.tree.node(other.root).kind, NodeKind::TypeDecl) {
             return None;
         }
         let (token, name) = named(&other)?;
@@ -442,7 +439,7 @@ impl<'a> File<'a> {
     }
     fn decl(&self, item: &Item<'a>) -> Option<Decl<'a>> {
         let root = item.root;
-        if !matches!(self.kind(root), NodeKind::TypeDecl | NodeKind::StableType) {
+        if !matches!(self.kind(root), NodeKind::TypeDecl) {
             return None;
         }
         let mut generics = vec![];

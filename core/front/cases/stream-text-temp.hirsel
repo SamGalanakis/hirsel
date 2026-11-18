@@ -7,7 +7,7 @@
 // 1-byte tag then a W = 2 count and 3 bytes, so 3 bytes overflow on the Text after the
 // temporary exists and 0 bytes overflow on the tag before it does.
 @compact(u16)
-stable type J = Null | Str(Text)
+type J = Null | Str(Text)
 
 fn own(x: String) -> String {
     let mut s = string.new()
@@ -28,7 +28,7 @@ fn make_owned(r: Region, n: u64) -> Result[J in r, BuildError] {
     match build_stream_in(r, bytes n, fn(take w: Writer[J, in r]) -> Result[Child[J], BuildError] {
         emit(take w, Str(own("abc")))
     }) {
-        Ok(take b) => Ok(finish(take b)),
+        Ok(take built) => Ok(finish(take built)),
         Error(e) => Error(e),
     }
 }

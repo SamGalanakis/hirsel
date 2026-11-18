@@ -157,7 +157,7 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::Seq(e) => format!("seq {}", field_ty(e)),
         FieldTy::Rc(t) => format!("rc t{}", t.0),
         FieldTy::Arc(t) => format!("arc t{}", t.0),
-        FieldTy::Stable(t) => format!("stable t{}", t.0),
+        FieldTy::RegionRef(t) => format!("region_ref t{}", t.0),
         FieldTy::Array(e, n) => format!("array {n} {}", field_ty(e)),
         FieldTy::Fn => "fn".into(),
         FieldTy::OwnFn => "ownfn".into(),
@@ -198,7 +198,7 @@ fn shape(s: &Shape) -> String {
     let repr = match s.repr {
         Repr::Own => "own".into(),
         Repr::Resource => "resource".into(),
-        Repr::Stable => "stable".into(),
+        Repr::Region => "region".into(),
         Repr::Scoped => "scoped".into(),
         Repr::Compact(w) => format!(
             "compact {}",
@@ -601,7 +601,7 @@ impl Printer {
                         let kind = match kind {
                             AllocKind::Own { edge } => format!("for {}", field_ty(edge)),
                             AllocKind::Environment { ty } => format!("env t{}", ty.0),
-                            AllocKind::Stable => "stable".into(),
+                            AllocKind::Region => "region".into(),
                             AllocKind::Resource { grant } => format!("resource grant {grant}"),
                         };
                         let place = match place {
@@ -954,14 +954,14 @@ impl<'a> Line<'a> {
         use hirsel_core_layout::Handle;
         let boxed = |l: &mut Self| l.field_ty().map(Box::new);
         Ok(match self.peek().ok_or("expected a field type")? {
-            "box" | "rc" | "arc" | "stable" | "link" => {
+            "box" | "rc" | "arc" | "region_ref" | "link" => {
                 let w = self.next()?;
                 let t = self.tref()?;
                 match w {
                     "box" => FieldTy::Box(t),
                     "rc" => FieldTy::Rc(t),
                     "arc" => FieldTy::Arc(t),
-                    "stable" => FieldTy::Stable(t),
+                    "region_ref" => FieldTy::RegionRef(t),
                     _ => FieldTy::Link(t),
                 }
             }
@@ -1041,7 +1041,7 @@ impl<'a> Line<'a> {
         let repr = match self.next()? {
             "own" => Repr::Own,
             "resource" => Repr::Resource,
-            "stable" => Repr::Stable,
+            "region" => Repr::Region,
             "scoped" => Repr::Scoped,
             "compact" => Repr::Compact(match self.next()? {
                 "u16" => Width::U16,
@@ -1423,7 +1423,7 @@ impl BodyParser {
                     edge: l.field_ty()?,
                 },
                 "env" => AllocKind::Environment { ty: l.tref()? },
-                "stable" => AllocKind::Stable,
+                "region" => AllocKind::Region,
                 "resource" => {
                     l.expect("grant")?;
                     AllocKind::Resource { grant: l.num()? }

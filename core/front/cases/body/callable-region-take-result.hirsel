@@ -6,12 +6,13 @@
 // expect: run agreement() = 33
 // expect: run literal() = 1
 // expect: run mutable() = 7
-stable type Stamp {
+@compact(u32)
+type Stamp {
     n: u64
 }
 
 fn make(take r: Region) -> Result[Stamp in r, Capacity] {
-    Stamp(n: 1) in r
+    make_stamp(r, 1)
 }
 
 fn witness() -> u64 {
@@ -23,7 +24,7 @@ fn witness() -> u64 {
 }
 
 fn two(take r: Region, spare: Region, n: u64) -> Result[Stamp in r, Capacity] {
-    Stamp(n: n) in r
+    make_stamp(r, n)
 }
 
 fn agreement() -> u64 {
@@ -58,7 +59,7 @@ fn literal() -> u64 {
 }
 
 fn via_mut(mut r: Region) -> Result[Stamp in r, Capacity] {
-    Stamp(n: 7) in r
+    make_stamp(r, 7)
 }
 
 fn read_mut(mut r: Region) -> u64 {
@@ -79,5 +80,15 @@ pub fn main() -> Result[(), Exit] {
         Ok(())
     } else {
         Error(Exit(status: 1))
+    }
+}
+
+fn make_stamp(r: Region, n: u64) -> Result[Stamp in r, Capacity] {
+    match build_in(r, bytes 8, fn(mut d: Dest[Stamp]) -> Result[Child[Stamp], BuildError] {
+        dest.put(mut d, Stamp(n: n))
+    }) {
+        Ok(take built) => Ok(finish(take built)),
+        Error(Capacity(capacity)) => Error(capacity),
+        Error(Overflow) => fail("fixed document size"),
     }
 }

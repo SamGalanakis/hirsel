@@ -420,7 +420,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             && g.path.package_is("core", "1")
             && g.path.0.modules == ["core"]
             && matches!(g.path.0.name.as_str(), "clone" | "clone_in")
-            && let Some(why) = self.clone_refusal(tys[0], tys[1])
+            && let Some(why) = self.clone_refusal(tys[0], tys[1], g.path.0.name == "clone_in")
         {
             self.refuse("MEM-17", n, why);
             return (result, None);
@@ -718,7 +718,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) {
         match self.known_rooted(pt, found, roots) {
             Some(t) => {
-                let view = self.type_kind(t) == Kind::Stable;
+                let view = self.type_kind(t) == Kind::Region;
                 self.coerce(
                     at,
                     Want {
@@ -962,7 +962,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             (TyKind::Anchored(a, ar), TyKind::Anchored(b, br)) => {
                 self.unify_part(a, b, s, roots) && self.unify_part(ar, br, s, roots)
             }
-            (_, TyKind::Anchored(b, _)) if self.type_kind(b) == Kind::Stable => {
+            (_, TyKind::Anchored(b, _)) if self.type_kind(b) == Kind::Region => {
                 self.unify_part(pt, b, s, roots)
             }
             (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
@@ -1258,42 +1258,35 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
-    /// MEM-17: why `clone` or `clone_in` of an `x: T` expecting `U` is refused, if it is.
-    /// A value holding a resource, a scoped value or an opaque owner is never cloned;
-    /// otherwise `U` (or its twin) is `T` or a payload through `Box`, `Rc` and `Arc`,
-    /// outermost first.
-    fn clone_refusal(&self, x: TyId, u: TyId) -> Option<&'static str> {
-        let unanchored = |t: TyId| match self.t.kind(t) {
-            TyKind::Anchored(x, _) => *x,
-            _ => t,
+    /// MEM-17 selects the expected type from the source. Only an ordinary clone
+    /// can select a payload of a Box, Rc or Arc.
+    fn clone_refusal(&self, x: TyId, u: TyId, into_region: bool) -> Option<&'static str> {
+        let mut part = self.bare(x);
+        let u = match self.t.kind(u) {
+            TyKind::Anchored(u, _) => *u,
+            _ => u,
         };
+        if matches!(self.t.kind(part), TyKind::Error | TyKind::Hole)
+            || matches!(self.t.kind(u), TyKind::Error | TyKind::Hole)
+        {
+            return None;
+        }
+        if into_region {
+            return (part != u || kind(&self.p.decls, &self.t, u, &self.params) != Kind::Region)
+                .then_some("clone_in copies a region value of the expected type");
+        }
         if self.capture_holds(x) & (crate::H_RESOURCE | crate::H_SCOPED | crate::H_OPAQUE) != 0 {
             return Some(
                 "a value holding a resource, a scoped value or an opaque owner is never cloned",
             );
         }
-        let u = unanchored(u);
-        let twin = match self.t.kind(u) {
-            TyKind::Adt(d, xs) if xs.is_empty() => {
-                crate::decls::twin_of(&self.p.decls, &self.t, *d)
-            }
-            _ => None,
-        };
-        let mut part = unanchored(x);
         loop {
-            match self.t.kind(part) {
-                TyKind::Error | TyKind::Hole => return None,
-                _ if part == u => return None,
-                TyKind::Adt(d, xs) if Some(*d) == twin && xs.is_empty() => return None,
-                TyKind::Adt(d, xs)
-                    if matches!(
-                        self.p.decls[d.index()].role,
-                        Some(crate::Role::Box | crate::Role::Rc | crate::Role::Arc)
-                    ) =>
-                {
-                    part = unanchored(xs[0]);
-                }
-                _ => return Some("no part of this value is the expected type or its twin"),
+            if part == u {
+                return None;
+            }
+            match self.role_of(part) {
+                Some((Role::Box | Role::Rc | Role::Arc, args)) => part = self.bare(args[0]),
+                _ => return Some("no part of this value is the expected type"),
             }
         }
     }

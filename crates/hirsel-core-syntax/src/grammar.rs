@@ -5,7 +5,6 @@ pub const ITEM_START: &[Symbol] = &[
     sym::PUB,
     sym::FN,
     sym::TYPE,
-    sym::STABLE,
     sym::RESOURCE,
     sym::SCOPED,
     sym::CONST,
@@ -50,7 +49,6 @@ pub enum Continuation {
     Index,
     Projection,
     Try,
-    Placement,
     Binary(u8, bool),
 }
 /// LANG-4's closed set for a complete expression at a newline. Assignment
@@ -89,7 +87,6 @@ pub fn continuation(word: Symbol) -> Option<Continuation> {
         sym::LBRACKET => Continuation::Index,
         sym::DOT => Continuation::Projection,
         sym::QUESTION => Continuation::Try,
-        sym::IN => Continuation::Placement,
         sym::DOTDOT => Continuation::Binary(1, true),
         sym::DOTDOTEQ => Continuation::Binary(1, true),
         sym::OROR => Continuation::Binary(2, false),

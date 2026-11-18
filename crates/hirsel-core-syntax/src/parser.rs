@@ -508,19 +508,14 @@ impl Parser<'_> {
                 }
                 self.bump();
                 self.expect(sym::RPAREN)?;
-            } else if word == sym::TWIN {
-                self.expect(sym::LPAREN)?;
-                let path = self.path(NodeKind::TypePath)?;
-                self.expect(sym::RPAREN)?;
-                c.push(self.node(a, NodeKind::Attribute, Some(n), &[path]));
-                continue;
             } else if word != sym::TEST {
                 self.diagnostics.push(
-                    Diagnostic::error("LANG-5", self.token(0).span, "unknown attribute")
-                        .with_comparison(
-                            self.symbols.text(word),
-                            "test, compact or twin attribute",
-                        ),
+                    Diagnostic::error(
+                        "LANG-5",
+                        self.tokens[n.0 as usize].span,
+                        "unknown attribute",
+                    )
+                    .with_comparison(self.symbols.text(word), "test or compact attribute"),
                 );
                 return Err(());
             }
@@ -566,9 +561,7 @@ impl Parser<'_> {
             c.push(self.required(|p| p.expr(0))?);
             return Ok(self.node(s, NodeKind::Constant, Some(name), &c));
         }
-        let kind = if self.eat(sym::STABLE) {
-            NodeKind::StableType
-        } else if self.eat(sym::RESOURCE) {
+        let kind = if self.eat(sym::RESOURCE) {
             NodeKind::ResourceType
         } else if self.eat(sym::SCOPED) {
             NodeKind::ScopedType
@@ -1091,9 +1084,11 @@ impl Parser<'_> {
         let s = self.pos;
         let mut left = self.primary()?;
         let mut nonassoc = None;
-        let mut placed = false;
         loop {
             let word = self.word(0);
+            if word == sym::IN && (self.whitespace > 0 || !self.newline()) {
+                return self.fail("MEM-2", "region literals are written in dest.put or emit");
+            }
             let Some(next) = continuation(word) else {
                 if self.whitespace > 0 && self.newline() && self.bare_exit(left) {
                     return self.fail("LANG-4", "a bare exit is complete at its newline");
@@ -1103,10 +1098,7 @@ impl Parser<'_> {
             if self.newline() {
                 if self.whitespace == 0
                     && (word == sym::MINUS
-                        || matches!(
-                            next,
-                            Continuation::Call | Continuation::Index | Continuation::Placement
-                        ))
+                        || matches!(next, Continuation::Call | Continuation::Index))
                 {
                     break;
                 }
@@ -1115,7 +1107,7 @@ impl Parser<'_> {
                 }
             }
             match next {
-                Continuation::Call if minimum <= 12 && !placed => {
+                Continuation::Call if minimum <= 12 => {
                     self.bump();
                     let mut c: Nodes = smallvec![left];
                     self.list_into(sym::RPAREN, &mut c, |p| {
@@ -1139,13 +1131,13 @@ impl Parser<'_> {
                     })?;
                     left = self.node(s, NodeKind::Call, None, &c);
                 }
-                Continuation::Index if minimum <= 12 && !placed => {
+                Continuation::Index if minimum <= 12 => {
                     self.bump();
                     let i = self.required(|p| p.expr(0))?;
                     self.expect(sym::RBRACKET)?;
                     left = self.node(s, NodeKind::Index, None, &[left, i]);
                 }
-                Continuation::Projection if minimum <= 12 && !placed => {
+                Continuation::Projection if minimum <= 12 => {
                     self.bump();
                     if self.tree.node(left).kind == NodeKind::Literal && self.eof() {
                         let start = self.base + self.tree.node(left).origin.span.start;
@@ -1169,15 +1161,9 @@ impl Parser<'_> {
                     };
                     left = self.node(s, NodeKind::Projection, Some(n), &[left]);
                 }
-                Continuation::Try if minimum <= 12 && !placed => {
+                Continuation::Try if minimum <= 12 => {
                     self.bump();
                     left = self.node(s, NodeKind::Try, None, &[left]);
-                }
-                Continuation::Placement if minimum <= 11 && !placed => {
-                    self.bump();
-                    let p = self.path(NodeKind::Path)?;
-                    left = self.node(s, NodeKind::Placement, None, &[left, p]);
-                    placed = true;
                 }
                 Continuation::Binary(prec, na) if prec >= minimum => {
                     if na && nonassoc == Some(prec) {

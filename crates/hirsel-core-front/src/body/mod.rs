@@ -188,15 +188,6 @@ pub struct Emitter {
     constant_statics: HashMap<crate::ConstValue, hirsel_core_ir::StaticId>,
 }
 
-/// A literal placed by `T(..) in r` (MEM-2): its node, the region's value and root.
-#[derive(Clone, Copy)]
-struct Placing {
-    lit: NodeId,
-    region: Option<ValueId>,
-    root: TyId,
-    /// The literal's own expected type, `T` of an expected `Result[T in r, Capacity]`.
-    want: Option<Want>,
-}
 /// How a value of a type is carried in a body (crate docs, "Values, slots and
 /// addresses"): a scalar, nothing (unit, Never), or a pointer to a place of a declared
 /// type, which a parameter takes by address and a result returns through `dest`.
@@ -654,11 +645,11 @@ impl Emitter {
         self.module.types[id.index()].repr == LRepr::Resource
     }
     /// A value of row `id` is held as a pointer to its block: a resource (MEM-24) or a
-    /// stable value, which never moves once published (MEM-5).
+    /// region value, which never moves once published (MEM-5).
     fn by_block(&self, id: TypeId) -> bool {
         matches!(
             self.module.types[id.index()].repr,
-            LRepr::Resource | LRepr::Stable
+            LRepr::Resource | LRepr::Region
         )
     }
     /// The admission of a resource of row `id`: its storage, cause cell and grant
@@ -1027,7 +1018,7 @@ struct Var {
 struct At {
     place: Place,
     ty: TyId,
-    /// Reached through a view or a stable value, so never written (OWN-12).
+    /// Reached through a view or a region value, so never written (OWN-12).
     shared: bool,
 }
 
@@ -1163,9 +1154,6 @@ struct Cx<'c, 'a, 'e> {
     synth_ty: TyId,
     /// The synthesised type of the tail of the block being closed; unit without one.
     tail_ty: TyId,
-    /// The literal being placed by `T(..) in r` (MEM-2), until its construction
-    /// takes it.
-    placing: Option<Placing>,
     scope_slots: Vec<u32>,
     step_scopes: Vec<(u32, u32)>,
     copies: Vec<CopySize>,
@@ -1308,7 +1296,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             depth: 0,
             synth_ty: UNIT,
             tail_ty: UNIT,
-            placing: None,
             scope_slots: vec![],
             step_scopes: vec![],
             copies: vec![],
@@ -1613,7 +1600,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             (TyKind::Adt(d, a), TyKind::Adt(e, b))
                 if a == b && is_core_prelude(&self.p.decls[d.index()].path, &["SeqSpan"])
                     && is_core_prelude(&self.p.decls[e.index()].path, &["IndexedSpan"]));
-        // OWN-25: a stable value is read where a view of its type is expected.
+        // OWN-25: a region value is read where a view of its type is expected.
         let stable = matches!(self.t.kind(w.ty), TyKind::View(x)
             if crate::decls::stable_parameter(&self.p.decls, &self.t, t, *x));
         if t != w.ty
@@ -2505,7 +2492,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             NodeKind::For | NodeKind::ForTake => self.for_(n, None),
             NodeKind::Region => self.region_(n, want),
             NodeKind::Bound => self.bound_(n, want),
-            NodeKind::Placement => self.placement(n, want),
             NodeKind::Closure | NodeKind::ScopedClosure => self.closure(n, want),
             _ => self.gap_ty(n, "expression form is not built"),
         }
@@ -2660,15 +2646,15 @@ fn mentions_error(t: &impl TyRead, ty: TyId) -> bool {
 
 /// The bytes a value of a row with `repr` and `recipe` takes where it is held (a
 /// local, a field, an element, a copy), or with `logical` what it counts in a
-/// portable size (FORM #116). A resource's or a stable value's holder is its block
-/// pointer, and a stable holder counts as a `Stable` field, 16 (MEM-24); only
+/// portable size (FORM #116). A resource's or a region value's holder is its block
+/// pointer, and a region holder counts as a `RegionRef` field, 16 (MEM-24); only
 /// allocating the value takes its block. The emitter and the generic materialiser
 /// both ask here, so a rigid `T` and its instance cannot disagree.
 pub(super) fn held_size(repr: LRepr, recipe: &Recipe, logical: bool) -> Result<u64, &'static str> {
     Ok(match repr {
         LRepr::Resource => hirsel_core_layout::POINTER,
-        LRepr::Stable if logical => 16,
-        LRepr::Stable => hirsel_core_layout::POINTER,
+        LRepr::Region if logical => 16,
+        LRepr::Region => hirsel_core_layout::POINTER,
         _ if logical => recipe
             .logical_size
             .ok_or("logical size of a compact generic value is not built")?,

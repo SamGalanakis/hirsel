@@ -24,11 +24,11 @@
 // Reading text. `text.as_string(t)` views a Str, a Num's spelling or a key as a String with
 // no copy, so every string reader prints or compares it (`text.as_string(k) == step`).
 @compact(u32)
-pub stable type Json = Null | False | True | Num(Text) | Str(Text) | Arr(IndexedSpan[Json]) | Obj(IndexedSpan[Member])
+pub type Json = Null | False | True | Num(Text) | Str(Text) | Arr(IndexedSpan[Json]) | Obj(IndexedSpan[Member])
 
 /// One object member: its decoded key, then its value.
 @compact(u32)
-pub stable type Member {
+pub type Member {
     key: Text,
     value: Json
 }

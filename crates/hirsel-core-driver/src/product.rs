@@ -434,15 +434,15 @@ mod tests {
             }],
         }
     }
-    /// A legal twin pair is published first. Adding a rival in another file of
-    /// the same module must not reuse that image and hide the new refusal.
+    /// Adding a duplicate declaration in another file of the same module must
+    /// invalidate the cached package and surface the refusal.
     #[test]
     fn a_package_record_is_keyed_by_its_source_traversal() {
         let dir = tempfile::tempdir().unwrap();
         let texts = [
             "pub type Row { n: u64 }",
-            "@twin(Row) pub stable type RowS { n: u64 }\nfn thaw(s: RowS) -> Result[Row, Capacity] { clone(s) }",
-            "@twin(Row) pub stable type RowT { n: u64 }",
+            "fn read(s: Row) -> u64 { s.n }",
+            "pub type Row { m: u64 }",
         ];
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
         let manifest = |rival: bool| {
@@ -488,10 +488,7 @@ mod tests {
         let primed = product(true, "kept");
         let fresh = product(true, "fresh-rival");
         let error = fresh.0.as_ref().unwrap_err();
-        assert!(
-            error.contains("already has declared twin") && error.contains("RowS"),
-            "{error}"
-        );
+        assert!(error.contains("duplicate definition"), "{error}");
         assert_eq!(primed, fresh);
     }
     /// An image is a function of its sources and request: one library imaged

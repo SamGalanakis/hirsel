@@ -2221,9 +2221,9 @@ impl Machine<'_> {
     /// A value of `t` is held as a pointer to its block: a resource, or a stable
     /// value, which never moves once published (MEM-5).
     fn by_block(&self, t: TypeRef) -> bool {
-        matches!(self.shape(t).repr, Repr::Resource | Repr::Stable)
+        matches!(self.shape(t).repr, Repr::Resource | Repr::Region)
     }
-    /// Bytes a holder spends on a value of `t`: a resource or stable value is a
+    /// Bytes a holder spends on a value of `t`: a resource or region value is a
     /// pointer to its block.
     fn held(&self, t: TypeRef) -> u64 {
         if self.by_block(t) {
@@ -2330,7 +2330,7 @@ impl Machine<'_> {
         match ty {
             FieldTy::Scalar(_)
             | FieldTy::Fn
-            | FieldTy::Stable(_)
+            | FieldTy::RegionRef(_)
             | FieldTy::Locator(_)
             | FieldTy::Borrow
             | FieldTy::View(_)

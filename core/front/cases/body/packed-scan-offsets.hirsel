@@ -13,15 +13,15 @@
 // expect: run failure_order(0) = fail Overflow
 // expect: run failure_order(3) = fail Bounds
 @compact(u16)
-stable type Item = Flag(bool) | Name(Text) | Scores(FixedSpan[u64])
+type Item = Flag(bool) | Name(Text) | Scores(FixedSpan[u64])
 
 @compact(u16)
-stable type Batch {
+type Batch {
     items: IndexedSpan[Item]
 }
 
 @compact(u16)
-stable type Numbers {
+type Numbers {
     xs: FixedSpan[u64]
 }
 

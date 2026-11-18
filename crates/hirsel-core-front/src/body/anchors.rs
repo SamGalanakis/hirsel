@@ -340,7 +340,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     #[inline(always)]
     pub(super) fn anchor_tracked(&mut self, ty: TyId) -> bool {
-        matches!(self.type_kind(ty), Kind::Scoped | Kind::Stable)
+        matches!(self.type_kind(ty), Kind::Scoped | Kind::Region)
     }
     pub(super) fn anchor_regions(&mut self, ty: TyId) -> Fact {
         fn walk(p: &Program<'_>, t: &impl TyRead, anchors: &mut Anchors, ty: TyId) -> Fact {
@@ -488,7 +488,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !tracked && regions == 0 {
             return;
         }
-        let stable = self.type_kind(ty) == Kind::Stable;
+        let stable = self.type_kind(ty) == Kind::Region;
         let initial = if stable {
             if regions != 0 {
                 regions
@@ -647,7 +647,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn anchor_read(&mut self, at: At) -> Fact {
         if matches!(
             self.type_kind(self.var(at.place.slot).ty),
-            Kind::Scoped | Kind::Stable
+            Kind::Scoped | Kind::Region
         ) {
             self.anchor_place(at)
         } else {

@@ -1,5 +1,5 @@
 // MEM-5 (memory.md): a published stable value is never written, so a `mut` parameter of
-// a stable type is refused at that parameter (the spec's `f`). A plain view of it is
+// a region type is refused at that parameter (the spec's `f`). A plain view of it is
 // accepted.
 // expect: refuse MEM-5 at 6:17
 // expect: compared MEM-5 at 6:17 | mut | view

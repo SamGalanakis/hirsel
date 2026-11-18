@@ -1,9 +1,9 @@
 // OWN-4: each forbidden category is named at its field; representation at the bound.
 resource type Resource: codec { n: u64 }
-stable type Stable: codec { n: u64 }
+@compact(u32) type Stable: codec { n: u64 }
 scoped type Scoped: codec { n: u64 }
 resource type R { n: u64 }
-stable type S { n: u64 }
+@compact(u32) type S { n: u64 }
 type HasResource: codec { payload: R }
 type HasStable[in r]: codec { payload: S in r }
 type HasScoped: codec { payload: View[u64] }
@@ -24,7 +24,7 @@ fn conditional_missing(x: Wrapper[HostFile]) -> u64 { require(x) }
 type Wrapper[T]: codec { x: T }
 fn never_missing(x: Option[Never]) -> u64 { require(x) }
 // expect: refuse OWN-4 at 2:25
-// expect: refuse OWN-4 at 3:21
+// expect: refuse OWN-4 at 3:28
 // expect: refuse OWN-4 at 4:21
 // expect: refuse OWN-4 at 7:27
 // expect: refuse OWN-4 at 8:31
@@ -68,4 +68,4 @@ type Denied = Restricted[HostFile]
 // expect: compared LANG-12 at 66:26 | core@1/core/HostFile | codec
 
 // expect: cause OWN-4 at 7:27 from 7:6 7:19 7:27 5:15
-// expect: cause OWN-4 at 8:31 from 8:6 8:16 8:23 8:31 6:13
+// expect: cause OWN-4 at 8:31 from 8:6 8:16 8:23 8:31 6:20

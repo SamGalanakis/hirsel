@@ -300,7 +300,7 @@ fn well_formedness_rejects_producer_mistakes() {
         // stable gets no prefix or cleanup, region storage named for an edge gets a
         // prefix and an edge's cleanup the region never runs
         (
-            "b0(v0: i32, v1: i32):\n  v2: u64 = const 8\n  v3: ptr, v4: u64 = alloc stable v2 align 8 charge v2\n  free v3 charge v2\n  return v0\n}\n",
+            "b0(v0: i32, v1: i32):\n  v2: u64 = const 8\n  v3: ptr, v4: u64 = alloc region v2 align 8 charge v2\n  free v3 charge v2\n  return v0\n}\n",
             "stable storage",
         ),
         (

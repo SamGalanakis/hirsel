@@ -192,7 +192,6 @@ impl ResolutionScratch {
                     NodeKind::Function
                         | NodeKind::CloneHook
                         | NodeKind::TypeDecl
-                        | NodeKind::StableType
                         | NodeKind::ResourceType
                         | NodeKind::ScopedType
                 ),
@@ -1054,7 +1053,6 @@ impl<'a> Resolver<'a, '_> {
                 | NodeKind::ScopedCallableType
                 | NodeKind::OwnCallableType => self.function(n),
                 NodeKind::TypeDecl
-                | NodeKind::StableType
                 | NodeKind::ResourceType
                 | NodeKind::ScopedType
                 | NodeKind::Block => self.scope(|r| {

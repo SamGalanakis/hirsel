@@ -133,7 +133,7 @@ pub const fn seq_index(count: u64) -> Option<u64> {
     }
 }
 
-/// A region allocation (a placed literal, a sized destination, `build_in` and
+/// A region allocation (a sized destination, `build_in` and
 /// `build_stream_in` of `n` bytes; `finish_trim` lowers it to the used bytes).
 pub const fn region(bytes: u64) -> Option<u64> {
     round8(bytes)

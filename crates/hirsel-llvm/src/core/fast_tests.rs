@@ -74,7 +74,7 @@ b2:
   v15: bool, v16: u64 = limit_enter v5
   branch v15, b3, b8
 b3:
-  v10: ptr, v11: u64, v12: u64 = alloc stable v5 align 8 charge v5 in v2
+  v10: ptr, v11: u64, v12: u64 = alloc region v5 align 8 charge v5 in v2
   v13: bool = ne v10, v6
   branch v13, b4, b7
 b4:

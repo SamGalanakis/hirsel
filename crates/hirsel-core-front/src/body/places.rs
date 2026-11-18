@@ -461,7 +461,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             return self.field(at, name, n);
         }
-        // A stable value in region `r`: its stable fields are in `r` unless they name
+        // A region value in region `r`: its region fields are in `r` unless they name
         // another region (MEM-6).
         let (inner, root) = match self.t.kind(inner) {
             TyKind::Anchored(x, root) => (*x, Some(*root)),
@@ -472,7 +472,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             TyKind::Adt(d, args) => {
                 self.require_visible_fields(d, n)?;
                 let decl = &self.p.decls[d.index()];
-                stable = decl.repr == Repr::Stable;
+                stable = decl.repr == Repr::Region;
                 match &decl.body {
                     DeclBody::Record(fs) => fs.iter().position(|f| f.name == name).map(|i| {
                         let ft = subst(&mut self.t, fs[i].ty, &args);
@@ -515,7 +515,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return copyable(&self.p.decls, &self.t, ty, &self.params);
         };
         match kind {
-            Kind::Plain | Kind::Stable => true,
+            Kind::Plain | Kind::Region => true,
             Kind::Own | Kind::Resource | Kind::Counted | Kind::Generic => false,
             Kind::Scoped => {
                 if let Some(value) = copies.get() {
@@ -645,7 +645,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     (address, ty) = self.compact_field(header, ty, None, i, n)?;
                 }
                 PStep::Field(i) => {
-                    // A resource's or stable value's fields are in the block its
+                    // A resource's or region value's fields are in the block its
                     // holder points at.
                     if let Ok(Rep::Place(id)) = self.rep(ty)
                         && self.e.by_block(id)

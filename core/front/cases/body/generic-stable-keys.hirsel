@@ -1,9 +1,9 @@
-// FORM #115: equality, order and hash of a stable value read its block's fields (SEM-7),
+// FORM #115: equality, order and hash of a compact value read its encoded fields (SEM-7),
 // never its holder's address (SEM-8), in concrete code, through a generic `T: key` or
 // `T: ordered`, and in Map and Heap at `Span3 in r`, on the evaluator and both engines.
 // Oracles: blocks are allocated so that address order is the reverse of field order,
-// and equal contents sit in different blocks; Map's charge at a stable reference equals
-// its charge at P16, the 16-byte twin (budgets.md). The kernels' moves and charges are
+// and equal contents sit in different blocks; Map's charge at a region reference equals
+// its charge at P16, an own 16-byte key (budgets.md). The kernels' moves and charges are
 // generic-stable-kernels.hirsel.
 // expect: accept
 // expect: run map_rt() = 6
@@ -15,7 +15,8 @@
 // expect: run order_concrete() = 1
 // expect: run captured() = 10
 // native: run heaped() = 159
-stable type Span3: key + ordered {
+@compact(u32)
+type Span3: key + ordered {
     a: u64,
     b: u64,
     c: u64
@@ -32,7 +33,7 @@ fn sum3(s: Span3) -> u64 {
 
 fn map_rt() -> u64 {
     region r {
-        match Span3(a: 1, b: 2, c: 3) in r {
+        match make_span3(r, 1, 2, 3) {
             Ok(s) => {
                 let mut m: Map[u64, Span3 in r] = map.new()
                 let _ = map.insert(mut m, 7, s)
@@ -73,7 +74,7 @@ fn map_charge() -> u64 {
 // Equal keys in different blocks hit one entry: hash and equality read the block.
 fn map_key() -> u64 {
     region r {
-        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 1, b: 2, c: 3) in r) {
+        match (make_span3(r, 1, 2, 3), make_span3(r, 1, 2, 3)) {
             (Ok(s), Ok(t)) => {
                 let mut m: Map[Span3 in r, u64] = map.new()
                 let _ = map.insert(mut m, s, 7)
@@ -101,7 +102,7 @@ fn lt[T: ordered](a: T, b: T) -> u64 {
 
 fn same() -> u64 {
     region r {
-        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 1, b: 2, c: 3) in r) {
+        match (make_span3(r, 1, 2, 3), make_span3(r, 1, 2, 3)) {
             (Ok(s), Ok(t)) => if eqs(s, t) {
                 1
             } else {
@@ -114,7 +115,7 @@ fn same() -> u64 {
 
 fn same_concrete() -> u64 {
     region r {
-        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 1, b: 2, c: 3) in r) {
+        match (make_span3(r, 1, 2, 3), make_span3(r, 1, 2, 3)) {
             (Ok(s), Ok(t)) => if s == t && s <= t && t <= s {
                 1
             } else {
@@ -128,7 +129,7 @@ fn same_concrete() -> u64 {
 // Allocated 9 then 1, so the address order is the reverse of the field order.
 fn order_generic() -> u64 {
     region r {
-        match (Span3(a: 9, b: 0, c: 0) in r, Span3(a: 1, b: 0, c: 0) in r) {
+        match (make_span3(r, 9, 0, 0), make_span3(r, 1, 0, 0)) {
             (Ok(s), Ok(t)) => lt(s, t) * 10 + lt(t, s),
             _ => 99
         }
@@ -137,7 +138,7 @@ fn order_generic() -> u64 {
 
 fn order_concrete() -> u64 {
     region r {
-        match (Span3(a: 9, b: 0, c: 0) in r, Span3(a: 1, b: 0, c: 0) in r) {
+        match (make_span3(r, 9, 0, 0), make_span3(r, 1, 0, 0)) {
             (Ok(s), Ok(t)) => if s < t {
                 10
             } else {
@@ -151,7 +152,7 @@ fn order_concrete() -> u64 {
 // Minimum first by fields; the blocks are allocated 9, 1, 5.
 fn heaped() -> u64 {
     region r {
-        match (Span3(a: 9, b: 0, c: 0) in r, Span3(a: 1, b: 0, c: 0) in r, Span3(a: 5, b: 0, c: 0) in r) {
+        match (make_span3(r, 9, 0, 0), make_span3(r, 1, 0, 0), make_span3(r, 5, 0, 0)) {
             (Ok(x), Ok(y), Ok(z)) => {
                 let mut h: Heap[Span3 in r] = heap.new()
                 let _ = heap.push(mut h, x)
@@ -167,7 +168,7 @@ fn heaped() -> u64 {
     }
 }
 
-// A scoped closure in a generic body captures a stable T as its holder (LANG-14 allows
+// A scoped closure in a generic body captures a region T as its holder (LANG-14 allows
 // a scoped view capture; an owning one is refused): equal contents in two blocks, then
 // unequal ones.
 fn same_in[T: key](x: T, y: T) -> u64 {
@@ -183,9 +184,19 @@ fn same_in[T: key](x: T, y: T) -> u64 {
 
 fn captured() -> u64 {
     region r {
-        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 1, b: 2, c: 3) in r, Span3(a: 1, b: 2, c: 4) in r) {
+        match (make_span3(r, 1, 2, 3), make_span3(r, 1, 2, 3), make_span3(r, 1, 2, 4)) {
             (Ok(s), Ok(t), Ok(u)) => same_in(s, t) * 10 + same_in(s, u),
             _ => 99
         }
+    }
+}
+
+fn make_span3(r: Region, a: u64, b: u64, c: u64) -> Result[Span3 in r, Capacity] {
+    match build_in(r, bytes 24, fn(mut d: Dest[Span3]) -> Result[Child[Span3], BuildError] {
+        dest.put(mut d, Span3(a: a, b: b, c: c))
+    }) {
+        Ok(take built) => Ok(finish(take built)),
+        Error(Capacity(capacity)) => Error(capacity),
+        Error(Overflow) => fail("fixed document size"),
     }
 }

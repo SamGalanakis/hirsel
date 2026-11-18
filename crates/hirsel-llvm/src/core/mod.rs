@@ -1742,7 +1742,10 @@ impl FunctionEmitter<'_> {
                     scopes: self.access_facts(&[address]),
                     tbaa: self
                         .facts
-                        .then(|| alias::writer_state_memory(self.module, self.body, address))
+                        .then(|| {
+                            alias::writer_state_memory(self.module, self.body, address)
+                                .or_else(|| self.storage_memory(address))
+                        })
                         .flatten(),
                     ..Memory::default()
                 };
@@ -1757,7 +1760,10 @@ impl FunctionEmitter<'_> {
                     scopes: self.access_facts(&[address]),
                     tbaa: self
                         .facts
-                        .then(|| alias::writer_state_memory(self.module, self.body, address))
+                        .then(|| {
+                            alias::writer_state_memory(self.module, self.body, address)
+                                .or_else(|| self.storage_memory(address))
+                        })
                         .flatten(),
                     ..Memory::default()
                 };

@@ -1405,6 +1405,95 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
 }
 
 #[test]
+fn element_stores_keep_a_shrinking_sibling_bound_and_failure_site() {
+    // `pop` through `xs[j]` shrinks the same carrier that `xs[k]` reads when
+    // `j == k`. The element store into `xs[1 - k]` leaves every carrier alone.
+    // Reading `xs[k][i]` must fail Bounds at its own site once `i` reaches the
+    // shrunk length, never pass a length loaded before the pop.
+    let source = r#"
+fn walk(mut xs: List[List[u64]], j: u64, k: u64, n: u64) -> u64 {
+    let mut total = 0u64
+    for i in 0u64 .. n {
+        xs[1u64 - k][i] = i
+        let _ = list.pop(mut xs[j])
+        total += xs[k][i]
+    }
+    total
+}
+fn probe(n: u64, extra: u64, k: u64) -> u64 {
+    let mut xs: List[List[u64]] = list.new()
+    for _ in 0u64 .. 2u64 {
+        let mut b: List[u64] = list.new()
+        result.unwrap(list.fill(mut b, n + extra, 3u64))
+        result.unwrap(list.push(mut xs, take b))
+    }
+    walk(mut xs, 0u64, k, n) + list.len(xs[0]) * 100u64
+}
+"#;
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let cases =
+        [(4, 5, 0), (4, 1, 0), (4, 5, 1), (4, 1, 1), (64, 2, 0)].map(|(n, extra, k)| Case {
+            function: names["probe"],
+            args: vec![n, extra, k],
+            limit: 1_000_000,
+            injection: None,
+        });
+    // Four reads of 3 and five elements left; the pop before i = 2 leaves two.
+    assert_eq!(
+        eval::run(&module, names["probe"], &[4, 5, 0], 1_000_000).outcome,
+        eval::Outcome::Returned(vec![512])
+    );
+    assert_eq!(
+        eval::run(&module, names["probe"], &[4, 1, 0], 1_000_000).outcome,
+        eval::Outcome::Failed(vec!["Bounds".into()])
+    );
+    assert_eq!(
+        eval::run(&module, names["probe"], &[4, 5, 1], 1_000_000).outcome,
+        eval::Outcome::Returned(vec![512])
+    );
+    let check = |reports: Vec<NativeReport>| {
+        for (case, report) in cases.iter().zip(reports) {
+            let expected = eval::run(&module, case.function, &case.args, case.limit);
+            assert_eq!(report.outcome, expected.outcome, "args={:?}", case.args);
+            let expected = expected
+                .sites
+                .iter()
+                .map(|a| {
+                    a.map_or(0, |a| {
+                        ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                report.sites, expected,
+                "failure sites, args={:?}",
+                case.args
+            );
+        }
+    };
+    let ir = emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, true).unwrap();
+    verify_ir(&ir);
+    let object = hirsel_llvm_lazy::compile_ir(&ir, true).unwrap();
+    check(execute_object(
+        &module,
+        &cases,
+        "",
+        "",
+        Optimization::Speed,
+        Some(object),
+    ));
+    let object = module.llvm_program(Target::X86_64Linux, false, false, &[names["probe"]]);
+    check(execute_object(
+        &module,
+        &cases,
+        "",
+        "",
+        Optimization::Speed,
+        Some(object),
+    ));
+}
+
+#[test]
 fn exposed_loop_helpers_keep_failure_sites() {
     let source = r#"
 fn helper(mut xs: Inline[u64, 8], i: u64, d: u64) -> u64 {

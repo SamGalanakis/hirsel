@@ -169,6 +169,12 @@ impl FunctionEmitter<'_> {
 const STEP_ACCESS: usize = 5;
 const PROGRAM_ACCESS: usize = 6;
 const WRITER_STATE_ACCESS: usize = 8;
+// Program storage splits into the words of `seq` carriers and the scalar
+// leaves of declared fields, array elements and element buffers. A
+// collection's backing never holds its own carrier, so an element store leaves
+// every length and data pointer in place (Goose's typed kills, LLVM's TBAA).
+pub(super) const SEQ_WORD_ACCESS: usize = 11;
+pub(super) const DATA_ACCESS: usize = 12;
 pub(super) fn writer_state_memory(
     module: &Module,
     body: &hirsel_core_ir::Body,
@@ -223,6 +229,30 @@ pub(super) fn private_steps(sink: &mut dyn Sink) -> usize {
             ],
         ),
         (
+            9,
+            vec![
+                MdItem::String("seq words".into()),
+                MdItem::Node(4),
+                MdItem::I64(0),
+            ],
+        ),
+        (
+            10,
+            vec![
+                MdItem::String("scalar data".into()),
+                MdItem::Node(4),
+                MdItem::I64(0),
+            ],
+        ),
+        (
+            SEQ_WORD_ACCESS,
+            vec![MdItem::Node(9), MdItem::Node(9), MdItem::I64(0)],
+        ),
+        (
+            DATA_ACCESS,
+            vec![MdItem::Node(10), MdItem::Node(10), MdItem::I64(0)],
+        ),
+        (
             WRITER_STATE_ACCESS,
             vec![MdItem::Node(7), MdItem::Node(7), MdItem::I64(0)],
         ),
@@ -243,7 +273,7 @@ pub(super) fn private_steps(sink: &mut dyn Sink) -> usize {
             },
         );
     }
-    9
+    13
 }
 pub(super) fn program_memory(memory: &Memory, facts: bool) -> Memory {
     let mut memory = memory.clone();

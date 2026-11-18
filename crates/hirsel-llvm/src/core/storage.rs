@@ -79,6 +79,42 @@ impl FunctionEmitter<'_> {
         let size = field_size(&self.module.types, self.recipes, &element).2;
         Some(hirsel_core_layout::charge::seq_len_bound(size)? + 1)
     }
+    /// The TBAA access type of a scalar read or store at `address`: a `seq`
+    /// carrier word, or a scalar leaf that no carrier word can occupy. Any
+    /// other place keeps the program storage type, which aliases both.
+    pub(super) fn storage_memory(&self, address: AddressId) -> Option<usize> {
+        let info = &self.body.addresses[address.index()];
+        let steps = info.steps.get(&self.body.pools.steps).unwrap();
+        let (last, before) = steps.split_last()?;
+        let scalar = |t: &FieldTy| {
+            matches!(
+                t,
+                FieldTy::Scalar(_) | FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_)
+            )
+        };
+        let data = match *last {
+            Step::Seq(_) => return Some(alias::SEQ_WORD_ACCESS),
+            _ if steps.iter().any(|s| matches!(s, Step::Byte(_))) => false,
+            Step::Index(_) => matches!(info.ty, PlaceTy::Value(_)),
+            Step::Element(_) => {
+                matches!(self.walk(address, before.len()), At::Array(e, _) if scalar(&e))
+            }
+            Step::Field(field) | Step::CaseField { field, .. } => {
+                let case = match *last {
+                    Step::CaseField { case, .. } => Some(case),
+                    _ => None,
+                };
+                match self.walk(address, before.len()) {
+                    At::Declared(t) => self.module.types[t.index()]
+                        .fields(case)
+                        .is_some_and(|f| scalar(&f[field as usize].ty)),
+                    _ => false,
+                }
+            }
+            Step::Deref | Step::Byte(_) => false,
+        };
+        data.then_some(alias::DATA_ACCESS)
+    }
     fn kind_at(&self, address: AddressId) -> At {
         self.walk(address, usize::MAX)
     }

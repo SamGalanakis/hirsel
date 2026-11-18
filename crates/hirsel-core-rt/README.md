@@ -51,7 +51,8 @@ free. A task-local lock serializes queue operations and foreign returns.
 Regions bump within nonmoving pools keyed by native size and alignment. The
 first chunk rounds the request to a granule. Each pool grows geometrically
 within the region-wide backing ceiling. Closing refunds the aggregate payer
-runs and returns the complete chunk set to the task for reuse. A compact builder
+runs and returns chunks to the task for reuse, retiring at most one chunk beyond
+the last two nonempty uses. A compact builder
 remembers its region entry and retained charge. Trim takes those explicit
 operands and needs no allocation header. Writer/copy/index code and
 Child/Bounds/Overflow checks belong to the emitter.

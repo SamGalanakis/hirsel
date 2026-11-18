@@ -254,6 +254,47 @@ fn closing_and_reopening_a_region_reuses_chunks_without_visiting_values() {
 }
 
 #[test]
+fn region_cache_retires_backing_after_two_smaller_uses() {
+    use crate::region::{CHUNK_REQUESTS, GRANULE, cached_backing};
+
+    const LARGE: usize = 8 << 20;
+    let mut all_samples = Vec::new();
+    for uses in [
+        &[true, false, false][..],
+        &[true, true, true],
+        &[true, false, true, false, true],
+    ] {
+        let context = Context::new(LARGE as u64 + 8);
+        let mut samples = Vec::new();
+        let previous_requests = CHUNK_REQUESTS.with(std::cell::Cell::get);
+        for &large in uses {
+            let mut region = Region::open(&context);
+            region.allocate(&context, 8, 8, Some(8)).unwrap();
+            if large {
+                let slot = region
+                    .allocate(&context, LARGE, 8, Some(LARGE as u64))
+                    .unwrap();
+                // SAFETY: the reservation has LARGE writable bytes until close.
+                unsafe { slot.as_ptr().write_bytes(1, LARGE) };
+            }
+            let active = region.physical_bytes();
+            region.close();
+            assert_eq!(context.available(), LARGE as u64 + 8);
+            let (chunks, bytes) = cached_backing(&context);
+            samples.push((chunks, bytes, bytes - active));
+        }
+        eprintln!("{uses:?}: cached (chunks, bytes, unused bytes) = {samples:?}");
+        assert_eq!(samples[0], (2, GRANULE + LARGE, 0));
+        assert_eq!(
+            CHUNK_REQUESTS.with(std::cell::Cell::get) - previous_requests,
+            2,
+        );
+        all_samples.push(samples);
+    }
+    assert_eq!(all_samples[0].last().copied(), Some((1, GRANULE, 0)));
+}
+
+#[test]
 fn region_slot_opens_only_after_admission_and_refunds_the_handed_over_payer() {
     use crate::abi::*;
     // SAFETY: the slot belongs to this context, starts empty and holds its only Region.

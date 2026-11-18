@@ -69,6 +69,7 @@ pub struct Region {
     capacity: usize,
     reserved: usize,
     used_chunks: usize,
+    previous_used_chunks: usize,
     pools: HashMap<PoolKey, Cursor>,
     cache: Weak<Recycled>,
     inline: [Option<Entry>; 4],
@@ -100,6 +101,7 @@ impl Region {
             capacity: 0,
             reserved: 0,
             used_chunks: 0,
+            previous_used_chunks: 0,
             pools: HashMap::new(),
             cache,
             inline: [None; 4],
@@ -300,11 +302,19 @@ impl Region {
         self.extra.clear();
     }
 
-    /// Return the chunk chain and its metadata together. Work here depends on
-    /// payer runs only; reuse never inspects the objects in a chunk.
+    /// Return the recently used chunks and their metadata to the cache.
+    /// Closing refunds payer runs and can release one stale chunk.
     pub fn close(mut self: Box<Self>) {
         self.refund();
         if let Some(cache) = self.cache.upgrade() {
+            if self.used_chunks != 0 {
+                // Adapt bumpalo's reset: keep enough chunks for the
+                // larger of the last two uses and retire unused chunks one at a time.
+                if self.chunks.len() > self.used_chunks.max(self.previous_used_chunks) {
+                    self.chunks.pop();
+                }
+                self.previous_used_chunks = self.used_chunks;
+            }
             self.cursor = ptr::null_mut();
             self.end = ptr::null_mut();
             self.entry = usize::MAX;
@@ -319,6 +329,16 @@ impl Region {
             cache.borrow_mut().push(self);
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn cached_backing(context: &Context) -> (usize, usize) {
+    let cache = context.regions.0.get().unwrap().borrow();
+    let chunks = &cache.last().unwrap().chunks;
+    (
+        chunks.len(),
+        chunks.iter().map(|chunk| chunk.layout.size()).sum(),
+    )
 }
 
 impl Drop for Region {

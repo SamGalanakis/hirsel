@@ -4,6 +4,7 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/IRReader.h>
+#include <llvm-c/Support.h>
 #include <llvm-c/Error.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
@@ -37,6 +38,11 @@ extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef mac
     HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *context, char **error);
 static pthread_once_t initialized = PTHREAD_ONCE_INIT;
 static void initialize(void) {
+    // Dense control flow leaves many copies of the same rematerializable
+    // register. Batch its live-interval updates before the coalescer visits
+    // every copy separately.
+    const char *options[] = {"hirsel", "-late-remat-update-threshold=16"};
+    LLVMParseCommandLineOptions(2, options, NULL);
     LLVMInitializeX86TargetInfo(); LLVMInitializeX86Target();
     LLVMInitializeX86TargetMC(); LLVMInitializeX86AsmPrinter();
     LLVMInitializeX86AsmParser();
@@ -550,12 +556,12 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
                           uint8_t speed, const char *triple, const char *cpu, unsigned jobs,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
                           HirselLlvmOutput *out) {
-    pthread_once(&initialized, initialize);
     unsigned major, minor, patch;
     LLVMGetVersion(&major, &minor, &patch);
     if (major != 23 || minor != 1 || patch != 5) {
         error(out, "LLVM component requires pinned LLVM 23.1.5"); return;
     }
+    pthread_once(&initialized, initialize);
     LLVMTargetRef target = NULL;
     char *message = NULL;
     if (LLVMGetTargetFromTriple(triple, &target, &message)) {

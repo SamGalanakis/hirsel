@@ -99,3 +99,143 @@ fn test_shared_payload_copy(c: Clock) -> Result[(), ()] {
         Error(())
     }
 }
+
+fn pages_match(s: Snapshot, sh: Shape[u64, u64], ix: Index[u64, u64, u64], indexed: bool, limits: Limits) -> bool {
+    let table_model: Inline[(u64, u64), 5] = [(2, 5), (3, 9), (4, 2), (5, 13), (6, 6)]
+    let index_model: Inline[(u64, u64), 5] = [(2, 5), (3, 9), (5, 13), (4, 2), (6, 6)]
+    let expected = if indexed { index_model } else { table_model }
+    let mut page = if indexed {
+        result.unwrap(find_page(s, ix, Included(1), Excluded(3), limits))
+    } else {
+        result.unwrap(scan_page(s, sh, Excluded(1), Included(6), limits))
+    }
+    let mut offset = 0u64
+    for _ in 0u64 .. 5 {
+        let mut count = 0u64
+        while offset + count < 5 && count < limits.rows {
+            if count > 0 && (count + 1) * 22 > limits.byte_limit {
+                break
+            }
+            count += 1
+        }
+        if list.len(page.rows) != count || page.byte_count != count * 22 {
+            return false
+        }
+        for position in 0u64 .. count {
+            if page.rows[position] != expected[offset + position] {
+                return false
+            }
+        }
+        offset += count
+        let Page(rows: _, byte_count: _, next: take resume) = take page
+        match take resume {
+            None => return offset == 5,
+            Some(take token) => {
+                if offset == 5 {
+                    return false
+                }
+                let resumed = if indexed {
+                    find_next(s, ix, take token, limits)
+                } else {
+                    scan_next(s, sh, take token, limits)
+                }
+                match take resumed {
+                    Ok(Paged(take following)) => { page = take following },
+                    _ => return false
+                }
+            }
+        }
+    }
+    false
+}
+
+fn page_token(take page: Page[u64, u64]) -> Resume {
+    let Page(rows: _, byte_count: _, next: take resume) = take page
+    option.unwrap(take resume)
+}
+
+fn page_missing[T](take actual: Result[T, Error], name: String) -> bool {
+    match take actual {
+        Error(Missing(field)) => field == name,
+        _ => false
+    }
+}
+
+fn page_empty(take page: Page[u64, u64]) -> bool {
+    match page.next {
+        None => list.len(page.rows) == 0 && page.byte_count == 0,
+        Some(_) => false
+    }
+}
+
+pub fn law_keyset_pages(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("pages", std.codec.key_u64(), std.codec.of_u64())))
+    let mut original = result.unwrap(table(mut db, "pages", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_index(mut db, original, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let ix = result.unwrap(index(db, mut original, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let sh = shape(original)
+    let written = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        let inserted: Inline[(u64, u64), 7] = [(5, 13), (3, 9), (7, 3), (1, 8), (6, 6), (2, 5), (4, 2)]
+        for (key, value) in inserted {
+            put(mut tx, original, key, value)?
+        }
+        Ok(())
+    })
+    match take written {
+        Ok(Committed(_)) => {},
+        _ => return false
+    }
+    let held = snapshot(db)
+    let byte_limits: Inline[u64, 3] = [21, 22, 66]
+    for row_limit in 1u64 .. 4 {
+        for byte_limit in byte_limits {
+            let limits = Limits(rows: row_limit, byte_limit: byte_limit)
+            if !pages_match(held, sh, ix, false, limits) || !pages_match(held, sh, ix, true, limits) {
+                return false
+            }
+        }
+    }
+    let one = Limits(rows: 1, byte_limit: 22)
+    if !page_empty(result.unwrap(scan_page(held, sh, Excluded(5), Included(5), one))) ||
+        !page_empty(result.unwrap(find_page(held, ix, Included(1), Excluded(1), one))) {
+        return false
+    }
+    let zero_rows = Limits(rows: 0, byte_limit: 22)
+    let zero_bytes = Limits(rows: 1, byte_limit: 0)
+    if !page_missing(scan_page(held, sh, Unbounded, Unbounded, zero_rows), "rows") ||
+        !page_missing(find_page(held, ix, Unbounded, Unbounded, zero_bytes), "bytes") ||
+        !page_missing(scan_next(held, sh, page_token(result.unwrap(scan_page(held, sh, Unbounded, Unbounded, one))), zero_bytes), "bytes") ||
+        !page_missing(find_next(held, ix, page_token(result.unwrap(find_page(held, ix, Unbounded, Unbounded, one))), zero_rows), "rows") {
+        return false
+    }
+
+    result.unwrap(drop_table(mut db, take original))
+    result.unwrap(create_table(mut db, spec("pages", std.codec.key_u64(), std.codec.of_u64())))
+    let mut fresh = result.unwrap(table(mut db, "pages", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_index(mut db, fresh, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let fresh_ix = result.unwrap(index(db, mut fresh, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let fresh_shape = shape(fresh)
+    let current = snapshot(db)
+    match scan_next(current, fresh_shape, page_token(result.unwrap(scan_page(held, sh, Unbounded, Unbounded, one))), one) {
+        Ok(Moved(head)) => if head != version(current) { return false },
+        _ => return false
+    }
+    match find_next(current, fresh_ix, page_token(result.unwrap(find_page(held, ix, Unbounded, Unbounded, one))), one) {
+        Ok(Moved(head)) => if head != version(current) { return false },
+        _ => return false
+    }
+    match scan_next(held, fresh_shape, page_token(result.unwrap(scan_page(held, sh, Unbounded, Unbounded, one))), one) {
+        Error(Stale(1)) => {},
+        _ => return false
+    }
+    match find_next(held, fresh_ix, page_token(result.unwrap(find_page(held, ix, Unbounded, Unbounded, one))), one) {
+        Error(Stale(2)) => true,
+        _ => false
+    }
+}
+
+@test
+fn test_keyset_pages(c: Clock) -> Result[(), ()] waits {
+    if law_keyset_pages(c) { Ok(()) } else { Error(()) }
+}

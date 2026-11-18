@@ -56,12 +56,12 @@ returns a Latest root; publication follows the admitted head swap. A refused
 snapshot-record allocation leaves the follower behind until a later publication.
 Closing the writer leaves readers' last snapshots usable.
 
-**Keyset pages (STORE-SPEC v2.25 AI1; specified, not built).**
+**Keyset pages (STORE-SPEC v2.25 AI1).**
 `scan_page(s, shape, lo, hi, limits)` and `find_page(s, index, lo, hi, limits)`
 read one bounded page from the same byte cursor as `scan` and `find`.
-`Limits{rows, bytes}` refuses zero with `Missing("rows")` or `Missing("bytes")`.
+`Limits{rows, byte_limit}` refuses zero with `Missing("rows")` or `Missing("bytes")`.
 A row counts its data-tree key plus its stored value, and a page holds at least
-one row when one remains. `Page{rows, bytes, next}` has `next` = None exactly
+one row when one remains. `Page{rows, byte_count, next}` has `next` = None exactly
 on the last page. `Resume` is `send`, not `codec`. It binds the Snapshot's
 identity, the table or index id, the upper bound and the last row's full
 physical key. `scan_next` and `find_next` resume strictly after that key, so

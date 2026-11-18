@@ -302,6 +302,29 @@ pub type Done[R] {
 
 pub type Bound[K] = Unbounded | Included(K) | Excluded(K)
 
+pub type Limits: shareable + send {
+    rows: u64,
+    byte_limit: u64
+}
+
+pub opaque type Resume: send {
+    store: StoreId,
+    open: u64,
+    branch: u32,
+    version: u64,
+    source: u32,
+    high: Bytes,
+    last: Bytes
+}
+
+pub type Page[K, V]: send {
+    rows: List[(K, V)],
+    byte_count: u64,
+    next: Option[Resume]
+}
+
+pub type Resumed[K, V]: send = Paged(Page[K, V]) | Moved(u64)
+
 pub scoped type Tx {
     store: StoreId,
     roots: Roots,
@@ -1545,11 +1568,11 @@ fn range_bytes(tx: Tx, id: u32, lo: Bound[Bytes], hi: Bound[Bytes]) -> Result[By
         return Error(OutOfScope)
     }
     note_read(tx, Span(copied(low)?, copied(high)?))?
-    byte_cursor(tx.roots.data, low, high)
+    byte_cursor(tx.roots.data, Included(take low), high)
 }
 
-fn byte_cursor(data: std.omap.OMap[Bytes, Arc[Bytes]], low: Bytes, high: Bytes) -> Result[ByteRows, Error] {
-    match std.omap.range(data, Included(copied(low)?), Excluded(copied(high)?)) {
+fn byte_cursor(data: std.omap.OMap[Bytes, Arc[Bytes]], take low: std.omap.Bound[Bytes], high: Bytes) -> Result[ByteRows, Error] {
+    match std.omap.range(data, take low, Excluded(copied(high)?)) {
         Ok(take cursor) => Ok(ByteRows(cursor: take cursor)),
         Error((c, _)) => Error(Full(c))
     }
@@ -1568,7 +1591,7 @@ fn get_bytes(s: Snapshot, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
 }
 
 fn scan_bytes(s: Snapshot, id: u32, lo: Bound[Bytes], hi: Bound[Bytes]) -> Result[ByteRows, Error] {
-    byte_cursor(s.roots.data, lower_bytes(id, lo, false)?, lower_bytes(id, hi, true)?)
+    byte_cursor(s.roots.data, Included(lower_bytes(id, lo, false)?), lower_bytes(id, hi, true)?)
 }
 
 // Codec-independent S1 law fixtures. Byte keys are fixed-width big endian.
@@ -2474,7 +2497,11 @@ pub fn scan[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Re
     }
     readable(s.roots, t.catalog_key, t.id)?
     let cursor = scan_bytes(s, t.id, typed_bound(t.key, lo)?, typed_bound(t.key, hi)?)?
-    Ok(Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: std.omap.snapshot(s.roots.data), skip: None))
+    Ok(table_rows(s, t, take cursor))
+}
+
+fn table_rows[K, V](s: Snapshot, t: Shape[K, V], take cursor: ByteRows) -> Rows[K, V] {
+    Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: std.omap.snapshot(s.roots.data), skip: None)
 }
 
 // RUNNER-SPEC §4 (R2): a Cover names data-tree key ranges (I1) without reading them. `key_span`
@@ -2490,7 +2517,7 @@ pub fn span_changes(s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List[Change], E
     if hi <= lo {
         return Ok(take out)
     }
-    let mut rows = byte_cursor(s.roots.data, copied(lo)?, copied(hi)?)?
+    let mut rows = byte_cursor(s.roots.data, Included(copied(lo)?), hi)?
     while let Some((k, v)) = next_bytes(mut rows)? {
         capacity(result.capacity_only(list.push(mut out, Change(tree_key: take k, value: Some(copied(v)?)))))?
     }
@@ -2604,7 +2631,7 @@ pub fn lookup[J, K, V](tx: Tx, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -
     let low = index_bound(ix.id, ix.key, lo, false)?
     let high = index_bound(ix.id, ix.key, hi, true)?
     note_read(tx, Span(copied(low)?, copied(high)?))?
-    let cursor = byte_cursor(tx.roots.data, low, high)?
+    let cursor = byte_cursor(tx.roots.data, Included(take low), high)?
     let rows = indexed_rows(tx.roots.data, ix, take cursor)?
     Ok(IndexRows(rows: take rows, reads: tx.reads, scope: take within))
 }
@@ -2614,41 +2641,139 @@ pub fn find[J, K, V](s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]
         return Error(Foreign)
     }
     readable(s.roots, ix.catalog_key, ix.id)?
-    let cursor = byte_cursor(s.roots.data, index_bound(ix.id, ix.key, lo, false)?, index_bound(ix.id, ix.key, hi, true)?)?
+    let cursor = byte_cursor(s.roots.data, Included(index_bound(ix.id, ix.key, lo, false)?), index_bound(ix.id, ix.key, hi, true)?)?
     indexed_rows(s.roots.data, ix, take cursor)
 }
 
-fn advance_rows[K, V](mut r: Rows[K, V], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[(K, V)], Error] {
-    let found = next_bytes(mut r.cursor)?
-    let pair = match take found {
-        Some(take pair) => take pair,
-        None => return Ok(None)
+fn page_limits(limits: Limits) -> Result[(), Error] {
+    if limits.rows == 0 {
+        return Error(Missing("rows"))
     }
+    if limits.byte_limit == 0 {
+        return Error(Missing("bytes"))
+    }
+    Ok(())
+}
+
+pub fn scan_page[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K], l: Limits) -> Result[Page[K, V], Error] {
+    page_limits(l)?
+    if !same(s.store, t.store) {
+        return Error(Foreign)
+    }
+    readable(s.roots, t.catalog_key, t.id)?
+    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
+    let cursor = byte_cursor(s.roots.data, Included(lower_bytes(t.id, typed_bound(t.key, lo)?, false)?), high)?
+    read_page(s, t.id, take high, table_rows(s, t, take cursor), l)
+}
+
+pub fn find_page[J, K, V](s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J], l: Limits) -> Result[Page[K, V], Error] {
+    page_limits(l)?
+    if !same(s.store, ix.store) {
+        return Error(Foreign)
+    }
+    readable(s.roots, ix.catalog_key, ix.id)?
+    let high = index_bound(ix.id, ix.key, hi, true)?
+    let cursor = byte_cursor(s.roots.data, Included(index_bound(ix.id, ix.key, lo, false)?), high)?
+    read_page(s, ix.id, take high, indexed_rows(s.roots.data, ix, take cursor)?, l)
+}
+
+fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, r: Resume, limits: Limits) -> Result[bool, Error] {
+    if !same(s.store, store) {
+        return Error(Foreign)
+    }
+    if !same(s.store, r.store) || s.open != r.open || s.branch != r.branch || s.head != r.version {
+        return Ok(false)
+    }
+    if id != r.source {
+        return Error(Stale(r.source))
+    }
+    page_limits(limits)?
+    readable(s.roots, catalog_key, id)?
+    Ok(true)
+}
+
+pub fn scan_next[K, V](s: Snapshot, t: Shape[K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] {
+    if !resume_here(s, t.store, t.id, t.catalog_key, r, l)? {
+        return Ok(Moved(s.head))
+    }
+    let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take last) = take r
+    let cursor = byte_cursor(s.roots.data, Excluded(take last), high)?
+    Ok(Paged(read_page(s, t.id, take high, table_rows(s, t, take cursor), l)?))
+}
+
+pub fn find_next[J, K, V](s: Snapshot, ix: Index[J, K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] {
+    if !resume_here(s, ix.store, ix.id, ix.catalog_key, r, l)? {
+        return Ok(Moved(s.head))
+    }
+    let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take last) = take r
+    let cursor = byte_cursor(s.roots.data, Excluded(take last), high)?
+    Ok(Paged(read_page(s, ix.id, take high, indexed_rows(s.roots.data, ix, take cursor)?, l)?))
+}
+
+fn read_page[K, V](s: Snapshot, source: u32, take high: Bytes, take rows: Rows[K, V], limits: Limits) -> Result[Page[K, V], Error] {
+    let mut cursor = take rows
+    let mut page: List[(K, V)] = list.new()
+    let mut byte_count = 0u64
+    let mut last: Option[Bytes] = None
+    while true {
+        let found = next_bytes(mut cursor.cursor)?
+        let (take key, take raw) = match take found {
+            Some(take pair) => take pair,
+            None => return Ok(Page(rows: take page, byte_count: byte_count, next: None))
+        }
+        if list.len(page) == limits.rows {
+            break
+        }
+        let remaining: Option[u64] = if list.len(page) == 0 { None } else { Some(int.saturating_sub(limits.byte_limit, byte_count)) }
+        let row = advance_rows(cursor, key, raw, remaining, fn(observed: Bytes) -> Result[(), Error] { Ok(()) })?
+        match take row {
+            Some((take value, size)) => {
+                capacity(result.capacity_only(list.push(mut page, take value)))?
+                byte_count += size
+                last = Some(take key)
+            },
+            None => break
+        }
+    }
+    let resume = match take last {
+        Some(take key) => Some(Resume(store: s.store, open: s.open, branch: s.branch, version: s.head, source: source, high: take high, last: take key)),
+        None => None
+    }
+    Ok(Page(rows: take page, byte_count: byte_count, next: take resume))
+}
+
+fn advance_rows[K, V](r: Rows[K, V], physical_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
     let mut at: u64 = 4
     if let Some(skip) = r.skip {
-        match (skip)(pair.0, mut at) {
+        match (skip)(physical_key, mut at) {
             Ok(()) => {},
             Error(Bad(e)) => return Error(Decode(e)),
             Error(Full(c)) => return Error(Full(c))
         }
     }
-    let key = list.slice(pair.0, at, list.len(pair.0))
+    let key = list.slice(physical_key, at, list.len(physical_key))
     let k = decoded(std.codec.decode_key(r.key, key))?
     if let Some(_) = r.skip {
-        let physical_key = physical(r.table, key)?
-        match std.omap.get(r.data, physical_key) {
-            Some(raw) => {
-                let value = row_value(r.readers, r.table, raw)?
-                seen(physical_key)?
-                Ok(Some((take k, take value)))
-            },
+        let primary = physical(r.table, key)?
+        match std.omap.get(r.data, primary) {
+            Some(value) => finish_row(r, take k, primary, value, remaining, seen),
             None => Error(Stale(r.table))
         }
     } else {
-        let value = row_value(r.readers, r.table, pair.1)?
-        seen(pair.0)?
-        Ok(Some((take k, take value)))
+        finish_row(r, take k, physical_key, raw, remaining, seen)
     }
+}
+
+fn finish_row[K, V](r: Rows[K, V], take key: K, physical_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
+    let size = list.len(physical_key) + list.len(raw)
+    if let Some(left) = remaining {
+        if size > left {
+            return Ok(None)
+        }
+    }
+    let value = row_value(r.readers, r.table, raw)?
+    seen(physical_key)?
+    Ok(Some(((take key, take value), size)))
 }
 
 type ValueSchema: shareable + send {
@@ -3003,7 +3128,7 @@ pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error
     let mut roots = share_roots(db.heads[0].roots)
     let mut live = db.resident
     for id in ids {
-        let mut rows = byte_cursor(roots.data, prefix(id)?, prefix(id + 1)?)?
+        let mut rows = byte_cursor(roots.data, Included(prefix(id)?), prefix(id + 1)?)?
         while let Some((k, v)) = next_bytes(mut rows)? {
             live = int.saturating_sub(live, entry(k, v))
             roots.data = capacity(std.omap.remove(mut db.next_node, roots.data, k))?
@@ -3098,7 +3223,7 @@ fn migrate_build[K, V, K2, V2](source: Snapshot, take base: Roots, mut ids: u64,
         capacity(result.capacity_only(list.push(mut gone, old.id)))?
     }
     for old_id in gone {
-        let mut old_rows = byte_cursor(roots.data, prefix(old_id)?, prefix(old_id + 1)?)?
+        let mut old_rows = byte_cursor(roots.data, Included(prefix(old_id)?), prefix(old_id + 1)?)?
         while let Some((k, v)) = next_bytes(mut old_rows)? {
             if !retained { live = int.saturating_sub(live, entry(k, v)) }
             roots.data = capacity(std.omap.remove(mut ids, roots.data, k))?
@@ -5034,9 +5159,23 @@ pub scoped type IndexRows[K, V] {
 }
 
 pub fn next[K, V](mut r: Rows[K, V]) -> Result[Option[(K, V)], Error] {
-    advance_rows(mut r, fn(key: Bytes) -> Result[(), Error] {
+    next_row(mut r, fn(key: Bytes) -> Result[(), Error] {
         Ok(())
     })
+}
+
+fn next_row[K, V](mut r: Rows[K, V], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[(K, V)], Error] {
+    let found = next_bytes(mut r.cursor)?
+    match take found {
+        Some((take key, take raw)) => {
+            let row = advance_rows(r, key, raw, None, seen)?
+            match take row {
+                Some((take value, _)) => Ok(Some(take value)),
+                None => Ok(None)
+            }
+        },
+        None => Ok(None)
+    }
 }
 
 pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Error] {
@@ -5045,7 +5184,7 @@ pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Erro
 
 fn indexed_advance[K, V](mut rows: Rows[K, V], reads: View[Log[Read]], within: KeyScope) -> Result[Option[(K, V)], Error] {
     let owner = rows.table
-    advance_rows(mut rows, fn(key: Bytes) -> Result[(), Error] {
+    next_row(mut rows, fn(key: Bytes) -> Result[(), Error] {
         if !key_in(within, owner, key, false) {
             return Error(OutOfScope)
         }

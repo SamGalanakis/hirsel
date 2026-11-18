@@ -1,4 +1,5 @@
-// expect: refuse OWN-9
+// expect: refuse OWN-9 at 6:26
+// expect: cause OWN-9 at 6:26 from 6:16
 // The receiver is reserved by the mut argument while the scoped callback is
 // formed. Capturing the same map, even for len, overlaps that reservation.
 fn overlaps_receiver(mut m: Map[u64, u64]) -> Option[()] {

@@ -1623,6 +1623,12 @@ fn loop_scoped_slots_preserve_their_anchor_sets() {
 }
 
 #[test]
+fn map_update_receiver_overlap() {
+    let failures = run_case(&root().join("cases/own/map-update-receiver-overlap.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
 fn captured_callback_cases() {
     let mut report = vec![];
     for name in [

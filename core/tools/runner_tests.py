@@ -942,6 +942,10 @@ def admission_laws(args, root, work, engines, row):
     if args.no_mutants or args.part != 'admission':
         return
     mutants = (
+        ('slot_freed_at_handoff', '            return Ok(wire_take_output(s, mut work))',
+         '            let handed = wire_take_output(s, mut work)\n'
+         '            wire_sent(mut s, mut work)\n'
+         '            return Ok(take handed)', 'unread_client'),
         ('slot_freed_at_answer', 'h.queued += count', 'h.queued = 0u64', 'unread_client'),
         ('refusal_rows_uncapped', 'if s.refusals >= 1u64 + s.config.q { return Error(1008u16) }', 'if false { return Error(1008u16) }', 'unread_client'),
         ('reset_drops_held', 'wire_queue(mut work, Reset(version, take done), take marks, list.new())', 'wire_queue(mut work, Reset(version, list.new()), take marks, list.new())', 'unread_client'),
@@ -1130,7 +1134,7 @@ def main():
     p.add_argument('--session-mutant', action='append', choices=['encode_outside_pool', 'writer_queue', 'orphan_reader'])
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
-    p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])
+    p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_handoff', 'slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])
     p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1'])
     args = p.parse_args()
     r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1', 'calls')

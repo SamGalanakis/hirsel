@@ -17,6 +17,12 @@ fn w3c_key[A, R](f: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R])
     key
 }
 
+fn transport_receive[G: send, H: send](mut s: WireSession[G, H], mut w: WireWork) -> Option[Frame] {
+    let frame = wire_take_output(s, mut w)
+    wire_sent(mut s, mut w)
+    take frame
+}
+
 pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
     let mut reg: Registry[(), ()] = registry()
     result.unwrap(compute(mut reg, code.describe(w3c_bytes), 65536u64, DEFAULT_STEPS))
@@ -47,9 +53,14 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
         result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: stream, p: 0u64, slot: 0u32, deadline: 10000u32, arg: take arg, at: at, grows: true), true))
     }
     if wire_units(s) != 5u64 { return false }
-    for _ in 0u64 .. 5u64 { let _ = wire_take_output(mut s, mut work) }
+    for units in 0u64 .. 5u64 {
+        let selected = result.unwrap(wire_step(mut s, mut work, WPoll(true)))
+        if let None = selected { return false }
+        if wire_units(s) != 5u64 - units { return false }
+        let _ = result.unwrap(wire_step(mut s, mut work, WSent))
+    }
     if wire_units(s) != 0u64 { return false }
-    // One durable group retains each unit until the group frame is handed to the writer.
+    // One durable group retains its units and V1 rows until Sent.
     let mut answers: List[KeyedDone] = list.new()
     for stream in 0u32 .. 5u32 {
         let mut arg: Bytes = list.new()
@@ -74,7 +85,10 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
     for o in work.output { if let Batch(_, _, _, ds) = o.frame { for d in ds { retained += wire_done_size(d.outcome) } } }
     if retained != 41140u64 { return false }
     result.unwrap(wire_reset(mut s, mut work, 7u64))
-    let reset = wire_take_output(mut s, mut work)
+    let reset = result.unwrap(wire_step(mut s, mut work, WPoll(true)))
+    if wire_units(s) != 5u64 || s.refusals != 5u64 { return false }
+    if let Error(1008u16) = wire_refused(mut s, mut work, 10u32, 0u64, Overloaded) {} else { return false }
+    let _ = result.unwrap(wire_step(mut s, mut work, WSent))
     let preserved = match take reset {
         Some(Reset(7u64, take ds)) => {
             if list.len(ds) != 10u64 { false } else {
@@ -142,7 +156,7 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool w
     if let Error(1008u16) = wire_step(mut s, mut work, WClient(Hello(None, list.new()), 0u64)) {} else { return false }
     let at = host.mono_ns(clock)
     result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: 1u32, p: 2u64, slot: 0xffffffffu32, deadline: 10u32, arg: list.new(), at: at, grows: true), true))
-    let refused = match wire_take_output(mut s, mut work) { Some(Batch(0u64, _, _, ds)) => list.len(ds) == 1u64 && match ds[0u64].outcome { Refused(NoEntry) => true, _ => false }, _ => false }
+    let refused = match transport_receive(mut s, mut work) { Some(Batch(0u64, _, _, ds)) => list.len(ds) == 1u64 && match ds[0u64].outcome { Refused(NoEntry) => true, _ => false }, _ => false }
     let empty = match channel.try_receive(requests) { Error(Empty) => true, _ => false }
     let mut old: Bytes = list.new()
     result.unwrap(std.codec.put_u32(0u32, mut old))
@@ -253,7 +267,7 @@ fn w3c_arg(n: u32) -> Bytes {
 fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, slot: u32, take arg: Bytes) -> Frame waits {
     let at = host.mono_ns(rig.owner.clock)
     result.unwrap(wire_call_ready(mut rig.owner, mut rig.work, WirePending(stream: stream, p: p, slot: slot, deadline: 10000u32, arg: take arg, at: at, grows: true), true))
-    if let Some(take out) = wire_take_output(mut rig.owner, mut rig.work) { return take out }
+    if let Some(take out) = transport_receive(mut rig.owner, mut rig.work) { return take out }
     let q = result.unwrap(channel.try_receive(rig.requests))
     result.unwrap(head_arrival(mut rig.head, take q, false))
     if list.len(rig.head.group) != 0u64 { result.unwrap(gate(mut rig.head)) }
@@ -269,7 +283,7 @@ fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, slot: u32, take arg: Bytes) ->
     let WireEvent(e: take event) = result.unwrap(channel.try_receive(rig.inbox))
     let delivered = match take event { FromRunner(take message) => take message, _ => fail("W3c: expected runner event") }
     result.unwrap(wire_step(mut rig.owner, mut rig.work, WRunner(take delivered)))
-    option.unwrap(wire_take_output(mut rig.owner, mut rig.work))
+    option.unwrap(transport_receive(mut rig.owner, mut rig.work))
 }
 
 fn w3c_answer(frame: Frame, version: u64, stream: u32, p: u64, expected: Outcome) -> bool {
@@ -322,7 +336,7 @@ pub fn law_refused_send_releases_timer(tasks: Tasks, clock: Clock, random: Rando
         let at = host.mono_ns(clock)
         let pending = WirePending(stream: stream, p: 0u64, slot: 0u32, deadline: 10000u32, arg: w3c_arg(7u32), at: at, grows: true)
         result.unwrap(wire_call_ready(mut rig.owner, mut rig.work, take pending, true))
-        let output = option.unwrap(wire_take_output(mut rig.owner, mut rig.work))
+        let output = option.unwrap(transport_receive(mut rig.owner, mut rig.work))
         if !w3c_answer(output, 0u64, stream, 0u64, Refused(Overloaded)) || map.len(rig.work.timers) != 0u64 { return false }
     }
     w3c_close(take rig)
@@ -431,15 +445,15 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
 
     wire_subscribed(mut owner, mut work, 10u32, query_key(code.describe(q1)), no_arg())
     wire_deliver_content(mut owner, mut work, inbox)
-    let _ = wire_take_output(mut owner, mut work)
+    let _ = transport_receive(mut owner, mut work)
 
     let sub = 8u32
     wire_subscribed(mut owner, mut work, sub, query_key(code.describe(q1)), no_arg())
     wire_deliver_content(mut owner, mut work, inbox)
     wire_subscribed(mut owner, mut work, sub, query_key(code.describe(qf)), no_arg())
-    let old_initial_discarded = match wire_take_output(mut owner, mut work) { None => true, _ => false }
+    let old_initial_discarded = match transport_receive(mut owner, mut work) { None => true, _ => false }
     wire_deliver_content(mut owner, mut work, inbox)
-    let new_initial = wire_take_output(mut owner, mut work)
+    let new_initial = transport_receive(mut owner, mut work)
     let replacement_published = wire_initial_count(new_initial, sub, 1u64)
 
     set(mut db, t, 2u64, 2u64)
@@ -452,12 +466,12 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
         result.unwrap(wire_step(mut owner, mut work, WRunner(take old_end)))
     } else { return false }
     wire_deliver_content(mut owner, mut work, inbox)
-    let after_end = wire_take_output(mut owner, mut work)
+    let after_end = transport_receive(mut owner, mut work)
     let other_sub_kept = match take after_end {
         Some(Batch(_, complete, rows, _)) => list.len(complete) == 0u64 && list.len(rows) == 1u64 && rows[0].sub == 10u32,
         _ => false,
     }
-    let renewed = wire_take_output(mut owner, mut work)
+    let renewed = transport_receive(mut owner, mut work)
     let stale_end_discarded = other_sub_kept && wire_initial_count(renewed, sub, 2u64)
 
     // The old complete can still be in the owner inbox when a replacement arrives.
@@ -465,7 +479,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     wire_subscribed(mut owner, mut work, 3u32, list.new(), no_arg())
     wire_deliver_content(mut owner, mut work, inbox)
     wire_deliver_content(mut owner, mut work, inbox)
-    let stale_complete_discarded = match wire_take_output(mut owner, mut work) {
+    let stale_complete_discarded = match transport_receive(mut owner, mut work) {
         Some(Ended(3u32, Refused(NoEntry))) => true,
         _ => false,
     }

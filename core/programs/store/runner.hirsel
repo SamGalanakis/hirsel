@@ -2967,6 +2967,7 @@ fn retired_owner(take seed: RetiredOwner) -> Result[(), ()] waits {
         }
         let _ = result.unwrap((service.step)(mut service.context, mut work, take input))
         while let Some(take frame) = result.unwrap((service.step)(mut service.context, mut work, WPoll(true))) {
+            let _ = result.unwrap((service.step)(mut service.context, mut work, WSent))
             let down = match take frame {
                 Batch(v, take complete, take rows, _) => Batched(KeyedBatch(version: v, complete: take complete, rows: take rows, outcomes: list.new())),
                 Ended(sub, take outcome) => Ended(sub, take outcome),
@@ -3384,7 +3385,7 @@ pub const DONE_MAX: u64 = 8192
 
 // WIRE W3b. The service owns principal binding, admission, dedup and outcomes.
 // Each owner holds the one publisher sender. Another transport calls the same dispatch.
-pub type ServiceInput: send = WAttach(Ip, Sender[WireEvent], Sender[PubIn]) | WClient(Frame, u64) | WRunner(Notice) | WAuthenticated(Option[ingress.Principal]) | WRate(bool) | WDrained | WPoll(bool) | WClose(u64) | WForce
+pub type ServiceInput: send = WAttach(Ip, Sender[WireEvent], Sender[PubIn]) | WClient(Frame, u64) | WRunner(Notice) | WAuthenticated(Option[ingress.Principal]) | WRate(bool) | WDrained | WSent | WPoll(bool) | WClose(u64) | WForce
 
 pub type Service[C: send]: send {
     context: C,
@@ -3882,7 +3883,11 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]], mu
                 if op == 8u8 { closing = true }
                 None
             },
-            Sent => { busy = false; None },
+            Sent => {
+                busy = false
+                let _ = apply_input(mut service.context, mut work, WSent)
+                None
+            },
             WriteTimedOut(end) => {
                 if !closing {
                     close_at = Some(end)
@@ -4347,9 +4352,9 @@ pub fn prepare[G: send, H: send](r: Registry[G, H], a: Admitted, take want: Call
 // The wire owner owns this state. Policy tasks answer only through its inbox.
 type WireOwed: send { generation: u64 }
 
-pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], timers: Map[u64, Task[()]], output: List[WireOutput], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64 }
+pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], timers: Map[u64, Task[()]], output: List[WireOutput], sending: List[WireMark], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64 }
 
-fn wire_work() -> WireWork { WireWork(head: None, asking: None, timers: map.new(), output: list.new(), deadline: None, drain: None, abandoned: 0u64) }
+fn wire_work() -> WireWork { WireWork(head: None, asking: None, timers: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64) }
 
 fn wire_cut(work: WireWork, clock: Clock) -> bool {
     if let Some(root) = work.drain {
@@ -4671,13 +4676,19 @@ fn wire_prune_output[G: send, H: send](mut s: WireSession[G, H], mut work: WireW
     }
 }
 
-fn wire_take_output[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork) -> Option[Frame] {
+fn wire_take_output[G: send, H: send](s: WireSession[G, H], mut work: WireWork) -> Option[Frame] {
     let selected = loop {
         if list.len(work.output) == 0u64 { return None }
         let next = list.remove(mut work.output, 0u64)
         if let Some(take current) = wire_current_output(s.subs, take next) { break take current }
     }
     let WireOutput(frame: take f, marks: take marks, generations: _, external: _) = take selected
+    work.sending = take marks
+    Some(take f)
+}
+
+fn wire_sent[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork) {
+    let marks = replace(mut work.sending, list.new())
     for take mark in take marks {
         match take mark {
             V1 => { s.refusals -= 1u64 },
@@ -4688,7 +4699,6 @@ fn wire_take_output[G: send, H: send](mut s: WireSession[G, H], mut work: WireWo
             },
         }
     }
-    Some(take f)
 }
 
 fn wire_begin_policy[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, take request: WireAsk) -> Result[(), u16] {
@@ -5031,6 +5041,7 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
                 _ => {},
             }
         },
+        WSent => { wire_sent(mut s, mut work); return Ok(None) },
         WDrained => {
             if let Some(_) = work.head { let _ = channel.try_send(wire_publisher(s), PubIn(e: Drained)) }
         },
@@ -5064,7 +5075,7 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
                 if index + 1u64 == list.len(s.entries) { s.phase = 4u8 }
                 return Ok(Some(Placed(take answer)))
             }
-            return Ok(wire_take_output(mut s, mut work))
+            return Ok(wire_take_output(s, mut work))
         },
     }
     let version = s.last

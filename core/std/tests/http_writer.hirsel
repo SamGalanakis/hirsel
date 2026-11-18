@@ -24,11 +24,15 @@ fn http_response_wire_head() -> bool {
     let mut cache = date_cache()
     let first = "HTTP/1.0 204 No Content\r\nConnection: keep-alive\r\nDate: Tue, 29 Feb 2000 00:00:00 GMT\r\n\r\n"
     let next = "HTTP/1.0 204 No Content\r\nConnection: keep-alive\r\nDate: Tue, 29 Feb 2000 00:00:01 GMT\r\n\r\n"
-    let inputs =[(951782400000u64, first), (951782400999u64, first), (951782401000u64, next), (951782400000u64, first)]
+    let walls =[951782400000u64, 951782400999u64, 951782401000u64, 951782400000u64]
     for i in 0u64 .. 4u64 {
-        let (wall, expected) = inputs[i]
-        result.unwrap(response_head(mut out, r, 0, false, wall, mut cache))
-        if out != string.as_bytes(expected) {
+        result.unwrap(response_head(mut out, r, 0, false, walls[i], mut cache))
+        let matches = if i == 2 {
+            out == string.as_bytes(next)
+        } else {
+            out == string.as_bytes(first)
+        }
+        if !matches {
             return false
         }
     }

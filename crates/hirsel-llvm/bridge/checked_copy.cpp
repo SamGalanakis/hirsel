@@ -8,6 +8,7 @@
 #endif
 #include "forward_reads.h"
 #include "loop_version.h"
+#include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -620,6 +621,52 @@ extern "C" void hirsel_llvm_inline_recursive_leaves(void *Raw) {
         inlineRecursiveLeaf(*Call, *Leaf, Arg->getArgNo(), *Value);
       Leaf->eraseFromParent();
       break;
+    }
+  }
+}
+
+// Inlining and Step versioning can copy the same source Step many times. On
+// x86-64 a relocated source position costs a ten-byte movabs at each copy.
+// Share that load on the slow edge once it pays for a separate function.
+extern "C" void hirsel_llvm_share_step_sites(void *Raw) {
+  auto &M = *static_cast<Module *>(Raw);
+  if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return;
+  auto *Step = M.getFunction("hirsel_core_step_out");
+  if (!Step) return;
+  MapVector<Constant *, SmallVector<CallInst *, 4>> Sites;
+  for (auto &F : M)
+    for (auto &B : F)
+      for (auto &I : B) {
+        auto *Call = dyn_cast<CallInst>(&I);
+        if (!Call || Call->getCalledFunction() != Step) continue;
+        auto *Site = Call->getArgOperand(1);
+        if (auto *Word = dyn_cast<ConstantInt>(Site)) {
+          if (Word->getValue().isSignedIntN(32)) continue;
+        } else if (!isa<ConstantExpr>(Site)) {
+          continue;
+        }
+        Sites[cast<Constant>(Site)].push_back(Call);
+      }
+  auto *Type = FunctionType::get(Step->getReturnType(), {Step->getArg(0)->getType()}, false);
+  auto &Context = M.getContext();
+  for (auto &[Site, Calls] : Sites) {
+    // Four saved loads pay for the thunk, its alignment and bookkeeping.
+    if (Calls.size() < 4) continue;
+    auto *Shared = Function::Create(Type, GlobalValue::InternalLinkage, "hirsel.step.out", M);
+    Shared->addFnAttr(Attribute::Cold);
+    IRBuilder<> Body(BasicBlock::Create(Context, "", Shared));
+    auto *Slow = Body.CreateCall(Step, {Shared->getArg(0), Site});
+    Slow->setTailCallKind(CallInst::TCK_Tail);
+    Body.CreateRet(Slow);
+    for (auto *Call : Calls) {
+      IRBuilder<> Builder(Call);
+      auto *Replacement = Builder.CreateCall(Shared, {Call->getArgOperand(0)});
+      auto Attrs = Call->getAttributes();
+      Replacement->setAttributes(AttributeList::get(
+          Context, Attrs.getFnAttrs(), Attrs.getRetAttrs(), {Attrs.getParamAttrs(0)}));
+      Replacement->copyMetadata(*Call);
+      Call->replaceAllUsesWith(Replacement);
+      Call->eraseFromParent();
     }
   }
 }

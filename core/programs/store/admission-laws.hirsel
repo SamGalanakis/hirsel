@@ -53,13 +53,15 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
         result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: stream, p: 0u64, slot: 0u32, deadline: 10000u32, arg: take arg, at: at, grows: true), true))
     }
     if wire_units(s) != 5u64 { return false }
-    for units in 0u64 .. 5u64 {
+    for completed in 0u64 .. 5u64 {
         let selected = result.unwrap(wire_step(mut s, mut work, WPoll(true)))
         if let None = selected { return false }
-        if wire_units(s) != 5u64 - units { return false }
+        if wire_units(s) != 5u64 - completed { return false }
+        let _ = result.unwrap(wire_step(mut s, mut work, WPoll(false)))
+        if wire_units(s) != 5u64 - completed { return false }
         let _ = result.unwrap(wire_step(mut s, mut work, WSent))
+        if wire_units(s) != 4u64 - completed { return false }
     }
-    if wire_units(s) != 0u64 { return false }
     // One durable group retains its units and V1 rows until Sent.
     let mut answers: List[KeyedDone] = list.new()
     for stream in 0u32 .. 5u32 {
@@ -115,9 +117,13 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
     result.unwrap(list.push(mut unfit, KeyedDone(stream: list.new(), p: 0u64, outcome: Returned(take legacy))))
     let refused_legacy = match wire_update(mut s, mut work, Update(version: 9u64, content: None, outcomes: take unfit)) { Error(1009u16) => true, _ => false }
     let unchanged = s.last == 7u64 && list.len(work.output) == 0u64
+    let readmitted = match wire_refused(mut s, mut work, 10u32, 0u64, Overloaded) {
+        Ok(()) => s.refusals == 1u64,
+        Error(_) => false,
+    }
     task.cancel(mut policy_handle)
     let _ = task.join(take policy_handle)
-    preserved && freed && no_head && refused_legacy && unchanged
+    preserved && freed && no_head && refused_legacy && unchanged && readmitted
 }
 
 pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool waits {

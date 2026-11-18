@@ -39,7 +39,7 @@ use hirsel_core_resolve::{
     DefinitionId, ModuleId, NameIndex, Refusal, Resolution, ResolutionScratch, ResolvedUse, Site,
     Target,
 };
-use hirsel_core_syntax::{Item, NodeId, Span, SyntaxFile};
+use hirsel_core_syntax::{Item, NodeId, Span, Symbol, SyntaxFile};
 use std::collections::HashMap;
 
 /// One module of the program, already parsed.
@@ -118,6 +118,7 @@ pub struct Program<'a> {
     pub by_definition: Rows<Option<Def>>,
     pub(crate) core_operations: Rows<Option<u16>>,
     pub(crate) library_paths: Option<std::sync::Arc<hirsel_core_ids::published::Map<DefPath, Def>>>,
+    core_never: Option<(ModuleId, Symbol)>,
     /// Refusals of declarations and signatures, and the resolver's.
     pub refusals: Vec<Refusal>,
     pub gaps: Vec<Gap>,
@@ -451,6 +452,16 @@ impl<'a> Program<'a> {
             },
             by_path: HashMap::new(),
             library_paths: library.map(|l| std::sync::Arc::new(l.paths.clone())),
+            core_never: index
+                .symbols
+                .find("Never")
+                .zip(
+                    index
+                        .symbols
+                        .find("core")
+                        .and_then(|name| index.core_module(name)),
+                )
+                .map(|(name, module)| (module, name)),
             by_definition: {
                 let mut rows = library.map_or_else(Rows::default, |l| {
                     Rows::overlay(std::sync::Arc::clone(&l.definitions))
@@ -503,15 +514,11 @@ impl<'a> Program<'a> {
         (k != u32::MAX).then(|| &info.resolution.names[k as usize])
     }
 
-    pub(crate) fn core_named(&self, id: DefinitionId, names: &[&str]) -> bool {
-        let d = self.index.get(id);
-        let m = self.index.modules[d.site.module.0 as usize];
-        Some(m.package) == self.index.core
-            && m.depth == 1
-            && self.index.symbols.text(m.name) == "core"
-            && names
-                .iter()
-                .any(|n| self.index.symbols.find(n) == Some(d.name))
+    pub(crate) fn is_core_never(&self, id: DefinitionId) -> bool {
+        self.core_never.is_some_and(|(module, name)| {
+            let definition = self.index.get(id);
+            definition.name == name && definition.site.module == module
+        })
     }
     pub fn decl(&self, path: &DefPath) -> Option<&TypeDecl> {
         match self

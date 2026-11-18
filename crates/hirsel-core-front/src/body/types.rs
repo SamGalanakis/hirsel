@@ -287,7 +287,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return ERROR;
                 }
             },
-            Some(Target::Definition(q)) if p.core_named(q, &["Never"]) => {
+            Some(Target::Definition(q)) if p.is_core_never(q) => {
                 if !args.is_empty() {
                     let message = "this type takes no type arguments";
                     self.refuse_type_arguments(path, args.len(), 0, message);

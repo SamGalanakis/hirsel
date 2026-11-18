@@ -1320,7 +1320,7 @@ impl Program<'_> {
                 };
                 return self.no_args(scalar(s), args, &site);
             }
-            Some(Target::Definition(p)) if self.core_named(p, &["Never"]) => {
+            Some(Target::Definition(p)) if self.is_core_never(p) => {
                 return self.no_args(NEVER, args, &site);
             }
             Some(Target::Binder(b)) => {

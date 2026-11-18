@@ -32,6 +32,12 @@
       "name": "rust-std-aarch64",
       "sha256": "31a2340697bcc392974882712a4d0bce96bd7834a4a25aee14224ba43b5c64c2",
       "url": "https://github.com/hermeticbuild/rust-redist/releases/download/1.99.0/rust-std-1.99.0-aarch64-unknown-linux-gnu.tar.zst"
+    },
+    {
+      "archive_prefix": "rust-src-1.99.0/rust-src",
+      "name": "rust-src",
+      "sha256": "9128e68f0cac5c7666a72209cbca8c3f0a6e2e17725350b92ddbdbb9b31ae797",
+      "url": "https://github.com/hermeticbuild/rust-redist/releases/download/1.99.0/rust-src-1.99.0.tar.zst"
     }
   ]
 }

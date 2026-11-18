@@ -96,6 +96,21 @@ and never continues with live effects.
 `tape show --include-credentials` writes the header and stored frames to standard
 output. Source positions appear in diagnose replay.
 
+## Symbolize a runtime panic
+
+The shipping native runtime prints raw PCs when `RUST_BACKTRACE=1` or
+`RUST_BACKTRACE=full`. Keep the unstripped executable and match its
+`readelf -n` build ID with the ID in the trace. For a frame in that
+executable, subtract the reported executable load bias and one byte from
+the return PC before passing the resulting ELF address to LLVM.
+
+```sh
+llvm-symbolizer --obj=./program "$(printf '%#x' "$((pc - load_bias - 1))")"
+```
+
+Use the return PC and load bias from the same panic. Frames from other shared
+objects need the corresponding object and mapping from the process.
+
 ## Run tests
 
 ```sh

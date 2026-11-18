@@ -1,7 +1,34 @@
 load("@prelude//rust:rust_toolchain.bzl", "PanicRuntime", "RustToolchainInfo")
 
+def _trace_std(ctx):
+    tree = ctx.actions.copied_dir("rust", ctx.attrs.srcs)
+    std = ctx.actions.declare_output("libstd-hirsel-trace.rlib")
+    ctx.actions.run(cmd_args(
+        "python3", ctx.attrs.script, tree, ctx.attrs.std_sources,
+        ctx.attrs.panic_image, ctx.attrs.target_triple, std.as_output(),
+    ), category = "rust_trace_only_std")
+    return [DefaultInfo(default_output = std)]
+
+trace_std = rule(
+    impl = _trace_std,
+    attrs = {
+        "srcs": attrs.dict(attrs.string(), attrs.source()),
+        "std_sources": attrs.source(allow_directory = True),
+        "target_triple": attrs.string(),
+        "script": attrs.source(),
+        "panic_image": attrs.source(),
+    },
+)
+
 def _rust(ctx):
     tree = ctx.actions.copied_dir("rust", ctx.attrs.srcs)
+    sysroot = tree
+    if ctx.attrs.runtime_std != None:
+        target_lib = "lib/rustlib/{}/lib/".format(ctx.attrs.target_triple)
+        std = ctx.attrs.runtime_std[DefaultInfo].default_outputs[0]
+        files = {name: source for name, source in ctx.attrs.srcs.items() if not name.startswith(target_lib + "libstd-")}
+        files[target_lib + "libstd-hirsel-trace.rlib"] = std
+        sysroot = ctx.actions.copied_dir("runtime-rust", files)
     return [
         DefaultInfo(),
         RustToolchainInfo(
@@ -10,7 +37,7 @@ def _rust(ctx):
             clippy_driver = RunInfo(args = cmd_args(tree.project("bin/clippy-driver"), hidden = tree)),
             # Prelude actions name the declared sysroot instead of discovering it
             # from the executable's location.
-            sysroot_path = tree,
+            sysroot_path = sysroot,
             default_edition = "2024",
             panic_runtime = PanicRuntime("unwind"),
             # Cargo's dev profile for workspace members ([profile.dev] in Cargo.toml):
@@ -37,6 +64,7 @@ rust_toolchain = rule(
     impl = _rust,
     attrs = {
         "srcs": attrs.dict(attrs.string(), attrs.source()),
+        "runtime_std": attrs.option(attrs.dep(), default = None),
         "target_triple": attrs.string(),
     },
     is_toolchain_rule = True,

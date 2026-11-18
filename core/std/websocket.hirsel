@@ -373,10 +373,14 @@ fn close_error(c: Control) -> u16 {
     0
 }
 
-fn reject(mut d: Decoder, code: u16) -> Event {
+/// Releases an incomplete message when its reader stops decoding.
+pub fn discard(mut d: Decoder) {
     d.ended = true
-    // Release a partial message on terminal protocol failure.
     let old = replace(mut d.message, list.new())
+}
+
+fn reject(mut d: Decoder, code: u16) -> Event {
+    discard(mut d)
     Reject(code)
 }
 
@@ -512,8 +516,7 @@ fn finish_frame(mut d: Decoder) -> Event {
         if code != 0 {
             return reject(mut d, code)
         }
-        d.ended = true
-        let old = replace(mut d.message, list.new())
+        discard(mut d)
         return Closed(d.control)
     }
     d.fragmented = !d.fin

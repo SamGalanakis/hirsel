@@ -614,67 +614,91 @@ pub fn owe_pong(mut w: WriteBuffer, control: websocket.Control) {
 
 pub const MESSAGE_NS: u64 = 30000000000
 
+fn message_expired(r: Reader, now: u64) -> bool {
+    match r.message_end {
+        Some(end) => now >= end,
+        None => false
+    }
+}
+
+/// Decodes bytes already received into scratch. None means the caller must
+/// refill the scratch before polling again. This step never waits on I/O.
+pub fn decode_buffered(mut r: Reader) -> Result[Option[websocket.Event], Error] {
+    let now = host.mono_ns(r.clock)
+    if message_expired(r, now) {
+        return Error(Protocol(1001u16))
+    }
+    let before = websocket.frame_count(r.decoder)
+    let event = match websocket.next(mut r.decoder, r.input, mut r.cursor) {
+        Ok(take event) => take event,
+        Error(c) => return Error(Allocation(c))
+    }
+    if websocket.incomplete(r.decoder) {
+        if let None = r.message_end {
+            r.message_end = Some(int.saturating_add(now, MESSAGE_NS))
+        }
+    } else {
+        r.message_end = None
+    }
+    match take event {
+        Need => if websocket.frame_count(r.decoder) != before {
+            Ok(Some(Need))
+        } else {
+            Ok(None)
+        },
+        take other => Ok(Some(take other))
+    }
+}
+
+/// Reuses the reader's fixed scratch after decode_buffered returns None.
+pub fn refill(mut r: Reader, deadline: Until) -> Result[(), Error] waits {
+    list.clear(mut r.input)
+    r.cursor = 0
+    let max = list.capacity(r.input)
+    let read_until = match r.message_end {
+        Some(end) => match deadline {
+            At(_, earlier) => if earlier < end {
+                deadline
+            } else {
+                At(r.clock, end)
+            },
+            Never => At(r.clock, end)
+        },
+        None => deadline
+    }
+    match host.recv_bounded(mut r.half, mut r.input, max, read_until) {
+        Ok(0) => Error(Eof),
+        Ok(_) => Ok(()),
+        Error(TimedOut) => if message_expired(r, host.mono_ns(r.clock)) {
+            Error(Protocol(1001u16))
+        } else {
+            Error(Network(TimedOut))
+        },
+        Error(e) => Error(Network(e))
+    }
+}
+
 /// Reads one protocol event with bounded 8192-byte scratch. An incomplete
 /// message has one absolute deadline across reads and intervening controls.
 pub fn read(mut r: Reader, deadline: Until) -> Result[websocket.Event, Error] waits {
-    let before = websocket.frame_count(r.decoder)
-    let mut attempted = false
     loop {
-        let now = host.mono_ns(r.clock)
-        if let Some(end) = r.message_end {
-            if now >= end {
+        if let Some(take event) = decode_buffered(mut r)? {
+            return Ok(take event)
+        }
+        refill(mut r, deadline)?
+        if expired(deadline) {
+            if message_expired(r, host.mono_ns(r.clock)) {
                 return Error(Protocol(1001u16))
             }
-        }
-        if attempted && expired(deadline) {
             return Error(Network(TimedOut))
         }
-        let event = match websocket.next(mut r.decoder, r.input, mut r.cursor) {
-            Ok(take event) => take event,
-            Error(c) => return Error(Allocation(c))
-        }
-        if websocket.incomplete(r.decoder) {
-            if let None = r.message_end {
-                r.message_end = Some(int.saturating_add(now, MESSAGE_NS))
-            }
-        } else {
-            r.message_end = None
-        }
-        match take event {
-            Need => if websocket.frame_count(r.decoder) != before {
-                return Ok(Need)
-            },
-            take other => return Ok(take other),
-        }
-        list.clear(mut r.input)
-        r.cursor = 0
-        let max = list.capacity(r.input)
-        let read_until = match r.message_end {
-            Some(end) => match deadline {
-                At(_, earlier) => if earlier < end {
-                    deadline
-                } else {
-                    At(r.clock, end)
-                },
-                Never => At(r.clock, end),
-            },
-            None => deadline,
-        }
-        match host.recv_bounded(mut r.half, mut r.input, max, read_until) {
-            Ok(0) => return Error(Eof),
-            Ok(_) => {},
-            Error(TimedOut) => {
-                if let Some(end) = r.message_end {
-                    if host.mono_ns(r.clock) >= end {
-                        return Error(Protocol(1001u16))
-                    }
-                }
-                return Error(Network(TimedOut))
-            },
-            Error(e) => return Error(Network(e))
-        }
-        attempted = true
     }
+}
+
+/// Releases decoder storage before returning the read half for TCP drain.
+pub fn finish_read(mut r: Reader) {
+    websocket.discard(mut r.decoder)
+    let old = replace(mut r.input, list.new())
 }
 
 pub type Upgraded: send {

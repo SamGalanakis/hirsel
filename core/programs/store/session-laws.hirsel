@@ -1,57 +1,29 @@
-// WIRE-SPEC 2.3: ten reader-funded frames at q=4, assembly plus growth and
-// scratch 401408, and 4096 bytes of reader bookkeeping. Decode's safe bound
-// is four payload bytes per encoded byte plus 128 per frame, not a run's peak.
-fn pressure(take c: WireConfig) -> bool {
-    let units = 1u64 + c.q
-    let (head, stalled): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(units))
-    let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(units))
-    let mut input: Bytes = result.unwrap(list.with_capacity(c.socket.max_frame))
-    result.unwrap(std.codec.put_u32(1u32, mut input))
-    result.unwrap(std.codec.put_u32(0u32, mut input))
-    result.unwrap(std.codec.put_u64(0u64, mut input))
-    result.unwrap(std.codec.put_u32(0u32, mut input))
-    result.unwrap(std.codec.put_u32(1000u32, mut input))
-    result.unwrap(std.codec.put_u32(262116u32, mut input))
-    while list.len(input) < c.socket.max_frame { result.unwrap(list.push(mut input, 97u8)) }
-    for _ in 0u64 .. units {
-        let f = result.unwrap(wire_decode(input))
-        if let Error(_) = channel.try_send(head, wire_event(Input(take f, 0u64))) { return false }
-    }
-    for _ in 0u64 .. units {
-        let f = result.unwrap(wire_decode(input))
-        if let Error(_) = channel.try_send(to, wire_event(Input(take f, 0u64))) { return false }
-    }
-    // A max frame still being assembled, with geometric-growth transient and
-    // receive scratch, while neither consumer drains its held requests.
-    let assembly: Bytes = result.unwrap(list.with_capacity(401408u64))
-    let full_head = match channel.try_send(head, wire_event(Input(Unsubscribe(0u32), 0u64))) { Error(Full(_)) => true, _ => false }
-    let full_inbox = match channel.try_send(to, wire_event(Input(Unsubscribe(0u32), 0u64))) { Error(Full(_)) => true, _ => false }
-    let mut count = 0u64
-    for _ in 0u64 .. units {
-        if let Ok(WireEvent(e: Input(Call(_, _, _, _, arg), _))) = channel.try_receive(stalled) {
-            if list.len(arg) == c.socket.max_frame - 28u64 { count += 1u64 }
-        }
-        if let Ok(WireEvent(e: Input(Call(_, _, _, _, arg), _))) = channel.try_receive(inbox) {
-            if list.len(arg) == c.socket.max_frame - 28u64 { count += 1u64 }
-        }
-    }
-    full_head && full_inbox && count == 10u64 && list.capacity(assembly) == 401408u64
-}
-
-pub fn law_reader_reservation_holds(tasks: Tasks) -> bool waits {
-    let c = wire_defaults(0u64, 0u64)
-    // Independent arithmetic from the WIRE formula, for m=262144 and q=4.
-    let expected = 10u64 * (4u64 * 262144u64 + 128u64) + 401408u64 + 4096u64
-    if reader_bytes(c) < expected { return false }
-    let h = match task.spawn(tasks, bytes reader_bytes(c), c, pressure) {
-        Ok(take h) => take h, Error(_) => return false,
-    }
-    match task.join(take h) { Ok(ok) => ok, Error(_) => false }
+// A Reset encodes from a 16-byte payload and a 30-byte wire capacity. Two
+// connections hold one wire block each. A third job needs 48 more bytes
+// (16 + 32), so an 80-byte pool refuses until one of the two blocks drops.
+pub fn law_pool_holds_writer_bytes(tasks: Tasks, clock: Clock) -> bool waits {
+    let config = wire_defaults(0u64, 0u64)
+    let (pool, take pooled_task) = result.unwrap(start_wire_pool(tasks, config, clock, 80u64))
+    let (one_to, one_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = result.unwrap(channel.new(1u64))
+    let (two_to, two_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = result.unwrap(channel.new(1u64))
+    let (write, pending): (Sender[Bytes], Receiver[Bytes]) = result.unwrap(channel.new(1u64))
+    let first = result.unwrap(wire_pack(pool, one_to, one_from, Reset(17u64, list.new())))
+    let second = result.unwrap(wire_pack(pool, two_to, two_from, Reset(19u64, list.new())))
+    result.unwrap(channel.try_send(write, take first))
+    let before_write = match wire_pack(pool, one_to, one_from, Reset(23u64, list.new())) { Error(Protocol(1013u16)) => true, _ => false }
+    let writing = result.unwrap(channel.try_receive(pending))
+    let during_write = match wire_pack(pool, two_to, two_from, Reset(29u64, list.new())) { Error(Protocol(1013u16)) => true, _ => false }
+    let bytes_sent = list.len(writing)
+    let _ = take writing
+    let third = result.unwrap(wire_pack(pool, one_to, one_from, Reset(31u64, list.new())))
+    let other_bytes = list.len(second)
+    let _ = take pooled_task
+    before_write && during_write && bytes_sent == 18u64 && other_bytes == 18u64 && list.len(third) == 18u64
 }
 
 @test
-fn test_wire_session(tasks: Tasks) -> Result[(), ()] waits {
-    if law_session_records(tasks) && law_reader_reservation_holds(tasks) && law_writer_one_frame() && law_children_joined_on_close(tasks) { Ok(()) } else { Error(()) }
+fn test_wire_session(tasks: Tasks, clock: Clock) -> Result[(), ()] waits {
+    if law_session_records(tasks) && law_pool_holds_writer_bytes(tasks, clock) && law_writer_one_frame() && law_children_joined_on_close(tasks) { Ok(()) } else { Error(()) }
 }
 
 pub fn law_writer_one_frame() -> bool {

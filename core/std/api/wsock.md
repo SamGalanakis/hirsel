@@ -34,9 +34,10 @@ and retains response read-ahead. It returns `Connected` and a client encoder.
 An incomplete message has a 30-second deadline from its first partial frame.
 Arriving bytes and interleaved controls leave that deadline fixed. Expiry
 returns `Protocol(1001)`.
-Decoded messages allocate in the task calling read. Moving them through a
-channel preserves that task's charge. The session must budget all outstanding
-reader-funded frames according to WIRE 2.3 arrangement (a).
+`decode_buffered` and `refill` separate parsing from socket waits. Assembly
+allocates in the task calling `decode_buffered`. The runner moves the reader to
+its shared transport allocation task for this step and refills the scratch in
+the reader child. Moving the resulting message preserves its allocation charge.
 
 `outbound` and `encode` run at the allocating owner. The client encoder requests
 four fresh host.random bytes on every frame, including controls. An encoded

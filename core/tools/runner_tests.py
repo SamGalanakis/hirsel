@@ -829,7 +829,7 @@ def session_laws(args, root, work, engines, row):
     adapted.parent.mkdir()
     adapted.write_text(text + '\n' + laws)
     selected = manifest(root, work, 'session', adapted)
-    names = args.session_law or ('reader_reservation_holds', 'writer_one_frame', 'children_joined_on_close', 'session_records')
+    names = args.session_law or ('pool_holds_writer_bytes', 'writer_one_frame', 'children_joined_on_close', 'session_records')
     if 'evaluator' in engines:
         for name in names:
             value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/runner/law_' + name)
@@ -845,9 +845,10 @@ def session_laws(args, root, work, engines, row):
     if args.no_mutants:
         return
     mutants = (
-        ('undersized_reader', [(' + 8192u64 + 4096u64', ' + 0u64 + 0u64')], 'reader_reservation_holds'),
-        ('head_frames_uncounted', [('let outstanding = 2u64 * (1u64 + c.q)',
-          'let outstanding = 1u64 * (1u64 + c.q)')], 'reader_reservation_holds'),
+        ('encode_outside_pool', [('    if let Error(_) = channel.try_send(pool, Encode(take frame, channel.sender(to))) { return Error(Protocol(1013u16)) }',
+          '    let mut out = result.unwrap(std.wsock.outbound(Server, std.wsock.defaults(), None))\n'
+          '    let payload = wire_payload(take frame, 262144u64)?\n'
+          '    return std.wsock.encode(mut out, true, 2u8, payload)')], 'pool_holds_writer_bytes'),
         ('writer_queue', [('fn wire_ready(busy: bool) -> bool { !busy }', 'fn wire_ready(busy: bool) -> bool { true }')], 'writer_one_frame'),
         ('orphan_reader', [('    task.cancel(mut reader)\n    task.cancel(mut writer)\n'
           '    let _ = task.join(take reader)\n    let _ = task.join(take writer)',
@@ -1125,8 +1126,8 @@ def main():
     p.add_argument('--mutant', action='append', choices=[m[0] for m in MUTANTS])
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
-    p.add_argument('--session-law', action='append', choices=['reader_reservation_holds', 'writer_one_frame', 'children_joined_on_close', 'session_records'])
-    p.add_argument('--session-mutant', action='append', choices=['undersized_reader', 'head_frames_uncounted', 'writer_queue', 'orphan_reader'])
+    p.add_argument('--session-law', action='append', choices=['pool_holds_writer_bytes', 'writer_one_frame', 'children_joined_on_close', 'session_records'])
+    p.add_argument('--session-mutant', action='append', choices=['encode_outside_pool', 'writer_queue', 'orphan_reader'])
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
     p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])

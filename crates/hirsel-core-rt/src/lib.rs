@@ -86,6 +86,7 @@ pub struct Context {
     pub(crate) step_slice_tail: u64,
     pub(crate) regions: region::RegionCache,
     pub(crate) heap: std::cell::OnceCell<std::sync::Arc<task_heap::Heap>>,
+    pub(crate) spare_isolate_cell: Option<Box<std::mem::MaybeUninit<causes::Cell>>>,
 }
 
 impl Context {
@@ -117,6 +118,7 @@ impl Context {
             active_resource: std::ptr::null_mut(),
             host_files: std::ptr::null_mut(),
             isolates: Vec::new(),
+            spare_isolate_cell: None,
         }
     }
 

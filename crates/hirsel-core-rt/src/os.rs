@@ -3,7 +3,7 @@
 use crate::provider::*;
 use std::{
     collections::BTreeMap,
-    ffi::CString,
+    ffi::{CStr, CString},
     io,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     path::Path,
@@ -515,7 +515,15 @@ fn valid_path(path: &[u8]) -> io::Result<()> {
     Ok(())
 }
 fn beneath(fd: i32, path: &[u8], flags: i32) -> io::Result<OwnedFd> {
-    let path = CString::new(path)?;
+    let mut short = [0; 64];
+    let long;
+    let path: &CStr = if path.len() < short.len() {
+        short[..path.len()].copy_from_slice(path);
+        CStr::from_bytes_with_nul(&short[..=path.len()]).map_err(|_| io::ErrorKind::InvalidInput)?
+    } else {
+        long = CString::new(path)?;
+        &long
+    };
     // SAFETY: open_how is an integer-only Linux UAPI structure.
     let mut how: libc::open_how = unsafe { std::mem::zeroed() };
     how.flags = (flags | libc::O_CLOEXEC) as u64;

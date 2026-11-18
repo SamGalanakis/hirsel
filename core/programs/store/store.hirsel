@@ -4711,8 +4711,8 @@ pub fn law_look_faults(c: Clock) -> bool {
         } else {
             19u64
         }
-        let observed = result.unwrap(look(s, None, fn(tx: Tx) -> u64 {
-            expected
+        let observed = result.unwrap(result.unwrap(bound bytes 80 {
+            look(s, None, fn(tx: Tx) -> u64 { expected })
         }))
         match take observed {
             Seen(value) => if value.value != expected || value.version != 0 || list.len(value.reads) != 0 {
@@ -4721,13 +4721,14 @@ pub fn law_look_faults(c: Clock) -> bool {
             _ => return false
         }
     }
-    let refused_query = result.unwrap(bound bytes 0 {
+    let refused_query = result.unwrap(bound bytes 79 {
         look(s, None, fn(tx: Tx) -> u64 {
             7u64
         })
     })
     match take refused_query {
-        Ok(Refused(_)) => db.heads[0].head == 0 && db.resident == 0,
+        Ok(Refused(cap)) => cap.requested == 32 && cap.available == 31 &&
+            db.heads[0].head == 0 && db.resident == 0,
         _ => false
     }
 }

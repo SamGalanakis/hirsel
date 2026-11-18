@@ -72,6 +72,10 @@ fn caught_primary_keeps_exactly_one_reserved_cell() {
     let mut context = started(1024);
     let before = context.available();
     assert!(unsafe { hirsel_core_isolate_enter(&mut context) }.entered);
+    unsafe { hirsel_core_isolate_leave(&mut context) };
+    assert_eq!(context.available(), before);
+
+    assert!(unsafe { hirsel_core_isolate_enter(&mut context) }.entered);
     unsafe { causes::record(&mut context, Cause::new(causes::UNWRAP, 7)) };
     let caught = unsafe { hirsel_core_isolate_catch(&mut context) };
     assert_eq!(caught.status, 0);
@@ -79,6 +83,11 @@ fn caught_primary_keeps_exactly_one_reserved_cell() {
     assert!(context.primary.is_some());
     assert_eq!(context.available(), before - 32);
     drop_caught(caught.causes);
+    assert_eq!(context.available(), before - 32);
+
+    assert!(unsafe { hirsel_core_isolate_enter(&mut context) }.entered);
+    assert_eq!(context.available(), before - 64);
+    unsafe { hirsel_core_isolate_leave(&mut context) };
     assert_eq!(context.available(), before - 32);
 }
 

@@ -27,6 +27,12 @@ pub struct IsolateCatch {
     pub status: u8,
 }
 
+fn release_unused(context: &mut Context, cell: Option<Box<Cell>>) {
+    if context.spare_isolate_cell.is_none() {
+        context.spare_isolate_cell = cell.map(Cell::recycle);
+    }
+}
+
 /// Reserve the isolate's cause cell. Refusal is a value and leaves the context
 /// and cause chain unchanged.
 #[unsafe(no_mangle)]
@@ -45,8 +51,12 @@ pub unsafe extern "C" fn hirsel_core_isolate_enter(context: *mut Context) -> Iso
                 };
             }
         };
+        let storage = context
+            .spare_isolate_cell
+            .take()
+            .unwrap_or_else(Box::new_uninit);
         let reservation = Reservation {
-            cell: Some(Cell::reserved(payer)),
+            cell: Some(Box::write(storage, Cell::reserved(payer))),
             saved: std::mem::take(&mut context.causes),
             obligation: context.active_resource,
             used: false,
@@ -67,7 +77,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_leave(context: *mut Context) {
     unsafe {
         let context = &mut *context;
         let reservation = context.isolates.pop().expect("isolate leave without enter");
-        drop(reservation.cell);
+        release_unused(context, reservation.cell);
         context.causes = reservation.saved;
     }
 }
@@ -87,7 +97,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_catch(context: *mut Context) -> Iso
                     && crate::steps::is_active(context, cause.message.data.addr() as u64))
         });
         if cancelled {
-            drop(reservation.cell);
+            release_unused(context, reservation.cell);
             let mut restored = reservation.saved;
             restored.append_chain(caught);
             context.causes = restored;
@@ -109,7 +119,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_catch(context: *mut Context) -> Iso
                 (*context.active_resource).cell = Some(cell);
             }
         } else {
-            drop(reservation.cell);
+            release_unused(context, reservation.cell);
         }
         context.causes = reservation.saved;
         IsolateCatch {

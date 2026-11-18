@@ -7,7 +7,10 @@ use crate::{
     limit::{Funding, Payer},
 };
 use hirsel_core_layout::charge;
-use std::{mem::ManuallyDrop, ptr};
+use std::{
+    mem::{ManuallyDrop, MaybeUninit},
+    ptr,
+};
 
 pub const OVERFLOW: u8 = 0;
 pub const BOUNDS: u8 = 1;
@@ -106,14 +109,23 @@ impl Cell {
     /// A reservation has already moved its 32-byte charge into this payer's
     /// outstanding balance. It therefore must not call `prepaid`, which creates
     /// a child scope and transfers a parent charge.
-    pub(crate) fn reserved(funding: Payer) -> Box<Self> {
-        Box::new(Self {
+    pub(crate) fn reserved(funding: Payer) -> Self {
+        Self {
             funding,
             reserved: true,
             startup: false,
             cause: Cause::default(),
             next: ptr::null_mut(),
-        })
+        }
+    }
+
+    pub(crate) fn recycle(cell: Box<Self>) -> Box<MaybeUninit<Self>> {
+        // SAFETY: both boxes own the same allocation with the same layout.
+        let mut storage = unsafe { Box::from_raw(Box::into_raw(cell).cast::<MaybeUninit<Self>>()) };
+        // SAFETY: the cell is still initialized. Its destructor settles the
+        // old payer before this allocation can be used for a new reservation.
+        unsafe { storage.as_mut_ptr().drop_in_place() };
+        storage
     }
 
     pub(crate) fn startup(funding: Payer) -> Box<Self> {

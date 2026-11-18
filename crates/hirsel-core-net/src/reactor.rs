@@ -3,12 +3,29 @@
 use std::{
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 pub struct Poller {
     epoll: OwnedFd,
     wake: OwnedFd,
+    polling: AtomicBool,
+}
+
+struct PollTurn<'a>(&'a AtomicBool);
+impl Drop for PollTurn<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// One kernel turn, before socket identities are resolved by the registry.
+struct PollEvents {
+    events: [libc::epoll_event; 128],
+    len: usize,
 }
 fn checked(rc: i32) -> io::Result<i32> {
     if rc < 0 {
@@ -28,7 +45,11 @@ impl Poller {
                 libc::EFD_CLOEXEC | libc::EFD_NONBLOCK,
             ))?)
         };
-        let poller = Arc::new(Self { epoll, wake });
+        let poller = Arc::new(Self {
+            epoll,
+            wake,
+            polling: AtomicBool::new(false),
+        });
         poller.ctl(
             libc::EPOLL_CTL_ADD,
             poller.wake.as_raw_fd(),
@@ -46,6 +67,39 @@ impl Poller {
         checked(unsafe { libc::epoll_ctl(self.epoll.as_raw_fd(), op, fd, &mut event) })?;
         Ok(())
     }
+    fn try_turn(&self) -> Option<PollTurn<'_>> {
+        self.polling
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| PollTurn(&self.polling))
+    }
+
+    /// Try the driver token. A busy token returns immediately, even if the
+    /// token holder is waiting for I/O. A zero timeout is a nonblocking turn.
+    fn poll(&self, timeout_ms: i32) -> io::Result<Option<PollEvents>> {
+        let Some(_turn) = self.try_turn() else {
+            return Ok(None);
+        };
+        let mut events = [libc::epoll_event { events: 0, u64: 0 }; 128];
+        // SAFETY: epoll owns its descriptor and the fixed array is writable.
+        let count = unsafe {
+            libc::epoll_wait(
+                self.epoll.as_raw_fd(),
+                events.as_mut_ptr(),
+                events.len() as i32,
+                timeout_ms,
+            )
+        };
+        if count < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            return Ok(None);
+        }
+        let len = checked(count)? as usize;
+        if events[..len].iter().any(|event| event.u64 == u64::MAX) {
+            self.drain();
+        }
+        Ok(Some(PollEvents { events, len }))
+    }
+
     pub fn wake(&self) {
         let one = 1u64;
         loop {
@@ -279,34 +333,33 @@ impl Sockets {
         }
         self.update(index, generation, waiters)
     }
-    /// Polls only returned registrations. Stack scratch is independent of live sockets.
-    pub fn poll(&mut self, timeout_ms: i32, mut ready: impl FnMut(u64)) -> io::Result<usize> {
-        let Some(poller) = self.poller.clone() else {
+    /// Poll only returned registrations. The token covers the kernel poll,
+    /// while the caller has exclusive access to the socket registry.
+    pub fn poll(&mut self, timeout_ms: i32, ready: impl FnMut(u64)) -> io::Result<usize> {
+        let Some(poller) = self.poller.as_ref() else {
             return Ok(0);
         };
-        let mut events = [libc::epoll_event { events: 0, u64: 0 }; 128];
-        // SAFETY: epoll owns its descriptor and the fixed array is writable.
-        let count = unsafe {
-            libc::epoll_wait(
-                poller.epoll.as_raw_fd(),
-                events.as_mut_ptr(),
-                events.len() as i32,
-                timeout_ms,
-            )
-        };
-        if count < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+        let Some(events) = poller.poll(timeout_ms)? else {
             return Ok(0);
-        }
-        let count = checked(count)? as usize;
-        for event in &events[..count] {
-            if event.u64 == u64::MAX {
-                poller.drain();
-            } else {
+        };
+        self.dispatch_polled(events, ready)
+    }
+
+    /// Apply a poll from this registry's driver. A re-arm between collection
+    /// and dispatch invalidates the old kernel identity.
+    fn dispatch_polled(
+        &mut self,
+        events: PollEvents,
+        mut ready: impl FnMut(u64),
+    ) -> io::Result<usize> {
+        for event in &events.events[..events.len] {
+            if event.u64 != u64::MAX {
                 self.dispatch(event.u64, event.events, &mut ready)?;
             }
         }
-        Ok(count)
+        Ok(events.len)
     }
+
     pub fn release(&mut self, key: u64) {
         if crate::model::Model::owns(key) {
             let model = self.model.as_ref().unwrap();
@@ -373,5 +426,33 @@ impl Drop for Sockets {
                 drop(r);
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{io::Write, os::unix::net::UnixStream};
+
+    #[test]
+    fn a_busy_driver_turn_leaves_readiness_for_the_next_worker() {
+        let mut sockets = Sockets::default();
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let key = sockets.insert(socket.into()).unwrap();
+        sockets.arm(key, false, 17).unwrap();
+        let driver = sockets.poller().unwrap();
+        let held = driver.try_turn().unwrap();
+        peer.write_all(b"x").unwrap();
+        let busy = std::thread::scope(|scope| {
+            scope.spawn(|| driver.poll(0).unwrap().is_none()).join().unwrap()
+        });
+        drop(held);
+        assert!(busy);
+        let events = driver.poll(0).unwrap().unwrap();
+        let mut tokens = Vec::new();
+        sockets.dispatch_polled(events, |token| tokens.push(token)).unwrap();
+        assert_eq!(tokens, [17]);
     }
 }

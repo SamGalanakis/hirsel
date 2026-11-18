@@ -485,10 +485,14 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
     }
 }
 
+use crate::channel::{Channel, hirsel_core_channel_new, hirsel_core_receiver_drop,
+    hirsel_core_sender_drop, hirsel_core_try_send, hirsel_core_try_receive};
+
 struct SocketScenario {
     key: u64,
     peer: i32,
     cancel: bool,
+    publish: [*mut Channel; 2],
     done: bool,
     error: u8,
     appended: usize,
@@ -506,9 +510,38 @@ unsafe extern "C" fn socket_reader(context: *mut Context, _: *mut u8, input: *mu
             .cancel_requested
             .load(std::sync::atomic::Ordering::Acquire);
         (*scenario).done = true;
+        for sender in (*scenario).publish {
+            if !sender.is_null() {
+                assert_eq!(hirsel_core_try_send(sender, ptr::NonNull::dangling().as_ptr()), 0);
+                hirsel_core_sender_drop(sender);
+            }
+        }
     }
     0
 }
+
+unsafe fn poll_channel(receiver: *mut Channel) -> bool {
+    // SAFETY: this fiber owns the receiver and its item is ().
+    unsafe {
+        for _ in 0..256 {
+            if hirsel_core_try_receive(receiver, ptr::NonNull::dangling().as_ptr()) == 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+unsafe extern "C" fn socket_poller(context: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: the parent moved the receiver to this fiber and owns the result.
+    unsafe {
+        let receiver = input.cast::<*mut Channel>().read();
+        out.write(u8::from(poll_channel(receiver)));
+        hirsel_core_receiver_drop(context, receiver);
+    }
+    0
+}
+
 unsafe extern "C" fn socket_parent(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
     use crate::tasks::*;
     unsafe {
@@ -526,6 +559,20 @@ unsafe extern "C" fn socket_parent(context: *mut Context, _: *mut u8, input: *mu
             logical: 0,
             clean: None,
         };
+        let mut second_receiver = ptr::null_mut();
+        let mut poller = ptr::null_mut();
+        if !(*scenario).cancel {
+            let first = hirsel_core_channel_new(context, 1, result_layout, 1);
+            let second = hirsel_core_channel_new(context, 1, result_layout, 1);
+            (*scenario).publish = [first.sender, second.sender];
+            second_receiver = second.receiver;
+            let mut receiver = first.receiver;
+            poller = hirsel_core_spawn(
+                context, 0, 512, (&raw mut receiver).cast(), socket_poller,
+                crate::tasks_tests::layout::<*mut Channel, u8>(0), 1,
+            ).task;
+            assert!(!poller.is_null());
+        }
         let child = hirsel_core_spawn(
             context,
             0,
@@ -553,17 +600,13 @@ unsafe extern "C" fn socket_parent(context: *mut Context, _: *mut u8, input: *mu
         if (*scenario).cancel {
             hirsel_core_cancel(context, child.task);
         } else {
-            // Never idle. Socket progress must come from nonblocking polls at events.
-            for _ in 0..256 {
-                event(CHECK_CANCEL, 0, 0);
-                if (*scenario).done {
-                    break;
-                }
-            }
-            assert!(
-                (*scenario).done,
-                "active scheduler events must poll sockets"
-            );
+            // The root and its peer keep polling while the reader is parked.
+            // Only the nonblocking driver turn can make the reader publish.
+            assert!(poll_channel(second_receiver));
+            hirsel_core_receiver_drop(context, second_receiver);
+            let mut delivered = 0u8;
+            let joined = hirsel_core_join(context, poller, &mut delivered, 2);
+            assert_eq!((joined.kind, joined.status, delivered), (0, 0, 1));
         }
         let joined = hirsel_core_join(context, child.task, ptr::null_mut(), 2);
         assert_eq!((joined.kind, joined.status), (0, 0));
@@ -589,6 +632,7 @@ unsafe fn scheduler_socket_law(context: *mut Context, cancel: bool) {
             key: halves.value,
             peer: peer.as_raw_fd(),
             cancel,
+            publish: [ptr::null_mut(); 2],
             done: false,
             error: 0,
             appended: 0,

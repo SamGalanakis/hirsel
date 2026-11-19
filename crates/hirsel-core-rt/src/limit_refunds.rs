@@ -69,9 +69,11 @@ impl Inbox {
     }
 }
 
+type Inboxes = HashMap<u64, Box<Inbox>, foldhash::fast::RandomState>;
+
 pub(super) struct Remote {
     pub(super) retired: bool,
-    inboxes: HashMap<u64, Box<Inbox>>,
+    inboxes: Inboxes,
     // A foreign OS thread cannot inspect task-exclusive union records. The
     // next owner event routes this list under the scheduler's table lease.
     unassigned: Option<NonNull<Slot>>,
@@ -81,7 +83,7 @@ impl Remote {
     pub(super) fn new() -> Self {
         Self {
             retired: false,
-            inboxes: HashMap::new(),
+            inboxes: Inboxes::default(),
             unassigned: None,
             queued: 0,
         }
@@ -178,7 +180,7 @@ impl Remote {
         }
     }
 
-    fn notify(payer: Payer, inbox: Option<NonNull<Inbox>>, inboxes: &HashMap<u64, Box<Inbox>>) {
+    fn notify(payer: Payer, inbox: Option<NonNull<Inbox>>, inboxes: &Inboxes) {
         if let Some(inbox) = inbox {
             // SAFETY: live limit metadata retains this domain-owned inbox.
             unsafe { inbox.as_ref().notify() };

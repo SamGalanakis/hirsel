@@ -1200,10 +1200,11 @@ fn inlined_count_increment_overflow_is_the_runtime_stop() {
         )
         .unwrap();
         fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
+        // Arc share reads the live context to choose its replay path, so the
+        // caller passes one, as every instance's entry ABI requires.
+        let name = module.identity(hirsel_core_ir::InstanceId(0)).symbol();
         let source = format!(
-            "#include <stdint.h>\nextern uint8_t {}(void*,void*,uint64_t);\nint main(void) {{ uint64_t node[2]={{UINT64_MAX,7}}; {}(0,node,0);return 0; }}\n",
-            module.identity(hirsel_core_ir::InstanceId(0)).symbol(),
-            module.identity(hirsel_core_ir::InstanceId(0)).symbol()
+            "#include \"hirsel_core_rt.h\"\nextern uint8_t {name}(HirselCoreContext*,void*,uint64_t);\nint main(void) {{ HirselCoreContext *ctx=hirsel_core_context_new(1000); uint64_t node[2]={{UINT64_MAX,7}}; {name}(ctx,node,0); hirsel_core_context_free(ctx); return 0; }}\n"
         );
         let run = Command::new(link_program(&scratch, &source))
             .output()

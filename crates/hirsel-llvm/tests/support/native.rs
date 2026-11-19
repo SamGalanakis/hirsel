@@ -172,10 +172,17 @@ fn execute_target_object_checked(
     if observing {
         c.push_str("extern void *hirsel_core_test_observe_begin(const HirselCoreContext *); extern uint64_t hirsel_core_test_observe_end(void *);\n");
     }
-    let called: std::collections::BTreeSet<_> =
-        cases.iter().map(|case| case.function.index()).collect();
-    for i in called {
-        let s = &module.signatures[module.functions[i].signature.index()];
+    // Every function C can name gets its result type and declaration: a
+    // case calls some, and the bindings define the externals. A function
+    // with a vector in its signature has no C type and is never named.
+    for (i, f) in module.functions.iter().enumerate() {
+        let s = &module.signatures[f.signature.index()];
+        let vector = |t: &Ty| matches!(t, Ty::Vector(_));
+        if s.results.iter().any(vector)
+            || s.params.iter().any(|p| matches!(p, Param::Value(t) if vector(t)))
+        {
+            continue;
+        }
         let mut fields = s.results.clone();
         fields.push(Ty::Scalar(Scalar::U8));
         let ret = if fields.len() == 1 {

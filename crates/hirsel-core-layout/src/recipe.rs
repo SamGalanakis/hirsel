@@ -1554,29 +1554,37 @@ fn drop_recipe(
     out: &Computed<'_>,
     this: TypeRef,
 ) -> Option<DropRecipe> {
-    let mut fields: Vec<Vec<FieldDrop>> = rows
-        .iter()
-        .zip(offsets)
-        .map(|(row, offs)| {
-            row.iter()
-                .enumerate()
-                .filter(|(_, f)| needs_drop(shapes, &f.ty, out))
-                .map(|(i, f)| FieldDrop {
-                    field: i as u32,
-                    offset: offs[i],
-                    ty: f.ty.clone(),
-                })
-                .collect()
-        })
-        .collect();
+    // A resource always cleans its block, cell and grant.
+    let any = shape.repr == Repr::Resource || shape.finalizer.is_some();
+    let drops = |row: &[Field], offs: &[u64]| {
+        row.iter()
+            .enumerate()
+            .filter(|(_, f)| needs_drop(shapes, &f.ty, out))
+            .map(|(i, f)| FieldDrop {
+                field: i as u32,
+                offset: offs[i],
+                ty: f.ty.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut fields = if let ([row], [offs]) = (rows, offsets) {
+        let row = drops(row, offs);
+        if row.is_empty() && !any {
+            return None;
+        }
+        vec![row]
+    } else {
+        rows.iter()
+            .zip(offsets)
+            .map(|(row, offs)| drops(row, offs))
+            .collect()
+    };
     // Order only needs proving when one case has more than one drop.
     if fields.iter().any(|r| r.len() > 1) && out.effects.borrow_mut().effectful(shapes, this) {
         for row in &mut fields {
             row.reverse();
         }
     }
-    // A resource always has cleanup: its block, cell and grant are freed and refunded.
-    let any = shape.repr == Repr::Resource || shape.finalizer.is_some();
     (any || fields.iter().any(|r| !r.is_empty())).then_some(DropRecipe {
         finalizer: shape.finalizer,
         fields,

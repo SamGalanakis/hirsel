@@ -3798,6 +3798,10 @@ const DFA_UNKNOWN: u32 = 0xFFFFFFFF
 
 const DFA_MATCH: u32 = 0x80000000
 
+// Targets fit below bit 30 when the state's exclusive limit is at most 2^30.
+// Larger caches keep the full target field and inspect the start key.
+const DFA_START: u32 = 0x40000000
+
 const DFA_TARGET: u32 = 0x7FFFFFFF
 
 const DFA_DEAD: u32 = 0
@@ -3825,6 +3829,8 @@ type DfaLayout: key {
     keys: u64,
     scratch: u64,
     width: u64,
+    start_bit: u32,
+    start_entry: u32,
     reverse: bool,
 }
 
@@ -3856,7 +3862,11 @@ fn dfa_layout(re: Regex, c: Cache, reverse: bool) -> DfaLayout {
         nr
     } else {
         nf
-    }, reverse: reverse,)
+    }, start_bit: if !reverse && s <= 0x40000000 {
+        DFA_START
+    } else {
+        0
+    }, start_entry: int.narrow(re.start), reverse: reverse,)
 }
 
 fn dfa_context(ch: u64) -> u32 {
@@ -4172,6 +4182,11 @@ fn dfa_transition(program: List[NfaState], edges: List[NfaEdge], mut work: List[
         (behind, ahead)
     }
     let found = dfa_walk(program, edges, mut work, d, key + 2, len, ch, left, right, at_boundary)
+    let start_tag = if d.start_bit != 0 && found.len_out == 1 && work[d.scratch] == d.start_entry {
+        d.start_bit
+    } else {
+        0
+    }
     let (from, target) = if found.len_out == 0 {
         (state, DFA_DEAD)
     } else {
@@ -4181,9 +4196,9 @@ fn dfa_transition(program: List[NfaState], edges: List[NfaEdge], mut work: List[
         return DFA_UNKNOWN
     }
     let edge = if found.matched {
-        target | DFA_MATCH
+        target | DFA_MATCH | start_tag
     } else {
-        target
+        target | start_tag
     }
     if at_boundary {
         let current: u64 = int.widen(from)
@@ -4217,17 +4232,17 @@ fn memchr_at(data: Bytes, table: Bytes, literals: u64, at: u64) -> Option[u64] {
     } else {
         x
     }
-    let xs: Simd[u8, 16] = simd.splat(x)
-    let ys: Simd[u8, 16] = simd.splat(y)
-    let zs: Simd[u8, 16] = simd.splat(z)
-    while end - pos >= 16 {
-        let input: Simd[u8, 16] = list.lanes(data, pos)
+    let xs: Simd[u8, 32] = simd.splat(x)
+    let ys: Simd[u8, 32] = simd.splat(y)
+    let zs: Simd[u8, 32] = simd.splat(z)
+    while end - pos >= 32 {
+        let input: Simd[u8, 32] = list.lanes(data, pos)
         let candidates = simd.bitmask(simd.eq(input, xs) | simd.eq(input, ys) | simd.eq(input, zs))
         if candidates != 0 {
             let low: u64 = int.widen(int.trailing_zeros(candidates))
             return Some(pos + low)
         }
-        pos += 16
+        pos += 32
     }
     while pos < end {
         let ch = data[pos]
@@ -4248,21 +4263,21 @@ fn memmem_at(data: Bytes, table: Bytes, p: Prefilter, at: u64) -> Option[u64] {
     let mut pos = at
     let a = p.rare_a
     let b = p.rare_b
-    let left: Simd[u8, 16] = simd.splat(table[a])
-    let right: Simd[u8, 16] = simd.splat(table[b])
-    while end - pos >= 16 {
-        let lhs: Simd[u8, 16] = list.lanes(data, pos + a)
-        let rhs: Simd[u8, 16] = list.lanes(data, pos + b)
+    let left: Simd[u8, 32] = simd.splat(table[a])
+    let right: Simd[u8, 32] = simd.splat(table[b])
+    while end - pos >= 32 {
+        let lhs: Simd[u8, 32] = list.lanes(data, pos + a)
+        let rhs: Simd[u8, 32] = list.lanes(data, pos + b)
         let mut hits = simd.bitmask(simd.eq(lhs, left) & simd.eq(rhs, right))
         while hits != 0 {
             let offset: u64 = int.widen(int.trailing_zeros(hits))
             let candidate = pos + offset
-            if literal_at(data, table, candidate, 0, p.width) {
+            if p.width == 2 || literal_at(data, table, candidate, 0, p.width) {
                 return Some(candidate)
             }
             hits &= int.wrapping_sub(hits, 1)
         }
-        pos += 16
+        pos += 32
     }
     while pos < end {
         if data[pos + a] == table[a] && data[pos + b] == table[b] && literal_at(data, table, pos, 0, p.width) {
@@ -4274,11 +4289,27 @@ fn memmem_at(data: Bytes, table: Bytes, p: Prefilter, at: u64) -> Option[u64] {
 }
 
 fn teddy_confirm(data: Bytes, table: Bytes, p: Prefilter, pos: u64) -> bool {
-    let first = 32 * p.width
-    for i in 0u64 .. p.literals {
-        if literal_at(data, table, pos, first + i * p.width, p.width) {
-            return true
+    // A surviving bit identifies a bucket, whose literals are eight apart.
+    let mut buckets: u8 = 255
+    for i in 0u64 .. p.width {
+        let ch = data[pos + i]
+        let lo: u64 = int.widen(ch & 15)
+        let hi: u64 = int.widen(ch >> 4)
+        buckets &= table[32 * i + lo] & table[32 * i + 16 + hi]
+        if buckets == 0 {
+            return false
         }
+    }
+    let first = 32 * p.width
+    while buckets != 0 {
+        let mut i: u64 = int.widen(int.trailing_zeros(buckets))
+        while i < p.literals {
+            if literal_at(data, table, pos, first + i * p.width, p.width) {
+                return true
+            }
+            i += 8
+        }
+        buckets &= int.wrapping_sub(buckets, 1)
     }
     false
 }
@@ -4289,12 +4320,12 @@ fn teddy_at(data: Bytes, table: Bytes, p: Prefilter, at: u64) -> Option[u64] {
         return None
     }
     let end = width - p.width + 1
-    let mask: Simd[u8, 16] = simd.splat(15)
+    let mask: Simd[u8, 32] = simd.splat(15)
     let mut pos = at
-    while end - pos >= 16 {
-        let mut votes: Simd[u8, 16] = simd.splat(255)
+    while end - pos >= 32 {
+        let mut votes: Simd[u8, 32] = simd.splat(255)
         for i in 0u64 .. p.width {
-            let input: Simd[u8, 16] = list.lanes(data, pos + i)
+            let input: Simd[u8, 32] = list.lanes(data, pos + i)
             let low: Simd[u8, 16] = list.lanes(table, 32 * i)
             let high: Simd[u8, 16] = list.lanes(table, 32 * i + 16)
             votes &= simd.swizzle(low, input & mask) & simd.swizzle(high, input >> 4)
@@ -4308,7 +4339,7 @@ fn teddy_at(data: Bytes, table: Bytes, p: Prefilter, at: u64) -> Option[u64] {
             }
             hits &= int.wrapping_sub(hits, 1)
         }
-        pos += 16
+        pos += 32
     }
     while pos < end {
         if teddy_confirm(data, table, p, pos) {
@@ -4375,12 +4406,14 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
     }
     let mut state = dfa_start(mut work, d, query.entry, dfa_context(behind), query.remember)
     let mut matched: Option[u64] = None
+    let mut at_start = query.entry == re.start
+    let target_mask = DFA_TARGET ^ d.start_bit
     let mut scanned: u64 = 0
     while state != DFA_DEAD {
         if state == DFA_UNKNOWN {
             return DfaRun(half: Retry, stopped_at: pos)
         }
-        if skip_enabled && dfa_is_start(work, d, state, query.entry) {
+        if skip_enabled && (at_start || (d.start_bit == 0 && dfa_is_start(work, d, state, query.entry))) {
             match prefilter_at(data, re.prefilter, re.pref_plan, pos) {
                 None => {
                     scanned += width - pos
@@ -4444,7 +4477,8 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
         if pos == query.limit {
             break
         }
-        state = edge & DFA_TARGET
+        state = edge & target_mask
+        at_start = (edge & d.start_bit) != 0
         pos = if reverse {
             pos - 1
         } else {
@@ -4480,7 +4514,7 @@ fn reverse_prefilter(re: Regex, mut c: Cache, s: String, at: u64) -> Result[Opti
     let mut lo = at
     let mut from = at
     let mut min_pre_start = at
-    while let Some(needle) = prefilter_at(data, re.prefilter, re.pref_plan, from) {
+    while let Some(needle) = memchr_at(data, re.prefilter, 1, from) {
         if needle < min_pre_start {
             // A failed forward confirmation read into this candidate's region.
             return Error(())

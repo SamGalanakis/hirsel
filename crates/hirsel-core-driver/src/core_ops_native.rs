@@ -1421,19 +1421,27 @@ fn ordered_compact_llvm() {
 /// LANG-6 (native-model-fault-1023, N13): slots never needed at once share a home
 /// (hirsel_core_ir::extent::share_slots), so a straight-line body's frame is bounded
 /// by what is needed at once, not by its length. Each `?` call's result slot was a
-/// home of its own (108 KB at 3,000 calls on Cranelift, 192 KB on LLVM), past the
-/// 64 KiB task stack: `run stop: Stack`. The sum is n(n-1)/2.
+/// home of its own (108 KB at 3,000 calls on Cranelift, 192 KB on LLVM). The sum is
+/// n(n-1)/2 per level.
+///
+/// The bound is checked through the task stack: `place` recurses DEPTH levels
+/// before its straight-line body, so every level's frame is live at once. A task
+/// stack reserves 8 MiB (fiber.rs), which allows 8 MiB / 1,024 = 8 KiB per level.
+/// A shared frame holds a few result slots and spills, well under that. Unshared,
+/// a level holds at least 36 B per call: 108 KB at 3,000 calls, so 1,024 levels
+/// need about 110 MB and stop with `run stop: Stack`.
 fn straight_line_calls(backend: Backend) {
+    const DEPTH: u64 = 1024;
     for n in [3000u64, 10000] {
         let mut source = String::from(
-            "type Reg { n: u64 }\ntype RegErr = Room(u64) | Dup(u64)\nfn add(mut r: Reg, k: u64) -> Result[(), RegErr] {\n    if k == 1000000000 { return Error(Dup(k)) }\n    r.n += k\n    Ok(())\n}\nfn place(mut r: Reg) -> Result[(), RegErr] {\n",
+            "type Reg { n: u64 }\ntype RegErr = Room(u64) | Dup(u64)\nfn add(mut r: Reg, k: u64) -> Result[(), RegErr] {\n    if k == 1000000000 { return Error(Dup(k)) }\n    r.n += k\n    Ok(())\n}\nfn place(mut r: Reg, depth: u64) -> Result[(), RegErr] {\n    if depth > 1 { place(mut r, depth - 1)? }\n",
         );
         for i in 0..n {
             source.push_str(&format!("    add(mut r, {i})?\n"));
         }
         source.push_str(&format!(
-            "    Ok(())\n}}\npub fn main() -> Result[(), Exit] {{\n    let mut r = Reg(n: 0)\n    match place(mut r) {{ Ok(_) => {{}}, Error(_) => return Error(Exit(status: 2)) }}\n    if r.n == {} {{ Ok(()) }} else {{ Error(Exit(status: 1)) }}\n}}\n",
-            n * (n - 1) / 2
+            "    Ok(())\n}}\npub fn main() -> Result[(), Exit] {{\n    let mut r = Reg(n: 0)\n    match place(mut r, {DEPTH}) {{ Ok(_) => {{}}, Error(_) => return Error(Exit(status: 2)) }}\n    if r.n == {} {{ Ok(()) }} else {{ Error(Exit(status: 1)) }}\n}}\n",
+            DEPTH * (n * (n - 1) / 2)
         ));
         ordered_case(backend, &source);
     }

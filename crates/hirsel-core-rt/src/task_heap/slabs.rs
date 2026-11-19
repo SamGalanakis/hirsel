@@ -2,11 +2,8 @@
 //!
 //! A dropped slab stays claimed and resident in its shard's `retained` stack,
 //! up to `RETAINED_SLABS`, and the next claim takes it first. Its native pages
-//! go back to the host once a worker has waited `RELEASE_DELAY_MS` with
-//! nothing to run (`release_retained`), or when the stack is full, so a busy
-//! server does not return and refault the same pages on every request, and
-//! an idle one holds none of them. Mimalloc likewise delays purging freed
-//! arena memory (`purge_delay`).
+//! go back to the host when the stack is full or when an idle worker calls
+//! `super::release_retained`, which releases retained dedicated pages too.
 use super::{Mapping, SLAB};
 use std::ptr::NonNull;
 use std::sync::Mutex;
@@ -27,17 +24,9 @@ static SHARDS: [Mutex<Shard>; SHARD_COUNT] = [const {
 }; SHARD_COUNT];
 // Slabs on every shard's retained stack, so an idle worker with none skips the locks.
 static RETAINED: AtomicUsize = AtomicUsize::new(0);
-/// How long a worker waits with nothing to run before it releases retained slabs.
-pub(crate) const RELEASE_DELAY_MS: i32 = 100;
 
-/// The poll timeout for a worker about to wait `timeout` ms (-1: no limit),
-/// and whether it should release retained slabs if that wait finds nothing.
-pub(crate) fn idle_wait(timeout: i32) -> (i32, bool) {
-    if RETAINED.load(Ordering::Relaxed) == 0 || (0..=RELEASE_DELAY_MS).contains(&timeout) {
-        (timeout, false)
-    } else {
-        (RELEASE_DELAY_MS, true)
-    }
+pub(super) fn retaining() -> bool {
+    RETAINED.load(Ordering::Relaxed) != 0
 }
 
 struct Shard {
@@ -115,10 +104,8 @@ impl Drop for Slab {
     }
 }
 
-/// Return every retained slab's native pages to the host. A worker calls
-/// this after an `idle_wait` that found nothing, or before it parks without
-/// a poller.
-pub(crate) fn release_retained() {
+/// Return every retained slab's native pages to the host.
+pub(super) fn release_retained() {
     if RETAINED.load(Ordering::Relaxed) == 0 {
         return;
     }

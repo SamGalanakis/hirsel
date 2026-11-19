@@ -348,9 +348,9 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         dts.push_str(&result.declarations(&result_name));
         let name = json!(stub_name(&entry.identity)?);
         if entry.kind == 2 {
-            entries.push_str(&format!("subscribe[{name}] = (args,onRows) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onRows);\n"));
+            entries.push_str(&format!("subscribe[{name}] = (args,onRows,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onRows,onEnd);\n"));
             subscriptions.push(format!(
-                "{name}: (args: codec.{arg_name}, onRows: (rows: Row[]) => void) => Subscription"
+                "{name}: (args: codec.{arg_name}, onRows: (rows: Row[]) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
             ));
         } else {
             entries.push_str(&format!("call[{name}] = (args) => client.call(want[{i}],codec.{arg_name}.encode(args),codec.{result_name}.decode);\n"));
@@ -361,7 +361,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
     }
     entries.push_str("return {call,subscribe};\n}\n");
     let entry_dts = format!(
-        "import type * as codec from './codec.js';\nimport type {{Outcome, Row, Subscription, Transport}} from '@hirsel/client';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport function bind(client: Transport): {{call: {{ {} }}; subscribe: {{ {} }} }};\n",
+        "import type * as codec from './codec.js';\nimport type {{Outcome, Row, Subscription, SubscriptionEnd, Transport}} from '@hirsel/client';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport function bind(client: Transport): {{call: {{ {} }}; subscribe: {{ {} }} }};\n",
         calls.join("; "),
         subscriptions.join("; ")
     );

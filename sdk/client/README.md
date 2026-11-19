@@ -45,8 +45,15 @@ under its lock, so a live client with an older generation cannot send work.
 Subscription callbacks receive a complete current array of raw rows after an
 atomic Batch. Reset and reconnect preserve the old cache until the replacement
 id appears in `Batch.complete`, including an empty initial result. Old ids are
-ignored. All subscriptions use `resume: None`. Optional predictions supplied as
-the fourth `call()` argument are removed when a matching outcome row arrives;
+ignored. All subscriptions use `resume: None`.
+
+Pass `onEnd` after the row callback on `api.subscribe.<name>`,
+`client.subscribe()` or `client.subscribeChanges()` to receive the decoded
+`SubscriptionEnd` reason. The client removes the subscription before calling
+`onEnd` once for its `Ended` frame. Reset and reconnect resubscribe, and an empty
+completed Batch calls the row callback with `[]`.
+
+Optional predictions supplied as the fourth `call()` argument are removed when a matching outcome row arrives;
 `onPrediction` runs after the complete Batch has been applied.
 
 The scripted laws run as part of `store.codec_frames:ts_frame_vectors` in

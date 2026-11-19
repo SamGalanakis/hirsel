@@ -274,6 +274,25 @@ export async function laws(codec, only, mutant) {
     h.server.emit(h.server.sockets[0],{tag:'Batch',values:[3n,[],[{sub:2,key:bytes(1),value:{tag:'Some',value:bytes(3)}}],[]]});await settle();
     assert.equal(h.client.state,'Incompatible');assert.equal(caches.length,before);
   };
+  tests.subscription_end_after_reset=async()=>{
+    const h=await setup();await ready(h);
+    const reasons=[];
+    const subscription=h.client.subscribe(want,bytes(1),()=>assert.fail('unexpected row delivery'),reason=>reasons.push(reason));
+    await settle();
+    const socket=h.server.sockets[0];
+    h.server.emit(socket,{tag:'Reset',values:[2n,[]]});await settle();
+    assert.deepEqual(reasons,[],'Reset only resubscribes');
+    assert.deepEqual(h.server.sent.at(-1),{tag:'Subscribe',values:[1,0,bytes(1),{tag:'None'}]});
+    const reason={tag:'Refused',value:{tag:'Budget',value:{requested:9007199254740993n,available:4n}}};
+    h.server.emit(socket,{tag:'Ended',values:[1,reason]});await settle();
+    assert.deepEqual(reasons,[reason],'Ended delivers the decoded refusal');
+    h.server.emit(socket,{tag:'Ended',values:[1,reason]});
+    h.server.emit(socket,{tag:'Reset',values:[3n,[]]});await settle();
+    subscription.unsubscribe();await settle();
+    assert.deepEqual(reasons,[reason]);
+    assert.deepEqual(h.server.sent.filter(f=>f.tag==='Subscribe').map(f=>f.values[0]),[0,1]);
+    assert.equal(h.server.sent.some(f=>f.tag==='Unsubscribe'),false);
+  };
   tests.storage_unavailable_no_sends=async()=>{
     const h=await setup();await ready(h);
     h.storage.beforeWrite=()=>{throw new Error('disk unavailable');};

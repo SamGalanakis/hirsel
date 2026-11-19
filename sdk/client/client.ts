@@ -5,8 +5,9 @@ export type Fault = {tag: 'Raised'; value: number} | {tag: 'OutOfBytes'; value: 
   | {tag: 'OutOfTime'; value: bigint} | {tag: 'Gone'};
 export type Refusal = {tag: 'NoEntry' | 'Overloaded' | 'Deadline' | 'NotAllowed' | 'RequestMismatch' | 'HistoryUnavailable'}
   | {tag: 'Malformed'; value: {kind: number; at: bigint}} | {tag: 'Budget'; value: Room};
-export type Outcome<R> = {tag: 'Returned'; value: R} | {tag: 'Failed'; value: Fault}
-  | {tag: 'Refused'; value: Refusal} | {tag: 'Abandoned' | 'InDoubt' | 'LocallyUnknown' | 'RequestMismatch'};
+type WireOutcome<R> = {tag: 'Returned'; value: R} | {tag: 'Failed'; value: Fault}
+  | {tag: 'Refused'; value: Refusal} | {tag: 'Abandoned' | 'InDoubt'};
+export type Outcome<R> = WireOutcome<R> | {tag: 'LocallyUnknown' | 'RequestMismatch'};
 export interface Row { sub: number; key: Uint8Array; value: Option<Uint8Array> }
 export interface Done {stream: number; p: bigint; outcome: Outcome<Uint8Array>}
 export type Entry = {tag: 'Ready'; value: number} | {tag: 'Resolve'; values: [number, Uint8Array]} | {tag: 'Gone'};
@@ -17,13 +18,14 @@ export type Frame = {tag: 'Hello'; values: [Option<Uint8Array>, Want[]]}
   | {tag: 'Welcome'; values: [Uint8Array, number, bigint, Uint8Array, string, bigint]}
   | {tag: 'Placed'; value: Entry}
   | {tag: 'Batch'; values: [bigint, number[], Row[], Done[]]}
-  | {tag: 'Ended'; values: [number, Outcome<Uint8Array>]}
+  | {tag: 'Ended'; values: [number, WireOutcome<Uint8Array>]}
   | {tag: 'Reset'; values: [bigint, Done[]]};
 export interface Codec { encode(frame: Frame): Uint8Array; decode(bytes: Uint8Array): Frame }
+export type SubscriptionEnd = Extract<Frame, {tag: 'Ended'}>['values'][1];
 export interface Subscription { unsubscribe(): void }
 export interface Transport {
   call<R>(want: Want, args: Uint8Array, decode: (bytes: Uint8Array) => R): Promise<Outcome<R>>;
-  subscribe(want: Want, args: Uint8Array, onRows: (rows: Row[]) => void): Subscription;
+  subscribe(want: Want, args: Uint8Array, onRows: (rows: Row[]) => void, onEnd?: (reason: SubscriptionEnd) => void): Subscription;
 }
 export interface Pending {
   generation: bigint; stream: number; p: bigint; want: Want; args: Uint8Array;
@@ -78,8 +80,9 @@ const fresh = (generation: bigint): Installation => ({version: RECOVERY_VERSION,
 export class ClientError extends Error {
   constructor(public readonly code: string) { super(code); this.name = 'ClientError'; }
 }
-type RowDelivery = { onRows: (rows: Row[]) => void; cache: Map<string, Row> }
-  | { onChanges: (rows: Row[], replace: boolean) => void };
+type RowDelivery = {onEnd?: (reason: SubscriptionEnd) => void} & (
+  {onRows: (rows: Row[]) => void; cache: Map<string, Row>}
+  | {onChanges: (rows: Row[], replace: boolean) => void});
 interface Sub {
   want: Want; args: Uint8Array; delivery: RowDelivery; id?: number;
   complete: boolean; active: boolean;
@@ -354,8 +357,12 @@ export class Client implements Transport {
       for (const sub of this.subs) { sub.id = undefined; sub.complete = false; }
       this.publish(); await this.subscribeAll();
     } else if (frame.tag === 'Ended') {
-      const sub = [...this.subs].find(s => s.id === frame.values[0]);
-      if (sub) { sub.active = false; sub.id = undefined; this.subs.delete(sub); }
+      const [id, reason] = frame.values;
+      const sub = [...this.subs].find(s => s.id === id);
+      if (sub) {
+        sub.active = false; sub.id = undefined; this.subs.delete(sub);
+        sub.delivery.onEnd?.(reason);
+      }
     } else await this.incompatible(1008);
   }
   private compareIdentity(actual: Identity): void {
@@ -482,11 +489,11 @@ export class Client implements Transport {
       await this.stop('Fenced', outcome);
     });
   }
-  subscribe(want: Want, args: Uint8Array, onRows: (rows: Row[]) => void): Subscription {
-    return this.addSubscription(want, args, {onRows, cache: new Map()});
+  subscribe(want: Want, args: Uint8Array, onRows: (rows: Row[]) => void, onEnd?: (reason: SubscriptionEnd) => void): Subscription {
+    return this.addSubscription(want, args, {onRows, cache: new Map(), onEnd});
   }
-  subscribeChanges(want: Want, args: Uint8Array, onChanges: (rows: Row[], replace: boolean) => void): Subscription {
-    return this.addSubscription(want, args, {onChanges});
+  subscribeChanges(want: Want, args: Uint8Array, onChanges: (rows: Row[], replace: boolean) => void, onEnd?: (reason: SubscriptionEnd) => void): Subscription {
+    return this.addSubscription(want, args, {onChanges, onEnd});
   }
   private addSubscription(want: Want, args: Uint8Array, delivery: RowDelivery): Subscription {
     if (!this.wants.some(w => sameWant(w, want))) throw new ClientError('UnknownWant');

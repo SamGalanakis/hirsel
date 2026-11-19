@@ -23,10 +23,11 @@ export async function vectors(c,frame,entries) {
       const payload = committed ? '000000000900000000000000' : '0100000003000000626164';
       return Promise.resolve({tag:'Returned',value:decode(bytes(payload))});
     },
-    subscribe(want,args,onRows) {
+    subscribe(want,args,onRows,onEnd) {
       assert.strictEqual(want,entries.want[1]);
       assert.equal(Buffer.from(args).toString('hex'),'03000000');
       onRows([]);
+      onEnd({tag:'Refused',value:{tag:'Deadline'}});
       return {unsubscribe() { unsubscribed = true; }};
     }
   });
@@ -34,8 +35,10 @@ export async function vectors(c,frame,entries) {
   assert.deepEqual(await client.call.commit(1n),{tag:'Returned',value:{tag:'Ok',value:{n:9n}}});
   assert.deepEqual(await client.call.commit(0n),{tag:'Returned',value:{tag:'Error',value:{message:'bad'}}});
   let delivered = false;
-  client.subscribe.rows(3, rows => { assert.deepEqual(rows,[]); delivered = true; }).unsubscribe();
+  let reason;
+  client.subscribe.rows(3, rows => { assert.deepEqual(rows,[]); delivered = true; }, end => { reason = end; }).unsubscribe();
   assert.equal(delivered,true); assert.equal(unsubscribed,true);
+  assert.deepEqual(reason,{tag:'Refused',value:{tag:'Deadline'}});
   let cases = 0;
   function vector(value,hex) {
     cases++;

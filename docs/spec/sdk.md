@@ -28,9 +28,11 @@ percent-decoded final component of an entry's definition identity. Duplicate
 names cause `DuplicateStubName(a, b)` before any output is written.
 
 The transport implements `call(want, argsBytes, resultDecoder)`, returning
-`Promise<Outcome<R>>`, and `subscribe(want, argsBytes, onRows)`, returning a
-handle with `unsubscribe()`. The client runtime owns subscription recovery
-after Reset and reconnect.
+`Promise<Outcome<R>>`, and `subscribe(want, argsBytes, onRows, onEnd?)`, returning a
+handle with `unsubscribe()`. The generated stub forwards the optional `onEnd`
+callback. The runtime removes the matching subscription before delivering the
+decoded `Ended` reason once. An empty completed Batch delivers `[]` to `onRows`.
+Reset and reconnect resubscribe without calling `onEnd`.
 
 Compute and Granted calls return `Promise<Outcome<R>>`. Transact calls return
 `Promise<Outcome<Result<R, E>>>`: the Returned payload contains the complete

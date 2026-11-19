@@ -32,6 +32,28 @@ pub struct Recipe {
     pub drop: Option<DropRecipe>,
 }
 
+impl Recipe {
+    /// Translate a recipe's shape references into the table where it will be used.
+    pub fn map_refs(&mut self, mut map: impl FnMut(TypeRef) -> TypeRef) {
+        if let Layout::Compact(set) = &mut self.layout {
+            for field in set
+                .at
+                .iter_mut()
+                .flat_map(|c| c.fields.iter_mut().flatten())
+            {
+                if let Size::Inline(row) = &mut field.size {
+                    *row = map(*row);
+                }
+            }
+        }
+        if let Some(drop) = &mut self.drop {
+            for field in drop.fields.iter_mut().flatten() {
+                field.ty.map_refs(&mut map);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Layout {
     Fixed(Fixed),
@@ -365,6 +387,20 @@ impl RecipeScratch {
         shapes: &[Shape],
         recipes: &mut Vec<Recipe>,
     ) -> Result<(), LayoutError> {
+        self.extend_with(shapes, recipes, |_, make| make())
+    }
+
+    /// Extend using the caller's owner for layout recipes, with the same dependency
+    /// order and rollback as a direct extension.
+    pub fn extend_with(
+        &mut self,
+        shapes: &[Shape],
+        recipes: &mut Vec<Recipe>,
+        mut resolve: impl FnMut(
+            TypeRef,
+            &dyn Fn() -> Result<Recipe, LayoutError>,
+        ) -> Result<Recipe, LayoutError>,
+    ) -> Result<(), LayoutError> {
         let prefix = recipes.len();
         let appended = shapes.len() - prefix;
         self.state.clear();
@@ -383,7 +419,8 @@ impl RecipeScratch {
                 suffix: &mut pending,
                 effects: &self.effects,
             };
-            match recipe(shapes, TypeRef(prefix as u32), &out) {
+            let row = TypeRef(prefix as u32);
+            match resolve(row, &|| recipe(shapes, row, &out)) {
                 Ok(recipe) => recipes.push(recipe),
                 Err(error) => {
                     self.effects.get_mut().truncate(prefix);
@@ -411,7 +448,7 @@ impl RecipeScratch {
             effects: &self.effects,
         };
         for &t in &self.order {
-            match recipe(shapes, t, &out) {
+            match resolve(t, &|| recipe(shapes, t, &out)) {
                 Ok(recipe) => out.suffix[t.index() - prefix] = Some(recipe),
                 Err(error) => {
                     out.effects.borrow_mut().truncate(prefix);

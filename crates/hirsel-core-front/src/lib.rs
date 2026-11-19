@@ -139,6 +139,7 @@ pub struct Program<'a> {
     tuple_codec_protocol: std::sync::OnceLock<Option<TupleCodecProtocol>>,
     /// Published type spellings shared by body arenas; local types stay local.
     layout_type_names: std::sync::OnceLock<Vec<std::sync::OnceLock<String>>>,
+    recipe_layouts: std::sync::Mutex<layout::RecipeLayouts>,
     flow_holds: std::sync::OnceLock<Vec<std::sync::OnceLock<(u8, u64)>>>,
     closed_type_facts: std::sync::OnceLock<Vec<body::ClosedTypeFacts>>,
 }
@@ -531,6 +532,7 @@ impl<'a> Program<'a> {
             structural_codecs: std::sync::OnceLock::new(),
             tuple_codec_protocol: std::sync::OnceLock::new(),
             layout_type_names: std::sync::OnceLock::new(),
+            recipe_layouts: Default::default(),
             flow_holds: std::sync::OnceLock::new(),
             closed_type_facts: std::sync::OnceLock::new(),
         }

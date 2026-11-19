@@ -622,13 +622,17 @@ impl Emitter {
     }
     /// The recipe of row `id`, or None when the table's layout is refused, in which case
     /// the rows from `mark` on are taken back so the table stays computable.
-    fn recipe(&mut self, id: TypeId, mark: usize) -> Option<&Recipe> {
+    fn recipe(&mut self, p: &Program, id: TypeId, mark: usize) -> Option<&Recipe> {
         crate::cost_scope!("phase", "layout/drop recipes");
         if self.recipes.len() != self.module.types.len() {
+            let shapes = &self.module.types;
+            let names = &self.types;
+            let mut layouts = p.recipe_layouts.lock().unwrap();
             match self
                 .recipe_scratch
-                .extend(&self.module.types, &mut self.recipes)
-            {
+                .extend_with(shapes, &mut self.recipes, |row, make| {
+                    layouts.resolve(shapes, names, row, make)
+                }) {
                 Ok(()) => {}
                 Err(_) => {
                     self.module.types.truncate(mark);
@@ -667,7 +671,7 @@ impl Emitter {
         let id = self
             .type_row(p, t, ty)
             .ok_or("values of this type are not built")?;
-        match self.recipe(id, mark) {
+        match self.recipe(p, id, mark) {
             Some(r) if matches!(r.layout, Layout::Fixed(_)) => Ok(Rep::Place(id)),
             _ => Err("values of this type are not built"),
         }

@@ -8,8 +8,8 @@ use crate::Program;
 use crate::decls::{DeclBody, Repr, Role};
 use crate::types::*;
 use hirsel_core_layout::{
-    Body, Carried, Case, Field, FieldTy, FuncRef, Handle, LayoutError, Repr as LRepr, Scalar,
-    Shape, Ty, TypeRef, compute,
+    Body, Carried, Case, Field, FieldTy, FuncRef, Handle, LayoutError, Recipe, Repr as LRepr,
+    Scalar, Shape, Ty, TypeRef, compute,
 };
 use rustc_hash::FxHashMap as HashMap;
 
@@ -17,6 +17,48 @@ use rustc_hash::FxHashMap as HashMap;
 /// references, so recursive shapes use this same operation as ordinary shapes,
 /// template substitution and imported argument closures.
 pub(crate) type ShapeNames = HashMap<String, TypeRef>;
+
+/// A checked program's layout recipes, owned by canonical shape name. Body
+/// modules bind the recipe's operands to their own shape and function rows.
+#[derive(Default)]
+pub(crate) struct RecipeLayouts(HashMap<String, RecipeLayout>);
+
+struct RecipeLayout {
+    recipe: Recipe,
+    rows: Vec<String>,
+}
+
+impl RecipeLayouts {
+    pub(crate) fn resolve(
+        &mut self,
+        shapes: &[Shape],
+        names: &ShapeNames,
+        row: TypeRef,
+        make: &dyn Fn() -> Result<Recipe, LayoutError>,
+    ) -> Result<Recipe, LayoutError> {
+        let shape = &shapes[row.index()];
+        if let Some(layout) = self.0.get(&shape.name) {
+            let mut recipe = layout.recipe.clone();
+            recipe.map_refs(|r| names[&layout.rows[r.index()]]);
+            if let Some(drop) = &mut recipe.drop {
+                drop.finalizer = shape.finalizer;
+            }
+            return Ok(recipe);
+        }
+        let result = make()?;
+        let mut recipe = result.clone();
+        let mut rows = vec![];
+        recipe.map_refs(|r| {
+            let slot = TypeRef(rows.len() as u32);
+            rows.push(shapes[r.index()].name.clone());
+            slot
+        });
+        self.0
+            .insert(shape.name.clone(), RecipeLayout { recipe, rows });
+        Ok(result)
+    }
+}
+
 pub(crate) fn intern_shape(
     shapes: &mut Vec<Shape>,
     names: &mut ShapeNames,

@@ -5,6 +5,7 @@
 #include "hirsel_core_rt_host.h"
 #include "hirsel_core_rt_tasks.h"
 #include "hirsel_core_rt_sites.h"
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #ifndef TRY_SENDS
@@ -23,37 +24,66 @@ static int place_spawn, permit_create, places, publisher_live;
 static int first_permits, second_permits, place_permits, premature_accept;
 static uint64_t place_task, status_root, phases, permit_id;
 #endif
+// A linked site is its file's start word plus the byte offset into the file
+// (hirsel_core_rt_sites.h), so the item is the top-level declaration that
+// begins before that offset. Compact positions retain byte coordinates but omit
+// declaration text, so the file is read from disk, once per file row.
+static struct { char *bytes; size_t len; int read; } *file_cache;
 static int item_named(uint64_t site, const char *name) {
-    uint64_t ordinal = site >> 32;
-    if (!source_table || !ordinal || ordinal > source_table->items_len) return 0;
-    HirselCoreSourceItem item = source_table->items[ordinal - 1];
-    if (item.file >= source_table->files_len) return 0;
-    // Compact positions retain byte coordinates but omit declaration text.
-    // Source names are relative to the fixture manifest.
-    HirselCoreSourceView path = source_table->files[item.file].path;
-    if (!path.len) return 0;
-    // Views are byte ranges from the start of the files allocation.
-    const char *path_data = (const char *)source_table->files + path.offset;
-    size_t prefix_len = path_data[0] == '/' ? 0 : sizeof(source_dir) - 1;
-    char filename[prefix_len + path.len + 1];
-    memcpy(filename, source_dir, prefix_len);
-    memcpy(filename + prefix_len, path_data, path.len);
-    filename[prefix_len + path.len] = '\0';
-    FILE *file = fopen(filename, "rb");
-    if (!file) return 0;
-    enum { PREFIX = 32 };
-    size_t n = strlen(name);
-    char source[PREFIX + 3 + n];
-    size_t len = 0;
-    if (fseek(file, item.file_offset, SEEK_SET) == 0) {
-        len = fread(source, 1, sizeof(source), file);
+    if (!source_table || !site) return 0;
+    size_t row = 0;
+    while (row < source_table->files_len && source_table->files[row].start <= site) row++;
+    if (!row--) return 0;
+    if (!file_cache) file_cache = calloc(source_table->files_len, sizeof *file_cache);
+    if (!file_cache) return 0;
+    if (!file_cache[row].read) {
+        file_cache[row].read = 1;
+        // Source names are relative to the fixture manifest.
+        HirselCoreSourceView path = source_table->files[row].path;
+        if (!path.len) return 0;
+        // Views are byte ranges from the start of the files allocation.
+        const char *path_data = (const char *)source_table->files + path.offset;
+        size_t prefix_len = path_data[0] == '/' ? 0 : sizeof(source_dir) - 1;
+        char filename[prefix_len + path.len + 1];
+        memcpy(filename, source_dir, prefix_len);
+        memcpy(filename + prefix_len, path_data, path.len);
+        filename[prefix_len + path.len] = '\0';
+        FILE *file = fopen(filename, "rb");
+        if (!file) return 0;
+        if (fseek(file, 0, SEEK_END) == 0) {
+            long size = ftell(file);
+            char *bytes = size > 0 ? malloc((size_t)size) : NULL;
+            if (bytes && fseek(file, 0, SEEK_SET) == 0
+                && fread(bytes, 1, (size_t)size, file) == (size_t)size) {
+                file_cache[row].bytes = bytes;
+                file_cache[row].len = (size_t)size;
+            } else {
+                free(bytes);
+            }
+        }
+        fclose(file);
     }
-    fclose(file);
-    for (size_t i = 0; i + 3 < len && i < PREFIX; i++) {
-        if (!memcmp(source + i, "fn ", 3)) {
+    const char *source = file_cache[row].bytes;
+    uint64_t offset = site - source_table->files[row].start;
+    if (!source || offset >= file_cache[row].len) return 0;
+    // Items begin at column 0; bodies, continuations and comments do not
+    // begin with a letter there.
+    size_t line = (size_t)offset;
+    for (;;) {
+        while (line && source[line - 1] != '\n') line--;
+        char c = source[line];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) break;
+        if (!line) return 0;
+        line--;
+    }
+    enum { PREFIX = 32 };
+    size_t n = strlen(name), len = file_cache[row].len - line;
+    const char *item = source + line;
+    for (size_t i = 0; i + 3 < len && i < PREFIX && item[i] != '\n'; i++) {
+        if (!memcmp(item + i, "fn ", 3)) {
             size_t at = i + 3;
-            return at + n < len && !memcmp(source + at, name, n)
-                && (source[at+n] == '(' || source[at+n] == '[');
+            return at + n < len && !memcmp(item + at, name, n)
+                && (item[at+n] == '(' || item[at+n] == '[');
         }
     }
     return 0;

@@ -1,21 +1,17 @@
 #ifndef HIRSEL_CORE_RT_SITES_H
 #define HIRSEL_CORE_RT_SITES_H
 #include "hirsel_core_rt_host.h"
-/* FORM #91: Cause remains32 bytes, site@24 is
-   ((linked_item_ordinal + 1) << 32) | item_relative_byte_offset; 0 is none.
-   Driver binds current source and relocates item IDs; runtime never re-sites a
+/* FORM #91: Cause remains32 bytes, site@24 is a linked site word: its file's
+   start word plus the byte offset into that file; 0 is none. File rows ascend
+   by start. Driver binds current source; runtime never re-sites a
    propagated/joined cause. Callers may supply UTF-8 source. Generated bindings
    carry compact positions. Each view is a byte range relative to the start of
    the files allocation. The file directory and the views it names occupy that
    one allocation. All storage is borrowed immutably through reporting. No startup parse/index,
-   source copy or successful-run read. Empty table32B on both64-bit targets. */
+   source copy or successful-run read. Empty table16B on both64-bit targets. */
 typedef struct { size_t offset, len; } HirselCoreSourceView;
-typedef struct { HirselCoreSourceView path, source; } HirselCoreSourceFile;
-typedef struct { uint32_t file, file_offset; } HirselCoreSourceItem;
-typedef struct {
-    const HirselCoreSourceFile *files; size_t files_len;
-    const HirselCoreSourceItem *items; size_t items_len;
-} HirselCoreSourceTable;
+typedef struct { HirselCoreSourceView path, source; uint64_t start; } HirselCoreSourceFile;
+typedef struct { const HirselCoreSourceFile *files; size_t files_len; } HirselCoreSourceTable;
 /* Before run, bind or unbind(NULL) an explicitly constructed OS process.
    Failure101 reports Kind [or Fail("message")] at path:line:column, primary
    first; LANG-1 scalar columns/lines start at1, tab counts one. With no table

@@ -13,7 +13,10 @@ import struct
 import subprocess
 import sys
 
-from build import GAME_ROWS, ROOT, STANDARD_RUST_SIZES
+if __package__:
+    from .build import GAME_ROWS, ROOT, STANDARD_RUST_SIZES
+else:
+    from build import GAME_ROWS, ROOT, STANDARD_RUST_SIZES
 
 sys.path.insert(0, str(ROOT / "core/tools"))
 from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
@@ -127,7 +130,7 @@ def matches(output, wanted):
             count = remaining.pop(key, None)
             if not space or count is None or count > last:
                 return False
-            # Both upstream ports format float32. Hirsel and Goose format float64.
+            # The pinned peers use both float32 and float64.
             precise = 100 * count / total
             rounded32 = f32(f32(100 * count) / f32(total))
             if percent not in {f"{number:.3f}".encode() for number in (precise, rounded32)}:
@@ -163,6 +166,10 @@ def sample_command(bins, case, language, width, size, s0=False):
         if language == "Goose":
             args.append(width)
     return [directory / case, *args]
+
+
+def sample_stdin(bins, case, language):
+    return bins / "input.fasta" if case == "knucleotide" and language != "Hirsel" else Path(os.devnull)
 
 
 def applicable(case, s0=False):
@@ -202,7 +209,7 @@ def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0
     launch = [ROOT / "tools/capped", "perf", "stat", "-x", ";", "-e",
               "instructions:u,duration_time", "-o", perf, "--", "/usr/bin/time",
               "-f", "%M", "-o", rss, *command]
-    stdin = bins / "input.fasta" if case == "knucleotide" and language != "Hirsel" else Path(os.devnull)
+    stdin = sample_stdin(bins, case, language)
     wait_load()
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)

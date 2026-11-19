@@ -1,35 +1,53 @@
-type Sequence: shareable + send { bases: Bytes }
-type Job: send { sequence: Arc[Sequence], k: u64 }
-type Counts = Map[u64, u64]
-type Frequency { key: u64, count: u64 }
-
-fn base(c: u8) -> Option[u8] {
-    match c | 32u8 {
-        b'a' => Some(0),
-        b'c' => Some(1),
-        b'g' => Some(2),
-        b't' => Some(3),
-        _ => None,
-    }
+type Sequence: shareable + send {
+    bases: Bytes
 }
 
-fn extract(file: Bytes) -> Bytes {
-    let mut dna: Bytes = list.new()
-    let mut start: u64 = 0
-    let mut three = false
-    while start < list.len(file) {
-        let mut end = start
-        while end < list.len(file) && file[end] != b'\n' { end += 1 }
-        if start < end && file[start] == b'>' {
-            if three { break }
-            three = end - start >= 6 && file[start + 1] == b'T' && file[start + 2] == b'H'
-                && file[start + 3] == b'R' && file[start + 4] == b'E' && file[start + 5] == b'E'
-        } else if three {
-            for i in start .. end {
-                if let Some(code) = base(file[i]) { result.unwrap(list.push(mut dna, code)) }
-            }
+type Job: send {
+    sequence: Arc[Sequence],
+    k: u64
+}
+
+type Counts = Map[u64, u32]
+
+type Frequency {
+    key: u64,
+    count: u32
+}
+
+fn base(c: u8) -> u8 {
+    (c & 6u8) >> 1u8
+}
+
+fn record_three(line: Bytes) -> bool {
+    let key = string.as_bytes(">THREE")
+    if list.len(line) < list.len(key) {
+        return false
+    }
+    for i in 0 .. list.len(key) {
+        if line[i] != key[i] {
+            return false
         }
-        start = end + 1
+    }
+    true
+}
+
+fn extract(take file: HostFile) -> Bytes waits {
+    let mut input = result.unwrap(std.io.buffered_input(take file, 8192))
+    let mut dna: Bytes = result.unwrap(list.with_capacity(65536))
+    let mut line: Bytes = result.unwrap(list.with_capacity(64))
+    while result.unwrap(std.io.read_until_lf(mut input, mut line)) {
+        if record_three(line) {
+            break
+        }
+        list.clear(mut line)
+    }
+    list.clear(mut line)
+    while result.unwrap(std.io.read_until_lf(mut input, mut line)) {
+        // Rust #3 excludes the last byte returned by read_until.
+        for i in 0 .. list.len(line) - 1 {
+            result.unwrap(list.push(mut dna, base(line[i])))
+        }
+        list.clear(mut line)
     }
     take dna
 }
@@ -37,24 +55,26 @@ fn extract(file: Bytes) -> Bytes {
 fn tally(take job: Job) -> Counts {
     let n = list.len(job.sequence.bases)
     let mut table: Counts = map.new()
-    for frame in 0 .. job.k {
-        let mut at = frame
-        while at + job.k <= n {
-            let mut key: u64 = 0
-            for i in at .. at + job.k {
-                key = (key << 2) | int.widen(job.sequence.bases[i])
-            }
-            if map.update(mut table, key, fn(mut count: u64) { count += 1 }) == None {
-                result.unwrap(map.insert(mut table, key, 1u64))
-            }
-            at += job.k
-        }
+    if n < job.k {
+        return take table
+    }
+    let mask = (1u64 << (2 * job.k)) - 1
+    let first = job.k - 1
+    let mut key: u64 = 0
+    for i in 0 .. first {
+        key = (key << 2) | int.widen(job.sequence.bases[i])
+    }
+    for i in first .. n {
+        key = ((key << 2) | int.widen(job.sequence.bases[i])) & mask
+        result.unwrap(map.update_or_insert(mut table, key, 0u32, fn(mut count: u32) {
+            count += 1
+        }))
     }
     take table
 }
 
 fn push_name(mut line: String, key: u64, k: u64) {
-    let letters: Inline[char, 4] = ['A', 'C', 'G', 'T']
+    let letters: Inline[char, 4] =['A', 'C', 'T', 'G']
     for i in 0 .. k {
         let digit = (key >> (2 * (k - i - 1))) & 3
         result.unwrap(string.push_char(mut line, letters[digit]))
@@ -63,39 +83,55 @@ fn push_name(mut line: String, key: u64, k: u64) {
 
 fn frequencies(mut line: String, table: Counts, k: u64) {
     let mut sorted: List[Frequency] = result.unwrap(list.with_capacity(map.len(table)))
-    let mut total: u64 = 0
+    let mut total: u32 = 0
     for (key, count) in table {
         total += count
         result.unwrap(list.push(mut sorted, Frequency(key: key, count: count)))
     }
     std.list.sort(mut sorted, fn(a: Frequency, b: Frequency) -> Order {
         if a.count != b.count {
-            if a.count > b.count { Less } else { Greater }
-        } else if a.key < b.key { Less } else if a.key == b.key { Equal } else { Greater }
+            if a.count > b.count {
+                Less
+            } else {
+                Greater
+            }
+        } else if a.key > b.key {
+            Less
+        } else if a.key == b.key {
+            Equal
+        } else {
+            Greater
+        }
     })
     for row in sorted {
         push_name(mut line, row.key, k)
         result.unwrap(string.push(mut line, " "))
-        let part: f64 = float.from_int(row.count)
-        let whole: f64 = float.from_int(total)
-        result.unwrap(std.float.push_fixed64(mut line, part * 100.0 / whole, 3))
+        let part: f32 = float.from_int(row.count)
+        let whole: f32 = float.from_int(total)
+        result.unwrap(std.float.push_fixed64(mut line, float.widen(part * 100.0 / whole), 3))
         result.unwrap(string.push(mut line, "\n"))
     }
     result.unwrap(string.push(mut line, "\n"))
 }
 
 pub fn main(tasks: Tasks, out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
-    let Some(path) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
-    let input = result.unwrap(std.file.read(d, path))
-    let sequence = result.unwrap(arc.new(Sequence(bases: extract(input))))
-    let lengths: Inline[u64, 7] = [1u64, 2, 3, 4, 6, 12, 18]
-    let queries: Inline[String, 5] = ["GGT", "GGTA", "GGTATT", "GGTATTTTAATT", "GGTATTTTAATTTATAGT"]
+    let Some(path) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let input = result.unwrap(std.file.open(d, path, Read))
+    let sequence = result.unwrap(arc.new(Sequence(bases: extract(take input))))
+    let lengths: Inline[u64, 7] =[1u64, 2, 3, 4, 6, 12, 18]
+    let queries: Inline[String, 5] =["GGT", "GGTA", "GGTATT", "GGTATTTTAATT", "GGTATTTTAATTTATAGT"]
     let mut jobs: List[Task[Counts]] = result.unwrap(list.with_capacity(7))
     for i in 0u64 .. 7 {
         let k = lengths[6 - i]
         let bases = list.len(sequence.bases)
         let keys = 1u64 << (2 * k)
-        let upper_bound = if keys < bases { keys } else { bases }
+        let upper_bound = if keys < bases {
+            keys
+        } else {
+            bases
+        }
         let allowance = 65536 + upper_bound * 128
         let job = Job(sequence: arc.share(sequence), k: k)
         let h = result.unwrap(task.spawn(tasks, bytes allowance, take job, tally))
@@ -112,9 +148,15 @@ pub fn main(tasks: Tasks, out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] w
             let word = queries[i - 2]
             let mut key: u64 = 0
             let chars = string.as_bytes(word)
-            for j in 0 .. k { key = (key << 2) | int.widen(option.unwrap(base(chars[j]))) }
-            let count: u64 = if let Some(value) = map.get(table, key) { value } else { 0u64 }
-            result.unwrap(string.push_u64(mut line, count))
+            for j in 0 .. k {
+                key = (key << 2) | int.widen(base(chars[j]))
+            }
+            let count: u32 = if let Some(value) = map.get(table, key) {
+                value
+            } else {
+                0u32
+            }
+            result.unwrap(string.push_u64(mut line, int.widen(count)))
             result.unwrap(string.push(mut line, "\t"))
             result.unwrap(string.push(mut line, word))
             result.unwrap(string.push(mut line, "\n"))

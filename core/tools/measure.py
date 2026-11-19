@@ -96,7 +96,7 @@ def sources(name, layout):
 
 
 def sample(command, directory, compiler_only=False, env=None, *, cycles=False, cwd=None, pmu_times=False,
-           smt_siblings=None):
+           smt_siblings=None, stdin=None):
     directory.mkdir()
     perf = directory/'perf.csv'
     stats = directory/'time.txt'
@@ -127,11 +127,12 @@ def sample(command, directory, compiler_only=False, env=None, *, cycles=False, c
                        '-o', str(stats), *map(str, command)])
     started = time.monotonic()
     with contextlib.ExitStack() as stack:
+        input_file = stack.enter_context(Path(stdin).open('rb')) if stdin is not None else None
         if compiler_only:
             lock = stack.enter_context(open('/tmp/hirsel-langarena-measure.lock', 'a'))
             fcntl.flock(lock, fcntl.LOCK_EX)
         with (directory/'stdout').open('wb') as out, (directory/'stderr').open('wb') as err:
-            result = subprocess.run(launch, stdout=out, stderr=err, env=env, cwd=cwd)
+            result = subprocess.run(launch, stdin=input_file, stdout=out, stderr=err, env=env, cwd=cwd)
     if compiler_only:
         control.unlink()
         control.with_suffix('.ack').unlink()

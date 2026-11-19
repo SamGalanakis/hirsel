@@ -153,17 +153,21 @@ def observe(row, target, env, siblings, *, cycles=False, label=None, quiet_windo
     row["affinity"] = sorted(os.sched_getaffinity(0))
     activity = nullcontext() if quiet_window else smt_activity(siblings, label)
     options = {"smt_siblings": siblings} if quiet_window else {}
+    if "stdin" in row:
+        options["stdin"] = row["stdin"]
     with activity as busy:
         sample = measure.core_measure.sample(row["argv"], target, env=env, cwd=row["cwd"], cycles=cycles,
                                             pmu_times=True, **options)
     if not quiet_window:
         sample["smt_busy_percent"] = busy
     output = (target / "stdout").read_bytes()
-    lines = output.splitlines(keepends=True) if row.get("line_marker") else [output]
-    marker = row["marker"].encode()
-    sample["verified"] = sample["status"] in ("ok", "missing-counter") and any(
-        re.fullmatch(marker, line) for line in lines
-    )
+    if (verify := row.get("verify")) is not None:
+        valid_output = verify(output)
+    else:
+        lines = output.splitlines(keepends=True) if row.get("line_marker") else [output]
+        marker = row["marker"].encode()
+        valid_output = any(re.fullmatch(marker, line) for line in lines)
+    sample["verified"] = sample["status"] in ("ok", "missing-counter") and valid_output
     if sample["status"] == "ok":
         if not sample["verified"]:
             sample["status"] = "wrong-result"
@@ -466,14 +470,22 @@ def cycle_pairs(args):
         raise ValueError("--peer takes one Hirsel receipt and cannot be combined with --aa")
     if not args.peer and (args.candidate is None or args.upstream is not None):
         raise ValueError("provide two receipts for a Hirsel comparison or use --peer")
+    if args.multicore and (not args.peer or args.upstream is not None):
+        raise ValueError("--multicore requires --peer and a multicore build directory")
     with measurement_slot(args.lock), tempfile.TemporaryDirectory() as temporary:
         siblings = sibling_cpus((args.cpu,))
-        base, base_refusals = receipt_in(args.baseline)
-        after, after_refusals = receipt_in(args.candidate) if args.candidate else ({}, {})
-        keys = select_pair_rows(args.rows, base)
         env = build.capped_env(Path(temporary))
         activity = "no busy filter" if limit is None else f"quiet means below {limit}% busy per run"
         print(f"CPU {args.cpu}, SMT siblings {', '.join(map(str, siblings)) or 'none'}, {activity}", flush=True)
+        if args.multicore:
+            os.sched_setaffinity(0, {args.cpu})
+            try:
+                return multicore_peer_pairs(args, siblings, env)
+            finally:
+                os.sched_setaffinity(0, affinity)
+        base, base_refusals = receipt_in(args.baseline)
+        after, after_refusals = receipt_in(args.candidate) if args.candidate else ({}, {})
+        keys = select_pair_rows(args.rows, base)
         status = 0
         try:
             os.sched_setaffinity(0, {args.cpu})
@@ -529,9 +541,45 @@ def peer_cycle_pairs(key, hirsel, args, siblings, env):
     for peer in args.peer:
         command, marker = commands[peer]
         row = {"argv": list(map(str, command)), "cwd": str(cwd), "marker": marker.decode(), "line_marker": True}
-        kept, attempted = cycle_samples(row, hirsel, args, siblings, env)
-        status = max(status, report_cycle_pairs(f"{key} Hirsel/{peer}", kept, attempted, args.pairs,
-                                               filtered=args.sibling_busy_threshold is not None, peer=True))
+        status = max(status, report_peer_pair(f"{key} Hirsel/{peer}", row, hirsel, args, siblings, env))
+    return status
+
+
+def report_peer_pair(label, peer, hirsel, args, siblings, env):
+    kept, attempted = cycle_samples(peer, hirsel, args, siblings, env)
+    return report_cycle_pairs(label, kept, attempted, args.pairs,
+                              filtered=args.sibling_busy_threshold is not None, peer=True)
+
+
+def multicore_peer_pairs(args, siblings, env):
+    sys.path.insert(0, str(build.ROOT))
+    from bench.multicore import run as game
+
+    bins = args.baseline.resolve()
+    keys = select_pair_rows(args.rows, {f"multicore/{name}": name for name in game.GAME_ROWS})
+    env = env | {"LC_ALL": "C", "RAYON_NUM_THREADS": "1"}
+    status = 0
+    for key in keys:
+        name = key.split("/", 1)[1]
+        fasta = bins / "input.fasta"
+        wanted = game.expected(name, fasta)
+
+        def command(language):
+            argv = game.sample_command(bins, name, language, 1, game.SIZES[name])
+            return {"argv": list(map(str, argv)), "cwd": str(bins),
+                    "stdin": game.sample_stdin(bins, name, language),
+                    "verify": lambda output: game.matches(output, wanted)}
+
+        hirsel = command("Hirsel")
+        log = bins / f"hirsel-{name}.log"
+        report = next((json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")), {})
+        native = report.get("native") or {}
+        if not (report.get("accepted") and native.get("linked") and native.get("step_charging_elided")
+                and Path(native["executable"]).resolve() == Path(hirsel["argv"][0]).resolve()):
+            raise ValueError(f"{key}: expected a certified Hirsel build")
+        for peer in args.peer:
+            status = max(status, report_peer_pair(f"{key} Hirsel/{peer}", command(peer.title()),
+                                                 hirsel, args, siblings, env))
     return status
 
 
@@ -765,13 +813,15 @@ def main():
     comparison.add_argument("--threshold", type=threshold, default=INSTRUCTION_LIMIT, metavar="PERCENT")
     comparison.add_argument("--aa", action="store_true", help="require identical compiler, runtime and std/core hashes")
     cycles = commands.add_parser("cycle-pairs", help="qualify named runtime rows with interleaved counter pairs")
-    cycles.add_argument("baseline", type=Path, help="base directory containing receipt.json or board.json")
+    cycles.add_argument("baseline", type=Path, help="base receipt directory or --multicore build directory")
     cycles.add_argument("candidate", nargs="?", type=Path,
                         help="candidate directory containing receipt.json or board.json")
     cycles.add_argument("--peer", nargs="+", choices=("rust", "goose"),
-                        help="report Hirsel/peer ratios from one Hirsel receipt")
+                        help="report Hirsel/peer ratios from one Hirsel build")
     cycles.add_argument("--upstream", type=lambda path: Path(path).resolve(),
                         help="pinned AWFY checkout for peer commands")
+    cycles.add_argument("--multicore", action="store_true",
+                        help="sample Benchmarks Game peers from a multicore build directory")
     cycles.add_argument("--rows", required=True, metavar="ROW,ROW", help="comma-separated runtime row names")
     cycles.add_argument("--cpu", type=int, required=True, help="measurement CPU")
     cycles.add_argument("--pairs", type=positive_int, default=60, metavar="N", help="kept pairs per row (default: 60)")

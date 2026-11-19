@@ -373,3 +373,24 @@ fn whole_input_and_empty_at_full(out: Stdout) -> bool waits {
     result.unwrap(io.flush(mut w))
     full && suffix
 }
+
+// Raw input keeps invalid UTF-8, includes LF, and appends to the caller's
+// buffer. The first line crosses a refill and the final line ends at EOF.
+// expect: run buffered_raw_lines(dir) = true
+fn buffered_raw_lines(d: Dir) -> bool waits {
+    let mut raw: Bytes = list.new()
+    result.unwrap(list.push(mut raw, 255u8))
+    result.unwrap(list.append(mut raw, string.as_bytes("ab\nz")))
+    result.unwrap(file.write(d, "input", raw))
+    let f = result.unwrap(file.open(d, "input", Read))
+    let mut reader = result.unwrap(io.buffered_input(take f, 3))
+    let mut output: Bytes = list.new()
+    result.unwrap(list.push(mut output, b'!'))
+    if !result.unwrap(io.read_until_lf(mut reader, mut output)) || list.len(output) != 5 || output[0] != b'!' || output[1] != 255u8 || output[2] != b'a' || output[3] != b'b' || output[4] != b'\n' {
+        return false
+    }
+    if !result.unwrap(io.read_until_lf(mut reader, mut output)) || list.len(output) != 6 || output[5] != b'z' {
+        return false
+    }
+    !result.unwrap(io.read_until_lf(mut reader, mut output)) && list.len(output) == 6
+}

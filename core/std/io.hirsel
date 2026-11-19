@@ -291,3 +291,55 @@ pub fn write(mut w: Out, s: String) -> Result[(), WriteError] waits {
     }
     Ok(())
 }
+
+pub opaque type BufferedInput {
+    file: HostFile,
+    buffer: Bytes,
+    at: u64,
+}
+
+/// Takes ownership of f and reserves a reusable read buffer of at least one byte.
+/// On Capacity, returns f at its original position.
+pub fn buffered_input(take f: HostFile, cap: u64) -> Result[BufferedInput, (Capacity, HostFile)] {
+    let size: u64 = if cap == 0 {
+        1
+    } else {
+        cap
+    }
+    let allocated: Result[Bytes, Capacity] = list.with_capacity(size)
+    match take allocated {
+        Ok(take buffer) => Ok(BufferedInput(file: take f, buffer: take buffer, at: 0)),
+        Error(c) => Error((c, take f)),
+    }
+}
+
+/// Appends the next raw line, including its LF when present. False means EOF
+/// before appending any bytes. On failure, retains the prefix already appended.
+pub fn read_until_lf(mut input: BufferedInput, mut output: Bytes) -> Result[bool, Error] waits {
+    let before = list.len(output)
+    loop {
+        if input.at == list.len(input.buffer) {
+            list.clear(mut input.buffer)
+            input.at = 0
+            match file.read_into(mut input.file, mut input.buffer) {
+                Ok(0) => return Ok(list.len(output) != before),
+                Ok(_) => {},
+                Error(e) => return Error(Io(e)),
+            }
+        }
+        let len = list.len(input.buffer)
+        let start = input.at
+        let mut end = start + scan_newline(list.slice(input.buffer, start, len))
+        let found_lf = end < len
+        if found_lf {
+            end += 1
+        }
+        if let Error(c) = list.append(mut output, list.slice(input.buffer, start, end)) {
+            return Error(Capacity(c))
+        }
+        input.at = end
+        if found_lf {
+            return Ok(true)
+        }
+    }
+}

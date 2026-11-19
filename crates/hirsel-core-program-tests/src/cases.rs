@@ -294,7 +294,13 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                 ("hold_only", [t]) if *t == "u32" => (36, 4, 4),
                 _ => continue,
             };
-            let Some(b) = &f.body else { continue };
+            // A block's size is a layout query until the checked module's
+            // layouts resolve it, as each engine does before running it.
+            let recipes = hirsel_core_layout::compute(&module.types).unwrap();
+            let native = hirsel_core_ir::native_layout::resolve(module, &recipes);
+            let Some(b) = &native.functions[unit.function.index()].body else {
+                continue;
+            };
             let constant = |value| {
                 b.insts
                     .iter()

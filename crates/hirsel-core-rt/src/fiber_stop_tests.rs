@@ -24,19 +24,50 @@ fn startup_stop_child() {
                 super::fault(libc::SIGSEGV, &mut info, std::ptr::null_mut());
             }
         }
+        "refused growth" => {
+            super::arm();
+            let stack = super::Stack::new();
+            super::guard(stack.bounds());
+            let none = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: lower only this isolated child's limits. A zero data limit
+            // refuses the commit-on-touch mprotect of private writable pages.
+            unsafe {
+                assert_eq!(libc::setrlimit(libc::RLIMIT_CORE, &none), 0);
+                assert_eq!(libc::setrlimit(libc::RLIMIT_DATA, &none), 0);
+            }
+            // SAFETY: half way down the current stack's reservation, above its
+            // guard page; the fault handler either commits it or stops the run.
+            unsafe {
+                stack
+                    .base
+                    .as_ptr()
+                    .add(stack.len / 2)
+                    .cast::<u64>()
+                    .write_volatile(7);
+            }
+        }
         _ => unreachable!(),
     }
     panic!("startup stop returned");
 }
 
 #[test]
-fn host_startup_stops_have_exact_names_and_skip_cleanup() {
+fn host_stops_have_exact_names_and_skip_cleanup() {
     assert_eq!(super::page_bytes(4096), 4096);
-    for (mode, expected) in [
+    let mut modes = vec![
         ("negative page", b"run stop: PageSize\n".as_slice()),
         ("zero page", b"run stop: PageSize\n".as_slice()),
         ("missing action", b"run stop: Signal\n".as_slice()),
-    ] {
+    ];
+    // A host refusing a stack's growth is HostMemory (FAIL-15), not a fault.
+    // qemu-user ignores the guest's data limit, so only native targets refuse.
+    if cfg!(not(target_arch = "aarch64")) {
+        modes.push(("refused growth", b"run stop: HostMemory\n".as_slice()));
+    }
+    for (mode, expected) in modes {
         let output = crate::test_process::command()
             .args([
                 "--ignored",

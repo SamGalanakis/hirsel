@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import unittest
 
+import sdk_package
 from std_native import ROOT, discover, run
 
 
@@ -24,10 +25,25 @@ def main():
     if args.compiler and not args.runtime:
         parser.error('--compiler requires --runtime for the build revision law')
 
+    root = args.root.resolve()
+    node_dist = os.environ.get('HIRSEL_SDK_NODE_DIST')
+    packed = sdk_package.SELECTOR in args.filter or (node_dist and not args.filter)
+    filters = [selector for selector in args.filter if selector != sdk_package.SELECTOR]
+    if packed and (not node_dist or not args.compiler or not args.runtime):
+        parser.error('the packed SDK check requires the Buck SDK toolchain, compiler and runtime')
+
     class Laws(unittest.TestCase):
         def test_every_evaluator_eligible_law(self):
-            root = args.root.resolve()
-            contracts = discover(root, args.filter)
+            if not args.filter or filters:
+                self.check_evaluator_laws()
+            if packed:
+                tools = [Path(os.environ['HIRSEL_SDK_' + name]).resolve()
+                         for name in ('TYPESCRIPT', 'NODE_TYPES', 'UNDICI_TYPES')]
+                sdk_package.check(root, args.compiler.resolve(), args.runtime.resolve(), Path(node_dist).resolve(), tools)
+                print(f'{sdk_package.SELECTOR}: PASS', flush=True)
+
+        def check_evaluator_laws(self):
+            contracts = discover(root, filters)
             owners = json.loads(Path(__file__).with_name('std_native_owners.json').read_text())
             rows = run(root, args.compiler.resolve() if args.compiler else None,
                        args.runtime.resolve() if args.runtime else None, contracts, ['evaluator'], None, owners,

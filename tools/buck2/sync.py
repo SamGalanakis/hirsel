@@ -743,8 +743,12 @@ def first_party(meta: dict) -> str:
                             args=["--evaluator", "buck-out/tmp/cargo-bin-exe/core-evaluator/hirsel-core-contract-eval",
                                   "--compiler", "buck-out/tmp/cargo-bin-exe/core-evaluator/hirsel",
                                   "--node", "buck-out/tmp/cargo-bin-exe/core-evaluator/node"],
-                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/tests/**", "sdk/client/*.ts", "core/tools/std_native.py", "core/tools/std_native_owners.json"]) + ["crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/store/runner.hirsel", "core/programs/store/store.hirsel", "core/programs/store/ingress.hirsel"] + ["core/tools/case_progress.py"]')))
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                                       "HIRSEL_SDK_NODE_DIST": "//tools/buck2:sdk-node",
+                                       "HIRSEL_SDK_TYPESCRIPT": "//tools/buck2:sdk-typescript",
+                                       "HIRSEL_SDK_NODE_TYPES": "//tools/buck2:sdk-node-types",
+                                       "HIRSEL_SDK_UNDICI_TYPES": "//tools/buck2:sdk-undici-types"},
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/tests/**", "sdk/client/*.ts", "sdk/client/tests/*", "sdk/client/package.json", "sdk/client/tsconfig.json", "sdk/client/README.md", "core/tools/sdk_package.py", "core/tools/std_native.py", "core/tools/std_native_owners.json"]) + ["crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/store/runner.hirsel", "core/programs/store/store.hirsel", "core/programs/store/ingress.hirsel"] + ["core/tools/case_progress.py"]')))
     # CONC-10 event order: the evaluator against native cranelift under the poll recorder's FIFO choice.
     out.append("\n" + call("hirsel_script_test", name="core-event-order", script="crates/hirsel-core-rt/test-event-order.py",
                             host=True,

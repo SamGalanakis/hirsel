@@ -296,6 +296,12 @@ def wrapper(case):
 
 
 def manifest(root, case, adapted):
+    if case.test_of:
+        return source_manifest(root, case.package, [case.test_of], adapted, replace=True)
+    return source_manifest(root, case.package, ['tests', case.file.stem], adapted)
+
+
+def source_manifest(root, package, modules, source, *, replace=False):
     core = {'name': 'core', 'version': '1'}
     std = {'name': 'std', 'version': '1'}
     def sources(directory, signatures):
@@ -304,16 +310,16 @@ def manifest(root, case, adapted):
     packages = [
         {'package': core, 'sources': sources(root / 'core/core', True), 'dependencies': []},
         {'package': std, 'sources': sources(root / 'core/std', False), 'dependencies': [core]}]
-    if case.package == 'store':
+    if package == 'store':
         packages.append({'package': {'name': 'store', 'version': '1'}, 'dependencies': [core, std],
                          'sources': [{'file': str(root / 'core/programs/store' / (name + '.hirsel')),
                                       'modules': [name], 'signatures': False} for name in ['runner', 'store', 'ingress']]})
-    files = next(p['sources'] for p in packages if p['package']['name'] == case.package)
-    if case.test_of:
-        original = next(f for f in files if f['modules'] == [case.test_of])
-        original.update(file=str(adapted), signatures=case.package == 'core')
+    files = next(p['sources'] for p in packages if p['package']['name'] == package)
+    if replace:
+        original = next(f for f in files if f['modules'] == modules)
+        original.update(file=str(source), signatures=package == 'core')
     else:
-        files.append({'file': str(adapted), 'modules': ['tests', case.file.stem], 'signatures': False})
+        files.append({'file': str(source), 'modules': modules, 'signatures': False})
     return {'core': core, 'packages': packages}
 
 

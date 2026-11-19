@@ -1,0 +1,25 @@
+pub type Reply: codec + send = Value(Option[Option[u32]], u64) | Missing
+
+fn packed_reply(take _arg: ()) -> Result[Reply, Capacity] {
+    Ok(Value(Some(None), 9007199254740993u64))
+}
+
+fn place(mut registry: runner.Registry[(), ()]) -> Result[(), runner.RegisterError] {
+    runner.compute(mut registry, code.describe(packed_reply), 1024u64, runner.DEFAULT_STEPS)
+}
+
+fn payload(out: Stdout) -> Result[(), Exit] waits {
+    let reply = result.unwrap(packed_reply(()))
+    let codec: std.codec.Codec[Reply] = std.codec.of()
+    let mut encoded: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, reply, mut encoded))
+    match stdout.write_bytes(out, encoded) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 1))
+    }
+}
+
+pub fn main(args: Args, out: Stdout) -> Result[(), Exit] waits {
+    let serve = scoped fn() -> Result[(), Exit] waits { payload(out) }
+    runner.launch_server(args, code.describe(place), serve)
+}

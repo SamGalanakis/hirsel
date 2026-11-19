@@ -60,3 +60,8 @@ The scripted laws run as part of `store.codec_frames:ts_frame_vectors` in
 `//:core-evaluator`. They use the generated Frame codec and independent
 STORE P1-P3 fixtures. Real `serve` crash/reconnect qualification is deferred to
 W3e; these laws make no claim about that integration.
+
+The packed-package check runs in `//:core-evaluator`. To run it alone, use
+`.buck2/bin/buck2 test //:core-evaluator -- --test-arg=--filter --test-arg=sdk.client:packed_consumer`.
+It installs the tarball offline and type-checks and runs generated bindings in
+an isolated Node project.

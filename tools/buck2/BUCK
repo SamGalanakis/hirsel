@@ -11,6 +11,34 @@ http_archive(
     visibility = ["PUBLIC"],
 )
 
+# Local inputs to the packed SDK check's offline npm installs.
+http_file(
+    name = "sdk-typescript",
+    urls = ["https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz"],
+    out = "typescript-5.9.3.tgz",
+    sha256 = "10e108c9cf7d5f2879053dff18515fb405abf2ccef63eaaf017d9c571687a1d3",
+    size_bytes = 4377468,
+    visibility = ["PUBLIC"],
+)
+
+http_file(
+    name = "sdk-node-types",
+    urls = ["https://registry.npmjs.org/@types/node/-/node-22.19.1.tgz"],
+    out = "types-node-22.19.1.tgz",
+    sha256 = "579ccc9699521b05d25699a8634e6c9565d4ad977464393ac31c0d26c82ae231",
+    size_bytes = 444660,
+    visibility = ["PUBLIC"],
+)
+
+http_file(
+    name = "sdk-undici-types",
+    urls = ["https://registry.npmjs.org/undici-types/-/undici-types-6.21.0.tgz"],
+    out = "undici-types-6.21.0.tgz",
+    sha256 = "cfa1a9a5e18988850e548f4f6b629c58da32dc32bebb116e58ea301e516fd16d",
+    size_bytes = 21020,
+    visibility = ["PUBLIC"],
+)
+
 declare_platforms(
     name = "platforms",
     constraints = ["prelude//os:linux", "prelude//cpu:x86_64"],

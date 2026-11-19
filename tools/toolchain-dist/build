@@ -39,6 +39,11 @@ def witness(output):
               tempfile.TemporaryDirectory(prefix='hirsel-witness-', dir=output.parent) as scratch):
             moved, work = Path(prefix), Path(scratch)
             output.rename(moved)
+            # Native builds can cache new std objects beside the shipped ones.
+            packages = moved / 'core-packages'
+            shipped = work / 'core-packages'
+            packages.rename(shipped)
+            shutil.copytree(shipped, packages)
             compiler = moved / 'hirsel'
             project = work / 'app'
             env = dict(PATH=os.defpath, HOME=scratch, TMPDIR=scratch, HIRSEL_JOBS='1')
@@ -63,6 +68,8 @@ def witness(output):
                 if actual != expected:
                     raise ValueError(f'{backend} relocation witness wrote {actual!r}, expected {expected!r}')
                 print(f'dist: {backend} relocation witness passed', flush=True)
+            shutil.rmtree(packages)
+            shipped.rename(packages)
             moved.rename(output)
     except BaseException:
         if output.exists():

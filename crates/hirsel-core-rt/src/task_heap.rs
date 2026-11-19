@@ -6,17 +6,17 @@
 //! freed alone reuses its slot without resetting the page.
 use crate::{abi_layout::own_prefix, limit::Payer};
 use std::cell::Cell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const SLAB: usize = 64 * 1024;
-const HEADER_BACK: usize = 4096;
+const MIN_PAGE_BYTES: usize = 4096;
 const GROWTH_RESERVE_FACTOR: usize = 8;
 const MIN_GROWTH_RESERVATION: usize = 256 * 1024;
-// Each clean reservation still keeps its header resident.
+// Bound clean reservations and their external descriptors.
 const EMPTY_DEDICATED_LIMIT: usize = 8;
 const DEDICATED_PURGE_DELAY: Duration = Duration::from_millis(100);
 const MAX_RETAINED_DEDICATED_BYTES: usize = 4 * 1024 * 1024;
@@ -55,7 +55,8 @@ const DIRECT: [(u16, u8); DIRECT_WORDS + 1] = {
 
 // Direct classes are below the smallest native page and fit a slab.
 const _: () = assert!(
-    DIRECT[DIRECT_WORDS].0 as usize <= HEADER_BACK && (DIRECT[DIRECT_WORDS].1 as usize) < SLAB_BINS
+    DIRECT[DIRECT_WORDS].0 as usize <= MIN_PAGE_BYTES
+        && (DIRECT[DIRECT_WORDS].1 as usize) < SLAB_BINS
 );
 
 #[derive(Clone, Copy)]
@@ -111,7 +112,7 @@ impl Class {
         own_prefix(self.kind).next_multiple_of(self.align)
     }
     fn fits_slab(self) -> bool {
-        // A dedicated mapping would cost a header page for a sub-page payload.
+        // Small growable slots share a slab until they exceed a native page.
         (self.bin as usize) < SLAB_BINS && (!self.growable || self.stride <= page_bytes())
     }
 }
@@ -129,7 +130,32 @@ struct Key {
 
 type PagePointer = NonNull<Page>;
 
-struct Page {
+struct IndexedPage(PagePointer);
+
+// SAFETY: the index only publishes addresses. Live slots or the owning heap
+// keep each descriptor alive. The heap lock serializes page mutation.
+unsafe impl Send for IndexedPage {}
+
+// Mimalloc's arena metadata is indexed by slice. Dedicated mappings have no
+// common arena, so route them by slice address through independent shards.
+type DedicatedIndex = HashMap<usize, IndexedPage, foldhash::fast::FixedState>;
+
+fn dedicated_index(payload: NonNull<u8>) -> &'static Mutex<DedicatedIndex> {
+    static SHARDS: [Mutex<DedicatedIndex>; 64] = [const {
+        Mutex::new(HashMap::with_hasher(foldhash::fast::FixedState::with_seed(
+            0,
+        )))
+    }; 64];
+    let slice = payload.addr().get() / SLAB;
+    &SHARDS[(slice ^ (slice >> 6) ^ (slice >> 12)) % SHARDS.len()]
+}
+
+#[cold]
+fn dedicated_page(payload: NonNull<u8>) -> PagePointer {
+    dedicated_index(payload).lock().unwrap()[&payload.addr().get()].0
+}
+
+pub(crate) struct Page {
     heap: Arc<Heap>,
     backing: Mapping,
     payer: std::cell::UnsafeCell<Payer>,
@@ -158,47 +184,72 @@ impl Page {
         unsafe { *page.as_ref().key.get() }
     }
 
-    fn new(heap: &Arc<Heap>, payer: Payer, key: Key) -> PagePointer {
-        let class = key.class;
-        let (backing, header) = if class.fits_slab() {
-            let (map, start) = Mapping::aligned(SLAB, SLAB, 0, false);
-            (map, start)
-        } else {
-            let (map, payload) = Mapping::aligned(
-                class.stride,
-                class.align.max(SLAB),
-                page_bytes(),
-                class.growable,
-            );
-            // SAFETY: this mapping reserves a full native page before payload.
-            (map, unsafe { payload.sub(HEADER_BACK) })
-        };
-        let page: PagePointer = header.cast();
-        let slots = Self::slots(header, class);
-        // SAFETY: the header is aligned, in the new mapping, and disjoint from slots.
-        unsafe {
-            page.as_ptr().write(Self {
-                heap: Arc::clone(heap),
-                backing,
-                payer: payer.into(),
-                key: key.into(),
-                slots: slots.into(),
-            });
-        }
-        page
+    /// # Safety
+    /// A live slot pins the page and its original payer across the borrow.
+    #[inline(always)]
+    pub(crate) unsafe fn funding<'a>(page: PagePointer) -> &'a Payer {
+        // SAFETY: occupied slots keep the payer immutable until their release.
+        unsafe { &*page.as_ref().payer.get() }
     }
 
-    fn slots(header: NonNull<u8>, class: Class) -> Slots {
+    /// # Safety
+    /// A live slot pins this page's metadata.
+    #[inline]
+    pub(crate) unsafe fn kind(page: PagePointer) -> u8 {
+        // SAFETY: a live slot keeps its native kind.
+        unsafe { Self::key(page).class.kind }
+    }
+
+    fn new(heap: &Arc<Heap>, payer: Payer, key: Key) -> PagePointer {
+        let class = key.class;
+        let slab = class.fits_slab();
+        let (backing, start) = if slab {
+            Mapping::aligned(SLAB, SLAB, 0, false)
+        } else {
+            let headroom = if own_prefix(class.kind) == 0 {
+                0
+            } else {
+                page_bytes()
+            };
+            Mapping::aligned(
+                class.stride,
+                class.align.max(SLAB),
+                headroom,
+                class.growable,
+            )
+        };
+        let data = Self {
+            heap: Arc::clone(heap),
+            backing,
+            payer: payer.into(),
+            key: key.into(),
+            slots: Self::slots(start, class).into(),
+        };
+        if slab {
+            let page: PagePointer = start.cast();
+            // SAFETY: the start of a new slab has room for its aligned descriptor.
+            unsafe { page.as_ptr().write(data) };
+            page
+        } else {
+            let page = NonNull::from(Box::leak(Box::new(data)));
+            dedicated_index(start)
+                .lock()
+                .unwrap()
+                .insert(start.addr().get(), IndexedPage(page));
+            page
+        }
+    }
+
+    fn slots(start: NonNull<u8>, class: Class) -> Slots {
         let (first, limit) = if class.fits_slab() {
             let offset = (size_of::<Self>() + class.offset()).next_multiple_of(class.align);
             // SAFETY: size class guarantees at least one slot in the mapping.
             (
-                unsafe { header.add(offset) },
+                unsafe { start.add(offset) },
                 (SLAB - offset + class.offset()) / class.stride,
             )
         } else {
-            // SAFETY: the sole payload begins exactly HEADER_BACK bytes after the header.
-            (unsafe { header.add(HEADER_BACK) }, 1)
+            (start, 1)
         };
         Slots {
             first,
@@ -218,17 +269,31 @@ impl Page {
         unsafe {
             page.as_ref().payer.get().write(payer);
             page.as_ref().key.get().write(key);
-            page.as_ref()
-                .slots
-                .get()
-                .write(Self::slots(page.cast(), key.class));
+            let slots = page.as_ref().slots.get();
+            let start = if key.class.fits_slab() {
+                page.cast()
+            } else {
+                (*slots).first
+            };
+            slots.write(Self::slots(start, key.class));
         }
     }
 
     unsafe fn destroy(page: PagePointer) {
-        // SAFETY: no live slots or queues reference this page. Read its fields
-        // out of the mapping before dropping the owner and unmapping it.
-        let page = unsafe { page.as_ptr().read() };
+        // SAFETY: no live slots or queues reference this page. Move its fields
+        // out before dropping the owner and unmapping the payload.
+        let page = unsafe {
+            let first = (*page.as_ref().slots.get()).first;
+            if first.addr().get() & (SLAB - 1) == 0 {
+                dedicated_index(first)
+                    .lock()
+                    .unwrap()
+                    .remove(&first.addr().get());
+                *Box::from_raw(page.as_ptr())
+            } else {
+                page.as_ptr().read()
+            }
+        };
         drop(page.backing);
         drop(page.heap);
     }
@@ -421,8 +486,10 @@ impl DedicatedCache {
                 let page = unsafe { page.as_ref() };
                 let payload = unsafe { (*page.slots.get()).first };
                 let extent = page.backing.extent(payload);
-                (extent >= class.stride && payload.addr().get() & (class.align - 1) == 0)
-                    .then_some((index, extent))
+                (extent >= class.stride
+                    && payload.addr().get() & (class.align - 1) == 0
+                    && page.backing.headroom(payload) >= own_prefix(class.kind))
+                .then_some((index, extent))
             })
             .min_by_key(|&(_, extent)| extent)?;
         let page = if index < self.retained.len() {
@@ -491,11 +558,10 @@ impl DedicatedCache {
     }
 
     fn purge(&mut self, page: PagePointer) {
-        // SAFETY: the heap owns this empty page. The payload starts on a
-        // native page boundary, after the header and any ownership prefix.
+        // SAFETY: the heap owns this empty page and its separate descriptor.
         let header = unsafe { page.as_ref() };
         let payload = unsafe { (*header.slots.get()).first };
-        if !header.backing.discard_payload(payload) {
+        if !header.backing.discard_writable(payload) {
             // SAFETY: the page is empty and detached from both queues.
             unsafe { Page::destroy(page) };
             return;
@@ -707,30 +773,29 @@ impl Heap {
 
 /// # Safety
 /// A live own or resource block allocated by this heap.
-unsafe fn page_of(payload: NonNull<u8>) -> PagePointer {
+#[inline]
+pub(crate) unsafe fn page_of(payload: NonNull<u8>) -> PagePointer {
     let address = payload.as_ptr().addr();
     let base = address & !(SLAB - 1);
-    let header = if base == address {
-        base - HEADER_BACK
-    } else {
-        base
-    };
-    // SAFETY: slot placement and Mapping::aligned reserve this header.
-    unsafe { NonNull::new_unchecked(payload.as_ptr().with_addr(header).cast()) }
+    if base == address {
+        return dedicated_page(payload);
+    }
+    // SAFETY: slab slots share their mapping with its aligned descriptor.
+    unsafe { NonNull::new_unchecked(payload.as_ptr().with_addr(base).cast()) }
 }
 
 /// # Safety
 /// A live block pins its page's original payer until its logical refund.
 pub(crate) unsafe fn payer<'a>(payload: NonNull<u8>) -> &'a Payer {
     // SAFETY: the page's payer remains immutable throughout this block's lifetime.
-    unsafe { &*page_of(payload).as_ref().payer.get() }
+    unsafe { Page::funding(page_of(payload)) }
 }
 
 /// # Safety
 /// A live block whose kind was assigned by the allocator.
 pub(crate) unsafe fn kind(payload: NonNull<u8>) -> u8 {
     // SAFETY: exclusively owned slots pin the page metadata.
-    unsafe { Page::key(page_of(payload)).class.kind }
+    unsafe { Page::kind(page_of(payload)) }
 }
 
 /// # Safety
@@ -784,7 +849,14 @@ pub(crate) unsafe fn try_grow_in_place(
 #[inline]
 pub(crate) unsafe fn release(payload: NonNull<u8>) {
     // SAFETY: the slot pins its header and the page's heap while live.
-    let page = unsafe { page_of(payload) };
+    unsafe { release_page(page_of(payload), payload) };
+}
+
+/// # Safety
+/// The caller transfers the unique cleaned slot after its logical refund, and
+/// `page` is the owning page returned by `page_of(payload)` for that slot.
+#[inline]
+pub(crate) unsafe fn release_page(page: PagePointer, payload: NonNull<u8>) {
     // SAFETY: slot pins this immutable heap handle through the lock and state update.
     let heap = unsafe { &page.as_ref().heap };
     #[cfg(any(test, feature = "charge-observation"))]
@@ -927,7 +999,7 @@ impl Mapping {
             return None;
         }
         // SAFETY: a successful NULL-hint mapping is non-null. Trim to align the
-        // payload, then make only the initial extent and header writable.
+        // payload, then make the initial extent and ownership prefix writable.
         unsafe {
             let raw = NonNull::new_unchecked(raw.cast::<u8>());
             let payload = raw.add(headroom).map_addr(|address| {
@@ -956,8 +1028,12 @@ impl Mapping {
         }
     }
 
+    fn headroom(&self, payload: NonNull<u8>) -> usize {
+        payload.addr().get() - self.base.addr().get()
+    }
+
     fn extent(&self, payload: NonNull<u8>) -> usize {
-        self.len - (payload.addr().get() - self.base.addr().get())
+        self.len - self.headroom(payload)
     }
 
     fn extend(&self, payload: NonNull<u8>, bytes: usize) -> bool {
@@ -987,18 +1063,18 @@ impl Mapping {
         true
     }
 
-    fn discard_payload(&self, payload: NonNull<u8>) -> bool {
-        let bytes = self.writable.get();
-        // SAFETY: only empty dedicated mappings reach here, and this range
-        // consists of whole anonymous payload pages past the mapping header.
+    fn discard_writable(&self, payload: NonNull<u8>) -> bool {
+        let bytes = self.headroom(payload) + self.writable.get();
+        // SAFETY: only empty dedicated mappings reach here. The range covers
+        // every writable page, including any ownership prefix.
         #[cfg(target_os = "linux")]
         unsafe {
-            libc::madvise(payload.as_ptr().cast(), bytes, libc::MADV_DONTNEED) == 0
+            libc::madvise(self.base.as_ptr().cast(), bytes, libc::MADV_DONTNEED) == 0
         }
         #[cfg(not(target_os = "linux"))]
         unsafe {
             libc::mmap(
-                payload.as_ptr().cast(),
+                self.base.as_ptr().cast(),
                 bytes,
                 Self::WRITABLE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
@@ -1021,7 +1097,9 @@ fn page_bytes() -> usize {
         // SAFETY: sysconf reads the kernel's immutable page size.
         let value = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         match usize::try_from(value) {
-            Ok(bytes) if bytes.is_power_of_two() && (HEADER_BACK..=SLAB).contains(&bytes) => bytes,
+            Ok(bytes) if bytes.is_power_of_two() && (MIN_PAGE_BYTES..=SLAB).contains(&bytes) => {
+                bytes
+            }
             _ => crate::process::stop(b"PageSize"),
         }
     })
@@ -1037,14 +1115,25 @@ mod tests {
     use super::*;
     use crate::{Context, block};
 
-    fn resident(payload: NonNull<u8>) -> bool {
-        let mut flags = 0;
-        // SAFETY: the test holds a live or cached mapping for this native page.
+    fn resident_pages(base: NonNull<u8>, len: usize) -> usize {
+        let mut flags = vec![0; len / page_bytes()];
+        // SAFETY: the test holds a live or cached mapping across this range.
         assert_eq!(
-            unsafe { libc::mincore(payload.as_ptr().cast(), 4096, &mut flags) },
+            unsafe { libc::mincore(base.as_ptr().cast(), len, flags.as_mut_ptr()) },
             0
         );
-        flags & 1 != 0
+        flags.into_iter().filter(|flag| flag & 1 != 0).count()
+    }
+
+    fn resident(payload: NonNull<u8>) -> bool {
+        resident_pages(payload, page_bytes()) != 0
+    }
+
+    fn mapping(payload: NonNull<u8>) -> (NonNull<u8>, usize) {
+        // SAFETY: the owned buffer pins its backing until free, and the cache
+        // retains the reservation during the observations below.
+        let backing = unsafe { &page_of(payload).as_ref().backing };
+        (backing.base, backing.len)
     }
 
     #[test]
@@ -1080,6 +1169,7 @@ mod tests {
         // 1 MiB needs a separate reservation. Its release would leave 1 MiB
         // plus 8 KiB empty against a 1 MiB peak, so the older page gets purged.
         let large = allocate(LARGE);
+        let (base, len) = mapping(large);
         free(large, LARGE);
         assert!(!resident(small));
         assert!(resident(large));
@@ -1096,6 +1186,11 @@ mod tests {
                 .purge_expired(freed_at + Duration::from_millis(100));
             assert_eq!(state.dedicated.retained_bytes, 0);
             assert!(!resident(large));
+            let resident = resident_pages(base, len);
+            assert_eq!(
+                resident, 0,
+                "purged plain mapping retained {resident} native pages"
+            );
         }
 
         // An 8 MiB live peak still permits only 4 MiB of retained payload.
@@ -1103,6 +1198,25 @@ mod tests {
         free(oversized, OVERSIZED);
         assert_eq!(heap.lock().dedicated.retained_bytes, 0);
         assert!(!resident(oversized));
+
+        // A GRAPH buffer's cleanup frame uses the preceding native page.
+        // Pressure must discard that page too, while preserving reuse.
+        block::admit_storage(payer, Some(OVERSIZED as u64)).unwrap();
+        let graph = Heap::allocate(heap, payer, OVERSIZED, 8, block::GRAPH, true);
+        let (base, len) = mapping(graph);
+        // SAFETY: the exclusive buffer owns its reserved cleanup frame.
+        unsafe { graph.as_ptr().sub(own_prefix(block::GRAPH)).write(0x5a) };
+        assert!(resident(base));
+        free(graph, OVERSIZED);
+        let resident = resident_pages(base, len);
+        assert_eq!(
+            resident, 0,
+            "purged graph mapping retained {resident} native pages"
+        );
+        block::admit_storage(payer, Some(OVERSIZED as u64)).unwrap();
+        let graph_again = Heap::allocate(heap, payer, OVERSIZED, 8, block::GRAPH, true);
+        assert_eq!(graph_again, graph);
+        free(graph_again, OVERSIZED);
     }
 }
 

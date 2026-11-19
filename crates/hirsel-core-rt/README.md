@@ -47,6 +47,8 @@ the payload for resumable cleanup. Dynamic buffers keep a 40-byte frame, and
 resources reserve a state pointer. The page records the payer and native kind.
 A transferred block keeps its page and allocating heap alive until its last
 free. A task-local lock serializes queue operations and foreign returns.
+Dedicated descriptors live outside the mapping and use a sharded address
+index. Purging a dedicated mapping discards its payload and ownership prefix.
 
 Regions bump within nonmoving pools keyed by native size and alignment. The
 first chunk rounds the request to a granule. Each pool grows geometrically

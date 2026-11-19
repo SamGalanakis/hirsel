@@ -345,6 +345,162 @@ fn unknown(j: u64, n: u64) -> u64 {
     assert!(failed > 0, "no case reaches a boundary");
 }
 
+/// Release LLVM drops a counter's shift and increment checks only when a
+/// reset keeps it in range on every path (`counter_range.h`). The packer
+/// resets `pos` at 8, so `7u8 - pos` and `pos += 1` never fail; a reset at 9,
+/// a reset on only one path, and a second write to `pos` each let `pos` reach
+/// 8 at the shift, which still fails with the evaluator's text and site on
+/// both native engines.
+#[test]
+fn counter_resets_keep_reachable_failures() {
+    let source = r#"
+fn packed(n: u64) -> u64 {
+    let mut current: u8 = 0
+    let mut pos: u8 = 0
+    let mut total: u64 = 0
+    for i in 0u64 .. n {
+        if i % 3u64 != 0u64 {
+            current |= 1u8 << (7u8 - pos)
+        }
+        pos += 1
+        if pos == 8 {
+            total += int.widen(current)
+            current = 0
+            pos = 0
+        }
+    }
+    total * 16u64 + int.widen(pos)
+}
+
+fn reset_at_nine(n: u64) -> u64 {
+    let mut current: u8 = 0
+    let mut pos: u8 = 0
+    let mut total: u64 = 0
+    for i in 0u64 .. n {
+        if i % 3u64 != 0u64 {
+            current |= 1u8 << (7u8 - pos)
+        }
+        pos += 1
+        if pos == 9 {
+            total += int.widen(current)
+            current = 0
+            pos = 0
+        }
+    }
+    total * 16u64 + int.widen(pos)
+}
+
+fn one_path(n: u64, keep: u64) -> u64 {
+    let mut current: u8 = 0
+    let mut pos: u8 = 0
+    let mut total: u64 = 0
+    for i in 0u64 .. n {
+        if i % 3u64 != 0u64 {
+            current |= 1u8 << (7u8 - pos)
+        }
+        pos += 1
+        if pos == 8 {
+            total += int.widen(current)
+            current = 0
+            if keep == 0u64 {
+                pos = 0
+            }
+        }
+    }
+    total * 16u64 + int.widen(pos)
+}
+
+fn bumped(n: u64, skip: u64) -> u64 {
+    let mut current: u8 = 0
+    let mut pos: u8 = 0
+    let mut total: u64 = 0
+    for i in 0u64 .. n {
+        if i == skip {
+            pos += 1
+        }
+        if i % 3u64 != 0u64 {
+            current |= 1u8 << (7u8 - pos)
+        }
+        pos += 1
+        if pos == 8 {
+            total += int.widen(current)
+            current = 0
+            pos = 0
+        }
+    }
+    total * 16u64 + int.widen(pos)
+}
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    // Hand-derived. Bit i is set when i % 3 != 0, at bit 7 - pos. With a reset
+    // at 8 the bytes repeat 109 (0b01101101), 182 (0b10110110), 219
+    // (0b11011011); the result is the sum of completed bytes * 16 + pos.
+    // Without a reset at 8, i = 8 sets bit 7 - 8 and fails. In `bumped`, the
+    // extra step at i = 3 or 6 shifts the bytes to 102 (i 0..6) or 108
+    // (i 0..5), then 219 (i 7..14); at i = 7 it moves pos to 8 before a set
+    // bit, and at i = 15 (pos 7, no bit) it carries pos past 8 to 9, so the
+    // set bit at i = 16 fails.
+    let overflow = || eval::Outcome::Failed(vec!["Overflow".into()]);
+    let returned = |x: u64| eval::Outcome::Returned(vec![x]);
+    let laws = [
+        ("packed", vec![0], returned(0)),
+        ("packed", vec![5], returned(5)),
+        ("packed", vec![8], returned(109 * 16)),
+        ("packed", vec![20], returned((109 + 182) * 16 + 4)),
+        ("packed", vec![24], returned((109 + 182 + 219) * 16)),
+        ("reset_at_nine", vec![8], returned(8)),
+        ("reset_at_nine", vec![9], overflow()),
+        ("one_path", vec![20, 0], returned((109 + 182) * 16 + 4)),
+        ("one_path", vec![8, 1], returned(109 * 16 + 8)),
+        ("one_path", vec![9, 1], overflow()),
+        ("bumped", vec![20, 100], returned((109 + 182) * 16 + 4)),
+        ("bumped", vec![20, 3], returned((102 + 219) * 16 + 5)),
+        ("bumped", vec![20, 6], returned((108 + 219) * 16 + 5)),
+        ("bumped", vec![9, 7], overflow()),
+        ("bumped", vec![16, 15], returned(109 * 16 + 9)),
+        ("bumped", vec![17, 15], overflow()),
+    ];
+    let cases: Vec<_> = laws
+        .iter()
+        .map(|(name, args, _)| Case {
+            function: names[*name],
+            args: args.clone(),
+            limit: 1_000_000,
+            injection: None,
+        })
+        .collect();
+    let evaluated: Vec<_> = cases
+        .iter()
+        .zip(&laws)
+        .map(|(case, (_, _, outcome))| {
+            let run = eval::run(&program, case.function, &case.args, case.limit);
+            assert_eq!(&run.outcome, outcome, "f{}{:?}", case.function.0, case.args);
+            run
+        })
+        .collect();
+    let exports = ["packed", "reset_at_nine", "one_path", "bumped"].map(|name| names[name]);
+    let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &exports);
+    for (optimization, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
+        let reports = execute_object(&program, &cases, "", "", optimization, Some(object));
+        for ((case, evaluated), native) in cases.iter().zip(&evaluated).zip(reports) {
+            assert_eq!(
+                native.outcome, evaluated.outcome,
+                "f{}{:?}",
+                case.function.0, case.args
+            );
+            let sites: Vec<_> = evaluated
+                .sites
+                .iter()
+                .map(|anchor| {
+                    anchor.map_or(0, |a| program.sites[a.item.index()] + u64::from(a.start))
+                })
+                .collect();
+            assert_eq!(native.sites, sites, "f{}{:?}", case.function.0, case.args);
+        }
+    }
+}
+
 #[test]
 fn native_flow_corpus_agrees_with_the_owner_laws() {
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(FLOW_SOURCE, None);

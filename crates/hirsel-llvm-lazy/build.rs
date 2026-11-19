@@ -23,6 +23,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LLVM_SYS_231_PREFIX");
     for source in [
         &shared.join("counted_exit.h"),
+        &shared.join("counter_range.h"),
         &shared.join("forward_reads.h"),
         &shared.join("implied_check.h"),
         &shared.join("loop_version.h"),

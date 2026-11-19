@@ -10,7 +10,7 @@ LLVM_BRIDGE_FLAGS = [
 cxx_library(
     name = "bridge",
     srcs = ["core_passes.cpp", "checked_copy.cpp", "release_pipeline.cpp", "pass_cost.cpp"],
-    headers = ["aggregate_phi.h", "counted_exit.h", "failure_edges.h", "implied_check.h", "forward_reads.h", "loop_version.h", "step_tree.h", "pass_cost.h"],
+    headers = ["aggregate_phi.h", "counted_exit.h", "counter_range.h", "failure_edges.h", "implied_check.h", "forward_reads.h", "loop_version.h", "step_tree.h", "pass_cost.h"],
     header_namespace = "",
     compiler_flags = LLVM_BRIDGE_FLAGS,
     deps = ["toolchains//:libllvm"],
@@ -25,12 +25,13 @@ export_file(name = "checked_copy.cpp", mode = "reference", visibility = ["PUBLIC
 export_file(name = "pass_cost.h", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "loop_version.h", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "counted_exit.h", mode = "reference", visibility = ["PUBLIC"])
+export_file(name = "counter_range.h", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "implied_check.h", mode = "reference", visibility = ["PUBLIC"])
 
 cxx_library(
     name = "checked-copy-static",
     srcs = ["checked_copy.cpp", "release_pipeline.cpp", "pass_cost.cpp"],
-    headers = ["counted_exit.h", "failure_edges.h", "implied_check.h", "forward_reads.h", "loop_version.h", "step_tree.h", "pass_cost.h"],
+    headers = ["counted_exit.h", "counter_range.h", "failure_edges.h", "implied_check.h", "forward_reads.h", "loop_version.h", "step_tree.h", "pass_cost.h"],
     header_namespace = "",
     compiler_flags = LLVM_BRIDGE_FLAGS,
     deps = ["toolchains//:libllvm"],

@@ -6,6 +6,7 @@
 #endif
 
 #include "counted_exit.h"
+#include "counter_range.h"
 #include "implied_check.h"
 #include "pass_cost.h"
 
@@ -224,6 +225,10 @@ void registerReleasePasses(PassBuilder &builder) {
                 passes.addPass(hirsel_llvm::ImpliedCheckHoistPass());
                 return true;
             }
+            if (name == "counter-range") {
+                passes.addPass(hirsel_llvm::CounterRangePass());
+                return true;
+            }
             if (name == "counted-exit-split") {
                 passes.addPass(hirsel_llvm::CountedExitSplitPass());
                 return true;
@@ -332,7 +337,7 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
             "loop-mssa(loop-instsimplify,loop-simplifycfg,licm<no-allowspeculation>,"
                       "loop-rotate,licm<allowspeculation>,simple-loop-unswitch<nontrivial;trivial>),"
             "simplifycfg<switch-range-to-icmp>,instcombine<no-verify-fixpoint>,counted-exit-split,"
-            "loop(loop-idiom,indvars,simple-loop-unswitch<trivial>,extra-unswitch,loop-deletion,full-unroll),"
+            "loop(loop-idiom,indvars,simple-loop-unswitch<trivial>,extra-unswitch,loop-deletion,full-unroll),counter-range,"
             "sroa<modify-cfg>,early-vector-combine,mldst-motion,gvn,sccp,bdce,instcombine<no-verify-fixpoint>,"
             "dfa-jump-threading,jump-threading,correlated-propagation,adce,memcpyopt,dse,"
             "loop-mssa(licm<allowspeculation>),"

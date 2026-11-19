@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 
 import notices
 
@@ -23,12 +24,50 @@ BUCK = ROOT / '.buck2/bin/buck2'
 PROFILE = Path(__file__).with_name('profile.profdata')
 
 
-def build(mode, output):
+def build(mode, output, options):
     done = subprocess.run([str(BUCK), 'build', '--target-platforms', '//tools/buck2:dist',
+                           *options,
                            '-c', 'hirsel.dist_pgo=' + mode, '//:hirsel-toolchain', '--show-json-output'],
                           cwd=ROOT, stdout=subprocess.PIPE, text=True, check=True)
     bundle = ROOT / json.loads(done.stdout)['root//:hirsel-toolchain']
     shutil.copytree(bundle, output, dirs_exist_ok=True)
+
+
+def witness(output):
+    try:
+        with (tempfile.TemporaryDirectory(prefix='hirsel-prefix-', dir=output.parent) as prefix,
+              tempfile.TemporaryDirectory(prefix='hirsel-witness-', dir=output.parent) as scratch):
+            moved, work = Path(prefix), Path(scratch)
+            output.rename(moved)
+            compiler = moved / 'hirsel'
+            project = work / 'app'
+            env = dict(PATH=os.defpath, HOME=scratch, TMPDIR=scratch, HIRSEL_JOBS='1')
+            subprocess.run([compiler, 'new', project], cwd=work, env=env, check=True)
+            (project / 'main.hirsel').write_text(r'''pub fn main(out: Stdout) -> Result[(), Exit] waits {
+    let value = result.unwrap(std.int.parse_uint("2a", 16))
+    let mut line = string.new()
+    result.unwrap(string.push_u64(mut line, value))
+    result.unwrap(string.push_char(mut line, '\n'))
+    result.unwrap(stdout.write(out, line))
+    Ok(())
+}
+''')
+            # Hexadecimal 2a is 2 * 16 + 10 = 42. The program writes it in decimal with a newline.
+            expected = b'42\n'
+            for backend in ('cranelift', 'llvm'):
+                executable = work / backend
+                subprocess.run([compiler, 'build', project, '--backend', backend,
+                                '--grant', 'Stdout', '-o', executable],
+                               cwd=work, env=env, check=True)
+                actual = subprocess.check_output([executable], cwd=work, env=env)
+                if actual != expected:
+                    raise ValueError(f'{backend} relocation witness wrote {actual!r}, expected {expected!r}')
+                print(f'dist: {backend} relocation witness passed', flush=True)
+            moved.rename(output)
+    except BaseException:
+        if output.exists():
+            shutil.rmtree(output)
+        raise
 
 
 def manifest(output, mode):
@@ -69,16 +108,28 @@ def main():
     parser.add_argument('--work', type=Path)
     parser.add_argument('--pgo', action='store_true')
     parser.add_argument('--cpu', type=int, default=8)
+    parser.add_argument('--local', action='store_true', help='build locally without the remote action cache')
+    parser.add_argument('--num-threads', type=int, help='Buck2 execution threads')
     parser.add_argument('--profdata', help='LLVM tools matching the pinned rustc')
     args = parser.parse_args()
     output = args.output.resolve()
     if output.exists():
         parser.error('output already exists; use a fresh directory')
+    if output.is_relative_to(ROOT):
+        parser.error('output must be outside the checkout')
     work = args.work.resolve() if args.work else output.with_name(output.name + '-work')
-    subprocess.run(['python3', 'tools/buck2/prepare.py'], cwd=ROOT, check=True)
+    prepare = ['python3', 'tools/buck2/prepare.py']
+    options = []
+    if args.local:
+        prepare.append('--local')
+        options.append('--no-remote-cache')
+    if args.num_threads is not None:
+        options.extend(['--num-threads', str(args.num_threads)])
+    subprocess.run(prepare, cwd=ROOT, check=True)
     if not args.pgo:
-        build('off', output)
+        build('off', output, options)
         manifest(output, 'off')
+        witness(output)
         return
     with profile_lock():
         if args.profdata is None:
@@ -88,7 +139,7 @@ def main():
         raw = work / 'raw'
         if raw.exists():
             raise SystemExit(f'{raw} exists: use a fresh work directory to avoid stale profiles')
-        build('generate', instrumented)
+        build('generate', instrumented, options)
         subprocess.run([str(ROOT / 'tools/toolchain-dist/train'), '--toolchain', str(instrumented),
                         '--work', str(work / 'corpus'), '--raw', str(raw), '--cpu', str(args.cpu)], cwd=ROOT, check=True)
         profiles = sorted(raw.glob('*.profraw'))
@@ -100,9 +151,10 @@ def main():
                        env=dict(os.environ, HIRSEL_JOBS='1'), check=True)
         subprocess.run([args.profdata, 'show', str(merged)], check=True)
         shutil.copyfile(merged, PROFILE)
-        build('use', output)
+        build('use', output, options)
         shutil.copyfile(merged, output / 'hirsel.profdata')
         manifest(output, 'use')
+        witness(output)
 
 
 if __name__ == '__main__':

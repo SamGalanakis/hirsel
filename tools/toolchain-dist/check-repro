@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Build HEAD twice without PGO in fresh checkouts and compare the bundles."""
+
+import argparse
+from pathlib import Path
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[2]
+CHUNK = 1024 * 1024
+
+
+def build(revision, checkout, output, threads):
+    subprocess.run(['git', 'clone', '--quiet', '--shared', '--no-checkout', ROOT, checkout], check=True)
+    subprocess.run(['git', 'checkout', '--quiet', '--detach', revision], cwd=checkout, check=True)
+    try:
+        subprocess.run([checkout / 'tools/toolchain-dist/build', '--local',
+                        '--num-threads', str(threads), '--output', output],
+                       cwd=checkout, check=True)
+    finally:
+        buck = checkout / '.buck2/bin/buck2'
+        if buck.is_file():
+            subprocess.run([buck, 'kill'], cwd=checkout, check=True)
+
+
+def first_difference(left, right):
+    offset = 0
+    with left.open('rb') as a, right.open('rb') as b:
+        while True:
+            x, y = a.read(CHUNK), b.read(CHUNK)
+            if x != y:
+                return offset + next((i for i, (u, v) in enumerate(zip(x, y)) if u != v),
+                                     min(len(x), len(y)))
+            if not x:
+                return None
+            offset += len(x)
+
+
+def compare(left, right):
+    left_files = {p.relative_to(left) for p in left.rglob('*') if p.is_file()}
+    right_files = {p.relative_to(right) for p in right.rglob('*') if p.is_file()}
+    equal = True
+    for path in sorted(left_files | right_files):
+        a, b = left / path, right / path
+        if path not in left_files or path not in right_files:
+            missing = a if path not in left_files else b
+            print(f'{a} <> {b}: missing {missing}')
+            equal = False
+        elif (offset := first_difference(a, b)) is not None:
+            print(f'{a} <> {b}: first differing byte at offset {offset}')
+            equal = False
+    if equal:
+        print(f'check-repro: {len(left_files)} files match byte for byte')
+    return equal
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path, required=True, help='fresh directory for both bundles')
+    parser.add_argument('--num-threads', type=int, default=2, help='Buck2 execution threads per build')
+    args = parser.parse_args()
+    output = args.output.resolve()
+    if output.is_relative_to(ROOT) or output.exists():
+        parser.error('output must be a fresh directory outside the checkout')
+    if args.num_threads < 1:
+        parser.error('--num-threads must be positive')
+    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    output.mkdir(parents=True)
+    print(f'check-repro: building {revision} twice without PGO', flush=True)
+    left, right = output / 'first', output / 'second'
+    with tempfile.TemporaryDirectory(prefix='hirsel-repro-', dir=output) as scratch:
+        build(revision, Path(scratch) / 'checkout', left, args.num_threads)
+        build(revision, Path(scratch) / 'second-checkout', right, args.num_threads)
+    return 0 if compare(left, right) else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

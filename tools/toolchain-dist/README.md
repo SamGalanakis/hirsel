@@ -72,6 +72,18 @@ notice manifest hash and a canonical digest of the `core-packages` file map.
 The host loader, libc, libm, libgcc_s, libstdc++ and libz the compiler and
 libLLVM load are system dependencies and are not shipped.
 
+Every packaged build renames the prefix and uses the compiler there to create
+a project, compile a std-using program with both native backends, and check
+both executables' stdout. It restores the prefix after both runs pass and
+removes the bundle on failure.
+
+On Rust toolchain or LLVM bumps, run
+`tools/toolchain-dist/check-repro --output /tmp/hirsel-repro` from the commit
+to qualify. It builds that commit without PGO in two fresh local checkouts
+with separate Buck2 state and keeps both bundles in the output directory.
+It compares every file and reports the first differing byte offset in each
+changed file, starting at zero.
+
 Prior art: Rust release packaging at rust-lang/rust
 `a7c37f9f0ee5e93396106e9de20f4a86b4154e63`,
 `src/bootstrap/src/core/build_steps/dist.rs:678-697`, installs generated HTML

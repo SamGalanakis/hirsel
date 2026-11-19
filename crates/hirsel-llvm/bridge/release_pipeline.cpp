@@ -32,6 +32,28 @@ extern "C" void hirsel_llvm_prepay_step_trees(void *module);
 
 namespace {
 
+void limit_recursive_entry_inlining(Module &module) {
+    for (Function &function : module) {
+        if (function.isDeclaration()) continue;
+        unsigned self_calls = 0;
+        SmallVector<CallBase *, 4> entries;
+        for (Use &use : function.uses()) {
+            auto *call = dyn_cast<CallBase>(use.getUser());
+            if (!call || !call->isCallee(&use)) continue;
+            if (call->getCaller() == &function)
+                ++self_calls;
+            else
+                entries.push_back(call);
+        }
+        // An outside caller would copy the body and all four recursive edges.
+        // The recursive edges remain eligible for leaf specialization.
+        if (self_calls < 4) continue;
+        for (CallBase *call : entries) {
+            if (!call->hasFnAttr(Attribute::AlwaysInline)) call->addFnAttr(Attribute::NoInline);
+        }
+    }
+}
+
 class ReleasePipeline {
     Module &module;
     PassInstrumentationCallbacks callbacks;
@@ -263,6 +285,7 @@ extern "C" void hirsel_llvm_align_release_functions(LLVMModuleRef module) {
 extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
     LLVMModuleRef raw_module, LLVMTargetMachineRef raw_machine, LLVMBool prune,
     LLVMBool prepay_steps) {
+    limit_recursive_entry_inlining(*unwrap(raw_module));
     ReleasePipeline release(raw_module, raw_machine);
     PassBuilder &builder = release.builder;
     registerReleasePasses(builder);

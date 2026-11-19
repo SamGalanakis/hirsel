@@ -49,53 +49,6 @@ fn line_end(text: Bytes, at: u64, eof: bool) -> Result[Next, Error] {
     Error(Invalid(at))
 }
 
-// Scan only complete blocks. A quote ends a quoted run, whereas an
-// unquoted run ends at any of the four structural bytes.
-fn scan_field_blocks(text: Bytes, start: u64, delimiter: u8, quoted: bool) -> u64 {
-    let quote: Simd[u8, 32] = simd.splat(b'"')
-    let sep: Simd[u8, 32] = simd.splat(delimiter)
-    let cr: Simd[u8, 32] = simd.splat(13)
-    let lf: Simd[u8, 32] = simd.splat(10)
-    let n = list.len(text)
-    let last = n - 32
-    let mut i = start
-    while i <= last {
-        let block: Simd[u8, 32] = list.lanes(text, i)
-        let quotes = simd.eq(block, quote)
-        let mask = if quoted {
-            simd.bitmask(quotes)
-        } else {
-            simd.bitmask(quotes | simd.eq(block, sep) | simd.eq(block, cr) | simd.eq(block, lf))
-        }
-        if mask != 0 {
-            let offset: u64 = int.widen(int.trailing_zeros(mask))
-            return int.wrapping_add(i, offset)
-        }
-        i = int.wrapping_add(i, 32)
-    }
-    i
-}
-
-fn field_stop_tail(text: Bytes, start: u64, delimiter: u8, quoted: bool) -> u64 {
-    let n = list.len(text)
-    let mut i = start
-    if n - i >= 32 {
-        i = if quoted {
-            scan_field_blocks(text, i, delimiter, true)
-        } else {
-            scan_field_blocks(text, i, delimiter, false)
-        }
-    }
-    while i < n {
-        let c = text[i]
-        if c == b'"' || (!quoted && (c == delimiter || c == 13 || c == 10)) {
-            return i
-        }
-        i += 1
-    }
-    i
-}
-
 /// Clears fields and scans the record at at. Record(next) advances past its line end.
 /// End means EOF at at. Need means re-offer the same at after appending input,
 /// including when a final CR could still be followed by LF.
@@ -129,7 +82,7 @@ pub fn record(text: Bytes, at: u64, d: Dialect, eof: bool, mut fields: List[Fiel
         }
         let mut stop = start
         loop {
-            if n - stop >= 16 {
+            let found = if n - stop >= 16 {
                 let quote: Simd[u8, 16] = simd.splat(b'"')
                 let block: Simd[u8, 16] = list.lanes(text, stop)
                 let quotes = simd.eq(block, quote)
@@ -144,11 +97,44 @@ pub fn record(text: Bytes, at: u64, d: Dialect, eof: bool, mut fields: List[Fiel
                 if mask != 0 {
                     let offset: u64 = int.widen(int.trailing_zeros(mask))
                     stop = int.wrapping_add(stop, offset)
+                    true
                 } else {
-                    stop = field_stop_tail(text, int.wrapping_add(stop, 16), d.delimiter, quoted)
+                    stop = int.wrapping_add(stop, 16)
+                    false
                 }
             } else {
-                stop = field_stop_tail(text, stop, d.delimiter, quoted)
+                false
+            }
+            if !found {
+                if n - stop >= 32 {
+                    let quote32: Simd[u8, 32] = simd.splat(b'"')
+                    let last = n - 32
+                    while stop <= last {
+                        let block32: Simd[u8, 32] = list.lanes(text, stop)
+                        let quoted32 = simd.eq(block32, quote32)
+                        let mask = if quoted {
+                            simd.bitmask(quoted32)
+                        } else {
+                            let sep32: Simd[u8, 32] = simd.splat(d.delimiter)
+                            let cr32: Simd[u8, 32] = simd.splat(13)
+                            let lf32: Simd[u8, 32] = simd.splat(10)
+                            simd.bitmask(quoted32 | simd.eq(block32, sep32) | simd.eq(block32, cr32) | simd.eq(block32, lf32))
+                        }
+                        if mask != 0 {
+                            let offset: u64 = int.widen(int.trailing_zeros(mask))
+                            stop = int.wrapping_add(stop, offset)
+                            break
+                        }
+                        stop = int.wrapping_add(stop, 32)
+                    }
+                }
+                while stop < n {
+                    let c = text[stop]
+                    if c == b'"' || (!quoted && (c == d.delimiter || c == 13 || c == 10)) {
+                        break
+                    }
+                    stop += 1
+                }
             }
             if !quoted {
                 if stop < n && text[stop] == b'"' {

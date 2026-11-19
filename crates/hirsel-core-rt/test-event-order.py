@@ -166,7 +166,7 @@ def main():
             folder.mkdir()
             inputs = folder / 'inputs.json'
             inputs.write_text(json.dumps(manifest(fixture)))
-            ran = evaluator.evaluate(inputs, 'app@1/main/main', program_entry=True)
+            ran = evaluator.evaluate(inputs, 'app@1/main/main', program_entry=True, events=True)
             report = json.loads(ran.stdout)
             oracle = re.search(r'// expect: (Deadlock|returned)(?: stdout=(\S*))?', text)
             stopped = oracle is not None and oracle.group(1) == 'Deadlock'

@@ -222,8 +222,11 @@ class Evaluator:
     def __enter__(self):
         return self
 
-    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, sdk_compiler=None, sdk_native_options=None, network=False, progress=None):
+    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, sdk_compiler=None, sdk_native_options=None, network=False, events=False, progress=None):
         request = dict(manifest=str(manifest), entry=entry, program_entry=program_entry)
+        if events:
+            # CONC-10 events are recorded only on request (22f95498).
+            request["events"] = True
         if instructions is not None:
             request["instructions"] = instructions
         if network:

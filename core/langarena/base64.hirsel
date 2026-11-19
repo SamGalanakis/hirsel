@@ -1,11 +1,6 @@
 // kostya/LangArena 3c9f84d benchmarks/base64_{encode,decode}.rs.
 fn encode(s: String) -> Result[String, helper.Error] {
-    let mut out: Bytes = list.new()
-    helper.mem(std.base64.encode(string.as_bytes(s), mut out))?
-    match string.from_utf8(take out) {
-        Ok(take encoded) => Ok(take encoded),
-        Error(_) => Error(Config),
-    }
+    helper.mem(std.base64.encode_string(string.as_bytes(s)))
 }
 
 fn decode(s: String) -> Result[Bytes, helper.Error] {

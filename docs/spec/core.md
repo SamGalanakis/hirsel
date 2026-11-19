@@ -169,7 +169,10 @@ operations it names; nothing else about them may be inferred from an implementat
   leave every other byte as it is, so `s` keeps its length and stays UTF-8 with no second
   check. For an owned `s` they admit nothing and cannot fail. A static `s` is first copied
   as `into_bytes` copies it, and on that copy's `Capacity` they return the error with `s`
-  unchanged. `string.next_scalar(s, at)` returns `None` when `at`
+  unchanged. `string.encode_base64(b)` constructs a new `String` with the standard
+  RFC 4648 alphabet and `=` padding. `string.append_base64_bytes(b, mut out)` appends
+  the same encoding to a byte list and leaves `out` unchanged on `Capacity`.
+  `string.next_scalar(s, at)` returns `None` when `at`
   is `byte_len(s)`, and fails with `Bounds` when `at` is greater or falls inside a scalar.
 - **Slices.** `list.slice(xs, lo, hi)` and `string.slice(s, lo, hi)` view the elements or
   bytes from `lo` up to `hi`; they fail with `Bounds` when `lo > hi` or `hi` exceeds the

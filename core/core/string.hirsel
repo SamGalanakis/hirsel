@@ -17,6 +17,93 @@ pub fn from_utf8(take b: Bytes) -> Result[String, Bytes] {
     }
 }
 
+// The encoder writes only RFC 4648 alphabet bytes and '=' padding.
+pub fn encode_base64(b: Bytes) -> Result[String, Capacity] {
+    let mut out: Bytes = list.new()
+    append_base64_bytes(b, mut out)?
+    Ok(of_bytes(take out))
+}
+
+const ALPHABET: Inline[u8, 64] =[b'A', b'B', b'C', b'D', b'E', b'F', b'G', b'H', b'I', b'J', b'K', b'L', b'M', b'N', b'O', b'P', b'Q', b'R', b'S', b'T', b'U', b'V', b'W', b'X', b'Y', b'Z', b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h', b'i', b'j', b'k', b'l', b'm', b'n', b'o', b'p', b'q', b'r', b's', b't', b'u', b'v', b'w', b'x', b'y', b'z', b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'+', b'/']
+
+fn base64_symbol(x: u8) -> u8 {
+    ALPHABET[int.widen(x & 63)]
+}
+
+// Arrange each triple a,b,c as b,a,c,b. Two adjacent byte pairs supply the middle digits.
+const ENCODE_PICK: Inline[u8, 32] =[1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10, 13, 12, 14, 13, 16, 15, 17, 16, 19, 18, 20, 19, 22, 21, 23, 22]
+
+// The first two six-bit digits are reversed by the shifts.
+const ENCODE_ORDER: Inline[u8, 32] =[1, 0, 2, 3, 5, 4, 6, 7, 9, 8, 10, 11, 13, 12, 14, 15, 17, 16, 18, 19, 21, 20, 22, 23, 25, 24, 26, 27, 29, 28, 30, 31]
+
+// Offsets for uppercase, lowercase, ten digits, '+', and '/'.
+const ENCODE_ROLL: Inline[u8, 16] =[65, 71, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 237, 240, 0, 0]
+
+fn append_base64_blocks(b: Bytes, mut out: Bytes, n: u64) -> Result[u64, Capacity] {
+    let mut src: u64 = 0
+    // A 32-byte load covers eight triples and eight bytes of lookahead.
+    while n - src >= 32 {
+        let input: Simd[u8, 32] = list.lanes(b, src)
+        let triples: Simd[u32, 8] = simd.cast(simd.swizzle(input, simd.from(ENCODE_PICK)))
+        let a = (triples >> 2) & simd.splat(0x00003f00)
+        let digit_b = (triples >> 4) & simd.splat(0x0000003f)
+        let c = (triples >> 6) & simd.splat(0x003f0000)
+        let d = (triples << 8) & simd.splat(0x3f000000)
+        let digits: Simd[u8, 32] = simd.cast(a | digit_b | c | d)
+        let signed_digits: Simd[i8, 32] = simd.cast(digits)
+        let edge: Simd[i8, 32] = simd.splat(25)
+        let above_uppercase: Simd[u8, 32] = simd.cast(simd.lt(edge, signed_digits))
+        let class = simd.wrapping_sub(simd.saturating_sub(digits, simd.splat(51)), above_uppercase) & simd.splat(15)
+        let ascii = simd.wrapping_add(digits, simd.swizzle(simd.from(ENCODE_ROLL), class))
+        list.put_lanes(mut out, simd.swizzle(ascii, simd.from(ENCODE_ORDER)), 32)?
+        src += 24
+    }
+    Ok(src)
+}
+
+/// Appends RFC 4648's standard alphabet with '=' padding. O(n).
+/// Capacity leaves out unchanged. Ex: `string.append_base64_bytes(b, mut out)?`.
+pub fn append_base64_bytes(b: Bytes, mut out: Bytes) -> Result[(), Capacity] {
+    let n = list.len(b)
+    let tail = n % 3
+    let full = n - tail
+    let size = (n / 3 + if tail == 0 {
+        0
+    } else {
+        1
+    }) * 4
+    list.reserve(mut out, size)?
+    let mut src = append_base64_blocks(b, mut out, n)?
+    let written = src / 3 * 4
+    let mut dst = list.len(out)
+    list.fill(mut out, size - written, b'=')?
+    while src < full {
+        let a = b[src]
+        let c = b[src + 1]
+        let d = b[src + 2]
+        out[dst] = base64_symbol(a >> 2)
+        out[dst + 1] = base64_symbol(((a & 3) << 4) | (c >> 4))
+        out[dst + 2] = base64_symbol(((c & 15) << 2) | (d >> 6))
+        out[dst + 3] = base64_symbol(d & 63)
+        src += 3
+        dst += 4
+    }
+    if tail != 0 {
+        let a = b[full]
+        let c: u8 = if tail == 2 {
+            b[full + 1]
+        } else {
+            0
+        }
+        out[dst] = base64_symbol(a >> 2)
+        out[dst + 1] = base64_symbol(((a & 3) << 4) | (c >> 4))
+        if tail == 2 {
+            out[dst + 2] = base64_symbol((c & 15) << 2)
+        }
+    }
+    Ok(())
+}
+
 pub fn is_utf8(b: Bytes) -> bool {
     let n = list.len(b)
     let mut i: u64 = 0

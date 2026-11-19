@@ -1,7 +1,8 @@
 fn vector(raw: Bytes, coded: Bytes) -> bool {
     let mut out: Bytes = list.new()
     result.unwrap(base64.encode(raw, mut out))
-    out == coded && match result.unwrap(base64.decode(coded)) {
+    let encoded: String = result.unwrap(base64.encode_string(raw))
+    out == coded && string.as_bytes(encoded) == coded && match result.unwrap(base64.decode(coded)) {
         Some(b) => b == raw,
         None => false
     }
@@ -28,4 +29,93 @@ fn word_boundaries() -> bool {
     let mut out = result.unwrap(b"prefix:")
     result.unwrap(base64.encode(raw, mut out))
     out == result.unwrap(b"prefix:MDEyMzQ1Njc4OUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaPj8/Pj4+IQ==") && result.unwrap(base64.decode(coded)) == Some(raw) && result.unwrap(base64.decode(result.unwrap(b"/DEyMzQ@Njc4OUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaPj8/Pj4+IQ=="))) == None
+}
+
+// RFC 4648's arithmetic alphabet is independent of the vector offset tables.
+fn reference_digit(digit: u8) -> u8 {
+    if digit < 26 {
+        return b'A' + digit
+    }
+    if digit < 52 {
+        return b'a' + (digit - 26)
+    }
+    if digit < 62 {
+        return b'0' + (digit - 52)
+    }
+    if digit == 62 {
+        b'+'
+    } else {
+        b'/'
+    }
+}
+
+fn reference_base64(raw: Bytes) -> Bytes {
+    let n = list.len(raw)
+    let mut out: Bytes = list.new()
+    let mut at: u64 = 0
+    while at < n {
+        let left = n - at
+        let a: u32 = int.widen(raw[at])
+        let b: u32 = if left > 1 {
+            int.widen(raw[at + 1])
+        } else {
+            0
+        }
+        let c: u32 = if left > 2 {
+            int.widen(raw[at + 2])
+        } else {
+            0
+        }
+        let word = (a << 16) | (b << 8) | c
+        result.unwrap(list.push(mut out, reference_digit(int.truncate(word >> 18))))
+        result.unwrap(list.push(mut out, reference_digit(int.truncate((word >> 12) & 63))))
+        result.unwrap(list.push(mut out, if left > 1 {
+            reference_digit(int.truncate((word >> 6) & 63))
+        } else {
+            b'='
+        }))
+        result.unwrap(list.push(mut out, if left > 2 {
+            reference_digit(int.truncate(word & 63))
+        } else {
+            b'='
+        }))
+        at += 3
+    }
+    take out
+}
+
+// Lengths straddle the input lookahead, vector output boundaries and both pads.
+// A high byte or punctuation in any block must still refuse before allocation.
+// expect: run vector_blocks_match_rfc4648() = true
+fn vector_blocks_match_rfc4648() -> bool {
+    let mut random: u64 = 0x5281f625bd4c3315
+    for n in 0u64 .. 97u64 {
+        let mut raw: Bytes = result.unwrap(list.with_capacity(n))
+        for _ in 0u64 .. n {
+            random ^= random << 13
+            random ^= random >> 7
+            random ^= random << 17
+            result.unwrap(list.push(mut raw, int.truncate(random)))
+        }
+        let mut coded = reference_base64(raw)
+        if !vector(raw, coded) {
+            return false
+        }
+        if n != 0 {
+            let position = random % list.len(coded)
+            coded[position] = if random & 1 == 0 {
+                255
+            } else {
+                b'%'
+            }
+            let refused = bound bytes 0 {
+                base64.decode(coded)? == None
+            }
+            match refused {
+                Ok(true) => (),
+                _ => return false,
+            }
+        }
+    }
+    true
 }

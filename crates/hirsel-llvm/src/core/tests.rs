@@ -55,6 +55,10 @@ fn cleared_scalar_carriers_do_not_drop_saved_storage_but_keep_finalizers() {
     }
 }
 
+/// A carrier shadow's storage begins on an emitter temporary; scoped slot
+/// homes (`%s…`) carry markers of their own.
+const SHADOW_START: &str = "call void @llvm.lifetime.start.p0(ptr %t";
+
 #[test]
 fn scalar_growth_shadow_copies_back_before_success_failure_and_forwarded_return() {
     let source = include_str!("../../tests/core_runtime/carrier-shadow.core");
@@ -88,7 +92,7 @@ fn scalar_growth_shadow_copies_back_before_success_failure_and_forwarded_return(
             let no_record =
                 emit_ir_relocatable_for_target(&declaration, Target::X86_64Linux, false, false)
                     .unwrap();
-            assert!(!no_record.contains("call void @llvm.lifetime.start.p0"));
+            assert!(!no_record.contains(SHADOW_START));
             let installed = hirsel_core_ir::roles::Facts::program(&[&declaration], &records)
                 .pop()
                 .unwrap();
@@ -100,18 +104,11 @@ fn scalar_growth_shadow_copies_back_before_success_failure_and_forwarded_return(
                 &installed,
             )
             .unwrap();
-            assert_eq!(
-                restored.contains("call void @llvm.lifetime.start.p0"),
-                blind
-            );
+            assert_eq!(restored.contains(SHADOW_START), blind);
             let ir = emit_ir_with_facts(&module, false, true).unwrap();
-            assert_eq!(
-                ir.contains("call void @llvm.lifetime.start.p0"),
-                blind,
-                "{ir}"
-            );
+            assert_eq!(ir.contains(SHADOW_START), blind, "{ir}");
             let off = emit_ir_with_facts(&module, false, false).unwrap();
-            assert!(!off.contains("call void @llvm.lifetime.start.p0"));
+            assert!(!off.contains(SHADOW_START));
             let cases = [0, 1].map(|mode| Case {
                 function: FuncId(2),
                 args: vec![mode],
@@ -162,7 +159,7 @@ fn exposed_helpers_keep_imported_carrier_facts() {
     assert!(facts.place_blind(FuncId(1), 0));
     assert!(!hirsel_core_ir::roles::Facts::new(&caller).place_blind(FuncId(1), 0));
     let ir = carrier_ir(&caller, &facts, Target::X86_64Linux, false);
-    assert!(ir.contains("call void @llvm.lifetime.start.p0"));
+    assert!(ir.contains(SHADOW_START));
     let mut callee = module.clone();
     callee.functions[0].body = None;
     callee.functions[2].body = None;

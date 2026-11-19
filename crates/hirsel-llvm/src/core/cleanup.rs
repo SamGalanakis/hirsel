@@ -61,6 +61,8 @@ pub(super) fn glue_emitter<'a>(
         value_slots: Vec::new(),
         literals: Vec::new(),
         address_slots: Vec::new(),
+        scoped: vec![false; body.slots.len()],
+        scoped_ended: false,
         step_labels: Default::default(),
         unchecked_steps: false,
         precharge: None,

@@ -488,7 +488,7 @@ pub fn share_slots(b: &mut Body, signatures: &[Signature]) {
         return;
     }
     let from = provenance(b);
-    let escapes = escaping(b, signatures, &from);
+    let escapes = escaping(b, signatures, &from, false);
     // Candidates: slots that keep no address past the body and have a partner of
     // their type. Only they are tracked; every other slot keeps its home.
     let mut count: HashMap<PlaceTy, u32> = HashMap::new();
@@ -673,7 +673,7 @@ pub fn share_slots(b: &mut Body, signatures: &[Signature]) {
 /// Slots a pointer into may outlive the body's names: a pointer made from an
 /// address based on the slot that is stored, computed with, passed to a call
 /// other than as its destination, branched on or returned.
-fn escaping(b: &Body, signatures: &[Signature], from: &[Vec<u32>]) -> Vec<bool> {
+fn escaping(b: &Body, signatures: &[Signature], from: &[Vec<u32>], loans: bool) -> Vec<bool> {
     let n = b.values.len();
     let mut out = vec![false; b.slots.len()];
     let mut mark = |name: usize| {
@@ -689,9 +689,12 @@ fn escaping(b: &Body, signatures: &[Signature], from: &[Vec<u32>]) -> Vec<bool> 
                 if let Callee::Indirect(x) = site.callee {
                     mark(x.index());
                 }
-                let dest = signatures
-                    .get(site.signature.index())
-                    .is_some_and(|g| g.dest.is_some());
+                let sig = signatures.get(site.signature.index());
+                let dest = sig.is_some_and(|g| g.dest.is_some());
+                let lent = loans && matches!(site.callee, Callee::Direct(_));
+                // A `mut` loan to a call with results may leave a result
+                // anchored to the place (crate docs, "Loans", Ruling 7).
+                let anchored = sig.is_some_and(|g| g.dest.is_some() || !g.results.is_empty());
                 for (i, arg) in site
                     .args
                     .get(&b.pools.args)
@@ -699,8 +702,22 @@ fn escaping(b: &Body, signatures: &[Signature], from: &[Vec<u32>]) -> Vec<bool> 
                     .iter()
                     .enumerate()
                 {
-                    if dest && i == 0 {
+                    if dest && i == 0 && (lent || !loans) {
                         continue;
+                    }
+                    if lent && matches!(arg, Arg::Address(_)) {
+                        let param = sig.and_then(|g| g.params.get(i - usize::from(dest)));
+                        let held = anchored
+                            && matches!(
+                                param,
+                                Some(Param::Address {
+                                    loan: Loan::Mut,
+                                    ..
+                                })
+                            );
+                        if !held {
+                            continue;
+                        }
                     }
                     mark(match *arg {
                         Arg::Value(x) => x.index(),
@@ -737,4 +754,132 @@ fn escaping(b: &Body, signatures: &[Signature], from: &[Vec<u32>]) -> Vec<bool> 
         }
     }
     out
+}
+
+/// Slots whose storage an engine may end at `StorageDead` and begin, unwritten,
+/// at `StorageLive` (LLVM lifetime markers), so that slots never in use at once
+/// share frame bytes whatever their types. A slot qualifies when:
+/// - its address leaves the body only as a loan to a direct call, whose extent
+///   is the call (crate docs, "Loans"), and not as a `mut` loan to a call with
+///   results, which may stay anchored to the place;
+/// - every use follows a `StorageLive` on every path from the entry, failure
+///   edges included;
+/// - no `StorageLive` of it is reached on any path while it is live, since a
+///   `StorageLive` of a live slot keeps its bytes.
+///
+/// No use follows a `StorageDead` without a new `StorageLive` (wf), so between
+/// a slot's end and its next begin nothing reaches its bytes.
+pub fn scoped_slots(b: &Body, signatures: &[Signature]) -> Vec<bool> {
+    let k = b.slots.len();
+    if !b
+        .insts
+        .iter()
+        .any(|i| matches!(i, Inst::StorageLive { .. }))
+    {
+        return vec![false; k];
+    }
+    let from = provenance(b);
+    let mut out: Vec<bool> = escaping(b, signatures, &from, true)
+        .into_iter()
+        .map(|e| !e)
+        .collect();
+    let slots = slots_with(b, &from);
+    for s in 0..k {
+        if slots.lives[s].is_empty() {
+            out[s] = false;
+        }
+    }
+    let words = k.div_ceil(64);
+    let bit = |s: usize| (s / 64, 1u64 << (s % 64));
+    // Live on every path into each block (`must`, a meet) and on some path
+    // (`may`, a join).
+    let must = live_at_entry(b, words, true);
+    let may = live_at_entry(b, words, false);
+    // The slots each point uses.
+    let mut used: HashMap<Point, Vec<usize>> = HashMap::new();
+    for s in (0..k).filter(|&s| out[s]) {
+        for &p in &slots.uses[s] {
+            used.entry(p).or_default().push(s);
+        }
+    }
+    for (bi, blk) in b.blocks.iter().enumerate() {
+        let mut sure = must[bi * words..(bi + 1) * words].to_vec();
+        let mut maybe = may[bi * words..(bi + 1) * words].to_vec();
+        let insts = blk.insts.get(&b.insts).unwrap_or_default();
+        for j in 0..=insts.len() {
+            for &s in used.get(&(bi as u32, j as u32)).into_iter().flatten() {
+                let (w, m) = bit(s);
+                if sure[w] & m == 0 {
+                    out[s] = false;
+                }
+            }
+            match insts.get(j) {
+                Some(&Inst::StorageLive { slot }) => {
+                    let (w, m) = bit(slot.index());
+                    if maybe[w] & m != 0 {
+                        out[slot.index()] = false;
+                    }
+                    sure[w] |= m;
+                    maybe[w] |= m;
+                }
+                Some(&Inst::StorageDead { slot }) => {
+                    let (w, m) = bit(slot.index());
+                    sure[w] &= !m;
+                    maybe[w] &= !m;
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Each block's slots live at its entry, as bit sets of `words` words: live on
+/// every incoming path when `every`, else on some. `StorageLive` begins a slot,
+/// `StorageDead` ends it, and a failure edge leaves before its failing
+/// instruction.
+fn live_at_entry(b: &Body, words: usize, every: bool) -> Vec<u64> {
+    let nb = b.blocks.len();
+    let mut at = vec![if every { !0u64 } else { 0 }; nb * words];
+    at[..words].fill(0);
+    let mut state = vec![0u64; words];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for bi in 0..nb {
+            state.copy_from_slice(&at[bi * words..(bi + 1) * words]);
+            let mut flow = |state: &[u64], to: usize, at: &mut [u64]| {
+                for w in 0..words {
+                    let old = at[to * words + w];
+                    let next = if every {
+                        old & state[w]
+                    } else {
+                        old | state[w]
+                    };
+                    if next != old {
+                        at[to * words + w] = next;
+                        changed = true;
+                    }
+                }
+            };
+            for inst in b.blocks[bi].insts.get(&b.insts).unwrap_or_default() {
+                if let Some(f) = inst.fail(b) {
+                    flow(&state, f.index(), &mut at);
+                }
+                match *inst {
+                    Inst::StorageLive { slot } => {
+                        state[slot.index() / 64] |= 1 << (slot.index() % 64)
+                    }
+                    Inst::StorageDead { slot } => {
+                        state[slot.index() / 64] &= !(1 << (slot.index() % 64))
+                    }
+                    _ => {}
+                }
+            }
+            for t in targets(b, bi) {
+                flow(&state, t, &mut at);
+            }
+        }
+    }
+    at
 }

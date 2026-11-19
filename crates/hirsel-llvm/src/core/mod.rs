@@ -591,6 +591,8 @@ fn emit_module(
             value_slots: values::slots(body, &flow),
             literals: Vec::new(),
             address_slots: values::address_slots(body, &flow),
+            scoped: hirsel_core_ir::extent::scoped_slots(body, &module.signatures),
+            scoped_ended: false,
             step_labels: Default::default(),
             unchecked_steps: false,
             precharge: None,
@@ -1355,6 +1357,13 @@ struct FunctionEmitter<'a> {
     /// Each constant's literal, used in place of the value.
     literals: Vec<Option<Value>>,
     address_slots: Vec<bool>,
+    /// Slots whose `StorageLive` and `StorageDead` begin and end their storage
+    /// (hirsel_core_ir::extent::scoped_slots). Every return ends them too, so
+    /// an inlined copy's storage ends where the callee would have returned.
+    scoped: Vec<bool>,
+    /// Whether a forwarded tail call has already ended the scoped slots
+    /// before the return that follows it.
+    scoped_ended: bool,
     step_labels: std::collections::BTreeMap<usize, Label>,
     unchecked_steps: bool,
     precharge: Option<steps::Precharge>,
@@ -1479,12 +1488,27 @@ impl FunctionEmitter<'_> {
     fn ret(&mut self, t: &Type, v: &Value) {
         self.end_view_invariants();
         self.flush_steps();
+        self.end_scoped();
         self.effect(Operation::Return(Some((t, v))));
     }
     fn ret_void(&mut self) {
         self.end_view_invariants();
         self.flush_steps();
+        self.end_scoped();
         self.effect(Operation::Return(None));
+    }
+    /// Ends every scoped slot's storage before a return, once.
+    fn end_scoped(&mut self) {
+        if std::mem::take(&mut self.scoped_ended) {
+            return;
+        }
+        for slot in 0..self.scoped.len() {
+            if !self.scoped[slot] {
+                continue;
+            }
+            let home = Value::from(Local::Slot(slot));
+            self.runtime_void("llvm.lifetime.end.p0", &[ptr(home)]);
+        }
     }
     fn end_view_invariants(&mut self) {
         for (token, pointer, bytes) in self.view_invariants.clone() {
@@ -1881,6 +1905,14 @@ impl FunctionEmitter<'_> {
                     ..Memory::default()
                 };
                 self.store_with(&ty(self.vty(value)), &x, &p, &memory);
+            }
+            Inst::StorageLive { slot } if self.scoped[slot.index()] => {
+                let home = Value::from(Local::Slot(slot.index()));
+                self.runtime_void("llvm.lifetime.start.p0", &[ptr(home)]);
+            }
+            Inst::StorageDead { slot } if self.scoped[slot.index()] => {
+                let home = Value::from(Local::Slot(slot.index()));
+                self.runtime_void("llvm.lifetime.end.p0", &[ptr(home)]);
             }
             // FORM v1c: a mark is the evaluator's alone; no code.
             Inst::StorageLive { .. }

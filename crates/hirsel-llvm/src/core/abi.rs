@@ -419,6 +419,12 @@ impl FunctionEmitter<'_> {
             tail: ending.frame_safe,
             ..site_attrs(site)
         };
+        if ending.frame_safe {
+            // No argument points into the frame, so the scoped slots end
+            // before the call and it stays in tail position.
+            self.end_scoped();
+            self.scoped_ended = true;
+        }
         let result = self.call(&fn_sig, &callee, &values, &attrs);
         if abi.ty.is_void() {
             self.ret_void();
@@ -637,6 +643,8 @@ impl FunctionEmitter<'_> {
     ) {
         self.debug_location = debug.map(|(_, location)| location);
         self.view_invariants.clear();
+        // The wrapper has no slots of its own.
+        self.scoped.clear();
         self.next = 0;
         self.has_status = true;
         self.abi = Return::for_signature(self.abi.target, sig, layouts, true);

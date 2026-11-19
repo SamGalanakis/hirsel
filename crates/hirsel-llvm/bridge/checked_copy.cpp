@@ -820,6 +820,16 @@ static bool stepWord(Instruction &I, Value *Context, const DataLayout &DL) {
   int64_t Offset = 0;
   return GetPointerBaseWithConstantOffset(P, Offset, DL) == Context && Offset == 16;
 }
+// A callee's price for the expansion budgets: its instructions, less the
+// lifetime markers, which generate no code (LLVM's inline cost skips them too).
+static unsigned expansionCost(const Function &F) {
+  unsigned Cost = 0;
+  for (const BasicBlock &BB : F)
+    for (const Instruction &I : BB)
+      if (!isa<LifetimeIntrinsic>(I)) ++Cost;
+  return Cost;
+}
+
 // A full copy into a private slot can disappear once SROA sees the read-only
 // call's field loads. Limit early inlining to slots dedicated to that call.
 static bool hasSnapshotArgument(CallInst &Call, const DataLayout &DL) {
@@ -861,7 +871,7 @@ extern "C" void hirsel_llvm_inline_snapshot_calls(void *Raw) {
       }
     unsigned Budget = 2048;
     for (CallInst *Call : Calls) {
-      unsigned Cost = Call->getCalledFunction()->getInstructionCount();
+      unsigned Cost = expansionCost(*Call->getCalledFunction());
       if (Cost > Budget) continue;
       InlineFunctionInfo Info;
       if (InlineFunction(*Call, Info, true).isSuccess()) Budget -= Cost;
@@ -932,8 +942,8 @@ static void inlineLoopHelpers(Module &M) {
       if (!Target || Target->isDeclaration() || Target == &F ||
           Target->hasFnAttribute(Attribute::NoInline) ||
           Call->hasFnAttr(Attribute::NoInline) ||
-          Target->getInstructionCount() > Budget) continue;
-      unsigned Cost = Target->getInstructionCount();
+          expansionCost(*Target) > Budget) continue;
+      unsigned Cost = expansionCost(*Target);
       InlineFunctionInfo Info;
       if (InlineFunction(*Call, Info, true).isSuccess()) {
         Budget -= Cost;

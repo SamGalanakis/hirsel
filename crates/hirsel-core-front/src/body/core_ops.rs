@@ -57,6 +57,7 @@ enum Lane {
     Numeric,
     Value,
     Language,
+    Simd(SimdCall),
     PendingCode,
     Runtime(Kernel),
 }
@@ -205,6 +206,20 @@ operations! {
     ("int", "leading_zeros", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "trailing_zeros", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "count_ones", Lane::Numeric, "A", "core-check-index-912", false),
+    ("simd", "wrapping_add", Lane::Simd(SimdCall::Value(SimdOp::WrappingAdd)), "A", "simd-impl-1344", false),
+    ("simd", "wrapping_sub", Lane::Simd(SimdCall::Value(SimdOp::WrappingSub)), "A", "simd-impl-1344", false),
+    ("simd", "saturating_add", Lane::Simd(SimdCall::Value(SimdOp::SaturatingAdd)), "A", "simd-impl-1344", false),
+    ("simd", "saturating_sub", Lane::Simd(SimdCall::Value(SimdOp::SaturatingSub)), "A", "simd-impl-1344", false),
+    ("simd", "eq", Lane::Simd(SimdCall::Value(SimdOp::Eq)), "A", "simd-impl-1344", false),
+    ("simd", "lt", Lane::Simd(SimdCall::Value(SimdOp::Lt)), "A", "simd-impl-1344", false),
+    ("simd", "splat", Lane::Simd(SimdCall::Value(SimdOp::Splat)), "A", "simd-impl-1344", false),
+    ("simd", "from", Lane::Simd(SimdCall::Value(SimdOp::From)), "A", "simd-impl-1344", false),
+    ("simd", "swizzle", Lane::Simd(SimdCall::Value(SimdOp::Swizzle)), "A", "simd-impl-1344", false),
+    ("simd", "cast", Lane::Simd(SimdCall::Value(SimdOp::Cast)), "A", "simd-impl-1344", false),
+    ("simd", "any", Lane::Simd(SimdCall::Value(SimdOp::Any)), "A", "simd-impl-1344", false),
+    ("simd", "bitmask", Lane::Simd(SimdCall::Value(SimdOp::Bitmask)), "A", "simd-impl-1344", false),
+    ("list", "lanes", Lane::Simd(SimdCall::Value(SimdOp::Lanes)), "A", "simd-impl-1344", false),
+    ("list", "put_lanes", Lane::Simd(SimdCall::PutLanes), "A", "simd-impl-1344", false),
     ("list", "word_le", Lane::Value, "A", "core-check-index-912", false),
     ("list", "put_word_le", Lane::Value, "A", "core-ops-914", false),
     ("int", "widen", Lane::Numeric, "A", "core-check-index-912", false),
@@ -423,9 +438,19 @@ pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
         .position(|entry| {
             f.path.0.modules == [entry.module]
                 && f.path.0.name == entry.name
-                && matches!(entry.lane, Lane::Runtime(_) | Lane::PendingCode)
+                && matches!(
+                    entry.lane,
+                    Lane::Runtime(_) | Lane::PendingCode | Lane::Simd(_)
+                )
         })
         .map(|i| i as u16)
+}
+
+pub(super) fn simd_call(row: Option<u16>) -> Option<SimdCall> {
+    match OPERATIONS.get(row? as usize)?.lane {
+        Lane::Simd(op) => Some(op),
+        _ => None,
+    }
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {

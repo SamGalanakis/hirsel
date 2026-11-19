@@ -489,6 +489,7 @@ impl Derive<'_> {
                 let n = match info.ty {
                     PlaceTy::Value(Ty::Scalar(s)) => s.size(),
                     PlaceTy::Value(Ty::Ptr) => POINTER,
+                    PlaceTy::Value(Ty::Vector(v)) => v.size(),
                     PlaceTy::Declared(t) if carrier(self.m, t) => SEQ_CARRIER,
                     PlaceTy::Declared(_) => return None,
                 };
@@ -734,6 +735,21 @@ impl<'a> Seal<'a> {
                     (Some(Loc::Carrier(r, 0)), Some(r2)) if r == r2 => {}
                     _ => self.used(value, Use::Other),
                 }
+            }
+            Inst::Simd {
+                op, first, second, ..
+            } => {
+                if !matches!(op, crate::SimdOp::From | crate::SimdOp::Lanes) {
+                    self.used(first, Use::Other);
+                }
+                if let Some(v) = second {
+                    self.used(v, Use::Other);
+                }
+            }
+            Inst::PutLanes { to, vector, count } => {
+                self.whole(to);
+                self.used(vector, Use::Other);
+                self.used(count, Use::Other);
             }
             Inst::Compare { left, right, .. } => {
                 self.used(left, Use::Compare);

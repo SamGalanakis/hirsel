@@ -557,9 +557,9 @@ const BIG: u8 = 200 + 100                                 // refused: LANG-20, O
 ### LANG-21: Operators
 
 An operator applies to the operand types this table lists and to no other; anything else is
-refused at the operator. Both operands of a binary operator have one type, so there are no
-mixed-width or mixed-kind operators. A compound assignment `a op= b` types as `a op b` and
-installs the result ([OWN-12](ownership.md#own-12-assignment)).
+refused at the operator. A binary operator's operands have one type, except that a vector
+shift takes a scalar count of its lane type. A compound assignment `a op= b` types as
+`a op b` and installs the result ([OWN-12](ownership.md#own-12-assignment)).
 
 | operators | operands | result |
 |---|---|---|

@@ -1,0 +1,33 @@
+fn sum(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16] { a + b }
+type Block { lanes: Simd[u8, 16] }
+fn wide(v: Simd[u64, 8]) -> u64 { 0 }
+fn pick(t: Simd[u16, 16], i: Simd[u8, 16]) -> Simd[u16, 16] { simd.swizzle(t, i) }
+fn float_lanes(v: Simd[f32, 4]) {}
+fn length_parameter[N](v: Simd[u8, N]) {}
+fn short(v: Simd[u8, 8]) {}
+fn tuple_type(v: (Simd[u8, 16], u8)) {}
+fn array_type(v: Inline[Simd[u8, 16], 2]) {}
+fn list_type(v: List[Simd[u8, 16]]) {}
+fn callable(v: fn(Simd[u8, 16])) {}
+fn inferred_tuple(v: Simd[u8, 16]) { let _ = (v, 0u8) }
+fn inferred_array(v: Simd[u8, 16]) { let _ = [v; 2] }
+fn identity[T: plain](v: T) -> T { v }
+fn inferred_generic(v: Simd[u8, 16]) { let _ = identity(v) }
+fn capture(v: Simd[u8, 16]) { let _ = scoped fn() -> bool { simd.any(v) } }
+
+// expect: refuse LANG-21 at 1:62
+// expect: refuse SEM-11 at 2:21
+// expect: refuse SEM-11 at 3:12
+// expect: refuse SEM-11 at 4:76
+// expect: refuse SEM-11 at 5:19
+// expect: refuse SEM-11 at 6:27
+// expect: refuse SEM-11 at 7:13
+// expect: refuse SEM-11 at 8:19
+// expect: refuse SEM-11 at 9:25
+// expect: refuse SEM-11 at 10:22
+// expect: refuse SEM-11 at 11:19
+// expect: refuse SEM-11 at 12:47
+// expect: refuse SEM-11 at 13:47
+// expect: refuse SEM-11 at 15:57
+// expect: refuse SEM-11 at 16:70
+// expect: compared LANG-21 at 1:62 | Simd[u8, 16] | an operand type of `+`

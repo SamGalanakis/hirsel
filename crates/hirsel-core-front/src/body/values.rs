@@ -729,6 +729,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             let fresh = self.expression_destination(n).is_none();
             let (ty, value) = self.expr_into_field(field, expected.and_then(expect), place, fresh);
+            let ty = self.outside_vector(field, ty, "a tuple element");
             scratch.tys.push(ty);
             scratch.vals.push(value);
             self.anchor_field(n, anchors::Component::Field(i as u32), field);
@@ -1047,6 +1048,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     } else {
                         self.expr(e, None)
                     };
+                    let at = self.outside_vector(e, at, "a field");
+                    if at == ERROR {
+                        return (ERROR, None);
+                    }
                     if !self.unify(f.ty, at, &mut found) {
                         let before = self.partial_rooted(f.ty, &found, &[]);
                         self.refuse_twice(

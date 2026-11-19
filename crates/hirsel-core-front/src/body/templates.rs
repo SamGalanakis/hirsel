@@ -216,6 +216,7 @@ pub fn materialize(
             let instance = InstanceId(module.instances.len() as u32);
             module.instances.push(key);
             module.functions.push(Function {
+                versioned: false,
                 instance,
                 signature,
                 body: None,
@@ -410,6 +411,7 @@ fn import_hook(module: &mut Module, rows: &[TypeId], hook: &ClosureHook) -> Func
     let instance = InstanceId(module.instances.len() as u32);
     module.instances.push(key);
     module.functions.push(Function {
+        versioned: false,
         instance,
         signature,
         body: None,
@@ -453,6 +455,7 @@ pub(super) fn codec_maker(
     let instance = InstanceId(module.instances.len() as u32);
     module.instances.push(key);
     module.functions.push(Function {
+        versioned: false,
         instance,
         signature,
         body: None,
@@ -608,6 +611,7 @@ impl Substitution<'_> {
                 self.module.instances.push(key);
                 let f = FuncId(self.module.functions.len() as u32);
                 self.module.functions.push(Function {
+                    versioned: false,
                     instance,
                     signature,
                     body: None,
@@ -736,6 +740,7 @@ impl Substitution<'_> {
             self.module.instances.push(key);
             let row = FuncId(self.module.functions.len() as u32);
             self.module.functions.push(Function {
+                versioned: function.versioned,
                 instance,
                 signature: function.signature,
                 body: None,
@@ -799,6 +804,7 @@ impl Substitution<'_> {
         self.module.instances.push(key);
         let id = FuncId(self.module.functions.len() as u32);
         self.module.functions.push(Function {
+            versioned: false,
             instance,
             signature,
             body: None,
@@ -1017,6 +1023,7 @@ fn fill(
         &old_calls,
         &template.numeric_sites,
     );
+    s.module.functions[target.index()].versioned = s.module.functions[source.index()].versioned;
     s.module.functions[target.index()].body = Some(body);
     Ok(())
 }

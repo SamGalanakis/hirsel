@@ -583,6 +583,7 @@ impl Derive<'_> {
         module.instances.push(key);
         let row = FuncId(module.functions.len() as u32);
         module.functions.push(Function {
+            versioned: false,
             instance,
             signature,
             body: None,

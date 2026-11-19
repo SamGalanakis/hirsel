@@ -84,6 +84,7 @@ fn ty(t: Ty) -> ir::Type {
         Ty::Scalar(Scalar::Char | Scalar::I32 | Scalar::U32) => types::I32,
         Ty::Scalar(Scalar::F32) => types::F32,
         Ty::Scalar(Scalar::F64) => types::F64,
+        Ty::Vector(_) => unreachable!("SIMD functions need a vector lowering"),
     }
 }
 
@@ -369,6 +370,9 @@ fn emit(
     let mut object = ObjectModule::new(builder);
     drop(object_setup);
     let call_layouts = c::native_layout::CallLayouts::new(&input.types, layouts);
+    if input.functions.iter().any(|f| f.versioned) {
+        return Err(unsupported("Cranelift SIMD lowering is not built"));
+    }
     let signatures = {
         let _span = observer.enter("signature_setup");
         input

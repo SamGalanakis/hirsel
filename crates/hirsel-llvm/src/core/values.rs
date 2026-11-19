@@ -14,6 +14,7 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::IntArith { result, .. }
                 | Inst::MulAdd { result, .. }
                 | Inst::ScalarUnary { result, .. }
+                | Inst::Simd { result, .. }
                 | Inst::Read { result, .. }
                 | Inst::ReadStatic { result, .. }
                 | Inst::FunctionRef { result, .. }
@@ -85,6 +86,16 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 }
             };
             match *inst {
+                Inst::Simd { first, second, .. } => {
+                    read(first);
+                    if let Some(second) = second {
+                        read(second);
+                    }
+                }
+                Inst::PutLanes { vector, count, .. } => {
+                    read(vector);
+                    read(count);
+                }
                 Inst::Unary { operand, .. }
                 | Inst::ScalarUnary { operand, .. }
                 | Inst::Convert { operand, .. } => read(operand),
@@ -311,6 +322,7 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 }
                 Inst::Read { address, .. }
                 | Inst::Store { address, .. }
+                | Inst::PutLanes { to: address, .. }
                 | Inst::Pointer { address, .. }
                 | Inst::Case { address, .. }
                 | Inst::SetCase { address, .. }
@@ -341,6 +353,7 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::IntArith { .. }
                 | Inst::MulAdd { .. }
                 | Inst::ScalarUnary { .. }
+                | Inst::Simd { .. }
                 | Inst::StorageLive { .. }
                 | Inst::StorageDead { .. }
                 | Inst::UpdateMask { .. }

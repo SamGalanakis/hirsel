@@ -30,6 +30,16 @@ pub(crate) fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
         | Inst::FunctionRef { result, .. }
         | Inst::DescriptorRef { result, .. }
         | Inst::RegionOpen { result } => defs.push(v(result)),
+        Inst::Simd {
+            result,
+            first,
+            second,
+            ..
+        } => {
+            uses.extend([first].into_iter().chain(second).map(v));
+            defs.push(v(result));
+        }
+        Inst::PutLanes { to, vector, count } => uses.extend([a(to), v(vector), v(count)]),
         Inst::Unary {
             result, operand, ..
         }

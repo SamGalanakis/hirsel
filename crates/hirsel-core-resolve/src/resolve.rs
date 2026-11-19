@@ -82,6 +82,7 @@ pub(crate) fn builtin(n: Symbol) -> bool {
     matches!(
         n,
         sym::INLINE
+            | sym::SIMD
             | sym::BOOL
             | sym::CHAR
             | sym::U8

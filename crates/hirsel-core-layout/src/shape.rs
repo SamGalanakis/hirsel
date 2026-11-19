@@ -82,11 +82,91 @@ impl Scalar {
     }
 }
 
-/// The type of a CoreIR value: a scalar or an opaque target pointer.
+/// A SEM-11 integer vector. Each variant occupies exactly 16 or 32 bytes in a
+/// frame. Keeping both properties in one byte also keeps scalar CoreIR rows small.
+#[derive(
+    serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd,
+)]
+pub enum Vector {
+    I8x16,
+    I16x8,
+    I32x4,
+    I64x2,
+    U8x16,
+    U16x8,
+    U32x4,
+    U64x2,
+    I8x32,
+    I16x16,
+    I32x8,
+    I64x4,
+    U8x32,
+    U16x16,
+    U32x8,
+    U64x4,
+}
+impl Vector {
+    pub fn new(lane: Scalar, lanes: u64) -> Option<Self> {
+        use Scalar::*;
+        Some(match (lane, lanes) {
+            (I8, 16) => Self::I8x16,
+            (I16, 8) => Self::I16x8,
+            (I32, 4) => Self::I32x4,
+            (I64, 2) => Self::I64x2,
+            (U8, 16) => Self::U8x16,
+            (U16, 8) => Self::U16x8,
+            (U32, 4) => Self::U32x4,
+            (U64, 2) => Self::U64x2,
+            (I8, 32) => Self::I8x32,
+            (I16, 16) => Self::I16x16,
+            (I32, 8) => Self::I32x8,
+            (I64, 4) => Self::I64x4,
+            (U8, 32) => Self::U8x32,
+            (U16, 16) => Self::U16x16,
+            (U32, 8) => Self::U32x8,
+            (U64, 4) => Self::U64x4,
+            _ => return None,
+        })
+    }
+
+    pub const fn lane(self) -> Scalar {
+        match self {
+            Self::I8x16 | Self::I8x32 => Scalar::I8,
+            Self::I16x8 | Self::I16x16 => Scalar::I16,
+            Self::I32x4 | Self::I32x8 => Scalar::I32,
+            Self::I64x2 | Self::I64x4 => Scalar::I64,
+            Self::U8x16 | Self::U8x32 => Scalar::U8,
+            Self::U16x8 | Self::U16x16 => Scalar::U16,
+            Self::U32x4 | Self::U32x8 => Scalar::U32,
+            Self::U64x2 | Self::U64x4 => Scalar::U64,
+        }
+    }
+
+    pub const fn size(self) -> u64 {
+        match self {
+            Self::I8x16
+            | Self::I16x8
+            | Self::I32x4
+            | Self::I64x2
+            | Self::U8x16
+            | Self::U16x8
+            | Self::U32x4
+            | Self::U64x2 => 16,
+            _ => 32,
+        }
+    }
+
+    pub const fn lanes(self) -> u64 {
+        self.size() / self.lane().size()
+    }
+}
+
+/// The type of a CoreIR value.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Ty {
     Scalar(Scalar),
     Ptr,
+    Vector(Vector),
 }
 impl Ty {
     pub fn int(self) -> Option<(bool, u32)> {
@@ -100,7 +180,7 @@ impl Ty {
                 }
                 _ => None,
             },
-            Ty::Ptr => None,
+            Ty::Ptr | Ty::Vector(_) => None,
         }
     }
     pub fn is_float(self) -> bool {

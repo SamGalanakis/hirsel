@@ -1,25 +1,25 @@
-// Module `simd` (SEM-11). Vectors are `Simd[T, n]`, n × size(T) of 16 or 32 bytes.
-// Each operation is typed by its own rule at the call, as `int.widen` is (SEM-1), so
-// none has a generic signature here; the declarations land with their checker rows.
-//
-// wrapping_add(a: V, b: V) -> V        every lane by int.wrapping_add
-// wrapping_sub(a: V, b: V) -> V        every lane by int.wrapping_sub
-// saturating_add(a: V, b: V) -> V      every lane by int.saturating_add
-// saturating_sub(a: V, b: V) -> V      every lane by int.saturating_sub
-// eq(a: V, b: V) -> V                  mask: all ones where equal, else 0
-// lt(a: V, b: V) -> V                  mask: all ones where a < b as T, else 0
-// splat(x: T) -> V                     x in every lane; V from the expected type
-// from(a: Inline[T, n]) -> Simd[T, n]  lane i from element i
-// swizzle(t: Simd[T, m], i: Simd[u8, n]) -> Simd[T, n]
-//                                      T is u8 or i8, m and n are 16 or 32;
-//                                      lane k is t[i[k]] when i[k] < m, else 0
-// cast(v: V) -> W                      W from the expected type, same size;
-//                                      lanes from byte 0, each little-endian
-// any(v: V) -> bool                    some lane is not 0
-// bitmask(v: V) -> u64                 bit k is the top bit of lane k
-//
-// In `list`, with V = Simd[u8, n]:
-// lanes(b: Bytes, at: u64) -> V        n from the expected type; Bounds unless at + n ≤ len
-// put_lanes(mut b: Bytes, v: V, k: u64) -> Result[(), Capacity]
-//                                      appends lanes 0 to k − 1; Bounds when k > n;
-//                                      grows with needed = len + k (MEM-24)
+// Module `simd` (SEM-11). The checker types each operation at its call.
+// The signatures below name a representative shape.
+pub fn wrapping_add(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16]
+
+pub fn wrapping_sub(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16]
+
+pub fn saturating_add(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16]
+
+pub fn saturating_sub(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16]
+
+pub fn eq(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16]
+
+pub fn lt(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16]
+
+pub fn splat(x: u8) -> Simd[u8, 16]
+
+pub fn from(a: Inline[u8, 16]) -> Simd[u8, 16]
+
+pub fn swizzle(t: Simd[u8, 16], i: Simd[u8, 16]) -> Simd[u8, 16]
+
+pub fn cast(v: Simd[u8, 16]) -> Simd[u8, 16]
+
+pub fn any(v: Simd[u8, 16]) -> bool
+
+pub fn bitmask(v: Simd[u8, 16]) -> u64

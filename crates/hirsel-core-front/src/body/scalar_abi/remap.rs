@@ -4,6 +4,24 @@ use super::*;
 /// separately, so calls, edges and returns share the same substitution.
 pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut ValueId)) {
     match inst {
+        Inst::Simd {
+            result,
+            first,
+            second,
+            ..
+        } => {
+            if definitions {
+                f(result);
+            }
+            f(first);
+            if let Some(second) = second {
+                f(second);
+            }
+        }
+        Inst::PutLanes { vector, count, .. } => {
+            f(vector);
+            f(count);
+        }
         Inst::Const { result, .. }
         | Inst::LayoutConst { result, .. }
         | Inst::ReadStatic { result, .. }
@@ -210,6 +228,7 @@ pub(super) fn addresses(inst: &mut Inst, f: &mut impl FnMut(&mut AddressId)) {
         Inst::Address { address, .. }
         | Inst::Read { address, .. }
         | Inst::Store { address, .. }
+        | Inst::PutLanes { to: address, .. }
         | Inst::Pointer { address, .. }
         | Inst::Case { address, .. }
         | Inst::SetCase { address, .. }

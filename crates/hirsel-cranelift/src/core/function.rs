@@ -463,6 +463,9 @@ impl Function<'_, '_, '_> {
     }
     fn instruction(&mut self, inst: &Inst) -> Result<()> {
         match *inst {
+            Inst::Simd { .. } | Inst::PutLanes { .. } => {
+                return Err(unsupported("Cranelift SIMD lowering is not built"));
+            }
             Inst::Const { result, bits } => {
                 let t = ty(self.body.values[result.index()]);
                 let v = match t {

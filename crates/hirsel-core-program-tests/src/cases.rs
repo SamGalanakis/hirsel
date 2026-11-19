@@ -1988,3 +1988,31 @@ fn static_bytes_preserve_budget_law() {
     let failures = run_case(&root().join("cases/rules/MEM-28-static-bytes.hirsel"));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn simd_sem_11_evaluator() {
+    for name in [
+        "fixtures/simd-operations.hirsel",
+        "cases/body/simd-refusals.hirsel",
+    ] {
+        let failures = run_case(&root().join(name));
+        assert!(failures.is_empty(), "{name}: {failures:#?}");
+    }
+    let (program, names) = crate::SourceProgram::lower(
+        include_str!("../../../core/front/fixtures/simd-operations.hirsel"),
+        None,
+    );
+    assert!(program.functions[names["inferred"].index()].versioned);
+    assert!(!program.functions[names["closure_local"].index()].versioned);
+    assert!(program.functions.iter().any(|f| {
+        f.versioned
+            && program.instances[f.instance.index()]
+                .definition
+                .0
+                .name
+                .starts_with("closure_local$closure")
+    }));
+    let text = hirsel_core_ir::text::print(&program);
+    let parsed = hirsel_core_ir::text::parse(&text).unwrap();
+    assert_eq!(hirsel_core_ir::text::print(&parsed), text);
+}

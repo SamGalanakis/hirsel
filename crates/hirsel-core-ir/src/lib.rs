@@ -26,6 +26,24 @@
 //! `rt.latest_handle`, `rt.latest_publish`, `rt.latest_read`, CONC-13). Rule texts: failure.md, budgets.md and
 //! tasks.md (FAIL-2..14, MEM-14..16, MEM-19..28, CONC-3..9).
 //!
+//! **SEM-11 vectors (header `core v1`).** A value or frame slot can have an
+//! integer vector type, written `v16xu8`, `v8xi16`, and so on. The lane count
+//! times the lane size is 16 or 32. Vector values can cross direct calls and
+//! control-flow edges. They cannot be stored in declared fields or used in
+//! callable signatures. The function row's `versioned` marker is set after
+//! typing whenever that function uses a vector, including an inferred value.
+//! A closure is marked independently of its enclosing function.
+//!
+//! `simd OP vA[, vB] [fail bN]` names a SEM-11 operation on vector values.
+//! Its result type supplies the shape for splat and cast. Shift counts are
+//! scalars of the lane type and are checked once. `from` loads from a pointer
+//! to an inline array and `lanes` from a pointer to a byte list's checked range.
+//! `put_lanes aA, vB, vC` writes the first `vC` bytes of `vB` at `aA`.
+//! The producer checks list bounds at the source call site and, for a store,
+//! reserves exactly the appended length before the store. Vector operations
+//! charge no steps or bytes on their own. The source call and list growth
+//! determine those charges.
+//!
 //! **FORM v1b (frozen at spec revision 4):**
 //! - Variants: `case` reads a variant place's case number (`u32`), `set_case`
 //!   writes it, and `case c f` address steps reach a case's payload. Own, resource,

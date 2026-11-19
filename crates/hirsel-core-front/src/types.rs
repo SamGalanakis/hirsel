@@ -4,7 +4,7 @@
 //! is rigid (OWN-23) and means nothing outside that definition.
 
 use hirsel_core_ids::published::{Map, Publisher, Table};
-use hirsel_core_layout::Scalar;
+use hirsel_core_layout::{Scalar, Vector};
 use rustc_hash::FxHashMap as HashMap;
 use std::hash::BuildHasher;
 
@@ -106,6 +106,8 @@ pub enum TyKind {
     Fn(Vec<(Mode, TyId)>, TyId, bool, Callable),
     /// A part of a call's expected type not fixed yet; it constrains nothing (LANG-11).
     Hole,
+    /// A first-class integer vector (SEM-11).
+    Vector(Vector),
 }
 
 /// Syntactic properties of an immutable interned type, including its arguments.

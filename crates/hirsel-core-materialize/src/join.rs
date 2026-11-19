@@ -181,6 +181,7 @@ pub fn join(units: &[Unit<'_>], entry: &Identity) -> Result<(Module, FuncId), St
             let id = *functions.entry(name).or_insert_with(|| {
                 let id = FuncId(out.functions.len() as u32);
                 out.functions.push(Function {
+                    versioned: function.versioned,
                     instance: instance_ids[function.instance.index()],
                     signature: map.signatures[function.signature.index()],
                     body: None,
@@ -257,6 +258,7 @@ pub fn join(units: &[Unit<'_>], entry: &Identity) -> Result<(Module, FuncId), St
                 }
             } else {
                 row.signature = map.signatures[function.signature.index()];
+                row.versioned = function.versioned;
                 row.body = Some(body);
             }
         }

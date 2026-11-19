@@ -209,6 +209,14 @@ impl Words<'_> {
                 self.ty(t, x)?;
                 self.punct("]");
             }
+            TyKind::Vector(v) => {
+                self.word("Simd");
+                self.punct("[");
+                self.word(v.lane().name());
+                self.punct(",");
+                self.word(&v.lanes().to_string());
+                self.punct("]");
+            }
             TyKind::Array(x, n) => {
                 self.word("Inline");
                 self.punct("[");

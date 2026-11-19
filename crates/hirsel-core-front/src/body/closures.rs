@@ -261,6 +261,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ERROR, None);
         }
         let g = &self.p.fns[f];
+        if g.params.iter().any(|p| self.vector_shape(p.ty).is_some())
+            || self.vector_shape(g.result).is_some()
+        {
+            self.refuse(
+                "SEM-11",
+                n,
+                "a function with a vector parameter or result cannot be a callable value",
+            );
+            return (ERROR, None);
+        }
         if g.result == ERROR {
             self.inherited_refusal = true;
             self.halt();
@@ -931,7 +941,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 "closure parameters require written names and types",
                             );
                         };
-                        let ty = self.ty(self.kids(param)[0]);
+                        let ty_node = self.kids(param)[0];
+                        let ty = self.ty(ty_node);
+                        let ty = self.outside_vector(ty_node, ty, "part of a callable type");
                         if self.kind(param) == NodeKind::BytesParameter
                             && ty != scalar(Scalar::U64)
                             && ty != ERROR
@@ -958,6 +970,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     written_result = true;
                     let node = self.kids(child)[0];
                     callable_result = self.ty_result(node, true);
+                    callable_result =
+                        self.outside_vector(node, callable_result, "part of a callable type");
                     if expected_kind == Some(Callable::ScopedView)
                         && crate::decls::view_result_reserved(
                             &self.p.decls,
@@ -1647,6 +1661,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let owning = frame.owning;
         let index = frame.captures.len();
+        if self.vector_shape(original.ty).is_some() {
+            self.refuse("SEM-11", n, "a vector cannot be captured");
+            self.vars[slot as usize] = Some(Var {
+                ty: ERROR,
+                ..original
+            });
+            return;
+        }
         if matches!(self.t.kind(original.ty),TyKind::Adt(d,_) if self.p.decls[d.index()].role==Some(Role::Writer))
         {
             self.refuse("MEM-4", n, "a Writer is never captured");

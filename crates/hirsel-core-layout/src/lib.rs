@@ -53,7 +53,8 @@ pub use recipe::{
     tag_width, terminal, word,
 };
 pub use shape::{
-    Body, Carried, Case, Field, FieldTy, FuncRef, Handle, Repr, Scalar, Shape, Ty, TypeRef, Width,
+    Body, Carried, Case, Field, FieldTy, FuncRef, Handle, Repr, Scalar, Shape, Ty, TypeRef, Vector,
+    Width,
 };
 
 #[cfg(test)]

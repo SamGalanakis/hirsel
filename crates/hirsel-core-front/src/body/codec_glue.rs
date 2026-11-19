@@ -202,6 +202,7 @@ pub fn row(module: &mut Module, of: &DefPath, rows: &Rows, op: CodecOp) -> FuncI
     let instance = InstanceId(module.instances.len() as u32);
     module.instances.push(key);
     module.functions.push(Function {
+        versioned: false,
         instance,
         signature,
         body: None,
@@ -707,6 +708,7 @@ impl Derive<'_> {
         let instance = InstanceId(self.module.instances.len() as u32);
         self.module.instances.push(key);
         self.module.functions.push(Function {
+            versioned: false,
             instance,
             signature,
             body: None,

@@ -10,6 +10,8 @@
 //! Sequence storage is cleaned by its carrier; list and map operations are the
 //! producer's code. Provider rows run against a modelled provider ([`World`]).
 
+mod simd;
+
 use crate::*;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_layout::{
@@ -3377,8 +3379,15 @@ impl Machine<'_> {
             })
             .into_iter()
             .chain(sig.params.iter().copied())
-            .zip(args)
-            .filter_map(|(p, &a)| match p {
+            .scan(0, |offset, param| {
+                let a = *args.get(*offset)?;
+                *offset += match param {
+                    Param::Value(ty) => simd::word_count(ty),
+                    Param::Address { .. } => 1,
+                };
+                Some((param, a))
+            })
+            .filter_map(|(p, a)| match p {
                 Param::Address { place, loan } => {
                     let n = self.place_size(place) as usize;
                     (n > 0).then(|| {
@@ -3545,6 +3554,7 @@ impl Machine<'_> {
         let depth = t.limits.len();
         let reserved = t.reserved.len();
         let mut vals = vec![0u64; b.values.len()];
+        let mut vectors = simd::Vectors::default();
         let mut places = vec![(0u64, At::Other); b.addresses.len()];
         let pool = |r: PoolRange<ValueId>| r.get(&b.pools.values).unwrap().to_vec();
         let mut block = BlockId(0);
@@ -3556,9 +3566,7 @@ impl Machine<'_> {
             );
             self.instructions -= 1;
             let blk = &b.blocks[block.index()];
-            for (p, a) in pool(blk.params).into_iter().zip(&incoming) {
-                vals[p.index()] = *a;
-            }
+            vectors.unpack(b, &mut vals, &pool(blk.params), &incoming);
             let first = blk.insts.start as usize;
             for (k, inst) in blk.insts.get(&b.insts).unwrap().iter().enumerate() {
                 assert!(
@@ -3567,7 +3575,7 @@ impl Machine<'_> {
                 );
                 self.instructions -= 1;
                 t.at.last_mut().unwrap().0 = b.inst_anchors[first + k];
-                let r = self.inst(t, b, slots, &mut vals, &mut places, inst);
+                let r = self.inst(t, b, slots, &mut vals, &mut vectors, &mut places, inst);
                 if let Err(stop) = r {
                     if let Stop::Cause(c) = stop {
                         let site = self.site(t);
@@ -3589,10 +3597,7 @@ impl Machine<'_> {
             }
             let take = |e: &EdgeId, vals: &[u64]| {
                 let e = &b.edges[e.index()];
-                (
-                    e.target,
-                    pool(e.args).iter().map(|v| vals[v.index()]).collect(),
-                )
+                (e.target, vectors.pack(b, vals, &pool(e.args)))
             };
             (block, incoming) = match &b.terminators[block.index()] {
                 Terminator::Jump(e) => take(e, &vals),
@@ -3621,7 +3626,7 @@ impl Machine<'_> {
                 Terminator::Return(r) => {
                     assert_eq!(t.limits.len(), depth, "a return left a bound scope open");
                     assert_eq!(t.reserved.len(), reserved, "a return left an isolate open");
-                    return Ok(pool(*r).iter().map(|v| vals[v.index()]).collect());
+                    return Ok(vectors.pack(b, &vals, &pool(*r)));
                 }
                 Terminator::Raise { cause: c, cleanup } => {
                     let mut message = [0; 3];
@@ -3741,18 +3746,72 @@ impl Machine<'_> {
         Ok((p, at))
     }
 
+    fn load_vector(&self, ptr: u64, len: usize) -> [u8; 32] {
+        self.read_marked(ptr, len);
+        let mut bytes = [0; 32];
+        for (i, chunk) in bytes[..len].chunks_exact_mut(8).enumerate() {
+            chunk.copy_from_slice(&self.load(ptr + 8 * i as u64, 8).to_le_bytes());
+        }
+        bytes
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn inst(
         &mut self,
         t: &mut Task,
         b: &Body,
         slots: &[u64],
         vals: &mut [u64],
+        vectors: &mut simd::Vectors,
         places: &mut [(u64, At)],
         inst: &Inst,
     ) -> X<()> {
         let ty = |v: ValueId| b.values[v.index()];
         match *inst {
             Inst::Const { result, bits } => vals[result.index()] = bits,
+            Inst::Simd {
+                result,
+                op,
+                first,
+                second,
+                ..
+            } => {
+                if matches!(op, SimdOp::From | SimdOp::Lanes) {
+                    let ptr = vals[first.index()];
+                    let len = bytes_of(ty(result));
+                    vectors.set(result, self.load_vector(ptr, len));
+                } else {
+                    let vector = |id| match ty(id) {
+                        Ty::Vector(_) => vectors.value(id),
+                        _ => [0; 32],
+                    };
+                    let scalar = if op == SimdOp::Splat {
+                        vals[first.index()]
+                    } else {
+                        second.map_or(0, |id| vals[id.index()])
+                    };
+                    match simd::apply(
+                        op,
+                        ty(result),
+                        ty(first),
+                        vector(first),
+                        second.map_or([0; 32], vector),
+                        scalar,
+                    )? {
+                        simd::ResultValue::Scalar(word) => vals[result.index()] = word,
+                        simd::ResultValue::Vector(bytes) => vectors.set(result, bytes),
+                    }
+                }
+            }
+            Inst::PutLanes { to, vector, count } => {
+                let ptr = places[to.index()].0;
+                let bytes = vectors.value(vector);
+                let count = vals[count.index()] as usize;
+                self.touch(to, ptr, count);
+                for (i, &byte) in bytes[..count].iter().enumerate() {
+                    self.store(ptr + i as u64, 1, u64::from(byte));
+                }
+            }
             Inst::LayoutConst { .. } => unreachable!("engine-private operands are resolved"),
             Inst::FunctionRef { result, function } => {
                 vals[result.index()] = FN_BASE + u64::from(function.0)
@@ -3964,14 +4023,32 @@ impl Machine<'_> {
             } => {
                 let n = bytes_of(ty(result));
                 self.touch(address, places[address.index()].0, n);
-                self.read_marked(places[address.index()].0, n);
-                vals[result.index()] = self.load(places[address.index()].0, n);
+                if matches!(ty(result), Ty::Vector(_)) {
+                    vectors.set(result, self.load_vector(places[address.index()].0, n));
+                } else {
+                    self.read_marked(places[address.index()].0, n);
+                    vals[result.index()] = self.load(places[address.index()].0, n);
+                }
                 if let (p, At::Word(w, size)) = places[address.index()] {
                     self.check_carrier(p - w.offset(), size, None);
                 }
             }
             Inst::Store { address, value } => {
                 let (t, mut x) = (ty(value), vals[value.index()]);
+                if let Ty::Vector(shape) = t {
+                    let ptr = places[address.index()].0;
+                    let n = shape.size() as usize;
+                    self.touch(address, ptr, n);
+                    let bytes = vectors.value(value);
+                    for (i, chunk) in bytes[..n].chunks_exact(8).enumerate() {
+                        self.store(
+                            ptr + 8 * i as u64,
+                            8,
+                            u64::from_le_bytes(chunk.try_into().unwrap()),
+                        );
+                    }
+                    return Ok(());
+                }
                 if let Some(k) = self.scrambled.as_mut()
                     && t.is_float()
                     && float(t, x).is_nan()
@@ -4021,16 +4098,15 @@ impl Machine<'_> {
             }
             Inst::Call { call } => {
                 let site = &b.calls[call.index()];
-                let args: Vec<u64> = site
-                    .args
-                    .get(&b.pools.args)
-                    .unwrap()
-                    .iter()
-                    .map(|a| match a {
-                        Arg::Value(v) => vals[v.index()],
-                        Arg::Address(a) => places[a.index()].0,
-                    })
-                    .collect();
+                let args = site.args.get(&b.pools.args).unwrap();
+                let mut words = Vec::with_capacity(args.len());
+                for arg in args {
+                    match *arg {
+                        Arg::Value(v) => vectors.push(b, vals, v, &mut words),
+                        Arg::Address(a) => words.push(places[a.index()].0),
+                    }
+                }
+                let args = words;
                 let held = self.frozen.len();
                 self.lend(&self.m.signatures[site.signature.index()], &args);
                 let r = match site.callee {
@@ -4042,9 +4118,7 @@ impl Machine<'_> {
                 };
                 self.frozen.truncate(held);
                 let r = r?;
-                for (v, x) in site.results.get(&b.pools.values).unwrap().iter().zip(r) {
-                    vals[v.index()] = x;
-                }
+                vectors.unpack(b, vals, site.results.get(&b.pools.values).unwrap(), &r);
             }
             Inst::Alloc {
                 result,
@@ -4429,6 +4503,7 @@ fn width(t: Ty) -> u32 {
     match t {
         Ty::Scalar(s) => s.size() as u32 * 8,
         Ty::Ptr => 64,
+        Ty::Vector(v) => v.size() as u32 * 8,
     }
 }
 fn mask(t: Ty, x: u64) -> u64 {

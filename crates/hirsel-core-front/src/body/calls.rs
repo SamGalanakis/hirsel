@@ -148,6 +148,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.put_form(n, f, args, want);
         }
         let g = &p.fns[f];
+        if let Some(op) = core_ops::simd_call(p.core_operations[f]) {
+            return self.simd_call(op, f, n, args, want);
+        }
         if g.path.is_core("code.callable") {
             self.flow_callable(n);
         }
@@ -1053,6 +1056,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 continue;
             }
             checked[i] = true;
+            if self.outside_vector(n, t, "a type argument") == ERROR && t != ERROR {
+                return;
+            }
             if !p.fns[f].generics[i].region
                 && kind(&p.decls, &self.t, t, &self.params) == Kind::Scoped
             {

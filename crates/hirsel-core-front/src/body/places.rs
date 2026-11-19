@@ -1147,6 +1147,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 field,
                 fresh,
             );
+            let ty = self.outside_vector(child, ty, "an array element");
+            if ty == ERROR {
+                self.array_parts.truncate(parts);
+                return (ERROR, None);
+            }
             if expected.is_none()
                 && let Some(elem) = elem
             {

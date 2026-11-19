@@ -48,7 +48,9 @@ impl Program<'_> {
                 };
                 let kids = item.tree.children(item.root);
                 let expr = *kids.last().unwrap();
-                let ty = self.lower_ty(at, kids[kids.len() - 2], &[]);
+                let type_node = kids[kids.len() - 2];
+                let ty = self.lower_ty(at, type_node, &[]);
+                let ty = self.outside_vector(at, type_node, ty, "a constant");
                 let id = self.constants.len() as u32;
                 self.constant_ids[definition.0 as usize] = Some(id);
                 self.constants.push(Constant {

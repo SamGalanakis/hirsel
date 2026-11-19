@@ -497,6 +497,7 @@ fn width(t: Ty) -> u64 {
     match t {
         Ty::Scalar(s) => s.size(),
         Ty::Ptr => hirsel_core_layout::POINTER,
+        Ty::Vector(v) => v.size(),
     }
 }
 

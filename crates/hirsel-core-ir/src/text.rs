@@ -86,7 +86,8 @@ names!(Counted { Rc = "rc", Arc = "arc" });
 /// and a `core v0` text that uses one is refused.
 pub fn uses_v1(m: &Module) -> bool {
     !m.types.is_empty()
-        || m.signatures.iter().any(|s| s.never)
+        || m.signatures.iter().any(|s| s.never || s.has_vectors())
+        || m.functions.iter().any(|f| f.versioned)
         || m.functions.iter().filter_map(|f| f.body.as_ref()).any(|b| {
             b.calls
                 .iter()
@@ -122,6 +123,8 @@ pub fn uses_v1(m: &Module) -> bool {
                                 | Inst::Case { .. }
                                 | Inst::SetCase { .. }
                                 | Inst::Pointer { .. }
+                                | Inst::Simd { .. }
+                                | Inst::PutLanes { .. }
                         )
                 })
                 || b.pools
@@ -144,10 +147,11 @@ struct Printer {
     out: String,
 }
 
-fn ty(t: Ty) -> &'static str {
+fn ty(t: Ty) -> std::borrow::Cow<'static, str> {
     match t {
-        Ty::Scalar(s) => s.name(),
-        Ty::Ptr => "ptr",
+        Ty::Scalar(s) => s.name().into(),
+        Ty::Ptr => "ptr".into(),
+        Ty::Vector(v) => format!("v{}x{}", v.lanes(), v.lane().name()).into(),
     }
 }
 fn place(t: PlaceTy) -> String {
@@ -373,6 +377,9 @@ impl Printer {
                 let hex: String = hash.0.iter().map(|b| format!("{b:02x}")).collect();
                 head += &format!(" code {hex}");
             }
+            if f.versioned {
+                head += " versioned";
+            }
             match &f.body {
                 None => self.line(&format!("{head} extern")),
                 Some(body) => {
@@ -450,6 +457,25 @@ impl Printer {
             {
                 let v = |v: &ValueId| format!("v{}", v.0);
                 let text = match inst {
+                    Inst::Simd {
+                        result,
+                        op,
+                        first,
+                        second,
+                        fail: target,
+                    } => {
+                        let args = second.map(|s| format!(", v{}", s.0)).unwrap_or_default();
+                        format!(
+                            "{} = simd {} {}{args}{}",
+                            def(*result),
+                            op.name(),
+                            v(first),
+                            fail(*target)
+                        )
+                    }
+                    Inst::PutLanes { to, vector, count } => {
+                        format!("put_lanes a{}, {}, {}", to.0, v(vector), v(count))
+                    }
                     Inst::Const { result, bits } => {
                         format!(
                             "{} = const {}",
@@ -987,6 +1013,15 @@ impl<'a> Line<'a> {
         if t == "ptr" {
             return Ok(Ty::Ptr);
         }
+        if let Some((lanes, lane)) = t.strip_prefix('v').and_then(|t| t.split_once('x'))
+            && let Some(shape) = lanes
+                .parse()
+                .ok()
+                .zip(Scalar::from_name(lane))
+                .and_then(|(lanes, lane)| Vector::new(lane, lanes))
+        {
+            return Ok(Ty::Vector(shape));
+        }
         Scalar::from_name(t)
             .map(Ty::Scalar)
             .ok_or_else(|| format!("unknown type `{t}`"))
@@ -1300,6 +1335,18 @@ impl BodyParser {
     fn inst(&mut self, l: &mut Line) -> R<Inst> {
         // Instructions without results first.
         match l.peek() {
+            Some("put_lanes") => {
+                l.next()?;
+                let to = AddressId(l.id('a')?);
+                l.expect(",")?;
+                let vector = l.value()?;
+                l.expect(",")?;
+                return Ok(Inst::PutLanes {
+                    to,
+                    vector,
+                    count: l.value()?,
+                });
+            }
             Some("address") => {
                 l.next()?;
                 return Ok(Inst::Address {
@@ -1491,7 +1538,28 @@ impl BodyParser {
             [a, b] => Ok((*a, *b)),
             _ => Err(format!("`{op}` takes 2 results")),
         };
-        let inst = if op == "alloc" {
+        let inst = if op == "simd" {
+            one(&defs)?;
+            let name = l.next()?;
+            let op = SimdOp::ALL
+                .into_iter()
+                .find(|op| op.name() == name)
+                .ok_or_else(|| format!("unknown vector operation `{name}`"))?;
+            let first = l.value()?;
+            let second = if op.binary() {
+                l.expect(",")?;
+                Some(l.value()?)
+            } else {
+                None
+            };
+            Inst::Simd {
+                result: defs[0],
+                op,
+                first,
+                second,
+                fail: l.fail()?,
+            }
+        } else if op == "alloc" {
             let (result, available, region_entry) = match defs.as_slice() {
                 [a, b] => (*a, *b, None),
                 [a, b, c] => (*a, *b, Some(*c)),
@@ -2055,7 +2123,7 @@ impl Parser {
 
     fn function(&mut self) -> R<()> {
         let n = self.module.functions.len() as u32;
-        let (instance, signature, code, external) = {
+        let (instance, signature, code, versioned, external) = {
             let mut l = self.line().unwrap();
             l.next()?;
             expect_index(&mut l, 'f', n)?;
@@ -2075,12 +2143,13 @@ impl Parser {
             } else {
                 None
             };
+            let versioned = l.eat("versioned");
             let external = l.eat("extern");
             if !external {
                 l.expect("{")?;
             }
             l.end()?;
-            (instance, signature, code, external)
+            (instance, signature, code, versioned, external)
         };
         let body = if external { None } else { Some(self.body()?) };
         if let Some(hash) = code {
@@ -2090,6 +2159,7 @@ impl Parser {
             instance,
             signature,
             body,
+            versioned,
         });
         Ok(())
     }

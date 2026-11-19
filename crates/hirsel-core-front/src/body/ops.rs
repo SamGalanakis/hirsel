@@ -42,7 +42,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 (t, self.emit_unary(UnaryOp::Not, t, v, n))
             }
             "~" => {
-                let (t, v) = self.expr(e, want.filter(|w| int_of(&self.t, w.ty).is_some()));
+                let hint = want.filter(|w| {
+                    int_of(&self.t, w.ty).is_some() || self.vector_shape(w.ty).is_some()
+                });
+                let (t, v) = self.expr(e, hint);
+                if self.vector_shape(t).is_some() {
+                    return (t, self.emit_simd(SimdOp::BitNot, t, v, None, n));
+                }
                 if int_of(&self.t, t).is_none() {
                     return self.no_operator(n, t);
                 }
@@ -76,6 +82,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             "view" => match self.place(e) {
                 // OWN-8: a temporary view, to the end of its statement unless bound.
                 Ok(Some(at)) => {
+                    if self.outside_vector(e, at.ty, "the target of a view") == ERROR
+                        && at.ty != ERROR
+                    {
+                        return (ERROR, None);
+                    }
                     self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
                     let t = match self.t.kind(at.ty) {
                         TyKind::View(_) => at.ty,
@@ -118,7 +129,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (t, None);
         }
         let (op, a) = (self.token_text(n), self.shown(t));
-        let message = format!("`{op}` does not apply to `{a}`");
+        let message = match (op.trim_end_matches('='), self.vector_shape(t)) {
+            ("+", Some(_)) => format!("`{op}` does not apply to `{a}`. Use simd.wrapping_add"),
+            ("-", Some(_)) if self.kind(n) == NodeKind::Binary || op == "-=" => {
+                format!("`{op}` does not apply to `{a}`. Use simd.wrapping_sub")
+            }
+            _ => format!("`{op}` does not apply to `{a}`"),
+        };
         self.refuse_compared_at(
             "LANG-21",
             self.op_span(n),
@@ -260,7 +277,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 (BOOL, v)
             }
             _ => {
-                let hint = want.filter(|w| self.is_numeric(w.ty));
+                let hint =
+                    want.filter(|w| self.is_numeric(w.ty) || self.vector_shape(w.ty).is_some());
                 let (t, lv, rv) = self.operands(n, hint);
                 if t == ERROR || t == NEVER {
                     return (t, None);
@@ -296,7 +314,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let c = self.kids(n);
         let (l, r) = (c[0], c[1]);
         if self.synthesises(l) {
-            let (lt, lv) = self.operand(l, None);
+            let vector_hint = hint.filter(|w| self.vector_shape(w.ty).is_some());
+            let (lt, lv) = self.operand(l, vector_hint);
             if lt == NEVER || lt == ERROR {
                 if self.synthesises(r) {
                     self.operand(r, None);
@@ -381,6 +400,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         (t, self.view_of(at, view, e))
     }
     pub(super) fn second_operand(&mut self, n: NodeId, r: NodeId, t: TyId) -> Option<ValueId> {
+        let t = match self.vector_shape(t) {
+            Some(shape) if matches!(self.token_text(n), "<<" | ">>" | "<<=" | ">>=") => {
+                scalar(shape.lane())
+            }
+            _ => t,
+        };
         if !self.synthesises(r) {
             return self.expr(r, expect(t)).1;
         }
@@ -405,6 +430,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         r: Option<ValueId>,
         n: NodeId,
     ) -> Option<ValueId> {
+        if self.vector_shape(t).is_some() {
+            let op = match op {
+                "&" => SimdOp::BitAnd,
+                "|" => SimdOp::BitOr,
+                "^" => SimdOp::BitXor,
+                "<<" => SimdOp::Shl,
+                ">>" => SimdOp::Shr,
+                _ => return self.no_operator(n, t).1,
+            };
+            return self.emit_simd(op, t, l, r, n);
+        }
         let int = int_of(&self.t, t).is_some();
         let float = is_float(&self.t, t);
         let bop = match op {

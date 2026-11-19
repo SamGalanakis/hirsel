@@ -378,6 +378,9 @@ fn emit_module(
     provided: EmissionFacts<'_>,
     sink: &mut dyn Sink,
 ) -> Result<Vec<source::ReleaseSite>> {
+    if module.functions.iter().any(|f| f.versioned) {
+        return Err(Error::Unsupported("SIMD".into()));
+    }
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
     let native = hirsel_core_ir::native_layout::resolve(module, &recipes);
     let module = native.as_ref();
@@ -1308,6 +1311,7 @@ fn ty(t: Ty) -> Type {
         Ty::Scalar(Scalar::F32) => Type::Float,
         Ty::Scalar(Scalar::F64) => Type::Double,
         Ty::Scalar(s) => Type::Int(s.size() as u32 * 8),
+        Ty::Vector(_) => unreachable!("SIMD functions need a vector lowering"),
     }
 }
 fn bits_ty(t: Ty) -> Type {
@@ -1317,6 +1321,7 @@ fn size(t: Ty) -> u64 {
     match t {
         Ty::Ptr => 8,
         Ty::Scalar(s) => s.size(),
+        Ty::Vector(v) => v.size(),
     }
 }
 /// A typed call argument.

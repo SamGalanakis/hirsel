@@ -843,6 +843,56 @@ fn no_catch(b: &Body) -> R {
 fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
     let bool_ty = Ty::Scalar(Scalar::Bool);
     match *inst {
+        Inst::Simd {
+            result,
+            op,
+            first,
+            second,
+            fail,
+        } => {
+            c.def(result)?;
+            c.fail(fail, op.can_fail())?;
+            let (from, to) = (c.ty(first)?, c.ty(result)?);
+            let second = second.map(|v| c.ty(v)).transpose()?;
+            let vector = |t| match t {
+                Ty::Vector(v) => Some(v),
+                _ => None,
+            };
+            use SimdOp::*;
+            let ok = match op {
+                WrappingAdd | WrappingSub | SaturatingAdd | SaturatingSub | Eq | Lt | BitAnd
+                | BitOr | BitXor => vector(to).is_some() && from == to && second == Some(to),
+                BitNot => vector(to).is_some() && from == to,
+                Shl | Shr => {
+                    vector(to).is_some_and(|v| second == Some(Ty::Scalar(v.lane()))) && from == to
+                }
+                Splat => vector(to).is_some_and(|v| from == Ty::Scalar(v.lane())),
+                From => from == Ty::Ptr && vector(to).is_some(),
+                Lanes => from == Ty::Ptr && vector(to).is_some_and(|v| v.lane() == Scalar::U8),
+                Cast => vector(from)
+                    .zip(vector(to))
+                    .is_some_and(|(a, b)| a.size() == b.size()),
+                Swizzle => vector(from).zip(vector(to)).is_some_and(|(a, b)| {
+                    matches!(a.lane(), Scalar::U8 | Scalar::I8)
+                        && a.lane() == b.lane()
+                        && second == Vector::new(Scalar::U8, b.lanes()).map(Ty::Vector)
+                }),
+                Any => vector(from).is_some() && to == bool_ty,
+                Bitmask => vector(from).is_some() && to == Ty::Scalar(Scalar::U64),
+            };
+            need(ok && op.binary() == second.is_some(), || {
+                "vector operand types".into()
+            })
+        }
+        Inst::PutLanes { to, vector, count } => {
+            c.writes(to)?;
+            c.is(count, Ty::Scalar(Scalar::U64))?;
+            need(
+                c.place(to)? == PlaceTy::Value(Ty::Scalar(Scalar::U8))
+                    && matches!(c.ty(vector)?, Ty::Vector(Vector::U8x16 | Vector::U8x32)),
+                || "put_lanes operand types".into(),
+            )
+        }
         Inst::Const { result, bits } => {
             c.def(result)?;
             let fits = match c.ty(result)? {
@@ -851,6 +901,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                     u32::try_from(bits).ok().and_then(char::from_u32).is_some()
                 }
                 Ty::Scalar(Scalar::F32) => bits <= u64::from(u32::MAX),
+                Ty::Vector(_) => false,
                 t => t.int().is_none_or(|(_, w)| w == 64 || bits >> w == 0),
             };
             need(fits, || {
@@ -969,7 +1020,8 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 "compare types".into()
             })?;
             need(
-                t != Ty::Ptr || matches!(op, CompareOp::Eq | CompareOp::Ne),
+                !matches!(t, Ty::Vector(_))
+                    && (t != Ty::Ptr || matches!(op, CompareOp::Eq | CompareOp::Ne)),
                 || "ordered pointer compare".into(),
             )
         }
@@ -1524,7 +1576,9 @@ fn touch(m: &Module, b: &Body, i: &Inst) -> Touch {
             let p = read(&mut t, address);
             t.reads.extend(bytes(address, p));
         }
-        Inst::Store { address, .. } | Inst::SetCase { address, .. } => {
+        Inst::Store { address, .. }
+        | Inst::SetCase { address, .. }
+        | Inst::PutLanes { to: address, .. } => {
             let p = read(&mut t, address);
             t.writes.extend(p);
         }

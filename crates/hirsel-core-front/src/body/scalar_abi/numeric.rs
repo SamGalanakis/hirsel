@@ -70,6 +70,7 @@ fn fail_operand(inst: &mut Inst) -> Option<&mut Option<BlockId>> {
     match inst {
         Inst::Unary { fail, .. }
         | Inst::Binary { fail, .. }
+        | Inst::Simd { fail, .. }
         | Inst::Address { fail, .. }
         | Inst::Alloc { fail, .. }
         | Inst::Grow { fail, .. }

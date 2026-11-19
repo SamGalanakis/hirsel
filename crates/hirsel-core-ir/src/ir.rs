@@ -9,7 +9,7 @@
 //! slots or prove liveness before emitting.
 
 use hirsel_core_ids::{ContentHash, DefPath};
-pub use hirsel_core_layout::{Carried, Scalar, Shape, Ty};
+pub use hirsel_core_layout::{Carried, Scalar, Shape, Ty, Vector};
 use hirsel_core_layout::{Cleanup, FieldTy, FuncRef, Recipe, TypeRef, cleanup_class};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -342,6 +342,99 @@ pub enum ReadMode {
 /// An instruction. A `fail` block is the failure successor of an operation that
 /// can fail; the block takes no parameters in FORM v0 and what it does (cause
 /// storage, cleanup, propagation) is FORM v1.
+/// The vector value operations of SEM-11.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum SimdOp {
+    WrappingAdd,
+    WrappingSub,
+    SaturatingAdd,
+    SaturatingSub,
+    Eq,
+    Lt,
+    Splat,
+    From,
+    Swizzle,
+    Cast,
+    Any,
+    Bitmask,
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitNot,
+    Shl,
+    Shr,
+    Lanes,
+}
+impl SimdOp {
+    pub const ALL: [Self; 19] = [
+        Self::WrappingAdd,
+        Self::WrappingSub,
+        Self::SaturatingAdd,
+        Self::SaturatingSub,
+        Self::Eq,
+        Self::Lt,
+        Self::Splat,
+        Self::From,
+        Self::Swizzle,
+        Self::Cast,
+        Self::Any,
+        Self::Bitmask,
+        Self::BitAnd,
+        Self::BitOr,
+        Self::BitXor,
+        Self::BitNot,
+        Self::Shl,
+        Self::Shr,
+        Self::Lanes,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::WrappingAdd => "wrapping_add",
+            Self::WrappingSub => "wrapping_sub",
+            Self::SaturatingAdd => "saturating_add",
+            Self::SaturatingSub => "saturating_sub",
+            Self::Eq => "eq",
+            Self::Lt => "lt",
+            Self::Splat => "splat",
+            Self::From => "from",
+            Self::Swizzle => "swizzle",
+            Self::Cast => "cast",
+            Self::Any => "any",
+            Self::Bitmask => "bitmask",
+            Self::BitAnd => "bit_and",
+            Self::BitOr => "bit_or",
+            Self::BitXor => "bit_xor",
+            Self::BitNot => "bit_not",
+            Self::Shl => "shl",
+            Self::Shr => "shr",
+            Self::Lanes => "lanes",
+        }
+    }
+
+    pub const fn binary(self) -> bool {
+        matches!(
+            self,
+            Self::WrappingAdd
+                | Self::WrappingSub
+                | Self::SaturatingAdd
+                | Self::SaturatingSub
+                | Self::Eq
+                | Self::Lt
+                | Self::Swizzle
+                | Self::BitAnd
+                | Self::BitOr
+                | Self::BitXor
+                | Self::Shl
+                | Self::Shr
+        )
+    }
+
+    pub const fn can_fail(self) -> bool {
+        matches!(self, Self::Shl | Self::Shr)
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Inst {
     /// The bits of a scalar of the result's type (floats by their IEEE bits,
@@ -643,6 +736,22 @@ pub enum Inst {
     LayoutConst {
         result: ValueId,
         query: LayoutQuery,
+    },
+    /// One vector value operation. The two loads take the address of the first
+    /// lane, after the source operation's bounds check for Lanes.
+    Simd {
+        result: ValueId,
+        op: SimdOp,
+        first: ValueId,
+        second: Option<ValueId>,
+        fail: Option<BlockId>,
+    },
+    /// Store the first count lanes of a byte vector at to, after the source
+    /// operation's bounds check and reservation for those bytes.
+    PutLanes {
+        to: AddressId,
+        vector: ValueId,
+        count: ValueId,
     },
 }
 
@@ -1260,6 +1369,7 @@ impl Inst {
                 op == UnaryOp::Neg && ty(operand).is_some_and(|t| t.int().is_some())
             }
             Inst::Binary { op, left, .. } => ty(left).is_some_and(|t| op.can_fail(t)),
+            Inst::Simd { op, .. } => op.can_fail(),
             Inst::Address { address, .. } => b.addresses.get(address.index()).is_some_and(|a| {
                 a.steps
                     .get(&b.pools.steps)
@@ -1282,6 +1392,7 @@ impl Inst {
             Inst::Step { fail }
             | Inst::Unary { fail, .. }
             | Inst::Binary { fail, .. }
+            | Inst::Simd { fail, .. }
             | Inst::Address { fail, .. }
             | Inst::Alloc { fail, .. }
             | Inst::Grow { fail, .. }
@@ -1460,6 +1571,22 @@ pub struct Signature {
     pub never: bool,
 }
 
+impl Signature {
+    pub fn has_vectors(&self) -> bool {
+        self.results.iter().any(|t| matches!(t, Ty::Vector(_)))
+            || self.params.iter().any(|p| {
+                matches!(
+                    p,
+                    Param::Value(Ty::Vector(_))
+                        | Param::Address {
+                            place: PlaceTy::Value(Ty::Vector(_)),
+                            ..
+                        },
+                )
+            })
+    }
+}
+
 /// One instantiation as a row of its module (see the crate docs, "Instances"): its
 /// type arguments are rows of the same module, so the row means nothing apart from
 /// the module; [`Module::identity`] is its module-independent identity.
@@ -1630,6 +1757,8 @@ pub struct Function {
     pub signature: SigId,
     /// None for a function defined in another module (linked by name).
     pub body: Option<Body>,
+    /// This definition has a vector-typed parameter, result, binding or expression.
+    pub versioned: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]

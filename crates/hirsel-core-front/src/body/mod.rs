@@ -30,8 +30,8 @@ use hirsel_core_ir::{
     AddressBase, AddressId, AddressInfo, AllocKind, AllocPlace, Anchor, Arg, ArithMode, ArithOp,
     BinaryOp, Block, BlockId, Body, CallId, CallSite, Callee, CompareOp, ConvertMode, Edge, EdgeId,
     FuncId, Function, Inst, InstanceId, InstanceKey, ItemId, LayoutQuery, Loan, Module, Param,
-    PlaceTy, PoolRange, ReadMode, SeqWord, SigId, Signature, SlotId, Step, Terminator, Ty, TypeId,
-    UnaryOp, ValueId,
+    PlaceTy, PoolRange, ReadMode, SeqWord, SigId, Signature, SimdOp, SlotId, Step, Terminator, Ty,
+    TypeId, UnaryOp, ValueId, Vector,
 };
 use hirsel_core_layout::{
     Carried, FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef,
@@ -39,6 +39,7 @@ use hirsel_core_layout::{
 use hirsel_core_resolve::{Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use simd::SimdCall;
 
 mod admission;
 mod anchors;
@@ -66,6 +67,7 @@ mod ops;
 mod patterns;
 mod places;
 mod scalar_abi;
+mod simd;
 mod slots;
 mod spans;
 mod stable;
@@ -468,6 +470,7 @@ impl Emitter {
             }
             return f;
         }
+        let versioned = sig.has_vectors();
         let signature = self.sig_abi(sig, abi);
         let instance = InstanceId(self.module.instances.len() as u32);
         self.module.instances.push(key.clone());
@@ -476,6 +479,7 @@ impl Emitter {
             instance,
             signature,
             body: None,
+            versioned,
         });
         self.source_signatures.remember(f, signature);
         self.funcs.insert(key, f);
@@ -869,6 +873,7 @@ fn field_runs_code(t: &FieldTy, row: &mut impl FnMut(TypeId)) -> bool {
 fn value_ty(t: &impl TyRead, ty: TyId) -> Result<Option<Ty>, &'static str> {
     match t.kind(ty) {
         TyKind::Scalar(s) => Ok(Some(Ty::Scalar(*s))),
+        TyKind::Vector(v) => Ok(Some(Ty::Vector(*v))),
         TyKind::Fn(_, _, _, Callable::Plain) => Ok(Some(Ty::Ptr)),
         TyKind::Unit | TyKind::Never | TyKind::Error => Ok(None),
         _ => Err("values of this type are not built"),
@@ -1109,6 +1114,7 @@ struct Cx<'c, 'a, 'e> {
     t: Local<'c>,
     e: &'e mut Emitter,
     b: Body,
+    versioned: bool,
     func: Option<FuncId>,
     /// The StaticFn words `code.describe` produced in this body: each one's
     /// described function, its identity static and that static's length, so a
@@ -1275,6 +1281,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             t: Local::with_program(p),
             e,
             b: Body::default(),
+            versioned: false,
             func: None,
             static_fns: HashMap::default(),
             flow_literals: HashSet::default(),
@@ -1812,6 +1819,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let (id, bits) = match self.rep(ty) {
             Ok(Rep::Scalar(Ty::Scalar(s))) => (None, s.size()),
             Ok(Rep::Scalar(Ty::Ptr)) => (None, hirsel_core_layout::POINTER),
+            Ok(Rep::Scalar(Ty::Vector(v))) => (None, v.size()),
             Ok(Rep::None) => (None, 0),
             Ok(Rep::Place(id)) => {
                 if !logical {
@@ -2345,7 +2353,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             if self.fd.generics.is_empty() {
                 scalar_abi::inline_keys(&self.e.module, &mut self.b);
             }
-            self.e.module.functions[f.index()].body = Some(std::mem::take(&mut self.b));
+            let function = &mut self.e.module.functions[f.index()];
+            function.versioned |= self.versioned;
+            function.body = Some(std::mem::take(&mut self.b));
             if let Some(sig) = self.emitted {
                 self.e.install_source_signature(f, sig);
             }
@@ -2629,6 +2639,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn checked(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let outer = std::mem::replace(&mut self.node, n);
         let (t, v) = self.expr_inner(n, want);
+        self.versioned |= matches!(self.t.kind(t), TyKind::Vector(_));
         self.flow_expression(n, t);
         if matches!(self.kind(n), NodeKind::Closure | NodeKind::ScopedClosure)
             && let Some(v) = v
@@ -2864,6 +2875,7 @@ fn mentions_error(t: &impl TyRead, ty: TyId) -> bool {
         TyKind::Never
         | TyKind::Unit
         | TyKind::Scalar(_)
+        | TyKind::Vector(_)
         | TyKind::Param(_)
         | TyKind::Hole
         | TyKind::Region(_) => false,

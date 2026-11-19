@@ -240,6 +240,8 @@ fn cannot_install_step_bound(module: &Module) -> bool {
                     | Inst::Mark { .. }
                     | Inst::Unmark { .. }
                     | Inst::Step { .. }
+                    | Inst::Simd { .. }
+                    | Inst::PutLanes { .. }
                     | Inst::PromoteFrame { .. } => true,
                 })
             })

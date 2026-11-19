@@ -12,6 +12,7 @@ pub(super) fn result_cleanup(source: &Module, result: TypeId, entry: &DefPath) -
             .functions
             .iter()
             .map(|f| Function {
+                versioned: f.versioned,
                 instance: f.instance,
                 signature: f.signature,
                 body: None,
@@ -38,6 +39,7 @@ pub(super) fn result_cleanup(source: &Module, result: TypeId, entry: &DefPath) -
         never: false,
     });
     module.functions.push(Function {
+        versioned: false,
         instance,
         signature,
         body: Some(Body {

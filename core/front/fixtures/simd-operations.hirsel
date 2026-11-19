@@ -1,0 +1,103 @@
+// expect: accept
+// expect: run signed(1) = true
+// expect: run signed(-1) = fail Overflow@19:21
+// expect: run signed(8) = fail Overflow@19:21
+// expect: run unsigned() = true
+// expect: run wasm_swizzle() = true
+// expect: run halves() = true
+// expect: run inferred(0) = true
+// expect: run inferred(1) = fail Bounds@63:22
+// expect: run inferred(18446744073709551615) = fail Bounds@63:22
+// expect: run exact_tail(24) = true
+// expect: run exact_tail(33) = fail Bounds@72:9
+// expect: run capacity_refused() = true
+// expect: run closure_local() = true
+// Wasm spec d0b2e8d: simd_bit_shift.wast, i8x16.shr_s; simd_i8x16_sat_arith.wast,
+// i8x16.add_sat_s (64 + 64 = 127) and i8x16.sub_sat_s (-128 - 1 = -128).
+fn signed(count: i8) -> bool {
+    let a: Simd[i8, 16] = simd.from([-128, -64, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+    let shifted = a >> count
+    let want: Simd[i8, 16] = simd.from([-64, -32, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6])
+    let midpoint: Simd[i8, 16] = simd.splat(64)
+    let top: Simd[i8, 16] = simd.splat(127)
+    let bottom: Simd[i8, 16] = simd.splat(-128)
+    let saturated_sum = simd.saturating_add(midpoint, midpoint)
+    let saturated_diff = simd.saturating_sub(bottom, simd.splat(1))
+    simd.bitmask(simd.eq(shifted, want) & simd.eq(saturated_sum, top) & simd.eq(saturated_diff, bottom)) == 65535 && simd.bitmask(simd.lt(a, simd.splat(0))) == 3
+}
+
+fn unsigned() -> bool {
+    let high: Simd[u8, 16] = simd.splat(255)
+    let one: Simd[u8, 16] = simd.splat(1)
+    let zero = simd.wrapping_add(high, one)
+    let back = simd.wrapping_sub(zero, one)
+    let sat_high = simd.saturating_add(high, one)
+    let sat_low = simd.saturating_sub(zero, one)
+    let mut top = one | zero
+    top <<= 7
+    !simd.any(zero | sat_low) && simd.bitmask(top) == 65535 && !simd.any((back ^ sat_high) | ~high) && simd.bitmask(simd.lt(one, high)) == 65535
+}
+
+// Wasm spec d0b2e8d: simd_lane.wast, v8x16_swizzle with negative byte indices.
+fn wasm_swizzle() -> bool {
+    let table: Simd[u8, 16] = simd.from([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115])
+    let indices: Simd[u8, 16] = simd.from([255, 1, 254, 2, 253, 3, 252, 4, 251, 5, 250, 6, 249, 7, 248, 8])
+    let want: Simd[u8, 16] = simd.from([0, 101, 0, 102, 0, 103, 0, 104, 0, 105, 0, 106, 0, 107, 0, 108])
+    simd.bitmask(simd.eq(simd.swizzle(table, indices), want)) == 65535
+}
+
+// MEM-30 and SEM-11: reinterpret [0x01008002; 4] as LE bytes [2, 128, 0, 1] per lane.
+fn halves() -> bool {
+    let words: Simd[u32, 8] = simd.splat(0x01008002)
+    let octets: Simd[u8, 32] = simd.cast(words)
+    let expect: Simd[u8, 32] = simd.from([2, 128, 0, 1, 2, 128, 0, 1, 2, 128, 0, 1, 2, 128, 0, 1, 2, 128, 0, 1, 2, 128, 0, 1, 2, 128, 0, 1, 2, 128, 0, 1,])
+    simd.bitmask(octets) == 0x22222222 && !simd.any(octets ^ expect)
+}
+
+fn invalid(v: Simd[u8, 32]) -> Simd[u8, 32] {
+    simd.lt(v, simd.splat(100))
+}
+
+fn inferred(at: u64) -> bool {
+    let b = result.unwrap(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")
+    simd.any(invalid(list.lanes(b, at)))
+}
+
+// The remaining 24 bytes fit at capacity exactly. The whole vector does not.
+fn exact_tail(count: u64) -> bool {
+    let mut b: Bytes = result.unwrap(list.with_capacity(25))
+    result.unwrap(list.push(mut b, 0xFF))
+    let v: Simd[u8, 32] = simd.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,])
+    let r = bound bytes 0 {
+        list.put_lanes(mut b, v, count)?
+        list.len(b) == 25 && list.capacity(b) == 25 && b[0] == 255 && b[1] == 1 && b[24] == 24
+    }
+    match r {
+        Ok(ok) => ok,
+        Error(_) => false
+    }
+}
+
+fn capacity_refused() -> bool {
+    let mut b: Bytes = result.unwrap(list.with_capacity(1))
+    result.unwrap(list.push(mut b, 0xA5))
+    let v: Simd[u8, 16] = simd.splat(3)
+    let r = bound bytes 0 {
+        match list.put_lanes(mut b, v, 8) {
+            Error(c) => c.requested == 16 && c.available == 0 && list.len(b) == 1 && list.capacity(b) == 1 && b[0] == 0xA5,
+            Ok(()) => false,
+        }
+    }
+    match r {
+        Ok(ok) => ok,
+        Error(_) => false
+    }
+}
+
+fn closure_local() -> bool {
+    let check = fn() -> bool {
+        let v: Simd[u64, 2] = simd.splat(1)
+        simd.any(v)
+    }
+    check()
+}

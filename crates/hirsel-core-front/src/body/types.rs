@@ -86,6 +86,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.t.mk(TyKind::Region(Root::Local(b)))
     }
 
+    pub(super) fn outside_vector(&mut self, n: NodeId, ty: TyId, context: &'static str) -> TyId {
+        if matches!(self.t.kind(ty), TyKind::Vector(_)) {
+            self.refuse("SEM-11", n, format!("a vector cannot be {context}"));
+            ERROR
+        } else {
+            ty
+        }
+    }
+
     // ---- types written in bodies
     pub(super) fn ty(&mut self, n: NodeId) -> TyId {
         self.ty_result(n, false)
@@ -111,7 +120,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         NodeKind::Parameters => {
                             for &param in self.kids(child) {
                                 let mode = crate::decls::callable_mode_of(self.kind(param));
-                                let ty = self.ty(self.kids(param)[0]);
+                                let ty_node = self.kids(param)[0];
+                                let ty = self.ty(ty_node);
+                                let ty =
+                                    self.outside_vector(ty_node, ty, "part of a callable type");
                                 if mode == Mode::Bytes && ty != scalar(Scalar::U64) && ty != ERROR {
                                     self.refuse(
                                         "LANG-5",
@@ -125,6 +137,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         NodeKind::ResultType => {
                             let node = self.kids(child)[0];
                             result = self.ty_result(node, true);
+                            result = self.outside_vector(node, result, "part of a callable type");
                             if callable == Callable::ScopedView
                                 && crate::decls::view_result_reserved(
                                     &self.p.decls,
@@ -185,10 +198,48 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             NodeKind::UnitType => UNIT,
             NodeKind::GroupType => self.ty_result(c[0], scoped_roots),
             NodeKind::TupleType => {
-                let xs = c.iter().map(|&x| self.ty_result(x, scoped_roots)).collect();
+                let xs = c
+                    .iter()
+                    .map(|&x| {
+                        let ty = self.ty_result(x, scoped_roots);
+                        self.outside_vector(x, ty, "a tuple element")
+                    })
+                    .collect::<Vec<_>>();
+                if xs.contains(&ERROR) {
+                    return ERROR;
+                }
                 self.t.mk(TyKind::Tuple(xs))
             }
             NodeKind::TypePath => self.named_ty(n, &[]),
+            NodeKind::TypeArguments
+                if matches!(
+                    self.p.target(self.at, c[0]),
+                    Some(Target::Builtin(hirsel_core_syntax::sym::SIMD))
+                ) =>
+            {
+                if c.len() != 3 {
+                    self.refuse(
+                        "SEM-11",
+                        n,
+                        "Simd takes an integer lane type and a literal lane count",
+                    );
+                    return ERROR;
+                }
+                let lane = self.ty_result(c[1], scoped_roots);
+                let count = crate::decls::literal_length(self.p.item(self.at), c[2]);
+                match crate::decls::vector_shape(&self.t, lane, count) {
+                    Ok(shape) => {
+                        self.versioned = true;
+                        self.t.mk(TyKind::Vector(shape))
+                    }
+                    Err(message) => {
+                        if lane != ERROR {
+                            self.refuse("SEM-11", n, message);
+                        }
+                        ERROR
+                    }
+                }
+            }
             NodeKind::TypeArguments if matches!(self.p.target(self.at, c[0]), Some(Target::Builtin(name)) if self.p.index.symbols.text(*name) == "Inline") =>
             {
                 if c.len() != 3 {
@@ -197,6 +248,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return ERROR;
                 }
                 let element = self.ty_result(c[1], scoped_roots);
+                let element = self.outside_vector(c[1], element, "an array element");
+                if element == ERROR {
+                    return ERROR;
+                }
                 let Some(count) = crate::decls::literal_length(self.p.item(self.at), c[2]) else {
                     self.refuse(
                         if self.kind(c[2]) == NodeKind::Literal {
@@ -234,7 +289,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             NodeKind::TypeArguments => {
                 let mut args = vec![];
                 for &a in &c[1..] {
-                    args.push((self.ty_result(a, scoped_roots), a));
+                    let ty = self.ty_result(a, scoped_roots);
+                    args.push((self.outside_vector(a, ty, "a type argument"), a));
+                }
+                if args.iter().any(|&(t, _)| t == ERROR) {
+                    return ERROR;
                 }
                 let mut ty = self.named_ty(c[0], &args);
                 if scoped_roots && crate::decls::scoped_payload(&self.p.decls, &self.t, ty) {
@@ -249,6 +308,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             NodeKind::Anchor if c.len() == 1 => self.body_root(c[0], true),
             NodeKind::Anchor => {
                 let ty = self.ty_result(c[0], scoped_roots);
+                let ty = self.outside_vector(c[0], ty, "anchored to a region");
                 let root = self.body_root(
                     c[1],
                     !crate::decls::scoped_payload(&self.p.decls, &self.t, ty),
@@ -280,6 +340,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(_) => {
                     let message = "this type takes no type arguments";
                     self.refuse_type_arguments(path, args.len(), 0, message);
+                    return ERROR;
+                }
+                None if name == hirsel_core_syntax::sym::SIMD => {
+                    self.refuse(
+                        "SEM-11",
+                        path,
+                        "Simd takes an integer lane type and a literal lane count",
+                    );
                     return ERROR;
                 }
                 None => {

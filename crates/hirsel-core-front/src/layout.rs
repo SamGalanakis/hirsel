@@ -758,6 +758,7 @@ pub(crate) fn carried(
         // A value anchored in a region is held like its type; the anchor only bounds
         // where it may go (MEM-6). A view is carried exactly as its type (FORM #56).
         TyKind::Anchored(x, _) | TyKind::View(x) => return carried(decls, types, *x),
+        TyKind::Vector(v) => Carried::Value(Ty::Vector(*v)),
         TyKind::Tuple(_)
         | TyKind::Array(..)
         | TyKind::Adt(..)

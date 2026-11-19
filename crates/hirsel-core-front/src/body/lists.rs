@@ -423,7 +423,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(value)
     }
 
-    fn list_bool(&mut self, op: BinaryOp, left: ValueId, right: ValueId, n: NodeId) -> ValueId {
+    pub(super) fn list_bool(
+        &mut self,
+        op: BinaryOp,
+        left: ValueId,
+        right: ValueId,
+        n: NodeId,
+    ) -> ValueId {
         let result = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(
             Inst::Binary {

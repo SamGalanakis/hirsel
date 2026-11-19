@@ -955,6 +955,7 @@ impl Program<'_> {
                             .to_owned();
                         let tnode = item.tree.children(f)[0];
                         let ty = self.lower_ty(at, tnode, &generics);
+                        let ty = self.outside_vector(at, tnode, ty, "a field");
                         let ty = if self.decls[d.index()].repr == Repr::Region {
                             self.default_field_root(ty, &generics)
                         } else {
@@ -1017,6 +1018,7 @@ impl Program<'_> {
                             labelled = label.is_some();
                             let tnode = item.tree.children(p)[0];
                             let ty = self.lower_ty(at, tnode, &generics);
+                            let ty = self.outside_vector(at, tnode, ty, "a field");
                             let ty = if self.decls[d.index()].repr == Repr::Region {
                                 self.default_field_root(ty, &generics)
                             } else {
@@ -1103,7 +1105,10 @@ impl Program<'_> {
                 let xs = xs
                     .into_iter()
                     .map(|x| self.default_field_root(x, generics))
-                    .collect();
+                    .collect::<Vec<_>>();
+                if xs.contains(&ERROR) {
+                    return ERROR;
+                }
                 self.types.intern(TyKind::Tuple(xs))
             }
             TyKind::Adt(d, xs) if self.decls[d.index()].structural => {
@@ -1122,6 +1127,44 @@ impl Program<'_> {
         self.lower_ty_result(at, n, generics, false)
     }
 
+    pub(crate) fn scalar_vector(
+        &mut self,
+        at: ItemRef,
+        n: NodeId,
+        ty: TyId,
+        count: Option<u64>,
+    ) -> TyId {
+        match vector_shape(&self.types, ty, count) {
+            Ok(shape) => self.types.intern(TyKind::Vector(shape)),
+            Err(message) => {
+                if ty != ERROR {
+                    self.refusals
+                        .push(refusal("SEM-11", self.site(at, n), message));
+                }
+                ERROR
+            }
+        }
+    }
+
+    pub(crate) fn outside_vector(
+        &mut self,
+        at: ItemRef,
+        n: NodeId,
+        ty: TyId,
+        context: &'static str,
+    ) -> TyId {
+        if matches!(self.types.kind(ty), TyKind::Vector(_)) {
+            self.refusals.push(refusal(
+                "SEM-11",
+                self.site(at, n),
+                format!("a vector cannot be {context}"),
+            ));
+            ERROR
+        } else {
+            ty
+        }
+    }
+
     fn lower_ty_result(
         &mut self,
         at: ItemRef,
@@ -1138,11 +1181,35 @@ impl Program<'_> {
             NodeKind::TupleType => {
                 let xs = children
                     .iter()
-                    .map(|&c| self.lower_ty_result(at, c, generics, scoped_roots))
-                    .collect();
+                    .map(|&c| {
+                        let ty = self.lower_ty_result(at, c, generics, scoped_roots);
+                        self.outside_vector(at, c, ty, "a tuple element")
+                    })
+                    .collect::<Vec<_>>();
+                if xs.contains(&ERROR) {
+                    return ERROR;
+                }
                 self.types.intern(TyKind::Tuple(xs))
             }
             NodeKind::TypePath => self.named_ty(at, n, &[], generics),
+            NodeKind::TypeArguments
+                if matches!(
+                    self.target(at, children[0]),
+                    Some(Target::Builtin(hirsel_core_syntax::sym::SIMD))
+                ) =>
+            {
+                if children.len() != 3 {
+                    self.refusals.push(refusal(
+                        "SEM-11",
+                        self.site(at, n),
+                        "Simd takes an integer lane type and a literal lane count",
+                    ));
+                    return ERROR;
+                }
+                let count = literal_length(item, children[2]);
+                let lane = self.lower_ty_result(at, children[1], generics, scoped_roots);
+                self.scalar_vector(at, n, lane, count)
+            }
             NodeKind::TypeArguments if matches!(self.target(at, children[0]), Some(Target::Builtin(name)) if self.index.symbols.text(*name) == "Inline") =>
             {
                 if children.len() != 3 {
@@ -1160,6 +1227,10 @@ impl Program<'_> {
                     return ERROR;
                 }
                 let element = self.lower_ty_result(at, children[1], generics, scoped_roots);
+                let element = self.outside_vector(at, children[1], element, "an array element");
+                if element == ERROR {
+                    return ERROR;
+                }
                 let count = literal_length(item, children[2]);
                 let Some(count) = count else {
                     self.refusals.push(refusal(
@@ -1186,10 +1257,14 @@ impl Program<'_> {
                 for &c in &children[1..] {
                     let pending = self.pending.len();
                     let t = self.lower_ty_result(at, c, generics, scoped_roots);
+                    let t = self.outside_vector(at, c, t, "a type argument");
                     if item.tree.node(c).kind == NodeKind::Anchor {
                         roots.extend(pending..self.pending.len());
                     }
                     args.push((t, self.site(at, c)));
+                }
+                if args.iter().any(|&(t, _)| t == ERROR) {
+                    return ERROR;
                 }
                 let mut ty = self.named_ty(at, children[0], &args, generics);
                 // `R[in a, in b]`: each bare anchor roots the named type itself (OWN-20).
@@ -1221,6 +1296,7 @@ impl Program<'_> {
             }
             NodeKind::Anchor => {
                 let ty = self.lower_ty_result(at, children[0], generics, scoped_roots);
+                let ty = self.outside_vector(at, children[0], ty, "anchored to a region");
                 let root = self.root_ty(at, children[1], generics);
                 self.pending.push(Pending::Root {
                     base: ty,
@@ -1251,7 +1327,10 @@ impl Program<'_> {
                         NodeKind::Parameters => {
                             for &p in item.tree.children(c) {
                                 let mode = callable_mode_of(item.tree.node(p).kind);
-                                let t = self.lower_ty(at, item.tree.children(p)[0], generics);
+                                let ty_node = item.tree.children(p)[0];
+                                let t = self.lower_ty(at, ty_node, generics);
+                                let t =
+                                    self.outside_vector(at, ty_node, t, "part of a callable type");
                                 if mode == Mode::Bytes && t != scalar(Scalar::U64) && t != ERROR {
                                     self.refusals.push(refusal(
                                         "LANG-5",
@@ -1265,6 +1344,8 @@ impl Program<'_> {
                         NodeKind::ResultType => {
                             let node = item.tree.children(c)[0];
                             result = self.lower_ty_result(at, node, generics, true);
+                            result =
+                                self.outside_vector(at, node, result, "part of a callable type");
                             if callable == Callable::ScopedView
                                 && view_result_reserved(&self.decls, &self.types, result)
                             {
@@ -1322,7 +1403,14 @@ impl Program<'_> {
         let decl = match target {
             Some(Target::Builtin(name)) => {
                 let Some(s) = Scalar::from_name(self.index.symbols.text(name)) else {
-                    // The one builtin that is not a scalar: `Inline[T, n]`.
+                    if name == hirsel_core_syntax::sym::SIMD {
+                        self.refusals.push(refusal(
+                            "SEM-11",
+                            site,
+                            "Simd takes an integer lane type and a literal lane count",
+                        ));
+                        return ERROR;
+                    }
                     self.gaps
                         .push(Gap::new(site, "inline array types are not built"));
                     return ERROR;
@@ -2553,12 +2641,28 @@ pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[
     kind_row(decls, t, t.kind(ty), params)
 }
 
+pub(crate) fn vector_shape(
+    types: &impl TyRead,
+    lane: TyId,
+    count: Option<u64>,
+) -> Result<hirsel_core_layout::Vector, &'static str> {
+    let TyKind::Scalar(lane) = *types.kind(lane) else {
+        return Err("a vector lane must be an integer type");
+    };
+    let count = count.ok_or("a vector lane count must be an integer literal")?;
+    hirsel_core_layout::Vector::new(lane, count)
+        .ok_or("a vector must have integer lanes and occupy 16 or 32 bytes")
+}
+
 fn kind_row(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, row: &TyKind, params: &[u16]) -> Kind {
     crate::cost_scope!("query", "kind computation");
     match row {
-        TyKind::Error | TyKind::Hole | TyKind::Never | TyKind::Unit | TyKind::Scalar(_) => {
-            Kind::Plain
-        }
+        TyKind::Error
+        | TyKind::Hole
+        | TyKind::Never
+        | TyKind::Unit
+        | TyKind::Scalar(_)
+        | TyKind::Vector(_) => Kind::Plain,
         TyKind::Fn(_, _, _, callable) => match callable {
             Callable::Plain => Kind::Plain,
             Callable::Own | Callable::OwnSend => Kind::Own,
@@ -2738,6 +2842,7 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
             TyKind::Region(_) => 0,
             TyKind::Anchored(x, _) => has_bounds(decls, t, *x, params),
             TyKind::Array(x, _) => has_bounds(decls, t, *x, params) & all,
+            TyKind::Vector(_) => PLAIN | SHAREABLE | SEND,
             TyKind::View(x) => has_bounds(decls, t, *x, params) & (KEY | ORDERED),
             TyKind::Param(i) => params.get(*i as usize).copied().unwrap_or(0),
             TyKind::Adt(d, args) => {
@@ -2923,6 +3028,9 @@ fn write_canonical<const LAYOUT: bool>(
                 s.push(' ');
                 child(*r, s);
             }
+        }
+        TyKind::Vector(v) => {
+            let _ = write!(s, "Simd[{}, {}]", v.lane().name(), v.lanes());
         }
         TyKind::Array(x, n) => {
             s.push_str("Inline[");

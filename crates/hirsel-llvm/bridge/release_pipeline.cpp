@@ -212,10 +212,12 @@ extern "C" LLVMErrorRef hirsel_llvm_cleanup_release(LLVMModuleRef module,
                                                    LLVMTargetMachineRef machine) {
     // DSE removes carrier clears/restores after scalar cleanup eliminates typed
     // empty-drop guards. The final CFG and loop cleanup needs no second DSE.
+    // Specialize inlining and this cleanup leave internal functions with no
+    // callers; dropping them here spares each its own part's code generation.
     return runPasses(module, machine, "cleanup",
         "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,"
         "instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,gvn,simplifycfg,dse,"
-        "loop-simplify,lcssa,instcombine<no-verify-fixpoint>,simplifycfg)");
+        "loop-simplify,lcssa,instcombine<no-verify-fixpoint>,simplifycfg),globaldce");
 }
 
 extern "C" LLVMBool hirsel_llvm_emit_object(LLVMTargetMachineRef machine, LLVMModuleRef module,

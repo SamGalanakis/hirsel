@@ -179,26 +179,22 @@ fn average_mapping(s: String) -> Result[Coordinate, helper.Error] {
 }
 
 fn average_dom(j: std.json.Json) -> Result[Coordinate, helper.Error] {
-    if let Obj(members) = j {
-        for member in members {
-            if text.as_string(member.key) == "coordinates" {
-                let Arr(items) = member.value else {
-                    return Error(Config)
-                }
-                let mut x: f64 = 0.0
-                let mut y: f64 = 0.0
-                let mut z: f64 = 0.0
-                for item in items {
-                    let c = coordinate(item)?
-                    x += c.x
-                    y += c.y
-                    z += c.z
-                }
-                return Ok(mean(x, y, z, seq.len(items)))
-            }
-        }
+    let Obj(members) = j else {
+        return Error(Config)
     }
-    Error(Config)
+    let Some(Arr(items)) = std.json.find(members, "coordinates") else {
+        return Error(Config)
+    }
+    let mut x: f64 = 0.0
+    let mut y: f64 = 0.0
+    let mut z: f64 = 0.0
+    for item in items {
+        let c = coordinate(item)?
+        x += c.x
+        y += c.y
+        z += c.z
+    }
+    Ok(mean(x, y, z, seq.len(items)))
 }
 
 pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {

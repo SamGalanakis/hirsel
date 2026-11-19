@@ -239,7 +239,11 @@ fn lookup_takes_last() -> bool {
                     Some(_) => false,
                     None => true,
                 }
-                b && a && c
+                let single = match (json.find(ms, "b"), json.find(ms, "a"), json.find(ms, "c")) {
+                    (Some(last), Some(only), None) => spelled(last, "3") && spelled(only, "2"),
+                    _ => false,
+                }
+                b && a && c && single
             }
             _ => false,
         }

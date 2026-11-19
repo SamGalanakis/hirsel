@@ -107,6 +107,11 @@ pub fn helper_laws() -> bool {
     if result.unwrap(helper.config_s(settings, "word")) != "hé" {
         return false
     }
+    let repeated = "[{\"name\":\"Other\",\"name\":\"Probe\",\"count\":7}]"
+    let selected = result.unwrap(helper.read_settings(repeated, "Probe"))
+    if result.unwrap(helper.config_i64(selected, "count")) != 7i64 {
+        return false
+    }
     if helper.checksum_str("") != 5381u32 || helper.checksum_str("a") != 177670u32 || helper.checksum_str("abc") != 193485963u32 {
         return false
     }

@@ -504,6 +504,19 @@ fn push_quoted(mut s: String, value: String) -> Result[(), Capacity] {
     string.push(mut s, "\"")
 }
 
+/// Finds the last member of ms whose key equals k, as a view of its value.
+/// Returns None when no member matches. Alloc: none. Cost: one pass.
+/// Ex: `match std.json.find(ms, "name") { Some(v) => .., None => .. }`
+pub fn find[in a](ms: IndexedSpan[Member] in a, k: String) -> Option[View[Json]] in ms {
+    let mut found: Option[View[Json]] in ms = None
+    for m in ms {
+        if text.as_string(m.key) == k {
+            found = Some(m.value)
+        }
+    }
+    found
+}
+
 /// An object's members ordered for lookup: a permutation of member ordinals, sorted by key
 /// bytes and then by ordinal (goose-attack-898 APPENDIX C7). The members themselves never
 /// move. Opaque, so nothing outside this module replaces the members or adds ordinals that

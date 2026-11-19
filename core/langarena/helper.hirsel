@@ -48,15 +48,10 @@ pub fn mem[T](take r: Result[T, Capacity]) -> Result[T, Error] {
 }
 
 fn named[in a](ms: IndexedSpan[std.json.Member] in a, name: String) -> bool {
-    for m in ms {
-        if text.as_string(m.key) == "name" {
-            match m.value {
-                Str(t) => return text.as_string(t) == name,
-                _ => return false
-            }
-        }
+    match std.json.find(ms, "name") {
+        Some(Str(t)) => text.as_string(t) == name,
+        _ => false,
     }
-    false
 }
 
 type Setting = Integer(i64) | StringValue(String) | Invalid

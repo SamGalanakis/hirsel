@@ -318,18 +318,28 @@ impl Function<'_, '_, '_> {
                 } else {
                     v
                 };
-                let x = self.b.ins().trunc(x);
-                let lower = self.float_const(
-                    types::F64,
+                // The range check reads x itself, so no trunc (a libcall on baseline
+                // x86-64); the saturating conversions truncate toward zero.
+                let (below, strict) = float_to_int_floor(
                     if signed {
                         -(2f64).powi(width as i32 - 1)
                     } else {
                         0.0
                     },
+                    false,
                 );
+                let lower = self.float_const(types::F64, below);
                 let upper =
                     self.float_const(types::F64, (2f64).powi(width as i32 - i32::from(signed)));
-                let low = self.b.ins().fcmp(FloatCC::LessThan, x, lower);
+                let low = self.b.ins().fcmp(
+                    if strict {
+                        FloatCC::LessThanOrEqual
+                    } else {
+                        FloatCC::LessThan
+                    },
+                    x,
+                    lower,
+                );
                 let high = self.b.ins().fcmp(FloatCC::GreaterThanOrEqual, x, upper);
                 let outside = self.b.ins().bor(low, high);
                 let nan = self.b.ins().fcmp(FloatCC::Unordered, x, x);

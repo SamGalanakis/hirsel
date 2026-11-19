@@ -140,6 +140,7 @@ fn integer_modes_and_float_conversion_boundaries_match_evaluator() {
             lower,
             upper,
             upper - f64::EPSILON * upper,
+            lower - 0.5,
             lower - 1.0,
         ] {
             runs.push((FuncId(id), vec![value.to_bits()]));

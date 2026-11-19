@@ -265,6 +265,19 @@ pub enum ConvertMode {
     FloatResize,
 }
 
+/// The lower-bound test of `FloatToInt` on the operand itself, so a backend needs no
+/// trunc: for an integer `low`, trunc(x) >= low iff x > low - 1, and where low - 1 is
+/// not representable no float lies strictly between it and `low`, so iff x >= low.
+/// Returns the bound and whether the test is strict. `single`: an f32 operand.
+pub fn float_to_int_floor(low: f64, single: bool) -> (f64, bool) {
+    let below = low - 1.0;
+    if below != low && (!single || f64::from(below as f32) == below) {
+        (below, true)
+    } else {
+        (low, false)
+    }
+}
+
 /// Overflow behaviour of `IntArith` (LIR `ArithMode`).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ArithMode {

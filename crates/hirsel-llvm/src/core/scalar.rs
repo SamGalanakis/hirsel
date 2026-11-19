@@ -347,11 +347,6 @@ impl FunctionEmitter<'_> {
             }
             ConvertMode::FloatToInt => {
                 let (sign, w) = to.int().unwrap();
-                let truncated = self.intrinsic(
-                    &format!("llvm.trunc.f{}", size(from) * 8),
-                    ft.clone(),
-                    &[arg(ft.clone(), x.clone())],
-                );
                 let low = if sign {
                     -(2f64).powi(w as i32 - 1)
                 } else {
@@ -359,6 +354,10 @@ impl FunctionEmitter<'_> {
                 };
                 let high = (2f64).powi(w as i32 - i32::from(sign));
                 let single = size(from) == 4;
+                // The range check reads x itself, so no trunc (a libm call on baseline
+                // x86-64): trunc(x) < high iff x < high, and trunc(x) >= low iff
+                // x > low - 1, which is x >= low where low - 1 is not representable.
+                let (below, strict) = float_to_int_floor(low, single);
                 let constant = |f: f64| {
                     if single {
                         Value::Bitcast {
@@ -374,10 +373,15 @@ impl FunctionEmitter<'_> {
                         }
                     }
                 };
-                let a = self.cmp(Predicate::OGe, &ft, &truncated, &constant(low));
-                let b = self.cmp(Predicate::OLt, &ft, &truncated, &constant(high));
+                let at_least = if strict {
+                    Predicate::OGt
+                } else {
+                    Predicate::OGe
+                };
+                let a = self.cmp(at_least, &ft, &x, &constant(below));
+                let b = self.cmp(Predicate::OLt, &ft, &x, &constant(high));
                 let ok = self.bin(Binary::And, &Type::I1, &a, &b);
-                let safe = self.select(&ft, &ok, &truncated, &constant(0.0));
+                let safe = self.select(&ft, &ok, &x, &constant(0.0));
                 let op = if sign { Cast::FPToSI } else { Cast::FPToUI };
                 let r = self.cast(op, &ft, &safe, &tt);
                 let nan = self.cmp(Predicate::Uno, &ft, &x, &x);

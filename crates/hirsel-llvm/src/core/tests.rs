@@ -429,6 +429,56 @@ fn rotl_matches_evaluator_at_every_width() {
     agree(&module, &cases);
 }
 
+/// The range check reads the operand untruncated: a strict bound one below the minimum
+/// where that is representable, else the minimum itself. A wrong choice rejects
+/// -128.5 as an i8 or accepts -2^31 - 1 as an i32 (f64), or misjudges an f32 bound.
+#[test]
+fn float_to_int_matches_evaluator_at_every_width() {
+    let mut text = String::from("core v0\n");
+    let kinds = ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"];
+    let mut id = 0u32;
+    let mut bodies = String::new();
+    let mut cases = Vec::new();
+    for (k, kind) in kinds.iter().enumerate() {
+        let width = 8i32 << (k / 2);
+        let signed = k % 2 == 0;
+        let upper = (2f64).powi(width - i32::from(signed));
+        let lower = if signed { -upper } else { 0.0 };
+        for float in ["f32", "f64"] {
+            text += &format!(
+                "sig g{id} = ({float}) -> ({kind}, u8)\ninst n{id} = test@0/to_int/f{id} [] []\n"
+            );
+            bodies += &format!(
+                "fn f{id} = n{id} g{id} {{\nb0(v0: {float}):\n  v1: {kind}, v2: u8 = float_to_int v0\n  return v1, v2\n}}\n"
+            );
+            for value in [
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                -0.9,
+                2.9,
+                lower,
+                lower - 0.5,
+                lower - 1.0,
+                upper,
+                upper - f64::EPSILON * upper,
+            ] {
+                let bits = if float == "f32" {
+                    u64::from((value as f32).to_bits())
+                } else {
+                    value.to_bits()
+                };
+                cases.push((FuncId(id), vec![bits]));
+            }
+            id += 1;
+        }
+    }
+    text += &bodies;
+    let module = text::parse(&text).unwrap();
+    wf::module(&module).unwrap();
+    agree(&module, &cases);
+}
+
 #[test]
 fn c_results_and_indirect_calls_match_evaluator() {
     let module = text::parse(

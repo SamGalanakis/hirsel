@@ -582,6 +582,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                         'core-check-895' if not row['ran'] else 'core-form-883')
                     save_row(rows, row, output)
                     continue
+                # Store program modules bring their own standalone @tests.
+                if case.package == 'store':
+                    command.extend(['--filter', entry])
                 if target:
                     command.extend(['--target', target])
                 if emulator:

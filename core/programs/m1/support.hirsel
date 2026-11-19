@@ -49,22 +49,16 @@ pub fn number(s: String) -> Result[u64, Error] {
 }
 
 pub fn line(s: String, mut at: u64) -> View[String] in s {
-    let lo = at
-    let hi = match string.find(s, at, "\n") {
-        Some(n) => n,
-        None => string.byte_len(s)
+    let start = at
+    let Some((row, next)) = string.next_line(s, start) else {
+        return string.slice(s, start, start)
     }
-    at = if hi < string.byte_len(s) {
-        hi + 1
-    } else {
-        hi
+    at = next
+    // M1 also strips a CR at the end of an unterminated final line.
+    if next == string.byte_len(s) && string.as_bytes(s)[next - 1] == b'\r' {
+        return string.slice(s, start, next - 1)
     }
-    let end = if hi > lo && string.as_bytes(s)[hi - 1] == 13 {
-        hi - 1
-    } else {
-        hi
-    }
-    string.slice(s, lo, end)
+    row
 }
 
 pub fn name(prefix: String, n: u64, suffix: String) -> Result[String, Error] {

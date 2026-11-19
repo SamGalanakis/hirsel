@@ -384,6 +384,63 @@ static bool versionReadLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
 }
 }
 
+// A private cursor which advances by at most one on a back edge stays behind
+// the counted cursor. The exit test bounds that cursor by the same length SSA
+// value as the write check, including when the length originally came from memory.
+static bool removeBoundedCursorChecks(Function &F, FunctionAnalysisManager &AM) {
+  using namespace llvm::PatternMatch;
+  auto &LI = AM.getResult<LoopAnalysis>(F);
+  auto &SE = AM.getResult<ScalarEvolutionAnalysis>(F);
+  SmallVector<CondBrInst *, 4> Redundant;
+  for (Loop *L : LI.getLoopsInPreorder()) {
+    auto *Entry = L->getLoopPredecessor();
+    auto *Latch = L->getLoopLatch();
+    auto *Header = L->getHeader();
+    if (!Entry || !Latch || !L->isInnermost()) continue;
+    auto *Exit = dyn_cast<CondBrInst>(Latch->getTerminator());
+    if (!Exit || L->contains(Exit->getSuccessor(0)) || Exit->getSuccessor(1) != Header)
+      continue;
+    Value *Advance, *Length, *ReadValue;
+    if (!match(Exit->getCondition(),
+               m_SpecificICmp(ICmpInst::ICMP_EQ, m_Value(Advance), m_Value(Length))) ||
+        !match(Advance, m_c_Add(m_Value(ReadValue), m_One())) ||
+        !L->isLoopInvariant(Length)) continue;
+    auto *Read = dyn_cast<PHINode>(ReadValue);
+    if (!Read || Read->getParent() != Header || Read->getNumIncomingValues() != 2 ||
+        Read->getIncomingValueForBlock(Latch) != Advance) continue;
+    Value *ReadStart = Read->getIncomingValueForBlock(Entry);
+    if (!SE.isLoopEntryGuardedByCond(L, ICmpInst::ICMP_ULT,
+                                    SE.getSCEV(ReadStart), SE.getSCEV(Length))) continue;
+
+    SmallVector<BasicBlock *, 4> Exiting;
+    L->getExitingBlocks(Exiting);
+    for (BasicBlock *BB : Exiting) {
+      auto *Check = dyn_cast<CondBrInst>(BB->getTerminator());
+      Value *WriteValue;
+      if (!Check || !L->contains(Check->getSuccessor(0)) ||
+          !match(Check->getCondition(),
+                 m_SpecificICmp(ICmpInst::ICMP_ULT, m_Value(WriteValue), m_Specific(Length))))
+        continue;
+      auto *Write = dyn_cast<PHINode>(WriteValue);
+      if (!Write || Write->getParent() != Header || Write->getNumIncomingValues() != 2 ||
+          !SE.isLoopEntryGuardedByCond(L, ICmpInst::ICMP_ULE,
+                                      SE.getSCEV(Write->getIncomingValueForBlock(Entry)),
+                                      SE.getSCEV(ReadStart))) continue;
+      Value *Back = Write->getIncomingValueForBlock(Latch);
+      auto IsUnitStep = [Write](Value *V) {
+        return V == Write || match(V, m_c_Add(m_Specific(Write), m_One()));
+      };
+      auto *Merge = dyn_cast<PHINode>(Back);
+      if (IsUnitStep(Back) || (Merge && Merge->getParent() == Latch &&
+                             all_of(Merge->incoming_values(), IsUnitStep)))
+        Redundant.push_back(Check);
+    }
+  }
+  for (CondBrInst *Check : Redundant)
+    Check->setCondition(ConstantInt::getTrue(F.getContext()));
+  return !Redundant.empty();
+}
+
 extern "C" void hirsel_llvm_finish_reads(void *Raw, void *Machine) noexcept {
   auto &M = *static_cast<Module *>(Raw);
   runLoopPass(static_cast<TargetMachine *>(Machine), [&](PassBuilder &PB, FunctionAnalysisManager &FAM) {
@@ -405,9 +462,11 @@ extern "C" void hirsel_llvm_finish_reads(void *Raw, void *Machine) noexcept {
         if (!Changed) break;
         FAM.invalidate(F, PreservedAnalyses::none());
       }
+      const bool BoundedCursors = removeBoundedCursorChecks(F, FAM);
+      if (BoundedCursors) FAM.invalidate(F, PreservedAnalyses::none());
       const bool Forwarded = hirsel_llvm::forwardSnapshotReads(F, FAM);
       if (Forwarded) FAM.invalidate(F, PreservedAnalyses::none());
-      if (Forwarded || !Done.empty()) Clean.run(F, FAM);
+      if (BoundedCursors || Forwarded || !Done.empty()) Clean.run(F, FAM);
     }
   });
 }

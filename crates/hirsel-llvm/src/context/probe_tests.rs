@@ -7,6 +7,9 @@
 //! with the attribute and none without it.)
 use super::*;
 
+// The smallest page either target maps sets the minimum fiber guard size.
+const MIN_GUARD_BYTES: usize = 4096;
+
 /// A frame several guards wide, a small frame and a declaration, whose attributes the IR
 /// sets none of.
 const IR: &str = r#"
@@ -178,7 +181,7 @@ fn assert_probes(text: &str, target: &str, required: &[&str]) {
         assert_eq!(kind.as_deref(), Some("inline-asm"), "{target} {function}");
         let size: usize = size.as_deref().unwrap().parse().unwrap();
         assert!(
-            size <= STACK_PROBE_BYTES,
+            size <= MIN_GUARD_BYTES,
             "{target} {function}: probes every {size} bytes"
         );
     }

@@ -28,6 +28,7 @@ extern void hirsel_llvm_share_cold_step_sync(void *module, void *machine);
 extern void hirsel_llvm_reuse_step_flags(void *module);
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 extern void hirsel_llvm_fixed_width_checks(void *module);
+extern void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool frame_pointers);
 extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
                                                 LLVMBool prune, LLVMBool prepay_steps);
 extern LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
@@ -549,27 +550,11 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         }
     }
     if (!speed) hirsel_llvm_promote_development_slots(module);
-    LLVMAttributeRef probe = LLVMCreateStringAttribute(context, "probe-stack", 11, "inline-asm", 10);
-    LLVMAttributeRef interval = LLVMCreateStringAttribute(context, "stack-probe-size", 16, "4096", 4);
-    // Hirsel failures propagate through the call ABI with source sites.
-    // Generated frames never unwind into their callers.
-    LLVMAttributeRef no_unwind = LLVMCreateEnumAttribute(
-        context, LLVMGetEnumAttributeKindForName("nounwind", 8), 0);
-    unsigned unwind_table = LLVMGetEnumAttributeKindForName("uwtable", 7);
 #ifdef HIRSEL_PROFILE_FRAME_POINTERS
-    LLVMAttributeRef frame_pointer = LLVMCreateStringAttribute(context, "frame-pointer", 13, "all", 3);
+    hirsel_llvm_configure_codegen(module, 1);
+#else
+    hirsel_llvm_configure_codegen(module, 0);
 #endif
-    for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f)) {
-        if (LLVMCountBasicBlocks(f)) {
-            LLVMRemoveEnumAttributeAtIndex(f, LLVMAttributeFunctionIndex, unwind_table);
-            LLVMAddAttributeAtIndex(f, LLVMAttributeFunctionIndex, no_unwind);
-#ifdef HIRSEL_PROFILE_FRAME_POINTERS
-            LLVMAddAttributeAtIndex(f, LLVMAttributeFunctionIndex, frame_pointer);
-#endif
-            LLVMAddAttributeAtIndex(f, LLVMAttributeFunctionIndex, probe);
-            LLVMAddAttributeAtIndex(f, LLVMAttributeFunctionIndex, interval);
-        }
-    }
     buffer = NULL; message = NULL;
     // A program is keyed in parts, one per definition, and what no caller
     // holds is generated per part on `jobs` threads, or with `jobs` 0 as one

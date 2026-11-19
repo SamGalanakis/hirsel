@@ -30,10 +30,6 @@ use llvm_sys::target_machine::{
 #[cfg(test)]
 mod probe_tests;
 
-/// How far apart emitted functions touch a frame's pages (`stack-probe-size`): one 4 KiB
-/// page, the smallest page either target maps and so the smallest guard a task stack has.
-const STACK_PROBE_BYTES: usize = 4096;
-
 /// Registers the X86 and AArch64 code generators with LLVM, once per process.
 fn initialize_targets() {
     static ONCE: OnceLock<()> = OnceLock::new();
@@ -289,46 +285,19 @@ impl<'context> Module<'context> {
 
     /// Generates an object file and copies its bytes out of LLVM.
     ///
-    /// Every defined function probes its frame [`STACK_PROBE_BYTES`] at a time
-    /// (`probe-stack`), so a frame larger than that still faults in its fiber's guard: a stack
-    /// overflow is always the runtime's stack stop, never a write past the guard.
+    /// Every defined function probes its frame a page at a time so that a large
+    /// frame faults in the fiber's guard on stack overflow.
     pub(crate) fn emit_object(&self, machine: &TargetMachine) -> Result<Vec<u8>, String> {
-        if !machine.optimize {
-            unsafe extern "C" {
-                fn hirsel_llvm_promote_development_slots(module: LLVMModuleRef);
-            }
-            // SAFETY: the pass mutates this live module without keeping references.
-            unsafe { hirsel_llvm_promote_development_slots(self.raw) };
+        unsafe extern "C" {
+            fn hirsel_llvm_promote_development_slots(module: LLVMModuleRef);
+            fn hirsel_llvm_configure_codegen(module: LLVMModuleRef, frame_pointers: LLVMBool);
         }
-        let interval = STACK_PROBE_BYTES.to_string();
-        // SAFETY: each function belongs to this live module; LLVM copies the strings.
+        // SAFETY: both calls mutate this live module and retain no references.
         unsafe {
-            let attribute = |name: &str, value: &str| {
-                LLVMCreateStringAttribute(
-                    self.context.raw,
-                    name.as_ptr().cast(),
-                    name.len() as u32,
-                    value.as_ptr().cast(),
-                    value.len() as u32,
-                )
-            };
-            let attributes = [
-                attribute("probe-stack", "inline-asm"),
-                attribute("stack-probe-size", &interval),
-            ];
-            let mut function = LLVMGetFirstFunction(self.raw);
-            while !function.is_null() {
-                if LLVMCountBasicBlocks(function) != 0 {
-                    for attribute in attributes {
-                        LLVMAddAttributeAtIndex(
-                            function,
-                            llvm_sys::LLVMAttributeFunctionIndex,
-                            attribute,
-                        );
-                    }
-                }
-                function = LLVMGetNextFunction(function);
+            if !machine.optimize {
+                hirsel_llvm_promote_development_slots(self.raw);
             }
+            hirsel_llvm_configure_codegen(self.raw, 0);
         }
         let mut message = ptr::null_mut();
         let mut buffer: LLVMMemoryBufferRef = ptr::null_mut();

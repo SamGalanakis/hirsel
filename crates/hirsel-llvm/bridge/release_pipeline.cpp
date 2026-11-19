@@ -65,6 +65,19 @@ void registerReleasePasses(PassBuilder &builder) {
 
 } // namespace
 
+extern "C" void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool frame_pointers) {
+    for (Function &f : *unwrap(module)) {
+        if (f.isDeclaration()) continue;
+        // Hirsel failures propagate through the call ABI with source sites.
+        f.removeFnAttr(Attribute::UWTable);
+        f.setDoesNotThrow();
+        if (frame_pointers) f.addFnAttr("frame-pointer", "all");
+        // Probe at the smallest supported fiber guard size.
+        f.addFnAttr("probe-stack", "inline-asm");
+        f.addFnAttr("stack-probe-size", "4096");
+    }
+}
+
 extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
     LLVMModuleRef raw_module, LLVMTargetMachineRef raw_machine, LLVMBool prune,
     LLVMBool prepay_steps) {

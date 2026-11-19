@@ -197,7 +197,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,c
     memcpy(scenario,input->args[0].data,input->args[0].len);memcpy(cut_text,input->args[1].data,input->args[1].len);
     int uncut=!strcmp(cut_text,"count"),poison=!strcmp(scenario,"poison-segment");
     uint64_t cut=uncut||poison?UINT64_MAX:strtoull(cut_text,NULL,10);
-    void *state=store_crash_new(cut);store_crash_sync_failure(state,poison?1:0);
+    void *state=store_crash_new(cut);store_crash_sync_failure(state,poison?7:0);
     uint8_t status=0;
     for(int n=0;n<3;n++) {
         store_crash_phase(state,(uint64_t)n);

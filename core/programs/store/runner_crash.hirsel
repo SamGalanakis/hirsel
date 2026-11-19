@@ -19,7 +19,8 @@
 //   error from the second, then stream 0 p1 from the first;
 // - runner-order (out_of_order_two_sessions): stream 0 p1 from one session before p0, a
 //   fault, from the other;
-// - poison-segment (poison): the cross calls with the first journal sync failing.
+// - poison-segment (poison): the cross calls, each sent once the previous is answered, with
+//   the sync of the first call's effect frame failing.
 // The adapter gives one cut per run, so runner-order has one crash where the model has two.
 type Hd: send { t: store.Table[u64, u64] }
 
@@ -261,7 +262,13 @@ fn ack(out: Stdout, v: u64) waits {
 // leave its sessions open and the head waiting, so it hangs up every session, drains
 // each channel to its close, and returns its verdict (empty when every call was answered
 // as expected) for the caller to fail on.
-type Client { connections: List[wire_client.Conn], calls: List[Pos], out: Stdout }
+//
+// `armed` is the poison run. It arms the named sync failure once both sessions are up, then
+// sends each call only after the previous one is answered, so a call's commits are the only
+// frames the head has handed the journal when it gates them (see main's poison note).
+type Client { connections: List[wire_client.Conn], calls: List[Pos], out: Stdout, armed: bool }
+
+type Tally { floor: u64, answered: u64, bad: String }
 
 fn later(calls: List[Pos], x: Pos) -> bool {
     for y in calls {
@@ -272,54 +279,90 @@ fn later(calls: List[Pos], x: Pos) -> bool {
     false
 }
 
-fn client(take c: Client) -> String waits {
-    let Client(connections: take connections, calls: take calls, out: out) = take c
-    let mut floor = 0u64
-    let mut answered = 0u64
-    let mut bad = ""
-    for i in 0u64 .. list.len(connections) {
-        let mut owed = 0u64
+fn send_call(cn: wire_client.Conn, x: Pos) waits {
+    let stream: u32 = int.narrow(x.stream)
+    let slot: u32 = int.narrow(x.body)
+    let request: runner.Frame = Call(stream, x.p, slot, 4294967295u32, u64_bytes(x.k))
+    wire_client.send_frame(cn, take request)
+}
+
+// One Batch from session i, each of its answers checked and counted; the number of
+// answers, or None once the session ends or sends another frame.
+fn heard(cn: wire_client.Conn, i: u64, calls: List[Pos], out: Stdout, mut t: Tally) -> Option[u64] waits {
+    let b = match wire_client.next(cn) {
+        Ok(Batch(version, take complete, take rows, take done)) => runner.KeyedBatch(version: version, complete: take complete, rows: take rows, outcomes: keyed(take done)),
+        Ok(_) => {
+            t.bad = "runner_crash: a frame other than a Batch"
+            return None
+        },
+        Error(_) => return None,
+    }
+    let v = b.version
+    let mut n = 0u64
+    for f in b.outcomes {
+        n += 1u64
+        t.answered += 1u64
+        let mut matched = false
         for x in calls {
-            if x.from == i {
-                owed += 1u64
-            }
-        }
-        while owed > 0u64 && bad == "" {
-            let b = match wire_client.next(connections[i]) {
-                Ok(Batch(version, take complete, take rows, take done)) => runner.KeyedBatch(version: version, complete: take complete, rows: take rows, outcomes: keyed(take done)),
-                Ok(_) => {
-                    bad = "runner_crash: a frame other than a Batch"
-                    break
-                },
-                Error(_) => break,
-            }
-            let v = b.version
-            for f in b.outcomes {
-                owed -= 1u64
-                answered += 1u64
-                let mut matched = false
-                for x in calls {
-                    if x.from == i && u64_bytes(x.stream) == f.stream && x.p == f.p {
-                        let below = match f.outcome {
-                            Refused(r) => match r { HistoryUnavailable => later(calls, x), _ => false },
-                            _ => false,
-                        }
-                        if below || same(f.outcome, expected(x)) {
-                            matched = true
-                        }
-                    }
-                }
-                if !matched {
-                    bad = "runner_crash: an answer is not its call's expected Outcome"
-                }
-                let reports = match f.outcome {
-                    Returned(_) => true,
-                    Failed(_) => true,
+            if x.from == i && u64_bytes(x.stream) == f.stream && x.p == f.p {
+                let below = match f.outcome {
+                    Refused(r) => match r { HistoryUnavailable => later(calls, x), _ => false },
                     _ => false,
                 }
-                if reports && v > floor {
-                    floor = v
-                    ack(out, floor)
+                if below || same(f.outcome, expected(x)) {
+                    matched = true
+                }
+            }
+        }
+        if !matched {
+            t.bad = "runner_crash: an answer is not its call's expected Outcome"
+        }
+        let reports = match f.outcome {
+            Returned(_) => true,
+            Failed(_) => true,
+            _ => false,
+        }
+        if reports && v > t.floor {
+            t.floor = v
+            ack(out, t.floor)
+        }
+    }
+    Some(n)
+}
+
+fn client(take c: Client) -> String waits {
+    let Client(connections: take connections, calls: take calls, out: out, armed: armed) = take c
+    let mut t = Tally(floor: 0u64, answered: 0u64, bad: "")
+    if armed {
+        result.unwrap(stdout.write(out, "ARM"))
+        for x in calls {
+            send_call(connections[x.from], x)
+            let mut owed = 1u64
+            let mut ended = false
+            while owed > 0u64 && t.bad == "" {
+                match heard(connections[x.from], x.from, calls, out, mut t) {
+                    Some(n) => { owed -= n },
+                    None => {
+                        ended = true
+                        break
+                    },
+                }
+            }
+            if ended || t.bad != "" { break }
+        }
+    } else {
+        for x in calls { send_call(connections[x.from], x) }
+        for i in 0u64 .. list.len(connections) {
+            let mut owed = 0u64
+            for x in calls {
+                if x.from == i {
+                    owed += 1u64
+                }
+            }
+            while owed > 0u64 && t.bad == "" {
+                match heard(connections[i], i, calls, out, mut t) {
+                    Some(n) => { owed -= n },
+                    None => break,
                 }
             }
         }
@@ -328,15 +371,16 @@ fn client(take c: Client) -> String waits {
     for cn in connections {
         loop {
             match wire_client.next(cn) {
-                Ok(_) => if bad == "" { bad = "runner_crash: an answer after the last" },
+                Ok(_) => if t.bad == "" { t.bad = "runner_crash: an answer after the last" },
                 Error(_) => break,
             }
         }
     }
     for take cn in connections { let _ = wire_client.close(take cn) }
-    if bad == "" && answered != list.len(calls) {
-        bad = "unanswered"
+    if t.bad == "" && t.answered != list.len(calls) {
+        t.bad = "unanswered"
     }
+    let Tally(floor: _, answered: _, bad: take bad) = take t
     bad
 }
 
@@ -412,7 +456,7 @@ fn remember(out: Stdout, principal: Bytes) waits {
     result.unwrap(stdout.write(out, result.unwrap(string.from_utf8(take b))))
 }
 
-fn drive(c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, port: u16, sessions: u64, take calls: List[Pos], take principal: Option[Bytes]) -> String waits {
+fn drive(c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, port: u16, sessions: u64, take calls: List[Pos], take principal: Option[Bytes], armed: bool) -> String waits {
     let mut connections: List[wire_client.Conn] = list.new()
     let mut resume = take principal
     for _ in 0u64 .. sessions {
@@ -423,13 +467,7 @@ fn drive(c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, port: u16, sess
         resume = Some(result.unwrap(clone(cn.token)))
         result.unwrap(list.push(mut connections, take cn))
     }
-    for x in calls {
-        let stream: u32 = int.narrow(x.stream)
-        let slot: u32 = int.narrow(x.body)
-        let request: runner.Frame = Call(stream, x.p, slot, 4294967295u32, u64_bytes(x.k))
-        wire_client.send_frame(connections[x.from], take request)
-    }
-    client(Client(connections: take connections, calls: take calls, out: out))
+    client(Client(connections: take connections, calls: take calls, out: out, armed: armed))
 }
 
 fn arg_u64(text: View[String]) -> u64 {
@@ -627,15 +665,14 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
         let port: u16 = int.narrow(arg_u64(option.unwrap(args.get(argv, 3u64))))
         let principal = decode_fixture_token(option.unwrap(args.get(argv, 4u64)))
         if mode == "init" {
-            clean(drive(c, r, tasks, n, out, port, 1u64, list.new(), take principal))
+            clean(drive(c, r, tasks, n, out, port, 1u64, list.new(), take principal, false))
         } else if mode == "write" {
-            if scenario == "poison-segment" { result.unwrap(stdout.write(out, "ARM")) }
-            let verdict = drive(c, r, tasks, n, out, port, 2u64, positions(scenario), take principal)
+            let verdict = drive(c, r, tasks, n, out, port, 2u64, positions(scenario), take principal, scenario == "poison-segment")
             if verdict != "unanswered" { clean(take verdict) }
             else if scenario != "poison-segment" { return Ok(()) }
         } else {
             let (again, _) = resends(scenario)
-            clean(drive(c, r, tasks, n, out, port, 1u64, take again, take principal))
+            clean(drive(c, r, tasks, n, out, port, 1u64, take again, take principal, false))
         }
         result.unwrap(stdout.write(out, "DONE"))
         return Ok(())
@@ -649,7 +686,15 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
         return Ok(())
     }
     if phase == "write" {
-        let db = match store.open(tasks, d, c, r, options()) { Ok(take x) => take x, Error(_) => return Ok(()) }
+        // Poison: one frame per journal group, so the adapter's second armed segment sync
+        // carries exactly the call's effect frame. The admit frame's sync succeeds, and
+        // the effect frame's failure reaches the head only through the gate's durable:
+        // between that frame's hand-off and the gate the head makes no store call, and
+        // the client sends nothing more until it is answered. An answer before durable,
+        // or one sent despite the poison, then always reaches the client (L1).
+        let mut o = options()
+        if scenario == "poison-segment" { o.group_commits = 1u32 }
+        let db = match store.open(tasks, d, c, r, o) { Ok(take x) => take x, Error(_) => return Ok(()) }
         let opened = served(take db, c, r, tasks, n, out, 2u64)
         match opened {
             Ok(()) => want(scenario != "poison-segment", "runner_crash: a failed journal sync did not stop the head"),

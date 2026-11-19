@@ -8,6 +8,8 @@ mod test_provider;
 use test_provider::crash::{FileSystem, Op};
 
 const ORPHAN_END_SYNC_FAILURE: u8 = 6;
+/// runner_crash.c's poison-segment: fail the second armed segment sync.
+const SECOND_SEGMENT_SYNC_FAILURE: u8 = 7;
 
 #[repr(C)]
 #[derive(Default)]
@@ -45,6 +47,7 @@ struct Bridge {
     armed: bool,
     failed_syncs: u64,
     split_syncs: u64,
+    segment_syncs: u64,
     split_at: usize,
     random: u8,
     orphan_end: bool,
@@ -291,6 +294,14 @@ impl Bridge {
                     1 => name.starts_with("j-") && !name.ends_with(".end"),
                     2 => name.starts_with("j-") && name.ends_with(".end"),
                     3 => name.starts_with("p-"),
+                    // The runner's poison run: one frame per group, so the
+                    // second armed segment sync carries the call's effect frame.
+                    SECOND_SEGMENT_SYNC_FAILURE
+                        if self.phase == 1 && self.armed && is_segment(&name) && !self.crashed =>
+                    {
+                        self.segment_syncs += 1;
+                        self.segment_syncs == 2
+                    }
                     5 if self.phase == 1 && self.armed && is_segment(&name) && !self.crashed => {
                         self.split_syncs += 1;
                         self.split_syncs == 2
@@ -390,6 +401,7 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         armed: false,
         failed_syncs: 0,
         split_syncs: 0,
+        segment_syncs: 0,
         split_at: 0,
         random: 1,
         orphan_end: false,
@@ -506,10 +518,11 @@ pub unsafe extern "C" fn store_crash_floor(p: *mut c_void) -> u64 {
 
 /// # Safety
 /// `p` is live and quiescent. `kind` is 0 (off), 1 (segment), 2 (END),
-/// 3 (pack), 4 (segment write), 5 (byte split), or 6 (orphan END recovery).
+/// 3 (pack), 4 (segment write), 5 (byte split), 6 (orphan END recovery), or
+/// 7 (second segment sync).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn store_crash_sync_failure(p: *mut c_void, kind: u8) {
-    assert!(kind <= ORPHAN_END_SYNC_FAILURE);
+    assert!(kind <= SECOND_SEGMENT_SYNC_FAILURE);
     // SAFETY: the C wrapper configures the bridge before starting a run.
     unsafe { (*p.cast::<Bridge>()).sync_failure = kind };
 }

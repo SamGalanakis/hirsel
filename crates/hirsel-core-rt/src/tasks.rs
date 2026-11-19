@@ -2830,10 +2830,14 @@ pub(crate) fn attach_net(
         // SAFETY: the callback/task pins the run and its shared registry.
         unsafe {
             let run = &mut *(*task).run;
+            // Hooks read only whether the run has sockets, and tasks spawned
+            // since the first attach computed theirs with them, so a repeat
+            // attach of the same sockets leaves every byte as it is.
+            let attached = run.net == sockets;
             run.net = sockets;
             // Sockets change only a serial run's hooks, and its tasks all run
             // on this thread; pool tasks keep their byte and are not touched.
-            let mut at = if run.pool.is_none() {
+            let mut at = if run.pool.is_none() && !attached {
                 run.all
             } else {
                 ptr::null_mut()

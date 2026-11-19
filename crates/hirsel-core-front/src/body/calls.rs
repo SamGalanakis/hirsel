@@ -1018,6 +1018,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => ty,
             }
         }
+        if pt <= HOLE {
+            return pt;
+        }
         fill(&mut self.t, pt, s, roots)
     }
     /// `pt` with the type arguments found so far, when they determine it.
@@ -1030,6 +1033,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         s: &[Option<TyId>],
         roots: &[Option<TyId>],
     ) -> Option<TyId> {
+        if pt <= HOLE || (roots.is_empty() && !has_param(&self.t, pt)) {
+            return Some(pt);
+        }
         fn ready(t: &impl TyRead, ty: TyId, found: &[Option<TyId>]) -> bool {
             if !has_param(t, ty) {
                 return true;

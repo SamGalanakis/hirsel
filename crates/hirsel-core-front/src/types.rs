@@ -478,7 +478,7 @@ impl TyRead for Local<'_> {
 /// Replace `Param(i)` by `args[i]`.
 pub fn subst(t: &mut impl TyRead, ty: TyId, args: &[TyId]) -> TyId {
     crate::cost_scope!("phase", "type substitution");
-    if args.is_empty() {
+    if ty <= HOLE || args.is_empty() {
         return ty;
     }
     subst_at(t, ty, args, 0)

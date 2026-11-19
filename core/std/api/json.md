@@ -18,3 +18,13 @@ root container as one. `skip_value` applies the same limit to the value it
 skips. A 129th container returns `Error(Depth)`. The sizing pass checks the
 limit before `parse` admits or writes the document. The threshold follows
 [serde_json's default recursion limit](https://github.com/serde-rs/json/blob/f51fa15a7015c7d02817a46d2db44c899a0016e8/src/de.rs#L63).
+
+Use `write` to serialize one value directly into a caller-owned `String`.
+The scoped callback writes scalars or opens an object or array. Call
+`write_member` before each object value and `element` before each array
+value. Pretty mode indents two spaces for each level.
+
+Each completed append stays in the output if a later append refuses
+Capacity. A quoted string appends its opening quote, each unescaped run
+or escape, and its closing quote as separate requests. An object member
+writes its key this way before appending the colon.

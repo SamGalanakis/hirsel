@@ -74,6 +74,31 @@ and charges 16. Adding the digit requires 16 bytes, so capacity doubles to 30
 and charges 32. Both leave 32 bytes live and briefly hold 48 bytes at their
 largest growth. The respective label admission sums are 48 and 56 bytes.
 
+### JSON output
+
+Both layouts now use std's writer. The small fixture still grows the pretty
+output through capacities 4, 8, 16, 32, 64 and 128. The first brace charges
+8. After the newline and two-space indent the length is 4. The opening
+quote grows capacity to 8. Appending the five letters in items needs 10
+bytes and grows capacity to 16, as the former per-scalar writer did on
+the ninth byte. The later appends fit within the next doubled capacity.
+The growth charges are 8 + 8 + 16 + 32 + 64 + 128 = 256 bytes, with a peak
+of 64 + 128 = 192 during the last growth. The final 115-byte output holds
+128 bytes of capacity. Under the query's `query1=` prefix, old and new
+writers append the opening quote, b, the two-byte newline escape, the
+two-byte lambda and the closing quote in the same sizes.
+
+For an empty output carrier and a string of 16 plain ASCII bytes, the
+former writer admitted capacities 4, 8, 16 and 32, charging 64 bytes in
+all. It briefly held 16 + 32 = 48 bytes. The std writer opens with a
+four-byte capacity, then appends the full run at length 1. Its next
+capacity is max(17, 8) = 17, which charges 24. The closing quote needs
+18 bytes and thus doubles capacity to 34, which charges 40. The new
+admission sum is 8 + 24 + 40 = 72 bytes and the peak is 24 + 40 = 64.
+Under a 31-byte bound, the former writer refused 32 with 15 available
+after its first 16 output bytes. Std refuses 24 with 23 available after
+the opening quote. Both write the same 18 bytes when admitted.
+
 The matched variant reads the frozen input twice through std.json.parse: its
 validating size pass and its writing pass. It stores every duplicate member in
 one indexed compact document. ObjectIndex supplies the first position with the

@@ -26,98 +26,33 @@ fn parse_error(e: std.json.Error, n: u64) -> Result[m1.support.Error, m1.support
     Ok(m1.support.error(take label))
 }
 
-pub fn quote(mut out: String, s: String) -> Result[(), m1.support.Error] {
-    m1.support.add(mut out, "\"")?
-    let mut at: u64 = 0
-    while let Some((c, next)) = string.next_scalar(s, at) {
-        at = next
-        match c {
-            '"' => m1.support.add(mut out, "\\\"")?,
-            '\\' => m1.support.add(mut out, "\\\\")?,
-            '\n' => m1.support.add(mut out, "\\n")?,
-            '\r' => m1.support.add(mut out, "\\r")?,
-            '\t' => m1.support.add(mut out, "\\t")?,
-            '\u{8}' => m1.support.add(mut out, "\\b")?,
-            '\u{c}' => m1.support.add(mut out, "\\f")?,
-            _ => {
-                if char.to_u32(c) < 32 {
-                    m1.support.add(mut out, "\\u")?
-                    m1.support.mem(string.push_uint(mut out, int.widen(char.to_u32(c)), 16, 4, '0'))?
-                } else {
-                    m1.support.mem(string.push_char(mut out, c))?
-                }
-            },
-        }
-    }
-    m1.support.add(mut out, "\"")
-}
-
-pub fn indent(mut out: String, depth: u64) -> Result[(), m1.support.Error] {
-    let mut i: u64 = 0
-    while i < depth {
-        m1.support.add(mut out, "  ")?;
-        i += 1
-    }
-    Ok(())
-}
-
-fn render(mut out: String, j: Json, depth: u64, pretty: bool) -> Result[(), m1.support.Error] {
+fn write_tree(w: std.json.Writer, j: Json, depth: u64) -> Result[(), Capacity] {
     match j {
-        Null => m1.support.add(mut out, "null"),
-        Bool(b) => m1.support.add(mut out, if b {
-            "true"
-        } else {
-            "false"
-        }),
-        Num(s) => m1.support.add(mut out, s),
-        Str(s) => quote(mut out, s),
-        Arr(xs) => {
-            m1.support.add(mut out, "[")?
-            let mut first = true
+        Null => std.json.write_null(w),
+        Bool(b) => std.json.write_bool(w, b),
+        Num(s) => std.json.write_number_spelling(w, s),
+        Str(s) => std.json.write_string_value(w, s),
+        Arr(xs) => std.json.array(w, depth, scoped fn(child: std.json.Writer, mut items: std.json.Items) -> Result[(), Capacity] {
             for x in xs {
-                if !first {
-                    m1.support.add(mut out, ",")?
-                }
-                if pretty {
-                    m1.support.add(mut out, "\n")?;
-                    indent(mut out, depth + 1)?
-                }
-                first = false
-                render(mut out, x, depth + 1, pretty)?
+                std.json.element(child, mut items)?
+                write_tree(child, x, items.depth)?
             }
-            if pretty && !first {
-                m1.support.add(mut out, "\n")?;
-                indent(mut out, depth)?
+            Ok(())
+        }),
+        Obj(fields) => std.json.object(w, depth, scoped fn(child: std.json.Writer, mut items: std.json.Items) -> Result[(), Capacity] {
+            for (key, value) in fields {
+                std.json.write_member(child, mut items, key)?
+                write_tree(child, value, items.depth)?
             }
-            m1.support.add(mut out, "]")
-        },
-        Obj(fields) => {
-            m1.support.add(mut out, "{")?
-            let mut first = true
-            for (key, v) in fields {
-                if !first {
-                    m1.support.add(mut out, ",")?
-                }
-                if pretty {
-                    m1.support.add(mut out, "\n")?;
-                    indent(mut out, depth + 1)?
-                }
-                first = false
-                quote(mut out, key)?
-                m1.support.add(mut out, if pretty {
-                    ": "
-                } else {
-                    ":"
-                })?
-                render(mut out, v, depth + 1, pretty)?
-            }
-            if pretty && !first {
-                m1.support.add(mut out, "\n")?;
-                indent(mut out, depth)?
-            }
-            m1.support.add(mut out, "}")
-        },
+            Ok(())
+        }),
     }
+}
+
+fn render(mut out: String, j: Json) -> Result[(), m1.support.Error] {
+    m1.support.mem(std.json.write(mut out, true, scoped fn(w: std.json.Writer) -> Result[(), Capacity] {
+        write_tree(w, j, 0)
+    }))
 }
 
 fn query(j: Json, path: String, at: u64) -> Result[View[Json], m1.support.Error] in j {
@@ -165,10 +100,10 @@ fn document(out: Stdout, s: String, path: String, variant: String, n: u64, tx: S
         }
     })?
     let mut pretty = string.new()
-    render(mut pretty, root, 0, true)?
+    render(mut pretty, root)?
     let selected = query(root, path, 1)?
     let mut answer = m1.support.name("query", n, "=")?
-    render(mut answer, selected, 0, true)?
+    render(mut answer, selected)?
     m1.support.add(mut answer, "\n")?
     m1.support.put(out, answer)?
     if variant == "print" {

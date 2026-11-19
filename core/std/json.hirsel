@@ -69,7 +69,7 @@ pub fn size(s: String) -> Result[u64, Error] {
 pub fn parse(r: Region, s: String) -> Result[Json in r, Error] {
     let n = size(s)?
     let mut i: u64 = 0
-    match build_stream_in(r, bytes n, fn(take w: Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+    match build_stream_in(r, bytes n, fn(take w: core.core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
         write_value(s, mut i, take w)
     }) {
         Ok(take b) => Ok(finish(take b)),
@@ -281,44 +281,168 @@ fn decode_string(s: String, start: u64, end: u64) -> Result[String, Error] {
     Ok(take key)
 }
 
+type EmitKind = Raw | Quoted
+
+/// A scoped serializer that appends directly to the caller's String.
+pub scoped type Writer {
+    emit: scoped fn(EmitKind, String) -> Result[(), Capacity],
+    pretty: bool
+}
+
+/// Separator state for the current array or object.
+pub type Items {
+    depth: u64,
+    first: bool
+}
+
+/// Appends one value through build. Pretty uses two spaces per level.
+/// Capacity leaves the prefix of completed appends in out and stops writing.
+/// Alloc: GROWTH of out and allocations made by build. Cost: O(output bytes).
+pub fn write(mut out: String, pretty: bool, build: scoped fn(json.Writer) -> Result[(), Capacity]) -> Result[(), Capacity] {
+    let w = Writer(emit: scoped fn(kind: EmitKind, s: String) -> Result[(), Capacity] {
+        match kind {
+            Raw => string.push(mut out, s),
+            Quoted => push_quoted(mut out, s),
+        }
+    }, pretty: pretty)
+    build(w)
+}
+
+fn raw(w: json.Writer, s: String) -> Result[(), Capacity] {
+    (w.emit)(Raw, s)
+}
+
+/// Appends a quoted and escaped string.
+pub fn write_string_value(w: json.Writer, s: String) -> Result[(), Capacity] {
+    (w.emit)(Quoted, s)
+}
+
+/// Appends the original spelling of a number accepted by the JSON reader.
+pub fn write_number_spelling(w: json.Writer, spelling: String) -> Result[(), Capacity] {
+    raw(w, spelling)
+}
+
+/// Appends the JSON spelling of a boolean.
+pub fn write_bool(w: json.Writer, b: bool) -> Result[(), Capacity] {
+    raw(w, if b {
+        "true"
+    } else {
+        "false"
+    })
+}
+
+/// Appends JSON null.
+pub fn write_null(w: json.Writer) -> Result[(), Capacity] {
+    raw(w, "null")
+}
+
+fn indent_line(w: json.Writer, depth: u64) -> Result[(), Capacity] {
+    raw(w, "\n")?
+    for _ in 0u64 .. depth {
+        raw(w, "  ")?
+    }
+    Ok(())
+}
+
+fn container(w: json.Writer, depth: u64, open: String, close: String, body: scoped fn(json.Writer, mut Items) -> Result[(), Capacity]) -> Result[(), Capacity] {
+    raw(w, open)?
+    let mut items = Items(depth: depth + 1, first: true)
+    body(w, mut items)?
+    if w.pretty && !items.first {
+        indent_line(w, depth)?
+    }
+    raw(w, close)
+}
+
+/// Appends an array. The root depth is zero. The body calls element
+/// before each value and uses items.depth for nested containers.
+pub fn array(w: json.Writer, depth: u64, body: scoped fn(json.Writer, mut Items) -> Result[(), Capacity]) -> Result[(), Capacity] {
+    container(w, depth, "[", "]", body)
+}
+
+/// Appends an object with the same depth convention as array.
+/// The body calls write_member before each value.
+pub fn object(w: json.Writer, depth: u64, body: scoped fn(json.Writer, mut Items) -> Result[(), Capacity]) -> Result[(), Capacity] {
+    container(w, depth, "{", "}", body)
+}
+
+/// Writes the separator and any indentation before the next array value.
+pub fn element(w: json.Writer, mut items: Items) -> Result[(), Capacity] {
+    if !items.first {
+        raw(w, ",")?
+    }
+    if w.pretty {
+        indent_line(w, items.depth)?
+    }
+    items.first = false
+    Ok(())
+}
+
+/// Writes the separator, escaped key, and colon before the next member value.
+pub fn write_member(w: json.Writer, mut items: Items, key: String) -> Result[(), Capacity] {
+    element(w, mut items)?
+    write_string_value(w, key)?
+    raw(w, if w.pretty {
+        ": "
+    } else {
+        ":"
+    })
+}
+
 /// Appends compact JSON, with members and duplicates in document order. Numbers keep
 /// their original spelling; strings escape controls, quotes and backslashes (RFC 8259).
 /// Fails: Error(Capacity) at the first refused append. Prefix: all earlier appends stay
 /// in s, possibly an unfinished JSON value; the refused append changes nothing.
-/// Alloc: GROWTH of s. Cost: O(encoded bytes). Ex: `std.json.push_json(mut s, doc)?`
+/// Alloc: GROWTH of s. Cost: O(encoded bytes). Ex: std.json.push_json(mut s, doc)?
 pub fn push_json(mut s: String, x: Json) -> Result[(), Capacity] {
+    write(mut s, false, scoped fn(w: json.Writer) -> Result[(), Capacity] {
+        write_document(w, x, 0, false)
+    })
+}
+
+/// Appends JSON with two-space indentation and the ObjectIndex duplicate policy.
+/// Fails: Capacity, preserving all completed appends. Alloc: GROWTH of s and
+/// a temporary index for each object. Cost: O(encoded bytes) plus indexing.
+pub fn push_pretty(mut s: String, x: Json) -> Result[(), Capacity] {
+    write(mut s, true, scoped fn(w: json.Writer) -> Result[(), Capacity] {
+        write_document(w, x, 0, true)
+    })
+}
+
+fn write_document(w: json.Writer, x: Json, depth: u64, unique: bool) -> Result[(), Capacity] {
     match x {
-        Null => string.push(mut s, "null"),
-        False => string.push(mut s, "false"),
-        True => string.push(mut s, "true"),
-        Num(t) => string.push(mut s, text.as_string(t)),
-        Str(t) => push_quoted(mut s, text.as_string(t)),
-        Arr(xs) => {
-            string.push(mut s, "[")?
-            let mut first = true
+        Null => write_null(w),
+        False => write_bool(w, false),
+        True => write_bool(w, true),
+        Num(t) => write_number_spelling(w, text.as_string(t)),
+        Str(t) => write_string_value(w, text.as_string(t)),
+        Arr(xs) => array(w, depth, scoped fn(w2: json.Writer, mut items: Items) -> Result[(), Capacity] {
             for v in xs {
-                if !first {
-                    string.push(mut s, ",")?
-                }
-                push_json(mut s, v)?
-                first = false
+                element(w2, mut items)?
+                write_document(w2, v, items.depth, unique)?
             }
-            string.push(mut s, "]")
-        }
-        Obj(ms) => {
-            string.push(mut s, "{")?
-            let mut first = true
-            for m in ms {
-                if !first {
-                    string.push(mut s, ",")?
+            Ok(())
+        }),
+        Obj(ms) => if unique {
+            let order = index(ms)?
+            object(w, depth, scoped fn(w2: json.Writer, mut items: Items) -> Result[(), Capacity] {
+                for i in 0u64 .. seq.len(ms) {
+                    if let Some((key, value)) = shown(order, i) {
+                        write_member(w2, mut items, key)?
+                        write_document(w2, value, items.depth, true)?
+                    }
                 }
-                push_quoted(mut s, text.as_string(m.key))?
-                string.push(mut s, ":")?
-                push_json(mut s, m.value)?
-                first = false
-            }
-            string.push(mut s, "}")
-        }
+                Ok(())
+            })
+        } else {
+            object(w, depth, scoped fn(w2: json.Writer, mut items: Items) -> Result[(), Capacity] {
+                for m in ms {
+                    write_member(w2, mut items, text.as_string(m.key))?
+                    write_document(w2, m.value, items.depth, false)?
+                }
+                Ok(())
+            })
+        },
     }
 }
 
@@ -802,7 +926,7 @@ fn hex4(s: String, p: u64) -> Result[u32, Error] {
 // Writing pass. It runs only on input that `size` has accepted, and s is frozen for the
 // call, so every check it would repeat has already passed. Where a branch cannot be
 // reached, it fails (FOR SPEC 7).
-fn write_value[in r](s: String, mut i: u64, take w: Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+fn write_value[in r](s: String, mut i: u64, take w: core.core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
     skip(s, mut i)
     let c = at(s, i)
     if c == b'n' {
@@ -815,15 +939,15 @@ fn write_value[in r](s: String, mut i: u64, take w: Writer[Json, in r]) -> Resul
         i += 5
         emit(take w, False)
     } else if c == b'"' {
-        emit(take w, Str(emit(fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+        emit(take w, Str(emit(fn(take t: core.core.Writer[Text, in r]) -> Result[Child[Text], BuildError] {
             write_string(s, mut i, take t)
         })))
     } else if c == b'[' {
         i += 1
-        emit(take w, Arr(emit(fn(take xs: Writer[IndexedSpan[Json], in r]) -> Result[Child[IndexedSpan[Json]], BuildError] {
+        emit(take w, Arr(emit(fn(take xs: core.core.Writer[IndexedSpan[Json], in r]) -> Result[Child[IndexedSpan[Json]], BuildError] {
             skip(s, mut i)
             while at(s, i) != b']' {
-                writer.append(mut xs, fn(take x: Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+                writer.append(mut xs, fn(take x: core.core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
                     write_value(s, mut i, take x)
                 })?
                 skip(s, mut i)
@@ -836,14 +960,14 @@ fn write_value[in r](s: String, mut i: u64, take w: Writer[Json, in r]) -> Resul
         })))
     } else if c == b'{' {
         i += 1
-        emit(take w, Obj(emit(fn(take ms: Writer[IndexedSpan[Member], in r]) -> Result[Child[IndexedSpan[Member]], BuildError] {
+        emit(take w, Obj(emit(fn(take ms: core.core.Writer[IndexedSpan[Member], in r]) -> Result[Child[IndexedSpan[Member]], BuildError] {
             skip(s, mut i)
             while at(s, i) != b'}' {
-                writer.append(mut ms, fn(take m: Writer[Member, in r]) -> Result[Child[Member], BuildError] {
+                writer.append(mut ms, fn(take m: core.core.Writer[Member, in r]) -> Result[Child[Member], BuildError] {
                     skip(s, mut i)
-                    emit(take m, Member(key: emit(fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+                    emit(take m, Member(key: emit(fn(take t: core.core.Writer[Text, in r]) -> Result[Child[Text], BuildError] {
                         write_string(s, mut i, take t)
-                    }), value: emit(fn(take v: Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+                    }), value: emit(fn(take v: core.core.Writer[Json, in r]) -> Result[Child[Json], BuildError] {
                         skip(s, mut i)
                         i += 1
                         write_value(s, mut i, take v)
@@ -871,7 +995,7 @@ fn write_value[in r](s: String, mut i: u64, take w: Writer[Json, in r]) -> Resul
 /// At the opening '"': writes the decoded string, then closes it. Each run between
 /// escapes is one push; each escape is one scalar. The runs end at '"' or '\\', which are
 /// ASCII, so every slice is on a scalar boundary.
-fn write_string[in r](s: String, mut i: u64, take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+fn write_string[in r](s: String, mut i: u64, take t: core.core.Writer[Text, in r]) -> Result[Child[Text], BuildError] {
     i += 1
     while at(s, i) != b'"' {
         if at(s, i) != b'\\' {

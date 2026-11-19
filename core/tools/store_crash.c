@@ -21,6 +21,7 @@ extern uint64_t store_crash_failed_syncs(void *);
 extern void store_crash_free(void *);
 extern void store_crash_orphan_end(void *);
 extern uint8_t store_crash_crashed(void *);
+extern void store_crash_checkpoint_reopen(void *);
 extern uint8_t hirsel_core_test_run_scripted(const HirselCoreProcessConfig *, HirselCoreEntry, uint64_t);
 _Static_assert(sizeof(HirselCoreHostOutcome)==32, "provider outcome ABI");
 
@@ -146,17 +147,20 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     cancellation.enabled=!strcmp(scenario,"journal-cancel");
     cancellation.target=cut; cancellation.entry=entry;
     int uncut=!strcmp(raw_cut,"count");
-    enum { ORPHAN_END_SYNC_FAILURE=6 };
+    enum { ORPHAN_END_SYNC_FAILURE=6, OPEN_MANIFEST_SYNC_FAILURE=8 };
     int recovery_failure=!strcmp(scenario,"orphan-end-recovery-sync");
+    int open_sync_failure=!strcmp(scenario,"checkpoint-reopen-sync-failure");
+    int checkpoint_reopen=open_sync_failure || !strcmp(scenario,"checkpoint-reopen");
     uint8_t failure=(!strcmp(scenario,"poison-segment") || !strcmp(scenario,"poison-cut"))?1:
         !strcmp(scenario,"poison-end")?2:!strcmp(scenario,"poison-pack")?3:
         !strcmp(scenario,"poison-write")?4:!strcmp(scenario,"journal-place-split")?5:
-        recovery_failure?ORPHAN_END_SYNC_FAILURE:0;
+        recovery_failure?ORPHAN_END_SYNC_FAILURE:open_sync_failure?OPEN_MANIFEST_SYNC_FAILURE:0;
     int orphan_end=recovery_failure || !strcmp(scenario,"orphan-end");
     if((failure && failure!=5) || cancellation.enabled || orphan_end) cut=UINT64_MAX;
     void *state=store_crash_new(cut);
     store_crash_sync_failure(state,failure);
     if(orphan_end) store_crash_orphan_end(state);
+    if(checkpoint_reopen) store_crash_checkpoint_reopen(state);
     HirselCoreProvider provider={state,ready,issue,resume,cancel,deliver};
     HirselCoreEntryGrant caps[16]; uint64_t grants[16];
     for(size_t i=0;i<input->parameters_len;i++) {
@@ -164,19 +168,21 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         caps[i]=(HirselCoreEntryGrant){kind,&provider,kind==0?7:0}; grants[i]=i+1;
     }
     static const char *phases[]={"init","write","read","reopen"};
-    static const uint64_t orphan_order[]={0,1,3,2};
+    static const uint64_t reopen_order[]={0,1,3,2};
+    int reopen=orphan_end || checkpoint_reopen;
     uint8_t status=0;
-    for(uint64_t run=0;run<(orphan_end && !recovery_failure?4:3);run++) {
-        uint64_t phase=orphan_end?orphan_order[run]:run;
+    for(uint64_t run=0;run<(reopen && !recovery_failure?4:3);run++) {
+        uint64_t phase=reopen?reopen_order[run]:run;
         store_crash_phase(state,phase);
         cancellation.phase=phase;
         hold.enabled=phase==1 && !strcmp(scenario,"journal-ack");
         const char *expected=store_crash_acked(state)?"new":"prefix";
         char floor[32];
         snprintf(floor,sizeof floor,"%llu",(unsigned long long)store_crash_floor(state));
+        const char *fixture=checkpoint_reopen?"checkpoint":scenario;
         HirselCoreBuffer args[4]={
             {(uint8_t*)phases[phase],strlen(phases[phase]),0},
-            {(uint8_t*)input->args[0].data,input->args[0].len,0},
+            {(uint8_t*)fixture,strlen(fixture),0},
             {(uint8_t*)expected,strlen(expected),0},
             {(uint8_t*)floor,strlen(floor),0}
         };
@@ -189,7 +195,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         if(seed) cfg.scheduler.event=schedule_event;
         status=seed?hirsel_core_test_run_scripted(&cfg,run_entry,seed):hirsel_core_run(&cfg,run_entry);
         if(status) {fprintf(stderr,"store phase %s: status %u\n",phases[phase],status);break;}
-        if(phase==1 && failure && !recovery_failure && (failure!=5 || uncut) && store_crash_failed_syncs(state)!=1) {
+        if(phase==1 && failure && !recovery_failure && !open_sync_failure && (failure!=5 || uncut) && store_crash_failed_syncs(state)!=1) {
             fprintf(stderr,"named sync failure was not reached\n");status=120;break;
         }
         if(phase==1 && failure==5 && store_crash_failed_syncs(state) &&
@@ -199,13 +205,16 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         if(phase==1 && cancellation.enabled && !uncut && !cancellation.fired) {
             fprintf(stderr,"cancellation wait was not reached\n");status=120;break;
         }
-        if(recovery_failure && phase==3 && store_crash_failed_syncs(state)!=1) {
+        if((recovery_failure || open_sync_failure) && phase==3 && store_crash_failed_syncs(state)!=1) {
             fprintf(stderr,"recovery directory sync failure was not reached once\n");status=120;break;
         }
         if(orphan_end && (phase==1 || (phase==3 && !recovery_failure)) && !store_crash_crashed(state)) {
             fprintf(stderr,"orphan END crash was not reached in phase %s\n",phases[phase]);status=120;break;
         }
-        if(phase==1 && uncut && !orphan_end && !store_crash_acked(state)) {
+        if(checkpoint_reopen && (phase==1 || (phase==3 && !open_sync_failure)) && !store_crash_crashed(state)) {
+            fprintf(stderr,"checkpoint double crash was not reached in phase %s\n",phases[phase]);status=120;break;
+        }
+        if(phase==1 && uncut && !reopen && !store_crash_acked(state)) {
             fprintf(stderr,"uncut store run did not acknowledge its checkpoint\n");status=120;break;
         }
     }

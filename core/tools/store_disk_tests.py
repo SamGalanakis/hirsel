@@ -110,7 +110,8 @@ def main():
                 print(f'{engine} pack_bound: {"PASS" if good else "FAIL"}', flush=True)
                 try:
                     cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
-                                       args.cc, manifest, work, engine)
+                                       args.cc, manifest, work, engine,
+                                       count_only=('checkpoint-reopen', 'checkpoint-reopen-sync-failure'))
                     rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 except RuntimeError as error:
                     rows.append(dict(engine=engine, passed=False, crash_failure=str(error)))

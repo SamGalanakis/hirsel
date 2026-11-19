@@ -9487,6 +9487,9 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskD
         Ok(take existing) => {
             let manifest_bytes = disk_read_manifest("MANIFEST", existing)?
             let (id, take manifest) = take manifest_bytes
+            // A process crash can leave this rename visible but not durable.
+            // Persist it under LOCK before removing the previous cut's files.
+            disk_io(host.sync_dir(d))?
             disk_cleanup(d, manifest)?
             disk_decode_packs(d, id, take manifest)?
         },
@@ -9498,6 +9501,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskD
             let manifest = capacity(disk_manifest_empty())?
             let (take segment, take end_file) = disk_new_segment(d, id, 1, 0)?
             disk_publish_manifest(d, id, manifest)?
+            disk_io(host.sync_dir(d))?
             let genesis = capacity(main_state(empty_roots(), 0, 0))?
             let startup = DiskStartup(store: id, state: take genesis, live: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, seq: 1, segment: take segment, end_file: take end_file)
             let mut all: List[Roots] = list.new()
@@ -10529,6 +10533,11 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
             Error(Io(_)) => Ok(()),
             Error(Poisoned(_)) => Ok(()),
             Error(_) => Error(Exit(status: 32))
+        }
+    } else if phase == "reopen" {
+        match open(tasks, d, c, r, disk_crash_options(scenario)) {
+            Error(Io(_)) => Ok(()),
+            _ => Error(Exit(status: 34))
         }
     } else {
         let expected = option.unwrap(args.get(argv, 2))

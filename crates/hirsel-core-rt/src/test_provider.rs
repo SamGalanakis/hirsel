@@ -86,6 +86,12 @@ pub mod crash {
                 .insert(name.to_owned(), self.live_names[name]);
         }
 
+        /// Persist one removal before a crash, leaving other names untouched.
+        pub fn persist_removal(&mut self, name: &str) {
+            assert!(!self.live_names.contains_key(name));
+            assert!(self.durable_names.remove(name).is_some());
+        }
+
         pub fn restart(&mut self) {
             self.live_names = self.durable_names.clone();
             self.live_data = self.durable_data.clone();

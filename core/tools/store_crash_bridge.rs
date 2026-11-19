@@ -10,6 +10,7 @@ use test_provider::crash::{FileSystem, Op};
 const ORPHAN_END_SYNC_FAILURE: u8 = 6;
 /// runner_crash.c's poison-segment: fail the second armed segment sync.
 const SECOND_SEGMENT_SYNC_FAILURE: u8 = 7;
+const OPEN_MANIFEST_SYNC_FAILURE: u8 = 8;
 
 #[repr(C)]
 #[derive(Default)]
@@ -52,6 +53,7 @@ struct Bridge {
     random: u8,
     orphan_end: bool,
     orphan_end_path: Option<String>,
+    checkpoint_reopen: bool,
 }
 impl Bridge {
     fn exists(&self, name: &str) -> bool {
@@ -246,10 +248,20 @@ impl Bridge {
             }
             8 => {
                 let name = name();
+                if self.checkpoint_reopen && self.phase == 3 {
+                    assert_ne!(
+                        self.sync_failure, OPEN_MANIFEST_SYNC_FAILURE,
+                        "open tried to remove a file before its failed directory sync"
+                    );
+                }
                 if !self.exists(&name) {
                     return Self::error(1);
                 }
                 if self.apply(Op::Remove(&name)) {
+                    if self.checkpoint_reopen && self.phase == 3 && name.starts_with("p-") {
+                        self.fs.persist_removal(&name);
+                        self.crashed = true;
+                    }
                     if self.phase == 3
                         && self.sync_failure == ORPHAN_END_SYNC_FAILURE
                         && self.failed_syncs == 0
@@ -278,6 +290,9 @@ impl Bridge {
                     return Self::error(1);
                 }
                 if self.apply(Op::Rename(from, to)) {
+                    if self.checkpoint_reopen && self.phase == 1 && to == "MANIFEST" {
+                        self.crashed = true;
+                    }
                     Outcome::default()
                 } else {
                     Self::error(5)
@@ -354,6 +369,13 @@ impl Bridge {
                 }
             }
             17 => {
+                if self.checkpoint_reopen
+                    && self.phase == 3
+                    && self.sync_failure == OPEN_MANIFEST_SYNC_FAILURE
+                {
+                    self.failed_syncs += 1;
+                    return Self::error(5);
+                }
                 if self.phase == 3 && self.sync_failure == ORPHAN_END_SYNC_FAILURE && self.armed {
                     self.armed = false;
                     self.failed_syncs += 1;
@@ -406,6 +428,7 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         random: 1,
         orphan_end: false,
         orphan_end_path: None,
+        checkpoint_reopen: false,
     }))
     .cast()
 }
@@ -419,7 +442,11 @@ pub unsafe extern "C" fn store_crash_phase(p: *mut c_void, phase: u64) {
     let bridge = unsafe { &mut *p.cast::<Bridge>() };
     assert!(bridge.files.is_empty(), "run leaked provider file handles");
     if phase >= 2 {
-        bridge.fs.restart();
+        // The first crash in L25(b) is process-only. The next opener sees
+        // the pending rename and must make it durable before any removal.
+        if phase != 3 || !bridge.checkpoint_reopen {
+            bridge.fs.restart();
+        }
         bridge.locks.clear();
         bridge.crashed = false;
     }
@@ -519,10 +546,10 @@ pub unsafe extern "C" fn store_crash_floor(p: *mut c_void) -> u64 {
 /// # Safety
 /// `p` is live and quiescent. `kind` is 0 (off), 1 (segment), 2 (END),
 /// 3 (pack), 4 (segment write), 5 (byte split), 6 (orphan END recovery), or
-/// 7 (second segment sync).
+/// 7 (second segment sync), 8 (O1 open barrier).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn store_crash_sync_failure(p: *mut c_void, kind: u8) {
-    assert!(kind <= SECOND_SEGMENT_SYNC_FAILURE);
+    assert!(kind <= OPEN_MANIFEST_SYNC_FAILURE);
     // SAFETY: the C wrapper configures the bridge before starting a run.
     unsafe { (*p.cast::<Bridge>()).sync_failure = kind };
 }
@@ -553,4 +580,12 @@ pub unsafe extern "C" fn store_crash_process_exit(p: *mut c_void) {
     assert!(bridge.crashed);
     bridge.files.clear();
     bridge.locks.clear();
+}
+
+/// # Safety
+/// `p` is live and exclusive before the first run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_checkpoint_reopen(p: *mut c_void) {
+    // SAFETY: the wrapper owns p exclusively before invoking any provider.
+    unsafe { (*p.cast::<Bridge>()).checkpoint_reopen = true };
 }

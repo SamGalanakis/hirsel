@@ -294,55 +294,60 @@ pub fn capacity(d: Decoder) -> u64 {
     list.capacity(d.message)
 }
 
-// Incremental RFC 3629 byte ranges, adapted from core string.from_utf8 and
-// tungstenite protocol/message.rs. At most three bytes of pending state.
+// A truncated UTF-8 scalar holds at most three nonzero bytes.
 type Utf8: send {
-    remaining: u8,
-    low: u8,
-    high: u8
+    tail: Inline[u8, 3]
 }
 
 fn fresh_utf8() -> Utf8 {
-    Utf8(remaining: 0, low: 0x80, high: 0xbf)
+    Utf8(tail:[0; 3])
 }
 
-fn utf8_byte(mut utf: Utf8, x: u8) -> bool {
-    if utf.remaining != 0 {
-        if x < utf.low || x > utf.high {
-            return false
+fn validate_fragment(utf: Utf8, b: Bytes) -> Option[Utf8] {
+    let n = list.len(b)
+    let mut used: u64 = 0
+    if utf.tail[0] != 0 {
+        let prior: u64 = if utf.tail[2] != 0 {
+            3
+        } else if utf.tail[1] != 0 {
+            2
+        } else {
+            1
         }
-        utf.remaining -= 1
-        utf.low = 0x80
-        utf.high = 0xbf
-        return true
+        let head = option.unwrap(string.utf8_head(utf.tail[0]))
+        used = order.min(n, head.width - prior)
+        match string.utf8_tail(head, prior + used, fn(offset: u64) -> u8 {
+            if offset < prior {
+                utf.tail[offset]
+            } else {
+                b[offset - prior]
+            }
+        }) {
+            Ok(()) => {},
+            Error(Some(_)) => return None,
+            Error(None) => {
+                let mut pending = utf
+                for i in 0u64 .. used {
+                    pending.tail[prior + i] = b[i]
+                }
+                return Some(pending)
+            },
+        }
     }
-    if x < 128 {
-        return true
+    match utf8.validate(list.slice(b, used, n)) {
+        Ok(()) => Some(fresh_utf8()),
+        Error(e) => {
+            if e.error_len != None {
+                return None
+            }
+            let start = used + e.valid_up_to
+            let mut pending = fresh_utf8()
+            for i in start .. n {
+                pending.tail[i - start] = b[i]
+            }
+            Some(pending)
+        },
     }
-    utf.remaining = if x >= 0xc2 && x <= 0xdf {
-        1
-    } else if x >= 0xe0 && x <= 0xef {
-        2
-    } else if x >= 0xf0 && x <= 0xf4 {
-        3
-    } else {
-        return false
-    }
-    utf.low = if x == 0xe0 {
-        0xa0
-    } else if x == 0xf0 {
-        0x90
-    } else {
-        0x80
-    }
-    utf.high = if x == 0xed {
-        0x9f
-    } else if x == 0xf4 {
-        0x8f
-    } else {
-        0xbf
-    }
-    true
 }
 
 fn valid_code(code: u16) -> bool {
@@ -361,14 +366,17 @@ fn close_error(c: Control) -> u16 {
     if !valid_code((hi << 8) | lo) {
         return 1002
     }
-    let mut utf = fresh_utf8()
-    for i in 2u64 .. c.len {
-        if !utf8_byte(mut utf, c.data[i]) {
+    let mut i: u64 = 2
+    while i < c.len {
+        let Some(head) = string.utf8_head(c.data[i]) else {
             return 1007
         }
-    }
-    if utf.remaining != 0 {
-        return 1007
+        if let Error(_) = string.utf8_tail(head, c.len - i, fn(offset: u64) -> u8 {
+            c.data[i + offset]
+        }) {
+            return 1007
+        }
+        i += head.width
     }
     0
 }
@@ -521,7 +529,7 @@ fn finish_frame(mut d: Decoder) -> Event {
     }
     d.fragmented = !d.fin
     if d.fin {
-        if d.text && d.utf8.remaining != 0 {
+        if d.text && d.utf8.tail[0] != 0 {
             return reject(mut d, 1007)
         }
         let b = replace(mut d.message, list.new())
@@ -597,11 +605,11 @@ pub fn next(mut d: Decoder, b: Bytes, mut cursor: u64) -> Result[Event, Capacity
                 list.append(mut d.message, input)?
             }
             if d.text {
-                for i in start .. list.len(d.message) {
-                    if !utf8_byte(mut d.utf8, d.message[i]) {
-                        return Ok(reject(mut d, 1007))
-                    }
+                let checked = validate_fragment(d.utf8, list.slice(d.message, start, list.len(d.message)))
+                let Some(validated) = checked else {
+                    return Ok(reject(mut d, 1007))
                 }
+                d.utf8 = validated
             }
         }
         d.received += count
@@ -663,12 +671,11 @@ pub fn encode(mut e: Encoder, fin: bool, opcode: u8, payload: Bytes, mask: Inlin
         e.utf8
     }
     if is_text {
-        for x in payload {
-            if !utf8_byte(mut utf, x) {
-                return Ok(Error(1007))
-            }
+        let Some(validated) = validate_fragment(utf, payload) else {
+            return Ok(Error(1007))
         }
-        if fin && utf.remaining != 0 {
+        utf = validated
+        if fin && utf.tail[0] != 0 {
             return Ok(Error(1007))
         }
     }

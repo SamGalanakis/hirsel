@@ -207,26 +207,6 @@ fn scalar_code(b: Bytes, at: u64, width: u64) -> u32 {
     code
 }
 
-fn valid_scalar(b: Bytes, at: u64, width: u64) -> bool {
-    if width == 1 {
-        return true
-    }
-    let lead = b[at]
-    if lead < 0xc2 || lead > 0xf4 || list.len(b) - at < width {
-        return false
-    }
-    let second = b[at + 1]
-    if (lead == 0xe0 && second < 0xa0) || (lead == 0xed && second >= 0xa0) || (lead == 0xf0 && second < 0x90) || (lead == 0xf4 && second >= 0x90) {
-        return false
-    }
-    for k in 1u64 .. width {
-        if b[at + k] & 0xc0 != 0x80 {
-            return false
-        }
-    }
-    true
-}
-
 fn doubled(b: Bytes, i: u64, quoted: bool) -> bool {
     quoted && b[i] == b'"' && i + 1 < list.len(b) && b[i + 1] == b'"'
 }
@@ -239,14 +219,14 @@ fn doubled(b: Bytes, i: u64, quoted: bool) -> bool {
 /// Ex: `csv.field_text(buf, fields[i], mut value)?`.
 pub fn field_text(text: Bytes, f: Field, mut out: String) -> Result[(), Error] {
     let b = list.slice(text, f.span.start, f.span.end)
+    if let Error(e) = utf8.validate(b) {
+        return Error(NotUtf8(f.span.start + e.valid_up_to))
+    }
     let n = list.len(b)
     let mut size = n
     let mut i: u64 = 0
     while i < n {
         let width = scalar_width(b[i])
-        if !valid_scalar(b, i, width) {
-            return Error(NotUtf8(f.span.start + i))
-        }
         if doubled(b, i, f.quoted) {
             size -= 1
             i += 2

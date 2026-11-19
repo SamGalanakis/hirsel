@@ -505,38 +505,37 @@ pub fn decode(text: String, s: http1.Span, mut out: Bytes) -> Result[(), Error] 
 
 fn decoded_scalar(data: Bytes, start: u64, end: u64) -> Result[(char, u64, u64), Error] {
     let (b, next) = decoded_byte(data, start, end)?
-    // RFC 3629 §4. The minimum rejects overlong spellings, and from_u32
-    // rejects surrogate code points and values above U+10FFFF.
-    let (octets, bits, minimum): (u64, u8, u32) = if b < 0x80 {
-        (1, b, 0)
-    } else if b >= 0xC2 && b <= 0xDF {
-        (2, b & 0x1F, 0x80)
-    } else if b >= 0xE0 && b <= 0xEF {
-        (3, b & 0x0F, 0x800)
-    } else if b >= 0xF0 && b <= 0xF4 {
-        (4, b & 0x07, 0x10000)
-    } else {
+    let Some(head) = string.utf8_head(b) else {
         return Error(NotUtf8(start))
+    }
+    let octets = head.width
+    let bits = if octets == 1 {
+        b
+    } else {
+        b & (0x7fu8 >> int.narrow(octets))
     }
     let mut value: u32 = int.widen(bits)
     let mut i = next
+    let mut sequence: Inline[u8, 4] =[0; 4]
     for k in 1u64 .. octets {
         if i == end {
             return Error(NotUtf8(start))
         }
         let (c, after) = decoded_byte(data, i, end)?
-        if c & 0xC0 != 0x80 {
+        // Preserve the first bad percent escape or missing continuation.
+        if c & 0xc0 != 0x80 {
             return Error(NotUtf8(start))
         }
-        value = (value << 6) | int.widen(c & 0x3F)
+        sequence[k] = c
+        value = (value << 6) | int.widen(c & 0x3f)
         i = after
     }
-    if value < minimum {
+    if let Error(_) = string.utf8_tail(head, octets, fn(offset: u64) -> u8 {
+        sequence[offset]
+    }) {
         return Error(NotUtf8(start))
     }
-    let Some(scalar) = char.from_u32(value) else {
-        return Error(NotUtf8(start))
-    }
+    let scalar = option.unwrap(char.from_u32(value))
     Ok((scalar, i, octets))
 }
 

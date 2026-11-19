@@ -490,12 +490,29 @@ fn utf8(take b: Result[Bytes, Capacity]) -> u64 {
     }
 }
 
+fn utf8_error_is(take input: Result[Bytes, Capacity], at: u64, n: Option[u64]) -> bool {
+    let b = result.unwrap(take input)
+    utf8_error_at(b, at, n)
+}
+
+fn utf8_error_at(b: Bytes, at: u64, n: Option[u64]) -> bool {
+    match utf8.validate(b) {
+        Error(e) => e.valid_up_to == at && e.error_len == n,
+        _ => false,
+    }
+}
+
 // One digit per case, 1 for valid: a + é; overlong C0 80; overlong E0 80 80; E0 A0 80
 // (U+0800); surrogate ED A0 80; ED 9F BF (U+D7FF); overlong F0 80 80 80; F0 90 80 80
 // (U+10000); F4 90 80 80 (above U+10FFFF); F4 8F BF BF (U+10FFFF); truncated E2 82; a lone
 // continuation 80; F5 80 80 80.
 // expect: run from_utf8_boundaries() = 1001010101000
 fn from_utf8_boundaries() -> u64 {
+    // Rust std::str::from_utf8 distinguishes a bad available byte from a
+    // valid prefix that still needs bytes.
+    if !utf8_error_is(b"a\xED\xA0", 1, Some(1)) || !utf8_error_is(b"a\xE1\x80", 1, None) || !utf8_error_is(b"\xF0\x9F\xA6A", 0, Some(3)) {
+        return 0
+    }
     let mut v: u64 = utf8(b"a\xC3\xA9")
     v = v * 10 + utf8(b"\xC0\x80")
     v = v * 10 + utf8(b"\xE0\x80\x80")
@@ -610,6 +627,13 @@ fn from_utf8_vector_edges() -> bool {
         if !utf8_vector_case(i, b"\xE0\xA0\x80", 128) || !utf8_vector_case(i, b"\xF4\x8F\xBF\xBF", 128) || utf8_vector_case(i, b"\xED\xA0\x80", 128) || utf8_vector_case(i, b"\xF0\x8F\xBF\xBF", 128) || utf8_vector_case(i, b"\xC1\xBF", 128) || utf8_vector_case(i, b"\x80", 128) {
             return false
         }
+    }
+    // The lead in lane 31 starts in the previous block. Rust's Utf8Error
+    // counts the lead and two valid continuations before the bad fourth byte.
+    let mut split = a_run(31, b"\xF0\x90\x80A")
+    result.unwrap(list.fill(mut split, 128, b'a'))
+    if !utf8_error_at(split, 31, Some(3)) || !utf8_error_at(a_run(127, b"\xF0\x90\x80"), 127, None) {
+        return false
     }
     utf8_vector_case(127, b"\xF0\x90\x80\x80", 0) && !utf8_vector_case(127, b"\xF0\x90\x80", 0) && !utf8_vector_case(127, b"\xF4\x90\x80\x80", 0)
 }

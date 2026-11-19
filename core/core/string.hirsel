@@ -104,9 +104,22 @@ pub fn append_base64_bytes(b: Bytes, mut out: Bytes) -> Result[(), Capacity] {
     Ok(())
 }
 
+// A nonzero carry means the validated block ended inside a scalar.
+fn utf8_complete_prefix(b: Bytes, boundary: u64, carry: u64) -> u64 {
+    let mut start = boundary
+    if carry != 0 {
+        start -= 1
+        while b[start] & 0xc0 == 0x80 {
+            start -= 1
+        }
+    }
+    start
+}
+
 // For buffers of at least 128 bytes, validate a prefix ending at a scalar
-// boundary. The scalar validator checks the remaining bytes.
-fn utf8_block_prefix(b: Bytes) -> Option[u64] {
+// boundary. On a mismatch the scalar validator resumes at the start of
+// the suspect block or the scalar that crosses its leading edge.
+fn utf8_block_prefix(b: Bytes) -> u64 {
     let n = list.len(b)
     let last_block = n - 33
     let last_wide = n - 128
@@ -118,7 +131,7 @@ fn utf8_block_prefix(b: Bytes) -> Option[u64] {
         let non_ascii = simd.bitmask(block)
         if non_ascii == 0 {
             if carry != 0 {
-                return None
+                return utf8_complete_prefix(b, i, carry)
             }
             if i <= last_wide {
                 let run = list.slice(b, i, i + 128)
@@ -140,7 +153,7 @@ fn utf8_block_prefix(b: Bytes) -> Option[u64] {
             let lead4 = non_ascii & ~simd.bitmask(simd.lt(signed, simd.splat(-16)))
             let expected = carry | (starts << 1) | (lead3 << 2) | (lead4 << 3)
             if continuation != (expected & 0xffffffff) {
-                return None
+                return utf8_complete_prefix(b, i, carry)
             }
             // C0/C1 are overlong. F5..FF cannot start a Unicode scalar.
             let bad_lead = (simd.eq(block, simd.splat(0xc0)) | simd.eq(block, simd.splat(0xc1))) | ~simd.lt(block, simd.splat(0xf5))
@@ -155,7 +168,7 @@ fn utf8_block_prefix(b: Bytes) -> Option[u64] {
             let overlong4 = simd.eq(block, simd.splat(0xf0)) & low_90
             let out_of_range = simd.eq(block, simd.splat(0xf4)) & ~low_90
             if simd.any(bad_lead | overlong3 | surrogate | overlong4 | out_of_range) {
-                return None
+                return utf8_complete_prefix(b, i, carry)
             }
             carry = expected >> 32
         }
@@ -164,33 +177,91 @@ fn utf8_block_prefix(b: Bytes) -> Option[u64] {
     // Only the final scalar of the prefix can extend into the tail.
     while carry != 0 {
         if i == n || b[i] & 0xc0 != 0x80 {
-            return None
+            return utf8_complete_prefix(b, i, carry)
         }
         i += 1
         carry >>= 1
     }
-    Some(i)
+    i
 }
 
-pub fn is_utf8(b: Bytes) -> bool {
-    let n = list.len(b)
-    let mut i: u64 = 0
-    if n >= 128 {
-        let Some(start) = utf8_block_prefix(b) else {
-            return false
+pub type Utf8Error {
+    valid_up_to: u64,
+    error_len: Option[u64]
+}
+
+/// The scalar width and valid second-byte range for a UTF-8 lead.
+pub type Utf8Head {
+    width: u64,
+    low: u8,
+    high: u8
+}
+
+pub fn utf8_head(b: u8) -> Option[Utf8Head] {
+    if b < 0x80 {
+        return Some(Utf8Head(width: 1, low: 0x80, high: 0xbf))
+    }
+    if b < 0xc2 || b > 0xf4 {
+        return None
+    }
+    let width: u64 = if b < 0xe0 {
+        2
+    } else if b < 0xf0 {
+        3
+    } else {
+        4
+    }
+    let low: u8 = if b == 0xe0 {
+        0xa0
+    } else if b == 0xf0 {
+        0x90
+    } else {
+        0x80
+    }
+    let high: u8 = if b == 0xed {
+        0x9f
+    } else if b == 0xf4 {
+        0x8f
+    } else {
+        0xbf
+    }
+    Some(Utf8Head(width: width, low: low, high: high))
+}
+
+/// Validates the continuation bytes of one unit, with available bytes including
+/// its lead. An error counts the valid prefix of an invalid unit, or is None
+/// when the input ends in an otherwise valid prefix.
+pub fn utf8_tail(head: Utf8Head, available: u64, read: scoped fn(u64) -> u8) -> Result[(), Option[u64]] {
+    for i in 1u64 .. head.width {
+        if i >= available {
+            return Error(None)
         }
-        i = start
+        let byte = read(i)
+        if i == 1 {
+            if byte < head.low || byte > head.high {
+                return Error(Some(i))
+            }
+        } else if byte & 0xc0 != 0x80 {
+            return Error(Some(i))
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_utf8(b: Bytes) -> Result[(), Utf8Error] {
+    let n = list.len(b)
+    let mut i: u64 = if n >= 128 {
+        utf8_block_prefix(b)
+    } else {
+        0
     }
     while i < n {
         let x = b[i]
         if x < 0x80 {
-            // ASCII. From a word boundary, two words at a time while neither has a high bit.
             if i & 7 == 0 {
                 while i + 16 <= n && (list.word_le(b, i) | list.word_le(b, i + 8)) & 0x8080808080808080 == 0 {
                     i += 16
                 }
-                // The block that stopped the loop, or the tail under 16 bytes: its ASCII bytes in
-                // one tight loop (at most 15 before the stop), not one per outer step.
                 while i < n && b[i] < 0x80 {
                     i += 1
                 }
@@ -199,54 +270,24 @@ pub fn is_utf8(b: Bytes) -> bool {
             }
             continue
         }
-        // x >= 0x80: the width from the lead byte, then the range of the second byte and a
-        // continuation (10xxxxxx) for each other (RFC 3629, section 4).
-        if x < 0xE0 {
-            // C2..DF, one continuation; 80..C1 never lead.
-            if x < 0xC2 || n - i < 2 || b[i + 1] & 0xC0 != 0x80 {
-                return false
-            }
-            i += 2
-        } else if x < 0xF0 {
-            // E0 takes A0..BF (no overlong), ED 80..9F (no surrogate), the rest 80..BF.
-            if n - i < 3 {
-                return false
-            }
-            let y = b[i + 1]
-            let mut lo: u8 = 0x80
-            if x == 0xE0 {
-                lo = 0xA0
-            }
-            let mut hi: u8 = 0xBF
-            if x == 0xED {
-                hi = 0x9F
-            }
-            if y < lo || y > hi || b[i + 2] & 0xC0 != 0x80 {
-                return false
-            }
-            i += 3
-        } else {
-            // F0 takes 90..BF (no overlong), F4 80..8F (nothing above U+10FFFF), F1..F3
-            // 80..BF; F5..FF never lead.
-            if x > 0xF4 || n - i < 4 {
-                return false
-            }
-            let y = b[i + 1]
-            let mut lo: u8 = 0x80
-            if x == 0xF0 {
-                lo = 0x90
-            }
-            let mut hi: u8 = 0xBF
-            if x == 0xF4 {
-                hi = 0x8F
-            }
-            if y < lo || y > hi || b[i + 2] & 0xC0 != 0x80 || b[i + 3] & 0xC0 != 0x80 {
-                return false
-            }
-            i += 4
+        let Some(head) = utf8_head(x) else {
+            return Error(Utf8Error(valid_up_to: i, error_len: Some(1)))
         }
+        if let Error(length) = utf8_tail(head, n - i, fn(offset: u64) -> u8 {
+            b[i + offset]
+        }) {
+            return Error(Utf8Error(valid_up_to: i, error_len: length))
+        }
+        i += head.width
     }
-    true
+    Ok(())
+}
+
+pub fn is_utf8(b: Bytes) -> bool {
+    match validate_utf8(b) {
+        Ok(()) => true,
+        Error(_) => false,
+    }
 }
 
 pub fn into_bytes(take s: String) -> Result[Bytes, (Capacity, String)] {

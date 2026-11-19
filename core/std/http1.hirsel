@@ -71,27 +71,12 @@ fn target_byte(c: u8, mut cur: Cursor) -> bool {
     }
     cur.utf8_low = 128
     cur.utf8_high = 191
-    if c >= 0xc2 && c <= 0xdf {
-        cur.utf8_left = 1
-    } else if c >= 0xe0 && c <= 0xef {
-        cur.utf8_left = 2
-        if c == 0xe0 {
-            cur.utf8_low = 0xa0
-        }
-        if c == 0xed {
-            cur.utf8_high = 0x9f
-        }
-    } else if c >= 0xf0 && c <= 0xf4 {
-        cur.utf8_left = 3
-        if c == 0xf0 {
-            cur.utf8_low = 0x90
-        }
-        if c == 0xf4 {
-            cur.utf8_high = 0x8f
-        }
-    } else {
+    let Some(shape) = string.utf8_head(c) else {
         return false
     }
+    cur.utf8_left = int.narrow(shape.width - 1)
+    cur.utf8_low = shape.low
+    cur.utf8_high = shape.high
     true
 }
 

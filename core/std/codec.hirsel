@@ -326,60 +326,14 @@ pub fn take_string(b: Bytes, mut at: u64) -> Result[String, Stop] {
             at += n
             Ok(take s)
         }
-        Error(_) => Error(Bad(Utf8(at + utf8_stop(b, at, at + n))))
+        Error(_) => {
+            let stop = match utf8.validate(list.slice(b, at, at + n)) {
+                Ok(()) => n,
+                Error(e) => e.valid_up_to,
+            }
+            Error(Bad(Utf8(at + stop)))
+        },
     }
-}
-
-// Where b[lo..hi] stops being UTF-8, relative to lo: the first byte that is not part of a
-// scalar (RFC 3629, section 4). Only a refused string reaches it.
-fn utf8_stop(b: Bytes, lo: u64, hi: u64) -> u64 {
-    let mut i = lo
-    while i < hi {
-        let x = b[i]
-        if x < 0x80 {
-            i += 1
-            continue
-        }
-        let mut width: u64 = 0
-        let mut low: u8 = 0x80
-        let mut high: u8 = 0xbf
-        if x >= 0xc2 && x <= 0xdf {
-            width = 2
-        } else if x >= 0xe0 && x <= 0xef {
-            width = 3
-            if x == 0xe0 {
-                low = 0xa0
-            } else if x == 0xed {
-                high = 0x9f
-            }
-        } else if x >= 0xf0 && x <= 0xf4 {
-            width = 4
-            if x == 0xf0 {
-                low = 0x90
-            } else if x == 0xf4 {
-                high = 0x8f
-            }
-        }
-        if width == 0 {
-            return i - lo
-        }
-        if hi - i < width {
-            return i - lo
-        }
-        let second = b[i + 1]
-        if second < low || second > high {
-            return i - lo
-        }
-        let mut j: u64 = 2
-        while j < width {
-            if b[i + j] & 0xc0 != 0x80 {
-                return i - lo
-            }
-            j += 1
-        }
-        i += width
-    }
-    hi - lo
 }
 
 /// A variant tag: the declared index of the variant, below `count`, else Invalid at it.
@@ -1201,7 +1155,7 @@ fn name_end(b: Bytes, at: u64, end: u64) -> Option[u64] {
     if end - at - 4 < n {
         return None
     }
-    if utf8_stop(b, at + 4, at + 4 + n) != n {
+    if let Error(_) = utf8.validate(list.slice(b, at + 4, at + 4 + n)) {
         return None
     }
     Some(at + 4 + n)
@@ -1838,9 +1792,8 @@ fn leaf(code: u64, b: Bytes, mut at: u64, mut out: Bytes) -> Result[(), Stop] {
         if list.len(b) - at < n {
             return Error(Bad(Truncated(start)))
         }
-        let stop = utf8_stop(b, at, at + n)
-        if stop != n {
-            return Error(Bad(Utf8(at + stop)))
+        if let Error(e) = utf8.validate(list.slice(b, at, at + n)) {
+            return Error(Bad(Utf8(at + e.valid_up_to)))
         }
         at += n
     } else {
@@ -2326,18 +2279,16 @@ pub fn put_key_string(x: String, mut out: Bytes) -> Result[(), Capacity] {
 pub fn take_key_string(b: Bytes, mut at: u64) -> Result[String, Stop] {
     let start = at
     let raw = take_key_bytes(b, mut at)?
-    let n = list.len(raw)
-    let stop = utf8_stop(raw, 0, n)
-    if stop != n {
+    if let Error(e) = utf8.validate(raw) {
         let mut zeros: u64 = 0
         let mut i: u64 = 0
-        while i < stop {
+        while i < e.valid_up_to {
             if raw[i] == 0 {
                 zeros += 1
             }
             i += 1
         }
-        return Error(Bad(Utf8(start + stop + zeros)))
+        return Error(Bad(Utf8(start + e.valid_up_to + zeros)))
     }
     match string.from_utf8(take raw) {
         Ok(s) => Ok(take s),

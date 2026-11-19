@@ -1,0 +1,11 @@
+// RFC 3629 §4, with Rust's Utf8Error byte offsets.
+pub type Utf8Error = string.Utf8Error
+
+/// Validates a span without allocating. valid_up_to is the length of the
+/// valid UTF-8 prefix. Some(error_len) counts the bytes of an invalid code
+/// unit. None means the span ends partway through a scalar, so a streaming
+/// caller can retain that suffix and prepend it to the next span.
+/// Cost: O(len). Ex: `std.utf8.validate(input)?`.
+pub fn validate(b: Bytes) -> Result[(), Utf8Error] {
+    string.validate_utf8(b)
+}

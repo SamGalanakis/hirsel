@@ -1646,17 +1646,32 @@ mod tests {
                 })
             })
             .collect();
-        for (index, &(pointer, bytes)) in blocks.iter().enumerate() {
-            // SAFETY: the live block pins its page's key.
-            let stride = unsafe { Page::key(page_of(pointer)).class.stride };
-            assert_eq!(stride, 0, "block {index} of {bytes} bytes has a class page");
-        }
+        // Each payer's first small blocks share one native page.
+        let pages: Vec<_> = blocks
+            .chunks(4)
+            .map(|row| {
+                let page = row[0].0.addr().get() / page_bytes();
+                for &(pointer, bytes) in row {
+                    let other = pointer.addr().get() / page_bytes();
+                    assert_eq!(other, page, "a {bytes}-byte block left its payer's page");
+                }
+                page * page_bytes()
+            })
+            .collect();
         for (pointer, bytes) in blocks {
             // SAFETY: the test frees each block once with its full charge.
             unsafe { block::free(pointer, bytes as u64) };
         }
         heap.purge();
-        assert_eq!(heap.lock().nurseries.len(), 0);
+        for page in pages {
+            let mut flag = 0;
+            // SAFETY: mincore only reads the page tables; an unmapped range fails with ENOMEM.
+            let mapped = unsafe { libc::mincore(page as *mut _, page_bytes(), &mut flag) } == 0;
+            assert!(
+                !mapped || flag & 1 == 0,
+                "an emptied payer's page stayed resident"
+            );
+        }
         for context in &contexts {
             assert_eq!(context.available(), LIMIT);
         }

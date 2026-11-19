@@ -72,20 +72,20 @@ fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
 
 
 // The body writes k and returns its commit's version.
-fn write(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+fn write(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     match store.put(mut tx, h.t, k, k) {
         Ok(()) => Ok(store.info(mut tx).id.version),
         Error(_) => Error(1u32),
     }
 }
 
-fn refuse(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+fn refuse(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     let _ = store.put(mut tx, h.t, k, k)
     Error(7u32)
 }
 
 // A deterministic fault (Bounds, Raised(2)) after a write.
-fn crash(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+fn crash(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     let _ = store.put(mut tx, h.t, k, k)
     let xs: List[u64] = list.new()
     Ok(xs[k])
@@ -95,7 +95,7 @@ fn crash(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
 // (Raised(2)). The only other try_sends are the publisher's, one per answer it tells (L23),
 // so the TRY_SEND events (kind 7) in the evaluator's event log count this handler's runs,
 // aborted ones included, plus the law's answers.
-fn tally(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+fn tally(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     let _ = store.put(mut tx, h.t, k, k)
     let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
     if let Ok((to, _)) = take made {
@@ -106,12 +106,12 @@ fn tally(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
 }
 
 // L2's entry: a String argument, decoded under 16,384 bytes.
-fn named(mut tx: store.Tx, h: Hd, take s: String) -> Result[u64, u32] {
+fn named(mut tx: store.Tx, h: Hd, author: runner.Caller, take s: String) -> Result[u64, u32] {
     Ok(string.byte_len(s))
 }
 
 // k rows in one commit: past a small resident_limit, the store refuses the commit.
-fn flood(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+fn flood(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     for i in 0u64 .. k {
         if let Error(_) = store.put(mut tx, h.t, i, i) {
             return Error(1u32)
@@ -132,7 +132,7 @@ fn flood(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
 // new count was measured on the evaluator and checked natively, and which pre-loop calls
 // went is not yet re-tallied (followups.md).
 // core/tools/runner_tests.py and runner_count.c enforce this independent oracle.
-fn hung(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+fn hung(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     let _ = store.put(mut tx, h.t, k, k)
     let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
     // Keep the receiver alive so the hung body's sends can poll a full channel.
@@ -149,6 +149,7 @@ fn answer(take k: u64) -> Result[u64, Capacity] {
 // The place's one `place` function (rule 10): the head, the publisher and every session
 // run it.
 fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.policy(mut r, code.describe(runner.public_access), list.new(), 65536u64, 8192u64)?
     runner.transact(mut r, code.describe(write), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(refuse), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(crash), 65536u64, runner.DEFAULT_STEPS)?
@@ -995,14 +996,14 @@ fn revision_is[F](got: Option[Bytes], s: StaticFn[F]) -> bool {
     }
 }
 
-fn record_is(got: Option[store.CallRecord], key: Bytes, arg: u64, entry: u64, token: Bytes) -> bool {
+fn record_is(got: Option[store.Recorded], key: Bytes, arg: u64, entry: u64, token: Bytes) -> bool {
     match got {
-        Some(c) => c.key == key && c.args == u64_arg(arg) && c.stream == wire_client.stream(token, 0u32) && if entry == 0u64 {
-            revision_is(c.revision, code.describe(write))
+        Some(c) => c.record.key == key && c.record.args == u64_arg(arg) && c.record.stream == wire_client.stream(token, 0u32) && if entry == 0u64 {
+            revision_is(c.record.revision, code.describe(write))
         } else if entry == 1u64 {
-            revision_is(c.revision, code.describe(refuse))
+            revision_is(c.record.revision, code.describe(refuse))
         } else {
-            revision_is(c.revision, code.describe(crash))
+            revision_is(c.record.revision, code.describe(crash))
         },
         None => false,
     }
@@ -1021,7 +1022,7 @@ fn disk_options() -> store.Options {
 
 fn drain_send(to: Sender[runner.HeadInput], stream: String, position: u64, argument: u64) -> Receiver[runner.WireEvent] waits {
     let (reply_to, reply_from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = result.unwrap(channel.new(2u64))
-    let req = runner.head_request(digest_bytes(stream), position, k_write(), u64_arg(argument), take reply_to)
+    let req = runner.head_request(store.Caller(issuer: 1, subject: list.new()), digest_bytes(stream), position, k_write(), u64_arg(argument), take reply_to)
     result.unwrap(channel.send(to, RunRequest(take req)))
     take reply_from
 }
@@ -1169,7 +1170,7 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     let releases: store.Table[u64, runner.ReleaseRecord] = result.unwrap(store.table(mut reopened, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of()))
     let snap = store.snapshot(reopened)
     let version = store.version(snap)
-    let record = result.unwrap(store.get(snap, store.shape(releases), version))
+    let installed = result.unwrap(store.get(snap, store.shape(releases), version))
     result.unwrap(store.close(take reopened))
     result.unwrap(std.dir.remove_all(parent, name))
     if let Some(raw) = stored {
@@ -1177,7 +1178,7 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
         let activation = result.unwrap(result.unwrap(std.codec.decode(described, raw)))
         let release = result.unwrap(runner.release_digest(activation.exported))
         let revision = option.unwrap(code.revision(code.describe(write)))
-        if let Some(row) = record {
+        if let Some(row) = installed {
             if version == 1u64 && activation.exported[0u64].revision == revision && row.release == release &&
                 row.digest == activation.digest && release == managed_release(latest.read(status)) {
                 return std.codec.fingerprint_of(release)
@@ -1326,7 +1327,9 @@ fn drive_store_refusal(take d: Drive) -> () waits {
     hang(take s0)
 }
 
-const FLOOD: u64 = 4000u64
+// Each row's resident charge is 62 + 16 (key) + 8 (value) bytes.
+// This exceeds the 32,768-byte resident limit while the draft fits the entry grant.
+const FLOOD: u64 = 512u64
 
 pub fn law_calls_store_refusal(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut o = store.defaults()
@@ -1657,8 +1660,10 @@ pub fn law_authority_receipt(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let author = store.Caller(issuer: 1, subject: list.new())
     let stream = result.unwrap(runner.stream_key(author, 23))
     let request = store.request_digest(stream, stream)
-    if let Ok(Admitted(_)) = store.admit(mut db, stream, 0, request) {} else { return false }
-    let delivery = result.unwrap(store.serve(mut db, stream, 0, author, code.describe(receipt_policy), 65536, 8192, None,
+    let admission = result.unwrap(store.admit(mut db, stream, 0, request))
+    let Admitted(take complete) = take admission else { return false }
+    let plan = store.Plan(n_p: 65536, s_p: 8192, n_e: 65536, s_e: 8192, reply_max: 4096)
+    let delivery = result.unwrap(store.serve(mut db, take complete, plan, None, author, code.describe(receipt_policy),
         fn(mut tx: store.Tx) -> Result[Bytes, Bytes] {
             match store.put(mut tx, members, 1, 8) {
                 Ok(()) => Ok(u64_arg(8)),

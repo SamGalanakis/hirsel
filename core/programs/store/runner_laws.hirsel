@@ -201,6 +201,7 @@ fn same_fault(a: runner.Fault, b: runner.Fault) -> bool {
         OutOfBytes(x) => match b { OutOfBytes(y) => same_room(x, y), _ => false },
         OutOfTime(x) => match b { OutOfTime(y) => x == y, _ => false },
         Gone => match b { Gone => true, _ => false },
+        Policy => match b { Policy => true, _ => false },
     }
 }
 
@@ -224,6 +225,7 @@ fn same(a: runner.Outcome, b: runner.Outcome) -> bool {
         Refused(x) => match b { Refused(y) => same_refusal(x, y), _ => false },
         Abandoned => match b { Abandoned => true, _ => false },
         InDoubt => match b { InDoubt => true, _ => false },
+        Withheld => match b { Withheld => true, _ => false },
     }
 }
 

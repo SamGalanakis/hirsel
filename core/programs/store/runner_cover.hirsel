@@ -36,6 +36,7 @@ fn span(tx: store.Tx, h: Hc, take n: u64) -> Result[runner.Cover, Capacity] {
 
 // The query's bound also holds the rows it projects into the initial Batch: 1,954 in mode 1.
 fn place(mut r: Spans) -> Result[(), runner.RegisterError] {
+    runner.policy(mut r, code.describe(runner.public_access), list.new(), 65536u64, 8192u64)?
     runner.query(mut r, code.describe(span), 524288u64, runner.DEFAULT_STEPS)
 }
 

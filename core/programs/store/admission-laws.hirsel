@@ -11,7 +11,7 @@ fn w3c_bytes(take count: u32) -> Result[Bytes, Capacity] {
     Ok(take b)
 }
 
-fn w3c_tx(mut tx: store.Tx, h: (), take count: u32) -> Result[Bytes, u32] {
+fn w3c_tx(mut tx: store.Tx, h: (), author: Caller, take count: u32) -> Result[Bytes, u32] {
     match w3c_bytes(count) { Ok(take b) => Ok(take b), Error(_) => Error(1u32) }
 }
 
@@ -206,18 +206,19 @@ pub fn law_join_cleanup() -> bool {
 
 type W3cHandles: send { data: store.Table[u64, u32] }
 
-fn w3c_put(mut tx: store.Tx, h: W3cHandles, take value: u32) -> Result[u64, u32] {
+fn w3c_put(mut tx: store.Tx, h: W3cHandles, author: Caller, take value: u32) -> Result[u64, u32] {
     if let Error(_) = store.put(mut tx, h.data, 0u64, value) { return Error(1u32) }
     Ok(store.info(mut tx).id.version)
 }
 
-fn w3c_large(mut tx: store.Tx, h: W3cHandles, take count: u32) -> Result[Bytes, u32] {
+fn w3c_large(mut tx: store.Tx, h: W3cHandles, author: Caller, take count: u32) -> Result[Bytes, u32] {
     if let Error(_) = store.put(mut tx, h.data, 0u64, 99u32) { return Error(1u32) }
     match w3c_bytes(count) { Ok(take b) => Ok(take b), Error(_) => Error(2u32) }
 }
 
 fn w3c_registry() -> Registry[(), W3cHandles] {
     let mut r: Registry[(), W3cHandles] = registry()
+    result.unwrap(policy(mut r, code.describe(public_access), list.new(), 65536u64, 8192u64))
     result.unwrap(transact(mut r, code.describe(w3c_put), 65536u64, DEFAULT_STEPS))
     result.unwrap(transact(mut r, code.describe(w3c_large), 65536u64, DEFAULT_STEPS))
     result.unwrap(compute(mut r, code.describe(w3c_bytes), 65536u64, DEFAULT_STEPS))
@@ -265,7 +266,11 @@ fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
     result.unwrap(list.push(mut owner.entries, w3c_key(code.identity(code.describe(w3c_large)), std.codec.of_u32(), large_codec)))
     result.unwrap(list.push(mut owner.entries, w3c_key(code.identity(code.describe(w3c_bytes)), std.codec.of_u32(), big_codec)))
     result.unwrap(list.push(mut owner.entries, w3c_retired()))
-    let head = Head(db: take db, r: w3c_registry(), h: W3cHandles(data: data), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64)
+    let mut entries = w3c_registry()
+    let configured = result.unwrap(take_policy(mut entries))
+    result.unwrap(store.declare_authority(mut db, configured.reads))
+    let head = Head(db: take db, r: take entries, key_policy: take configured, replay_identity: list.new(),
+        h: W3cHandles(data: data), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64)
     W3cRig(head: take head, owner: take owner, work: wire_work(), requests: take requests, releases: take releases, inbox: take inbox, policy: take h)
 }
 
@@ -325,7 +330,7 @@ fn w3c_close(take rig: W3cRig) -> () waits {
     let mut h = take access_gate
     task.cancel(mut h)
     let _ = task.join(take h)
-    let Head(db: take db, r: _, h: _, out: _, busy: _, waiting: _, group: _, last: _, minted: _) = take hd
+    let Head(db: take db, ..) = take hd
     result.unwrap(store.close(take db))
 }
 
@@ -338,7 +343,7 @@ pub fn law_refused_send_releases_timer(tasks: Tasks, clock: Clock, random: Rando
         let key = w3c_retired()
         let arg: Bytes = list.new()
         let digest = store.request_digest(key, arg)
-        let request = Request(caller: None, stream: list.new(), p: p, key: take key, arg: take arg, digest: digest,
+        let request = Request(caller: store.Caller(issuer: 1, subject: list.new()), stream: list.new(), p: p, key: take key, arg: take arg, digest: digest,
             reply_to: wire_me(rig.owner), live: latest.handle(filling.live),
             identity: latest.handle(filling.identity), seed: result.unwrap(owner_seed(filling)))
         if let Posted = try_head(rig.owner.head, Req(e: Requested(take request))) {} else { return false }

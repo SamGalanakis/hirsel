@@ -69,7 +69,7 @@ fn flip(mut data: Bytes, i: Bit) -> bool {
     data[index] & mask != 0u8
 }
 
-fn toggle(mut tx: store.store.Tx, h: Handles, take i: Bit) -> Result[bool, NoError] {
+fn toggle(mut tx: store.store.Tx, h: Handles, author: store.runner.Caller, take i: Bit) -> Result[bool, NoError] {
     let key = chunk(i)
     let old = result.unwrap(store.store.fetch(tx, store.store.shape(h.chunks), key))
     let mut data = match take old {
@@ -86,6 +86,7 @@ fn board(tx: store.store.Tx, h: Handles, take _arg: ()) -> Result[store.runner.C
 }
 
 fn place(mut registry: Registry) -> Result[(), store.runner.RegisterError] {
+    store.runner.policy(mut registry, code.describe(store.runner.public_access), list.new(), 65536u64, 8192u64)?
     store.runner.transact(mut registry, code.describe(toggle), 65536u64, store.runner.DEFAULT_STEPS)?
     store.runner.query(mut registry, code.describe(board), 1048576u64, store.runner.DEFAULT_STEPS)
 }

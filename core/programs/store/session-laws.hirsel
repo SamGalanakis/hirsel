@@ -28,7 +28,7 @@ type PoolCallPeer: send {
 
 fn pool_call_peer(take peer: PoolCallPeer) -> () waits {
     let PoolCallPeer(net: net, address: address, clock: clock, random: random, socket: config, payload: take payload) = take peer
-    let end = At(clock, deadline_after(host.mono_ns(clock), 5000u64))
+    let end = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
     let socket = result.unwrap(host.connect(net, address, end))
     let mut name: Bytes = list.new()
     result.unwrap(list.append(mut name, string.as_bytes("127.0.0.1")))
@@ -90,7 +90,7 @@ fn pool_call_queued(tasks: Tasks, clock: Clock, random: Random, net: Net, config
     let mut listener = take listening
     let peer = PoolCallPeer(net: net, address: address, clock: clock, random: random, socket: config.socket, payload: take payload)
     let sending = result.unwrap(task.spawn(tasks, bytes 65536u64, take peer, pool_call_peer))
-    let deadline = At(clock, deadline_after(host.mono_ns(clock), 5000u64))
+    let deadline = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
     let (take socket, addr) = result.unwrap(host.accept(mut listener, deadline))
     let upgraded = result.unwrap(std.wsock.server(take socket, take slot, addr.ip, list.new(), config.socket, clock, host.mono_ns(clock)))
     let (ready, heard): (Sender[bool], Receiver[bool]) = result.unwrap(channel.new(1u64))
@@ -110,7 +110,7 @@ fn pool_call_queued(tasks: Tasks, clock: Clock, random: Random, net: Net, config
     before && reader_stopped && after && owner_stopped
 }
 
-fn pool_durable_add(mut tx: store.Tx, table: store.Table[u64, u32], take value: u32) -> Result[u32, u32] {
+fn pool_durable_add(mut tx: store.Tx, table: store.Table[u64, u32], author: Caller, take value: u32) -> Result[u32, u32] {
     let old = match store.fetch(tx, store.shape(table), 0u64) {
         Ok(Some(count)) => count,
         Ok(None) => 0u32,
@@ -126,7 +126,7 @@ fn pool_retry(mut head: Head[(), store.Table[u64, u32]], inbox: Receiver[PubIn],
     let (to, heard): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(1u64))
     let mut stream: Bytes = list.new()
     result.unwrap(std.codec.put_u32(0u32, mut stream))
-    let request = head_request(take stream, 0u64, take key, take arg, take to)
+    let request = head_request(store.Caller(issuer: 1, subject: list.new()), take stream, 0u64, take key, take arg, take to)
     result.unwrap(head_arrival(mut head, take request, false))
     if list.len(head.group) != 0u64 { result.unwrap(gate(mut head)) }
     let PubIn(e: take event) = result.unwrap(channel.receive(inbox))
@@ -159,10 +159,14 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u32())))
     let table = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), std.codec.of_u32()))
     let mut entries: Registry[(), store.Table[u64, u32]] = registry()
+    result.unwrap(policy(mut entries, code.describe(public_access), list.new(), 65536u64, 8192u64))
     let add = code.describe(pool_durable_add)
     result.unwrap(transact(mut entries, add, 65536u64, DEFAULT_STEPS))
+    let configured = result.unwrap(take_policy(mut entries))
+    result.unwrap(store.declare_authority(mut db, configured.reads))
     let (release_to, releases): (Sender[PubIn], Receiver[PubIn]) = result.unwrap(channel.new(1u64))
-    let mut head = Head(db: take db, r: take entries, h: table, out: take release_to, busy: map.new(), waiting: list.new(),
+    let mut head = Head(db: take db, r: take entries, key_policy: take configured, replay_identity: list.new(),
+        h: table, out: take release_to, busy: map.new(), waiting: list.new(),
         group: list.new(), last: None, minted: 0u64)
 
     // The retained writer block costs 32 bytes. A Reset needs the remaining
@@ -191,7 +195,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let untouched = store.version(before) == 1u64 && result.unwrap(store.get(before, store.shape(head.h), 0u64)) == None
     let _ = take before
     let reply_codec: std.codec.Codec[Result[u32, u32]] = std.codec.of()
-    let (take key, _) = result.unwrap(described(code.identity(add), Transact, std.codec.of_u32(), reply_codec))
+    let (take key, _) = result.unwrap(described(code.identity(add), code.revision(add), Transact, std.codec.of_u32(), reply_codec))
     let Call(_, _, _, _, take retry_arg) = result.unwrap(wire_decode(payload)) else { return false }
     let committed = pool_retry(mut head, releases, result.unwrap(clone(key)), result.unwrap(clone(retry_arg)), 3u64)
     let replayed = pool_retry(mut head, releases, take key, take retry_arg, 3u64)

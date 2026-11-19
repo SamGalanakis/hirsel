@@ -38,9 +38,9 @@ def traced_calls(root, work):
     text = without_tests((root / 'core/programs/store/runner_calls.hirsel').read_text())
     text = replace(text, 'type Conn =', 'type Transport =')
     text = replace(text, 'type Drive: send {', 'type Drive: send { out: Stdout, err: Stderr,')
-    text = text.replace('Drive(head:', 'Drive(out: out, err: err, head:')
+    text = text.replace('let d = Drive(', 'let d = Drive(out: out, err: err, ')
     text = re.sub(r'(pub fn law_\w+\()', r'\1out: Stdout, err: Stderr, ', text)
-    for name in ('served', 'served_in', 'served_on', 'served_with_handles'):
+    for name in ('served', 'served_in', 'served_on'):
         text = replace(text, f'fn {name}(', f'fn {name}(out: Stdout, err: Stderr, ')
         text = re.sub(rf'(?<!fn )\b{name}\(', f'{name}(out, err, ', text)
     text = replace(text, 'Some(Socket(take cn, take h))',
@@ -118,7 +118,8 @@ pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Ta
     let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, c, r, fixture_policy(), 1048576u64))
     let mut policy_task = take policy_handle
     let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
-    let d = Drive(out: out, err: err, head: take head, post: runner.post(mail), clock: c,
+    let db = store.memory(c, r, store.defaults())
+    let d = Drive(out: out, err: err, authority: store.authority_reader(db), head: take head, post: runner.post(mail), clock: c,
         tasks: tasks, net: n, random: r, policy: ingress.share(policy),
         token: result.unwrap(clone(ingress.principal(principal))), accepted: None)
     let mut cn = conn(d, 1u64)

@@ -24,7 +24,7 @@ fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
 }
 
 
-fn named(mut tx: store.Tx, h: Hd, take s: String) -> Result[u64, u32] {
+fn named(mut tx: store.Tx, h: Hd, author: runner.Caller, take s: String) -> Result[u64, u32] {
     match store.put(mut tx, h.t, 0u64, string.byte_len(s)) {
         Ok(()) => Ok(string.byte_len(s)),
         Error(_) => Error(1u32),
@@ -32,6 +32,7 @@ fn named(mut tx: store.Tx, h: Hd, take s: String) -> Result[u64, u32] {
 }
 
 fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.policy(mut r, code.describe(runner.public_access), list.new(), 65536u64, 8192u64)?
     runner.transact(mut r, code.describe(named), 16384u64, runner.DEFAULT_STEPS)
 }
 

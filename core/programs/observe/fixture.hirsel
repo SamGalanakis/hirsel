@@ -45,7 +45,7 @@ pub fn law_digest() -> bool {
     got != digest(empty, other)
 }
 
-pub fn record(mut tx: store.Tx, h: Handles, take a: Request) -> Result[Recorded, u32] {
+pub fn record(mut tx: store.Tx, h: Handles, author: runner.Caller, take a: Request) -> Result[Recorded, u32] {
     match k_record(mut tx, h, observe.own(a)) {
         Ok(v) => Ok(Recorded(request: take a, version: v)),
         Error(_) => Error(1u32),

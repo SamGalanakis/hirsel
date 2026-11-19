@@ -50,7 +50,7 @@ fn counted(tx: store.Tx, h: Hd) -> Result[u64, u32] {
 }
 
 // Adds 1 to the counter and returns k.
-fn bump(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+fn bump(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     let n = counted(tx, h)?
     match store.put(mut tx, h.t, 0u64, n + 1u64) {
         Ok(()) => Ok(k),
@@ -59,14 +59,14 @@ fn bump(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
 }
 
 // Adds 1 to the counter, then returns a typed error, so the effect is aborted.
-fn deny(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+fn deny(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     let n = counted(tx, h)?
     let _ = store.put(mut tx, h.t, 0u64, n + 1u64)
     Error(7u32)
 }
 
 // Adds 1 to the counter, then faults (Bounds, Raised(2)).
-fn trip(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+fn trip(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     let n = counted(tx, h)?
     let _ = store.put(mut tx, h.t, 0u64, n + 1u64)
     let xs: List[u64] = list.new()
@@ -74,6 +74,7 @@ fn trip(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
 }
 
 fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.policy(mut r, code.describe(runner.public_access), list.new(), 65536u64, 8192u64)?
     runner.transact(mut r, code.describe(bump), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(deny), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(trip), 65536u64, runner.DEFAULT_STEPS)

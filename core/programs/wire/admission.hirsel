@@ -17,12 +17,12 @@ fn handles(catalog: store.store.Schema) -> Result[H, store.store.Error] {
 }
 
 
-fn put(mut tx: store.store.Tx, h: H, take value: u32) -> Result[u64, u32] {
+fn put(mut tx: store.store.Tx, h: H, author: store.runner.Caller, take value: u32) -> Result[u64, u32] {
     if let Error(_) = store.store.put(mut tx, h.table, 0u64, value) { return Error(1u32) }
     Ok(store.store.info(mut tx).id.version)
 }
 
-fn large(mut tx: store.store.Tx, h: H, take count: u32) -> Result[Bytes, u32] {
+fn large(mut tx: store.store.Tx, h: H, author: store.runner.Caller, take count: u32) -> Result[Bytes, u32] {
     if let Error(_) = store.store.put(mut tx, h.table, 0u64, 99u32) { return Error(1u32) }
     let mut b: Bytes = list.new()
     let n: u64 = int.widen(count)
@@ -50,6 +50,7 @@ fn retired() -> Bytes {
 }
 
 fn place(mut r: Reg) -> Result[(), store.runner.RegisterError] {
+    store.runner.policy(mut r, code.describe(store.runner.public_access), list.new(), 65536u64, 8192u64)?
     store.runner.transact(mut r, code.describe(put), 65536u64, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(large), 65536u64, store.runner.DEFAULT_STEPS)?
     store.runner.compute(mut r, code.describe(big), 65536u64, store.runner.DEFAULT_STEPS)?

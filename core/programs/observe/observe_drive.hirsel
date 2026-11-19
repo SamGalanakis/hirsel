@@ -9,6 +9,7 @@ const LATER: u64 = 10000000000u64
 const N_PLACE: u64 = 1048576u64
 
 fn place(mut r: Reg) -> Result[(), runner.RegisterError] {
+    runner.policy(mut r, code.describe(runner.public_access), list.new(), 65536u64, 8192u64)?
     runner.transact(mut r, code.describe(observe_fixture.record), 65536u64, runner.DEFAULT_STEPS)
 }
 
@@ -48,7 +49,7 @@ fn drive_input(take head: Sender[runner.Req], take post: Sender[runner.PubIn], a
     config.call_period_ns = 1u64
     let (policy, take handle) = result.unwrap(ingress.start(tasks, clock, random, config, 1048576u64))
     let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
-    let d = Drive(head: take head, post: take post, authority: store.dup(authority), clock: clock, tasks: tasks, net: net, random: random,
+    let d = Drive(authority: store.dup(authority), head: take head, post: take post, clock: clock, tasks: tasks, net: net, random: random,
         policy: ingress.share(policy), token: result.unwrap(clone(ingress.principal(principal))),
         out: out, err: err, seed: seed, mix: mix)
     (take d, take handle)

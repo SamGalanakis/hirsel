@@ -8,9 +8,9 @@ pub type Kind: codec + send = Compute | Transact | Query | Granted
 
 pub type Refusal: codec + send = NoEntry | Malformed(Bad) | Overloaded | Deadline | Budget(Room) | NotAllowed | RequestMismatch | HistoryUnavailable
 
-pub type Fault: codec + send = Raised(u32) | OutOfBytes(Room) | OutOfTime(u64) | Gone
+pub type Fault: codec + send = Raised(u32) | OutOfBytes(Room) | OutOfTime(u64) | Gone | Policy
 
-pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refusal) | Abandoned | InDoubt
+pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refusal) | Abandoned | InDoubt | Withheld
 
 pub type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }
 
@@ -52,7 +52,7 @@ pub fn stream_key(c: Caller, number: u32) -> Result[Bytes, Capacity] {
 
 pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes)
 pub type Selection: send = Current(u64) | Install
-pub type OpenError: send = Store(store.Error) | Place(RegisterError) | PolicyTable(String) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown
+pub type OpenError: send = Store(store.Error) | Place(RegisterError) | PolicyTable(String) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | NoPolicy
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Draining
@@ -348,7 +348,7 @@ fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receive
 // starts a task under `bytes n` that holds the grant. A transact slot has two: the
 // session's check (rule 5: decode the argument, keep nothing) and the head's run, with the
 // entry's step bound and its code.revision, which each call record carries (R5, §7).
-type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes) -> Result[Task[Outcome], Capacity]) | Transact(u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Bytes) -> Ran) | Query(u64, u64, own[send] fn(store.Snapshot, H, Bytes, store.Snapshot, Option[View[Cover]], u32, Log[Row]) -> Queried)
+type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes) -> Result[Task[Outcome], Capacity]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Caller, Bytes) -> Ran) | Query(u64, u64, own[send] fn(store.Snapshot, H, Bytes, store.Snapshot, Option[View[Cover]], u32, Log[Row]) -> Queried)
 
 type KeyPolicy: send {
     f: StaticFn[fn(store.Tx, Caller) -> Result[store.KeyScope, Capacity]],
@@ -379,6 +379,10 @@ pub fn policy[G: send, H: send](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, 
         },
         Error(c) => Error(Full(c))
     }
+}
+
+pub fn public_access(tx: store.Tx, author: Caller) -> Result[store.KeyScope, Capacity] {
+    Ok(store.everything(tx))
 }
 
 fn room(c: Capacity) -> Room {
@@ -748,7 +752,7 @@ fn placed[G: send, H: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(),
 
 // A transact run, for the head: an effect to commit with its reply, a typed error whose
 // reply is kept alone, a fault after entry, or a refusal that records nothing.
-type Ran: send = Commit(Bytes) | Abort(Bytes) | Faulted(Fault) | Refuse(Refusal)
+type Ran: send = Commit(Bytes) | Abort(Bytes) | Exhausted(Capacity) | Refuse(Refusal)
 
 // The session's check (rule 5): the argument decodes under n, and the value is dropped.
 // Running out of n is not a refusal; the head's run answers it with Failed(OutOfBytes).
@@ -768,41 +772,30 @@ fn check_arg[A](ca: std.codec.Codec[A], arg: Bytes, n: u64) -> Option[Refusal] {
     }
 }
 
-// The transact adapter, inside the head's `store.run` (which isolates it): decode A, call
-// f with the Tx and the handles, and encode its Result[R, E], all inside `bound bytes n`.
-fn adapt_transact[H: send, A, R, E](f: StaticFn[fn(mut store.Tx, H, take A) -> Result[R, E]], ca: std.codec.Codec[A], cr: std.codec.Codec[R], ce: std.codec.Codec[E], mut tx: store.Tx, h: H, arg: Bytes, n: u64) -> Ran {
+// The store's entry bound covers decoding, execution and reply encoding.
+fn adapt_transact[H: send, A, R, E](f: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]], ca: std.codec.Codec[A], cr: std.codec.Codec[R], ce: std.codec.Codec[E], mut tx: store.Tx, h: H, author: Caller, arg: Bytes) -> Ran {
     let body = code.callable(f)
-    let tried = bound bytes n {
-        match std.codec.decode(ca, arg) {
-            Ok(Ok(take a)) => {
-                let res = body(mut tx, h, take a)
-                let kept = match res {
-                    Ok(_) => true,
-                    Error(_) => false,
-                }
-                let mut out: Bytes = list.new()
-                match std.codec.put_result(res, cr, ce, mut out) {
-                    Ok(()) => if list.len(out) > DONE_MAX - 20u64 {
-                        { let stopped: Ran = Faulted(OutOfBytes(Room(requested: list.len(out), available: DONE_MAX - 20u64))); stopped }
-                    } else if kept {
-                        Commit(take out)
-                    } else {
-                        Abort(take out)
-                    },
-                    Error(c) => Faulted(OutOfBytes(room(c))),
-                }
-            },
-            Ok(Error(e)) => Refuse(Malformed(bad(e))),
-            Error(c) => Faulted(OutOfBytes(room(c))),
-        }
-    }
-    match take tried {
-        Ok(take r) => take r,
-        Error(c) => Refuse(Budget(room(c))),
+    match std.codec.decode(ca, arg) {
+        Ok(Ok(take a)) => {
+            let res = body(mut tx, h, author, take a)
+            let kept = match res { Ok(_) => true, Error(_) => false }
+            let mut out: Bytes = list.new()
+            match std.codec.put_result(res, cr, ce, mut out) {
+                Ok(()) => {
+                    let length = list.len(out)
+                    if length > MAX_RETURNED_BYTES {
+                        Exhausted(Capacity(requested: length, available: MAX_RETURNED_BYTES))
+                    } else if kept { Commit(take out) } else { Abort(take out) }
+                },
+                Error(c) => Exhausted(c),
+            }
+        },
+        Ok(Error(e)) => Refuse(Malformed(bad(e))),
+        Error(c) => Exhausted(c),
     }
 }
 
-pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[G, H], f: StaticFn[fn(mut store.Tx, H, take A) -> Result[R, E]], n: u64, s: u64) -> Result[(), RegisterError] {
+pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[G, H], f: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let ce: std.codec.Codec[E] = std.codec.of()
@@ -822,10 +815,10 @@ pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[
     }
     register_check(mut r, key, ca, n, s)?
     let check = fn(arg: Bytes) -> Option[Refusal] { check_arg(ca, arg, n) }
-    let run = fn(mut tx: store.Tx, h: H, arg: Bytes) -> Ran { adapt_transact(f, ca, cr, ce, mut tx, h, arg, n) }
+    let run = fn(mut tx: store.Tx, h: H, author: Caller, arg: Bytes) -> Ran { adapt_transact(f, ca, cr, ce, mut tx, h, author, arg) }
     match check {
         Ok(take c) => match run {
-            Ok(take go) => insert(mut r, take key, take d, Transact(s, take revision, take c, take go)),
+            Ok(take go) => insert(mut r, take key, take d, Transact(n, s, take revision, take c, take go)),
             Error((e, _)) => Error(Full(e)),
         },
         Error((e, _)) => Error(Full(e)),
@@ -1281,7 +1274,7 @@ pub opaque type Req: send { e: HeadIn }
 type HeadIn: send = Requested(Request) | OwnerLeft
 
 type Request: send {
-    caller: Option[Caller],
+    caller: Caller,
     stream: Bytes,
     p: u64,
     key: Bytes,
@@ -1342,6 +1335,8 @@ type Waiting: send { req: Request, parked: bool }
 type Head[G: send, H: send] {
     db: store.Db,
     r: Registry[G, H],
+    key_policy: KeyPolicy,
+    replay_identity: Bytes,
     h: H,
     out: Sender[PubIn],
     busy: Map[Bytes, Worker],
@@ -1389,14 +1384,14 @@ pub fn place_head_selected[G: send, H: send](take db: store.Db, selection: Selec
     let mut owned = take db
     let persistent = store.is_disk(owned)
     let prepared = head_prepare(mut owned, selection, persistent, place, migrate, handles, n_place, tasks)
-    let (r, h, h2, _) = match take prepared {
+    let (r, configured, h, h2, _, replay_identity) = match take prepared {
         Ok(take ready) => take ready,
         Error(take problem) => { let _ = close_store(take owned); return Error(take problem) },
     }
-    run_head(take owned, take r, take h, take h2, place, n_place, take inbox, take mail, tasks, n_publisher, None)
+    run_head(take owned, take r, take configured, take replay_identity, take h, take h2, place, n_place, take inbox, take mail, tasks, n_publisher, None)
 }
 
-fn run_head[G: send, H: send](take db: store.Db, take r: Registry[G, H], take h: H, take h2: H,
+fn run_head[G: send, H: send](take db: store.Db, take r: Registry[G, H], take configured: KeyPolicy, take replay_identity: Bytes, take h: H, take h2: H,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take inbox: HeadRequests,
     take mail: Mailbox, tasks: Tasks, n_publisher: u64, take drain: Option[HeadDrain]) -> Result[(), OpenError] waits {
     let mut owned = take db
@@ -1415,7 +1410,7 @@ fn run_head[G: send, H: send](take db: store.Db, take r: Registry[G, H], take h:
             }
         }
     }
-    let mut hd = Head(db: take owned, r: take r, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64)
+    let mut hd = Head(db: take owned, r: take r, key_policy: take configured, replay_identity: take replay_identity, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64)
     let served = serve_head(mut hd, take inbox, take drain)
     finish_head(take hd, take publisher_task, take served)
 }
@@ -1514,7 +1509,7 @@ fn managed_head[G: send, H: send](take job: ManagedHead[G, H]) -> Result[(), Sta
     let mut db = match take opened { Ok(take db) => take db, Error(take problem) => return Error(Open(Store(take problem))) }
     if !head_advance(to, inbox, Recovered) { return head_closed(take db) }
     let prepared = head_prepare(mut db, selection, persistent, place, migrate, handles, n_place, tasks)
-    let (reg, local, publisher_handles, release) = match take prepared {
+    let (reg, configured, local, publisher_handles, release, replay_identity) = match take prepared {
         Ok(take values) => take values,
         Error(take problem) => { let _ = close_store(take db); return Error(Open(take problem)) },
     }
@@ -1524,7 +1519,7 @@ fn managed_head[G: send, H: send](take job: ManagedHead[G, H]) -> Result[(), Sta
         Error(cap) => { let _ = close_store(take db); return Error(Full(cap)) },
     }
     let closing = HeadDrain(finish: take finish_from, events: take to, window: take drain, clock: clock)
-    let ended = run_head(take db, take reg, take local, take publisher_handles, place, n_place, ManagedRequests(take inbox), take mail, tasks, n_publisher, Some(take closing))
+    let ended = run_head(take db, take reg, take configured, take replay_identity, take local, take publisher_handles, place, n_place, ManagedRequests(take inbox), take mail, tasks, n_publisher, Some(take closing))
     let _ = take temporary
     match take ended {
         Ok(()) => Ok(()),
@@ -1539,15 +1534,17 @@ fn head_closed(take db: store.Db) -> Result[(), StartError] waits {
 
 fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persistent: bool,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, H, Bytes), OpenError] waits {
+    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], KeyPolicy, H, H, Bytes, Bytes), OpenError] waits {
     if !store.is_disk(db) {
+        let mut local_registry = match placed(place, n_place) { Ok(take registered) => take registered, Error(take problem) => return Error(Place(take problem)) }
+        let configured = take_policy(mut local_registry)?
+        let identity = activation_identity(code.identity(place), code.identity(migrate), code.identity(handles))?
         if let Error(take problem) = store.run_migration(mut db, tasks, migrate) { return Error(Migrate(take problem)) }
-        let local_registry = match placed(place, n_place) { Ok(take registered) => take registered, Error(take problem) => return Error(Place(take problem)) }
         let h = open_handles(db, handles)?
         let h2 = open_handles(db, handles)?
-        if let Some(settings) = local_registry.key_policy { declare_policy(mut db, settings)? }
+        declare_policy(mut db, configured)?
         let release = match release_digest(local_registry.exported) { Ok(take value) => take value, Error(cap) => return Error(Store(Full(cap))) }
-        return Ok((take local_registry, take h, take h2, take release))
+        return Ok((take local_registry, take configured, take h, take h2, take release, take identity))
     }
     let current = activation_result(current_description(db))?
     let selected: Option[u64] = match selection {
@@ -1566,7 +1563,8 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
         },
     }
     if persistent && selected == None && launch_word(1u64, 0u64) == 0u64 { return Error(IdentityUnknown) }
-    let reg = match placed(place, n_place) { Ok(take reg) => take reg, Error(take problem) => return Error(Place(take problem)) }
+    let mut reg = match placed(place, n_place) { Ok(take reg) => take reg, Error(take problem) => return Error(Place(take problem)) }
+    let configured = take_policy(mut reg)?
     let payload = prepare_activation(reg, n_place)
     let (description, record) = match take payload {
         Ok(take pair) => take pair,
@@ -1575,12 +1573,14 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
     if let Some(version) = selected {
         let old = option.unwrap(take current)
         if old != description { return Error(NotCurrent(Active(version, take old))) }
+        let identity = activation_identity(code.identity(place), code.identity(migrate), code.identity(handles))?
         let h = open_handles(db, handles)?
         let h2 = open_handles(db, handles)?
-        if let Some(settings) = reg.key_policy { declare_policy(mut db, settings)? }
+        declare_policy(mut db, configured)?
         let ReleaseRecord(release: take release, ..) = take record
-        return Ok((take reg, take h, take h2, take release))
+        return Ok((take reg, take configured, take h, take h2, take release, take identity))
     }
+    let identity = activation_identity(code.identity(place), code.identity(migrate), code.identity(handles))?
     let mut stage = match store.stage_migration(db, tasks, migrate) {
         Ok(take staged) => take staged,
         Error(take problem) => return Error(Migrate(take problem)),
@@ -1590,20 +1590,15 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
     activation_result(store.stage_activation(mut stage, version, current, description, release_codec, record))?
     let h = activation_result(store.with_staged_schema(stage, handles))?
     let h2 = activation_result(store.with_staged_schema(stage, handles))?
-    let names = match reg.key_policy {
-        Some(settings) => {
-            let copied: Result[List[String], Capacity] = clone(settings.reads)
-            match take copied { Ok(take names) => Some(take names), Error(cap) => return Error(Store(Full(cap))) }
-        },
-        None => None,
-    }
-    match store.install_activation(mut db, take stage, take names) {
+    let copied: Result[List[String], Capacity] = clone(configured.reads)
+    let names = match take copied { Ok(take names) => take names, Error(cap) => return Error(Store(Full(cap))) }
+    match store.install_activation(mut db, take stage, Some(take names)) {
         Ok(()) => (),
         Error(Missing(take name)) => return Error(PolicyTable(take name)),
         Error(take problem) => return Error(Store(take problem)),
     }
     let ReleaseRecord(release: take release, ..) = take record
-    Ok((take reg, take h, take h2, take release))
+    Ok((take reg, take configured, take h, take h2, take release, take identity))
 }
 
 fn activation_result[T](take answer: Result[T, store.Error]) -> Result[T, OpenError] {
@@ -1611,6 +1606,38 @@ fn activation_result[T](take answer: Result[T, store.Error]) -> Result[T, OpenEr
         Ok(take value) => Ok(take value),
         Error(take problem) => Error(Store(take problem)),
     }
+}
+
+fn take_policy[G: send, H: send](mut r: Registry[G, H]) -> Result[KeyPolicy, OpenError] {
+    match replace(mut r.key_policy, None) {
+        Some(take configured) => Ok(take configured),
+        None => Error(NoPolicy),
+    }
+}
+
+fn activation_identity(place_id: Bytes, migrate_id: Bytes, handles_id: Bytes) -> Result[Bytes, OpenError] {
+    match replay_identity_of(place_id, migrate_id, handles_id) {
+        Ok(take digest) => Ok(take digest),
+        Error(problem) => Error(Store(Full(problem))),
+    }
+}
+
+fn replay_identity_of(place_id: Bytes, migrate_id: Bytes, handles_id: Bytes) -> Result[Bytes, Capacity] {
+    let launch = launch_digest()?
+    if list.len(launch) == 0 { return Ok(list.new()) }
+    let mut raw = take launch
+    authority_word(mut raw, list.len(place_id), 4)?
+    list.append(mut raw, place_id)?
+    authority_word(mut raw, list.len(migrate_id), 4)?
+    list.append(mut raw, migrate_id)?
+    authority_word(mut raw, list.len(handles_id), 4)?
+    list.append(mut raw, handles_id)?
+    let mut hash = std.sha256.start()
+    std.sha256.add(mut hash, raw, 0, list.len(raw))
+    let digest = std.sha256.finish(hash)
+    let mut identity: Bytes = list.with_capacity(32)?
+    for byte in digest { result.capacity_only(list.push(mut identity, byte))? }
+    Ok(take identity)
 }
 
 fn declare_policy(mut db: store.Db, settings: KeyPolicy) -> Result[(), OpenError] {
@@ -1802,15 +1829,9 @@ fn begin[G: send, H: send](mut hd: Head[G, H], take q: Request) -> Result[(), st
         Error(e) => return Error(e),
     }
     match take a {
-        Admitted(_) => execute(mut hd, take q),
-        Abandoned(_) => execute(mut hd, take q),
-        Duplicate(b) => {
-            let co: std.codec.Codec[Outcome] = std.codec.of()
-            match std.codec.decode(co, b) {
-                Ok(Ok(take o)) => commitless(mut hd, take q, take o),
-                _ => fail("runner: a stored reply does not decode"),
-            }
-        },
+        Admitted(take complete) => execute(mut hd, take q, take complete),
+        Abandoned(take complete) => execute(mut hd, take q, take complete),
+        Duplicate(stored) => duplicate_reply(mut hd, take q, stored),
         Rejected(_) => {
             result.unwrap(list.push(mut hd.waiting, Waiting(req: take q, parked: true)))
             Ok(())
@@ -1818,46 +1839,6 @@ fn begin[G: send, H: send](mut hd: Head[G, H], take q: Request) -> Result[(), st
         HistoryUnavailable => commitless(mut hd, take q, Refused(HistoryUnavailable)),
         RequestMismatch => commitless(mut hd, take q, Refused(RequestMismatch)),
     }
-}
-
-// What a failed transact run leaves: its reply, which the store keeps alone in the aborted
-// run's frame (STORE-SPEC F2), or a refusal that records nothing.
-type Kept = Alone(Outcome) | Nothing(Refusal)
-
-// The effect run: the slot's body and its reply in one commit. It takes the head's parts
-// as separate places, so the body can view the registry and handles while db is lent.
-fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, q: Request) -> Option[Result[store.Outcome[Outcome, Kept], store.Error]] waits {
-    match map.get(r.slots, q.key) {
-        Some(Transact(s, revision, _, go)) => Some(store.run_with_reply(mut db, Some(s), fn(why: Kept) -> bool {
-            match why { Alone(_) => true, Nothing(_) => false }
-        }, scoped fn(mut tx: store.Tx) -> Result[Outcome, Kept] {
-            match go(mut tx, h, q.arg) {
-                Commit(take b) => {
-                    let o: Outcome = Returned(take b)
-                    match answered(mut tx, q, o, revision) {
-                        Ok(()) => Ok(take o),
-                        Error(_) => Error(Nothing(Overloaded)),
-                    }
-                },
-                Abort(take b) => keep_reply(mut tx, q, Returned(take b), revision),
-                Faulted(take f) => keep_reply(mut tx, q, Failed(take f), revision),
-                Refuse(take why) => Error(Nothing(take why)),
-            }
-        })),
-        _ => None,
-    }
-}
-
-// R5 (§7): a run's reply and its call record in one Tx: the requested key, the exact
-// argument bytes, the stream, and the code.revision of the entry that ran.
-fn answered(mut tx: store.Tx, q: Request, o: Outcome, revision: Option[Bytes]) -> Result[(), store.Error] {
-    let answer_bytes = encode_runner_reply(o)?
-    let rev = match revision {
-        Some(b) => Some(copy_bytes(b)?),
-        None => None,
-    }
-    let recorded = store.CallRecord(key: copy_bytes(q.key)?, args: copy_bytes(q.arg)?, stream: copy_bytes(q.stream)?, revision: take rev)
-    store.reply_recorded(mut tx, q.p, take answer_bytes, take recorded)
 }
 
 fn copy_bytes(b: Bytes) -> Result[Bytes, store.Error] {
@@ -1868,87 +1849,147 @@ fn copy_bytes(b: Bytes) -> Result[Bytes, store.Error] {
     }
 }
 
-// The revision a reply-only commit records for a faulted or stopped run of q's entry.
-fn revision_of[G: send, H: send](r: Registry[G, H], key: Bytes) -> Option[Option[Bytes]] {
-    match map.get(r.slots, key) {
-        Some(Transact(_, revision, _, _)) => match revision {
-            Some(b) => {
-                let mut out: Bytes = list.new()
-                result.unwrap(list.append(mut out, b))
-                Some(Some(take out))
-            },
-            None => Some(None),
+fn authority_word(mut raw: Bytes, value: u64, width: u64) -> Result[(), Capacity] {
+    for i in 0u64 .. width {
+        result.capacity_only(list.push(mut raw, int.truncate(value >> int.truncate(8 * (width - 1 - i)))))?
+    }
+    Ok(())
+}
+
+fn authority_bytes(settings: KeyPolicy, n: u64, s: u64, replay_identity: Bytes) -> Result[Bytes, Capacity] {
+    let mut raw: Bytes = list.with_capacity(64 + list.len(replay_identity))?
+    match code.revision(settings.f) {
+        Some(revision) => list.append(mut raw, revision)?,
+        None => list.fill(mut raw, 32, 0u8)?,
+    }
+    authority_word(mut raw, settings.n, 8)?
+    authority_word(mut raw, settings.s, 8)?
+    authority_word(mut raw, n, 8)?
+    authority_word(mut raw, s, 8)?
+    list.append(mut raw, replay_identity)?
+    Ok(take raw)
+}
+
+fn record_request(q: Request, revision: Option[Bytes], settings: KeyPolicy, n: u64, s: u64, replay_identity: Bytes) -> Result[store.CallRecord, store.Error] {
+    let rev = match revision { Some(bytes_in) => Some(copy_bytes(bytes_in)?), None => None }
+    let authority = match authority_bytes(settings, n, s, replay_identity) {
+        Ok(take bytes_in) => take bytes_in,
+        Error(problem) => return Error(Full(problem)),
+    }
+    Ok(store.CallRecord(key: copy_bytes(q.key)?, args: copy_bytes(q.arg)?, stream: copy_bytes(q.stream)?, revision: take rev, authority: take authority))
+}
+
+fn encode_entry_reply(mut tx: store.Tx, take result: Ran) -> Result[Bytes, Bytes] {
+    let (keep, take outcome): (bool, Outcome) = match take result {
+        Commit(take raw) => (true, Returned(take raw)),
+        Abort(take raw) => (false, Returned(take raw)),
+        Refuse(take reason) => (false, Refused(take reason)),
+        Exhausted(problem) => {
+            store.body_capacity(mut tx, problem)
+            return Error(list.new())
         },
-        _ => None,
+    }
+    match encode_runner_reply(outcome) {
+        Ok(take wire_bytes) => if keep { Ok(take wire_bytes) } else { Error(take wire_bytes) },
+        Error(Full(problem)) => { store.body_capacity(mut tx, problem); Error(list.new()) },
+        Error(_) => fail("runner: reply encoding failed"),
     }
 }
 
-fn keep_reply(mut tx: store.Tx, q: Request, take o: Outcome, revision: Option[Bytes]) -> Result[Outcome, Kept] {
-    match answered(mut tx, q, o, revision) {
-        Ok(()) => Error(Alone(take o)),
-        Error(_) => Error(Nothing(Overloaded)),
+fn failed_stop(stop: store.Stop) -> Outcome {
+    match stop {
+        Raised(reason) => Failed(Raised(reason)),
+        OutOfSteps(steps) => Failed(OutOfTime(steps)),
+        OutOfBytes(problem) => Failed(OutOfBytes(room(problem))),
+        Policy => Failed(Policy),
     }
 }
 
-fn execute[G: send, H: send](mut hd: Head[G, H], take q: Request) -> Result[(), store.Error] waits {
-    let tried = effect(mut hd.db, hd.r, hd.h, q)
+type Effect = Served(Result[store.Served, store.ServeError]) | Unregistered(store.Pending)
+
+fn run_effect[G: send, H: send](mut db: store.Db, settings: KeyPolicy, identity: Bytes, locations: Registry[G, H],
+        handles: H, q: Request, take complete: store.Completion) -> Result[Effect, store.Error] waits {
+    match map.get(locations.slots, q.key) {
+        Some(Transact(n, s, revision, _, go)) => {
+            let rec = record_request(q, revision, settings, n, s, identity)?
+            // The stored Outcome adds a four-byte tag and a four-byte length.
+            let plan = store.Plan(n_p: settings.n, s_p: settings.s, n_e: n, s_e: s, reply_max: MAX_RETURNED_BYTES + 8u64)
+            Ok(Served(store.serve(mut db, take complete, plan, Some(take rec), q.caller, settings.f,
+                scoped fn(mut tx: store.Tx) -> Result[Bytes, Bytes] {
+                    let outcome = go(mut tx, handles, q.caller, q.arg)
+                    encode_entry_reply(mut tx, take outcome)
+                })))
+        },
+        _ => {
+            let attempted = store.next_call_info(db)
+            Ok(Unregistered(store.untried(take complete, None, attempted)))
+        },
+    }
+}
+
+fn execute[G: send, H: send](mut hd: Head[G, H], take q: Request, take complete: store.Completion) -> Result[(), store.Error] waits {
+    let tried = run_effect(mut hd.db, hd.key_policy, hd.replay_identity, hd.r, hd.h, q, take complete)
     let ran = match take tried {
-        Some(take x) => match take x {
-            Ok(take y) => take y,
-            Error(e) => return Error(e),
-        },
-        // §7's one exception: a gone entry's reply has no call record.
-        None => return reply_only(mut hd, take q, Failed(Gone), None),
+        Ok(Served(take result)) => take result,
+        Ok(Unregistered(take pending_run)) => return reply_only(mut hd, take q, take pending_run, Failed(Gone)),
+        Error(Full(_)) => return commitless(mut hd, take q, Refused(Overloaded)),
+        Error(take problem) => return Error(take problem),
     }
     match take ran {
-        Committed(take d) => {
-            let store.Done(value: take o, ticket: t, info: i, reads: _) = take d
-            worker(mut hd, take q, take o, t, i.id.version)
-        },
-        Aborted(take u) => match take u {
-            store.Undone(value: Alone(take o), ticket: Some(t)) => {
-                let version = store.version(store.snapshot(hd.db))
-                worker(mut hd, take q, take o, t, version)
-            },
-            store.Undone(value: Alone(_), ticket: None) => fail("runner: an aborted run lost its reply"),
-            store.Undone(value: Nothing(take why), ticket: _) => commitless(mut hd, take q, Refused(take why)),
-        },
-        Failed(cs) => {
-            let rev = revision_of(hd.r, q.key)
-            reply_only(mut hd, take q, Failed(Raised(raised(cs))), take rev)
-        },
-        Stopped(e) => {
-            let rev = revision_of(hd.r, q.key)
-            reply_only(mut hd, take q, Failed(OutOfTime(e.steps)), take rev)
-        },
-        Refused(_) => commitless(mut hd, take q, Refused(Overloaded)),
+        Ok(Committed(take receipt)) => answered(mut hd, take q, take receipt),
+        Ok(Kept(take receipt)) => answered(mut hd, take q, take receipt),
+        Ok(Failed(take pending_run, stop)) => reply_only(mut hd, take q, take pending_run, failed_stop(stop)),
+        Ok(NoRoom(_, _)) => commitless(mut hd, take q, Refused(Overloaded)),
+        Error(Before(Full(_))) => commitless(mut hd, take q, Refused(Overloaded)),
+        Error(Before(take problem)) => Error(take problem),
+        Error(After(take problem)) => Error(take problem),
     }
 }
 
-// `record` is Some(the entry's revision) for a run's reply, which keeps its call record,
-// and None for a gone entry's.
-fn reply_alone(mut db: store.Db, q: Request, o: Outcome, record: Option[Option[Bytes]]) -> Result[store.Outcome[(), store.Error], store.Error] waits {
-    store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        match record {
-            Some(revision) => answered(mut tx, q, o, revision),
-            None => store.reply(mut tx, q.stream, q.p, encode_runner_reply(o)?),
+fn answered[G: send, H: send](mut hd: Head[G, H], take q: Request, take receipt: store.Receipt) -> Result[(), store.Error] {
+    let co: std.codec.Codec[Outcome] = std.codec.of()
+    let version = store.version(store.snapshot(hd.db))
+    match std.codec.decode(co, receipt.reply) {
+        Ok(Ok(take outcome)) => worker(mut hd, take q, take outcome, receipt.ticket, version),
+        _ => fail("runner: stored reply did not decode"),
+    }
+}
+
+fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Request, take pending_run: store.Pending, take outcome: Outcome) -> Result[(), store.Error] waits {
+    let wire_bytes = encode_runner_reply(outcome)?
+    let settled = store.conclude(mut hd.db, take pending_run, take wire_bytes, Resident)
+    match take settled {
+        Ok(Committed(receipt)) => {
+            let version = store.version(store.snapshot(hd.db))
+            worker(mut hd, take q, take outcome, receipt.ticket, version)
+        },
+        Ok(NoRoom(_, _)) => commitless(mut hd, take q, Refused(Overloaded)),
+        Error(Before(take problem)) => Error(take problem),
+        Error(After(take problem)) => Error(take problem),
+        _ => fail("runner: invalid conclude outcome"),
+    }
+}
+
+fn duplicate_reply[G: send, H: send](mut hd: Head[G, H], take q: Request, stored: store.Stored) -> Result[(), store.Error] waits {
+    let co: std.codec.Codec[Outcome] = std.codec.of()
+    let outcome = match std.codec.decode(co, stored.reply) {
+        Ok(Ok(take value)) => take value,
+        _ => fail("runner: a stored reply does not decode"),
+    }
+    match outcome {
+        Failed(Gone) => return commitless(mut hd, take q, take outcome),
+        Failed(Policy) => return commitless(mut hd, take q, take outcome),
+        _ => (),
+    }
+    let grant = store.authorize_head(hd.db, q.caller, hd.key_policy.f, hd.key_policy.n, hd.key_policy.s)
+    if let Ok(auth) = grant {
+        let left = auth.digest
+        let right = stored.scope_digest
+        if left.a == right.a && left.b == right.b && left.c == right.c && left.d == right.d {
+            return commitless(mut hd, take q, take outcome)
         }
-    })
-}
-
-// A reply with no effect: a run whose body only replies (STORE-SPEC §1.8).
-fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome, take record: Option[Option[Bytes]]) -> Result[(), store.Error] waits {
-    let ran = reply_alone(mut hd.db, q, o, record)?
-    match take ran {
-        Committed(d) => worker(mut hd, take q, take o, d.ticket, d.info.id.version),
-        Refused(_) => commitless(mut hd, take q, Refused(Overloaded)),
-        Aborted(take u) => {
-            let store.Undone(value: take e, ticket: _) = take u
-            Error(take e)
-        },
-        Failed(_) => fail("runner: a reply-only commit faulted"),
-        Stopped(e) => commitless(mut hd, take q, Failed(OutOfTime(e.steps))),
     }
+    commitless(mut hd, take q, Withheld)
 }
 
 fn worker[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome, t: store.Ticket, version: u64) -> Result[(), store.Error] {
@@ -2285,14 +2326,14 @@ fn update(at: u64, take content: Option[Owe], take outcomes: List[KeyedDone]) ->
     Notice(e: Updated(Update(version: at, content: take content, outcomes: take outcomes)))
 }
 
-pub fn head_request(take stream: Bytes, p: u64, take key: Bytes, take arg: Bytes, take reply_to: Sender[WireEvent]) -> Req {
+pub fn head_request(take author: Caller, take stream: Bytes, p: u64, take key: Bytes, take arg: Bytes, take reply_to: Sender[WireEvent]) -> Req {
     let digest = store.request_digest(key, arg)
     let alive = result.unwrap(result.capacity_only(arc.new(HeadLife(active: true))))
     let live = result.unwrap(result.capacity_only(latest.new(take alive)))
     let blank = result.unwrap(result.capacity_only(arc.new(OwnerNumber(number: 0u64))))
     let identity = result.unwrap(result.capacity_only(latest.new(take blank)))
     let seed = result.unwrap(result.capacity_only(arc.new(OwnerNumber(number: 0u64))))
-    Req(e: Requested(Request(caller: None, stream: take stream, p: p, key: take key, arg: take arg, digest: digest,
+    Req(e: Requested(Request(caller: take author, stream: take stream, p: p, key: take key, arg: take arg, digest: digest,
         reply_to: take reply_to, live: take live, identity: take identity, seed: Some(take seed))))
 }
 
@@ -3528,6 +3569,7 @@ fn wire_decode(b: Bytes) -> Result[Frame, u16] {
 
 
 pub const DONE_MAX: u64 = 8192
+const MAX_RETURNED_BYTES: u64 = DONE_MAX - 20u64
 
 // WIRE W3b. The service owns principal binding, admission, dedup and outcomes.
 // Each owner holds the one publisher sender. Another transport calls the same dispatch.
@@ -4486,8 +4528,8 @@ fn serve_ingress[C: send](take listener: Listener, tasks: Tasks, clock: Clock, t
 }
 
 fn limited_reply(take b: Bytes) -> Outcome {
-    if list.len(b) > DONE_MAX - 20u64 {
-        Failed(OutOfBytes(Room(requested: list.len(b), available: DONE_MAX - 20u64)))
+    if list.len(b) > MAX_RETURNED_BYTES {
+        Failed(OutOfBytes(Room(requested: list.len(b), available: MAX_RETURNED_BYTES)))
     } else { Returned(take b) }
 }
 
@@ -5026,7 +5068,7 @@ fn wire_apply_plan[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
     let (forwarded, same, queued) = match map.get(s.held, k) { Some(h) => (h.forwarded, h.digest == sent.digest, h.queued), _ => (false, true, 0u64) }
     if forwarded && !same { return Error(1008u16) }
     if wire_admission_closed(work, s.clock) && !forwarded { return wire_refused(mut s, mut work, stream, p, Overloaded) }
-    let durable = match map.get(s.registry.slots, sent.key) { Some(Transact(_, _, _, _)) => true, None => true, _ => false }
+    let durable = match map.get(s.registry.slots, sent.key) { Some(Transact(_, _, _, _, _)) => true, None => true, _ => false }
     if !durable {
         let is_compute = match map.get(s.registry.slots, sent.key) { Some(Compute(_)) => true, _ => false }
         if !is_compute { return wire_refused(mut s, mut work, stream, p, NotAllowed) }
@@ -5072,7 +5114,7 @@ fn wire_apply_plan[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
             None => fail("runner: missing head lease"),
         }
         let Admitted(caller: take principal, ..) = take context
-        let request = Request(caller: Some(take principal), stream: take named, p: position, key: take entry, arg: take argument, digest: digest, reply_to: wire_me(s), live: take live, identity: take identity, seed: take seed)
+        let request = Request(caller: take principal, stream: take named, p: position, key: take entry, arg: take argument, digest: digest, reply_to: wire_me(s), live: take live, identity: take identity, seed: take seed)
         let mut sends: List[WireOwed] = list.new()
         if let Error(_) = list.push(mut sends, take owed) { return wire_refused(mut s, mut work, stream, p, Overloaded) }
         match try_head(s.head, Req(e: Requested(take request))) {
@@ -5274,7 +5316,7 @@ fn wire_answer[G: send, H: send](mut s: WireSession[G, H], mut completed: List[u
     if wire_cut_at(drain, s.clock) { return Ok(()) }
     // A pre-W3c stored reply can exceed today's producer bound. Preserve its
     // bytes in the store and fail delivery explicitly before retaining its row.
-    if let Returned(b) = told.outcome { if list.len(b) > DONE_MAX - 20u64 { return Error(1009u16) } }
+    if let Returned(b) = told.outcome { if list.len(b) > MAX_RETURNED_BYTES { return Error(1009u16) } }
     let key = slot_key(told.stream, told.p)
     if let Some(take found) = map.remove(mut s.held, key) {
         let mut h = take found

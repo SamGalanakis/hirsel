@@ -322,25 +322,30 @@ impl Emitter {
         // A region argument names no layout, so it is erased: every region
         // instantiation shares one instance, its argument `()`, and the signature keeps
         // the callee's own generic root (MEM-6).
-        let erased: Vec<_> = (0..arguments.len())
-            .map(|i| {
-                if fd.generics[i].region {
-                    crate::types::UNIT
-                } else {
-                    arguments[i]
-                }
-            })
-            .collect();
-        let rooted: Vec<_> = (0..arguments.len())
-            .map(|i| {
-                if fd.generics[i].region {
-                    t.mk(generic_arg(fd, i))
-                } else {
-                    arguments[i]
-                }
-            })
-            .collect();
-        let (arguments, signed) = (&erased[..], &rooted[..]);
+        let erased;
+        let rooted;
+        let (arguments, signed) = if fd.generics.iter().any(|g| g.region) {
+            erased = arguments
+                .iter()
+                .zip(&fd.generics)
+                .map(|(&arg, g)| if g.region { crate::types::UNIT } else { arg })
+                .collect::<Vec<_>>();
+            rooted = arguments
+                .iter()
+                .zip(&fd.generics)
+                .enumerate()
+                .map(|(i, (&arg, g))| {
+                    if g.region {
+                        t.mk(generic_arg(fd, i))
+                    } else {
+                        arg
+                    }
+                })
+                .collect::<Vec<_>>();
+            (&erased[..], &rooted[..])
+        } else {
+            (arguments, arguments)
+        };
         // An anchor bounds lifetime without changing a layout. Instance identities
         // name the published row, exactly as the materializer looks it up.
         let rows: Vec<_> = arguments
@@ -747,12 +752,9 @@ impl Emitter {
         p: &Program,
         f: usize,
     ) -> Result<(Signature, scalar_abi::SignatureAbi), &'static str> {
-        let fd = &p.fns[f];
+        // The template signature already names its own rigid parameters.
         let mut t = Local::with_program(p);
-        let arguments: Vec<_> = (0..fd.generics.len())
-            .map(|i| t.mk(generic_arg(fd, i)))
-            .collect();
-        self.signature_inst(p, &mut t, f, &arguments)
+        self.signature_inst(p, &mut t, f, &[])
     }
     fn signature_inst(
         &mut self,

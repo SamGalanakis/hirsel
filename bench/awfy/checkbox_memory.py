@@ -12,7 +12,7 @@ import tempfile
 import board
 import build
 import receipt
-from bench_cpus import add_cpu_sets, positive_int, require_idle, validate_cpu_sets
+from bench_cpus import add_cpu_sets, positive_int, sibling_cpus, smt_activity, validate_cpu_sets
 
 MODES = ("memory-subscribed", "memory-unsubscribed")
 POINTS = (64, 1000, 10000)
@@ -80,19 +80,21 @@ def collect(args, work):
     }
     target = args.out / "memory-sweep.json"
     snapshots = work.parent / "snapshots"
+    siblings = sibling_cpus(args.measure_cpus[:2])
     with receipt.measurement_slot(args.lock):
         try:
             os.sched_setaffinity(0, args.measure_cpus[:2])
-            require_idle(args.siblings)
             for clients in args.clients:
                 for mode in args.mode:
                     directory = args.out / f"{mode}-{clients}"
+                    busy = {}
                     try:
-                        row = sample(work, directory, snapshots / directory.name, prepared, mode, clients,
-                                     *args.measure_cpus[:2])
+                        with smt_activity(siblings, f"{mode}/{clients}") as busy:
+                            row = sample(work, directory, snapshots / directory.name, prepared, mode, clients,
+                                         *args.measure_cpus[:2])
                     except (OSError, ValueError, RuntimeError, KeyError, StopIteration, subprocess.SubprocessError) as error:
                         row = {"complete": False, "error": str(error)}
-                    report["rows"].append({"mode": mode, "clients": clients, **row})
+                    report["rows"].append({"mode": mode, "clients": clients, "smt_busy_percent": busy, **row})
                     if row["complete"]:
                         report["highest_complete"][mode] = clients
                     receipt.write(target, report)
@@ -116,7 +118,7 @@ def main():
     add_cpu_sets(parser)
     parser.add_argument("--lock", type=Path, default=board.LOCK)
     args = parser.parse_args()
-    args.siblings = validate_cpu_sets(parser, args, width=2)
+    validate_cpu_sets(parser, args, width=2)
     if args.out.is_relative_to(build.ROOT):
         parser.error("use a new evidence directory outside the checkout")
     args.clients = sorted(set(args.clients))

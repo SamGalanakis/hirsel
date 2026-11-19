@@ -16,7 +16,7 @@ import sys
 from build import GAME_ROWS, ROOT, STANDARD_RUST_SIZES
 
 sys.path.insert(0, str(ROOT / "core/tools"))
-from bench_cpus import add_cpu_sets, require_idle, sibling_cpus, validate_cpu_sets
+from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
 from std_native import wait_load
 
 LOCK = Path("/tmp/hirsel-langarena-measure.lock")
@@ -206,11 +206,11 @@ def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0
     wait_load()
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        require_idle(siblings)
-        with stdin.open("rb") as inp, (directory / "stdout").open("wb") as out_file, (directory / "stderr").open("wb") as err:
+        with (smt_activity(siblings, f"{case}/{language}/{width}") as busy, stdin.open("rb") as inp,
+              (directory / "stdout").open("wb") as out_file, (directory / "stderr").open("wb") as err):
             result = subprocess.run(["taskset", "-c", cpus, *map(str, launch)],
                                     cwd=ROOT, env=env, stdin=inp, stdout=out_file, stderr=err)
-    row = {"status": "ok", "cpus": cpus}
+    row = {"status": "ok", "cpus": cpus, "smt_busy_percent": busy}
     if result.returncode:
         if case == "mandelbrot":
             (directory / "stdout").unlink(missing_ok=True)
@@ -221,7 +221,7 @@ def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0
         if not any(line.startswith(receipt) for line in (directory / "stderr").read_text().splitlines()):
             row["status"] = "missing-test-pool-receipt"
             return row
-    return validate_sample(directory, case, wanted, cpus, kernel)
+    return validate_sample(directory, case, wanted, cpus, kernel) | {"smt_busy_percent": busy}
 
 
 def validate_sample(directory, case, wanted, cpus, kernel=False):

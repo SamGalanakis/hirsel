@@ -15,7 +15,7 @@ import time
 
 from arena import group, root_mib
 from build import ROOT, sha256
-from bench_cpus import add_cpu_sets, require_idle, validate_cpu_sets
+from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
 from elf_census import STRIP_FLAGS, strip_image
 
 
@@ -236,7 +236,8 @@ def main():
     parser.add_argument("--only", nargs="+")
     add_cpu_sets(parser)
     args = parser.parse_args()
-    siblings = validate_cpu_sets(parser, args)
+    validate_cpu_sets(parser, args)
+    siblings = sibling_cpus(args.measure_cpus[:1])
     os.sched_setaffinity(0, args.build_cpus)
     if not args.arena and args.upstream is None:
         parser.error("--upstream is required for the AWFY workload sizes")
@@ -244,20 +245,18 @@ def main():
     if out.is_relative_to(ROOT):
         parser.error("use an evidence directory outside the repo")
     with measurement_slot():
-        try:
-            require_idle(siblings)
-        except ValueError as error:
-            parser.error(str(error))
         os.sched_setaffinity(0, {args.measure_cpus[0]})
         out.mkdir(parents=True, exist_ok=False)
-        return collect(parser, args, out)
+        return collect(parser, args, out, siblings)
 
 
-def collect(parser, args, out):
+def collect(parser, args, out, siblings):
     if args.size_board:
         if args.only or set(args.sides) != set(SIDES):
             parser.error("the size board requires all original workloads on all three sides")
-        result = size_board(args.build.resolve(), args.upstream.resolve())
+        with smt_activity(siblings, "AWFY original size checks") as busy:
+            result = size_board(args.build.resolve(), args.upstream.resolve())
+        result["smt_busy_percent"] = busy
         write_results(out, result)
         print(json.dumps(result, indent=2))
         return 0
@@ -285,10 +284,14 @@ def collect(parser, args, out):
             invocation = list(map(str, command))
             observed = result[side] = {"stripped_bytes": sizes[binary], "status": "ok"}
             if not args.arena and name != "Hello":
-                observed.update(runtime(invocation, marker, out / stem,
-                                        exact_output=args.pool and side != "rust"))
+                with smt_activity(siblings, f"{name}/{side}") as busy:
+                    observed.update(runtime(invocation, marker, out / stem,
+                                            exact_output=args.pool and side != "rust"))
+                observed["smt_busy_percent"] = busy
             if not args.pool:
-                observed["startup_ns"] = startup(invocation, marker, out / f"{stem}-startup.log")
+                with smt_activity(siblings, f"{name}/{side} startup") as busy:
+                    observed["startup_ns"] = startup(invocation, marker, out / f"{stem}-startup.log")
+                observed["startup_smt_busy_percent"] = busy
                 if observed["startup_ns"] is None and observed["status"] == "ok":
                     observed["status"] = "wrong-startup-output"
             print(name, side, observed["status"], flush=True)

@@ -1,9 +1,10 @@
 """CPU assignments and Linux SMT activity for benchmark runners."""
 import argparse
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import re
-import time
+import sys
 
 
 def positive_int(value):
@@ -36,15 +37,18 @@ def add_cpu_sets(parser, *, required=True):
 
 
 def sibling_cpus(measure_cpus, build_cpus=()):
-    collisions = set(measure_cpus) & set(build_cpus)
+    measure_cpus, build_cpus = set(measure_cpus), set(build_cpus)
+    collisions = measure_cpus & build_cpus
     if collisions:
         raise ValueError(f"CPUs assigned to both build and measurement: {sorted(collisions)}")
     siblings = set()
     for cpu in measure_cpus:
         topology = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list")
         peers = set(cpu_list(topology.read_text().strip())) - {cpu}
-        if peers.intersection(build_cpus):
-            raise ValueError(f"CPU {cpu} has SMT siblings in the build set: {sorted(peers.intersection(build_cpus))}")
+        if shared := peers & build_cpus:
+            raise ValueError(f"CPU {cpu} has SMT siblings in the build set: {sorted(shared)}")
+        if shared := peers & measure_cpus:
+            raise ValueError(f"CPU {cpu} has SMT siblings in the measurement set: {sorted(shared)}")
         siblings.update(peers)
     return sorted(siblings)
 
@@ -90,12 +94,14 @@ def busy_percent(before, after):
     return result
 
 
-def require_idle(siblings):
-    if not siblings:
-        return
+@contextmanager
+def smt_activity(siblings, label=None):
     before = cpu_ticks(siblings)
-    time.sleep(0.2)
-    busy = busy_percent(before, cpu_ticks(siblings))
-    active = [f"CPU {cpu} {value:.2f}% busy" for cpu, value in busy.items() if value]
-    if active:
-        raise ValueError("measurement refused, SMT sibling active at start: " + ", ".join(active))
+    busy = {}
+    try:
+        yield busy
+    finally:
+        busy.update(busy_percent(before, cpu_ticks(siblings)))
+        if busy and label is not None:
+            details = ", ".join(f"CPU {cpu} {value:.2f}% busy" for cpu, value in busy.items())
+            print(f"{label}: SMT {details}", file=sys.stderr, flush=True)

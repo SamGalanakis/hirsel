@@ -2,12 +2,13 @@
 """Sample the S8u fixtures, then check each result and its work receipt."""
 import argparse
 import fcntl
+import json
 import os
 from pathlib import Path
 import subprocess
 
 from run import LOCK, ROOT, wait_load
-from bench_cpus import add_cpu_sets, require_idle, sibling_cpus, validate_cpu_sets
+from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
 
 MASK = (1 << 64) - 1
 CASES = ("knapsack", "portfolio")
@@ -80,9 +81,10 @@ def sample(case, side, cpus, bins, out, lock_path):
     wait_load()
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        require_idle(siblings)
-        with (directory / "stdout").open("wb") as stdout, (directory / "stderr").open("wb") as stderr:
+        with (smt_activity(siblings, f"{case}/{side}/{width}") as busy,
+              (directory / "stdout").open("wb") as stdout, (directory / "stderr").open("wb") as stderr):
             subprocess.run(command, cwd=ROOT, env=env, stdout=stdout, stderr=stderr, check=True)
+    (directory / "smt.json").write_text(json.dumps(busy) + "\n")
 
 
 

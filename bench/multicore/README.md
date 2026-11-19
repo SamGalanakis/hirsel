@@ -96,8 +96,8 @@ the whole PBM and retains its SHA-256 in the sample record. It saves the process
 `perf stat` counters, GNU time RSS, output and diagnostics outside the repository.
 Set `build_cpus` and `measure_cpus` to CPU lists within your assignment.
 Width N uses the first N measurement CPUs in the order supplied. The runner
-refuses a measurement CPU with a build CPU on the same core or with a busy
-SMT sibling at sample start.
+refuses CPU assignments with a measurement CPU that shares a core with
+another CPU in the same run. Each sample records its SMT siblings' activity.
 Each point runs under `tools/capped` at 2 GiB with the matching CPU quota.
 Startup is included. Each output must match its workload oracle. K-nucleotide
 checks each frequency and exact query count. It allows either order for

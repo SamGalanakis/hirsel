@@ -23,7 +23,7 @@ import build
 import measure
 import receipt
 from receipt import measurement_slot, write as write_json
-from bench_cpus import add_cpu_sets, require_idle, validate_cpu_sets
+from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
 
 ROOT = build.ROOT
 CAP = ROOT / "tools/capped"
@@ -369,6 +369,7 @@ def runtime_rows(board, suite, directory, upstream, tools):
     fixture = receipt.runtime_fixture(suite, directory, upstream)
     samples_dir = board.out / "runtime" / goal
     samples_dir.mkdir(parents=True)
+    siblings = sibling_cpus(os.sched_getaffinity(0))
     verified = []
     for index, (name, commands) in enumerate(rows):
         row = receipt.runtime_case(suite, name, directory, *commands["hirsel"], fixture, tools)
@@ -379,12 +380,15 @@ def runtime_rows(board, suite, directory, upstream, tools):
             command, marker = commands[side]
             target = samples_dir / f"{name.replace('::', '-')}-{side}"
             env = build.capped_env(board.out)
+            label = f"{goal}/{name}/{side}"
             if side == "hirsel":
-                sample = receipt.observe(row, target, env)
+                sample = receipt.observe(row, target, env, siblings, label=label)
                 board.report["instruction_receipt"]["rows"].append(row)
                 samples[side] = sample
                 continue
-            sample = measure.core_measure.sample(command, target, env=env, cwd=directory, pmu_times=True)
+            with smt_activity(siblings, label) as busy:
+                sample = measure.core_measure.sample(command, target, env=env, cwd=directory, pmu_times=True)
+            sample["smt_busy_percent"] = busy
             output = (target / "stdout").read_bytes().splitlines(keepends=True)
             sample["verified"] = sample["status"] in ("ok", "missing-counter") and any(
                 re.fullmatch(marker, line) for line in output)
@@ -498,6 +502,7 @@ def compile_rows(board, out, prepared, fixture, tools):
     task = next(row for row in tasks if row["name"] == name)
     if task["checksum"] != expected:
         raise ValueError(f"{name}: expected the pinned cold checksum {expected}")
+    siblings = sibling_cpus(os.sched_getaffinity(0))
     for mode in ("cold", "edit"):
         if mode == "edit":
             edit_checksum(clbg, "helper.checksum_f64(float.sqrt(vbv / vv))",
@@ -518,7 +523,10 @@ def compile_rows(board, out, prepared, fixture, tools):
             commands.reverse()
         for side, command, cwd, executable in commands:
             target = out / f"{mode}-{side}"
-            sample = measure.core_measure.sample(command, target, env=cargo_scope(env), cycles=True, cwd=cwd, pmu_times=True)
+            with smt_activity(siblings, f"{label}/{side}") as busy:
+                sample = measure.core_measure.sample(command, target, env=cargo_scope(env), cycles=True,
+                                                     cwd=cwd, pmu_times=True)
+            sample["smt_busy_percent"] = busy
             samples[side] = sample
             if sample["status"] not in ("ok", "missing-counter"):
                 continue
@@ -649,6 +657,7 @@ def checkbox_rows(board, out, prepared, server_cpu, loader_cpu):
     checkbox, executable, address, wants, tools = prepared
     env = build.capped_env(out)
     overrides = ["--per-ip-sessions", "20000", "--per-ip-new-principals", "20000", "--principal-rate", "1000000000"]
+    siblings = sibling_cpus((server_cpu, loader_cpu))
     clients, toggles = CHECKBOX_CLIENTS, 200
     for index, (mode, metric) in enumerate(CHECKBOX_METRICS.items()):
         samples = {}
@@ -660,8 +669,11 @@ def checkbox_rows(board, out, prepared, server_cpu, loader_cpu):
             else:
                 command = [tools / "wire-reference", "--listen", address, "--wal", directory / "wire.wal",
                            "--n-place", checkbox.N_PLACE, "--wants", wants, *overrides]
+            busy = {}
             try:
-                with private_server(command, address, directory, env, server_cpu) as pid:
+                with smt_activity(siblings, f"{mode}/{side}") as busy, private_server(
+                    command, address, directory, env, server_cpu
+                ) as pid:
                     load_command = [tools / "wire-load", mode, "--url", f"ws://{address}/hirsel",
                                     "--wants", wants, "--clients", str(clients)]
                     load_command += ["--toggles", str(toggles), "--pace", "1000"] if mode == "converge" else ["--server-pid", str(pid)]
@@ -683,6 +695,7 @@ def checkbox_rows(board, out, prepared, server_cpu, loader_cpu):
             except (OSError, ValueError, RuntimeError) as error:
                 samples[side] = {"status": str(error)}
             finally:
+                samples[side]["smt_busy_percent"] = busy
                 if side == "hirsel":
                     (out / "data").rename(directory / "data")
                     (out / "data").mkdir()
@@ -757,7 +770,6 @@ def run_board(board, args):
     checkbox_ready = board.attempt("Checkbox build", prepare_checkbox, checkbox_dir, artifacts, env)
     with measurement_slot(args.lock):
         os.sched_setaffinity(0, {args.measure_cpus[0]})
-        require_idle(args.siblings)
         if awfy_ready:
             board.attempt("AWFY measurement", awfy_rows, board, awfy, args.awfy, tools)
         if arena_rows:
@@ -840,7 +852,7 @@ def main():
     add_cpu_sets(parser)
     parser.add_argument("--lock", type=Path, default=LOCK)
     args = parser.parse_args()
-    args.siblings = validate_cpu_sets(parser, args, width=2)
+    validate_cpu_sets(parser, args, width=2)
     os.sched_setaffinity(0, args.build_cpus)
     out = args.out.resolve()
     if out.is_relative_to(ROOT):

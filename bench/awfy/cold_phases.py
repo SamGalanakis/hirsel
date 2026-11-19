@@ -15,7 +15,7 @@ import board
 import build
 import receipt
 from request_profile import frames
-from bench_cpus import add_cpu_sets, require_idle, validate_cpu_sets
+from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
 
 STAGES = (
     ("link", r"link_objects|direct_link|native_entry::Plan.*::emit"),
@@ -120,15 +120,17 @@ def collect(args, scratch):
     with receipt.measurement_slot(args.lock):
         try:
             os.sched_setaffinity(0, {args.measure_cpus[0]})
-            require_idle(args.siblings)
             env = build.capped_env(directory) | ld
-            data = run_profile(directory, profile_evidence, command, env)
+            with smt_activity(args.siblings, "cold profile") as profile_busy:
+                data = run_profile(directory, profile_evidence, command, env)
             stdout = checked(directory, profile_evidence, exe, args.fixture, env)
             passes = None
+            pass_busy = None
             if trace_args is not None:
                 pass_dir, pass_evidence, pass_command, pass_exe, tracer = trace_args
                 pass_env = build.capped_env(pass_dir) | ld
-                passes = run_pass_trace(pass_dir, pass_evidence, pass_command, tracer, pass_env)
+                with smt_activity(args.siblings, "LLVM pass trace") as pass_busy:
+                    passes = run_pass_trace(pass_dir, pass_evidence, pass_command, tracer, pass_env)
                 checked(pass_dir, pass_evidence, pass_exe, args.fixture, pass_env)
         finally:
             os.sched_setaffinity(0, args.build_cpus)
@@ -140,6 +142,7 @@ def collect(args, scratch):
     receipt.write(output, {
         "workload": "LangArena cold", "store": "fresh, with prebuilt std product",
         "argv": command, "stdout": stdout, "affinity": [args.measure_cpus[0]], **tools,
+        "smt_busy_percent": profile_busy, "llvm_pass_trace_smt_busy_percent": pass_busy,
         "fixture": receipt.fixture_identity(directory / "inputs.json", args.fixture),
         "event": "instructions:u", "period": PERIOD, "samples": counts, "total_samples": counts.total(),
         "driver_metrics": receipt.read(profile_evidence / "driver-metrics.json"), "llvm_pass_trace": passes,
@@ -157,7 +160,8 @@ def main():
     add_cpu_sets(parser)
     parser.add_argument("--lock", type=Path, default=board.LOCK)
     args = parser.parse_args()
-    args.siblings = validate_cpu_sets(parser, args)
+    validate_cpu_sets(parser, args)
+    args.siblings = sibling_cpus(args.measure_cpus[:1])
     if args.out.is_relative_to(build.ROOT):
         parser.error("use a new evidence directory outside the checkout")
     os.sched_setaffinity(0, args.build_cpus)

@@ -19,7 +19,7 @@ from build import sha256
 import elf_census
 import measure
 import profile_diff
-from bench_cpus import busy_percent, cpu_ticks, positive_int, require_idle, sibling_cpus
+from bench_cpus import positive_int, sibling_cpus, smt_activity
 from measurement_artifacts import SHIPPING, check
 
 VERSION = 2
@@ -135,10 +135,12 @@ def counter_ready(sample, event):
     )
 
 
-def observe(row, target, env, *, cycles=False):
+def observe(row, target, env, siblings, *, cycles=False, label=None):
     row["affinity"] = sorted(os.sched_getaffinity(0))
-    sample = measure.core_measure.sample(row["argv"], target, env=env, cwd=row["cwd"], cycles=cycles,
-                                        pmu_times=True)
+    with smt_activity(siblings, label) as busy:
+        sample = measure.core_measure.sample(row["argv"], target, env=env, cwd=row["cwd"], cycles=cycles,
+                                            pmu_times=True)
+    sample["smt_busy_percent"] = busy
     sample["verified"] = (
         sample["status"] in ("ok", "missing-counter")
         and re.fullmatch(row["marker"].encode(), (target / "stdout").read_bytes()) is not None
@@ -177,6 +179,7 @@ def sample(args):
         raise ValueError("use a new evidence directory outside the checkout")
     if args.cpu not in os.sched_getaffinity(0):
         raise ValueError(f"CPU {args.cpu} is outside the assigned affinity")
+    siblings = sibling_cpus((args.cpu,))
     cases = dict(runtime_rows(args))
     if args.only:
         if len(set(args.only)) != len(args.only) or set(args.only) - cases.keys():
@@ -203,7 +206,7 @@ def sample(args):
         os.sched_setaffinity(0, {args.cpu})
         for key, row in rows.items():
             try:
-                observed = observe(row, out / key.replace("/", "-", 1), env)
+                observed = observe(row, out / key.replace("/", "-", 1), env, siblings, label=key)
                 receipt["rows"].append(row)
                 if observed["status"] != "ok":
                     receipt["failures"][key] = observed["status"]
@@ -398,7 +401,17 @@ def aa_spread(key, pairs, baseline, cpu, count):
 
 
 def summarize_pairs(key, pairs, noise, limit):
-    summary = {}
+    rates = {}
+    shifted = False
+    for pair in pairs:
+        left, right = (pair[side]["sample"]["smt_busy_percent"] for side in ("base", "candidate"))
+        for cpu, before in left.items():
+            after = right[cpu]
+            rates.setdefault(cpu, []).extend((before, after))
+            shifted |= round(abs(after - before), 9) > 20
+    ranges = {cpu: (min(values), max(values)) for cpu, values in rates.items()}
+    activity = ", ".join(f"CPU {cpu} {low:.2f}–{high:.2f}% busy" for cpu, (low, high) in ranges.items())
+    summary = {"smt_busy_range_percent": ranges}
     for event in ("instructions", "cycles"):
         left = [pair["base"]["sample"][event] for pair in pairs]
         right = [pair["candidate"]["sample"][event] for pair in pairs]
@@ -407,11 +420,18 @@ def summarize_pairs(key, pairs, noise, limit):
         verdict = ""
         if event == "instructions" and limit is not None and center > limit:
             verdict = "FAIL"
-        if event == "cycles" and noise is not None:
-            verdict = "within noise" if noise[0] <= center <= noise[1] else "outside A/A spread"
-            verdict += f" (A/A {noise[0]:+.3f}% to {noise[1]:+.3f}%)"
+        detail = ""
+        if event == "cycles":
+            if shifted:
+                verdict = "sibling busy"
+            elif noise is not None:
+                verdict = "within noise" if noise[0] <= center <= noise[1] else "outside A/A spread"
+            if noise is not None:
+                detail += f" (A/A {noise[0]:+.3f}% to {noise[1]:+.3f}%)"
+            if activity:
+                detail += f" | SMT {activity}"
         print(f"{key} {event}: {median(left):,} -> {median(right):,}, paired median {center:+.3f}% "
-              f"[{low:+.3f}%, {high:+.3f}%] {verdict}", flush=True)
+              f"[{low:+.3f}%, {high:+.3f}%] {verdict}{detail}", flush=True)
         summary[event] = {"base_median": median(left), "candidate_median": median(right),
                           "median_percent": str(center), "min_percent": str(low), "max_percent": str(high),
                           "verdict": verdict}
@@ -457,7 +477,6 @@ def pair_samples(args):
     failed = False
     with measurement_slot(args.lock):
         os.sched_setaffinity(0, {args.cpu})
-        require_idle(siblings)
         for key in keys:
             pairs = report["rows"][key] = []
             row_dir = out / key
@@ -469,9 +488,7 @@ def pair_samples(args):
                     sides = (("base", base[key]), ("candidate", after[key]))
                     for side, prepared in (sides if index % 2 == 0 else reversed(sides)):
                         row = pair[side] = prepared.copy()
-                        before = cpu_ticks(siblings)
-                        observe(row, row_dir / f"{index + 1}-{side}", env, cycles=True)
-                        row["sample"]["smt_busy_percent"] = busy_percent(before, cpu_ticks(siblings))
+                        observe(row, row_dir / f"{index + 1}-{side}", env, siblings, cycles=True)
                         cycle_count(key, row)
                     match_rows(key, pair["base"], pair["candidate"])
                 summary = summarize_pairs(key, pairs, noise.get(key), limit)

@@ -142,9 +142,9 @@ fixture. The checkbox rows compare the same wire load on a fresh private Hirsel
 server and the Rust reference, using an ephemeral port.
 
 Use at least two measurement CPUs. The first runs AWFY, LangArena and the
-checkbox server. The second runs the checkbox loader. The board refuses a
-measurement CPU with a build CPU on the same core or with an SMT sibling busy
-during the 200 ms check at measurement start. It holds
+checkbox server. The second runs the checkbox loader. A measurement CPU
+must have a core to itself within the run's CPU assignment. The board
+reports sibling activity for each sample. It holds
 `/run/user/1000/hirsel-board.lock` while measuring by default. It needs Linux perf user
 counters, CMake, Clang, Rust 1.99.0 with the pinned Cargo dependencies
 available, Node.js, and GNU strip and time. Keep `board.json` and `board.md`
@@ -190,8 +190,10 @@ Each checked pair runs back to back and reverses order on alternate trials.
 The receipt records SMT sibling activity for each sample, and the runner
 reports the median and min/max of the paired instruction and cycle changes.
 An A/B median cycle change inside the matching A/A min/max is "within noise".
-Check sibling activity before interpreting a change outside that range.
-Only the instruction threshold decides whether a comparable run passes.
+Each row prints the sibling's busy range. If activity differs by more than
+20 percentage points between the two halves of any pair, the cycle verdict is
+"sibling busy". Only the instruction threshold decides whether a comparable
+run passes.
 
 ## Paired instruction guard
 

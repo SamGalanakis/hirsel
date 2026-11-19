@@ -8,7 +8,7 @@ import re
 import subprocess
 
 from measure import ROOT, measurement_slot, rows
-from bench_cpus import add_cpu_sets, require_idle, validate_cpu_sets
+from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
 
 
 def ratios(samples):
@@ -25,7 +25,8 @@ def main():
     parser.add_argument("--upstream", type=Path, required=True)
     add_cpu_sets(parser)
     args = parser.parse_args()
-    siblings = validate_cpu_sets(parser, args)
+    validate_cpu_sets(parser, args)
+    siblings = sibling_cpus(args.measure_cpus[:1])
     os.sched_setaffinity(0, args.build_cpus)
     programs = dict(rows(args.build.resolve(), False, args.upstream))
     samples = json.loads(args.samples.read_text())
@@ -39,11 +40,7 @@ def main():
         print(name, flush=True)
         binary, marker = programs[name]["hirsel"]
         data = args.out / f"{name}.data"
-        with measurement_slot():
-            try:
-                require_idle(siblings)
-            except ValueError as error:
-                parser.error(str(error))
+        with measurement_slot(), smt_activity(siblings, name) as busy:
             run = subprocess.run([
                 "taskset", "-c", str(args.measure_cpus[0]),
                 ROOT / "tools/capped", "perf", "record", "-e", "instructions:u",
@@ -51,7 +48,7 @@ def main():
                 "-o", data, "--", *binary,
             ], capture_output=True)
         report = args.out / f"{name}.txt"
-        report.write_bytes(run.stderr)
+        report.write_bytes(run.stderr + f"SMT busy percent: {busy}\n".encode())
         if run.returncode != 0 or not re.fullmatch(marker, run.stdout):
             failures += 1
             report.write_bytes(report.read_bytes() + run.stdout)

@@ -107,24 +107,27 @@ class BoardCompletion(unittest.TestCase):
 
 
 class SiblingActivity(unittest.TestCase):
-    def test_refuses_busy_sibling_from_linux_ticks(self):
+    def test_records_busy_sibling_from_linux_ticks(self):
         # CPU 18 sees four active ticks out of twenty. Linux already
         # includes guest time in user time. CPU 19 only sees I/O wait.
-        before = "cpu18 100 0 50 300 80 0 0 0 20 0\ncpu19 100 0 50 300 80 0 0 0 20 0\n"
         with tempfile.TemporaryDirectory() as temp:
             stat = Path(temp) / "stat"
-            stat.write_text(before)
+            stat.write_text("cpu18 100 0 50 300 80 0 0 0 20 0\ncpu19 100 0 50 300 80 0 0 0 20 0\n")
+            with patch.object(bench_cpus, "Path", return_value=stat):
+                with bench_cpus.smt_activity([18, 19]) as busy:
+                    stat.write_text("cpu18 104 0 50 316 80 0 0 0 24 0\ncpu19 100 0 50 300 100 0 0 0 20 0\n")
+        self.assertEqual(busy, {18: 20.0, 19: 0.0})
 
-            def advance_ticks(_interval):
-                stat.write_text("cpu18 104 0 50 316 80 0 0 0 24 0\ncpu19 100 0 50 300 100 0 0 0 20 0\n")
-
-            with patch.object(bench_cpus, "Path", return_value=stat), patch.object(
-                bench_cpus.time, "sleep", side_effect=advance_ticks
-            ):
-                with self.assertRaisesRegex(ValueError, r"CPU 18 20\.00% busy$"):
-                    bench_cpus.require_idle([18, 19])
-                stat.write_text(before)
-                bench_cpus.require_idle([19])
+    def test_refuses_threads_sharing_a_core_in_one_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            topology = Path(temp) / "thread_siblings_list"
+            topology.write_text("2,18\n")
+            with patch.object(bench_cpus, "Path", return_value=topology):
+                self.assertEqual(bench_cpus.sibling_cpus([2], [1]), [18])
+                with self.assertRaisesRegex(ValueError, "build set"):
+                    bench_cpus.sibling_cpus([2], [18])
+                with self.assertRaisesRegex(ValueError, "measurement set"):
+                    bench_cpus.sibling_cpus([2, 18], [1])
 
 
 class PairedSampling(unittest.TestCase):
@@ -139,23 +142,25 @@ class PairedSampling(unittest.TestCase):
         candidate = base | {"image_sha256": "e" * 64}
         cpu = min(os.sched_getaffinity(0))
         events = ("instructions:u", "cycles:u")
-        counts = iter((100, 96, 101, 100, 100, 104, 100, 103, 103, 100, 100, 103))
+        counts = iter((100, 96, 101, 100, 100, 104) + (100, 103, 103, 100, 100, 103) * 2)
+        activity = iter((5, 5, 10, 10, 25, 25, 10, 30, 49, 29, 25, 25, 10, 30, 50, 29, 25, 25))
         images = []
 
-        def observe(row, directory, env, *, cycles):
+        def observe(row, directory, env, siblings, *, cycles):
             images.append(row["image_sha256"])
             row["affinity"] = [cpu]
             row["stdout"] = "verified\n"
             row["sample"] = {
                 "status": "ok", "verified": True, "cycles": next(counts),
+                "smt_busy_percent": {18: next(activity)},
                 "instructions": 100 if row["image_sha256"] == base["image_sha256"] else 101,
                 "pmu_times_ns": {event: [[100, 100]] for event in events},
             }
 
         with (tempfile.TemporaryDirectory() as temp, redirect_stdout(io.StringIO()),
               patch.object(receipt, "runtime_rows", return_value=[(key, ())]),
-              patch.object(receipt, "prepare_pair_rows", side_effect=[{key: base}, {key: base}, {key: candidate}]),
-              patch.object(receipt, "require_idle"), patch.object(receipt, "sibling_cpus", return_value=[]),
+              patch.object(receipt, "prepare_pair_rows", side_effect=[{key: base}] + [{key: base}, {key: candidate}] * 2),
+              patch.object(receipt, "sibling_cpus", return_value=[18]),
               patch.object(receipt.os, "sched_setaffinity"), patch.object(receipt, "observe", side_effect=observe)):
             root = Path(temp)
             args = Namespace(upstream=None, candidate_awfy_build=None, candidate_pool_build=None,
@@ -163,11 +168,12 @@ class PairedSampling(unittest.TestCase):
                              rows="List", pairs=3, cpu=cpu, lock=root / "lock", threshold=None, out=root / "aa")
             self.assertEqual(receipt.pair_samples(args), 0)
             args.aa = args.out / "pairs.json"
-            args.out = root / "ab"
             args.candidate_artifacts = root / "candidate-toolchain.json"
-            self.assertEqual(receipt.pair_samples(args), 1)
-            result = receipt.read(args.out / "pairs.json")["summary"][key]
-        self.assertEqual(result["cycles"]["median_percent"], "3")
-        self.assertIn("within noise", result["cycles"]["verdict"])
+            for verdict in ("within noise", "sibling busy"):
+                args.out = root / verdict.replace(" ", "-")
+                self.assertEqual(receipt.pair_samples(args), 1)
+                result = receipt.read(args.out / "pairs.json")["summary"][key]
+                self.assertEqual(result["cycles"]["median_percent"], "3")
+                self.assertEqual(result["cycles"]["verdict"], verdict)
         a, b = base["image_sha256"], candidate["image_sha256"]
-        self.assertEqual(images[-6:], [a, b, b, a, a, b])
+        self.assertEqual(images[6:], [a, b, b, a, a, b] * 2)

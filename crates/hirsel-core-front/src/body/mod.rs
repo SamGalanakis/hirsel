@@ -1123,6 +1123,7 @@ struct Cx<'c, 'a, 'e> {
     e: &'e mut Emitter,
     b: Body,
     versioned: bool,
+    steps_in_source: bool,
     func: Option<FuncId>,
     /// The StaticFn words `code.describe` produced in this body: each one's
     /// described function, its identity static and that static's length, so a
@@ -1292,6 +1293,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             e,
             b: Body::default(),
             versioned: false,
+            steps_in_source: !fd.path.package_is("core", "1"),
             func: None,
             static_fns: HashMap::default(),
             flow_literals: HashSet::default(),
@@ -1708,7 +1710,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
     }
     pub(super) fn source_step(&mut self, n: NodeId) {
-        if !self.fd.path.package_is("core", "1") && self.live() {
+        if self.steps_in_source && self.live() {
             let fail = self.fail_to(n);
             self.inst(Inst::Step { fail }, n);
         }

@@ -2451,6 +2451,10 @@ fn replay_boundary(provider_entry: bool) {
                     group.fail();
                     return;
                 }
+                // A FIFO record takes an input only where its task leaves the
+                // processor by itself (poll_event), so this task runs on to that
+                // point; an event first passes the input's position and diverges.
+                Turn::Wake(_) | Turn::Cancel(_) | Turn::Done(_) if group.fifo() => return,
                 _ => checkpoint(),
             }
         }
@@ -2625,9 +2629,16 @@ unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
     // SAFETY: this synchronous poll only queues tokens, never invokes task callbacks.
     unsafe {
         let run = (*task).run;
-        if !(*run).net.is_null()
-            && ((*run).pool.is_none() || hirsel_core_layout::event::is_poll(kind, value))
-        {
+        // A serial task on a FIFO tape is never preempted for readiness: the
+        // tape records where an input arrives, not whether the running task
+        // was still runnable then, so readiness is taken only where the task
+        // leaves the processor by its own logic (park, provider wait, poll
+        // turn, slice end, end), which replay reaches by itself.
+        let preemptible = || match (*run).pool {
+            None => !(*task).group.is_some_and(|group| group.fifo()),
+            Some(_) => hirsel_core_layout::event::is_poll(kind, value),
+        };
+        if !(*run).net.is_null() && preemptible() {
             // A model's readiness is part of the replayed input, so it is read at
             // every event; a live kernel is asked at one event in an interval.
             if (*run).model.is_some() {

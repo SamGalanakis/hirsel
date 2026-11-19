@@ -12,7 +12,6 @@ impl Group {
         }
         state.live.as_mut().map(f)
     }
-    #[cfg(any(test, feature = "testing"))]
     pub fn fifo(self) -> bool {
         self.with(|live| live.schedule.chooser == format::CHOOSER_FIFO)
             .unwrap_or(false)

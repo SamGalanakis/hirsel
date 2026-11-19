@@ -2,6 +2,7 @@ fn problem(e: std.json.Error, number: u64) -> Result[m1.support.Error, m1.suppor
     let label = match e {
         Syntax(_) => m1.support.name("Syntax@document", number, "")?,
         NotFinite(_) => m1.support.name("InvalidNumber@document", number, "")?,
+        Depth => m1.support.name("Depth@document", number, "")?,
         Build(Capacity(c)) => return Ok(m1.support.Error(exit: Exit(status: 3), label: "Capacity@ambient", capacity: Some(c))),
         Build(Overflow) => m1.support.name("Build@document", number, "")?,
     }

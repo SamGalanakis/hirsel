@@ -36,12 +36,16 @@ pub type Member {
 /// Syntax(i): byte i is where the input stops being JSON: a trailing comma, a control
 /// byte in a string, a lone surrogate, a leading zero, trailing bytes, or the end of the
 /// input. NotFinite(i): the number at i rounds to an infinity (`1e999`). Build(e): the
-/// document did not fit (Capacity) or exceeds W's blob cap (Overflow).
-pub type Error = Syntax(u64) | NotFinite(u64) | Build(BuildError)
+/// document did not fit (Capacity) or exceeds W's blob cap (Overflow). Depth means
+/// the sizing pass encountered a 129th nested array or object.
+pub type Error = Syntax(u64) | NotFinite(u64) | Build(BuildError) | Depth
+
+const MAX_DEPTH: u64 = 128
 
 /// Checks that s is one JSON value, which may have whitespace around it, and returns the
 /// exact number of bytes its document takes. `parse` admits exactly that many.
-/// Fails: Error(Syntax(i) | NotFinite(i)) at the first byte that is wrong.
+/// Fails: Error(Syntax(i) | NotFinite(i)) at the first byte that is wrong, or
+/// Error(Depth) at the first container beyond the 128-container nesting limit.
 /// Alloc: nothing. Cost: O(len); each number once more through float.parse64.
 /// Ex: `let n = std.json.size(line)?`; `[12,"ab",[true,30],[]]` takes 73 bytes
 pub fn size(s: String) -> Result[u64, Error] {
@@ -56,6 +60,7 @@ pub fn size(s: String) -> Result[u64, Error] {
 
 /// Parses s into one document in r: `size(s)`, then a single admission of that many bytes,
 /// then each value written once at its final offset.
+/// The sizing pass checks depth before the document is admitted or written.
 /// Fails: as size; Error(Build(Capacity(c))) when r's limit refuses the admission,
 /// with nothing written; Error(Build(Overflow)) past 2^32 - 1 bytes.
 /// Alloc: one block of exactly size(s) bytes (rounded to 8) in r.
@@ -525,37 +530,59 @@ fn value_start(s: String, mut i: u64) -> Result[ValueStart, Error] {
 }
 
 fn value_size(s: String, mut i: u64) -> Result[u64, Error] {
-    match value_start(s, mut i)? {
-        ReadNull => Ok(1),
-        ReadTrue => Ok(1),
-        ReadFalse => Ok(1),
-        ReadString => Ok(5 + string_size(s, mut i)?),
-        ReadNumber => Ok(5 + number_size(s, mut i)?),
-        ReadArray => {
-            let mut n: u64 = 9
-            if !ends(s, mut i, b']') {
-                loop {
-                    n += value_size(s, mut i)? + 4
-                    if after_item(s, mut i, b']')? {
-                        break
-                    }
-                }
+    let mut n: u64 = 0
+    let mut close: u8 = 0
+    let mut depth: u64 = 0
+    let mut outer: Inline[u8, 128] =[0; 128]
+    loop {
+        let opened: u8 = match value_start(s, mut i)? {
+            ReadNull => {
+                n += 1
+                0
+            },
+            ReadTrue => {
+                n += 1
+                0
+            },
+            ReadFalse => {
+                n += 1
+                0
+            },
+            ReadString => {
+                n += 5 + string_size(s, mut i)?
+                0
+            },
+            ReadNumber => {
+                n += 5 + number_size(s, mut i)?
+                0
+            },
+            ReadArray => b']',
+            ReadObject => b'}',
+        }
+        if opened != 0 {
+            if depth == MAX_DEPTH {
+                return Error(Depth)
             }
-            Ok(n)
-        },
-        ReadObject => {
-            let mut n: u64 = 9
-            if !ends(s, mut i, b'}') {
-                loop {
-                    let (_, _, width) = member_name(s, mut i)?
-                    n += 4 + width + value_size(s, mut i)? + 4
-                    if after_item(s, mut i, b'}')? {
-                        break
-                    }
-                }
+            n += 9
+        }
+        if opened != 0 && !ends(s, mut i, opened) {
+            outer[depth] = close
+            depth += 1
+            close = opened
+        } else {
+            while close != 0 && after_item(s, mut i, close)? {
+                depth -= 1
+                close = outer[depth]
             }
-            Ok(n)
-        },
+        }
+        if close == 0 {
+            return Ok(n)
+        }
+        n += 4
+        if close == b'}' {
+            let (_, _, width) = member_name(s, mut i)?
+            n += 4 + width
+        }
     }
 }
 

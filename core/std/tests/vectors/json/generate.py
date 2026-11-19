@@ -9,7 +9,6 @@ FINITE = {
     'i_number_too_big_neg_int',
     'i_number_too_big_pos_int',
     'i_number_very_big_negative_int',
-    'i_structure_500_nested_arrays',
 }
 OVERFLOW = {
     'i_number_huge_exp',
@@ -19,9 +18,9 @@ OVERFLOW = {
     'i_number_real_pos_overflow',
 }
 DEEP = {
-    'i_structure_500_nested_arrays',
-    'n_structure_100000_opening_arrays',
-    'n_structure_open_array_object',
+    'i_structure_500_nested_arrays': (b'[', 500, b']' * 500),
+    'n_structure_100000_opening_arrays': (b'[', 100_000, b''),
+    'n_structure_open_array_object': (b'[{"":', 50_000, b'\n'),
 }
 
 
@@ -46,17 +45,32 @@ def expect(name, data):
 def main():
     # One static string keeps LLVM from constructing hundreds of owned rows.
     # Each row is a tag, filename, space, original bytes in hex, and newline.
-    rows = []
+    rows, deep = [], []
     for path in sorted(Path(__file__).with_name('test_parsing').glob('*.json')):
         name = path.stem
-        if name in DEEP:
-            continue  # Native Stack run stops. See README.md for the affected cases.
         data = path.read_bytes()
+        if name in DEEP:
+            unit, count, tail = DEEP[name]
+            if unit * count + tail != data:
+                raise ValueError(f'nesting fixture changed: {name}')
+            deep.append((name, unit.decode(), count, tail.decode()))
+            continue
         rows.append(f'{expect(name, data)}{name} {data.hex()}')
     if not rows:
         raise ValueError('JSONTestSuite input directory is empty')
     print('fn json_test_suite_data() -> String {')
     print('    "' + '\\n'.join(rows) + '\\n"')
+    print('}')
+    # Use repetition to keep the exact long inputs without giant source tokens.
+    if len(deep) != len(DEEP):
+        raise ValueError('missing JSONTestSuite nesting input')
+    print(f'fn json_test_suite_deep_data() -> Inline[(String, String, u64, String), {len(deep)}] {{')
+    print('    [')
+    for name, unit, count, tail in deep:
+        escaped_unit = unit.replace('"', '\\"')
+        escaped_tail = tail.replace('\n', '\\n')
+        print(f'        ("{name}", "{escaped_unit}", {count}, "{escaped_tail}"),')
+    print('    ]')
     print('}')
 
 

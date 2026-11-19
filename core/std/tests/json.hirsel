@@ -519,3 +519,53 @@ fn serde_json_numbers() -> bool {
     }
     true
 }
+
+fn nested_json_input(unit: String, count: u64, tail: String) -> String {
+    let mut input = result.unwrap(string.repeat(unit, count))
+    result.unwrap(string.push(mut input, tail))
+    take input
+}
+
+fn refuses_depth_before_admission(input: String) -> bool {
+    region r {
+        result.unwrap(bound bytes 0 {
+            match json.parse(r, input) {
+                Error(Depth) => true,
+                _ => false,
+            }
+        })
+    }
+}
+
+// expect: run json_test_suite_nesting() = true
+fn json_test_suite_nesting() -> bool {
+    for row in json_test_suite_deep_data() {
+        let (name, unit, count, tail) = row
+        if !refuses_depth_before_admission(nested_json_input(unit, count, tail)) {
+            fail(result.unwrap(string.from(name)))
+        }
+    }
+    true
+}
+
+// expect: run json_nesting_128() = true
+fn json_nesting_128() -> bool {
+    let input = nested_json_input("[", 128, result.unwrap(string.repeat("]", 128)))
+    // The innermost empty array takes 9 bytes. Each of the other arrays
+    // adds a 9-byte header and one 4-byte offset.
+    let Ok(1660u64) = json.size(input) else {
+        return false
+    }
+    region r {
+        match json.parse(r, input) {
+            Ok(Arr(xs)) => seq.len(xs) == 1,
+            _ => false,
+        }
+    }
+}
+
+// expect: run json_nesting_129() = true
+fn json_nesting_129() -> bool {
+    let closing = result.unwrap(string.repeat("]", 129))
+    refuses_depth_before_admission(nested_json_input("[", 129, closing))
+}

@@ -16,6 +16,7 @@ fn parse_error(e: std.json.Error, n: u64) -> Result[m1.support.Error, m1.support
     let prefix = match e {
         Syntax(_) => "Syntax",
         NotFinite(_) => "InvalidNumber",
+        Depth => "Depth",
         Build(Capacity(c)) => return Ok(m1.support.Error(exit: Exit(status: 3), label: "Capacity@ambient", capacity: Some(c))),
         Build(Overflow) => "Build",
     }

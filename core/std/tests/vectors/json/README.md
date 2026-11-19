@@ -27,17 +27,9 @@ It makes these choices for the `i_` inputs:
   `json.parse` takes a `String`, which admits only UTF-8 scalar values.
 - A leading UTF-8 BOM returns `Syntax`. No JSON token starts with a BOM, and
   advancing past it as whitespace is optional under RFC 8259 section 8.1.
-- The 500 nested arrays parse. `json.parse` documents syntax, finite-number and
-  byte-admission checks without a fixed nesting limit.
+- The 500 nested arrays return `Depth` under the 128-container depth
+  contract in [the JSON API](../../../api/json.md).
 
-## Pending nesting cases
-
-Both native engines stop with `Stack` for these three cases. The evaluator
-returns the upstream verdict for all three. Their original files stay in the
-vendor directory while the native stack behavior is resolved.
-
-| File | Expected |
-| --- | --- |
-| `i_structure_500_nested_arrays.json` | Parse |
-| `n_structure_100000_opening_arrays.json` | Refuse |
-| `n_structure_open_array_object.json` | Refuse |
+The two required refusals with a deep unclosed prefix also return `Depth`.
+The generator checks that its repeated-prefix representation reconstructs
+each of the three upstream nesting inputs byte for byte.

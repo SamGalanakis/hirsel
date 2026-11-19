@@ -1223,7 +1223,10 @@ fn test_lag_window(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net:
     if let Ok(Ok(Stopped)) = task.join(take running) {} else { fail("lag: idle place did not stop") }
     if let Ok(_) = wire_client.connect(tasks, net, address, clock, random, client_keys(), None, socket) { fail("lag: accepted a connection after the drain") }
     let clipped = runner.Stop(lag_ms: 10000u64, grace_ms: 100u64)
-    let (cutting, cut_to, cut_phases, cut_status) = start_managed(tasks, managed_settings(dir, clock, random, tasks, net, policy, address, clipped), false)
+    let mut restarted_settings = managed_settings(dir, clock, random, tasks, net, policy, address, clipped)
+    // The first launch installed release 1 (RUNNER-SPEC §6).
+    restarted_settings.selection = Current(1u64)
+    let (cutting, cut_to, cut_phases, cut_status) = start_managed(tasks, take restarted_settings, false)
     loop {
         match channel.receive(cut_phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("lag: clipped place did not become ready") }
     }

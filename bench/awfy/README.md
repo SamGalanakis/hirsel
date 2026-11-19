@@ -228,6 +228,10 @@ runtime or std/core source changes, both rows must carry verified build records.
 The report names the changed hashes. Identical candidate hashes across all
 rows cause an A/A refusal. Use `compare --aa` for a deliberate run with
 identical compiler, runtime and std/core hashes.
+Each LangArena image uses an application manifest containing its benchmark
+group and the shared harness and helper. The runtime fixture identity combines
+those sources with the configuration file. A port edit refuses comparisons for
+that group while rows from other groups can still be compared.
 An identity refusal exits 2. A comparable
 row above +0.5% exits 1. Use `--threshold PERCENT` to set another limit.
 
@@ -254,6 +258,18 @@ to measure identical builds deliberately. The command exits 0 if every
 row has enough pairs and its median cycle ratio is at most 1.01x, 1 if a
 row exceeds that ratio, or 2 if a row has too few pairs or the comparison
 is refused.
+
+To measure against Rust and Goose, pass a single Hirsel receipt directory.
+Put the peer binaries beside the Hirsel image using the normal build layout.
+Add `--upstream "$awfy"` for AWFY or pool peer commands.
+
+```sh
+python3 bench/awfy/receipt.py cycle-pairs "$out/candidate-samples" \
+  --peer rust goose --rows 'arena/Sort::Merge' --cpu "$cpu" --lock "$lock"
+```
+
+Peer mode checks all outputs and reports Hirsel/peer ratios. Exit 0 means all
+requested pairs completed. The ratios have no regression threshold.
 
 ### Profile a runtime delta
 

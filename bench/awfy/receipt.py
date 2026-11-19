@@ -62,18 +62,23 @@ def release_tools(artifacts):
 
 
 def fixture_identity(manifest, runtime_fixture):
+    return source_fixture(manifest, {str(runtime_fixture): sha256(runtime_fixture)})
+
+
+def source_fixture(manifest, files):
     sources = build.manifest_digests(manifest)
-    digest = sha256(runtime_fixture)
+    digest, = files.values()
     return {
         **sources,
         "fixture_sha256": hashlib.sha256(bytes.fromhex(sources["workload_sources_sha256"] + digest)).hexdigest(),
-        "fixture_files": {str(runtime_fixture): digest},
+        "fixture_files": files,
     }
 
 
 def runtime_fixture(suite, directory, upstream):
     if suite == "arena":
-        return fixture_identity(directory / "inputs.json", directory / "one-iteration.json")
+        path = directory / "one-iteration.json"
+        return {"fixture_files": {str(path): sha256(path)}}
     return fixture_identity(directory / "hirsel-inputs.json", upstream / "rebench.conf")
 
 
@@ -110,6 +115,9 @@ def runtime_case(suite, name, directory, command, marker, fixture, tools):
     provenance = report.get("measurement")
     if provenance is None:
         raise ValueError(f"{path}: build with the release row adapter to record measurement provenance")
+    if suite == "arena":
+        manifest = binary.with_name(f"{binary.name}-inputs.json")
+        fixture = source_fixture(manifest, fixture["fixture_files"])
     image = sha256(binary)
     checked = tools | {field: fixture[field] for field in build.MANIFEST_HASHES} | {"image_sha256": image}
     for field, value in checked.items():
@@ -419,7 +427,7 @@ def cycle_samples(base, candidate, args, siblings, env):
     return kept, attempt
 
 
-def report_cycle_pairs(key, kept, attempted, wanted, *, filtered=True):
+def report_cycle_pairs(key, kept, attempted, wanted, *, filtered=True, peer=False):
     description = "quiet pairs" if filtered else "unfiltered pairs"
     if kept:
         cycles, instructions = (
@@ -437,6 +445,8 @@ def report_cycle_pairs(key, kept, attempted, wanted, *, filtered=True):
         print(f"{key}: 0/{attempted} {description}")
     if len(kept) < wanted:
         verdict, status = "TOO FEW QUIET PAIRS", REFUSED
+    elif peer:
+        return 0
     elif center > CYCLE_RIDE_RATIO:
         verdict, status = "FAILS", 1
     else:
@@ -450,10 +460,14 @@ def cycle_pairs(args):
     affinity = os.sched_getaffinity(0)
     if args.cpu not in affinity:
         raise ValueError(f"CPU {args.cpu} is outside the assigned affinity")
+    if args.peer and (args.candidate is not None or args.aa):
+        raise ValueError("--peer takes one Hirsel receipt and cannot be combined with --aa")
+    if not args.peer and (args.candidate is None or args.upstream is not None):
+        raise ValueError("provide two receipts for a Hirsel comparison or use --peer")
     with measurement_slot(args.lock), tempfile.TemporaryDirectory() as temporary:
         siblings = sibling_cpus((args.cpu,))
         base, base_refusals = receipt_in(args.baseline)
-        after, after_refusals = receipt_in(args.candidate)
+        after, after_refusals = receipt_in(args.candidate) if args.candidate else ({}, {})
         keys = select_pair_rows(args.rows, base)
         env = build.capped_env(Path(temporary))
         activity = "no busy filter" if limit is None else f"quiet means below {limit}% busy per run"
@@ -465,13 +479,11 @@ def cycle_pairs(args):
                 try:
                     if key in base_refusals or key in after_refusals:
                         raise ValueError((base_refusals | after_refusals)[key])
-                    left, right = base[key].copy(), after[key].copy()
-                    for label, row in (("base", left), ("candidate", right)):
-                        validate_row(key, row)
-                        if row["suite"] == "compile" or not verified_build(row):
-                            raise ValueError(f"{label}: expected a verified runtime build")
-                        verify_runtime_files(row, label)
-                        row["affinity"] = [args.cpu]
+                    left = cycle_row(key, base[key], "base", args.cpu)
+                    if args.peer:
+                        status = max(status, peer_cycle_pairs(key, left, args, siblings, env))
+                        continue
+                    right = cycle_row(key, after[key], "candidate", args.cpu)
                     match_rows(key, left, right)
                     same = all(left[field] == right[field] for field in (*CANDIDATE_HASHES, "image_sha256"))
                     if same != args.aa:
@@ -485,6 +497,36 @@ def cycle_pairs(args):
         finally:
             os.sched_setaffinity(0, affinity)
         return status
+
+
+def cycle_row(key, source, label, cpu):
+    validate_row(key, source)
+    if source["suite"] == "compile" or not verified_build(source):
+        raise ValueError(f"{label}: expected a verified runtime build")
+    verify_runtime_files(source, label)
+    return source | {"affinity": [cpu]}
+
+
+def peer_cycle_pairs(key, hirsel, args, siblings, env):
+    suite = hirsel["suite"]
+    if suite != "arena" and args.upstream is None:
+        raise ValueError("--upstream is required for AWFY and pool peer commands")
+    name = key.split("/", 1)[1]
+    cwd = Path(hirsel["cwd"])
+    cases = dict(measure.runtime_cases(suite, cwd, args.upstream))
+    commands = cases[name]
+    command, marker = commands["hirsel"]
+    argv = [f"./{command[0].name}", *map(str, command[1:])]
+    if argv != hirsel["argv"] or marker.decode() != hirsel["marker"]:
+        raise ValueError("the peer commands do not match the Hirsel receipt's workload")
+    status = 0
+    for peer in args.peer:
+        command, marker = commands[peer]
+        row = {"argv": list(map(str, command)), "cwd": str(cwd), "marker": marker.decode()}
+        kept, attempted = cycle_samples(row, hirsel, args, siblings, env)
+        status = max(status, report_cycle_pairs(f"{key} Hirsel/{peer}", kept, attempted, args.pairs,
+                                               filtered=args.sibling_busy_threshold is not None, peer=True))
+    return status
 
 
 def prepare_pair_rows(cases, keys, artifacts, upstream):
@@ -718,7 +760,12 @@ def main():
     comparison.add_argument("--aa", action="store_true", help="require identical compiler, runtime and std/core hashes")
     cycles = commands.add_parser("cycle-pairs", help="qualify named runtime rows with interleaved counter pairs")
     cycles.add_argument("baseline", type=Path, help="base directory containing receipt.json or board.json")
-    cycles.add_argument("candidate", type=Path, help="candidate directory containing receipt.json or board.json")
+    cycles.add_argument("candidate", nargs="?", type=Path,
+                        help="candidate directory containing receipt.json or board.json")
+    cycles.add_argument("--peer", nargs="+", choices=("rust", "goose"),
+                        help="report Hirsel/peer ratios from one Hirsel receipt")
+    cycles.add_argument("--upstream", type=lambda path: Path(path).resolve(),
+                        help="pinned AWFY checkout for peer commands")
     cycles.add_argument("--rows", required=True, metavar="ROW,ROW", help="comma-separated runtime row names")
     cycles.add_argument("--cpu", type=int, required=True, help="measurement CPU")
     cycles.add_argument("--pairs", type=positive_int, default=60, metavar="N", help="kept pairs per row (default: 60)")

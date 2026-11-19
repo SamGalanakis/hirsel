@@ -24,12 +24,23 @@ def root_mib(name):
     return 64
 
 
+def group_inputs(module):
+    manifest = inputs(ROOT, module)
+    # Groups are independent. Only harness and helper are shared LangArena
+    # modules. The compiler checks these manifests, including qualified names,
+    # so a new application dependency must be included before a build succeeds.
+    app = manifest["packages"][-1]
+    app["sources"] = [source for source in app["sources"]
+                      if source["modules"] in ([module], ["harness"], ["helper"])]
+    return manifest
+
+
 def build_hirsel(out, artifacts, rows, env=None, *, debug_lines=False):
-    manifest = out / "inputs.json"
-    manifest.write_text(json.dumps(inputs(ROOT, "harness")))
     for module, mib in sorted({(group(row["name"]), root_mib(row["name"])) for row in rows}):
         print(f"building {module} at {mib} MiB", flush=True)
         binary = out / f"{module}-{mib}"
+        manifest = out / f"{binary.name}-inputs.json"
+        manifest.write_text(json.dumps(group_inputs(module)))
         command = [
             artifacts["compiler"], "build",
             "--inputs", manifest, "--entry", f"langarena@1/{module}/main",

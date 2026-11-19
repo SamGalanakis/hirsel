@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import arena
 import build
 import bench_cpus
 import receipt
@@ -254,6 +255,35 @@ class QuietCyclePairs(unittest.TestCase):
                 self.assertEqual(receipt.report_cycle_pairs("awfy/List", samples, 3, 3), expected)
                 self.assertIn(f"awfy/List {verdict}\n", output.getvalue())
 
+    def test_peer_pairs_use_the_same_workload_and_peer_checksum(self):
+        args = Namespace(peer=["rust", "goose"], upstream=None, pairs=1,
+                         max_attempts=1, sibling_busy_threshold=None)
+        cwd = Path("/benchmark")
+        name = "Sort::Merge"
+        native = {"suite": "arena", "cwd": str(cwd), "argv": ["./sort-64", "one-iteration.json", name],
+                  "marker": "checksum\n"}
+        commands = {"hirsel": ([cwd / "sort-64", *native["argv"][1:]], b"checksum\n"),
+                    "rust": ([cwd / "rust", cwd / "one-iteration.json", name], b"rust checksum\n"),
+                    "goose": ([cwd / "goose", cwd / "one-iteration.json", name], b"goose checksum\n")}
+
+        def pair(peer, candidate, *_):
+            command, marker = commands[Path(peer["argv"][0]).name]
+            self.assertEqual(peer["argv"], list(map(str, command)))
+            self.assertEqual(peer["marker"], marker.decode())
+            self.assertEqual(candidate, native)
+            base = {"cycles": 100, "instructions": 150, "smt_busy_percent": {}}
+            return [(base, base | {"cycles": 200})], 1
+
+        with (patch.object(receipt.measure, "runtime_cases", return_value=[(name, commands)]),
+              patch.object(receipt, "cycle_samples", side_effect=pair) as sample,
+              redirect_stdout(io.StringIO()) as output):
+            self.assertEqual(receipt.peer_cycle_pairs(f"arena/{name}", native, args, (), {}), 0)
+            self.assertEqual(sample.call_count, 2)
+            self.assertIn("Hirsel/rust: 1/1 unfiltered pairs, cycles 2.000000x", output.getvalue())
+            self.assertIn("Hirsel/goose: 1/1 unfiltered pairs, cycles 2.000000x", output.getvalue())
+            with self.assertRaisesRegex(ValueError, "do not match"):
+                receipt.peer_cycle_pairs(f"arena/{name}", native | {"marker": "other\n"}, args, (), {})
+
 
 class ProfileSelfCosts(unittest.TestCase):
     def test_excludes_call_edges_and_keeps_inlined_line(self):
@@ -294,6 +324,29 @@ totals: 56
 
 
 class NativeProvenance(unittest.TestCase):
+    def test_arena_fixture_hashes_the_built_group_and_its_shared_sources(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            source = directory / "core/langarena"
+            source.mkdir(parents=True)
+            for module in ("sort", "clbg", "harness", "helper"):
+                (source / f"{module}.hirsel").write_text(f"// {module}\n")
+            (directory / "one-iteration.json").write_text("fixture")
+            fixture = receipt.runtime_fixture("arena", directory, None)
+
+            def identity(module):
+                manifest = directory / f"{module}-64-inputs.json"
+                with patch.object(arena, "ROOT", directory):
+                    manifest.write_text(json.dumps(arena.group_inputs(module)))
+                return receipt.source_fixture(manifest, fixture["fixture_files"])["fixture_sha256"]
+
+            sort, clbg = identity("sort"), identity("clbg")
+            (source / "clbg.hirsel").write_text("// revised CLBG\n")
+            self.assertEqual(identity("sort"), sort)
+            self.assertNotEqual(identity("clbg"), clbg)
+            (source / "helper.hirsel").write_text("// revised shared helper\n")
+            self.assertNotEqual(identity("sort"), sort)
+
     def test_runtime_receipt_refuses_a_replaced_binary(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)

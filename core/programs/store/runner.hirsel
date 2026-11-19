@@ -50,7 +50,7 @@ pub fn stream_key(c: Caller, number: u32) -> Result[Bytes, Capacity] {
     Ok(take stream)
 }
 
-pub type OpenError: send = Store(store.Error) | Place(RegisterError) | PolicyTable(String)
+pub type OpenError: send = Store(store.Error) | Place(RegisterError) | PolicyTable(String) | Migrate(store.Error)
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Draining
@@ -59,7 +59,7 @@ pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 pub type Backing: send = Memory | Disk(Dir, store.Options) | Temp(Dir)
 pub type PlaceConfig[G: send, H: send]: send {
     backing: Backing, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
-    handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H],
+    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], policy: ingress.Ingress, n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
 }
@@ -176,7 +176,7 @@ fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
 }
 
 fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
-    let PlaceConfig(backing: take backing, place: place, handles: handles, query_handles: query_handles, n_place: n_place, n_publisher: n_publisher,
+    let PlaceConfig(backing: take backing, place: place, migrate: migrate, handles: handles, n_place: n_place, n_publisher: n_publisher,
         session: session_config, max_sessions: limit, proxies: take proxies, policy: take access_gate,
         listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config) = take p
     if limit == 0u64 || limit > WIRE_OWNER_LIMIT || !wire_configuration(session_config) { return Error(Missing("socket")) }
@@ -207,7 +207,7 @@ fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receive
         _ => { let _ = channel.try_send(to, StopRequested); None },
     }
     let allowance = head_bytes(backing, n_place, n_publisher)
-    let head_job = ManagedHead(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, handles: handles, query_handles: query_handles,
+    let head_job = ManagedHead(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain))
     let head_run: fn(take ManagedHead[G, H]) -> () waits = head_ended
     let mut heading: Option[Task[()]] = match task.spawn(tasks, bytes allowance, take head_job, head_run) {
@@ -1393,15 +1393,19 @@ fn publish[G: send, H: send](take p: Publish[G, H]) -> () waits {
     publisher(take r, take h, take base, take from)
 }
 
-// Each task runs place under n_place. The head selects handles once, then
-// derives the publisher handles from that selection.
-pub fn place_head[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H], take inbox: Receiver[Req], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
-    place_head_requests(take db, place, n_place, handles, query_handles, DirectRequests(take inbox), take mail, tasks, n_publisher)
+// The head runs the migration once and opens handles for both tasks against
+// the resulting catalog. Each task runs place under n_place.
+pub fn place_head[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: Receiver[Req], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
+    place_head_requests(take db, place, n_place, migrate, handles, DirectRequests(take inbox), take mail, tasks, n_publisher)
 }
 
-pub fn place_head_requests[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H], take inbox: HeadRequests, take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
+pub fn place_head_requests[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: HeadRequests, take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
     let mut owned = take db
-    let (r, h, h2) = prepare_registry(mut owned, place, handles, query_handles, n_place)?
+    let prepared = prepare_registry(mut owned, place, migrate, handles, n_place, tasks)
+    let (r, h, h2) = match take prepared {
+        Ok(take ready) => take ready,
+        Error(take problem) => { let _ = close_store(take owned); return Error(take problem) },
+    }
     run_head(take owned, take r, take h, take h2, place, n_place, take inbox, take mail, tasks, n_publisher, None)
 }
 
@@ -1441,14 +1445,11 @@ fn close_store(take db: store.Db) -> Result[(), OpenError] waits {
     match store.close(take db) { Ok(()) => Ok(()), Error(take problem) => Error(Store(take problem)) }
 }
 
-fn open_handles[H: send](mut owned: store.Db, handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H]) -> Result[(H, H), OpenError] waits {
-    let make = code.callable(handles)
-    let h = match make(mut owned) {
-        Ok(take x) => take x,
-        Error(e) => return Error(Store(e)),
+fn open_handles[H: send](db: store.Db, handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]]) -> Result[H, OpenError] {
+    match store.with_schema(db, handles) {
+        Ok(take h) => Ok(take h),
+        Error(take problem) => Error(Store(take problem)),
     }
-    let h2 = (code.callable(query_handles))(h)
-    Ok((take h, take h2))
 }
 
 fn start_publisher[G: send, H: send](owned: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take h2: H, take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(Sender[PubIn], Task[()]), OpenError] waits {
@@ -1491,7 +1492,7 @@ type HeadDrain { finish: Receiver[()], events: Sender[LifeEvent], window: Latest
 type ManagedHead[G: send, H: send]: send {
     backing: Backing, tasks: Tasks, clock: Clock, random: Random,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H],
+    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     n_place: u64, n_publisher: u64, inbox: Receiver[HeadInput], finish_from: Receiver[()],
     to: Sender[LifeEvent], drain: Latest[Option[DrainWindow]],
 }
@@ -1508,7 +1509,7 @@ fn head_ended[G: send, H: send](take job: ManagedHead[G, H]) -> () waits {
 }
 
 fn managed_head[G: send, H: send](take job: ManagedHead[G, H]) -> Result[(), StartError] waits {
-    let ManagedHead(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, handles: handles, query_handles: query_handles,
+    let ManagedHead(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain) = take job
     let mut temporary: Option[TemporaryBacking] = None
     let opened: Result[store.Db, store.Error] = match backing {
@@ -1524,7 +1525,7 @@ fn managed_head[G: send, H: send](take job: ManagedHead[G, H]) -> Result[(), Sta
     }
     let mut db = match take opened { Ok(take db) => take db, Error(take problem) => return Error(Open(Store(take problem))) }
     if !head_advance(to, inbox, Recovered) { return head_closed(take db) }
-    let prepared = head_prepare(mut db, place, handles, query_handles, n_place)
+    let prepared = head_prepare(mut db, place, migrate, handles, n_place, tasks)
     let (reg, local, publisher_handles, release) = match take prepared {
         Ok(take values) => take values,
         Error(take problem) => { let _ = close_store(take db); return Error(Open(take problem)) },
@@ -1549,16 +1550,18 @@ fn head_closed(take db: store.Db) -> Result[(), StartError] waits {
 }
 
 fn head_prepare[G: send, H: send](mut db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H], n_place: u64) -> Result[(Registry[G, H], H, H, Bytes), OpenError] waits {
-    let (reg, local, published_handles) = prepare_registry(mut db, place, handles, query_handles, n_place)?
+    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, H, Bytes), OpenError] waits {
+    let (reg, local, published_handles) = prepare_registry(mut db, place, migrate, handles, n_place, tasks)?
     let release = activate(mut db, reg, n_place)?
     Ok((take reg, take local, take published_handles, take release))
 }
 
 fn prepare_registry[G: send, H: send](mut db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H], n_place: u64) -> Result[(Registry[G, H], H, H), OpenError] waits {
+    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, H), OpenError] waits {
+    if let Error(take problem) = store.run_migration(mut db, tasks, migrate) { return Error(Migrate(take problem)) }
     let reg = match placed(place, n_place) { Ok(take reg) => take reg, Error(take problem) => return Error(Place(take problem)) }
-    let (local, published_handles) = open_handles(mut db, handles, query_handles)?
+    let local = open_handles(db, handles)?
+    let published_handles = open_handles(db, handles)?
     if let Some(settings) = reg.key_policy {
         declare_policy(mut db, settings)?
     }

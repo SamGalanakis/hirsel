@@ -35,14 +35,19 @@ type Handles: send {
 
 type Registry = store.runner.Registry[(), Handles]
 
-fn handles(mut db: store.store.Db) -> Result[Handles, store.store.Error] waits {
+fn migrate(mut phase: store.store.Migration) -> Result[(), store.store.Error] {
     let codec: std.codec.Codec[Bytes] = std.codec.of()
-    let chunks = store.store.table(mut db, "chunks", std.codec.key_u32(), codec)?
-    Ok(Handles(chunks: chunks))
+    match store.store.migration_create_table(mut phase, store.store.spec("chunks", std.codec.key_u32(), codec)) {
+        Ok(()) => Ok(()),
+        Error(Exists(_)) => Ok(()),
+        Error(take problem) => Error(take problem),
+    }
 }
 
-fn query_handles(h: Handles) -> Handles {
-    Handles(chunks: store.store.query_table(h.chunks))
+fn handles(catalog: store.store.Schema) -> Result[Handles, store.store.Error] {
+    let codec: std.codec.Codec[Bytes] = std.codec.of()
+    let chunks = store.store.schema_table(catalog, "chunks", std.codec.key_u32(), codec)?
+    Ok(Handles(chunks: chunks))
 }
 
 fn chunk(i: Bit) -> u32 {
@@ -184,16 +189,8 @@ fn serve(take server: Server) -> Result[(), std.wsock.Error] waits {
 fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
     let Settings(listen: listen, proxies: take proxies, policy: options) = settings(a)?
     let failed = Exit(status: 1u8)
-    let mut db = match store.store.open(tasks, directory, c, random, store.store.defaults()) {
+    let db = match store.store.open(tasks, directory, c, random, store.store.defaults()) {
         Ok(take value) => take value,
-        Error(_) => return Error(failed),
-    }
-    let codec: std.codec.Codec[Bytes] = std.codec.of()
-    match store.store.create_table(mut db, store.store.spec("chunks", std.codec.key_u32(), codec)) {
-        Ok(ticket) => if let Error(_) = store.store.durable(mut db, ticket) {
-            return Error(failed)
-        },
-        Error(Exists(_)) => (),
         Error(_) => return Error(failed),
     }
     let (policy, take admission_task) = result.unwrap(store.ingress.start(tasks, c, random, options, 8388608u64))
@@ -210,7 +207,7 @@ fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Task
         Ok(take job) => take job,
         Error(_) => return Error(failed),
     }
-    let ended = store.runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 67108864u64)
+    let ended = store.runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 67108864u64)
     task.cancel(mut serving)
     let _ = task.join(take serving)
     let mut admission = take admission_task

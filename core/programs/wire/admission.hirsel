@@ -1,14 +1,19 @@
 type H: send { table: store.store.Table[u64, u32] }
 type Reg = store.runner.Registry[(), H]
 
-fn handles(mut db: store.store.Db) -> Result[H, store.store.Error] waits {
+fn migrate(mut phase: store.store.Migration) -> Result[(), store.store.Error] {
     let codec: std.codec.Codec[u32] = std.codec.of()
-    let table = store.store.table(mut db, "data", std.codec.key_u64(), codec)?
-    Ok(H(table: table))
+    match store.store.migration_create_table(mut phase, store.store.spec("data", std.codec.key_u64(), codec)) {
+        Ok(()) => Ok(()),
+        Error(Exists(_)) => Ok(()),
+        Error(take problem) => Error(take problem),
+    }
 }
 
-fn query_handles(h: H) -> H {
-    H(table: store.store.query_table(h.table))
+fn handles(catalog: store.store.Schema) -> Result[H, store.store.Error] {
+    let codec: std.codec.Codec[u32] = std.codec.of()
+    let table = store.store.schema_table(catalog, "data", std.codec.key_u64(), codec)?
+    Ok(H(table: table))
 }
 
 
@@ -123,7 +128,7 @@ pub fn main(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(
     let mail = result.unwrap(store.runner.mailbox(64u64))
     let seed = Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: store.runner.post(mail), authority: store.store.authority_reader(db))
     let h = result.unwrap(task.spawn(tasks, bytes 1073741824u64, take seed, server))
-    let _ = store.runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 8388608u64)
+    let _ = store.runner.place_head(take db, code.describe(place), 1048576u64, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 8388608u64)
     let _ = task.join(take h)
     Ok(())
 }

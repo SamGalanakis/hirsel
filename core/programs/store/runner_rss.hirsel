@@ -8,14 +8,19 @@ type Hd: send { t: store.Table[u64, u64] }
 
 type Calls = runner.Registry[(), Hd]
 
-fn handles(mut db: store.Db) -> Result[Hd, store.Error] waits {
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.table(mut db, "data", std.codec.key_u64(), cv)?
-    Ok(Hd(t: t))
+fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+    let codec: std.codec.Codec[u64] = std.codec.of()
+    match store.migration_create_table(mut phase, store.spec("data", std.codec.key_u64(), codec)) {
+        Ok(()) => Ok(()),
+        Error(Exists(_)) => Ok(()),
+        Error(take problem) => Error(take problem),
+    }
 }
 
-fn query_handles(h: Hd) -> Hd {
-    Hd(t: store.query_table(h.t))
+fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let t = store.schema_table(catalog, "data", std.codec.key_u64(), cv)?
+    Ok(Hd(t: t))
 }
 
 
@@ -110,7 +115,7 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args, net: Net) ->
         Ok(take t) => take t,
         Error(_) => return Error(Exit(status: 3)),
     }
-    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 1048576u64) {
+    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64) {
         Ok(()) => (),
         Error(_) => return Error(Exit(status: 4)),
     }

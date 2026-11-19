@@ -222,7 +222,7 @@ pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks,
         Error(_) => return false,
     }
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.handles), code.describe(observe_fixture.query_handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.migrate), code.describe(observe_fixture.handles), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)
     task.cancel(mut policy_task)
     let _ = task.join(take policy_task)
@@ -335,7 +335,7 @@ pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: T
         Error(_) => return false,
     }
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.handles), code.describe(observe_fixture.query_handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.migrate), code.describe(observe_fixture.handles), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)
     task.cancel(mut policy_task)
     let _ = task.join(take policy_task)

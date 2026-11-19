@@ -37,7 +37,7 @@ pub type Fault: send {
     why: Why
 }
 
-pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(Capacity) | Limit(Limit) | Schema(u64) | Stale(u32) | OutOfScope | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Diverged(u32) | Foreign
+pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(Capacity) | Limit(Limit) | Schema(u64) | Stale(u32) | OutOfScope | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Diverged(u32) | Foreign | MigrationFault
 
 type Roots: shareable + send {
     data: std.omap.OMap[Bytes, Arc[Bytes]],
@@ -3484,7 +3484,11 @@ fn catalog_index_key(id: u32, name: String) -> Result[Bytes, Error] {
 
 fn catalog_entry(db: Db, k: Bytes) -> Result[Catalog, Error] {
     healthy(db)?
-    match std.omap.get(db.heads[0].roots.catalog, k) {
+    catalog_entry_in(db.heads[0].roots.catalog, k)
+}
+
+fn catalog_entry_in(catalog: std.omap.OMap[Bytes, Arc[Bytes]], k: Bytes) -> Result[Catalog, Error] {
+    match std.omap.get(catalog, k) {
         Some(raw) => decode_catalog(raw),
         None => Error(Stale(0))
     }
@@ -3498,6 +3502,103 @@ fn catalog_put(mut db: Db, roots: Roots, k: Bytes, v: Bytes) -> Result[Roots, Er
         Error((c, _)) => return Error(Full(c))
     }
     Ok(Roots(data: std.omap.snapshot(roots.data), streams: std.omap.snapshot(roots.streams), catalog: take catalog))
+}
+
+pub opaque type Schema {
+    store: StoreId,
+    catalog: std.omap.OMap[Bytes, Arc[Bytes]]
+}
+
+pub opaque type Migration { plan: SchemaPlan }
+
+type SchemaPlan: send {
+    store: StoreId,
+    roots: Roots,
+    next_node: u64,
+    next_table: u32,
+    live: u64,
+    ceiling: u64,
+    retained: bool,
+    changed: bool
+}
+
+fn schema_plan(db: Db) -> SchemaPlan {
+    SchemaPlan(store: db.store, roots: share_roots(db.heads[0].roots), next_node: db.next_node,
+        next_table: db.next_table, live: db.resident, ceiling: db.ceiling, retained: retaining(db), changed: false)
+}
+
+fn keep_schema(mut plan: SchemaPlan, take roots: Roots, live: u64, next_table: u32) -> Result[(), Error] {
+    over_ceiling(live, plan.ceiling)?
+    plan.roots = take roots
+    plan.live = live
+    plan.next_table = next_table
+    plan.changed = true
+    Ok(())
+}
+
+fn publish_schema_plan(mut db: Db, take plan: SchemaPlan) -> Result[Ticket, Error] waits {
+    let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, live: live, ..) = take plan
+    // A cut records these high-water marks. On refusal both counters can keep
+    // their gaps, just as with a single schema operation.
+    db.next_node = ids
+    db.next_table = tables
+    schema_publish(mut db, take roots, live)
+}
+
+fn application_name(name: String) -> Result[(), Error] {
+    if std.string.starts_with(name, "hirsel.") { return Error(Exists("reserved")) }
+    Ok(())
+}
+
+pub fn with_schema[H](db: Db, make: StaticFn[fn(Schema) -> Result[H, Error]]) -> Result[H, Error] {
+    healthy(db)?
+    (code.callable(make))(Schema(store: db.store, catalog: std.omap.snapshot(db.heads[0].roots.catalog)))
+}
+
+type MigrationJob: send {
+    plan: SchemaPlan,
+    configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits],
+    answer: Sender[Result[SchemaPlan, Error]]
+}
+
+fn prepare_migration(take job: MigrationJob) -> () waits {
+    let MigrationJob(plan: take plan, configure: configure, answer: take answer) = take job
+    let mut working = Migration(plan: take plan)
+    let result = (code.callable(configure))(mut working)
+    let completed: Result[SchemaPlan, Error] = match take result {
+        Ok(()) => {
+            let Migration(plan: take committed) = take working
+            Ok(take committed)
+        },
+        Error(take problem) => Error(take problem)
+    }
+    let _ = channel.send(answer, take completed)
+}
+
+pub fn run_migration(mut db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[(), Error] waits {
+    healthy(db)?
+    let (answer, from): (Sender[Result[SchemaPlan, Error]], Receiver[Result[SchemaPlan, Error]]) = capacity(channel.new(1))?
+    let job = MigrationJob(plan: schema_plan(db), configure: configure, answer: take answer)
+    // The callback can wait, so its fault boundary is a task (FAIL-14).
+    // An empty task result costs 288 B (MEM-24). Use the parent's remaining
+    // grant for this phase and release the unused portion before the cut.
+    let first = task.spawn(tasks, bytes 18446744073709551327u64, take job, prepare_migration)
+    let running = match take first {
+        Ok(take handle) => take handle,
+        Error((c, take returned)) => {
+            if c.available < 288 { return Error(Full(c)) }
+            match task.spawn(tasks, bytes (c.available - 288), take returned, prepare_migration) {
+                Ok(take handle) => take handle,
+                Error((problem, _)) => return Error(Full(problem)),
+            }
+        },
+    }
+    if let Error(_) = task.join(take running) { return Error(MigrationFault) }
+    let plan = result.unwrap(channel.receive(from))?
+    if plan.changed {
+        let _ = publish_schema_plan(mut db, take plan)?
+    }
+    Ok(())
 }
 
 fn schema_publish(mut db: Db, take roots: Roots, live: u64) -> Result[Ticket, Error] waits {
@@ -3519,30 +3620,41 @@ fn schema_publish(mut db: Db, take roots: Roots, live: u64) -> Result[Ticket, Er
 // table takes the next id and its indexes the ids after it, in `s`'s order.
 pub fn create_table[K, V](mut db: Db, take s: TableSpec[K, V]) -> Result[Ticket, Error] waits {
     healthy(db)?
+    let mut plan = schema_plan(db)
+    stage_create_table(mut plan, take s)?
+    publish_schema_plan(mut db, take plan)
+}
+
+pub fn migration_create_table[K, V](mut phase: Migration, take s: TableSpec[K, V]) -> Result[(), Error] {
+    application_name(s.name)?
+    for ix in s.indexes { application_name(ix.name)? }
+    stage_create_table(mut phase.plan, take s)
+}
+
+fn stage_create_table[K, V](mut plan: SchemaPlan, take s: TableSpec[K, V]) -> Result[(), Error] {
     let k = table_key(s.name)?
-    if let Some(_) = std.omap.get(db.heads[0].roots.catalog, k) {
+    if let Some(_) = std.omap.get(plan.roots.catalog, k) {
         return Error(Exists(named(s.name)?))
     }
     let schema = capacity(std.codec.schema(s.value))?
     let mut schemas: List[ValueSchema] = list.new()
     let fp = std.codec.fingerprint_of(schema)
     capacity(result.capacity_only(list.push(mut schemas, ValueSchema(number: 0, fingerprint: fp, schema: take schema))))?
-    let id = db.next_table
+    let id = plan.next_table
     let c = Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: capacity(std.codec.key_schema(s.key))?, schemas: take schemas, next: 1, by: list.new(), revision: list.new())
     let raw = encode_catalog(c)?
-    let mut live = catalog_recharge(db.resident, db.heads[0].roots, k, raw, retaining(db))
-    let base = share_roots(db.heads[0].roots)
-    let mut roots = catalog_put(mut db, base, k, raw)?
+    let mut live = catalog_recharge(plan.live, plan.roots, k, raw, plan.retained)
+    let base = share_roots(plan.roots)
+    let mut roots = catalog_insert(mut plan.next_node, base, k, raw)?
     let mut index_id = id + 1
     for ix in s.indexes {
         let ik = catalog_index_key(id, ix.name)?
         let entry_raw = encode_catalog(Catalog(kind: 2, id: index_id, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new()))?
-        live = catalog_recharge(live, db.heads[0].roots, ik, entry_raw, retaining(db))
-        roots = catalog_put(mut db, roots, ik, entry_raw)?
+        live = catalog_recharge(live, plan.roots, ik, entry_raw, plan.retained)
+        roots = catalog_insert(mut plan.next_node, roots, ik, entry_raw)?
         index_id += 1
     }
-    db.next_table = index_id
-    schema_publish(mut db, take roots, live)
+    keep_schema(mut plan, take roots, live, index_id)
 }
 
 fn readers[V](value: std.codec.Codec[V], c: Catalog, current: u16) -> Result[Arc[Readers[V]], Error] {
@@ -3582,8 +3694,20 @@ fn index_catalog_in(catalog: std.omap.OMap[Bytes, Arc[Bytes]], id: u32) -> Resul
 
 pub fn table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] waits {
     healthy(db)?
+    let mut plan = schema_plan(db)
+    let target = stage_table(mut plan, name, take key, take value)?
+    if plan.changed { let _ = publish_schema_plan(mut db, take plan)? }
+    Ok(take target)
+}
+
+pub fn migration_table[K, V](mut phase: Migration, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+    application_name(name)?
+    stage_table(mut phase.plan, name, take key, take value)
+}
+
+fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     let k = table_key(name)?
-    let mut c = match std.omap.get(db.heads[0].roots.catalog, k) {
+    let mut c = match std.omap.get(plan.roots.catalog, k) {
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(named(name)?))
     }
@@ -3603,26 +3727,33 @@ pub fn table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take va
     }
     // Resolve before publishing a schema addition: Schema is always without effect.
     let resolved = readers(value, c, number)?
+    let catalog = index_catalog_in(plan.roots.catalog, c.id)?
+    let key_handle = catalog_key_handle(take k)?
     if !found {
         capacity(result.capacity_only(list.push(mut c.schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))))?
         c.next += 1
         let raw = encode_catalog(c)?
-        let live = catalog_recharge(db.resident, db.heads[0].roots, k, raw, retaining(db))
-        let base = share_roots(db.heads[0].roots)
-        let roots = catalog_put(mut db, base, k, raw)?
-        let _ = schema_publish(mut db, take roots, live)?
+        let live = catalog_recharge(plan.live, plan.roots, key_handle, raw, plan.retained)
+        let base = share_roots(plan.roots)
+        let roots = catalog_insert(mut plan.next_node, base, key_handle, raw)?
+        let next_id = plan.next_table
+        keep_schema(mut plan, take roots, live, next_id)?
     }
-    let catalog = index_catalog(db, c.id)?
-    Ok(Table(store: db.store, id: c.id, epoch: c.epoch, complete: list.len(catalog) == 0, catalog_key: catalog_key_handle(take k)?, key: key, readers: take resolved, indexes: list.new()))
+    Ok(Table(store: plan.store, id: c.id, epoch: c.epoch, complete: list.len(catalog) == 0, catalog_key: take key_handle, key: key, readers: take resolved, indexes: list.new()))
 }
 
 pub fn catalog_table[K, V](tx: Tx, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
-    metered_read(tx.policy_fault, catalog_handle(tx, take name, take key, take value))
+    metered_read(tx.policy_fault, catalog_handle(tx.store, tx.roots.catalog, false, take name, take key, take value))
 }
 
-fn catalog_handle[K, V](tx: Tx, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+pub fn schema_table[K, V](source: Schema, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+    application_name(name)?
+    catalog_handle(source.store, source.catalog, true, take name, take key, take value)
+}
+
+fn catalog_handle[K, V](store_id: StoreId, catalog: std.omap.OMap[Bytes, Arc[Bytes]], writable_handle: bool, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     let k = table_key(name)?
-    let c = match std.omap.get(tx.roots.catalog, k) {
+    let c = match std.omap.get(catalog, k) {
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(take name))
     }
@@ -3634,7 +3765,8 @@ fn catalog_handle[K, V](tx: Tx, take name: String, take key: std.codec.Key[K], t
         if prior.fingerprint == fp && prior.schema == schema {
             let number = prior.number
             let resolved = readers(value, c, number)?
-            return Ok(Table(store: tx.store, id: c.id, epoch: c.epoch, complete: false, catalog_key: catalog_key_handle(take k)?, key: key, readers: take resolved, indexes: list.new()))
+            let complete = writable_handle && list.len(index_catalog_in(catalog, c.id)?) == 0
+            return Ok(Table(store: store_id, id: c.id, epoch: c.epoch, complete: complete, catalog_key: catalog_key_handle(take k)?, key: key, readers: take resolved, indexes: list.new()))
         }
     }
     Error(Schema(int.widen(c.next)))
@@ -3642,23 +3774,34 @@ fn catalog_handle[K, V](tx: Tx, take name: String, take key: std.codec.Key[K], t
 
 pub fn create_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Ticket, Error] waits {
     healthy(db)?
-    if !same(db.store, t.store) {
+    let mut plan = schema_plan(db)
+    stage_create_index(mut plan, t, name, by, take key)?
+    publish_schema_plan(mut db, take plan)
+}
+
+pub fn migration_create_index[J, K, V](mut phase: Migration, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[(), Error] {
+    application_name(name)?
+    stage_create_index(mut phase.plan, t, name, by, take key)
+}
+
+fn stage_create_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[(), Error] {
+    if !same(plan.store, t.store) {
         return Error(Foreign)
     }
     let k = catalog_index_key(t.id, name)?
-    if let Some(_) = std.omap.get(db.heads[0].roots.catalog, k) {
+    if let Some(_) = std.omap.get(plan.roots.catalog, k) {
         return Error(Exists(named(name)?))
     }
-    let mut meta = catalog_entry(db, t.catalog_key)?
+    let mut meta = catalog_entry_in(plan.roots.catalog, t.catalog_key)?
     if meta.id != t.id {
         return Error(Stale(t.id))
     }
-    let id = db.next_table
+    let id = plan.next_table
     let c = Catalog(kind: 2, id: id, owner: t.id, epoch: 1, key: capacity(std.codec.key_schema(key))?, schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: list.new())
     let raw = encode_catalog(c)?
-    let mut roots = share_roots(db.heads[0].roots)
-    let mut live = catalog_recharge(db.resident, db.heads[0].roots, k, raw, retaining(db))
-    let mut rows = scan_bytes(snapshot(db), t.id, Unbounded, Unbounded)?
+    let mut roots = share_roots(plan.roots)
+    let mut live = catalog_recharge(plan.live, plan.roots, k, raw, plan.retained)
+    let mut rows = byte_cursor(plan.roots.data, Included(prefix(t.id)?), prefix(t.id + 1)?)?
     while let Some((primary, encoded)) = next_bytes(mut rows)? {
         let value = row_value(t.readers, t.id, encoded)?
         let j = capacity((code.callable(by))(value))?
@@ -3672,25 +3815,38 @@ pub fn create_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: Stati
         let empty: Bytes = list.new()
         live = int.saturating_add(live, entry(physical_key, empty))
         let shared_empty = capacity(result.capacity_only(arc.new(take empty)))?
-        let (take data, _) = capacity(result.capacity_only(std.omap.insert(mut db.next_node, roots.data, take physical_key, take shared_empty)))?
+        let (take data, _) = capacity(result.capacity_only(std.omap.insert(mut plan.next_node, roots.data, take physical_key, take shared_empty)))?
         roots.data = take data
     }
-    roots = catalog_put(mut db, roots, k, raw)?
+    roots = catalog_insert(mut plan.next_node, roots, k, raw)?
     meta.epoch += 1
     let changed = encode_catalog(meta)?
-    live = catalog_recharge(live, db.heads[0].roots, t.catalog_key, changed, retaining(db))
-    roots = catalog_put(mut db, roots, t.catalog_key, changed)?
-    db.next_table += 1
-    schema_publish(mut db, take roots, live)
+    live = catalog_recharge(live, plan.roots, t.catalog_key, changed, plan.retained)
+    roots = catalog_insert(mut plan.next_node, roots, t.catalog_key, changed)?
+    keep_schema(mut plan, take roots, live, id + 1)
 }
 
 pub fn index[J, K, V](db: Db, mut t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
     healthy(db)?
-    if !same(db.store, t.store) {
+    catalog_index(db.store, db.heads[0].roots.catalog, mut t, name, by, take key)
+}
+
+pub fn schema_index[J, K, V](source: Schema, mut t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+    application_name(name)?
+    catalog_index(source.store, source.catalog, mut t, name, by, take key)
+}
+
+pub fn migration_index[J, K, V](phase: Migration, mut t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+    application_name(name)?
+    catalog_index(phase.plan.store, phase.plan.roots.catalog, mut t, name, by, take key)
+}
+
+fn catalog_index[J, K, V](store_id: StoreId, catalog: std.omap.OMap[Bytes, Arc[Bytes]], mut t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+    if !same(store_id, t.store) {
         return Error(Foreign)
     }
     let k = catalog_index_key(t.id, name)?
-    let c = match std.omap.get(db.heads[0].roots.catalog, k) {
+    let c = match std.omap.get(catalog, k) {
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(named(name)?))
     }
@@ -3707,7 +3863,7 @@ pub fn index[J, K, V](db: Db, mut t: Table[K, V], name: String, by: StaticFn[fn(
         let extract = erase(by, key)?
         capacity(result.capacity_only(list.push(mut t.indexes, IndexOf(id: c.id, extract: take extract))))?
     }
-    let all = index_catalog(db, t.id)?
+    let all = index_catalog_in(catalog, t.id)?
     let mut complete = true
     for needed in all {
         let mut registered = false
@@ -3721,46 +3877,57 @@ pub fn index[J, K, V](db: Db, mut t: Table[K, V], name: String, by: StaticFn[fn(
         }
     }
     t.complete = complete
-    t.epoch = catalog_entry(db, t.catalog_key)?.epoch
+    t.epoch = catalog_entry_in(catalog, t.catalog_key)?.epoch
     Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers)))
 }
 
 pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error] waits {
     healthy(db)?
-    if !same(db.store, t.store) {
+    let mut plan = schema_plan(db)
+    stage_drop_table(mut plan, take t)?
+    publish_schema_plan(mut db, take plan)
+}
+
+pub fn migration_drop_table[K, V](mut phase: Migration, take t: Table[K, V]) -> Result[(), Error] {
+    stage_drop_table(mut phase.plan, take t)
+}
+
+fn stage_drop_table[K, V](mut plan: SchemaPlan, take t: Table[K, V]) -> Result[(), Error] {
+    if !same(plan.store, t.store) {
         return Error(Foreign)
     }
-    let meta = catalog_entry(db, t.catalog_key)?
+    let meta = catalog_entry_in(plan.roots.catalog, t.catalog_key)?
     if meta.id != t.id {
         return Error(Stale(t.id))
     }
-    let indexes = index_catalog(db, t.id)?
+    let indexes = index_catalog_in(plan.roots.catalog, t.id)?
     let mut ids: List[u32] = list.new()
     capacity(result.capacity_only(list.push(mut ids, t.id)))?
     for ix in indexes {
         capacity(result.capacity_only(list.push(mut ids, ix.id)))?
     }
-    let mut roots = share_roots(db.heads[0].roots)
-    let mut live = db.resident
+    let mut roots = share_roots(plan.roots)
+    let mut live = plan.live
     for id in ids {
         let mut rows = byte_cursor(roots.data, Included(prefix(id)?), prefix(id + 1)?)?
         while let Some((k, v)) = next_bytes(mut rows)? {
-            live = int.saturating_sub(live, entry(k, v))
-            roots.data = capacity(std.omap.remove(mut db.next_node, roots.data, k))?
+            if !plan.retained { live = int.saturating_sub(live, entry(k, v)) }
+            roots.data = capacity(std.omap.remove(mut plan.next_node, roots.data, k))?
         }
     }
     let low = index_prefix(t.id)?
     let high = index_prefix(t.id + 1)?
     let mut cursor = capacity(result.capacity_only(std.omap.range(roots.catalog, Included(copied(low)?), Excluded(copied(high)?))))?
     while let Some((k, v)) = capacity(std.omap.next(mut cursor))? {
-        live = int.saturating_sub(live, entry(k, v))
-        roots.catalog = capacity(std.omap.remove(mut db.next_node, roots.catalog, k))?
+        if !plan.retained { live = int.saturating_sub(live, entry(k, v)) }
+        roots.catalog = capacity(std.omap.remove(mut plan.next_node, roots.catalog, k))?
     }
-    if let Some(raw) = std.omap.get(db.heads[0].roots.catalog, t.catalog_key) {
-        live = int.saturating_sub(live, entry(t.catalog_key, raw))
+    if let Some(raw) = std.omap.get(plan.roots.catalog, t.catalog_key) {
+        if !plan.retained { live = int.saturating_sub(live, entry(t.catalog_key, raw)) }
     }
-    roots.catalog = capacity(std.omap.remove(mut db.next_node, roots.catalog, t.catalog_key))?
-    schema_publish(mut db, take roots, live)
+    roots.catalog = capacity(std.omap.remove(mut plan.next_node, roots.catalog, t.catalog_key))?
+    let next_id = plan.next_table
+    keep_schema(mut plan, take roots, live, next_id)
 }
 
 // What a migrate builds before its cut: the new roots and the account.
@@ -3791,10 +3958,10 @@ fn insert_row(mut ids: u64, mut roots: Roots, take p: Bytes, take raw: Bytes) ->
 // against the ceiling before the next (section 1.11); old entries come off
 // only when nothing retains them. Nothing here waits: it is all built before
 // the cut, so a refusal changes nothing.
-fn migrate_build[K, V, K2, V2](source: Snapshot, take base: Roots, mut ids: u64, start: u64, ceiling: u64, retained: bool, from: Table[K, V], olds: List[Catalog], to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity], id: u32, number: u16, target: Bytes) -> Result[Built, Error] {
+fn migrate_build[K, V, K2, V2](source: std.omap.OMap[Bytes, Arc[Bytes]], take base: Roots, mut ids: u64, start: u64, ceiling: u64, retained: bool, from: Table[K, V], olds: List[Catalog], to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity], id: u32, number: u16, target: Bytes) -> Result[Built, Error] {
     let mut roots = take base
     let mut live = start
-    let mut rows = scan_bytes(source, from.id, Unbounded, Unbounded)?
+    let mut rows = byte_cursor(source, Included(prefix(from.id)?), prefix(from.id + 1)?)?
     while let Some((primary, encoded)) = next_bytes(mut rows)? {
         let user_key = list.slice(primary, 4, list.len(primary))
         let k = decoded(std.codec.decode_key(from.key, user_key))?
@@ -3861,14 +4028,14 @@ fn migrate_build[K, V, K2, V2](source: Snapshot, take base: Roots, mut ids: u64,
     capacity(result.capacity_only(list.push(mut schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))))?
     let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: capacity(std.codec.key_schema(to.key))?, schemas: take schemas, next: number + 1, by: list.new(), revision: list.new()))?
     live = int.saturating_add(live, entry(target, table_raw))
-    let with_table = catalog_insert(mut ids, take roots, target, table_raw)?
+    let with_table = catalog_insert(mut ids, roots, target, table_raw)?
     roots = take with_table
     let mut position: u32 = 1
     for ix in to.indexes {
         let ik = catalog_index_key(id, ix.name)?
         let ix_raw = encode_catalog(Catalog(kind: 2, id: id + position, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new()))?
         live = int.saturating_add(live, entry(ik, ix_raw))
-        let with_entry = catalog_insert(mut ids, take roots, ik, ix_raw)?
+        let with_entry = catalog_insert(mut ids, roots, ik, ix_raw)?
         roots = take with_entry
         position += 1
     }
@@ -3880,7 +4047,7 @@ fn same_bytes(a: Bytes, b: Bytes) -> bool {
     a == b
 }
 
-fn catalog_insert(mut ids: u64, take roots: Roots, k: Bytes, v: Bytes) -> Result[Roots, Error] {
+fn catalog_insert(mut ids: u64, roots: Roots, k: Bytes, v: Bytes) -> Result[Roots, Error] {
     let shared_value = capacity(result.capacity_only(arc.new(copied(v)?)))?
     let inserted = std.omap.insert(mut ids, roots.catalog, copied(k)?, take shared_value)
     let catalog = match take inserted {
@@ -3898,33 +4065,43 @@ fn catalog_insert(mut ids: u64, take roots: Roots, k: Bytes, v: Bytes) -> Result
 // migrate whose `f` keeps every row.
 pub fn migrate[K, V, K2, V2](mut db: Db, take from: Table[K, V], take to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[Ticket, Error] waits {
     healthy(db)?
-    if !same(db.store, from.store) {
+    let mut plan = schema_plan(db)
+    stage_migrate(mut plan, take from, take to, f)?
+    publish_schema_plan(mut db, take plan)
+}
+
+pub fn migration_migrate[K, V, K2, V2](mut phase: Migration, take from: Table[K, V], take to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
+    application_name(to.name)?
+    for ix in to.indexes { application_name(ix.name)? }
+    stage_migrate(mut phase.plan, take from, take to, f)
+}
+
+fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], take to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
+    if !same(plan.store, from.store) {
         return Error(Foreign)
     }
-    let meta = catalog_entry(db, from.catalog_key)?
+    let meta = catalog_entry_in(plan.roots.catalog, from.catalog_key)?
     if meta.id != from.id {
         return Error(Stale(from.id))
     }
     let target = table_key(to.name)?
     if !same_bytes(target, from.catalog_key) {
-        if let Some(_) = std.omap.get(db.heads[0].roots.catalog, target) {
+        if let Some(_) = std.omap.get(plan.roots.catalog, target) {
             return Error(Exists(named(to.name)?))
         }
     }
     if meta.next == 65535 {
         return Error(Limit(Value))
     }
-    let olds = index_catalog(db, from.id)?
-    let id = db.next_table
+    let olds = index_catalog_in(plan.roots.catalog, from.id)?
+    let id = plan.next_table
     let count: u32 = int.truncate(list.len(to.indexes))
-    let source = snapshot(db)
-    let base = share_roots(db.heads[0].roots)
-    let mut ids = db.next_node
-    let built = migrate_build(source, take base, mut ids, db.resident, db.ceiling, retaining(db), from, olds, to, f, id, meta.next, target)
-    db.next_node = ids
+    let base = share_roots(plan.roots)
+    let mut ids = plan.next_node
+    let built = migrate_build(plan.roots.data, take base, mut ids, plan.live, plan.ceiling, plan.retained, from, olds, to, f, id, meta.next, target)
+    plan.next_node = ids
     let Built(roots: take roots, live: live) = built?
-    db.next_table = id + 1 + count
-    schema_publish(mut db, take roots, live)
+    keep_schema(mut plan, take roots, live, id + 1 + count)
 }
 
 fn bucket(v: u64) -> Result[u64, Capacity] {
@@ -10178,11 +10355,7 @@ fn disk_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String)
         }
         let _ = checkpoint(mut db)?
     } else if scenario == "migrate" {
-        // L17: rows k -> k + 1 become k -> k + 1001 with index by_v, at once.
-        let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-        let mut declared = spec("rows", std.codec.key_u64(), std.codec.of_u64())
-        with_index(mut declared, "by_v", code.describe(crash_value), std.codec.key_u64())?
-        let _ = migrate(mut db, take t, take declared, crash_thousand)?
+        run_migration(mut db, tasks, code.describe(crash_migration))?
     } else if scenario == "branches" {
         // L7 at every W2 cut: pin, fork, a fork commit made durable, unpin.
         let arg10 = snapshot(db)
@@ -10197,6 +10370,16 @@ fn disk_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String)
         let _ = checkpoint(mut db)?
     }
     close(take db)
+}
+
+// L17 and L33. The rewrite, its index and the extra table are published at
+// one version by the migration phase.
+fn crash_migration(mut phase: Migration) -> Result[(), Error] {
+    let t = migration_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let mut declared = spec("rows", std.codec.key_u64(), std.codec.of_u64())
+    with_index(mut declared, "by_v", code.describe(crash_value), std.codec.key_u64())?
+    migration_migrate(mut phase, take t, take declared, crash_thousand)?
+    migration_create_table(mut phase, spec("added", std.codec.key_u64(), std.codec.of_u64()))
 }
 
 fn crash_value(v: u64) -> Result[u64, Capacity] {
@@ -10292,8 +10475,13 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
             }
             whole = whole && expect == 96
         }
+        let added = table(mut db, "added", std.codec.key_u64(), std.codec.of_u64())
         let before = old && listed == 0 && db.heads[0].head == 97
-        good = (before && !required_new) || whole
+        good = match take added {
+            Ok(created) => whole && created.id == 4,
+            Error(Missing(_)) => before && !required_new,
+            _ => false,
+        }
     } else if scenario == "branches" {
         // The states in write order: nothing; pin p at 97; and b at 97; b at
         // 98 with k0 = 500; p gone. Main is at 97 with every row k + 1 in all.

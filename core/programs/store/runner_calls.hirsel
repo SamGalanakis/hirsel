@@ -55,14 +55,19 @@ fn test_release_digest() -> Result[(), ()] {
     if law_release_digest() { Ok(()) } else { Error(()) }
 }
 
-fn handles(mut db: store.Db) -> Result[Hd, store.Error] waits {
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.table(mut db, "data", std.codec.key_u64(), cv)?
-    Ok(Hd(t: t))
+fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+    let codec: std.codec.Codec[u64] = std.codec.of()
+    match store.migration_create_table(mut phase, store.spec("data", std.codec.key_u64(), codec)) {
+        Ok(()) => Ok(()),
+        Error(Exists(_)) => Ok(()),
+        Error(take problem) => Error(take problem),
+    }
 }
 
-fn query_handles(h: Hd) -> Hd {
-    Hd(t: store.query_table(h.t))
+fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let t = store.schema_table(catalog, "data", std.codec.key_u64(), cv)?
+    Ok(Hd(t: t))
 }
 
 
@@ -379,13 +384,7 @@ fn served_in(c: Clock, r: Random, tasks: Tasks, n: Net, o: store.Options, f: fn(
 }
 
 fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: u64, f: fn(take Drive) -> () waits) -> bool waits {
-    served_with_handles(take fresh, c, tasks, n, r, mut token, grouped, f, code.describe(handles))
-}
-
-fn served_with_handles(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: u64, f: fn(take Drive) -> () waits, select: StaticFn[fn(mut store.Db) -> Result[Hd, store.Error] waits]) -> bool waits {
-    let mut db = take fresh
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let db = take fresh
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let mail = result.unwrap(runner.mailbox(4u64))
@@ -406,7 +405,7 @@ fn served_with_handles(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: 
         Ok(take t) => take t,
         Error(_) => return false,
     }
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, select, code.describe(query_handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
     let drove = task.join(take driving)
     if let Some(take h) = take forwarding { let _ = task.join(take h) }
     task.cancel(mut policy_task)
@@ -1048,7 +1047,7 @@ fn drained(take fresh: store.Db, tasks: Tasks) -> bool waits {
     let fresh_request = drain_send(to, "new", 0u64, 42u64)
     let _ = take to
     let mail = result.unwrap(runner.mailbox(4u64))
-    result.unwrap(runner.place_head_requests(take db, code.describe(place), N_PLACE, code.describe(handles), code.describe(query_handles), ManagedRequests(take from), take mail, tasks, 1048576u64))
+    result.unwrap(runner.place_head_requests(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), ManagedRequests(take from), take mail, tasks, 1048576u64))
     let admitted = drain_answer(first, "held", 0u64)
     let joined = drain_answer(join, "held", 0u64)
     match (admitted, joined, drain_answer(fifo, "held", 1u64), drain_answer(fresh_request, "new", 0u64)) {
@@ -1074,7 +1073,7 @@ fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     let mut options = disk_options()
     options.create = false
     let mut db = result.unwrap(store.open(tasks, dir, c, r, options))
-    let table = result.unwrap(handles(mut db))
+    let table = result.unwrap(store.with_schema(db, code.describe(handles)))
     let snap = store.snapshot(db)
     want(result.unwrap(store.get(snap, store.shape(table.t), 40u64)) == Some(40u64), "drain: admitted effect did not survive reopen")
     want(result.unwrap(store.get(snap, store.shape(table.t), 41u64)) == None, "drain: FIFO refusal wrote data")
@@ -1088,15 +1087,6 @@ fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     result.unwrap(store.close(take db))
     result.unwrap(std.dir.remove_all(parent, name))
     Ok(())
-}
-
-fn create_managed_data(mut db: store.Db) -> Result[Hd, store.Error] waits {
-    let codec: std.codec.Codec[u64] = std.codec.of()
-    if let Error(Missing(_)) = store.table(mut db, "data", std.codec.key_u64(), codec) {
-        let ticket = store.create_table(mut db, store.spec("data", std.codec.key_u64(), codec))?
-        store.durable(mut db, ticket)?
-    }
-    handles(mut db)
 }
 
 type ManagedRun: send {
@@ -1114,7 +1104,7 @@ fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: N
     let mut wire = runner.wire_defaults(65536u64, N_PLACE)
     wire.n_pool = 4194304u64
     runner.PlaceConfig(backing: Disk(dir, disk_options()), place: code.describe(place), n_place: N_PLACE,
-        handles: code.describe(create_managed_data), query_handles: code.describe(query_handles), session: wire, max_sessions: 1u64,
+        migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), policy: ingress.share(policy), n_publisher: 1048576u64, listen: listen,
         net: net, tasks: tasks, clock: clock, random: random, stop: stop)
 }
@@ -1532,34 +1522,6 @@ fn test_calls_retired_head(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[
     if law_calls_retired_head(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
-// L14: schema initialization selects "data" while creating "other". Re-running
-// selection would find "other", so the subscription would miss the transaction's row.
-fn choose_handles(mut db: store.Db) -> Result[Hd, store.Error] waits {
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    match store.table(mut db, "other", std.codec.key_u64(), cv) {
-        Ok(take t) => Ok(Hd(t: take t)),
-        Error(Missing(_)) => {
-            let _ = store.create_table(mut db, store.spec("other", std.codec.key_u64(), cv))?
-            handles(mut db)
-        },
-        Error(e) => Error(e),
-    }
-}
-
-fn drive_handle_selection(take d: Drive) -> () waits {
-    let client = conn(d, 0u64)
-    ask(client, d.clock, 0u64, 0u64, k_write(), u64_arg(7u64), LATER)
-    want(written(frame(client), 4u64), "handles: one schema commit before the transaction")
-    subscribe(client, 1u32, k_everything())
-    want(content(down(client), 4u64, Some(1u32), 1u32, keys(7u8, 1u8)), "handles: the query uses the transaction's table")
-    hang(take client)
-}
-
-pub fn law_l14_handles(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
-    let mut token: Bytes = list.new()
-    served_with_handles(store.memory(c, r, store.defaults()), c, tasks, n, r, mut token, 0u64, drive_handle_selection, code.describe(choose_handles))
-}
-
 @test
 fn test_calls_two_streams(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     if law_calls_two_streams(c, r, tasks, n) { Ok(()) } else { Error(()) }
@@ -1613,11 +1575,6 @@ fn test_calls_deadline_held(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result
 @test
 fn test_calls_runs_once(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     if law_calls_runs_once(c, r, tasks, n) { Ok(()) } else { Error(()) }
-}
-
-@test
-fn test_l14_handles(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
-    if law_l14_handles(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 // A stopped transaction is reply-only, is replayed for a Duplicate, and leaves
@@ -1723,4 +1680,53 @@ pub fn law_authority_receipt(c: Clock, r: Random, tasks: Tasks) -> bool waits {
 @test
 fn test_authority_receipt(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_authority_receipt(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+fn migration_second_refuses(mut phase: store.Migration) -> Result[(), store.Error] {
+    store.migration_create_table(mut phase, store.spec("first", std.codec.key_u64(), std.codec.of_u64()))?
+    let second = store.spec("second", std.codec.key_u64(), std.codec.of_u64())
+    let attempted = bound bytes 0u64 {
+        store.migration_create_table(mut phase, take second)
+    }
+    match take attempted {
+        Ok(take outcome) => take outcome,
+        Error(c) => Error(Full(c)),
+    }
+}
+
+fn migration_tables_absent(catalog: store.Schema) -> Result[bool, store.Error] {
+    match store.schema_table(catalog, "first", std.codec.key_u64(), std.codec.of_u64()) {
+        Error(Missing(_)) => (),
+        _ => return Ok(false),
+    }
+    Ok(match store.schema_table(catalog, "second", std.codec.key_u64(), std.codec.of_u64()) {
+        Error(Missing(_)) => true,
+        _ => false,
+    })
+}
+
+// L33. The second operation refuses. Reopen the backing store and look for
+// both tables through the same open-only API the runner gives to handles.
+pub fn law_atomic_migration(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let options = disk_options()
+    let db = result.unwrap(store.open(tasks, d, c, r, options))
+    let (_, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(1))
+    let mail = result.unwrap(runner.mailbox(1))
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE,
+        code.describe(migration_second_refuses), code.describe(handles), take inbox, take mail, tasks, 1048576)
+    if let Error(Migrate(Full(_))) = opened {} else { return false }
+    let reopened = result.unwrap(store.open(tasks, d, c, r, options))
+    let unchanged = store.version(store.snapshot(reopened)) == 0 &&
+        result.unwrap(store.with_schema(reopened, code.describe(migration_tables_absent)))
+    result.unwrap(store.close(take reopened))
+    unchanged
+}
+
+@test
+fn test_atomic_migration(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let mut name = result.unwrap(string.with_capacity(32))
+    let directory = result.unwrap(host.mkdtemp(parent, mut name))
+    let good = law_atomic_migration(directory, c, r, tasks)
+    result.unwrap(std.dir.remove_all(parent, name))
+    if good { Ok(()) } else { Error(()) }
 }

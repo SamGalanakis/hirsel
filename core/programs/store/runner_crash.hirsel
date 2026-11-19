@@ -26,14 +26,19 @@ type Hd: send { t: store.Table[u64, u64] }
 
 type Calls = runner.Registry[(), Hd]
 
-fn handles(mut db: store.Db) -> Result[Hd, store.Error] waits {
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.table(mut db, "data", std.codec.key_u64(), cv)?
-    Ok(Hd(t: t))
+fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+    let codec: std.codec.Codec[u64] = std.codec.of()
+    match store.migration_create_table(mut phase, store.spec("data", std.codec.key_u64(), codec)) {
+        Ok(()) => Ok(()),
+        Error(Exists(_)) => Ok(()),
+        Error(take problem) => Error(take problem),
+    }
 }
 
-fn query_handles(h: Hd) -> Hd {
-    Hd(t: store.query_table(h.t))
+fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let t = store.schema_table(catalog, "data", std.codec.key_u64(), cv)?
+    Ok(Hd(t: t))
 }
 
 fn counted(tx: store.Tx, h: Hd) -> Result[u64, u32] {
@@ -232,14 +237,14 @@ pub fn no_secret_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, 
     let mut policy_handle = take policy_task
     let seed = SecretClient(tasks: tasks, net: n, clock: c, random: r, policy: take policy, head: take head, post: runner.post(mail), authority: store.authority_reader(db), token: take token)
     let driving = result.unwrap(task.spawn(tasks, bytes 33554432u64, take seed, secret_client))
-    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 1048576u64))
+    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64))
     clean(result.unwrap(task.join(take driving)))
     task.cancel(mut policy_handle)
     let _ = task.join(take policy_handle)
     let mut o = options()
     o.create = false
     let mut again = result.unwrap(store.open(tasks, d, c, r, o))
-    let h = result.unwrap(handles(mut again))
+    let h = result.unwrap(store.with_schema(again, code.describe(handles)))
     let total = result.unwrap(store.get(store.snapshot(again), store.shape(h.t), 0u64))
     want(total == Some(2u64), "L31: two effects must be durable")
     let ticket = result.unwrap(store.checkpoint(mut again))
@@ -427,7 +432,7 @@ fn served(take db: store.Db, c: Clock, r: Random, tasks: Tasks, n: Net, out: Std
     let mut policy_task = take policy_handle
     let seed = Accept(listener: take listener, tasks: tasks, clock: c, policy: ingress.share(policy), head: take head, post: runner.post(mail), authority: store.authority_reader(db), sessions: sessions)
     let mut driving = result.unwrap(task.spawn(tasks, bytes 33554432u64, take seed, accept))
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
     if let Error(_) = opened { task.cancel(mut driving) }
     let _ = task.join(take driving)
     task.cancel(mut policy_task)
@@ -485,7 +490,7 @@ fn count(d: Dir, c: Clock, r: Random, tasks: Tasks) -> (u64, u64) waits {
     let mut o = options()
     o.create = false
     let mut db = result.unwrap(store.open(tasks, d, c, r, o))
-    let h = result.unwrap(handles(mut db))
+    let h = result.unwrap(store.with_schema(db, code.describe(handles)))
     let v = store.version(store.snapshot(db))
     let n = match result.unwrap(store.get(store.snapshot(db), store.shape(h.t), 0u64)) {
         Some(n) => n,
@@ -563,7 +568,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
     let mut wire = runner.wire_defaults(131072u64, N_PLACE)
     wire.n_pool = 4194304u64
-    let settings = runner.PlaceConfig(backing: Disk(d, existing), place: code.describe(place), n_place: N_PLACE, handles: code.describe(handles), query_handles: code.describe(query_handles),
+    let settings = runner.PlaceConfig(backing: Disk(d, existing), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
@@ -594,7 +599,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     let mut wire = runner.wire_defaults(131072u64, N_PLACE)
     wire.n_pool = 4194304u64
     wire.socket.max_frame = 65536u64
-    let config = runner.PlaceConfig(backing: Disk(d, options()), place: code.describe(place), n_place: N_PLACE, handles: code.describe(handles), query_handles: code.describe(query_handles),
+    let config = runner.PlaceConfig(backing: Disk(d, options()), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64))
@@ -642,7 +647,7 @@ fn deadline_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args) -> () 
     let mut existing = options()
     existing.create = false
     let mut db = result.unwrap(store.open(tasks, d, c, r, existing))
-    let data = result.unwrap(handles(mut db))
+    let data = result.unwrap(store.with_schema(db, code.describe(handles)))
     let named = option.unwrap(decode_fixture_token(option.unwrap(args.get(argv, 4u64))))
     let stream = wire_client.stream(named, 0u32)
     want(match result.unwrap(store.get(store.snapshot(db), store.shape(data.t), 0u64)) { None => true, _ => false }, "runner-deadline: frozen effect reached disk")

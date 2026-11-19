@@ -159,7 +159,10 @@ fn head_bounds() -> bool {
     let sixty_four = http1.request(fields, mut h) == Complete && h.count == 64
     let at = list.len(fields) - 2
     let _ = list.set(mut fields, at, b'X')
-    exact && long && sixty_four && http1.request(fields, mut h) == TooLarge
+    let excess = http1.request(fields, mut h) == TooLarge
+    let partial = result.unwrap(b"HTTP/1.1 200 OK\r\nX: \tval \t\r\nY")
+    let response_progress = http1.response(partial, mut h)
+    exact && long && sixty_four && excess && response_progress == Partial && h.status == 200 && h.reason == http1.Span(start: 13, end: 15) && h.count == 1 && h.fields[0].name == http1.Span(start: 17, end: 18) && h.fields[0].value == http1.Span(start: 21, end: 24)
 }
 
 // Mutant: status_only_check.

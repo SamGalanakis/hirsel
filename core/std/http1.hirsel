@@ -402,53 +402,6 @@ pub fn token(c: u8) -> bool {
     int.is_ascii_alpha(c) || int.is_ascii_digit(c) || c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 || c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124 || c == 126
 }
 
-// httparse accepts non-ASCII URI bytes only when they form UTF-8. Validate
-// each scalar as it arrives, without allocating a String for the target.
-fn uri_scalar(b: Bytes, mut at: u64) -> Result[(), Stop] {
-    let x = byte(b, at)?
-    if x < 128 {
-        if x < 33 || x == 127 {
-            return Error(Malformed)
-        }
-        at += 1
-        return Ok(())
-    }
-    let width: u64 = if x >= 0xc2 && x <= 0xdf {
-        2
-    } else if x >= 0xe0 && x <= 0xef {
-        3
-    } else if x >= 0xf0 && x <= 0xf4 {
-        4
-    } else {
-        return Error(Malformed)
-    }
-    let y = byte(b, at + 1)?
-    let low: u8 = if x == 0xe0 {
-        0xa0
-    } else if x == 0xf0 {
-        0x90
-    } else {
-        0x80
-    }
-    let high: u8 = if x == 0xed {
-        0x9f
-    } else if x == 0xf4 {
-        0x8f
-    } else {
-        0xbf
-    }
-    if y < low || y > high {
-        return Error(Malformed)
-    }
-    for i in 2u64 .. width {
-        if byte(b, at + i)? & 0xc0 != 0x80 {
-            return Error(Malformed)
-        }
-    }
-    at += width
-    Ok(())
-}
-
 fn version(b: Bytes, mut at: u64) -> Result[u8, Stop] {
     let prefix = string.as_bytes("HTTP/1.")
     for i in 0u64 .. 7u64 {
@@ -465,126 +418,45 @@ fn version(b: Bytes, mut at: u64) -> Result[u8, Stop] {
     Ok(c - b'0')
 }
 
-fn headers(b: Bytes, mut at: u64, mut h: Head) -> Result[(), Stop] {
-    loop {
-        let c = byte(b, at)?
-        if c == 13 || c == 10 {
-            newline(b, mut at)?
-            h.end = at
-            return Ok(())
-        }
-        if h.count == 64 {
-            return Error(Limit)
-        }
-        let ns = at
-        while token(byte(b, at)?) {
-            at += 1
-        }
-        if at == ns || byte(b, at)? != b':' {
-            return Error(Malformed)
-        }
-        let ne = at
-        at += 1
-        while byte(b, at)? == b' ' || byte(b, at)? == 9 {
-            at += 1
-        }
-        let vs = at
-        let mut ve = at
-        loop {
-            let x = byte(b, at)?
-            if x == 13 || x == 10 {
-                break
-            }
-            if x < 32 && x != 9 || x == 127 {
-                return Error(Malformed)
-            }
-            at += 1
-            if x != b' ' && x != 9 {
-                ve = at
-            }
-        }
-        newline(b, mut at)?
-        h.fields[h.count] = Header(name: Span(start: ns, end: ne), value: Span(start: vs, end: ve))
-        h.count += 1
-    }
-}
-
-fn parse(b: Bytes, mut h: Head, is_response: bool) -> Result[(), Stop] {
-    let mut at: u64 = 0
+fn status_line(b: Bytes, mut at: u64, mut h: Head) -> Result[(), Stop] {
     while byte(b, at)? == 13 || byte(b, at)? == 10 {
         newline(b, mut at)?
     }
-    if is_response {
-        h.version = version(b, mut at)?
-        if byte(b, at)? != b' ' {
-            return Error(Malformed)
-        }
-        at += 1
-        let mut status: u16 = 0
-        for i in 0u64 .. 3u64 {
-            let c = byte(b, at)?
-            if !int.is_ascii_digit(c) {
-                return Error(Malformed)
-            }
-            let digit: u16 = int.widen(c - b'0')
-            status = status * 10 + digit
-            at += 1
-        }
-        h.status = status
+    h.version = version(b, mut at)?
+    if byte(b, at)? != b' ' {
+        return Error(Malformed)
+    }
+    at += 1
+    let mut status: u16 = 0
+    for i in 0u64 .. 3u64 {
         let c = byte(b, at)?
-        if c == b' ' {
-            at += 1
-        } else if c != 13 && c != 10 {
+        if !int.is_ascii_digit(c) {
             return Error(Malformed)
         }
-        let start = at
-        loop {
-            let x = byte(b, at)?
-            if x == 13 || x == 10 {
-                break
-            }
-            if x < 32 && x != 9 || x == 127 {
-                return Error(Malformed)
-            }
-            at += 1
-        }
-        h.reason = Span(start: start, end: at)
-    } else {
-        let start = at
-        while token(byte(b, at)?) {
-            at += 1
-        }
-        if at == start || byte(b, at)? != b' ' {
-            return Error(Malformed)
-        }
-        h.method = Span(start: start, end: at)
+        let digit: u16 = int.widen(c - b'0')
+        status = status * 10 + digit
         at += 1
-        let target_start = at
-        loop {
-            let c = byte(b, at)?
-            if c == b' ' {
-                break
-            }
-            uri_scalar(b, mut at)?
+    }
+    h.status = status
+    let c = byte(b, at)?
+    if c == b' ' {
+        at += 1
+    } else if c != 13 && c != 10 {
+        return Error(Malformed)
+    }
+    let start = at
+    loop {
+        let x = byte(b, at)?
+        if x == 13 || x == 10 {
+            break
         }
-        if at == target_start {
+        if x < 32 && x != 9 || x == 127 {
             return Error(Malformed)
         }
-        h.target = Span(start: target_start, end: at)
         at += 1
-        h.version = version(b, mut at)?
     }
-    newline(b, mut at)?
-    headers(b, mut at, mut h)
-}
-
-fn progress(r: Result[(), Stop]) -> Progress {
-    match r {
-        Ok(_) => Complete,
-        Error(More) => Partial,
-        Error(Malformed) => Bad,
-        Error(Limit) => TooLarge
-    }
+    h.reason = Span(start: start, end: at)
+    newline(b, mut at)
 }
 
 /// Parses one request head, capped at 8192 bytes and 64 fields. A complete
@@ -592,14 +464,24 @@ fn progress(r: Result[(), Stop]) -> Progress {
 /// Partial keeps initialized fields. Ex: `http1.request(b, mut h)`.
 pub fn request(b: Bytes, mut h: Head) -> Progress {
     h = head()
-    progress(parse(b, mut h, false))
+    let mut cur = cursor()
+    resume(b, mut h, mut cur)
 }
 
 /// Bounded status-head parser for WebSocket's client 101 check. Same offsets,
 /// limits and strict header rules as request. Ex: `http1.response(b, mut h)`.
 pub fn response(b: Bytes, mut h: Head) -> Progress {
     h = head()
-    progress(parse(b, mut h, true))
+    let mut cur = cursor()
+    match status_line(b, mut cur.offset, mut h) {
+        Ok(()) => {
+            cur.state = FieldStart
+            resume(b, mut h, mut cur)
+        },
+        Error(More) => Partial,
+        Error(Malformed) => Bad,
+        Error(Limit) => TooLarge,
+    }
 }
 
 /// Compares ASCII bytes without changing their spelling. O(n), no allocation.

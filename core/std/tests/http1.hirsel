@@ -14,8 +14,8 @@ fn same_head(a: http1.Head, b: http1.Head) -> bool {
 }
 
 // L1: every split, including empty fragments, and the one-byte drip schedule.
-// The independent single-shot parser supplies parity; the existing corpus
-// supplies hand-derived syntax/offset answers. The counter counts buffer reads.
+// The single-shot result establishes split invariance, and request_case
+// checks the syntax and offsets against fixture answers. Count buffer reads.
 fn prefix_progress(at: u64, complete_at: u64) -> http1.Progress {
     if at < complete_at {
         Partial

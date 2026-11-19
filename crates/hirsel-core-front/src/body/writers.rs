@@ -1246,6 +1246,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.pointer(to, n))
     }
 
+    /// The byte width of a compact type's declared `W` (MEM-9).
+    fn compact_w(&self, ty: TyId) -> Option<u64> {
+        let (d, _) = self.compact_adt(ty)?;
+        Some(match self.p.decls[d.index()].compact? {
+            hirsel_core_layout::Width::U16 => 2,
+            hirsel_core_layout::Width::U32 => 4,
+            hirsel_core_layout::Width::U64 => 8,
+        })
+    }
+
     /// The frame a `mut` or viewed writer argument's place holds.
     fn read_writer(&mut self, place: ValueId, n: NodeId) -> Option<ValueId> {
         self.get_word(AddressBase::Value(place), 0, Ty::Ptr, n)
@@ -1264,11 +1274,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         let u64t = Ty::Scalar(Scalar::U64);
         let w: u64 = match (self.compact_adt(ty), self.shape(ty)) {
-            (Some((d, _)), _) => match self.p.decls[d.index()].compact? {
-                hirsel_core_layout::Width::U16 => 2,
-                hirsel_core_layout::Width::U32 => 4,
-                hirsel_core_layout::Width::U64 => 8,
-            },
+            (Some(_), _) => self.compact_w(ty)?,
             (None, Shape::Text | Shape::Seq | Shape::Indexed) => 8,
             _ => {
                 self.refuse(
@@ -1674,7 +1680,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             return (result, None);
         }
-        let v = self.put_value(dest, u, args[1], result, n);
+        let v = self.put_value(dest, t, u, args[1], result, n);
         (result, v)
     }
     /// The declaration a construction literal's head names, when it names a type.
@@ -1692,9 +1698,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => None,
         }
     }
+    #[allow(clippy::too_many_arguments)]
     fn put_value(
         &mut self,
         dest: Option<ValueId>,
+        t: TyId,
         u: TyId,
         x: NodeId,
         result: TyId,
@@ -1709,7 +1717,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let state = self.get_word(AddressBase::Value(place), 0, Ty::Ptr, n)?;
         let id = self.state_word(state, 40, u64t, n)?;
-        let w = self.state_word(state, 24, u64t, n)?;
+        // `build_in` is the only maker of a `Dest[T]` and fixes its `W` to `T`'s
+        // (MEM-4), so a put into a destination of a known compact `T` encodes with
+        // a constant width; only a body generic over `T` reads it from the build.
+        let w = match self.compact_w(t) {
+            Some(w) => self.u64k(w, n)?,
+            None => self.state_word(state, 24, u64t, n)?,
+        };
         // Each link's identity, in field order, before the size (MEM-4).
         for p in &pieces {
             match *p {
@@ -1836,17 +1850,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let u64t = Ty::Scalar(Scalar::U64);
-        let Some(width) = self
-            .compact_adt(ty)
-            .and_then(|(d, _)| self.p.decls[d.index()].compact)
-        else {
+        let Some(w) = self.compact_w(ty) else {
             self.refuse("MEM-4", n, "`build_in` builds a value of a compact type");
             return None;
-        };
-        let w = match width {
-            hirsel_core_layout::Width::U16 => 2,
-            hirsel_core_layout::Width::U32 => 4,
-            hirsel_core_layout::Width::U64 => 8,
         };
         let (to, eid) = self.build_result(result, n)?;
         let join = self.new_block(&[]);

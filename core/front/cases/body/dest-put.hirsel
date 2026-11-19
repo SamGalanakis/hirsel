@@ -89,3 +89,41 @@ fn stray_link() -> u64 {
         0
     }
 }
+
+// MEM-4: every put is encoded with the destination's W, not the literal's own: a
+// u16 Chain put into a Dest[Top] carries a 4-byte link, and Top's u8 follows its
+// 4-byte link. Read back at the blob's W, the chain is Stop(7) under one Hop.
+// expect: run mixed_width() = 1709
+@compact(u16)
+type Chain = Stop(u8) | Hop(Link[Chain])
+
+@compact(u32)
+type Top {
+    a: Link[Chain],
+    b: u8,
+}
+
+fn walk(c: Chain) -> u64 {
+    match c {
+        Stop(v) => int.widen(v),
+        Hop(x) => 10 + walk(x),
+    }
+}
+
+fn top(r: Region) -> Result[Top in r, BuildError] {
+    let b = build_in(r, bytes 64, fn(mut d: Dest[Top]) -> Result[Child[Top], BuildError] {
+        let e: Result[Child[Chain], BuildError] = dest.put(mut d, Stop(7))
+        let h: Result[Child[Chain], BuildError] = dest.put(mut d, Hop(e?))
+        dest.put(mut d, Top(a: h?, b: 9))
+    })?
+    Ok(finish(take b))
+}
+
+fn mixed_width() -> u64 {
+    region r {
+        match top(r) {
+            Ok(t) => walk(t.a) * 100 + int.widen(t.b),
+            Error(_) => 0,
+        }
+    }
+}

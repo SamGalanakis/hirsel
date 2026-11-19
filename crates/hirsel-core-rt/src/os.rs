@@ -7,6 +7,7 @@ use std::{
     io,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     path::Path,
+    sync::Mutex,
 };
 pub(crate) const TEMP_ATTEMPTS: usize = 128;
 
@@ -35,6 +36,7 @@ pub struct OsProvider {
     files: BTreeMap<u64, OwnedFd>,
     next: u64,
     temporary: u64,
+    pub(crate) inherited_listener: Mutex<Option<OwnedFd>>,
     pub stdout: OwnedFd,
     pub stderr: OwnedFd,
 }
@@ -52,6 +54,7 @@ impl OsProvider {
             files: BTreeMap::new(),
             next: 1,
             temporary: 0,
+            inherited_listener: Mutex::new(None),
             stdout,
             stderr,
         }
@@ -473,7 +476,24 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
             CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR
         )
     } {
-        let step = unsafe { (socket_operations(request).step)(request, token, true) };
+        // SAFETY: socket adapters pin the request, and state is this run's
+        // OS provider. Only the first LISTEN can take its inherited fd.
+        let step = unsafe {
+            let operations = socket_operations(request);
+            let inherited = if (*request).operation == LISTEN {
+                (*state.cast::<OsProvider>())
+                    .inherited_listener
+                    .lock()
+                    .unwrap()
+                    .take()
+            } else {
+                None
+            };
+            match inherited {
+                Some(fd) => (operations.adopt_listener)(request, fd),
+                None => (operations.step)(request, token, true),
+            }
+        };
         #[cfg(test)]
         probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
         return step;

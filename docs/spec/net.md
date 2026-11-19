@@ -23,9 +23,7 @@ spare capacity. Send attempts the concatenation of its two borrowed slices
 and returns the number of prefix bytes committed across both. Each operation
 keeps one absolute deadline through readiness retries.
 
-W1a declares these entries. A denied address returns `Denied` before issue or
-any OS call. Every admitted provider call currently returns `Other(38)`;
-OS attempts, readiness, cancellation after issue and deadlines belong to W1b.
+An address argument outside the grant returns `Denied` before issue.
 `listen` has a backlog, with no `Until` parameter.
 `NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32)`.
 
@@ -66,6 +64,16 @@ listen requires a `/0` rule of the same family. Listen port 0 requires the whole
 The unspecified address is denied as a connect target. Accepted peers inherit
 the listener's authority; there is no peer rule check. Handles cannot become Net
 values or widen authority.
+
+A native launch may supply one inherited TCP listener at descriptor 3 using
+`LISTEN_PID` and `LISTEN_FDS`. The runtime uses activation metadata addressed
+to its PID and requires exactly one listening stream socket. It restores
+close-on-exec on receipt. The first authorized `listen` takes that socket
+without binding or changing its backlog. The socket's actual bound address
+must also pass the calling grant's Listen rule. An IPv6 wildcard listener
+must be IPv6-only so a same-family rule covers every accepted connection.
+The runner starts accepting after it publishes `Ready`. Dropping the listener closes only
+this process's descriptor, leaving the host's socket and accept queue live.
 
 Graceful finish, prefix I/O, try-first waiting, reset propagation and the scheduler's
 poll registration are specified by NET-1 through NET-10 and implemented after W1a.

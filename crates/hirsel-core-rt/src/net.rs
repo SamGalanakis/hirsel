@@ -187,18 +187,21 @@ unsafe fn permitted(request: &Request, handle: u64) -> bool {
     // SAFETY: network adapters pin the scalar address and the grant's Rules.
     unsafe {
         let address = &(*request.path.cast::<NetworkRequest>()).address;
-        let rules = &*(handle as *const Rules);
-        rules.as_slice().iter().any(|r| {
-            r.permits(
-                u8::from(request.operation == LISTEN),
-                address.family,
-                address.hi,
-                address.lo,
-                address.port,
-            )
-        })
+        permits_address(handle, address, u8::from(request.operation == LISTEN))
     }
 }
+
+/// SAFETY: handle is the live Net grant's immutable rule slice.
+pub(crate) unsafe fn permits_address(handle: u64, address: &Address, dir: u8) -> bool {
+    unsafe {
+        let rules = &*(handle as *const Rules);
+        rules
+            .as_slice()
+            .iter()
+            .any(|r| r.permits(dir, address.family, address.hi, address.lo, address.port))
+    }
+}
+
 pub(crate) fn empty_buffer() -> Buffer {
     Buffer {
         data: ptr::null_mut(),

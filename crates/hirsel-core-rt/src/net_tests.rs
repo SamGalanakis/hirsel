@@ -40,9 +40,14 @@ fn net_laws_child() {
     let Ok(law) = std::env::var("WIRE_W1A_LAW") else {
         return;
     };
+    let listen = if law == "inherited_denied" {
+        "Listen 127.0.0.1/32 0-65535"
+    } else {
+        "Listen 127.0.0.0/8 0-65535"
+    };
     let rules = [
         hirsel_core_net::Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
-        hirsel_core_net::Rule::parse("Listen 127.0.0.0/8 0-65535").unwrap(),
+        hirsel_core_net::Rule::parse(listen).unwrap(),
         hirsel_core_net::Rule::parse("Connect ::1/128 1-65535").unwrap(),
         hirsel_core_net::Rule::parse("Listen ::1/128 0-65535").unwrap(),
     ];
@@ -181,6 +186,105 @@ fn net_socket_provider_laws() {
         isolated(law);
     }
 }
+fn inherited_child(listener: &std::net::TcpListener, law: &str) -> std::process::Command {
+    use std::{os::fd::AsRawFd, os::unix::process::CommandExt, process::Command};
+
+    let fd = listener.as_raw_fd();
+    let executable = crate::test_process::command();
+    let mut child = Command::new("sh");
+    child
+        .args([
+            "-c",
+            r#"LISTEN_PID=$$ LISTEN_FDS=1 exec "$@""#,
+            "net-activation",
+        ])
+        .arg(executable.get_program())
+        .args(executable.get_args())
+        .args(["--exact", "net_tests::net_laws_child", "--nocapture"])
+        .env("WIRE_W1A_LAW", law)
+        .env(
+            "HIRSEL_TEST_LISTEN_PORT",
+            listener.local_addr().unwrap().port().to_string(),
+        );
+    // SAFETY: the parent keeps fd live through spawn. The child transfers
+    // only its duplicate at fd 3 and uses async-signal-safe descriptor calls.
+    unsafe {
+        child.pre_exec(move || {
+            if libc::dup2(fd, crate::os_net::LISTEN_FD) < 0
+                || libc::fcntl(crate::os_net::LISTEN_FD, libc::F_SETFD, 0) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    child
+}
+
+#[test]
+fn net_inherited_listener_keeps_queued_connection() {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::{TcpListener, TcpStream},
+        process::Stdio,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut old = inherited_child(&listener, "inherited_hold")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Always close the child's stdin and reap it, including when it fails
+    // before reporting the listener.
+    let mut output = BufReader::new(old.stdout.take().unwrap());
+    let result = (|| -> std::io::Result<Option<TcpStream>> {
+        let mut line = String::new();
+        while output.read_line(&mut line)? != 0 {
+            if line.contains("inherited listener ready") {
+                let mut client = TcpStream::connect(listener.local_addr()?)?;
+                client.write_all(b"queued")?;
+                old.stdin.as_mut().unwrap().write_all(b"x")?;
+                return Ok(Some(client));
+            }
+            line.clear();
+        }
+        Ok(None)
+    })();
+    drop(old.stdin.take());
+    std::io::copy(&mut output, &mut std::io::sink()).unwrap();
+    assert!(
+        old.wait().unwrap().success(),
+        "old process failed to close its listener"
+    );
+    let _queued = result
+        .unwrap()
+        .expect("old process never held the listener");
+    let output = inherited_child(&listener, "inherited_accept")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn net_inherited_listener_checks_bound_address() {
+    let listener = std::net::TcpListener::bind("127.0.0.2:0").unwrap();
+    let output = inherited_child(&listener, "inherited_denied")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn carrier(bytes: &mut [u8], len: usize) -> Buffer {
     Buffer {
         data: bytes.as_mut_ptr(),
@@ -211,6 +315,41 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
     };
     unsafe {
         match law {
+            "inherited_hold" | "inherited_accept" | "inherited_denied" => {
+                let listener = hirsel_core_host_listen(context, n, 0, 0, 0x7f000001, 0, 16, 1);
+                if law == "inherited_denied" {
+                    assert_eq!(listener.error, DENIED.error);
+                    return;
+                }
+                assert_eq!(listener.error, IoError::OK);
+                let port = std::env::var("HIRSEL_TEST_LISTEN_PORT")
+                    .unwrap()
+                    .parse::<u16>()
+                    .unwrap();
+                assert_eq!(listener.port, port, "must adopt the host's socket");
+                if law == "inherited_hold" {
+                    println!("\ninherited listener ready");
+                    std::io::stdout().flush().unwrap();
+                    std::io::stdin().read_exact(&mut [0]).unwrap();
+                } else {
+                    let accepted = hirsel_core_host_accept(context, listener.value, 0, 0, 0, 2);
+                    assert_eq!(accepted.error, IoError::OK);
+                    let pair = hirsel_core_net_split(context, accepted.value, 3);
+                    let mut buf = [0; 6];
+                    let mut input = carrier(&mut buf, 0);
+                    while input.len < buf.len() {
+                        let read = hirsel_core_host_recv_bounded(
+                            context, pair.value, &mut input, 6, 0, 0, 0, 4,
+                        );
+                        assert_eq!(read.error, IoError::OK);
+                        assert_ne!(read.value, 0);
+                    }
+                    assert_eq!(&buf, b"queued");
+                    hirsel_core_socket_drop(context, pair.value);
+                    hirsel_core_socket_drop(context, pair.written);
+                }
+                hirsel_core_socket_drop(context, listener.value);
+            }
             "loopback_io" | "ipv6_loopback" | "deadline" => {
                 let available = (*context).available();
                 let (listener, client, server) =

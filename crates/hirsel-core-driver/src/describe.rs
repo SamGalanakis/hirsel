@@ -2,7 +2,7 @@
 use std::{
     fmt,
     io::{self, Read},
-    os::fd::AsRawFd,
+    os::{fd::AsRawFd, unix::process::CommandExt},
     path::Path,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -67,14 +67,35 @@ pub fn describe_child(
             "n_place does not fit this host",
         )
     })?;
+    let mut command = Command::new(executable);
+    command
+        .arg("--hirsel-describe")
+        .arg(format!("--hirsel-n-place={n_place}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .env_remove("LISTEN_PID")
+        .env_remove("LISTEN_FDS")
+        .env_remove("LISTEN_FDNAMES")
+        .env_remove("LISTEN_PIDFDID");
+    if std::env::var_os("LISTEN_FDS").is_some() {
+        // SAFETY: fcntl changes only the fd flags in the forked preview child.
+        // The CLI normally sealed this fd at startup. This also covers the
+        // library entry and hosts without close_range.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::fcntl(3, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::EBADF) {
+                        return Err(error);
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
     let mut owner = Running {
-        child: Command::new(executable)
-            .arg("--hirsel-describe")
-            .arg(format!("--hirsel-n-place={n_place}"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?,
+        child: command.spawn()?,
         reaped: false,
     };
     let mut stdout = owner.child.stdout.take().expect("piped child stdout");

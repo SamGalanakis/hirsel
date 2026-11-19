@@ -228,6 +228,12 @@ impl OsProcess {
             let target = std::str::from_utf8(bytes(input.target))
                 .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
             let launch = Box::new(launch_metadata(target, n_place, describe_mode));
+            // Receive before the first dup/open can reuse a missing activation fd.
+            let inherited = if input.grant_mask & (1 << NET) != 0 {
+                crate::os_net::receive_listener()?
+            } else {
+                None
+            };
             let mut os = Box::new(OsProvider::new(
                 duplicate(if !describe_mode && input.grant_mask & (1 << STDOUT) != 0 {
                     input.stdout_fd
@@ -236,6 +242,9 @@ impl OsProcess {
                 })?,
                 duplicate(input.stderr_fd)?,
             ));
+            if !describe_mode {
+                *os.inherited_listener.get_mut().unwrap() = inherited;
+            }
             let describe_out = if describe_mode {
                 Some(duplicate(input.stdout_fd)?)
             } else {

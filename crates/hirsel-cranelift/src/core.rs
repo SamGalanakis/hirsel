@@ -96,6 +96,7 @@ pub(super) struct Tables<'a> {
     input: &'a c::Module,
     layouts: &'a [hirsel_core_layout::Recipe],
     signatures: &'a [abi::Signature],
+    call_layouts: &'a c::native_layout::CallLayouts,
     functions: &'a [cranelift_module::FuncId],
     statics: &'a [cranelift_module::DataId],
     /// By function, its static descriptor when a body of this unit describes it.
@@ -116,6 +117,8 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
     for (name, value) in [
         ("is_pic", "true"),
         ("enable_verifier", "false"),
+        // A scalar pair and the internal failure status can occupy three GPRs.
+        ("enable_llvm_abi_extensions", "true"),
         ("opt_level", if options.optimize { "speed" } else { "none" }),
         // Step slow paths split otherwise sequential live ranges. The single-
         // pass allocator gives each spilled value its own permanent stack home;
@@ -365,12 +368,13 @@ fn emit(
     .map_err(error)?;
     let mut object = ObjectModule::new(builder);
     drop(object_setup);
+    let call_layouts = c::native_layout::CallLayouts::new(&input.types, layouts);
     let signatures = {
         let _span = observer.enter("signature_setup");
         input
             .signatures
             .iter()
-            .map(|s| abi::Signature::new(s, &object))
+            .map(|s| abi::Signature::new(s, &object, &call_layouts))
             .collect::<Vec<_>>()
     };
     let declarations = observer.enter("declarations");
@@ -423,6 +427,7 @@ fn emit(
         input,
         layouts,
         signatures: &signatures,
+        call_layouts: &call_layouts,
         functions: &functions,
         statics: &statics,
         descriptors: &descriptors,

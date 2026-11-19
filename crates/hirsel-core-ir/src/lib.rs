@@ -854,6 +854,10 @@
 //! `char` as a u32 scalar value. Link names are `h` followed by the hex digest of the
 //! instance key ([`InstanceKey::digest`]). The context parameter and the failure
 //! status are the FORM v1a additions to this convention (Native ABI, above).
+//! The native emitters carry a fixed record of one or two scalar leaves as
+//! separate values for an internal view or take argument or a destination result.
+//! They use the layout's byte offsets to reconstruct places where the body needs
+//! them. Mutating loans keep the caller's place.
 //!
 //! # Loans
 //!

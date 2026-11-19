@@ -1,5 +1,7 @@
-use crate::{Inst, LayoutQuery, Module};
-use hirsel_core_layout::{FieldTy, Layout, Recipe, Shape, TypeRef, field_size};
+use crate::{Inst, LayoutQuery, Loan, Module, Param, PlaceTy, Signature, TypeId};
+use hirsel_core_layout::{
+    Body, FieldTy, Handle, Layout, Recipe, Repr, Scalar, Shape, Ty, TypeRef, field_size,
+};
 use std::borrow::Cow;
 
 impl LayoutQuery {
@@ -65,4 +67,138 @@ pub fn resolve<'a>(module: &'a Module, recipes: &[Recipe]) -> Cow<'a, Module> {
         }
     }
     Cow::Owned(native)
+}
+
+/// A fixed record carried in the internal native ABI by its scalar leaves.
+/// The offsets describe its original place, including any intervening padding.
+#[derive(Clone, Copy)]
+pub struct ScalarRecord {
+    pub size: u64,
+    fields: [(u64, Ty); 2],
+    len: usize,
+}
+
+impl ScalarRecord {
+    pub fn fields(&self) -> &[(u64, Ty)] {
+        &self.fields[..self.len]
+    }
+}
+
+/// Classify native call boundaries using the same recipes as field projection.
+pub struct CallLayouts {
+    records: Vec<Option<ScalarRecord>>,
+}
+
+impl CallLayouts {
+    pub fn new(shapes: &[Shape], recipes: &[Recipe]) -> Self {
+        let mut records = vec![None; shapes.len()];
+        let mut pending = Vec::new();
+        for (i, shape) in shapes.iter().enumerate() {
+            if matches!(shape.repr, Repr::Resource | Repr::Region) {
+                continue;
+            }
+            let (Body::Record(fields), Layout::Fixed(layout)) = (&shape.body, &recipes[i].layout)
+            else {
+                continue;
+            };
+            if !(1..=16).contains(&layout.size) {
+                continue;
+            }
+            let mut record = ScalarRecord {
+                size: layout.size,
+                fields: [(0, Ty::Ptr); 2],
+                len: 0,
+            };
+            pending.clear();
+            pending.extend(
+                fields
+                    .iter()
+                    .zip(&layout.offsets[0])
+                    .rev()
+                    .map(|(field, &at)| (at, &field.ty)),
+            );
+            let accepted = loop {
+                let Some((at, field)) = pending.pop() else {
+                    break true;
+                };
+                let ty = match field {
+                    FieldTy::Scalar(s) => Ty::Scalar(*s),
+                    FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) | FieldTy::Fn => Ty::Ptr,
+                    FieldTy::Handle(Handle::Sender | Handle::Receiver) => break false,
+                    FieldTy::Handle(_) => Ty::Scalar(Scalar::U64),
+                    FieldTy::Inline(id) => {
+                        let nested = &shapes[id.index()];
+                        if nested.repr == Repr::Resource {
+                            Ty::Ptr
+                        } else {
+                            let (Body::Record(fields), Layout::Fixed(layout)) =
+                                (&nested.body, &recipes[id.index()].layout)
+                            else {
+                                break false;
+                            };
+                            pending.extend(
+                                fields
+                                    .iter()
+                                    .zip(&layout.offsets[0])
+                                    .rev()
+                                    .map(|(field, &offset)| (at + offset, &field.ty)),
+                            );
+                            continue;
+                        }
+                    }
+                    FieldTy::View(inner) => {
+                        pending.push((at, inner));
+                        continue;
+                    }
+                    FieldTy::Array(_, 0) => continue,
+                    FieldTy::Array(element, len) => {
+                        let stride = field_size(shapes, recipes, element).0;
+                        if stride == 0 {
+                            continue;
+                        }
+                        // Each nonempty element needs at least one scalar.
+                        if *len > (record.fields.len() - record.len) as u64 {
+                            break false;
+                        }
+                        pending.extend((0..*len).rev().map(|i| (at + i * stride, &**element)));
+                        continue;
+                    }
+                    _ => break false,
+                };
+                if record.len == record.fields.len() {
+                    break false;
+                }
+                record.fields[record.len] = (at, ty);
+                record.len += 1;
+            };
+            if accepted && record.len != 0 {
+                records[i] = Some(record);
+            }
+        }
+        Self { records }
+    }
+
+    pub fn parameter(&self, param: Param) -> Option<ScalarRecord> {
+        match param {
+            Param::Address {
+                place: PlaceTy::Declared(ty),
+                loan: Loan::View | Loan::Take,
+            } => self.record(ty),
+            _ => None,
+        }
+    }
+
+    pub fn result(&self, signature: &Signature) -> Option<ScalarRecord> {
+        // Source signatures use either a declared destination or immediate
+        // results. Explicit CoreIR multi-result signatures keep their ABI.
+        if signature.results.is_empty() {
+            signature.dest.and_then(|ty| self.record(ty))
+        } else {
+            None
+        }
+    }
+
+    pub fn record(&self, ty: TypeId) -> Option<ScalarRecord> {
+        self.records[ty.index()]
+    }
 }

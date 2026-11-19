@@ -2,6 +2,7 @@
 //! A cleanup, store, read or fallible projection after the call keeps the staged
 //! result: failure cleanup may have to drop it before abandoning the return.
 use super::*;
+use hirsel_core_ir::native_layout::CallLayouts;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Root {
@@ -12,6 +13,8 @@ enum Root {
 pub(super) struct Forwarding<'a> {
     body: &'a Body,
     incoming: Vec<bool>,
+    materialized: Vec<bool>,
+    call_layouts: Option<&'a CallLayouts>,
     pointers: Vec<Option<AddressId>>,
     permanent: Vec<bool>,
     roots: Vec<Option<Option<Root>>>,
@@ -48,11 +51,27 @@ impl<'a> Forwarding<'a> {
         Self {
             body,
             incoming,
+            materialized: vec![false; body.values.len()],
+            call_layouts: None,
             pointers,
             permanent,
             roots: vec![None; body.addresses.len()],
             safe_addresses: vec![None; body.addresses.len()],
         }
+    }
+
+    pub fn native(body: &'a Body, sig: &Signature, layouts: &'a CallLayouts) -> Self {
+        let mut forwarding = Self::new(body);
+        forwarding.call_layouts = Some(layouts);
+        let values = body.blocks[0].params.get(&body.pools.values).unwrap();
+        let skip = usize::from(sig.dest.is_some());
+        if layouts.result(sig).is_some() {
+            forwarding.materialized[values[0].index()] = true;
+        }
+        for (&value, &param) in values[skip..].iter().zip(&sig.params) {
+            forwarding.materialized[value.index()] = layouts.parameter(param).is_some();
+        }
+        forwarding
     }
 
     fn root(&mut self, a: AddressId) -> Option<Root> {
@@ -75,7 +94,7 @@ impl<'a> Forwarding<'a> {
     }
 
     fn value_safe(&mut self, v: ValueId) -> bool {
-        self.incoming[v.index()]
+        (self.incoming[v.index()] && !self.materialized[v.index()])
             || self.permanent[v.index()]
             || self.pointers[v.index()].is_some_and(|a| self.address_safe(a))
     }
@@ -174,6 +193,13 @@ impl<'a> Forwarding<'a> {
         }
         let frame_safe = arguments.iter().enumerate().all(|(i, arg)| {
             if dest && i == 0 {
+                return true;
+            }
+            if self.call_layouts.is_some_and(|layouts| {
+                layouts
+                    .parameter(callee.params[i - usize::from(dest)])
+                    .is_some()
+            }) {
                 return true;
             }
             match *arg {

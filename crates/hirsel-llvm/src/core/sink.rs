@@ -76,6 +76,7 @@ pub(super) enum Local {
     Address(usize),
     Slot(usize),
     Param(usize),
+    ParamField(usize, usize),
     Named(&'static str),
 }
 impl Local {
@@ -95,6 +96,7 @@ impl Local {
             Self::Address(i) => write!(out, "a{i}"),
             Self::Slot(i) => write!(out, "s{i}"),
             Self::Param(i) => write!(out, "p{i}"),
+            Self::ParamField(i, j) => write!(out, "p{i}_{j}"),
             Self::Named(name) => out.write_str(name),
         }
     }

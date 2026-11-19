@@ -493,13 +493,15 @@ fn emit_module(
     };
     let local_roles =
         (facts && provided.roles.is_none()).then(|| hirsel_core_ir::roles::Facts::new(module));
+    let call_layouts = hirsel_core_ir::native_layout::CallLayouts::new(&module.types, &recipes);
     let role_facts = provided.roles.or(local_roles.as_ref()).filter(|_| facts);
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
         let has_status = failures.may_fail[i];
-        let abi = abi::Return::core(target, &sig.results, has_status || f.body.is_none());
+        let abi =
+            abi::Return::for_signature(target, sig, &call_layouts, has_status || f.body.is_none());
         let name = symbol(module, FuncId(i as u32));
-        let (params, locals) = abi.parameters(sig, facts, |place| match place {
+        let (params, locals) = abi.parameters(sig, &call_layouts, facts, |place| match place {
             PlaceTy::Value(t) => size(t),
             PlaceTy::Declared(t)
                 if matches!(
@@ -548,6 +550,7 @@ fn emit_module(
         let flow = flow::Flow::new(body);
         let mut e = FunctionEmitter {
             function: Some(FuncId(i as u32)),
+            call_layouts: Some(&call_layouts),
             append_fast,
             outline_byte_growth: None,
             shadow_callee,
@@ -638,7 +641,7 @@ fn emit_module(
                 }
                 _ => Inline::Default,
             },
-            destination_size: destination,
+            destination_size: destination.filter(|_| e.abi.record.is_none()),
             carriers: carriers(module, &recipes, role_facts, FuncId(i as u32), sig, &locals),
             subprogram: function_debug.map(|d| d.scope),
             ..FnAttrs::default()
@@ -716,6 +719,9 @@ fn emit_module(
                 e.literals[result.index()] = Some(e.literal(result, bits));
             }
         }
+        if let Some(record) = e.abi.record {
+            e.sink.alloca(Local::DEST, &Type::bytes(record.size), 8);
+        }
         for (i, v) in body.blocks[0]
             .params
             .get(&body.pools.values)
@@ -724,16 +730,26 @@ fn emit_module(
             .enumerate()
         {
             let parameter = if sig.dest.is_some() && i == 0 {
-                Local::DEST
+                Local::DEST.into()
             } else {
-                Local::Param(i - usize::from(sig.dest.is_some()))
+                let index = i - usize::from(sig.dest.is_some());
+                if let Some(record) = call_layouts.parameter(sig.params[index]) {
+                    let place = e.temp(Type::bytes(record.size));
+                    let values: Vec<_> = (0..record.fields().len())
+                        .map(|j| Local::ParamField(index, j).into())
+                        .collect();
+                    e.store_record(record, &place, &values);
+                    place
+                } else {
+                    Local::Param(index).into()
+                }
             };
-            e.put(*v, &parameter.into());
+            e.put(*v, &parameter);
         }
         if let Some(scopes) = e.aliases.as_ref().map(|a| a.declared().to_vec()) {
             e.declare_scopes(&scopes);
         }
-        let mut forwarding = forward::Forwarding::new(body);
+        let mut forwarding = forward::Forwarding::native(body, sig, &call_layouts);
         // A view freezes the carrier header throughout the activation, even
         // across calls through an opaque capture. End the invariant on every
         // return; retain existing frame-safe tail-call functions unchanged.
@@ -805,7 +821,7 @@ fn emit_module(
                     && offset == ending.prefix
                     && {
                         e.anchor = body.inst_anchors[b.insts.start as usize + offset];
-                        e.return_call(&body.calls[ending.call.index()], ending)
+                        e.return_call(&body.calls[ending.call.index()], ending, &call_layouts)
                     }
                 {
                     returned = true;
@@ -842,7 +858,13 @@ fn emit_module(
         e.sink.end_function();
         e.step_counter = None;
         if !has_status {
-            e.infallible_wrapper(&name, sig, facts, function_debug.and_then(|d| d.wrapper));
+            e.infallible_wrapper(
+                &name,
+                sig,
+                &call_layouts,
+                facts,
+                function_debug.and_then(|d| d.wrapper),
+            );
         }
     }
     cleanup::drop_glue(
@@ -855,7 +877,16 @@ fn emit_module(
         sink,
         &mut items,
     )?;
-    task_entry::emit(module, target, &recipes, &failures, facts, sink, &mut items)?;
+    task_entry::emit(
+        module,
+        target,
+        &recipes,
+        &call_layouts,
+        &failures,
+        facts,
+        sink,
+        &mut items,
+    )?;
     let lasts = items.take_release_lasts();
     cleanup::release_lasts(
         module, target, &recipes, &failures, facts, &lasts, sink, &mut items,
@@ -1246,6 +1277,7 @@ const FALSE: Value = Value::Bool(false);
 
 struct FunctionEmitter<'a> {
     function: Option<FuncId>,
+    call_layouts: Option<&'a hirsel_core_ir::native_layout::CallLayouts>,
     module: &'a Module,
     body: &'a Body,
     recipes: &'a [hirsel_core_layout::Recipe],
@@ -1945,7 +1977,12 @@ impl FunctionEmitter<'_> {
                     .iter()
                     .map(|v| self.numeric(*v))
                     .collect::<Vec<_>>();
-                self.return_values(&xs);
+                if let Some(record) = self.abi.record {
+                    let fields = self.load_record(record, &Local::DEST.into());
+                    self.return_values(&fields);
+                } else {
+                    self.return_values(&xs);
+                }
             }
             Terminator::Unreachable => self.effect(Operation::Unreachable),
             Terminator::Propagate => {

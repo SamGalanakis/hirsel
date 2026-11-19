@@ -3,6 +3,7 @@
 //! aggregates or integer carriers, and otherwise the dedicated sret register.
 //! Only FORM's naturally aligned scalar fields occur.
 use super::*;
+use hirsel_core_ir::native_layout::{CallLayouts, ScalarRecord};
 
 pub(super) struct Return {
     pub target: hirsel_core_layout::Target,
@@ -16,6 +17,7 @@ pub(super) struct Return {
     pub offsets: Vec<u64>,
     pub regs: Vec<Type>,
     pub reg_stride: u64,
+    pub record: Option<ScalarRecord>,
 }
 pub(super) fn extension(target: hirsel_core_layout::Target, t: Ty) -> Extension {
     if target == hirsel_core_layout::Target::Aarch64Linux
@@ -48,6 +50,50 @@ impl Return {
         }
     }
 
+    pub fn for_signature(
+        target: Target,
+        sig: &Signature,
+        layouts: &CallLayouts,
+        has_status: bool,
+    ) -> Self {
+        Self::core_record(target, &sig.results, layouts.result(sig), has_status)
+    }
+
+    pub fn core_record(
+        target: Target,
+        fields: &[Ty],
+        record: Option<ScalarRecord>,
+        has_status: bool,
+    ) -> Self {
+        let Some(record) = record else {
+            return Self::core(target, fields, has_status);
+        };
+        let fields: Vec<_> = record
+            .fields()
+            .iter()
+            .map(|&(_, t)| t)
+            .chain(has_status.then_some(Ty::Scalar(Scalar::U8)))
+            .collect();
+        let regs: Vec<_> = fields.iter().copied().map(ty).collect();
+        let ty = if regs.len() == 1 {
+            regs[0].clone()
+        } else {
+            Type::structure(regs.clone())
+        };
+        Self {
+            target,
+            internal: true,
+            ty,
+            storage: Type::Void,
+            indirect: false,
+            fields,
+            offsets: vec![],
+            regs,
+            reg_stride: 0,
+            record: Some(record),
+        }
+    }
+
     /// A CoreIR value argument as caller and callee type it.
     pub fn value_parameter(&self, t: Ty) -> Parameter {
         Parameter::extended(ty(t), extension(self.target, t))
@@ -56,6 +102,7 @@ impl Return {
     pub fn parameters(
         &self,
         sig: &Signature,
+        layouts: &CallLayouts,
         facts: bool,
         extent: impl Fn(PlaceTy) -> u64,
     ) -> (Vec<Parameter>, Vec<Local>) {
@@ -67,7 +114,7 @@ impl Return {
         }
         params.push(Type::Ptr.into());
         locals.push(Local::CONTEXT);
-        if sig.dest.is_some() {
+        if sig.dest.is_some() && self.record.is_none() {
             params.push(Parameter {
                 noalias: facts,
                 ..Parameter::plain(Type::Ptr)
@@ -75,6 +122,13 @@ impl Return {
             locals.push(Local::DEST);
         }
         for (i, p) in sig.params.iter().enumerate() {
+            if let Some(record) = layouts.parameter(*p) {
+                for (j, &(_, t)) in record.fields().iter().enumerate() {
+                    params.push(self.value_parameter(t));
+                    locals.push(Local::ParamField(i, j));
+                }
+                continue;
+            }
             params.push(match p {
                 Param::Value(t) => self.value_parameter(*t),
                 Param::Address { loan, place } if facts => Parameter {
@@ -181,6 +235,7 @@ impl Return {
             offsets,
             regs,
             reg_stride,
+            record: None,
         }
     }
 }
@@ -228,41 +283,77 @@ impl FunctionEmitter<'_> {
         self.runtime_void("llvm.lifetime.end.p0", &[ptr(shadow.clone())]);
     }
     /// The arguments of a direct or indirect CoreIR call, after the context.
+    pub(super) fn load_record(&mut self, record: ScalarRecord, address: &Value) -> Vec<Value> {
+        record
+            .fields()
+            .iter()
+            .map(|&(offset, t)| {
+                let at = self.offset(address, offset);
+                self.load(&ty(t), &at, 1)
+            })
+            .collect()
+    }
+
+    pub(super) fn store_record(&mut self, record: ScalarRecord, address: &Value, values: &[Value]) {
+        for (&(offset, t), value) in record.fields().iter().zip(values) {
+            let at = self.offset(address, offset);
+            self.store(&ty(t), value, &at, 1);
+        }
+    }
+
     fn call_arguments(
         &mut self,
         site: &CallSite,
-        destination: bool,
+        layouts: &CallLayouts,
+        result: Option<ScalarRecord>,
+        forward: bool,
     ) -> (Vec<CArg>, Option<(Value, Value)>) {
+        let sig = &self.module.signatures[site.signature.index()];
         let mut args = vec![ptr(CONTEXT)];
         let shadow_index = self.shadow_argument(site);
         let mut carrier_shadow = None;
-        for (i, a) in site
-            .args
-            .get(&self.body.pools.args)
-            .unwrap()
-            .iter()
-            .enumerate()
-        {
-            args.push(if destination && i == 0 {
-                ptr(Local::DEST)
+        let actual = site.args.get(&self.body.pools.args).unwrap();
+        let skip = usize::from(sig.dest.is_some());
+        if skip != 0 && result.is_none() {
+            let Arg::Address(dest) = actual[0] else {
+                unreachable!()
+            };
+            let place = if forward {
+                Local::DEST.into()
             } else {
-                match *a {
-                    Arg::Address(a) => {
-                        let p = self.address(a);
-                        if shadow_index == Some(i) {
-                            let shadow = self.shadow_copy_in(&p);
-                            carrier_shadow = Some((p, shadow.clone()));
-                            ptr(shadow)
-                        } else {
-                            ptr(p)
-                        }
+                self.address(dest)
+            };
+            args.push(ptr(place));
+        }
+        for (i, (&a, &p)) in actual[skip..].iter().zip(&sig.params).enumerate() {
+            let operand = match a {
+                Arg::Address(a) => {
+                    let pointer = self.address(a);
+                    if let Some(record) = layouts.parameter(p) {
+                        let values = self.load_record(record, &pointer);
+                        args.extend(
+                            record
+                                .fields()
+                                .iter()
+                                .zip(values)
+                                .map(|(&(_, t), x)| (self.abi.value_parameter(t), x)),
+                        );
+                        continue;
                     }
-                    Arg::Value(v) => {
-                        let x = self.numeric(v);
-                        (self.abi.value_parameter(self.vty(v)), x)
+                    if shadow_index == Some(i + skip) {
+                        let shadow = self.shadow_copy_in(&pointer);
+                        carrier_shadow = Some((pointer, shadow.clone()));
+                        ptr(shadow)
+                    } else {
+                        ptr(pointer)
                     }
                 }
-            });
+                Arg::Value(v) => {
+                    let x = self.numeric(v);
+                    (self.abi.value_parameter(self.vty(v)), x)
+                }
+            };
+            args.push(operand);
         }
         (args, carrier_shadow)
     }
@@ -277,18 +368,24 @@ impl FunctionEmitter<'_> {
             Callee::Runtime(_) => unreachable!(),
         }
     }
-    pub(super) fn return_call(&mut self, site: &CallSite, ending: &super::forward::Ending) -> bool {
+    pub(super) fn return_call(
+        &mut self,
+        site: &CallSite,
+        ending: &super::forward::Ending,
+        layouts: &CallLayouts,
+    ) -> bool {
         let has_status = match site.callee {
             Callee::Direct(f) => self.failures.may_fail[f.index()],
             Callee::Indirect(_) => true,
             Callee::Runtime(_) => return false,
         };
         let sig = &self.module.signatures[site.signature.index()];
-        let abi = Return::core(self.abi.target, &sig.results, has_status);
+        let abi = Return::for_signature(self.abi.target, sig, layouts, has_status);
         if has_status && !self.has_status {
             return false;
         }
-        let (mut args, carrier_shadow) = self.call_arguments(site, ending.destination);
+        let (mut args, carrier_shadow) =
+            self.call_arguments(site, layouts, abi.record, ending.destination);
         let callee = self.callee(site.callee, has_status);
         let site_word = self.call_site_word(site.callee);
         args.push(word(site_word));
@@ -339,6 +436,10 @@ impl FunctionEmitter<'_> {
         let abi_ty = self.abi.ty.clone();
         if self.abi.fields.len() == 1 {
             self.ret(&abi_ty, &int(1));
+        } else if self.abi.record.is_some() {
+            let mut values = vec![Value::Zero; self.abi.fields.len() - 1];
+            values.push(int(1));
+            self.return_abi_values(&values);
         } else if self.abi.indirect {
             let storage = self.abi.storage.clone();
             let sret = Local::SRET.into();
@@ -387,6 +488,15 @@ impl FunctionEmitter<'_> {
             }
             return;
         }
+        if self.abi.record.is_some() {
+            let regs = self.abi.regs.clone();
+            let mut result = Value::Poison;
+            for (i, (t, value)) in regs.iter().zip(values).enumerate() {
+                result = self.emit(Operation::Insert(&abi_ty, &result, t, value, i as u32));
+            }
+            self.ret(&abi_ty, &result);
+            return;
+        }
         let storage = self.abi.storage.clone();
         let p = if self.abi.indirect {
             Local::SRET.into()
@@ -432,8 +542,9 @@ impl FunctionEmitter<'_> {
             Callee::Direct(f) => self.failures.may_fail[f.index()],
             _ => true,
         };
-        let abi = Return::core(self.abi.target, &sig.results, has_status);
-        let (mut args, carrier_shadow) = self.call_arguments(site, false);
+        let layouts = self.call_layouts.unwrap();
+        let abi = Return::for_signature(self.abi.target, sig, layouts, has_status);
+        let (mut args, carrier_shadow) = self.call_arguments(site, layouts, abi.record, false);
         let callee = self.callee(site.callee, has_status);
         let site_word = self.call_site_word(site.callee);
         args.push(word(site_word));
@@ -445,6 +556,13 @@ impl FunctionEmitter<'_> {
             let status = values.pop().unwrap();
             let failed = self.cmp(Predicate::Ne, &Type::I8, &status, &int(0));
             self.branch_failure(&failed, site.fail, None);
+        }
+        if let Some(record) = abi.record {
+            let Arg::Address(dest) = site.args.get(&self.body.pools.args).unwrap()[0] else {
+                unreachable!()
+            };
+            let dest = self.address(dest);
+            self.store_record(record, &dest, &values);
         }
         for (v, x) in site
             .results
@@ -464,7 +582,7 @@ impl FunctionEmitter<'_> {
         mut args: Vec<CArg>,
         attrs: &CallAttrs,
     ) -> Vec<Value> {
-        let scratch = if abi.fields.len() > 1 {
+        let scratch = if abi.fields.len() > 1 && abi.record.is_none() {
             Some(self.temp(abi.storage.clone()))
         } else {
             None
@@ -484,6 +602,8 @@ impl FunctionEmitter<'_> {
         let mut values = vec![];
         if abi.fields.len() == 1 {
             values.push(r);
+        } else if abi.record.is_some() {
+            values.extend((0..abi.fields.len()).map(|i| self.extract(&abi.ty, &r, i as u32)));
         } else if let Some(p) = scratch {
             if !abi.indirect {
                 for (i, t) in abi.regs.iter().enumerate() {
@@ -508,6 +628,7 @@ impl FunctionEmitter<'_> {
         &mut self,
         name: &str,
         sig: &Signature,
+        layouts: &CallLayouts,
         facts: bool,
         debug: Option<(usize, usize)>,
     ) {
@@ -515,8 +636,10 @@ impl FunctionEmitter<'_> {
         self.view_invariants.clear();
         self.next = 0;
         self.has_status = true;
-        self.abi = Return::internal_on_target(self.abi.target, &sig.results);
-        let (params, locals) = self.abi.parameters(sig, facts, |p| self.place_layout(p).0);
+        self.abi = Return::for_signature(self.abi.target, sig, layouts, true);
+        let (params, locals) = self
+            .abi
+            .parameters(sig, layouts, facts, |p| self.place_layout(p).0);
         let attrs = FnAttrs {
             linkage: Linkage::WeakOdr,
             subprogram: debug.map(|(scope, _)| scope),
@@ -524,19 +647,15 @@ impl FunctionEmitter<'_> {
         };
         let signature = self.abi.signature(params);
         self.sink.begin_function(name, &signature, &locals, &attrs);
-        let mut args = vec![ptr(CONTEXT)];
-        if sig.dest.is_some() {
-            args.push(ptr(Local::DEST));
-        }
-        for (i, p) in sig.params.iter().enumerate() {
-            args.push(match p {
-                Param::Value(t) => (self.abi.value_parameter(*t), Local::Param(i).into()),
-                Param::Address { .. } => ptr(Local::Param(i)),
-            });
-        }
-        args.push(word(Local::CALLER_SITE));
+        let args = signature
+            .params
+            .into_iter()
+            .zip(locals)
+            .skip(usize::from(self.abi.indirect))
+            .map(|(param, local)| (Parameter::extended(param.ty, param.extension), local.into()))
+            .collect();
         let values = self.invoke(
-            &Return::core(self.abi.target, &sig.results, false),
+            &Return::for_signature(self.abi.target, sig, layouts, false),
             &Value::global(format!("{name}.infallible")),
             args,
             &CallAttrs::default(),

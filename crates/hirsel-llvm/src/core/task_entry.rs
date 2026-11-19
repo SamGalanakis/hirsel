@@ -16,10 +16,12 @@ pub(super) fn input_offset(
     .1
     .max(8)
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit(
     module: &Module,
     target: Target,
     recipes: &[hirsel_core_layout::Recipe],
+    call_layouts: &hirsel_core_ir::native_layout::CallLayouts,
     failures: &failure::Failures,
     facts: bool,
     sink: &mut dyn Sink,
@@ -45,7 +47,15 @@ pub(super) fn emit(
             Carried::Value(t) => vec![t],
             _ => vec![],
         };
-        let abi = abi::Return::internal_on_target(target, &fields);
+        let argument = match xc {
+            Carried::Address => call_layouts.record(x),
+            _ => None,
+        };
+        let returned = match rc {
+            Carried::Address => call_layouts.record(r),
+            _ => None,
+        };
+        let abi = abi::Return::core_record(target, &fields, returned, true);
         sink.begin_function(
             &format!("core_task_entry_{}_{}", x.0, r.0),
             &FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr, Type::Ptr]),
@@ -67,12 +77,25 @@ pub(super) fn emit(
         let code = e.load(&Type::Ptr, &input, 8);
         let data = e.offset(&input, input_offset(module, recipes, x));
         let mut args = vec![ptr(CONTEXT)];
-        if matches!(rc, Carried::Address) {
+        if matches!(rc, Carried::Address) && returned.is_none() {
             args.push(ptr(result.clone()));
         }
         args.push(ptr(Value::Null));
         match xc {
-            Carried::Address => args.push(ptr(data)),
+            Carried::Address => {
+                if let Some(record) = argument {
+                    let values = e.load_record(record, &data);
+                    args.extend(
+                        record
+                            .fields()
+                            .iter()
+                            .zip(values)
+                            .map(|(&(_, t), v)| (abi.value_parameter(t), v)),
+                    );
+                } else {
+                    args.push(ptr(data));
+                }
+            }
             Carried::Value(t) => {
                 let v = e.load(&ty(t), &data, 1);
                 args.push((
@@ -85,13 +108,17 @@ pub(super) fn emit(
         args.push(word(int(0)));
         let values = e.invoke(&abi, &code, args, &CallAttrs::default());
         let status = values.last().unwrap().clone();
-        if let Carried::Value(t) = rc {
+        if !fields.is_empty() || returned.is_some() {
             let success = e.cmp(Predicate::Eq, &Type::I8, &status, &int(0));
             let store = Label::plain("store_result");
             let done = Label::plain("done");
             e.cond(&success, store, done);
             e.block(store);
-            e.store(&ty(t), &values[0], &result, 1);
+            if let Some(record) = returned {
+                e.store_record(record, &result, &values);
+            } else {
+                e.store(&ty(fields[0]), &values[0], &result, 1);
+            }
             e.br(done);
             e.block(done);
         }

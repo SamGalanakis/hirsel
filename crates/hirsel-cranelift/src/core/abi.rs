@@ -1,8 +1,11 @@
 //! Linux System V / AAPCS64 scalar-struct returns. Like rustc_codegen_cranelift,
 //! physical register carriers follow aggregate classification, not source arity.
 use super::*;
-use cranelift_codegen::ir::{ArgumentPurpose, MemFlagsData as MemFlags, Value};
+use cranelift_codegen::ir::{
+    ArgumentPurpose, MemFlagsData as MemFlags, StackSlotData, StackSlotKind, Value,
+};
 use cranelift_codegen::isa::CallConv;
+use hirsel_core_ir::native_layout::{CallLayouts, ScalarRecord};
 
 pub(super) struct Signature {
     pub clif: ir::Signature,
@@ -12,10 +15,13 @@ pub(super) struct Signature {
     pub indirect: bool,
     pub aggregate: bool,
     homogeneous: bool,
+    pub param_records: Vec<Option<ScalarRecord>>,
+    pub record: Option<ScalarRecord>,
+    pub dest: bool,
 }
 impl Signature {
-    pub fn new(s: &c::Signature, object: &ObjectModule) -> Self {
-        Self::build(s, true, aarch64(object))
+    pub fn new(s: &c::Signature, object: &ObjectModule, layouts: &CallLayouts) -> Self {
+        Self::build(s, Some(layouts), aarch64(object))
     }
     pub fn c(object: &ObjectModule, params: &[Ty], results: &[Ty]) -> Self {
         let mut signature = Self::build(
@@ -25,7 +31,7 @@ impl Signature {
                 dest: None,
                 never: false,
             },
-            false,
+            None,
             aarch64(object),
         );
         // C bool parameters carry zero-extension in Rust/LLVM's ABI. Without
@@ -38,9 +44,15 @@ impl Signature {
         }
         signature
     }
-    fn build(s: &c::Signature, context: bool, arm: bool) -> Self {
-        let mut results = Vec::with_capacity(s.results.len() + usize::from(context));
-        results.extend_from_slice(&s.results);
+    fn build(s: &c::Signature, layouts: Option<&CallLayouts>, arm: bool) -> Self {
+        let context = layouts.is_some();
+        let record = layouts.and_then(|layouts| layouts.result(s));
+        let dest = s.dest.is_some() && record.is_none();
+        let mut results = if let Some(record) = record {
+            record.fields().iter().map(|&(_, t)| t).collect()
+        } else {
+            s.results.clone()
+        };
         if context {
             results.push(Ty::Scalar(Scalar::U8));
         }
@@ -64,7 +76,7 @@ impl Signature {
             && results.len() <= 4
             && results[0].is_float()
             && results.iter().all(|r| *r == results[0]);
-        let indirect = size > 16 && !homogeneous;
+        let indirect = record.is_none() && size > 16 && !homogeneous;
         let aggregate = results.len() > 1;
         if indirect {
             clif.params
@@ -75,22 +87,32 @@ impl Signature {
         if context {
             clif.params.push(AbiParam::new(types::I64));
         }
-        if s.dest.is_some() {
+        if dest {
             clif.params.push(AbiParam::new(types::I64));
         }
-        clif.params.extend(s.params.iter().map(|p| {
-            AbiParam::new(match *p {
-                Param::Value(t) => ty(t),
-                Param::Address { .. } => types::I64,
-            })
-        }));
+        let param_records: Vec<_> = s
+            .params
+            .iter()
+            .map(|&p| layouts.and_then(|layouts| layouts.parameter(p)))
+            .collect();
+        for (&p, scalar) in s.params.iter().zip(&param_records) {
+            if let Some(record) = scalar {
+                clif.params
+                    .extend(record.fields().iter().map(|&(_, t)| AbiParam::new(ty(t))));
+            } else {
+                clif.params.push(AbiParam::new(match p {
+                    Param::Value(t) => ty(t),
+                    Param::Address { .. } => types::I64,
+                }));
+            }
+        }
         if context {
             // FORM#91: activation fallback, after every source parameter.
             // The process/task C callbacks keep their published signatures.
             clif.params.push(AbiParam::new(types::I64));
         }
         if !indirect {
-            if !aggregate || homogeneous {
+            if !aggregate || homogeneous || record.is_some() {
                 clif.returns
                     .extend(results.iter().map(|&r| AbiParam::new(ty(r))));
             } else {
@@ -122,6 +144,9 @@ impl Signature {
             indirect,
             aggregate,
             homogeneous,
+            param_records,
+            record,
+            dest,
         }
     }
     pub fn unpack(
@@ -131,7 +156,7 @@ impl Signature {
         storage: Option<Value>,
         mut push: impl FnMut(Value),
     ) {
-        if !self.aggregate || self.homogeneous {
+        if !self.aggregate || self.homogeneous || self.record.is_some() {
             for &value in values {
                 push(value);
             }
@@ -184,7 +209,7 @@ impl Signature {
         }
     }
     pub fn return_(&self, b: &mut FunctionBuilder<'_>, values: &[Value], storage: Option<Value>) {
-        if !self.aggregate || self.homogeneous {
+        if !self.aggregate || self.homogeneous || self.record.is_some() {
             b.ins().return_(values);
             return;
         }
@@ -261,4 +286,37 @@ impl Signature {
 /// The module owns one target; every imported/generated C signature uses it.
 pub(super) fn aarch64(object: &ObjectModule) -> bool {
     object.isa().name() == "aarch64"
+}
+
+pub(super) fn record_place(b: &mut FunctionBuilder<'_>, record: ScalarRecord) -> Value {
+    let slot = b.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        record.size as u32,
+        3,
+    ));
+    b.ins().stack_addr(types::I64, slot, 0)
+}
+
+pub(super) fn load_record(
+    b: &mut FunctionBuilder<'_>,
+    record: ScalarRecord,
+    address: Value,
+    values: &mut Vec<Value>,
+) {
+    values.extend(record.fields().iter().map(|&(offset, t)| {
+        b.ins()
+            .load(ty(t), MemFlags::trusted(), address, offset as i32)
+    }));
+}
+
+pub(super) fn store_record(
+    b: &mut FunctionBuilder<'_>,
+    record: ScalarRecord,
+    address: Value,
+    values: &[Value],
+) {
+    for (&(offset, _), &value) in record.fields().iter().zip(values) {
+        b.ins()
+            .store(MemFlags::trusted(), value, address, offset as i32);
+    }
 }

@@ -16,6 +16,112 @@ include!("../../hirsel-llvm/tests/support/native.rs");
 include!("support/flow.rs");
 
 #[test]
+fn scalar_record_calls_agree_with_evaluator() {
+    let source = r#"
+type Single { n: u64 }
+type Mixed { tag: u8, value: f64 }
+type Wide { left: u64, right: u64 }
+
+fn single(n: Single) -> Single { Single(n: n.n + 1) }
+
+fn recurse(x: Mixed, n: u64) -> Mixed {
+    if n == 0 { return x }
+    recurse(Mixed(tag: x.tag, value: x.value + 0.5), n - 1)
+}
+
+fn wide(x: Wide, divisor: u64) -> Wide {
+    Wide(left: x.right / divisor, right: x.left)
+}
+
+fn apply(f: fn(Wide, u64) -> Wide, x: Wide, n: u64) -> Wide { f(x, n) }
+
+fn revise(mut x: Mixed) { x.tag = 7 }
+
+fn probe(s: u64, divisor: u64) -> u64 {
+    let ran = bound steps s {
+        let one = single(Single(n: 21u64))
+        let mut mixed = recurse(Mixed(tag: 5u8, value: 1.5), 4)
+        revise(mut mixed)
+        let two = apply(wide, Wide(left: 10u64, right: 20u64), divisor)
+        if mixed.tag == 7 && float.to_bits64(mixed.value) == 4615063718147915776 {
+            one.n + two.left + two.right
+        } else {
+            0u64
+        }
+    }
+    match ran { Ok(value) => value, Error(e) => 1000u64 + e.steps }
+}
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let ir = emit_ir(&program).unwrap();
+    let wide = symbol(&program, names["wide"]);
+    let wide_header = format!("{{ i64, i64, i8 }} @{wide}(");
+    assert!(
+        ir.lines()
+            .filter(|line| line.starts_with("define "))
+            .any(|line| {
+                let Some((_, args)) = line.split_once(&wide_header) else {
+                    return false;
+                };
+                let types = args
+                    .split(')')
+                    .next()
+                    .unwrap()
+                    .split(',')
+                    .map(|param| param.split_whitespace().next().unwrap());
+                types.eq(["ptr", "i64", "i64", "i64", "i64"])
+            }),
+        "two u64 leaves and failure status cross the call as immediate results"
+    );
+    let cases: Vec<_> = (0..=11)
+        .flat_map(|steps| [0, 2].map(move |divisor| (steps, divisor)))
+        .map(|(steps, divisor)| Case {
+            function: names["probe"],
+            args: vec![steps, divisor],
+            limit: 1_000,
+            injection: None,
+        })
+        .collect();
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|case| {
+            let (steps, divisor) = (case.args[0], case.args[1]);
+            // single, recurse (entry and four self-calls), revise, apply, and
+            // the indirect call to wide cost nine Steps. Only success calls to_bits64.
+            let outcome = if steps < if divisor == 0 { 9 } else { 10 } {
+                eval::Outcome::Returned(vec![1000 + steps])
+            } else if divisor == 0 {
+                eval::Outcome::Failed(vec!["Division".into()])
+            } else {
+                eval::Outcome::Returned(vec![42])
+            };
+            let evaluated = eval::run(&program, case.function, &case.args, case.limit);
+            assert_eq!(evaluated.outcome, outcome, "{:?}", case.args);
+            evaluated
+        })
+        .collect();
+    let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &[names["probe"]]);
+    for (optimization, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
+        let reports = execute_object(&program, &cases, "", "", optimization, Some(object));
+        for ((case, evaluated), native) in cases.iter().zip(&expected).zip(reports) {
+            assert_eq!(native.outcome, evaluated.outcome, "{:?}", case.args);
+            assert_eq!(native.used, evaluated.used);
+            let sites: Vec<_> = evaluated
+                .sites
+                .iter()
+                .map(|anchor| {
+                    anchor.map_or(0, |a| {
+                        ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                    })
+                })
+                .collect();
+            assert_eq!(native.sites, sites, "{:?}", case.args);
+        }
+    }
+}
+
+#[test]
 fn native_flow_corpus_agrees_with_the_owner_laws() {
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(FLOW_SOURCE, None);
     let mut cases: Vec<_> = FLOW_CASES

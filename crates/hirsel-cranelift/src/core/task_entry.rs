@@ -75,17 +75,23 @@ impl Glues {
                 never: false,
             };
             sig.params.insert(0, Param::Value(Ty::Ptr));
-            let abi = abi::Signature::new(&sig, object);
+            let abi = abi::Signature::new(&sig, object, tables.call_layouts);
             let signature = b.import_signature(abi.clif.clone());
             let mut args = Vec::with_capacity(4);
             args.push(ps[0]);
-            if matches!(rc, Carried::Address) {
+            if abi.dest {
                 args.push(ps[1]);
             }
             let environment = b.ins().iconst(types::I64, 0);
             args.push(environment);
             match xc {
-                Carried::Address => args.push(data),
+                Carried::Address => {
+                    if let Some(record) = abi.param_records[1] {
+                        abi::load_record(&mut b, record, data, &mut args);
+                    } else {
+                        args.push(data);
+                    }
+                }
                 Carried::Value(t) => {
                     let v = b.ins().load(ty(t), MemFlagsData::trusted(), data, 0);
                     args.push(v)
@@ -95,20 +101,24 @@ impl Glues {
             args.push(b.ins().iconst(types::I64, 0));
             let call = b.ins().call_indirect(signature, code, &args);
             let physical = b.inst_results(call).to_vec();
-            let mut values = [Value::from_u32(0); 2];
+            let mut values = [Value::from_u32(0); 3];
             let mut n = 0;
             abi.unpack(&mut b, &physical, None, |v| {
                 values[n] = v;
                 n += 1
             });
             let status = values[n - 1];
-            if matches!(rc, Carried::Value(_)) {
+            if matches!(rc, Carried::Value(_)) || abi.record.is_some() {
                 let success = b.create_block();
                 let done = b.create_block();
                 let ok = b.ins().icmp_imm(IntCC::Equal, status, 0);
                 b.ins().brif(ok, success, &[], done, &[]);
                 b.switch_to_block(success);
-                b.ins().store(MemFlagsData::trusted(), values[0], ps[1], 0);
+                if let Some(record) = abi.record {
+                    abi::store_record(&mut b, record, ps[1], &values[..n - 1]);
+                } else {
+                    b.ins().store(MemFlagsData::trusted(), values[0], ps[1], 0);
+                }
                 b.ins().jump(done, &[]);
                 b.switch_to_block(done);
             }

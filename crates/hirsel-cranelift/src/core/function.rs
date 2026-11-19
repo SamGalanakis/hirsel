@@ -54,6 +54,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub debug: bool,
     pub signature: &'c abi::Signature,
     pub result_storage: Option<Value>,
+    record_dest: Option<Value>,
     pub raise_blocks: Vec<PendingRaise>,
     pub raise_lookup: std::collections::HashMap<(u8, Option<BlockId>, Option<Anchor>), ir::Block>,
     pub site_reference: Option<ir::GlobalValue>,
@@ -94,13 +95,8 @@ pub(super) fn emit(
         }
     }
     let mut values = vec![Value::from_u32(0); body.values.len()];
-    for (i, block) in body.blocks.iter().enumerate() {
+    for (i, block) in body.blocks.iter().enumerate().skip(1) {
         let params = b.block_params(blocks[i]);
-        let params = if i == 0 {
-            &params[usize::from(signature.indirect) + 1..]
-        } else {
-            params
-        };
         for (&id, &value) in block
             .params
             .get(&body.pools.values)
@@ -203,10 +199,38 @@ pub(super) fn emit(
         ));
     }
     b.switch_to_block(blocks[0]);
-    let params = b.block_params(blocks[0]);
+    let params = b.block_params(blocks[0]).to_vec();
     let context = params[usize::from(signature.indirect)];
     let result_storage = signature.indirect.then(|| params[0]);
     let caller_site = *params.last().unwrap();
+    let record_dest = signature
+        .record
+        .map(|record| abi::record_place(&mut b, record));
+    let mut physical = params[usize::from(signature.indirect) + 1..]
+        .iter()
+        .copied();
+    let mut logical = body.blocks[0]
+        .params
+        .get(&body.pools.values)
+        .unwrap()
+        .iter();
+    if signature.dest || signature.record.is_some() {
+        values[logical.next().unwrap().index()] =
+            record_dest.unwrap_or_else(|| physical.next().unwrap());
+    }
+    for (&id, record) in logical.zip(&signature.param_records) {
+        values[id.index()] = if let Some(record) = *record {
+            let mut incoming = [Value::from_u32(0); 2];
+            for value in &mut incoming[..record.fields().len()] {
+                *value = physical.next().unwrap();
+            }
+            let place = abi::record_place(&mut b, record);
+            abi::store_record(&mut b, record, place, &incoming);
+            place
+        } else {
+            physical.next().unwrap()
+        };
+    }
     let mut f = Function {
         b,
         object,
@@ -233,6 +257,7 @@ pub(super) fn emit(
         task_entries: tables.task_entries,
         signature,
         result_storage,
+        record_dest,
         raise_blocks: Vec::with_capacity(4),
         raise_lookup: Default::default(),
         site_reference: None,
@@ -254,7 +279,9 @@ pub(super) fn emit(
     };
     for i in order(body) {
         let block = &body.blocks[i];
-        f.b.switch_to_block(f.blocks[i]);
+        if i != 0 {
+            f.b.switch_to_block(f.blocks[i]);
+        }
         if f.receive_loops.exit(i) {
             f.c_call("hirsel_core_receive_loop_end", &[], &[], &[])?;
         }
@@ -316,6 +343,9 @@ pub(super) fn emit(
                         .iter()
                         .map(|&v| f.get(v)),
                 );
+                if let Some(record) = signature.record {
+                    abi::load_record(&mut f.b, record, f.record_dest.unwrap(), &mut results);
+                }
                 results.push(f.b.ins().iconst(types::I8, 0));
                 signature.return_(&mut f.b, &results, result_storage);
                 f.calls.results = results;
@@ -643,11 +673,33 @@ impl Function<'_, '_, '_> {
                     args.push(storage);
                 }
                 args.push(self.context);
-                for arg in call.args.get(&self.body.pools.args).unwrap() {
-                    args.push(match *arg {
-                        Arg::Value(v) => self.get(v),
-                        Arg::Address(a) => self.addr(a),
-                    });
+                let actual = call.args.get(&self.body.pools.args).unwrap();
+                let dest = if signature.dest || signature.record.is_some() {
+                    let Arg::Address(dest) = actual[0] else {
+                        unreachable!()
+                    };
+                    Some(self.addr(dest))
+                } else {
+                    None
+                };
+                if signature.dest {
+                    args.push(dest.unwrap());
+                }
+                for (&arg, record) in actual[usize::from(dest.is_some())..]
+                    .iter()
+                    .zip(&signature.param_records)
+                {
+                    match arg {
+                        Arg::Value(v) => args.push(self.get(v)),
+                        Arg::Address(a) => {
+                            let address = self.addr(a);
+                            if let Some(record) = *record {
+                                abi::load_record(&mut self.b, record, address, &mut args);
+                            } else {
+                                args.push(address);
+                            }
+                        }
+                    }
                 }
                 let site = match call.callee {
                     Callee::Direct(f)
@@ -681,7 +733,7 @@ impl Function<'_, '_, '_> {
                     Callee::Runtime(_) => unreachable!(),
                 };
                 self.calls.args = args;
-                let mut returned = [Value::from_u32(0); 2];
+                let mut returned = [Value::from_u32(0); 3];
                 let len = self.b.inst_results(inst).len();
                 returned[..len].copy_from_slice(self.b.inst_results(inst));
                 let mut results = std::mem::take(&mut self.calls.results);
@@ -706,6 +758,9 @@ impl Function<'_, '_, '_> {
                     };
                 if !infallible {
                     self.call_failure(status, call.fail)?;
+                }
+                if let Some(record) = signature.record {
+                    abi::store_record(&mut self.b, record, dest.unwrap(), &results);
                 }
                 for (&v, &result) in call
                     .results

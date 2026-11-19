@@ -49,8 +49,8 @@ pub use recipe::{
     CField, CLOSURE_CARRIER, CaseOps, Cleanup, Compact, CompactSet, DropRecipe, Encoding,
     FieldDrop, Fixed, Layout, LayoutError, MapEntry, Niche, POINTER, Pos, Recipe, RecipeScratch,
     SEQ_CARRIER, Size, Tag, case_of, case_word, cleanup_class, compact_extent, compact_starts,
-    compute, extend, field_niche, field_size, map_entry, read_case, storage_free, tag_width,
-    terminal, word,
+    compute, extend, field_niche, field_size, held_size, map_entry, read_case, storage_free,
+    tag_width, terminal, word,
 };
 pub use shape::{
     Body, Carried, Case, Field, FieldTy, FuncRef, Handle, Repr, Scalar, Shape, Ty, TypeRef, Width,

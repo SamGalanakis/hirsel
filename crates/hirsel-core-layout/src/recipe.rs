@@ -1193,7 +1193,17 @@ pub fn map_entry(shapes: &[Shape], recipes: &[Recipe], k: &FieldTy, v: &FieldTy)
 /// Native size, native alignment and logical size of an own-held field of type `ty`
 /// whose shape is already accepted: what drop glue needs for an array's stride.
 pub fn field_size(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy) -> (u64, u64, u64) {
-    measure(shapes, Repr::Own, ty, &|t| &recipes[t.index()]).expect("an accepted field type")
+    held_size(shapes, recipes, Repr::Own, ty)
+}
+
+/// [`field_size`] of a field held by a value whose representation is `holder`.
+pub fn held_size(
+    shapes: &[Shape],
+    recipes: &[Recipe],
+    holder: Repr,
+    ty: &FieldTy,
+) -> (u64, u64, u64) {
+    measure(shapes, holder, ty, &|t| &recipes[t.index()]).expect("an accepted field type")
 }
 
 /// SEM-4: a `List` of a zero-sized element has no element storage (its capacity is

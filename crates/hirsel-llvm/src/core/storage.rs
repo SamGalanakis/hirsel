@@ -1,6 +1,6 @@
 //! Recipe-driven storage and runtime memory operations.
 use super::*;
-use hirsel_core_layout::{FieldTy, Layout, Repr, TypeRef, field_size};
+use hirsel_core_layout::{FieldTy, Layout, Repr, TypeRef, field_size, held_size};
 
 /// A C argument the x86-64 ABI zero-extends.
 pub(super) fn zeroext(ty: Type, value: impl Into<Value>) -> CArg {
@@ -53,6 +53,88 @@ impl FunctionEmitter<'_> {
             FieldTy::Array(e, n) => At::Array(e.clone(), *n),
             FieldTy::Seq(e) => At::Seq(e.clone()),
             _ => At::Other,
+        }
+    }
+    /// The pieces, as (offset, width) of naturally aligned integers, that a
+    /// whole-value copy of fixed own type `t` moves instead of all its bytes.
+    /// Padding is private (MEM-13): no read observes it. Copying a gap after a
+    /// narrow tag reads a word that the tag's narrow store only partly wrote,
+    /// and that reload misses store forwarding. Like rustc, which copies Scalar
+    /// and ScalarPair values as typed scalars and everything else with memcpy,
+    /// only a value whose occupied bytes are at most two such pieces and leave
+    /// a hole is split; a wider split costs more moves than the whole copy and
+    /// hides the copy from memcpy forwarding.
+    pub(super) fn copy_pieces(&self, t: TypeId) -> Option<Vec<(u64, u64)>> {
+        let mut ranges = Vec::new();
+        self.occupied(t, 0, &mut ranges)?;
+        ranges.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::new();
+        for (start, end) in ranges {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        if merged == [(0, self.fixed(t).size)] {
+            return None;
+        }
+        let mut pieces = Vec::new();
+        for (start, end) in merged {
+            let mut at = start;
+            while at < end {
+                let width = [8, 4, 2, 1]
+                    .into_iter()
+                    .find(|w| at % w == 0 && at + w <= end)
+                    .expect("a one-byte piece fits");
+                pieces.push((at, width));
+                at += width;
+            }
+        }
+        (pieces.len() <= 2).then_some(pieces)
+    }
+    /// Push the byte ranges that the tag or some case's data of fixed own type
+    /// `t` at offset `at` occupies. None when the value is too fragmented to
+    /// be worth splitting.
+    fn occupied(&self, t: TypeId, at: u64, out: &mut Vec<(u64, u64)>) -> Option<()> {
+        let Layout::Fixed(f) = &self.recipes[t.index()].layout else {
+            return None;
+        };
+        if self.by_block(t) {
+            out.push((at, at + 8));
+            return Some(());
+        }
+        if let Some(tag) = f.tag {
+            out.push((at + tag.offset, at + tag.offset + tag.width));
+        }
+        let shape = &self.module.types[t.index()];
+        for (case, offsets) in f.offsets.iter().enumerate() {
+            let case = f.tag.map(|_| case as u32);
+            for (field, &offset) in shape.fields(case)?.iter().zip(offsets) {
+                self.occupied_field(shape.repr, &field.ty, at + offset, out)?;
+            }
+        }
+        (out.len() <= 64).then_some(())
+    }
+    fn occupied_field(
+        &self,
+        holder: Repr,
+        ty: &FieldTy,
+        at: u64,
+        out: &mut Vec<(u64, u64)>,
+    ) -> Option<()> {
+        match ty {
+            FieldTy::Inline(t) if matches!(self.recipes[t.index()].layout, Layout::Fixed(_)) => {
+                self.occupied(TypeId(t.0), at, out)
+            }
+            FieldTy::Array(element, n) if *n <= 4 => {
+                let stride = held_size(&self.module.types, self.recipes, holder, element).0;
+                (0..*n).try_for_each(|i| self.occupied_field(holder, element, at + i * stride, out))
+            }
+            _ => {
+                let size = held_size(&self.module.types, self.recipes, holder, ty).0;
+                out.push((at, at + size));
+                Some(())
+            }
         }
     }
     pub(super) fn place_layout(&self, t: PlaceTy) -> (u64, u64) {
@@ -715,9 +797,34 @@ impl FunctionEmitter<'_> {
                 );
             }
             Inst::Copy { to, from, bytes } => {
+                let pieces = match self.body.addresses[to.index()].ty {
+                    PlaceTy::Declared(t)
+                        if self.body.addresses[from.index()].ty == PlaceTy::Declared(t)
+                            && matches!(self.recipes[t.index()].layout, Layout::Fixed(_))
+                            && !self.by_block(t)
+                            && self.constants[bytes.index()] == Some(self.fixed(t).size) =>
+                    {
+                        self.copy_pieces(t).map(|p| (p, self.fixed(t).align))
+                    }
+                    _ => None,
+                };
                 let scopes = self.access_facts(&[to, from]);
                 let to = self.address(to);
                 let from = self.address(from);
+                if let Some((pieces, align)) = pieces {
+                    for (at, width) in pieces {
+                        let ty = Type::Int(8 * width as u32);
+                        let memory = Memory {
+                            align: width.min(align) as u32,
+                            scopes: scopes.clone(),
+                            ..Memory::default()
+                        };
+                        let (src, dst) = (self.offset(&from, at), self.offset(&to, at));
+                        let value = self.load_with(&ty, &src, &memory);
+                        self.store_with(&ty, &value, &dst, &memory);
+                    }
+                    return Ok(());
+                }
                 let n = self.numeric(bytes);
                 self.runtime(
                     "llvm.memcpy.p0.p0.i64",

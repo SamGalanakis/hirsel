@@ -119,3 +119,22 @@ fn vector_blocks_match_rfc4648() -> bool {
     }
     true
 }
+
+// Source: Rust base64 src/engine/tests.rs, decode_detect_1_valid_symbol_in_last_quad_invalid_length,
+// decode_padding_starts_before_final_chunk_error_invalid_byte_at_first_pad, and
+// decode_too_little_data_before_padding_error_invalid_byte, 0695a61d83f568f4892ac3036001925a9b5c375b, MIT.
+// The existing canonical cases already check forbidden characters and tail bits.
+// expect: run rust_base64_rejects_bad_quanta() = true
+fn rust_base64_rejects_bad_quanta() -> bool {
+    let cases: Inline[String, 6] =["A", "AAAAA", "A===", "ABCDA===", "AAAAAAAAAAAAAAAAAAAAAAAAAAAA====", "AAAAAAAAAAAAAAAAAAAAAAAAAAA=====",]
+    for input in cases {
+        let refused = bound bytes 0 {
+            base64.decode(string.as_bytes(input))? == None
+        }
+        match refused {
+            Ok(true) => (),
+            _ => return false,
+        }
+    }
+    true
+}

@@ -141,6 +141,13 @@ impl<D: Document> Parser<'_, '_, D> {
                 return Err("Syntax".into());
             }
         }
+        // A malformed number-like suffix takes precedence over a non-finite prefix.
+        if matches!(
+            self.src.get(self.at),
+            Some(b'0'..=b'9' | b'+' | b'-' | b'.' | b'e' | b'E')
+        ) {
+            return Err("Syntax".into());
+        }
         let s = std::str::from_utf8(&self.src[begin..self.at]).unwrap();
         if !s.parse::<f64>().map_err(|_| "Syntax")?.is_finite() {
             return Err("InvalidNumber".into());

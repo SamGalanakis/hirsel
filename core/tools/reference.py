@@ -61,7 +61,7 @@ def json_ref(text, variant):
     error = None
     for i, line in enumerate(lines[1:], 1):
         trace += [f'acquire=document{i}']
-        # The fixture fixes this preorder admission before parsing the malformed suffix.
+        # The fixture fixes this preorder admission before the third node is read.
         if variant == f'capacity:document{i}.node3':
             error = f'Capacity@document{i}.node3'
         else:
@@ -345,7 +345,7 @@ def datasets():
         return [('small', small, 'normal'), ('normal', large, 'normal'), *extra]
     return {
         'request-scratch': cases(small_requests, requests, [('error', small_requests, 'error'), ('malformed', small_requests.replace('Content: abc', 'broken'), 'normal'), ('capacity', small_requests, 'capacity:request2.header2'), ('capacity-reply', small_requests, 'capacity:request2.reply')]),
-        'json': cases(small_json, documents, [('pretty', small_json, 'print'), ('error', small_json + '{"items":[1,]}\n', 'normal'), ('missing', '/missing\n{}\n', 'normal'), ('wrong-kind', '/x\n1\n', 'normal'), ('invalid-number', '/x\n{"x":1e999}\n', 'normal'), ('capacity', small_json+small_json.split('\n')[1]+'\n', 'capacity:document2.node3', ['idiomatic']), ('capacity-blob', small_json+small_json.split('\n')[1]+'\n', 'capacity:document2.blob', ['matched'])]),
+        'json': cases(small_json, documents, [('pretty', small_json, 'print'), ('error', small_json + '{"items":[1,]}\n', 'normal'), ('missing', '/missing\n{}\n', 'normal'), ('wrong-kind', '/x\n1\n', 'normal'), ('invalid-number', '/x\n{"x":1e999}\n', 'normal'), ('malformed-number', '/x\n{"x":1e999+2}\n', 'normal'), ('capacity', small_json+small_json.split('\n')[1]+'\n', 'capacity:document2.node3', ['idiomatic']), ('capacity-blob', small_json+small_json.split('\n')[1]+'\n', 'capacity:document2.blob', ['matched'])]),
         'lru': cases(small_lru, lru_ops, [('error', lru_ops+'S\n', 'normal'), ('capacity', small_lru, 'capacity:put2.payload')]),
         'bfs': cases(graph_small, graph, [('error', '3 0 2\n0 1\n', 'normal'), ('invalid', '3 0 2\n0 3\n', 'normal'), *[(f'capacity-{i}', graph_small, 'capacity:'+site) for i, site in enumerate(['search.parent', 'search.queue', 'result.path'])]]),
         'pipeline': cases(small_rows, rows, [('error', small_rows, 'error'), ('capacity', small_rows, 'capacity:batch2.output'), ('cancel', small_rows, 'cancel'), ('cancel-receive', small_rows, 'cancel-receive'), ('cancel-send', small_rows, 'cancel-send')]),

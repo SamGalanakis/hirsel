@@ -35,6 +35,11 @@
     "variant": "normal"
   },
   {
+    "name": "malformed-number",
+    "input": "inputs/malformed-number.txt",
+    "variant": "normal"
+  },
+  {
     "name": "capacity",
     "input": "inputs/capacity.txt",
     "variant": "capacity:document2.node3",

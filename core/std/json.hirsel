@@ -116,18 +116,11 @@ pub fn record_of[T](s: String, mut c: Cursor, take seed: T, field: scoped fn(Str
     let mut value = take seed
     if !ends(s, mut c.at, b'}') {
         loop {
-            skip(s, mut c.at)
-            let quote = c.at
-            if at(s, quote) != b'"' {
-                return Error(Syntax(quote))
-            }
-            let width = string_size(s, mut c.at)?
-            let end = c.at - 1
-            opening(s, mut c.at, b':')?
-            if end - quote - 1 == width {
-                field(string.slice(s, quote + 1, end), s, mut c, mut value)?
+            let (start, end, width) = member_name(s, mut c.at)?
+            if end - start == width {
+                field(string.slice(s, start, end), s, mut c, mut value)?
             } else {
-                let key = escaped_key(s, quote + 1, end)?
+                let key = decode_string(s, start, end)?
                 field(key, s, mut c, mut value)?
             }
             if after_item(s, mut c.at, b'}')? {
@@ -136,6 +129,82 @@ pub fn record_of[T](s: String, mut c: Cursor, take seed: T, field: scoped fn(Str
         }
     }
     Ok(take value)
+}
+
+/// One owned JSON node with children already constructed as T.
+pub type TreeValue[T] = Null | False | True | Num(String) | Str(String) | Arr(List[T]) | Obj(Map[String, T])
+
+/// Parses one JSON value into the caller's owned tree, using the same input
+/// grammar and error offsets as size. Calls before in preorder, before reading
+/// each node, and make after reading its children. Object keys are validated
+/// before allocation. Duplicate keys keep their first position and last value.
+/// Fails: before's first error, or wrap of the first syntax, number or Capacity error.
+/// Alloc: owned strings, lists and maps as consumed by make. Cost: O(input bytes)
+/// plus callbacks and map insertions.
+pub fn parse_tree[T, E](s: String, before: scoped fn() -> Result[(), E], make: scoped fn(take TreeValue[T]) -> T, wrap: scoped fn(take Error) -> E) -> Result[T, E] {
+    let mut i: u64 = 0
+    let value = tree_value(s, mut i, before, make, wrap)?
+    skip(s, mut i)
+    if i != string.byte_len(s) {
+        return Error(wrap(Syntax(i)))
+    }
+    Ok(take value)
+}
+
+fn tree_value[T, E](s: String, mut i: u64, before: scoped fn() -> Result[(), E], make: scoped fn(take TreeValue[T]) -> T, wrap: scoped fn(take Error) -> E) -> Result[T, E] {
+    before()?
+    let node: TreeValue[T] = match result.map_err(value_start(s, mut i), wrap)? {
+        ReadNull => Null,
+        ReadFalse => False,
+        ReadTrue => True,
+        ReadNumber => {
+            let start = i
+            let _ = result.map_err(read_number(s, mut i), wrap)?
+            let spelling = result.map_err(string.from(string.slice(s, start, i)), fn(take e: Capacity) -> E {
+                wrap(Build(Capacity(e)))
+            })?
+            Num(take spelling)
+        },
+        ReadString => {
+            let start = i + 1
+            let _ = result.map_err(string_size(s, mut i), wrap)?
+            let value = result.map_err(decode_string(s, start, i - 1), wrap)?
+            Str(take value)
+        },
+        ReadArray => {
+            let mut values: List[T] = list.new()
+            if !ends(s, mut i, b']') {
+                loop {
+                    let value = tree_value(s, mut i, before, make, wrap)?
+                    if let Error((e, _)) = list.push(mut values, take value) {
+                        return Error(wrap(Build(Capacity(e))))
+                    }
+                    if result.map_err(after_item(s, mut i, b']'), wrap)? {
+                        break
+                    }
+                }
+            }
+            Arr(take values)
+        },
+        ReadObject => {
+            let mut members: Map[String, T] = map.new()
+            if !ends(s, mut i, b'}') {
+                loop {
+                    let (start, end, _) = result.map_err(member_name(s, mut i), wrap)?
+                    let key = result.map_err(decode_string(s, start, end), wrap)?
+                    let value = tree_value(s, mut i, before, make, wrap)?
+                    if let Error((e, _)) = map.insert(mut members, take key, take value) {
+                        return Error(wrap(Build(Capacity(e))))
+                    }
+                    if result.map_err(after_item(s, mut i, b'}'), wrap)? {
+                        break
+                    }
+                }
+            }
+            Obj(take members)
+        },
+    }
+    Ok(make(take node))
 }
 
 /// Reads one finite JSON number, with the same grammar as parse.
@@ -163,7 +232,20 @@ fn opening(s: String, mut i: u64, expected: u8) -> Result[(), Error] {
     Ok(())
 }
 
-fn escaped_key(s: String, start: u64, end: u64) -> Result[String, Error] {
+// Validate the quoted key and its colon before any decoder takes ownership of it.
+fn member_name(s: String, mut i: u64) -> Result[(u64, u64, u64), Error] {
+    skip(s, mut i)
+    if at(s, i) != b'"' {
+        return Error(Syntax(i))
+    }
+    let start = i + 1
+    let width = string_size(s, mut i)?
+    let end = i - 1
+    opening(s, mut i, b':')?
+    Ok((start, end, width))
+}
+
+fn decode_string(s: String, start: u64, end: u64) -> Result[String, Error] {
     let mut key = string.new()
     let mut i = start
     while i < end {
@@ -399,67 +481,81 @@ fn member[in a](ms: IndexedSpan[Member] in a, o: u32) -> View[Member] in ms {
 
 // Sizing pass. Each function starts at byte i, checks one item, leaves i just after it,
 // and returns the item's size in the document.
-fn value_size(s: String, mut i: u64) -> Result[u64, Error] {
+type ValueStart: key = ReadNull | ReadTrue | ReadFalse | ReadNumber | ReadString | ReadArray | ReadObject
+
+fn literal(s: String, mut i: u64, word: String) -> Result[(), Error] {
+    if !is(s, i, word) {
+        return Error(Syntax(i))
+    }
+    i += string.byte_len(word)
+    Ok(())
+}
+
+fn value_start(s: String, mut i: u64) -> Result[ValueStart, Error] {
     skip(s, mut i)
     let c = at(s, i)
-    if c == b'n' {
-        if !is(s, i, "null") {
-            return Error(Syntax(i))
-        }
-        i += 4
-        Ok(1)
-    } else if c == b't' {
-        if !is(s, i, "true") {
-            return Error(Syntax(i))
-        }
-        i += 4
-        Ok(1)
-    } else if c == b'f' {
-        if !is(s, i, "false") {
-            return Error(Syntax(i))
-        }
-        i += 5
-        Ok(1)
-    } else if c == b'"' {
-        Ok(5 + string_size(s, mut i)?)
-    } else if c == b'-' || is_digit(c) {
-        Ok(5 + number_size(s, mut i)?)
-    } else if c == b'[' {
-        i += 1
-        let mut n: u64 = 9
-        if ends(s, mut i, b']') {
-            return Ok(n)
-        }
-        loop {
-            n += value_size(s, mut i)? + 4
-            if after_item(s, mut i, b']')? {
-                return Ok(n)
-            }
-        }
-    } else if c == b'{' {
-        i += 1
-        let mut n: u64 = 9
-        if ends(s, mut i, b'}') {
-            return Ok(n)
-        }
-        loop {
-            skip(s, mut i)
-            if at(s, i) != b'"' {
-                return Error(Syntax(i))
-            }
-            let k = string_size(s, mut i)?
-            skip(s, mut i)
-            if at(s, i) != b':' {
-                return Error(Syntax(i))
-            }
+    match c {
+        b'n' => {
+            literal(s, mut i, "null")?
+            Ok(ReadNull)
+        },
+        b't' => {
+            literal(s, mut i, "true")?
+            Ok(ReadTrue)
+        },
+        b'f' => {
+            literal(s, mut i, "false")?
+            Ok(ReadFalse)
+        },
+        b'"' => Ok(ReadString),
+        b'[' => {
             i += 1
-            n += 4 + k + value_size(s, mut i)? + 4
-            if after_item(s, mut i, b'}')? {
-                return Ok(n)
+            Ok(ReadArray)
+        },
+        b'{' => {
+            i += 1
+            Ok(ReadObject)
+        },
+        _ => if c == b'-' || is_digit(c) {
+            Ok(ReadNumber)
+        } else {
+            Error(Syntax(i))
+        },
+    }
+}
+
+fn value_size(s: String, mut i: u64) -> Result[u64, Error] {
+    match value_start(s, mut i)? {
+        ReadNull => Ok(1),
+        ReadTrue => Ok(1),
+        ReadFalse => Ok(1),
+        ReadString => Ok(5 + string_size(s, mut i)?),
+        ReadNumber => Ok(5 + number_size(s, mut i)?),
+        ReadArray => {
+            let mut n: u64 = 9
+            if !ends(s, mut i, b']') {
+                loop {
+                    n += value_size(s, mut i)? + 4
+                    if after_item(s, mut i, b']')? {
+                        break
+                    }
+                }
             }
-        }
-    } else {
-        Error(Syntax(i))
+            Ok(n)
+        },
+        ReadObject => {
+            let mut n: u64 = 9
+            if !ends(s, mut i, b'}') {
+                loop {
+                    let (_, _, width) = member_name(s, mut i)?
+                    n += 4 + width + value_size(s, mut i)? + 4
+                    if after_item(s, mut i, b'}')? {
+                        break
+                    }
+                }
+            }
+            Ok(n)
+        },
     }
 }
 

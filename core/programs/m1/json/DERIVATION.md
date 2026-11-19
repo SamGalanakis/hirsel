@@ -1,4 +1,4 @@
-# json: hand derivation
+# JSON hand derivation
 
 Preorder visits the outer object, items array, first object, first name,
 second object, second name, null, true and n. The second name decodes into
@@ -37,11 +37,42 @@ The complete pretty text, without a final newline in its measured bytes:
 
 ## Logical charges
 
-Idiomatic Json's inline size is 8+max(1,24,24,24,24)=32. Its initial
-four-element array block charges 128, and a four-entry Map[String, Json]
-charges 4×(24+32+16)=288. At document2.node3 the third preorder value is an
-object not yet populated, so no own-node allocation occurs at that point.
-It is the corpus's synthetic preorder refusal and selects only idiomatic.
+The idiomatic reader calls std.json.parse_tree. Its preorder hook still marks
+each node admission, and it constructs the workload's owned Json enum. The
+tree's inline size is 8 + max(1, 24, 24, 24, 24) = 32. The list grows to four
+slots and charges 4 × 32 = 128. The root and both item objects each grow to
+four map slots and charge 4 × (24 + 32 + 16) = 288 each.
+
+The two root keys, two name keys, one retained x key, two string values and
+one number spelling are eight separate owners. Each charges 8 bytes. The
+key items has capacity 5, the other keys grow to 4, and a and b/newline/lambda
+fit capacity 4. The number -2.5 is copied at exact capacity 4. The root holds
+128 + 3 × 288 + 8 × 8 = 1,056 bytes when parsing finishes. The second x key
+adds a transient 8-byte charge before the duplicate insertion drops one key.
+Both valid parsers admit those same payload bytes. At document2.node3 the
+root's items key charges 8, the root map and items list are still empty, and
+the third preorder value is refused before its object is read. The synthetic
+site has a request of 0 bytes.
+
+For `{"abcdef\q":0}`, the former reader appended the six-byte key
+prefix before reading the escape. Growth from zero requested
+round8(max(6, 4, 0)) = 8 bytes. The std reader sees the invalid escape at
+byte 9 while validating the key. It never creates the key and charges
+0 payload bytes. A missing colon after a valid key is likewise detected
+before the key is copied. The same validation-before-copy rule applies to
+string values.
+
+For `{"x":1e999+2}`, the owned x key grows to 4 and charges 8. The map
+stays empty and the rejected number spelling never allocates. The earlier
+parser checked the prefix 1e999 and reported InvalidNumber. The std scanner
+validates all seven number-like bytes first and finds the invalid plus at
+document byte 10, so the workload reports Syntax@document1. For the
+idiomatic error label alone, the old 13-byte prefix charged 16, then grew to
+capacity max(22, 2 × 13) = 26 and charged 32. Adding the document digit fits
+26. The new six-byte prefix charges 8, then grows to 15 on adding @document
+and charges 16. Adding the digit requires 16 bytes, so capacity doubles to 30
+and charges 32. Both leave 32 bytes live and briefly hold 48 bytes at their
+largest growth. The respective label admission sums are 48 and 56 bytes.
 
 The matched variant reads the frozen input twice through std.json.parse: its
 validating size pass and its writing pass. It stores every duplicate member in
@@ -93,10 +124,4 @@ without inventing a new output spelling.
 All charges use MEM-24, charge-v1. Empty owners and static literals charge 0.
 Named injections are source sites, not native allocator call numbers. Trace
 strings, resource grants and output blocks are separate from the payload charges.
-These are hand derivations; no Hirsel workload has executed yet.
-
-## Source length
-
-Physical lines, including comments and blanks: 442 idiomatic and 185 matched;
-Rust entry plus shared program.rs: 376 idiomatic and 506 matched.
-Shared support is counted separately in REPORT.md.
+These charges follow from the collection sizes and growth rules above.

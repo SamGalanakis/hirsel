@@ -344,7 +344,17 @@ fn parse_admission_order() -> bool {
                 Error(Build(Capacity(c))) => c.requested == 8 && c.available == 0,
                 _ => false
             }
-            bad && good
+            let bad_key = match json.parse_tree("{\"abcdef\\q\":0}", fn() -> Result[(), json.Error] {
+                Ok(())
+            }, fn(take node: json.TreeValue[()]) {
+                let _ = take node
+            }, fn(take e: json.Error) -> json.Error {
+                take e
+            }) {
+                Error(Syntax(9)) => true,
+                _ => false
+            }
+            bad && good && bad_key
         }
     })
 }

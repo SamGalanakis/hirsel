@@ -44,6 +44,12 @@ Per mechanism:
 - `choose_pivot` / `median3_rec` / `median3`: ADOPTED, as indices into the list.
 - Shorter-run buffered merge with branchless source selection (`merge_up`,
   `merge_down`): ADOPTED. Rust's `MergeState` drop becomes the `Hole` restore arms.
+- Merge trimming by galloping (CPython `Objects/listsort.txt`, "Galloping"): ADAPTED.
+  Rust merges whole runs. Before a merge, an exponential then binary search from the
+  run boundary finds the left keys not after the right run's first key and the right
+  keys not before the left run's last; only the overlap is merged. On the nearly
+  sorted rounds of LangArena BWT this cut instructions by 29%. The searches compare
+  in place with no hole open. TimSort's in-merge galloping mode: NOT TAKEN.
 - Insertion for ranges of at most 20 (Rust's small-sort fallback is 16, general 32):
   ADAPTED, as a hole insertion expressed as a one-element merge down so it shares
   that restore arm.

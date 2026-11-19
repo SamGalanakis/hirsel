@@ -252,10 +252,19 @@ fn logical_merge[T](mut g: Hole[T], lo: u64, hi: u64, left: u64, right: u64, bef
 }
 
 // The shorter run moves to scratch and merges back into xs from its end (merge.rs).
-fn merge[T](mut g: Hole[T], lo: u64, mid: u64, hi: u64, before: scoped fn(T, T) -> Order) {
-    if mid == lo || mid == hi {
+fn merge[T](mut g: Hole[T], lo0: u64, mid: u64, hi0: u64, before: scoped fn(T, T) -> Order) {
+    if mid == lo0 || mid == hi0 {
         return
     }
+    // Left keys not after xs[mid] and right keys not before xs[mid - 1] are already in
+    // place; only the overlap between them moves. Both searches gallop out from the run
+    // boundary, so near-sorted input costs O(log overlap) calls (CPython listsort.txt,
+    // "Galloping"). No slot is out of the list while they compare.
+    let lo = gallop_left(g.xs, lo0, mid, before)
+    if lo == mid {
+        return
+    }
+    let hi = gallop_right(g.xs, mid, hi0, before)
     if mid - lo <= hi - mid {
         slots_list_move(g.xs, lo, view g.scratch.raw, lo, mid - lo)
         g.active = Active(op: 1, a: lo, b: mid, c: mid, d: 0)
@@ -563,6 +572,56 @@ fn partition_scan[T](mut st: Active, xs: View[List[T]], s: View[List[T]], pivot_
             st.c = int.wrapping_add(st.c, 1)
         }
     }
+}
+
+// The first i in [lo, mid] with xs[mid] before every key of xs[i..mid).
+fn gallop_left[T](xs: View[List[T]], lo: u64, mid: u64, before: scoped fn(T, T) -> Order) -> u64 {
+    let mut found = mid
+    let mut low = lo
+    let mut step: u64 = 1
+    while step <= mid - lo {
+        let i = mid - step
+        if !precedes(xs[mid], xs[i], before) {
+            low = i + 1
+            break
+        }
+        found = i
+        step <<= 1
+    }
+    while low < found {
+        let m = low + (found - low) / 2
+        if precedes(xs[mid], xs[m], before) {
+            found = m
+        } else {
+            low = m + 1
+        }
+    }
+    found
+}
+
+// The first j in [mid, hi] whose key is not before xs[mid - 1].
+fn gallop_right[T](xs: View[List[T]], mid: u64, hi: u64, before: scoped fn(T, T) -> Order) -> u64 {
+    let mut found = hi
+    let mut low = mid
+    let mut step: u64 = 1
+    while step <= hi - mid {
+        let j = mid - 1 + step
+        if !precedes(xs[j], xs[mid - 1], before) {
+            found = j
+            break
+        }
+        low = j + 1
+        step <<= 1
+    }
+    while low < found {
+        let m = low + (found - low) / 2
+        if precedes(xs[m], xs[mid - 1], before) {
+            low = m + 1
+        } else {
+            found = m
+        }
+    }
+    found
 }
 
 fn precedes[T](a: T, b: T, before: scoped fn(T, T) -> Order) -> bool {

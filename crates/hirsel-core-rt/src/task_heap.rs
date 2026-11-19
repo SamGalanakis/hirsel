@@ -227,6 +227,8 @@ struct Slots {
     watch: usize,
     #[cfg(feature = "memcheck")]
     checked_bytes: usize,
+    /// Whether this page is first in its class's current list.
+    head: bool,
     previous: Option<PagePointer>,
     next: Option<PagePointer>,
 }
@@ -342,6 +344,7 @@ impl Page {
                     watch: 1,
                     #[cfg(feature = "memcheck")]
                     checked_bytes: 0,
+                    head: false,
                     previous: None,
                     next: None,
                 }
@@ -373,6 +376,7 @@ impl Page {
             watch: 1,
             #[cfg(feature = "memcheck")]
             checked_bytes: 0,
+            head: false,
             previous: None,
             next: None,
         }
@@ -451,9 +455,23 @@ impl Drop for Locked<'_> {
     }
 }
 
+/// The partial pages one payer can take for one kind, bin and alignment.
+type PartialKey = (usize, u8, u8, usize);
+
+fn partial_key(key: Key) -> PartialKey {
+    (key.payer, key.class.kind, key.class.bin, key.class.align)
+}
+
 struct State {
     closed: bool,
-    ready: [[Option<PagePointer>; SLAB_BINS]; 3],
+    /// Each slab class's current list: pages of one payer and alignment, the
+    /// key read off its first page. The first page may be empty, as the
+    /// class's spare; every page after it is partial.
+    heads: [[Option<PagePointer>; SLAB_BINS]; 3],
+    /// Every other key's partial pages, so a payer's slow allocation finds
+    /// its pages without visiting other payers'. Never holds an empty page or
+    /// the current list's key.
+    partial: HashMap<PartialKey, PagePointer, foldhash::fast::FixedState>,
     empty_slabs: VecDeque<PagePointer>,
     dedicated: DedicatedCache,
     /// Spread pages to purge when the task parks.
@@ -490,7 +508,8 @@ impl Default for State {
     fn default() -> Self {
         Self {
             closed: false,
-            ready: [[None; SLAB_BINS]; 3],
+            heads: [[None; SLAB_BINS]; 3],
+            partial: HashMap::default(),
             empty_slabs: VecDeque::new(),
             dedicated: DedicatedCache::default(),
             listed: Vec::new(),
@@ -505,87 +524,187 @@ impl Default for State {
 unsafe impl Send for State {}
 
 impl State {
-    fn ready_head(&mut self, class: Class) -> &mut Option<PagePointer> {
-        &mut self.ready[usize::from(class.kind)][usize::from(class.bin)]
+    fn head(&mut self, class: Class) -> &mut Option<PagePointer> {
+        &mut self.heads[usize::from(class.kind)][usize::from(class.bin)]
     }
 
-    /// The head's empty page, if the queue keeps one.
+    /// The head's empty page, if the class keeps one.
     fn spare(&mut self, class: Class) -> Option<PagePointer> {
-        // SAFETY: this heap owns the ready list and its pages' slots.
-        self.ready_head(class)
+        // SAFETY: this heap owns the head and its page's slots.
+        self.head(class)
             .filter(|&page| unsafe { (*page.as_ref().slots.get()).live == 0 })
     }
 
     fn available(&mut self, payer: Payer, key: Key) -> Option<PagePointer> {
-        let head = *self.ready_head(key.class);
-        let spare = self.spare(key.class);
-        // Prefer partial pages, so the empty head is the last resort.
-        let mut current = if spare.is_some() {
-            // SAFETY: this heap owns the ready list.
-            unsafe { (*head?.as_ref().slots.get()).next }
-        } else {
-            head
-        };
-        while let Some(page) = current {
-            // SAFETY: this heap owns the ready list. A linked page with a live
-            // slot keeps its payer and alignment fixed.
-            unsafe {
-                let existing = Page::key(page);
-                if existing.payer == key.payer && existing.class.align == key.class.align {
-                    return Some(page);
-                }
-                current = (*page.as_ref().slots.get()).next;
-            }
-        }
-        let page = spare?;
-        // SAFETY: the empty head has no live slot, so this heap may rebind it.
-        // The same bin and alignment keep its stride and free slots valid.
+        let wanted = partial_key(key);
+        // SAFETY: this heap owns the lists. A linked page keeps its key while
+        // it has a live slot, and the empty head keeps the key of the pages
+        // behind it until it is rebound here.
         unsafe {
-            let existing = Page::key(page);
-            if existing.class.align != key.class.align {
+            let head = *self.head(key.class);
+            if let Some(page) = head
+                && partial_key(Page::key(page)) == wanted
+            {
+                // Prefer partial pages, so the empty head is the last resort.
                 let slots = &*page.as_ref().slots.get();
-                let links = (slots.previous, slots.next);
-                Page::reuse(page, payer, key);
+                return Some(if slots.live == 0 {
+                    slots.next.unwrap_or(page)
+                } else {
+                    page
+                });
+            }
+            // Switch the class to the wanted key: file the current list's
+            // partial pages under their key and take the wanted key's list.
+            let spare = head.filter(|&page| (*page.as_ref().slots.get()).live == 0);
+            let filed = match (head, spare) {
+                (Some(page), Some(_)) => (*page.as_ref().slots.get()).next.take(),
+                (head, None) => head,
+                (None, Some(_)) => None,
+            };
+            if let Some(page) = filed {
                 let slots = &mut *page.as_ref().slots.get();
-                (slots.previous, slots.next) = links;
-            } else if existing.payer != key.payer {
+                slots.head = false;
+                slots.previous = None;
+                let displaced = self.partial.insert(partial_key(Page::key(page)), page);
+                debug_assert!(displaced.is_none(), "the current list's key is never filed");
+            }
+            let list = if self.partial.is_empty() {
+                None
+            } else {
+                self.partial.remove(&wanted)
+            };
+            let Some(page) = spare else {
+                *self.head(key.class) = list;
+                if let Some(page) = list {
+                    (*page.as_ref().slots.get()).head = true;
+                }
+                return list;
+            };
+            // The empty head stays first, rebound to the wanted key, with the
+            // wanted partial pages after it. The same bin keeps its stride.
+            if Page::key(page).class.align != key.class.align {
+                Page::reuse(page, payer, key);
+            } else {
                 page.as_ref().payer.get().write(payer);
                 page.as_ref().key.get().write(key);
             }
+            let slots = &mut *page.as_ref().slots.get();
+            slots.head = true;
+            slots.previous = None;
+            slots.next = list;
+            if let Some(first) = list {
+                (*first.as_ref().slots.get()).previous = Some(page);
+            }
+            // Prefer partial pages, so the empty head is the last resort.
+            Some(list.unwrap_or(page))
         }
-        Some(page)
     }
 
-    unsafe fn link(&mut self, page: PagePointer, class: Class) {
-        // SAFETY: exclusively held heap; this page was absent from the class
-        // queue. A partial page goes after an empty head, which stays first.
+    /// File the class's current list under its key, leaving the class with
+    /// no current list.
+    /// # Safety
+    /// The heap is exclusively held, and the class has no spare.
+    unsafe fn file_current(&mut self, class: Class) {
+        // SAFETY: as the caller states; the current list's pages are partial
+        // and its key is never filed while it is current.
         unsafe {
-            let slots = &mut *page.as_ref().slots.get();
-            let after = self.spare(class).filter(|_| slots.live != 0);
-            slots.previous = after;
-            slots.next = match after {
-                Some(head) => (*head.as_ref().slots.get()).next.replace(page),
-                None => self.ready_head(class).replace(page),
+            if let Some(first) = self.head(class).take() {
+                (*first.as_ref().slots.get()).head = false;
+                let displaced = self.partial.insert(partial_key(Page::key(first)), first);
+                debug_assert!(displaced.is_none(), "the current list's key is never filed");
+            }
+        }
+    }
+
+    /// Link a page that is in no list. A page of the current list's key, or
+    /// any page while the class has none, goes first in the current list; a
+    /// partial page of another key goes first in its own list. An empty page
+    /// of another key never comes here: it becomes the spare after the
+    /// current list is filed, or joins the empty cache.
+    unsafe fn link(&mut self, page: PagePointer, class: Class) {
+        // SAFETY: exclusively held heap; a linked page's key is fixed.
+        unsafe {
+            let key = partial_key(Page::key(page));
+            let head = *self.head(class);
+            let live = (*page.as_ref().slots.get()).live;
+            let next = match head {
+                None => {
+                    // No current list: the key's filed pages, if any, follow.
+                    if self.partial.is_empty() {
+                        None
+                    } else {
+                        self.partial.remove(&key)
+                    }
+                }
+                Some(first) if partial_key(Page::key(first)) == key => {
+                    let first_slots = &mut *first.as_ref().slots.get();
+                    if first_slots.live == 0 {
+                        // The spare stays first; the partial page goes after it.
+                        debug_assert!(live != 0, "a class keeps one spare");
+                        let slots = &mut *page.as_ref().slots.get();
+                        slots.head = false;
+                        slots.previous = Some(first);
+                        slots.next = first_slots.next.replace(page);
+                        if let Some(next) = slots.next {
+                            (*next.as_ref().slots.get()).previous = Some(page);
+                        }
+                        return;
+                    }
+                    first_slots.head = false;
+                    Some(first)
+                }
+                Some(_) => {
+                    debug_assert!(live != 0, "an empty page of another key is cached");
+                    let next = self.partial.insert(key, page);
+                    let slots = &mut *page.as_ref().slots.get();
+                    slots.head = false;
+                    slots.previous = None;
+                    slots.next = next;
+                    if let Some(next) = next {
+                        (*next.as_ref().slots.get()).previous = Some(page);
+                    }
+                    return;
+                }
             };
-            if let Some(next) = slots.next {
+            let slots = &mut *page.as_ref().slots.get();
+            slots.head = true;
+            slots.previous = None;
+            slots.next = next;
+            if let Some(next) = next {
                 (*next.as_ref().slots.get()).previous = Some(page);
             }
+            *self.head(class) = Some(page);
         }
     }
 
     unsafe fn unlink(&mut self, page: PagePointer, class: Class) {
-        // SAFETY: exclusively held heap; this page belongs to the class queue.
+        // SAFETY: exclusively held heap; this page is in the current list or
+        // in its key's partial list, whose key it keeps while linked.
         unsafe {
             let slots = &mut *page.as_ref().slots.get();
             let previous = slots.previous.take();
             let next = slots.next.take();
-            if let Some(previous) = previous {
-                (*previous.as_ref().slots.get()).next = next;
-            } else {
-                *self.ready_head(class) = next;
-            }
             if let Some(next) = next {
                 (*next.as_ref().slots.get()).previous = previous;
+            }
+            if let Some(previous) = previous {
+                (*previous.as_ref().slots.get()).next = next;
+            } else if slots.head {
+                slots.head = false;
+                if let Some(next) = next {
+                    (*next.as_ref().slots.get()).head = true;
+                }
+                *self.head(class) = next;
+            } else {
+                let key = partial_key(Page::key(page));
+                match next {
+                    Some(next) => {
+                        self.partial.insert(key, next);
+                    }
+                    None => {
+                        self.partial.remove(&key);
+                    }
+                }
             }
         }
     }
@@ -770,7 +889,7 @@ impl Heap {
         // and alignment has a free slot and stays partial after this one.
         // Direct classes are below a native page, so they always fit a slab.
         unsafe {
-            if let Some(page) = *state.ready_head(class)
+            if let Some(page) = *state.head(class)
                 && (*page.as_ref().key.get()).payer == payer.record_pointer().addr()
                 && (*page.as_ref().key.get()).class.align == class.align
                 && (*page.as_ref().slots.get()).live + 1 < (*page.as_ref().slots.get()).limit
@@ -1014,7 +1133,8 @@ impl Heap {
             // SAFETY: the heap lock owns the nurseries' slots.
             .filter(|&page| unsafe { (*page.as_ref().slots.get()).live == 0 })
             .collect::<Vec<_>>();
-        let spares = std::mem::replace(&mut state.ready, [[None; SLAB_BINS]; 3])
+        state.partial = HashMap::default();
+        let spares = std::mem::replace(&mut state.heads, [[None; SLAB_BINS]; 3])
             .into_iter()
             .flatten()
             .flatten()
@@ -1143,7 +1263,7 @@ pub(crate) unsafe fn release_page(page: PagePointer, payload: NonNull<u8>) {
         if slots.live != slots.limit
             && (slots.live > slots.watch
                 || (slots.live == 1
-                    && slots.previous.is_none()
+                    && slots.head
                     && !state.closed
                     && !(*page.as_ref().spread.get()).spread))
         {
@@ -1404,12 +1524,14 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
             if was_full {
                 state.link(page, class);
             }
-        } else if !was_full && slots.previous.is_none() {
+        } else if !was_full && slots.head {
             // Already the queue head: it stays as the spare.
         } else if state.spare(class).is_none() {
+            // The emptied page becomes the spare, its key the current list's.
             if !was_full {
                 state.unlink(page, class);
             }
+            state.file_current(class);
             state.link(page, class);
         } else {
             if !was_full {

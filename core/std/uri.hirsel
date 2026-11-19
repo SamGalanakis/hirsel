@@ -452,7 +452,11 @@ fn capacity_result[T](take r: Result[T, Capacity]) -> Result[T, Error] {
     }
 }
 
-fn decoded_byte(data: Bytes, i: u64, end: u64) -> Result[(u8, u64), Error] {
+/// Decodes one byte from data[i..end] and returns it with the next byte offset.
+/// Requires i < end <= list.len(data). A literal '+' yields '+'.
+/// Fails: Invalid(i) for a malformed %HH escape. Alloc: none. Cost: O(1).
+/// Ex: `let (byte, next) = std.uri.decode_next(data, i, end)?`.
+pub fn decode_next(data: Bytes, i: u64, end: u64) -> Result[(u8, u64), Error] {
     if data[i] == b'%' {
         Ok((escaped(data, i, end)?, i + 3))
     } else {
@@ -470,14 +474,14 @@ pub fn decode(text: String, s: http1.Span, mut out: Bytes) -> Result[(), Error] 
     let mut size: u64 = 0
     let mut i = s.start
     while i < s.end {
-        let (_, next) = decoded_byte(data, i, s.end)?
+        let (_, next) = decode_next(data, i, s.end)?
         size += 1
         i = next
     }
     capacity_result(list.reserve(mut out, size))?
     i = s.start
     while i < s.end {
-        let (b, next) = decoded_byte(data, i, s.end)?
+        let (b, next) = decode_next(data, i, s.end)?
         let _ = list.push(mut out, b)
         i = next
     }
@@ -485,7 +489,7 @@ pub fn decode(text: String, s: http1.Span, mut out: Bytes) -> Result[(), Error] 
 }
 
 fn decoded_scalar(data: Bytes, start: u64, end: u64) -> Result[(char, u64, u64), Error] {
-    let (b, next) = decoded_byte(data, start, end)?
+    let (b, next) = decode_next(data, start, end)?
     let Some(head) = string.utf8_head(b) else {
         return Error(NotUtf8(start))
     }
@@ -502,7 +506,7 @@ fn decoded_scalar(data: Bytes, start: u64, end: u64) -> Result[(char, u64, u64),
         if i == end {
             return Error(NotUtf8(start))
         }
-        let (c, after) = decoded_byte(data, i, end)?
+        let (c, after) = decode_next(data, i, end)?
         // Preserve the first bad percent escape or missing continuation.
         if c & 0xc0 != 0x80 {
             return Error(NotUtf8(start))

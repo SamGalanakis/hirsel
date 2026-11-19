@@ -590,26 +590,12 @@ fn segment(b: Bytes) -> Result[String, TargetError] {
     }
     let mut at: u64 = 0
     while at < end {
-        let c = b[at]
-        if c == b'%' {
-            if end - at < 3 {
-                return Error(BadTarget)
-            }
-            let hi = match int.ascii_digit(b[at + 1], 16) {
-                Some(x) => x,
-                None => return Error(BadTarget),
-            }
-            let lo = match int.ascii_digit(b[at + 2], 16) {
-                Some(x) => x,
-                None => return Error(BadTarget),
-            }
-            let byte: u8 = hi * 16 + lo
-            let _ = list.push(mut decoded, byte)
-            at += 3
-        } else {
-            let _ = list.push(mut decoded, c)
-            at += 1
+        let (byte, next) = match uri.decode_next(b, at, end) {
+            Ok(value) => value,
+            Error(_) => return Error(BadTarget),
         }
+        let _ = list.push(mut decoded, byte)
+        at = next
     }
     if decoded == string.as_bytes(".") || decoded == string.as_bytes("..") {
         return Error(BadTarget)

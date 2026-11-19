@@ -336,6 +336,13 @@ fn bad_utf8(raw: String, at: u64) -> bool {
 // Mutants: decode '+' as a space or report a bad continuation at its own offset.
 // expect: run decode_utf8() = true
 fn decode_utf8() -> bool {
+    // The byte decoder also accepts input that cannot be a String.
+    let raw_bytes = result.unwrap(b"\xFF%2B")
+    let (literal, next) = result.unwrap(uri.decode_next(raw_bytes, 0, 4))
+    let (plus, end) = result.unwrap(uri.decode_next(raw_bytes, next, 4))
+    if literal != 0xff || next != 1 || plus != b'+' || end != 4 {
+        return false
+    }
     let raw = "x%FF#"
     let mut raw_out: Bytes = list.new()
     result.unwrap(uri.decode(raw, span(1, 4), mut raw_out))

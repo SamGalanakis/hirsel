@@ -294,8 +294,16 @@ fn read_bit(data: Bytes, mut position: u64) -> u64 {
 }
 
 fn arith_decode(encoded: Arith) -> Result[Bytes, helper.Error] {
-    let t = table(encoded.frequencies)?
-    let total: u64 = int.narrow(t.total)
+    // Upstream's decoder builds its own [i32; 256] tables on the stack.
+    let mut low_table: Inline[i32, 256] =[0i32; 256]
+    let mut high_table: Inline[i32, 256] =[0i32; 256]
+    let mut cum: i32 = 0
+    for i in 0u64 .. 256u64 {
+        low_table[i] = cum;
+        cum += encoded.frequencies[i];
+        high_table[i] = cum
+    }
+    let total: u64 = int.narrow(cum)
     let mut output: Bytes = list.new()
     helper.mem(list.fill(mut output, total, 0u8))?
     let mut position: u64 = 0
@@ -312,7 +320,7 @@ fn arith_decode(encoded: Arith) -> Result[Bytes, helper.Error] {
         let mut right: u64 = 256
         while left < right {
             let middle = left + (right - left) / 2
-            let hi: u64 = int.narrow(t.high[middle])
+            let hi: u64 = int.narrow(high_table[middle])
             if hi <= scaled {
                 left = middle + 1
             } else {
@@ -321,8 +329,8 @@ fn arith_decode(encoded: Arith) -> Result[Bytes, helper.Error] {
         }
         let symbol = left
         output[j] = int.narrow(symbol)
-        let hi: u64 = int.narrow(t.high[symbol])
-        let lo: u64 = int.narrow(t.low[symbol])
+        let hi: u64 = int.narrow(high_table[symbol])
+        let lo: u64 = int.narrow(low_table[symbol])
         high = low + range * hi / total - 1
         low = low + range * lo / total
         loop {

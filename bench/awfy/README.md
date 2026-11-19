@@ -242,15 +242,18 @@ Pass the directories containing the base and candidate `receipt.json` or
 
 ```sh
 python3 bench/awfy/receipt.py cycle-pairs "$out/base-samples" "$out/candidate-samples" \
-  --rows awfy/Mandelbrot --cpu "$cpu" --pairs 9 --max-attempts 60 --lock "$lock"
+  --rows awfy/Mandelbrot --cpu "$cpu" --lock "$lock"
 ```
 
-Each pair runs both images in random order on the measurement CPU. By
-default, both runs must record less than 5% busy time on every SMT sibling.
-Use `--sibling-busy-threshold` to change that limit and `--aa` to measure
-identical builds deliberately. The command exits 0 if every row has enough
-quiet pairs and its median cycle ratio is at most 1.01x, 1 if a row exceeds
-that ratio, or 2 if a row has too few quiet pairs or the comparison is refused.
+Each pair runs both images in random order on the measurement CPU and
+samples SMT sibling activity. The default uses all 60 pairs. With
+`--sibling-busy-threshold PERCENT`, keep a pair only when both runs record
+less than that busy percentage on every SMT sibling. Set `--pairs` and
+`--max-attempts` to control the sample size and attempt budget. Use `--aa`
+to measure identical builds deliberately. The command exits 0 if every
+row has enough pairs and its median cycle ratio is at most 1.01x, 1 if a
+row exceeds that ratio, or 2 if a row has too few pairs or the comparison
+is refused.
 
 ### Profile a runtime delta
 

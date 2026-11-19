@@ -397,8 +397,9 @@ def receipt_in(directory):
     return instruction_rows(path if path.is_file() else directory / "board.json")
 
 
-def quiet_cycle_samples(base, candidate, args, siblings, env):
+def cycle_samples(base, candidate, args, siblings, env):
     kept = []
+    limit = args.sibling_busy_threshold
     for attempt in range(1, args.max_attempts + 1):
         sides = [("base", base), ("candidate", candidate)]
         random.shuffle(sides)
@@ -410,27 +411,30 @@ def quiet_cycle_samples(base, candidate, args, siblings, env):
                     detail = (Path(temporary) / side / "stderr").read_text().strip()
                     raise ValueError(f"attempt {attempt}, {side}: {sample['status']}\n{detail}")
                 samples[side] = sample
-        if all((busy := sample["smt_busy_percent"][cpu]) is not None and busy < args.sibling_busy_threshold
-               for sample in samples.values() for cpu in siblings):
+        if limit is None or all((busy := sample["smt_busy_percent"][cpu]) is not None and busy < limit
+                                for sample in samples.values() for cpu in siblings):
             kept.append((samples["base"], samples["candidate"]))
             if len(kept) == args.pairs:
                 break
     return kept, attempt
 
 
-def report_cycle_pairs(key, kept, attempted, wanted):
+def report_cycle_pairs(key, kept, attempted, wanted, *, filtered=True):
+    description = "quiet pairs" if filtered else "unfiltered pairs"
     if kept:
         cycles, instructions = (
             [Decimal(right[event]) / left[event] for left, right in kept] for event in ("cycles", "instructions")
         )
         center = median(cycles)
-        print(f"{key}: {len(kept)}/{attempted} quiet pairs, cycles {center:.6f}x "
+        print(f"{key}: {len(kept)}/{attempted} {description}, cycles {center:.6f}x "
               f"[{min(cycles):.6f}x, {max(cycles):.6f}x], instructions {median(instructions):.6f}x")
         for cpu in kept[0][0]["smt_busy_percent"]:
-            rates = [sample["smt_busy_percent"][cpu] for pair in kept for sample in pair]
-            print(f"  CPU {cpu} busy {min(rates):.2f}% to {max(rates):.2f}% in kept runs")
+            rates = [rate for pair in kept for sample in pair
+                     if (rate := sample["smt_busy_percent"][cpu]) is not None]
+            if rates:
+                print(f"  CPU {cpu} busy {min(rates):.2f}% to {max(rates):.2f}% in kept runs")
     else:
-        print(f"{key}: 0/{attempted} quiet pairs")
+        print(f"{key}: 0/{attempted} {description}")
     if len(kept) < wanted:
         verdict, status = "TOO FEW QUIET PAIRS", REFUSED
     elif center > CYCLE_RIDE_RATIO:
@@ -442,8 +446,7 @@ def report_cycle_pairs(key, kept, attempted, wanted):
 
 
 def cycle_pairs(args):
-    if not 0 < args.sibling_busy_threshold <= 100:
-        raise ValueError("sibling busy threshold must be above 0 and at most 100 percent")
+    limit = args.sibling_busy_threshold
     affinity = os.sched_getaffinity(0)
     if args.cpu not in affinity:
         raise ValueError(f"CPU {args.cpu} is outside the assigned affinity")
@@ -453,8 +456,8 @@ def cycle_pairs(args):
         after, after_refusals = receipt_in(args.candidate)
         keys = select_pair_rows(args.rows, base)
         env = build.capped_env(Path(temporary))
-        print(f"CPU {args.cpu}; SMT siblings {', '.join(map(str, siblings)) or 'none'}; "
-              f"quiet means below {args.sibling_busy_threshold}% busy per run", flush=True)
+        activity = "no busy filter" if limit is None else f"quiet means below {limit}% busy per run"
+        print(f"CPU {args.cpu}, SMT siblings {', '.join(map(str, siblings)) or 'none'}, {activity}", flush=True)
         status = 0
         try:
             os.sched_setaffinity(0, {args.cpu})
@@ -474,8 +477,8 @@ def cycle_pairs(args):
                     if same != args.aa:
                         raise ValueError("--aa requires identical builds and images" if args.aa
                                          else "identical builds and images; pass --aa for a deliberate A/A run")
-                    kept, attempted = quiet_cycle_samples(left, right, args, siblings, env)
-                    status = max(status, report_cycle_pairs(key, kept, attempted, args.pairs))
+                    kept, attempted = cycle_samples(left, right, args, siblings, env)
+                    status = max(status, report_cycle_pairs(key, kept, attempted, args.pairs, filtered=limit is not None))
                 except (*INVALID_RECEIPT, subprocess.SubprocessError) as error:
                     print(f"{key} REFUSED ({error})", file=sys.stderr)
                     status = REFUSED
@@ -680,6 +683,15 @@ def threshold(value):
     raise argparse.ArgumentTypeError("threshold must be a finite non-negative percentage")
 
 
+def sibling_busy_threshold(value):
+    if value == "none":
+        return None
+    limit = float(threshold(value))
+    if not 0 < limit <= 100:
+        raise argparse.ArgumentTypeError("sibling busy threshold must be above 0 and at most 100 percent")
+    return limit
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
@@ -704,16 +716,16 @@ def main():
     comparison.add_argument("candidate", type=Path)
     comparison.add_argument("--threshold", type=threshold, default=INSTRUCTION_LIMIT, metavar="PERCENT")
     comparison.add_argument("--aa", action="store_true", help="require identical compiler, runtime and std/core hashes")
-    cycles = commands.add_parser("cycle-pairs", help="qualify named runtime rows with quiet interleaved counter pairs")
+    cycles = commands.add_parser("cycle-pairs", help="qualify named runtime rows with interleaved counter pairs")
     cycles.add_argument("baseline", type=Path, help="base directory containing receipt.json or board.json")
     cycles.add_argument("candidate", type=Path, help="candidate directory containing receipt.json or board.json")
     cycles.add_argument("--rows", required=True, metavar="ROW,ROW", help="comma-separated runtime row names")
     cycles.add_argument("--cpu", type=int, required=True, help="measurement CPU")
-    cycles.add_argument("--pairs", type=positive_int, default=9, metavar="N", help="quiet pairs per row (default: 9)")
+    cycles.add_argument("--pairs", type=positive_int, default=60, metavar="N", help="kept pairs per row (default: 60)")
     cycles.add_argument("--max-attempts", type=positive_int, default=60, metavar="N",
                         help="attempted pairs per row (default: 60)")
-    cycles.add_argument("--sibling-busy-threshold", type=threshold, default=Decimal(5), metavar="PERCENT",
-                        help="each run must be strictly below this SMT sibling busy percentage (default: 5)")
+    cycles.add_argument("--sibling-busy-threshold", type=sibling_busy_threshold, metavar="PERCENT",
+                        help="each run must be strictly below this SMT sibling busy percentage (default: none)")
     cycles.add_argument("--lock", type=Path, required=True)
     cycles.add_argument("--aa", action="store_true", help="require identical builds and images")
     profiling = commands.add_parser("profile-diff", help="attribute one matched runtime row with Callgrind")

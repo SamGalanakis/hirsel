@@ -234,9 +234,14 @@ class QuietCyclePairs(unittest.TestCase):
                   patch.object(bench_cpus.subprocess, "run", side_effect=run),
                   patch.object(receipt.measure.core_measure, "sample", side_effect=sample)):
                 siblings = bench_cpus.sibling_cpus([7])
-                kept, attempts = receipt.quiet_cycle_samples(row, row, args, siblings, {})
+                kept, attempts = receipt.cycle_samples(row, row, args, siblings, {})
+                args.sibling_busy_threshold = None
+                windows = iter((20, 20))
+                unfiltered, unfiltered_attempts = receipt.cycle_samples(row, row, args, siblings, {})
             self.assertEqual((len(kept), attempts), (1, 3))
             self.assertEqual([run["smt_busy_percent"] for run in kept[0]], [{23: 0.0}, {23: 0.0}])
+            self.assertEqual((len(unfiltered), unfiltered_attempts), (1, 1))
+            self.assertEqual([run["smt_busy_percent"] for run in unfiltered[0]], [{23: 100.0}, {23: 100.0}])
 
     def test_ride_uses_the_median_of_the_paired_cycle_ratios(self):
         for center, verdict, expected in ((1009, "RIDES", 0), (1011, "FAILS", 1)):

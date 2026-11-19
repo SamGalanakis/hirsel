@@ -1,5 +1,6 @@
 // n=5, input keys [2,1,2,0,1]. Stable output ids [3,1,4,0,2].
-// Fail during run detection and insertion; the n=20 cases below fail inside a merge.
+// Short lists sort by insertion. Each call after the first of an insertion holds the
+// inserted element in scratch; the larger cases below fail inside merges and partitions.
 resource type SortItem {
     out: Stdout,
     id: u64,
@@ -174,8 +175,7 @@ fn scratch_capacity_atomic(out: Stdout) -> bool {
 }
 
 // n=7 keys [3,2,1,0,3,2,1], stable ids [3,2,6,1,5,0,4].
-// The descending runs overlap in key values, so the merge moves elements
-// from each run before the last comparator failure.
+// 15 calls. Calls 3, 5-6, 9-10 and 12-15 hold an inserted element in scratch.
 resource type SevenAudit {
     out: Stdout,
     values: List[SortItem]
@@ -418,37 +418,6 @@ fn seven_plain_failure_12() -> u64 {
     seven_plain_fail_at(12)
 }
 
-// n=20 keys (3i mod 5 for i < 16, then 3,1,4,0): the first 16 sort by insertion into one
-// run, the last four into another. Calls 74-93 merge from scratch into xs,
-// starting with the in-order check. The audit checks original keys and single ownership
-// when cleanup has to finish moving either or both tails into xs.
-fn twenty_key(id: u64) -> u64 {
-    if id < 16 {
-        (id * 3) % 5
-    } else if id == 16 {
-        3
-    } else if id == 17 {
-        1
-    } else if id == 18 {
-        4
-    } else {
-        0
-    }
-}
-
-fn merge_key(count: u64, id: u64) -> u64 {
-    if count == 20 {
-        return twenty_key(id)
-    }
-    if id < 32 {
-        80 - id / 16 * 16 + id % 16
-    } else if id < 48 {
-        2 * (id - 32) + 1
-    } else {
-        2 * (id - 48)
-    }
-}
-
 resource type MergeAudit {
     out: Stdout,
     values: List[SortItem],
@@ -537,303 +506,424 @@ fn merge_plain_fail_at(count: u64, failure: u64) -> bool {
     sorted
 }
 
-fn twenty_fail_at(out: Stdout, failure: u64) -> bool {
-    merge_fail_at(out, 20, failure)
+// Keys by count; each list exercises one restore arm (calls from the sort's own
+// replay, checked call by call against an independent model of it).
+// 36: two ascending runs of 18, evens then odds. Run detection takes calls 1-35;
+//     the merge copies the left run to scratch and merges up on calls 36-70.
+// 37: an ascending run of 21, then 16 keys sorted by insertion (calls 39-93);
+//     the merge copies the right run to scratch and merges down on calls 94-129.
+// 44: (7i mod 44) mod 3. Calls 9-51 partition [0, 44) around id 35; the right
+//     range inherits it as ancestor, so its next pivot (id 27) is the least key
+//     and calls 70-97 are an equal partition of [15, 44), the pivot in scratch
+//     from call 82.
+// 52: ids 0-31 two ascending blocks, the second preceding the first; ids 32-47
+//     odd keys; ids 48-51 even keys. No natural run reaches 26, so the whole list
+//     is quicksorted: calls 26-76 partition [0, 52) around id 24, the pivot in
+//     scratch from call 50; calls 80-102 partition [28, 52).
+fn merge_key(count: u64, id: u64) -> u64 {
+    if count == 36 {
+        if id < 18 {
+            2 * id
+        } else {
+            2 * (id - 18) + 1
+        }
+    } else if count == 37 {
+        if id < 21 {
+            2 * id
+        } else {
+            (7 * (id - 21)) % 16 * 3 + 1
+        }
+    } else if count == 44 {
+        (id * 7) % 44 % 3
+    } else if id < 32 {
+        80 - id / 16 * 16 + id % 16
+    } else if id < 48 {
+        2 * (id - 32) + 1
+    } else {
+        2 * (id - 48)
+    }
 }
 
-fn twenty_plain_fail_at(failure: u64) -> bool {
-    merge_plain_fail_at(20, failure)
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_complete(out) = true
+fn up_complete(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 0)
 }
 
-// The four runs are ascending, with the second preceding the first and the
-// last two interleaved. Powersort detects three runs, merges the first pair
-// into scratch, then detects the fourth run. Calls 69-72 begin the second
-// merge into scratch, selecting right, left, right. Failure on call 73
-// leaves holes in both input runs while the first pair is still in scratch.
+// expect: run up_plain_complete() = true
+fn up_plain_complete() -> bool {
+    merge_plain_fail_at(36, 0)
+}
+
+// Run detection ends before the merge; nothing is in scratch.
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_35(out) = fail Unwrap
+fn up_failure_35(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 35)
+}
+
+// expect: run up_plain_failure_35() = fail Unwrap
+fn up_plain_failure_35() -> bool {
+    merge_plain_fail_at(36, 35)
+}
+
+// merge_up twins: the left run's unmerged tail is in scratch and returns to
+// the hole below the right run's remainder; call 36 holds all 18, call 70 one.
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_36(out) = fail Unwrap
+fn up_failure_36(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 36)
+}
+
+// expect: run up_plain_failure_36() = fail Unwrap
+fn up_plain_failure_36() -> bool {
+    merge_plain_fail_at(36, 36)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_37(out) = fail Unwrap
+fn up_failure_37(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 37)
+}
+
+// expect: run up_plain_failure_37() = fail Unwrap
+fn up_plain_failure_37() -> bool {
+    merge_plain_fail_at(36, 37)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_38(out) = fail Unwrap
+fn up_failure_38(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 38)
+}
+
+// expect: run up_plain_failure_38() = fail Unwrap
+fn up_plain_failure_38() -> bool {
+    merge_plain_fail_at(36, 38)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_40(out) = fail Unwrap
+fn up_failure_40(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 40)
+}
+
+// expect: run up_plain_failure_40() = fail Unwrap
+fn up_plain_failure_40() -> bool {
+    merge_plain_fail_at(36, 40)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_43(out) = fail Unwrap
+fn up_failure_43(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 43)
+}
+
+// expect: run up_plain_failure_43() = fail Unwrap
+fn up_plain_failure_43() -> bool {
+    merge_plain_fail_at(36, 43)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_46(out) = fail Unwrap
+fn up_failure_46(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 46)
+}
+
+// expect: run up_plain_failure_46() = fail Unwrap
+fn up_plain_failure_46() -> bool {
+    merge_plain_fail_at(36, 46)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_50(out) = fail Unwrap
+fn up_failure_50(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 50)
+}
+
+// expect: run up_plain_failure_50() = fail Unwrap
+fn up_plain_failure_50() -> bool {
+    merge_plain_fail_at(36, 50)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_54(out) = fail Unwrap
+fn up_failure_54(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 54)
+}
+
+// expect: run up_plain_failure_54() = fail Unwrap
+fn up_plain_failure_54() -> bool {
+    merge_plain_fail_at(36, 54)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_58(out) = fail Unwrap
+fn up_failure_58(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 58)
+}
+
+// expect: run up_plain_failure_58() = fail Unwrap
+fn up_plain_failure_58() -> bool {
+    merge_plain_fail_at(36, 58)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_62(out) = fail Unwrap
+fn up_failure_62(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 62)
+}
+
+// expect: run up_plain_failure_62() = fail Unwrap
+fn up_plain_failure_62() -> bool {
+    merge_plain_fail_at(36, 62)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_66(out) = fail Unwrap
+fn up_failure_66(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 66)
+}
+
+// expect: run up_plain_failure_66() = fail Unwrap
+fn up_plain_failure_66() -> bool {
+    merge_plain_fail_at(36, 66)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_69(out) = fail Unwrap
+fn up_failure_69(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 69)
+}
+
+// expect: run up_plain_failure_69() = fail Unwrap
+fn up_plain_failure_69() -> bool {
+    merge_plain_fail_at(36, 69)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run up_failure_70(out) = fail Unwrap
+fn up_failure_70(out: Stdout) -> bool {
+    merge_fail_at(out, 36, 70)
+}
+
+// expect: run up_plain_failure_70() = fail Unwrap
+fn up_plain_failure_70() -> bool {
+    merge_plain_fail_at(36, 70)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run down_complete(out) = true
+fn down_complete(out: Stdout) -> bool {
+    merge_fail_at(out, 37, 0)
+}
+
+// expect: run down_plain_complete() = true
+fn down_plain_complete() -> bool {
+    merge_plain_fail_at(37, 0)
+}
+
+// merge_down: all 16 right keys are in scratch at its first call, one at its last.
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run down_failure_94(out) = fail Unwrap
+fn down_failure_94(out: Stdout) -> bool {
+    merge_fail_at(out, 37, 94)
+}
+
+// expect: run down_plain_failure_94() = fail Unwrap
+fn down_plain_failure_94() -> bool {
+    merge_plain_fail_at(37, 94)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run down_failure_95(out) = fail Unwrap
+fn down_failure_95(out: Stdout) -> bool {
+    merge_fail_at(out, 37, 95)
+}
+
+// expect: run down_plain_failure_95() = fail Unwrap
+fn down_plain_failure_95() -> bool {
+    merge_plain_fail_at(37, 95)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run down_failure_110(out) = fail Unwrap
+fn down_failure_110(out: Stdout) -> bool {
+    merge_fail_at(out, 37, 110)
+}
+
+// expect: run down_plain_failure_110() = fail Unwrap
+fn down_plain_failure_110() -> bool {
+    merge_plain_fail_at(37, 110)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run down_failure_128(out) = fail Unwrap
+fn down_failure_128(out: Stdout) -> bool {
+    merge_fail_at(out, 37, 128)
+}
+
+// expect: run down_plain_failure_128() = fail Unwrap
+fn down_plain_failure_128() -> bool {
+    merge_plain_fail_at(37, 128)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run down_failure_129(out) = fail Unwrap
+fn down_failure_129(out: Stdout) -> bool {
+    merge_fail_at(out, 37, 129)
+}
+
+// expect: run down_plain_failure_129() = fail Unwrap
+fn down_plain_failure_129() -> bool {
+    merge_plain_fail_at(37, 129)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run equal_complete(out) = true
+fn equal_complete(out: Stdout) -> bool {
+    merge_fail_at(out, 44, 0)
+}
+
+// expect: run equal_plain_complete() = true
+fn equal_plain_complete() -> bool {
+    merge_plain_fail_at(44, 0)
+}
+
+// Equal partition: call 70 has moved nothing, call 81 is the last with the pivot in xs,
+// call 82 the first with it in scratch counted in the left block.
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run equal_failure_70(out) = fail Unwrap
+fn equal_failure_70(out: Stdout) -> bool {
+    merge_fail_at(out, 44, 70)
+}
+
+// expect: run equal_plain_failure_70() = fail Unwrap
+fn equal_plain_failure_70() -> bool {
+    merge_plain_fail_at(44, 70)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run equal_failure_81(out) = fail Unwrap
+fn equal_failure_81(out: Stdout) -> bool {
+    merge_fail_at(out, 44, 81)
+}
+
+// expect: run equal_plain_failure_81() = fail Unwrap
+fn equal_plain_failure_81() -> bool {
+    merge_plain_fail_at(44, 81)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run equal_failure_82(out) = fail Unwrap
+fn equal_failure_82(out: Stdout) -> bool {
+    merge_fail_at(out, 44, 82)
+}
+
+// expect: run equal_plain_failure_82() = fail Unwrap
+fn equal_plain_failure_82() -> bool {
+    merge_plain_fail_at(44, 82)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run equal_failure_97(out) = fail Unwrap
+fn equal_failure_97(out: Stdout) -> bool {
+    merge_fail_at(out, 44, 97)
+}
+
+// expect: run equal_plain_failure_97() = fail Unwrap
+fn equal_plain_failure_97() -> bool {
+    merge_plain_fail_at(44, 97)
+}
+
 // expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run failure_after_completed_pair(out) = fail Unwrap
-fn failure_after_completed_pair(out: Stdout) -> bool {
+// expect: run partition_complete(out) = true
+fn partition_complete(out: Stdout) -> bool {
+    merge_fail_at(out, 52, 0)
+}
+
+// expect: run partition_plain_complete() = true
+fn partition_plain_complete() -> bool {
+    merge_plain_fail_at(52, 0)
+}
+
+// Partition: call 26 has moved nothing; by call 49 both blocks hold keys and the
+// pivot is still in xs; from call 50 it waits in scratch at the head of the right block.
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run partition_failure_26(out) = fail Unwrap
+fn partition_failure_26(out: Stdout) -> bool {
+    merge_fail_at(out, 52, 26)
+}
+
+// expect: run partition_plain_failure_26() = fail Unwrap
+fn partition_plain_failure_26() -> bool {
+    merge_plain_fail_at(52, 26)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run partition_failure_49(out) = fail Unwrap
+fn partition_failure_49(out: Stdout) -> bool {
+    merge_fail_at(out, 52, 49)
+}
+
+// expect: run partition_plain_failure_49() = fail Unwrap
+fn partition_plain_failure_49() -> bool {
+    merge_plain_fail_at(52, 49)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run partition_failure_50(out) = fail Unwrap
+fn partition_failure_50(out: Stdout) -> bool {
+    merge_fail_at(out, 52, 50)
+}
+
+// expect: run partition_plain_failure_50() = fail Unwrap
+fn partition_plain_failure_50() -> bool {
+    merge_plain_fail_at(52, 50)
+}
+
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run partition_failure_73(out) = fail Unwrap
+fn partition_failure_73(out: Stdout) -> bool {
     merge_fail_at(out, 52, 73)
 }
 
-// expect: run plain_failure_after_completed_pair() = fail Unwrap
-fn plain_failure_after_completed_pair() -> bool {
+// expect: run partition_plain_failure_73() = fail Unwrap
+fn partition_plain_failure_73() -> bool {
     merge_plain_fail_at(52, 73)
 }
 
-// The second merge exhausts its right run on call 76. The root check
-// on call 77 sees both complete runs in scratch before starting its merge.
 // expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run failure_at_final_merge_check(out) = fail Unwrap
-fn failure_at_final_merge_check(out: Stdout) -> bool {
+// expect: run partition_failure_76(out) = fail Unwrap
+fn partition_failure_76(out: Stdout) -> bool {
+    merge_fail_at(out, 52, 76)
+}
+
+// expect: run partition_plain_failure_76() = fail Unwrap
+fn partition_plain_failure_76() -> bool {
+    merge_plain_fail_at(52, 76)
+}
+
+// Between partitions: choosing the right range's pivot holds nothing in scratch.
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run partition_failure_77(out) = fail Unwrap
+fn partition_failure_77(out: Stdout) -> bool {
     merge_fail_at(out, 52, 77)
 }
 
-// expect: run plain_failure_at_final_merge_check() = fail Unwrap
-fn plain_failure_at_final_merge_check() -> bool {
+// expect: run partition_plain_failure_77() = fail Unwrap
+fn partition_plain_failure_77() -> bool {
     merge_plain_fail_at(52, 77)
 }
 
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_complete(out) = true
-fn twenty_complete(out: Stdout) -> bool {
-    twenty_fail_at(out, 0)
+// The last call of the second partition.
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run partition_failure_102(out) = fail Unwrap
+fn partition_failure_102(out: Stdout) -> bool {
+    merge_fail_at(out, 52, 102)
 }
 
-// expect: run twenty_plain_complete() = true
-fn twenty_plain_complete() -> bool {
-    twenty_plain_fail_at(0)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_1(out) = fail Unwrap
-fn twenty_failure_1(out: Stdout) -> bool {
-    twenty_fail_at(out, 1)
-}
-
-// expect: run twenty_plain_failure_1() = fail Unwrap
-fn twenty_plain_failure_1() -> bool {
-    twenty_plain_fail_at(1)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_40(out) = fail Unwrap
-fn twenty_failure_40(out: Stdout) -> bool {
-    twenty_fail_at(out, 40)
-}
-
-// expect: run twenty_plain_failure_40() = fail Unwrap
-fn twenty_plain_failure_40() -> bool {
-    twenty_plain_fail_at(40)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_73(out) = fail Unwrap
-fn twenty_failure_73(out: Stdout) -> bool {
-    twenty_fail_at(out, 73)
-}
-
-// expect: run twenty_plain_failure_73() = fail Unwrap
-fn twenty_plain_failure_73() -> bool {
-    twenty_plain_fail_at(73)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_74(out) = fail Unwrap
-fn twenty_failure_74(out: Stdout) -> bool {
-    twenty_fail_at(out, 74)
-}
-
-// expect: run twenty_plain_failure_74() = fail Unwrap
-fn twenty_plain_failure_74() -> bool {
-    twenty_plain_fail_at(74)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_75(out) = fail Unwrap
-fn twenty_failure_75(out: Stdout) -> bool {
-    twenty_fail_at(out, 75)
-}
-
-// expect: run twenty_plain_failure_75() = fail Unwrap
-fn twenty_plain_failure_75() -> bool {
-    twenty_plain_fail_at(75)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_76(out) = fail Unwrap
-fn twenty_failure_76(out: Stdout) -> bool {
-    twenty_fail_at(out, 76)
-}
-
-// expect: run twenty_plain_failure_76() = fail Unwrap
-fn twenty_plain_failure_76() -> bool {
-    twenty_plain_fail_at(76)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_77(out) = fail Unwrap
-fn twenty_failure_77(out: Stdout) -> bool {
-    twenty_fail_at(out, 77)
-}
-
-// expect: run twenty_plain_failure_77() = fail Unwrap
-fn twenty_plain_failure_77() -> bool {
-    twenty_plain_fail_at(77)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_78(out) = fail Unwrap
-fn twenty_failure_78(out: Stdout) -> bool {
-    twenty_fail_at(out, 78)
-}
-
-// expect: run twenty_plain_failure_78() = fail Unwrap
-fn twenty_plain_failure_78() -> bool {
-    twenty_plain_fail_at(78)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_79(out) = fail Unwrap
-fn twenty_failure_79(out: Stdout) -> bool {
-    twenty_fail_at(out, 79)
-}
-
-// expect: run twenty_plain_failure_79() = fail Unwrap
-fn twenty_plain_failure_79() -> bool {
-    twenty_plain_fail_at(79)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_80(out) = fail Unwrap
-fn twenty_failure_80(out: Stdout) -> bool {
-    twenty_fail_at(out, 80)
-}
-
-// expect: run twenty_plain_failure_80() = fail Unwrap
-fn twenty_plain_failure_80() -> bool {
-    twenty_plain_fail_at(80)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_81(out) = fail Unwrap
-fn twenty_failure_81(out: Stdout) -> bool {
-    twenty_fail_at(out, 81)
-}
-
-// expect: run twenty_plain_failure_81() = fail Unwrap
-fn twenty_plain_failure_81() -> bool {
-    twenty_plain_fail_at(81)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_82(out) = fail Unwrap
-fn twenty_failure_82(out: Stdout) -> bool {
-    twenty_fail_at(out, 82)
-}
-
-// expect: run twenty_plain_failure_82() = fail Unwrap
-fn twenty_plain_failure_82() -> bool {
-    twenty_plain_fail_at(82)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_83(out) = fail Unwrap
-fn twenty_failure_83(out: Stdout) -> bool {
-    twenty_fail_at(out, 83)
-}
-
-// expect: run twenty_plain_failure_83() = fail Unwrap
-fn twenty_plain_failure_83() -> bool {
-    twenty_plain_fail_at(83)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_84(out) = fail Unwrap
-fn twenty_failure_84(out: Stdout) -> bool {
-    twenty_fail_at(out, 84)
-}
-
-// expect: run twenty_plain_failure_84() = fail Unwrap
-fn twenty_plain_failure_84() -> bool {
-    twenty_plain_fail_at(84)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_85(out) = fail Unwrap
-fn twenty_failure_85(out: Stdout) -> bool {
-    twenty_fail_at(out, 85)
-}
-
-// expect: run twenty_plain_failure_85() = fail Unwrap
-fn twenty_plain_failure_85() -> bool {
-    twenty_plain_fail_at(85)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_86(out) = fail Unwrap
-fn twenty_failure_86(out: Stdout) -> bool {
-    twenty_fail_at(out, 86)
-}
-
-// expect: run twenty_plain_failure_86() = fail Unwrap
-fn twenty_plain_failure_86() -> bool {
-    twenty_plain_fail_at(86)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_87(out) = fail Unwrap
-fn twenty_failure_87(out: Stdout) -> bool {
-    twenty_fail_at(out, 87)
-}
-
-// expect: run twenty_plain_failure_87() = fail Unwrap
-fn twenty_plain_failure_87() -> bool {
-    twenty_plain_fail_at(87)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_88(out) = fail Unwrap
-fn twenty_failure_88(out: Stdout) -> bool {
-    twenty_fail_at(out, 88)
-}
-
-// expect: run twenty_plain_failure_88() = fail Unwrap
-fn twenty_plain_failure_88() -> bool {
-    twenty_plain_fail_at(88)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_89(out) = fail Unwrap
-fn twenty_failure_89(out: Stdout) -> bool {
-    twenty_fail_at(out, 89)
-}
-
-// expect: run twenty_plain_failure_89() = fail Unwrap
-fn twenty_plain_failure_89() -> bool {
-    twenty_plain_fail_at(89)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_90(out) = fail Unwrap
-fn twenty_failure_90(out: Stdout) -> bool {
-    twenty_fail_at(out, 90)
-}
-
-// expect: run twenty_plain_failure_90() = fail Unwrap
-fn twenty_plain_failure_90() -> bool {
-    twenty_plain_fail_at(90)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_91(out) = fail Unwrap
-fn twenty_failure_91(out: Stdout) -> bool {
-    twenty_fail_at(out, 91)
-}
-
-// expect: run twenty_plain_failure_91() = fail Unwrap
-fn twenty_plain_failure_91() -> bool {
-    twenty_plain_fail_at(91)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_92(out) = fail Unwrap
-fn twenty_failure_92(out: Stdout) -> bool {
-    twenty_fail_at(out, 92)
-}
-
-// expect: run twenty_plain_failure_92() = fail Unwrap
-fn twenty_plain_failure_92() -> bool {
-    twenty_plain_fail_at(92)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXX"
-// expect: run twenty_failure_93(out) = fail Unwrap
-fn twenty_failure_93(out: Stdout) -> bool {
-    twenty_fail_at(out, 93)
-}
-
-// expect: run twenty_plain_failure_93() = fail Unwrap
-fn twenty_plain_failure_93() -> bool {
-    twenty_plain_fail_at(93)
+// expect: run partition_plain_failure_102() = fail Unwrap
+fn partition_plain_failure_102() -> bool {
+    merge_plain_fail_at(52, 102)
 }

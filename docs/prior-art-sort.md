@@ -1,57 +1,63 @@
 # Sort prior art
 
-`list.sort_stable` ports Zig's WikiSort at commit
-`bff490a23889750de7096d9057c0a432efc929a8` (MIT), cloned for this work.
-The source is `lib/std/sort/block.zig`: Range, Iterator and Pull at lines 7–104;
-internal-buffer discovery, extraction, block tagging, rolling and redistribution
-at 320–755; constrained rotation merge at 758–803; internal swap merge at
-806–839; block swap and biased binary searches at 842–983.
-The former implementation used the `list`
-module. It replaces the recursive rotation merge with the cache-free block
-algorithm: O(n log n) time and O(1) auxiliary space.
+## Stable sort
 
-The former sort vectors ported
-`lib/std/sort.zig:178–222` (two nine-element IdAndValue cases), 225–252
-(ten stability fuzz trials), 254–330 (six u8 and seven i32 input/output pairs),
-and 471–513 (all twelve binary-search assertions). The thirteen literal sort
-vectors run against both `sort` and `sort_stable`. The search case also checks
-Hirsel's first-equal guarantee. Each fuzz trial has its own fixture,
-checks reverse IDs among equal values, and verifies the ID permutation.
-Fifteen additional block cases check the exact stable permutation, both sort
-directions, power-of-two boundaries and one/few/many distinct keys.
+`list.sort_stable` (`core/core/list.hirsel`) adapts Rust core's stable driftsort at
+commit `a7c37f9f0ee5e93396106e9de20f4a86b4154e63`. References are under
+`library/core/src/slice/sort/`: `stable/mod.rs:29-93` (entry), `stable/drift.rs:20-260`
+(Powersort over lazy logical runs, `merge_tree_depth`, `sqrt_approx`, `logical_merge`,
+`create_run`), `stable/quicksort.rs:16-240` (bounded stable quicksort, ancestor
+equality, `stable_partition`, `PartitionState`), `stable/merge.rs:8-140` (shorter-run
+merge, `merge_up`, `merge_down` and the drop guard), `shared/pivot.rs:13-100`
+(`choose_pivot`, `median3_rec`, `median3`), `shared/mod.rs:20-50`
+(`find_existing_run`) and `shared/smallsort.rs:174-191,536-606,754` (thresholds,
+`insert_tail`, `sort4_stable`, `bidirectional_merge`).
 
-Deviations from Zig:
+Hirsel elements are owned and may be move-only, and the comparator may fail at any
+call. One scratch allocation of n slots (`slots_new`, its byte charge admitted
+before any call) holds elements in flight. A `Hole` guard records the single
+operation that holds scratch slots at a comparator call (merge up, merge down or
+insertion, partition) and its drop returns exactly those slots to the holes in the
+list, so every element stays owned once on every exit. Core loops take no Steps;
+each callback entry is one Step, so failure sites are comparator calls only.
 
-- The external `[512]T` cache is disabled. Its uninitialized storage, copies and
-  overwritten owners cannot represent arbitrary move-only Hirsel elements.
-  Zig explicitly supports the zero-cache internal-buffer path (block.zig:590–593).
-  Every element remains in the input and moves through ownership-preserving swaps.
-- Adjacent stable insertion replaces the tagged sorting networks for initial
-  groups of at most seven elements, and the hard-coded two/three-element path.
-  This avoids the auxiliary mutable order array under `@noalloc` and uses the
-  existing ownership-preserving insertion helper. The run boundaries are Zig's.
-- The two Pull descriptors are local records, instead of an array, avoiding
-  collection storage; the rational run iterator otherwise follows Zig exactly.
-  Discovery, extraction, block merging and redistribution are separate helpers
-  so the ownership checker does not retain the entire large merge function
-  at once (the initial monolithic port exceeded the 2 GiB std-precheck limit).
-- List indices are u64; the existing three-way comparator is tested for `< 0`
-  instead of taking a context and a boolean less-than callback. Debug-only
-  comparator validation is omitted: Hirsel has no compilation-mode-dependent
-  std behavior, and callers must provide a consistent strict ordering.
-- The integer square-root helper is Zig `lib/std/math/sqrt.zig:36–61`
-  specialized to u64, including its highest power-of-four initialization.
-- Fuzzing uses ten fixed seeds (0–9), each drawing a size in [0,1000) and keys
-  in [0,100) with std.prng, so corpus execution is reproducible. Upstream uses
-  the test runner's random seed. The ten full-sized trials, three large block
-  cases and the existing 257-element stability case run as Rust integration
-  tests with a 30M-step bound: they exceed the corpus's 1M-step limit. The
-  grouped 63/64/65 case is split into one corpus program per size.
-- Binary-search callbacks reverse Zig's context/item comparator direction.
-  The three interval queries are represented as point intervals, and the string
-  length query as a four-byte string, because Hirsel's existing API takes a
-  needle of the element type. Input ranges, query values and results are exact.
-  u8 character vectors use their numeric byte values. The public API is unchanged.
+Per mechanism:
+
+- Powersort merge order with the scaled leading-zero merge-tree depth: ADOPTED.
+  The run stack packs length, depth and the sorted bit into one `Inline[u64, 66]`.
+- `min_good_run_len` (half the input up to 64, then `sqrt_approx` above 4096): ADOPTED.
+- Lazy unsorted logical runs, joined while unsorted and quicksorted when they meet a
+  sorted run: ADOPTED. Eager mode for inputs of at most 40 and for the quicksort
+  fallback: ADOPTED, sorting runs of 20 by insertion.
+- Run detection (strictly descending reversed, nondescending kept): ADOPTED.
+- Stable quicksort with a 2 floor(log2 n) bad-partition budget and eager drift
+  fallback: ADOPTED. Rust recurses on the right side; here the larger side waits on
+  an explicit pending stack and the loop takes the smaller, because task stacks are
+  64 KiB: ADAPTED.
+- Ancestor-pivot equal partition: ADAPTED. Rust copies the ancestor pivot (Freeze) or
+  falls back to `left_partition_len == 0`. Here the right range keeps the ancestor's
+  index, which is stable until that range is first partitioned; left ranges use the
+  `left_partition_len == 0` rule. No element is copied.
+- Branchless stable partition (left keys fill scratch upward, right keys downward,
+  right block reversed on copy-back; the pivot is never compared with itself):
+  ADOPTED, with checked indices and no four-way unroll.
+- `choose_pivot` / `median3_rec` / `median3`: ADOPTED, as indices into the list.
+- Shorter-run buffered merge with branchless source selection (`merge_up`,
+  `merge_down`): ADOPTED. Rust's `MergeState` drop becomes the `Hole` restore arms.
+- Insertion for ranges of at most 20 (Rust's small-sort fallback is 16, general 32):
+  ADAPTED, as a hole insertion expressed as a one-element merge down so it shares
+  that restore arm.
+- `sort4_stable` / `sort8_stable` networks and `bidirectional_merge`: NOT TAKEN.
+  `bidirectional_merge` relies on Freeze bitwise copies and can duplicate elements
+  under an inconsistent comparator. The networks always yield a permutation and remain
+  a candidate; they were not measured in this change.
+- Uninitialized `MaybeUninit` scratch, 4 KiB stack buffer, 8 MB full-scratch cap and
+  type-size specialization: REPLACED by one n-slot `Slots[T]` allocation, which
+  keeps the single allocation and byte charge of the previous sort.
+
+The failure laws in `core/core/tests/list_sort_failure.hirsel` choose their call
+indices from an independent replay model of this algorithm, checked call by call
+against the evaluator, and each restore arm has laws that go red when it is removed.
 
 ## Unstable partition storage
 
@@ -117,110 +123,3 @@ LLVM can remove the repeated pivot bounds check and address calculation, and
 vectorize a concrete infallible integer comparison where its existing rules
 permit it. Fallible or generic callbacks retain their ordinary call sequence;
 no compiler, IR, runtime or callback contract changes are involved.
-
-## Allocating stable driftsort
-
-`list.sort_stable_fast` ports Rust core's stable driftsort, revision
-`f6c1107f8be13e48465e12c0fd26e6a39fe18e4f`. References under
-`library/core/src/slice/sort/` are `stable/mod.rs:30–140` (entry and scratch
-policy), `stable/drift.rs:22–310` (powersort, lazy runs, eager fallback),
-`stable/quicksort.rs:19–183` (bounded recursion, ancestor equality and stable
-partition), `stable/merge.rs:10–70` (shorter-run buffered merge),
-`shared/pivot.rs:17–117` (adaptive pseudomedian), and `shared/mod.rs:20–49`
-(strict descending and nondecreasing run detection).
-
-The allocation is acceptable for this explicitly allocating API: Hirsel permits
-ordinary bounded heap allocation outside `@noalloc`; exhaustion follows normal
-allocation failure and cleanup. `sort_stable` remains the allocation-free
-WikiSort, with its original signature and comparator order. Choose it when
-allocation is prohibited; choose `sort_stable_fast` for throughput. Sort::Self
-now uses the allocating API because upstream Rust calls `Vec::sort`, which
-also allocates scratch. Its input, clone, PRNG and checksum are unchanged.
-
-Deviations from Rust:
-
-- Sort original u64 indices, then apply the permutation with ownership-preserving
-  swaps. Rust's uninitialized T scratch, pointer copies and panic hole guards
-  cannot be expressed for arbitrary move-only Hirsel T. No owner enters scratch.
-  For inputs above 20, all callbacks finish before owners move; a callback failure
-  drops the scratch and retains the original input owner set and order. Smaller
-  inputs use the existing stable adjacent-swap insertion, retaining a permutation
-  at every failure point. Ordinary failures propagate immediately; no callback is
-  reordered by a purity assumption. The old noalloc API's callback order is intact.
-- Allocate one n-entry index list and one scratch list of
-  `max(48, ceil(n/2), min(n, 1_000_000))` u64 entries. This applies Rust's 8 MB
-  full-scratch policy to indices, with at most two list allocations after the
-  small-input path, and initialized entries instead of MaybeUninit. The extra
-  index list is required by ownership. Rust's 4 KiB uninitialized stack buffer
-  is omitted; the powersort stack is three initialized Inline arrays of 66
-  entries. No type-size specialization or zero-sized-type detection is used.
-- The internal smallsort threshold is 32, with stable insertion shifts of u64
-  indices in place of Rust's type-specialized smallsort (`shared/smallsort.rs`).
-  The public <=20 path uses adjacent swaps instead of temporary T moves.
-- Stable partition uses checked source loops instead of unsafe pointers,
-  pointer arithmetic and four-element unrolling. Conditional writes with separate
-  left/right cursors replace Rust PartitionState's destination-base selection:
-  checked index arithmetic in that selector raised task instructions from 15.89B
-  to 18.94B in the measured alternative. Both forms place exactly the same
-  indices; pivot comparison order and the skipped self-comparison follow Rust. The pivot
-  is an index into the untouched input, so Freeze/interior-mutable-type pivot
-  copies and marker specialization are unnecessary under Hirsel's read-only
-  comparator loans. The merge uses checked indices and explicit remainder loops
-  instead of raw pointers and a panic guard. Scratch failure needs no owner repair.
-- Test vectors adapt `library/alloctests/tests/sort/tests.rs:18–22,450–565`
-  (length boundaries, stable occurrence ids and patterns) and `599–638`
-  (failure retains the original set). Eight deterministic distributions replace
-  random seeds; small sizes are bounded for the interpreter. A separate native
-  1,100,000-element vector runs all eight patterns above the full-scratch cap.
-  Move-only resources replace Rust Clone/Drop test values, with a finalizer ledger and two distinct
-  comparator failure sites. Observable interior mutation of a borrowed T is
-  unavailable in Hirsel's comparator contract. Tests compare interpreter, heap
-  evaluator, LLVM and Cranelift, including terminal failure and cleanup.
-
-### Plain element driftsort
-
-`list.sort_stable_plain[T: plain]`, implemented in `list_copy.hir`, keeps the
-same Rust revision, powersort runs, bounded quicksort fallback, recursive
-pseudomedian and stable shorter-run merge. It compares and partitions elements
-directly. `sort_stable_fast[T]` remains the index-based choice for counted or
-move-only elements; source generics have no bound-based dispatch.
-
-The partition follows `stable/quicksort.rs:92–244`: scan before the pivot,
-place the pivot without comparing it with itself, then scan the remainder.
-Each destination is `num_left + select(goes_left, 0, end - 1 - scan)` and the
-left cursor advances by the comparison's boolean value. A bounded `while`
-scan includes the input length in its condition, so LLVM can combine the
-upper bounds and omit a separate input projection failure inside the loop.
-Scratch destination checks and checked copy-back accesses remain. Wrapping
-cursor arithmetic is used only where `left <= scanned <= length` proves the
-mathematical result fits; list accesses remain checked.
-
-Small ranges follow `shared/smallsort.rs:226–291,606–676`: a stable sort4
-uses five comparisons, sort8 sorts two groups of four and merges them, and
-both halves are extended by insertion before their final merge. The entry
-insertion threshold is 20 and the quicksort small-sort threshold is 32.
-
-Deviations from Rust for this path:
-
-- The bound is `plain`, rather than Rust's `Freeze` specialization. Counted
-  copyable values can still carry scoped loans, so copying those values
-  through scratch is not licensed by this implementation's header. There are
-  no deep copies, retained counts, interior-mutability cases or owner guards
-  in the plain path.
-- Scratch is an initialized `List[T]`, initially filled with the first element,
-  rather than `MaybeUninit<T>`. The existing one-million-element cap replaces
-  Rust's type-size-dependent 8 MB cap because source has no `sizeof(T)`.
-  Capacity still covers at least half the input and 48 small-sort slots.
-- The scalar source scan replaces Rust's size-dependent four-element manual
-  unroll. Likewise sort8 seeds are used for every plain type at length 16,
-  rather than selecting sort4 for elements wider than 16 bytes.
-- Sort8 and the final small-sort merge reuse the checked shorter-run merge,
-  instead of Rust's raw-pointer bidirectional merge. Small runs are sorted in
-  place instead of ping-ponging between uninitialized buffers.
-- Insertion finds the destination before shifting. Thus a comparator failure
-  cannot interrupt a partially shifted insertion. Other failures propagate
-  through ordinary fail-stop cleanup; no user unwind guard is introduced.
-
-The driver adds plain length/distribution vectors, counted-string index-path
-controls and a direct comparator-failure case. Both allocation policies also
-run all eight distributions at 1,100,000 elements in native parity checks.

@@ -91,7 +91,7 @@ fn slots_forget_ring[T](mut s: Slots[T], head: u64)
 // runs. A run shorter than min_good stays unsorted until a stable quicksort with a
 // branchless partition sorts it, so random input is one quicksort. Between operations
 // every element is in xs. Scratch, indexed like xs, holds elements only inside one
-// merge, insertion or partition, and Hole.active describes which.
+// merge, insertion, small sort or partition, and Hole.active describes which.
 pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Result[(), Capacity] {
     let n = list.len(xs)
     if n < 2 {
@@ -99,7 +99,7 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
     }
     let scratch: Slots[T] = slots_new(n)?
     let mut g = Hole(xs: view xs, scratch: take scratch, active: idle())
-    if n <= small_len() {
+    if n <= insertion_len() {
         insertion_sort_hole(mut g, 0, n, before)
     } else {
         drift(mut g, 0, n, n <= 2 * small_len(), before)
@@ -108,10 +108,17 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
     Ok(())
 }
 
-// Ranges this short are sorted by insertion, as Rust's sort below 20 and its
-// small-sort fallback at 16.
-fn small_len() -> u64 {
+// Whole lists this short are sorted by insertion, as Rust's (stable/mod.rs
+// MAX_LEN_ALWAYS_INSERTION_SORT).
+fn insertion_len() -> u64 {
     20
+}
+
+// Quicksort leaves and eager runs this short go to small_sort. Rust's
+// SMALL_SORT_GENERAL_THRESHOLD is 32; 40 was measured faster here (LangArena Sort
+// and BWT instructions, 24 to 64 tried).
+fn small_len() -> u64 {
+    40
 }
 
 // Merges logical runs of [lo, hi) in Powersort order (drift.rs `sort`). Eager mode, used
@@ -194,7 +201,7 @@ fn create_run[T](mut g: Hole[T], lo: u64, hi: u64, min_good: u64, eager: bool, b
         } else {
             small_len()
         }
-        insertion_sort_hole(mut g, lo, lo + k, before)
+        small_sort(mut g, lo, lo + k, before)
         return (k << 1) | 1
     }
     let k = if size < min_good {
@@ -267,7 +274,7 @@ fn merge[T](mut g: Hole[T], lo0: u64, mid: u64, hi0: u64, before: scoped fn(T, T
     let hi = gallop_right(g.xs, mid, hi0, before)
     if mid - lo <= hi - mid {
         slots_list_move(g.xs, lo, view g.scratch.raw, lo, mid - lo)
-        g.active = Active(op: 1, a: lo, b: mid, c: mid, d: 0)
+        g.active = Active(op: 1, a: lo, b: mid, c: mid, d: 0, e: 0)
         merge_up(mut g.active, g.xs, view g.scratch.raw, hi, before)
         let st = g.active
         if st.a < st.b {
@@ -275,7 +282,7 @@ fn merge[T](mut g: Hole[T], lo0: u64, mid: u64, hi0: u64, before: scoped fn(T, T
         }
     } else {
         slots_list_move(g.xs, mid, view g.scratch.raw, mid, hi - mid)
-        g.active = Active(op: 2, a: mid, b: mid, c: hi, d: 0)
+        g.active = Active(op: 2, a: mid, b: mid, c: hi, d: 0, e: 0)
         merge_down(mut g.active, g.xs, view g.scratch.raw, lo, before)
         let st = g.active
         if st.b < st.c {
@@ -367,6 +374,177 @@ fn insert_tail[T](mut st: Active, xs: View[List[T]], s: View[List[T]], lo: u64, 
     st.op = 0
 }
 
+// smallsort.rs `small_sort_general`: each half of [lo, hi) starts as one sort4_stable
+// network from 8 keys (else one key), grows by insert_tail, and the halves meet in one
+// bidirectional merge. Rust builds the halves in scratch; here they are built in xs, so
+// only the merge holds two scratch runs at once.
+fn small_sort[T](mut g: Hole[T], lo: u64, hi: u64, before: scoped fn(T, T) -> Order) {
+    let size = hi - lo
+    if size < 2 {
+        return
+    }
+    let mid = lo + size / 2
+    let mut presorted: u64 = 1
+    if size >= 8 {
+        sort4_stable(g.xs, view g.scratch.raw, lo, before)
+        sort4_stable(g.xs, view g.scratch.raw, mid, before)
+        presorted = 4
+    }
+    let mut i = int.wrapping_add(lo, presorted)
+    while i < mid {
+        insert_tail(mut g.active, g.xs, view g.scratch.raw, lo, i, before)
+        i = int.wrapping_add(i, 1)
+    }
+    i = int.wrapping_add(mid, presorted)
+    while i < hi {
+        insert_tail(mut g.active, g.xs, view g.scratch.raw, mid, i, before)
+        i = int.wrapping_add(i, 1)
+    }
+    bidirectional_merge(mut g, lo, mid, hi, before)
+}
+
+// smallsort.rs `sort4_stable`: five comparisons pick the order of xs [v, v + 4), then
+// the four keys pass through scratch into place. Every comparison comes before any move,
+// so a failing comparator leaves xs as it was and no Hole operation is needed.
+fn sort4_stable[T](xs: View[List[T]], s: View[List[T]], v: u64, before: scoped fn(T, T) -> Order) {
+    let v1 = int.wrapping_add(v, 1)
+    let v2 = int.wrapping_add(v, 2)
+    let v3 = int.wrapping_add(v, 3)
+    let c1 = precedes(slots_list_view(xs, v1), slots_list_view(xs, v), before)
+    let c2 = precedes(slots_list_view(xs, v3), slots_list_view(xs, v2), before)
+    let a = if c1 {
+        v1
+    } else {
+        v
+    }
+    let b = if c1 {
+        v
+    } else {
+        v1
+    }
+    let c = if c2 {
+        v3
+    } else {
+        v2
+    }
+    let d = if c2 {
+        v2
+    } else {
+        v3
+    }
+    let c3 = precedes(slots_list_view(xs, c), slots_list_view(xs, a), before)
+    let c4 = precedes(slots_list_view(xs, d), slots_list_view(xs, b), before)
+    let least = if c3 {
+        c
+    } else {
+        a
+    }
+    let most = if c4 {
+        b
+    } else {
+        d
+    }
+    let inner_c = if c4 {
+        c
+    } else {
+        b
+    }
+    let unknown_left = if c3 {
+        a
+    } else {
+        inner_c
+    }
+    let inner_b = if c3 {
+        b
+    } else {
+        c
+    }
+    let unknown_right = if c4 {
+        d
+    } else {
+        inner_b
+    }
+    let c5 = precedes(slots_list_view(xs, unknown_right), slots_list_view(xs, unknown_left), before)
+    let second = if c5 {
+        unknown_right
+    } else {
+        unknown_left
+    }
+    let third = if c5 {
+        unknown_left
+    } else {
+        unknown_right
+    }
+    slots_list_move(xs, least, s, v, 1)
+    slots_list_move(xs, second, s, v1, 1)
+    slots_list_move(xs, third, s, v2, 1)
+    slots_list_move(xs, most, s, v3, 1)
+    slots_list_move(s, v, xs, v, 4)
+}
+
+// smallsort.rs `bidirectional_merge` of the sorted runs xs [lo, mid) and [mid, hi):
+// both move to scratch, then each round places the least remaining key at the front
+// and the greatest at the back. Rust reads past an exhausted run and checks the
+// cursors at the end; here the rounds stop when either run is empty, and the other
+// run's remainder fills the gap, so any comparator leaves a permutation.
+fn bidirectional_merge[T](mut g: Hole[T], lo: u64, mid: u64, hi: u64, before: scoped fn(T, T) -> Order) {
+    slots_list_move(g.xs, lo, view g.scratch.raw, lo, hi - lo)
+    g.active = Active(op: 4, a: lo, b: mid, c: mid, d: hi, e: mid)
+    merge_both(mut g.active, g.xs, view g.scratch.raw, mid, before)
+    let st = g.active
+    let to = int.wrapping_sub(int.wrapping_add(st.a, st.c), mid)
+    let left = int.wrapping_sub(st.b, st.a)
+    if left != 0 {
+        slots_list_move(view g.scratch.raw, st.a, g.xs, to, left)
+    }
+    let right = int.wrapping_sub(st.d, st.c)
+    if right != 0 {
+        slots_list_move(view g.scratch.raw, st.c, g.xs, to, right)
+    }
+    g.active = idle()
+}
+
+// Left run scratch [a, b), right run [c, d); the front fills xs from a + c - mid and
+// the back down from b + d - mid. Equal keys take the left at the front and the right
+// at the back, so they keep their order.
+fn merge_both[T](mut st: Active, xs: View[List[T]], s: View[List[T]], mid: u64, before: scoped fn(T, T) -> Order) {
+    while st.a < st.b && st.c < st.d {
+        let take_left = !precedes(slots_list_view(s, st.c), slots_list_view(s, st.a), before)
+        let at = if take_left {
+            st.a
+        } else {
+            st.c
+        }
+        slots_list_move(s, at, xs, int.wrapping_sub(int.wrapping_add(st.a, st.c), mid), 1)
+        let step: u64 = if take_left {
+            1
+        } else {
+            0
+        }
+        st.a = int.wrapping_add(st.a, step)
+        st.c = int.wrapping_add(st.c, int.wrapping_sub(1, step))
+        if st.a == st.b || st.c == st.d {
+            return
+        }
+        let l = int.wrapping_sub(st.b, 1)
+        let r = int.wrapping_sub(st.d, 1)
+        let take_right = !precedes(slots_list_view(s, r), slots_list_view(s, l), before)
+        let from = if take_right {
+            r
+        } else {
+            l
+        }
+        slots_list_move(s, from, xs, int.wrapping_sub(int.wrapping_sub(int.wrapping_add(st.b, st.d), mid), 1), 1)
+        let back: u64 = if take_right {
+            1
+        } else {
+            0
+        }
+        st.d = int.wrapping_sub(st.d, back)
+        st.b = int.wrapping_sub(st.b, int.wrapping_sub(1, back))
+    }
+}
+
 fn stable_quicksort[T](mut g: Hole[T], lo: u64, hi: u64, before: scoped fn(T, T) -> Order) {
     // At most 2 floor(log2(size)) unbalanced partitions before the eager merge fallback.
     let log: u64 = int.widen(63 - int.leading_zeros((hi - lo) | 1))
@@ -398,7 +576,7 @@ fn quicksort[T](mut g: Hole[T], lo: u64, hi: u64, limit: u64, before: scoped fn(
         let size = b - a
         if size <= small_len() || budget == 0 {
             if size <= small_len() {
-                insertion_sort_hole(mut g, a, b, before)
+                small_sort(mut g, a, b, before)
             } else {
                 drift(mut g, a, b, true, before)
             }
@@ -494,7 +672,7 @@ fn partition_hole[T](mut g: Hole[T], lo: u64, hi: u64, p: u64, equal: bool, befo
     let size = hi - lo
     // The right element scanned at index i goes to scratch t - i + left.
     let t = lo + hi - 1
-    g.active = Active(op: 3, a: lo, b: size, c: lo, d: 0)
+    g.active = Active(op: 3, a: lo, b: size, c: lo, d: 0, e: 0)
     partition_scan(mut g.active, g.xs, view g.scratch.raw, false, p, p, t, equal, before)
     // The pivot is never compared with itself.
     let left_before = g.active.d
@@ -662,16 +840,19 @@ fn precedes[T](a: T, b: T, before: scoped fn(T, T) -> Order) -> bool {
 // op 3 (partition of b elements from a, scanned up to c, d of them left):
 // scratch [a, a + d) to xs [a, a + d), and the c - a - d right ones, which end at
 // a + b, to xs from a + d.
+// op 4 (bidirectional merge split at e): scratch [a, b) then [c, d) to xs from
+// a + c - e.
 type Active {
     op: u64,
     a: u64,
     b: u64,
     c: u64,
-    d: u64
+    d: u64,
+    e: u64
 }
 
 fn idle() -> Active {
-    Active(op: 0, a: 0, b: 0, c: 0, d: 0)
+    Active(op: 0, a: 0, b: 0, c: 0, d: 0, e: 0)
 }
 
 scoped type Hole[T] {
@@ -698,6 +879,16 @@ scoped type Hole[T] {
         if right != 0 {
             let from = int.wrapping_sub(int.wrapping_add(st.a, st.b), right)
             slots_list_move(view g.scratch.raw, from, g.xs, int.wrapping_add(st.a, st.d), right)
+        }
+    } else if st.op == 4 {
+        let to = int.wrapping_sub(int.wrapping_add(st.a, st.c), st.e)
+        let left = int.wrapping_sub(st.b, st.a)
+        if left != 0 {
+            slots_list_move(view g.scratch.raw, st.a, g.xs, to, left)
+        }
+        let right = int.wrapping_sub(st.d, st.c)
+        if right != 0 {
+            slots_list_move(view g.scratch.raw, st.c, g.xs, int.wrapping_add(to, left), right)
         }
     }
     slots_finish_list(g.xs)

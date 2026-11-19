@@ -17,7 +17,7 @@ Hirsel elements are owned and may be move-only, and the comparator may fail at a
 call. One scratch allocation of n slots (`slots_new`, its byte charge admitted
 before any call) holds elements in flight. A `Hole` guard records the single
 operation that holds scratch slots at a comparator call (merge up, merge down or
-insertion, partition) and its drop returns exactly those slots to the holes in the
+insertion, partition, small-sort merge) and its drop returns exactly those slots to the holes in the
 list, so every element stays owned once on every exit. Core loops take no Steps;
 each callback entry is one Step, so failure sites are comparator calls only.
 
@@ -27,8 +27,9 @@ Per mechanism:
   The run stack packs length, depth and the sorted bit into one `Inline[u64, 66]`.
 - `min_good_run_len` (half the input up to 64, then `sqrt_approx` above 4096): ADOPTED.
 - Lazy unsorted logical runs, joined while unsorted and quicksorted when they meet a
-  sorted run: ADOPTED. Eager mode for inputs of at most 40 and for the quicksort
-  fallback: ADOPTED, sorting runs of 20 by insertion.
+  sorted run: ADOPTED. Eager mode for inputs of at most twice the small-sort threshold
+  and for the quicksort fallback: ADOPTED, sorting runs of the threshold (40 here, 32
+  in Rust) with the small sort below.
 - Run detection (strictly descending reversed, nondescending kept): ADOPTED.
 - Stable quicksort with a 2 floor(log2 n) bad-partition budget and eager drift
   fallback: ADOPTED. Rust recurses on the right side; here the larger side waits on
@@ -54,20 +55,32 @@ Per mechanism:
   keys not before the left run's last; only the overlap is merged. On the nearly
   sorted rounds of LangArena BWT this cut instructions by 29%. The searches compare
   in place with no hole open. TimSort's in-merge galloping mode: NOT TAKEN.
-- Insertion for ranges of at most 20 (Rust's small-sort fallback is 16, general 32):
-  ADAPTED, as a hole insertion expressed as a one-element merge down so it shares
-  that restore arm.
-- `sort4_stable` / `sort8_stable` networks and `bidirectional_merge`: NOT TAKEN.
-  `bidirectional_merge` relies on Freeze bitwise copies and can duplicate elements
-  under an inconsistent comparator. The networks always yield a permutation and remain
-  a candidate; they were not measured in this change.
+- Insertion for whole lists of at most 20 (`MAX_LEN_ALWAYS_INSERTION_SORT`): ADOPTED,
+  as a hole insertion expressed as a one-element merge down so it shares that restore
+  arm.
+- `small_sort_general` for quicksort leaves and eager runs: ADAPTED. The threshold is
+  40, not Rust's 32: on 510c749d, 24, 28, 32, 40, 48 and 64 moved LangArena Sort::Self
+  instructions by +2.49%, +1.09%, +0.15%, -0.75%, -0.71% and -0.32%, and 40 also cut
+  BWTEncode 1.30% and BWTDecode 0.91%.
+  Each half starts from a `sort4_stable` network, grows by `insert_tail` and the halves
+  meet in one `bidirectional_merge`. The network makes all five comparisons before it
+  moves a key, so a failure inside it holds nothing. Rust builds the halves in scratch
+  with bitwise copies; here they are built in xs, so only the merge holds scratch (two
+  runs at once, restored by their own `Hole` arm). Rust's merge reads past an exhausted
+  run (Freeze copies) and panics on an order violation at the end; here the rounds stop
+  when either run empties and the other run's remainder fills the gap, so every
+  comparator yields a permutation with no check. `sort8_stable`: NOT TAKEN (measured
+  +3.1% Sort::Self instructions at threshold 32, cycles unchanged).
 - Uninitialized `MaybeUninit` scratch, 4 KiB stack buffer, 8 MB full-scratch cap and
   type-size specialization: REPLACED by one n-slot `Slots[T]` allocation, which
   keeps the single allocation and byte charge of the previous sort.
 
-The failure laws in `core/core/tests/list_sort_failure.hirsel` choose their call
-indices from an independent replay model of this algorithm, checked call by call
-against the evaluator, and each restore arm has laws that go red when it is removed.
+The failure laws in `core/core/tests/list_sort_failure.hirsel` fail the comparator
+at every call of lists that reach each phase (natural runs, small sorts, partitions,
+equal partitions, merges), audit the permutation after each failure, and expect the
+complete sort's call count from an independent replay model of this algorithm.
+Per-call twins on the evaluator check scratch and list slot liveness, and each
+restore arm has laws that go red when it is removed.
 
 ## Unstable partition storage
 

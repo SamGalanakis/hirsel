@@ -198,7 +198,8 @@ operations it names; nothing else about them may be inferred from an implementat
   For two or more elements it admits one scratch block of `len` elements as a `List[T]`
   ([MEM-24](budgets.md#mem-24-logical-charges)) before moving any, and refunds it before it
   returns; on `Capacity` `xs` is unchanged. A failure inside `before` leaves `xs` holding
-  every element it had, in an unspecified order, refunds the scratch and propagates.
+  every element it had, in an unspecified order, refunds the scratch and propagates. The
+  number and order of calls to `before` is unspecified.
 - **Deques and heaps.** `deque.push_back` and `deque.push_front` add at either end of a
   `Deque[T]`, and `heap.push` adds to a `Heap[T]`; on `Capacity` each returns `x` and leaves
   the collection unchanged. `deque.pop_front`, `deque.pop_back` and `heap.pop` remove and

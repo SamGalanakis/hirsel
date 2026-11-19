@@ -506,22 +506,21 @@ fn merge_plain_fail_at(count: u64, failure: u64) -> bool {
     sorted
 }
 
-// Keys by count; each list exercises one restore arm (calls from the sort's own
-// replay, checked call by call against an independent model of it).
+// Keys by count. The merge_up laws below fail at chosen calls of the 36 list; the
+// sweeps at the end fail at every call of the 37, 44, 88 and 104 lists. Call
+// counts come from an independent replay model of the sort.
 // 36: two ascending runs of 18, evens then odds. Run detection takes calls 1-35
 //     and the merge's gallops 36-49 (key 0 stays put); the merge copies the other
 //     17 left keys to scratch and merges up on calls 50-82.
-// 37: an ascending run of 21, then 16 keys sorted by insertion (calls 39-93);
-//     the merge's gallops take calls 94-109 (3 right keys stay put), then it
-//     copies 13 right keys to scratch and merges down on calls 110-141.
-// 44: (7i mod 44) mod 3. Calls 9-51 partition [0, 44) around id 35; the right
-//     range inherits it as ancestor, so its next pivot (id 27) is the least key
-//     and calls 70-97 are an equal partition of [15, 44), the pivot in scratch
-//     from call 82.
-// 52: ids 0-31 two ascending blocks, the second preceding the first; ids 32-47
-//     odd keys; ids 48-51 even keys. No natural run reaches 26, so the whole list
-//     is quicksorted: calls 26-76 partition [0, 52) around id 24, the pivot in
-//     scratch from call 50; calls 80-102 partition [28, 52).
+// 37: an ascending run of 21, then 16 keys the small sort orders (sort4 and
+//     insertion, then a bidirectional merge of the halves on calls 66-80); the
+//     merge with the run gallops and merges down. 128 calls.
+// 44: (7i mod 44) mod 3. Short runs, small sorts with bidirectional merges, then
+//     merges down. 251 calls.
+// 88: (7i mod 88) mod 3. Too long for one small sort: partitions, an equal
+//     partition and small sorts. 282 calls.
+// 104: ids 0-63 two ascending blocks, the second preceding the first; ids 64-95
+//     odd keys; ids 96-103 even keys. Three partitions and small sorts. 583 calls.
 fn merge_key(count: u64, id: u64) -> u64 {
     if count == 36 {
         if id < 18 {
@@ -535,14 +534,14 @@ fn merge_key(count: u64, id: u64) -> u64 {
         } else {
             (7 * (id - 21)) % 16 * 3 + 1
         }
-    } else if count == 44 {
-        (id * 7) % 44 % 3
-    } else if id < 32 {
-        80 - id / 16 * 16 + id % 16
-    } else if id < 48 {
-        2 * (id - 32) + 1
+    } else if count == 44 || count == 88 {
+        (id * 7) % count % 3
+    } else if id < 64 {
+        160 - id / 32 * 32 + id % 32
+    } else if id < 96 {
+        2 * (id - 64) + 1
     } else {
-        2 * (id - 48)
+        2 * (id - 96)
     }
 }
 
@@ -725,230 +724,219 @@ fn up_plain_failure_82() -> bool {
     merge_plain_fail_at(36, 82)
 }
 
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run down_complete(out) = true
-fn down_complete(out: Stdout) -> bool {
-    merge_fail_at(out, 37, 0)
+type SweepItem {
+    id: u64,
+    key: u64
 }
 
-// expect: run down_plain_complete() = true
-fn down_plain_complete() -> bool {
-    merge_plain_fail_at(37, 0)
+// Writes only when the list is not the original keys in some order.
+resource type SweepAudit {
+    out: Stdout,
+    values: List[SweepItem],
+    count: u64
+} drop(t) {
+    let mut valid = list.len(t.values) == t.count
+    let mut low: u64 = 0
+    let mut high: u64 = 0
+    for x in t.values {
+        if x.id >= t.count || x.key != merge_key(t.count, x.id) {
+            valid = false
+        } else {
+            let bit = 1u64 << (x.id % 64)
+            let seen = if x.id < 64 {
+                low
+            } else {
+                high
+            }
+            if (seen & bit) != 0 {
+                valid = false
+            }
+            if x.id < 64 {
+                low |= bit
+            } else {
+                high |= bit
+            }
+        }
+    }
+    let want_high = if t.count > 64 {
+        (1u64 << (t.count - 64)) - 1
+    } else {
+        0
+    }
+    let want_low = if t.count >= 64 {
+        int.wrapping_sub(0u64, 1)
+    } else {
+        (1u64 << t.count) - 1
+    }
+    if !valid || low != want_low || high != want_high {
+        let _ = stdout.write(t.out, "bad")
+    }
 }
 
-// The merge gallops for the overlap; no slot is out of the list.
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run down_failure_100(out) = fail Unwrap
-fn down_failure_100(out: Stdout) -> bool {
-    merge_fail_at(out, 37, 100)
+fn sweep_fail_at(out: Stdout, count: u64, failure: u64) -> bool {
+    let mut xs: List[SweepItem] = list.new()
+    for i in 0u64 .. count {
+        result.unwrap(list.push(mut xs, SweepItem(id: i, key: merge_key(count, i))))
+    }
+    let mut audit = result.unwrap(SweepAudit(out: out, values: take xs, count: count))
+    let mut calls: u64 = 0
+    result.unwrap(list.sort_stable(mut audit.values, fn(a: SweepItem, b: SweepItem) -> Order {
+        calls += 1
+        if calls == failure {
+            let none: Option[u64] = None;
+            let _ = option.unwrap(none)
+        }
+        if a.key < b.key {
+            Less
+        } else if a.key > b.key {
+            Greater
+        } else {
+            Equal
+        }
+    }))
+    let mut sorted = true
+    for i in 1u64 .. count {
+        let (ak, ai) = (audit.values[i - 1].key, audit.values[i - 1].id)
+        let (bk, bi) = (audit.values[i].key, audit.values[i].id)
+        if ak > bk || (ak == bk && ai > bi) {
+            sorted = false
+        }
+    }
+    sorted
 }
 
-// expect: run down_plain_failure_100() = fail Unwrap
-fn down_plain_failure_100() -> bool {
-    merge_plain_fail_at(37, 100)
+// Fails the comparator at call 1, 2, ... until a sort completes; each failure's
+// audit checks the list. Returns the calls of the complete sort; 0 if it is
+// unsorted or no sort completes in 1000 calls.
+fn sweep(out: Stdout, count: u64) -> u64 {
+    let mut failed: u64 = 0
+    loop {
+        if failed == 1000 {
+            return 0
+        }
+        let f = failed + 1
+        match result.unwrap(isolate(fn() -> bool {
+            sweep_fail_at(out, count, f)
+        })) {
+            Ok(sorted) => {
+                return if sorted {
+                    failed
+                } else {
+                    0
+                }
+            }
+            Error(_) => {
+                failed += 1
+            }
+        }
+    }
 }
 
-// merge_down: 13 right keys are in scratch at its first call, one at its last.
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run down_failure_110(out) = fail Unwrap
-fn down_failure_110(out: Stdout) -> bool {
-    merge_fail_at(out, 37, 110)
+// expect: run sweep_37(out) = 128
+fn sweep_37(out: Stdout) -> u64 {
+    sweep(out, 37)
 }
 
-// expect: run down_plain_failure_110() = fail Unwrap
-fn down_plain_failure_110() -> bool {
-    merge_plain_fail_at(37, 110)
+// expect: run sweep_44(out) = 251
+fn sweep_44(out: Stdout) -> u64 {
+    sweep(out, 44)
 }
 
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run down_failure_111(out) = fail Unwrap
-fn down_failure_111(out: Stdout) -> bool {
-    merge_fail_at(out, 37, 111)
+// expect: run sweep_88(out) = 282
+fn sweep_88(out: Stdout) -> u64 {
+    sweep(out, 88)
 }
 
-// expect: run down_plain_failure_111() = fail Unwrap
-fn down_plain_failure_111() -> bool {
-    merge_plain_fail_at(37, 111)
+// expect: run sweep_104(out) = 583
+fn sweep_104(out: Stdout) -> u64 {
+    sweep(out, 104)
 }
 
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run down_failure_126(out) = fail Unwrap
-fn down_failure_126(out: Stdout) -> bool {
-    merge_fail_at(out, 37, 126)
+// Host-free per-call twins: the evaluator checks scratch and source live slots
+// on failure, one failure per law. Call ranges from the replay model.
+// 37: sort4_stable on calls 22-31.
+// expect: run small_plain_37_22() = fail Unwrap
+fn small_plain_37_22() -> bool {
+    merge_plain_fail_at(37, 22)
 }
 
-// expect: run down_plain_failure_126() = fail Unwrap
-fn down_plain_failure_126() -> bool {
-    merge_plain_fail_at(37, 126)
+// expect: run small_plain_37_31() = fail Unwrap
+fn small_plain_37_31() -> bool {
+    merge_plain_fail_at(37, 31)
 }
 
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run down_failure_140(out) = fail Unwrap
-fn down_failure_140(out: Stdout) -> bool {
-    merge_fail_at(out, 37, 140)
+// 37: insert_tail on calls 32-65, the inserted key in scratch.
+// expect: run small_plain_37_32() = fail Unwrap
+fn small_plain_37_32() -> bool {
+    merge_plain_fail_at(37, 32)
 }
 
-// expect: run down_plain_failure_140() = fail Unwrap
-fn down_plain_failure_140() -> bool {
-    merge_plain_fail_at(37, 140)
+// expect: run small_plain_37_65() = fail Unwrap
+fn small_plain_37_65() -> bool {
+    merge_plain_fail_at(37, 65)
 }
 
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run down_failure_141(out) = fail Unwrap
-fn down_failure_141(out: Stdout) -> bool {
-    merge_fail_at(out, 37, 141)
+// 37: the bidirectional merge of the two sorted halves on calls 66-80 (op 4).
+// expect: run small_plain_37_66() = fail Unwrap
+fn small_plain_37_66() -> bool {
+    merge_plain_fail_at(37, 66)
 }
 
-// expect: run down_plain_failure_141() = fail Unwrap
-fn down_plain_failure_141() -> bool {
-    merge_plain_fail_at(37, 141)
+// expect: run small_plain_37_73() = fail Unwrap
+fn small_plain_37_73() -> bool {
+    merge_plain_fail_at(37, 73)
 }
 
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run equal_complete(out) = true
-fn equal_complete(out: Stdout) -> bool {
-    merge_fail_at(out, 44, 0)
+// expect: run small_plain_37_80() = fail Unwrap
+fn small_plain_37_80() -> bool {
+    merge_plain_fail_at(37, 80)
 }
 
-// expect: run equal_plain_complete() = true
-fn equal_plain_complete() -> bool {
-    merge_plain_fail_at(44, 0)
+// 44: a bidirectional merge of halves shorter than four.
+// expect: run small_plain_44_207() = fail Unwrap
+fn small_plain_44_207() -> bool {
+    merge_plain_fail_at(44, 207)
 }
 
-// Equal partition: call 70 has moved nothing, call 81 is the last with the pivot in xs,
-// call 82 the first with it in scratch counted in the left block.
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run equal_failure_70(out) = fail Unwrap
-fn equal_failure_70(out: Stdout) -> bool {
-    merge_fail_at(out, 44, 70)
+// expect: run small_plain_44_209() = fail Unwrap
+fn small_plain_44_209() -> bool {
+    merge_plain_fail_at(44, 209)
 }
 
-// expect: run equal_plain_failure_70() = fail Unwrap
-fn equal_plain_failure_70() -> bool {
-    merge_plain_fail_at(44, 70)
+// 88: a partition of [0, 88) on calls 16-102.
+// expect: run small_plain_88_16() = fail Unwrap
+fn small_plain_88_16() -> bool {
+    merge_plain_fail_at(88, 16)
 }
 
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run equal_failure_81(out) = fail Unwrap
-fn equal_failure_81(out: Stdout) -> bool {
-    merge_fail_at(out, 44, 81)
+// expect: run small_plain_88_59() = fail Unwrap
+fn small_plain_88_59() -> bool {
+    merge_plain_fail_at(88, 59)
 }
 
-// expect: run equal_plain_failure_81() = fail Unwrap
-fn equal_plain_failure_81() -> bool {
-    merge_plain_fail_at(44, 81)
+// expect: run small_plain_88_102() = fail Unwrap
+fn small_plain_88_102() -> bool {
+    merge_plain_fail_at(88, 102)
 }
 
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run equal_failure_82(out) = fail Unwrap
-fn equal_failure_82(out: Stdout) -> bool {
-    merge_fail_at(out, 44, 82)
+// 88: an equal partition on calls 168-224.
+// expect: run small_plain_88_168() = fail Unwrap
+fn small_plain_88_168() -> bool {
+    merge_plain_fail_at(88, 168)
 }
 
-// expect: run equal_plain_failure_82() = fail Unwrap
-fn equal_plain_failure_82() -> bool {
-    merge_plain_fail_at(44, 82)
+// expect: run small_plain_88_224() = fail Unwrap
+fn small_plain_88_224() -> bool {
+    merge_plain_fail_at(88, 224)
 }
 
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run equal_failure_97(out) = fail Unwrap
-fn equal_failure_97(out: Stdout) -> bool {
-    merge_fail_at(out, 44, 97)
+// 104: the first partition of [0, 104) on calls 56-158.
+// expect: run small_plain_104_56() = fail Unwrap
+fn small_plain_104_56() -> bool {
+    merge_plain_fail_at(104, 56)
 }
 
-// expect: run equal_plain_failure_97() = fail Unwrap
-fn equal_plain_failure_97() -> bool {
-    merge_plain_fail_at(44, 97)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run partition_complete(out) = true
-fn partition_complete(out: Stdout) -> bool {
-    merge_fail_at(out, 52, 0)
-}
-
-// expect: run partition_plain_complete() = true
-fn partition_plain_complete() -> bool {
-    merge_plain_fail_at(52, 0)
-}
-
-// Partition: call 26 has moved nothing; by call 49 both blocks hold keys and the
-// pivot is still in xs; from call 50 it waits in scratch at the head of the right block.
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run partition_failure_26(out) = fail Unwrap
-fn partition_failure_26(out: Stdout) -> bool {
-    merge_fail_at(out, 52, 26)
-}
-
-// expect: run partition_plain_failure_26() = fail Unwrap
-fn partition_plain_failure_26() -> bool {
-    merge_plain_fail_at(52, 26)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run partition_failure_49(out) = fail Unwrap
-fn partition_failure_49(out: Stdout) -> bool {
-    merge_fail_at(out, 52, 49)
-}
-
-// expect: run partition_plain_failure_49() = fail Unwrap
-fn partition_plain_failure_49() -> bool {
-    merge_plain_fail_at(52, 49)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run partition_failure_50(out) = fail Unwrap
-fn partition_failure_50(out: Stdout) -> bool {
-    merge_fail_at(out, 52, 50)
-}
-
-// expect: run partition_plain_failure_50() = fail Unwrap
-fn partition_plain_failure_50() -> bool {
-    merge_plain_fail_at(52, 50)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run partition_failure_73(out) = fail Unwrap
-fn partition_failure_73(out: Stdout) -> bool {
-    merge_fail_at(out, 52, 73)
-}
-
-// expect: run partition_plain_failure_73() = fail Unwrap
-fn partition_plain_failure_73() -> bool {
-    merge_plain_fail_at(52, 73)
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run partition_failure_76(out) = fail Unwrap
-fn partition_failure_76(out: Stdout) -> bool {
-    merge_fail_at(out, 52, 76)
-}
-
-// expect: run partition_plain_failure_76() = fail Unwrap
-fn partition_plain_failure_76() -> bool {
-    merge_plain_fail_at(52, 76)
-}
-
-// Between partitions: choosing the right range's pivot holds nothing in scratch.
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run partition_failure_77(out) = fail Unwrap
-fn partition_failure_77(out: Stdout) -> bool {
-    merge_fail_at(out, 52, 77)
-}
-
-// expect: run partition_plain_failure_77() = fail Unwrap
-fn partition_plain_failure_77() -> bool {
-    merge_plain_fail_at(52, 77)
-}
-
-// The last call of the second partition.
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-// expect: run partition_failure_102(out) = fail Unwrap
-fn partition_failure_102(out: Stdout) -> bool {
-    merge_fail_at(out, 52, 102)
-}
-
-// expect: run partition_plain_failure_102() = fail Unwrap
-fn partition_plain_failure_102() -> bool {
-    merge_plain_fail_at(52, 102)
+// expect: run small_plain_104_158() = fail Unwrap
+fn small_plain_104_158() -> bool {
+    merge_plain_fail_at(104, 158)
 }

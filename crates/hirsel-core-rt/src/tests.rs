@@ -542,8 +542,33 @@ fn the_header_numbers_every_event_kind_as_the_table_does() {
     assert_eq!(published, table);
 }
 
+fn reexecute_heap_test(name: &str, child_flag: &str) -> bool {
+    if std::env::var_os(child_flag).is_some() {
+        return false;
+    }
+    let output = crate::test_process::command()
+        .args(["--exact", name])
+        .env(child_flag, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child output: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    true
+}
+
 #[test]
 fn same_size_own_blocks_reuse_mappings_and_pack_small_slots() {
+    // This law observes a cold mapping before measuring reuse. Run it apart
+    // from other tests whose heaps can share a mapped slab range.
+    if reexecute_heap_test(
+        "tests::same_size_own_blocks_reuse_mappings_and_pack_small_slots",
+        "HIRSEL_COLD_SLAB_TEST_CHILD",
+    ) {
+        return;
+    }
     use crate::task_heap::MAP_REQUESTS;
     let mut context = Context::new(1_000_000);
     let before = MAP_REQUESTS.with(std::cell::Cell::get);
@@ -628,23 +653,37 @@ fn cross_task_slots_return_to_the_allocating_heap_and_survive_its_exit() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn closed_task_heaps_unmap_their_emptied_pages() {
-    const CHILD: &str = "CLOSED_TASK_HEAPS_TEST_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        let output = crate::test_process::command()
-            .args([
-                "--exact",
-                "tests::closed_task_heaps_unmap_their_emptied_pages",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "child output: {:?}",
-            String::from_utf8_lossy(&output.stdout)
-        );
+    if reexecute_heap_test(
+        "tests::closed_task_heaps_unmap_their_emptied_pages",
+        "CLOSED_TASK_HEAPS_TEST_CHILD",
+    ) {
         return;
     }
+    use crate::task_heap::MAP_REQUESTS;
+    {
+        let before = MAP_REQUESTS.with(std::cell::Cell::get);
+        let context = Context::new(4096);
+        let mut blocks: Vec<_> = (0..65)
+            .map(|_| Block::new(&context, Some(24), 32 * 1024, 8).unwrap())
+            .collect();
+        let requests = MAP_REQUESTS.with(std::cell::Cell::get) - before;
+        assert!(
+            (1..=2).contains(&requests),
+            "65 cold slabs made {requests} mapping requests"
+        );
+        assert_eq!(context.available(), 4096 - 65 * 24);
+
+        // Leave one slot live in the first range while its neighbors return.
+        let survivor = blocks.swap_remove(1);
+        // SAFETY: the survivor exclusively owns this byte.
+        unsafe { survivor.pointer().as_ptr().write(17) };
+        drop(context);
+        drop(blocks);
+        // SAFETY: the transferred survivor still pins its slot and its range.
+        assert_eq!(unsafe { survivor.pointer().as_ptr().read() }, 17);
+        drop(survivor);
+    }
+
     let mapped_kib = || {
         std::fs::read_to_string("/proc/self/status")
             .unwrap()

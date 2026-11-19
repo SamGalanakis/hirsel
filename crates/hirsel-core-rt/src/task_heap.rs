@@ -4,6 +4,8 @@
 //! retires a queue's last page lazily, a queue keeps at most one empty page,
 //! at its head, with its free list intact: a block that is allocated and
 //! freed alone reuses its slot without resetting the page.
+mod slabs;
+
 use crate::{abi_layout::own_prefix, limit::Payer};
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -157,10 +159,24 @@ fn dedicated_page(payload: NonNull<u8>) -> PagePointer {
 
 pub(crate) struct Page {
     heap: Arc<Heap>,
-    backing: Mapping,
+    backing: Backing,
     payer: std::cell::UnsafeCell<Payer>,
     key: std::cell::UnsafeCell<Key>,
     slots: std::cell::UnsafeCell<Slots>,
+}
+
+enum Backing {
+    Slab { _allocation: slabs::Slab },
+    Dedicated(Mapping),
+}
+
+impl Backing {
+    fn dedicated(&self) -> &Mapping {
+        match self {
+            Self::Dedicated(mapping) => mapping,
+            Self::Slab { .. } => unreachable!("dedicated page has a slab backing"),
+        }
+    }
 }
 
 struct Slots {
@@ -204,19 +220,26 @@ impl Page {
         let class = key.class;
         let slab = class.fits_slab();
         let (backing, start) = if slab {
-            Mapping::aligned(SLAB, SLAB, 0, false)
+            let (allocation, start) = slabs::Slab::allocate(Arc::as_ptr(heap).addr());
+            (
+                Backing::Slab {
+                    _allocation: allocation,
+                },
+                start,
+            )
         } else {
             let headroom = if own_prefix(class.kind) == 0 {
                 0
             } else {
                 page_bytes()
             };
-            Mapping::aligned(
+            let (mapping, start) = Mapping::aligned(
                 class.stride,
                 class.align.max(SLAB),
                 headroom,
                 class.growable,
-            )
+            );
+            (Backing::Dedicated(mapping), start)
         };
         let data = Self {
             heap: Arc::clone(heap),
@@ -485,10 +508,11 @@ impl DedicatedCache {
                 // SAFETY: the heap owns these empty pages and their mappings.
                 let page = unsafe { page.as_ref() };
                 let payload = unsafe { (*page.slots.get()).first };
-                let extent = page.backing.extent(payload);
+                let backing = page.backing.dedicated();
+                let extent = backing.extent(payload);
                 (extent >= class.stride
                     && payload.addr().get() & (class.align - 1) == 0
-                    && page.backing.headroom(payload) >= own_prefix(class.kind))
+                    && backing.headroom(payload) >= own_prefix(class.kind))
                 .then_some((index, extent))
             })
             .min_by_key(|&(_, extent)| extent)?;
@@ -503,7 +527,7 @@ impl DedicatedCache {
         unsafe {
             let header = page.as_ref();
             let payload = (*header.slots.get()).first;
-            if header.backing.extend(payload, class.stride) {
+            if header.backing.dedicated().extend(payload, class.stride) {
                 Some(page)
             } else {
                 Page::destroy(page);
@@ -514,7 +538,7 @@ impl DedicatedCache {
 
     fn retain(&mut self, page: PagePointer) {
         // SAFETY: this heap owns the empty page and its mapping.
-        let bytes = unsafe { page.as_ref().backing.writable.get() };
+        let bytes = unsafe { page.as_ref().backing.dedicated().writable.get() };
         self.live_bytes -= bytes;
         let now = Instant::now();
         self.purge_expired(now);
@@ -553,7 +577,7 @@ impl DedicatedCache {
     fn remove_retained(&mut self, index: usize) -> PagePointer {
         let page = self.retained.remove(index).unwrap().page;
         // SAFETY: this heap exclusively owns the removed empty page.
-        self.retained_bytes -= unsafe { page.as_ref().backing.writable.get() };
+        self.retained_bytes -= unsafe { page.as_ref().backing.dedicated().writable.get() };
         page
     }
 
@@ -561,7 +585,7 @@ impl DedicatedCache {
         // SAFETY: the heap owns this empty page and its separate descriptor.
         let header = unsafe { page.as_ref() };
         let payload = unsafe { (*header.slots.get()).first };
-        if !header.backing.discard_writable(payload) {
+        if !header.backing.dedicated().discard_writable(payload) {
             // SAFETY: the page is empty and detached from both queues.
             unsafe { Page::destroy(page) };
             return;
@@ -726,7 +750,7 @@ impl Heap {
             if !slab {
                 state
                     .dedicated
-                    .add_live(page.as_ref().backing.writable.get());
+                    .add_live(page.as_ref().backing.dedicated().writable.get());
             }
             let pointer = Self::take(page, class, bytes);
             let slots = &*page.as_ref().slots.get();
@@ -823,11 +847,12 @@ pub(crate) unsafe fn try_grow_in_place(
         }
         let key = Page::key(page);
         let class = Class::for_block(bytes, align, kind, true);
-        let before = header.backing.writable.get();
-        if !header.backing.extend(payload, class.stride) {
+        let backing = header.backing.dedicated();
+        let before = backing.writable.get();
+        if !backing.extend(payload, class.stride) {
             return false;
         }
-        let added = header.backing.writable.get() - before;
+        let added = backing.writable.get() - before;
         if added != 0 {
             heap.lock().dedicated.add_live(added);
         }
@@ -1065,16 +1090,22 @@ impl Mapping {
 
     fn discard_writable(&self, payload: NonNull<u8>) -> bool {
         let bytes = self.headroom(payload) + self.writable.get();
-        // SAFETY: only empty dedicated mappings reach here. The range covers
-        // every writable page, including any ownership prefix.
+        // SAFETY: the empty dedicated mapping owns this whole writable range.
+        unsafe { Mapping::discard(self.base, bytes) }
+    }
+
+    /// # Safety
+    /// The caller exclusively owns these whole anonymous pages, with no live data.
+    unsafe fn discard(base: NonNull<u8>, bytes: usize) -> bool {
+        // SAFETY: the caller owns the anonymous range, with no live data.
         #[cfg(target_os = "linux")]
         unsafe {
-            libc::madvise(self.base.as_ptr().cast(), bytes, libc::MADV_DONTNEED) == 0
+            libc::madvise(base.as_ptr().cast(), bytes, libc::MADV_DONTNEED) == 0
         }
         #[cfg(not(target_os = "linux"))]
         unsafe {
             libc::mmap(
-                self.base.as_ptr().cast(),
+                base.as_ptr().cast(),
                 bytes,
                 Self::WRITABLE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
@@ -1132,7 +1163,7 @@ mod tests {
     fn mapping(payload: NonNull<u8>) -> (NonNull<u8>, usize) {
         // SAFETY: the owned buffer pins its backing until free, and the cache
         // retains the reservation during the observations below.
-        let backing = unsafe { &page_of(payload).as_ref().backing };
+        let backing = unsafe { page_of(payload).as_ref().backing.dedicated() };
         (backing.base, backing.len)
     }
 

@@ -104,6 +104,7 @@ operations! {
     ("code", "revision", Lane::Runtime(Kernel::CodeRevision), "A", "core-ops-914", false),
     ("code", "callable", Lane::Runtime(Kernel::CodeCallable), "A", "core-ops-914", false),
     ("host", "rename", Lane::Runtime(Kernel::Host(HostOp::Rename)), "B", "core-ops-914", false),
+    ("host", "stopped", Lane::Runtime(Kernel::Host(HostOp::Stopped)), "B", "host-stopped-1426", false),
     ("host", "sleep_until", Lane::Runtime(Kernel::Host(HostOp::SleepUntil)), "B", "core-ops-914", false),
     ("host", "sync", Lane::Runtime(Kernel::Host(HostOp::Sync)), "B", "core-ops-914", false),
     ("host", "sync_dir", Lane::Runtime(Kernel::Host(HostOp::SyncDir)), "B", "core-ops-914", false),
@@ -2635,8 +2636,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => 1,
         };
-        if op == HostOp::Random {
-            let _ = self.runtime_row(RtOp::Host(op), &args[..2], n)?;
+        if matches!(op, HostOp::Random | HostOp::Stopped) {
+            let _ = self.runtime_row(RtOp::Host(op), &args[..len], n)?;
             return None;
         }
         if op == HostOp::Close {

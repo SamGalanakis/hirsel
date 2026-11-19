@@ -5,6 +5,12 @@ of a place, as a library over v1 (reserved R13). R0 has `Registry[G, H]`, `compu
 `granted`, `describe`, `call`, `start` and `finish`. R1 adds `transact`, the head
 (`place_head`), its internal publisher, and sessions (`connect`, `ask`, `hang_up`).
 
+`runner.main(args, process, tasks, place, serve)` passes a stop receiver to
+`serve` on the normal launch path. Pass that receiver to `runner.operate`.
+The first [process stop](process.md) closes the channel and starts the drain
+specified in RUNNER-SPEC §12.4. Describe mode runs `place` before the serve
+callback or the stop task starts.
+
 The wire types are `Kind`, `Refusal`, `Fault`, `Outcome` and `Described`, all
 `codec + send`. `Room` and `Bad` carry Capacity and DecodeError, because those types
 are not codec. `Bad.kind` and `Raised(u32)` (the first cause's kind) are fixed wire

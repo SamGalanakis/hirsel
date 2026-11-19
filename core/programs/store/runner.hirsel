@@ -685,9 +685,38 @@ fn describe_response[G: send, H: send](a: Args, place: StaticFn[fn(mut Registry[
     }
 }
 
+type HostStop: send { process: Process, to: Sender[()] }
+
+fn wait_for_host_stop(take stop: HostStop) -> () waits {
+    let HostStop(process: process, to: take to) = take stop
+    host.stopped(process)
+    let _ = take to
+}
+
+pub fn main[G: send, H: send](a: Args, process: Process, tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn(take Receiver[()]) -> Result[(), Exit] waits) -> Result[(), Exit] waits {
+    let serving = scoped fn() -> Result[(), Exit] waits {
+        let full = Exit(status: 1u8)
+        let stop: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
+        let (to, from) = match take stop {
+            Ok(take pair) => take pair,
+            Error(_) => return Error(full),
+        }
+        let seed = HostStop(process: process, to: take to)
+        let mut waiting = match task.spawn(tasks, bytes 4096u64, take seed, wait_for_host_stop) {
+            Ok(take task_handle) => take task_handle,
+            Error(_) => return Error(full),
+        }
+        let ended = start_server(take from)
+        task.cancel(mut waiting)
+        let _ = task.join(take waiting)
+        ended
+    }
+    launch_server(a, place, serving)
+}
+
 // The first branch precedes the caller's ordinary serve callback, including its
 // store open, listener and every capability use. No n_place runtime argument.
-pub fn main[G: send, H: send](a: Args, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
+pub fn launch_server[G: send, H: send](a: Args, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
     if launch_word(5u64, 0u64) == 0u64 {
         return start_server()
     }

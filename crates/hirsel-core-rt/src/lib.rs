@@ -41,6 +41,7 @@ mod sequencer;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
 pub mod steps;
+mod stop_signals;
 pub mod tape;
 mod task_heap;
 pub mod tasks;

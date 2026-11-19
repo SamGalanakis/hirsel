@@ -91,6 +91,11 @@ The driver pins a Config with immutable argv, explicit grants, the provider and
 source-bound diagnostic callbacks. The generated entry thunk calls main,
 cleans its returned error and live owners, and then writes MainResult. Only
 hirsel_core_run maps that completed outcome to PROG-3's process status.
+Before live or recording entry, an OS Process grant installs SIGTERM and
+SIGINT handlers. The first signal latches the stop and wakes the provider
+through the scheduler's readiness path. A second signal takes the default
+crash action. Replay supplies the stop from the tape and leaves the signal
+dispositions alone.
 
 Provider callbacks receive a Request at issue and an Outcome at delivery. A
 replay adapter supplies the result at issue without calling the OS adapter.
@@ -156,7 +161,7 @@ the existing remote refund path. It then returns the slot to its allocating
 task.
 
 FORM #50 provider rows use `hirsel_core_host_op(context, op, handle, operand,
-mode, site)`, with HostOp codes 0..17 (including sync and sync_dir). Operand points to a String/Bytes carrier;
+mode, site)`, with HostOp codes listed in the host header. Operand points to a String/Bytes carrier;
 only read/mkdtemp update its length. Capacity zero borrows storage regardless of
 the pointer or length. No provider call frees, grows or admits carrier storage.
 Open returns a provider-aware HostFile; mkdtemp returns a provider-aware Dir.

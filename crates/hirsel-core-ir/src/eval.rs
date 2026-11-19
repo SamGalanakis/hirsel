@@ -680,6 +680,7 @@ enum Condition {
 /// A task wait or a provider deadline.
 #[derive(Clone, Copy, Debug)]
 enum Wait {
+    Stop,
     Task(Condition),
     /// A sleep until this clock value.
     Sleep(u64),
@@ -1570,7 +1571,7 @@ impl<'m> Machine<'m> {
                 let at = s.timers.partition_point(|&(d, _)| d <= deadline);
                 s.timers.insert(at, (deadline, k));
             }
-            Some(Wait::Network(None)) => self.sched.tasks[k].state = State::Provider,
+            Some(Wait::Network(None) | Wait::Stop) => self.sched.tasks[k].state = State::Provider,
             Some(Wait::Task(condition)) => {
                 self.sched.tasks[k].state = State::Waiting(condition);
                 self.sched
@@ -1946,6 +1947,13 @@ impl Machine<'_> {
                         }
                     }
                 }
+            }
+            HostOp::Stopped => {
+                // The model has no OS signal source. Cancellation still wakes this wait.
+                self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+                self.park(Some(Wait::Stop));
+                self.check_cancel(t)?;
+                vec![]
             }
             HostOp::SleepUntil => {
                 // Ready if the deadline has passed, else park in W until its

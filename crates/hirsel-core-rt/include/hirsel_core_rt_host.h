@@ -3,7 +3,8 @@
 #include "hirsel_core_rt.h"
 /* Provider operations: Open 0, Read 1, Write 2, Close 3, TryLock 4, Unlock 5,
    Mkdir 6, Mkdtemp 7, Remove 8, RemoveTree 9, WallMs 10, MonoNs 11,
-   Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18, Connect 19, Listen 20, Accept 21, Recv 22, Send 23.
+   Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18,
+   Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28.
    Open modes: Read 0, Write 1, Append 2, CreateNew 3. */
 typedef struct { uint8_t tag; uint32_t code; } HirselCoreIoError;
 /* IoError: 0 success, 1 NotFound, 2 Denied, 3 Exists, 4 Closed, 5 Other(code).

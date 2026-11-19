@@ -278,5 +278,5 @@ Each item is a later addition that changes no seed signature.
 - `dir.narrow` (no host primitive), a Path type
 - Shared and blocking file locks, seek, sync, directory listing, metadata, rename, a
   read-write open mode (core.md: there is none)
-- `Net`, `Random`, `Stdin`, `Env`, `Process` operations (none in v1)
+- `Net`, `Random`, and `Process` operations are core. `Stdin` and `Env` have no operations.
 - `channel.try_receive`, channel selection, timeouts (none in v1)

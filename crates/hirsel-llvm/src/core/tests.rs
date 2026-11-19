@@ -2285,7 +2285,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             HostOp::RecvBounded => &["u64", "ptr", "u64", "u8", "u64", "u64"],
             HostOp::SendPair => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
             HostOp::NetNarrow => &["u64", "u8", "u8", "u64", "u64", "u8", "u16", "u16"],
-            HostOp::NetSplit => &["u64"],
+            HostOp::NetSplit | HostOp::Stopped => &["u64"],
             HostOp::Open => &["u64", "ptr", "u8"],
             HostOp::Close | HostOp::TryLock | HostOp::Unlock | HostOp::WallMs | HostOp::MonoNs => {
                 &["u64"]
@@ -2295,7 +2295,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             HostOp::Sync | HostOp::SyncDir => &["u64"],
             _ => &["u64", "ptr"],
         };
-        let results: &[&str] = if op == HostOp::Random {
+        let results: &[&str] = if matches!(op, HostOp::Random | HostOp::Stopped) {
             &[]
         } else if matches!(op, HostOp::Listen | HostOp::Accept) {
             &["u64", "u8", "u32", "u64", "u8", "u64", "u64", "u16"]

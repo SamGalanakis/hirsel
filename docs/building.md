@@ -77,7 +77,8 @@ AArch64 runtime libraries.
 `hirsel run app --record session.tape [grants] [-- arguments...]` records
 provider operations and task scheduling in a new, owner-only tape. The tape may
 contain bearer tokens and other credentials from provider calls. Choose a path
-that does not exist yet. A main that takes Process cannot be recorded.
+that does not exist yet. A stopped run records the delivery of `host.stopped`
+through its Process grant.
 
 ```sh
 hirsel run app --record session.tape --dir inputs --grant Stdout -- input.json

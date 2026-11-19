@@ -25,17 +25,17 @@ fn serve(d: Dir) -> Result[(), Exit] waits {
 
 pub fn main(a: Args, d: Dir) -> Result[(), Exit] waits {
     let start = scoped fn() -> Result[(), Exit] waits { serve(d) }
-    runner.main(a, code.describe(place), start)
+    runner.launch_server(a, code.describe(place), start)
 }
 
 pub fn main_duplicate(a: Args, d: Dir) -> Result[(), Exit] waits {
     let start = scoped fn() -> Result[(), Exit] waits { serve(d) }
-    runner.main(a, code.describe(duplicate), start)
+    runner.launch_server(a, code.describe(duplicate), start)
 }
 
 pub fn main_loop(a: Args, d: Dir) -> Result[(), Exit] waits {
     let start = scoped fn() -> Result[(), Exit] waits { serve(d) }
-    runner.main(a, code.describe(forever), start)
+    runner.launch_server(a, code.describe(forever), start)
 }
 
 fn status(take r: Result[(), Exit]) -> u64 {

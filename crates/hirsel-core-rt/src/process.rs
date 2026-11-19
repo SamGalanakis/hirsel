@@ -300,8 +300,8 @@ pub fn stop(name: &[u8]) -> ! {
 
 // Rust std's Unix startup ignores SIGPIPE so write returns EPIPE. Generated C
 // entries do not run Rust startup. Hold that same policy while runs are active,
-// then restore the embedding host's action after the last run. No source signal
-// operations exist in v1. The counter permits concurrent independent runs.
+// then restore the embedding host's action after the last run. The counter
+// permits concurrent independent runs.
 struct PipeState {
     users: u64,
     previous: Option<libc::sigaction>,

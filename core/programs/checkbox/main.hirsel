@@ -226,7 +226,7 @@ fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Task
 }
 
 pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
-    store.runner.main(a, code.describe(place), scoped fn() -> Result[(), Exit] waits {
+    store.runner.launch_server(a, code.describe(place), scoped fn() -> Result[(), Exit] waits {
         if let Some(take candidate) = store.runner.launch_prepare_args(a)? {
             let store.runner.PrepareArgs(attempt: take attempt, digest: take digest) = take candidate
             let setup = store.runner.PrepareConfig(scratch: directory, options: store.store.defaults(),

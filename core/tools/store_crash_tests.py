@@ -18,7 +18,7 @@ SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'b
 def checked(command, env=None, *, engine, case=None):
     result = run_case(case or ' '.join(command[1:]), engine, command, capture_output=True, text=True, env=env)
     if result.returncode:
-        raise RuntimeError(f'{shlex.join(map(str, command))}\n{result.stdout}\n{result.stderr}')
+        raise RuntimeError(f'{shlex.join(map(str, command))} exited {result.returncode}\n{result.stdout}\n{result.stderr}')
     return result
 
 
@@ -39,7 +39,7 @@ def run_cuts(executable, engine, env=None, scenarios=SCENARIOS):
 
 def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
                 entry="store@1/store/disk_crash_main", scenarios=SCENARIOS, environment=None, adapter="store_crash.c",
-                count_only=()):
+                count_only=(), extra_grants=()):
     build = work / (engine + '-crash')
     build.mkdir()
     if cc is None:
@@ -64,7 +64,7 @@ def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
                'llvm' if engine == 'llvm-release' else engine, '--runtime', str(runtime.resolve()),
                '--cc', str(wrapper), '--store', str(build / 'objects'), '--limit', str(64 * 1024 * 1024),
                '--dir', str(build), '-o', str(executable), '--json']
-    for grant in ('Clock', 'Random', 'Tasks', 'Stderr', 'Stdout'):
+    for grant in ('Clock', 'Random', 'Tasks', 'Stderr', 'Stdout', *extra_grants):
         command += ['--grant', grant]
     if adapter == 'runner_crash.c':
         command += ['--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']

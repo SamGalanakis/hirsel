@@ -141,6 +141,7 @@ pub struct OsProcess {
     pub(crate) sources: *const crate::abi_sites::SourceTable,
     os: Option<Box<OsProvider>>,
     _provider: Box<Provider>,
+    _stop: Option<Box<crate::stop_signals::StopSignals>>,
     _args: Vec<Vec<u8>>,
     _carriers: Vec<Buffer>,
     _metadata: Box<[Grant]>,
@@ -303,6 +304,17 @@ impl OsProcess {
             });
             let provider = Box::new(os.provider_with(directory_ops.map(|ops| ops.issue)));
             let provider_pointer = &*provider as *const Provider;
+            let requirements = if input.parameters_len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(input.parameters, input.parameters_len)
+            };
+            let stop = (!describe_mode
+                && input.grant_mask & (1 << PROCESS) != 0
+                && requirements.iter().any(|req| req.kind == PROCESS))
+            .then(crate::stop_signals::StopSignals::install)
+            .transpose()?
+            .map(Box::new);
             let mut metadata = Vec::new();
             if describe_mode {
                 // Main receives inert designations. The launch boundary denies
@@ -329,7 +341,11 @@ impl OsProcess {
                     if input.grant_mask & (1 << kind) != 0 {
                         metadata.push(Grant {
                             kind,
-                            provider: provider_pointer,
+                            provider: if kind == PROCESS {
+                                stop.as_ref().map_or(provider_pointer, |s| s.provider())
+                            } else {
+                                provider_pointer
+                            },
                             handle: if kind == NET {
                                 (&*net_rules as *const crate::net::Rules) as u64
                             } else {
@@ -367,6 +383,7 @@ impl OsProcess {
                 sources: std::ptr::null(),
                 os: Some(os),
                 _provider: provider,
+                _stop: stop,
                 _args: args,
                 _carriers: views,
                 _metadata: metadata,

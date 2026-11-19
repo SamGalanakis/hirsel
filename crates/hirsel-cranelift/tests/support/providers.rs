@@ -393,7 +393,7 @@ fn every_host_row_preserves_c_fields_and_status() {
             let outcome = if failing {
                 Outcome::Failed(vec!["Cancelled".into()])
             } else {
-                Outcome::Returned(if op == HostOp::Random {
+                Outcome::Returned(if matches!(op, HostOp::Random | HostOp::Stopped) {
                     vec![]
                 } else if op.waits() {
                     vec![0x1011121314151617, 5, 0x89abcdef, 0x2122232425262728]

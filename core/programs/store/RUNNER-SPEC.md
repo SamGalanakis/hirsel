@@ -91,7 +91,7 @@ v2.15 adds §12 for gap study 1117's items 1, 2 and 5 (/workspace/code/hirsel-br
 | 1 | One lifecycle owner | **NEW** | `runner.operate` owns store open, activation, publisher, listener, drain and close, publishes `Starting(step)`, `Ready` and `Draining` to one `Latest[Status]` root, and supervises the head, the serve supervisor and its acceptor as separate tasks (§12.1). | GAPS #1 |
 | 2 | Readiness | **DECIDED: a status route on the place's listener** | `GET /hirsel/status`, a raw route that reads the `Latest[Status]`: 200 in `Ready`, 503 in `Draining`; no connection is accepted before `Ready`. The supervisor-channel option is NOT TAKEN as the outside read, because every outside reader speaks HTTP probes and a channel would need a second outside protocol. | §12.1; http.md §6 |
 | 3 | The drain | **EXTENDS V1 and V3** | One absolute deadline D = stop + `grace_ms`, shared with std.http's stop (http.md HTTP-1 "Stopping", added in v2.15). Admission closes at min(stop + `lag_ms`, D). After `Close`, a send the session does not hold and a FIFO entry never admitted are `Refused(Overloaded)`; admitted work runs to its reply; at D each owed send is `Abandoned` and the store is left for recovery. | §12.1; rule 5 |
-| 4 | The stop source | **PROPOSED, Sam's call** | `host.stopped(p: Process)`: the first SIGTERM or SIGINT, through the replay point. | §12.4 |
+| 4 | The stop source | **DECIDED** | `host.stopped(p: Process)`: the first SIGTERM or SIGINT, through the replay point. | §12.4; DECISIONS, 2026-11-18 "service-ops host stop source" |
 | 5 | Manifest | **NEW; extends D1** | Written by `hirsel build --manifest`, from the preview launch with an empty old list, so there is no second entry list and no second hash. | §12.2; launch.md |
 | 6 | Preview | **NEW** | The new executable answers the old entry list with the session's own `Placed` function. Schema readiness is reported as unknown. It is advisory (ENDSTATE: no deploy gate). | §12.2 |
 | 7 | Confirmation | **NEW** | `hirsel confirm` reads the status route and compares the identity and `release_digest`. | §12.2 |
@@ -1201,10 +1201,10 @@ A failure after the activation commit and before `Ready` leaves the new activati
 
 **Replay.** The stop request is a channel receive. t₀ and every deadline come from `host.mono_ns`. Both are events at the replay point (CONC-10, CAP-8). The host stop source is a provider result (below). So a replay takes the stop at the same point, reaches the same D and records the same answers.
 
-**The host stop source** is a new host operation, and Sam's call (§12.4).
+**The host stop source** uses the existing `Process` capability (§12.4).
 - `host.stopped(p: Process) waits` returns once the process has received its first SIGTERM or SIGINT.
 - It is a cancellation point at its entry and while it waits. Its completion passes the replay point at issue and at delivery (CAP-8).
-- The runtime installs the handler only when the program holds `Process`. A program without it keeps the default action, which ends the process as a crash cut.
+- Before entering a live or recording program that holds `Process`, the runtime installs the handler. A program without that grant keeps the default action, which ends the process as a crash cut. Replay gets its stop from the tape.
 - A second SIGTERM or SIGINT after the first ends the process at once, also as a crash cut.
 - `runner.main` spawns one task that calls `host.stopped` and then drops the stop `Sender`, so W reads `Closed`.
 - `main` returns `Ok(())` for `Stopped`. For `Forced(n)` and for a `StartError` it writes one stderr line and returns `Error(Exit(status: 1u8))`. The line is `place: forced at the drain deadline, n sends abandoned`, or the error.
@@ -1313,10 +1313,7 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 
 ### 12.4 Calls this section makes
 
-- **The host stop source (Sam's call).** It changes what `--grant Process` means at the command line.
-  - **Recommended:** `host.stopped(p: Process)`, under the existing `Process` capability. `Process` has no operations in v1, and the end of one's own process is process authority.
-  - **The /wholehog alternative:** a new grant kind, `Signal`, which keeps `Process` for starting children (gap 26). It is not recommended, because it adds a kind for one operation.
-  - **Reversible** until the slice lands: renaming the capability touches one host operation and the grant table.
+- **The host stop source** is `host.stopped(p: Process)` under the existing `Process` capability, per DECISIONS, 2026-11-18 "service-ops host stop source".
 - **The status route's contract** (outward-facing: proxies and supervisors will read it). `GET /hirsel/status` with 200/503 and the JSON fields above. Reversible until the route ships in a release.
 - **The new CLI verbs** (outward-facing): `hirsel build --manifest`, `hirsel manifest show`, `hirsel preview` and `hirsel confirm`.
 - **Readiness through the route** is decided here, for the reasons above. Reversible: the route is one raw handler over `status`.

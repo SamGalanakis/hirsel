@@ -104,11 +104,6 @@ impl<'a> Plan<'a> {
                         .ok_or_else(|| {
                             NativeStop::Entry(format!("unsupported provider parameter {}", p.ty))
                         })?;
-                if options.tape.is_some() && kind == 8 {
-                    return Err(NativeStop::Entry(
-                        "Process cannot be recorded or replayed".into(),
-                    ));
-                }
                 let index = ordinals[kind as usize];
                 ordinals[kind as usize] += 1;
                 Ok(Requirement {

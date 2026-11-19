@@ -36,6 +36,8 @@ pub fn mono_ns(c: Clock) -> u64
 
 pub fn sleep_until(c: Clock, deadline_ns: u64) waits
 
+pub fn stopped(p: Process) waits
+
 pub fn connect(n: Net, a: Addr, until: Until) -> Result[Socket, NetError] waits
 
 pub fn listen(n: Net, a: Addr, backlog: u16) -> Result[(Listener, Addr), NetError] waits

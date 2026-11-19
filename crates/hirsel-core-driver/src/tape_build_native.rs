@@ -396,22 +396,76 @@ fn tape_cli_replays() {
         "{err}"
     );
     assert_eq!(std::fs::read(&tape).unwrap(), bytes);
-    std::fs::write(
-        app.join("main.hirsel"),
-        "pub fn main(p: Process) -> Result[(), Exit] { Ok(()) }",
-    )
-    .unwrap();
-    let (code, _, err) = invoke(
-        "run",
-        vec![
-            "--grant".into(),
-            "Process".into(),
-            "--record".into(),
-            dir.path().join("process.tape").display().to_string(),
-        ],
+}
+
+#[test]
+fn run_tape_replays_process_stop() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let tape = dir.path().join("stop.tape");
+    let source = r#"
+pub fn main(p: Process, out: Stdout) -> Result[(), Exit] waits {
+    result.unwrap(stdout.write(out, "ready\n"))
+    host.stopped(p)
+    result.unwrap(stdout.write(out, "stopped\n"))
+    Ok(())
+}
+"#;
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = (1 << grant_kind("Process").unwrap()) | (1 << grant_kind("Stdout").unwrap());
+    options.tape = Some(crate::RunTape {
+        path: tape.to_str().unwrap().into(),
+        mode: crate::RunTapeMode::Record,
+    });
+    let built = product.build(&entry, &options).unwrap();
+    let mut child = Command::new(&built.executable)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    let pid = child.id().to_string();
+    let name = Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid])
+        .output()
+        .unwrap();
+    assert!(name.status.success());
+    assert_eq!(
+        String::from_utf8(name.stdout).unwrap().trim(),
+        built.executable.file_name().unwrap().to_str().unwrap()
     );
-    assert_ne!(code, Some(0));
-    assert!(err.contains("Process cannot be recorded"), "{err}");
+    // SAFETY: this is the still-owned child, which wrote the ready marker.
+    assert_eq!(unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) }, 0);
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "stopped\n");
+    let record = child.wait_with_output().unwrap();
+    assert!(record.status.success(), "{:?}", record.stderr);
+    let sealed = std::fs::read(&tape).unwrap();
+
+    options.backend = Backend::Llvm;
+    options.grant_mask = 0;
+    options.tape.as_mut().unwrap().mode = crate::RunTapeMode::Replay;
+    let replay = product.build(&entry, &options).unwrap();
+    assert_eq!(replay.revision, built.revision);
+    let result = Command::new(&replay.executable).output().unwrap();
+    assert_eq!(result.status.code(), Some(0), "{:?}", result.stderr);
+    assert!(result.stdout.is_empty(), "replay wrote through the live Stdout");
+    assert_eq!(std::fs::read(tape).unwrap(), sealed);
 }
 
 fn http_reply_bytes(

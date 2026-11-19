@@ -1056,4 +1056,5 @@ pub mod op {
     pub const ACCEPT: u8 = 21;
     pub const RECV_BOUNDED: u8 = 27;
     pub const SEND_PAIR: u8 = 26;
+    pub const STOPPED: u8 = 28;
 }

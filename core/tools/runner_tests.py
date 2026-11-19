@@ -328,6 +328,7 @@ def l10_holds(values):
 # its poison scenario, whose one failed journal sync the adapter checks in count mode.
 CRASHES = ('runner-cross', 'runner-order')
 POISON = 'poison-segment'
+STOP_CASES = ('runner-deadline', 'runner-stop-early', 'runner-stop-twice')
 
 
 def crashes(args, root, work, engine, name):
@@ -352,10 +353,12 @@ def drain_deadline(args, root, work, engine, name, runner=None, activation=False
         add_legacy_activation(root, work, inputs_path, args.activation_legacy_rev)
     build = work / name
     build.mkdir()
+    stop_cases = (args.stop_case,) if args.stop_case else STOP_CASES
     return run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc, inputs_path, build, engine,
-                       entry='store@1/runner_crash/main', adapter='runner_crash.c',
+                       entry='store@1/runner_crash/' + ('main' if activation else 'stop_main'), adapter='runner_crash.c',
                        scenarios=('runner-activation', 'runner-activation-genesis') if activation else (),
-                       count_only=('runner-unavailable-genesis', 'runner-unavailable-install') if activation else ('runner-deadline',))
+                       count_only=('runner-unavailable-genesis', 'runner-unavailable-install') if activation else stop_cases,
+                       extra_grants=() if activation else ('Process',))
 
 
 def add_legacy_activation(root, work, manifest_path, revision):
@@ -777,6 +780,7 @@ def main():
     p.add_argument('--cc', type=Path)
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm'])
     p.add_argument('--activation-legacy-rev')
+    p.add_argument('--stop-case', choices=STOP_CASES)
     p.add_argument('--call-law', action='append', choices=CALLS)
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
@@ -785,6 +789,8 @@ def main():
                    'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max', *SETTLEMENT_LAWS])
     p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1'])
     args = p.parse_args()
+    if args.stop_case and args.part != 'deadline':
+        p.error('--stop-case requires --part deadline')
     r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1', 'calls')
     selected_calls = args.call_law or CALLS
     root = args.root.resolve()

@@ -582,6 +582,18 @@ pub unsafe extern "C" fn store_crash_process_exit(p: *mut c_void) {
     bridge.locks.clear();
 }
 
+/// Report a crash observed by the out-of-process signal witness.
+/// # Safety
+/// As for `store_crash_process_exit`. The child was reaped after a signal.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_signal_exit(p: *mut c_void) {
+    // SAFETY: the wrapper reaped the child and owns the bridge.
+    unsafe {
+        (*p.cast::<Bridge>()).crashed = true;
+        store_crash_process_exit(p);
+    }
+}
+
 /// # Safety
 /// `p` is live and exclusive before the first run.
 #[unsafe(no_mangle)]

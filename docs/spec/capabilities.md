@@ -132,6 +132,15 @@ fn store_id(r: Random) -> Result[Bytes, Capacity] {
 }
 ```
 
+`host.stopped(p: Process) waits` completes after the process receives its first
+SIGTERM or SIGINT, including a signal received before the call. It is a
+cancellation point at entry and while waiting. Its issue and delivery pass
+through [CAP-8](#cap-8-the-replay-point), so replay observes the recorded
+completion. Native live and recording entry install the handlers before
+entering a program that receives `Process`. A second SIGTERM or SIGINT takes
+its default action and ends the process immediately. Replay and launches
+without `Process` leave the host's signal dispositions untouched.
+
 ### CAP-6: No ambient input
 
 No operation without a capability argument observes anything outside its arguments: there

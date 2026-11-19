@@ -24,6 +24,7 @@ extern void store_crash_sync_failure(void *,uint8_t);
 extern uint64_t store_crash_failed_syncs(void *);
 extern uint8_t store_crash_crashed(void *);
 extern void store_crash_process_exit(void *);
+extern void store_crash_signal_exit(void *);
 extern void store_crash_free(void *);
 
 typedef struct { uint64_t handle,path_len,len,capacity; uint8_t op,mode; } Request;
@@ -108,34 +109,41 @@ static Child launch(const HirselCoreOsConfig *input,const HirselCoreSourceTable 
     }
     close(pair[1]);return (Child){.pid=pid,.fd=pair[0]};
 }
+static void signal_child(const Child *child,int signal) {
+    /* Only this fork's PID is eligible. Check its comm immediately before
+     * signaling; it must still be this executable, never a parent/helper. */
+    char command[80],comm[80],own[80];
+    snprintf(command,sizeof command,"ps -o comm= -p %ld",(long)child->pid);
+    FILE *p=popen(command,"r"),*me=fopen("/proc/self/comm","r");
+    if(!p || !me || !fgets(comm,sizeof comm,p) || !fgets(own,sizeof own,me)) abort();
+    int status=pclose(p);fclose(me);
+    if(status || strcmp(comm,own)) abort();
+    if(kill(child->pid,signal) && errno!=ESRCH) abort();
+}
 static void stop(Child *child) {
     if(child->finished) return;
     pid_t ended=waitpid(child->pid,&child->status,WNOHANG);
     if(ended==0) {
-        /* Only this fork's PID is eligible. Check its comm immediately before
-         * signaling; it must still be this executable, never a parent/helper. */
-        char command[80],comm[80],own[80];
-        snprintf(command,sizeof command,"ps -o comm= -p %ld",(long)child->pid);
-        FILE *p=popen(command,"r"),*me=fopen("/proc/self/comm","r");
-        if(!p || !me || !fgets(comm,sizeof comm,p) || !fgets(own,sizeof own,me)) abort();
-        int status=pclose(p);fclose(me);
-        if(status || strcmp(comm,own)) abort();
-        if(kill(child->pid,SIGKILL) && errno!=ESRCH) abort();
+        signal_child(child,SIGKILL);
         if(waitpid(child->pid,&child->status,0)!=child->pid) abort();
     } else if(ended!=child->pid) abort();
     child->finished=1;if(child->fd>=0) close(child->fd);child->fd=-1;
 }
-static void service(void *state,Child *child,int server,int phase) {
+static void service(void *state,Child *child,int server,int phase,int stop_case) {
     Request q;ssize_t first=read(child->fd,&q,sizeof q);
     if(first<0 && errno==EINTR) return;
-    if(first==0) { close(child->fd);child->fd=-1;return; }
+    if(first==0 || (first<0 && errno==ECONNRESET)) { close(child->fd);child->fd=-1;return; }
     if(first<0) abort();
     if((size_t)first<sizeof q) transfer(child->fd,(uint8_t *)&q+first,sizeof q-(size_t)first,0);
     size_t capacity=q.capacity>q.len?q.capacity:q.len;
     uint8_t *path=malloc(q.path_len?q.path_len:1),*data=calloc(capacity?capacity:1,1);
     if(!path || !data) abort();
     transfer(child->fd,path,q.path_len,0);transfer(child->fd,data,q.len,0);
+    int second=stop_case && server && phase==1 && q.op==12 && q.len==6 && !memcmp(data,"SECOND",6);
     if(q.op==12) {
+        if(stop_case && server && phase==1 &&
+           ((q.len==7 && !memcmp(data,"FROZEN?",7)) || (q.len==5 && !memcmp(data,"EARLY",5))))
+            signal_child(child,SIGTERM);
         if(q.len>5 && !memcmp(data,"PORT ",5)) {
             char text[32]={0};if(q.len-5>=sizeof text) abort();memcpy(text,data+5,q.len-5);port=(unsigned)strtoul(text,NULL,10);
         } else if(q.len==48 && !memcmp(data,"TOKEN ",6)) {
@@ -145,7 +153,11 @@ static void service(void *state,Child *child,int server,int phase) {
     HirselCoreHostOutcome out=store_crash_op(state,q.op,q.mode,q.handle,path,q.path_len,data,q.len,q.capacity);
     uint64_t bytes=!out.error.tag?(q.op==1?out.value:q.op==18?out.written:0):0;
     Response response={out,bytes,(uint8_t)(server && phase==1 && store_crash_crashed(state))};
-    transfer(child->fd,&response,sizeof response,1);
+    if(second) {
+        signal_child(child,SIGTERM);
+        ssize_t sent=send(child->fd,&response,sizeof response,MSG_NOSIGNAL);
+        if(sent!=(ssize_t)sizeof response && !(sent<0 && (errno==EPIPE || errno==ECONNRESET))) abort();
+    } else transfer(child->fd,&response,sizeof response,1);
     if(bytes) transfer(child->fd,data+q.len,bytes,1);
     free(path);free(data);
 }
@@ -154,15 +166,22 @@ static int phase(void *state,const HirselCoreOsConfig *input,const HirselCoreSou
     port=0;
     char floor[32];snprintf(floor,sizeof floor,"%llu",(unsigned long long)store_crash_floor(state));
     const char *server_args[]={modes[number],scenario,store_crash_acked(state)?"new":"prefix",floor,saved_token};
+    int twice=!strcmp(scenario,"runner-stop-twice");
     int deadline_case=!strcmp(scenario,"runner-deadline");
-    Child server=launch(input,sources,entry,server_args,deadline_case?5:4,-1),client={.fd=-1,.finished=1};
+    int stop_case=deadline_case || twice || !strcmp(scenario,"runner-stop-early");
+    Child server=launch(input,sources,entry,server_args,stop_case?5:4,-1),client={.fd=-1,.finished=1};
     struct timespec start;
     if(deadline_case && clock_gettime(CLOCK_MONOTONIC,&start)) abort();
     while(!server.finished || !client.finished) {
         if(deadline_case) {
             struct timespec now;
             if(clock_gettime(CLOCK_MONOTONIC,&now)) abort();
-            if(now.tv_sec-start.tv_sec>=8) {stop(&server);fprintf(stderr,"runner-deadline: forced teardown did not finish\n");return 120;}
+            if(now.tv_sec-start.tv_sec>=8) {
+                stop(&server);
+                store_crash_signal_exit(state);
+                fprintf(stderr,"%s: teardown did not finish\n",scenario);
+                return 120;
+            }
         }
         if(port && client.pid==0) {
             char address[16];snprintf(address,sizeof address,"%u",port);
@@ -181,10 +200,18 @@ static int phase(void *state,const HirselCoreOsConfig *input,const HirselCoreSou
         struct pollfd fds[2]={{server.fd,POLLIN,0},{client.fd,POLLIN,0}};
         if(server.finished && client.finished) break;
         int count=poll(fds,2,100);if(count<0 && errno==EINTR) continue;if(count<0) abort();
-        if(fds[0].revents) service(state,&server,1,number);
-        if(fds[1].revents) service(state,&client,0,number);
+        if(fds[0].revents) service(state,&server,1,number,stop_case);
+        if(fds[1].revents) service(state,&client,0,number,stop_case);
     }
     if(store_crash_crashed(state)) store_crash_process_exit(state);
+    if(twice && number==1) {
+        if(WIFSIGNALED(server.status) && WTERMSIG(server.status)==SIGTERM) {
+            store_crash_signal_exit(state);
+            return 0;
+        }
+        fprintf(stderr,"second SIGTERM did not crash the place: wait status %d\n",server.status);
+        return 120;
+    }
     int expected=number==1 && WIFEXITED(server.status) && WEXITSTATUS(server.status)==99;
     if(!WIFEXITED(server.status) || (!expected && WEXITSTATUS(server.status))) {
         fprintf(stderr,"server phase %s: wait status %d\n",modes[number],server.status);return 120;
@@ -200,11 +227,12 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,c
     uint64_t cut=uncut||poison?UINT64_MAX:strtoull(cut_text,NULL,10);
     void *state=store_crash_new(cut);store_crash_sync_failure(state,poison?7:0);
     uint8_t status=0;
-    for(int n=0;n<3;n++) {
+    int early=!strcmp(scenario,"runner-stop-early"),twice=!strcmp(scenario,"runner-stop-twice");
+    for(int n=early?1:0;n<(early || twice?2:3);n++) {
         store_crash_phase(state,(uint64_t)n);
         if(phase(state,input,sources,entry,scenario,n)) {status=120;break;}
         if(n==1 && poison && store_crash_failed_syncs(state)!=1) {fprintf(stderr,"named sync failure was not reached\n");status=120;break;}
-        if(n==1 && uncut && !store_crash_acked(state)) {fprintf(stderr,"uncut run did not acknowledge its checkpoint\n");status=120;break;}
+        if(n==1 && uncut && !early && !twice && !store_crash_acked(state)) {fprintf(stderr,"uncut run did not acknowledge its checkpoint\n");status=120;break;}
     }
     if(!status) printf("cuts %llu\n",(unsigned long long)store_crash_events(state));
     store_crash_free(state);return status;

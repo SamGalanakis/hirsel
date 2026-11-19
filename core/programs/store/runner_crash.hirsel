@@ -661,9 +661,8 @@ fn unavailable_identity(d: Dir, c: Clock, r: Random, tasks: Tasks, grow: bool, p
     }
 }
 
-fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: Net) -> () waits {
+fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: Net, take stopping: Receiver[()], twice: bool) -> () waits {
     let (policy, policy_handle) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
-    let (stop, stopping): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
     let status = result.unwrap(runner.status_root())
     let mut wire = runner.wire_defaults(131072u64, N_PLACE)
@@ -691,7 +690,8 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
         if now >= watchdog { fail("runner-deadline: no journal sync to freeze") }
         host.sleep_until(c, now + 1000000u64)
     }
-    result.unwrap(channel.send(stop, ()))
+    if let Ok(Draining) = channel.receive(phases) {} else { fail("runner-deadline: no Draining after SIGTERM") }
+    if twice { result.unwrap(stdout.write(out, "SECOND")) }
     match task.join(take running) {
         Ok(Ok(Forced(1u64))) => (),
         _ => fail("runner-deadline: expected exactly one logically abandoned send"),
@@ -730,6 +730,50 @@ fn deadline_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args) -> () 
     result.unwrap(store.close(take db))
 }
 
+// §12.4 uses the live Process grant, including under the crash adapter's
+// substituted directory and stdout providers.
+pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, n: Net, process: Process) -> Result[(), Exit] waits {
+    let phase = option.unwrap(args.get(argv, 0u64))
+    let scenario = option.unwrap(args.get(argv, 1u64))
+    if scenario == "runner-stop-early" {
+        result.unwrap(stdout.write(out, "EARLY"))
+        host.stopped(process)
+        let start = scoped fn(take stopping: Receiver[()]) -> Result[(), Exit] waits {
+            let (policy, policy_handle) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
+            let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+            wire.n_pool = 4194304u64
+            let config = runner.PlaceConfig(backing: Disk(d, options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
+                migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
+                proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
+                listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
+                stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
+            if let Ok(Stopped) = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) {} else {
+                fail("runner-stop-early: place did not stop")
+            }
+            let mut ending_policy = take policy_handle
+            task.cancel(mut ending_policy)
+            let _ = task.join(take ending_policy)
+            Ok(())
+        }
+        return runner.main(argv, process, tasks, code.describe(place), start)
+    }
+    if phase == "init" {
+        let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
+        let value: std.codec.Codec[u64] = std.codec.of()
+        let created = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), value)))
+        result.unwrap(store.durable(mut db, created))
+        result.unwrap(store.close(take db))
+    } else if phase == "write" {
+        let twice = scenario == "runner-stop-twice"
+        let start = scoped fn(take stopping: Receiver[()]) -> Result[(), Exit] waits {
+            freeze_until_stop(d, c, r, tasks, out, n, take stopping, twice)
+            Ok(())
+        }
+        return runner.main(argv, process, tasks, code.describe(place), start)
+    } else { deadline_reopen(d, c, r, tasks, argv) }
+    Ok(())
+}
+
 pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, n: Net) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0u64))
     let scenario = option.unwrap(args.get(argv, 1u64))
@@ -739,16 +783,6 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
     }
     if scenario == "runner-unavailable-genesis" || scenario == "runner-unavailable-install" {
         unavailable_identity(d, c, r, tasks, scenario == "runner-unavailable-install", phase, out)
-        return Ok(())
-    }
-    if scenario == "runner-deadline" {
-        if phase == "init" {
-            let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
-            let value: std.codec.Codec[u64] = std.codec.of()
-            let created = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), value)))
-            result.unwrap(store.durable(mut db, created))
-            result.unwrap(store.close(take db))
-        } else if phase == "write" { freeze_until_stop(d, c, r, tasks, out, n) } else { deadline_reopen(d, c, r, tasks, argv) }
         return Ok(())
     }
     if phase == "client" {

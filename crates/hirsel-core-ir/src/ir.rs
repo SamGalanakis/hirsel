@@ -985,6 +985,7 @@ pub enum HostOp {
     SendPair = 26,
     NetNarrow = 24,
     NetSplit = 25,
+    Stopped = 28,
 }
 
 impl HostOp {
@@ -992,7 +993,7 @@ impl HostOp {
     pub fn io_symbol(self) -> &'static str {
         match self {
             Self::WallMs | Self::MonoNs => "hirsel_core_host_clock",
-            Self::Random | Self::Stdout | Self::Stderr => "hirsel_core_host_io",
+            Self::Random | Self::Stdout | Self::Stderr | Self::Stopped => "hirsel_core_host_io",
             _ => "hirsel_core_host_op",
         }
     }
@@ -1024,6 +1025,7 @@ impl HostOp {
         HostOp::SendPair,
         HostOp::NetNarrow,
         HostOp::NetSplit,
+        HostOp::Stopped,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -1058,6 +1060,7 @@ impl HostOp {
             HostOp::SendPair => "host_send_pair",
             HostOp::NetNarrow => "net_narrow",
             HostOp::NetSplit => "net_split",
+            HostOp::Stopped => "host_stopped",
         }
     }
     /// C entry of a socket or Net ownership/authority adapter.
@@ -1289,6 +1292,7 @@ impl RtOp {
                     | HostOp::Sync
                     | HostOp::SyncDir => (vec![V(u64_)], outcome),
                     HostOp::Random => (vec![V(u64_), V(p)], vec![]),
+                    HostOp::Stopped => (vec![V(u64_)], vec![]),
                     HostOp::WallMs | HostOp::MonoNs => (vec![V(u64_)], vec![u64_]),
                     _ => (vec![V(u64_), V(p)], outcome),
                 }

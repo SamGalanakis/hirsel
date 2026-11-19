@@ -1,6 +1,6 @@
 # Io
 
-[API overview](../API.md). [Operations and contracts](../io.hirsel).
+[API overview](../API.md). [Process](process.md). [Operations and contracts](../io.hirsel).
 
 Buffered I/O uses explicit host capabilities. `Lines` owns its HostFile and
 lexical line views freeze its buffer. `BufferedInput` reads raw bytes into a

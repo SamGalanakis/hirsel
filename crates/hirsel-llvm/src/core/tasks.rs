@@ -127,7 +127,7 @@ impl FunctionEmitter<'_> {
         let status = values.remove(4);
         match op {
             HostOp::WallMs | HostOp::MonoNs => values.truncate(1),
-            HostOp::Random => values.clear(),
+            HostOp::Random | HostOp::Stopped => values.clear(),
             _ => {}
         }
         values.push(status);

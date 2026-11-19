@@ -349,8 +349,10 @@ operations it names; nothing else about them may be inferred from an implementat
   changes its capacity, and never waits or fails. The bytes are unpredictable and
   independent of every other value the run observes; like every provider result they pass
   the replay point at issue and at delivery ([CAP-8](capabilities.md#cap-8-the-replay-point)),
-  so a replay delivers the recorded bytes and a simulation supplies its own. `Net`,
-  `Stdin`, `Env` and `Process` have no operations in v1.
+  so a replay delivers the recorded bytes and a simulation supplies its own.
+  `host.stopped(p: Process) waits` observes the first SIGTERM or SIGINT
+  ([CAP-5](capabilities.md#cap-5-provider-operations)). `Stdin` and `Env` have no
+  operations in v1.
 - **Other results.** `box.unbox` returns the payload and refunds the node. `ParseError`'s
   `Invalid` holds a byte position. A
   `Box`, `Rc` or `Arc` is read through its payload where its own type does not fit

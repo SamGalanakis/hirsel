@@ -259,7 +259,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::RecvBounded
                     | HostOp::SendPair
                     | HostOp::NetNarrow
-                    | HostOp::NetSplit => (null, no_mode),
+                    | HostOp::NetSplit
+                    | HostOp::Stopped => (null, no_mode),
                 };
                 // The C outcome is always 32 bytes: value at 0, error.tag at 8,
                 // error.code at 12, written at 16, status at 24.
@@ -306,7 +307,7 @@ impl Function<'_, '_, '_> {
                 };
                 // Every provider row can fail: a tape refuses it before issue (CAP-9).
                 self.call_failure(values[4], call.fail)?;
-                let n = if op == HostOp::Random {
+                let n = if matches!(op, HostOp::Random | HostOp::Stopped) {
                     0
                 } else if matches!(op, HostOp::WallMs | HostOp::MonoNs) {
                     1

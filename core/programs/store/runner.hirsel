@@ -1564,10 +1564,10 @@ fn head_next(inbox: HeadRequests, waiting: bool) -> Option[HeadInput] waits {
 const SETTLE_PROBES: u64 = 64
 
 fn settle_probe(inbox: HeadRequests) -> Option[HeadInput] waits {
-    let mut probe = 0u64
-    while probe < SETTLE_PROBES {
+    let mut polls = 0u64
+    while polls < SETTLE_PROBES {
         if let Some(take more) = head_next(inbox, false) { return Some(take more) }
-        probe += 1u64
+        polls += 1u64
     }
     None
 }

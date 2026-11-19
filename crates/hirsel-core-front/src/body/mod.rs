@@ -892,6 +892,15 @@ fn is_float(t: &impl TyRead, ty: TyId) -> bool {
 
 /// Lay out emitted instructions in block order after control-flow construction.
 fn order_instructions(b: &mut Body) {
+    let mut start = 0;
+    if b.blocks.iter().all(|block| {
+        let ordered = block.insts.start as usize == start;
+        start += block.insts.len as usize;
+        ordered
+    }) && start == b.insts.len()
+    {
+        return;
+    }
     let mut old = std::mem::take(&mut b.insts);
     let mut insts = Vec::with_capacity(old.len());
     let mut anchors = Vec::with_capacity(old.len());

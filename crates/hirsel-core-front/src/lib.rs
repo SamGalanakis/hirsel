@@ -135,7 +135,7 @@ pub struct Program<'a> {
     /// Aliases being lowered, each with its reference continuing the chain.
     pub(crate) alias_stack: Vec<(DeclId, Option<Site>)>,
     core_declarations: [std::sync::OnceLock<Option<DeclId>>; PRELUDE.len()],
-    structural_codecs: std::sync::OnceLock<Vec<(DeclId, u32)>>,
+    structural_codecs: std::sync::OnceLock<StructuralCodecs>,
     tuple_codec_protocol: std::sync::OnceLock<Option<TupleCodecProtocol>>,
     /// Published type spellings shared by body arenas; local types stay local.
     layout_type_names: std::sync::OnceLock<Vec<std::sync::OnceLock<String>>>,
@@ -208,6 +208,45 @@ pub const STRUCTURAL_CODECS: [(&str, &str); 4] = [
     ("Option", "of_option"),
     ("Result", "of_result"),
 ];
+/// std's maker of `List[u8]`, which moves the bytes in bulk; every byte list's
+/// codec is this one, read as [`STRUCTURAL_CODECS`]' makers are.
+pub const BYTES_CODEC: &str = "of_bytes";
+/// [`STRUCTURAL_CODECS`] and [`BYTES_CODEC`] as one program's function rows.
+pub struct StructuralCodecs {
+    rows: Vec<(DeclId, u32)>,
+    /// List's declaration and `of_bytes`.
+    bytes: Option<(DeclId, u32)>,
+}
+impl StructuralCodecs {
+    pub const NONE: Self = Self {
+        rows: Vec::new(),
+        bytes: None,
+    };
+    /// Whether no type's codec is std's structural maker (the program has no std).
+    pub fn rows_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+    /// Whether `d`'s codec is std's structural maker.
+    pub fn has(&self, d: DeclId) -> bool {
+        self.rows.iter().any(|&(x, _)| x == d)
+    }
+    /// std's maker of `d` at `args` with the arguments it takes, when `d` is one of
+    /// [`STRUCTURAL_CODECS`]' types: `of_bytes`, taking none, at `List[u8]`.
+    pub fn maker(&self, types: &impl TyRead, d: DeclId, args: &[TyId]) -> Option<(u32, Vec<TyId>)> {
+        if let Some((list, bytes)) = self.bytes
+            && d == list
+            && let [element] = args
+            && matches!(
+                types.kind(*element),
+                TyKind::Scalar(hirsel_core_layout::Scalar::U8)
+            )
+        {
+            return Some((bytes, vec![]));
+        }
+        let &(_, maker) = self.rows.iter().find(|&&(x, _)| x == d)?;
+        Some((maker, args.to_vec()))
+    }
+}
 /// The path of the core prelude type `name`, when the index has core.
 fn prelude_path(index: &NameIndex, name: &str) -> Option<DefPath> {
     let package = &index.packages[index.core?.0 as usize];
@@ -269,7 +308,7 @@ impl<'a> Program<'a> {
     }
     /// [`STRUCTURAL_CODECS`] as the program's rows: each core type's declaration with
     /// its std maker's function. Empty when the program has no std.
-    pub(crate) fn structural_codecs(&self) -> &[(DeclId, u32)] {
+    pub(crate) fn structural_codecs(&self) -> &StructuralCodecs {
         self.structural_codecs.get_or_init(|| {
             let Some(package) = self
                 .index
@@ -277,23 +316,27 @@ impl<'a> Program<'a> {
                 .iter()
                 .find(|p| self.index.symbols.text(p.name) == "std")
             else {
-                return vec![];
+                return StructuralCodecs::NONE;
             };
             let package = hirsel_core_ids::PackageId {
                 name: "std".into(),
                 version: self.index.symbols.text(package.version).into(),
             };
-            STRUCTURAL_CODECS
-                .into_iter()
-                .filter_map(|(ty, maker)| {
-                    let path = DefPath(hirsel_core_ids::ItemPath {
-                        package: package.clone(),
-                        modules: vec!["codec".into()],
-                        name: maker.into(),
-                    });
-                    Some((self.core_decl(ty)?, self.function_id(&path)? as u32))
-                })
-                .collect()
+            let maker = |name: &str| {
+                let path = DefPath(hirsel_core_ids::ItemPath {
+                    package: package.clone(),
+                    modules: vec!["codec".into()],
+                    name: name.into(),
+                });
+                Some(self.function_id(&path)? as u32)
+            };
+            StructuralCodecs {
+                rows: STRUCTURAL_CODECS
+                    .into_iter()
+                    .filter_map(|(ty, name)| Some((self.core_decl(ty)?, maker(name)?)))
+                    .collect(),
+                bytes: self.core_decl("List").zip(maker(BYTES_CODEC)),
+            }
         })
     }
     /// Shared tuple codec signatures. The name index avoids demand-decoding the

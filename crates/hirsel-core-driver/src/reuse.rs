@@ -789,6 +789,7 @@ impl Keys {
                 for maker in hirsel_core_front::STRUCTURAL_CODECS
                     .iter()
                     .map(|(_, maker)| *maker)
+                    .chain([hirsel_core_front::BYTES_CODEC])
                     .chain(hirsel_core_front::TUPLE_CODEC_READS)
                 {
                     let id = module.and_then(|m| {

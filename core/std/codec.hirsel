@@ -540,6 +540,51 @@ pub fn of_list[E: codec]() -> Codec[List[E]] {
     Codec(encoder: list_encode, decoder: list_decode, describer: describe_list, smallest: 4)
 }
 
+/// The codec of Bytes (List[u8]), which `of` resolves to at List[u8]: the u32 count, then
+/// the bytes, moved in bulk. Its bytes, charges, failures and schema are of_list's at u8.
+pub fn of_bytes() -> Codec[Bytes] {
+    Codec(encoder: put_bytes, decoder: take_bytes, describer: describe_bytes, smallest: 4)
+}
+
+/// The count, then the bytes. out grows as pushing them one by one grows it, by one
+/// growth at a time, so a Capacity leaves the same prefix and the same capacity.
+fn put_bytes(xs: Bytes, mut out: Bytes) -> Result[(), Capacity] {
+    put_count(list.len(xs), mut out)?
+    let n = list.len(xs)
+    let mut i: u64 = 0
+    while i < n {
+        let space = list.capacity(out) - list.len(out)
+        if space == 0 {
+            // Growth only where put_byte's push would grow out, by MEM-24 as it does.
+            put_byte(mut out, xs[i])?
+            i += 1
+        } else {
+            let k = if space < n - i {
+                space
+            } else {
+                n - i
+            }
+            list.append(mut out, list.slice(xs, i, i + k))?
+            i += k
+        }
+    }
+    Ok(())
+}
+
+/// The count, Truncated at the count when fewer bytes remain, then exactly that many.
+fn take_bytes(b: Bytes, mut at: u64) -> Result[Bytes, Stop] {
+    let n = take_count(b, mut at, 1)?
+    let mut xs: Bytes = room(n)?
+    // Within the exact capacity room admitted, so the append never grows.
+    let _ = list.append(mut xs, list.slice(b, at, at + n))
+    at += n
+    Ok(take xs)
+}
+
+fn describe_bytes(mut s: Schema, _c: Codec[Bytes]) -> Result[(), Capacity] {
+    schema_list(mut s, of_u8())
+}
+
 /// The codec of Option[E]: tag 0 for None, or tag 1 then the value.
 pub fn of_option[E: codec]() -> Codec[Option[E]] {
     Codec(encoder: option_encode, decoder: option_decode, describer: describe_option, smallest: 4)

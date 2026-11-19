@@ -1328,10 +1328,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             return Some(self.emit_call(maker as usize, &args, vals, result, n));
         }
-        // A core List, Map, Option or Result's maker is std's `of_list` and the rest at
+        // A core List, Map, Option or Result's maker is std's `of_list` (`of_bytes` at u8) and the rest at
         // its arguments, when theirs are built.
         if let TyKind::Adt(d, args) = self.t.kind(ty).clone()
-            && let Some(&(_, maker)) = self.p.structural_codecs().iter().find(|(x, _)| *x == d)
+            && let Some((maker, args)) = self.p.structural_codecs().maker(&self.t, d, &args)
         {
             if !self.codec_built(ty) {
                 self.gap(n, "the codec of this type is not built");
@@ -1388,7 +1388,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             {
                 true
             }
-            TyKind::Adt(d, args) if self.p.structural_codecs().iter().any(|(x, _)| *x == d) => {
+            TyKind::Adt(d, args) if self.p.structural_codecs().has(d) => {
                 args.into_iter().all(|x| self.codec_built(x))
             }
             _ => {

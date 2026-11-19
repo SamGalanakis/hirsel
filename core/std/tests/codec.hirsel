@@ -193,6 +193,82 @@ fn of_builtins() -> bool {
     direct && generic
 }
 
+// Bytes through `of` (the bulk of_bytes) against of_list at u8, pushing byte by byte:
+// into an out already holding `pre` bytes, under a bound of `limit`, both succeed or both
+// fail, and leave the same bytes and the same capacity, so the same charges. Both decode
+// what either wrote to the same value, and every prefix is Truncated. A bulk put that
+// grows out other than by MEM-24 at the bytes a push grows at, writes a partial chunk
+// another way on Capacity, or a take that reads past the count, fails it.
+// expect: run bytes_as_list() = 0
+fn bytes_as_list() -> u64 {
+    let mut bad: u64 = 0
+    for a in 0u64 .. 7 {
+        let n = match a {
+            0 => 0u64,
+            1 => 1,
+            2 => 2,
+            3 => 5,
+            4 => 9,
+            5 => 23,
+            _ => 64
+        }
+        let mut xs: Bytes = list.new()
+        let mut i: u64 = 0
+        while i < n {
+            result.unwrap(result.capacity_only(list.push(mut xs, int.truncate((i * 37 + 1) & 255))))
+            i += 1
+        }
+        let slow: codec.Codec[Bytes] = codec.of_list()
+        let bulk: codec.Codec[Bytes] = codec.of()
+        let both = enc(slow, xs)
+        if enc(bulk, xs) != both || !prefixes(bulk, both) {
+            bad += 1
+        }
+        let back = match (codec.decode(bulk, both), codec.decode(slow, both)) {
+            (Ok(Ok(x)), Ok(Ok(y))) => x == xs && y == xs,
+            _ => false
+        }
+        if !back {
+            bad += 1
+        }
+        for b in 0u64 .. 4 {
+            let pre = b * b - b / 2
+            for d in 0u64 .. 7 {
+                let limit = if d == 6 {
+                    100000u64
+                } else {
+                    8u64 << d
+                }
+                let (fa, la, ca, oa) = put_under(bulk, xs, pre, limit)
+                let (fb, lb, cb, ob) = put_under(slow, xs, pre, limit)
+                if fa != fb || la != lb || ca != cb || oa != ob {
+                    bad += 1
+                }
+            }
+        }
+    }
+    bad
+}
+
+// Encodes xs with c into an out holding pre bytes, under a bound of limit: whether it
+// failed, then out's length, capacity and bytes.
+fn put_under(c: codec.Codec[Bytes], xs: Bytes, pre: u64, limit: u64) -> (bool, u64, u64, Bytes) {
+    let mut out: Bytes = list.new()
+    let mut i: u64 = 0
+    while i < pre {
+        result.unwrap(result.capacity_only(list.push(mut out, 0xee)))
+        i += 1
+    }
+    let r = bound bytes limit {
+        codec.encode(c, xs, mut out)
+    }
+    let failed = match r {
+        Ok(Ok(())) => false,
+        _ => true
+    }
+    (failed, list.len(out), list.capacity(out), take out)
+}
+
 // The extremes of each width come back, and every prefix of them is Truncated.
 // expect: run scalars_round_trip() = true
 fn scalars_round_trip() -> bool {

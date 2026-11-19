@@ -428,7 +428,7 @@ impl Emitter {
         let TyKind::Adt(d, args) = t.kind(ty).clone() else {
             return;
         };
-        let Some(&(_, maker)) = p.structural_codecs().iter().find(|(x, _)| *x == d) else {
+        let Some((maker, args)) = p.structural_codecs().maker(&*t, d, &args) else {
             return;
         };
         if let Ok((func, _)) = self.instance(p, t, maker as usize, &args) {

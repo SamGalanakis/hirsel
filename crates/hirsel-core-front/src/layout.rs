@@ -39,7 +39,7 @@ pub(crate) struct Shapes<'p, T: TyRead> {
     /// `.3` (its instance when the type is generic), for the caller to name.
     pub hooks: Vec<(TypeRef, Hook, u32, Vec<TyId>)>,
     /// The core types whose codec maker is std's ([`crate::Program::structural_codecs`]).
-    pub codecs: &'p [(DeclId, u32)],
+    pub codecs: &'p crate::StructuralCodecs,
     /// Closed codec tuples get their hook even when no source call requests it.
     pub tuple_codecs: Vec<(TypeRef, TyId)>,
 }
@@ -68,7 +68,7 @@ impl<T: TyRead> Shapes<'_, T> {
         ty: TyId,
         args: &[TyId],
     ) -> Option<FuncRef> {
-        let &(_, maker) = self.codecs.iter().find(|(x, _)| *x == d)?;
+        let (maker, args) = self.codecs.maker(&*self.types, d, args)?;
         if !self.module
             || has_param(&*self.types, ty)
             || crate::decls::has_bounds(self.decls, &*self.types, ty, &[]) & crate::decls::CODEC
@@ -76,7 +76,7 @@ impl<T: TyRead> Shapes<'_, T> {
         {
             return None;
         }
-        self.hooks.push((r, Hook::Codec, maker, args.to_vec()));
+        self.hooks.push((r, Hook::Codec, maker, args));
         Some(FuncRef(u32::MAX))
     }
     /// Whether `ty`'s declaration gives it `send` when every type argument is `send`
@@ -174,7 +174,7 @@ impl<T: TyRead> Shapes<'_, T> {
             }
             TyKind::Tuple(xs) => {
                 if self.module
-                    && !self.codecs.is_empty()
+                    && !self.codecs.rows_empty()
                     && !has_param(&*self.types, ty)
                     && crate::decls::has_bounds(self.decls, &*self.types, ty, &[])
                         & crate::decls::CODEC
@@ -810,7 +810,7 @@ pub(crate) fn recipes(p: &mut Program) {
         of: &mut of,
         module: false,
         hooks: vec![],
-        codecs: &[],
+        codecs: &crate::StructuralCodecs::NONE,
         tuple_codecs: vec![],
     };
     let mut roots = vec![];

@@ -593,10 +593,23 @@ impl Substitution<'_> {
                 if !arguments.iter().all(|&a| available(self.module, a)) {
                     return None;
                 }
+                let mut dictionaries: Vec<String> =
+                    dictionaries.iter().map(|d| d.render(&self.names)).collect();
+                let (mut definition, mut arguments) = (definition, arguments);
+                // A List reaching u8 by substitution takes the one byte-list codec,
+                // as a closed List[u8] does (`StructuralCodecs::maker`).
+                if definition.0.name == crate::STRUCTURAL_CODECS[0].1
+                    && let [element] = arguments[..]
+                    && self.module.types[element.index()].name == "u8"
+                {
+                    definition.0.name = crate::BYTES_CODEC.into();
+                    arguments.clear();
+                    dictionaries.clear();
+                }
                 let key = InstanceKey {
                     definition,
                     arguments,
-                    dictionaries: dictionaries.iter().map(|d| d.render(&self.names)).collect(),
+                    dictionaries,
                 };
                 if let Some(f) = self
                     .module
@@ -1096,7 +1109,7 @@ impl Emitter {
                     }
                 }
                 TyKind::Adt(d, args) => {
-                    if let Some(&(_, maker)) = p.structural_codecs().iter().find(|(x, _)| *x == d) {
+                    if let Some((maker, args)) = p.structural_codecs().maker(&*t, d, &args) {
                         let arguments = args
                             .iter()
                             .map(|&x| self.type_row(p, t, x))

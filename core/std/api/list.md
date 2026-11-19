@@ -13,7 +13,3 @@ outcomes precede mutation as stated in each source contract.
 refused growth. In a function returning `Result[_, Capacity]`, use
 `result.capacity_only(list.push(mut xs, take x))?` to clean the returned element
 and propagate only Capacity. Plain elements may be passed as `x` without `take`.
-
-`list.find_byte(xs, start, end, byte)` returns the first matching index in
-`xs[start..end]`, or `None`. It allocates nothing and fails with Bounds on an
-invalid range. `string.find` uses it to locate the first byte of its pattern.

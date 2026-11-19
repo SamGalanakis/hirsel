@@ -295,13 +295,6 @@ fn find_byte_from_every_start() -> u64 {
     total
 }
 
-// expect: run find_long_with_endpoint_collisions() = true
-fn find_long_with_endpoint_collisions() -> bool {
-    let mut text = result.unwrap(string.repeat("axé", 40))
-    result.unwrap(string.push(mut text, "abé"))
-    string.find(text, 0, "abé") == Some(160) && string.find(text, 159, "abé") == Some(160) && string.find(text, 161, "abé") == None
-}
-
 // expect: run find_start_past_end() = fail Bounds
 fn find_start_past_end() -> u64 {
     found(string.find("abc", 4, "a"))

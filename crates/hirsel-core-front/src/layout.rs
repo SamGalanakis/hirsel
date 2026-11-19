@@ -585,9 +585,9 @@ impl<T: TyRead> Shapes<'_, T> {
     }
 
     fn field_in(&mut self, ty: TyId, compact: bool) -> Option<FieldTy> {
-        Some(match self.types.kind(ty).clone() {
-            TyKind::Scalar(s) => FieldTy::Scalar(s),
-            TyKind::Anchored(x, _) => self.field_in(x, compact)?,
+        Some(match self.types.kind(ty) {
+            TyKind::Scalar(s) => FieldTy::Scalar(*s),
+            TyKind::Anchored(x, _) => self.field_in(*x, compact)?,
             TyKind::Adt(d, args) => match self.decls[d.index()].role {
                 Some(Role::Box) => FieldTy::Box(self.shape(args[0])?),
                 Some(Role::Rc) => FieldTy::Rc(self.shape(args[0])?),
@@ -660,7 +660,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 {
                     // MEM-10's optional link is a compact variant of its own, whose empty
                     // case is the link's zero distance (a niche the layout assigns).
-                    match self.types.kind(args[0]).clone() {
+                    match self.types.kind(args[0]) {
                         TyKind::Adt(link, _)
                             if self.decls[link.index()].role == Some(Role::Link) =>
                         {
@@ -686,18 +686,19 @@ impl<T: TyRead> Shapes<'_, T> {
                 // row and holders' fields are then the same (FORM #109).
                 if !matches!(
                     (
-                        crate::decls::kind(self.decls, self.types, x, &[]),
+                        crate::decls::kind(self.decls, self.types, *x, &[]),
                         self.module
                     ),
                     (crate::Kind::Plain | crate::Kind::Own, _) | (crate::Kind::Generic, true)
                 ) {
                     return None;
                 }
-                FieldTy::Array(Box::new(self.field(x)?), n)
+                let n = *n;
+                FieldTy::Array(Box::new(self.field(*x)?), n)
             }
             TyKind::Tuple(_) | TyKind::Unit | TyKind::Never => FieldTy::Inline(self.shape(ty)?),
             TyKind::Param(_) if self.module => FieldTy::Inline(self.shape(ty)?),
-            TyKind::View(x) => view_field(self.field_in(x, compact)?),
+            TyKind::View(x) => view_field(self.field_in(*x, compact)?),
             TyKind::Fn(_, _, _, callable) => match callable {
                 Callable::Plain => FieldTy::Fn,
                 Callable::Own | Callable::OwnSend => FieldTy::OwnFn,

@@ -602,10 +602,78 @@ fn agree_cases(input: &impl NativeInput, cases: &[Case], memory: bool) {
     }
 }
 
+enum RelativeDebugRow {
+    Authored {
+        item: hirsel_core_ids::DefPath,
+        start: u32,
+    },
+    Generated,
+}
 
-fn assert_relative_debug_rows(bytes: &[u8], module: &Module) {
-    use object::{Object as _, ObjectSection as _};
+impl RelativeDebugRow {
+    fn parse(path: &str, line: Option<std::num::NonZeroU64>) -> Option<Self> {
+        if path == "<generated>" {
+            return Some(Self::Generated);
+        }
+        let line = line?;
+        let item = hirsel_core_ids::DefPath::from_full(path)
+            .unwrap_or_else(|| panic!("not an item identity: {path}"));
+        Some(Self::Authored {
+            item,
+            start: (line.get() - 1) as u32,
+        })
+    }
+}
+
+fn assert_relative_debug_rows(
+    bytes: &[u8],
+    module: &Module,
+    expected_inline_sites: &[(hirsel_core_ids::DefPath, u32)],
+) {
+    use hirsel_core_ir::source::CodeRange;
+    use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+    let debug = assert_native_debug_product(bytes);
     let file = object::File::parse(bytes).unwrap();
+    let adapter_symbols = module
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(_, function)| {
+            let definition = &module.instances[function.instance.index()].definition;
+            definition.0.name.contains("$callable[")
+                && function.body.as_ref().is_some_and(|body| {
+                    body.inst_anchors.iter().all(Option::is_none)
+                        && body.blocks.iter().all(|block| block.anchor.is_none())
+                })
+        })
+        .map(|(i, _)| symbol(module, FuncId(i as u32)))
+        .collect::<std::collections::HashSet<_>>();
+    let text_sections = file
+        .sections()
+        .filter(|section| section.kind() == object::SectionKind::Text)
+        .map(|section| section.index())
+        .collect::<Vec<_>>();
+    let adapter_ranges: Vec<_> = file
+        .symbols()
+        .filter(|s| s.kind() == object::SymbolKind::Text && s.size() != 0 && !s.is_undefined())
+        .filter(|s| adapter_symbols.contains(s.name().unwrap().split('.').next().unwrap()))
+        .map(|s| CodeRange {
+            section: text_sections
+                .iter()
+                .position(|&section| Some(section) == s.section_index())
+                .unwrap() as u32,
+            begin: s.address(),
+            end: s.address() + s.size(),
+        })
+        .collect();
+    // Relocated rows carry a section index. Raw rows retain the synthetic
+    // filename, which the debug product represents as an absent source.
+    let mut machine_rows = debug.sequences.iter().flat_map(|sequence| {
+        sequence
+            .rows
+            .iter()
+            .map(move |row| (sequence.range.section, row))
+    });
     let data = file.section_by_name(".debug_line").unwrap().data().unwrap();
     let strings = file.section_by_name(".debug_str").unwrap().data().unwrap();
     let strings = gimli::DebugStr::new(strings, gimli::LittleEndian);
@@ -629,10 +697,11 @@ fn assert_relative_debug_rows(bytes: &[u8], module: &Module) {
             if row.end_sequence() {
                 continue;
             }
-            let Some(line) = row.line() else {
+            let (section, machine) = machine_rows.next().unwrap();
+            let Some(entry) = row.file(header) else {
+                assert!(row.line().is_none(), "debug row has no file");
                 continue;
             };
-            let entry = row.file(header).unwrap();
             let path = text(entry.path_name());
             let directory = header
                 .directory(entry.directory_index())
@@ -643,10 +712,23 @@ fn assert_relative_debug_rows(bytes: &[u8], module: &Module) {
             } else {
                 format!("{directory}/{path}")
             };
-            let item = hirsel_core_ids::DefPath::from_full(&path)
-                .unwrap_or_else(|| panic!("not an item identity: {path}"));
+            let (item, start) = match RelativeDebugRow::parse(&path, row.line()) {
+                Some(RelativeDebugRow::Authored { item, start }) => (item, start),
+                Some(RelativeDebugRow::Generated) => {
+                    assert!(
+                        adapter_ranges.iter().any(|range| {
+                            range.section == section
+                                && (range.begin..range.end).contains(&machine.offset)
+                        }),
+                        "generated row outside an adapter at {section}:{:#x}",
+                        machine.offset
+                    );
+                    assert!(machine.source.is_none());
+                    continue;
+                }
+                None => continue,
+            };
             let item = module.items.iter().position(|p| *p == item).unwrap();
-            let start = (line.get() - 1) as u32;
             assert!(
                 start == 0
                     || module
@@ -661,15 +743,84 @@ fn assert_relative_debug_rows(bytes: &[u8], module: &Module) {
                             .any(|a| a.item.index() == item && a.start == start)),
                 "debug offset {start} in {path}"
             );
+            let source = machine.source.unwrap();
+            assert_eq!(
+                (&debug.items[source.item as usize], source.start),
+                (&module.items[item], start)
+            );
             mapped += 1;
         }
         offset += 4 + length;
     }
     assert!(mapped > 0, "no item-relative machine rows");
-    assert_native_debug_product(bytes);
+    assert!(machine_rows.next().is_none(), "extra relocated debug rows");
+
+    assert_adapter_inline_sites(&debug, &adapter_ranges, expected_inline_sites);
 }
 
-fn assert_native_debug_product(bytes: &[u8]) {
+fn assert_adapter_inline_sites(
+    debug: &hirsel_core_ir::source::NativeDebug,
+    adapter_ranges: &[hirsel_core_ir::source::CodeRange],
+    expected_inline_sites: &[(hirsel_core_ids::DefPath, u32)],
+) {
+    use hirsel_core_ir::source::ScopeKind;
+    let mut inline_sites = std::collections::HashSet::new();
+    for scope in debug
+        .scopes
+        .iter()
+        .filter(|scope| scope.kind == ScopeKind::Inline)
+    {
+        let Some(declaration) = scope
+            .origin
+            .and_then(|origin| debug.scopes[origin as usize].declaration)
+        else {
+            continue;
+        };
+        let item = &debug.items[declaration.item as usize];
+        for range in &scope.ranges {
+            if !adapter_ranges.iter().any(|adapter| {
+                adapter.section == range.section
+                    && adapter.begin <= range.begin
+                    && range.end <= adapter.end
+            }) {
+                continue;
+            }
+            // A row covers bytes up to the next row or the end of its sequence.
+            let mut has_authored_row = false;
+            for sequence in debug
+                .sequences
+                .iter()
+                .filter(|sequence| sequence.range.section == range.section)
+            {
+                for (index, row) in sequence.rows.iter().enumerate() {
+                    let end = sequence
+                        .rows
+                        .get(index + 1)
+                        .map_or(sequence.range.end, |next| next.offset);
+                    if row.offset.max(range.begin) < end.min(range.end)
+                        && let Some(source) = row.source
+                        && source.item == declaration.item
+                    {
+                        has_authored_row = true;
+                        inline_sites.insert((item, source.start));
+                    }
+                }
+            }
+            assert!(
+                has_authored_row,
+                "inline range {range:?} in an adapter has no row for {item}"
+            );
+        }
+    }
+    for (item, start) in expected_inline_sites {
+        assert!(
+            inline_sites.contains(&(item, *start)),
+            "lost inlined operation at {item}:{start}"
+        );
+    }
+}
+
+fn assert_native_debug_product(bytes: &[u8]) -> hirsel_core_ir::source::NativeDebug {
     use hirsel_core_ir::source::ScopeKind;
     use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
     let unit = hirsel_core_ids::ContentHash::of_bytes(b"native debug witness");
@@ -740,4 +891,5 @@ fn assert_native_debug_product(bytes: &[u8]) {
     let off = finish_native_object(bytes.to_vec(), unit, false).unwrap();
     assert_eq!(off.bytes, bytes);
     assert!(off.debug.is_none());
+    debug
 }

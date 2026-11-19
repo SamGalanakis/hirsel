@@ -604,6 +604,15 @@ fn site_fixture(target: Target) {
         limit: u64::MAX,
         injection: None,
     });
+    let inline_fail_sites = ["child", "other"].map(|name| {
+        let definition = &module.functions[names[name].index()];
+        let item = module.instances[definition.instance.index()]
+            .definition
+            .clone();
+        let function_start = source.find(&format!("fn {name}(")).unwrap();
+        let fail_start = source[function_start..].find("fail(take message)").unwrap();
+        (item, fail_start as u32)
+    });
     let mut bindings = String::new();
     for (i, item) in module.items.iter().enumerate() {
         writeln!(
@@ -614,12 +623,13 @@ fn site_fixture(target: Target) {
         )
         .unwrap();
     }
-    for (opt, composed, debug_lines) in [
+    let fixtures = [
         (Optimization::None, false, true),
         (Optimization::Speed, false, true),
         (Optimization::Speed, true, true),
         (Optimization::Speed, false, false),
-    ] {
+    ]
+    .map(|(opt, composed, debug_lines)| {
         let bytes = if composed {
             module.llvm_program(
                 target,
@@ -630,6 +640,16 @@ fn site_fixture(target: Target) {
         } else {
             module.llvm_eager_object(target, opt, debug_lines)
         };
+        if debug_lines {
+            assert_relative_debug_rows(
+                &bytes,
+                &module,
+                if composed { &inline_fail_sites } else { &[] },
+            );
+        }
+        (opt, composed, debug_lines, bytes)
+    });
+    for (opt, composed, debug_lines, bytes) in fixtures {
         let file = object::File::parse(bytes.as_slice()).unwrap();
         let mut site_relocations = 0;
         for section in file.sections() {
@@ -677,7 +697,6 @@ fn site_fixture(target: Target) {
                     "{name}"
                 );
             }
-            assert_relative_debug_rows(&bytes, &module);
             let debug_strings = file.section_by_name(".debug_str").unwrap().data().unwrap();
             let debug_info = file.section_by_name(".debug_info").unwrap().data().unwrap();
             let has_subprogram = |name: &str| {

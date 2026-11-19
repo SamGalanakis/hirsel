@@ -1873,3 +1873,29 @@ fn test_scope_bound_to_caller(c: Clock, r: Random, tasks: Tasks) -> Result[(), (
 fn test_withheld_after_revocation(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_withheld_after_revocation(c, r, tasks) { Ok(()) } else { Error(()) }
 }
+
+fn reserve_registration() -> bool {
+    let half = 1u64 << 63u64
+    let quarter = 1u64 << 62u64
+    let policy = code.describe(runner.public_access)
+    let entry = code.describe(write)
+    let mut first: Calls = runner.registry()
+    result.unwrap(runner.policy(mut first, policy, list.new(), quarter, 8192))
+    if let Error(Bounds) = runner.transact(mut first, entry, half, 8192) {} else { return false }
+    let mut late: Calls = runner.registry()
+    result.unwrap(runner.transact(mut late, entry, half, 8192))
+    if let Error(Bounds) = runner.policy(mut late, policy, list.new(), quarter, 8192) {} else { return false }
+    match runner.transact(mut first, entry, 8, 18446744073709551615u64) {
+        Error(Bounds) => true,
+        _ => false,
+    }
+}
+
+pub fn law_serve_bounded_and_settled(c: Clock) -> bool waits {
+    reserve_registration() && store.law_call_reserve(c)
+}
+
+@test
+fn test_serve_bounded_and_settled(c: Clock) -> Result[(), ()] waits {
+    if law_serve_bounded_and_settled(c) { Ok(()) } else { Error(()) }
+}

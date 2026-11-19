@@ -27,7 +27,7 @@ pub type Row: codec + send { sub: u32, key: Bytes, value: Option[Bytes] }
 
 pub type Frame: codec + send = Hello(Option[Bytes], List[Want]) | Call(u32, u64, u32, u32, Bytes) | Subscribe(u32, u32, Bytes, Option[Bytes]) | Unsubscribe(u32) | Welcome(Bytes, u32, u64, Bytes, String, u64) | Placed(Entry) | Batch(u64, List[u32], List[Row], List[Done]) | Ended(u32, Outcome) | Reset(u64, List[Done])
 
-pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes) | PolicyTwice
+pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes) | PolicyTwice | Bounds
 
 pub const DEFAULT_STEPS: u64 = 1 << 30
 
@@ -371,6 +371,10 @@ pub fn registry[G: send, H: send]() -> Registry[G, H] {
 
 pub fn policy[G: send, H: send](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, Caller) -> Result[store.KeyScope, Capacity]], reads: List[String], n: u64, s: u64) -> Result[(), RegisterError] {
     if let Some(_) = r.key_policy { return Error(PolicyTwice) }
+    check_call_reserve(n, s, 0, 0)?
+    for (_, slot) in r.slots {
+        if let Transact(body_bytes, body_steps, ..) = slot { check_call_reserve(n, s, body_bytes, body_steps)? }
+    }
     let held: Result[List[String], Capacity] = clone(reads)
     match take held {
         Ok(take names) => {
@@ -379,6 +383,11 @@ pub fn policy[G: send, H: send](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, 
         },
         Error(c) => Error(Full(c))
     }
+}
+
+fn check_call_reserve(n_p: u64, s_p: u64, n_e: u64, s_e: u64) -> Result[(), RegisterError] {
+    let plan = store.Plan(n_p: n_p, s_p: s_p, n_e: n_e, s_e: s_e, reply_max: MAX_RETURNED_BYTES + 8u64)
+    match store.call_reserves(plan) { Some(_) => Ok(()), None => Error(Bounds) }
 }
 
 pub fn public_access(tx: store.Tx, author: Caller) -> Result[store.KeyScope, Capacity] {
@@ -593,7 +602,7 @@ pub fn release_digest(exported: List[Exported]) -> Result[Bytes, Capacity] {
 
 pub type Describe: codec + send { digest: Bytes, target: String, n_place: u64, exported: List[Exported] }
 
-pub type DescribeError: codec + send = PlaceCapacity(Room) | AlreadyRegistered(Bytes) | PolicyTwice
+pub type DescribeError: codec + send = PlaceCapacity(Room) | AlreadyRegistered(Bytes) | PolicyTwice | Bounds
 
 fn launch_emit(data: Bytes) -> bool { false }
 
@@ -689,6 +698,7 @@ pub fn main[G: send, H: send](a: Args, place: StaticFn[fn(mut Registry[G, H]) ->
                 Full(c) => PlaceCapacity(room(c)),
                 AlreadyRegistered(take key) => AlreadyRegistered(take key),
                 PolicyTwice => PolicyTwice,
+                Bounds => Bounds,
             }
             let codec: std.codec.Codec[DescribeError] = std.codec.of()
             let mut out: Bytes = list.new()
@@ -796,6 +806,8 @@ fn adapt_transact[H: send, A, R, E](f: StaticFn[fn(mut store.Tx, H, Caller, take
 }
 
 pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[G, H], f: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]], n: u64, s: u64) -> Result[(), RegisterError] {
+    let (n_p, s_p) = match r.key_policy { Some(configured) => (configured.n, configured.s), None => (0u64, 0u64) }
+    check_call_reserve(n_p, s_p, n, s)?
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let ce: std.codec.Codec[E] = std.codec.of()

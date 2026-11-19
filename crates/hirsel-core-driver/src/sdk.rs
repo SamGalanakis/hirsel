@@ -281,6 +281,7 @@ pub fn place_error(bytes: &[u8]) -> Result<String, Error> {
         ),
         1 => format!("AlreadyRegistered({:?})", r.bytes()?),
         2 => "PolicyTwice".to_owned(),
+        3 => "Bounds".to_owned(),
         _ => return Err("Malformed: describe error tag".into()),
     };
     r.done()?;
@@ -586,7 +587,8 @@ mod tests {
         );
         assert!(place_error(&capacity[..19]).is_err());
         assert_eq!(place_error(&[2, 0, 0, 0]).unwrap(), "PolicyTwice");
-        assert!(place_error(&[3, 0, 0, 0]).is_err());
+        assert_eq!(place_error(&[3, 0, 0, 0]).unwrap(), "Bounds");
+        assert!(place_error(&[4, 0, 0, 0]).is_err());
     }
     #[test]
     fn sdk_describe_result_is_the_complete_returned_codec() {

@@ -38,9 +38,11 @@ def manifest_sha256(manifest):
     return hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def native_provenance(command, manifest):
+def native_provenance(command, manifest, *, cwd=None):
     # Keep every option, with private directory paths represented by their
     # roles. The files that affect the build have separate content identities.
+    if cwd is None:
+        cwd = Path.cwd()
     flags = list(map(str, command[2:]))
     path_roles = {"--inputs": "manifest", "--store": "store", "--runtime": "runtime",
                   "--dir": "workload directory", "-o": "image"}
@@ -48,19 +50,21 @@ def native_provenance(command, manifest):
         if flag in path_roles:
             flags[index + 1] = path_roles[flag]
         elif flag == "--cc":
-            flags[index + 1] = sha256(Path(flags[index + 1]))
+            flags[index + 1] = sha256(cwd / flags[index + 1])
     return {
         "flags": flags,
         "manifest_sha256": manifest_sha256(manifest),
-        "compiler_sha256": sha256(Path(command[0])),
-        "runtime_archive_sha256": sha256(Path(command[command.index("--runtime") + 1])),
+        "compiler_sha256": sha256(cwd / command[0]),
+        "runtime_archive_sha256": sha256(cwd / command[command.index("--runtime") + 1]),
     }
 
 
-def write_native_report(binary, stdout, provenance):
+def write_native_report(binary, stdout, provenance, *, path=None):
     report = json.loads(stdout)
     report["measurement"] = provenance | {"image_sha256": sha256(binary)}
-    binary.with_name(f"{binary.name}-build.json").write_text(json.dumps(report) + "\n")
+    target = path if path is not None else binary.with_name(f"{binary.name}-build.json")
+    target.write_text(json.dumps(report) + "\n")
+    return report
 
 
 def fixture(upstream):

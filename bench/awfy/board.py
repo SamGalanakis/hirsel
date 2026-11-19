@@ -261,10 +261,11 @@ def compile_profile(target):
             "--config", "profile.release.overflow-checks=true"]
 
 
-def compile_commands(out, artifacts):
+def compile_commands(out):
     target = out / "target"
     executable = out / "hirsel"
-    hirsel = [artifacts["compiler"], "build", *release_flags(artifacts), "--inputs", "inputs.json",
+    hirsel = ["./pinned-compiler", "build", *release_flags({"runtime": "./pinned-runtime.a"}),
+              "--inputs", "inputs.json",
               "--core-product", "packages", "--store", "store", "--entry", "langarena@1/suite/main",
               "--dir", ".", "--grant", "Stdout", "--grant", "Tasks", "--limit", str(256 << 20), "-o", "hirsel"]
     return (out / "rust", out / "helper.hirsel", hirsel, cargo("build", "-j1", *compile_profile(target)),
@@ -295,7 +296,9 @@ def prepare_compile(out, artifacts, env):
     source.write_text(suite.suite_source())
     manifest["packages"][-1]["sources"].append({"file": str(source), "modules": ["suite"], "signatures": False})
     write_json(out / "inputs.json", manifest)
-    return compile_commands(out, artifacts)
+    (out / "pinned-compiler").symlink_to(artifacts["compiler"])
+    (out / "pinned-runtime.a").symlink_to(artifacts["runtime"])
+    return compile_commands(out)
 
 
 def compile_rows(board, out, prepared, fixture, tools):
@@ -316,6 +319,7 @@ def compile_rows(board, out, prepared, fixture, tools):
         certified = None
         label = f"LangArena {mode}"
         fixture_id = receipt.fixture_identity(out / "inputs.json", config)
+        provenance = build.native_provenance(hirsel, out / "inputs.json", cwd=out)
         commands = [("hirsel", hirsel, out, exe), ("rust", cargo_build, rust, rust_exe)]
         if mode == "edit":
             commands.reverse()
@@ -326,7 +330,11 @@ def compile_rows(board, out, prepared, fixture, tools):
             if sample["status"] not in ("ok", "missing-counter"):
                 continue
             if side == "hirsel":
-                certified = native(target / "stdout")
+                native_path = target / "stdout"
+                certified = native(native_path)
+                report = build.write_native_report(executable, native_path.read_bytes(), provenance,
+                                                   path=target / "build.json")
+                record = receipt.build_record(report)
             verify = subprocess.run([CAP, executable, config.name, name], env=env, cwd=out,
                                     capture_output=True, text=True)
             (target / "verification").write_text(verify.stdout + verify.stderr)
@@ -345,7 +353,8 @@ def compile_rows(board, out, prepared, fixture, tools):
             if side == "hirsel":
                 board.report["instruction_receipt"]["rows"].append({
                     "key": f"compile/{label}", "suite": "compile", "mode": mode, "certified": certified,
-                    "flags": list(map(str, command[2:])), "argv": list(map(str, command)),
+                    "flags": provenance["flags"], "argv": list(map(str, command)),
+                    "build_record": record, "image_sha256": record["image_sha256"],
                     "affinity": sorted(os.sched_getaffinity(0)), "marker": marker + "\n",
                     "stdout": verify.stdout, "sample": sample, **fixture_id, **tools,
                 })

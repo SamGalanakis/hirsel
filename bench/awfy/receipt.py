@@ -68,6 +68,27 @@ def runtime_fixture(suite, directory, upstream):
     return fixture_identity(directory / "hirsel-inputs.json", upstream / "rebench.conf")
 
 
+def build_record(report):
+    native = report["native"]
+    return {
+        **report["measurement"],
+        "accepted": report["accepted"] is True and not report.get("stopped"),
+        "linked": native["linked"],
+        "certified": native.get("step_charging_elided", False),
+    }
+
+
+def verified_build(row):
+    record = row.get("build_record")
+    if not isinstance(record, dict) or record.get("accepted") is not True or record.get("linked") is not True:
+        return False
+    for field in (*ARTIFACT_HASHES, "manifest_sha256", "image_sha256"):
+        value = row.get(field)
+        if not isinstance(value, str) or not re.fullmatch("[a-f0-9]{64}", value) or record.get(field) != value:
+            return False
+    return record.get("certified") is row["certified"] and record.get("flags") == row["flags"]
+
+
 def runtime_case(suite, name, directory, command, marker, fixture, tools):
     binary = command[0]
     path = binary.with_name(f"{binary.name}-build.json")
@@ -94,6 +115,7 @@ def runtime_case(suite, name, directory, command, marker, fixture, tools):
         "argv": [f"./{binary.name}", *map(str, command[1:])],
         "cwd": str(directory),
         "image_sha256": image,
+        "build_record": build_record(report),
         "marker": marker.decode(),
         **fixture,
         **tools,
@@ -234,14 +256,29 @@ def compare(before_path, after_path, threshold):
         raise ValueError(f"row sets differ (missing: {sorted(before.keys() - after.keys())}, "
                          f"unexpected: {sorted(after.keys() - before.keys())})")
     differences = {}
+    compiler_pairs = set()
     for key, left in before.items():
         right = after[key]
-        fields = [field for field in (*IDENTITY, "marker", "stdout") if left[field] != right[field]]
+        compiler_changed = left["compiler_sha256"] != right["compiler_sha256"]
+        fields = [field for field in (*IDENTITY, "marker", "stdout")
+                  if left[field] != right[field] and not (compiler_changed and field in ARTIFACT_HASHES)]
         if fields:
             differences[key] = fields
+        elif compiler_changed:
+            for path, row in ((before_path, left), (after_path, right)):
+                if not verified_build(row):
+                    raise ValueError(f"{path}: {key} requires a verified build record for a compiler pair")
+            if left["manifest_sha256"] != right["manifest_sha256"]:
+                differences[key] = ["manifest_sha256"]
+                continue
+            compiler_pairs.add(tuple(row[field] for row in (left, right) for field in ARTIFACT_HASHES))
     if differences:
         raise ValueError("identity differs: " + "; ".join(
             f"{key}: {', '.join(fields)}" for key, fields in differences.items()))
+    for base_compiler, base_runtime, candidate_compiler, candidate_runtime in sorted(compiler_pairs):
+        print(f"Variable compiler_sha256 {base_compiler} -> {candidate_compiler}")
+        runtime = "unchanged" if base_runtime == candidate_runtime else f"{base_runtime} -> {candidate_runtime}"
+        print(f"Paired runtime_archive_sha256 {runtime}")
     failed = False
     ratios = []
     for key, left in sorted(before.items()):
@@ -331,7 +368,7 @@ def main():
     for option in ("upstream", "awfy-build", "pool-build", "arena-build"):
         sampling.add_argument(f"--{option}", type=lambda path: Path(path).resolve())
     sampling.add_argument("--only", nargs="+", metavar="SUITE/ROW")
-    comparison = commands.add_parser("compare", help="fail on differing identity, missing rows or a threshold breach")
+    comparison = commands.add_parser("compare", help="compare matched rows, including verified compiler pairs")
     comparison.add_argument("baseline", type=Path)
     comparison.add_argument("candidate", type=Path)
     comparison.add_argument("--threshold", type=threshold, default=Decimal("0.5"), metavar="PERCENT")

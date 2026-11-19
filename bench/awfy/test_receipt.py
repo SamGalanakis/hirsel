@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 import build
-from receipt import make_receipt, runtime_case
+from receipt import build_record, make_receipt, runtime_case
 
 
 class InstructionGuard(unittest.TestCase):
@@ -27,6 +27,8 @@ class InstructionGuard(unittest.TestCase):
             "compiler_sha256": "a" * 64,
             "runtime_archive_sha256": "b" * 64,
             "fixture_sha256": "c" * 64,
+            "manifest_sha256": "e" * 64,
+            "image_sha256": "f" * 64,
             "marker": stdout,
             "stdout": stdout,
             "sample": {"status": "ok", "verified": True, "instructions": 69_882_571,
@@ -48,7 +50,7 @@ class InstructionGuard(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("CLBG::Mandelbrot 69,882,571 -> 71,302,841 (+2.032%) FAIL", result.stdout)
 
-            for field, value in (("affinity", [11]), ("compiler_sha256", "d" * 64),
+            for field, value in (("affinity", [11]), ("runtime_archive_sha256", "d" * 64),
                                  ("argv", ["./clbg-64", "one-iteration.json", "other"])):
                 with self.subTest(field=field):
                     changed = deepcopy(baseline)
@@ -56,6 +58,44 @@ class InstructionGuard(unittest.TestCase):
                     result = compare(changed)
                     self.assertEqual(result.returncode, 2)
                     self.assertIn(f"identity differs: arena/CLBG::Mandelbrot: {field}", result.stderr)
+
+            def record_build(receipt):
+                row, = receipt["rows"]
+                row["build_record"] = build_record({
+                    "accepted": True, "native": {"linked": True, "step_charging_elided": True},
+                    "measurement": {key: row[key] for key in ("compiler_sha256", "runtime_archive_sha256",
+                                                              "manifest_sha256", "image_sha256", "flags")},
+                })
+
+            paired = deepcopy(injected)
+            paired["rows"][0]["compiler_sha256"] = "d" * 64
+            record_build(paired)
+            result = compare(paired)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("base.json: arena/CLBG::Mandelbrot requires a verified build record", result.stderr)
+
+            record_build(baseline)
+            base.write_text(json.dumps(baseline))
+            result = compare(paired)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn(f"Variable compiler_sha256 {'a' * 64} -> {'d' * 64}", result.stdout)
+            self.assertIn("(+2.032%) FAIL", result.stdout)
+
+            paired["rows"][0]["runtime_archive_sha256"] = "e" * 64
+            result = compare(paired)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("candidate.json: arena/CLBG::Mandelbrot requires a verified build record", result.stderr)
+
+            record_build(paired)
+            result = compare(paired)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn(f"Paired runtime_archive_sha256 {'b' * 64} -> {'e' * 64}", result.stdout)
+
+            paired["rows"][0]["flags"] += ["--debug-lines", "on"]
+            record_build(paired)
+            result = compare(paired)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("identity differs: arena/CLBG::Mandelbrot: flags", result.stderr)
 
             missing = deepcopy(baseline)
             missing["rows"].clear()

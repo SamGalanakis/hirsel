@@ -1721,6 +1721,42 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let zero = self.konst(ty, 0, n)?;
             return self.numeric_arith(ty, ArithOp::Sub, zero, vals[0]?, n);
         }
+        if name == "abs" {
+            // `if a < 0 { -a } else { a }`: the negation is `-a`'s own checked
+            // negation, so MIN fails with `-a`'s cause at the call's site.
+            let a = vals[0]?;
+            if !signed {
+                return Some(a);
+            }
+            let zero = self.konst(ty, 0, n)?;
+            let negative = self.numeric_compare(CompareOp::Lt, a, zero, n);
+            let arm = self.new_block(&[]);
+            let join = self.new_block(&[ty]);
+            let (yes, no) = (self.edge(arm, &[]), self.edge(join, &[a]));
+            self.end(
+                Terminator::Branch {
+                    condition: negative,
+                    yes,
+                    no,
+                },
+                Some(n),
+            );
+            self.start(arm);
+            let result = self.value(ty);
+            let fail = self.fail_to(n);
+            self.inst(
+                Inst::Unary {
+                    result,
+                    op: UnaryOp::Neg,
+                    operand: a,
+                    fail,
+                },
+                n,
+            );
+            self.jump(join, &[result], n);
+            self.start(join);
+            return self.block_params(join).first().copied();
+        }
         if name == "wrapping_shl" {
             let mask = self.konst(Ty::Scalar(Scalar::U32), u64::from(width - 1), n)?;
             let count =

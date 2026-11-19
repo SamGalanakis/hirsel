@@ -7,6 +7,8 @@ pub fn wrapping_mul[T: integer](a: T, b: T) -> T
 
 pub fn wrapping_neg[T: integer](a: T) -> T
 
+pub fn abs[T: integer](a: T) -> T
+
 pub fn wrapping_shl[T: integer](a: T, n: u32) -> T
 
 pub fn checked_add[T: integer](a: T, b: T) -> Option[T]

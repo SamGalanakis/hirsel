@@ -243,7 +243,8 @@ operations it names; nothing else about them may be inferred from an implementat
   every `T` fits in `U`, and `int.truncate` only where `U` is no wider than `T`
   ([SEM-1](semantics.md#sem-1-integers)); `int.narrow` fails with `Overflow`; `int.truncate` keeps
   the low bits of the destination's width. `wrapping_neg` and `wrapping_shl` work modulo 2^width, `wrapping_shl` taking
-  its count modulo the width. `checked_div` returns `None` for a zero divisor and for `MIN /
+  its count modulo the width. `int.abs(a)` is `a` on an unsigned type; on a signed type it is `-a` for
+  a negative `a` and `a` otherwise, so `int.abs(MIN)` fails with `Overflow` at the call, as `-MIN` does. `checked_div` returns `None` for a zero divisor and for `MIN /
   -1`. `int.mul_wide(a, b)` returns the high and low halves of the exact 128-bit product.
   `int.parse` reads ASCII decimal digits, with one leading `-` for a signed `T` and no other
   sign, space or underscore. It checks the whole grammar before the range: it returns

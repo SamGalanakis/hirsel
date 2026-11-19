@@ -198,6 +198,7 @@ operations! {
     ("int", "wrapping_sub", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "wrapping_mul", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "wrapping_neg", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "abs", Lane::Numeric, "A", "runtime-gap-1346", false),
     ("int", "wrapping_shl", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "checked_add", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "checked_sub", Lane::Numeric, "A", "core-check-index-912", false),

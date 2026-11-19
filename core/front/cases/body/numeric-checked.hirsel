@@ -10,6 +10,10 @@
 // expect: run narrow(255) = 255
 // expect: run try_narrow(-1) = 77
 // expect: run try_narrow(255) = 255
+// expect: run abs_i64(-9223372036854775808) = fail Overflow@58:5
+// expect: run abs_i32(-2147483648) = fail Overflow@62:5
+// expect: run abs_i32(-7) = 7
+// expect: run abs_u64(18446744073709551615) = 18446744073709551615
 fn add(a: u8, b: u8) -> u8 {
     match int.checked_add(a, b) {
         Some(x) => x,
@@ -48,4 +52,16 @@ fn try_narrow(a: i64) -> u8 {
         Some(x) => x,
         None => 77
     }
+}
+
+fn abs_i64(a: i64) -> i64 {
+    int.abs(a)
+}
+
+fn abs_i32(a: i32) -> i32 {
+    int.abs(a)
+}
+
+fn abs_u64(a: u64) -> u64 {
+    int.abs(a)
 }

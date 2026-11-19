@@ -139,6 +139,7 @@ pub struct Program<'a> {
     tuple_codec_protocol: std::sync::OnceLock<Option<TupleCodecProtocol>>,
     /// Published type spellings shared by body arenas; local types stay local.
     layout_type_names: std::sync::OnceLock<Vec<std::sync::OnceLock<String>>>,
+    flow_holds: std::sync::OnceLock<Vec<std::sync::OnceLock<(u8, u64)>>>,
 }
 
 /// The core types lowering builds, matches or lays out without the program naming
@@ -486,6 +487,7 @@ impl<'a> Program<'a> {
             structural_codecs: std::sync::OnceLock::new(),
             tuple_codec_protocol: std::sync::OnceLock::new(),
             layout_type_names: std::sync::OnceLock::new(),
+            flow_holds: std::sync::OnceLock::new(),
         }
     }
 

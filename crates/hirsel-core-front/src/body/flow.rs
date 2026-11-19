@@ -42,10 +42,17 @@ impl Cx<'_, '_, '_> {
         if ty <= HOLE {
             return;
         }
-        let (holds, parameters) = *self
-            .flow_holds
-            .entry(ty)
-            .or_insert_with(|| holds_components(&self.p.decls, &self.t, ty));
+        let i = ty.0 as usize;
+        let facts = || holds_components(&self.p.decls, &self.t, ty);
+        let (holds, parameters) = if let Some(shared) = self.shared_flow_holds.get(i) {
+            *shared.get_or_init(facts)
+        } else {
+            let i = i - self.shared_flow_holds.len();
+            if i >= self.local_flow_holds.len() {
+                self.local_flow_holds.resize(i + 1, None);
+            }
+            *self.local_flow_holds[i].get_or_insert_with(facts)
+        };
         let holds = holds & (H_RESOURCE | H_CAPABILITY);
         if holds != 0 || parameters != 0 {
             let when = if holds != 0 { 0 } else { parameters };

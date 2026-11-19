@@ -43,6 +43,7 @@ pub(crate) struct Plan<'a> {
     parameters: Vec<Requirement<'a>>,
     cleanup: Option<String>,
     launch_digest_unused: bool,
+    uses_simd_versions: bool,
     release_sites: &'a [hirsel_core_ir::source::ReleaseSite],
     root_limit: u64,
     grant_mask: u64,
@@ -125,6 +126,7 @@ impl<'a> Plan<'a> {
             exit_offset: binding.exit_offset,
             parameters,
             launch_digest_unused: launch_digest_unused && cleanup.is_none(),
+            uses_simd_versions: false,
             release_sites: &[],
             cleanup,
             root_limit: options.root_limit,
@@ -144,6 +146,11 @@ impl<'a> Plan<'a> {
         sites: &'a [hirsel_core_ir::source::ReleaseSite],
     ) -> Self {
         self.release_sites = sites;
+        self
+    }
+
+    pub(crate) fn with_simd_versions(mut self, enabled: bool) -> Self {
+        self.uses_simd_versions = enabled;
         self
     }
 

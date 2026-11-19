@@ -3297,21 +3297,51 @@ fn simd_llvm_matches_evaluator() {
             .collect();
         let exports: Vec<_> = exports.into_iter().collect();
         let release = hirsel_llvm_lazy::emit_program_for_target(&units, &exports, target).unwrap();
-        let reports = execute_target_object(
-            &module,
-            &cases,
-            "",
-            "",
-            Optimization::Speed,
-            Some(release),
-            target,
-        );
-        // The production builder has no allocation-injection test hooks.
-        // Compare its byte balance and observable bounds/capacity results.
-        for (case, report) in cases.iter().zip(&reports) {
-            let expected = eval::run(&module, case.function, &case.args, case.limit);
-            assert_eq!(report.used, expected.used, "native byte balance");
+        let caps: Vec<_> = if target == Target::X86_64Linux {
+            hirsel_core_layout::isa::X86_64_LEVELS
+                .iter()
+                .map(|level| level.number)
+                .collect()
+        } else {
+            vec![0]
+        };
+        for cap in caps {
+            let bindings = if cap == 0 {
+                String::new()
+            } else {
+                format!(
+                    r#"
+#include <stdatomic.h>
+extern int setenv(const char *, const char *, int);
+extern _Atomic uint8_t hirsel_core_isa_level;
+extern void hirsel_core_init_isa(void);
+__attribute__((constructor)) static void simd_test_level(void) {{
+    assert(setenv("HIRSEL_ISA_CAP", "{cap}", 1) == 0);
+    hirsel_core_init_isa();
+    assert(atomic_load(&hirsel_core_isa_level) == {cap});
+}}
+"#
+                )
+            };
+            let reports = execute_target_object(
+                &module,
+                &cases,
+                &bindings,
+                "",
+                Optimization::Speed,
+                Some(release.clone()),
+                target,
+            );
+            // The production builder has no allocation-injection test hooks.
+            // Compare its byte balance and observable bounds/capacity results.
+            for (case, report) in cases.iter().zip(&reports) {
+                let expected = eval::run(&module, case.function, &case.args, case.limit);
+                assert_eq!(
+                    report.used, expected.used,
+                    "native byte balance at cap {cap}"
+                );
+            }
+            check_native_reports(&module, &cases, reports, false);
         }
-        check_native_reports(&module, &cases, reports, false);
     }
 }

@@ -20,6 +20,8 @@ pub mod flow;
 mod growth;
 pub mod host_file;
 pub mod host_ops;
+#[cfg(target_arch = "x86_64")]
+mod isa;
 pub mod isolate;
 pub mod latest;
 pub mod limit;

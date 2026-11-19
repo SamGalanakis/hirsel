@@ -33,4 +33,8 @@ the load or store. The store reserves only the appended length.
 A function's text header carries `versioned` when the checker finds a vector
 type after typing, including those it inferred. Closures carry their own
 marks. The evaluator and Cranelift operate lane by lane. LLVM emits fixed
-vector IR and one function body for the target.
+vector IR. In x86-64 release builds, it emits each versioned body for the
+psABI levels in the shared detection table. Calls between those bodies use
+the same level. A vector-free entry stub reads the level chosen at executable
+startup. AArch64 emits one NEON body. Every body keeps the source function's
+identity and revision.

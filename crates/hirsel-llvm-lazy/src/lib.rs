@@ -167,6 +167,8 @@ pub fn emit_program_parts(
         })
         .collect::<Vec<_>>();
     let neutral = (!elide_steps).then(|| core::step_neutral_program(&modules));
+    let versions = (target == hirsel_core_layout::Target::X86_64Linux)
+        .then(|| core::versioned_program(&modules));
     let mut lowered = Vec::with_capacity(units.len());
     for unit in units {
         match unit {
@@ -184,6 +186,7 @@ pub fn emit_program_parts(
                     *observe_charge,
                     *debug_lines,
                     neutral.as_ref(),
+                    versions.as_ref(),
                 )
                 .map_err(|e| e.to_string())?,
             )),

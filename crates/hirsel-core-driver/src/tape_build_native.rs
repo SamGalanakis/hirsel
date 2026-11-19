@@ -624,3 +624,52 @@ fn tape_http_replays_both_native_engines() {
         assert!(error.contains("Diverged(Arg)"), "{engine}: {error}");
     }
 }
+
+/// An ISA cap changes the machine body called by the entry, and has no tape
+/// or descriptor identity. The independently computed swizzle checksum is
+/// the same at both caps. The low-cap replay consumes the high-cap record.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn simd_versions_preserve_run_tape_and_revision() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let tape = dir.path().join("vector.tape");
+    let source = format!(
+        "{}\npub fn main(output: Stdout) -> Result[(), Exit] waits {{
+    if swizzle_32_32(255) != 6182210682794503310 {{ return Error(Exit(status: 6)) }}
+    result.unwrap(stdout.write(output, \"simd\"))
+    Ok(())
+}}",
+        include_str!("../../../core/front/fixtures/simd-differential.hirsel"),
+    );
+    let mut request = source_request(&source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted());
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(Backend::Llvm, dir.path());
+    options.optimize = true;
+    options.grant_mask = 1 << grant_kind("Stdout").unwrap();
+    let mut run = |mode, cap: &str| {
+        options.tape = Some(crate::RunTape { path: tape.to_str().unwrap().into(), mode });
+        let built = product.build(&entry, &options).unwrap();
+        assert_eq!(built.revision.0, code_revision_of(&built.executable));
+        let output = Command::new(&built.executable)
+            .env("HIRSEL_ISA_CAP", cap)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        (built.revision, output.stdout)
+    };
+    let levels = hirsel_core_layout::isa::X86_64_LEVELS;
+    let (revision, recorded) = run(crate::RunTapeMode::Record, &levels.last().unwrap().number.to_string());
+    assert_eq!(recorded, b"simd");
+    let bytes = std::fs::read(&tape).unwrap();
+    let (replay_revision, replayed) = run(crate::RunTapeMode::Replay, &levels[0].number.to_string());
+    assert_eq!(revision, replay_revision);
+    assert!(replayed.is_empty());
+    assert_eq!(std::fs::read(&tape).unwrap(), bytes);
+}

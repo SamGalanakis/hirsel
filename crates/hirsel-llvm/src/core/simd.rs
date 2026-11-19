@@ -169,6 +169,26 @@ impl FunctionEmitter<'_> {
                 .collect();
             return self.emit(Operation::Shuffle(&table_ty, bytes, &Value::Zero, &mask));
         }
+        if output.lanes() == 32 && self.level.is_some_and(|level| level.number >= 3) {
+            let wide = vector_type(32, 8);
+            let broadcast = std::array::from_fn::<_, 32, _>(|lane| (lane % 16) as i32);
+            let low = self.emit(Operation::Shuffle(
+                &table_ty,
+                bytes,
+                &Value::Poison,
+                &broadcast,
+            ));
+            let high = (table.lanes() == 32).then(|| {
+                let broadcast = broadcast.map(|lane| lane + 16);
+                self.emit(Operation::Shuffle(
+                    &table_ty,
+                    bytes,
+                    &Value::Poison,
+                    &broadcast,
+                ))
+            });
+            return self.swizzle_pshufb(&wide, 32, &low, high.as_ref(), indices);
+        }
         const LOW: [i32; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         const HIGH: [i32; 16] = [
             16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
@@ -214,6 +234,9 @@ impl FunctionEmitter<'_> {
             };
             return self.intrinsic(name, ty.clone(), &args);
         }
+        if self.level.is_some_and(|level| level.number >= 2) {
+            return self.swizzle_pshufb(ty, 16, low, high, indices);
+        }
         let mask_ty = vector_type(16, 1);
         let mut result = Value::Zero;
         for (half, table) in std::iter::once(low).chain(high).enumerate() {
@@ -228,6 +251,63 @@ impl FunctionEmitter<'_> {
             }
         }
         result
+    }
+
+    fn swizzle_pshufb(
+        &mut self,
+        ty: &Type,
+        width: u64,
+        low: &Value,
+        high: Option<&Value>,
+        indices: &Value,
+    ) -> Value {
+        let shuffle = if width == 32 {
+            "llvm.x86.avx2.pshuf.b"
+        } else {
+            "llvm.x86.ssse3.pshuf.b.128"
+        };
+        let Some(high) = high else {
+            // 0..15 retains its low nibble. Every larger byte saturates into
+            // 0x80..0xff, whose top bit makes PSHUFB zero that lane.
+            let clamp = self.splat(ty, &Type::I8, width, &int(0x70));
+            let indices = self.intrinsic(
+                &format!("llvm.uadd.sat.v{width}i8"),
+                ty.clone(),
+                &[arg(ty.clone(), indices.clone()), arg(ty.clone(), clamp)],
+            );
+            return self.intrinsic(
+                shuffle,
+                ty.clone(),
+                &[arg(ty.clone(), low.clone()), arg(ty.clone(), indices)],
+            );
+        };
+        let nibble = self.splat(ty, &Type::I8, width, &int(15));
+        let within = self.bin(Binary::And, ty, indices, &nibble);
+        let lo = self.intrinsic(
+            shuffle,
+            ty.clone(),
+            &[
+                arg(ty.clone(), low.clone()),
+                arg(ty.clone(), within.clone()),
+            ],
+        );
+        let hi = self.intrinsic(
+            shuffle,
+            ty.clone(),
+            &[arg(ty.clone(), high.clone()), arg(ty.clone(), within)],
+        );
+        let upper = self.cmp(Predicate::Ugt, ty, indices, &nibble);
+        let mask = vector_type(width, 1);
+        let selected = self.emit(Operation::VectorSelect(ty, &mask, &upper, &hi, &lo));
+        let limit = self.splat(ty, &Type::I8, width, &int(32));
+        let valid = self.cmp(Predicate::Ult, ty, indices, &limit);
+        self.emit(Operation::VectorSelect(
+            ty,
+            &mask,
+            &valid,
+            &selected,
+            &Value::Zero,
+        ))
     }
 
     pub(super) fn put_lanes(&mut self, to: AddressId, vector: ValueId, count: ValueId) {

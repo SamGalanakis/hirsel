@@ -601,6 +601,7 @@ pub(super) struct FnAttrs {
     /// words on direct calls).
     pub carriers: String,
     pub subprogram: Option<usize>,
+    pub level: Option<hirsel_core_layout::isa::Level>,
 }
 impl Default for FnAttrs {
     fn default() -> Self {
@@ -611,6 +612,7 @@ impl Default for FnAttrs {
             argmem_read: false,
             carriers: String::new(),
             subprogram: None,
+            level: None,
         }
     }
 }
@@ -801,6 +803,9 @@ fn function_attrs(out: &mut String, attrs: &FnAttrs) {
     }
     if !attrs.carriers.is_empty() {
         write!(out, " \"hirsel-carriers\"=\"{}\"", attrs.carriers).unwrap();
+    }
+    if let Some(level) = attrs.level {
+        write!(out, " \"target-features\"=\"{}\"", level.llvm_features()).unwrap();
     }
     if let Some(scope) = attrs.subprogram {
         write!(out, " !dbg !{scope}").unwrap();

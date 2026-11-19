@@ -484,6 +484,7 @@ struct Emitted {
     table: Option<Table>,
     step_charging_elided: bool,
     launch_digest_unused: bool,
+    uses_simd_versions: bool,
     release_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
 }
 
@@ -534,6 +535,7 @@ impl CheckProduct {
             table,
             step_charging_elided: false,
             launch_digest_unused: false,
+            uses_simd_versions: false,
             release_sites: Vec::new(),
         })
     }
@@ -843,6 +845,7 @@ impl CheckProduct {
             table,
             step_charging_elided,
             launch_digest_unused,
+            uses_simd_versions,
             release_sites,
         } = self.emit_reached(entry, reached, options, true)?;
         let store = Store::new(&options.store)?;
@@ -927,7 +930,8 @@ impl CheckProduct {
             launch_digest_unused,
             options,
         )?
-        .with_release_sites(&release_sites);
+        .with_release_sites(&release_sites)
+        .with_simd_versions(uses_simd_versions);
         let image = self
             .image
             .as_ref()

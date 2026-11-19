@@ -39,6 +39,7 @@ pub(super) fn glue_emitter<'a>(
 ) -> FunctionEmitter<'a> {
     FunctionEmitter {
         function: None,
+        level: None,
         call_layouts: None,
         append_fast: false,
         shadow_callee: None,

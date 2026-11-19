@@ -36,6 +36,7 @@ mod tasks;
 #[cfg(all(test, not(hirsel_lazy_core)))]
 mod tests;
 mod values;
+mod versions;
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Write};
@@ -48,7 +49,10 @@ use sink::{
 
 use hirsel_core_ir::failure;
 use hirsel_core_ir::*;
-use hirsel_core_layout::Target;
+use hirsel_core_layout::{
+    Target,
+    isa::{Level, X86_64_LEVELS},
+};
 
 #[cfg(not(hirsel_lazy_core))]
 use crate::context::{Context, Module as LlvmModule, TargetMachine};
@@ -259,6 +263,7 @@ fn emit_ir_target_with_role_facts(
 /// declarations by result type and name, the shared byte order, module asm.
 struct Items {
     function_symbols: Vec<String>,
+    versioned: Option<Vec<bool>>,
     pending: std::collections::BTreeMap<String, Item>,
     release_sites: Option<ReleaseSites>,
 }
@@ -281,9 +286,13 @@ impl Items {
     fn new(module: &Module) -> Self {
         Self {
             function_symbols: module.link_symbols(),
+            versioned: None,
             pending: Default::default(),
             release_sites: None,
         }
+    }
+    fn is_versioned(&self, function: FuncId) -> bool {
+        self.versioned.as_ref().is_some_and(|v| v[function.index()])
     }
     fn function_symbol(&self, function: FuncId) -> &str {
         &self.function_symbols[function.index()]
@@ -363,6 +372,11 @@ struct EmissionFacts<'a> {
     elide_steps: bool,
     prepay_step_trees: bool,
     release_sites: bool,
+    versions: Option<&'a BTreeSet<hirsel_core_ids::ContentHash>>,
+}
+#[cfg(hirsel_lazy_core)]
+pub(crate) fn versioned_program(modules: &[&Module]) -> BTreeSet<hirsel_core_ids::ContentHash> {
+    versions::program(modules)
 }
 #[cfg(hirsel_lazy_core)]
 pub(crate) fn step_neutral_program(modules: &[&Module]) -> BTreeSet<hirsel_core_ids::ContentHash> {
@@ -388,6 +402,28 @@ fn emit_module(
         .flatten();
     let module = exposed.as_ref().unwrap_or(module);
     let mut items = Items::new(module);
+    if let Some(known) = provided.versions.filter(|known| !known.is_empty()) {
+        items.versioned = Some(
+            module
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    f.versioned || known.contains(&module.code_identity(FuncId(i as u32)))
+                })
+                .collect(),
+        );
+        sink.global(&Global {
+            name: "hirsel_core_isa_level".into(),
+            linkage: Linkage::External,
+            constant: false,
+            externally_initialized: false,
+            ty: Type::I8,
+            init: None,
+            align: 1,
+            absolute_symbol: false,
+        });
+    }
     items.release_sites = provided.release_sites.then(ReleaseSites::default);
     let batch_steps = source.batch_steps && !provided.elide_steps;
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
@@ -515,12 +551,13 @@ fn emit_module(
         sites::debug_plan(
             module,
             &items.function_symbols,
+            items.versioned.as_deref(),
             &failures,
             &mut next_scope,
             sink,
         )
     } else {
-        module.functions.iter().map(|_| None).collect()
+        sites::DebugPlan::default()
     };
     let local_roles =
         (facts && provided.roles.is_none()).then(|| hirsel_core_ir::roles::Facts::new(module));
@@ -531,8 +568,9 @@ fn emit_module(
         let has_status = failures.may_fail[i];
         let abi =
             abi::Return::for_signature(target, sig, &call_layouts, has_status || f.body.is_none());
-        let name = items.function_symbols[i].clone();
-        let (params, locals) = abi.parameters(sig, &call_layouts, facts, |place| match place {
+        let mut name = items.function_symbols[i].clone();
+        let versioned = items.is_versioned(FuncId(i as u32));
+        let (mut params, locals) = abi.parameters(sig, &call_layouts, facts, |place| match place {
             PlaceTy::Value(t) => size(t),
             PlaceTy::Declared(t)
                 if matches!(
@@ -548,9 +586,43 @@ fn emit_module(
             },
         });
         let Some(body) = &f.body else {
-            sink.declare(&name, &abi.signature(params), &FnAttrs::default());
+            let signature = abi.signature(params);
+            if !versioned || !sig.has_vectors() {
+                sink.declare(&name, &signature, &FnAttrs::default());
+            }
+            if versioned {
+                for &level in X86_64_LEVELS {
+                    let attrs = FnAttrs {
+                        level: Some(level),
+                        ..FnAttrs::default()
+                    };
+                    sink.declare(&versions::symbol(&name, level), &signature, &attrs);
+                }
+            }
             continue;
         };
+        if versioned && !sig.has_vectors() {
+            if !has_status {
+                versions::stub(
+                    sink,
+                    &name,
+                    &abi.signature(params.clone()),
+                    &locals,
+                    Linkage::Internal,
+                    true,
+                );
+            }
+            let public = abi::Return::for_signature(target, sig, &call_layouts, true);
+            let (params, locals) = public.parameters(sig, &call_layouts, false, |_| 0);
+            versions::stub(
+                sink,
+                &name,
+                &public.signature(params),
+                &locals,
+                Linkage::WeakOdr,
+                false,
+            );
+        }
         let definition = module.instances[f.instance.index()].definition.to_string();
         let append_fast = definition == "core@1/string/push_char";
         let shadow_callee = append_fast
@@ -566,71 +638,88 @@ fn emit_module(
                 })
             })
             .flatten();
-        let function_debug = debug[i].as_ref();
-        let aliases = role_facts.as_ref().and_then(|r| {
-            alias::Scopes::new(
-                module,
-                r,
-                FuncId(i as u32),
-                &name,
-                &mut next_scope,
-                sink,
-                &mut items,
-            )
-        });
-        let flow = flow::Flow::new(body);
-        let mut e = FunctionEmitter {
-            function: Some(FuncId(i as u32)),
-            call_layouts: Some(&call_layouts),
-            append_fast,
-            shadow_callee,
-            caller_site: Value::Local(Local::CALLER_SITE),
-            debug_location: function_debug.map(|d| d.location(None)),
-            anchor: None,
-            relocatable_sites: source.relocatable_sites,
-            test_hooks: source.test_hooks,
-            value_slots: values::slots(body, &flow),
-            static_vectors: f.versioned.then(|| simd::static_vectors(body)),
-            literals: Vec::new(),
-            address_slots: values::address_slots(body, &flow),
-            scoped: hirsel_core_ir::extent::scoped_slots(body, &module.signatures),
-            live: None,
-            scoped_ended: false,
-            step_labels: Default::default(),
-            unchecked_steps: false,
-            precharge: None,
-            step_neutral: step_neutral.as_deref(),
-            step_counter: None,
-            neutral_step_call: false,
-            view_invariants: Vec::new(),
-            aliases,
-            module,
-            body,
-            recipes: &recipes,
-            abi,
-            has_status,
-            failures: &failures,
-            constants: &failures.constants[i],
-            observe_charge,
-            receive_loops: hirsel_core_ir::receive_loops::ReceiveLoops::new(body),
-            facts,
-            empty_bounds: if observe_charge {
-                empty::EmptyBounds::default()
+        let variants = if versioned { X86_64_LEVELS.len() } else { 1 };
+        let mut abi = Some(abi);
+        for variant in 0..variants {
+            let level = versioned.then(|| X86_64_LEVELS[variant]);
+            let name = match level {
+                Some(level) => versions::symbol(&name, level),
+                None => std::mem::take(&mut name),
+            };
+            let (signature_abi, signature_params) = if variant + 1 == variants {
+                (abi.take().unwrap(), std::mem::take(&mut params))
             } else {
-                empty::EmptyBounds::new(body, &failures.constants[i])
-            },
-            sink: &mut *sink,
-            items: &mut items,
-            next: 0,
-            fixed_point: None,
-            fixed_rank: None,
-        };
-        let body_name = if has_status {
-            name.clone()
-        } else {
-            format!("{name}.infallible")
-        };
-        let attrs = FnAttrs {
+                (
+                    abi::Return::for_signature(target, sig, &call_layouts, has_status),
+                    params.clone(),
+                )
+            };
+            let function_debug = debug.get(i, level);
+            let aliases = role_facts.as_ref().and_then(|r| {
+                alias::Scopes::new(
+                    module,
+                    r,
+                    FuncId(i as u32),
+                    &name,
+                    &mut next_scope,
+                    sink,
+                    &mut items,
+                )
+            });
+            let flow = flow::Flow::new(body);
+            let mut e = FunctionEmitter {
+                function: Some(FuncId(i as u32)),
+                level,
+                call_layouts: Some(&call_layouts),
+                append_fast,
+                shadow_callee,
+                caller_site: Value::Local(Local::CALLER_SITE),
+                debug_location: function_debug.map(|d| d.location(None)),
+                anchor: None,
+                relocatable_sites: source.relocatable_sites,
+                test_hooks: source.test_hooks,
+                value_slots: values::slots(body, &flow),
+                static_vectors: f.versioned.then(|| simd::static_vectors(body)),
+                literals: Vec::new(),
+                address_slots: values::address_slots(body, &flow),
+                scoped: hirsel_core_ir::extent::scoped_slots(body, &module.signatures),
+                live: None,
+                scoped_ended: false,
+                step_labels: Default::default(),
+                unchecked_steps: false,
+                precharge: None,
+                step_neutral: step_neutral.as_deref(),
+                step_counter: None,
+                neutral_step_call: false,
+                view_invariants: Vec::new(),
+                aliases,
+                module,
+                body,
+                recipes: &recipes,
+                abi: signature_abi,
+                has_status,
+                failures: &failures,
+                constants: &failures.constants[i],
+                observe_charge,
+                receive_loops: hirsel_core_ir::receive_loops::ReceiveLoops::new(body),
+                facts,
+                empty_bounds: if observe_charge {
+                    empty::EmptyBounds::default()
+                } else {
+                    empty::EmptyBounds::new(body, &failures.constants[i])
+                },
+                sink: &mut *sink,
+                items: &mut items,
+                next: 0,
+                fixed_point: None,
+                fixed_rank: None,
+            };
+            let body_name = if has_status {
+                name.clone()
+            } else {
+                format!("{name}.infallible")
+            };
+            let attrs = FnAttrs {
             linkage: if has_status {
                 Linkage::WeakOdr
             } else {
@@ -671,228 +760,230 @@ fn emit_module(
             },
             carriers: carriers(module, &recipes, role_facts, FuncId(i as u32), sig, &locals),
             subprogram: function_debug.map(|d| d.scope),
+            level,
             ..FnAttrs::default()
         };
-        let signature = e.abi.signature(params);
-        e.sink
-            .begin_function(&body_name, &signature, &locals, &attrs);
-        if !provided.elide_steps && body.insts.iter().any(|i| matches!(i, Inst::Step { .. })) {
-            let counter = Local::Named("hirsel.step.counter");
-            e.sink.alloca(counter, &Type::I64, 8);
-            e.step_counter = Some(counter.into());
-            e.reload_steps();
-        }
-        // Eager and lazy objects use the same exact-metering CFG at every
-        // optimization level. LLVM promotes its joins to registers at Speed.
-        let step_loops = if batch_steps {
-            steps::loops(module, body, e.constants, neutral_functions)
-        } else {
-            Vec::new()
-        };
-        let step_regions = if batch_steps {
-            steps::regions(module, body, neutral_functions, &step_loops)
-        } else {
-            Vec::new()
-        };
-        let step_groups = body
-            .blocks
-            .iter()
-            .map(|b| {
-                if batch_steps {
-                    steps::groups(module, body, neutral_functions, b.insts)
-                } else {
-                    Default::default()
-                }
-            })
-            .collect::<Vec<_>>();
-        if !step_loops.is_empty()
-            || !step_regions.is_empty()
-            || step_groups.iter().any(|g| !g.is_empty())
-        {
-            // Both loop copies define the same source values and addresses.
-            // Entry allocas give mem2reg their joins before ordinary O3 runs.
-            e.value_slots.fill(true);
-            e.address_slots.fill(true);
-        }
-        for (i, t) in body.values.iter().enumerate() {
-            if e.value_slots[i] {
-                e.sink.alloca(Local::Value(i), &ty(*t), 0);
-            }
-        }
-        for (i, t) in body.slots.iter().enumerate() {
-            let (bytes, align) = e.place_layout(*t);
+            let signature = e.abi.signature(signature_params);
             e.sink
-                .alloca(Local::Slot(i), &Type::bytes(bytes), align as u32);
-        }
-        for i in 0..body.addresses.len() {
-            if e.address_slots[i] {
-                e.sink.alloca(Local::Address(i), &Type::Ptr, 0);
+                .begin_function(&body_name, &signature, &locals, &attrs);
+            if !provided.elide_steps && body.insts.iter().any(|i| matches!(i, Inst::Step { .. })) {
+                let counter = Local::Named("hirsel.step.counter");
+                e.sink.alloca(counter, &Type::I64, 8);
+                e.step_counter = Some(counter.into());
+                e.reload_steps();
             }
-        }
-        let step_ends = step_loops
-            .iter()
-            .map(|_| e.step_window())
-            .collect::<Vec<_>>();
-        let region_windows = step_regions
-            .iter()
-            .map(|_| e.step_window())
-            .collect::<Vec<_>>();
-        // A constant is a literal at each use: it has no effects or operands, and
-        // a value defined once for the whole function would be live, and spilled,
-        // across all of it.
-        e.literals = vec![None; body.values.len()];
-        for inst in &body.insts {
-            if let Inst::Const { result, bits } = *inst {
-                e.literals[result.index()] = Some(e.literal(result, bits));
-            }
-        }
-        if let Some(record) = e.abi.record {
-            e.sink.alloca(Local::DEST, &Type::bytes(record.size), 8);
-        }
-        for (i, v) in body.blocks[0]
-            .params
-            .get(&body.pools.values)
-            .unwrap()
-            .iter()
-            .enumerate()
-        {
-            let parameter = if sig.dest.is_some() && i == 0 {
-                Local::DEST.into()
+            // Eager and lazy objects use the same exact-metering CFG at every
+            // optimization level. LLVM promotes its joins to registers at Speed.
+            let step_loops = if batch_steps {
+                steps::loops(module, body, e.constants, neutral_functions)
             } else {
-                let index = i - usize::from(sig.dest.is_some());
-                if let Some(record) = call_layouts.parameter(sig.params[index]) {
-                    let place = e.temp(Type::bytes(record.size));
-                    let values: Vec<_> = (0..record.fields().len())
-                        .map(|j| Local::ParamField(index, j).into())
-                        .collect();
-                    e.store_record(record, &place, &values);
-                    place
-                } else {
-                    Local::Param(index).into()
-                }
+                Vec::new()
             };
-            e.put(*v, &parameter);
-        }
-        if let Some(scopes) = e.aliases.as_ref().map(|a| a.declared().to_vec()) {
-            e.declare_scopes(&scopes);
-        }
-        let mut forwarding = forward::Forwarding::native(body, sig, &call_layouts);
-        // A view freezes the carrier header throughout the activation, even
-        // across calls through an opaque capture. End the invariant on every
-        // return; retain existing frame-safe tail-call functions unchanged.
-        if facts
-            && !(0..body.blocks.len()).any(|b| {
-                forwarding
-                    .ending(module, &recipes, sig, e.constants, b)
-                    .is_some_and(|ending| ending.frame_safe)
-            })
-        {
-            for (index, param) in sig.params.iter().enumerate() {
-                if let Param::Address {
-                    place: PlaceTy::Declared(t),
-                    loan: Loan::View,
-                } = *param
-                    && hirsel_core_ir::roles::carrier(module, t)
-                {
-                    let bytes = e.place_layout(PlaceTy::Declared(t)).0;
-                    let pointer = Value::Local(Local::Param(index));
-                    let token = e.intrinsic(
-                        "llvm.invariant.start.p0",
-                        Type::Ptr,
-                        &[word(int(bytes)), ptr(pointer.clone())],
-                    );
-                    e.view_invariants.push((token, pointer, bytes));
+            let step_regions = if batch_steps {
+                steps::regions(module, body, neutral_functions, &step_loops)
+            } else {
+                Vec::new()
+            };
+            let step_groups = body
+                .blocks
+                .iter()
+                .map(|b| {
+                    if batch_steps {
+                        steps::groups(module, body, neutral_functions, b.insts)
+                    } else {
+                        Default::default()
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !step_loops.is_empty()
+                || !step_regions.is_empty()
+                || step_groups.iter().any(|g| !g.is_empty())
+            {
+                // Both loop copies define the same source values and addresses.
+                // Entry allocas give mem2reg their joins before ordinary O3 runs.
+                e.value_slots.fill(true);
+                e.address_slots.fill(true);
+            }
+            for (i, t) in body.values.iter().enumerate() {
+                if e.value_slots[i] {
+                    e.sink.alloca(Local::Value(i), &ty(*t), 0);
                 }
             }
-        }
-        e.br(Label::block(0u32));
-        for (i, b) in body.blocks.iter().enumerate() {
-            e.block(Label::block(i));
-            e.enter_block(i);
-            if e.receive_loops.exit(i) {
-                e.native_call("hirsel_core_receive_loop_end", &[], &[]);
+            for (i, t) in body.slots.iter().enumerate() {
+                let (bytes, align) = e.place_layout(*t);
+                e.sink
+                    .alloca(Local::Slot(i), &Type::bytes(bytes), align as u32);
             }
-            if let Some((number, plan)) = step_loops
+            for i in 0..body.addresses.len() {
+                if e.address_slots[i] {
+                    e.sink.alloca(Local::Address(i), &Type::Ptr, 0);
+                }
+            }
+            let step_ends = step_loops
+                .iter()
+                .map(|_| e.step_window())
+                .collect::<Vec<_>>();
+            let region_windows = step_regions
+                .iter()
+                .map(|_| e.step_window())
+                .collect::<Vec<_>>();
+            // A constant is a literal at each use: it has no effects or operands, and
+            // a value defined once for the whole function would be live, and spilled,
+            // across all of it.
+            e.literals = vec![None; body.values.len()];
+            for inst in &body.insts {
+                if let Inst::Const { result, bits } = *inst {
+                    e.literals[result.index()] = Some(e.literal(result, bits));
+                }
+            }
+            if let Some(record) = e.abi.record {
+                e.sink.alloca(Local::DEST, &Type::bytes(record.size), 8);
+            }
+            for (i, v) in body.blocks[0]
+                .params
+                .get(&body.pools.values)
+                .unwrap()
                 .iter()
                 .enumerate()
-                .find(|(_, p)| p.reserve == i && p.reserve != p.header)
             {
-                e.step_dispatch(plan, step_ends[number], number);
-            }
-            if let Some((number, plan)) =
-                step_regions.iter().enumerate().find(|(_, p)| p.header == i)
-            {
-                e.region_dispatch(plan, region_windows[number], number);
-            }
-            let ending = forwarding.ending(module, &recipes, sig, e.constants, i);
-            let mut returned = false;
-            let groups = &step_groups[i];
-            let skipped = groups
-                .values()
-                .flat_map(|g| g.start + 1..g.end)
-                .collect::<BTreeSet<_>>();
-            for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
-                let index = b.insts.start as usize + offset;
-                if skipped.contains(&index)
-                    || (provided.elide_steps && matches!(inst, Inst::Step { .. }))
-                {
-                    continue;
-                }
-                e.debug_location = function_debug.map(|d| d.location(body.inst_anchors[index]));
-                if let Some(group) = groups.get(&index) {
-                    e.step_effect_group(*group, |anchor| {
-                        function_debug.map(|d| d.location(anchor))
-                    })?;
-                    continue;
-                }
-                if let Some(ending) = &ending
-                    && offset == ending.prefix
-                    && {
-                        e.anchor = body.inst_anchors[b.insts.start as usize + offset];
-                        e.return_call(&body.calls[ending.call.index()], ending, &call_layouts)
+                let parameter = if sig.dest.is_some() && i == 0 {
+                    Local::DEST.into()
+                } else {
+                    let index = i - usize::from(sig.dest.is_some());
+                    if let Some(record) = call_layouts.parameter(sig.params[index]) {
+                        let place = e.temp(Type::bytes(record.size));
+                        let values: Vec<_> = (0..record.fields().len())
+                            .map(|j| Local::ParamField(index, j).into())
+                            .collect();
+                        e.store_record(record, &place, &values);
+                        place
+                    } else {
+                        Local::Param(index).into()
                     }
-                {
-                    returned = true;
-                    break;
-                }
-                if !matches!(inst, Inst::Const { .. }) {
-                    e.inst(inst, index)?;
+                };
+                e.put(*v, &parameter);
+            }
+            if let Some(scopes) = e.aliases.as_ref().map(|a| a.declared().to_vec()) {
+                e.declare_scopes(&scopes);
+            }
+            let mut forwarding = forward::Forwarding::native(body, sig, &call_layouts);
+            // A view freezes the carrier header throughout the activation, even
+            // across calls through an opaque capture. End the invariant on every
+            // return; retain existing frame-safe tail-call functions unchanged.
+            if facts
+                && !(0..body.blocks.len()).any(|b| {
+                    forwarding
+                        .ending(module, &recipes, sig, e.constants, b)
+                        .is_some_and(|ending| ending.frame_safe)
+                })
+            {
+                for (index, param) in sig.params.iter().enumerate() {
+                    if let Param::Address {
+                        place: PlaceTy::Declared(t),
+                        loan: Loan::View,
+                    } = *param
+                        && hirsel_core_ir::roles::carrier(module, t)
+                    {
+                        let bytes = e.place_layout(PlaceTy::Declared(t)).0;
+                        let pointer = Value::Local(Local::Param(index));
+                        let token = e.intrinsic(
+                            "llvm.invariant.start.p0",
+                            Type::Ptr,
+                            &[word(int(bytes)), ptr(pointer.clone())],
+                        );
+                        e.view_invariants.push((token, pointer, bytes));
+                    }
                 }
             }
-            if !returned {
-                e.anchor = b.anchor;
-                e.debug_location = function_debug.map(|d| d.location(b.anchor));
+            e.br(Label::block(0u32));
+            for (i, b) in body.blocks.iter().enumerate() {
+                e.block(Label::block(i));
+                e.enter_block(i);
+                if e.receive_loops.exit(i) {
+                    e.native_call("hirsel_core_receive_loop_end", &[], &[]);
+                }
                 if let Some((number, plan)) = step_loops
                     .iter()
                     .enumerate()
-                    .find(|(_, p)| p.header == i && p.reserve == i)
+                    .find(|(_, p)| p.reserve == i && p.reserve != p.header)
                 {
                     e.step_dispatch(plan, step_ends[number], number);
-                } else {
-                    e.term(&body.terminators[i])?;
+                }
+                if let Some((number, plan)) =
+                    step_regions.iter().enumerate().find(|(_, p)| p.header == i)
+                {
+                    e.region_dispatch(plan, region_windows[number], number);
+                }
+                let ending = forwarding.ending(module, &recipes, sig, e.constants, i);
+                let mut returned = false;
+                let groups = &step_groups[i];
+                let skipped = groups
+                    .values()
+                    .flat_map(|g| g.start + 1..g.end)
+                    .collect::<BTreeSet<_>>();
+                for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
+                    let index = b.insts.start as usize + offset;
+                    if skipped.contains(&index)
+                        || (provided.elide_steps && matches!(inst, Inst::Step { .. }))
+                    {
+                        continue;
+                    }
+                    e.debug_location = function_debug.map(|d| d.location(body.inst_anchors[index]));
+                    if let Some(group) = groups.get(&index) {
+                        e.step_effect_group(*group, |anchor| {
+                            function_debug.map(|d| d.location(anchor))
+                        })?;
+                        continue;
+                    }
+                    if let Some(ending) = &ending
+                        && offset == ending.prefix
+                        && {
+                            e.anchor = body.inst_anchors[b.insts.start as usize + offset];
+                            e.return_call(&body.calls[ending.call.index()], ending, &call_layouts)
+                        }
+                    {
+                        returned = true;
+                        break;
+                    }
+                    if !matches!(inst, Inst::Const { .. }) {
+                        e.inst(inst, index)?;
+                    }
+                }
+                if !returned {
+                    e.anchor = b.anchor;
+                    e.debug_location = function_debug.map(|d| d.location(b.anchor));
+                    if let Some((number, plan)) = step_loops
+                        .iter()
+                        .enumerate()
+                        .find(|(_, p)| p.header == i && p.reserve == i)
+                    {
+                        e.step_dispatch(plan, step_ends[number], number);
+                    } else {
+                        e.term(&body.terminators[i])?;
+                    }
                 }
             }
-        }
-        for (number, plan) in step_loops.iter().enumerate() {
-            e.step_versions(plan, step_ends[number], number, |anchor| {
-                function_debug.map(|d| d.location(anchor))
-            })?;
-        }
-        for (number, plan) in step_regions.iter().enumerate() {
-            e.region_version(plan, region_windows[number], number, |anchor| {
-                function_debug.map(|d| d.location(anchor))
-            })?;
-        }
-        e.sink.end_function();
-        e.step_counter = None;
-        if !has_status {
-            e.infallible_wrapper(
-                &name,
-                sig,
-                &call_layouts,
-                facts,
-                function_debug.and_then(|d| d.wrapper),
-            );
+            for (number, plan) in step_loops.iter().enumerate() {
+                e.step_versions(plan, step_ends[number], number, |anchor| {
+                    function_debug.map(|d| d.location(anchor))
+                })?;
+            }
+            for (number, plan) in step_regions.iter().enumerate() {
+                e.region_version(plan, region_windows[number], number, |anchor| {
+                    function_debug.map(|d| d.location(anchor))
+                })?;
+            }
+            e.sink.end_function();
+            e.step_counter = None;
+            if !has_status {
+                e.infallible_wrapper(
+                    &name,
+                    sig,
+                    &call_layouts,
+                    facts,
+                    function_debug.and_then(|d| d.wrapper),
+                );
+            }
         }
     }
     cleanup::drop_glue(
@@ -932,6 +1023,7 @@ pub(crate) fn emit_native_module_in_context(
     observe_charge: bool,
     debug_lines: bool,
     neutral: Option<&BTreeSet<hirsel_core_ids::ContentHash>>,
+    versions: Option<&BTreeSet<hirsel_core_ids::ContentHash>>,
 ) -> Result<crate::construction::NativeModule> {
     native_module(
         module,
@@ -950,6 +1042,7 @@ pub(crate) fn emit_native_module_in_context(
             elide_steps: neutral.is_none(),
             prepay_step_trees: neutral.is_some(),
             release_sites: false,
+            versions,
         },
     )
 }
@@ -963,6 +1056,7 @@ pub(crate) fn emit_release_unit(
     neutral: Option<&BTreeSet<hirsel_core_ids::ContentHash>>,
 ) -> Result<(crate::construction::NativeModule, Vec<source::ReleaseSite>)> {
     let mut native = sink::native::NativeSink::new(context);
+    let versions = versions::program(&[module]);
     let sites = emit_module(
         module,
         Target::X86_64Linux,
@@ -980,6 +1074,7 @@ pub(crate) fn emit_release_unit(
             elide_steps: neutral.is_none(),
             prepay_step_trees: neutral.is_some(),
             release_sites: true,
+            versions: Some(&versions),
         },
         &mut native,
     )?;
@@ -1341,6 +1436,7 @@ const FALSE: Value = Value::Bool(false);
 
 struct FunctionEmitter<'a> {
     function: Option<FuncId>,
+    level: Option<Level>,
     call_layouts: Option<&'a hirsel_core_ir::native_layout::CallLayouts>,
     module: &'a Module,
     body: &'a Body,

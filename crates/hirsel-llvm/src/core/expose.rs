@@ -45,6 +45,8 @@ fn supported(i: &Inst) -> bool {
             | Inst::Case { .. }
             | Inst::SetCase { .. }
             | Inst::Step { .. }
+            | Inst::Simd { .. }
+            | Inst::PutLanes { .. }
     )
 }
 fn edge(body: &mut Body, target: BlockId, args: PoolRange<ValueId>) -> EdgeId {
@@ -196,6 +198,27 @@ impl Rename {
                 v(bytes);
             }
             Inst::SetCase { address, .. } => *address = self.a(*address),
+            Inst::Simd {
+                result,
+                op,
+                first,
+                second,
+                fail,
+            } => {
+                v(result);
+                v(first);
+                if let Some(second) = second {
+                    v(second);
+                }
+                if matches!(op, SimdOp::Shl | SimdOp::Shr) {
+                    *fail = self.f(*fail);
+                }
+            }
+            Inst::PutLanes { to, vector, count } => {
+                *to = self.a(*to);
+                v(vector);
+                v(count);
+            }
             Inst::Step { fail } => *fail = self.f(*fail),
             _ => unreachable!("selected helper instruction"),
         }
@@ -586,6 +609,7 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
         }
         // A small reader can be hot inside a recursive parser without living
         // in a local loop. Use the same bounded exposure at those direct calls.
+        let caller_versioned = f.versioned;
         let mut hot = (0..original.blocks.len()).collect::<BTreeSet<_>>();
         let mut body = original.clone();
         let mut budget = 2048;
@@ -609,6 +633,9 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
                             return None;
                         };
                         let callee = eligible[f.index()]?;
+                        if module.functions[f.index()].versioned && !caller_versioned {
+                            return None;
+                        }
                         (!call.cold && f.index() != i && callee.insts.len().max(1) <= budget)
                             .then_some((b, offset, callee))
                     })

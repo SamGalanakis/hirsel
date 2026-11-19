@@ -336,6 +336,9 @@ impl NativeSink {
         if !attrs.carriers.is_empty() {
             string("hirsel-carriers", &attrs.carriers);
         }
+        if let Some(level) = attrs.level {
+            string("target-features", &level.llvm_features());
+        }
         if let Some(scope) = attrs.subprogram {
             let scope = self.md(scope);
             // SAFETY: a subprogram node of this unit.

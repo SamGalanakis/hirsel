@@ -361,11 +361,14 @@ impl FunctionEmitter<'_> {
         match callee {
             Callee::Direct(f) => {
                 let name = self.items.function_symbol(f);
-                Value::global(if has_status {
-                    name.to_owned()
-                } else {
-                    format!("{name}.infallible")
-                })
+                let mut name = match self.level {
+                    Some(level) if self.items.is_versioned(f) => versions::symbol(name, level),
+                    _ => name.to_owned(),
+                };
+                if !has_status {
+                    name.push_str(".infallible");
+                }
+                Value::global(name)
             }
             Callee::Indirect(v) => self.numeric(v),
             Callee::Runtime(_) => unreachable!(),
@@ -655,6 +658,7 @@ impl FunctionEmitter<'_> {
         let attrs = FnAttrs {
             linkage: Linkage::WeakOdr,
             subprogram: debug.map(|(scope, _)| scope),
+            level: self.level,
             ..FnAttrs::default()
         };
         let signature = self.abi.signature(params);

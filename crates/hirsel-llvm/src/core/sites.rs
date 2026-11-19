@@ -150,16 +150,31 @@ impl DebugFunction {
     }
 }
 
+#[derive(Default)]
+pub(super) struct DebugPlan {
+    base: Vec<Option<DebugFunction>>,
+    versions: std::collections::BTreeMap<(usize, u8), DebugFunction>,
+}
+impl DebugPlan {
+    pub(super) fn get(&self, index: usize, level: Option<Level>) -> Option<&DebugFunction> {
+        match level {
+            Some(level) => self.versions.get(&(index, level.number)),
+            None => self.base.get(index).and_then(Option::as_ref),
+        }
+    }
+}
+
 /// Synthetic DWARF is only an intermediate machine-to-anchor map. Its file is
 /// the item's identity and its line is the item-relative byte offset plus one.
 /// The final link writer resolves these rows against the current SourceMap.
 pub(super) fn debug_plan(
     module: &Module,
     function_symbols: &[String],
+    versioned: Option<&[bool]>,
     failures: &failure::Failures,
     next: &mut usize,
     sink: &mut dyn Sink,
-) -> Vec<Option<DebugFunction>> {
+) -> DebugPlan {
     let mut node = |value: Metadata| {
         let id = *next;
         *next += 1;
@@ -182,7 +197,7 @@ pub(super) fn debug_plan(
         }
     }
     if files.is_empty() && module.functions.iter().all(|f| f.body.is_none()) {
-        return module.functions.iter().map(|_| None).collect();
+        return DebugPlan::default();
     }
     // Generated adapters have no source positions of their own. Give them
     // an artificial scope so LLVM can describe source code inlined into them.
@@ -207,88 +222,96 @@ pub(super) fn debug_plan(
         items: vec![],
     });
     let signature = node(Metadata::SubroutineType { types });
-    let plan = module
-        .functions
-        .iter()
-        .enumerate()
-        .map(|(i, function)| {
-            let body = function.body.as_ref()?;
-            let first = body
-                .inst_anchors
-                .iter()
-                .flatten()
-                .next()
-                .copied()
-                .or_else(|| body.blocks.iter().find_map(|b| b.anchor));
-            let file = first.map_or(generated_file, |anchor| files[&anchor.item.0]);
-            let base = &function_symbols[i];
-            let name = module.instances[function.instance.index()]
-                .definition
-                .to_string();
-            let subprogram = |linkage: String| Metadata::Subprogram {
-                name: name.clone(),
-                linkage,
-                file,
-                ty: signature,
-                unit,
-            };
-            let linkage = if failures.may_fail[i] {
-                base.clone()
-            } else {
-                format!("{base}.infallible")
-            };
-            let scope = node(subprogram(linkage));
-            let fallback = node(Metadata::Location {
-                line: 0,
-                column: 0,
-                scope,
+    let mut make = |i: usize, base: &str| {
+        let function = &module.functions[i];
+        let body = function.body.as_ref()?;
+        let first = body
+            .inst_anchors
+            .iter()
+            .flatten()
+            .next()
+            .copied()
+            .or_else(|| body.blocks.iter().find_map(|b| b.anchor));
+        let file = first.map_or(generated_file, |anchor| files[&anchor.item.0]);
+        let name = module.instances[function.instance.index()]
+            .definition
+            .to_string();
+        let subprogram = |linkage: String| Metadata::Subprogram {
+            name: name.clone(),
+            linkage,
+            file,
+            ty: signature,
+            unit,
+        };
+        let linkage = if failures.may_fail[i] {
+            base.to_owned()
+        } else {
+            format!("{base}.infallible")
+        };
+        let scope = node(subprogram(linkage));
+        let fallback = node(Metadata::Location {
+            line: 0,
+            column: 0,
+            scope,
+        });
+        let mut scopes = first
+            .into_iter()
+            .map(|anchor| (anchor.item.0, scope))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut locations = std::collections::BTreeMap::new();
+        for anchor in body
+            .inst_anchors
+            .iter()
+            .flatten()
+            .chain(body.blocks.iter().filter_map(|b| b.anchor.as_ref()))
+        {
+            let scope = *scopes.entry(anchor.item.0).or_insert_with(|| {
+                node(Metadata::LexicalBlockFile {
+                    scope,
+                    file: files[&anchor.item.0],
+                })
             });
-            let mut scopes = first
-                .into_iter()
-                .map(|anchor| (anchor.item.0, scope))
-                .collect::<std::collections::BTreeMap<_, _>>();
-            let mut locations = std::collections::BTreeMap::new();
-            for anchor in body
-                .inst_anchors
-                .iter()
-                .flatten()
-                .chain(body.blocks.iter().filter_map(|b| b.anchor.as_ref()))
-            {
-                let scope = *scopes.entry(anchor.item.0).or_insert_with(|| {
-                    node(Metadata::LexicalBlockFile {
+            locations
+                .entry((anchor.item.0, anchor.start))
+                .or_insert_with(|| {
+                    node(Metadata::Location {
+                        line: u64::from(anchor.start) + 1,
+                        column: 1,
                         scope,
-                        file: files[&anchor.item.0],
                     })
                 });
-                locations
-                    .entry((anchor.item.0, anchor.start))
-                    .or_insert_with(|| {
-                        node(Metadata::Location {
-                            line: u64::from(anchor.start) + 1,
-                            column: 1,
-                            scope,
-                        })
-                    });
-            }
-            let wrapper = if failures.may_fail[i] {
-                None
-            } else {
-                let wrapper = node(subprogram(base.clone()));
-                let location = node(Metadata::Location {
-                    line: 0,
-                    column: 0,
-                    scope: wrapper,
-                });
-                Some((wrapper, location))
-            };
-            Some(DebugFunction {
-                scope,
-                wrapper,
-                fallback,
-                locations,
-            })
+        }
+        let wrapper = if failures.may_fail[i] {
+            None
+        } else {
+            let wrapper = node(subprogram(base.to_owned()));
+            let location = node(Metadata::Location {
+                line: 0,
+                column: 0,
+                scope: wrapper,
+            });
+            Some((wrapper, location))
+        };
+        Some(DebugFunction {
+            scope,
+            wrapper,
+            fallback,
+            locations,
         })
-        .collect();
+    };
+    let mut plan = DebugPlan::default();
+    for (i, name) in function_symbols.iter().enumerate() {
+        if versioned.is_some_and(|rows| rows[i]) {
+            plan.base.push(None);
+            for &level in X86_64_LEVELS {
+                if let Some(debug) = make(i, &versions::symbol(name, level)) {
+                    plan.versions.insert((i, level.number), debug);
+                }
+            }
+        } else {
+            plan.base.push(make(i, name));
+        }
+    }
     sink.named_metadata("llvm.dbg.cu", &[unit]);
     sink.named_metadata("llvm.module.flags", &[dwarf_flag, debug_flag]);
     plan

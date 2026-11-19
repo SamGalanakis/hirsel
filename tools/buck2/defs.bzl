@@ -723,7 +723,7 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
         host_targets.append(":" + target)
         _rust_test(
             name = target,
-            args = ["--ignored", "--exact", case],
+            args = ["--include-ignored", "--exact", case],
             labels = ["local-execution", "requires-openat2"],
             exec_compatible_with = [budget_constraint("host")],
             pool = False,

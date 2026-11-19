@@ -23,6 +23,9 @@ pub(super) fn emit(
     f.b.append_block_params_for_function_params(start);
     f.b.switch_to_block(start);
     let parameters = f.b.block_params(start).to_vec();
+    if plan.uses_simd_versions {
+        f.void_call("hirsel_core_init_isa", &[])?;
+    }
     let argc = f.b.ins().uextend(I64, parameters[0]);
     let n = f.b.ins().iadd_imm_s(argc, -1);
     let one = f.constant(1);

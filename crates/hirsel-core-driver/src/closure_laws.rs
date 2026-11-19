@@ -75,6 +75,7 @@ fn module_pad() -> hirsel_core_ir::Shape {
         clone: None,
         codec: None,
         grant: 0,
+        send: false,
         held: None,
     }
 }

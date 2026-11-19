@@ -79,6 +79,21 @@ impl<T: TyRead> Shapes<'_, T> {
         self.hooks.push((r, Hook::Codec, maker, args.to_vec()));
         Some(FuncRef(u32::MAX))
     }
+    /// Whether `ty`'s declaration gives it `send` when every type argument is `send`
+    /// (CONC-2). It names the declaration only, so a generic row and each of its
+    /// instances agree; the layout crate checks the arguments through the fields.
+    fn declares_send(&mut self, ty: TyId) -> bool {
+        let TyKind::Adt(d, args) = self.types.kind(ty).clone() else {
+            return true;
+        };
+        let params: Vec<TyId> = (0..args.len())
+            .map(|i| self.types.mk(TyKind::Param(i as _)))
+            .collect();
+        let generic = self.types.mk(TyKind::Adt(d, params));
+        let every = vec![u16::MAX; args.len()];
+        crate::decls::has_bounds(self.decls, &*self.types, generic, &every) & crate::decls::SEND
+            != 0
+    }
     /// The shape of a closed type held inline, or None when the layout crate has no
     /// field type for some part of it (recorded as a gap by the caller).
     pub fn shape(&mut self, ty: TyId) -> Option<TypeRef> {
@@ -111,9 +126,11 @@ impl<T: TyRead> Shapes<'_, T> {
                 clone: None,
                 codec: None,
                 grant: 0,
+                send: false,
                 held: None,
             },
         );
+        self.shapes[r.index()].send = self.declares_send(ty);
         let (repr, body, finalizer, held) = match self.types.kind(ty).clone() {
             TyKind::Scalar(s) => (
                 LRepr::Own,
@@ -434,9 +451,11 @@ impl<T: TyRead> Shapes<'_, T> {
                 clone: None,
                 codec: None,
                 grant: 0,
+                send: false,
                 held: None,
             },
         );
+        self.shapes[r.index()].send = self.declares_send(ty);
         let body = self.body(decl, &args, true)?;
         self.shapes[r.index()].body = body;
         Some(r)
@@ -557,6 +576,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 clone: None,
                 codec: None,
                 grant: 0,
+                send: false,
                 held: None,
             },
         );

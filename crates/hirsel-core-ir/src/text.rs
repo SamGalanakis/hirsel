@@ -252,6 +252,9 @@ fn shape(s: &Shape) -> String {
     if s.grant != 0 {
         out += &format!(" grant {}", s.grant);
     }
+    if s.send {
+        out += " send";
+    }
     if let Some(held) = &s.held {
         out += &format!(" held {}", field_ty(held));
     }
@@ -1179,6 +1182,7 @@ impl<'a> Line<'a> {
             None
         };
         let grant = if self.eat("grant") { self.num()? } else { 0 };
+        let send = self.eat("send");
         let held = if self.eat("held") {
             Some(self.field_ty()?)
         } else {
@@ -1206,6 +1210,7 @@ impl<'a> Line<'a> {
             clone,
             codec,
             grant,
+            send,
             held,
         })
     }

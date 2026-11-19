@@ -17,6 +17,57 @@ struct Trace {
     kind: u8,
     count: std::sync::atomic::AtomicU64,
     allocation: *mut u8,
+    /// Kind 5: the child's blocks of 16 and 32 bytes, then whether both are freed.
+    boxes: [*mut u8; 2],
+    freed: bool,
+}
+/// The bytes of kind 5's two blocks: `Job.a` and `Job.b` in [`job_cleanup`].
+const BOX_BYTES: [u64; 2] = [16, 32];
+/// The field order the derived drop glue cleans `type Job: send { a: Box[A],
+/// b: Box[B] }` in, with `A` and `B` send records of 16 and 32 bytes.
+fn job_cleanup() -> Vec<u32> {
+    use hirsel_core_layout::{Body, Carried, Field, FieldTy, Repr, Scalar, Shape, TypeRef};
+    let row = |name: &str, fields: Vec<(&str, FieldTy)>| Shape {
+        name: name.into(),
+        repr: Repr::Own,
+        carried: Carried::Address,
+        body: Body::Record(
+            fields
+                .into_iter()
+                .map(|(name, ty)| Field {
+                    name: name.into(),
+                    ty,
+                })
+                .collect(),
+        ),
+        finalizer: None,
+        clone: None,
+        codec: None,
+        grant: 0,
+        send: true,
+        held: None,
+    };
+    let words = |n: usize| {
+        (0..n)
+            .map(|_| ("w", FieldTy::Scalar(Scalar::U64)))
+            .collect()
+    };
+    let shapes = [
+        row(
+            "Job",
+            vec![
+                ("a", FieldTy::Box(TypeRef(1))),
+                ("b", FieldTy::Box(TypeRef(2))),
+            ],
+        ),
+        row("A", words(2)),
+        row("B", words(4)),
+    ];
+    let recipes = hirsel_core_layout::compute(&shapes).unwrap();
+    recipes[0].drop.as_ref().unwrap().fields[0]
+        .iter()
+        .map(|f| f.field)
+        .collect()
 }
 unsafe extern "C" fn record(state: *mut u8, event: Event) {
     // SAFETY: callbacks exclusively borrow pinned host instrumentation.
@@ -46,6 +97,12 @@ unsafe extern "C" fn child(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 
             let block = crate::block::Block::new(&*ctx, Some(800), 800, 8).unwrap();
             (*input.trace).allocation = block.into_raw().as_ptr();
         }
+        if (*input.trace).kind == 5 {
+            for (slot, bytes) in (*input.trace).boxes.iter_mut().zip(BOX_BYTES) {
+                let block = crate::block::Block::new(&*ctx, Some(bytes), bytes as usize, 8);
+                *slot = block.unwrap().into_raw().as_ptr();
+            }
+        }
         let mut unit = 0u8;
         assert_eq!(hirsel_core_try_send(input.ready, &mut unit), 0);
         assert!(!(*input.trace).parent_ran, "successful try_send switched");
@@ -59,6 +116,14 @@ unsafe extern "C" fn child(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 
                     }
                     Err(_) => assert!((*ctx).causes.iter().next().is_none()),
                 }
+            }
+            hirsel_core_sender_drop(input.ready);
+            hirsel_core_sender_drop(input.gate);
+            return 0;
+        } else if (*input.trace).kind == 5 {
+            // Stay live, so each refund crosses to this task's limit.
+            while !(*input.trace).freed {
+                assert_eq!(hirsel_core_check_cancel(ctx, 76), 0);
             }
             hirsel_core_sender_drop(input.ready);
             hirsel_core_sender_drop(input.gate);
@@ -165,6 +230,15 @@ unsafe extern "C" fn root(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
             // Foreign drop queues the refund to the child; it is not visible
             // until a later semantic event owned by the child.
             crate::abi::hirsel_core_free(ptr::NonNull::new((*trace).allocation).unwrap(), 800);
+        } else if (*trace).kind == 5 {
+            // The parent drops a Job the child built: the glue frees its boxes
+            // in the recipe's field order, each refund an event (MEM-20).
+            for field in job_cleanup() {
+                let i = field as usize;
+                let block = ptr::NonNull::new((*trace).boxes[i]).unwrap();
+                crate::abi::hirsel_core_free(block, BOX_BYTES[i]);
+            }
+            (*trace).freed = true;
         } else {
             hirsel_core_cancel(ctx, child.task);
         }
@@ -175,7 +249,7 @@ unsafe extern "C" fn root(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
         let joined = hirsel_core_join(ctx, child.task, ptr::null_mut(), 12);
         assert_eq!(
             (joined.kind, joined.status),
-            (if (*trace).kind == 4 { 0 } else { 2 }, 0)
+            (if (*trace).kind >= 4 { 0 } else { 2 }, 0)
         );
         let causes = causes::Causes::from_raw(joined.causes);
         assert_eq!(
@@ -183,7 +257,7 @@ unsafe extern "C" fn root(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
                 .iter()
                 .map(|c| (c.kind(), c.site))
                 .collect::<Vec<_>>(),
-            if (*trace).kind == 4 {
+            if (*trace).kind >= 4 {
                 vec![]
             } else {
                 vec![(causes::CANCELLED, 77)]
@@ -251,8 +325,23 @@ fn gate_replay_child() {
             .filter(|e| e.kind == CANCELLED)
             .map(|e| e.value)
             .collect::<Vec<_>>(),
-        if kind == 4 { vec![] } else { vec![77] }
+        if kind >= 4 { vec![] } else { vec![77] }
     );
+    if kind == 5 {
+        // FAIL-8 by hand: Job's fields clean in reverse declaration order, so
+        // b's 32 bytes refund to the child before a's 16 (SEM-8: event order
+        // is observable).
+        let child = recorded.events.iter().find(|e| e.kind == SPAWN).unwrap();
+        assert_eq!(
+            recorded
+                .events
+                .iter()
+                .filter(|e| e.kind == REFUND && e.object == child.object)
+                .map(|e| e.value)
+                .collect::<Vec<_>>(),
+            [32, 16]
+        );
+    }
 }
 #[test]
 fn full_schedules_a_peer_without_observing_cancel_and_replays_exactly() {
@@ -301,4 +390,10 @@ fn all_polling_peers_remain_runnable_when_the_ready_queue_is_empty() {
 #[test]
 fn capacity_retries_observe_foreign_refunds_only_at_owner_events_and_replay() {
     run_bounded("4");
+}
+/// Bug: a `send` record cleans its fields in declaration order, so the refunds
+/// its boxes owe another task's limit arrive in the wrong event order.
+#[test]
+fn a_send_records_foreign_refunds_follow_reverse_field_order() {
+    run_bounded("5");
 }

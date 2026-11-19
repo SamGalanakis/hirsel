@@ -19,6 +19,7 @@ fn record(name: &str, repr: Repr, fields: Vec<Field>) -> Shape {
         clone: None,
         codec: None,
         grant: 0,
+        send: false,
         held: None,
     }
 }
@@ -40,6 +41,7 @@ fn variant(name: &str, repr: Repr, cases: Vec<(&str, Vec<Field>)>) -> Shape {
         clone: None,
         codec: None,
         grant: 0,
+        send: false,
         held: None,
     }
 }
@@ -112,8 +114,7 @@ fn own_variant_reserves_the_largest_payload_after_its_tag() {
 
 /// Bug: a by-value self-reference accepted (infinite size), or a reference through a
 /// List refused. `Chain = End | Link(u64, Chain)` is refused (MEM-13); `Tree {label:
-/// String, kids: List[Tree]}` is accepted and its cleanup visits label, then kids
-/// (it only frees, so declaration order).
+/// String, kids: List[Tree]}` is accepted and its cleanup visits kids, then label.
 #[test]
 fn by_value_cycles_are_refused_and_collections_break_them() {
     let chain = variant(
@@ -149,18 +150,21 @@ fn by_value_cycles_are_refused_and_collections_break_them() {
             .iter()
             .map(|f| (f.field, f.offset))
             .collect::<Vec<_>>(),
-        vec![(0, 0), (1, 24)]
+        vec![(1, 24), (0, 0)]
     );
     assert_eq!(fixed(&r[0]).size, 48);
 }
 
 /// Bug: cleanup in declaration order instead of reverse (FAIL-8) where a
-/// finalizer or handle could observe it, a plain field visited, or a resource
-/// without finalizer called plain.
+/// finalizer, a handle or a refund to another task's limit could observe it
+/// (SEM-8), a plain field visited, or a resource without finalizer called plain.
 /// `resource Pair {a: Task[u64], n: u64, b: List[u8]}`: a@0, n@8, b@16; drops b then a.
 /// `Outer {p: Box[Pair], s: List[u8]}` reaches the resource only through a box,
-/// still observably: drops s@0 then p@24. `Plain {x: List[u8], y: Box[Plain2]}`
-/// frees blocks only, so it cleans in construction order: x@0 then y@24.
+/// still observably: drops s@0 then p@24. `Sent {x: List[u8], y: Box[Plain2]}`:
+/// a `List[u8]` is `send`, so its storage may refund to another task's limit,
+/// an event (MEM-20): drops y@24 then x@0. `Plain {x: Box[Plain2], y:
+/// Box[Plain2]}` with `Plain2` not `send` frees blocks to its own task's limits
+/// only, so it cleans in construction order: x@0 then y@8.
 #[test]
 fn cleanup_visits_owned_fields_in_reverse_declaration_order() {
     let mut s = record(
@@ -207,13 +211,28 @@ fn cleanup_visits_owned_fields_in_reverse_declaration_order() {
         vec![field("p", FieldTy::Box(TypeRef(0))), field("s", string())],
     );
     assert_eq!(order(&[pair, outer], 1), vec![(1, 0), (0, 24)]);
-    let plain = record(
-        "Plain",
+    let plain2 = || {
+        record(
+            "Plain2",
+            Repr::Own,
+            vec![field("z", FieldTy::Rc(TypeRef(1)))],
+        )
+    };
+    let sent = record(
+        "Sent",
         Repr::Own,
         vec![field("x", string()), field("y", FieldTy::Box(TypeRef(1)))],
     );
-    let plain2 = record("Plain2", Repr::Own, vec![field("z", string())]);
-    assert_eq!(order(&[plain, plain2], 0), vec![(0, 0), (1, 24)]);
+    assert_eq!(order(&[sent, plain2()], 0), vec![(1, 24), (0, 0)]);
+    let plain = record(
+        "Plain",
+        Repr::Own,
+        vec![
+            field("x", FieldTy::Box(TypeRef(1))),
+            field("y", FieldTy::Box(TypeRef(1))),
+        ],
+    );
+    assert_eq!(order(&[plain, plain2()], 0), vec![(0, 0), (1, 8)]);
     let bare = record("Lock", Repr::Resource, vec![field("n", u(Scalar::U64))]);
     assert!(
         !compute(&[bare]).unwrap()[0].plain,
@@ -1079,15 +1098,15 @@ fn several_dataful_cases_share_one_niche_without_touching_it() {
 
 /// Bug: a suspended fixed block's frame (node-bytes-1076) lands on a word cleanup
 /// still reads, or a shared array record's offsets move with the element, so the
-/// drain recovers an interior base (ATTACK-rev2). Hand-derived from the
-/// declaration order these finalizer-free rows clean in:
-/// - Node: Binary yields l@0 (its vacated word and op's word @16 free; r@8 and the
-///   tag@24 live), then r@8 (l's word @0 and its own free). Assignment first
-///   frees its terminal String name@8..32 (step 1, no yield; the cap niche @24
-///   carries the tag and stays live), then yields v@0 with words @0 and @8 free.
-///   No spares: 32 native bytes, a 48-byte chunk with the 8-byte payer word.
-///   Binary's r and Assignment's v are last: nothing follows them, while l is
-///   followed by r, so marking l last would leak r's tree.
+/// drain recovers an interior base (ATTACK-rev2). Hand-derived from FAIL-8's
+/// reverse field order:
+/// - Node: Binary yields r@8 (its vacated word and op's word @16 free; l@0 and the
+///   tag@24 live), then l@0. Assignment yields v@0 while name@8..32 (with the
+///   cap niche) is still to clean; a terminal String is freed from its pointer
+///   and capacity, so its length word @16 is free. No spares: 32 native bytes,
+///   a 48-byte chunk with the 8-byte payer word. Only Binary's l is last: after
+///   it nothing is left to clean (op is a scalar), while Assignment's v still
+///   has name to free, so marking it last would leak the String.
 /// - Holder{xs: Inline[Pair, 2]}, Pair{pad, l, r} of stride 24: every word is in
 ///   the unfinished array, so A, B and the index are three spares after 48.
 #[test]
@@ -1149,12 +1168,14 @@ fn suspended_frames_avoid_live_words_and_unfinished_arrays() {
         last,
     };
     let f = frames(&shapes, &r, TypeRef(0));
+    // Assignment cleans v@0 while name@8 waits: a terminal String is freed from
+    // its pointer and capacity, so its length word @16 takes the link.
     assert_eq!(
         f.points,
         [
-            at(1, 0, 16, None, false),
+            at(1, 8, 16, None, false),
             at(2, 0, 8, None, true),
-            at(2, 0, 8, None, true)
+            at(1, 0, 16, None, false)
         ]
     );
     assert_eq!((f.spares, f.native_bytes(32)), (0, 32));

@@ -876,6 +876,40 @@ fn causes_iteration_reads_complete_cells_and_preserves_order() {
     }
 }
 
+/// Bug: the front never marks a `send` declaration's row, so a record whose
+/// boxes may refund another task's limit cleans in declaration order. By hand
+/// from FAIL-8 and SEM-8: `Job: send` cleans b before a; `Node`, not `send`,
+/// frees to its own task's limits only and cleans in declaration order.
+#[test]
+fn send_records_keep_reverse_field_cleanup() {
+    let (index, inputs) = program_inputs(
+        "type A: send { x: u64 }\n\
+         type Job: send { a: Box[A], b: Box[A] }\n\
+         type Node { l: Option[Box[Node]], r: Option[Box[Node]] }\n\
+         fn f(j: Job, n: Node) -> u64 { 0 }",
+    );
+    let p = Program::declare(&index, &inputs);
+    let f = p.fns.iter().position(|f| f.path.0.name == "f").unwrap();
+    let mut emitter = Emitter::new();
+    let check = p.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{check:?}"
+    );
+    let m = &emitter.module;
+    let recipes = hirsel_core_layout::compute(&m.types).unwrap();
+    let order = |suffix: &str| -> Vec<u32> {
+        let row = m.types.iter().position(|t| t.name.ends_with(suffix));
+        let row = row.unwrap_or_else(|| panic!("no {suffix} row"));
+        recipes[row].drop.as_ref().unwrap().fields[0]
+            .iter()
+            .map(|f| f.field)
+            .collect()
+    };
+    assert_eq!(order("/Job"), [1, 0]);
+    assert_eq!(order("/Node"), [0, 1]);
+}
+
 mod run_time_abi {
     include!("../../hirsel-core-rt/src/abi_layout.rs");
 }

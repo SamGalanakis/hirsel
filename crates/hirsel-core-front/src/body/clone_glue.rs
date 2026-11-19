@@ -799,6 +799,7 @@ mod kernel_clone_tests {
             clone: None,
             codec: None,
             grant: 0,
+            send: false,
             held: None,
         };
         let mut base = Module::default();

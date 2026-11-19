@@ -250,9 +250,10 @@ pub struct FieldDrop {
 
 /// FAIL-8: the finalizer runs first, then fields in reverse declaration order,
 /// then the block is freed and refunded. A row whose cleanup reaches no
-/// finalizer, resource, handle, `own fn`, `Arc` or region reference only frees
-/// and refunds; FAIL-8 leaves that order to SEM-8's as-if rule, so it cleans
-/// its fields in declaration order instead (see `drop_recipe`). A `List` (`Seq`) and an inline array
+/// finalizer, resource, handle, `own fn`, `Arc`, region reference or block of a
+/// `send` type only frees and refunds to the cleaning task's limits; FAIL-8
+/// leaves that order to SEM-8's as-if rule, so it cleans its fields in
+/// declaration order instead (see `drop_recipe`). A `List` (`Seq`) and an inline array
 /// (`FieldTy::Array`, at the stride `field_size` gives) clean their completed
 /// elements from index 0 up (SEM-9, core.md); a `Map` cleans entry by entry in
 /// insertion order, each key before its value ([`map_entry`]). Those loops are in
@@ -413,32 +414,41 @@ struct Effects {
     rows: Vec<u8>,
     stack: Vec<(TypeRef, usize)>,
     seen: Vec<TypeRef>,
+    send: Sendable,
 }
 
 impl Effects {
-    /// Whether cleaning a value of row `root` can observe the order of its steps:
-    /// it reaches a finalizer, a resource, a handle, an `own fn` environment, an
-    /// `Arc` (its releases are task events) or a region reference. Any other
-    /// cleanup only frees and refunds blocks, which nothing runs between, so
-    /// those steps commute.
+    /// Whether cleaning a value of row `root` can observe the order of its steps
+    /// (SEM-8): it reaches a finalizer, a resource, a handle, an `own fn`
+    /// environment, an `Arc` (its releases are task events), a region reference,
+    /// or a block a value of a `send` type owns, which may be charged to another
+    /// task's limit, so its refund is an event (MEM-20). Any other cleanup only
+    /// frees blocks and refunds them to the cleaning task's own limits, which
+    /// nothing runs between, so those steps commute.
     fn effectful(&mut self, shapes: &[Shape], root: TypeRef) -> bool {
-        if self.rows.len() < shapes.len() {
-            self.rows.resize(shapes.len(), 0);
+        let Effects {
+            rows,
+            stack,
+            seen,
+            send,
+        } = self;
+        if rows.len() < shapes.len() {
+            rows.resize(shapes.len(), 0);
         }
-        match self.rows[root.index()] {
+        match rows[root.index()] {
             1 => return false,
             2 => return true,
             _ => {}
         }
         // Depth-first over owning edges. Reaching an effectful row marks every
         // row on the path; exhausting the closure marks every row seen free.
-        self.stack.clear();
-        self.seen.clear();
-        self.rows[root.index()] = 3;
-        self.seen.push(root);
-        self.stack.push((root, 0));
+        stack.clear();
+        seen.clear();
+        rows[root.index()] = 3;
+        seen.push(root);
+        stack.push((root, 0));
         let mut found = false;
-        'walk: while let Some(&mut (t, ref mut next)) = self.stack.last_mut() {
+        'walk: while let Some(&mut (t, ref mut next)) = stack.last_mut() {
             let shape = &shapes[t.index()];
             if shape.repr == Repr::Resource || shape.finalizer.is_some() {
                 found = true;
@@ -448,70 +458,136 @@ impl Effects {
             for f in fields.skip(*next) {
                 *next += 1;
                 let mut targets = vec![];
-                if !owned_rows(&f.ty, &mut targets) {
+                if !owned_rows(shapes, send, &f.ty, &mut targets) {
                     found = true;
                     break 'walk;
                 }
                 for d in targets {
-                    match self.rows[d.index()] {
+                    match rows[d.index()] {
                         2 => {
                             found = true;
                             break 'walk;
                         }
                         0 => {
-                            self.rows[d.index()] = 3;
-                            self.seen.push(d);
-                            self.stack.push((d, 0));
+                            rows[d.index()] = 3;
+                            seen.push(d);
+                            stack.push((d, 0));
                             continue 'walk;
                         }
                         _ => {}
                     }
                 }
             }
-            self.stack.pop();
+            stack.pop();
         }
         if found {
-            for &(t, _) in &self.stack {
-                self.rows[t.index()] = 2;
+            for &(t, _) in stack.iter() {
+                rows[t.index()] = 2;
             }
-            for &t in &self.seen {
-                if self.rows[t.index()] == 3 {
-                    self.rows[t.index()] = 0;
+            for &t in seen.iter() {
+                if rows[t.index()] == 3 {
+                    rows[t.index()] = 0;
                 }
             }
         } else {
-            for &t in &self.seen {
-                self.rows[t.index()] = 1;
+            for &t in seen.iter() {
+                rows[t.index()] = 1;
             }
         }
         found
     }
 }
 
+/// Which rows are `send` (CONC-2): the declaration allows it ([`Shape::send`])
+/// and every field is. A row on the current path counts as `send`, so a
+/// recursive type is `send` when its other fields are; an answer may err only
+/// towards `send`, which keeps FAIL-8's order.
+#[derive(Default)]
+struct Sendable {
+    /// Per row: 0 unknown, 1 send, 2 not, 3 on the path.
+    rows: Vec<u8>,
+}
+
+impl Sendable {
+    fn row(&mut self, shapes: &[Shape], t: TypeRef) -> bool {
+        if self.rows.len() < shapes.len() {
+            self.rows.resize(shapes.len(), 0);
+        }
+        match self.rows[t.index()] {
+            1 | 3 => return true,
+            2 => return false,
+            _ => {}
+        }
+        let shape = &shapes[t.index()];
+        self.rows[t.index()] = 3;
+        let send = shape.send
+            && cases(shape)
+                .into_iter()
+                .flatten()
+                .all(|f| self.ty(shapes, &f.ty));
+        self.rows[t.index()] = if send { 1 } else { 2 };
+        send
+    }
+    fn ty(&mut self, shapes: &[Shape], ty: &FieldTy) -> bool {
+        match ty {
+            FieldTy::Inline(t) | FieldTy::Box(t) => self.row(shapes, *t),
+            FieldTy::Seq(e) | FieldTy::Array(e, _) => self.ty(shapes, e),
+            FieldTy::Map(k, v) => self.ty(shapes, k) && self.ty(shapes, v),
+            FieldTy::Rc(_) | FieldTy::Borrow | FieldTy::View(_) | FieldTy::RegionRef(_) => false,
+            FieldTy::Text
+            | FieldTy::Link(_)
+            | FieldTy::Locator(_)
+            | FieldTy::FixedSpan(_)
+            | FieldTy::SeqSpan(_)
+            | FieldTy::IndexedSpan(_)
+            | FieldTy::Scalar(_)
+            | FieldTy::Fn
+            | FieldTy::OwnFn
+            | FieldTy::Arc(_)
+            | FieldTy::Handle(_)
+            | FieldTy::FrozenBytes => true,
+        }
+    }
+}
+
 /// The rows whose cleanup cleaning a field of `ty` runs, or false when
-/// cleaning it can observe order by itself (see [`Effects::effectful`]).
+/// cleaning it can observe order by itself (see [`Effects::effectful`]): a
+/// block of a `send` type may have arrived from another task and refund there.
 /// An allow-list: a field type not named here is effectful.
-fn owned_rows(ty: &FieldTy, rows: &mut Vec<TypeRef>) -> bool {
+fn owned_rows(
+    shapes: &[Shape],
+    send: &mut Sendable,
+    ty: &FieldTy,
+    rows: &mut Vec<TypeRef>,
+) -> bool {
     match ty {
+        FieldTy::Box(t) if send.row(shapes, *t) => false,
+        FieldTy::Seq(e) if send.ty(shapes, e) => false,
+        FieldTy::Map(k, v) if send.ty(shapes, k) && send.ty(shapes, v) => false,
         FieldTy::Inline(t) | FieldTy::Box(t) | FieldTy::Rc(t) => {
             rows.push(*t);
             true
         }
-        FieldTy::Seq(e) | FieldTy::Array(e, _) => owned_rows(e, rows),
-        FieldTy::Map(k, v) => owned_rows(k, rows) && owned_rows(v, rows),
+        FieldTy::Seq(e) | FieldTy::Array(e, _) => owned_rows(shapes, send, e, rows),
+        FieldTy::Map(k, v) => {
+            owned_rows(shapes, send, k, rows) && owned_rows(shapes, send, v, rows)
+        }
         FieldTy::Scalar(_)
         | FieldTy::Fn
         | FieldTy::Borrow
         | FieldTy::View(_)
-        | FieldTy::FrozenBytes
         | FieldTy::Text
         | FieldTy::Link(_)
         | FieldTy::Locator(_)
         | FieldTy::Handle(Handle::Capability) => true,
         FieldTy::FixedSpan(e) | FieldTy::SeqSpan(e) | FieldTy::IndexedSpan(e) => {
-            owned_rows(e, rows)
+            owned_rows(shapes, send, e, rows)
         }
-        FieldTy::Arc(_) | FieldTy::RegionRef(_) | FieldTy::OwnFn | FieldTy::Handle(_) => false,
+        FieldTy::FrozenBytes
+        | FieldTy::Arc(_)
+        | FieldTy::RegionRef(_)
+        | FieldTy::OwnFn
+        | FieldTy::Handle(_) => false,
     }
 }
 impl Computed<'_> {

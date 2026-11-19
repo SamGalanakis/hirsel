@@ -1279,6 +1279,7 @@ mod tests {
             clone: None,
             codec: None,
             grant: 0,
+            send: false,
             held: None,
         };
         // This template constant is the producer's size query, independent of any
@@ -1313,6 +1314,7 @@ mod tests {
             clone: None,
             codec: None,
             grant: 0,
+            send: false,
             held: None,
         };
         template.copies = vec![CopySize {

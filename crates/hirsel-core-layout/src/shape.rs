@@ -403,6 +403,10 @@ pub struct Shape {
     pub codec: Option<FuncRef>,
     /// `grant bytes n` (MEM-27).
     pub grant: u64,
+    /// The row has the `send` bound (CONC-2): a value of it may arrive from
+    /// another task, so the blocks it owns may be charged to that task's limit
+    /// and their refunds cross tasks (MEM-20).
+    pub send: bool,
     /// How a holder writes a field of this row's type when that is not
     /// `Inline(this row)` (`Scalar` for a scalar, `Seq` for a list, `Box` for a box,
     /// `RegionRef` for a region value, ..): the one encoding a substituted generic row

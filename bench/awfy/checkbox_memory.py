@@ -74,7 +74,7 @@ def collect(args, work):
         "loader_sha256": build.sha256(tools / "wire-load"),
         "wants_sha256": build.sha256(wants),
         "server_cpu": 10, "loader_cpu": 11,
-        "points": args.clients, "complete": False, "rows": [], "highest_complete": dict.fromkeys(MODES, 0),
+        "points": args.clients, "complete": False, "rows": [], "highest_complete": dict.fromkeys(args.mode, 0),
     }
     target = args.out / "memory-sweep.json"
     snapshots = work.parent / "snapshots"
@@ -82,7 +82,7 @@ def collect(args, work):
         try:
             os.sched_setaffinity(0, board.MEASURE_CPUS)
             for clients in args.clients:
-                for mode in MODES:
+                for mode in args.mode:
                     directory = args.out / f"{mode}-{clients}"
                     try:
                         row = sample(work, directory, snapshots / directory.name, prepared, mode, clients)
@@ -107,11 +107,13 @@ def main():
     parser.add_argument("out", type=lambda path: Path(path).resolve())
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--wire-tools", type=lambda path: Path(path).resolve(), help="prebuilt wire release directory")
+    parser.add_argument("--mode", nargs="+", choices=MODES, default=MODES)
     parser.add_argument("--clients", type=int, nargs="+", choices=POINTS, default=POINTS)
     args = parser.parse_args()
     if args.out.is_relative_to(build.ROOT):
         parser.error("use a new evidence directory outside the checkout")
     args.clients = sorted(set(args.clients))
+    args.mode = list(dict.fromkeys(args.mode))
     os.sched_setaffinity(0, board.BUILD_CPUS)
     args.out.mkdir(parents=True)
     with tempfile.TemporaryDirectory(prefix="hirsel-checkbox-memory-") as scratch:

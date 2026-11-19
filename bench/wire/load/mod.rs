@@ -218,9 +218,9 @@ pub async fn memory(
     }
     let version = witness.version;
     witness.socket.close(None).await?;
-    let idle_sockets = if let Some(out) = snapshots {
+    let snapshots = if let Some(out) = snapshots {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        Some(memory_snapshot(out, "seeded-idle", pid)?)
+        Some((out, memory_snapshot(out, "seeded-idle", pid)?))
     } else {
         None
     };
@@ -269,22 +269,38 @@ pub async fn memory(
         "server_threads": field(&status, "Threads:")?,
         "wall_seconds": wall.elapsed().as_secs_f64(),
     });
-    if let Some(out) = snapshots {
+    if let Some((out, idle_sockets)) = snapshots {
         let live_sockets = memory_snapshot(out, "held", pid)?;
         sockets.shutdown().await;
         tokio::time::sleep(Duration::from_millis(500)).await;
         let after_sockets = memory_snapshot(out, "after-close", pid)?;
         result["socket_counts"] = json!({
-            "seeded_idle": idle_sockets.as_ref().map(HashSet::len),
+            "seeded_idle": idle_sockets.len(),
             "held": live_sockets.len(), "after_close": after_sockets.len(),
         });
-        let drained = idle_sockets.as_ref() == Some(&after_sockets);
+        let (held_sockets, drained) =
+            session_sockets_closed(&idle_sockets, &live_sockets, &after_sockets, count);
+        result["held_session_sockets"] = json!(held_sockets);
         result["drained"] = json!(drained);
         if !drained {
             result["complete"] = json!(false);
         }
     }
     Ok(result)
+}
+
+fn session_sockets_closed(
+    seeded_idle: &HashSet<std::path::PathBuf>,
+    held: &HashSet<std::path::PathBuf>,
+    after_close: &HashSet<std::path::PathBuf>,
+    expected: usize,
+) -> (usize, bool) {
+    let mut sockets = held.difference(seeded_idle);
+    let present = sockets.clone().count();
+    (
+        present,
+        present == expected && sockets.all(|socket| !after_close.contains(socket)),
+    )
 }
 
 fn memory_snapshot(
@@ -554,6 +570,27 @@ mod tests {
         peer.await??;
         assert!(ended.starts_with("idle socket closed"));
         Ok(())
+    }
+
+    #[test]
+    fn memory_drain_checks_held_sessions_even_if_a_seed_socket_closes() {
+        let sockets = |ids: &[&str]| ids.iter().map(std::path::PathBuf::from).collect();
+        let seeded_idle = sockets(&["listener", "seed"]);
+        let held = sockets(&["listener", "session-1", "session-2"]);
+        let after_close = sockets(&["listener"]);
+        assert_eq!(
+            session_sockets_closed(&seeded_idle, &held, &after_close, 2),
+            (2, true)
+        );
+        let leaked = sockets(&["listener", "session-2"]);
+        assert_eq!(
+            session_sockets_closed(&seeded_idle, &held, &leaked, 2),
+            (2, false)
+        );
+        assert_eq!(
+            session_sockets_closed(&seeded_idle, &held, &after_close, 3),
+            (2, false)
+        );
     }
 
     #[tokio::test]

@@ -139,9 +139,10 @@ Run `python3 bench/awfy/checkbox_memory.py OUT --artifacts TOOLCHAIN` on the
 board host. It launches a new private Hirsel server for each subscribed and
 unsubscribed point at 64, 1,000 and 10,000 sessions. Use `--clients 64` for
 the smallest point or `--wire-tools DIRECTORY` to reuse a release wire build.
-The sweep retains the verified session count, highest
+Use `--mode memory-subscribed` or `--mode memory-unsubscribed` to select one
+mode. The sweep retains the verified session count, highest
 complete point per mode, and Linux `smaps`, `smaps_rollup` and `status`
 snapshots with the seeded server idle, the sessions held, and 500 ms after
-closing their transports. A completed point requires the server's socket set
-to match its seeded-idle state. The snapshots describe process mappings
+closing their transports. A completed point accounts for every held
+session socket and checks that each closes. The snapshots describe process mappings
 and OS threads.

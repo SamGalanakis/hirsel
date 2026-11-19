@@ -69,8 +69,11 @@ async fn main() -> Result<()> {
             )
             .await?;
             println!("{result}");
+            if result["setup_error"].is_null() && result["drained"] == false {
+                return Err("memory sample incomplete: held sessions did not all drain".into());
+            }
             if result["complete"] != true {
-                return Err("memory sample censored by session admission".into());
+                return Err("memory sample censored by session admission or early closure".into());
             }
         }
         "converge" => {

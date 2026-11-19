@@ -809,8 +809,7 @@ pub fn scoped_slots(b: &Body, signatures: &[Signature]) -> ScopedSlots {
     let bit = |s: usize| (s / 64, 1u64 << (s % 64));
     // Live on every path into each block (`must`, a meet) and on some path
     // (`may`, a join).
-    let must = live_at_entry(b, words, true);
-    let may = live_at_entry(b, words, false);
+    let (must, may) = live_at_entry(b, words);
     // The slots each point uses.
     let mut used: HashMap<Point, Vec<usize>> = HashMap::new();
     for s in (0..k).filter(|&s| out[s]) {
@@ -931,51 +930,82 @@ impl ScopedSlots {
 }
 
 /// Each block's slots live at its entry, as bit sets of `words` words: live on
-/// every incoming path when `every`, else on some. `StorageLive` begins a slot,
-/// `StorageDead` ends it, and a failure edge leaves before its failing
+/// every incoming path (`must`) and on some (`may`). `StorageLive` begins a
+/// slot, `StorageDead` ends it, and a failure edge leaves before its failing
 /// instruction.
-fn live_at_entry(b: &Body, words: usize, every: bool) -> Vec<u64> {
+///
+/// Each block is read once into its exits: a target and the slots begun and
+/// ended on the way from the block's entry to that edge, so the set leaving
+/// along it is `(entry & !ended) | begun`. A worklist then revisits a block
+/// only when its entry set changes.
+fn live_at_entry(b: &Body, words: usize) -> (Vec<u64>, Vec<u64>) {
     let nb = b.blocks.len();
-    let mut at = vec![if every { !0u64 } else { 0 }; nb * words];
-    at[..words].fill(0);
-    let mut state = vec![0u64; words];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for bi in 0..nb {
-            state.copy_from_slice(&at[bi * words..(bi + 1) * words]);
-            let mut flow = |state: &[u64], to: usize, at: &mut [u64]| {
+    // `marks` holds (begun, ended) pairs of `words` words each; every exit
+    // names the pair in force when it leaves.
+    let mut marks: Vec<u64> = Vec::new();
+    let mut exits: Vec<Vec<(usize, usize)>> = Vec::with_capacity(nb);
+    for bi in 0..nb {
+        let mut out = Vec::new();
+        let mut current = marks.len() / (2 * words);
+        marks.resize(marks.len() + 2 * words, 0);
+        let mut fresh = true;
+        for inst in b.blocks[bi].insts.get(&b.insts).unwrap_or_default() {
+            if let Some(f) = inst.fail(b) {
+                out.push((f.index(), current));
+                fresh = false;
+            }
+            let (slot, begins) = match *inst {
+                Inst::StorageLive { slot } => (slot.index(), true),
+                Inst::StorageDead { slot } => (slot.index(), false),
+                _ => continue,
+            };
+            if !fresh {
+                let base = current * 2 * words;
+                marks.extend_from_within(base..base + 2 * words);
+                current += 1;
+                fresh = true;
+            }
+            let (w, m) = (slot / 64, 1u64 << (slot % 64));
+            let base = current * 2 * words;
+            if begins {
+                marks[base + w] |= m;
+            } else {
+                marks[base + w] &= !m;
+                marks[base + words + w] |= m;
+            }
+        }
+        for t in targets(b, bi) {
+            out.push((t, current));
+        }
+        exits.push(out);
+    }
+    let solve = |every: bool| {
+        let mut at = vec![if every { !0u64 } else { 0 }; nb * words];
+        at[..words].fill(0);
+        let mut queued = vec![true; nb];
+        let mut work: std::collections::VecDeque<usize> = (0..nb).collect();
+        while let Some(bi) = work.pop_front() {
+            queued[bi] = false;
+            for &(to, mark) in &exits[bi] {
+                let (begun, ended) =
+                    marks[mark * 2 * words..(mark + 1) * 2 * words].split_at(words);
+                let mut changed = false;
                 for w in 0..words {
+                    let state = (at[bi * words + w] & !ended[w]) | begun[w];
                     let old = at[to * words + w];
-                    let next = if every {
-                        old & state[w]
-                    } else {
-                        old | state[w]
-                    };
+                    let next = if every { old & state } else { old | state };
                     if next != old {
                         at[to * words + w] = next;
                         changed = true;
                     }
                 }
-            };
-            for inst in b.blocks[bi].insts.get(&b.insts).unwrap_or_default() {
-                if let Some(f) = inst.fail(b) {
-                    flow(&state, f.index(), &mut at);
+                if changed && !queued[to] {
+                    queued[to] = true;
+                    work.push_back(to);
                 }
-                match *inst {
-                    Inst::StorageLive { slot } => {
-                        state[slot.index() / 64] |= 1 << (slot.index() % 64)
-                    }
-                    Inst::StorageDead { slot } => {
-                        state[slot.index() / 64] &= !(1 << (slot.index() % 64))
-                    }
-                    _ => {}
-                }
-            }
-            for t in targets(b, bi) {
-                flow(&state, t, &mut at);
             }
         }
-    }
-    at
+        at
+    };
+    (solve(true), solve(false))
 }

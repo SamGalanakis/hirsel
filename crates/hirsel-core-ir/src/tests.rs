@@ -86,6 +86,69 @@ fn evaluator_identity_unavailable() {
     );
 }
 
+/// A slot gets storage markers only if every use is under a begin on all paths
+/// in and no begin is reached while it may be live. Expected answers are read
+/// off each body by hand: a begin reached again round a loop, a use reached on a
+/// path with no begin, and a failure edge leaving before the begin that
+/// follows its instruction are refused; the same shapes with their ends are
+/// admitted.
+#[test]
+fn slot_markers_follow_liveness_round_loops_joins_and_failure_edges() {
+    let begin =
+        |v: u32| format!("  live s0\n  address a0\n  store a0, v0\n  v{v}: ptr = pointer a0\n");
+    let cases = [
+        (
+            "straight",
+            format!(
+                "b0(v0: i32, v1: i32):\n{}  dead s0\n  return v0\n",
+                begin(2)
+            ),
+            true,
+        ),
+        (
+            "loop with an end",
+            format!(
+                "b0(v0: i32, v1: i32):\n  jump b1\nb1:\n  v2: bool = lt v0, v1\n  branch v2, b2, b3\nb2:\n{}  dead s0\n  jump b1\nb3:\n  return v0\n",
+                begin(3)
+            ),
+            true,
+        ),
+        (
+            "begun again round a loop",
+            format!(
+                "b0(v0: i32, v1: i32):\n  jump b1\nb1:\n  v2: bool = lt v0, v1\n  branch v2, b2, b3\nb2:\n{}  jump b1\nb3:\n  return v0\n",
+                begin(3)
+            ),
+            false,
+        ),
+        (
+            "used after a join with one unbegun path",
+            format!(
+                "b0(v0: i32, v1: i32):\n  v2: bool = lt v0, v1\n  branch v2, b1, b2\nb1:\n{}  jump b3\nb2:\n  jump b3\nb3:\n  address a0\n  v4: ptr = pointer a0\n  return v0\n",
+                begin(3)
+            ),
+            false,
+        ),
+        (
+            "used where a failure before the begin lands",
+            format!(
+                "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n{}  return v2\nb1:\n  address a0\n  v4: ptr = pointer a0\n  propagate\n",
+                begin(3)
+            ),
+            false,
+        ),
+    ];
+    for (case, body, scoped) in cases {
+        let text = format!(
+            "core v1\nsig g0 = (i32, i32) -> (i32)\ninst n0 = p@0/m/f [] []\nfn f0 = n0 g0 {{\n  slot s0 = i32\n  addr a0 = s0 : i32\n{body}}}\n"
+        );
+        let m = parse(&text).unwrap_or_else(|e| panic!("{case}: {e:?}"));
+        let b = m.functions[0].body.as_ref().unwrap();
+        let answer = crate::extent::scoped_slots(b, &m.signatures);
+        assert_eq!(answer.slots[0], scoped, "{case}");
+    }
+}
+
 #[test]
 fn evaluator_identity_stable() {
     let module = launch_module();

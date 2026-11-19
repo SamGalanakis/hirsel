@@ -2847,58 +2847,74 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
             TyKind::Param(i) => params.get(*i as usize).copied().unwrap_or(0),
             TyKind::Adt(d, args) => {
                 let decl = &decls[d.index()];
-                let declared = match decl.role {
-                    Some(Role::List) => meet(args) & (KEY | ORDERED | SHAREABLE | SEND | CODEC),
-                    Some(Role::String) => KEY | ORDERED | SHAREABLE | SEND | CODEC,
-                    Some(Role::FrozenBytes) => SHAREABLE | SEND,
-                    Some(Role::Text) => KEY | ORDERED,
-                    Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan) => {
-                        meet(args) & (KEY | ORDERED)
-                    }
-                    Some(Role::Child | Role::Unique | Role::Site) => PLAIN | SHAREABLE | SEND | KEY,
-                    Some(Role::Args) => PLAIN | SHAREABLE | SEND,
-                    Some(Role::Causes) => SEND,
-                    Some(Role::StaticFn) => PLAIN | SHAREABLE | SEND | KEY,
-                    Some(Role::Rc) => SHAREABLE | (meet(args) & (KEY | ORDERED)),
-                    Some(Role::Arc) => SHAREABLE | SEND | (meet(args) & (KEY | ORDERED)),
-                    Some(Role::Box) => meet(args) & (SHAREABLE | SEND | KEY | ORDERED),
-                    Some(
-                        Role::Sender
-                        | Role::Receiver
-                        | Role::Socket
-                        | Role::HostFile
-                        | Role::Tape
-                        | Role::Latest,
-                    ) => SEND,
-                    Some(Role::Map) => meet(args) & (SHAREABLE | SEND | CODEC),
-                    Some(Role::Capability) => PLAIN | SHAREABLE | SEND,
-                    Some(_) => 0,
-                    None if decl.structural => meet(args),
-                    None => {
-                        let mut bounds = decl.declared & !PLAIN;
-                        for &i in &decl.summary.bound_params {
-                            bounds &= has_bounds(decls, t, args[i as usize], params);
-                        }
-                        if let Some(codec) = decl.codec() {
-                            let mut codec_bound = decl.declared & CODEC;
-                            for &i in &codec.params {
-                                codec_bound &= has_bounds(decls, t, args[i as usize], params);
-                            }
-                            bounds = bounds & !CODEC | codec_bound;
-                        }
-                        bounds
-                    }
-                };
-                let declared = match decl.repr {
-                    Repr::Region => declared & !(SEND | SHAREABLE | CODEC),
-                    Repr::Scoped => declared & !(SEND | SHAREABLE | KEY | ORDERED | CODEC),
-                    // SEM-7: a resource is never compared, whatever it declares.
-                    Repr::Resource => declared & !(KEY | ORDERED | CODEC),
-                    Repr::Own => declared,
-                };
-                declared | encoding_bounds(decls, t, ty, params) & ENCODED
+                nominal_bounds(
+                    decl,
+                    || meet(args),
+                    |i| has_bounds(decls, t, args[i], params),
+                ) | encoding_bounds(decls, t, ty, params) & ENCODED
             }
         }
+}
+
+fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) -> u16) -> u16 {
+    let declared = match decl.role {
+        Some(Role::List) => meet() & (KEY | ORDERED | SHAREABLE | SEND | CODEC),
+        Some(Role::String) => KEY | ORDERED | SHAREABLE | SEND | CODEC,
+        Some(Role::FrozenBytes) => SHAREABLE | SEND,
+        Some(Role::Text) => KEY | ORDERED,
+        Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan) => meet() & (KEY | ORDERED),
+        Some(Role::Child | Role::Unique | Role::Site) => PLAIN | SHAREABLE | SEND | KEY,
+        Some(Role::Args) => PLAIN | SHAREABLE | SEND,
+        Some(Role::Causes) => SEND,
+        Some(Role::StaticFn) => PLAIN | SHAREABLE | SEND | KEY,
+        Some(Role::Rc) => SHAREABLE | (meet() & (KEY | ORDERED)),
+        Some(Role::Arc) => SHAREABLE | SEND | (meet() & (KEY | ORDERED)),
+        Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
+        Some(
+            Role::Sender
+            | Role::Receiver
+            | Role::Socket
+            | Role::HostFile
+            | Role::Tape
+            | Role::Latest,
+        ) => SEND,
+        Some(Role::Map) => meet() & (SHAREABLE | SEND | CODEC),
+        Some(Role::Capability) => PLAIN | SHAREABLE | SEND,
+        Some(_) => 0,
+        None if decl.structural => meet(),
+        None => {
+            let mut bounds = decl.declared & !PLAIN;
+            for &i in &decl.summary.bound_params {
+                bounds &= at(i as usize);
+            }
+            if let Some(codec) = decl.codec() {
+                let mut codec_bound = decl.declared & CODEC;
+                for &i in &codec.params {
+                    codec_bound &= at(i as usize);
+                }
+                bounds = bounds & !CODEC | codec_bound;
+            }
+            bounds
+        }
+    };
+    match decl.repr {
+        Repr::Region => declared & !(SEND | SHAREABLE | CODEC),
+        Repr::Scoped => declared & !(SEND | SHAREABLE | KEY | ORDERED | CODEC),
+        // SEM-7: a resource is never compared, whatever it declares.
+        Repr::Resource => declared & !(KEY | ORDERED | CODEC),
+        Repr::Own => declared,
+    }
+}
+
+/// Whether a declaration permits send when all its type arguments are plain
+/// and meet every bound. Layout checks the actual fields separately.
+pub(crate) fn permits_send(decl: &TypeDecl) -> bool {
+    let plain = if let Some(role) = decl.role {
+        role.kind() == Kind::Plain
+    } else {
+        decl.repr == Repr::Own && (decl.structural || decl.summary.kind_fixed == Some(Kind::Plain))
+    };
+    plain || nominal_bounds(decl, || u16::MAX, |_| u16::MAX) & SEND != 0
 }
 
 pub(crate) fn mode_of(k: NodeKind) -> Mode {

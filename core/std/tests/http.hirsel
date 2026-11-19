@@ -113,6 +113,71 @@ fn unsupported_codings() -> bool {
     frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"), 99, refused(501)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"), 99, refused(501)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n\r\n"), 99, refused(501)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n"), 99, refused(501)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding:\r\n\r\n"), 99, refused(501))
 }
 
+// llhttp test/request/{content-length,transfer-encoding}.md, 36151b9a7d6320072e24e472a769a5e09f9e969d.
+// MIT, see vectors/llhttp-LICENSE.
+// RFC 9112 section 6.3 defines body framing. HTTP-4 rules 1-3 select refusal and close.
+// Hirsel maps unsupported transfer codings to 501, including non-final chunked.
+// expect: run upstream_framing_fields() = true
+fn upstream_framing_fields() -> bool {
+    for (raw, status) in[
+    // Content-Length followed by Transfer-Encoding.
+    ("PUT /url HTTP/1.1\r\nContent-Length: 1\r\nTransfer-Encoding: identity\r\n\r\n", 400u16),
+    // Transfer-Encoding followed by Content-Length.
+    ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: identity\r\nContent-Length: 5\r\n\r\nWorld", 400u16),
+    // Duplicate Content-Length, conflicting decimal lengths.
+    ("PUT /url HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n", 400u16),
+    // The same duplicate-field refusal applies to equal lengths (HTTP-4 rule 2).
+    ("PUT /url HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\n", 400u16),
+    // Unknown transfer coding.
+    ("PUT /url HTTP/1.1\r\nTransfer-Encoding: pigeons\r\n\r\n", 501u16),
+    // Non-final chunked in one field.
+    ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunked, deflate\r\n\r\nWorld", 501u16),
+    // Non-final chunked across two fields.
+    ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: deflate\r\n\r\nWorld", 501u16),
+    // A token containing chunked twice is not the chunked coding.
+    ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunkedchunked\r\n\r\n5\r\nWorld\r\n0\r\n\r\n", 501u16),] {
+        if !frame_case(string.as_bytes(raw), 99, refused(status)) {
+            return false
+        }
+    }
+    true
+}
+
+// llhttp test/request/{content-length,transfer-encoding}.md, 36151b9a7d6320072e24e472a769a5e09f9e969d.
+// MIT, see vectors/llhttp-LICENSE.
+// httparse src/lib.rs, 9f29e79f9832dbd0ae5220acb17c1866745bdecd.
+// MIT, see vectors/httparse-LICENSE.
+// RFC 9112 sections 2.2 and 5.2. Hirsel's strict head grammar accepts bare LF
+// as a line ending and refuses obs-fold before framing can select a body.
+// expect: run upstream_framing_head_lines() = true
+fn upstream_framing_head_lines() -> bool {
+    let cases: Inline[(String, Option[http.Framing]), 5] =[
+    // httparse test_request_newlines, plus an LF-only Content-Length head.
+    ("GET / HTTP/1.1\nHost: foo.bar\n\n", Some(Empty)), ("PUT /url HTTP/1.1\nContent-Length: 1\n\n", Some(ContentLength(1))),
+    // llhttp Invalid OBS fold after chunked value.
+    ("PUT /url HTTP/1.1\r\nTransfer-Encoding: chunked\r\n  abc\r\n\r\n5\r\nWorld\r\n0\r\n\r\n", None),
+    // httparse test_request_header_with_missing_colon_with_folding.
+    ("GET / HTTP/1.1\r\nAccess-Control-Allow-Credentials   \r\n hello\r\nBread: baguette\r\n\r\n", None),
+    // RFC 9112 section 5.2. A tab starts an obsolete continuation.
+    ("PUT /url HTTP/1.1\r\nContent-Length: 1\r\n\t1\r\n\r\n", None),]
+    for (raw, expected) in cases {
+        let bytes_in = string.as_bytes(raw)
+        match expected {
+            Some(frame) => if !frame_case(bytes_in, 99, Ok(frame)) {
+                return false
+            },
+            None => {
+                let mut h = http1.head()
+                let mut cursor = http1.cursor()
+                if http1.request(bytes_in, mut h) != Bad || http1.resume(bytes_in, mut h, mut cursor) != Bad {
+                    return false
+                }
+            },
+        }
+    }
+    true
+}
+
 fn same_head(a: http1.Head, b: http1.Head) -> bool {
     if a.method != b.method || a.target != b.target || a.version != b.version || a.status != b.status || a.reason != b.reason || a.count != b.count || a.end != b.end {
         return false
@@ -172,6 +237,38 @@ fn chunk_case(wire: Bytes, limit: u64, status: u16, body: Bytes, used: u64, eof_
     let head = result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")
     for split in 0u64 .. list.len(wire) + 1 {
         if !body_split(head, wire, limit, status, body, used, split, eof_only) {
+            return false
+        }
+    }
+    true
+}
+
+// llhttp test/request/transfer-encoding.md, 36151b9a7d6320072e24e472a769a5e09f9e969d.
+// MIT, see vectors/llhttp-LICENSE.
+// httparse src/lib.rs, 9f29e79f9832dbd0ae5220acb17c1866745bdecd.
+// MIT, see vectors/httparse-LICENSE.
+// HTTP-4 rule 5 and RFC 9112 section 7.1.1. The two loose httparse extension
+// inputs are errors under Hirsel's documented token and whitespace grammar.
+// expect: run upstream_chunk_lines() = true
+fn upstream_chunk_lines() -> bool {
+    for (wire, status, body, used) in[
+    // llhttp Chunk extensions.
+    ("5;ilovew3;somuchlove=aretheseparametersfor;another=withvalue\r\nhello\r\n6;blahblah;blah\r\n world\r\n0\r\n\r\n", 0u16, "hello world", 99u64),
+    // llhttp Chunk extensions quoting.
+    ("5;ilovew3=\"I \\\"love\\\"; \\\\extensions\\\\\";somuchlove=\"aretheseparametersfor\";blah;foo=bar\r\nhello\r\n6;blahblah;blah\r\n world\r\n0\r\n\r\n", 0u16, "hello world", 125u64),
+    // llhttp No semicolon before chunk extensions.
+    ("2 erfrferferf\r\naa\r\n0 rrrr\r\n\r\n", 400u16, "", 0u64),
+    // llhttp No extension after semicolon.
+    ("2;\r\naa\r\n0\r\n\r\n", 400u16, "", 0u64),
+    // llhttp Unbalanced chunk extensions quoting.
+    ("5;ilovew3=\"abc\";somuchlove=\"def; ghi\r\nhello\r\n6;blahblah;blah\r\n world\r\n0\r\n\r\n", 400u16, "", 0u64),
+    // httparse test_chunk_size, invalid hex digit.
+    ("567xf8a\r\n", 400u16, "", 0u64),
+    // httparse test_chunk_size, values beyond u64.
+    ("1ffffffffffffffff\r\n", 400u16, "", 0u64), ("Affffffffffffffff\r\n", 400u16, "", 0u64), ("fffffffffffffffff\r\n", 400u16, "", 0u64),
+    // RFC 9112 section 7.1.1 requires token syntax and binds whitespace to a delimiter.
+    ("3735AB1;foo bar*\r\n", 400u16, "", 0u64), ("3735ab1 ; baz \r\n", 400u16, "", 0u64),] {
+        if !chunk_case(string.as_bytes(wire), 18446744073709551615, status, string.as_bytes(body), used, false) {
             return false
         }
     }

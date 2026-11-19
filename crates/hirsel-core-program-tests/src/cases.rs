@@ -1218,7 +1218,7 @@ fn recovered_header_cases() -> Vec<String> {
         std::fs::write(&path, source).unwrap();
         let mut packages = vec![
             PackageManifest::directory(&core_dir(), package("core"), true).unwrap(),
-            PackageManifest::directory(&repo().join("core/std"), package("std"), false).unwrap(),
+            crate::std_manifest(),
         ];
         let (owner, module, entry) = if name == "store" {
             let manifest: serde_json::Value = serde_json::from_str(

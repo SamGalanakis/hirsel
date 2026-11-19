@@ -15,6 +15,13 @@ pub fn package(name: &str) -> hirsel_core_ids::PackageId {
     hirsel_core_driver::package(name)
 }
 
+fn std_manifest() -> PackageManifest {
+    let mut manifest =
+        PackageManifest::directory(&repo().join("core/std"), package("std"), false).unwrap();
+    manifest.dependencies.push(package("core"));
+    manifest
+}
+
 /// A fixture opts into std when its diagnostic exercises codec derivation.
 pub(crate) fn source_manifest(
     source: &str,
@@ -26,9 +33,7 @@ pub(crate) fn source_manifest(
     let mut packages = vec![PackageManifest::directory(core, package("core"), true).unwrap()];
     if source.lines().any(|line| line == "// library: std") {
         dependencies.push(package("std"));
-        packages.push(
-            PackageManifest::directory(&repo().join("core/std"), package("std"), false).unwrap(),
-        );
+        packages.push(std_manifest());
     }
     packages.push(PackageManifest {
         package: package("app"),

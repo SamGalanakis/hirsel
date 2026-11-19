@@ -378,20 +378,30 @@ fn release_edit_is_the_cold_build() {
                 let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
                 let tool = root.join(std::env::var_os("HIRSEL_TEST_TAIL_CONTEXT").unwrap());
                 let llvm = hirsel_llvm_lazy::llvm_library().unwrap();
+                let mut built_keys = 0;
                 for fixture in fixtures {
-                    let paths = [("tail-key", fixture.key), ("tail-input", fixture.input), ("tail-cached", fixture.cached)]
+                    let paths = [
+                        ("tail-key", fixture.key),
+                        ("tail-input", fixture.input),
+                        ("tail-cached", fixture.cached),
+                        ("tail-ir", fixture.ir.to_vec()),
+                    ]
                         .map(|(name, data)| {
                             let path = dir.path().join(name);
                             std::fs::write(&path, data).unwrap();
                             path
                         });
+                    let run = Command::new(&tool).args(paths)
+                        .env("LD_LIBRARY_PATH", llvm.parent().unwrap())
+                        .stderr(std::process::Stdio::inherit())
+                        .output().unwrap();
                     assert!(
-                        Command::new(&tool).args(paths)
-                            .env("LD_LIBRARY_PATH", llvm.parent().unwrap())
-                            .status().unwrap().success(),
-                        "the tail rebuilt using only the key equals the cached tail"
+                        run.status.success(),
+                        "the part's key is exact and the tail rebuilt using only the key equals the cached tail"
                     );
+                    built_keys += usize::from(run.stdout == b"built key\n");
                 }
+                assert!(built_keys > 0, "some part read back has the key the build computed");
             }
             let (cold, cold_bytes, _) = reach_build(
                 &record_check(app, core, dir.path(), &format!("fresh{n}")),

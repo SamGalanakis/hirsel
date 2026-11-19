@@ -2,10 +2,11 @@
 //! The release unit is the whole program: every reached body, the program's and
 //! each library's alike, is an internal definition of one LLVM module that the
 //! whole-program pipeline optimises. After cleanup, each definition's release
-//! tail runs alone and is held in the shared parts store under its bitcode at
-//! that cut (with the linkage facts the bitcode does not keep), so an edit
-//! reruns only the tails whose input changed. Each out-of-line definition is then a
-//! part keyed by its own bitcode and the code generator's settings; one code
+//! tail runs alone and is held in the shared parts store under the key of its
+//! part at that cut (`module_key`, a walk of the part's IR in memory, with the
+//! linkage facts the part does not keep), so an edit reruns only the tails whose
+//! input changed. Each out-of-line definition is then a part keyed by its own
+//! IR and the code generator's settings; one code
 //! generation covers every part not already held, and its object is cut per
 //! part. An unchanged definition is generated once, whichever program and
 //! build reached it.
@@ -28,34 +29,31 @@ fn unit_key(
 /// A part's key: the compiler, libLLVM, target and debug lines
 /// (`generator`), the target machine's settings as libLLVM states them
 /// (`machine`: CPU, features, relocation and code model, codegen options), and
-/// the part's bitcode, which is all a part's object is a function of.
+/// the part's key (`ir`: what its bitcode records), which is all a part's
+/// object is a function of.
 fn part_key(
     generator: &impl serde::Serialize,
     machine: &str,
-    bitcode: &[u8],
+    ir: &[u8; 32],
 ) -> io::Result<ContentHash> {
     crate::native::key(
-        "hirsel.core-release-part.v2",
-        &(generator, machine, ContentHash::of_bytes(bitcode)),
+        "hirsel.core-release-part.v3",
+        &(generator, machine, ContentHash(*ir)),
     )
 }
 
 /// A release tail's key: the compiler, libLLVM, target and debug lines
 /// (`generator`), the machine text and the linkage the definition's part
-/// does not keep (`key`), and the part's bitcode at the cut, which is all the
-/// tail's output is a function of.
+/// does not keep (`key`), and the key of the part at the cut (`ir`), which is
+/// all the tail's output is a function of.
 fn tail_key(
     generator: &impl serde::Serialize,
     key: &[u8],
-    bitcode: &[u8],
+    ir: &[u8; 32],
 ) -> io::Result<ContentHash> {
     crate::native::key(
-        "hirsel.core-release-tail.v2",
-        &(
-            generator,
-            ContentHash::of_bytes(key),
-            ContentHash::of_bytes(bitcode),
-        ),
+        "hirsel.core-release-tail.v3",
+        &(generator, ContentHash::of_bytes(key), ContentHash(*ir)),
     )
 }
 
@@ -73,6 +71,7 @@ struct SharedParts<'a, G> {
 #[cfg(test)]
 pub(super) struct TailFixture {
     pub key: Vec<u8>,
+    pub ir: [u8; 32],
     pub input: Vec<u8>,
     pub cached: Vec<u8>,
 }
@@ -83,8 +82,8 @@ std::thread_local! {
 }
 
 impl<G: serde::Serialize> hirsel_llvm_lazy::Held for SharedParts<'_, G> {
-    fn part(&mut self, _: &str, machine: &str, bitcode: &[u8]) -> bool {
-        let loaded = part_key(self.generator, machine, bitcode).and_then(|key| {
+    fn part(&mut self, _: &str, machine: &str, ir: &[u8; 32]) -> bool {
+        let loaded = part_key(self.generator, machine, ir).and_then(|key| {
             self.parts.push(key);
             crate::native_object::load(self.shared, key)
         });
@@ -101,11 +100,11 @@ impl<G: serde::Serialize> hirsel_llvm_lazy::Held for SharedParts<'_, G> {
         }
     }
 
-    fn tail(&mut self, key: &[u8], bitcode: &[u8]) -> Option<Vec<u8>> {
+    fn tail(&mut self, key: &[u8], ir: &[u8; 32]) -> Option<Vec<u8>> {
         if self.failure.is_some() {
             return None;
         }
-        tail_key(self.generator, key, bitcode)
+        tail_key(self.generator, key, ir)
             .and_then(|key| self.shared.get(key))
             .unwrap_or_else(|error| {
                 self.failure.get_or_insert(error);
@@ -113,7 +112,7 @@ impl<G: serde::Serialize> hirsel_llvm_lazy::Held for SharedParts<'_, G> {
             })
     }
 
-    fn keep_tail(&mut self, key: &[u8], bitcode: &[u8], tail: &[u8]) {
+    fn keep_tail(&mut self, key: &[u8], ir: &[u8; 32], input: &[u8], tail: &[u8]) {
         if self.failure.is_some() {
             return;
         }
@@ -122,16 +121,23 @@ impl<G: serde::Serialize> hirsel_llvm_lazy::Held for SharedParts<'_, G> {
             if let Some(fixtures) = fixtures.borrow_mut().as_mut() {
                 fixtures.push(TailFixture {
                     key: key.to_vec(),
-                    input: bitcode.to_vec(),
+                    ir: *ir,
+                    input: input.to_vec(),
                     cached: tail.to_vec(),
                 });
             }
         });
         if let Err(error) =
-            tail_key(self.generator, key, bitcode).and_then(|key| self.shared.put_keyed(key, tail))
+            tail_key(self.generator, key, ir).and_then(|key| self.shared.put_keyed(key, tail))
         {
             self.failure.get_or_insert(error);
         }
+    }
+
+    /// A test that collects tail fixtures replays each tail from its input.
+    #[cfg(test)]
+    fn witness(&self) -> bool {
+        TAIL_FIXTURES.with(|fixtures| fixtures.borrow().is_some())
     }
 }
 
@@ -460,8 +466,8 @@ impl CheckProduct {
             .map_err(emit)?;
             sites = std::mem::take(&mut release.sites);
             let key = crate::native::key(
-                "hirsel.core-release-bitcode.v1",
-                &(&generator, runtime, instance, release.bitcode_hash()),
+                "hirsel.core-release-ir.v2",
+                &(&generator, runtime, instance, release.ir_key()),
             )?;
             if let Some((mut record, objects)) = load_parts(store, &shared, key)? {
                 record.sites.clone_from(&sites);

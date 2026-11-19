@@ -30,7 +30,7 @@ pub(crate) struct Api {
     pub unit_drop: unsafe extern "C" fn(Raw),
     pub unit_take: unsafe extern "C" fn(Raw, *mut Output) -> Raw,
     pub module_drop: unsafe extern "C" fn(Raw),
-    pub bitcode: unsafe extern "C" fn(Raw, *mut Output),
+    pub module_key: unsafe extern "C" fn(Raw, *mut Output),
     pub print: unsafe extern "C" fn(Raw, *mut Output),
     pub print_text: unsafe extern "C" fn(*const c_char, usize, *mut Output),
     pub integer_type: unsafe extern "C" fn(Raw, u32) -> Raw,
@@ -156,10 +156,12 @@ impl NativeModule {
     pub(crate) fn consume(&self) {
         self.consumed.set(true);
     }
-    pub(crate) fn bitcode_hash(&self) -> hirsel_core_ids::ContentHash {
+    /// What the module's bitcode records, read from the module in memory.
+    pub(crate) fn ir_key(&self) -> hirsel_core_ids::ContentHash {
         let mut out = Output::default();
-        unsafe { (self.context.api.bitcode)(self.raw, &mut out) };
-        hirsel_core_ids::ContentHash::of_bytes(&output_bytes(out).0)
+        unsafe { (self.context.api.module_key)(self.raw, &mut out) };
+        let key = output_bytes(out).0;
+        hirsel_core_ids::ContentHash(key.try_into().expect("a module key is 32 bytes"))
     }
 }
 impl Drop for NativeModule {

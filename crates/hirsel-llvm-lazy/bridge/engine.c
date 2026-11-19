@@ -42,7 +42,8 @@ extern void hirsel_llvm_merge_glue(LLVMModuleRef module);
 typedef int (*HirselLlvmReuse)(void *, const char *, size_t, const char *, size_t, const uint8_t *, size_t);
 typedef void (*HirselLlvmDeliver)(void *, const uint8_t *, size_t);
 typedef int (*HirselLlvmFindTail)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t **, size_t *);
-typedef void (*HirselLlvmKeepTail)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t *, size_t);
+typedef void (*HirselLlvmKeepTail)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
+                                   const uint8_t *, size_t);
 extern void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachineRef machine,
     HirselLlvmFindTail find, HirselLlvmKeepTail keep, void *context);
 extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,

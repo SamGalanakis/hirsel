@@ -1,6 +1,7 @@
 // Share the private part writer with the native driver test. This executable
 // is built only for tests.
 #include "parts.cpp"
+#include <functional>
 #include <llvm/Support/TargetSelect.h>
 
 namespace {
@@ -35,17 +36,115 @@ std::string decoded_part(StringRef code) {
     part->print(out, nullptr, /*ShouldPreserveUseListOrder=*/true);
     return text;
 }
+
+// The key law: the part's key read back from its bitcode in another context
+// is the key the build computed in memory, and each change to a fact the
+// part's code is a function of changes it. Reading bitcode resets each
+// intrinsic declaration's attributes to the intrinsic's own
+// (`UpgradeIntrinsicFunction`), so a part that declares an intrinsic is not
+// the built part once read back; for it, the key read back is the key of the
+// part read back again. Returns whether the read-back key was the built key.
+enum class Law { Built, Reread, Broken };
+Law key_law(StringRef input, StringRef ir) {
+    auto read = [](StringRef code, LLVMContext &context) {
+        context.setDiscardValueNames(true);
+        return cantFail(parseBitcodeFile(MemoryBufferRef(code, "test-tail"), context));
+    };
+    auto key = [&](function_ref<void(Module &)> change) {
+        LLVMContext context;
+        auto part = read(input, context);
+        change(*part);
+        return hirsel_key::module_key(*part);
+    };
+    hirsel_key::Digest built;
+    if (ir.size() != built.size()) return Law::Broken;
+    memcpy(built.data(), ir.data(), built.size());
+    auto own = [](Module &part) -> Function & {
+        for (Function &f : part)
+            if (!f.isDeclaration()) return f;
+        report_fatal_error("a tail input defines its function");
+    };
+    hirsel_key::Digest base = key([](Module &) {});
+    bool intrinsic = false;
+    {
+        LLVMContext context;
+        auto part = read(input, context);
+        for (Function &f : *part) intrinsic |= f.isIntrinsic();
+    }
+    if (!intrinsic && base != built) {
+        errs() << "the key of the part read back differs from the built key\n";
+        return Law::Broken;
+    }
+    if (intrinsic) {
+        LLVMContext context;
+        auto part = read(input, context);
+        SmallVector<char, 0> code;
+        bitcode(*part, code);
+        LLVMContext again;
+        if (hirsel_key::module_key(*read(StringRef(code.data(), code.size()), again)) != base) {
+            errs() << "the key of the part read back twice differs from the key read back once\n";
+            return Law::Broken;
+        }
+    }
+    std::pair<const char *, std::function<bool(Module &)>> changes[] = {
+        {"a function attribute", [&](Module &part) {
+             Function &f = own(part);
+             if (f.hasFnAttribute(Attribute::Cold)) f.removeFnAttr(Attribute::Cold);
+             else f.addFnAttr(Attribute::Cold);
+             return true;
+         }},
+        {"a debug location's line", [&](Module &part) {
+             for (BasicBlock &b : own(part))
+                 for (Instruction &i : b)
+                     if (DILocation *at = i.getDebugLoc()) {
+                         i.setDebugLoc(DILocation::get(at->getContext(), at->getLine() + 1, at->getColumn(),
+                                                       at->getScope(), at->getInlinedAt()));
+                         return true;
+                     }
+             return false;
+         }},
+        {"a global initializer", [&](Module &part) {
+             for (GlobalVariable &g : part.globals())
+                 if (g.hasInitializer()) {
+                     Constant *init = g.getInitializer();
+                     g.setInitializer(init->isNullValue() ? UndefValue::get(init->getType())
+                                                          : Constant::getNullValue(init->getType()));
+                     return true;
+                 }
+             return false;
+         }},
+        {"the data layout", [&](Module &part) {
+             part.setDataLayout(part.getDataLayoutStr() + "-ni:1");
+             return true;
+         }},
+    };
+    for (auto &[what, change] : changes) {
+        bool changed = false;
+        if (key([&](Module &part) { changed = change(part); }) == base) {
+            if (!changed) continue;
+            errs() << "changing " << what << " keeps the part's key\n";
+            return Law::Broken;
+        }
+        if (!changed) report_fatal_error("an unchanged part changed its key");
+    }
+    return intrinsic ? Law::Reread : Law::Built;
+}
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc != 4) return 2;
+    if (argc != 5) return 2;
     LLVMInitializeX86TargetInfo();
     LLVMInitializeX86Target();
     LLVMInitializeX86TargetMC();
     auto key = MemoryBuffer::getFile(argv[1]);
     auto input = MemoryBuffer::getFile(argv[2]);
     auto cached = MemoryBuffer::getFile(argv[3]);
-    if (!key || !input || !cached) return 2;
+    auto ir = MemoryBuffer::getFile(argv[4]);
+    if (!key || !input || !cached || !ir) return 2;
+    Law law = key_law((*input)->getBuffer(), (*ir)->getBuffer());
+    if (law == Law::Broken) return 1;
+    // The driver test requires some part to meet the built key exactly.
+    if (law == Law::Built) outs() << "built key\n";
     StringRef facts = (*key)->getBuffer();
     auto machine = test_machine(facts);
     if (!machine) return 2;

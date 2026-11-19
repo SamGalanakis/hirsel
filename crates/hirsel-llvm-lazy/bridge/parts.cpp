@@ -1,5 +1,5 @@
 // The release module's codegen parts. Whole-program O3 has run; each
-// out-of-line definition is then a part keyed by its bitcode, a part whose
+// out-of-line definition is then a part keyed by what its bitcode records (key.h), a part whose
 // object a caller already holds is not generated again, and each of the rest
 // is generated from that bitcode alone, the parts in parallel.
 //
@@ -19,11 +19,13 @@
 #undef _GLIBCXX_USE_PTHREAD_MUTEX_CLOCKLOCK
 #undef _GLIBCXX_USE_PTHREAD_RWLOCK_CLOCKLOCK
 #endif
+#include "key.h"
 #include "pass_cost.h"
 
 #include <llvm-c/Core.h>
 #include <llvm-c/TargetMachine.h>
 #include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/STLFunctionalExtras.h>
 #include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/StringMap.h>
@@ -319,8 +321,8 @@ void order_uses_like(const Function &f, const ValueToValueMapTy &map) {
     }
 }
 
-// The bitcode of `f` alone, with what it references, in a module of its own.
-// The part's definition borrows `f`'s body for the write: its blocks move in,
+// Lends `use` the part of `f`: `f` alone, with what it references, in a
+// module of its own. The part's definition borrows `f`'s body for the call: its blocks move in,
 // its operands and metadata that name a global name the part's declaration
 // instead, and all of it is put back after, so `m` is as it was. The move
 // keeps every use-list order the code generator follows. A body the move
@@ -330,10 +332,9 @@ void order_uses_like(const Function &f, const ValueToValueMapTy &map) {
 // With `linkage`, the linkage and visibility the part does not keep of `f`
 // and of each global it names, and whether each is defined, are written to it,
 // and the part defines every variable it names with its initializer (a tail
-// folds a load from a constant): the bitcode is then a release tail's key.
-void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
-                  SmallVectorImpl<char> &out, std::string *linkage = nullptr,
-                  SmallVectorImpl<MDNode *> *debug = nullptr) {
+// folds a load from a constant): the part is then a release tail's input.
+void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::string *linkage,
+               SmallVectorImpl<MDNode *> *debug, function_ref<void(Module &)> use) {
     LLVMContext &context = m.getContext();
     auto p = std::make_unique<Module>("hirsel-part", context);
     p->setSourceFileName("hirsel-part");
@@ -420,7 +421,7 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
         SmallVector<ReturnInst *, 8> returns;
         CloneFunctionInto(own, &f, map, CloneFunctionChangeType::DifferentModule, returns);
         order_uses_like(f, map);
-        bitcode(*p, out);
+        use(*p);
         return;
     }
     if (debug && !debug->empty()) {
@@ -464,12 +465,19 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
                     i.setMetadata(kind, MapMetadata(node, map));
                 }
         }
-    bitcode(*p, out);
+    use(*p);
     for (auto &[i, kind, node] : retagged) i->setMetadata(kind, node);
     for (auto it = moved.rbegin(); it != moved.rend(); ++it) it->first->set(it->second);
     for (auto [from, to] = std::pair(f.arg_begin(), own->arg_begin()); from != f.arg_end(); ++from, ++to)
         hand_uses(*to, *from);
     f.splice(f.end(), own);
+}
+
+// The bitcode of `f`'s part (`with_part`).
+void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
+                  SmallVectorImpl<char> &out, std::string *linkage = nullptr,
+                  SmallVectorImpl<MDNode *> *debug = nullptr) {
+    with_part(m, f, sets, linkage, debug, [&](Module &p) { bitcode(p, out); });
 }
 
 // What code generation is a function of besides the IR: the machine and the
@@ -620,14 +628,15 @@ void generate_all(const TargetMachine &tm, std::vector<Miss> &misses, unsigned j
 }  // namespace
 
 // Generate every definition of `module` a caller does not hold. Each
-// out-of-line definition is a part keyed by its own bitcode (`part`); `reuse`
-// gets the machine text, the part's definition name and bitcode, and answers 1
+// out-of-line definition is a part keyed by what its bitcode records
+// (`hirsel_key::module_key`); `reuse` gets the definition name, the machine
+// text and the part's key, and answers 1
 // when it holds the part's object. With `jobs` 0 the rest are generated
 // together in one object with a section per definition, which `deliver` gets
 // and the caller cuts per part. Otherwise each missed part is generated from
 // its bitcode alone on up to `jobs` threads, and `deliver` gets its object, in
 // part order. A module that cannot be cut (`unsplittable`) is one part named
-// "" keyed by the module's bitcode and generated whole.
+// "" keyed by the module's key and generated whole.
 // Returns 0, or 1 with `*error` set to an LLVM message.
 extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     int (*reuse)(void *, const char *, size_t, const char *, size_t, const uint8_t *, size_t),
@@ -652,29 +661,32 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
     }
     name_from_content(m);
     bool whole = !unsplittable(m).empty();
-    auto ask = [&](StringRef name, const SmallVectorImpl<char> &code) {
+    auto ask = [&](StringRef name, const hirsel_key::Digest &key) {
         return reuse(context, name.data(), name.size(), machine_key.data(), machine_key.size(),
-                     (const uint8_t *)code.data(), code.size()) != 0;
+                     key.data(), key.size()) != 0;
     };
     std::vector<Miss> misses;
     if (whole) {
-        SmallVector<char, 0> code;
-        bitcode(m, code);
-        if (ask("", code)) return 0;
+        if (ask("", hirsel_key::module_key(m))) return 0;
         jobs = 0;
         misses.emplace_back();
     } else {
-        // Keyed while local definitions are still local: a part's bitcode
-        // then carries each constant it reaches with its initializer, which
-        // the part's object holds a copy of.
+        // Keyed while local definitions are still local: a part then
+        // carries each constant it reaches with its initializer, which the
+        // part's object holds a copy of. A missed part's bitcode is the
+        // input its worker generates from.
         StringMap<std::string> sets = asm_lines(m);
         std::vector<Function *> held;
         for (Function &f : m) {
             if (f.isDeclaration()) continue;
-            Miss miss;
-            part_bitcode(m, f, sets, miss.code);
-            if (ask(f.getName(), miss.code)) held.push_back(&f);
-            else misses.push_back(std::move(miss));
+            with_part(m, f, sets, nullptr, nullptr, [&](Module &p) {
+                if (ask(f.getName(), hirsel_key::module_key(p))) {
+                    held.push_back(&f);
+                    return;
+                }
+                Miss &miss = misses.emplace_back();
+                if (jobs) bitcode(p, miss.code);
+            });
         }
         if (jobs) {
             if (misses.empty()) return 0;
@@ -909,14 +921,17 @@ bool restore(Module &m, Function &f, StringRef held, ArrayRef<MDNode *> debug) {
 // The release tail (`hirsel_llvm_tail_run`) of every definition of `module`,
 // in module order. The tail of a definition is a function of its part at the
 // cut, so a definition whose body a part can lend and take back exactly is
-// keyed by that part's bitcode, the machine text, and the linkage the part
-// does not keep: `find` answers with the part after the tail when the caller
-// holds it, the body is restored from it, and otherwise the tail runs in place
-// and `keep` gets the part after it. A module that cannot be split is not
+// keyed by that part's key (`hirsel_key::module_key`), the machine text, and
+// the linkage the part does not keep: `find` answers 1 with the part after the
+// tail when the caller holds it, the body is restored from it, and otherwise
+// the tail runs in place and `keep` gets the part after it. `find` answers 2
+// when the caller does not hold the tail and wants the part's bitcode at the
+// cut with it. A module that cannot be split is not
 // keyed: a definition the parts do not hold may reach what no part carries.
 extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachineRef machine,
     int (*find)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t **, size_t *),
-    void (*keep)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t *, size_t),
+    void (*keep)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
+                 const uint8_t *, size_t),
     void *context) {
     Module &m = *unwrap(module);
     // Local value names label printed IR only; a key does not take them.
@@ -933,8 +948,8 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
     bool keyed = find && unsplittable(m).empty();
     const bool debug_info = keyed && m.getModuleFlag("Debug Info Version");
     // The pinned reader's UpgradeDebugInfo verifier looks up both names
-    // even on x86. The bitcode writer includes the context's kind registry,
-    // so a cache hit must not change the bytes of later parts.
+    // even on x86. A key records the context's kind registry, as the
+    // bitcode writer does, so a cache hit must not change later parts' keys.
     if (debug_info) {
         m.getContext().getMDKindID("reqd_work_group_size");
         m.getContext().getMDKindID("amdgpu.expected.active.lanes");
@@ -952,14 +967,19 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
             continue;
         }
         std::string key = machine_key;
-        SmallVector<char, 0> code;
+        hirsel_key::Digest ir;
+        SmallVector<char, 0> input;
         SmallVector<MDNode *, 8> debug;
         auto *bindings = debug_info ? &debug : nullptr;
-        part_bitcode(m, *f, sets, code, &key, bindings);
         const uint8_t *held = nullptr;
         size_t held_len = 0;
-        if (find(context, key.data(), key.size(), (const uint8_t *)code.data(), code.size(), &held, &held_len) &&
-            restore(m, *f, StringRef((const char *)held, held_len), debug))
+        int found = 0;
+        with_part(m, *f, sets, &key, bindings, [&](Module &p) {
+            ir = hirsel_key::module_key(p);
+            found = find(context, key.data(), key.size(), ir.data(), ir.size(), &held, &held_len);
+            if (found == 2) bitcode(p, input);
+        });
+        if (found == 1 && restore(m, *f, StringRef((const char *)held, held_len), debug))
             continue;
         hirsel_llvm_tail_run(tail, wrap(f));
         SmallVector<char, 0> after;
@@ -968,8 +988,8 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
         std::string value((const char *)&size, sizeof size);
         value.append(after.data(), after.size());
         use_orders(*f, value);
-        keep(context, key.data(), key.size(), (const uint8_t *)code.data(), code.size(),
-             (const uint8_t *)value.data(), value.size());
+        keep(context, key.data(), key.size(), ir.data(), ir.size(), (const uint8_t *)input.data(),
+             input.size(), (const uint8_t *)value.data(), value.size());
     }
     hirsel_llvm_tail_close(tail);
 }

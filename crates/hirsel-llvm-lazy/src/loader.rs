@@ -54,8 +54,17 @@ type FindTail = unsafe extern "C" fn(
     *mut *const u8,
     *mut usize,
 ) -> i32;
-type KeepTail =
-    unsafe extern "C" fn(*mut libc::c_void, *const u8, usize, *const u8, usize, *const u8, usize);
+type KeepTail = unsafe extern "C" fn(
+    *mut libc::c_void,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+);
 type Program = unsafe extern "C" fn(
     *const Input,
     usize,
@@ -333,21 +342,19 @@ unsafe extern "C" fn reuse_part(
     name_len: usize,
     machine: *const u8,
     machine_len: usize,
-    bitcode: *const u8,
+    ir: *const u8,
     len: usize,
 ) -> i32 {
     // SAFETY: `receiver` is the Receiver `emit` passes for this synchronous
-    // call; the name, machine text and bitcode are borrowed for this callback
+    // call; the name, machine text and key are borrowed for this callback
     // only.
     unsafe {
         let receiver = &mut *(receiver as *mut Receiver<'_>);
         let text = |p, n| std::str::from_utf8(std::slice::from_raw_parts(p, n)).unwrap_or("");
         let name = text(name, name_len);
-        let reused = receiver.held.part(
-            name,
-            text(machine, machine_len),
-            std::slice::from_raw_parts(bitcode, len),
-        );
+        let reused = receiver
+            .held
+            .part(name, text(machine, machine_len), &ir_key(ir, len));
         receiver.program.parts.push(crate::Part {
             name: name.to_owned(),
             reused,
@@ -359,7 +366,7 @@ unsafe extern "C" fn find_tail(
     receiver: *mut libc::c_void,
     key: *const u8,
     key_len: usize,
-    bitcode: *const u8,
+    ir: *const u8,
     len: usize,
     tail: *mut *const u8,
     tail_len: *mut usize,
@@ -369,11 +376,9 @@ unsafe extern "C" fn find_tail(
     unsafe {
         let receiver = &mut *(receiver as *mut Receiver<'_>);
         let key = std::slice::from_raw_parts(key, key_len);
-        let Some(held) = receiver
-            .held
-            .tail(key, std::slice::from_raw_parts(bitcode, len))
-        else {
-            return 0;
+        let Some(held) = receiver.held.tail(key, &ir_key(ir, len)) else {
+            // 2: not held, and `keep_tail` is to get the part's bitcode.
+            return if receiver.held.witness() { 2 } else { 0 };
         };
         receiver.tail = held;
         *tail = receiver.tail.as_ptr();
@@ -385,20 +390,38 @@ unsafe extern "C" fn keep_tail(
     receiver: *mut libc::c_void,
     key: *const u8,
     key_len: usize,
-    bitcode: *const u8,
+    ir: *const u8,
     len: usize,
+    input: *const u8,
+    input_len: usize,
     tail: *const u8,
     tail_len: usize,
 ) {
-    // SAFETY: as in `reuse_part`.
+    // SAFETY: as in `reuse_part`; `input` is empty (and may be null) unless
+    // `find_tail` asked for it.
     unsafe {
         let receiver = &mut *(receiver as *mut Receiver<'_>);
+        let input = if input_len == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(input, input_len)
+        };
         receiver.held.keep_tail(
             std::slice::from_raw_parts(key, key_len),
-            std::slice::from_raw_parts(bitcode, len),
+            &ir_key(ir, len),
+            input,
             std::slice::from_raw_parts(tail, tail_len),
         );
     }
+}
+/// A part's key as the engine passes it.
+///
+/// # Safety
+/// `ir` points at `len` readable bytes.
+unsafe fn ir_key(ir: *const u8, len: usize) -> [u8; 32] {
+    // SAFETY: the caller's.
+    let bytes = unsafe { std::slice::from_raw_parts(ir, len) };
+    bytes.try_into().expect("a part key is 32 bytes")
 }
 unsafe extern "C" fn deliver_part(receiver: *mut libc::c_void, object: *const u8, len: usize) {
     // SAFETY: as in `reuse_part`; the object is copied before the callback returns.

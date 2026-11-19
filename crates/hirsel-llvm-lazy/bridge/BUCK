@@ -27,9 +27,10 @@ COMPOSE_FLAGS = [
 
 cxx_library(
     name = "compose",
-    srcs = ["compose.cpp", "builder.cpp", "parts.cpp"],
+    srcs = ["compose.cpp", "builder.cpp", "parts.cpp", "key.cpp"],
     headers = {
         "builder.h": "builder.h",
+        "key.h": "key.h",
         "pass_cost.h": "//crates/hirsel-llvm/bridge:pass_cost.h",
     },
     header_namespace = "",
@@ -41,8 +42,9 @@ cxx_library(
 
 cxx_binary(
     name = "tail-context-test",
-    srcs = ["tail_context_test.cpp"],
+    srcs = ["tail_context_test.cpp", "key.cpp"],
     headers = {
+        "key.h": "key.h",
         "parts.cpp": "parts.cpp",
         "pass_cost.h": "//crates/hirsel-llvm/bridge:pass_cost.h",
     },

@@ -33,8 +33,8 @@ Per mechanism:
 - Run detection (strictly descending reversed, nondescending kept): ADOPTED.
 - Stable quicksort with a 2 floor(log2 n) bad-partition budget and eager drift
   fallback: ADOPTED. Rust recurses on the right side; here the larger side waits on
-  an explicit pending stack and the loop takes the smaller, because task stacks are
-  64 KiB: ADAPTED.
+  an explicit pending stack and the loop takes the smaller, because the evaluator gives
+  each spawned task 64 KiB of stack: ADAPTED.
 - Ancestor-pivot equal partition: ADAPTED. Rust copies the ancestor pivot (Freeze) or
   falls back to `left_partition_len == 0`. Here the right range keeps the ancestor's
   index, which is stable until that range is first partitioned; left ranges use the

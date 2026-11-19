@@ -1438,7 +1438,7 @@ const POW5: Inline[(u64, u64), 651] =[(0xeef453d6923bd65a, 0x113faa2906a13b3f), 
 /// Appends x as Rust's `{}` prints an f64: the shortest decimal that parses back to x
 /// (`shortest64`), never in exponent form: "0.1", "1", "-0", "1000000000000000000000",
 /// "0.000001"; "NaN", "inf", "-inf". Fails: Error(c); s then holds a prefix of the text.
-/// Alloc: at most 330 bytes for the text, then the push into s. Cost: O(digits of x).
+/// Alloc: GROWTH of s only. Cost: O(digits of x).
 /// Ex: `float.push_f64(mut line, 0.1)?` appends "0.1"
 pub fn push_f64(mut s: String, x: f64) -> Result[(), Capacity] {
     push_shortest(mut s, x, false)
@@ -1447,11 +1447,16 @@ pub fn push_f64(mut s: String, x: f64) -> Result[(), Capacity] {
 /// Appends the shortest round-trip number with serde_json's spelling. Finite
 /// values keep a fractional digit in integral decimal form and use scientific
 /// notation below 1e-5 or at or above 1e16. Nonfinite values append null.
-/// Fails: Capacity. Alloc: the decimal text and growth of s. Cost: O(digits).
+/// Fails: Error(c); s then holds a prefix of the text. Alloc: GROWTH of s only.
+/// Cost: O(digits).
 pub fn push_json_f64(mut s: String, x: f64) -> Result[(), Capacity] {
     push_shortest(mut s, x, true)
 }
 
+// The text goes straight into s, as push_scaled writes it: the digits through push_u64
+// and the zeros, point and exponent as literal slices. Every layout is
+// whole [. zeros fraction] [zeros] [.0] [e+-exponent]: 0.000ddd and d.ddd/dd.ddd split c
+// at a point, ddd000 keeps c whole and pads p zeros.
 fn push_shortest(mut s: String, x: f64, json: bool) -> Result[(), Capacity] {
     let bits = float.to_bits64(x)
     if !is_finite(x) {
@@ -1473,86 +1478,80 @@ fn push_shortest(mut s: String, x: f64, json: bool) -> Result[(), Capacity] {
             "0"
         })
     }
-    let mut t: Inline[u8, 20] =[0; 20]
-    let len = digits_of(c, mut t)
+    let len = decimal_len(c)
     let width: i64 = int.narrow(len)
     let point = width + p
-    if json && (point <= -5 || point > 16) {
-        return push_scientific(mut s, t, len, point - 1)
-    }
-    let fractional_zero = json && p >= 0
-    // Three layouts: 0.000ddd, dd.ddd, ddd000.
-    let decimal_width: u64 = if point <= 0 {
+    let scientific = json && (point <= -5 || point > 16)
+    let mut whole = c
+    let mut fraction: u64 = 0
+    let mut places: u64 = 0
+    if !scientific && point <= 0 {
         let lead: u64 = int.narrow(-point)
-        2 + lead + len
-    } else if point < width {
-        len + 1
-    } else {
-        let tail: u64 = int.narrow(point)
-        tail
-    }
-    let n = decimal_width + if fractional_zero {
-        2
-    } else {
-        0
-    }
-    let mut o: Bytes = list.with_capacity(n)?
-    list.fill(mut o, n, b'0')?
-    let mut at: u64 = 0
-    if point <= 0 {
-        o[1] = b'.'
-        at = n - len
-    } else if point < width {
-        let dot: u64 = int.narrow(point)
-        o[dot] = b'.'
-    }
-    if fractional_zero {
-        o[decimal_width] = b'.'
-    }
-    for i in 0 .. len {
-        if o[at] == b'.' {
-            at += 1
+        whole = 0
+        fraction = c
+        places = len + lead
+    } else if scientific || point < width {
+        places = if scientific {
+            len - 1
+        } else {
+            int.narrow(width - point)
         }
-        o[at] = b'0' + t[i]
-        at += 1
+        let scale = POW10_U64[places]
+        whole = c / scale
+        fraction = c % scale
     }
-    push_ascii(mut s, take o)
-}
-
-// serde_json 1.0.154 uses Zmij's signed exponent spelling.
-fn push_scientific(mut s: String, digits: Inline[u8, 20], len: u64, exponent: i64) -> Result[(), Capacity] {
-    let magnitude: u64 = int.narrow(if exponent < 0 {
+    string.push_u64(mut s, whole)?
+    let zeros: u64 = if places != 0 {
+        string.push(mut s, ".")?
+        places - decimal_len(fraction)
+    } else if scientific {
+        0
+    } else {
+        int.narrow(p)
+    }
+    push_zeros(mut s, zeros)?
+    if places != 0 {
+        string.push_u64(mut s, fraction)?
+    } else if json && !scientific {
+        string.push(mut s, ".0")?
+    }
+    if !scientific {
+        return Ok(())
+    }
+    // serde_json 1.0.154 uses Zmij's signed exponent spelling.
+    let exponent = point - 1
+    string.push(mut s, if exponent < 0 {
+        "e-"
+    } else {
+        "e+"
+    })?
+    string.push_u64(mut s, int.narrow(if exponent < 0 {
         -exponent
     } else {
         exponent
-    })
-    let mut exponent_digits: Inline[u8, 20] =[0; 20]
-    let power_len = digits_of(magnitude, mut exponent_digits)
-    let mantissa_len = len + if len > 1 {
-        1
-    } else {
-        0
+    }))
+}
+
+/// The number of decimal digits push_u64 writes for v: 1 for 0.
+fn decimal_len(v: u64) -> u64 {
+    let mut n: u64 = 1
+    while n < 20 && v >= POW10_U64[n] {
+        n += 1
     }
-    let n = mantissa_len + 2 + power_len
-    let mut out: Bytes = list.with_capacity(n)?
-    list.fill(mut out, n, b'0')?
-    out[0] = b'0' + digits[0]
-    if len > 1 {
-        out[1] = b'.'
-        for i in 1u64 .. len {
-            out[i + 1] = b'0' + digits[i]
-        }
+    n
+}
+
+fn push_zeros(mut s: String, n: u64) -> Result[(), Capacity] {
+    let zeros = "00000000000000000000000000000000"
+    let mut left = n
+    while left > 32 {
+        string.push(mut s, zeros)?
+        left -= 32
     }
-    out[mantissa_len] = b'e'
-    out[mantissa_len + 1] = if exponent < 0 {
-        b'-'
-    } else {
-        b'+'
+    if left == 0 {
+        return Ok(())
     }
-    for i in 0u64 .. power_len {
-        out[mantissa_len + 2 + i] = b'0' + exponent_digits[i]
-    }
-    push_ascii(mut s, take out)
+    string.push(mut s, string.slice(zeros, 0, left))
 }
 
 /// Appends x rounded to `digits` places after the point, as Rust's `{:.N}` prints an f64:

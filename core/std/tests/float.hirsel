@@ -369,10 +369,11 @@ fn shown_json(x: f64) -> String {
     take out
 }
 
-// Shortest digits in Rust's `{}` layout: no exponent, no ".0".
+// Shortest digits in Rust's `{}` layout: no exponent, no ".0". A zero after the point
+// stays in both layouts (1.05, 1.05e-7; Python repr and serde_json).
 // expect: run shown_plain() = true
 fn shown_plain() -> bool {
-    shown(0.1) == "0.1" && shown(1.0) == "1" && shown(-0.0) == "-0" && shown(0.0) == "0" && shown(123.456) == "123.456" && shown(1e21) == "1000000000000000000000" && shown(1e-7) == "0.0000001" && shown(0.1 + 0.2) == "0.30000000000000004" && shown_json(1.0) == "1.0" && shown_json(-0.0) == "-0.0" && shown_json(1e-5) == "0.00001" && shown_json(1e-6) == "1e-6" && shown_json(1e16) == "1e+16" && shown_json(float.from_bits64(0x7ff0000000000000)) == "null"
+    shown(0.1) == "0.1" && shown(1.0) == "1" && shown(-0.0) == "-0" && shown(0.0) == "0" && shown(123.456) == "123.456" && shown(1e21) == "1000000000000000000000" && shown(1e-7) == "0.0000001" && shown(0.1 + 0.2) == "0.30000000000000004" && shown(1.05) == "1.05" && shown_json(1.05e-7) == "1.05e-7" && shown_json(1.0) == "1.0" && shown_json(-0.0) == "-0.0" && shown_json(1e-5) == "0.00001" && shown_json(1e-6) == "1e-6" && shown_json(1e16) == "1e+16" && shown_json(float.from_bits64(0x7ff0000000000000)) == "null"
 }
 
 // Powers of two: below 2^64 the gap is half the gap above, which makes the shortest

@@ -1136,7 +1136,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             } else {
                 None
             };
-            let (ty, value) = self.expr_into(
+            let fresh = self.expression_destination(n).is_none();
+            let (ty, value) = self.expr_into_field(
                 child,
                 if expected.is_some() {
                     elem.and_then(expect)
@@ -1144,6 +1145,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     None
                 },
                 field,
+                fresh,
             );
             if expected.is_none()
                 && let Some(elem) = elem

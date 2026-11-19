@@ -1170,7 +1170,7 @@ struct Cx<'c, 'a, 'e> {
     call_seq: u32,
     /// The call whose copyable view arguments are passed by address rather than
     /// snapshotted, and the arguments so passed.
-    direct_call: Option<u32>,
+    direct_call: Option<(u32, Option<SlotId>)>,
     direct_args: Vec<(usize, TypeId, NodeId)>,
     callable_signatures: HashMap<TyId, closures::CallableAbi>,
     callable_reps: Vec<Rep>,
@@ -1206,7 +1206,7 @@ struct Cx<'c, 'a, 'e> {
     return_place: Option<AddressId>,
     returned_local: Option<(u32, AddressId)>,
     /// The uninitialized destination offered to this particular expression.
-    destination: Option<(NodeId, AddressId)>,
+    destination: Option<(NodeId, AddressId, bool)>,
     /// A clone body's `to` (MEM-17): its result is built in a local `dest` and moved
     /// here on `Ok`.
     clone_to: Option<ValueId>,
@@ -2493,8 +2493,22 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
 
     fn expression_destination(&self, n: NodeId) -> Option<AddressId> {
         self.destination
-            .filter(|&(node, _)| node == n)
-            .map(|(_, to)| to)
+            .filter(|&(node, _, _)| node == n)
+            .map(|(_, to, _)| to)
+    }
+
+    fn fresh_destination_root(&self, n: NodeId) -> Option<SlotId> {
+        let (node, mut address, fresh) = self.destination?;
+        if node != n || !fresh {
+            return None;
+        }
+        loop {
+            address = match self.b.addresses[address.index()].base {
+                AddressBase::Slot(slot) => return Some(slot),
+                AddressBase::Address(base) => base,
+                AddressBase::Value(value) => self.pointer_address(value)?,
+            };
+        }
     }
 
     // The enclosing recipe may describe the field as a carrier or holder.
@@ -2524,7 +2538,17 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         want: Option<Want>,
         to: Option<AddressId>,
     ) -> (TyId, Option<ValueId>) {
-        let outer = std::mem::replace(&mut self.destination, to.map(|to| (n, to)));
+        self.expr_into_field(n, want, to, false)
+    }
+
+    fn expr_into_field(
+        &mut self,
+        n: NodeId,
+        want: Option<Want>,
+        to: Option<AddressId>,
+        fresh: bool,
+    ) -> (TyId, Option<ValueId>) {
+        let outer = std::mem::replace(&mut self.destination, to.map(|to| (n, to, fresh)));
         let result = self.expr(n, want);
         self.destination = outer;
         result

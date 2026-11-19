@@ -95,6 +95,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(&resolved.target)
     }
 
+    fn lend_direct_argument(&self, call: u32, at: At) -> bool {
+        let Some((active, destination)) = self.direct_call else {
+            return false;
+        };
+        if active != call {
+            return false;
+        }
+        let Some(destination) = destination else {
+            return true;
+        };
+        let Binding::Slot(Some(argument)) = self.var(at.place.slot).binding else {
+            return false;
+        };
+        at.place.len == 0
+            && matches!(self.b.addresses[argument.index()].base,
+                AddressBase::Slot(slot) if slot != destination)
+    }
+
     fn call_inner(
         &mut self,
         n: NodeId,
@@ -266,18 +284,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // A copyable view argument read from a place is passed by that place's
         // address when nothing can write the place before the callee returns:
         // every parameter views, every argument is evaluated without a write,
-        // the callee does not wait, and its result has no supplied destination.
+        // the callee does not wait, and any supplied result is a field of a
+        // fresh aggregate. Each lent argument names a different slot from the result.
         // That every argument is plain data is known only once the arguments
         // are typed; otherwise the passed places are snapshotted after the
         // arguments, which no argument wrote.
+        let fresh = self.fresh_destination_root(n);
         let direct = g.body.is_some()
             && !g.waits
             && g.params
                 .iter()
                 .all(|q| matches!(q.mode, Mode::View | Mode::Steps | Mode::Bytes))
-            && self.expression_destination(n).is_none()
+            && (self.expression_destination(n).is_none() || fresh.is_some())
             && args.iter().all(|&a| self.writes_nothing(a));
-        let outer_call = std::mem::replace(&mut self.direct_call, direct.then_some(call));
+        let outer_call = std::mem::replace(&mut self.direct_call, direct.then_some((call, fresh)));
         let outer_args = std::mem::take(&mut self.direct_args);
         let mut push = None;
         let mut replacement = None;
@@ -827,7 +847,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.use_place(at, Use::Value, e);
                     *val = match self.rep(ty) {
                         Ok(Rep::Place(id))
-                            if self.direct_call == Some(call)
+                            if self.lend_direct_argument(call, at)
                                 && mode == Mode::View
                                 && !self.is_view(ty)
                                 && self.type_kind(ty) == Kind::Plain =>

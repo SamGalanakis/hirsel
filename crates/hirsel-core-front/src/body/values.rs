@@ -727,7 +727,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             } else {
                 None
             };
-            let (ty, value) = self.expr_into(field, expected.and_then(expect), place);
+            let fresh = self.expression_destination(n).is_none();
+            let (ty, value) = self.expr_into_field(field, expected.and_then(expect), place, fresh);
             scratch.tys.push(ty);
             scratch.vals.push(value);
             self.anchor_field(n, anchors::Component::Field(i as u32), field);
@@ -1031,7 +1032,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     } else {
                         None
                     };
-                    self.expr_into(e, expect(t), field).1
+                    let fresh = self.expression_destination(n).is_none();
+                    self.expr_into_field(e, expect(t), field, fresh).1
                 }
                 None => {
                     let (at, v) = if let Some(hint) =

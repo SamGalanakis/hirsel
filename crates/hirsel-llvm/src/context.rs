@@ -262,11 +262,16 @@ impl<'context> Module<'context> {
                         module: LLVMModuleRef,
                         context: LLVMContextRef,
                     );
+                    fn hirsel_llvm_growth_arms_back(
+                        module: LLVMModuleRef,
+                        machine: LLVMTargetMachineRef,
+                    ) -> LLVMErrorRef;
                     fn hirsel_llvm_align_release_functions(module: LLVMModuleRef);
                 }
                 hirsel_llvm_share_cold_sites(self.raw);
                 hirsel_llvm_cold_failure_edges(self.raw, self.context.raw);
                 hirsel_llvm_share_cold_step_sync(self.raw, machine.raw);
+                error = hirsel_llvm_growth_arms_back(self.raw, machine.raw);
                 hirsel_llvm_align_release_functions(self.raw);
             }
             if error.is_null() {

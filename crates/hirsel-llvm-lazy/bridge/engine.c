@@ -31,6 +31,7 @@ extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTarge
 extern LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_cleanup_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_sweep_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
+extern LLVMErrorRef hirsel_llvm_growth_arms_back(LLVMModuleRef module, LLVMTargetMachineRef machine);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
 typedef struct { const uint8_t *data; size_t len; LLVMModuleRef module; } HirselLlvmUnit;
@@ -543,6 +544,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             hirsel_llvm_share_cold_sites(module);
             hirsel_cold_failure_edges(module, context);
             hirsel_llvm_share_cold_step_sync(module, machine);
+            e = hirsel_llvm_growth_arms_back(module, machine);
             hirsel_llvm_align_release_functions(module);
         }
         if (e) {

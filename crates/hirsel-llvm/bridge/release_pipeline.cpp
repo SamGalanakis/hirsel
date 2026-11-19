@@ -12,6 +12,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Passes/StandardInstrumentations.h>
+#include <llvm/Transforms/IPO/AlwaysInliner.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/IPO/Inliner.h>
 #include <llvm/Transforms/Scalar/LoopUnrollPass.h>
@@ -66,6 +67,43 @@ LLVMErrorRef runPasses(LLVMModuleRef module, LLVMTargetMachineRef machine,
     release.run(pipeline, phase);
     return LLVMErrorSuccess;
 }
+
+// HotColdSplit outlines each growth arm (a `cold` call into a body this
+// module defines: list/grow and its carrier twin) before the inliner, so every
+// inlining decision prices the hot body. Once the last inlining pass is done,
+// each outline holding a growth call goes back into its caller: a sequence that
+// fills inside a hot loop keeps its header next to the loop instead of behind
+// an outlined call (awfy/Havlak's identify_edges, 2% of its instructions). The
+// arm keeps its 2000:1 edge and its `cold` call for block placement.
+class GrowthArmsBackPass : public OptionalPassInfoMixin<GrowthArmsBackPass> {
+public:
+    PreservedAnalyses run(Module &module, ModuleAnalysisManager &) {
+        bool any = false;
+        for (Function &f : module) {
+            if (f.isDeclaration() || !f.getName().contains(".cold.")) continue;
+            bool growth = false;
+            for (BasicBlock &block : f)
+                for (Instruction &i : block)
+                    if (auto *call = dyn_cast<CallBase>(&i))
+                        if (call->hasFnAttr(Attribute::Cold) && call->getCalledFunction() &&
+                            !call->getCalledFunction()->isDeclaration())
+                            growth = true;
+            if (!growth) continue;
+            f.removeFnAttr(Attribute::NoInline);
+            f.removeFnAttr(Attribute::Cold);
+            f.removeFnAttr(Attribute::MinSize);
+            f.removeFnAttr(Attribute::OptimizeForSize);
+            f.addFnAttr(Attribute::AlwaysInline);
+            for (User *user : f.users())
+                if (auto *call = dyn_cast<CallBase>(user)) {
+                    call->removeFnAttr(Attribute::NoInline);
+                    call->removeFnAttr(Attribute::Cold);
+                }
+            any = true;
+        }
+        return any ? PreservedAnalyses::none() : PreservedAnalyses::all();
+    }
+};
 
 class PrepayStepTreesPass : public OptionalPassInfoMixin<PrepayStepTreesPass> {
 public:
@@ -200,6 +238,17 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
         return wrap(std::move(error));
 
     release.run(pipeline, "release");
+    return LLVMErrorSuccess;
+}
+
+extern "C" LLVMErrorRef hirsel_llvm_growth_arms_back(LLVMModuleRef module,
+                                                     LLVMTargetMachineRef machine) {
+    ReleasePipeline release(module, machine);
+    ModulePassManager pipeline;
+    pipeline.addPass(GrowthArmsBackPass());
+    pipeline.addPass(AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/false));
+    pipeline.addPass(GlobalDCEPass());
+    release.run(pipeline, "growth-arms-back");
     return LLVMErrorSuccess;
 }
 

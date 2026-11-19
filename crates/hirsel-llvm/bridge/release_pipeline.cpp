@@ -12,6 +12,7 @@
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Dominators.h>
+#include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Passes/PassBuilder.h>
@@ -222,8 +223,17 @@ void registerReleasePasses(PassBuilder &builder) {
 } // namespace
 
 extern "C" void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool frame_pointers) {
-    for (Function &f : *unwrap(module)) {
+    Module &m = *unwrap(module);
+    const bool x86 = m.getTargetTriple().getArch() == Triple::x86_64;
+    for (Function &f : m) {
         if (f.isDeclaration()) continue;
+        // The v3 schedule reduces spills in packed floating-point code.
+        // Tune after optimization so the instruction features and IR stay fixed.
+        if (x86 && any_of(instructions(f), [](const Instruction &i) {
+                return isa<BinaryOperator>(i) && i.getType()->isVectorTy() &&
+                       i.getType()->getScalarType()->isFloatingPointTy();
+            }))
+            f.addFnAttr("tune-cpu", "x86-64-v3");
         // Hirsel failures propagate through the call ABI with source sites.
         f.removeFnAttr(Attribute::UWTable);
         f.setDoesNotThrow();

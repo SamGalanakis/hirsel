@@ -419,11 +419,6 @@ impl CheckProduct {
             .expect("reached entry");
         let target = hirsel_core_layout::Target::from_triple(&options.target)
             .expect("supported native target");
-        let uses_simd_versions = target == hirsel_core_layout::Target::X86_64Linux
-            && modules[0]
-                .functions
-                .iter()
-                .any(|f| f.body.is_some() && f.versioned);
         let generator = (compiler, llvm, &options.target, options.debug_lines);
         let unit = unit_key(
             &(
@@ -590,7 +585,6 @@ impl CheckProduct {
             table: None,
             step_charging_elided: elide_steps,
             launch_digest_unused,
-            uses_simd_versions,
             release_sites: sites,
         })
     }

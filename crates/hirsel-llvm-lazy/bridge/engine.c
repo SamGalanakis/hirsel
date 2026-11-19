@@ -439,7 +439,8 @@ static int public_body(LLVMValueRef f) {
 
 static void emit_program(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
-                          uint8_t speed, const char *triple, const char *cpu, unsigned jobs,
+                          uint8_t speed, const char *triple, const char *cpu,
+                          const char *features, unsigned jobs,
                           HirselLlvmFindTail find, HirselLlvmKeepTail keep,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
                           HirselLlvmOutput *out) {
@@ -454,7 +455,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     if (LLVMGetTargetFromTriple(triple, &target, &message)) {
         error(out, message); LLVMDisposeMessage(message); return;
     }
-    LLVMTargetMachineRef machine = LLVMCreateTargetMachine(target, triple, cpu, "",
+    LLVMTargetMachineRef machine = LLVMCreateTargetMachine(target, triple, cpu, features,
         speed ? LLVMCodeGenLevelAggressive : LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
     if (!machine) { error(out, "LLVM could not create the target machine"); return; }
     LLVMContextRef context = NULL;
@@ -588,19 +589,21 @@ done:
 // `jobs` threads, or with `jobs` 0 the one object generated, if any, and `out`
 // is empty or holds the error.
 __attribute__((visibility("default")))
-void hirsel_llvm_program_v7(const HirselLlvmUnit *units, size_t count,
+void hirsel_llvm_program_v8(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
-                          uint8_t speed, const char *triple, const char *cpu, unsigned jobs,
+                          uint8_t speed, const char *triple, const char *cpu,
+                          const char *features, unsigned jobs,
                           HirselLlvmFindTail find, HirselLlvmKeepTail keep,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
                           HirselLlvmOutput *out) {
-    emit_program(units, count, exports, export_count, speed, triple, cpu, jobs, find, keep, reuse, deliver,
-                 receiver, out);
+    emit_program(units, count, exports, export_count, speed, triple, cpu, features, jobs, find, keep,
+                 reuse, deliver, receiver, out);
 }
 __attribute__((visibility("default")))
-void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
+void hirsel_llvm_compile_v2(const uint8_t *ir, size_t len, uint8_t speed, const char *triple,
+                           const char *cpu, const char *features, HirselLlvmOutput *out) {
     HirselLlvmUnit unit = { ir, len, NULL };
-    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, 0, NULL, NULL, NULL, NULL, NULL, out);
+    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, features, 0, NULL, NULL, NULL, NULL, NULL, out);
 }
 
 extern const void *hirsel_llvm_no_folder_api(void);

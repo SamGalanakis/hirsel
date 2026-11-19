@@ -43,7 +43,6 @@ pub(crate) struct Plan<'a> {
     parameters: Vec<Requirement<'a>>,
     cleanup: Option<String>,
     launch_digest_unused: bool,
-    uses_simd_versions: bool,
     release_sites: &'a [hirsel_core_ir::source::ReleaseSite],
     root_limit: u64,
     grant_mask: u64,
@@ -126,7 +125,6 @@ impl<'a> Plan<'a> {
             exit_offset: binding.exit_offset,
             parameters,
             launch_digest_unused: launch_digest_unused && cleanup.is_none(),
-            uses_simd_versions: false,
             release_sites: &[],
             cleanup,
             root_limit: options.root_limit,
@@ -146,11 +144,6 @@ impl<'a> Plan<'a> {
         sites: &'a [hirsel_core_ir::source::ReleaseSite],
     ) -> Self {
         self.release_sites = sites;
-        self
-    }
-
-    pub(crate) fn with_simd_versions(mut self, enabled: bool) -> Self {
-        self.uses_simd_versions = enabled;
         self
     }
 
@@ -179,6 +172,7 @@ impl<'a> Plan<'a> {
         ] {
             flags.set(name, value).map_err(error)?;
         }
+        // The launcher must reach the CPU check even on a pre-v2 x86-64 host.
         let isa = cranelift_codegen::isa::lookup_by_name(target)
             .map_err(error)?
             .finish(settings::Flags::new(flags))

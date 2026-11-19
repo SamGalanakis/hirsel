@@ -23,7 +23,8 @@ pub(super) fn emit(
     f.b.append_block_params_for_function_params(start);
     f.b.switch_to_block(start);
     let parameters = f.b.block_params(start).to_vec();
-    if plan.uses_simd_versions {
+    let triple = f.object.isa().triple().to_string();
+    if triple == hirsel_core_layout::Target::X86_64Linux.triple() {
         f.void_call("hirsel_core_init_isa", &[])?;
     }
     let argc = f.b.ins().uextend(I64, parameters[0]);
@@ -55,7 +56,6 @@ pub(super) fn emit(
     let streams = f.constant((2u64 << 32) | 1);
     let net_rules = f.address(data.net_rules);
     let net_rules_len = f.constant(plan.net_rules.len() as u64);
-    let triple = f.object.isa().triple().to_string();
     let target_data = data::bytes(f.object, None, triple.as_bytes().to_vec(), 1)?;
     let target = f.address(target_data);
     let target_len = f.constant(triple.len() as u64);

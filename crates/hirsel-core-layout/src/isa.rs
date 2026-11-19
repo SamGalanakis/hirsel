@@ -16,6 +16,7 @@ struct Feature {
     word: Word,
     bit: u32,
     llvm: Option<&'static str>,
+    cranelift: Option<&'static str>,
 }
 
 const fn cpu(word: Word, bit: u32, llvm: &'static str) -> Feature {
@@ -23,6 +24,14 @@ const fn cpu(word: Word, bit: u32, llvm: &'static str) -> Feature {
         word,
         bit,
         llvm: Some(llvm),
+        cranelift: None,
+    }
+}
+
+impl Feature {
+    const fn with_cranelift(mut self, flag: &'static str) -> Self {
+        self.cranelift = Some(flag);
+        self
     }
 }
 
@@ -41,15 +50,18 @@ const BASE: &[Feature] = &[
         word: ExtendedD,
         bit: 11,
         llvm: None,
+        cranelift: None,
     }, // SYSCALL/SYSRET
 ];
 const SSE4: &[Feature] = &[
-    cpu(BasicC, 0, "sse3"),
-    cpu(BasicC, 9, "ssse3"),
-    cpu(BasicC, 13, "cx16"),
-    cpu(BasicC, 19, "sse4.1"),
-    cpu(BasicC, 20, "sse4.2"),
-    cpu(BasicC, 23, "popcnt"),
+    cpu(BasicC, 0, "sse3").with_cranelift("has_sse3"),
+    cpu(BasicC, 9, "ssse3").with_cranelift("has_ssse3"),
+    cpu(BasicC, 13, "cx16").with_cranelift("has_cmpxchg16b"),
+    cpu(BasicC, 19, "sse4.1").with_cranelift("has_sse41"),
+    cpu(BasicC, 20, "sse4.2").with_cranelift("has_sse42"),
+    // LLVM tracks CRC32 separately, but SSE4.2's CPUID bit covers the instruction.
+    cpu(BasicC, 20, "crc32"),
+    cpu(BasicC, 23, "popcnt").with_cranelift("has_popcnt"),
     cpu(ExtendedC, 0, "sahf"),
 ];
 const AVX2: &[Feature] = &[
@@ -66,29 +78,31 @@ const AVX2: &[Feature] = &[
         word: AvxState,
         bit: 0,
         llvm: None,
+        cranelift: None,
     }, // OSXSAVE, XMM and YMM state
 ];
 
 #[derive(Clone, Copy, Debug)]
 pub struct Level {
     pub number: u8,
+    pub name: &'static str,
     features: &'static [&'static [Feature]],
 }
 
 pub const X86_64_LEVELS: &[Level] = &[
     Level {
-        number: 1,
-        features: &[BASE],
-    },
-    Level {
         number: 2,
+        name: "x86-64-v2",
         features: &[BASE, SSE4],
     },
     Level {
         number: 3,
+        name: "x86-64-v3",
         features: &[BASE, SSE4, AVX2],
     },
 ];
+
+pub const X86_64_BASE: Level = X86_64_LEVELS[0];
 
 impl Level {
     fn features(self) -> impl Iterator<Item = Feature> {
@@ -105,6 +119,10 @@ impl Level {
             flags.push_str(name);
         }
         flags
+    }
+
+    pub fn cranelift_features(self) -> impl Iterator<Item = &'static str> {
+        self.features().filter_map(|feature| feature.cranelift)
     }
 }
 
@@ -133,7 +151,7 @@ impl Registers {
     }
 
     fn level(&self, cap: u8) -> Option<u8> {
-        let cap = cap.max(X86_64_LEVELS[0].number);
+        let cap = cap.max(X86_64_BASE.number);
         X86_64_LEVELS
             .iter()
             .rev()
@@ -179,21 +197,20 @@ mod tests {
         // Columns from the x86-64 psABI, using LLVM's spelling. Linux owns
         // OSFXSR and SYSCALL/SYSRET. The AVX OS-state check has no LLVM flag.
         let expected = [
-            "cmov cx8 fxsr mmx sse sse2 x87",
-            "cmov cx16 cx8 fxsr mmx popcnt sahf sse sse2 sse3 sse4.1 sse4.2 ssse3 x87",
-            "avx avx2 bmi bmi2 cmov cx16 cx8 f16c fma fxsr lzcnt mmx movbe popcnt sahf sse sse2 sse3 sse4.1 sse4.2 ssse3 x87 xsave",
+            "cmov crc32 cx16 cx8 fxsr mmx popcnt sahf sse sse2 sse3 sse4.1 sse4.2 ssse3 x87",
+            "avx avx2 bmi bmi2 cmov crc32 cx16 cx8 f16c fma fxsr lzcnt mmx movbe popcnt sahf sse sse2 sse3 sse4.1 sse4.2 ssse3 x87 xsave",
         ];
         let ids: Vec<_> = X86_64_LEVELS.iter().map(|row| row.number).collect();
-        assert!(ids.windows(2).all(|pair| pair[0] + 1 == pair[1]));
-        assert_eq!(ids.last(), Some(&3));
-        for level in X86_64_LEVELS {
+        assert_eq!(ids, [2, 3]);
+        assert_eq!(X86_64_LEVELS.len(), expected.len());
+        for (level, expected) in X86_64_LEVELS.iter().zip(expected) {
             let flags = level.llvm_features();
             let mut flags: Vec<_> = flags
                 .split(',')
                 .map(|flag| flag.strip_prefix('+').unwrap())
                 .collect();
             flags.sort_unstable();
-            assert_eq!(flags.join(" "), expected[usize::from(level.number - 1)]);
+            assert_eq!(flags.join(" "), expected);
 
             let full = || Registers {
                 basic_c: u32::MAX,

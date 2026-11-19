@@ -25,11 +25,20 @@ impl Target {
         }
     }
 
-    /// Baseline LLVM CPU, without host-specific features.
+    /// Keep LLVM's generic tuning. The named x86-64-v2 model splits unaligned
+    /// AVX2 accesses in v3 functions even though their features allow them.
     pub const fn cpu(self) -> &'static str {
         match self {
             Self::X86_64Linux => "x86-64",
             Self::Aarch64Linux => "generic",
+        }
+    }
+
+    /// LLVM features for all functions, before per-version SIMD attributes.
+    pub fn llvm_features(self) -> String {
+        match self {
+            Self::X86_64Linux => crate::isa::X86_64_BASE.llvm_features(),
+            Self::Aarch64Linux => String::new(),
         }
     }
 }

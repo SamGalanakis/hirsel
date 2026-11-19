@@ -466,10 +466,13 @@ may build a versioned function more than once, one **version** for each instruct
 level it supports. A call between versioned functions runs the callee's version at the
 caller's level. Every other call, through a function value, an export or a task entry
 included, enters through the function's **stub**, which has no vector in its signature and
-runs the version for the widest level the CPU allows. On x86-64 the levels are those of the
-x86-64 psABI. An engine selects level k only when the CPU has every feature that list names
-for level k, with the operating system's state for them enabled, and builds level k's
-version with exactly those features.
+runs the version for the widest level the CPU allows. On x86-64 the native baseline is
+x86-64-v2, and the available versions are v2 and v3 of the x86-64 psABI. Native release
+code uses v2 for unversioned functions. Before any program code runs, the launcher checks
+the full v2 feature set and reports that the CPU is unsupported if a feature is unavailable.
+An engine selects level k only when the CPU has every feature the psABI names for level k,
+with the operating system's state for them enabled. It builds level k's version with
+exactly those features. The launcher and the code generator use the same level table.
 
 A version has no meaning of its own. By [SEM-8](#sem-8-determinism) every version gives the
 same values, failures and sites, steps and charges, and a replay on a CPU with other levels

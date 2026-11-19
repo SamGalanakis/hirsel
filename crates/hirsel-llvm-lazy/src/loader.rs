@@ -25,6 +25,7 @@ type Compile = unsafe extern "C" fn(
     u8,
     *const libc::c_char,
     *const libc::c_char,
+    *const libc::c_char,
     *mut Output,
 );
 type Free = unsafe extern "C" fn(*mut u8);
@@ -61,6 +62,7 @@ type Program = unsafe extern "C" fn(
     *const *const libc::c_char,
     usize,
     u8,
+    *const libc::c_char,
     *const libc::c_char,
     *const libc::c_char,
     u32,
@@ -211,9 +213,9 @@ fn load() -> Result<Backend, String> {
     let handle = open(&path)?;
     // SAFETY: these two exports and C layouts are defined by the embedded
     // engine.c built in this same artifact. No foreign component is selected.
-    let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v1".as_ptr()) };
+    let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v2".as_ptr()) };
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
-    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v7".as_ptr()) };
+    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v8".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
     if compile.is_null() || free.is_null() || program.is_null() || construction.is_null() {
@@ -256,6 +258,7 @@ pub(crate) fn compile(
 ) -> Result<Vec<u8>, String> {
     let triple = CString::new(target.triple()).unwrap();
     let cpu = CString::new(target.cpu()).unwrap();
+    let features = CString::new(target.llvm_features()).unwrap();
     let backend = backend()?;
     let mut output = Output {
         data: std::ptr::null_mut(),
@@ -271,6 +274,7 @@ pub(crate) fn compile(
             u8::from(speed),
             triple.as_ptr(),
             cpu.as_ptr(),
+            features.as_ptr(),
             &mut output,
         );
         let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();
@@ -417,6 +421,7 @@ fn emit(
 ) -> Result<crate::Program, String> {
     let triple = CString::new(target.triple()).unwrap();
     let cpu = CString::new(target.cpu()).unwrap();
+    let features = CString::new(target.llvm_features()).unwrap();
     let backend = backend()?;
     let inputs: Vec<_> = units
         .iter_mut()
@@ -464,6 +469,7 @@ fn emit(
             u8::from(speed),
             triple.as_ptr(),
             cpu.as_ptr(),
+            features.as_ptr(),
             jobs,
             find_tail,
             keep_tail,

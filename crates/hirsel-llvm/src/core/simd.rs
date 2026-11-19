@@ -234,23 +234,7 @@ impl FunctionEmitter<'_> {
             };
             return self.intrinsic(name, ty.clone(), &args);
         }
-        if self.level.is_some_and(|level| level.number >= 2) {
-            return self.swizzle_pshufb(ty, 16, low, high, indices);
-        }
-        let mask_ty = vector_type(16, 1);
-        let mut result = Value::Zero;
-        for (half, table) in std::iter::once(low).chain(high).enumerate() {
-            for lane in 0..16 {
-                let index = self.splat(ty, &Type::I8, 16, &int(16 * half as i32 + lane));
-                let found = self.cmp(Predicate::Eq, ty, indices, &index);
-                let byte = self.emit(Operation::ExtractElement(ty, table, lane as u32));
-                let byte = self.splat(ty, &Type::I8, 16, &byte);
-                result = self.emit(Operation::VectorSelect(
-                    ty, &mask_ty, &found, &byte, &result,
-                ));
-            }
-        }
-        result
+        self.swizzle_pshufb(ty, 16, low, high, indices)
     }
 
     fn swizzle_pshufb(

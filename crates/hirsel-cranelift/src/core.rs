@@ -135,9 +135,16 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
     ]) {
         flags.set(name, value).map_err(|e| refuse(e.to_string()))?;
     }
-    cranelift_codegen::isa::lookup_by_name(options.target)
-        .map_err(|e| refuse(e.to_string()))?
-        .finish(settings::Flags::new(flags))
+    let mut isa = cranelift_codegen::isa::lookup_by_name(options.target)
+        .map_err(|e| refuse(e.to_string()))?;
+    if hirsel_core_layout::Target::from_triple(options.target)
+        == Some(hirsel_core_layout::Target::X86_64Linux)
+    {
+        for feature in hirsel_core_layout::isa::X86_64_BASE.cranelift_features() {
+            isa.enable(feature).map_err(|e| refuse(e.to_string()))?;
+        }
+    }
+    isa.finish(settings::Flags::new(flags))
         .map_err(|e| refuse(e.to_string()))
 }
 

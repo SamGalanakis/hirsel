@@ -348,7 +348,12 @@ pub(crate) struct TargetMachine {
 
 impl TargetMachine {
     pub(crate) fn core(target: hirsel_core_layout::Target, optimize: bool) -> Result<Self, String> {
-        Self::with_settings(target.triple(), target.cpu(), "", optimize)
+        Self::with_settings(
+            target.triple(),
+            target.cpu(),
+            &target.llvm_features(),
+            optimize,
+        )
     }
 
     fn with_settings(

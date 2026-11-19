@@ -1,9 +1,9 @@
-// A Reset encodes from a 16-byte payload and a 30-byte wire capacity. Two
-// connections hold one wire block each. A third job needs 48 more bytes
-// (16 + 32), so an 80-byte pool refuses until one of the two blocks drops.
+// A Reset encodes its 16-byte payload in place in one 30-byte wire capacity,
+// charged as 32. Two connections hold one wire block each, so a third job's
+// 32 bytes do not fit a 64-byte pool until one of the two blocks drops.
 pub fn law_pool_holds_writer_bytes(tasks: Tasks, clock: Clock) -> bool waits {
     let config = wire_defaults(0u64, 0u64)
-    let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 80u64, 2u64)
+    let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 64u64, 2u64)
     let (pool, take pooled_task) = result.unwrap(take allocated)
     let (one_to, one_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = result.unwrap(channel.new(1u64))
     let (two_to, two_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = result.unwrap(channel.new(1u64))
@@ -140,6 +140,12 @@ fn pool_retry(mut head: Head[(), store.Table[u64, u32]], inbox: Receiver[PubIn],
     reply && store.version(store.snapshot(head.db)) == version
 }
 
+fn pool_full_frame() -> Frame {
+    let mut body: Bytes = list.new()
+    for i in 0u8 .. 14u8 { result.unwrap(list.push(mut body, i)) }
+    Ended(0u32, Returned(take body))
+}
+
 pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Random, net: Net) -> bool waits {
     let mut config = wire_defaults(0u64, 0u64)
     config.socket.pending_max = 2u64
@@ -153,7 +159,10 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let writing = result.unwrap(wire_pack(pool, reply, result_from, Reset(41u64, list.new())))
     let mut arg: Bytes = list.new()
     result.unwrap(std.codec.put_u32(7u32, mut arg))
-    let payload = result.unwrap(wire_payload(Call(0u32, 0u64, 0u32, 10000u32, take arg), config.socket.max_frame))
+    let call_frame = Call(0u32, 0u64, 0u32, 10000u32, take arg)
+    let frames: std.codec.Codec[Frame] = std.codec.of()
+    let mut payload: Bytes = result.unwrap(list.with_capacity(wire_output_size(call_frame)))
+    result.unwrap(std.codec.encode(frames, call_frame, mut payload))
 
     let mut db = store.memory(clock, random, store.defaults())
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u32())))
@@ -166,14 +175,15 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
         h: table, out: take release_to, busy: map.new(), waiting: list.new(),
         group: list.new(), last: None, minted: 0u64)
 
-    // The retained writer block costs 32 bytes. A Reset needs the remaining
-    // 48 while encoding, so even one retained decoder charge refuses it.
+    // The retained writer block costs 32 bytes. An Ended frame with a 30-byte
+    // payload encodes in place in capacity 44, charged 48: the remaining 48,
+    // so even one retained decoder charge refuses it until the refund.
     let held = pool_call_queued(tasks, clock, random, net, config, pool, pending, result.unwrap(clone(payload)),
         scoped fn() -> bool waits {
-            match wire_pack(pool, reply, result_from, Reset(43u64, list.new())) { Error(Protocol(1013u16)) => true, _ => false }
+            match wire_pack(pool, reply, result_from, pool_full_frame()) { Error(Protocol(1013u16)) => true, _ => false }
         })
-    let bytes_refunded = match wire_pack(pool, reply, result_from, Reset(47u64, list.new())) {
-        Ok(body) => list.len(body) == 18u64,
+    let bytes_refunded = match wire_pack(pool, reply, result_from, pool_full_frame()) {
+        Ok(body) => list.len(body) == 32u64,
         _ => false,
     }
     let slot_returned_once = match std.wsock.acquire(pending) {

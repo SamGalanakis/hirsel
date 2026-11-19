@@ -420,6 +420,35 @@ pub fn encode(mut out: Outbound, fin: bool, opcode: u8, payload: Bytes) -> Resul
     }
 }
 
+/// Encodes x as one whole binary frame, writing its codec bytes straight
+/// behind the header so the payload is built once. n is x's exact encoded
+/// length; a codec that writes any other count fails closed with 1011. Server
+/// role only. Capacity n+14, as encode reserves.
+/// Ex: `wsock.encode_with(out, codec, frame, size)?`.
+pub fn encode_with[T](out: Outbound, coding: codec.Codec[T], x: T, n: u64) -> Result[Bytes, Error] {
+    if n > out.max {
+        return Error(Protocol(1009))
+    }
+    if out.role == Client {
+        return Error(Configuration)
+    }
+    let mut b = buffer(n + 14)?
+    match websocket.binary_head(out.encoder, n, mut b) {
+        Ok(Ok(_)) => {},
+        Ok(Error(code)) => return Error(Protocol(code)),
+        Error(c) => return Error(Allocation(c))
+    }
+    let start = list.len(b)
+    match codec.encode(coding, x, mut b) {
+        Ok(_) => {},
+        Error(c) => return Error(Allocation(c))
+    }
+    if list.len(b) - start != n {
+        return Error(Protocol(1011))
+    }
+    Ok(take b)
+}
+
 /// One pending frame, moved from its allocating owner. A busy writer returns
 /// the offered buffer unchanged; controls wait behind a part-written frame.
 pub fn offer(mut w: WriteBuffer, take frame: Bytes) -> Result[(), Bytes] {

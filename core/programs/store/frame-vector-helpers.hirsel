@@ -78,3 +78,10 @@ fn vector[T](c: std.codec.Codec[T], x: T, expected: Bytes) -> bool {
         _ => false,
     }
 }
+
+fn wire(out: std.wsock.Outbound, x: runner.Frame, expected: Bytes) -> bool {
+    match runner.wire_encode(out, x) {
+        Ok(take actual) => actual == expected,
+        Error(_) => false,
+    }
+}

@@ -757,6 +757,46 @@ pub fn encode(mut e: Encoder, fin: bool, opcode: u8, payload: Bytes, mask: Inlin
     Ok(Ok(()))
 }
 
+/// Appends the header of one whole unmasked binary frame of n payload bytes,
+/// for a caller that writes those bytes in place behind it. Server role only;
+/// the frame must not interrupt a fragmented message. The encoder state is
+/// unchanged, as a whole binary frame leaves it. O(1); reserves n + header.
+/// Ex: `websocket.binary_head(e, n, mut out)?`.
+pub fn binary_head(e: Encoder, n: u64, mut out: Bytes) -> Result[Result[(), u16], Capacity] {
+    if e.closed || e.fragmented || e.role == Client {
+        return Ok(Error(1002))
+    }
+    if n > e.max {
+        return Ok(Error(1009))
+    }
+    let wide: u64 = if n < 126 {
+        0
+    } else if n <= 65535 {
+        2
+    } else {
+        8
+    }
+    let needed = match int.checked_add(n, 2 + wide) {
+        Some(x) => x,
+        None => return Error(Capacity(requested: n, available: 0))
+    }
+    list.reserve(mut out, needed)?
+    let _ = list.push(mut out, 130u8)
+    let tag: u8 = if wide == 0 {
+        int.narrow(n)
+    } else if wide == 2 {
+        126
+    } else {
+        127
+    }
+    let _ = list.push(mut out, tag)
+    for i in 0u64 .. wide {
+        let x: u8 = int.truncate(n >> ((wide - i - 1) * 8))
+        let _ = list.push(mut out, x)
+    }
+    Ok(Ok(()))
+}
+
 /// Appends the inline control payload, for the sole writer to encode as Pong
 /// or a Close echo. O(len), at most 125 bytes. Ex: `websocket.control(c, mut out)?`.
 pub fn control(c: Control, mut out: Bytes) -> Result[(), Capacity] {

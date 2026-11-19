@@ -514,7 +514,8 @@ def frame_module(root, path):
     """Construct values beside the shared, hand-derived byte oracle, never from it."""
     vectors = json.loads((root / 'core/programs/store/frame-vectors.json').read_text())['vectors']
     helpers = (root / 'core/programs/store/frame-vector-helpers.hirsel').read_text()
-    lines = [helpers, '', 'pub fn law_frame_vectors() -> bool {']
+    lines = [helpers, '', 'pub fn law_frame_vectors() -> bool {',
+             '    let out = result.unwrap(std.wsock.outbound(Server, runner.wire_defaults(0u64, 0u64).socket, None))']
     for v in vectors:
         payload = bytes.fromhex(v['hex'])
         if 'wire_bytes' in v:
@@ -523,10 +524,14 @@ def frame_module(root, path):
         lines += [f'    // {v["name"]}: {v["derivation"]}',
                   f'    let c_{v["name"]}: std.codec.Codec[runner.{v["type"]}] = std.codec.of()',
                   f'    if !vector(c_{v["name"]}, {v["value"]}, b("{v["hex"]}")) {{ return false }}']
-        # The admission and max_frame checks charge a frame by wire_output_size;
-        # it must count exactly the codec's bytes, which the hex fixes by hand.
+        # Admission, max_frame and the in-place WebSocket header all take a
+        # frame's size from wire_output_size; the encoder fails closed unless
+        # it counts exactly the codec's bytes, which the hex fixes by hand.
         if v['type'] == 'Frame':
-            lines += [f'    if runner.wire_output_size({v["value"]}) != {len(payload)}u64 {{ return false }}']
+            # RFC 6455 5.2 unmasked final binary frame header, derived here.
+            n = len(payload)
+            size = bytes([n]) if n <= 125 else bytes([126]) + n.to_bytes(2, 'big') if n <= 65535 else bytes([127]) + n.to_bytes(8, 'big')
+            lines += [f'    if !wire(out, {v["value"]}, b("{(bytes([0x82]) + size + payload).hex()}")) {{ return false }}']
     lines += ['    true', '}', '', '@test', 'fn test_frame_vectors() -> Result[(), ()] {',
               '    if law_frame_vectors() { Ok(()) } else { Error(()) }', '}', '']
     path.write_text('\n'.join(lines))

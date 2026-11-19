@@ -4214,7 +4214,7 @@ fn wire_parse(mut reader: std.wsock.Reader, at: u64, clock: Clock) -> Result[Opt
 
 fn wire_pool[C: send](take pool: WirePool[C]) -> () waits {
     let WirePool(inbox: take inbox, config: config, clock: clock, tasks: tasks, service_bytes: service_bytes) = take pool
-    let mut encoder = match std.wsock.outbound(Server, config, None) { Ok(out) => out, Error(_) => return }
+    let encoder = match std.wsock.outbound(Server, config, None) { Ok(out) => out, Error(_) => return }
     while let Ok(take work) = channel.receive(inbox) {
         match take work {
             Decode(take input, at, take to) => {
@@ -4223,10 +4223,7 @@ fn wire_pool[C: send](take pool: WirePool[C]) -> () waits {
                 let _ = channel.try_send(to, WireParsed(reader: take reader, packet: take packet))
             },
             Encode(take frame, take to) => {
-                let encoded_frame = match wire_payload(take frame, config.max_frame) {
-                    Ok(take payload) => std.wsock.encode(mut encoder, true, 2u8, payload),
-                    Error(e) => Error(e),
-                }
+                let encoded_frame = wire_encode(encoder, frame)
                 let _ = channel.try_send(to, take encoded_frame)
             },
             AllocateService(take owned, take plan, take to) => {
@@ -4243,6 +4240,12 @@ fn wire_pool[C: send](take pool: WirePool[C]) -> () waits {
             },
         }
     }
+}
+
+/// One whole binary frame for f, its codec bytes written once behind the header.
+pub fn wire_encode(out: std.wsock.Outbound, f: Frame) -> Result[Bytes, std.wsock.Error] {
+    let codec: std.codec.Codec[Frame] = std.codec.of()
+    std.wsock.encode_with(out, codec, f, wire_output_size(f))
 }
 
 fn start_wire_pool[C: send](tasks: Tasks, c: WireConfig, clock: Clock, n: u64, slots: u64) -> Result[(Sender[WireAllocation[C]], Task[()]), Capacity] {
@@ -4430,21 +4433,6 @@ fn wire_join(take first: Task[()], take second: Task[()]) -> () waits {
 
 pub fn wire_publish(to: Sender[WireEvent], take frame: Frame) -> Result[(), SendError[WireEvent]] {
     channel.try_send(to, wire_event(Published(take frame)))
-}
-
-fn wire_payload(take frame: Frame, max: u64) -> Result[Bytes, std.wsock.Error] {
-    let size = wire_output_size(frame)
-    if size > max { return Error(Protocol(1009u16)) }
-    let allocation: Result[Bytes, Capacity] = list.with_capacity(size)
-    let mut b = match take allocation {
-        Ok(take allocated) => take allocated,
-        Error(c) => return Error(Allocation(c)),
-    }
-    let codec: std.codec.Codec[Frame] = std.codec.of()
-    match std.codec.encode(codec, frame, mut b) {
-        Ok(()) => Ok(take b),
-        Error(c) => Error(Allocation(c)),
-    }
 }
 
 type WireAlarm: send { clock: Clock, at: u64, to: Sender[WireEvent] }
@@ -5512,7 +5500,7 @@ fn wire_done_bytes(done: List[Done]) -> u64 {
     size
 }
 
-pub fn wire_output_size(f: Frame) -> u64 {
+fn wire_output_size(f: Frame) -> u64 {
     match f {
         Hello(token, wanted) => {
             let mut size = 12u64 + wire_optional_bytes(token)

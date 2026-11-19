@@ -1,3 +1,4 @@
+// test-vectors
 // Contract tests for `json` (core/std/json.hirsel), written to run once an engine runs
 // library bodies. Sizes come from the layout in the module header, by hand:
 // a tag 1, a Text 4 + its bytes, a container 1 + 4 + 4 + its items + 4 per item, a member
@@ -440,4 +441,81 @@ fn typed_record_decode() -> bool {
     let source = " {\"unused\":[false,{\"a\":null}],\"x\u{005c}u0079\":[-2.5,3e1]} "
     let values = result.unwrap(json.decode(source, read_named_values))
     list.len(values) == 2 && float.to_bits64(values[0]) == float.to_bits64(-2.5) && float.to_bits64(values[1]) == float.to_bits64(30.0) && decode_refuses("{\"xy\":[],\"unused\":[true,]}") && decode_refuses("{\"xy\":[false]}") && decode_refuses("{\"xy\":[]}{}")
+}
+
+type JsonTestExpectation = AcceptJson | RefuseJson | RefuseJsonSyntax | RefuseJsonNumber
+
+fn json_test_case(s: String, expected: JsonTestExpectation) -> bool {
+    region r {
+        match (json.parse(r, s), expected) {
+            (Ok(_), AcceptJson) => true,
+            (Error(Syntax(_)), RefuseJson) => true,
+            (Error(Syntax(_)), RefuseJsonSyntax) => true,
+            (Error(NotFinite(_)), RefuseJson) => true,
+            (Error(NotFinite(_)), RefuseJsonNumber) => true,
+            _ => false,
+        }
+    }
+}
+
+fn decode_json_fixture(hex: String) -> Bytes {
+    let n = string.byte_len(hex)
+    let mut input: Bytes = result.unwrap(list.with_capacity(n / 2))
+    for i in 0u64 .. n / 2 {
+        let byte: u8 = int.narrow(result.unwrap(int.parse_uint(string.slice(hex, 2 * i, 2 * i + 2), 16)))
+        result.unwrap(list.push(mut input, byte))
+    }
+    take input
+}
+
+// Source and implementation-defined choices are in vectors/json/README.md.
+// expect: run json_test_suite() = true
+fn json_test_suite() -> bool {
+    let data = json_test_suite_data()
+    let mut at: u64 = 0
+    while at < string.byte_len(data) {
+        let end = option.unwrap(string.find(data, at, "\n"))
+        let Some((name, hex)) = string.split_once(string.slice(data, at + 1, end), " ") else {
+            return false
+        }
+        let tag = string.as_bytes(data)[at]
+        let passed = match string.from_utf8(decode_json_fixture(hex)) {
+            Ok(s) => match tag {
+                b'A' => json_test_case(s, AcceptJson),
+                b'R' => json_test_case(s, RefuseJson),
+                b'S' => json_test_case(s, RefuseJsonSyntax),
+                b'N' => json_test_case(s, RefuseJsonNumber),
+                _ => false,
+            },
+            Error(_) => tag == b'U',
+        }
+        if !passed {
+            fail(result.unwrap(string.from(name)))
+        }
+        at = end + 1
+    }
+    true
+}
+
+// Source: serde_json tests/test.rs, f51fa15a7015c7d02817a46d2db44c899a0016e8, MIT.
+// expect: run serde_json_numbers() = true
+fn serde_json_numbers() -> bool {
+    let valid: Inline[(String, u64), 10] =[("-0", 0x8000000000000000), ("-0.0", 0x8000000000000000), ("-0e2", 0x8000000000000000), ("-0.0e2", 0x8000000000000000), ("-1e-400", 0x8000000000000000), ("-1e-4000000000000000000000000000000000000000000000000", 0x8000000000000000), ("-9223372036854775808", 0xc3e0000000000000), ("9223372036854775807", 0x43e0000000000000), ("18446744073709551615", 0x43f0000000000000), ("2.638344616030823e-256", 0xadfb11e2adb03c3),]
+    for row in valid {
+        let (input, bits) = row
+        match json.decode(input, json.read_f64) {
+            Ok(n) => if float.to_bits64(n) != bits {
+                fail(result.unwrap(string.from(input)))
+            },
+            Error(_) => fail(result.unwrap(string.from(input))),
+        }
+    }
+    let invalid: Inline[(String, JsonTestExpectation), 9] =[("00", RefuseJsonSyntax), ("0x80", RefuseJsonSyntax), (".0", RefuseJsonSyntax), ("1.e1", RefuseJsonSyntax), ("1e", RefuseJsonSyntax), ("1e+", RefuseJsonSyntax), ("1a", RefuseJsonSyntax), ("100e777777777777777777777777777", RefuseJsonNumber), ("-100e777777777777777777777777777", RefuseJsonNumber),]
+    for row in invalid {
+        let (input, expected) = row
+        if !json_test_case(input, expected) {
+            fail(result.unwrap(string.from(input)))
+        }
+    }
+    true
 }

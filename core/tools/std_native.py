@@ -471,7 +471,11 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 host.mkdir()  # Script: every contract receives one fresh, empty confined Dir.
                 adapted = scratch / case.file.name
                 original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
-                source = original + case.file.read_text()
+                fixture = case.file.read_text()
+                source = original + fixture
+                if fixture.startswith('// test-vectors\n'):
+                    generator = case.file.parent / 'vectors' / case.file.stem / 'generate.py'
+                    source += '\n' + subprocess.check_output([sys.executable, generator], text=True)
                 if case.call.startswith(('ts_codec_vectors(', 'ts_hirsel_differential(', 'ts_frame_vectors(', 'ts_frame_differential(')):
                     frame = case.package == 'store'
                     if frame and protocol_codec is None and typescript_override is None:

@@ -11,6 +11,11 @@ owner. Zero matches fail; a missing native run never counts as passing.
 
     python3 core/tools/std_native.py --compiler <hirsel> --runtime <core-rt.a>         --filter file --backend both --report /tmp/file-native.json
 
+For byte fixtures that need to run on the evaluator, a std test file may
+start with `// test-vectors`. The walker appends Hirsel data definitions
+emitted on stdout by `vectors/<file-stem>/generate.py` beside the test.
+Keep the pinned inputs there so the walker can run without network access.
+
 The same walker discovers core/core/tests and core/std/tests. A filter is a module/function prefix (file, file:read, core.list, core.list:law) or source path prefix. Existing std filters retain their spelling; std.file also works.
 Repeat --filter for several prefixes. The compiler and runtime are Buck targets
 hirsel-core-driver-bin-hirsel and the shipping hirsel-core-rt-archives.

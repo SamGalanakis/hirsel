@@ -665,8 +665,9 @@ pub enum Inst {
     /// hand its record over (MEM-20). Never fails.
     LimitExit,
     /// Clean the value at `address` by its type's drop recipe (FAIL-8): the
-    /// finalizer under its grant, then fields in reverse declaration order, then
-    /// the value's own block. A finalizer failure still cleans the fields and then
+    /// finalizer under its grant, then fields in the recipe's order (reverse
+    /// declaration order wherever cleanup can observe it), then the value's own
+    /// block. A finalizer failure still cleans the fields and then
     /// takes `fail` (FAIL-12); the cause is already in the chain.
     Drop {
         address: AddressId,

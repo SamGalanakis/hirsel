@@ -249,7 +249,10 @@ pub struct FieldDrop {
 }
 
 /// FAIL-8: the finalizer runs first, then fields in reverse declaration order,
-/// then the block is freed and refunded. A `List` (`Seq`) and an inline array
+/// then the block is freed and refunded. A row whose cleanup reaches no
+/// finalizer, resource, handle, `own fn`, `Arc` or region reference only frees
+/// and refunds, which nothing can observe the order of; it cleans its fields in
+/// declaration order instead (as if, see `drop_recipe`). A `List` (`Seq`) and an inline array
 /// (`FieldTy::Array`, at the stride `field_size` gives) clean their completed
 /// elements from index 0 up (SEM-9, core.md); a `Map` cleans entry by entry in
 /// insertion order, each key before its value ([`map_entry`]). Those loops are in
@@ -349,6 +352,7 @@ pub struct RecipeScratch {
     order: Vec<TypeRef>,
     stack: Vec<TypeRef>,
     suffix: Vec<Option<Recipe>>,
+    effects: std::cell::RefCell<Effects>,
     #[cfg(test)]
     pub(crate) initialized_rows: usize,
 }
@@ -385,9 +389,10 @@ impl RecipeScratch {
         let out = Computed {
             prefix: recipes,
             suffix: &mut self.suffix,
+            effects: &self.effects,
         };
         for &t in &self.order {
-            out.suffix[t.index() - prefix] = Some(recipe(shapes, &shapes[t.index()], &out)?);
+            out.suffix[t.index() - prefix] = Some(recipe(shapes, t, &out)?);
         }
         recipes.extend(self.suffix.drain(..).map(|r| r.expect("visited")));
         Ok(())
@@ -397,6 +402,117 @@ impl RecipeScratch {
 struct Computed<'a> {
     prefix: &'a [Recipe],
     suffix: &'a mut [Option<Recipe>],
+    effects: &'a std::cell::RefCell<Effects>,
+}
+
+/// Which rows' cleanup can observe its own order, memoized across extensions
+/// (a row's answer depends only on rows it reaches, which never change).
+#[derive(Default)]
+struct Effects {
+    /// Per row: 0 unknown, 1 order-free, 2 effectful.
+    rows: Vec<u8>,
+    stack: Vec<(TypeRef, usize)>,
+    seen: Vec<TypeRef>,
+}
+
+impl Effects {
+    /// Whether cleaning a value of row `root` can observe the order of its steps:
+    /// it reaches a finalizer, a resource, a handle, an `own fn` environment, an
+    /// `Arc` (its releases are task events) or a region reference. Any other
+    /// cleanup only frees and refunds blocks, which nothing runs between, so
+    /// those steps commute.
+    fn effectful(&mut self, shapes: &[Shape], root: TypeRef) -> bool {
+        if self.rows.len() < shapes.len() {
+            self.rows.resize(shapes.len(), 0);
+        }
+        match self.rows[root.index()] {
+            1 => return false,
+            2 => return true,
+            _ => {}
+        }
+        // Depth-first over owning edges. Reaching an effectful row marks every
+        // row on the path; exhausting the closure marks every row seen free.
+        self.stack.clear();
+        self.seen.clear();
+        self.rows[root.index()] = 3;
+        self.seen.push(root);
+        self.stack.push((root, 0));
+        let mut found = false;
+        'walk: while let Some(&mut (t, ref mut next)) = self.stack.last_mut() {
+            let shape = &shapes[t.index()];
+            if shape.repr == Repr::Resource || shape.finalizer.is_some() {
+                found = true;
+                break;
+            }
+            let fields = cases(shape).into_iter().flatten();
+            for f in fields.skip(*next) {
+                *next += 1;
+                let mut targets = vec![];
+                if !owned_rows(&f.ty, &mut targets) {
+                    found = true;
+                    break 'walk;
+                }
+                for d in targets {
+                    match self.rows[d.index()] {
+                        2 => {
+                            found = true;
+                            break 'walk;
+                        }
+                        0 => {
+                            self.rows[d.index()] = 3;
+                            self.seen.push(d);
+                            self.stack.push((d, 0));
+                            continue 'walk;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            self.stack.pop();
+        }
+        if found {
+            for &(t, _) in &self.stack {
+                self.rows[t.index()] = 2;
+            }
+            for &t in &self.seen {
+                if self.rows[t.index()] == 3 {
+                    self.rows[t.index()] = 0;
+                }
+            }
+        } else {
+            for &t in &self.seen {
+                self.rows[t.index()] = 1;
+            }
+        }
+        found
+    }
+}
+
+/// The rows whose cleanup cleaning a field of `ty` runs, or false when
+/// cleaning it can observe order by itself (see [`Effects::effectful`]).
+/// An allow-list: a field type not named here is effectful.
+fn owned_rows(ty: &FieldTy, rows: &mut Vec<TypeRef>) -> bool {
+    match ty {
+        FieldTy::Inline(t) | FieldTy::Box(t) | FieldTy::Rc(t) => {
+            rows.push(*t);
+            true
+        }
+        FieldTy::Seq(e) | FieldTy::Array(e, _) => owned_rows(e, rows),
+        FieldTy::Map(k, v) => owned_rows(k, rows) && owned_rows(v, rows),
+        FieldTy::Scalar(_)
+        | FieldTy::Fn
+        | FieldTy::Borrow
+        | FieldTy::View(_)
+        | FieldTy::FrozenBytes
+        | FieldTy::Text
+        | FieldTy::Link(_)
+        | FieldTy::Locator(_)
+        | FieldTy::Handle(Handle::Capability) => true,
+        FieldTy::FixedSpan(e) | FieldTy::SeqSpan(e) | FieldTy::IndexedSpan(e) => {
+            owned_rows(e, rows)
+        }
+        FieldTy::Arc(_) | FieldTy::RegionRef(_) | FieldTy::OwnFn | FieldTy::Handle(_) => false,
+    }
 }
 impl Computed<'_> {
     fn get(&self, t: TypeRef) -> Option<&Recipe> {
@@ -484,7 +600,8 @@ fn done<'a>(out: &'a Computed<'_>, t: TypeRef) -> &'a Recipe {
     out.get(t).expect("inline dependency computed first")
 }
 
-fn recipe(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, LayoutError> {
+fn recipe(shapes: &[Shape], this: TypeRef, out: &Computed<'_>) -> Result<Recipe, LayoutError> {
+    let shape = &shapes[this.index()];
     let refused = || LayoutError::Carried {
         ty: shape.name.clone(),
     };
@@ -493,7 +610,7 @@ fn recipe(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe,
     }
     let recipe = match shape.repr {
         Repr::Compact(w) => compact(shapes, shape, w, out),
-        _ => fixed(shapes, shape, out),
+        _ => fixed(shapes, shape, this, out),
     }?;
     // A variant carried as a word is laid out as exactly that word: its tag.
     if let (Body::Variant(_), Carried::Value(t)) = (&shape.body, shape.carried) {
@@ -939,7 +1056,12 @@ fn several_dataful(
     Ok(Some((offsets, end, tag, rest)))
 }
 
-fn fixed(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, LayoutError> {
+fn fixed(
+    shapes: &[Shape],
+    shape: &Shape,
+    this: TypeRef,
+    out: &Computed<'_>,
+) -> Result<Recipe, LayoutError> {
     let rows = cases(shape);
     let variant = matches!(shape.body, Body::Variant(_));
     // (size, align, logical) per field, per case.
@@ -1017,7 +1139,7 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, 
             .map_or_else(String::new, |f| f.name.clone()),
         bytes: wide_align_up(end.into(), align),
     })?;
-    let drop = drop_recipe(shapes, shape, &rows, &offsets, out);
+    let drop = drop_recipe(shapes, shape, &rows, &offsets, out, this);
     Ok(Recipe {
         plain: drop.is_none() && shape.repr != Repr::Resource,
         drop,
@@ -1325,21 +1447,31 @@ fn drop_recipe(
     rows: &[&[Field]],
     offsets: &[Vec<u64>],
     out: &Computed<'_>,
+    this: TypeRef,
 ) -> Option<DropRecipe> {
+    // FAIL-8 order (reverse declaration) where cleanup can observe it. Elsewhere
+    // the steps commute, so cleanup follows declaration order, the order LANG-9
+    // constructs and so allocates in: a drain then walks owned blocks forward
+    // through memory, as Rust drops fields.
+    let forward = !out.effects.borrow_mut().effectful(shapes, this);
     let fields: Vec<Vec<FieldDrop>> = rows
         .iter()
         .zip(offsets)
         .map(|(row, offs)| {
-            row.iter()
+            let mut fields: Vec<FieldDrop> = row
+                .iter()
                 .enumerate()
-                .rev()
                 .filter(|(_, f)| needs_drop(shapes, &f.ty, out))
                 .map(|(i, f)| FieldDrop {
                     field: i as u32,
                     offset: offs[i],
                     ty: f.ty.clone(),
                 })
-                .collect()
+                .collect();
+            if !forward {
+                fields.reverse();
+            }
+            fields
         })
         .collect();
     // A resource always has cleanup: its block, cell and grant are freed and refunded.

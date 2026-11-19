@@ -1470,6 +1470,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let sig = &self.e.module.signatures[signature.index()];
         let (dest, result_ty) = (sig.dest, sig.results.first().copied());
+        // The source signature omits uncarried parameters. With no omissions,
+        // it already supplies each argument's carriage in source order.
+        let all_carried =
+            sig.params.len() == g.params.len() && g.drop_of.is_none() && g.clone_of.is_none();
         // The destination is the first argument: a fresh place the result is written to.
         let source_call = self.expression_destination(n).is_some()
             && self.kind(n) == NodeKind::Call
@@ -1489,31 +1493,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 // A1 cleanup: the callee owns a taken argument from entry (T2.3).
                 self.consume(vals[i], n);
             }
-            let ty = subst(&mut self.t, p.ty, types);
-            let r = match self.rep(ty) {
-                Ok(Rep::None) if p.mode != Mode::Mut => {
-                    continue;
+            let place = if all_carried {
+                match self.e.module.signatures[signature.index()].params[i] {
+                    Param::Value(_) => None,
+                    Param::Address { place, .. } => Some(place),
                 }
-                Ok(r) => r,
-                Err(what) => {
-                    self.gap(n, what);
-                    return None;
+            } else {
+                let ty = subst(&mut self.t, p.ty, types);
+                let rep = match self.rep(ty) {
+                    Ok(Rep::None) if p.mode != Mode::Mut => continue,
+                    Ok(rep) => rep,
+                    Err(what) => {
+                        self.gap(n, what);
+                        return None;
+                    }
+                };
+                match rep {
+                    _ if p.mode == Mode::Mut => {
+                        Some(self.e.mut_place(self.p, &mut self.t, ty, rep)?)
+                    }
+                    Rep::Place(id) => Some(PlaceTy::Declared(id)),
+                    _ => None,
                 }
             };
-            // Unit parameters were skipped above. An emission failure halts the
-            // body before this live-call path, so every carried argument has a value.
+            // A live call has a value for each carried source argument.
             let v = vals[i].expect("a live call has every carried argument value");
-            let arg = match r {
-                _ if p.mode == Mode::Mut => {
-                    let place = self.e.mut_place(self.p, &mut self.t, ty, r)?;
-                    let a = self.address(AddressBase::Value(v), &[], place, n);
-                    Arg::Address(a)
-                }
-                Rep::Place(id) => {
-                    let a = self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n);
-                    Arg::Address(a)
-                }
-                _ => Arg::Value(v),
+            let arg = match place {
+                Some(place) => Arg::Address(self.address(AddressBase::Value(v), &[], place, n)),
+                None => Arg::Value(v),
             };
             self.b.pools.args.push(arg);
         }

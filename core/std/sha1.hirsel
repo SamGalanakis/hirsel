@@ -7,22 +7,28 @@ fn rotl(x: u32, n: u32) -> u32 {
 
 fn block(b: Bytes, at: u64, mut h: Inline[u32, 5], tail: bool) {
     let mut w: Inline[u32, 80] =[0; 80]
-    let n = list.len(b)
-    let bits = n << 3
-    for i in 0u64 .. 64u64 {
-        let p = at + i
-        let x: u8 = if !tail || p < n {
-            b[p]
-        } else if p == n {
-            128
-        } else if i >= 56 && at + 64 - n >= 9 {
-            int.truncate(bits >> ((63 - i) * 8))
-        } else {
-            0
+    if tail {
+        let n = list.len(b)
+        let bits = n << 3
+        for i in 0u64 .. 64u64 {
+            let p = at + i
+            let x: u8 = if p < n {
+                b[p]
+            } else if p == n {
+                128
+            } else if i >= 56 && at + 64 - n >= 9 {
+                int.truncate(bits >> ((63 - i) * 8))
+            } else {
+                0
+            }
+            let x32: u32 = int.widen(x)
+            let shift: u32 = int.narrow(24 - (i % 4) * 8)
+            w[i / 4] = w[i / 4] | (x32 << shift)
         }
-        let x32: u32 = int.widen(x)
-        let shift: u32 = int.narrow(24 - (i % 4) * 8)
-        w[i / 4] = w[i / 4] | (x32 << shift)
+    } else {
+        for i in 0u64 .. 16 {
+            w[i] = list.word_be(b, at + i * 4)
+        }
     }
     for i in 16u64 .. 80u64 {
         w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1)
@@ -80,10 +86,8 @@ pub fn hash(b: Bytes) -> Result[Bytes, Capacity] {
         block(b, at + 64, mut h, true)
     }
     let mut out: Bytes = list.with_capacity(20)?
-    for i in 0u64 .. 20u64 {
-        let shift: u32 = int.narrow(24 - (i % 4) * 8)
-        let x: u8 = int.truncate(h[i / 4] >> shift)
-        let _ = list.push(mut out, x)
+    for word in h {
+        list.put_word_be(mut out, word)?
     }
     Ok(take out)
 }

@@ -89,14 +89,7 @@ pub fn get_u64(b: Bytes, at: u64) -> Option[u64] {
     if at > list.len(b) || list.len(b) - at < 8 {
         return None
     }
-    let mut x: u64 = 0
-    let mut i: u64 = 0
-    while i < 8 {
-        let byte: u64 = int.widen(b[at + i])
-        x = x | (byte << (i * 8))
-        i += 1
-    }
-    Some(x)
+    Some(list.word_le(b, at))
 }
 
 fn header(mut out: Bytes, kind: u8) -> Result[(), Failure] {
@@ -157,7 +150,9 @@ pub fn dispatch(r: Registry, frame: Bytes) -> Result[Reply, Failure] {
         return Ok(NoCode)
     }
     let f = code.callable(h)
-    match (bound bytes r.limit { f(arg) }) {
+    match (bound bytes r.limit {
+        f(arg)
+    }) {
         Ok(Ok(take o)) => Ok(Done(take o)),
         Ok(Error(c)) => Ok(Refused(c)),
         Error(c) => Ok(Refused(c)),

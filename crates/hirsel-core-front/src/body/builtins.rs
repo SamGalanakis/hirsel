@@ -36,11 +36,28 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if module == ["map"] {
             return self.map_value(name, types, vals, result, n);
         }
-        if module == ["list"] && name == "word_le" {
-            return Some(self.list_word_le(vals[0]?, vals[1]?, n));
+        if module == ["list"] && matches!(name, "word_le" | "word_be") {
+            return Some(self.list_word(vals[0]?, vals[1]?, result, name == "word_be", n));
         }
-        if module == ["list"] && name == "put_word_le" {
-            return Some(self.list_put_word_le(vals[0]?, vals[1]?, result, n));
+        if module == ["list"] && matches!(name, "put_word_le" | "put_word_be") {
+            return Some(self.list_put_word(
+                vals[0]?,
+                vals[1]?,
+                types[0],
+                result,
+                name == "put_word_be",
+                n,
+            ));
+        }
+        if module == ["inline"] && matches!(name, "word_le" | "word_be") {
+            return Some(self.inline_word(
+                types[0],
+                vals[0],
+                vals[1]?,
+                result,
+                name == "word_be",
+                n,
+            ));
         }
         if module == ["inline"] && name == "copy_from_slice" {
             self.inline_copy_from_slice(types[0], vals[0], vals[1]?, vals[2], vals[3]?, n)?;

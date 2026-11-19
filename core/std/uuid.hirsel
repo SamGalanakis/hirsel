@@ -83,38 +83,19 @@ pub fn push(mut out: String, u: Uuid) -> Result[(), Capacity] {
     Ok(())
 }
 
-// Offsets are relative to a checked suffix, so even u64's largest offset
-// produces Bounds without forming an overflowing at + width.
-fn read_word(b: Bytes, start: u64, end: u64) -> u64 {
-    let mut word: u64 = 0
-    for i in start .. end {
-        let byte: u64 = int.widen(b[i])
-        word = (word << 8) | byte
-    }
-    word
-}
-
 /// Reads the 16 bytes starting at at, in network order.
 /// Fails: Bounds if the range is outside b. Alloc: nothing.
 pub fn from_bytes(b: Bytes, at: u64) -> Uuid {
     let suffix = list.slice(b, at, list.len(b))
-    Uuid(hi: read_word(suffix, 0, 8), lo: read_word(suffix, 8, 16))
+    Uuid(hi: list.word_be(suffix, 0), lo: list.word_be(suffix, 8))
 }
 
 /// Appends the 16 UUID bytes in network order. The function reserves all 16
 /// bytes first. Fails: Capacity leaves out unchanged. Alloc: growth of out.
 pub fn push_bytes(mut out: Bytes, u: Uuid) -> Result[(), Capacity] {
     list.reserve(mut out, 16)?
-    for i in 0u64 .. 16u64 {
-        let word = if i < 8 {
-            u.hi
-        } else {
-            u.lo
-        }
-        let byte: u8 = int.truncate(word >> ((7 - i % 8) * 8))
-        let _ = list.push(mut out, byte)
-    }
-    Ok(())
+    list.put_word_be(mut out, u.hi)?
+    list.put_word_be(mut out, u.lo)
 }
 
 /// Returns the top four bits of byte 6 for any variant.
@@ -159,9 +140,10 @@ pub fn v7(ms: u64, b: Bytes, at: u64) -> Option[Uuid] {
         return None
     }
     let suffix = list.slice(b, at, list.len(b))
-    let rand_a = read_word(suffix, 0, 2) & 0xfff
-    let rand_b = rfc_variant(read_word(suffix, 2, 10))
-    Some(Uuid(hi: (ms << 16) | 0x7000 | rand_a, lo: rand_b))
+    let rand_a: u16 = list.word_be(suffix, 0)
+    let rand_b = rfc_variant(list.word_be(suffix, 2))
+    let rand_bits: u64 = int.widen(rand_a & 0xfff)
+    Some(Uuid(hi: (ms << 16) | 0x7000 | rand_bits, lo: rand_b))
 }
 
 /// Returns the top 48 bits as milliseconds since the Unix epoch for version 7

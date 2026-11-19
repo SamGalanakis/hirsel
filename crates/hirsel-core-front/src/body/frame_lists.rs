@@ -201,6 +201,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 if IN_PLACE.iter().any(|op| path.is_core(op))
                                     || path.is_core("list.append")
                                     || path.is_core("list.put_word_le")
+                                    || path.is_core("list.put_word_be")
                                 {
                                     return Some(false);
                                 }

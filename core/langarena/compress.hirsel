@@ -155,8 +155,8 @@ fn lzw_encode(input: Bytes) -> Result[Bytes, helper.Error] {
                     None => return Error(Config)
                 }
             }
-            push(mut output, int.narrow((code >> 8u32) & 255u32))?
-            push(mut output, int.narrow(code & 255u32))?
+            let word: u16 = int.truncate(code)
+            helper.mem(list.put_word_be(mut output, word))?
             helper.mem(result.capacity_only(map.insert(mut dict, take current, next_code)))?
             next_code += 1
             current = list.new()
@@ -167,8 +167,8 @@ fn lzw_encode(input: Bytes) -> Result[Bytes, helper.Error] {
         Some(c) => c,
         None => return Error(Config)
     }
-    push(mut output, int.narrow((code >> 8u32) & 255u32))?
-    push(mut output, int.narrow(code & 255u32))?
+    let word: u16 = int.truncate(code)
+    helper.mem(list.put_word_be(mut output, word))?
     Ok(take output)
 }
 
@@ -369,15 +369,13 @@ fn lzw_decode(encoded: Bytes) -> Result[Bytes, helper.Error] {
         push(mut dict, take phrase)?
     }
     let mut output: Bytes = helper.mem(list.with_capacity(n * 2))?
-    let first: u64 = int.widen(encoded[0])
-    let second: u64 = int.widen(encoded[1])
-    let mut old_code = (first << 8u64) | second
+    let first: u16 = list.word_be(encoded, 0)
+    let mut old_code: u64 = int.widen(first)
     helper.mem(list.append(mut output, dict[old_code]))?
     let mut i: u64 = 2
     while i < n {
-        let hi: u64 = int.widen(encoded[i])
-        let lo: u64 = int.widen(encoded[i + 1])
-        let code = (hi << 8u64) | lo
+        let word: u16 = list.word_be(encoded, i)
+        let code: u64 = int.widen(word)
         let next = list.len(dict)
         let mut phrase: Bytes = helper.mem(clone(dict[old_code]))?
         if code < next {

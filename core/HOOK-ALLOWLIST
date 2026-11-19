@@ -204,6 +204,9 @@ core@1/host/unlock
 core@1/host/wall_ms
 core@1/host/write
 core@1/indexed/get
+# DECISIONS.md 2026-11-19 (dedup-1357 rank 10, endian words).
+core@1/inline/word_be
+core@1/inline/word_le
 core@1/int/checked_add
 core@1/int/checked_div
 core@1/int/checked_mul
@@ -237,6 +240,8 @@ core@1/list/len
 core@1/list/new
 core@1/list/pop
 core@1/list/push
+# DECISIONS.md 2026-11-19 (dedup-1357 rank 10, endian words).
+core@1/list/put_word_be
 core@1/list/put_word_le
 core@1/list/reserve
 core@1/list/set
@@ -256,6 +261,8 @@ core@1/list/sort_stable
 core@1/list/sum
 core@1/list/swap
 core@1/list/with_capacity
+# DECISIONS.md 2026-11-19 (dedup-1357 rank 10, endian words).
+core@1/list/word_be
 core@1/list/word_le
 core@1/log/append
 core@1/log/finish

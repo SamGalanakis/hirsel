@@ -164,64 +164,143 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(())
     }
 
-    /// SEM-4: an unaligned little-endian word, with Bounds even when `at + 8`
-    /// would overflow. Keep the checked end and unsigned bound in one predicate so
-    /// native optimizers can combine it with the caller's checked offsets.
-    pub(super) fn list_word_le(
+    fn word_scalar(&mut self, ty: TyId, n: NodeId) -> Option<Scalar> {
+        match *self.t.kind(ty) {
+            TyKind::Scalar(s @ (Scalar::U16 | Scalar::U32 | Scalar::U64)) => Some(s),
+            _ => {
+                self.refuse("SEM-4", n, "a word must be u16, u32 or u64");
+                None
+            }
+        }
+    }
+
+    fn word_order(&mut self, word: ValueId, ty: Ty, big_endian: bool, n: NodeId) -> ValueId {
+        if !big_endian {
+            return word;
+        }
+        let result = self.value(ty);
+        self.inst(
+            Inst::ScalarUnary {
+                result,
+                op: hirsel_core_ir::ScalarUnaryOp::SwapBytes,
+                operand: word,
+            },
+            n,
+        );
+        result
+    }
+
+    /// SEM-4: keep the checked end and unsigned bound in one predicate.
+    fn require_word_range(
+        &mut self,
+        at: ValueId,
+        len: ValueId,
+        scalar: Scalar,
+        n: NodeId,
+    ) -> Option<()> {
+        let width = self.konst(Ty::Scalar(Scalar::U64), scalar.size(), n)?;
+        let (end, overflow) = self.list_arith(ArithOp::Add, ArithMode::Checked, at, width, n);
+        let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
+        let within = self.list_compare(CompareOp::Le, end, len, n);
+        let valid = self.list_bool(BinaryOp::BitAnd, no_overflow, within, n);
+        self.list_require_element(valid, n);
+        Some(())
+    }
+
+    fn read_word(
+        &mut self,
+        data: ValueId,
+        at: ValueId,
+        scalar: Scalar,
+        big_endian: bool,
+        n: NodeId,
+    ) -> ValueId {
+        let ty = Ty::Scalar(scalar);
+        let address = self.address(
+            AddressBase::Value(data),
+            &[Step::Byte(at)],
+            PlaceTy::Value(ty),
+            n,
+        );
+        let word = self.read_bits(address, ty, n);
+        self.word_order(word, ty, big_endian, n)
+    }
+
+    pub(super) fn list_word(
         &mut self,
         header: ValueId,
         at: ValueId,
+        result: TyId,
+        big_endian: bool,
         n: NodeId,
     ) -> Option<ValueId> {
         if !self.live() {
             return None;
         }
+        let scalar = self.word_scalar(result, n)?;
         let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
-        let width = self.konst(Ty::Scalar(Scalar::U64), 8, n)?;
-        let (end, overflow) = self.list_arith(ArithOp::Add, ArithMode::Checked, at, width, n);
-        let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
-        let within = self.list_compare(CompareOp::Le, end, len, n);
-        let valid = self.list_bool(BinaryOp::BitAnd, no_overflow, within, n);
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        self.list_branch(valid, yes, no, n);
-        self.start(no);
-        let cleanup = self.fail_to(n);
-        self.end(
-            Terminator::Raise {
-                cause: hirsel_core_ir::RaiseCause::Bounds,
-                cleanup,
-            },
-            Some(n),
-        );
-        self.start(yes);
+        self.require_word_range(at, len, scalar, n)?;
         let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
-        let address = self.address(
-            AddressBase::Value(data),
-            &[Step::Byte(at)],
-            PlaceTy::Value(Ty::Scalar(Scalar::U64)),
-            n,
-        );
-        Some(self.read_bits(address, Ty::Scalar(Scalar::U64), n))
+        Some(self.read_word(data, at, scalar, big_endian, n))
     }
 
-    /// The store twin of word_le. Reserve first, so a refusal preserves every
-    /// carrier word and byte; success appends one unaligned little-endian u64.
-    pub(super) fn list_put_word_le(
+    pub(super) fn inline_word(
+        &mut self,
+        array: TyId,
+        data: Option<ValueId>,
+        at: ValueId,
+        result: TyId,
+        big_endian: bool,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let len = match *self.t.kind(array) {
+            TyKind::Array(item, len) if item == scalar(Scalar::U8) => len,
+            _ => {
+                self.refuse(
+                    "SEM-4",
+                    n,
+                    "an Inline word read takes an Inline array of u8",
+                );
+                return None;
+            }
+        };
+        let scalar = self.word_scalar(result, n)?;
+        if len < scalar.size() {
+            let cleanup = self.fail_to(n);
+            self.end(
+                Terminator::Raise {
+                    cause: hirsel_core_ir::RaiseCause::Bounds,
+                    cleanup,
+                },
+                Some(n),
+            );
+            return None;
+        }
+        let bound = self.konst(Ty::Scalar(Scalar::U64), len, n)?;
+        self.require_word_range(at, bound, scalar, n)?;
+        Some(self.read_word(data?, at, scalar, big_endian, n))
+    }
+
+    /// Reserve first so refusal preserves the carrier and all its bytes.
+    pub(super) fn list_put_word(
         &mut self,
         header: ValueId,
         word: ValueId,
+        input: TyId,
         result: TyId,
+        big_endian: bool,
         n: NodeId,
     ) -> Option<ValueId> {
+        let word_scalar = self.word_scalar(input, n)?;
+        let ty = Ty::Scalar(word_scalar);
         let Some(carrier) = self.list_carrier(scalar(Scalar::U8), n) else {
-            self.gap(n, "put_word_le without the Bytes carrier row is not built");
+            self.gap(n, "put_word without the Bytes carrier row is not built");
             return None;
         };
         let result_id =
-            self.place_row(result, "put_word_le without a Result place is not built", n)?;
+            self.place_row(result, "put_word without a Result place is not built", n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        let width = self.konst(Ty::Scalar(Scalar::U64), 8, n)?;
+        let width = self.konst(Ty::Scalar(Scalar::U64), word_scalar.size(), n)?;
         let reserved =
             self.list_reserve(scalar(Scalar::U8), header, width, Ask::Bounded, result, n)?;
         let at = self.address(
@@ -248,9 +327,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let at = self.address(
             AddressBase::Value(data),
             &[Step::Byte(len)],
-            PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+            PlaceTy::Value(ty),
             n,
         );
+        let word = self.word_order(word, ty, big_endian, n);
         self.inst(
             Inst::Store {
                 address: at,

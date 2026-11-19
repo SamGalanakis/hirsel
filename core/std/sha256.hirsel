@@ -58,11 +58,7 @@ fn compress(mut h: Inline[u32, 8], mut w: Inline[u32, 64]) {
 fn buffered(mut h: Inline[u32, 8], input: Inline[u8, 64]) {
     let mut w: Inline[u32, 64] =[0; 64]
     for i in 0u64 .. 16u64 {
-        let a: u32 = int.widen(input[i * 4])
-        let b: u32 = int.widen(input[i * 4 + 1])
-        let c: u32 = int.widen(input[i * 4 + 2])
-        let d: u32 = int.widen(input[i * 4 + 3])
-        w[i] = (a << 24) | (b << 16) | (c << 8) | d
+        w[i] = inline.word_be(input, i * 4)
     }
     compress(mut h, mut w)
 }
@@ -70,11 +66,7 @@ fn buffered(mut h: Inline[u32, 8], input: Inline[u8, 64]) {
 fn block(mut h: Inline[u32, 8], input: Bytes, at: u64) {
     let mut w: Inline[u32, 64] =[0; 64]
     for i in 0u64 .. 16u64 {
-        let a: u32 = int.widen(input[at + i * 4])
-        let b: u32 = int.widen(input[at + i * 4 + 1])
-        let c: u32 = int.widen(input[at + i * 4 + 2])
-        let d: u32 = int.widen(input[at + i * 4 + 3])
-        w[i] = (a << 24) | (b << 16) | (c << 8) | d
+        w[i] = list.word_be(input, at + i * 4)
     }
     compress(mut h, mut w)
 }

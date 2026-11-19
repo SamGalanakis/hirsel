@@ -195,3 +195,70 @@ fn copy_from_slice_unit_bounds() -> bool {
     list.copy_from_slice(mut dst, 1, src)
     list.len(dst) == 2
 }
+
+// The words start one byte into the buffer. The reference bytes spell the
+// numbers directly so matching read and write mistakes cannot cancel.
+// expect: run word_widths_unaligned() = true
+fn word_widths_unaligned() -> bool {
+    let mut b: Bytes = result.unwrap(list.with_capacity(22))
+    result.unwrap(list.push(mut b, 0xff))
+    result.unwrap(list.put_word_le(mut b, 0x0201u16))
+    result.unwrap(list.put_word_be(mut b, 0x0304u16))
+    result.unwrap(list.put_word_le(mut b, 0x08070605u32))
+    result.unwrap(list.put_word_be(mut b, 0x090a0b0cu32))
+    result.unwrap(list.put_word_be(mut b, 0x0d0e0f1011121314u64))
+    let little16: u16 = list.word_le(b, 1)
+    let big16: u16 = list.word_be(b, 3)
+    let little32: u32 = list.word_le(b, 5)
+    let big32: u32 = list.word_be(b, 9)
+    let big64: u64 = list.word_be(b, 13)
+    if list.len(b) != 21 || b[0] != 0xff {
+        return false
+    }
+    for i in 1u64 .. 21 {
+        if b[i] != int.truncate(i) {
+            return false
+        }
+    }
+    little16 == 0x0201 && big16 == 0x0304 && little32 == 0x08070605 && big32 == 0x090a0b0c && big64 == 0x0d0e0f1011121314
+}
+
+// With one byte left only a one-byte read would fit.
+// expect: run word_widths_truncated() = fail Bounds
+fn word_widths_truncated() -> u16 {
+    list.word_be(string.as_bytes("abc"), 2)
+}
+
+// The original one-byte list charges eight. A two-byte append needs capacity
+// four, also charged as eight, and there are zero bytes left to admit it.
+// expect: run word_widths_capacity() = true
+fn word_widths_capacity() -> bool {
+    let run = bound bytes 8 {
+        let mut b: Bytes = list.with_capacity(1)?
+        result.unwrap(list.push(mut b, 0xa5))
+        match list.put_word_be(mut b, 0x1234u16) {
+            Error(c) => c.requested == 8 && c.available == 0 && list.len(b) == 1 && list.capacity(b) == 1 && b[0] == 0xa5,
+            Ok(()) => false,
+        }
+    }
+    match run {
+        Ok(ok) => ok,
+        Error(_) => false,
+    }
+}
+
+// Inline reads use the same unaligned byte positions.
+// expect: run inline_word_widths() = true
+fn inline_word_widths() -> bool {
+    let raw: Inline[u8, 5] =[0xff, 1, 2, 3, 4]
+    let little: u32 = inline.word_le(raw, 1)
+    let big: u32 = inline.word_be(raw, 1)
+    little == 0x04030201 && big == 0x01020304
+}
+
+// No start offset can fit a word in a zero-length byte array.
+// expect: run inline_word_widths_empty() = fail Bounds
+fn inline_word_widths_empty() -> u16 {
+    let raw: Inline[u8, 0] =[0; 0]
+    inline.word_le(raw, 0)
+}

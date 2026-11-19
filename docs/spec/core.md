@@ -186,13 +186,17 @@ operations it names; nothing else about them may be inferred from an implementat
   A range outside either carrier raises `Bounds` before any writes. The destination
   keeps its length and capacity. Each copy admits no bytes and takes one Step
   ([MEM-30](budgets.md#mem-30-step-bounds)).
-- **Words.** `list.word_le(b, at)` reads the 8 bytes of `b` from `at` as a little-endian
-  `u64` and fails with `Bounds` unless `at + 8 ≤ len`. Its store twin, `list.put_word_le(mut
-  b, x) -> Result[(), Capacity]`, appends `x` as 8 little-endian bytes, growing `b` as
-  [MEM-24](budgets.md#mem-24-logical-charges) says, and on `Capacity` leaves `b` unchanged.
-  With `list.lanes` and `list.put_lanes` ([SEM-11](semantics.md#sem-11-vectors)) they are the only multi-byte loads and stores. Byte search, UTF-8 validation, Base64 and other scans are ordinary Hirsel over
-  them, the vectors of SEM-11 and the bit counts of [SEM-1](semantics.md#sem-1-integers) (`string.find` is std),
-  not engine kernels.
+- **Words.** `list.word_le(b, at)` and `list.word_be(b, at)` read a little- or big-endian
+  word from `b` at a byte offset. The expected `u16`, `u32` or `u64` type fixes the width.
+  Without an expected type the result is `u64`. An invalid range, including an overflowing
+  end, fails with `Bounds`. `list.put_word_le(mut b, x)` and `list.put_word_be(mut b, x)`
+  append the two, four or eight bytes of `x` in the specified order. Growth follows
+  [MEM-24](budgets.md#mem-24-logical-charges). On `Capacity` the list is unchanged.
+  `inline.word_le` and `inline.word_be` read the same widths from an Inline byte
+  array. Its expected integer type fixes the width and an invalid range fails with `Bounds`.
+  The word operations and [SEM-11](semantics.md#sem-11-vectors) lane operations are the
+  multi-byte loads and stores. Library scans use them and the [SEM-1](semantics.md#sem-1-integers)
+  integer operations.
 - **Lists.** `list.set` returns the old element and `list.get` returns `None` out of range,
   where `xs[i]` and `list.set` fail with `Bounds`. An element is mutated in place through
   its index place (`xs[i] = x`, or `mut xs[i]` as an argument), including nested places

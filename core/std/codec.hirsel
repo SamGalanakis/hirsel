@@ -106,30 +106,6 @@ fn put_byte(mut out: Bytes, x: u8) -> Result[(), Capacity] {
     }
 }
 
-fn put_le(mut out: Bytes, x: u64, width: u64) -> Result[(), Capacity] {
-    list.reserve(mut out, width)?
-    let mut i: u64 = 0
-    while i < width {
-        let byte: u8 = int.truncate(x >> int.truncate(i * 8))
-        put_byte(mut out, byte)?
-        i += 1
-    }
-    Ok(())
-}
-
-fn take_le(b: Bytes, mut at: u64, width: u64) -> Result[u64, Stop] {
-    need(b, at, width)?
-    let mut x: u64 = 0
-    let mut i: u64 = 0
-    while i < width {
-        let byte: u64 = int.widen(b[at + i])
-        x = x | byte << int.truncate(i * 8)
-        i += 1
-    }
-    at += width
-    Ok(x)
-}
-
 pub fn put_unit(x: (), mut out: Bytes) -> Result[(), Capacity] {
     Ok(())
 }
@@ -168,21 +144,25 @@ pub fn take_u8(b: Bytes, mut at: u64) -> Result[u8, Stop] {
 }
 
 pub fn put_u16(x: u16, mut out: Bytes) -> Result[(), Capacity] {
-    put_le(mut out, int.widen(x), 2)
+    list.put_word_le(mut out, x)
 }
 
 pub fn take_u16(b: Bytes, mut at: u64) -> Result[u16, Stop] {
-    let x = take_le(b, mut at, 2)?
-    Ok(int.truncate(x))
+    need(b, at, 2)?
+    let x: u16 = list.word_le(b, at)
+    at += 2
+    Ok(x)
 }
 
 pub fn put_u32(x: u32, mut out: Bytes) -> Result[(), Capacity] {
-    put_le(mut out, int.widen(x), 4)
+    list.put_word_le(mut out, x)
 }
 
 pub fn take_u32(b: Bytes, mut at: u64) -> Result[u32, Stop] {
-    let x = take_le(b, mut at, 4)?
-    Ok(int.truncate(x))
+    need(b, at, 4)?
+    let x: u32 = list.word_le(b, at)
+    at += 4
+    Ok(x)
 }
 
 pub fn put_u64(x: u64, mut out: Bytes) -> Result[(), Capacity] {
@@ -226,7 +206,8 @@ pub fn take_i32(b: Bytes, mut at: u64) -> Result[i32, Stop] {
 }
 
 pub fn put_i64(x: i64, mut out: Bytes) -> Result[(), Capacity] {
-    list.put_word_le(mut out, int.truncate(x))
+    let bits: u64 = int.truncate(x)
+    list.put_word_le(mut out, bits)
 }
 
 pub fn take_i64(b: Bytes, mut at: u64) -> Result[i64, Stop] {
@@ -2109,30 +2090,6 @@ pub fn take_key_with[T](b: Bytes, mut at: u64, k: Key[T]) -> Result[T, Stop] {
     (k.decoder)(b, mut at)
 }
 
-fn put_be(mut out: Bytes, x: u64, width: u64) -> Result[(), Capacity] {
-    list.reserve(mut out, width)?
-    let mut i = width
-    while i > 0 {
-        i -= 1
-        let byte: u8 = int.truncate((x >> (8 * i)) & 0xff)
-        let _ = list.push(mut out, byte)
-    }
-    Ok(())
-}
-
-fn take_be(b: Bytes, mut at: u64, width: u64) -> Result[u64, Stop] {
-    need(b, at, width)?
-    let mut x: u64 = 0
-    let mut i: u64 = 0
-    while i < width {
-        let byte: u64 = int.widen(b[at + i])
-        x = (x << 8) | byte
-        i += 1
-    }
-    at += width
-    Ok(x)
-}
-
 pub fn put_key_u8(x: u8, mut out: Bytes) -> Result[(), Capacity] {
     put_byte(mut out, x)
 }
@@ -2142,29 +2099,36 @@ pub fn take_key_u8(b: Bytes, mut at: u64) -> Result[u8, Stop] {
 }
 
 pub fn put_key_u16(x: u16, mut out: Bytes) -> Result[(), Capacity] {
-    put_be(mut out, int.widen(x), 2)
+    list.put_word_be(mut out, x)
 }
 
 pub fn take_key_u16(b: Bytes, mut at: u64) -> Result[u16, Stop] {
-    let x = take_be(b, mut at, 2)?
-    Ok(int.truncate(x))
+    need(b, at, 2)?
+    let x: u16 = list.word_be(b, at)
+    at += 2
+    Ok(x)
 }
 
 pub fn put_key_u32(x: u32, mut out: Bytes) -> Result[(), Capacity] {
-    put_be(mut out, int.widen(x), 4)
+    list.put_word_be(mut out, x)
 }
 
 pub fn take_key_u32(b: Bytes, mut at: u64) -> Result[u32, Stop] {
-    let x = take_be(b, mut at, 4)?
-    Ok(int.truncate(x))
+    need(b, at, 4)?
+    let x: u32 = list.word_be(b, at)
+    at += 4
+    Ok(x)
 }
 
 pub fn put_key_u64(x: u64, mut out: Bytes) -> Result[(), Capacity] {
-    put_be(mut out, x, 8)
+    list.put_word_be(mut out, x)
 }
 
 pub fn take_key_u64(b: Bytes, mut at: u64) -> Result[u64, Stop] {
-    take_be(b, mut at, 8)
+    need(b, at, 8)?
+    let x: u64 = list.word_be(b, at)
+    at += 8
+    Ok(x)
 }
 
 pub fn put_key_i8(x: i8, mut out: Bytes) -> Result[(), Capacity] {
@@ -2179,33 +2143,31 @@ pub fn take_key_i8(b: Bytes, mut at: u64) -> Result[i8, Stop] {
 
 pub fn put_key_i16(x: i16, mut out: Bytes) -> Result[(), Capacity] {
     let bits: u16 = int.truncate(x)
-    put_be(mut out, int.widen(bits ^ 0x8000), 2)
+    put_key_u16(bits ^ 0x8000, mut out)
 }
 
 pub fn take_key_i16(b: Bytes, mut at: u64) -> Result[i16, Stop] {
-    let x = take_be(b, mut at, 2)?
-    let bits: u16 = int.truncate(x ^ 0x8000)
+    let bits = take_key_u16(b, mut at)? ^ 0x8000
     Ok(int.truncate(bits))
 }
 
 pub fn put_key_i32(x: i32, mut out: Bytes) -> Result[(), Capacity] {
     let bits: u32 = int.truncate(x)
-    put_be(mut out, int.widen(bits ^ 0x80000000), 4)
+    put_key_u32(bits ^ 0x80000000, mut out)
 }
 
 pub fn take_key_i32(b: Bytes, mut at: u64) -> Result[i32, Stop] {
-    let x = take_be(b, mut at, 4)?
-    let bits: u32 = int.truncate(x ^ 0x80000000)
+    let bits = take_key_u32(b, mut at)? ^ 0x80000000
     Ok(int.truncate(bits))
 }
 
 pub fn put_key_i64(x: i64, mut out: Bytes) -> Result[(), Capacity] {
     let bits: u64 = int.truncate(x)
-    put_be(mut out, bits ^ 0x8000000000000000, 8)
+    put_key_u64(bits ^ 0x8000000000000000, mut out)
 }
 
 pub fn take_key_i64(b: Bytes, mut at: u64) -> Result[i64, Stop] {
-    let x = take_be(b, mut at, 8)?
+    let x = take_key_u64(b, mut at)?
     Ok(int.truncate(x ^ 0x8000000000000000))
 }
 

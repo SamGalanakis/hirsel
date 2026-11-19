@@ -13,7 +13,13 @@ pub fn get[T](xs: List[T], i: u64) -> Option[View[T]] in xs
 
 pub fn slice[T](xs: List[T], lo: u64, hi: u64) -> View[List[T]] in xs
 
-pub fn word_le(b: Bytes, at: u64) -> u64
+// Read a little-endian u16, u32 or u64. The expected type fixes the width;
+// without one the width is u64. An invalid range, including an overflowing
+// end, fails with Bounds. Alloc: nothing.
+pub fn word_le[T: integer](b: Bytes, at: u64) -> T
+
+// Like word_le, in big-endian byte order.
+pub fn word_be[T: integer](b: Bytes, at: u64) -> T
 
 // The expected type fixes the number of bytes read (SEM-11).
 pub fn lanes(b: Bytes, at: u64) -> Simd[u8, 16]
@@ -21,8 +27,12 @@ pub fn lanes(b: Bytes, at: u64) -> Simd[u8, 16]
 // Appends exactly k lanes. Capacity leaves the buffer unchanged (SEM-11).
 pub fn put_lanes(mut b: Bytes, v: Simd[u8, 16], k: u64) -> Result[(), Capacity]
 
-// Append eight little-endian bytes; Capacity leaves the buffer unchanged.
-pub fn put_word_le(mut b: Bytes, x: u64) -> Result[(), Capacity]
+// Append the little-endian bytes of a u16, u32 or u64 atomically.
+// Capacity leaves the buffer unchanged.
+pub fn put_word_le[T: integer](mut b: Bytes, x: T) -> Result[(), Capacity]
+
+// Like put_word_le, in big-endian byte order.
+pub fn put_word_be[T: integer](mut b: Bytes, x: T) -> Result[(), Capacity]
 
 // The front expands push in place: a full test, a cold call to grow in its true
 // arm (MEM-24 from needed = len + 1), then a store within capacity.

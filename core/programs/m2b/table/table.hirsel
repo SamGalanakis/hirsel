@@ -74,7 +74,8 @@ fn get_u64(b: Bytes, mut at: u64) -> Option[u64] {
 // each integer is eight little-endian bytes.
 fn encode_account(a: Account, mut out: Bytes) -> Result[(), Capacity] {
     list.put_word_le(mut out, a.id)?
-    list.put_word_le(mut out, int.truncate(a.balance))?
+    let balance: u64 = int.truncate(a.balance)
+    list.put_word_le(mut out, balance)?
     list.put_word_le(mut out, string.byte_len(a.owner))?
     list.append(mut out, string.as_bytes(a.owner))
 }

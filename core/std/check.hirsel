@@ -28,24 +28,6 @@ fn secret(at: u64) -> u64 {
     }
 }
 
-fn word64(b: Inline[u8, 64], at: u64) -> u64 {
-    let mut n: u64 = 0
-    for i in 0u64 .. 8 {
-        let byte: u64 = int.widen(b[at + i]);
-        n = n | (byte << (i * 8))
-    }
-    n
-}
-
-fn small_word(b: Inline[u8, 256], at: u64, width: u64) -> u64 {
-    let mut n: u64 = 0
-    for i in 0u64 .. width {
-        let byte: u64 = int.widen(b[at + i]);
-        n = n | (byte << (i * 8))
-    }
-    n
-}
-
 fn lane(mut acc: Inline[u64, 8], i: u64, data: u64, sec: u64) {
     let keyed = data ^ secret(sec + i * 8)
     acc[i ^ 1] = int.wrapping_add(acc[i ^ 1], data)
@@ -66,7 +48,7 @@ fn scramble(mut s: Xxh3) {
 fn buffered_stripe(mut s: Xxh3) {
     let sec = s.stripes * 8
     for i in 0u64 .. 8 {
-        lane(mut s.acc, i, word64(s.pending, i * 8), sec)
+        lane(mut s.acc, i, inline.word_le(s.pending, i * 8), sec)
     }
     scramble(mut s)
     s.pending_len = 0
@@ -165,7 +147,9 @@ fn reverse(x: u64) -> u64 {
 }
 
 fn mix(b: Inline[u8, 256], at: u64, sec: u64) -> u64 {
-    fold(small_word(b, at, 8) ^ secret(sec), small_word(b, at + 8, 8) ^ secret(sec + 8))
+    let lo: u64 = inline.word_le(b, at)
+    let hi: u64 = inline.word_le(b, at + 8)
+    fold(lo ^ secret(sec), hi ^ secret(sec + 8))
 }
 
 fn short_hash(b: Inline[u8, 256], n: u64) -> u64 {
@@ -181,7 +165,11 @@ fn short_hash(b: Inline[u8, 256], n: u64) -> u64 {
         return avalanche64(combined ^ flip)
     }
     if n <= 8 {
-        let input = small_word(b, n - 4, 4) | (small_word(b, 0, 4) << 32)
+        let bottom: u32 = inline.word_le(b, n - 4)
+        let top: u32 = inline.word_le(b, 0)
+        let bottom64: u64 = int.widen(bottom)
+        let top64: u64 = int.widen(top)
+        let input = bottom64 | (top64 << 32)
         let keyed = input ^ secret(8) ^ secret(16)
         let rotated = keyed ^ ((keyed << 49) | (keyed >> 15)) ^ ((keyed << 24) | (keyed >> 40))
         let a = int.wrapping_mul(rotated, 0x9FB21C651E98DF25u64)
@@ -189,8 +177,10 @@ fn short_hash(b: Inline[u8, 256], n: u64) -> u64 {
         return c ^ (c >> 28)
     }
     if n <= 16 {
-        let low = small_word(b, 0, 8) ^ secret(24) ^ secret(32)
-        let high = small_word(b, n - 8, 8) ^ secret(40) ^ secret(48)
+        let first: u64 = inline.word_le(b, 0)
+        let last: u64 = inline.word_le(b, n - 8)
+        let low = first ^ secret(24) ^ secret(32)
+        let high = last ^ secret(40) ^ secret(48)
         return avalanche(int.wrapping_add(int.wrapping_add(int.wrapping_add(n, reverse(low)), high), fold(low, high)))
     }
     let mut acc = int.wrapping_mul(n, 0x9E3779B185EBCA87u64)
@@ -229,7 +219,7 @@ pub fn finish(s: Xxh3) -> u64 {
     }
     let mut acc = s.acc
     for i in 0u64 .. 8 {
-        lane(mut acc, i, word64(s.tail, i * 8), 121)
+        lane(mut acc, i, inline.word_le(s.tail, i * 8), 121)
     }
     let mut sum = int.wrapping_mul(s.total, 0x9E3779B185EBCA87u64)
     for i in 0u64 .. 4 {

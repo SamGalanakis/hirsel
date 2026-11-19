@@ -284,6 +284,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             self.determined(f, found, checked, n);
         }
+        // With no width from context, retain the original u64 word read.
+        if matches!(found.as_slice(), [None])
+            && (g.path.is_core("list.word_le") || g.path.is_core("list.word_be"))
+        {
+            found[0] = Some(scalar(Scalar::U64));
+        }
         // A copyable view argument read from a place is passed by that place's
         // address when nothing can write the place before the callee returns:
         // every parameter views, every argument is evaluated without a write,

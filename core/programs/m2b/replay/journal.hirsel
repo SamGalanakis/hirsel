@@ -85,14 +85,7 @@ fn get_u64(b: Bytes, at: u64) -> Option[u64] {
     if at > list.len(b) || list.len(b) - at < 8 {
         return None
     }
-    let mut x: u64 = 0
-    let mut i: u64 = 0
-    while i < 8 {
-        let byte: u64 = int.widen(b[at + i])
-        x = x | (byte << (i * 8))
-        i += 1
-    }
-    Some(x)
+    Some(list.word_le(b, at))
 }
 
 fn u64_bytes(x: u64) -> Result[Bytes, Diverged] {

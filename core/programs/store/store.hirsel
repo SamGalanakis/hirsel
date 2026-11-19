@@ -2028,11 +2028,22 @@ fn old_op_size(ops: std.omap.OMap[Bytes, Option[Bytes]], key: Bytes) -> u64 {
 }
 
 fn le(mut out: Bytes, x: u64, width: u64) -> Result[(), Capacity] {
-    list.reserve(mut out, width)?
-    for i in 0u64 .. width {
-        result.capacity_only(list.push(mut out, int.truncate(x >> int.truncate(i * 8))))?
+    match width {
+        1 => {
+            list.reserve(mut out, 1)?
+            result.capacity_only(list.push(mut out, int.truncate(x)))
+        },
+        2 => {
+            let word: u16 = int.truncate(x)
+            list.put_word_le(mut out, word)
+        },
+        4 => {
+            let word: u32 = int.truncate(x)
+            list.put_word_le(mut out, word)
+        },
+        8 => list.put_word_le(mut out, x),
+        _ => fail("store: invalid frame word width"),
     }
-    Ok(())
 }
 
 fn blob(mut out: Bytes, b: Bytes) -> Result[(), Capacity] {
@@ -2438,12 +2449,19 @@ fn decoded[T](take r: Result[Result[T, std.codec.DecodeError], Capacity]) -> Res
 }
 
 fn read_le(raw: Bytes, at: u64, width: u64) -> u64 {
-    let mut n: u64 = 0
-    for i in 0u64 .. width {
-        let x: u64 = int.widen(raw[at + i]);
-        n = n | (x << (i * 8))
+    match width {
+        1 => int.widen(raw[at]),
+        2 => {
+            let word: u16 = list.word_le(raw, at)
+            int.widen(word)
+        },
+        4 => {
+            let word: u32 = list.word_le(raw, at)
+            int.widen(word)
+        },
+        8 => list.word_le(raw, at),
+        _ => fail("store: invalid frame word width"),
     }
-    n
 }
 
 fn row_value[V](r: Readers[V], id: u32, raw: Bytes) -> Result[V, Error] {

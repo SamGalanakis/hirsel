@@ -9,6 +9,7 @@
 #include "pass_cost.h"
 #include "failure_edges.h"
 #include <llvm-c/TargetMachine.h>
+#include "counted_exit.h"
 #include "forward_reads.h"
 #include "loop_version.h"
 #include "step_tree.h"
@@ -1596,6 +1597,8 @@ struct ReleaseTail {
     finishReads(F, FAM, Clean);
     lowerX86IndexStrides(F);
     reuseStepFlags(F);
+    FAM.invalidate(F, PreservedAnalyses::none());
+    hirsel_llvm::CountedExitSplitPass().run(F, FAM);
     FAM.clear(F, F.getName());
   }
 };

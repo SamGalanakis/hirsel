@@ -19,6 +19,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        manifest.join("bridge/counted_exit.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         manifest.join("bridge/forward_reads.h").display()
     );
     println!(

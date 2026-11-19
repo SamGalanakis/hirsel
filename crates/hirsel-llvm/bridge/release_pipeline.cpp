@@ -5,6 +5,7 @@
 #undef _GLIBCXX_USE_PTHREAD_RWLOCK_CLOCKLOCK
 #endif
 
+#include "counted_exit.h"
 #include "pass_cost.h"
 
 #include <llvm-c/TargetMachine.h>
@@ -218,6 +219,10 @@ public:
 void registerReleasePasses(PassBuilder &builder) {
     builder.registerPipelineParsingCallback(
         [](StringRef name, FunctionPassManager &passes, ArrayRef<PassBuilder::PipelineElement>) {
+            if (name == "counted-exit-split") {
+                passes.addPass(hirsel_llvm::CountedExitSplitPass());
+                return true;
+            }
             if (name == "invariant-arm-sink") {
                 passes.addPass(InvariantArmSinkPass());
                 return true;
@@ -321,7 +326,7 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
             "simplifycfg<switch-range-to-icmp>,reassociate,constraint-elimination,invariant-arm-sink,"
             "loop-mssa(loop-instsimplify,loop-simplifycfg,licm<no-allowspeculation>,"
                       "loop-rotate,licm<allowspeculation>,simple-loop-unswitch<nontrivial;trivial>),"
-            "simplifycfg<switch-range-to-icmp>,instcombine<no-verify-fixpoint>,"
+            "simplifycfg<switch-range-to-icmp>,instcombine<no-verify-fixpoint>,counted-exit-split,"
             "loop(loop-idiom,indvars,simple-loop-unswitch<trivial>,extra-unswitch,loop-deletion,full-unroll),"
             "sroa<modify-cfg>,early-vector-combine,mldst-motion,gvn,sccp,bdce,instcombine<no-verify-fixpoint>,"
             "dfa-jump-threading,jump-threading,correlated-propagation,adce,memcpyopt,dse,"

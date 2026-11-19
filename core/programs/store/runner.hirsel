@@ -1556,12 +1556,12 @@ fn head_next(inbox: HeadRequests, waiting: bool) -> Option[HeadInput] waits {
 // H3's group ends when the inbox stays empty while every task that was ready
 // has had its turn: arrivals that a reader or owner is already carrying join
 // this group instead of each paying a durable, a Release and a fan-out round.
-// A try_receive that finds Empty is a poll, and CONC-10's fairness lets ready
-// tasks reach their events while the head polls. The bound stays well inside
-// one CONC-10 turn (64 polls), so the gate follows the probes in the head's
-// own turn: at 63 or more, a poisoned journal's failure overtakes the gate and
-// R1b's poison_answers mutant goes uncaught. 32 measures the same as 64-192.
-const SETTLE_PROBES: u64 = 32
+// A try_receive that finds Empty is a poll, and the head yields to ready tasks
+// only when its polls end a CONC-10 turn (64 polls). The bound is one full
+// turn, so every settle crosses a turn boundary before the gate; at 32 half
+// the groups gate without yielding, and 1,000 clients at 500 calls/s fall
+// behind.
+const SETTLE_PROBES: u64 = 64
 
 fn settle_probe(inbox: HeadRequests) -> Option[HeadInput] waits {
     let mut probe = 0u64

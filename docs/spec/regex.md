@@ -167,9 +167,9 @@ fn names(re: std.regex.Regex, t: String) -> Result[u64, Capacity] {   // re from
 std regex is ordinary std code: it has no bodiless function and adds no core function. Its charges are the [MEM-24](budgets.md#mem-24-logical-charges) charges of its own source. This rule fixes what a caller can rely on.
 
 - **`new(p)`** admits exactly this sequence, with `L = string.byte_len(p)`, and nothing else:
-  1. the parse arena, one `List[u64]` of `8 × (L + 1)` words, in one admission of `64 × (L + 1)` bytes;
+  1. the parse arena, one list of `L + 1` 64-byte nodes, in one admission of `64 × (L + 1)` bytes;
   2. while parsing, the group-name list, a `List[u32]` of two words per named group, grown by `list.push`;
-  3. after a successful parse, the translation arena, one `List[u64]` of `8 × (L + 1)` words, in one admission of `64 × (L + 1)` bytes;
+  3. after a successful parse, the translation arena, one list of `L + 1` 64-byte nodes, in one admission of `64 × (L + 1)` bytes;
   4. while translating, the class-range pool, a `List[u32]` of two words per scalar range, grown by `list.push`;
   5. after translation, the parse arena is refunded, and a counting pass sums the program's size without admitting anything. It stops as soon as its running total exceeds `SIZE_LIMIT`; then `new` refunds everything and returns `Error(TooBig(SIZE_LIMIT))` (RE-8);
   6. otherwise the program's lists, each in one admission at its exact size; their total is `size(re)`, a function of `p` alone. Then the translation arena, the range pool and the name list are refunded, and `new` returns `Ok(re)`.

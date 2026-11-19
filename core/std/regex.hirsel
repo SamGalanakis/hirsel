@@ -1,5 +1,5 @@
 // Syntax follows regex-syntax at fde4946. Scratch belongs to the caller's
-// byte limit. The AST uses an eight-word record for each source token.
+// byte limit. The AST and HIR use one 64-byte node per source token.
 pub type SyntaxKind: key = CaptureLimitExceeded | ClassEscapeInvalid | ClassRangeInvalid | ClassRangeLiteral | ClassUnclosed | DecimalEmpty | DecimalInvalid | EscapeHexEmpty | EscapeHexInvalid | EscapeHexInvalidDigit | EscapeUnexpectedEof | EscapeUnrecognized | FlagDanglingNegation | FlagDuplicate | FlagRepeatedNegation | FlagUnexpectedEof | FlagUnrecognized | GroupNameDuplicate | GroupNameEmpty | GroupNameInvalid | GroupNameUnexpectedEof | GroupUnclosed | GroupUnopened | NestLimitExceeded | RepetitionCountInvalid | RepetitionCountDecimalEmpty | RepetitionCountUnclosed | RepetitionMissing | SpecialWordBoundaryUnclosed | SpecialWordBoundaryUnrecognized | SpecialWordOrRepetitionUnexpectedEof | UnicodeClassInvalid | UnsupportedBackreference | UnsupportedLookAround | UnicodeNotAllowed | InvalidUtf8 | UnicodePropertyNotFound | UnicodePropertyValueNotFound
 
 pub type SyntaxError: key {
@@ -61,7 +61,9 @@ const UNBOUNDED: u64 = 4294967296
 
 // first/successor link the contents of one arm; more links arms of a group or
 // the operands of a bracket class. While parsing, b links back to the open
-// enclosing arm. For a repetition, first links to the preceding atom.
+// enclosing arm. An open capture keeps its name offset in successor. Closing
+// the capture moves that offset to b and frees successor for the next atom.
+// For a repetition, first links to the preceding atom.
 type Node: key {
     kind: u64,
     at: u64,
@@ -74,7 +76,7 @@ type Node: key {
 }
 
 type Parser {
-    ast: List[u64],
+    ast: List[Node],
     names: List[u32],
     at: u64,
     width: u64,
@@ -93,49 +95,28 @@ fn syntax(at: u64, kind: SyntaxKind) -> Error {
     Syntax(SyntaxError(at: at, kind: kind))
 }
 
-fn read(xs: List[u64], i: u64) -> Node {
-    let base = 8 * i
-    Node(kind: xs[base], at: xs[base + 1], end: xs[base + 2], first: xs[base + 3], successor: xs[base + 4], a: xs[base + 5], b: xs[base + 6], more: xs[base + 7])
+fn read(xs: List[Node], i: u64) -> Node {
+    xs[i]
 }
 
-fn write(mut xs: List[u64], i: u64, n: Node) {
-    let base = 8 * i
-    xs[base] = n.kind
-    xs[base + 1] = n.at
-    xs[base + 2] = n.end
-    xs[base + 3] = n.first
-    xs[base + 4] = n.successor
-    xs[base + 5] = n.a
-    xs[base + 6] = n.b
-    xs[base + 7] = n.more
+fn write(mut xs: List[Node], i: u64, n: Node) {
+    xs[i] = n
 }
 
-fn append_word(mut xs: List[u64], n: u64) -> Result[(), Error] {
+fn insert(mut xs: List[Node], n: Node) -> Result[u64, Error] {
+    let i = list.len(xs)
     match list.push(mut xs, n) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(i),
         Error((e, _)) => Error(Capacity(e)),
     }
-}
-
-fn insert(mut xs: List[u64], n: Node) -> Result[u64, Error] {
-    let i = list.len(xs) / 8
-    append_word(mut xs, n.kind)?
-    append_word(mut xs, n.at)?
-    append_word(mut xs, n.end)?
-    append_word(mut xs, n.first)?
-    append_word(mut xs, n.successor)?
-    append_word(mut xs, n.a)?
-    append_word(mut xs, n.b)?
-    append_word(mut xs, n.more)?
-    Ok(i)
 }
 
 fn append(mut p: Parser, n: Node) -> Result[u64, Error] {
     let i = insert(mut p.ast, n)?
     if p.tail == 0 {
-        p.ast[8 * p.arm + 3] = i
+        p.ast[p.arm].first = i
     } else {
-        p.ast[8 * p.tail + 4] = i
+        p.ast[p.tail].successor = i
     }
     p.tail = i
     Ok(i)
@@ -197,7 +178,7 @@ fn skip(s: String, mut p: Parser) {
 
 fn ast(s: String) -> Result[Parser, Error] {
     let width = string.byte_len(s)
-    let alloc: Result[List[u64], Capacity] = list.with_capacity((width + 1) * 8)
+    let alloc: Result[List[Node], Capacity] = list.with_capacity(width + 1)
     let arena = match take alloc {
         Ok(take xs) => take xs,
         Error(e) => return Error(Capacity(e)),
@@ -222,7 +203,7 @@ fn ast(s: String) -> Result[Parser, Error] {
             b'|' => {
                 p.at += 1
                 let arm = insert(mut p.ast, node(ARM, p.at, p.at, p.scope, 0))?
-                p.ast[8 * p.arm + 7] = arm
+                p.ast[p.arm].more = arm
                 p.arm = arm
                 p.tail = 0
             },
@@ -260,6 +241,7 @@ fn open_group(s: String, mut p: Parser) -> Result[(), Error] {
     }
     let mut kind = CAPTURE
     let mut data: u64 = 0
+    let mut name_start: u64 = 0
     if starts(s, inner, "?P<") || starts(s, inner, "?<") {
         p.at += if starts(s, inner, "?P<") {
             3
@@ -267,6 +249,7 @@ fn open_group(s: String, mut p: Parser) -> Result[(), Error] {
             2
         }
         data = capture_index(mut p, start)?
+        name_start = p.at
         capture_name(s, mut p)?
     } else if starts(s, inner, "?") {
         p.at += 1
@@ -294,7 +277,8 @@ fn open_group(s: String, mut p: Parser) -> Result[(), Error] {
     } else {
         0
     }
-    let opener = node(kind, start, p.at, data, saved)
+    let mut opener = node(kind, start, p.at, data, saved)
+    opener.successor = name_start
     let opened = append(mut p, opener)?
     if kind == SCOPED {
         p.free_space = spacing(p.free_space, data)
@@ -310,7 +294,13 @@ fn close_group(mut p: Parser) -> Result[(), Error] {
         return Error(syntax(p.at, GroupUnopened))
     }
     let opened = p.scope
-    let saved = read(p.ast, opened).b
+    let mut opener = read(p.ast, opened)
+    let saved = opener.b
+    if opener.kind == CAPTURE {
+        opener.b = opener.successor
+        opener.successor = 0
+        write(mut p.ast, opened, opener)
+    }
     p.free_space = (saved & 1) != 0
     p.arm = saved / 2
     let parent = read(p.ast, p.arm)
@@ -862,7 +852,7 @@ fn bracket(s: String, mut p: Parser) -> Result[(), Error] {
             if op != 0 {
                 p.at += 2
                 let successor = insert(mut p.ast, node(SEGMENT, p.at, p.at, op, class))?
-                p.ast[8 * segment + 7] = successor
+                p.ast[segment].more = successor
                 segment = successor
                 tail = 0
             } else {
@@ -915,9 +905,9 @@ fn class_leading(s: String, mut p: Parser, class: u64) -> Result[u64, Error] {
 fn append_set(mut p: Parser, segment: u64, tail: u64, item: Node) -> Result[u64, Error] {
     let i = insert(mut p.ast, item)?
     if tail == 0 {
-        p.ast[8 * segment + 3] = i
+        p.ast[segment].first = i
     } else {
-        p.ast[8 * tail + 4] = i
+        p.ast[tail].successor = i
     }
     Ok(i)
 }
@@ -1062,9 +1052,9 @@ fn ascii_class(s: String, at: u64) -> Option[Node] {
     }))
 }
 
-const WALK_EXPR: u64 = 0
+const WALK_EXPR: u64 = 1
 
-const WALK_ARMS: u64 = 1
+const WALK_ARMS: u64 = 0
 
 const WALK_CLASS: u64 = 2
 
@@ -1083,7 +1073,7 @@ fn descent(depth: u64, at: u64) -> Result[u64, Error] {
     Ok(depth + 1)
 }
 
-fn check_depth(xs: List[u64]) -> Result[(), Error] {
+fn check_depth(xs: List[Node]) -> Result[(), Error] {
     let mut pending: Inline[Walk, 503] =[Walk(kind: WALK_ARMS, i: 0, depth: 0); 503]
     let mut used: u64 = 1
     while used != 0 {
@@ -1347,7 +1337,7 @@ fn property_kind(s: String, n: Node) -> Result[Property, Error] {
 }
 
 type Hir {
-    nodes: List[u64],
+    nodes: List[Node],
     ranges: List[u32],
     names: List[u32]
 }
@@ -1362,24 +1352,25 @@ type Translate: key {
     saved: u64
 }
 
-const ENTER: u64 = 0
+const ENTER: u64 = 3
 
 const EXIT_GROUP: u64 = 1
 
 const EXIT_REPEAT: u64 = 2
 
-const ENTER_ARM: u64 = 3
+const ENTER_ARM: u64 = 0
 
 fn compile_hir(s: String) -> Result[Hir, Error] {
     let parsed = ast(s)?
     check_depth(parsed.ast)?
-    let alloc: Result[List[u64], Capacity] = list.with_capacity((parsed.width + 1) * 8)
+    let alloc: Result[List[Node], Capacity] = list.with_capacity(parsed.width + 1)
     let mut nodes = match take alloc {
         Ok(take xs) => take xs,
         Error(e) => return Error(Capacity(e)),
     }
-    for v in parsed.ast {
-        append_word(mut nodes, v)?
+    match list.append(mut nodes, parsed.ast) {
+        Ok(()) => {},
+        Error(e) => return Error(Capacity(e)),
     }
     let mut ranges: List[u32] = list.new()
     translate(s, parsed.ast, mut nodes, mut ranges)?
@@ -1387,7 +1378,7 @@ fn compile_hir(s: String) -> Result[Hir, Error] {
     Ok(Hir(nodes: take nodes, ranges: take ranges, names: take names))
 }
 
-fn translate(s: String, tree: List[u64], mut nodes: List[u64], mut ranges: List[u32]) -> Result[(), Error] {
+fn translate(s: String, tree: List[Node], mut nodes: List[Node], mut ranges: List[u32]) -> Result[(), Error] {
     let mut active = UNICODE
     let mut pending: Inline[Translate, 753] =[Translate(i: 0, kind: ENTER_ARM, saved: 0); 753]
     let mut used: u64 = 1
@@ -1457,7 +1448,7 @@ fn translate(s: String, tree: List[u64], mut nodes: List[u64], mut ranges: List[
     Ok(())
 }
 
-fn translate_atom(s: String, tree: List[u64], i: u64, n: Node, active: u64, mut nodes: List[u64], mut ranges: List[u32]) -> Result[Node, Error] {
+fn translate_atom(s: String, tree: List[Node], i: u64, n: Node, active: u64, mut nodes: List[Node], mut ranges: List[u32]) -> Result[Node, Error] {
     let mut result = n
     let unicode = (active & UNICODE) != 0
     let lo = list.len(ranges) / 2
@@ -1923,24 +1914,25 @@ type ClassFrame: key {
     mid: u64
 }
 
-fn class_frame(nodes: List[u64], i: u64) -> ClassFrame {
-    let at = 8 * i
-    ClassFrame(parent: nodes[at + 5], segment: nodes[at + 1], successor: nodes[at + 2], lo: nodes[at + 3], mid: nodes[at + 4])
+fn class_frame(nodes: List[Node], i: u64) -> ClassFrame {
+    let n = read(nodes, i)
+    ClassFrame(parent: n.a, segment: n.at, successor: n.end, lo: n.first, mid: n.successor)
 }
 
-fn put_class_frame(mut nodes: List[u64], i: u64, frame: ClassFrame) {
-    let at = 8 * i
-    nodes[at + 1] = frame.segment
-    nodes[at + 2] = frame.successor
-    nodes[at + 3] = frame.lo
-    nodes[at + 4] = frame.mid
-    nodes[at + 5] = frame.parent
+fn put_class_frame(mut nodes: List[Node], i: u64, frame: ClassFrame) {
+    let mut n = read(nodes, i)
+    n.at = frame.segment
+    n.end = frame.successor
+    n.first = frame.lo
+    n.successor = frame.mid
+    n.a = frame.parent
+    write(mut nodes, i, n)
 }
 
 // A bracket class consumes only its root HIR slot. While translating it,
 // borrow each bracket's unused HIR fields for the open class's frame.
 // Record the parent on descent because repetition can move a class root.
-fn translate_class(s: String, tree: List[u64], root: u64, active: u64, mut nodes: List[u64], mut pool: List[u32]) -> Result[(), Error] {
+fn translate_class(s: String, tree: List[Node], root: u64, active: u64, mut nodes: List[Node], mut pool: List[u32]) -> Result[(), Error] {
     let start = list.len(pool) / 2
     put_class_frame(mut nodes, root, ClassFrame(parent: 0, segment: root, successor: read(tree, root).first, lo: start, mid: start))
     let mut open_class_id = root
@@ -1991,11 +1983,24 @@ fn translate_class(s: String, tree: List[u64], root: u64, active: u64, mut nodes
     }
 }
 
+type NfaState: key {
+    op: u32,
+    a: u32,
+    b: u32,
+    c: u32
+}
+
+type NfaEdge: key {
+    lo: u32,
+    hi: u32,
+    target: u32
+}
+
 pub opaque type Regex: shareable + send {
     owner: Unique,
-    forward: List[u32],
-    reverse: List[u32],
-    edges: List[u32],
+    forward: List[NfaState],
+    reverse: List[NfaState],
+    edges: List[NfaEdge],
     class_map: Bytes,
     names: List[u32],
     name_text: Bytes,
@@ -2034,10 +2039,6 @@ pub type Match: key {
 
 const SIZE_LIMIT: u64 = 10485760
 
-const NFA_WORDS: u64 = 4
-
-const EDGE_WORDS: u64 = 3
-
 const OFFSET_LIMIT: u64 = 4294967295
 
 fn round8(n: u64) -> u64 {
@@ -2061,8 +2062,8 @@ type Layout: key {
 
 fn layout(re: Regex, budget: u64) -> Layout {
     let classes = re.class_count + 1
-    let nf = list.len(re.forward) / NFA_WORDS
-    let nr = list.len(re.reverse) / NFA_WORDS
+    let nf = list.len(re.forward)
+    let nr = list.len(re.reverse)
     let n = re.group_count
     let headers: u64 = 24
     let dfa_scratch = 3 * (nf + nr)
@@ -2339,17 +2340,23 @@ fn sized_alts(h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
     Ok(total)
 }
 
-fn chain_end(xs: List[u64], first: u64, link: u64) -> u64 {
+fn chain_end(xs: List[Node], first: u64, arms: bool) -> u64 {
     let mut at = first
-    let mut successor = xs[8 * at + link]
-    while successor != 0 {
+    loop {
+        let n = read(xs, at)
+        let successor = if arms {
+            n.more
+        } else {
+            n.successor
+        }
+        if successor == 0 {
+            return at
+        }
         at = successor
-        successor = xs[8 * at + link]
     }
-    at
 }
 
-fn disjoint_literals(xs: List[u64], i: u64, rev: bool) -> bool {
+fn disjoint_literals(xs: List[Node], i: u64, rev: bool) -> bool {
     let mut seen: Inline[bool, 128] =[false; 128]
     let mut here = i
     loop {
@@ -2479,9 +2486,9 @@ fn sized_set(ranges: List[u32], start: u64, end: u64) -> Result[Shape, Error] {
 }
 
 type Assembler {
-    fw: List[u32],
-    rv: List[u32],
-    sparse_edges: List[u32],
+    fw: List[NfaState],
+    rv: List[NfaState],
+    sparse_edges: List[NfaEdge],
     boundaries: Inline[bool, 257],
     rev: bool,
     ops_used: u64,
@@ -2489,6 +2496,30 @@ type Assembler {
     quit_non_ascii: bool,
     pref_node: u64,
     pref_start: u64
+}
+
+fn admit_states(n: u64) -> Result[List[NfaState], Error] {
+    let admitted: Result[List[NfaState], Capacity] = list.with_capacity(n)
+    let mut xs = match take admitted {
+        Ok(take x) => take x,
+        Error(e) => return Error(Capacity(e)),
+    }
+    match list.fill(mut xs, n, NfaState(op: 0, a: 0, b: 0, c: 0)) {
+        Ok(()) => Ok(take xs),
+        Error(e) => Error(Capacity(e)),
+    }
+}
+
+fn admit_edges(n: u64) -> Result[List[NfaEdge], Error] {
+    let admitted: Result[List[NfaEdge], Capacity] = list.with_capacity(n)
+    let mut xs = match take admitted {
+        Ok(take x) => take x,
+        Error(e) => return Error(Capacity(e)),
+    }
+    match list.fill(mut xs, n, NfaEdge(lo: 0, hi: 0, target: 0)) {
+        Ok(()) => Ok(take xs),
+        Error(e) => Error(Capacity(e)),
+    }
 }
 
 fn admit_u32(n: u64) -> Result[List[u32], Error] {
@@ -2516,17 +2547,11 @@ fn admit_u8(n: u64) -> Result[Bytes, Error] {
 }
 
 fn put_op(mut a: Assembler, i: u64, tag: u32, x: u32, y: u32, z: u32) {
-    let at = NFA_WORDS * i
+    let state = NfaState(op: tag, a: x, b: y, c: z)
     if a.rev {
-        a.rv[at] = tag
-        a.rv[at + 1] = x
-        a.rv[at + 2] = y
-        a.rv[at + 3] = z
+        a.rv[i] = state
     } else {
-        a.fw[at] = tag
-        a.fw[at + 1] = x
-        a.fw[at + 2] = y
-        a.fw[at + 3] = z
+        a.fw[i] = state
     }
 }
 
@@ -2548,12 +2573,10 @@ fn emit_byte(mut a: Assembler, lo: u32, hi: u32, following: u64) -> u64 {
 }
 
 fn emit_edge(mut a: Assembler, lo: u32, hi: u32, following: u64) {
-    let offset = EDGE_WORDS * a.edges_used
+    let i = a.edges_used
     a.edges_used += 1
     edge_bounds(mut a, lo, hi)
-    a.sparse_edges[offset] = lo
-    a.sparse_edges[offset + 1] = hi
-    a.sparse_edges[offset + 2] = int.narrow(following)
+    a.sparse_edges[i] = NfaEdge(lo: lo, hi: hi, target: int.narrow(following))
 }
 
 fn emit_set(mut a: Assembler, ranges: List[u32], start: u64, end: u64, following: u64) -> u64 {
@@ -2765,7 +2788,7 @@ fn sequence_entry(h: Hir, first: u64, rev: bool) -> u64 {
     if rev || first == 0 {
         first
     } else {
-        chain_end(h.nodes, first, 4)
+        chain_end(h.nodes, first, false)
     }
 }
 
@@ -2827,7 +2850,7 @@ fn emit_alts(h: Hir, mut a: Assembler, first: u64, following: u64) -> u64 {
         let total_count = a.edges_used - offset
         return emit(mut a, OP_SPARSE, offset, total_count, 0)
     }
-    let mut at = chain_end(h.nodes, first, 7)
+    let mut at = chain_end(h.nodes, first, true)
     let mut start = emit_seq(h, mut a, read(h.nodes, at).first, following)
     while at != first {
         at = read(h.nodes, at).end
@@ -2837,40 +2860,24 @@ fn emit_alts(h: Hir, mut a: Assembler, first: u64, following: u64) -> u64 {
     start
 }
 
-fn link_backwards(mut xs: List[u64]) {
+fn link_backwards(mut xs: List[Node]) {
     let mut i: u64 = 0
-    while i < list.len(xs) / 8 {
+    while i < list.len(xs) {
         let n = read(xs, i)
         if n.kind == ROOT || n.kind == ARM || n.kind == CAPTURE || n.kind == SCOPED {
             let mut previous: u64 = 0
             let mut child = n.first
             while child != 0 {
-                xs[8 * child + 2] = previous
+                xs[child].end = previous
                 previous = child
                 child = read(xs, child).successor
             }
             if n.more != 0 {
-                xs[8 * n.more + 2] = i
+                xs[n.more].end = i
             }
         }
         i += 1
     }
-}
-
-fn pattern_capture_name(p: String, n: Node) -> Option[(u64, u64)] {
-    let opening = advance_space(p, n.at + 1, (n.b & 1) != 0)
-    let lo = if starts(p, opening, "?P<") {
-        opening + 3
-    } else if starts(p, opening, "?<") {
-        opening + 2
-    } else {
-        return None
-    }
-    let mut hi = lo
-    while byte(p, hi) != b'>' {
-        hi += 1
-    }
-    Some((lo, hi))
 }
 
 type NameLayout: key {
@@ -2878,31 +2885,26 @@ type NameLayout: key {
     length: u64
 }
 
-fn names_atom(p: String, h: Hir, i: u64, mut ns: NameLayout) {
+fn names_atom(h: Hir, i: u64, mut ns: NameLayout) {
     let n = read(h.nodes, i)
     if n.kind == REPEAT {
-        names_atom(p, h, n.first, mut ns)
+        names_atom(h, n.first, mut ns)
     } else if n.kind == CAPTURE || n.kind == SCOPED {
-        if n.kind == CAPTURE {
-            match pattern_capture_name(p, n) {
-                Some((lo, hi)) => {
-                    ns.total_count += 1
-                    ns.length += hi - lo
-                },
-                None => {},
-            }
+        if n.kind == CAPTURE && n.b != 0 {
+            ns.total_count += 1
+            ns.length += n.end - 1 - n.b
         }
-        names_size(p, h, i, mut ns)
+        names_size(h, i, mut ns)
     }
 }
 
-fn names_size(p: String, h: Hir, i: u64, mut ns: NameLayout) {
+fn names_size(h: Hir, i: u64, mut ns: NameLayout) {
     let mut al = i
     loop {
         let arm = read(h.nodes, al)
         let mut at = arm.first
         while at != 0 {
-            names_atom(p, h, at, mut ns)
+            names_atom(h, at, mut ns)
             at = read(h.nodes, at).successor
         }
         if arm.more == 0 {
@@ -2924,21 +2926,14 @@ fn write_name_atom(p: String, h: Hir, i: u64, mut ns: NameTable) {
     if n.kind == REPEAT {
         write_name_atom(p, h, n.first, mut ns)
     } else if n.kind == CAPTURE || n.kind == SCOPED {
-        if n.kind == CAPTURE {
-            match pattern_capture_name(p, n) {
-                Some((lo, hi)) => {
-                    let mut j = lo
-                    while j < hi {
-                        ns.text[ns.pos] = byte(p, j)
-                        ns.pos += 1
-                        j += 1
-                    }
-                    ns.index[2 * ns.slot] = int.narrow(n.a)
-                    ns.index[2 * ns.slot + 1] = int.narrow(ns.pos)
-                    ns.slot += 1
-                },
-                None => {},
+        if n.kind == CAPTURE && n.b != 0 {
+            for j in n.b .. (n.end - 1) {
+                ns.text[ns.pos] = byte(p, j)
+                ns.pos += 1
             }
+            ns.index[2 * ns.slot] = int.narrow(n.a)
+            ns.index[2 * ns.slot + 1] = int.narrow(ns.pos)
+            ns.slot += 1
         }
         write_names(p, h, i, mut ns)
     }
@@ -3486,14 +3481,14 @@ fn compile_new(pattern: String, take input_hir: Hir) -> Result[Regex, Error] {
     let r = sized_alts(hir, 0, true)?
     let nf = FORWARD_BASE + f.states
     let nr = REVERSE_BASE + r.states
-    let mut candidates = Needles(values:[blank_needle(); 250], linear:[0; 100], end: 0, full: false)
+    let mut candidates = Needles(values:[Needle(items:[0; 8], width: 0, exact: false); 250], linear:[0; 100], end: 0, full: false)
     let plan = choose_prefilter(hir, mut candidates)
     let mut ns = NameLayout(total_count: 0, length: 0)
-    names_size(pattern, hir, 0, mut ns)
+    names_size(hir, 0, mut ns)
     let charge = check_size(nf, nr, f.edges + r.edges, ns.total_count, ns.length, plan.bytes_count)?
-    let forward = admit_u32(NFA_WORDS * nf)?
-    let reverse = admit_u32(NFA_WORDS * nr)?
-    let edges = admit_u32(EDGE_WORDS * (f.edges + r.edges))?
+    let forward = admit_states(nf)?
+    let reverse = admit_states(nr)?
+    let edges = admit_edges(f.edges + r.edges)?
     let mut map = admit_u8(256)?
     let index = admit_u32(2 * ns.total_count)?
     let text = admit_u8(ns.length)?
@@ -3645,7 +3640,7 @@ type Pike: key {
 }
 
 fn pike_config(re: Regex, c: Cache, groups_wanted: u64) -> Pike {
-    Pike(width: list.len(re.forward) / NFA_WORDS, slots: 2 * groups_wanted, row: c.slices.row, saved: c.slices.saved, stack: c.slices.stack)
+    Pike(width: list.len(re.forward), slots: 2 * groups_wanted, row: c.slices.row, saved: c.slices.saved, stack: c.slices.stack)
 }
 
 fn closure(re: Regex, flow: Pike, mut work: List[u32], mut into: Frontier, s: String, at: u64, entry: u64) {
@@ -3669,11 +3664,11 @@ fn closure(re: Regex, flow: Pike, mut work: List[u32], mut into: Frontier, s: St
                 if rank < into.extent && work[into.offset + rank] == id {
                     break
                 }
-                let base = NFA_WORDS * state
-                let op = re.forward[base]
-                let left: u64 = int.widen(re.forward[base + 1])
-                let right: u64 = int.widen(re.forward[base + 2])
-                let third: u64 = int.widen(re.forward[base + 3])
+                let inst = re.forward[state]
+                let op = inst.op
+                let left: u64 = int.widen(inst.a)
+                let right: u64 = int.widen(inst.b)
+                let third: u64 = int.widen(inst.c)
                 if op == OP_BYTE || op == OP_SPARSE || op == OP_MATCH {
                     // Keep consuming and match states first in priority order.
                     // The remaining dense entries deduplicate epsilon paths.
@@ -3731,24 +3726,20 @@ fn closure(re: Regex, flow: Pike, mut work: List[u32], mut into: Frontier, s: St
     }
 }
 
-fn nfa_advance(program: List[u32], edges: List[u32], state: u64, ch: u32) -> Option[u64] {
-    let i = NFA_WORDS * state
-    let op = program[i]
-    if op == OP_BYTE {
-        let interval = program[i + 1]
+fn nfa_advance(inst: NfaState, edges: List[NfaEdge], ch: u32) -> Option[u64] {
+    if inst.op == OP_BYTE {
+        let interval = inst.a
         if (interval & 255) <= ch && ch <= (interval >> 8) {
-            return Some(int.widen(program[i + 2]))
+            return Some(int.widen(inst.b))
         }
-    } else if op == OP_SPARSE {
-        let start: u64 = int.widen(program[i + 1])
-        let len: u64 = int.widen(program[i + 2])
-        let mut j = start
-        while j < start + len {
-            let at = EDGE_WORDS * j
-            if edges[at] <= ch && ch <= edges[at + 1] {
-                return Some(int.widen(edges[at + 2]))
+    } else if inst.op == OP_SPARSE {
+        let start: u64 = int.widen(inst.a)
+        let len: u64 = int.widen(inst.b)
+        for j in start .. (start + len) {
+            let edge = edges[j]
+            if edge.lo <= ch && ch <= edge.hi {
+                return Some(int.widen(edge.target))
             }
-            j += 1
         }
     }
     None
@@ -3772,7 +3763,8 @@ fn pike_search(re: Regex, mut c: Cache, s: String, at: u64, width: u64, entry: u
         while rank < now.ready {
             let state: u64 = int.widen(c.work[now.offset + rank])
             let row = slot_row(now, flow.width, flow.slots, rank)
-            if re.forward[NFA_WORDS * state] == OP_MATCH {
+            let inst = re.forward[state]
+            if inst.op == OP_MATCH {
                 if boundary(s, pos) {
                     let lo = read_slot(c.work, row)
                     let hi = read_slot(c.work, row + 2)
@@ -3781,7 +3773,7 @@ fn pike_search(re: Regex, mut c: Cache, s: String, at: u64, width: u64, entry: u
                     break
                 }
             } else if pos < width {
-                match nfa_advance(re.forward, re.edges, state, ch) {
+                match nfa_advance(inst, re.edges, ch) {
                     Some(successor) => {
                         copy_slots(mut c.work, flow.row, row, flow.slots)
                         closure(re, flow, mut c.work, mut later, s, pos + 1, successor)
@@ -3837,8 +3829,8 @@ type DfaLayout: key {
 }
 
 fn dfa_layout(re: Regex, c: Cache, reverse: bool) -> DfaLayout {
-    let nf = list.len(re.forward) / NFA_WORDS
-    let nr = list.len(re.reverse) / NFA_WORDS
+    let nf = list.len(re.forward)
+    let nr = list.len(re.reverse)
     let s = c.slices.states
     let columns = re.class_count + 1
     let table = s * (columns + 20)
@@ -4093,7 +4085,7 @@ type DfaVisit: key {
     matched: bool,
 }
 
-fn dfa_walk(program: List[u32], edges: List[u32], mut work: List[u32], d: DfaLayout, key: u64, len: u64, ch: u64, left: u32, right: u32, valid: bool,) -> DfaVisit {
+fn dfa_walk(program: List[NfaState], edges: List[NfaEdge], mut work: List[u32], d: DfaLayout, key: u64, len: u64, ch: u64, left: u32, right: u32, valid: bool,) -> DfaVisit {
     let seen = d.scratch + d.width
     let stack = seen + d.width
     for i in 0u64 .. d.width {
@@ -4113,11 +4105,11 @@ fn dfa_walk(program: List[u32], edges: List[u32], mut work: List[u32], d: DfaLay
                     break
                 }
                 work[seen + state] = marks | 1
-                let base = NFA_WORDS * state
-                let op = program[base]
-                let a: u64 = int.widen(program[base + 1])
-                let b: u64 = int.widen(program[base + 2])
-                let c: u64 = int.widen(program[base + 3])
+                let inst = program[state]
+                let op = inst.op
+                let a: u64 = int.widen(inst.a)
+                let b: u64 = int.widen(inst.b)
+                let c: u64 = int.widen(inst.c)
                 if op == OP_SPLIT {
                     work[stack + filled] = int.narrow(b)
                     filled += 1
@@ -4142,7 +4134,7 @@ fn dfa_walk(program: List[u32], edges: List[u32], mut work: List[u32], d: DfaLay
                             return DfaVisit(len_out: len_out, matched: true)
                         }
                     } else if ch != DFA_INPUT_END {
-                        match nfa_advance(program, edges, state, int.narrow(ch)) {
+                        match nfa_advance(inst, edges, int.narrow(ch)) {
                             Some(target) => {
                                 let visit = work[seen + target]
                                 if (visit & 2) == 0 {
@@ -4162,7 +4154,7 @@ fn dfa_walk(program: List[u32], edges: List[u32], mut work: List[u32], d: DfaLay
     DfaVisit(len_out: len_out, matched: matched)
 }
 
-fn dfa_transition(program: List[u32], edges: List[u32], mut work: List[u32], d: DfaLayout, state: u32, col: u64, ch: u64, at_boundary: bool,) -> u32 {
+fn dfa_transition(program: List[NfaState], edges: List[NfaEdge], mut work: List[u32], d: DfaLayout, state: u32, col: u64, ch: u64, at_boundary: bool,) -> u32 {
     let id: u64 = int.widen(state)
     let i = d.transitions + (id - 1) * d.columns + col
     let cached = work[i]
@@ -4371,7 +4363,7 @@ fn dfa_is_start(work: List[u32], d: DfaLayout, state: u32, entry: u64) -> bool {
     work[key] == 1 && work[key + 2] == int.narrow(entry)
 }
 
-fn dfa_search(re: Regex, program: List[u32], mut work: List[u32], d: DfaLayout, query: DfaQuery, s: String) -> DfaRun {
+fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLayout, query: DfaQuery, s: String) -> DfaRun {
     let data = string.as_bytes(s)
     let width = list.len(data)
     let reverse = d.reverse

@@ -737,6 +737,17 @@ fn emit_module(
                 "core@1/list/median3_rec" => Inline::Default,
                 "std@1/float/shortest64" | "std@1/float/push_fixed64" => Inline::Always,
                 "std@1/float/shortest_decimal64" | "std@1/float/push_fixed_decimal64" => Inline::Never,
+                // Share regex construction across call sites. The parser and
+                // translator each have a fixed workspace and independent error paths.
+                "std@1/regex/read"
+                | "std@1/regex/write"
+                | "std@1/regex/insert"
+                | "std@1/regex/ast"
+                | "std@1/regex/check_depth"
+                | "std@1/regex/translate"
+                | "std@1/regex/translate_atom"
+                | "std@1/regex/compile_hir"
+                | "std@1/regex/compile_new" => Inline::Never,
                 // Revisit bounded mutable loops after borrow-scope emission.
                 // LLVM inlining carries their parameter scopes into the caller.
                 _ if source.batch_steps

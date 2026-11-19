@@ -13,9 +13,13 @@ pub fn reset(mut g: Lcg) {
     g.state = 42
 }
 
-pub fn next_int(mut g: Lcg, max: i32) -> i32 {
+fn advance(mut g: Lcg) -> f64 {
     g.state = int.wrapping_add(int.wrapping_mul(g.state, 3877), 29573) % 139968
-    let state: f64 = float.from_int(g.state)
+    float.from_int(g.state)
+}
+
+pub fn next_int(mut g: Lcg, max: i32) -> i32 {
+    let state = advance(mut g)
     let scale: f64 = float.from_int(max)
     let n = state / 139968.0 * scale
     let converted: Result[i32, FloatError] = float.to_int(n)
@@ -23,8 +27,7 @@ pub fn next_int(mut g: Lcg, max: i32) -> i32 {
 }
 
 pub fn next_float(mut g: Lcg, max: f64) -> f64 {
-    g.state = int.wrapping_add(int.wrapping_mul(g.state, 3877), 29573) % 139968
-    let state: f64 = float.from_int(g.state)
+    let state = advance(mut g)
     max * state / 139968.0
 }
 

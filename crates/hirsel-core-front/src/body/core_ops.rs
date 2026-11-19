@@ -328,6 +328,8 @@ operations! {
     ("list", "swap", Lane::Value, "A", "core-collections-918", false),
     ("list", "clear", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "append", Lane::PendingCode, "A", "core-check-calls-910", false),
+    ("list", "copy_from_slice", Lane::Value, "A", "port-fidelity-1360", false),
+    ("inline", "copy_from_slice", Lane::Value, "A", "port-fidelity-1360", false),
     ("map", "probe_insert", Lane::PendingCode, "C", "mem-b-1172", true),
     ("map", "push_entry", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "pop_entry", Lane::Value, "A", "core-check-callables-913", true),

@@ -1091,6 +1091,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return;
             }
             if missing == 0
+                && path.is_core("inline.copy_from_slice")
+                && !matches!(self.t.kind(t), TyKind::Array(..))
+            {
+                self.refuse("LANG-11", n, "inline.copy_from_slice requires Inline[T, N]");
+                return;
+            }
+            if missing == 0
                 && (path.is_core("flow.sink")
                     || path.is_core("flow.stage")
                     || path.is_core("flow.port"))

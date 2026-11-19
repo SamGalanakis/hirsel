@@ -15,9 +15,7 @@ fn fannkuch(n: u64) -> (i32, i32) {
             count[r - 1] = int.narrow(r);
             r -= 1
         }
-        for i in 0 .. n {
-            perm[i] = perm1[i]
-        }
+        inline.copy_from_slice(mut perm, 0, perm1, n)
         let mut flips: i32 = 0
         let mut k = perm[0]
         while k != 0 {

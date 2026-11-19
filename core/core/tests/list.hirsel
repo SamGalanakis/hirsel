@@ -146,3 +146,52 @@ fn refused_max(r: Result[(), Capacity]) -> bool {
         Ok(()) => false,
     }
 }
+
+// A tuple stride, a borrowed middle slice, and untouched destination sentinels.
+// expect: run copy_from_slice_list() = true
+fn copy_from_slice_list() -> bool {
+    let mut src: List[(u8, u64)] = list.new()
+    result.unwrap(list.fill(mut src, 3, (4u8, 67u64)))
+    src[0] = (8u8, 3u64)
+    src[2] = (6u8, 12u64)
+    let mut dst: List[(u8, u64)] = list.new()
+    result.unwrap(list.fill(mut dst, 4, (10u8, 29u64)))
+    let capacity = list.capacity(dst)
+    list.copy_from_slice(mut dst, 1, list.slice(src, 1, 3))
+    let empty: List[(u8, u64)] = list.new()
+    list.copy_from_slice(mut dst, 4, empty)
+    list.len(dst) == 4 && list.capacity(dst) == capacity && dst[0] == (10u8, 29u64) && dst[1] == (4u8, 67u64) && dst[2] == (6u8, 12u64) && dst[3] == (10u8, 29u64)
+}
+
+// expect: run copy_from_slice_inline_step() = true
+fn copy_from_slice_inline_step() -> bool {
+    let run = bound steps 1 {
+        let mut dst: Inline[i32, 4] =[8, 7, 6, 5]
+        let src: Inline[i32, 4] =[1, 2, 3, 4]
+        inline.copy_from_slice(mut dst, 1, src, 2)
+        dst[0] == 8 && dst[1] == 1 && dst[2] == 2 && dst[3] == 5
+    }
+    match run {
+        Ok(valid) => valid,
+        Error(_) => false,
+    }
+}
+
+// expect: run copy_from_slice_overflow() = fail Bounds
+fn copy_from_slice_overflow() -> bool {
+    let src: Inline[u64, 2] =[3, 7]
+    let mut dst: Inline[u64, 2] =[11, 13]
+    inline.copy_from_slice(mut dst, 18446744073709551615, src, 2)
+    dst[0] == 11
+}
+
+// Even without storage, an overwrite must fit the destination's live elements.
+// expect: run copy_from_slice_unit_bounds() = fail Bounds
+fn copy_from_slice_unit_bounds() -> bool {
+    let mut src: List[()] = list.new()
+    let mut dst: List[()] = list.new()
+    result.unwrap(list.fill(mut src, 2, ()))
+    result.unwrap(list.fill(mut dst, 2, ()))
+    list.copy_from_slice(mut dst, 1, src)
+    list.len(dst) == 2
+}

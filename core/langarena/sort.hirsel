@@ -32,15 +32,14 @@ fn quick(mut a: List[i32], lo: u64, hi: u64) {
 }
 
 fn merge(mut a: List[i32], mut temp: List[i32], lo: u64, hi: u64) {
-    if hi - lo <= 1 {
+    let len = hi - lo
+    if len <= 1 {
         return
     }
-    let mid = lo + (hi - lo) / 2
+    let mid = hi - len / 2
     merge(mut a, mut temp, lo, mid)
     merge(mut a, mut temp, mid, hi)
-    for k in lo .. hi {
-        temp[k] = a[k]
-    }
+    list.copy_from_slice(mut temp, lo, list.slice(a, lo, hi))
     let mut i = lo
     let mut j = mid
     let mut k = lo

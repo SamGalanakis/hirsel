@@ -46,6 +46,10 @@ pub fn fill[T: plain](mut xs: List[T], n: u64, x: T) -> Result[(), Capacity]
 
 pub fn append[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity]
 
+// Overwrite src's length of existing elements starting at at. A range outside
+// dst (including an overflowing end) fails with Bounds before any write.
+pub fn copy_from_slice[T: plain](mut dst: List[T], at: u64, src: List[T])
+
 pub fn sum[T: integer](xs: List[T]) -> T {
     let mut t: T = int.narrow(0u8)
     for x in xs {

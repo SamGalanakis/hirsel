@@ -1106,6 +1106,80 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(reserved)
     }
 
+    pub(super) fn list_copy_from_slice(
+        &mut self,
+        item: TyId,
+        dst: ValueId,
+        at: ValueId,
+        src: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let carrier = self.list_carrier(item, n)?;
+        let len = self.carrier_word(dst, carrier, SeqWord::Len, n);
+        let count = self.carrier_word(src, carrier, SeqWord::Len, n);
+        self.require_copy_range(at, count, len, n);
+        let dst = self.carrier_word(dst, carrier, SeqWord::Data, n);
+        let src = self.carrier_word(src, carrier, SeqWord::Data, n);
+        self.copy_plain_range(item, dst, at, src, count, n)
+    }
+
+    pub(super) fn inline_copy_from_slice(
+        &mut self,
+        array: TyId,
+        dst: Option<ValueId>,
+        at: ValueId,
+        src: Option<ValueId>,
+        count: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let TyKind::Array(item, len) = *self.t.kind(array) else {
+            return None;
+        };
+        let bound = self.konst(Ty::Scalar(Scalar::U64), len, n)?;
+        // Both arrays have the same length, so the destination range check also
+        // proves that count fits the source prefix.
+        self.require_copy_range(at, count, bound, n);
+        if len != 0 && self.list_storage_static(item) != Some(false) {
+            self.copy_plain_range(item, dst?, at, src?, count, n)?;
+        }
+        Some(())
+    }
+
+    fn require_copy_range(&mut self, at: ValueId, count: ValueId, len: ValueId, n: NodeId) {
+        let within = self.list_compare(CompareOp::Le, at, len, n);
+        let (room, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, len, at, n);
+        let fits = self.list_compare(CompareOp::Le, count, room, n);
+        let valid = self.list_bool(BinaryOp::BitAnd, within, fits, n);
+        self.list_require_element(valid, n);
+    }
+
+    fn copy_plain_range(
+        &mut self,
+        item: TyId,
+        dst: ValueId,
+        at: ValueId,
+        src: ValueId,
+        count: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let stride = self.layout_size(item, false, n)?;
+        let (bytes, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, count, stride, n);
+        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
+        let copying = self.list_compare(CompareOp::Ne, bytes, zero, n);
+        let copy = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.list_branch(copying, copy, done, n);
+        self.start(copy);
+        let (offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, at, stride, n);
+        let byte = PlaceTy::Value(Ty::Scalar(Scalar::U8));
+        let to = self.address(AddressBase::Value(dst), &[Step::Byte(offset)], byte, n);
+        let from = self.address(AddressBase::Value(src), &[], byte, n);
+        self.inst(Inst::Copy { to, from, bytes }, n);
+        self.jump(done, &[], n);
+        self.start(done);
+        Some(())
+    }
+
     pub(super) fn list_fill(
         &mut self,
         item: TyId,

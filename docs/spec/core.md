@@ -179,6 +179,13 @@ operations it names; nothing else about them may be inferred from an implementat
   length, and `string.slice` also when `lo` or `hi` falls inside a scalar. A slice's
   capacity is its length; `string.as_bytes` reports its `String`'s capacity, 0 for static
   storage. No view grants spare capacity.
+- **Bulk overwrite.** `list.copy_from_slice(mut dst, at, src)` copies all elements of
+  the source List or List view over existing elements starting at `at`. The Inline
+  counterpart `inline.copy_from_slice(mut dst, at, src, count)` takes the first
+  `count` elements of an Inline array of the same type. Elements must be plain.
+  A range outside either carrier raises `Bounds` before any writes. The destination
+  keeps its length and capacity. Each copy admits no bytes and takes one Step
+  ([MEM-30](budgets.md#mem-30-step-bounds)).
 - **Words.** `list.word_le(b, at)` reads the 8 bytes of `b` from `at` as a little-endian
   `u64` and fails with `Bounds` unless `at + 8 ≤ len`. Its store twin, `list.put_word_le(mut
   b, x) -> Result[(), Capacity]`, appends `x` as 8 little-endian bytes, growing `b` as

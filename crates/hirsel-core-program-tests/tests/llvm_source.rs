@@ -121,6 +121,86 @@ fn probe(s: u64, divisor: u64) -> u64 {
     }
 }
 
+/// A constant divisor drops a division's checks only where the division cannot
+/// fail (`failure::constant_safe`): a signed quotient by -1 still raises
+/// Overflow at its type's minimum, also at a narrow width, and a zero divisor
+/// still raises Division. Both native engines agree with the evaluator.
+#[test]
+fn constant_divisors_keep_reachable_failures() {
+    let source = r#"
+fn by_minus_one(x: i64) -> i64 { x / -1i64 }
+fn rem_minus_one(x: i64) -> i64 { x % -1i64 }
+fn narrow_minus_one(x: u64) -> u64 {
+    let n: i8 = int.truncate(x)
+    let q: i8 = n / -1i8
+    let w: u8 = int.truncate(q)
+    int.widen(w)
+}
+fn by_zero(x: u64) -> u64 { x / 0u64 }
+fn by_seven(x: i64) -> i64 { x / 7i64 + x % 7i64 }
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let min = i64::MIN as u64;
+    let calls = [
+        ("by_minus_one", min),
+        ("by_minus_one", 5),
+        ("by_minus_one", -5i64 as u64),
+        ("rem_minus_one", min),
+        ("narrow_minus_one", 0x80),
+        ("narrow_minus_one", 5),
+        ("by_zero", 1),
+        ("by_seven", min),
+        ("by_seven", -15i64 as u64),
+        ("by_seven", 15),
+    ];
+    let cases: Vec<_> = calls
+        .iter()
+        .map(|&(name, x)| Case {
+            function: names[name],
+            args: vec![x],
+            limit: 1_000,
+            injection: None,
+        })
+        .collect();
+    // Hand-derived: MIN / -1 and -128i8 / -1 overflow, x / 0 is a Division,
+    // and x / 7 + x % 7 truncates toward zero (-15 gives -2 + -1).
+    let overflow = || eval::Outcome::Failed(vec!["Overflow".into()]);
+    let expected = [
+        overflow(),
+        eval::Outcome::Returned(vec![-5i64 as u64]),
+        eval::Outcome::Returned(vec![5]),
+        eval::Outcome::Returned(vec![0]),
+        overflow(),
+        eval::Outcome::Returned(vec![0xFB]),
+        eval::Outcome::Failed(vec!["Division".into()]),
+        eval::Outcome::Returned(vec![(i64::MIN / 7 + i64::MIN % 7) as u64]),
+        eval::Outcome::Returned(vec![-3i64 as u64]),
+        eval::Outcome::Returned(vec![3]),
+    ];
+    let evaluated: Vec<_> = cases
+        .iter()
+        .zip(&expected)
+        .map(|(case, outcome)| {
+            let run = eval::run(&program, case.function, &case.args, case.limit);
+            assert_eq!(&run.outcome, outcome, "f{}{:?}", case.function.0, case.args);
+            run
+        })
+        .collect();
+    let exports = calls.map(|(name, _)| names[name]);
+    let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &exports);
+    for (optimization, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
+        let reports = execute_object(&program, &cases, "", "", optimization, Some(object));
+        for ((case, evaluated), native) in cases.iter().zip(&evaluated).zip(reports) {
+            assert_eq!(
+                native.outcome, evaluated.outcome,
+                "f{}{:?}",
+                case.function.0, case.args
+            );
+        }
+    }
+}
+
 /// Release LLVM drops a loop's failure check only when ScalarEvolution proves it
 /// never fires. The Fannkuch flip (`j - i` for `i < (k + 1) >> 1`) agrees with
 /// the evaluator; variants that reach the boundary (an extra trip, a trip count

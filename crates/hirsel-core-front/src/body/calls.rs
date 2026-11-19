@@ -153,7 +153,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             return self.simd_call(op, f, n, args, want);
         }
-        if g.path.is_core("code.callable") {
+        if g.path.0.name == "callable" && g.path.is_core("code.callable") {
             self.flow_callable(n);
         }
         if g.result == ERROR {
@@ -166,7 +166,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // cannot otherwise be materialized without an expected callable type.
         // Keep this refusal ahead of function-value inference so the diagnostic
         // names the offending generic item rather than cascading LANG-12.
-        if g.path.is_core("code.describe")
+        if g.path.0.name == "describe"
+            && g.path.is_core("code.describe")
             && let Some(argument) = args.first()
             && let Some(Target::Definition(id)) = p.target(self.at, *argument)
             && let Some(Def::Fn(item)) = p.by_definition[id.0 as usize]
@@ -578,7 +579,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if result == NEVER {
             self.dead = true;
         }
-        if g.path.is_core("flow.stage") {
+        if g.path.0.name == "stage" && g.path.is_core("flow.stage") {
             self.flow_stage(args[6], vals[6]);
         }
         if !undetermined
@@ -1117,9 +1118,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return;
             }
             if missing == 0
-                && (path.is_core("flow.sink")
-                    || path.is_core("flow.stage")
-                    || path.is_core("flow.port"))
+                && matches!(path.0.name.as_str(), "sink" | "stage" | "port")
+                && path.0.modules == ["flow"]
+                && path.package_is("core", "1")
             {
                 let (holds, parameters) = crate::decls::holds_components(&p.decls, &self.t, t);
                 if holds == 0 && parameters != 0 {

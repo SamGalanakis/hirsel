@@ -572,32 +572,30 @@ pub fn shown[in a](x: ObjectIndex[in a], i: u64) -> Option[(View[String], View[J
 
 /// The first position in x.ordinals whose key is above k.
 fn above[in a](x: ObjectIndex[in a], k: String) -> u64 {
-    let mut lo: u64 = 0
-    let mut hi = list.len(x.ordinals)
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2
-        if k < text.as_string(member(x.members, x.ordinals[mid]).key) {
-            hi = mid
+    match list.binary_search_by(x.ordinals, scoped fn(ordinal: u32) -> Order {
+        if k < text.as_string(member(x.members, ordinal).key) {
+            Greater
         } else {
-            lo = mid + 1
+            Less
         }
+    }) {
+        Ok(i) => i,
+        Error(i) => i,
     }
-    lo
 }
 
 /// The first position in x.ordinals whose key is not below k.
 fn below[in a](x: ObjectIndex[in a], k: String) -> u64 {
-    let mut lo: u64 = 0
-    let mut hi = list.len(x.ordinals)
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2
-        if text.as_string(member(x.members, x.ordinals[mid]).key) < k {
-            lo = mid + 1
+    match list.binary_search_by(x.ordinals, scoped fn(ordinal: u32) -> Order {
+        if text.as_string(member(x.members, ordinal).key) < k {
+            Less
         } else {
-            hi = mid
+            Greater
         }
+    }) {
+        Ok(i) => i,
+        Error(i) => i,
     }
-    lo
 }
 
 /// Orders ordinals x and y by their members' keys, then by ordinal.

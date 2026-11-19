@@ -404,21 +404,9 @@ pub fn contains[T: key](xs: List[T], x: T) -> bool {
 /// First equal index, or Error(insertion index), in an ascending sorted list.
 /// Alloc: nothing. Cost: O(log len) comparisons. Ex: `list.binary_search(ids, id)`
 pub fn binary_search[T: ordered](xs: List[T], x: T) -> Result[u64, u64] {
-    let mut lo: u64 = 0
-    let mut hi = list.len(xs)
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2
-        if xs[mid] < x {
-            lo = mid + 1
-        } else {
-            hi = mid
-        }
-    }
-    if lo < list.len(xs) && !(x < xs[lo]) {
-        Ok(lo)
-    } else {
-        Error(lo)
-    }
+    binary_search_by(xs, scoped fn(item: T) -> Order {
+        order.compare(item, x)
+    })
 }
 
 /// Keeps the first of each consecutive run of equal elements, preserving order.

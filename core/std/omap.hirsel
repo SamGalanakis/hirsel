@@ -259,42 +259,43 @@ fn key_order[K: ordered + shareable + send, V: shareable + send](ks: List[Arc[En
 }
 
 fn lower[K: ordered + shareable + send, V: shareable + send](ks: List[Arc[Entry[K, V]]], k: K) -> u64 {
-    let mut a: u64 = 0
-    let mut b = list.len(ks)
-    if b > 0 && ks[b - 1].key < k {
-        return b
+    let n = list.len(ks)
+    if n > 0 && ks[n - 1].key < k {
+        return n
     }
-    while a < b {
-        let mid = a + (b - a) / 2
-        if ks[mid].key < k {
-            a = mid + 1
+    match list.binary_search_by(ks, scoped fn(entry: Arc[Entry[K, V]]) -> Order {
+        if entry.key < k {
+            Less
         } else {
-            b = mid
+            Greater
         }
+    }) {
+        Ok(i) => i,
+        Error(i) => i,
     }
-    a
 }
 
 // First separator greater than k; its predecessor owns k's interval.
 // One comparison per step, without rechecking the final separator.
 fn upper_child[K: ordered + shareable + send, V: shareable + send](ks: List[Separator[K, V]], k: K) -> u64 {
-    let mut a: u64 = 0
-    let mut b = list.len(ks)
-    if b > 0 && !(k < separator_key(ks[b - 1])) {
-        return b - 1
+    let n = list.len(ks)
+    if n > 0 && !(k < separator_key(ks[n - 1])) {
+        return n - 1
     }
-    while a < b {
-        let mid = a + (b - a) / 2
-        if k < separator_key(ks[mid]) {
-            b = mid
+    let index = match list.binary_search_by(ks, scoped fn(entry: Separator[K, V]) -> Order {
+        if k < separator_key(entry) {
+            Greater
         } else {
-            a = mid + 1
+            Less
         }
+    }) {
+        Ok(i) => i,
+        Error(i) => i,
     }
-    if a == 0 {
+    if index == 0 {
         0u64
     } else {
-        a - 1
+        index - 1
     }
 }
 

@@ -213,8 +213,9 @@ resource type Log grant bytes 256 { sink: Sender[String] }
 
 ### MEM-28: Optimisation keeps charges
 
-No optimisation changes which operations admit, how much they charge, when they refund or
-which of them fail with `Capacity`. An engine that allocates less still charges the
+No optimisation changes which operations admit, how much they charge, which refunds an
+admission sees or which of them fail with `Capacity`
+([SEM-8](semantics.md#sem-8-determinism)). An engine that allocates less still charges the
 logical amount; an engine that elides a copy still charges for it.
 
 ### MEM-30: Step bounds

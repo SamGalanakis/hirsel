@@ -251,8 +251,8 @@ pub struct FieldDrop {
 /// FAIL-8: the finalizer runs first, then fields in reverse declaration order,
 /// then the block is freed and refunded. A row whose cleanup reaches no
 /// finalizer, resource, handle, `own fn`, `Arc` or region reference only frees
-/// and refunds, which nothing can observe the order of; it cleans its fields in
-/// declaration order instead (as if, see `drop_recipe`). A `List` (`Seq`) and an inline array
+/// and refunds; FAIL-8 leaves that order to SEM-8's as-if rule, so it cleans
+/// its fields in declaration order instead (see `drop_recipe`). A `List` (`Seq`) and an inline array
 /// (`FieldTy::Array`, at the stride `field_size` gives) clean their completed
 /// elements from index 0 up (SEM-9, core.md); a `Map` cleans entry by entry in
 /// insertion order, each key before its value ([`map_entry`]). Those loops are in
@@ -1450,7 +1450,8 @@ fn drop_recipe(
     this: TypeRef,
 ) -> Option<DropRecipe> {
     // FAIL-8 order (reverse declaration) where cleanup can observe it. Elsewhere
-    // the steps commute, so cleanup follows declaration order, the order LANG-9
+    // the steps commute and SEM-8's as-if rule applies, so cleanup follows
+    // declaration order, the order LANG-9
     // constructs and so allocates in: a drain then walks owned blocks forward
     // through memory, as Rust drops fields.
     let forward = !out.effects.borrow_mut().effectful(shapes, this);

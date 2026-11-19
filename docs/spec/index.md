@@ -83,6 +83,7 @@ and keyed operations. It is unbuilt design.
 | term | defined in |
 |---|---|
 | anchor | [OWN-19](ownership.md#own-19-scoped-values) |
+| as if, observables | [SEM-8](semantics.md#sem-8-determinism) |
 | blob | [MEM-9](memory.md#mem-9-compact-types) |
 | codec | [SEM-10](semantics.md#sem-10-codecs) |
 | tombstone | [SEM-10](semantics.md#sem-10-codecs) |

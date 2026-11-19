@@ -8,8 +8,8 @@ A task's handle is a resource that is not `send`, so it stays in the task that s
 and a task ends only after cleaning its handles (CONC-8): no task outlives its spawner.
 A value passes from one task to another only by moving through a spawn, a channel or a
 join. A flow stage ([CONC-14](#conc-14-flows)) receives and sends plain values through its flow's ports. The only program memory two tasks can both read is the immutable payload of an `Arc`
-(CONC-11). Whether tasks and stages run in parallel is the engine's choice and is not observable,
-except in a run that CONC-10 leaves unspecified.
+(CONC-11). Whether tasks and stages run in parallel is the engine's choice
+([SEM-8](semantics.md#sem-8-determinism)), except in a run that CONC-10 leaves unspecified.
 
 ### CONC-2: The send bound
 
@@ -83,7 +83,7 @@ exactly when one was published before it in the event order and not yet taken, a
 replay decides as recorded. With one receiver, `receive` and `try_receive` take items from the one front in
 the receiving task's program order, whichever it calls. The queue is first in,
 first out by publication order; positions are logical, so how an engine stores the queue
-is not observable. The blocks of a sent value stay charged to the limit that admitted them
+is its choice ([SEM-8](semantics.md#sem-8-determinism)). The blocks of a sent value stay charged to the limit that admitted them
 ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)).
 
 ```hirsel

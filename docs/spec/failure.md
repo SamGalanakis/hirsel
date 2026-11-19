@@ -105,7 +105,10 @@ cleaned, a maybe slot is cleaned when its flag is set, and a moved slot is not t
 Cleaning a value runs its finalizer if it has one, then cleans its record and tuple fields
 in reverse declaration order, the elements of a complete `List` or `Inline` array from
 index 0 up, a `Map`'s entries as [core](core.md) says and a queue's items as
-[CONC-9](tasks.md#conc-9-queue-drop) says, then frees and refunds its block. A construction
+[CONC-9](tasks.md#conc-9-queue-drop) says, then frees and refunds its block. This order is
+fixed wherever it is observable: where cleaning runs a finalizer, ends a resource or makes an
+event, such as an `Arc` release or a refund that crosses tasks; elsewhere the as-if rule of
+[SEM-8](semantics.md#sem-8-determinism) applies. A construction
 that fails cleans its completed temporaries in reverse evaluation order
 ([T1.1](ownership.md#own-26-the-transition-table)). A region opened by an exited block closes after its block's owners
 are cleaned.

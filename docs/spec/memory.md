@@ -482,7 +482,7 @@ its largest payload, `Box[T]` holds one block made by `box.new(take x)`, and `Li
 its block, which is safe because a view freezes it
 ([OWN-10](ownership.md#own-10-freezes)). Field order, padding, alignment, how a variant stores its tag and the native
 calling convention, including how several scalar results are returned, are private to the
-implementation and may differ between engines; nothing in a program can observe them. A
+implementation and may differ between engines ([SEM-8](semantics.md#sem-8-determinism)). A
 type that contains itself inline is refused by
 [OWN-2](ownership.md#own-2-type-summaries).
 
@@ -793,8 +793,9 @@ fn seen(take l: Log[u64]) -> List[u64] {
 
 Charged bytes are semantic and identical on every engine, including the reference evaluator
 ([MEM-24](budgets.md#mem-24-logical-charges)). The physical layout and work count obligations
-below bind native engines only. Refund points, refusal points, cleanup order and output agree
-across engines. `Capacity` fails at the same operation on every engine. Each physical
+below bind native engines only. Everything [SEM-8](semantics.md#sem-8-determinism) makes
+observable agrees across engines, refunds as admissions see them, refusal points, finalizer
+order and output included. `Capacity` fails at the same operation on every engine. Each physical
 obligation is checked by counting the native engine's work, never by a program:
 
 - **A size-class allocator per task.** Own blocks (`Box` nodes, collection storage, counted

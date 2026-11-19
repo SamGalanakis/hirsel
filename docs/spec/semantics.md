@@ -203,11 +203,29 @@ type Q: key { w: f64 }                                     // refused: OWN-4, f6
 Given the same program, the same values at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)), the same root limit and the same charge
 policy, every run that no run stop ends ([FAIL-15](failure.md#fail-15-run-stops)) behaves
-identically on every engine, build and optimisation level: the same values, outputs,
-`Capacity` and `OutOfTime` results, failure causes and sites, steps and slice ends
-([MEM-30](budgets.md#mem-30-step-bounds)), cleanup order and run outcome. Nothing
-observable depends on addresses (of blocks or of functions), on the order of declarations
-in a source, on timing, on the host or on unrecorded scheduling. The one value a compiler may change
+identically on every engine, build and optimisation level. Its **observables** are exactly:
+
+- its values, its output and its outcome;
+- its steps and slice ends ([MEM-30](budgets.md#mem-30-step-bounds));
+- its failures: each cause, its site and its place in the cause chain
+  ([FAIL-2](failure.md#fail-2-causes), [FAIL-10](failure.md#fail-10-cause-chain));
+- its charges as limits see them: which operations admit, how much, which return `Capacity`
+  and with what value, and which refunds each admission sees
+  ([MEM-21](budgets.md#mem-21-admission) to [MEM-24](budgets.md#mem-24-logical-charges),
+  [MEM-28](budgets.md#mem-28-optimisation-keeps-charges));
+- its finalizer runs and their order ([FAIL-8](failure.md#fail-8-exit-edge-cleanup),
+  [FAIL-11](failure.md#fail-11-resources));
+- its events and their order ([CONC-10](tasks.md#conc-10-event-order));
+- its host effects: each provider operation's issue, its arguments and its order
+  ([CAP-5](capabilities.md#cap-5-provider-operations), [CAP-8](capabilities.md#cap-8-the-replay-point));
+- what its tapes record ([CAP-9](capabilities.md#cap-9-tapes)).
+
+**As if.** An engine may do anything whose effects on the observables are those this
+specification gives. Anything not listed is the engine's choice: layout, addresses (of
+blocks or of functions), allocators, parallelism, timing, and the order of steps that change
+no observable between them, such as freeing blocks whose refunds no admission sees apart.
+Nothing observable depends on addresses, on the order of declarations in a source, on
+timing, on the host or on unrecorded scheduling. The one value a compiler may change
 is a function's revision ([PROG-9](programs.md#prog-9-code-descriptors)), which names the
 checked IR its compiler made: it is still the same on every engine and optimisation level.
 

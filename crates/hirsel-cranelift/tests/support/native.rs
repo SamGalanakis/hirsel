@@ -111,7 +111,7 @@ fn declare_functions(source: &mut String, module: &c::Module) {
             source,
             "__asm__(\".globl {0}\\n.hidden {0}\\n.set {0}, {1}\\n\");",
             c::source::site_symbol(item),
-            ((i as u64) + 1) << 32
+            c::source::module_site_word(i, 0)
         )
         .unwrap();
     }
@@ -131,7 +131,7 @@ fn declare_functions(source: &mut String, module: &c::Module) {
         }
         source.push_str("},");
     }
-    source.push_str("};\nstatic void emit_test_site(uint64_t site) { uint64_t present=site!=0, start=(uint32_t)site, empty[4]={0}; fwrite(&present,8,1,stdout); fwrite(present?test_site_items[(site>>32)-1]:empty,8,4,stdout); fwrite(&start,8,1,stdout); }\n");
+    write!(source, "}};\nstatic void emit_test_site(uint64_t site) {{ uint64_t present=site!=0, start=site&{mask}, empty[4]={{0}}; fwrite(&present,8,1,stdout); fwrite(present?test_site_items[(site>>{shift})-1]:empty,8,4,stdout); fwrite(&start,8,1,stdout); }}\n", mask = (1u64 << c::source::MODULE_SITE_SHIFT) - 1, shift = c::source::MODULE_SITE_SHIFT).unwrap();
 }
 
 fn execute(input: &impl NativeInput, runs: &[(FuncId, Vec<u64>)], optimize: bool) {

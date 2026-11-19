@@ -25,6 +25,30 @@ pub struct ItemSource {
 }
 
 impl SourceMap {
+    /// The site word of each file's first byte, in file order: 1, then each
+    /// file starts one past the previous file's end, so a site at a file's end
+    /// stays in that file. Refuses sources whose last site would reach
+    /// `SITE_END`; a site word is never truncated.
+    pub fn site_starts(&self) -> Result<Vec<u64>, String> {
+        let mut next = 1u64;
+        let starts = self
+            .files
+            .iter()
+            .map(|file| {
+                let start = next;
+                next += file.text.len() as u64 + 1;
+                start
+            })
+            .collect();
+        if next > hirsel_core_layout::source_positions::SITE_END {
+            return Err(format!(
+                "linked sources hold {} bytes; failure sites address fewer than {}",
+                next - 1 - self.files.len() as u64,
+                hirsel_core_layout::source_positions::SITE_END - 1,
+            ));
+        }
+        Ok(starts)
+    }
     /// Resolve an item-relative byte offset in the current checked source.
     /// Lines and Unicode scalar columns start at one; a tab counts as one.
     pub fn position(&self, item: &DefPath, start: u32) -> Option<(&SourceFile, u32, u32)> {
@@ -37,8 +61,29 @@ impl SourceMap {
     }
 }
 
-/// A cached native unit loads this item's linked ordinal high word. The fresh
-/// entry unit defines the symbol as `(ordinal + 1) << 32` beside its source table.
+/// The module-local site word of literal (non-relocatable) emission and of
+/// native test bindings: the item ordinal plus one above `MODULE_SITE_SHIFT`,
+/// the item-relative start below. Like a linked word it is below `SITE_END`.
+pub fn module_site_word(item: usize, start: u32) -> u64 {
+    let word = ((item as u64 + 1) << MODULE_SITE_SHIFT) | u64::from(start);
+    assert!(
+        start < 1 << MODULE_SITE_SHIFT && word < hirsel_core_layout::source_positions::SITE_END,
+        "module site word for item {item} at {start} exceeds the site bound"
+    );
+    word
+}
+/// The item ordinal and item-relative start of a nonzero `module_site_word`.
+pub fn module_site_parts(word: u64) -> (usize, u32) {
+    (
+        (word >> MODULE_SITE_SHIFT) as usize - 1,
+        (word & ((1 << MODULE_SITE_SHIFT) - 1)) as u32,
+    )
+}
+pub const MODULE_SITE_SHIFT: u32 = 20;
+
+/// A cached native unit addresses this item's linked site, plus the anchor's
+/// item-relative start. The fresh entry unit defines the symbol as the item's
+/// first site word (`SourceMap::site_starts` plus its file offset).
 pub fn site_symbol(item: &DefPath) -> String {
     let hash = item.fingerprint();
     let mut symbol = String::from(SITE_SYMBOL_PREFIX);

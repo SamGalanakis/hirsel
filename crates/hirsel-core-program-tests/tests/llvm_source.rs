@@ -112,7 +112,7 @@ fn probe(s: u64, divisor: u64) -> u64 {
                 .iter()
                 .map(|anchor| {
                     anchor.map_or(0, |a| {
-                        ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                        hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
                     })
                 })
                 .collect();
@@ -769,7 +769,7 @@ fn site_fixture(target: Target) {
             bindings,
             "__asm__(\".globl {0}\\n.hidden {0}\\n.set {0}, {1}\\n\");",
             hirsel_core_ir::source::site_symbol(item),
-            (i as u64 + 1) << 32
+            hirsel_core_ir::source::module_site_word(i, 0)
         )
         .unwrap();
     }
@@ -822,7 +822,15 @@ fn site_fixture(target: Target) {
                         "{target:?} {} {relocation:?}",
                         section.name().unwrap()
                     );
-                    assert_eq!(relocation.size(), 64);
+                    // x86-64 code takes a site as a 32-bit immediate (SITE_END);
+                    // data words and AArch64's pool keep 8 bytes.
+                    let code = section.kind() == object::SectionKind::Text;
+                    let width = if code && target == Target::X86_64Linux {
+                        32
+                    } else {
+                        64
+                    };
+                    assert_eq!(relocation.size(), width, "{target:?} {relocation:?}");
                     assert!(relocation.addend() >= 0);
                     site_relocations += 1;
                 }
@@ -997,10 +1005,8 @@ fn site_fixture(target: Target) {
                 .iter()
                 .map(|word| {
                     (*word != 0).then(|| {
-                        (
-                            module.items[((word >> 32) - 1) as usize].clone(),
-                            *word as u32,
-                        )
+                        let (item, start) = hirsel_core_ir::source::module_site_parts(*word);
+                        (module.items[item].clone(), start)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1791,7 +1797,7 @@ fn probe(n: u64, extra: u64, k: u64) -> u64 {
                 .iter()
                 .map(|a| {
                     a.map_or(0, |a| {
-                        ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                        hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1863,7 +1869,7 @@ fn probe(n: u64, d: u64) -> u64 {
                 .iter()
                 .map(|a| {
                     a.map_or(0, |a| {
-                        ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                        hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -2073,7 +2079,7 @@ fn probe(s: u64, mode: u64, repeats: u64) -> u64 {
                     .iter()
                     .map(|a| {
                         a.map_or(0, |a| {
-                            ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                            hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
                         })
                     })
                     .collect::<Vec<_>>();
@@ -2203,7 +2209,7 @@ fn failing(s: u64, n: u64) -> u64 {
                     .iter()
                     .map(|a| {
                         a.map_or(0, |a| {
-                            ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                            hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
                         })
                     })
                     .collect::<Vec<_>>();
@@ -2316,7 +2322,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
                     .iter()
                     .map(|a| {
                         a.map_or(0, |a| {
-                            ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                            hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
                         })
                     })
                     .collect::<Vec<_>>();
@@ -2682,7 +2688,7 @@ fn probe(s: u64, n: u64, d: u64, mode: u64) -> u64 {
                 .iter()
                 .map(|a| {
                     a.map_or(0, |a| {
-                        ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                        hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
                     })
                 })
                 .collect::<Vec<_>>();

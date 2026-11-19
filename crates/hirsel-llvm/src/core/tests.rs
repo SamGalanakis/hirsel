@@ -2826,13 +2826,13 @@ b0(v0: u64):
     );
     let expected = [
         0,
-        (1u64 << 32) | 20,
-        (2u64 << 32) | 35,
-        (2u64 << 32) | 35,
+        hirsel_core_ir::source::module_site_word(0, 20),
+        hirsel_core_ir::source::module_site_word(1, 35),
+        hirsel_core_ir::source::module_site_word(1, 35),
         0,
-        (1u64 << 32) | 50,
-        (1u64 << 32) | 60,
-        (2u64 << 32) | 35,
+        hirsel_core_ir::source::module_site_word(0, 50),
+        hirsel_core_ir::source::module_site_word(0, 60),
+        hirsel_core_ir::source::module_site_word(1, 35),
     ];
     let cases = (0..8)
         .map(|f| Case {

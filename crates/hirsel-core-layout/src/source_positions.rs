@@ -3,7 +3,11 @@
 //! and zero for a UTF-8 continuation byte. Markers denote the byte after the
 //! event, so an offset landing on a newline is still on its original line.
 pub const TAG: u8 = 0xff;
-pub const TABLE_SYMBOL: &str = "hirsel_core_relative_source_table_v1";
+pub const TABLE_SYMBOL: &str = "hirsel_core_relative_source_table_v2";
+/// Every linked site word is below this bound, so code materialises it as a
+/// sign-extended 32-bit immediate. A word is the file's first site plus the
+/// byte offset into that file; 0 means no site.
+pub const SITE_END: u64 = 1 << 31;
 
 pub fn encode(text: &str) -> Vec<u8> {
     let mut output = vec![TAG];

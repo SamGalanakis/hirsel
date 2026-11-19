@@ -881,7 +881,13 @@ impl Sink for TextSink {
             write!(out, ", align {}", g.align).unwrap();
         }
         if g.absolute_symbol {
-            out.push_str(", !absolute_symbol !{i64 -1, i64 -1}");
+            // Site words are below SITE_END: a sign-extended 32-bit immediate.
+            write!(
+                out,
+                ", !absolute_symbol !{{i64 0, i64 {}}}",
+                hirsel_core_layout::source_positions::SITE_END
+            )
+            .unwrap();
         }
         out.push('\n');
     }

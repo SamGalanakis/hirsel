@@ -562,10 +562,10 @@ fn agree_cases(input: &impl NativeInput, cases: &[Case], memory: bool) {
             .iter()
             .map(|word| {
                 (*word != 0).then(|| {
-                    (
-                        module.items[((word >> 32) - 1) as usize].clone(),
-                        *word as u32,
-                    )
+                    {
+                        let (item, start) = hirsel_core_ir::source::module_site_parts(*word);
+                        (module.items[item].clone(), start)
+                    }
                 })
             })
             .collect::<Vec<_>>();

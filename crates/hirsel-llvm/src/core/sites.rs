@@ -86,9 +86,10 @@ impl FunctionEmitter<'_> {
             .anchor
             .filter(|a| !self.module.items[a.item.index()].package_is("core", "1"))?;
         if !self.relocatable_sites {
-            return Some(int(
-                ((u64::from(anchor.item.0) + 1) << 32) | u64::from(anchor.start)
-            ));
+            return Some(int(hirsel_core_ir::source::module_site_word(
+                anchor.item.index(),
+                anchor.start,
+            )));
         }
         if let Some(sites) = &mut self.items.release_sites {
             let name = sites

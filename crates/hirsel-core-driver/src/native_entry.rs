@@ -201,8 +201,8 @@ impl<'a> Plan<'a> {
         adapter::emit(&mut object, self, entry, signature)?;
         start::emit(&mut object, self, &data, entry)?;
         let mut product = object.finish();
-        sites::define(&mut product.object, sources);
-        sites::define_release(&mut product.object, sources, self.release_sites);
+        sites::define(&mut product.object, sources)?;
+        sites::define_release(&mut product.object, sources, self.release_sites)?;
         product.object.write().map_err(error)
     }
 }

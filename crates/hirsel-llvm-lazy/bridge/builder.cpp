@@ -140,8 +140,12 @@ static void global(HirselLlvmBuilder *u, const char *name, size_t len, LLVMTypeR
     g->setConstant(constant); g->setLinkage(linkages[linkage]); g->setExternallyInitialized(externally_initialized);
     if (alignment) g->setAlignment(Align(alignment));
     if (absolute) {
-        auto *all = ConstantAsMetadata::get(ConstantInt::getSigned(Type::getInt64Ty(u->context), -1));
-        g->setMetadata(LLVMContext::MD_absolute_symbol, MDNode::get(u->context, {all, all}));
+        // Site words are below source_positions::SITE_END (2^31), so code
+        // materialises them as sign-extended 32-bit immediates.
+        auto *i64 = Type::getInt64Ty(u->context);
+        g->setMetadata(LLVMContext::MD_absolute_symbol,
+                       MDNode::get(u->context, {ConstantAsMetadata::get(ConstantInt::get(i64, 0)),
+                                                ConstantAsMetadata::get(ConstantInt::get(i64, uint64_t(1) << 31))}));
     }
     resolve(u, symbol, g);
 }

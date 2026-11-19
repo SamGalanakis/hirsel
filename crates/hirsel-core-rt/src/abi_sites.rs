@@ -1,10 +1,11 @@
 //! FORM #91: late source binding for the existing Cause.site word at offset24.
-//! The driver supplies linked item ordinals, paths and positions. Nothing
+//! A linked site is its file's first site word plus the byte offset into the
+//! file (`source_positions::SITE_END`). The driver supplies files and starts. Nothing
 //! reads these borrowed tables before failure reporting; no global registry.
 use crate::{causes::Cause, entry::OsProcess};
 use hirsel_core_layout::source_positions;
 
-#[unsafe(export_name = "hirsel_core_relative_source_table_v1")]
+#[unsafe(export_name = "hirsel_core_relative_source_table_v2")]
 pub static RELATIVE_SOURCE_TABLE_V1: u8 = source_positions::TAG;
 
 #[repr(C)]
@@ -25,18 +26,13 @@ impl SourceView {
 pub struct SourceFile {
     pub path: SourceView,
     pub source: SourceView,
-}
-#[repr(C)]
-pub struct SourceItem {
-    pub file: u32,
-    pub file_offset: u32,
+    /// The site word of this file's first byte; rows ascend.
+    pub start: u64,
 }
 #[repr(C)]
 pub struct SourceTable {
     pub files: *const SourceFile,
     pub files_len: usize,
-    pub items: *const SourceItem,
-    pub items_len: usize,
 }
 
 /// Bind current source storage before running an explicitly constructed process.
@@ -45,7 +41,7 @@ pub struct SourceTable {
 /// The process is exclusively borrowed before run. A nonnull table, its arrays
 /// and file bytes remain immutable and pinned through reporting. Each relative
 /// range is within the allocation starting at `files`. Every nonzero
-/// cause site designates an item and UTF-8 boundary in this linked table.
+/// cause site designates a UTF-8 boundary of a file in this linked table.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_process_set_sources(
     process: *mut OsProcess,
@@ -70,9 +66,15 @@ pub(crate) unsafe fn format_cause(cause: &Cause, sources: *const SourceTable) ->
     // our binder. UTF-8 was checked before source positions were assigned.
     unsafe {
         let sources = &*sources;
-        let item = &*sources.items.add(((cause.site >> 32) - 1) as usize);
-        let file = &*sources.files.add(item.file as usize);
-        let offset = item.file_offset as usize + (cause.site as u32) as usize;
+        let rows = std::slice::from_raw_parts(sources.files, sources.files_len);
+        let Some(row) = rows
+            .partition_point(|file| file.start <= cause.site)
+            .checked_sub(1)
+        else {
+            return crate::abi_host::format_cause(cause);
+        };
+        let file = &rows[row];
+        let offset = (cause.site - file.start) as usize;
         let source = file.source.bytes(sources.files);
         let (line, column) = if let Some(markers) = source.strip_prefix(&[source_positions::TAG]) {
             source_positions::position(markers, offset)

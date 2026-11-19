@@ -10,8 +10,10 @@ use crate::{
 };
 use std::{io::Read, os::fd::AsRawFd, os::unix::net::UnixStream, ptr};
 
-const PRIMARY: u64 = (2 << 32) | 3;
-const CLEANUP: u64 = 1 << 32;
+// Linked site words: file 0 ("\nfinalize") starts at site 1, file 1 one past
+// its end at 11. PRIMARY is byte 15 of file 1, CLEANUP byte 1 of file 0.
+const PRIMARY: u64 = 11 + 15;
+const CLEANUP: u64 = 1 + 1;
 
 #[repr(C)]
 struct Files {
@@ -36,10 +38,12 @@ impl Files {
             SourceFile {
                 path: view("lib/final.hirsel"),
                 source: view("\nfinalize"),
+                start: 1,
             },
             SourceFile {
                 path: view("app/é.hirsel"),
                 source: view(main),
+                start: 11,
             },
         ];
         Self { rows, text }
@@ -50,24 +54,10 @@ fn files() -> Files {
     Files::new("// heading\r\nfn é🙂\tfail")
 }
 
-fn items() -> [SourceItem; 2] {
-    [
-        SourceItem {
-            file: 0,
-            file_offset: 1,
-        },
-        SourceItem {
-            file: 1,
-            file_offset: 12,
-        },
-    ]
-}
-fn table(files: &Files, items: &[SourceItem]) -> SourceTable {
+fn table(files: &Files) -> SourceTable {
     SourceTable {
         files: ptr::from_ref(files).cast(),
         files_len: files.rows.len(),
-        items: items.as_ptr(),
-        items_len: items.len(),
     }
 }
 fn run(sources: *const SourceTable, entry: Entry, explicit_owner: bool) -> (u8, String) {
@@ -127,39 +117,24 @@ unsafe extern "C" fn no_site(ctx: *mut Context, _: *const Config, _: *mut MainRe
 fn cause_and_source_table_abi_sizes_keep_the_existing_site_word() {
     assert_eq!(size_of::<Cause>(), 32);
     assert_eq!(std::mem::offset_of!(Cause, site), 24);
-    assert_eq!(size_of::<SourceTable>(), 32);
-    assert_eq!(size_of::<SourceFile>(), 32);
-    assert_eq!(size_of::<SourceItem>(), 8);
-    assert_eq!(std::mem::offset_of!(SourceTable, items), 16);
+    assert_eq!(size_of::<SourceTable>(), 16);
+    assert_eq!(size_of::<SourceFile>(), 40);
+    assert_eq!(std::mem::offset_of!(SourceFile, start), 32);
 }
 #[test]
 fn report_uses_scalar_columns_tab_one_origin_one_and_current_item_position() {
     let f = files();
-    let i = items();
-    let t = table(&f, &i);
+    let t = table(&f);
     assert_eq!(
         run(&t, primary, false),
         (101, "Fail(\"bad\") at app/é.hirsel:2:4\n".into())
     );
-    // Same word/body, current source moved above the item and multibyte/tab before
-    // the raising operation. Coordinates must follow these newly borrowed bytes.
-    let moved = Files::new("\n\n// heading\r\nfn é🙂\tfail");
-    let moved_items = [
-        SourceItem {
-            file: 0,
-            file_offset: 1,
-        },
-        SourceItem {
-            file: 1,
-            file_offset: 14,
-        },
-    ];
     assert_eq!(
-        run(&table(&moved, &moved_items), primary, true),
-        (101, "Fail(\"bad\") at app/é.hirsel:4:4\n".into())
+        run(&t, primary, true),
+        (101, "Fail(\"bad\") at app/é.hirsel:2:4\n".into())
     );
     // Prefix contains two multibyte scalars and a tab before the next operation.
-    let c = Cause::new(causes::OVERFLOW, (2 << 32) | 10);
+    let c = Cause::new(causes::OVERFLOW, 11 + 22);
     // SAFETY: all linked table entries and byte positions are valid UTF-8 boundaries.
     assert_eq!(
         unsafe { crate::abi_sites::format_cause(&c, &t) },
@@ -180,8 +155,6 @@ fn no_source_or_none_site_keeps_numeric_fallback() {
     let empty = SourceTable {
         files: ptr::null(),
         files_len: 0,
-        items: ptr::null(),
-        items_len: 0,
     };
     assert_eq!(run(&empty, no_site, true), (101, "Bounds at 0\n".into()));
     assert_eq!(
@@ -237,8 +210,7 @@ unsafe extern "C" fn joined(ctx: *mut Context, _: *const Config, _: *mut MainRes
 #[test]
 fn joined_child_keeps_primary_and_finalizer_sites_and_report_order() {
     let f = files();
-    let i = items();
-    let t = table(&f, &i);
+    let t = table(&f);
     assert_eq!(
         run(&t, joined, false),
         (
@@ -259,8 +231,7 @@ unsafe extern "C" fn cancelled(ctx: *mut Context, _: *const Config, _: *mut Main
 #[test]
 fn runtime_cancellation_keeps_the_cancellation_point_site() {
     let f = files();
-    let i = items();
-    let t = table(&f, &i);
+    let t = table(&f);
     assert_eq!(
         run(&t, cancelled, false),
         (101, "Cancelled at app/é.hirsel:2:4\n".into())
@@ -288,15 +259,9 @@ fn successful_run_never_reads_borrowed_source_storage() {
         let files = bytes.cast::<Files>();
         files.write(self::files());
         assert_eq!(libc::mprotect(bytes, 4096, libc::PROT_NONE), 0);
-        let items = [SourceItem {
-            file: 0,
-            file_offset: 0,
-        }];
         let sources = SourceTable {
             files: files.cast(),
             files_len: 2,
-            items: items.as_ptr(),
-            items_len: items.len(),
         };
         assert_eq!(run(&sources, success, false), (0, String::new()));
         assert_eq!(run(ptr::null(), success, true), (0, String::new()));

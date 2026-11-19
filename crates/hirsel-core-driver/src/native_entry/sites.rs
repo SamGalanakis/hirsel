@@ -63,39 +63,39 @@ pub(crate) fn retain_referenced(
     Ok(())
 }
 
-pub(super) fn define(object: &mut object::write::Object<'_>, sources: &SourceMap) {
-    for (i, path) in sources.items.keys().enumerate() {
+/// Each item's symbol is its first site word: its file's first site plus the
+/// item's offset in that file.
+pub(super) fn define(object: &mut object::write::Object<'_>, sources: &SourceMap) -> Result<()> {
+    let starts = sources.site_starts()?;
+    for (path, item) in &sources.items {
         absolute(
             object,
             hirsel_core_ir::source::site_symbol(path),
-            (i as u64 + 1) << 32,
+            starts[item.file as usize] + u64::from(item.file_offset),
         );
     }
+    Ok(())
 }
 
 pub(super) fn define_release(
     object: &mut object::write::Object<'_>,
     sources: &SourceMap,
     bindings: &[hirsel_core_ir::source::ReleaseSite],
-) {
+) -> Result<()> {
     if bindings.is_empty() {
-        return;
+        return Ok(());
     }
-    let items = sources
-        .items
-        .keys()
-        .enumerate()
-        .map(|(index, path)| (path, index + 1))
-        .collect::<std::collections::HashMap<_, _>>();
+    let starts = sources.site_starts()?;
     for binding in bindings {
-        if let Some(&item) = items.get(&binding.item) {
+        if let Some(item) = sources.items.get(&binding.item) {
             absolute(
                 object,
                 hirsel_core_ir::source::release_site_symbol(&binding.item, binding.ordinal),
-                ((item as u64) << 32) | u64::from(binding.start),
+                starts[item.file as usize] + u64::from(item.file_offset) + u64::from(binding.start),
             );
         }
     }
+    Ok(())
 }
 
 fn absolute(object: &mut object::write::Object<'_>, name: String, value: u64) {
@@ -160,7 +160,10 @@ mod tests {
             );
             let path = hirsel_core_ids::DefPath::core("site_binding");
             let sources = SourceMap {
-                files: vec![],
+                files: vec![hirsel_core_ir::source::SourceFile {
+                    path: "site.hirsel".into(),
+                    text: String::new(),
+                }],
                 items: std::collections::BTreeMap::from([(
                     path.clone(),
                     hirsel_core_ir::source::ItemSource {
@@ -169,7 +172,7 @@ mod tests {
                     },
                 )]),
             };
-            define(&mut object, &sources);
+            define(&mut object, &sources).unwrap();
             let bytes = object.write().unwrap();
             let file = object::File::parse(bytes.as_slice()).unwrap();
             let symbol = file
@@ -177,7 +180,7 @@ mod tests {
                 .find(|s| s.name().unwrap() == hirsel_core_ir::source::site_symbol(&path))
                 .unwrap();
             assert_eq!(symbol.section(), object::SymbolSection::Absolute);
-            assert_eq!(symbol.address(), 1u64 << 32);
+            assert_eq!(symbol.address(), 1);
             assert_eq!(symbol.size(), 0);
             assert_eq!(symbol.scope(), object::SymbolScope::Linkage);
             assert!(

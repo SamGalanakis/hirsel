@@ -200,7 +200,7 @@ impl SourceProgram {
                 bindings,
                 "__asm__(\".globl {0}\\n.hidden {0}\\n.set {0}, {1}\\n\");",
                 hirsel_core_ir::source::site_symbol(item),
-                (i as u64 + 1) << 32
+                hirsel_core_ir::source::module_site_word(i, 0)
             )
             .unwrap();
         }

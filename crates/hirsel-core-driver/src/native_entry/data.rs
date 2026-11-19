@@ -99,13 +99,7 @@ pub(super) fn write(
         rules.extend(row);
     }
     let net_rules = bytes(object, None, rules, 8)?;
-    let files = bytes(object, None, source_files(sources), 8)?;
-    let mut items = Vec::new();
-    for item in sources.items.values() {
-        items.extend_from_slice(&item.file.to_le_bytes());
-        items.extend_from_slice(&item.file_offset.to_le_bytes());
-    }
-    let items = bytes(object, None, items, 4)?;
+    let files = bytes(object, None, source_files(sources)?, 8)?;
     // The versioned symbol binds the source layout to the supplied runtime.
     let decoder = object
         .declare_data(
@@ -115,16 +109,9 @@ pub(super) fn write(
             false,
         )
         .map_err(error)?;
-    let mut table = vec![0; 40];
+    let mut table = vec![0; 24];
     table[8..16].copy_from_slice(&(sources.files.len() as u64).to_le_bytes());
-    table[24..32].copy_from_slice(&(sources.items.len() as u64).to_le_bytes());
-    let sources = define(
-        object,
-        None,
-        table,
-        8,
-        &[(0, files), (16, items), (32, decoder)],
-    )?;
+    let sources = define(object, None, table, 8, &[(0, files), (16, decoder)])?;
     if plan.charge_report.is_some() {
         let mut label = DataDescription::new();
         label.define(
@@ -147,19 +134,21 @@ pub(super) fn write(
     })
 }
 
-fn source_files(sources: &hirsel_core_ir::source::SourceMap) -> Vec<u8> {
-    let mut files = vec![0; 32 * sources.files.len()];
-    for (row, file) in sources.files.iter().enumerate() {
+/// One 40-byte row per file: path and source views, then the file's first site word.
+fn source_files(sources: &hirsel_core_ir::source::SourceMap) -> Result<Vec<u8>> {
+    let mut files = vec![0; 40 * sources.files.len()];
+    for ((row, file), start) in sources.files.iter().enumerate().zip(sources.site_starts()?) {
+        files[40 * row + 32..40 * row + 40].copy_from_slice(&start.to_le_bytes());
         for (view, content) in [file.path.as_bytes(), &source_positions::encode(&file.text)]
             .into_iter()
             .enumerate()
         {
-            let field = 32 * row + 16 * view;
+            let field = 40 * row + 16 * view;
             let offset = files.len() as u64;
             files[field..field + 8].copy_from_slice(&offset.to_le_bytes());
             files[field + 8..field + 16].copy_from_slice(&(content.len() as u64).to_le_bytes());
             files.extend_from_slice(content);
         }
     }
-    files
+    Ok(files)
 }

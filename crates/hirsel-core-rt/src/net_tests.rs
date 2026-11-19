@@ -71,9 +71,24 @@ fn net_laws_child() {
         },
     };
     // SAFETY: fixture pins configuration, context and registry through all calls.
+    // An activation child runs one test, with the harness waiting for it and
+    // no other code accessing the environment.
     unsafe {
         let owner = hirsel_core_os_process_new(&config);
         assert!(!owner.process.is_null());
+        if law.starts_with("inherited_") {
+            for name in [
+                "LISTEN_PID",
+                "LISTEN_FDS",
+                "LISTEN_FDNAMES",
+                "LISTEN_PIDFDID",
+            ] {
+                assert!(
+                    std::env::var_os(name).is_none(),
+                    "{name} leaked after receipt"
+                );
+            }
+        }
         let run = hirsel_core_os_process_config(owner.process);
         let mut context = Context::new(1 << 20);
         let mut files = Files::default();
@@ -200,8 +215,16 @@ fn inherited_child(listener: &std::net::TcpListener, law: &str) -> std::process:
         ])
         .arg(executable.get_program())
         .args(executable.get_args())
-        .args(["--exact", "net_tests::net_laws_child", "--nocapture"])
+        .args([
+            "--exact",
+            "net_tests::net_laws_child",
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ])
         .env("WIRE_W1A_LAW", law)
+        .env("LISTEN_FDNAMES", "listener")
+        .env("LISTEN_PIDFDID", "1")
         .env(
             "HIRSEL_TEST_LISTEN_PORT",
             listener.local_addr().unwrap().port().to_string(),

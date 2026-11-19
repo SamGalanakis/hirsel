@@ -387,6 +387,8 @@ unsafe extern "C" fn invoke(
 /// # Safety
 /// The generated config, names, source tables, entry and 32-byte revision stay
 /// pinned for the call. Path and identity are NUL-terminated native strings.
+/// Recording with matching socket activation follows the startup and fd
+/// ownership contract of `entry::hirsel_core_os_process_new`.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_run_taped(

@@ -68,7 +68,8 @@ values or widen authority.
 A native launch may supply one inherited TCP listener at descriptor 3 using
 `LISTEN_PID` and `LISTEN_FDS`. The runtime uses activation metadata addressed
 to its PID and requires exactly one listening stream socket. It restores
-close-on-exec on receipt. The first authorized `listen` takes that socket
+close-on-exec and clears `LISTEN_PID`, `LISTEN_FDS`, `LISTEN_FDNAMES` and
+`LISTEN_PIDFDID` on receipt. The first authorized `listen` takes that socket
 without binding or changing its backlog. The socket's actual bound address
 must also pass the calling grant's Listen rule. An IPv6 wildcard listener
 must be IPv6-only so a same-family rule covers every accepted connection.

@@ -159,7 +159,9 @@ typedef struct {
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;
 /* Copies argv, pins directories, duplicates stream descriptors. A failed
-   constructor closes every acquired descriptor. No process owner on error. */
+   constructor closes every acquired descriptor. No process owner on error.
+   Matching socket activation transfers fd 3 and consumes LISTEN_* metadata
+   at startup, before other threads can access the environment. */
 HirselCoreOpenProcess hirsel_core_os_process_new(const HirselCoreOsConfig *);
 /* Named OS entry. parameter_names has one borrowed UTF-8 view per requirement.
    First Dir requires one successful confined openat2 probe before main; no Dir

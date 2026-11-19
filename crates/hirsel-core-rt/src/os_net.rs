@@ -31,8 +31,10 @@ pub(crate) const LISTEN_FD: i32 = 3;
 static LISTENER_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 /// Take custody of the single socket passed to this process by its launcher.
-/// SAFETY: matching activation metadata must designate a descriptor this
-/// process inherited at exec and has not otherwise taken into ownership.
+/// # Safety
+/// Matching activation metadata must designate a descriptor this process
+/// inherited at exec and has not otherwise taken into ownership. Receive
+/// before any other thread can access the process environment.
 pub(crate) unsafe fn receive_listener() -> io::Result<Option<OwnedFd>> {
     let Some(pid) = env::var_os("LISTEN_PID") else {
         return Ok(None);
@@ -59,7 +61,18 @@ pub(crate) unsafe fn receive_listener() -> io::Result<Option<OwnedFd>> {
     unsafe {
         retry(|| libc::fcntl(LISTEN_FD, libc::F_SETFD, libc::FD_CLOEXEC) as isize)
             .map_err(io::Error::from_raw_os_error)?;
-        Ok(Some(OwnedFd::from_raw_fd(LISTEN_FD)))
+        let listener = OwnedFd::from_raw_fd(LISTEN_FD);
+        // SAFETY: the launch receives the socket before any other thread can
+        // access the environment. Leave no activation metadata for children.
+        for name in [
+            "LISTEN_PID",
+            "LISTEN_PIDFDID",
+            "LISTEN_FDS",
+            "LISTEN_FDNAMES",
+        ] {
+            env::remove_var(name);
+        }
+        Ok(Some(listener))
     }
 }
 

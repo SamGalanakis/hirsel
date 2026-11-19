@@ -195,6 +195,8 @@ impl StartupError {
 }
 impl OsProcess {
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
+    /// Matching socket activation metadata is consumed during process startup,
+    /// before other threads can access the environment.
     unsafe fn new(
         input: &OsConfig,
         probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
@@ -385,6 +387,8 @@ impl OsProcess {
 /// UTF-8 argv and pins paths/stream descriptors. Failure closes every prefix.
 /// # Safety
 /// Config/input tables are borrowed only for this call, with exact extents.
+/// For a matching socket activation, call at process startup before other
+/// threads can access the environment. The launcher transfers ownership of fd 3.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_process_new(config: *const OsConfig) -> OpenProcess {
     // SAFETY: constructor copies/pins all configuration before returning its owner.
@@ -457,6 +461,8 @@ unsafe extern "C" fn describe(state: *mut u8, cause: *const crate::causes::Cause
 /// line with status 103. Parameter names correspond to OsConfig.parameters.
 /// # Safety
 /// All input/name views remain borrowed for this call; entry follows the run ABI.
+/// Matching socket activation has the same startup and fd ownership contract
+/// as `hirsel_core_os_process_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_run(
     input: *const OsConfig,

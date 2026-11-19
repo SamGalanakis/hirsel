@@ -209,37 +209,22 @@ fn new_finder(size: u64) -> Result[Finder, Capacity] {
     Ok(take f)
 }
 
-type Frame {
-    ordinal: u64,
-    edge: u64
-}
-
-fn enter(graph: Graph, mut f: Finder, mut path: List[Frame], block: u64, ordinal: u64) -> Result[(), Capacity] {
-    f.nodes[ordinal] = UnionNode(parent: ordinal, block: Some(block), loop_id: None, ordinal: ordinal)
-    numbers_pool.put(mut f.number, block, ordinal)?
-    result.capacity_only(list.push(mut path, Frame(ordinal: ordinal, edge: graph.blocks[block].outgoing.head)))
-}
-
-fn dfs(graph: Graph, mut f: Finder) -> Result[(), Capacity] {
-    let mut path: List[Frame] = list.new()
-    let mut last = 0u64
-    enter(graph, mut f, mut path, 0, last)?
-    while list.len(path) != 0 {
-        let head = list.len(path) - 1
-        let frame = path[head]
-        if frame.edge == NONE {
-            f.last[frame.ordinal] = last
-            let _ = list.pop(mut path)
-        } else {
-            let target = graph.links[frame.edge].value
-            path[head].edge = graph.links[frame.edge].next
-            if numbers_pool.get(f.number, target) == Some(UNVISITED) {
-                last += 1
-                enter(graph, mut f, mut path, target, last)?
-            }
+// Upstream's recursive doDFS: number `block` with `current`, then each unvisited
+// successor with the next ordinal; returns the last ordinal in its subtree.
+fn dfs(graph: Graph, mut f: Finder, block: u64, current: u64) -> Result[u64, Capacity] {
+    f.nodes[current] = UnionNode(parent: current, block: Some(block), loop_id: None, ordinal: current)
+    numbers_pool.put(mut f.number, block, current)?
+    let mut last = current
+    let mut edge = graph.blocks[block].outgoing.head
+    while edge != NONE {
+        let target = graph.links[edge].value
+        edge = graph.links[edge].next
+        if numbers_pool.get(f.number, target) == Some(UNVISITED) {
+            last = dfs(graph, mut f, target, last + 1)?
         }
     }
-    Ok(())
+    f.last[current] = last
+    Ok(last)
 }
 
 fn ancestor(f: Finder, w: u64, v: u64) -> bool {
@@ -354,7 +339,7 @@ fn find_loops(graph: Graph, mut forest: Forest) -> Result[(), Capacity] {
             numbers_pool.put(mut f.number, i, UNVISITED)?
         }
     }
-    dfs(graph, mut f)?
+    let _ = dfs(graph, mut f, 0, 0)?
     identify_edges(graph, mut f, size)?
     f.header[0] = 0
     let mut w = size

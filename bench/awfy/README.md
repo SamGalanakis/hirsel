@@ -13,8 +13,8 @@ Rust uses the complete community port in Resid revision
 The ports follow the AWFY JavaScript algorithms. Richards and DeltaBlue use
 variants for task and constraint dispatch. Graph links use indices into the
 run's owning collections. Havlak keeps the suite's bucket dictionary and
-predecessor sets. Hirsel uses explicit DFS frames to fit the native stack
-limit. Goose uses pools for data whose lifetime spans the traversal. Json
+predecessor sets, and both Hirsel variants recurse in the DFS as upstream does.
+Goose uses pools for data whose lifetime spans the traversal. Json
 builds a tree with the suite's parser and object hash index. The build extracts
 the RAP document directly from upstream. CD uses the suite's red-black tree and
 voxel traversal. Hirsel uses fdlibm's medium-range trigonometric kernels over

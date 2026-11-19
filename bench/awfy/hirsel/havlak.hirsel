@@ -180,39 +180,21 @@ fn new_finder(size: u64) -> Result[Finder, Capacity] {
     Ok(take f)
 }
 
-type Frame {
-    block: u64,
-    ordinal: u64,
-    edge: u64
-}
-
-fn enter(mut f: Finder, mut path: List[Frame], block: u64, ordinal: u64) -> Result[(), Capacity] {
-    f.nodes[ordinal] = UnionNode(parent: ordinal, block: Some(block), loop_id: None, ordinal: ordinal)
-    numbers.put(mut f.number, block, ordinal)?
-    result.capacity_only(list.push(mut path, Frame(block: block, ordinal: ordinal, edge: 0)))
-}
-
-fn dfs(graph: Graph, mut f: Finder) -> Result[(), Capacity] {
-    let mut path: List[Frame] = list.new()
-    let mut last = 0u64
-    enter(mut f, mut path, 0, last)?
-    while list.len(path) != 0 {
-        let head = list.len(path) - 1
-        let frame = path[head]
-        let targets = graph.blocks[frame.block].outgoing
-        if frame.edge == list.len(targets) {
-            f.last[frame.ordinal] = last
-            let _ = list.pop(mut path)
-        } else {
-            let target = targets[frame.edge]
-            path[head].edge += 1
-            if numbers.get(f.number, target) == Some(UNVISITED) {
-                last += 1
-                enter(mut f, mut path, target, last)?
-            }
+// Upstream's recursive doDFS: number `block` with `current`, then each unvisited
+// successor with the next ordinal; returns the last ordinal in its subtree.
+fn dfs(graph: Graph, mut f: Finder, block: u64, current: u64) -> Result[u64, Capacity] {
+    f.nodes[current] = UnionNode(parent: current, block: Some(block), loop_id: None, ordinal: current)
+    numbers.put(mut f.number, block, current)?
+    let mut last = current
+    let targets = graph.blocks[block].outgoing
+    for i in 0 .. list.len(targets) {
+        let target = targets[i]
+        if numbers.get(f.number, target) == Some(UNVISITED) {
+            last = dfs(graph, mut f, target, last + 1)?
         }
     }
-    Ok(())
+    f.last[current] = last
+    Ok(last)
 }
 
 fn ancestor(f: Finder, w: u64, v: u64) -> bool {
@@ -322,7 +304,7 @@ fn find_loops(graph: Graph, mut loops: List[SimpleLoop]) -> Result[(), Capacity]
             numbers.put(mut f.number, i, UNVISITED)?
         }
     }
-    dfs(graph, mut f)?
+    let _ = dfs(graph, mut f, 0, 0)?
     identify_edges(graph, mut f, size)?
     f.header[0] = 0
     let mut w = size

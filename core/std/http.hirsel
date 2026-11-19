@@ -27,7 +27,7 @@ pub opaque type Response: send {
     invalid: bool
 }
 
-pub type ResponseError: send = StatusInvalid | HeaderReserved | HeaderInvalid | HeadTooLarge | InvalidUpgrade | InvalidStream | Allocation(Capacity)
+pub type ResponseError: send = StatusInvalid | HeaderReserved | HeaderInvalid | HeadTooLarge | InvalidUpgrade | InvalidStream | Allocation(Capacity) | DateInvalid
 
 pub type HandlerError = ResponseError
 
@@ -156,43 +156,40 @@ fn decimal(mut out: Bytes, n: u64, width: u64) -> Result[(), ResponseError] {
     }
 }
 
-// Days since the Unix epoch to a Gregorian civil date, using a March-based
-// 400-year era (Howard Hinnant, civil_from_days). IMF-fixdate uses UTC.
+// IMF-fixdate uses UTC and a four-digit year. Refuse at the Date field before
+// appending it when the wall time is outside std.time's timestamp range.
 fn date_field(mut out: Bytes, wall_ms: u64) -> Result[(), ResponseError] {
-    let seconds = wall_ms / 1000
-    let days = seconds / 86400
-    let weekdays =["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
+    let Some(stamp) = time.from_unix_ms(wall_ms) else {
+        return Error(DateInvalid)
+    }
+    // A valid UTC timestamp has a civil reading at offset zero.
+    let utc = option.unwrap(time.civil(stamp, 0))
+    let date = time.date_of(utc)
+    let weekday = match time.weekday(date) {
+        Monday => "Mon",
+        Tuesday => "Tue",
+        Wednesday => "Wed",
+        Thursday => "Thu",
+        Friday => "Fri",
+        Saturday => "Sat",
+        Sunday => "Sun",
+    }
     let months =["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    let z = days + 719468
-    let doe = z % 146097
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
-    let mp = (5 * doy + 2) / 153
-    let day = doy - (153 * mp + 2) / 5 + 1
-    let month = if mp < 10 {
-        mp + 3
-    } else {
-        mp - 9
-    }
-    let year = z / 146097 * 400 + yoe + if month <= 2 {
-        1
-    } else {
-        0
-    }
+    let month: u64 = int.widen(time.month(date))
     head_text(mut out, "Date: ")?
-    head_text(mut out, weekdays[days % 7])?
+    head_text(mut out, weekday)?
     head_text(mut out, ", ")?
-    decimal(mut out, day, 2)?
+    decimal(mut out, int.widen(time.day(date)), 2)?
     head_text(mut out, " ")?
     head_text(mut out, months[month - 1])?
     head_text(mut out, " ")?
-    decimal(mut out, year, 4)?
+    decimal(mut out, int.widen(time.year(date)), 4)?
     head_text(mut out, " ")?
-    decimal(mut out, seconds / 3600 % 24, 2)?
+    decimal(mut out, int.widen(time.hour(utc)), 2)?
     head_text(mut out, ":")?
-    decimal(mut out, seconds / 60 % 60, 2)?
+    decimal(mut out, int.widen(time.minute(utc)), 2)?
     head_text(mut out, ":")?
-    decimal(mut out, seconds % 60, 2)?
+    decimal(mut out, int.widen(time.second(utc)), 2)?
     head_text(mut out, " GMT\r\n")
 }
 
@@ -217,7 +214,6 @@ fn append_date(mut out: Bytes, wall_ms: u64, mut cache: DateCache) -> Result[(),
     let start = list.len(out)
     date_field(mut out, wall_ms)?
     let n = list.len(out) - start
-    // A u64 millisecond timestamp has at most a nine-digit year.
     for i in 0u64 .. n {
         cache.data[i] = out[start + i]
     }

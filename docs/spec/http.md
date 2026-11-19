@@ -361,7 +361,7 @@ The writer owns `out_cap` bytes and a cursor `committed`: the count of response 
 
 **Ready batches.** The connection serves up to 16 ready pipelined requests, then calls `task.check_cancel()`. That is a recorded scheduling point (CONC-10), so a connection that pipelines heavily lets the others run. This is the event-order form of hyper's 16 iterations. It does not bound one handler's own computation (HTTP-5).
 
-**Date.** `Date` is formatted from one `host.wall_ms` read per response head. RFC 9110 §6.6.1 Date is wall time, which a monotonic reading cannot give. The read is a recorded input (§5).
+**Date.** `Date` is formatted from one `host.wall_ms` read per response head. RFC 9110 §6.6.1 Date is wall time, which a monotonic reading cannot give. The read is a recorded input (§5). The writer uses `std.time.from_unix_ms` for the calendar range. At Date-field encoding it returns `DateInvalid` before appending any part of that field if the timestamp is outside that range. IMF-fixdate requires a four-digit year (RFC 9110 §5.6.7).
 
 ### HTTP-10: Outcomes
 

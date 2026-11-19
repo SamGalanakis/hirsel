@@ -51,6 +51,9 @@ through 599. `header(mut response, take name, take value)` appends a field
 after checking HTTP field syntax. It refuses Content-Length, Transfer-Encoding
 and Connection case-insensitively with `HeaderReserved`. Invalid status and
 field syntax return `StatusInvalid` and `HeaderInvalid` respectively.
+While encoding the response head, HTTP returns `DateInvalid` at the Date
+field when the clock falls outside `std.time.from_unix_ms`. The refusal
+occurs before the writer appends any part of that field.
 
 `framing(bytes, head, body_max)` reads the parsed field offsets once and returns
 `Empty`, `ContentLength(n)` or `Chunked`. It rejects TE+CL, repeated or listed

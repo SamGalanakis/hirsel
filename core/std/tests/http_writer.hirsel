@@ -37,7 +37,20 @@ fn http_response_wire_head() -> bool {
             return false
         }
     }
-    true
+    // The 8,030 years from 1970 through 9999 contain 2,007 - 80 + 20 leap
+    // days, so year 10000 starts after 2,932,897 days. Its first millisecond
+    // is 2,932,897 * 86,400 * 1,000. The previous day is Friday because
+    // 2,932,896 mod 7 is 1 and the epoch was Thursday.
+    let last = "HTTP/1.0 204 No Content\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nDate: Fri, 31 Dec 9999 23:59:59 GMT\r\n\r\n"
+    result.unwrap(response_head(mut out, r, 0, false, 253402300799999, mut cache))
+    if out != string.as_bytes(last) {
+        return false
+    }
+    let prefix = "HTTP/1.0 204 No Content\r\nContent-Type: application/json\r\nConnection: keep-alive\r\n"
+    if let Error(DateInvalid) = response_head(mut out, r, 0, false, 253402300800000, mut cache) {
+        return out == string.as_bytes(prefix) && cache.second == Some(253402300799)
+    }
+    false
 }
 
 // HTTP-4(8): validate both authorities and use the one in an absolute-form target.

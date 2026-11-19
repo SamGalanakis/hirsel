@@ -1619,8 +1619,17 @@ fn generic_templates_survive_disk_reuse_and_materialize_the_call_closure() {
         let key = reached.materialized.named(&path, &["u64"]).unwrap();
         assert!(keys.contains(&key));
         let source = cached.demand(&path).unwrap();
-        let template = source.check.template.as_ref().unwrap();
-        assert!(!template.copies.is_empty());
+        assert!(source.check.template.is_some());
+        // T's held size is a layout relocation the instance resolves.
+        assert!(
+            source.ir().unwrap().functions[source.check.function.unwrap().index()]
+                .body
+                .as_ref()
+                .unwrap()
+                .insts
+                .iter()
+                .any(|i| matches!(i, hirsel_core_ir::Inst::LayoutConst { .. }))
+        );
         let ir = reached.materialized.get(&key).ir().unwrap();
         let layouts = hirsel_core_layout::compute(&ir.types).unwrap();
         let object = hirsel_cranelift::core::emit_object_with_layouts(

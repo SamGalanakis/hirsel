@@ -1737,3 +1737,139 @@ fn test_atomic_migration(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     result.unwrap(std.dir.remove_all(parent, name))
     if good { Ok(()) } else { Error(()) }
 }
+
+// L26 and L32. A note key's high byte is the owner and its low 56 bits
+// are the owner's note number. Only the authority table can grant that range.
+type ScopedHandles: send { notes: store.Table[u64, u64], members: store.Table[u64, u64] }
+type ScopedRegistry = runner.Registry[(), ScopedHandles]
+
+fn scoped_handles(schema: store.Schema) -> Result[ScopedHandles, store.Error] {
+    let notes = store.schema_table(schema, "notes", std.codec.key_u64(), std.codec.of_u64())?
+    let members = store.schema_table(schema, "members", std.codec.key_u64(), std.codec.of_u64())?
+    Ok(ScopedHandles(notes: take notes, members: take members))
+}
+
+fn scoped_migrate(mut plan: store.Migration) -> Result[(), store.Error] {
+    store.migration_create_table(mut plan, store.spec("notes", std.codec.key_u64(), std.codec.of_u64()))?
+    store.migration_create_table(mut plan, store.spec("members", std.codec.key_u64(), std.codec.of_u64()))
+}
+
+fn scoped_policy(tx: store.Tx, caller: runner.Caller) -> Result[store.KeyScope, Capacity] {
+    let owner: u64 = int.widen(caller.subject[0])
+    if owner == 0u64 { return Ok(store.everything(tx)) }
+    let members = result.unwrap(store.catalog_table(tx, "members", std.codec.key_u64(), std.codec.of_u64()))
+    let notes = result.unwrap(store.catalog_table(tx, "notes", std.codec.key_u64(), std.codec.of_u64()))
+    let low = owner << 56u64
+    let granted = result.unwrap(store.fetch(tx, store.shape(members), owner)) == Some(1u64)
+    let high: store.Bound[u64] = if granted { Included(low | 0x00ff_ffff_ffff_ffffu64) } else { Excluded(low) }
+    match store.scope_keys(notes, Included(low), high, ReadWrite) {
+        Ok(take scope) => Ok(take scope),
+        Error(Full(room)) => Error(room),
+        Error(_) => fail("caller scope: invalid note range"),
+    }
+}
+
+fn scoped_write(mut tx: store.Tx, hd: ScopedHandles, caller: runner.Caller, take key: u64) -> Result[u64, u32] {
+    let owner: u64 = int.widen(caller.subject[0])
+    match store.put(mut tx, hd.notes, key, owner) {
+        Ok(()) => Ok(owner),
+        Error(OutOfScope) => Error(17u32),
+        Error(_) => fail("caller scope: unexpected note write failure"),
+    }
+}
+
+fn scoped_revoke(mut tx: store.Tx, hd: ScopedHandles, caller: runner.Caller, take owner: u64) -> Result[u64, u32] {
+    if caller.subject[0] != 0u8 { return Error(18u32) }
+    if result.unwrap(store.delete(mut tx, hd.members, owner)) { Ok(owner) } else { Error(19u32) }
+}
+
+fn scoped_fault(mut tx: store.Tx, hd: ScopedHandles, caller: runner.Caller, take key: u64) -> Result[u64, u32] {
+    if result.unwrap(store.fetch(tx, store.shape(hd.notes), key)) == Some(1u64) {
+        let no_rows: List[u64] = list.new()
+        return Ok(no_rows[0])
+    }
+    Ok(0u64)
+}
+
+fn scoped_place(mut r: ScopedRegistry) -> Result[(), runner.RegisterError] {
+    let mut reads: List[String] = list.new()
+    result.unwrap(list.push(mut reads, "members"))
+    runner.policy(mut r, code.describe(scoped_policy), reads, 65536u64, 8192u64)?
+    runner.transact(mut r, code.describe(scoped_write), 65536u64, 8192u64)?
+    runner.transact(mut r, code.describe(scoped_revoke), 65536u64, 8192u64)?
+    runner.transact(mut r, code.describe(scoped_fault), 65536u64, 8192u64)
+}
+
+type ScopedDriver: send { head: Sender[runner.Req], snapshots: Latest[store.Snapshot], notes: store.Shape[u64, u64], revoke: bool }
+
+fn scoped_send(d: ScopedDriver, owner: u8, stream: u32, f: StaticFn[fn(mut store.Tx, ScopedHandles, runner.Caller, take u64) -> Result[u64, u32]], arg: u64) -> runner.Outcome waits {
+    let mut subject: Bytes = list.new()
+    result.unwrap(list.push(mut subject, owner))
+    let caller = store.Caller(issuer: 1u8, subject: take subject)
+    let name = result.unwrap(runner.stream_key(caller, stream))
+    let key = key_of(code.identity(f), std.codec.of_u64(), reply())
+    let (to, from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = result.unwrap(channel.new(1u64))
+    result.unwrap(channel.send(d.head, runner.head_request(take caller, take name, 0u64, take key, u64_arg(arg), take to)))
+    let delivery = option.unwrap(runner.head_outcome(result.unwrap(channel.receive(from))))
+    let runner.KeyedDone(outcome: take outcome, ..) = take delivery
+    take outcome
+}
+
+fn drive_scoped(take d: ScopedDriver) -> () waits {
+    let a = 1u64 << 56u64
+    let b = 2u64 << 56u64
+    let entry = code.describe(scoped_write)
+    let before = latest.read(d.snapshots)
+    let denied = scoped_send(d, 1u8, 0u32, entry, b)
+    want(err_value(denied) == Some(17u32), "caller scope: A may not write B's note")
+    let after = latest.read(d.snapshots)
+    want(result.unwrap(store.get(after, d.notes, b)) == None, "caller scope: B's note remains absent")
+    want(list.len(result.unwrap(store.changes(before, after))) == 0u64, "caller scope: denied call changed no data key")
+    let a_reply = scoped_send(d, 1u8, 1u32, entry, a)
+    want(ok_value(a_reply) == Some(1u64), "caller scope: A owns its note")
+    let b_reply = scoped_send(d, 2u8, 1u32, entry, b)
+    want(ok_value(b_reply) == Some(2u64), "caller scope: B owns its note")
+    if !d.revoke { return }
+    let fault = code.describe(scoped_fault)
+    want(is(scoped_send(d, 1u8, 2u32, fault, a), Failed(Raised(2u32))), "caller scope: A's fault detail reflects its note")
+    let revoked = scoped_send(d, 0u8, 0u32, code.describe(scoped_revoke), 1u64)
+    want(ok_value(revoked) == Some(1u64), "caller scope: admin revoked A")
+    want(is(scoped_send(d, 1u8, 1u32, entry, a), Withheld), "caller scope: A's duplicate must be withheld")
+    want(is(scoped_send(d, 1u8, 2u32, fault, a), Withheld), "caller scope: A's duplicate fault must be withheld")
+    want(is(scoped_send(d, 2u8, 1u32, entry, b), b_reply), "caller scope: B's duplicate is unchanged")
+}
+
+fn scoped_case(c: Clock, r: Random, tasks: Tasks, revoke: bool) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(scoped_migrate)))
+    let hd = result.unwrap(store.with_schema(db, code.describe(scoped_handles)))
+    let seeded = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, hd.members, 1u64, 1u64)?
+        store.put(mut tx, hd.members, 2u64, 1u64)
+    }))
+    if let Committed(_) = seeded {} else { return false }
+    let branch = store.main_branch(db)
+    let snapshots = result.unwrap(store.follow(mut db, branch))
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(4u64))
+    let mail = result.unwrap(runner.mailbox(4u64))
+    let driving = result.unwrap(task.spawn(tasks, bytes 1048576u64, ScopedDriver(head: take head, snapshots: take snapshots, notes: store.shape(hd.notes), revoke: revoke), drive_scoped))
+    let ended = runner.place_head(take db, code.describe(scoped_place), N_PLACE, code.describe(already_migrated), code.describe(scoped_handles), take inbox, take mail, tasks, 1048576u64)
+    let drove = task.join(take driving)
+    match (take ended, take drove) { (Ok(()), Ok(())) => true, _ => false }
+}
+
+fn already_migrated(mut phase: store.Migration) -> Result[(), store.Error] { Ok(()) }
+
+pub fn law_scope_bound_to_caller(c: Clock, r: Random, tasks: Tasks) -> bool waits { scoped_case(c, r, tasks, false) }
+
+pub fn law_withheld_after_revocation(c: Clock, r: Random, tasks: Tasks) -> bool waits { scoped_case(c, r, tasks, true) }
+
+@test
+fn test_scope_bound_to_caller(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_scope_bound_to_caller(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_withheld_after_revocation(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_withheld_after_revocation(c, r, tasks) { Ok(()) } else { Error(()) }
+}

@@ -21,13 +21,20 @@ pub fn rx5_threshold() -> u64 {
     regex_step_thresholds()
 }
 
+pub fn rx5_fixed_capture_threshold() -> u64 {
+    regex_fixed_capture_threshold()
+}
+
 pub fn rx5_main(out: Stdout) -> Result[(), Exit] waits {
     let threshold = regex_step_thresholds()
-    if threshold == 0 || !regex_cache_refusal() {
+    let fixed_capture = regex_fixed_capture_threshold()
+    if threshold == 0 || fixed_capture == 0 || !regex_cache_refusal() {
         return Error(Exit(status: 1))
     }
     let mut answer = "RX5 threshold "
     result.unwrap(string.push_u64(mut answer, threshold))
+    result.unwrap(string.push(mut answer, " "))
+    result.unwrap(string.push_u64(mut answer, fixed_capture))
     result.unwrap(string.push(mut answer, "\\n"))
     result.unwrap(stdout.write(out, answer))
     Ok(())
@@ -97,6 +104,10 @@ def run(compiler, runtime, evaluator):
             assert threshold["kind"] == "returned" and len(threshold["values"]) == 1, threshold
             (steps,) = threshold["values"]
             assert steps > 0
+            fixed = evaluate(engine, cfg, entry + "rx5_fixed_capture_threshold")["outcome"]
+            assert fixed["kind"] == "returned" and len(fixed["values"]) == 1, fixed
+            (capture_steps,) = fixed["values"]
+            assert capture_steps > 0
 
             app, _ = application("caught", """pub fn main(out: Stdout) -> Result[(), Exit] waits {
     std.regex.rx5_main(out)
@@ -106,11 +117,12 @@ def run(compiler, runtime, evaluator):
             for backend in ("cranelift", "llvm"):
                 extra = ["--record", tape] if backend == "cranelift" else []
                 result = invoke("run", app, backend, "--grant", "Stdout", *extra)
-                assert result.returncode == 0 and result.stdout == f"RX5 threshold {steps}\n", result
+                assert result.returncode == 0 and result.stdout == f"RX5 threshold {steps} {capture_steps}\n", result
                 result = invoke("replay", app, backend, "--tape", tape)
                 assert result.returncode == 0, result
             thresholds = [(steps >> (16 * i)) & 65535 for i in range(4)]
-            print(f"RX3 three exact refusals. RX5 caught thresholds {thresholds} on all engines and replay.", flush=True)
+            print(f"RX3 three exact refusals. RX5 caught thresholds {thresholds} and fixed capture "
+                  f"{capture_steps} on all engines and replay.", flush=True)
 
             app_package = {"name": "app", "version": "1"}
             inputs["packages"].append({

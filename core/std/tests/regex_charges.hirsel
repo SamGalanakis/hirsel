@@ -248,6 +248,70 @@ fn regex_dfa_steps() -> bool {
     regex_step_thresholds() != 0
 }
 
+fn fixed_capture_trial(re: Regex, budget: u64) -> Option[bool] {
+    let c = result.unwrap(cache(re, 0))
+    let g = result.unwrap(groups(re))
+    let start = cursor(0)
+    let subject = "xé界éaaa界"
+    let observed = bound steps budget {
+        let mut inside = take c
+        let mut captured = take g
+        let mut k = start
+        let found = next_captures(re, mut inside, subject, mut k, mut captured)
+        (take inside, take captured, k, found)
+    }
+    match take observed {
+        Ok((take used, take filled, k, found)) => {
+            let mut resumed_cache = take used
+            let mut captured = take filled
+            let mut resumed = k
+            if !found || group(captured, 0) != Some(Match(start: 1, end: 6)) || group(captured, 1) != Some(Match(start: 3, end: 3)) {
+                return None
+            }
+            let second = next_captures(re, mut resumed_cache, subject, mut resumed, mut captured)
+            if second && group(captured, 0) == Some(Match(start: 6, end: 14)) && group(captured, 1) == Some(Match(start: 8, end: 11)) {
+                Some(true)
+            } else {
+                None
+            }
+        },
+        Error(e) => if e.steps == budget {
+            Some(false)
+        } else {
+            None
+        },
+    }
+}
+
+fn regex_fixed_capture_threshold() -> u64 {
+    let re = result.unwrap(new("é(?<body>a*?)界"))
+    let mut low: u64 = 0
+    let mut high: u64 = 65535
+    if fixed_capture_trial(re, low) != Some(false) || fixed_capture_trial(re, high) != Some(true) {
+        return 0
+    }
+    while high - low > 1 {
+        let budget = low + (high - low) / 2
+        match fixed_capture_trial(re, budget) {
+            Some(true) => {
+                high = budget
+            },
+            Some(false) => {
+                low = budget
+            },
+            None => {
+                return 0
+            },
+        }
+    }
+    high
+}
+
+// expect: run regex_fixed_capture_steps() = true
+fn regex_fixed_capture_steps() -> bool {
+    regex_fixed_capture_threshold() != 0
+}
+
 fn regex_worker(take input: Arc[Regex]) -> Option[Match] {
     let mut local = result.unwrap(cache(input, 0))
     find(input, mut local, "xa", 0)

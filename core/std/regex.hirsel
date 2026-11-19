@@ -1996,6 +1996,11 @@ type NfaEdge: key {
     target: u32
 }
 
+type CaptureOffsets: key {
+    prefix: u64,
+    suffix: u64,
+}
+
 pub opaque type Regex: shareable + send {
     owner: Unique,
     forward: List[NfaState],
@@ -2009,6 +2014,7 @@ pub opaque type Regex: shareable + send {
     pref_reverse_start: u64,
     charge: u64,
     group_count: u64,
+    capture_offsets: Option[CaptureOffsets],
     class_count: u64,
     start: u64,
     reverse_start: u64,
@@ -3488,12 +3494,47 @@ pub fn new(pattern: String) -> Result[Regex, Error] {
     compile_new(pattern, take hir)
 }
 
+// One mandatory capture with fixed-width neighbors is determined by the
+// whole match. Its body can still contain choices and repetitions.
+fn fixed_capture_offsets(h: Hir, highest_group: u64) -> Option[CaptureOffsets] {
+    let root = read(h.nodes, 0)
+    if highest_group != 1 || root.more != 0 {
+        return None
+    }
+    let mut prefix: u64 = 0
+    let mut suffix: u64 = 0
+    let mut found = false
+    let mut id = root.first
+    while id != 0 {
+        let n = read(h.nodes, id)
+        if n.kind == LITERAL {
+            let width = utf8_width(n.a)
+            if found {
+                suffix += width
+            } else {
+                prefix += width
+            }
+        } else if n.kind == CAPTURE && n.a == 1 && !found {
+            found = true
+        } else {
+            return None
+        }
+        id = n.successor
+    }
+    if found {
+        Some(CaptureOffsets(prefix: prefix, suffix: suffix))
+    } else {
+        None
+    }
+}
+
 fn compile_new(pattern: String, take input_hir: Hir) -> Result[Regex, Error] {
     let mut hir = take input_hir
     let f = sized_alts(hir, 0, false)?
     let r = sized_alts(hir, 0, true)?
     let nf = FORWARD_BASE + f.states
     let nr = REVERSE_BASE + r.states
+    let offsets = fixed_capture_offsets(hir, f.pgroup)
     let mut candidates = Needles(values:[Needle(items:[0; 8], width: 0, exact: false); 250], linear:[0; 100], end: 0, full: false)
     let plan = choose_prefilter(hir, mut candidates)
     let mut ns = NameLayout(total_count: 0, length: 0)
@@ -3536,7 +3577,7 @@ fn compile_new(pattern: String, take input_hir: Hir) -> Result[Regex, Error] {
     }
     let Assembler(fw: take f_program, rv: take r_program, sparse_edges: take transitions, has_look: has_look, quit_non_ascii: quit, pref_start: pre_reverse, ..) = take a
     let NameTable(index: take name_index, text: take name_text, ..) = take metadata
-    Ok(Regex(owner: unique.new(), forward: take f_program, reverse: take r_program, edges: take transitions, class_map: take map, names: take name_index, name_text: take name_text, prefilter: take pref, pref_plan: plan, pref_reverse_start: pre_reverse, charge: charge, group_count: f.pgroup + 1, class_count: classes, start: unanchored, reverse_start: anchored_r, can_empty: f.can_empty, has_look: has_look, quit_non_ascii: quit))
+    Ok(Regex(owner: unique.new(), forward: take f_program, reverse: take r_program, edges: take transitions, class_map: take map, names: take name_index, name_text: take name_text, prefilter: take pref, pref_plan: plan, pref_reverse_start: pre_reverse, charge: charge, group_count: f.pgroup + 1, capture_offsets: offsets, class_count: classes, start: unanchored, reverse_start: anchored_r, can_empty: f.can_empty, has_look: has_look, quit_non_ascii: quit))
 }
 
 const ABSENT: u64 = 0xFFFFFFFFFFFFFFFF
@@ -4697,21 +4738,31 @@ fn match_span(re: Regex, mut c: Cache, s: String, at: u64) -> Result[Option[Matc
 
 fn search(re: Regex, mut c: Cache, s: String, at: u64, groups_wanted: u64) -> Option[Match] {
     let width = string.byte_len(s)
+    let vm_groups: u64 = if re.capture_offsets != None {
+        1
+    } else {
+        groups_wanted
+    }
     match match_span(re, mut c, s, at) {
         Ok(None) => None,
         Ok(Some(span)) => {
-            if groups_wanted > 1 {
-                return pike_search(re, mut c, s, span.start, span.end, re.start - 1, groups_wanted)
+            if vm_groups > 1 {
+                return pike_search(re, mut c, s, span.start, span.end, re.start - 1, vm_groups)
             }
             Some(span)
         },
-        Error(()) => pike_search(re, mut c, s, at, width, re.start, groups_wanted),
+        Error(()) => pike_search(re, mut c, s, at, width, re.start, vm_groups),
     }
 }
 
 fn publish_groups(re: Regex, c: Cache, mut g: Groups, span: Match) {
     g.spans[0] = span.start
     g.spans[1] = span.end
+    if let Some(offsets) = re.capture_offsets {
+        g.spans[2] = span.start + offsets.prefix
+        g.spans[3] = span.end - offsets.suffix
+        return
+    }
     let mut i: u64 = 1
     while i < re.group_count {
         let lo = read_slot(c.work, c.slices.saved + 4 * i)

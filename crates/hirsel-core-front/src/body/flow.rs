@@ -18,51 +18,57 @@ pub struct Violation {
 }
 
 impl Cx<'_, '_, '_> {
-    fn add_flow_violation(&mut self, n: NodeId, when: u64, message: String) {
+    fn add_flow_violation(&mut self, n: NodeId, when: u64, message: impl FnOnce(&Self) -> String) {
         let at = self.span(n).start;
         // Keep the earliest witness for a fixed violation or a set of parameters.
-        let violations = &mut self.out.flow.violations;
-        if let Some(found) = violations.iter_mut().find(|v| v.when == when) {
-            if at < found.at {
-                *found = Violation { at, when, message };
-            }
+        let violations = &self.out.flow.violations;
+        let found = violations.iter().position(|v| v.when == when);
+        if found.is_some_and(|i| violations[i].at <= at) {
+            return;
+        }
+        let violation = Violation {
+            at,
+            when,
+            message: message(self),
+        };
+        if let Some(i) = found {
+            self.out.flow.violations[i] = violation;
         } else {
-            violations.push(Violation { at, when, message });
+            self.out.flow.violations.push(violation);
         }
     }
 
     pub(super) fn flow_expression(&mut self, n: NodeId, ty: TyId) {
-        let (holds, parameters) = holds_components(&self.p.decls, &self.t, ty);
+        if ty <= HOLE {
+            return;
+        }
+        let (holds, parameters) = *self
+            .flow_holds
+            .entry(ty)
+            .or_insert_with(|| holds_components(&self.p.decls, &self.t, ty));
         let holds = holds & (H_RESOURCE | H_CAPABILITY);
         if holds != 0 || parameters != 0 {
-            let shown = self.shown(ty);
-            let name = &self.fd.path;
-            self.add_flow_violation(
-                n,
-                if holds != 0 { 0 } else { parameters },
+            let when = if holds != 0 { 0 } else { parameters };
+            self.add_flow_violation(n, when, |cx| {
+                let shown = cx.shown(ty);
+                let name = &cx.fd.path;
                 format!(
                     "an expression in `{name}` has type `{shown}` holding a resource or capability"
-                ),
-            );
+                )
+            });
         }
     }
 
     pub(super) fn flow_callable(&mut self, n: NodeId) {
-        let name = &self.fd.path;
-        self.add_flow_violation(
-            n,
-            0,
-            format!("a call in `{name}` goes through a callable value"),
-        );
+        self.add_flow_violation(n, 0, |cx| {
+            format!("a call in `{}` goes through a callable value", cx.fd.path)
+        });
     }
 
     pub(super) fn flow_waits(&mut self, n: NodeId) {
-        let name = &self.fd.path;
-        self.add_flow_violation(
-            n,
-            0,
-            format!("a closure written in `{name}` is declared `waits`"),
-        );
+        self.add_flow_violation(n, 0, |cx| {
+            format!("a closure written in `{}` is declared `waits`", cx.fd.path)
+        });
     }
 
     pub(super) fn flow_stage(&mut self, argument: NodeId, value: Option<ValueId>) {

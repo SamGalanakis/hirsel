@@ -1121,6 +1121,7 @@ struct Cx<'c, 'a, 'e> {
     /// `code.identity` or `code.callable` of one reads no descriptor.
     static_fns: HashMap<ValueId, (FuncId, hirsel_core_ir::StaticId, u64)>,
     flow_literals: HashSet<ValueId>,
+    flow_holds: HashMap<TyId, (u8, u64)>,
     /// The growth path is cold (growth.rs).
     growth: growth::Growth,
     /// The signature a source body's entry was emitted against. A row first mentioned
@@ -1285,6 +1286,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             func: None,
             static_fns: HashMap::default(),
             flow_literals: HashSet::default(),
+            flow_holds: HashMap::default(),
             growth: growth::Growth::default(),
             emitted: None,
             ir_item,

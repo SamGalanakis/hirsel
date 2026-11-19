@@ -1993,6 +1993,7 @@ fn static_bytes_preserve_budget_law() {
 fn simd_sem_11_evaluator() {
     for name in [
         "fixtures/simd-operations.hirsel",
+        "fixtures/simd-differential.hirsel",
         "cases/body/simd-refusals.hirsel",
     ] {
         let failures = run_case(&root().join(name));

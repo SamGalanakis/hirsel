@@ -1,0 +1,131 @@
+// expect: accept
+// expect: run swizzle_16_16(15) = 4738760131140810551
+// expect: run swizzle_16_16(16) = 15580044370724620071
+// expect: run swizzle_16_16(31) = 15580044370724620071
+// expect: run swizzle_16_16(32) = 15580044370724620071
+// expect: run swizzle_16_16(255) = 15580044370724620071
+// expect: run swizzle_16_32(15) = 12606002035768998784
+// expect: run swizzle_16_32(16) = 1707152056228899680
+// expect: run swizzle_16_32(31) = 1707152056228899680
+// expect: run swizzle_16_32(32) = 1707152056228899680
+// expect: run swizzle_16_32(255) = 1707152056228899680
+// expect: run swizzle_32_16(15) = 15338408251673234252
+// expect: run swizzle_32_16(16) = 825769931417082445
+// expect: run swizzle_32_16(31) = 4497124012089424732
+// expect: run swizzle_32_16(32) = 15871080935497812317
+// expect: run swizzle_32_16(255) = 15871080935497812317
+// expect: run swizzle_32_32(15) = 13339379130250391916
+// expect: run swizzle_32_32(16) = 3644263712510025326
+// expect: run swizzle_32_32(31) = 5791485036080939404
+// expect: run swizzle_32_32(32) = 6182210682794503310
+// expect: run swizzle_32_32(255) = 6182210682794503310
+// expect: run tail_block() = 16777583164318909683
+// expect: run step_budget(5) = false
+// expect: run step_budget(12) = false
+// expect: run step_budget(13) = true
+// expect: run keep_halves(true) = 14
+// expect: run keep_halves(false) = 7
+// expect: run zero_append() = true
+fn swizzle_16_16(key: u8) -> u64 {
+    let table: Simd[u8, 16] = simd.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+    let indices: Simd[u8, 16] = simd.from([key, 15, 16, 31, 32, 255, 0, 13, 5, 29, 128, 127, 16, 1, 31, 255])
+    let picked = simd.swizzle(table, indices)
+    let octets = picked
+    let mut b: Bytes = result.unwrap(list.with_capacity(16))
+    result.unwrap(list.put_lanes(mut b, octets, 16))
+    sum_bytes(b)
+}
+
+fn swizzle_16_32(key: u8) -> u64 {
+    let table: Simd[u8, 16] = simd.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+    let indices: Simd[u8, 32] = simd.from([key, 15, 16, 31, 32, 255, 0, 13, 5, 29, 128, 127, 16, 1, 31, 255, 15, key, 16, 31, 32, 255, 4, 7, 2, 8, 14, 17, 240, 255, 0, 31])
+    let picked = simd.swizzle(table, indices)
+    let octets = picked
+    let mut b: Bytes = result.unwrap(list.with_capacity(32))
+    result.unwrap(list.put_lanes(mut b, octets, 32))
+    sum_bytes(b)
+}
+
+fn swizzle_32_16(key: u8) -> u64 {
+    let table: Simd[i8, 32] = simd.from([-32, -31, -30, -29, -28, -27, -26, -25, -24, -23, -22, -21, -20, -19, -18, -17, -16, -15, -14, -13, -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1])
+    let indices: Simd[u8, 16] = simd.from([key, 15, 16, 31, 32, 255, 0, 13, 5, 29, 128, 127, 16, 1, 31, 255])
+    let picked = simd.swizzle(table, indices)
+    let octets: Simd[u8, 16] = simd.cast(picked)
+    let mut b: Bytes = result.unwrap(list.with_capacity(16))
+    result.unwrap(list.put_lanes(mut b, octets, 16))
+    sum_bytes(b)
+}
+
+fn swizzle_32_32(key: u8) -> u64 {
+    let table: Simd[i8, 32] = simd.from([-32, -31, -30, -29, -28, -27, -26, -25, -24, -23, -22, -21, -20, -19, -18, -17, -16, -15, -14, -13, -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1])
+    let indices: Simd[u8, 32] = simd.from([key, 15, 16, 31, 32, 255, 0, 13, 5, 29, 128, 127, 16, 1, 31, 255, 15, key, 16, 31, 32, 255, 4, 7, 2, 8, 14, 17, 240, 255, 0, 31])
+    let picked = simd.swizzle(table, indices)
+    let octets: Simd[u8, 32] = simd.cast(picked)
+    let mut b: Bytes = result.unwrap(list.with_capacity(32))
+    result.unwrap(list.put_lanes(mut b, octets, 32))
+    sum_bytes(b)
+}
+
+// A polynomial over independently selected table bytes, reduced modulo 2^64.
+fn sum_bytes(b: Bytes) -> u64 {
+    let mut acc: u64 = 0
+    for i in 0u64 .. list.len(b) {
+        acc = int.wrapping_add(int.wrapping_mul(acc, 257), int.widen(b[i]))
+    }
+    acc
+}
+
+fn tail_block() -> u64 {
+    let input = result.unwrap(b"abcdefghijklmnopqrstuvwxyz012345678")
+    let mut output: Bytes = result.unwrap(list.with_capacity(35))
+    let a: Simd[u8, 16] = list.lanes(input, 0)
+    let b: Simd[u8, 16] = list.lanes(input, 16)
+    result.unwrap(list.put_lanes(mut output, a, 16))
+    result.unwrap(list.put_lanes(mut output, b, 16))
+    for i in 32u64 .. 35u64 {
+        result.unwrap(list.push(mut output, input[i]))
+    }
+    sum_bytes(output)
+}
+
+// Two splats, four adds and four back edges, then a splat, equality and bitmask.
+fn step_budget(n: u64) -> bool {
+    let r = bound steps n {
+        let mut sum: Simd[u8, 16] = simd.splat(0)
+        let inc: Simd[u8, 16] = simd.splat(1)
+        let mut i: u64 = 0
+        while i < 4 {
+            sum = simd.wrapping_add(sum, inc)
+            i += 1
+        }
+        let want: Simd[u8, 16] = simd.splat(4)
+        simd.bitmask(simd.eq(sum, want)) == 65535
+    }
+    match r {
+        Ok(ok) => ok,
+        Error(_) => false,
+    }
+}
+
+fn change(mut v: Simd[u64, 4]) {
+    v = ~v
+}
+
+fn keep_halves(pick: bool) -> u64 {
+    let a: Simd[u64, 4] = simd.from([0x8000000000000000, 0, 0, 0])
+    let b: Simd[u64, 4] = simd.from([0, 0, 0, 0x8000000000000000])
+    let mut chosen = if pick {
+        a
+    } else {
+        b
+    }
+    change(mut chosen)
+    simd.bitmask(chosen)
+}
+
+fn zero_append() -> bool {
+    let mut b: Bytes = list.new()
+    let v: Simd[u8, 32] = simd.splat(42)
+    result.unwrap(list.put_lanes(mut b, v, 0))
+    list.capacity(b) == 0 && list.len(b) == 0
+}

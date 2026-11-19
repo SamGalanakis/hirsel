@@ -37,6 +37,7 @@ fn result_layout(s: &c::Signature) -> (bool, Vec<u32>, u32) {
         let size = match t {
             Ty::Ptr => 8,
             Ty::Scalar(s) => s.size() as u32,
+            Ty::Vector(v) => v.size() as u32,
         };
         align = align.max(size);
         offset = offset.next_multiple_of(size);
@@ -65,11 +66,12 @@ fn ctype(t: Ty) -> &'static str {
         Ty::Scalar(Scalar::U64) => "uint64_t",
         Ty::Scalar(Scalar::F32) => "float",
         Ty::Scalar(Scalar::F64) => "double",
+        Ty::Vector(_) => unreachable!("vector calls use an internal Hirsel signature"),
     }
 }
 fn declare_functions(source: &mut String, module: &c::Module) {
     for (i, s) in module.signatures.iter().enumerate() {
-        if !s.results.is_empty() {
+        if !s.has_vectors() && !s.results.is_empty() {
             write!(source, "struct r{i} {{ ").unwrap();
             for (j, &t) in s.results.iter().enumerate() {
                 write!(source, "{} v{j};", ctype(t)).unwrap();
@@ -79,6 +81,9 @@ fn declare_functions(source: &mut String, module: &c::Module) {
     }
     for f in &module.functions {
         let s = &module.signatures[f.signature.index()];
+        if s.has_vectors() {
+            continue;
+        }
         // Declare aggregate returns as aggregates even when Cranelift lowers
         // them through a hidden sret pointer.  On AArch64 this makes the C
         // compiler place that hidden pointer in x8, matching the platform ABI;
@@ -587,6 +592,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
                     match match t {
                         Ty::Ptr => 64,
                         Ty::Scalar(s) => s.size() as u32 * 8,
+                        Ty::Vector(_) => unreachable!("native test entry results are scalars"),
                     } {
                         64 => u64::MAX,
                         n => (1u64 << n) - 1,

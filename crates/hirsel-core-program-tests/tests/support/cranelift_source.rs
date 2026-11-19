@@ -254,3 +254,15 @@ fn cancelled(tasks: Tasks) -> u64 waits {
         );
     }
 }
+
+#[test]
+fn simd_cranelift_matches_evaluator() {
+    for source in [
+        include_str!("../../../../core/front/fixtures/simd-operations.hirsel"),
+        include_str!("../../../../core/front/fixtures/simd-differential.hirsel"),
+    ] {
+        let (module, functions) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+        let runs = front_runs(&module, &functions, source);
+        execute(&module, &runs, false);
+    }
+}

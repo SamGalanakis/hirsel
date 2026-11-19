@@ -35,6 +35,8 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub instance: &'c InstanceKey,
     pub layouts: &'c [hirsel_core_layout::Recipe],
     pub values: Vec<Value>,
+    /// The upper 16 bytes of each 32-byte vector value.
+    pub high: Vec<Value>,
     addresses: Vec<AddressValue>,
     pub blocks: Vec<ir::Block>,
     pub slots: Vec<ir::StackSlot>,
@@ -93,20 +95,27 @@ pub(super) fn emit(
     b.append_block_params_for_function_params(blocks[0]);
     for (i, block) in body.blocks.iter().enumerate().skip(1) {
         for v in block.params.get(&body.pools.values).unwrap() {
-            b.append_block_param(blocks[i], ty(body.values[v.index()]));
+            let t = body.values[v.index()];
+            b.append_block_param(blocks[i], ty(t));
+            if simd::two_halves(t) {
+                b.append_block_param(blocks[i], ty(t));
+            }
         }
     }
-    let mut values = vec![Value::from_u32(0); body.values.len()];
+    let missing = Value::from_u32(0);
+    let mut values = vec![missing; body.values.len()];
+    let mut high = if function.versioned {
+        vec![missing; body.values.len()]
+    } else {
+        Vec::new()
+    };
     for (i, block) in body.blocks.iter().enumerate().skip(1) {
-        let params = b.block_params(blocks[i]);
-        for (&id, &value) in block
-            .params
-            .get(&body.pools.values)
-            .unwrap()
-            .iter()
-            .zip(params)
-        {
-            values[id.index()] = value;
+        let mut physical = b.block_params(blocks[i]).iter().copied();
+        for &id in block.params.get(&body.pools.values).unwrap() {
+            values[id.index()] = physical.next().unwrap();
+            if simd::two_halves(body.values[id.index()]) {
+                high[id.index()] = physical.next().unwrap();
+            }
         }
     }
     let fills = super::loops::byte_fills(body);
@@ -139,6 +148,7 @@ pub(super) fn emit(
                 }
                 Inst::Read { address, .. }
                 | Inst::Store { address, .. }
+                | Inst::PutLanes { to: address, .. }
                 | Inst::Pointer { address, .. }
                 | Inst::Case { address, .. }
                 | Inst::SetCase { address, .. }
@@ -230,7 +240,11 @@ pub(super) fn emit(
             abi::store_record(&mut b, record, place, &incoming);
             place
         } else {
-            physical.next().unwrap()
+            let low = physical.next().unwrap();
+            if simd::two_halves(body.values[id.index()]) {
+                high[id.index()] = physical.next().unwrap();
+            }
+            low
         };
     }
     let mut f = Function {
@@ -241,6 +255,7 @@ pub(super) fn emit(
         instance: &input.instances[function.instance.index()],
         layouts,
         values,
+        high,
         addresses,
         blocks,
         slots,
@@ -344,7 +359,7 @@ pub(super) fn emit(
                         .get(&body.pools.values)
                         .unwrap()
                         .iter()
-                        .map(|&v| f.get(v)),
+                        .flat_map(|&v| f.parts(v)),
                 );
                 if let Some(record) = signature.record {
                     abi::load_record(&mut f.b, record, f.record_dest.unwrap(), &mut results);
@@ -412,6 +427,10 @@ impl Function<'_, '_, '_> {
     pub fn get(&self, v: ValueId) -> Value {
         self.values[v.index()]
     }
+    fn parts(&self, v: ValueId) -> impl Iterator<Item = Value> {
+        let high = simd::two_halves(self.body.values[v.index()]).then(|| self.high[v.index()]);
+        std::iter::once(self.get(v)).chain(high)
+    }
     pub fn set(&mut self, v: ValueId, value: Value) {
         self.values[v.index()] = value;
     }
@@ -457,15 +476,22 @@ impl Function<'_, '_, '_> {
                 .get(&self.body.pools.values)
                 .unwrap()
                 .iter()
-                .map(|&v| BlockArg::from(self.get(v))),
+                .flat_map(|&v| self.parts(v).map(BlockArg::from)),
         );
         self.blocks[edge.target.index()]
     }
     fn instruction(&mut self, inst: &Inst) -> Result<()> {
         match *inst {
-            Inst::Simd { .. } | Inst::PutLanes { .. } => {
-                return Err(unsupported("Cranelift SIMD lowering is not built"));
+            Inst::Simd {
+                result,
+                op,
+                first,
+                second,
+                fail,
+            } => {
+                self.simd(result, op, first, second, fail)?;
             }
+            Inst::PutLanes { to, vector, count } => self.put_lanes(to, vector, count)?,
             Inst::Const { result, bits } => {
                 let t = ty(self.body.values[result.index()]);
                 let v = match t {
@@ -636,16 +662,23 @@ impl Function<'_, '_, '_> {
                 result, address, ..
             } => {
                 let a = self.addr_parts(address);
-                let v = self.b.ins().load(
-                    ty(self.body.values[result.index()]),
-                    MemFlags::new(),
-                    a.base,
-                    a.offset,
-                );
+                let result_ty = self.body.values[result.index()];
+                if matches!(result_ty, Ty::Vector(_)) {
+                    self.load_vector(result, a);
+                    return Ok(());
+                }
+                let v = self
+                    .b
+                    .ins()
+                    .load(ty(result_ty), MemFlags::new(), a.base, a.offset);
                 self.set(result, v);
             }
             Inst::Store { address, value } => {
                 let a = self.addr_parts(address);
+                if matches!(self.body.values[value.index()], Ty::Vector(_)) {
+                    self.store_vector(value, a);
+                    return Ok(());
+                }
                 let v = self.get(value);
                 self.b.ins().store(MemFlags::new(), v, a.base, a.offset);
             }
@@ -697,7 +730,7 @@ impl Function<'_, '_, '_> {
                     .zip(&signature.param_records)
                 {
                     match arg {
-                        Arg::Value(v) => args.push(self.get(v)),
+                        Arg::Value(v) => args.extend(self.parts(v)),
                         Arg::Address(a) => {
                             let address = self.addr(a);
                             if let Some(record) = *record {
@@ -769,14 +802,12 @@ impl Function<'_, '_, '_> {
                 if let Some(record) = signature.record {
                     abi::store_record(&mut self.b, record, dest.unwrap(), &results);
                 }
-                for (&v, &result) in call
-                    .results
-                    .get(&self.body.pools.values)
-                    .unwrap()
-                    .iter()
-                    .zip(&results)
-                {
-                    self.set(v, result);
+                let mut physical = results.iter().copied();
+                for &v in call.results.get(&self.body.pools.values).unwrap() {
+                    self.set(v, physical.next().unwrap());
+                    if simd::two_halves(self.body.values[v.index()]) {
+                        self.high[v.index()] = physical.next().unwrap();
+                    }
                 }
                 self.calls.results = results;
             }

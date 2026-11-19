@@ -48,10 +48,14 @@ impl Signature {
         let context = layouts.is_some();
         let record = layouts.and_then(|layouts| layouts.result(s));
         let dest = s.dest.is_some() && record.is_none();
-        let mut results = if let Some(record) = record {
+        let mut results: Vec<Ty> = if let Some(record) = record {
             record.fields().iter().map(|&(_, t)| t).collect()
         } else {
-            s.results.clone()
+            s.results
+                .iter()
+                .copied()
+                .flat_map(|t| std::iter::once(t).chain(simd::two_halves(t).then_some(t)))
+                .collect()
         };
         if context {
             results.push(Ty::Scalar(Scalar::U8));
@@ -100,10 +104,15 @@ impl Signature {
                 clif.params
                     .extend(record.fields().iter().map(|&(_, t)| AbiParam::new(ty(t))));
             } else {
-                clif.params.push(AbiParam::new(match p {
-                    Param::Value(t) => ty(t),
-                    Param::Address { .. } => types::I64,
-                }));
+                match p {
+                    Param::Value(t) => {
+                        clif.params.push(AbiParam::new(ty(t)));
+                        if simd::two_halves(t) {
+                            clif.params.push(AbiParam::new(ty(t)));
+                        }
+                    }
+                    Param::Address { .. } => clif.params.push(AbiParam::new(types::I64)),
+                }
             }
         }
         if context {
@@ -165,8 +174,12 @@ impl Signature {
         for (&t, &offset) in self.results.iter().zip(&self.offsets) {
             let target = ty(t);
             let value = if self.indirect {
-                b.ins()
-                    .load(target, MemFlags::trusted(), storage.unwrap(), offset as i32)
+                b.ins().load(
+                    target,
+                    result_flags(target),
+                    storage.unwrap(),
+                    offset as i32,
+                )
             } else {
                 let carrier = values[(offset / 8) as usize];
                 let native = b.func.dfg.value_type(carrier);
@@ -216,8 +229,8 @@ impl Signature {
         if self.indirect {
             let addr = storage.unwrap();
             for (&value, &offset) in values.iter().zip(&self.offsets) {
-                b.ins()
-                    .store(MemFlags::trusted(), value, addr, offset as i32);
+                let flags = result_flags(b.func.dfg.value_type(value));
+                b.ins().store(flags, value, addr, offset as i32);
             }
             b.ins().return_(&[]);
             return;
@@ -280,6 +293,15 @@ impl Signature {
             };
         }
         b.ins().return_(&registers[..self.clif.returns.len()]);
+    }
+}
+
+fn result_flags(t: ir::Type) -> MemFlags {
+    // The shared caller result slot is aligned to a machine word.
+    if t.is_vector() {
+        MemFlags::new()
+    } else {
+        MemFlags::trusted()
     }
 }
 

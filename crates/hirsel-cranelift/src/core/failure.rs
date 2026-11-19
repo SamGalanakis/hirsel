@@ -47,6 +47,10 @@ impl Function<'_, '_, '_> {
                 let zero = match ty(t) {
                     types::F32 => self.b.ins().f32const(0.0),
                     types::F64 => self.b.ins().f64const(0.0),
+                    types::I8X16 => {
+                        let zero = self.b.ins().iconst(types::I8, 0);
+                        self.b.ins().splat(types::I8X16, zero)
+                    }
                     t => self.b.ins().iconst(t, 0),
                 };
                 results.push(zero);

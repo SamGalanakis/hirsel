@@ -44,6 +44,7 @@ fn field_at<'a>(input: &c::Module, t: &'a FieldTy) -> At<'a> {
 }
 pub(super) fn storage(input: &c::Module, layouts: &[Recipe], p: PlaceTy) -> Result<(u64, u64)> {
     Ok(match p {
+        PlaceTy::Value(Ty::Vector(v)) => (v.size(), 16),
         PlaceTy::Value(t) => {
             let n = u64::from(ty(t).bytes());
             (n, n)

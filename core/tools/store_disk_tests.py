@@ -111,7 +111,7 @@ def main():
                 try:
                     cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
                                        args.cc, manifest, work, engine,
-                                       count_only=('checkpoint-reopen', 'checkpoint-reopen-sync-failure'))
+                                       count_only=('checkpoint-reopen', 'checkpoint-reopen-sync-failure', 'install-refusals'))
                     rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 except RuntimeError as error:
                     rows.append(dict(engine=engine, passed=False, crash_failure=str(error)))

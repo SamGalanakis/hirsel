@@ -1889,6 +1889,147 @@ fn replay_identity_of(place_id: Bytes, migrate_id: Bytes, handles_id: Bytes) -> 
     Ok(take identity)
 }
 
+pub type PrepareError: send = Open(OpenError) | Deploy(store.DeployError) | Identity
+
+pub type PrepareConfig[G: send, H: send] {
+    scratch: Dir,
+    options: store.Options,
+    attempt: Bytes,
+    image_digest: Bytes,
+    clock: Clock,
+    tasks: Tasks,
+    n_place: u64,
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits],
+    handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]]
+}
+
+pub type PrepareArgs { attempt: Bytes, digest: Bytes }
+
+pub fn launch_prepare_args(a: Args) -> Result[Option[PrepareArgs], Exit] {
+    let Some(mode) = args.get(a, 0u64) else { return Ok(None) }
+    if mode != "--hirsel-prepare" { return Ok(None) }
+    let invalid = Exit(status: 1u8)
+    if args.len(a) != 4u64 { return Error(invalid) }
+    let Some(attempt_text) = args.get(a, 2u64) else { return Error(invalid) }
+    let Some(image_text) = args.get(a, 3u64) else { return Error(invalid) }
+    let attempt = std.base64.decode(string.as_bytes(attempt_text))
+    let digest = std.base64.decode(string.as_bytes(image_text))
+    match (take attempt, take digest) {
+        (Ok(Some(take ticket)), Ok(Some(take image))) => {
+            if list.len(ticket) != 16 || list.len(image) != 32 { return Error(invalid) }
+            Ok(Some(PrepareArgs(attempt: take ticket, digest: take image)))
+        },
+        _ => Error(invalid),
+    }
+}
+
+fn prepare_result[T](take outcome: Result[T, store.DeployError]) -> Result[T, PrepareError] {
+    match take outcome {
+        Ok(take answer) => Ok(take answer),
+        Error(take reason) => Error(Deploy(take reason)),
+    }
+}
+
+fn prepare_open_result[T](take outcome: Result[T, store.Error]) -> Result[T, PrepareError] {
+    match take outcome {
+        Ok(take answer) => Ok(take answer),
+        Error(take reason) => Error(Open(Store(take reason))),
+    }
+}
+
+// The process receives its export directory as a scratch capability. It
+// creates no listener or live-store lock.
+pub fn prepare_deploy[G: send, H: send](p: PrepareConfig[G, H]) -> Result[(), PrepareError] waits {
+    let source = prepare_result(store.open_export(p.scratch, p.clock, p.attempt, p.options))?
+    let digest = match launch_digest() {
+        Ok(take hash) => take hash,
+        Error(c) => return Error(Open(Store(Full(c)))),
+    }
+    if list.len(digest) != 32 || digest != p.image_digest { return Error(Identity) }
+    let registered = match placed(p.place, p.n_place) {
+        Ok(take reg) => take reg,
+        Error(take error) => return Error(Open(Place(take error))),
+    }
+    if let Error(take problem) = activation_identity(code.identity(p.place), code.identity(p.migrate), code.identity(p.handles)) {
+        return Error(Open(take problem))
+    }
+    let staged = match store.stage_export_migration(source, p.tasks, p.migrate) {
+        Ok(take staged) => take staged,
+        Error(take error) => return Error(Open(Migrate(take error))),
+    }
+    let _ = prepare_open_result(store.with_staged_schema(staged, p.handles))?
+    let _ = prepare_open_result(store.with_staged_schema(staged, p.handles))?
+    if let Error(take problem) = store.validate_preparation(source, staged) { return Error(Open(Store(take problem))) }
+    let payload = prepare_activation(registered, p.n_place)
+    let (take description, take record) = match take payload {
+        Ok(take answer) => take answer,
+        Error(c) => return Error(Open(Store(Full(c)))),
+    }
+    let ReleaseRecord(release: take release, digest: take image) = take record
+    let target = store.PreparedTarget(describe: take description, release: take release, digest: take image,
+        resident_limit: p.options.resident_limit, checkpoint_task_bytes: p.options.checkpoint_task_bytes)
+    prepare_result(store.write_prepared(source, staged, p.scratch, take target))
+}
+
+fn target_release(target: store.PreparedTarget) -> Result[ReleaseRecord, store.DeployError] {
+    let codec: std.codec.Codec[Describe] = std.codec.of()
+    let decoded = std.codec.decode(codec, target.describe)
+    let description = match take decoded {
+        Ok(Ok(take description)) => take description,
+        Ok(Error(_)) => return Error(ImportMalformed),
+        Error(c) => return Error(Store(Full(c))),
+    }
+    if description.digest != target.digest { return Error(ImportMalformed) }
+    let answer = release_digest(description.exported)
+    let release = match take answer {
+        Ok(take release) => take release,
+        Error(c) => return Error(Store(Full(c))),
+    }
+    if release != target.release { return Error(ImportMalformed) }
+    let digest: Result[Bytes, Capacity] = clone(target.digest)
+    match take digest {
+        Ok(take image) => Ok(ReleaseRecord(release: take release, digest: take image)),
+        Error(c) => Error(Store(Full(c))),
+    }
+}
+
+fn cutover_store[G: send, H: send](mut db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64) -> Result[u64, store.DeployError] waits {
+    let description = match prepare_activation(reg, n_place) {
+        Ok((take description, _)) => take description,
+        Error(c) => { store.release_export(mut db, request.attempt); return Error(Store(Full(c))) },
+    }
+    let selected = current_description(db)
+    match take selected {
+        Ok(Some(known)) => if known != description { store.release_export(mut db, request.attempt); return Error(Drift) },
+        Ok(None) => { store.release_export(mut db, request.attempt); return Error(Drift) },
+        Error(take problem) => { store.release_export(mut db, request.attempt); return Error(Store(take problem)) },
+    }
+    let version = match activation_version(db) {
+        Ok(version) => version,
+        Error(take problem) => { store.release_export(mut db, request.attempt); return Error(Store(take problem)) },
+    }
+    let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
+    store.perform_cutover(mut db, request, version, description, codec, target_release)
+}
+
+pub type CutoverOutcome = Installed(u64, Result[(), store.Error]) | Refused(store.DeployError, store.Db)
+
+// The request reaches this point only after the head settles its admitted
+// calls. Once installed, the callback retires publication and the sessions;
+// the caller cannot regain a writer for the old image.
+pub fn cutover[G: send, H: send](take db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64,
+    retire: scoped fn(u64) -> () waits) -> CutoverOutcome waits {
+    let mut owned = take db
+    match cutover_store(mut owned, request, reg, n_place) {
+        Ok(version) => {
+            retire(version)
+            Installed(version, store.close(take owned))
+        },
+        Error(take problem) => Refused(take problem, take owned),
+    }
+}
+
 fn declare_policy(mut db: store.Db, settings: KeyPolicy) -> Result[(), OpenError] {
     match store.declare_authority(mut db, settings.reads) {
         Ok(()) => Ok(()),

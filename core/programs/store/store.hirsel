@@ -38,7 +38,7 @@ pub type Fault: send {
     why: Why
 }
 
-pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(Capacity) | Limit(Limit) | Schema(u64) | Stale(u32) | OutOfScope | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Diverged(u32) | Foreign | MigrationFault
+pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(Capacity) | Limit(Limit) | Schema(u64) | Stale(u32) | OutOfScope | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | OpenLimit(Capacity)
 
 type Roots: shareable + send {
     data: std.omap.OMap[Bytes, Arc[Bytes]],
@@ -7780,6 +7780,11 @@ fn disk_kind_limit(kind: u16) -> Option[u64] {
         0x0020 => Some(33686028),
         0x0030 => Some(67108864),
         0x0070 => Some(4),
+        0x0080 => Some(128),
+        0x0081 => Some(1048832),
+        0x0082 => Some(2097480),
+        0x0083 => Some(20),
+        0x0084 => Some(1052680),
         _ => None
     }
 }
@@ -7794,7 +7799,7 @@ fn disk_read_frame(file: String, ctx: DiskContext, raw: Bytes, at: u64) -> Resul
     if kind == 0 {
         return Error(disk_fault(file, at, Kind(0)))
     }
-    if kind == 0x0070 && ctx.role != 1 {
+    if (kind == 0x0070 && ctx.role != 1) || (kind == 0x0080 && ctx.role != 5) || (kind >= 0x0081 && kind <= 0x0084 && ctx.role != 6) {
         return Error(disk_fault(file, at, Malformed))
     }
     if flags & 65534 != 0 {
@@ -9504,20 +9509,786 @@ fn disk_test_draft_refusal(c: Clock) -> Result[(), ()] {
     }
 }
 
+// The export binds a durable prefix and the exact live open that owns it.
+pub type ExportStamp: codec + send {
+    attempt: Bytes,
+    store_hi: u64,
+    store_lo: u64,
+    opened: u64,
+    branch: u32,
+    head: u64,
+    next_table: u32,
+    activation: u64,
+    terminal: u64,
+    end: u64
+}
+
+type ExportLease: shareable + send {
+    attempt: Bytes,
+    packs: List[DiskPack],
+    first: u64,
+    terminal: u64,
+    end: u64,
+    head: u64,
+    next_table: u32,
+    activation: u64
+}
+
+pub type Exported: send { dir: Dir, name: String, stamp: ExportStamp }
+
+type ExportCopy: send {
+    from: Dir,
+    scratch: Dir,
+    raw: Bytes,
+    stamp: ExportStamp,
+    lease: Arc[ExportLease]
+}
+
+pub type DeployError: send = Store(Error) | Scratch(Error) | ExportMismatch | AttemptBusy | ImportMalformed | IdBound | Drift | Expired | FullNew(Capacity)
+
+fn scratch_result[T](take answer: Result[T, Error]) -> Result[T, DeployError] {
+    match take answer { Ok(take result_value) => Ok(take result_value), Error(take problem) => Error(Scratch(take problem)) }
+}
+
+fn deploy_result[T](take answer: Result[T, Error]) -> Result[T, DeployError] {
+    match take answer { Ok(take result_value) => Ok(take result_value), Error(take problem) => Error(Store(take problem)) }
+}
+
+fn copy_export_file(from: Dir, to: Dir, name: String, end: Option[u64]) -> Result[(), Error] waits {
+    let mut input = disk_io(host.open(from, name, Read))?
+    let mut output = disk_io(host.open(to, name, Write))?
+    let mut offset = 0u64
+    let mut chunk: Bytes = capacity(list.with_capacity(16384))?
+    loop {
+        list.clear(mut chunk)
+        if let Some(total) = end {
+            if offset == total { break }
+            if total - offset < list.capacity(chunk) {
+                chunk = capacity(list.with_capacity(total - offset))?
+            }
+        }
+        let count = disk_io(host.read(mut input, mut chunk))?
+        if count == 0 {
+            if let Some(_) = end { return Error(disk_fault(name, offset, Truncated)) }
+            break
+        }
+        // A provider may round a buffer's capacity up. Keep only the captured
+        // prefix of the terminal segment.
+        let written = if let Some(total) = end {
+            if count > total - offset { total - offset } else { count }
+        } else { count }
+        match host.write(mut output, list.slice(chunk, 0u64, written)) {
+            Ok(()) => (),
+            Error(e) => return Error(Io(e.error)),
+        }
+        offset += written
+    }
+    disk_io(host.close(take input))?
+    disk_io(host.sync(mut output))?
+    disk_io(host.close(take output))
+}
+
+fn export_bytes(stamp: ExportStamp) -> Result[Bytes, Error] {
+    let codec: std.codec.Codec[ExportStamp] = std.codec.of()
+    let ctx = DiskContext(store: StoreId(hi: stamp.store_hi, lo: stamp.store_lo), role: 5, seq: stamp.opened)
+    let mut raw = capacity(disk_header_bytes(ctx, 0))?
+    let mut body: Bytes = list.new()
+    capacity(std.codec.encode(codec, stamp, mut body))?
+    capacity(list.append(mut raw, capacity(disk_seal(ctx, 72, 0x0080, 1, body))?))?
+    Ok(take raw)
+}
+
+fn export_copy(take job: ExportCopy) -> Result[Exported, DeployError] waits {
+    let mut name = scratch_result(capacity(string.with_capacity(32)))?
+    let to = scratch_result(disk_io(host.mkdtemp(job.scratch, mut name)))?
+    let raw_stamp = scratch_result(export_bytes(job.stamp))?
+    for pack in job.lease.packs {
+        let path = scratch_result(capacity(disk_path("p-", pack.seq, "")))?
+        scratch_result(copy_export_file(job.from, to, path, None))?
+    }
+    scratch_result(disk_write_synced(to, "MANIFEST", job.raw))?
+    for seq in job.lease.first .. job.stamp.terminal {
+        let path = scratch_result(capacity(disk_path("j-", seq, "")))?
+        scratch_result(copy_export_file(job.from, to, path, None))?
+    }
+    let terminal = scratch_result(capacity(disk_path("j-", job.stamp.terminal, "")))?
+    scratch_result(copy_export_file(job.from, to, terminal, Some(job.stamp.end)))?
+    scratch_result(disk_write_synced(to, "EXPORT", raw_stamp))?
+    scratch_result(disk_io(host.sync_dir(to)))?
+    let ExportCopy(stamp: take stamp, ..) = take job
+    Ok(Exported(dir: to, name: take name, stamp: take stamp))
+}
+
+// E1 takes the manifest and the acknowledged extent under the writer's LOCK.
+// An export task copies those immutable names while the head continues.
+pub fn begin_export(mut db: Db, tasks: Tasks, scratch: Dir, take attempt: Bytes, activation: u64, allowance: u64) -> Result[Task[Result[Exported, DeployError]], DeployError] waits {
+    deploy_result(healthy(db))?
+    if !is_disk(db) || list.len(attempt) != 16 { return Error(ExportMismatch) }
+    if let Some(_) = db.disk[0].lease { return Error(AttemptBusy) }
+    if let Some(pending) = disk_pending(db) {
+        deploy_result(disk_wait_cut(mut db, pending.generation))?
+    }
+    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    deploy_result(durable(mut db, last))?
+    let from = db.disk[0].d
+    let raw = deploy_result(disk_read_file(from, "MANIFEST", 68157548))?
+    let (_id, take manifest) = deploy_result(disk_read_manifest("MANIFEST", raw))?
+    let lease_attempt = deploy_result(copied(attempt))?
+    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db),
+        branch: 0, head: db.heads[0].head, next_table: db.next_table, activation: activation, terminal: db.file_seq, end: db.file_end)
+    let DiskManifest(packs: take packs, first_live: first_live, ..) = take manifest
+    let kept = ExportLease(attempt: take lease_attempt, packs: take packs, first: first_live, terminal: stamp.terminal,
+        end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
+    let lease = deploy_result(capacity(result.capacity_only(arc.new(take kept))))?
+    let job = ExportCopy(from: from, scratch: scratch, raw: take raw, stamp: take stamp, lease: arc.share(lease))
+    match task.spawn(tasks, bytes allowance, take job, export_copy) {
+        Ok(take copying) => {
+            db.disk[0].lease = Some(take lease)
+            Ok(take copying)
+        },
+        Error((cap, _)) => Error(Store(Full(cap))),
+    }
+}
+
+// The owner joins or cancels the copy before it releases the attempt.
+pub fn release_export(mut db: Db, attempt: Bytes) {
+    if is_disk(db) {
+        let releasing = match db.disk[0].lease { Some(lease) => lease.attempt == attempt, None => false }
+        if releasing { forget_import(mut db) }
+    }
+}
+
+// R1 has no LOCK, cleanup, rotation or worker. Only this module has a Db
+// for the recovered export; callers can stage schema operations on it.
+pub opaque type Preparation { db: Db, stamp: ExportStamp }
+
+fn read_export_stamp(d: Dir) -> Result[ExportStamp, DeployError] waits {
+    let raw = scratch_result(disk_read_file(d, "EXPORT", 216))?
+    let head = deploy_result(disk_read_header("EXPORT", raw, 5, None, None))?
+    let frame = deploy_result(disk_read_frame("EXPORT", head.context, raw, 72))?
+    if frame.kind != 0x0080 || frame.flags != 1 || frame.end != list.len(raw) { return Error(ExportMismatch) }
+    let codec: std.codec.Codec[ExportStamp] = std.codec.of()
+    let stamp = deploy_result(decoded(std.codec.decode(codec, list.slice(raw, frame.payload, frame.end))))?
+    if list.len(stamp.attempt) != 16 || stamp.store_hi != head.context.store.hi ||
+        stamp.store_lo != head.context.store.lo || stamp.opened != head.context.seq ||
+        stamp.branch != 0 || stamp.terminal < stamp.opened || stamp.end < 72 || stamp.activation > stamp.head {
+        return Error(ExportMismatch)
+    }
+    Ok(take stamp)
+}
+
+fn replay_export(d: Dir, id: StoreId, first: u64, terminal: u64, limit: u64, take initial: JournalReplay) -> Result[JournalReplay, Error] waits {
+    let mut replay = take initial
+    let mut seq = first
+    loop {
+        let path = capacity(disk_path("j-", seq, ""))?
+        let boundary = if seq == terminal {
+            limit
+        } else {
+            let following = journal_header(d, id, seq + 1u64, false)?
+            match following { Some(head) => head.prev_end, None => return Error(disk_fault(path, 0u64, Header)) }
+        }
+        let raw = disk_read_file(d, path, if seq == terminal { boundary } else { 18446744073709551615u64 })?
+        let segment = journal_segment(path, id, seq, raw, Some(boundary), false)?
+        for commit in segment.commits { journal_apply(path, mut replay, commit)? }
+        if seq == terminal { return Ok(take replay) }
+        seq += 1
+    }
+}
+
+pub fn open_export(d: Dir, c: Clock, attempt: Bytes, options: Options) -> Result[Preparation, DeployError] waits {
+    let stamp = read_export_stamp(d)?
+    if stamp.attempt != attempt { return Error(ExportMismatch) }
+    let raw = scratch_result(disk_read_file(d, "MANIFEST", 68157548))?
+    let (id, take manifest) = deploy_result(disk_read_manifest("MANIFEST", raw))?
+    if id.hi != stamp.store_hi || id.lo != stamp.store_lo || manifest.fence != 1 ||
+        manifest.first_live > stamp.terminal || manifest.next_table > stamp.next_table {
+        return Error(ExportMismatch)
+    }
+    let decoded_packs = deploy_result(disk_decode_packs(d, id, take manifest))?
+    let initial = deploy_result(capacity(manifest_state(decoded_packs.manifest, decoded_packs.all)))?
+    let replayed = deploy_result(replay_export(d, id, decoded_packs.manifest.first_live, stamp.terminal, stamp.end,
+        JournalReplay(state: take initial, next_node: decoded_packs.manifest.next_node - 1)))?
+    let JournalReplay(state: take state, next_node: ids) = take replayed
+    if state.tips[0].head != stamp.head { return Error(ExportMismatch) }
+    let live = deploy_result(capacity(state_account(state)))?
+    deploy_result(over_ceiling(live, options.resident_limit))?
+    let register = deploy_result(capacity(new_register()))?
+    let mut db = empty_db(c, id, options, take register)
+    deploy_result(open_heads(mut db, take state))?
+    db.resident = live
+    db.next_node = ids
+    db.next_table = stamp.next_table
+    Ok(Preparation(db: take db, stamp: take stamp))
+}
+
+pub fn stage_export_migration(source: Preparation, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[StagedMigration, Error] waits {
+    stage_migration(source.db, tasks, configure)
+}
+
+pub type PreparedTarget: codec + send {
+    describe: Bytes,
+    release: Bytes,
+    digest: Bytes,
+    resident_limit: u64,
+    checkpoint_task_bytes: u64
+}
+
+type PreparedMeta: codec + send {
+    base: ExportStamp,
+    target: PreparedTarget,
+    next_table: u32,
+    changes: u64,
+    ranges: u64
+}
+
+type CatalogChange: codec + send {
+    key: Bytes,
+    before: Option[Bytes],
+    after: Option[Bytes]
+}
+
+type Inventory: codec + send {
+    id: u32,
+    count: u64,
+    digest: u64
+}
+
+type PreparedRow: codec + send { key: Bytes, value: Bytes }
+
+fn catalog_changes(base: Roots, planned: Roots) -> Result[List[CatalogChange], Error] {
+    let mut edits: List[CatalogChange] = list.new()
+    let mut before = capacity(result.capacity_only(std.omap.range(base.catalog, Unbounded, Unbounded)))?
+    while let Some((take key, old)) = capacity(std.omap.next(mut before))? {
+        match std.omap.get(planned.catalog, key) {
+            Some(new) => if new != old {
+                capacity(result.capacity_only(list.push(mut edits, CatalogChange(key: take key, before: Some(copied(old)?), after: Some(copied(new)?)))))?
+            },
+            None => capacity(result.capacity_only(list.push(mut edits, CatalogChange(key: take key, before: Some(copied(old)?), after: None))))?,
+        }
+    }
+    let mut after = capacity(result.capacity_only(std.omap.range(planned.catalog, Unbounded, Unbounded)))?
+    while let Some((take key, new)) = capacity(std.omap.next(mut after))? {
+        let exists = match std.omap.get(base.catalog, key) { Some(_) => true, None => false }
+        if !exists {
+            capacity(result.capacity_only(list.push(mut edits, CatalogChange(key: take key, before: None, after: Some(copied(new)?)))))?
+        }
+    }
+    list.sort(mut edits, fn(a: CatalogChange, b: CatalogChange) -> Order { std.order.compare(a.key, b.key) })
+    Ok(take edits)
+}
+
+type RangeChange: send { id: u32, catalog: Option[Bytes] }
+
+fn changed_ranges(edits: List[CatalogChange], initial: u32, advanced: u32) -> Result[List[RangeChange], Error] {
+    let mut changes_by_id: List[RangeChange] = list.new()
+    for change in edits {
+        let old = match change.before { Some(raw) => decode_catalog(raw)?.id, None => 0u32 }
+        let new = match change.after { Some(raw) => decode_catalog(raw)?.id, None => 0u32 }
+        if old == new { continue }
+        if old != 0u32 {
+            capacity(result.capacity_only(list.push(mut changes_by_id, RangeChange(id: old, catalog: None))))?
+        }
+        if let Some(raw) = change.after {
+            capacity(result.capacity_only(list.push(mut changes_by_id, RangeChange(id: new, catalog: Some(copied(raw)?)))))?
+        }
+    }
+    list.sort(mut changes_by_id, fn(a: RangeChange, b: RangeChange) -> Order { std.order.compare(a.id, b.id) })
+    let mut previous = 0u32
+    let mut expected = initial
+    for change in changes_by_id {
+        if previous >= change.id { return Error(malformed(0u64)) }
+        previous = change.id
+        if change.id >= initial {
+            if change.id != expected || expected == 4294967295u32 { return Error(malformed(0u64)) }
+            expected += 1
+        }
+    }
+    if expected != advanced { return Error(malformed(0u64)) }
+    Ok(take changes_by_id)
+}
+
+fn entries_of(data: std.omap.OMap[Bytes, Arc[Bytes]], id: u32) -> Result[ByteRows, Error] {
+    if id == 4294967295u32 { return Error(malformed(0u64)) }
+    byte_cursor(data, Included(prefix(id)?), prefix(id + 1u32)?)
+}
+
+fn checksum_row(mut checksum: std.check.Xxh3, key: Bytes, encoded: Bytes) -> Result[(), Error] {
+    let mut lengths: Bytes = capacity(list.with_capacity(8u64))?
+    capacity(le(mut lengths, list.len(key), 4u64))?
+    capacity(le(mut lengths, list.len(encoded), 4u64))?
+    std.check.add(mut checksum, lengths, 0u64, 8u64)
+    std.check.add(mut checksum, key, 0u64, list.len(key))
+    std.check.add(mut checksum, encoded, 0u64, list.len(encoded))
+    Ok(())
+}
+
+fn range_inventory(data: std.omap.OMap[Bytes, Arc[Bytes]], ranges: List[RangeChange]) -> Result[List[Inventory], Error] {
+    let mut inventory: List[Inventory] = capacity(list.with_capacity(list.len(ranges)))?
+    for desc in ranges {
+        let mut cursor = entries_of(data, desc.id)?
+        let mut count = 0u64
+        let mut checksum = std.check.start()
+        while let Some((key, value)) = next_bytes(mut cursor)? {
+            checksum_row(mut checksum, key, value)?
+            count += 1
+        }
+        capacity(result.capacity_only(list.push(mut inventory, Inventory(id: desc.id, count: count, digest: std.check.finish(checksum)))))?
+    }
+    Ok(take inventory)
+}
+
+fn write_prepared_frame[T](mut file: HostFile, ctx: DiskContext, mut offset: u64, kind: u16, codec: std.codec.Codec[T], value: T) -> Result[(), Error] waits {
+    let mut encoded: Bytes = list.new()
+    capacity(std.codec.encode(codec, value, mut encoded))?
+    let raw = capacity(disk_seal(ctx, offset, kind, 1, encoded))?
+    match host.write(mut file, raw) {
+        Ok(()) => (),
+        Error(e) => return Error(Io(e.error)),
+    }
+    offset += list.len(raw)
+    Ok(())
+}
+
+pub fn validate_preparation(source: Preparation, staged: StagedMigration) -> Result[(), Error] {
+    let mut state = capacity(current_state(source.db))?
+    state.tips[0].roots = share_roots(staged.plan.roots)
+    over_ceiling(capacity(state_account(state))?, source.db.ceiling)
+}
+
+pub fn write_prepared(source: Preparation, staged: StagedMigration, d: Dir, take target: PreparedTarget) -> Result[(), DeployError] waits {
+    let delta = deploy_result(catalog_changes(source.db.heads[0].roots, staged.plan.roots))?
+    let ranges = deploy_result(changed_ranges(delta, source.stamp.next_table, staged.plan.next_table))?
+    let inventory = deploy_result(range_inventory(staged.plan.roots.data, ranges))?
+    let base: ExportStamp = deploy_result(capacity(clone(source.stamp)))?
+    let ctx = DiskContext(store: source.db.store, role: 6, seq: source.stamp.opened)
+    let meta = PreparedMeta(base: take base, target: take target, next_table: staged.plan.next_table, changes: list.len(delta), ranges: list.len(inventory))
+    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Write)))?
+    let header = scratch_result(capacity(disk_header_bytes(ctx, 0u64)))?
+    if let Error(e) = host.write(mut file, header) { return Error(Scratch(Io(e.error))) }
+    let mut offset = 72u64
+    let metadata_codec: std.codec.Codec[PreparedMeta] = std.codec.of()
+    let delta_codec: std.codec.Codec[CatalogChange] = std.codec.of()
+    let inventory_codec: std.codec.Codec[Inventory] = std.codec.of()
+    let row_codec: std.codec.Codec[PreparedRow] = std.codec.of()
+    scratch_result(write_prepared_frame(mut file, ctx, mut offset, 0x0081, metadata_codec, meta))?
+    for change in delta { scratch_result(write_prepared_frame(mut file, ctx, mut offset, 0x0082, delta_codec, change))? }
+    for desc in inventory { scratch_result(write_prepared_frame(mut file, ctx, mut offset, 0x0083, inventory_codec, desc))? }
+    for desc in inventory {
+        let mut rows = deploy_result(entries_of(staged.plan.roots.data, desc.id))?
+        while let Some((take key, value)) = deploy_result(next_bytes(mut rows))? {
+            let row = PreparedRow(key: take key, value: deploy_result(copied(value))?)
+            scratch_result(write_prepared_frame(mut file, ctx, mut offset, 0x0084, row_codec, row))?
+        }
+    }
+    scratch_result(disk_io(host.sync(mut file)))?
+    scratch_result(disk_io(host.close(take file)))
+}
+
+type PreparedInput { file: HostFile, ctx: DiskContext, offset: u64, digest: std.sha256.Sha256 }
+
+fn prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] waits {
+    let mut out: Bytes = capacity(list.with_capacity(n))?
+    while list.len(out) < n {
+        let mut chunk: Bytes = capacity(list.with_capacity(n - list.len(out)))?
+        if disk_io(host.read(mut file, mut chunk))? == 0 {
+            return Error(disk_fault("PREPARED", list.len(out), Truncated))
+        }
+        capacity(list.append(mut out, chunk))?
+    }
+    Ok(take out)
+}
+
+fn prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.codec.Codec[T]) -> Result[T, DeployError] waits {
+    let raw = scratch_result(prepared_read(mut input.file, 16u64))?
+    let n = read_le(raw, 4u64, 4u64)
+    if read_le(raw, 0u64, 2u64) != int.widen(kind) || read_le(raw, 2u64, 2u64) != 1u64 ||
+        n > option.unwrap(disk_kind_limit(kind)) {
+        return Error(ImportMalformed)
+    }
+    let encoded = scratch_result(prepared_read(mut input.file, n))?
+    let check = deploy_result(capacity(disk_check(input.ctx, input.offset, list.slice(raw, 0u64, 8u64), encoded)))?
+    if check != read_le(raw, 8u64, 8u64) { return Error(ImportMalformed) }
+    std.sha256.add(mut input.digest, raw, 0u64, 16u64)
+    std.sha256.add(mut input.digest, encoded, 0u64, n)
+    input.offset += 16u64 + n
+    match std.codec.decode(codec, encoded) {
+        Error(c) => Error(Store(Full(c))),
+        Ok(Error(_)) => Error(ImportMalformed),
+        Ok(Ok(take value)) => Ok(take value),
+    }
+}
+
+fn validate_catalog_key(key: Bytes, c: Catalog) -> bool {
+    if list.len(key) == 0 || key[0u64] != c.kind { return false }
+    let prefix_size = if c.kind == 1 { 1u64 } else { 5u64 }
+    if list.len(key) < prefix_size || list.len(key) - prefix_size > 255u64 { return false }
+    if c.kind == 2 {
+        let owner: u32 = list.word_be(key, 1u64)
+        if owner != c.owner { return false }
+    }
+    if c.kind == 1 {
+        let count = list.len(c.schemas)
+        if c.owner != 0 || c.next == 0 || count == 0 || c.schemas[count - 1u64].number != c.next - 1u16 { return false }
+        for i in 0u64 .. count {
+            let schema = c.schemas[i]
+            if (i > 0 && schema.number <= c.schemas[i - 1u64].number) ||
+                std.codec.fingerprint_of(schema.schema) != schema.fingerprint { return false }
+        }
+    } else if c.next != 0 || list.len(c.schemas) != 0 {
+        return false
+    }
+    let text = match copied(list.slice(key, prefix_size, list.len(key))) { Ok(take b) => take b, Error(_) => return false }
+    match string.from_utf8(take text) {
+        Ok(name) => !std.string.starts_with(name, "hirsel."),
+        Error(_) => false,
+    }
+}
+
+fn validate_delta(change: CatalogChange, initial: u32) -> Result[(), DeployError] {
+    let old = match change.before {
+        Some(raw) => {
+            let c = deploy_result(decode_catalog(raw))?
+            if !validate_catalog_key(change.key, c) || c.id >= initial { return Error(ImportMalformed) }
+            Some(take c)
+        },
+        None => None,
+    }
+    if let Some(raw) = change.after {
+        let c = deploy_result(decode_catalog(raw))?
+        if !validate_catalog_key(change.key, c) { return Error(ImportMalformed) }
+        if let Some(before) = old {
+            if c.id == before.id {
+                if c.kind != before.kind || c.owner != before.owner || c.epoch < before.epoch ||
+                    c.key != before.key || c.next < before.next || c.by != before.by || c.revision != before.revision ||
+                    list.len(c.schemas) < list.len(before.schemas) {
+                    return Error(ImportMalformed)
+                }
+                for i in 0u64 .. list.len(before.schemas) {
+                    let left = before.schemas[i]
+                    let right = c.schemas[i]
+                    if left.number != right.number || left.fingerprint != right.fingerprint || left.schema != right.schema {
+                        return Error(ImportMalformed)
+                    }
+                }
+                return Ok(())
+            }
+        }
+        if c.id < initial { return Error(ImportMalformed) }
+    } else if let None = old {
+        return Error(ImportMalformed)
+    }
+    Ok(())
+}
+
+type ValidatedRange: send { id: u32, keys: List[Bytes], values: List[Arc[Bytes]] }
+
+pub opaque type ValidatedImport: send {
+    meta: PreparedMeta,
+    delta: List[CatalogChange],
+    ranges: List[ValidatedRange],
+    digest: Inline[u8, 32],
+    nodes: u64,
+    charge: u64
+}
+
+fn bounded_nodes(count: u64) -> u64 {
+    if count == 0 { return 0u64 }
+    let mut at_level = (count - 1u64) / 16u64 + 1u64
+    let mut total = at_level
+    while at_level > 1 {
+        at_level = (at_level - 1u64) / 16u64 + 1u64
+        total += at_level
+    }
+    total
+}
+
+fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inventory, codec: std.codec.Codec[PreparedRow], mut charge: u64) -> Result[ValidatedRange, DeployError] waits {
+    if desc.id != expected.id { return Error(ImportMalformed) }
+    let (kind, schema_number) = match expected.catalog {
+        Some(raw) => {
+            let meta = deploy_result(decode_catalog(raw))?
+            (meta.kind, meta.next)
+        },
+        None => {
+            if desc.count != 0u64 { return Error(ImportMalformed) }
+            (0u8, 0u16)
+        },
+    }
+    let mut keys: List[Bytes] = list.new()
+    let mut values: List[Arc[Bytes]] = list.new()
+    let mut digest = std.check.start()
+    for i in 0u64 .. desc.count {
+        let PreparedRow(key: take key, value: take encoded) = prepared_frame(mut input, 0x0084, codec)?
+        if list.len(key) < 4 || list.len(key) > 4096 || list.len(encoded) > 1048576 { return Error(ImportMalformed) }
+        let seen: u32 = list.word_be(key, 0u64)
+        if seen != desc.id || (i > 0 && !(keys[i - 1u64] < key)) { return Error(ImportMalformed) }
+        if kind == 1 {
+            if list.len(encoded) < 2 || read_le(encoded, 0u64, 2u64) + 1u64 != int.widen(schema_number) { return Error(ImportMalformed) }
+        } else if list.len(encoded) != 0 {
+            return Error(ImportMalformed)
+        }
+        deploy_result(checksum_row(mut digest, key, encoded))?
+        charge = int.saturating_add(charge, entry(key, encoded))
+        let payload = deploy_result(capacity(result.capacity_only(arc.new(take encoded))))?
+        deploy_result(capacity(result.capacity_only(list.push(mut keys, take key))))?
+        deploy_result(capacity(result.capacity_only(list.push(mut values, take payload))))?
+    }
+    if std.check.finish(digest) != desc.digest { return Error(ImportMalformed) }
+    Ok(ValidatedRange(id: desc.id, keys: take keys, values: take values))
+}
+
+// M1 may run in a task while OLD serves. It checks all scratch input before
+// the head can reserve ids or attach the result to an attempt.
+pub fn validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] waits {
+    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
+    let header = scratch_result(prepared_read(mut file, 72u64))?
+    let head = deploy_result(disk_read_header("PREPARED", header, 6, None, None))?
+    let mut digest = std.sha256.start()
+    std.sha256.add(mut digest, header, 0u64, 72u64)
+    let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: take digest)
+    let metadata_codec: std.codec.Codec[PreparedMeta] = std.codec.of()
+    let delta_codec: std.codec.Codec[CatalogChange] = std.codec.of()
+    let inventory_codec: std.codec.Codec[Inventory] = std.codec.of()
+    let row_codec: std.codec.Codec[PreparedRow] = std.codec.of()
+    let meta = prepared_frame(mut input, 0x0081, metadata_codec)?
+    if list.len(meta.base.attempt) != 16 || meta.base.store_hi != head.context.store.hi ||
+        meta.base.store_lo != head.context.store.lo || meta.base.opened != head.context.seq ||
+        meta.base.branch != 0 || meta.base.next_table == 0 || meta.next_table < meta.base.next_table ||
+        list.len(meta.target.digest) != 32 || list.len(meta.target.release) != 32 ||
+        list.len(meta.target.describe) == 0 {
+        return Error(ImportMalformed)
+    }
+    let mut delta: List[CatalogChange] = list.new()
+    for i in 0u64 .. meta.changes {
+        let changed = prepared_frame(mut input, 0x0082, delta_codec)?
+        if i != 0 && !(delta[i - 1u64].key < changed.key) { return Error(ImportMalformed) }
+        validate_delta(changed, meta.base.next_table)?
+        deploy_result(capacity(result.capacity_only(list.push(mut delta, take changed))))?
+    }
+    let needed = deploy_result(changed_ranges(delta, meta.base.next_table, meta.next_table))?
+    if list.len(needed) != meta.ranges { return Error(ImportMalformed) }
+    let mut inventory: List[Inventory] = list.new()
+    for _ in 0u64 .. meta.ranges {
+        deploy_result(capacity(result.capacity_only(list.push(mut inventory, prepared_frame(mut input, 0x0083, inventory_codec)?))))?
+    }
+    let mut ranges: List[ValidatedRange] = list.new()
+    let mut charge = 0u64
+    let mut nodes = 0u64
+    for i in 0u64 .. meta.ranges {
+        let desc = inventory[i]
+        nodes = int.saturating_add(nodes, bounded_nodes(desc.count))
+        let checked_range = read_valid_range(mut input, needed[i], desc, row_codec, mut charge)?
+        deploy_result(capacity(result.capacity_only(list.push(mut ranges, take checked_range))))?
+    }
+    let mut extra: Bytes = deploy_result(capacity(list.with_capacity(1)))?
+    if scratch_result(disk_io(host.read(mut input.file, mut extra)))? != 0 { return Error(ImportMalformed) }
+    let PreparedInput(file: take done, digest: take hashed, ..) = take input
+    scratch_result(disk_io(host.close(take done)))?
+    Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, digest: std.sha256.finish(hashed), nodes: nodes, charge: charge))
+}
+
+type ImportedRange: send { id: u32, tree: std.omap.OMap[Bytes, Arc[Bytes]] }
+
+pub opaque type Imported: send {
+    meta: PreparedMeta,
+    delta: List[CatalogChange],
+    ranges: List[ImportedRange],
+    digest: Inline[u8, 32],
+    charge: u64
+}
+
+pub opaque type ImportWork: send { payload: ValidatedImport, low: u64, high: u64 }
+
+pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[ImportWork, DeployError] {
+    deploy_result(healthy(db))?
+    if !is_disk(db) || validated.meta.base.opened != open_number(db) ||
+        validated.meta.base.store_hi != db.store.hi || validated.meta.base.store_lo != db.store.lo ||
+        !matches_export(db, validated.meta.base) {
+        return Error(ExportMismatch)
+    }
+    let current = db.disk[0].options.resident_limit
+    let s = deploy_result(capacity(current_state(db)))?
+    let exact = deploy_result(capacity(state_account(s)))?
+    let requested = int.saturating_add(int.saturating_add(exact, db.inflight), validated.charge)
+    if requested > current { return Error(Store(Full(Capacity(requested: requested, available: current)))) }
+    let low = db.next_node
+    let Some(high) = int.checked_add(low, validated.nodes) else { return Error(IdBound) }
+    if high == 18446744073709551615u64 { return Error(IdBound) }
+    db.next_node = high
+    db.disk[0].imported = None
+    db.disk[0].reserving = Some(validated.digest)
+    db.ceiling = current - validated.charge
+    Ok(ImportWork(payload: take validated, low: low, high: high))
+}
+
+fn matches_export(db: Db, base: ExportStamp) -> bool {
+    match db.disk[0].lease {
+        Some(kept) => kept.attempt == base.attempt && kept.terminal == base.terminal && kept.end == base.end &&
+            kept.head == base.head && kept.next_table == base.next_table && kept.activation == base.activation,
+        None => false,
+    }
+}
+
+pub fn import_trees(take work: ImportWork) -> Result[Imported, DeployError] {
+    let ImportWork(payload: take payload, low: low, high: high) = take work
+    let ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, digest: digest, charge: charge, ..) = take payload
+    let mut ids = low
+    let mut imported: List[ImportedRange] = deploy_result(capacity(list.with_capacity(list.len(ranges))))?
+    for checked_range in ranges {
+        let tree = deploy_result(capacity(std.omap.from_sorted(mut ids, checked_range.keys, checked_range.values)))?
+        if ids > high { return Error(IdBound) }
+        deploy_result(capacity(result.capacity_only(list.push(mut imported, ImportedRange(id: checked_range.id, tree: take tree)))))?
+    }
+    Ok(Imported(meta: take meta, delta: take delta, ranges: take imported, digest: digest, charge: charge))
+}
+
+pub fn imported_digest(value: Imported) -> Inline[u8, 32] { value.digest }
+
+pub type Cutover: send { attempt: Bytes, digest: Inline[u8, 32], deadline: u64 }
+
+type TargetLimits { resident: u64, pack: u64 }
+
+fn catalog_bytes_equal(a: Bytes, b: Bytes) -> bool { a == b }
+
+fn planned_catalog(mut plan: SchemaPlan, delta: List[CatalogChange]) -> Result[(), DeployError] {
+    for changed in delta {
+        let agrees = {
+            let current = std.omap.get(plan.roots.catalog, changed.key)
+            match changed.before {
+                Some(expected) => match current { Some(raw) => catalog_bytes_equal(raw, expected), None => false },
+                None => match current { None => true, Some(_) => false },
+            }
+        }
+        if !agrees { return Error(ImportMalformed) }
+        if let Some(raw) = changed.after {
+            let roots = deploy_result(catalog_insert(mut plan.next_node, plan.roots, changed.key, raw))?
+            plan.roots = take roots
+        } else {
+            let updated = deploy_result(capacity(std.omap.remove(mut plan.next_node, plan.roots.catalog, changed.key)))?
+            plan.roots.catalog = take updated
+        }
+    }
+    Ok(())
+}
+
+fn planned_ranges(mut plan: SchemaPlan, imported: List[ImportedRange]) -> Result[(), DeployError] {
+    for replaced in imported {
+        let start = deploy_result(prefix(replaced.id))?
+        let end = deploy_result(prefix(replaced.id + 1u32))?
+        let data = deploy_result(capacity(std.omap.graft(mut plan.next_node, plan.roots.data, start, end, replaced.tree)))?
+        plan.roots.data = take data
+    }
+    Ok(())
+}
+
+fn install_account(db: Db, roots: Roots) -> Result[u64, DeployError] {
+    let mut s = deploy_result(capacity(current_state(db)))?
+    s.tips[0].roots = share_roots(roots)
+    deploy_result(capacity(state_account(s)))
+}
+
+// M3 associates the trees with the most recent reservation on this attempt.
+pub fn keep_import(mut db: Db, take completed: Imported) -> Result[(), DeployError] {
+    if !is_disk(db) || !matches_export(db, completed.meta.base) ||
+        db.disk[0].reserving != Some(completed.digest) {
+        return Error(ExportMismatch)
+    }
+    db.disk[0].imported = Some(take completed)
+    Ok(())
+}
+
+fn accept_cutover(mut db: Db, request: Cutover) -> Result[Imported, DeployError] waits {
+    deploy_result(healthy(db))?
+    if !is_disk(db) { return Error(ExportMismatch) }
+    if let Some(pending) = disk_pending(db) {
+        deploy_result(disk_wait_cut(mut db, pending.generation))?
+    }
+    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    deploy_result(durable(mut db, last))?
+    let finished = replace(mut db.disk[0].imported, None)
+    let Some(take staged) = take finished else { return Error(ExportMismatch) }
+    let agrees = {
+        let base = view staged.meta.base
+        staged.digest == request.digest && base.attempt == request.attempt &&
+            base.opened == open_number(db) && base.store_hi == db.store.hi && base.store_lo == db.store.lo && base.branch == 0
+    }
+    if !agrees { return Error(ExportMismatch) }
+    Ok(take staged)
+}
+
+fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes,
+    release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget) -> Result[V, DeployError]) -> Result[u64, DeployError] waits {
+    let staged = accept_cutover(mut db, request)?
+    let base = view staged.meta.base
+    if db.heads[0].head != base.head || db.next_table != base.next_table || current_activation != base.activation {
+        return Error(Drift)
+    }
+    let disk_limit = db.disk[0].options.resident_limit
+    let mut planned = schema_plan(db)
+    planned.ceiling = disk_limit
+    planned_catalog(mut planned, staged.delta)?
+    planned_ranges(mut planned, staged.ranges)?
+    planned.next_table = staged.meta.next_table
+    planned.live = install_account(db, planned.roots)?
+    deploy_result(over_ceiling(planned.live, disk_limit))?
+    let mut installation = StagedMigration(plan: take planned)
+    let target = view staged.meta.target
+    let release_at = base.head + 1u64
+    let prior = deploy_result(copied(old_describe))?
+    let release = release_from(target)?
+    deploy_result(stage_activation(mut installation, release_at, Some(take prior), target.describe, release_codec, release))?
+    installation.plan.live = install_account(db, installation.plan.roots)?
+    deploy_result(over_ceiling(installation.plan.live, disk_limit))?
+    if installation.plan.live > target.resident_limit {
+        return Error(FullNew(Capacity(requested: installation.plan.live, available: target.resident_limit)))
+    }
+    if host.mono_ns(db.clock) >= request.deadline { return Error(Expired) }
+    db.ceiling = disk_limit
+    let limits = TargetLimits(resident: target.resident_limit, pack: target.checkpoint_task_bytes)
+    db.disk[0].target = Some(limits)
+    let StagedMigration(plan: take ready) = take installation
+    let installed = publish_schema_plan(mut db, take ready)
+    db.disk[0].target = None
+    match take installed {
+        Ok(_) => Ok(release_at),
+        Error(OpenLimit(problem)) => Error(FullNew(problem)),
+        Error(take fault) => Error(Store(take fault)),
+    }
+}
+
+// The runner has paused admission and settled its workers before this call.
+pub fn perform_cutover[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes,
+    release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget) -> Result[V, DeployError]) -> Result[u64, DeployError] waits {
+    let outcome = install_prepared(mut db, request, current_activation, old_describe, release_codec, release_from)
+    if is_disk(db) { forget_import(mut db) }
+    take outcome
+}
+
+fn forget_import(mut db: Db) {
+    db.disk[0].imported = None
+    db.disk[0].reserving = None
+    db.disk[0].lease = None
+    db.ceiling = db.disk[0].options.resident_limit
+}
+
 type DiskCut: send {
     generation: u64,
     fence: u32,
+    lease: Option[Arc[ExportLease]],
+    target: Option[TargetLimits],
     state: State,
     next_node: u64,
     next_table: u32,
     first_live: u64
 }
 
-type DiskCutAck: send = Saved(u64, u64) | NoRoom(u64, Capacity) | CutFailed(Error)
+type DiskCutAck: send = Saved(u64, u64) | NoRoom(u64, Capacity) | TargetNoRoom(u64, Capacity) | CutFailed(Error)
 
 type DiskState: send {
     store: StoreId,
     manifest: DiskManifest,
+    lease: Option[Arc[ExportLease]],
     graph: DiskGraph
 }
 
@@ -9528,14 +10299,41 @@ type DiskPrepared: send {
     ack: DiskCutAck
 }
 
-fn disk_removals(m: DiskManifest) -> Result[List[String], Capacity] {
+fn cut_lease(lease: Option[Arc[ExportLease]]) -> Option[Arc[ExportLease]] {
+    match lease { Some(kept) => Some(arc.share(kept)), None => None }
+}
+
+fn db_target(db: Db) -> Option[TargetLimits] {
+    if is_disk(db) { db.disk[0].target } else { None }
+}
+
+fn db_lease(db: Db) -> Option[Arc[ExportLease]] {
+    if is_disk(db) { cut_lease(db.disk[0].lease) } else { None }
+}
+
+fn pack_leased(lease: Option[Arc[ExportLease]], seq: u64) -> bool {
+    if let Some(kept) = lease {
+        for pack in kept.packs {
+            if pack.seq == seq { return true }
+        }
+    }
+    false
+}
+
+fn segment_leased(lease: Option[Arc[ExportLease]], seq: u64) -> bool {
+    match lease { Some(kept) => seq >= kept.first && seq <= kept.terminal, None => false }
+}
+
+fn disk_removals(m: DiskManifest, lease: Option[Arc[ExportLease]]) -> Result[List[String], Capacity] {
     let mut names: List[String] = list.new()
     for seq in m.retired {
-        result.capacity_only(list.push(mut names, disk_path("p-", seq, "")?))?
+        if !pack_leased(lease, seq) { result.capacity_only(list.push(mut names, disk_path("p-", seq, "")?))? }
     }
     for seq in m.prev_first .. m.first_live {
-        result.capacity_only(list.push(mut names, disk_path("j-", seq, "")?))?
-        result.capacity_only(list.push(mut names, disk_path("j-", seq, ".end")?))?
+        if !segment_leased(lease, seq) {
+            result.capacity_only(list.push(mut names, disk_path("j-", seq, "")?))?
+            result.capacity_only(list.push(mut names, disk_path("j-", seq, ".end")?))?
+        }
     }
     Ok(take names)
 }
@@ -9545,7 +10343,18 @@ fn disk_prepare(d: Dir, state: DiskState, cut: DiskCut, cap: u64) -> Result[Disk
     let all = capacity(state_roots(cut.state))?
     let fresh = capacity(disk_track_roots(mut graph, all))?
     let pack_set = disk_compact(d, state.store, mut graph, state.manifest.packs, state.manifest.next_pack, cap, take fresh)?
-    let DiskPackSet(packs: take packs, retired: take retired, next: next_pack) = take pack_set
+    let DiskPackSet(packs: take packs, retired: take newly_retired, next: next_pack) = take pack_set
+    if let Some(wanted) = cut.target {
+        if graph.live > wanted.resident {
+            return Error(OpenLimit(Capacity(requested: graph.live, available: wanted.resident)))
+        }
+        for pack in packs {
+            let stats = option.unwrap(disk_index_get(graph.pack_stats, pack.seq))
+            if stats.total > wanted.pack {
+                return Error(OpenLimit(Capacity(requested: stats.total, available: wanted.pack)))
+            }
+        }
+    }
     // Heads are kept in id order, so the branches are written sorted by id.
     let mut branches: List[DiskBranch] = list.new()
     for t in cut.state.tips {
@@ -9557,11 +10366,20 @@ fn disk_prepare(d: Dir, state: DiskState, cut: DiskCut, cap: u64) -> Result[Disk
         let kept = DiskPin(name: capacity(string.from(held.name))?, branch: held.branch, version: held.version, roots: disk_root_ids(held.roots))
         capacity(result.capacity_only(list.push(mut pins, take kept)))?
     }
-    let manifest = DiskManifest(generation: cut.generation, fence: cut.fence, next_node: cut.next_node, next_branch: cut.state.next_branch, next_table: cut.next_table, next_pack: next_pack, first_live: cut.first_live, prev_first: state.manifest.first_live, packs: take packs, retired: take retired, branches: take branches, pins: take pins)
-    let names = capacity(disk_removals(manifest))?
+    let mut retired = take newly_retired
+    for seq in state.manifest.retired {
+        if pack_leased(state.lease, seq) { capacity(result.capacity_only(list.push(mut retired, seq)))? }
+    }
+    list.sort(mut retired, std.order.compare)
+    let prev_first = match state.lease {
+        Some(old) => if old.first < state.manifest.first_live { old.first } else { state.manifest.first_live },
+        None => state.manifest.first_live,
+    }
+    let manifest = DiskManifest(generation: cut.generation, fence: cut.fence, next_node: cut.next_node, next_branch: cut.state.next_branch, next_table: cut.next_table, next_pack: next_pack, first_live: cut.first_live, prev_first: prev_first, packs: take packs, retired: take retired, branches: take branches, pins: take pins)
+    let names = capacity(disk_removals(manifest, cut.lease))?
     let raw = capacity(disk_manifest_bytes(state.store, manifest))?
     let ack = Saved(cut.generation, graph.live)
-    Ok(DiskPrepared(state: DiskState(store: state.store, manifest: take manifest, graph: take graph), raw: take raw, removals: take names, ack: take ack))
+    Ok(DiskPrepared(state: DiskState(store: state.store, manifest: take manifest, lease: cut_lease(cut.lease), graph: take graph), raw: take raw, removals: take names, ack: take ack))
 }
 
 // Q1: no allocation follows the manifest rename. File names, final metadata
@@ -9607,6 +10425,11 @@ fn disk_worker(take input: DiskWorker) -> Result[(), Error] waits {
                     return Ok(())
                 }
             },
+            Error(OpenLimit(c)) => {
+                if let Error(_) = channel.send(send, TargetNoRoom(generation, c)) {
+                    return Ok(())
+                }
+            },
             Error(Io(e)) => {
                 let _ = channel.send(send, CutFailed(Io(e)))
                 return Error(Io(e))
@@ -9621,7 +10444,7 @@ fn disk_worker(take input: DiskWorker) -> Result[(), Error] waits {
 }
 
 fn disk_cut(db: Db, generation: u64, first_live: u64) -> DiskCut {
-    DiskCut(generation: generation, fence: db.fence, state: result.unwrap(current_state(db)), next_node: db.next_node + 1, next_table: db.next_table, first_live: first_live)
+    DiskCut(generation: generation, fence: db.fence, lease: db_lease(db), target: db_target(db), state: result.unwrap(current_state(db)), next_node: db.next_node + 1, next_table: db.next_table, first_live: first_live)
 }
 
 // L28 worker component: the task refuses a1MiB NODE under128KiB, preserves
@@ -9631,7 +10454,7 @@ pub fn disk_law_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
     let mut db = test_db(c, 1073741824)
     let manifest = disk_genesis_fixture()
     result.unwrap(disk_publish_manifest(d, db.store, manifest))
-    let state = DiskState(store: db.store, manifest: take manifest, graph: disk_graph())
+    let state = DiskState(store: db.store, manifest: take manifest, lease: None, graph: disk_graph())
     let (send, receive): (Sender[DiskCut], Receiver[DiskCut]) = result.unwrap(channel.new(1))
     let (acks, received): (Sender[DiskCutAck], Receiver[DiskCutAck]) = result.unwrap(channel.new(1))
     let input = DiskWorker(d: d, state: take state, cap: 512, receive: take receive, send: take acks)
@@ -9992,7 +10815,7 @@ fn disk_bootstrap(take input: DiskBootstrap) -> Result[(), Error] waits {
         Ok(take loaded) => {
             let mut startup = take initial
             let DiskLoaded(store: id, manifest: take manifest, roots: _, graph: take graph) = take loaded
-            let state = DiskState(store: id, manifest: take manifest, graph: take graph)
+            let state = DiskState(store: id, manifest: take manifest, lease: None, graph: take graph)
             if let Error(_) = channel.send(ready, Ok(take startup)) {
                 return Ok(())
             }
@@ -10025,6 +10848,7 @@ fn disk_lock(d: Dir, c: Clock, wait_ms: u64) -> Result[HostFile, Error] waits {
 }
 
 fn disk_session(tasks: Tasks, d: Dir, clock: Clock, r: Random, options: Options) -> Result[DiskSession, Error] waits {
+    if disk_exists(d, "EXPORT")? { return Error(ExportDirectory) }
     let lock = disk_lock(d, clock, options.lock_wait_ms)?
     let (send, receive): (Sender[DiskCut], Receiver[DiskCut]) = capacity(channel.new(1))?
     let (acks, received): (Sender[DiskCutAck], Receiver[DiskCutAck]) = capacity(channel.new(1))?
@@ -10153,6 +10977,10 @@ type DiskConnection {
     d: Dir,
     open: u64,
     options: Options,
+    lease: Option[Arc[ExportLease]],
+    imported: Option[Imported],
+    reserving: Option[Inline[u8, 32]],
+    target: Option[TargetLimits],
     pending: Option[DiskPending],
     refused_cut: Option[(u64, Capacity)],
     cut_live: u64,
@@ -10180,6 +11008,19 @@ fn healthy(db: Db) -> Result[(), Error] {
     }
 }
 
+fn open_heads(mut db: Db, take state: State) -> Result[(), Error] {
+    let State(tips: take tips, pins: take pins, next_branch: next_branch) = take state
+    let mut heads: List[Head] = capacity(list.with_capacity(list.len(tips)))?
+    for take t in take tips {
+        let Tip(id: br, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at) = take t
+        capacity(result.capacity_only(list.push(mut heads, Head(id: br, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at, following: None))))?
+    }
+    db.heads = take heads
+    db.pins = take pins
+    db.next_branch = next_branch
+    Ok(())
+}
+
 // S3 makes the disk opener public with its journal and final durability path.
 pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
     if options.group_commits == 0 { return Error(Missing("group_commits")) }
@@ -10189,22 +11030,14 @@ pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Resu
     let DiskSession(lock: take lock, startup: take startup, send: take send, acks: take acks, worker: take worker) = take session
     let DiskStartup(store: id, fence: fence, state: take state, live: live, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, seq: seq, segment: take segment, end_file: take end_file) = take startup
     let mut db = empty_db(c, id, options, take register)
-    let State(tips: take tips, pins: take pins, next_branch: next_branch) = take state
-    let mut heads: List[Head] = capacity(list.with_capacity(list.len(tips)))?
-    for take t in take tips {
-        let Tip(id: br, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at) = take t
-        capacity(result.capacity_only(list.push(mut heads, Head(id: br, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at, following: None))))?
-    }
-    db.heads = take heads
-    db.pins = take pins
+    open_heads(mut db, take state)?
     db.fence = fence
-    db.next_branch = next_branch
     db.next_node = next_node
     db.next_table = next_table
     db.file_seq = seq
     db.resident = live
     db.checkpointed = generation
-    capacity(result.capacity_only(list.push(mut db.disk, DiskConnection(lock: take lock, d: d, open: seq, options: options, pending: None, refused_cut: None, cut_live: live, record_cut: cut_first, previous_record_cut: cut_first, send: take send, acks: take acks, worker: take worker))))?
+    capacity(result.capacity_only(list.push(mut db.disk, DiskConnection(lock: take lock, d: d, open: seq, options: options, lease: None, imported: None, reserving: None, target: None, pending: None, refused_cut: None, cut_live: live, record_cut: cut_first, previous_record_cut: cut_first, send: take send, acks: take acks, worker: take worker))))?
     let group_count: u64 = int.widen(options.group_commits)
     let (frames, queued): (Sender[JournalMsg], Receiver[JournalMsg]) = capacity(channel.new(group_count * 2))?
     // Y1: one ack per frame, at most 2g queued + g in the group + 1 held back
@@ -10272,6 +11105,13 @@ fn disk_wait_cut(mut db: Db, generation: u64) -> Result[(), Error] waits {
                 db.disk[0].refused_cut = Some((g, c))
                 return Error(Full(c))
             },
+            TargetNoRoom(g, c) => {
+                let previous = db.disk[0].previous_record_cut
+                db.disk[0].record_cut = previous
+                db.disk[0].pending = None
+                db.disk[0].refused_cut = Some((g, c))
+                return Error(OpenLimit(c))
+            },
             CutFailed(Io(e)) => {
                 if let None = db.poison {
                     db.poison = Some(e)
@@ -10324,7 +11164,7 @@ fn disk_begin_cut(mut db: Db, take s: State) -> Result[Ticket, Error] waits {
     }
     db.file_seq = seq
     db.file_end = 72
-    let cut = DiskCut(generation: generation, fence: db.fence, state: take s, next_node: db.next_node + 1, next_table: db.next_table, first_live: seq)
+    let cut = DiskCut(generation: generation, fence: db.fence, lease: db_lease(db), target: db_target(db), state: take s, next_node: db.next_node + 1, next_table: db.next_table, first_live: seq)
     let record_previous = db.disk[0].record_cut
     db.disk[0].previous_record_cut = record_previous
     db.disk[0].record_cut = seq
@@ -10346,7 +11186,7 @@ pub fn checkpoint(mut db: Db) -> Result[Ticket, Error] waits {
 }
 
 fn disk_close_connection(take connection: DiskConnection) -> Result[(), Error] waits {
-    let DiskConnection(lock: take lock, d: _, open: _, options: _, pending: _, refused_cut: _, cut_live: _, record_cut: _, previous_record_cut: _, send: _, acks: _, worker: take worker) = take connection
+    let DiskConnection(lock: take lock, d: _, open: _, options: _, lease: _, imported: _, reserving: _, target: _, pending: _, refused_cut: _, cut_live: _, record_cut: _, previous_record_cut: _, send: _, acks: _, worker: take worker) = take connection
     let joined = task.join(take worker)
     let _ = take lock
     result.unwrap(take joined)
@@ -10708,8 +11548,8 @@ pub fn disk_law_publish_refusal(d: Dir) -> bool waits {
         let child = disk_test_directory(d)
         let manifest = disk_genesis_fixture()
         result.unwrap(disk_publish_manifest(child, id, manifest))
-        let state = DiskState(store: id, manifest: take manifest, graph: disk_graph())
-        let cut = DiskCut(generation: 2, fence: 0, state: result.unwrap(main_state(share_roots(roots), 0, 0)), next_node: 1, next_table: 1, first_live: 97)
+        let state = DiskState(store: id, manifest: take manifest, lease: None, graph: disk_graph())
+        let cut = DiskCut(generation: 2, fence: 0, lease: None, target: None, state: result.unwrap(main_state(share_roots(roots), 0, 0)), next_node: 1, next_table: 1, first_live: 97)
         let trial: Result[Result[(), Error], Capacity] = bound bytes (step * 512) {
             disk_try_publish(child, state, cut)
         }
@@ -10998,11 +11838,206 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
     Ok(good)
 }
 
+fn install_old(mut phase: Migration) -> Result[(), Error] {
+    migration_create_table(mut phase, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    migration_create_table(mut phase, spec("other", std.codec.key_u64(), std.codec.of_u64()))
+}
+
+fn install_next(mut phase: Migration) -> Result[(), Error] {
+    crash_migration(mut phase)?
+    let second = migration_table(mut phase, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let mut replacement = spec("other", std.codec.key_u64(), std.codec.of_u64())
+    with_index(mut replacement, "empty", code.describe(crash_value), std.codec.key_u64())?
+    migration_migrate(mut phase, take second, take replacement, crash_thousand)
+}
+
+fn install_target_value(target: PreparedTarget) -> Result[Bytes, DeployError] {
+    deploy_result(copied(target.release))
+}
+
+fn install_fixture_bytes(n: u64, b: u8) -> Bytes {
+    let mut out: Bytes = list.new()
+    result.unwrap(list.fill(mut out, n, b))
+    take out
+}
+
+fn crash_install_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, disk_crash_options("install"))?
+    let mut staging = stage_migration(db, tasks, code.describe(install_old))?
+    let description = install_fixture_bytes(32u64, 65u8)
+    stage_activation(mut staging, 1u64, None, description, std.codec.of_bytes(), description)?
+    install_activation(mut db, take staging, None)?
+    let target = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    for k in 0u64 .. 96u64 {
+        if !typed_put(mut db, target, k, k + 1) { fail("install seed row") }
+    }
+    let _ = checkpoint(mut db)?
+    close(take db)
+}
+
+fn crash_install_prepared(mut db: Db, d: Dir, c: Clock, tasks: Tasks, attempt: Bytes) -> Result[(Dir, u64), DeployError] waits {
+    let copying = begin_export(mut db, tasks, d, deploy_result(copied(attempt))?, 1u64, 4194304u64)?
+    let exported = match task.join(take copying) {
+        Ok(take answer) => (take answer)?,
+        Error(_) => return Error(ExportMismatch),
+    }
+    Ok((exported.dir, exported.stamp.head))
+}
+
+fn crash_import(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, attempt: Bytes, image: u8, pack: u64) -> Result[Inline[u8, 32], DeployError] waits {
+    let source = open_export(scratch, c, attempt, disk_crash_options("install"))?
+    let staged = deploy_result(stage_export_migration(source, tasks, code.describe(install_next)))?
+    let header = PreparedTarget(describe: install_fixture_bytes(32u64, image), release: install_fixture_bytes(32u64, 67u8),
+        digest: install_fixture_bytes(32u64, 68u8), resident_limit: 2097152u64, checkpoint_task_bytes: pack)
+    write_prepared(source, staged, scratch, take header)?
+    let checked = validate_prepared(scratch)?
+    let work = reserve_import(mut db, take checked)?
+    let assembled = import_trees(take work)?
+    let digest = imported_digest(assembled)
+    keep_import(mut db, take assembled)?
+    Ok(digest)
+}
+
+fn crash_apply(mut db: Db, attempt: Bytes, digest: Inline[u8, 32]) -> Result[u64, DeployError] waits {
+    let requested = Cutover(attempt: deploy_result(copied(attempt))?, digest: digest, deadline: 18446744073709551615u64)
+    let description = install_fixture_bytes(32u64, 65u8)
+    perform_cutover(mut db, requested, 1u64, description, std.codec.of_bytes(), install_target_value)
+}
+
+fn crash_install_run(mut db: Db, d: Dir, c: Clock, tasks: Tasks) -> Result[u64, DeployError] waits {
+    let attempt = install_fixture_bytes(16u64, 7u8)
+    let (scratch, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    let digest = crash_import(mut db, scratch, c, tasks, attempt, 66u8, 1048576u64)?
+    crash_apply(mut db, attempt, digest)
+}
+
+// Exercise the pre-rename refusals together with a fresh export after drift.
+// No cut in this case is permitted to change the activation until the retry.
+fn crash_install_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let mut db = deploy_result(open(tasks, d, c, r, disk_crash_options("install")))?
+    let attempt = install_fixture_bytes(16u64, 7u8)
+    let (scratch, base) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    if base != 97u64 { fail("fixture base") }
+    let first = crash_import(mut db, scratch, c, tasks, attempt, 66u8, 1048576u64)?
+    let second = crash_import(mut db, scratch, c, tasks, attempt, 70u8, 1048576u64)?
+    if first == second { fail("candidate digests are equal") }
+    match crash_apply(mut db, attempt, first) {
+        Error(ExportMismatch) => (),
+        _ => fail("cutover accepted a superseded candidate"),
+    }
+    let (scratch_limit, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    let blocked = crash_import(mut db, scratch_limit, c, tasks, attempt, 66u8, 32u64)?
+    match crash_apply(mut db, attempt, blocked) {
+        Error(FullNew(_)) => (),
+        _ => fail("cutover ignored the target's largest-pack limit"),
+    }
+    if version(snapshot(db)) != base { fail("a refusal published roots") }
+    let (scratch_writes, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    let stale = crash_import(mut db, scratch_writes, c, tasks, attempt, 66u8, 1048576u64)?
+    let t = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let acknowledged = deploy_result(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 0u64, 77u64)
+    }))?
+    if let Committed(done) = acknowledged {
+        deploy_result(durable(mut db, done.ticket))?
+    } else { fail("could not acknowledge the drift write") }
+    match crash_apply(mut db, attempt, stale) {
+        Error(Drift) => (),
+        _ => fail("cutover accepted an intervening journal commit"),
+    }
+    let (scratch_schema, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    let stale_schema = crash_import(mut db, scratch_schema, c, tasks, attempt, 66u8, 1048576u64)?
+    let _ = deploy_result(create_table(mut db, spec("kept", std.codec.key_u64(), std.codec.of_u64())))?
+    match crash_apply(mut db, attempt, stale_schema) {
+        Error(Drift) => (),
+        _ => fail("cutover accepted an intervening schema commit"),
+    }
+    let installed = crash_install_run(mut db, d, c, tasks)?
+    if installed != 100u64 { fail("fresh export lost an intervening version") }
+    deploy_result(close(take db))?
+    let reopened = deploy_result(open(tasks, d, c, r, disk_crash_options("install")))?
+    let migrated = deploy_result(system_table(reopened, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = deploy_result(system_table(reopened, "kept", std.codec.key_u64(), std.codec.of_u64()))?
+    if deploy_result(get(snapshot(reopened), shape(migrated), 0u64))? != Some(1077u64) {
+        fail("fresh export lost the acknowledged row")
+    }
+    deploy_result(close(take reopened))
+}
+
+fn crash_install_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, disk_crash_options("install"))?
+    match crash_install_run(mut db, d, c, tasks) {
+        Ok(v) => if v != 98 { fail("wrong installed version") },
+        Error(Store(take problem)) => return Error(take problem),
+        Error(Scratch(take problem)) => return Error(take problem),
+        Error(_) => fail("install fixture refused"),
+    }
+    close(take db)
+}
+
+fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool) -> Result[bool, Error] waits {
+    let mut db = open(tasks, d, c, r, disk_crash_options("install"))?
+    let snap = snapshot(db)
+    let v = version(snap)
+    if v != 98 && (v != 97 || required_new) { return Ok(false) }
+    let installed = v == 98
+    let activated = system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
+    let release = system_table(db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_bytes())?
+    let found = option.unwrap(get(snap, shape(activated), 0u8)?)
+    if found != install_fixture_bytes(32u64, if installed { 66u8 } else { 65u8 }) || db.fence != 1 { return Ok(false) }
+    let new_release = get(snap, shape(release), 98u64)?
+    if installed {
+        if option.unwrap(take new_release) != install_fixture_bytes(32u64, 67u8) || db.next_table != 10u32 { return Ok(false) }
+    } else if let Some(_) = new_release { return Ok(false) }
+    let t = system_table(db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    for k in 0u64 .. 96u64 {
+        if get(snap, shape(t), k)? != Some(k + if installed { 1001u64 } else { 1u64 }) { return Ok(false) }
+    }
+    if installed {
+        let other = system_table(db, "other", std.codec.key_u64(), std.codec.of_u64())?
+        if list.len(index_catalog(db, other.id)?) != 1 || std.omap.len(db.heads[0].roots.streams) != 0u64 { return Ok(false) }
+        let _ = create_table(mut db, spec("after", std.codec.key_u64(), std.codec.of_u64()))?
+        let after = system_table(db, "after", std.codec.key_u64(), std.codec.of_u64())?
+        if after.id != 10u32 { return Ok(false) }
+        let _ = checkpoint(mut db)?
+        close(take db)?
+        let reopened = open(tasks, d, c, r, disk_crash_options("install"))?
+        for k in 0u64 .. 96u64 {
+            if get(snapshot(reopened), shape(t), k)? != Some(k + 1001u64) { return Ok(false) }
+        }
+        close(take reopened)?
+    } else {
+        close(take db)?
+    }
+    Ok(true)
+}
+
 // Native provider entry; the adapter invokes it for init, one cut and reopen.
 // The expected rows and schema versions above follow the specified history.
 pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0))
     let scenario = option.unwrap(args.get(argv, 1))
+    if scenario == "install-refusals" {
+        if phase == "init" {
+            return match crash_install_init(d, c, r, tasks) { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 61u8)) }
+        }
+        if phase == "write" {
+            if let Ok(()) = crash_install_refusals(d, c, r, tasks) { let _ = stdout.write(out, "DONE"); return Ok(()) }
+            return Error(Exit(status: 64u8))
+        }
+        return Ok(())
+    }
+    if scenario == "install" {
+        if phase == "init" {
+            return match crash_install_init(d, c, r, tasks) { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 61u8)) }
+        }
+        if phase == "write" {
+            if let Ok(()) = crash_install_write(d, c, r, tasks) { let _ = stdout.write(out, "DONE") }
+            return Ok(())
+        }
+        let required_new = option.unwrap(args.get(argv, 2u64)) == "new"
+        return match crash_install_read(d, c, r, tasks, required_new) { Ok(true) => Ok(()), _ => Error(Exit(status: 63u8)) }
+    }
     if phase == "init" {
         if scenario == "genesis" {
             return Ok(())

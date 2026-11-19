@@ -227,6 +227,13 @@ fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Task
 
 pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
     store.runner.main(a, code.describe(place), scoped fn() -> Result[(), Exit] waits {
+        if let Some(take candidate) = store.runner.launch_prepare_args(a)? {
+            let store.runner.PrepareArgs(attempt: take attempt, digest: take digest) = take candidate
+            let setup = store.runner.PrepareConfig(scratch: directory, options: store.store.defaults(),
+                attempt: take attempt, image_digest: take digest, clock: c, tasks: tasks, n_place: N_PLACE,
+                place: code.describe(place), migrate: code.describe(migrate), handles: code.describe(handles))
+            return match store.runner.prepare_deploy(setup) { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 1u8)) }
+        }
         start(n, directory, web, c, random, tasks, a)
     })
 }

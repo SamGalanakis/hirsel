@@ -1088,3 +1088,148 @@ pub fn next[K: ordered + shareable + send, V: shareable + send](mut c: Cursor[K,
     c.path[at].position += 1
     Ok(Some(take pair))
 }
+
+/// Replace [lo, hi) with a sorted tree whose keys all lie in that interval.
+/// Unchanged subtrees stay shared. Fresh path nodes use ids after every root
+/// supplied by the caller.
+pub fn graft[K: ordered + shareable + send, V: shareable + send](mut ids: u64, base: OMap[K, V], lo: K, hi: K, replacement: OMap[K, V]) -> Result[OMap[K, V], Capacity] {
+    let (left, rest) = split_tree(mut ids, base, lo)?
+    let (_, right) = split_tree(mut ids, rest, hi)?
+    let prefix = concat_trees(mut ids, left, replacement)?
+    concat_trees(mut ids, prefix, right)
+}
+
+fn split_tree[K: ordered + shareable + send, V: shareable + send](mut ids: u64, tree: OMap[K, V], k: K) -> Result[(OMap[K, V], OMap[K, V]), Capacity] {
+    match tree.head {
+        Some(n) => split_node(mut ids, n, k),
+        None => Ok((new(), new())),
+    }
+}
+
+fn split_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, n: Arc[Node[K, V]], k: K) -> Result[(OMap[K, V], OMap[K, V]), Capacity] {
+    if n.depth == 0 {
+        let at = lower(n.rows, k)
+        if at == 0 {
+            return Ok((new(), from_root(Some(arc.share(n)))))
+        }
+        if at == list.len(n.rows) {
+            return Ok((from_root(Some(arc.share(n))), new()))
+        }
+        let left = leaf_part(mut ids, n.rows, 0u64, at)?
+        let right = leaf_part(mut ids, n.rows, at, list.len(n.rows))?
+        return Ok((from_root(Some(take left)), from_root(Some(take right))))
+    }
+    let at = child_index(n, k)
+    let (child_left, child_right) = split_node(mut ids, n.kids[at], k)?
+    let left = branch_part(mut ids, n.kids, 0u64, at)?
+    let right = branch_part(mut ids, n.kids, at + 1u64, list.len(n.kids))?
+    Ok((concat_trees(mut ids, left, child_left)?, concat_trees(mut ids, child_right, right)?))
+}
+
+fn leaf_part[K: ordered + shareable + send, V: shareable + send](mut ids: u64, rows: List[Arc[Entry[K, V]]], lo: u64, hi: u64) -> Result[Arc[Node[K, V]], Capacity] {
+    let mut part: List[Arc[Entry[K, V]]] = list.with_capacity(hi - lo)?
+    for i in lo .. hi {
+        result.capacity_only(list.push(mut part, arc.share(rows[i])))?
+    }
+    ids += 1
+    pack_leaf(ids, take part)
+}
+
+fn branch_part[K: ordered + shareable + send, V: shareable + send](mut ids: u64, kids: List[Arc[Node[K, V]]], lo: u64, hi: u64) -> Result[OMap[K, V], Capacity] {
+    if hi == lo {
+        return Ok(new())
+    }
+    if hi == lo + 1 {
+        return Ok(from_root(Some(arc.share(kids[lo]))))
+    }
+    let joined_root = build_branch_part(mut ids, kids, lo, hi)?
+    Ok(from_root(Some(take joined_root)))
+}
+
+fn build_branch_part[K: ordered + shareable + send, V: shareable + send](mut ids: u64, kids: List[Arc[Node[K, V]]], lo: u64, hi: u64) -> Result[Arc[Node[K, V]], Capacity] {
+    let mut part: List[Arc[Node[K, V]]] = list.with_capacity(hi - lo)?
+    for i in lo .. hi {
+        result.capacity_only(list.push(mut part, arc.share(kids[i])))?
+    }
+    fresh_branch(mut ids, take part)
+}
+
+fn concat_trees[K: ordered + shareable + send, V: shareable + send](mut ids: u64, left: OMap[K, V], right: OMap[K, V]) -> Result[OMap[K, V], Capacity] {
+    let Some(a) = root(left) else {
+        return Ok(snapshot(right))
+    }
+    let Some(b) = root(right) else {
+        return Ok(snapshot(left))
+    }
+    let joined = join_nodes(mut ids, a, b)?
+    let (take leading, take second) = take joined
+    if let Some(take other) = take second {
+        let mut children: List[Arc[Node[K, V]]] = list.with_capacity(2)?
+        result.capacity_only(list.push(mut children, take leading))?
+        result.capacity_only(list.push(mut children, take other))?
+        let joined_root = fresh_branch(mut ids, take children)?
+        return Ok(from_root(Some(take joined_root)))
+    }
+    Ok(from_root(Some(take leading)))
+}
+
+// Both results have the taller input's depth. At the same depth, combine the
+// two roots if either is too small to become a non-joined_root node.
+fn join_nodes[K: ordered + shareable + send, V: shareable + send](mut ids: u64, a: Arc[Node[K, V]], b: Arc[Node[K, V]]) -> Result[(Arc[Node[K, V]], Option[Arc[Node[K, V]]]), Capacity] {
+    let ac = node_count(a)
+    let bc = node_count(b)
+    if a.depth == b.depth && ac >= 16 && bc >= 16 {
+        return Ok((arc.share(a), Some(arc.share(b))))
+    }
+    if a.depth == 0 && b.depth == 0 {
+        let mut rows: List[Arc[Entry[K, V]]] = list.with_capacity(ac + bc)?
+        for row in a.rows {
+            result.capacity_only(list.push(mut rows, arc.share(row)))?
+        }
+        for row in b.rows {
+            result.capacity_only(list.push(mut rows, arc.share(row)))?
+        }
+        let end = list.len(rows)
+        if end <= 32 {
+            ids += 1
+            return Ok((pack_leaf(ids, take rows)?, None))
+        }
+        let left = leaf_part(mut ids, rows, 0u64, end / 2)?
+        let right = leaf_part(mut ids, rows, end / 2, end)?
+        return Ok((take left, Some(take right)))
+    }
+    let mut kids: List[Arc[Node[K, V]]] = list.with_capacity(64)?
+    if a.depth == b.depth {
+        for child in a.kids {
+            result.capacity_only(list.push(mut kids, arc.share(child)))?
+        }
+        for child in b.kids {
+            result.capacity_only(list.push(mut kids, arc.share(child)))?
+        }
+    } else if a.depth > b.depth {
+        for i in 0u64 .. ac - 1u64 {
+            result.capacity_only(list.push(mut kids, arc.share(a.kids[i])))?
+        }
+        let (take leading, take second) = join_nodes(mut ids, a.kids[ac - 1], b)?
+        result.capacity_only(list.push(mut kids, take leading))?
+        if let Some(take other) = take second {
+            result.capacity_only(list.push(mut kids, take other))?
+        }
+    } else {
+        let (take leading, take second) = join_nodes(mut ids, a, b.kids[0])?
+        result.capacity_only(list.push(mut kids, take leading))?
+        if let Some(take other) = take second {
+            result.capacity_only(list.push(mut kids, take other))?
+        }
+        for i in 1u64 .. bc {
+            result.capacity_only(list.push(mut kids, arc.share(b.kids[i])))?
+        }
+    }
+    let end = list.len(kids)
+    if end <= 32 {
+        return Ok((fresh_branch(mut ids, take kids)?, None))
+    }
+    let left = build_branch_part(mut ids, kids, 0u64, end / 2)?
+    let right = build_branch_part(mut ids, kids, end / 2, end)?
+    Ok((take left, Some(take right)))
+}

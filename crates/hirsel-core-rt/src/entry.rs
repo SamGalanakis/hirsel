@@ -227,6 +227,18 @@ impl OsProcess {
                 prefix += 1;
             }
             let args: Vec<_> = argv.skip(prefix).map(<[u8]>::to_vec).collect();
+            let prepare_path = if args.first().is_some_and(|arg| arg == b"--hirsel-prepare") {
+                if describe_mode || args.len() != 4 || input.directories_len == 0 {
+                    return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+                }
+                let dir = Path::new(OsStr::from_bytes(&args[1]));
+                if !dir.is_absolute() {
+                    return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+                }
+                Some(dir)
+            } else {
+                None
+            };
             let target = std::str::from_utf8(bytes(input.target))
                 .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
             let launch = Box::new(launch_metadata(target, n_place, describe_mode));
@@ -244,7 +256,7 @@ impl OsProcess {
                 })?,
                 duplicate(input.stderr_fd)?,
             ));
-            if !describe_mode {
+            if !describe_mode && prepare_path.is_none() {
                 *os.inherited_listener.get_mut().unwrap() = inherited;
             }
             let describe_out = if describe_mode {
@@ -253,7 +265,12 @@ impl OsProcess {
                 None
             };
             let mut dirs = Vec::new();
-            if !describe_mode && let Some(operations) = directory_ops {
+            if let Some(scratch) = prepare_path {
+                let operations =
+                    directory_ops.ok_or_else(|| io::Error::from_raw_os_error(libc::EACCES))?;
+                let handle = (operations.grant)(&mut os, scratch)?;
+                dirs.resize(input.directories_len, handle);
+            } else if !describe_mode && let Some(operations) = directory_ops {
                 for index in 0..input.directories_len {
                     let path = Path::new(OsStr::from_bytes(bytes(*input.directories.add(index))));
                     dirs.push((operations.grant)(&mut os, path)?);
@@ -267,12 +284,14 @@ impl OsProcess {
                     capacity: 0,
                 })
                 .collect::<Vec<_>>();
-            let net_storage: Box<[hirsel_core_net::Rule]> = if input.net_rules_len == 0 {
-                Box::default()
-            } else {
-                std::slice::from_raw_parts(input.net_rules, input.net_rules_len).into()
-            };
+            let net_storage: Box<[hirsel_core_net::Rule]> =
+                if prepare_path.is_some() || input.net_rules_len == 0 {
+                    Box::default()
+                } else {
+                    std::slice::from_raw_parts(input.net_rules, input.net_rules_len).into()
+                };
             if !describe_mode
+                && prepare_path.is_none()
                 && input.grant_mask & (1 << NET) != 0
                 && (net_storage.is_empty() || net_storage.iter().any(|r| !r.valid()))
             {

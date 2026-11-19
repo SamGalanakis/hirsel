@@ -129,6 +129,14 @@ A refused selection returns `NotCurrent(found)` before handles run. A disk
 genesis or standalone install requires a known executable identity and returns
 `IdentityUnknown` if it is unavailable.
 
+A prepare launch takes `--hirsel-prepare <absolute-export-dir> <attempt> <image-key>`
+as its place arguments. The attempt and image key use padded Base64 for 16 and
+32 bytes. The native launcher binds directory designations to that export
+directory and withholds network rules and the inherited listener. The place
+passes the scratch directory to `runner.prepare_deploy`. It verifies the image
+key, stages the migration, validates both handle sets, and
+syncs `PREPARED` before exiting.
+
 ## Release manifest
 
 `hirsel build --manifest PATH` writes the release manifest after it links the

@@ -102,11 +102,31 @@ static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t 
     }
     return (HirselCoreWait){0};
 }
+static uint64_t scratch_dirs;
 static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token) {
     (void)token;
     if(r->operation==15) return (HirselCoreStep){0};
+    const uint64_t scratch_handle=UINT64_C(1)<<48;
+    if(r->operation==7) {
+        char name[32];
+        int count=snprintf(name,sizeof name,"scratch-%llu",(unsigned long long)++scratch_dirs);
+        if(count<0 || (size_t)count>r->buffer.capacity-r->buffer.len) abort();
+        memcpy(r->buffer.data+r->buffer.len,name,(size_t)count);
+        r->buffer.len+=(size_t)count;
+        return (HirselCoreStep){.outcome.value=scratch_handle+scratch_dirs};
+    }
+    uint8_t path[4096];
+    const uint8_t *used_path=r->path;
+    size_t path_len=r->path_len;
+    if(r->handle>=scratch_handle && (r->operation==0 || r->operation==8)) {
+        int count=snprintf((char *)path,sizeof path,"scratch-%llu/",(unsigned long long)(r->handle-scratch_handle));
+        if(count<0 || r->path_len>sizeof path-(size_t)count) abort();
+        memcpy(path+count,r->path,r->path_len);
+        used_path=path;
+        path_len=(size_t)count+r->path_len;
+    }
     HirselCoreHostOutcome out=store_crash_op(state,r->operation,r->mode,r->handle,
-        r->path,r->path_len,r->buffer.data,r->buffer.len,r->buffer.capacity);
+        used_path,path_len,r->buffer.data,r->buffer.len,r->buffer.capacity);
     if(!out.error.tag) {
         if(r->operation==1) r->buffer.len+=(size_t)out.value;
         if(r->operation==18) r->buffer.len+=(size_t)out.written;

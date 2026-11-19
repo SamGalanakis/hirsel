@@ -104,9 +104,83 @@ pub fn append_base64_bytes(b: Bytes, mut out: Bytes) -> Result[(), Capacity] {
     Ok(())
 }
 
+// For buffers of at least 128 bytes, validate a prefix ending at a scalar
+// boundary. The scalar validator checks the remaining bytes.
+fn utf8_block_prefix(b: Bytes) -> Option[u64] {
+    let n = list.len(b)
+    let last_block = n - 33
+    let last_wide = n - 128
+    let mut i: u64 = 0
+    let mut carry: u64 = 0
+    // One byte of lookahead covers the range limits on a lead's second byte.
+    while i <= last_block {
+        let block: Simd[u8, 32] = list.lanes(b, i)
+        let non_ascii = simd.bitmask(block)
+        if non_ascii == 0 {
+            if carry != 0 {
+                return None
+            }
+            if i <= last_wide {
+                let run = list.slice(b, i, i + 128)
+                let a: Simd[u8, 32] = list.lanes(run, 32)
+                let c: Simd[u8, 32] = list.lanes(run, 64)
+                let d: Simd[u8, 32] = list.lanes(run, 96)
+                if simd.bitmask(a | c | d) == 0 {
+                    i = int.wrapping_add(i, 128)
+                    continue
+                }
+            }
+        } else {
+            // Signed values below -64 are exactly the continuation bytes.
+            // The non-ASCII mask excludes ASCII from the lead ranges.
+            let signed: Simd[i8, 32] = simd.cast(block)
+            let continuation = simd.bitmask(simd.lt(signed, simd.splat(-64)))
+            let starts = non_ascii & ~continuation
+            let lead3 = non_ascii & ~simd.bitmask(simd.lt(signed, simd.splat(-32)))
+            let lead4 = non_ascii & ~simd.bitmask(simd.lt(signed, simd.splat(-16)))
+            let expected = carry | (starts << 1) | (lead3 << 2) | (lead4 << 3)
+            if continuation != (expected & 0xffffffff) {
+                return None
+            }
+            // C0/C1 are overlong. F5..FF cannot start a Unicode scalar.
+            let bad_lead = (simd.eq(block, simd.splat(0xc0)) | simd.eq(block, simd.splat(0xc1))) | ~simd.lt(block, simd.splat(0xf5))
+            let next: Simd[u8, 32] = list.lanes(b, int.wrapping_add(i, 1))
+            let next_signed: Simd[i8, 32] = simd.cast(next)
+            // The continuation check also covers the lookahead via carry.
+            // Within a continuation, signed comparisons preserve byte order.
+            let low_a0: Simd[u8, 32] = simd.cast(simd.lt(next_signed, simd.splat(-96)))
+            let low_90: Simd[u8, 32] = simd.cast(simd.lt(next_signed, simd.splat(-112)))
+            let overlong3 = simd.eq(block, simd.splat(0xe0)) & low_a0
+            let surrogate = simd.eq(block, simd.splat(0xed)) & ~low_a0
+            let overlong4 = simd.eq(block, simd.splat(0xf0)) & low_90
+            let out_of_range = simd.eq(block, simd.splat(0xf4)) & ~low_90
+            if simd.any(bad_lead | overlong3 | surrogate | overlong4 | out_of_range) {
+                return None
+            }
+            carry = expected >> 32
+        }
+        i = int.wrapping_add(i, 32)
+    }
+    // Only the final scalar of the prefix can extend into the tail.
+    while carry != 0 {
+        if i == n || b[i] & 0xc0 != 0x80 {
+            return None
+        }
+        i += 1
+        carry >>= 1
+    }
+    Some(i)
+}
+
 pub fn is_utf8(b: Bytes) -> bool {
     let n = list.len(b)
     let mut i: u64 = 0
+    if n >= 128 {
+        let Some(start) = utf8_block_prefix(b) else {
+            return false
+        }
+        i = start
+    }
     while i < n {
         let x = b[i]
         if x < 0x80 {

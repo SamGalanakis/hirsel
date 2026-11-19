@@ -595,6 +595,25 @@ fn from_utf8_rows_after_a_block() -> u64 {
     v * 10 + valid(a_run(16, b"\xF5\x80\x80\x80"))
 }
 
+// Repeat the boundary scalars around adjacent vectors and where the
+// final vector hands off to the tail. Invalid second bytes are checked even
+// when the lead is the last lane. Truncated scalars still fail at EOF.
+fn utf8_vector_case(pad: u64, take tail: Result[Bytes, Capacity], rest: u64) -> bool {
+    let mut b = a_run(pad, take tail)
+    result.unwrap(list.fill(mut b, rest, b'a'))
+    string.is_utf8(b)
+}
+
+// expect: run from_utf8_vector_edges() = true
+fn from_utf8_vector_edges() -> bool {
+    for i in 28u64 .. 36 {
+        if !utf8_vector_case(i, b"\xE0\xA0\x80", 128) || !utf8_vector_case(i, b"\xF4\x8F\xBF\xBF", 128) || utf8_vector_case(i, b"\xED\xA0\x80", 128) || utf8_vector_case(i, b"\xF0\x8F\xBF\xBF", 128) || utf8_vector_case(i, b"\xC1\xBF", 128) || utf8_vector_case(i, b"\x80", 128) {
+            return false
+        }
+    }
+    utf8_vector_case(127, b"\xF0\x90\x80\x80", 0) && !utf8_vector_case(127, b"\xF0\x90\x80", 0) && !utf8_vector_case(127, b"\xF4\x90\x80\x80", 0)
+}
+
 // pad bytes of 'a', then x, y, k continuation bytes 80 (k = 0, 1, 2), then rest bytes of 'a',
 // over every pair of bytes x and y: the number accepted. RFC 3629's table, by hand:
 // k = 0: x y both ASCII (128 * 128) or C2..DF then 80..BF (30 * 64): 18304.

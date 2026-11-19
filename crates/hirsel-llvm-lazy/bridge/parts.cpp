@@ -54,6 +54,7 @@
 #include <cstring>
 #include <atomic>
 #include <numeric>
+#include <optional>
 #include <pthread.h>
 #include <string>
 #include <vector>
@@ -558,29 +559,41 @@ void diagnose(const DiagnosticInfo *d, void *miss) {
     d->print(printer);
 }
 
-// Generate the object of `miss` from its bitcode alone, in a context of its
-// own, with `tm`: what `LLVMTargetMachineEmitToMemoryBuffer` does.
-void generate(TargetMachine &tm, Miss &miss) {
-    LLVMContext context;
-    context.setDiscardValueNames(true);
-    context.setDiagnosticHandlerCallBack(diagnose, &miss);
-    auto parsed = parseBitcodeFile(MemoryBufferRef(StringRef(miss.code.data(), miss.code.size()), "hirsel-part"), context);
-    if (!parsed) {
-        if (miss.error.empty()) miss.error = toString(parsed.takeError());
-        else consumeError(parsed.takeError());
-        return;
+// The pass manager holds the object stream for its lifetime. LLVM runs
+// MachineModuleInfo and AsmPrinter initialization and finalization on each
+// module, as in llc's compile-twice path.
+class ObjectEmitter {
+    SmallVector<char, 0> bytes;
+    raw_svector_ostream stream{bytes};
+    std::optional<legacy::PassManager> passes;
+
+public:
+    void generate(TargetMachine &tm, Miss &miss) {
+        LLVMContext context;
+        context.setDiscardValueNames(true);
+        context.setDiagnosticHandlerCallBack(diagnose, &miss);
+        auto parsed = parseBitcodeFile(MemoryBufferRef(StringRef(miss.code.data(), miss.code.size()), "hirsel-part"), context);
+        if (!parsed) {
+            if (miss.error.empty()) miss.error = toString(parsed.takeError());
+            else consumeError(parsed.takeError());
+            return;
+        }
+        Module &part = **parsed;
+        part.setDataLayout(tm.createDataLayout());
+        hirsel_llvm::PassCost cost("object-emission", part);
+        if (!passes) {
+            passes.emplace();
+            if (tm.addPassesToEmitFile(*passes, stream, nullptr, CodeGenFileType::ObjectFile)) {
+                passes.reset();
+                miss.error = "the target machine cannot emit an object";
+                return;
+            }
+        }
+        passes->run(part);
+        miss.object = std::move(bytes);
+        bytes.clear();
     }
-    Module &p = **parsed;
-    p.setDataLayout(tm.createDataLayout());
-    raw_svector_ostream os(miss.object);
-    hirsel_llvm::PassCost cost("object-emission", p);
-    legacy::PassManager passes;
-    if (tm.addPassesToEmitFile(passes, os, nullptr, CodeGenFileType::ObjectFile)) {
-        miss.error = "the target machine cannot emit an object";
-        return;
-    }
-    passes.run(p);
-}
+};
 
 struct Workers {
     const TargetMachine &tm;
@@ -596,9 +609,10 @@ void *work(void *arg) {
     std::unique_ptr<TargetMachine> tm(w.tm.getTarget().createTargetMachine(
         w.tm.getTargetTriple(), w.tm.getTargetCPU(), w.tm.getTargetFeatureString(), w.tm.Options,
         w.tm.getRelocationModel(), w.tm.getCodeModel(), w.tm.getOptLevel()));
+    ObjectEmitter emitter;
     for (size_t k; (k = w.next.fetch_add(1)) < w.order.size();) {
         Miss &miss = w.misses[w.order[k]];
-        if (tm) generate(*tm, miss);
+        if (tm) emitter.generate(*tm, miss);
         else miss.error = "LLVM could not create the target machine";
     }
     return nullptr;

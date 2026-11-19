@@ -474,25 +474,23 @@ fn request_field(name: Bytes) -> RequestField {
 
 type FramingFields {
     lengths: u64,
-    encodings: u64,
-    length: http1.Span,
-    encoding: http1.Span
+    encoding_fields: u64,
+    length: http1.Span
 }
 
 fn framing_fields() -> FramingFields {
     let empty = http1.Span(start: 0, end: 0)
-    FramingFields(lengths: 0, encodings: 0, length: empty, encoding: empty)
+    FramingFields(lengths: 0, encoding_fields: 0, length: empty)
 }
 
-fn count_framing(mut fields: FramingFields, kind: RequestField, value: http1.Span) {
+fn count_framing(mut fields: FramingFields, kind: RequestField, value: http1.Span, index: u64) {
     match kind {
         LengthField => {
             fields.lengths += 1
             fields.length = value
         },
         EncodingField => {
-            fields.encodings += 1
-            fields.encoding = value
+            fields.encoding_fields |= int.wrapping_shl(1u64, int.narrow(index))
         },
         _ => {}
     }
@@ -546,7 +544,7 @@ fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[(RequestHead, Framing
             UpgradeField => {
                 upgrade_field = true
             },
-            _ => count_framing(mut wire_fields, kind, f.value)
+            _ => count_framing(mut wire_fields, kind, f.value, i)
         }
     }
     if h.version == 1 && host == None {
@@ -1786,7 +1784,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
                 break
             },
         }
-        let framed = frame_fields(input, parsed.version, fields, cfg.body_max)
+        let framed = frame_fields(input, parsed, fields, cfg.body_max)
         let wire: Result[Framing, BodyError] = if policy.upgrade_requested {
             match framed {
                 Ok(Empty) => Ok(Empty),
@@ -2493,25 +2491,124 @@ pub fn framing(b: Bytes, h: View[http1.Head], body_max: u64) -> Result[Framing, 
     let mut fields = framing_fields()
     for i in 0u64 .. h.count {
         let f = h.fields[i]
-        count_framing(mut fields, request_field(part(b, f.name)), f.value)
+        count_framing(mut fields, request_field(part(b, f.name)), f.value, i)
     }
-    frame_fields(b, h.version, fields, body_max)
+    frame_fields(b, h, fields, body_max)
+}
+
+fn transfer_ows_end(b: Bytes, start: u64, end: u64) -> u64 {
+    let mut at = start
+    while at < end && whitespace(b[at]) {
+        at += 1
+    }
+    at
+}
+
+fn transfer_token_end(b: Bytes, start: u64, end: u64) -> u64 {
+    let mut at = start
+    while at < end && http1.token(b[at]) {
+        at += 1
+    }
+    at
+}
+
+fn transfer_value_end(b: Bytes, start: u64, end: u64) -> Result[u64, BodyError] {
+    if start == end {
+        return Error(failure(400))
+    }
+    if b[start] != b'"' {
+        let next = transfer_token_end(b, start, end)
+        if next == start {
+            return Error(failure(400))
+        }
+        return Ok(next)
+    }
+    let mut at = start + 1
+    while at < end {
+        let c = b[at]
+        at += 1
+        if c == b'"' {
+            return Ok(at)
+        }
+        if c == b'\\' {
+            if at == end || !field_value(b[at]) {
+                break
+            }
+            at += 1
+        } else if !field_value(c) {
+            break
+        }
+    }
+    Error(failure(400))
+}
+
+fn transfer_parameters_end(b: Bytes, start: u64, end: u64) -> Result[u64, BodyError] {
+    let mut at = start
+    while at < end && b[at] == b';' {
+        let name_start = transfer_ows_end(b, at + 1, end)
+        let name_end = transfer_token_end(b, name_start, end)
+        let equals = transfer_ows_end(b, name_end, end)
+        if name_end == name_start || equals == end || b[equals] != b'=' {
+            return Error(failure(400))
+        }
+        let value_end = transfer_value_end(b, transfer_ows_end(b, equals + 1, end), end)?
+        at = transfer_ows_end(b, value_end, end)
+    }
+    Ok(at)
+}
+
+// The field mask preserves order without scanning unrelated fields again.
+// A comma inside a quoted parameter does not separate transfer codings.
+fn transfer_framing(b: Bytes, h: View[http1.Head], fields: u64) -> Result[Framing, BodyError] {
+    let mut remaining = fields
+    let mut chunked = false
+    let mut unknown = false
+    while remaining != 0 {
+        let index: u64 = int.widen(int.trailing_zeros(remaining))
+        let value = h.fields[index].value
+        let mut at = value.start
+        loop {
+            let start = transfer_ows_end(b, at, value.end)
+            let end = transfer_token_end(b, start, value.end)
+            if chunked || start == end {
+                return Error(failure(400))
+            }
+            chunked = http1.equal_ascii(list.slice(b, start, end), string.as_bytes("chunked"))
+            unknown = unknown || !chunked
+            at = transfer_ows_end(b, end, value.end)
+            if at < value.end && b[at] == b';' {
+                if chunked {
+                    return Error(failure(400))
+                }
+                at = transfer_parameters_end(b, at, value.end)?
+            }
+            if at == value.end {
+                break
+            }
+            if b[at] != b',' {
+                return Error(failure(400))
+            }
+            at += 1
+        }
+        remaining &= remaining - 1
+    }
+    if unknown {
+        return Error(failure(501))
+    }
+    Ok(Chunked)
 }
 
 // The connection checks policy first, then interprets the recorded framing spans.
-fn frame_fields(b: Bytes, version: u8, fields: FramingFields, body_max: u64) -> Result[Framing, BodyError] {
-    let FramingFields(lengths: lengths, encodings: encodings, length: length, encoding: encoding) = fields
-    if lengths > 0 && encodings > 0 || lengths > 1 {
+fn frame_fields(b: Bytes, h: View[http1.Head], fields: FramingFields, body_max: u64) -> Result[Framing, BodyError] {
+    let FramingFields(lengths: lengths, encoding_fields: encoding_fields, length: length) = fields
+    if lengths > 0 && encoding_fields != 0 || lengths > 1 {
         return Error(failure(400))
     }
-    if encodings > 0 {
-        if version == 0 {
+    if encoding_fields != 0 {
+        if h.version == 0 {
             return Error(failure(400))
         }
-        if encodings != 1 || !http1.equal_ascii(list.slice(b, encoding.start, encoding.end), string.as_bytes("chunked")) {
-            return Error(failure(501))
-        }
-        return Ok(Chunked)
+        return transfer_framing(b, h, encoding_fields)
     }
     if lengths == 0 {
         return Ok(Empty)

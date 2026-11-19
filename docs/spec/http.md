@@ -223,7 +223,9 @@ Framing runs once per request over the parsed `Head`. Each failure below closes 
 2. More than one `Content-Length` field, or one value that is a list (even of equal values), gives 400.
    - The value is `1*DIGIT`, at most 19 digits, and no larger than the route's body limit.
    - An oversize value gives 413.
-3. `Transfer-Encoding` other than exactly one coding `chunked` gives 501. `Transfer-Encoding` in an HTTP/1.0 request gives 400.
+3. Read `Transfer-Encoding` codings across fields in wire order. A non-final `chunked` gives 400 (RFC 9112 §6.3). Empty or malformed coding fields, parameters on `chunked`, and `Transfer-Encoding` on HTTP/1.0 also give 400.
+   - A syntactically valid unknown coding gives 501 when no earlier framing error applies (RFC 9112 §6.1).
+   - A single `chunked` coding selects chunked framing.
 4. A request with neither field has an empty body.
 
 **Chunked bodies** (RFC 9112 §7.1). Chunked framing requires CRLF, whatever `http1`'s head rule accepts.

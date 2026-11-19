@@ -27,6 +27,13 @@ UTF-8. Offsets preserve field spelling, order and duplicates. Body framing and
 URL checks in the old Go HTTP adapter are outside this head parser; the
 upgrade rejects body framing before interpreting its tail as frames.
 
+`std.http.framing` interprets request framing after the head parser completes.
+It rejects a non-final `chunked` transfer coding with 400 and close
+([RFC 9112 §6.3](https://www.rfc-editor.org/rfc/rfc9112#section-6.3)).
+A syntactically valid unknown coding gives 501 and close when no earlier
+framing error applies ([§6.1](https://www.rfc-editor.org/rfc/rfc9112#section-6.1)).
+Repeated Transfer-Encoding fields retain their order for this check.
+
 The request laws port httparse a0fa552e's 29 request vectors and the empty-input
 control from revision 64d4d617. The Go ebe2feefc400 heads retain their raw
 inputs and parsed fields; expectations for the old adapter's URL and body

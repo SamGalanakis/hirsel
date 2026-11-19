@@ -107,16 +107,27 @@ fn te_in_10() -> bool {
     frame_case(result.unwrap(b"POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.0\r\nTransfer-Encoding: gzip\r\n\r\n"), 99, refused(400))
 }
 
-// HTTP-4(3)'s one-coding policy uses 501 for unknown, lists or repeats.
+// RFC 9112 sections 6.1 and 6.3. Unknown codings give 501 unless an
+// invalid coding list or non-final chunked already requires 400.
 // expect: run unsupported_codings() = true
 fn unsupported_codings() -> bool {
-    frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"), 99, refused(501)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"), 99, refused(501)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n\r\n"), 99, refused(501)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n"), 99, refused(501)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding:\r\n\r\n"), 99, refused(501))
+    for (raw, status) in[
+    // Unknown alone or before final chunked.
+    ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n", 501u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", 501u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n", 501u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: coding; x=\"chunked, gzip\", chunked\r\n\r\n", 501u16),
+    // A recognized chunked coding must be final and cannot be repeated.
+    ("POST / HTTP/1.1\r\nTransfer-Encoding: ChUnKeD , gzip\r\n\r\n", 400u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked, gzip\r\n\r\n", 400u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n", 400u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: chunked, chunked\r\n\r\n", 400u16),
+    // A malformed field never yields an unknown-coding result.
+    ("POST / HTTP/1.1\r\nTransfer-Encoding:\r\n\r\n", 400u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: chunked; x=y\r\n\r\n", 400u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip; x=\"unterminated\r\n\r\n", 400u16),] {
+        if !frame_case(string.as_bytes(raw), 99, refused(status)) {
+            return false
+        }
+    }
+    true
 }
 
 // llhttp test/request/{content-length,transfer-encoding}.md, 36151b9a7d6320072e24e472a769a5e09f9e969d.
 // MIT, see vectors/llhttp-LICENSE.
 // RFC 9112 section 6.3 defines body framing. HTTP-4 rules 1-3 select refusal and close.
-// Hirsel maps unsupported transfer codings to 501, including non-final chunked.
 // expect: run upstream_framing_fields() = true
 fn upstream_framing_fields() -> bool {
     for (raw, status) in[
@@ -131,9 +142,9 @@ fn upstream_framing_fields() -> bool {
     // Unknown transfer coding.
     ("PUT /url HTTP/1.1\r\nTransfer-Encoding: pigeons\r\n\r\n", 501u16),
     // Non-final chunked in one field.
-    ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunked, deflate\r\n\r\nWorld", 501u16),
+    ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunked, deflate\r\n\r\nWorld", 400u16),
     // Non-final chunked across two fields.
-    ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: deflate\r\n\r\nWorld", 501u16),
+    ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: deflate\r\n\r\nWorld", 400u16),
     // A token containing chunked twice is not the chunked coding.
     ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunkedchunked\r\n\r\n5\r\nWorld\r\n0\r\n\r\n", 501u16),] {
         if !frame_case(string.as_bytes(raw), 99, refused(status)) {

@@ -54,10 +54,13 @@ field syntax return `StatusInvalid` and `HeaderInvalid` respectively.
 
 `framing(bytes, head, body_max)` reads the parsed field offsets once and returns
 `Empty`, `ContentLength(n)` or `Chunked`. It rejects TE+CL, repeated or listed
-lengths, invalid decimal lengths, HTTP/1.0 TE and unsupported codings with a
-`BodyError { status, close: true }`. Framing syntax refusals are 400, a valid
-length above the body cap is 413, and unsupported HTTP/1.1 codings are 501.
-The selector allocates nothing and performs no I/O.
+lengths, invalid decimal lengths, HTTP/1.0 TE and invalid transfer-coding
+lists with a `BodyError { status, close: true }`. It reads transfer codings in
+field order. A non-final `chunked` gives 400 and close (RFC 9112 §6.3), as
+do empty or malformed coding fields and parameters on `chunked`. A valid
+unknown coding gives 501 and close when no earlier framing error applies
+(§6.1). A single `chunked` selects chunked framing. A valid length above the
+body cap gives 413 and close. The selector allocates nothing and performs no I/O.
 
 `decoder(frame, head, body_max)` starts fixed storage after successful framing.
 `decode(mut decoder, input)` consumes a fresh input fragment and returns one

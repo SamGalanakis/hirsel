@@ -41,10 +41,10 @@
           "marginal_per_line": 56700
         },
         "json-idiomatic": {
-          "marginal_per_line": 39500
+          "marginal_per_line": 52100
         },
         "json-matched": {
-          "marginal_per_line": 39500
+          "marginal_per_line": 52100
         },
         "pipeline-idiomatic": {
           "marginal_per_line": 51000

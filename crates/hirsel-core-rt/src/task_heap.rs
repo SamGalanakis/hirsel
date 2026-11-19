@@ -10,9 +10,10 @@
 //! slots have reached its third native page is spread. When its task parks,
 //! the worker returns the native pages that hold no live slot, as mimalloc's
 //! page reset and jemalloc's dirty-page purge do, and moves the frontier back
-//! to the highest live slot. A heap's first few blocks of a class that has no
-//! page share one native page of a slab per payer and kind (a nursery), so an
-//! idle task's scattered small state does not hold a slab per class.
+//! to the highest live slot. Blocks of a class that has no page with a free
+//! slot share one native page of a slab per payer and kind (a nursery), up to
+//! a few per class in each nursery, so a payer's scattered small state does
+//! not hold a slab per class, even in a heap that serves many payers.
 mod slabs;
 
 use crate::{abi_layout::own_prefix, limit::Payer};
@@ -34,7 +35,7 @@ const EMPTY_SLAB_LIMIT: usize = 8;
 const DEDICATED_PURGE_DELAY: Duration = Duration::from_millis(100);
 const MAX_RETAINED_DEDICATED_BYTES: usize = 4 * 1024 * 1024;
 const SLAB_BINS: usize = size_bin(SLAB / 2) as usize + 1;
-// Blocks of each class a heap places in nurseries before the class gets a page.
+// Blocks of each class one nursery takes before the class gets a page.
 const NURSERY_BLOCKS: u8 = 16;
 const NURSERY_STRIDE: usize = 1024;
 // The most native pages a slab spans.
@@ -419,7 +420,8 @@ impl Page {
 #[derive(Default)]
 pub(crate) struct Heap {
     locked: AtomicBool,
-    /// `State::listed` is not empty, or detached empty slabs exceed `EMPTY_SLAB_LIMIT`.
+    /// `State::listed` is not empty, a nursery emptied, or detached empty
+    /// slabs exceed `EMPTY_SLAB_LIMIT`.
     pending: AtomicBool,
     state: std::cell::UnsafeCell<State>,
 }
@@ -457,9 +459,17 @@ struct State {
     /// Spread pages to purge when the task parks.
     listed: Vec<PagePointer>,
     /// The nursery that takes new blocks, by payer and kind.
-    nurseries: HashMap<(usize, u8), PagePointer, foldhash::fast::FixedState>,
-    /// Nursery placements left per class.
-    nursery_blocks: [[u8; SLAB_BINS]; 3],
+    nurseries: HashMap<(usize, u8), Nursery, foldhash::fast::FixedState>,
+    /// A nursery emptied or filled since the last purge.
+    idle_nurseries: bool,
+}
+
+/// A payer's placements of one kind. Its budget outlives each page, so a
+/// payer places as many blocks per class as a heap with one payer does.
+struct Nursery {
+    page: Option<PagePointer>,
+    /// Placements left per class.
+    left: [u8; SLAB_BINS],
 }
 
 #[derive(Default)]
@@ -485,7 +495,7 @@ impl Default for State {
             dedicated: DedicatedCache::default(),
             listed: Vec::new(),
             nurseries: HashMap::with_hasher(foldhash::fast::FixedState::with_seed(0)),
-            nursery_blocks: [[NURSERY_BLOCKS; SLAB_BINS]; 3],
+            idle_nurseries: false,
         }
     }
 }
@@ -904,13 +914,16 @@ impl Heap {
         class: Class,
         bytes: usize,
     ) -> Option<NonNull<u8>> {
-        let left = &mut state.nursery_blocks[usize::from(class.kind)][usize::from(class.bin)];
-        *left = left.checked_sub(1)?;
         let key = (payer.record_pointer().addr(), class.kind);
-        let page = *state
-            .nurseries
-            .entry(key)
-            .or_insert_with(|| Page::nursery(heap, payer, class.kind));
+        let nursery = state.nurseries.entry(key).or_insert_with(|| Nursery {
+            page: None,
+            left: [NURSERY_BLOCKS; SLAB_BINS],
+        });
+        let left = &mut nursery.left[usize::from(class.bin)];
+        *left = left.checked_sub(1)?;
+        let page = *nursery
+            .page
+            .get_or_insert_with(|| Page::nursery(heap, payer, class.kind));
         // SAFETY: the heap lock owns the nursery's slots.
         unsafe {
             let slots = &mut *page.as_ref().slots.get();
@@ -918,7 +931,9 @@ impl Heap {
             let end = start + class.stride;
             if end > page.as_ptr().addr() + page_bytes() {
                 // Full: it leaves with its last block.
-                state.nurseries.remove(&key);
+                nursery.page = None;
+                state.idle_nurseries = true;
+                state.0.pending.store(true, Ordering::Relaxed);
                 if slots.live == 0 {
                     Page::destroy(page);
                 }
@@ -948,8 +963,9 @@ impl Heap {
         self.pending.load(Ordering::Relaxed)
     }
 
-    /// Return the listed pages' native pages that hold no live slot, and
-    /// unmap the oldest detached empty slabs beyond `EMPTY_SLAB_LIMIT`.
+    /// Return the listed pages' native pages that hold no live slot, drop
+    /// empty and filled nurseries, and unmap the oldest detached empty slabs
+    /// beyond `EMPTY_SLAB_LIMIT`.
     #[cold]
     #[inline(never)]
     pub(crate) fn purge(&self) {
@@ -962,6 +978,21 @@ impl Heap {
             unsafe { purge(page) };
         }
         state.listed = listed;
+        if std::mem::take(&mut state.idle_nurseries) {
+            // A departed payer leaves neither a page nor a budget behind.
+            state.nurseries.retain(|_, nursery| match nursery.page {
+                None => false,
+                // SAFETY: the heap lock owns the nurseries' slots; an empty
+                // current nursery has no other reference.
+                Some(page) => unsafe {
+                    if (*page.as_ref().slots.get()).live != 0 {
+                        return true;
+                    }
+                    Page::destroy(page);
+                    false
+                },
+            });
+        }
         while state.empty_slabs.len() > EMPTY_SLAB_LIMIT {
             let oldest = state.empty_slabs.pop_front().unwrap();
             // SAFETY: the cache held the empty slab's only reference, and the
@@ -979,6 +1010,7 @@ impl Heap {
         self.pending.store(false, Ordering::Relaxed);
         let nurseries = std::mem::take(&mut state.nurseries)
             .into_values()
+            .filter_map(|nursery| nursery.page)
             // SAFETY: the heap lock owns the nurseries' slots.
             .filter(|&page| unsafe { (*page.as_ref().slots.get()).live == 0 })
             .collect::<Vec<_>>();
@@ -1321,8 +1353,17 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
             slots.live -= 1;
             slots.limit = slots.live;
             if slots.live == 0 {
-                if !state.closed && state.nurseries.get(&(key.payer, class.kind)) == Some(&page) {
+                if !state.closed
+                    && state
+                        .nurseries
+                        .get(&(key.payer, class.kind))
+                        .is_some_and(|nursery| nursery.page == Some(page))
+                {
+                    // Kept for the payer's next block; the park purge
+                    // returns it if the payer allocates nothing until then.
                     slots.bump = 0;
+                    state.idle_nurseries = true;
+                    state.0.pending.store(true, Ordering::Relaxed);
                 } else {
                     drop(state);
                     Page::destroy(page);
@@ -1582,6 +1623,43 @@ mod tests {
         // retains the reservation during the observations below.
         let backing = unsafe { page_of(payload).as_ref().backing.dedicated() };
         (backing.base, backing.len)
+    }
+
+    /// A heap that serves many payers, as a session server's does, nurses
+    /// each payer's first small blocks instead of giving the later payers a
+    /// slab per class, and a payer that frees everything leaves no nursery
+    /// once the task parks.
+    #[test]
+    fn every_payer_nurses_its_first_blocks_and_leaves_nothing_after_purge() {
+        const PAYERS: usize = 3 * NURSERY_BLOCKS as usize;
+        const LIMIT: u64 = 1 << 20;
+        let contexts: Vec<_> = (0..PAYERS).map(|_| Context::new(LIMIT)).collect();
+        let heap = contexts[0].heap.get_or_init(Arc::default);
+        let blocks: Vec<_> = contexts
+            .iter()
+            .flat_map(|context| {
+                let payer = context.payer();
+                [8, 32, 40, 128].map(|bytes| {
+                    block::admit_storage(payer, Some(bytes as u64)).unwrap();
+                    let pointer = Heap::allocate(heap, payer, bytes, 8, block::PLAIN, false);
+                    (pointer, bytes)
+                })
+            })
+            .collect();
+        for (index, &(pointer, bytes)) in blocks.iter().enumerate() {
+            // SAFETY: the live block pins its page's key.
+            let stride = unsafe { Page::key(page_of(pointer)).class.stride };
+            assert_eq!(stride, 0, "block {index} of {bytes} bytes has a class page");
+        }
+        for (pointer, bytes) in blocks {
+            // SAFETY: the test frees each block once with its full charge.
+            unsafe { block::free(pointer, bytes as u64) };
+        }
+        heap.purge();
+        assert_eq!(heap.lock().nurseries.len(), 0);
+        for context in &contexts {
+            assert_eq!(context.available(), LIMIT);
+        }
     }
 
     #[test]

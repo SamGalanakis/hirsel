@@ -37,9 +37,11 @@ def fingerprint(*opcodes):
     return value
 
 
+# PROG-9 encodes the entire function signature, including the transaction's
+# Caller parameter. RUNNER-SPEC rule 3 puts those identity bytes in the key.
 ENTRIES = {
-    'put': (b'\x01wire@1/admission/put(mut store@1/store/Tx,wire@1/admission/H,take u32)->core@1/core/Result[u64,u32]', fingerprint(5), fingerprint(17, 6, 5)),
-    'large': (b'\x01wire@1/admission/large(mut store@1/store/Tx,wire@1/admission/H,take u32)->core@1/core/Result[core@1/core/List[u8],u32]', fingerprint(5), fingerprint(17, 14, 3, 5)),
+    'put': (b'\x01wire@1/admission/put(mut store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[u64,u32]', fingerprint(5), fingerprint(17, 6, 5)),
+    'large': (b'\x01wire@1/admission/large(mut store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[core@1/core/List[u8],u32]', fingerprint(5), fingerprint(17, 14, 3, 5)),
     'big': (b'\x01wire@1/admission/big(take u32)->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]', fingerprint(5), fingerprint(14, 3)),
     'read': (b'\x01wire@1/admission/read(store@1/store/Tx,wire@1/admission/H,take u32)->core@1/core/Result[store@1/runner/Cover,core@1/core/Capacity]', fingerprint(5), fingerprint(0)),
     'gone': (b'retired', 0, 0),

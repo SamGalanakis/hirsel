@@ -75,13 +75,36 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
             }
         }
     }
-    let mut slots: Vec<_> = owners.iter().map(Option::is_none).collect();
+    // A parameter of a block entered by one edge is that edge's argument: the
+    // edge binds it by name, with no join to build. The parameter is defined at
+    // its block's entry.
+    let mut incoming = vec![0usize; body.blocks.len()];
+    for edge in &body.edges {
+        incoming[edge.target.index()] += 1;
+    }
+    let mut entries = vec![None; body.values.len()];
+    for (block, b) in body.blocks.iter().enumerate().skip(1) {
+        // An unreachable block's one edge may come from itself.
+        if incoming[block] == 1 && flow.block_dominates(0, block) {
+            for v in b.params.get(&body.pools.values).unwrap() {
+                entries[v.index()] = Some(block);
+            }
+        }
+    }
+    let available = |v: ValueId, at: (usize, usize)| {
+        owners[v.index()].is_some_and(|definition| flow.available(definition, at))
+            || entries[v.index()]
+                .is_some_and(|entry| entry == at.0 || flow.block_dominates(entry, at.0))
+    };
+    let mut slots: Vec<_> = owners
+        .iter()
+        .zip(&entries)
+        .map(|(owner, entry)| owner.is_none() && entry.is_none())
+        .collect();
     for (block, b) in body.blocks.iter().enumerate() {
         for (index, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
             let mut read = |v: ValueId| {
-                if !owners[v.index()]
-                    .is_some_and(|definition| flow.available(definition, (block, index)))
-                {
+                if !available(v, (block, index)) {
                     slots[v.index()] = true;
                 }
             };
@@ -218,9 +241,7 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
             }
         }
         let mut read = |v: ValueId| {
-            if !owners[v.index()]
-                .is_some_and(|definition| flow.available(definition, (block, b.insts.len as usize)))
-            {
+            if !available(v, (block, b.insts.len as usize)) {
                 slots[v.index()] = true;
             }
         };

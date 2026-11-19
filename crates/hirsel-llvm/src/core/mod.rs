@@ -66,11 +66,15 @@ pub enum Optimization {
 }
 
 #[derive(Clone, Copy)]
-struct SourceEmission {
+struct SourceEmission<'s> {
     batch_steps: bool,
     test_hooks: bool,
     relocatable_sites: bool,
     debug_lines: bool,
+    /// Without relocatable sites, each item's first site word
+    /// (`SourceMap::item_sites`); empty means the module's own
+    /// (`source::module_sites`), as the evaluator's.
+    fixed_sites: &'s [u64],
 }
 
 /// An operation whose native contract has not been implemented yet, or a tool error.
@@ -190,11 +194,17 @@ pub fn emit_ir(module: &Module) -> Result<String> {
 
 /// Optional diagnostic emission; timings of these objects are not performance samples.
 pub fn emit_ir_with_charge_observation(module: &Module, observe_charge: bool) -> Result<String> {
-    emit_ir_for_target(module, Target::X86_64Linux, observe_charge)
+    emit_ir_for_target(module, Target::X86_64Linux, observe_charge, &[])
 }
 
-/// Emit CoreIR with the requested Linux calling convention.
-pub fn emit_ir_for_target(module: &Module, target: Target, observe_charge: bool) -> Result<String> {
+/// Emit CoreIR with the requested Linux calling convention. A cause's site word is
+/// `sites[item] + start` (`SourceMap::item_sites` over the module's items).
+pub fn emit_ir_for_target(
+    module: &Module,
+    target: Target,
+    observe_charge: bool,
+    sites: &[u64],
+) -> Result<String> {
     emit_ir_target_with_facts(
         module,
         target,
@@ -205,6 +215,7 @@ pub fn emit_ir_for_target(module: &Module, target: Target, observe_charge: bool)
             test_hooks: cfg!(test),
             relocatable_sites: false,
             debug_lines: false,
+            fixed_sites: sites,
         },
     )
 }
@@ -221,6 +232,7 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
             test_hooks: cfg!(test),
             relocatable_sites: false,
             debug_lines: false,
+            fixed_sites: &[],
         },
     )
 }
@@ -401,6 +413,13 @@ fn emit_module(
         .then(|| expose::module(module, provided.prepay_step_trees))
         .flatten();
     let module = exposed.as_ref().unwrap_or(module);
+    let own_sites;
+    let fixed_sites = if source.relocatable_sites || !source.fixed_sites.is_empty() {
+        source.fixed_sites
+    } else {
+        own_sites = hirsel_core_ir::source::module_sites(module);
+        &own_sites
+    };
     let mut items = Items::new(module);
     if let Some(known) = provided.versions.filter(|known| !known.is_empty()) {
         items.versioned = Some(
@@ -677,6 +696,7 @@ fn emit_module(
                 debug_location: function_debug.map(|d| d.location(None)),
                 anchor: None,
                 relocatable_sites: source.relocatable_sites,
+                fixed_sites,
                 test_hooks: source.test_hooks,
                 value_slots: values::slots(body, &flow),
                 static_vectors: f.versioned.then(|| simd::static_vectors(body)),
@@ -1058,6 +1078,7 @@ pub(crate) fn emit_native_module_in_context(
             test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines,
+            fixed_sites: &[],
         },
         EmissionFacts {
             roles: Some(roles),
@@ -1090,6 +1111,7 @@ pub(crate) fn emit_release_unit(
             test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines: false,
+            fixed_sites: &[],
         },
         EmissionFacts {
             roles: Some(roles),
@@ -1226,6 +1248,7 @@ pub fn emit_ir_relocatable_for_target(
             test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines,
+            fixed_sites: &[],
         },
     )
 }
@@ -1249,6 +1272,7 @@ pub fn emit_ir_relocatable_with_role_facts_for_target(
             test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines,
+            fixed_sites: &[],
         },
         Some(roles),
     )
@@ -1267,15 +1291,17 @@ pub fn emit_object_with_charge_observation(
     opt: Optimization,
     observe_charge: bool,
 ) -> Result<Vec<u8>> {
-    emit_object_for_target(module, Target::X86_64Linux, opt, observe_charge)
+    emit_object_for_target(module, Target::X86_64Linux, opt, observe_charge, &[])
 }
 
 /// Compile for one supported Linux target with the same ABI on both LLVM paths.
+/// A cause's site word is `sites[item] + start` (`SourceMap::item_sites`).
 pub fn emit_object_for_target(
     module: &Module,
     target: Target,
     opt: Optimization,
     observe_charge: bool,
+    sites: &[u64],
 ) -> Result<Vec<u8>> {
     emit_object_site_binding(
         module,
@@ -1287,6 +1313,7 @@ pub fn emit_object_for_target(
             test_hooks: cfg!(test),
             relocatable_sites: false,
             debug_lines: false,
+            fixed_sites: sites,
         },
     )
 }
@@ -1311,6 +1338,7 @@ pub fn emit_object_relocatable_for_target(
             test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines,
+            fixed_sites: &[],
         },
     )
 }
@@ -1386,6 +1414,7 @@ fn compile<R>(
             test_hooks: cfg!(test),
             relocatable_sites: false,
             debug_lines: false,
+            fixed_sites: &[],
         },
         inspect,
         observer,
@@ -1479,6 +1508,7 @@ struct FunctionEmitter<'a> {
     debug_location: Option<usize>,
     anchor: Option<Anchor>,
     relocatable_sites: bool,
+    fixed_sites: &'a [u64],
     test_hooks: bool,
     value_slots: Vec<bool>,
     /// Static inline arrays converted directly into constant vectors.
@@ -2349,6 +2379,7 @@ pub fn emit_ir_for_test_with_facts(
             test_hooks: true,
             relocatable_sites: true,
             debug_lines,
+            fixed_sites: &[],
         },
         None,
     )
@@ -2373,6 +2404,7 @@ pub fn emit_ir_for_test(
             test_hooks: true,
             relocatable_sites: true,
             debug_lines,
+            fixed_sites: &[],
         },
         roles,
     )
@@ -2396,6 +2428,7 @@ pub fn emit_object_for_test(
             test_hooks: true,
             relocatable_sites: true,
             debug_lines,
+            fixed_sites: &[],
         },
     )
 }

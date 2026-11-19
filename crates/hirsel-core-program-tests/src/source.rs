@@ -8,6 +8,10 @@ use std::{collections::HashMap, fmt::Write as _, ops::Deref, process::Command};
 pub struct SourceProgram {
     pub modules: Vec<Module>,
     joined: Module,
+    /// By joined item, its first site word, bound to the checked sources as a
+    /// native link binds them (`SourceMap::item_sites`); 0 for an item no
+    /// failure anchor names (`source::anchored_items`).
+    pub sites: Vec<u64>,
     _checked: Checked,
 }
 impl Deref for SourceProgram {
@@ -150,6 +154,7 @@ impl SourceProgram {
         (
             Self {
                 modules,
+                sites: sites(&checked, &joined),
                 joined,
                 _checked: checked,
             },
@@ -195,12 +200,14 @@ impl SourceProgram {
     }
     pub fn site_bindings(&self) -> String {
         let mut bindings = String::new();
-        for (i, item) in self.items.iter().enumerate() {
+        for (item, &site) in self.items.iter().zip(&self.sites) {
+            if site == 0 {
+                continue;
+            }
             writeln!(
                 bindings,
-                "__asm__(\".globl {0}\\n.hidden {0}\\n.set {0}, {1}\\n\");",
+                "__asm__(\".globl {0}\\n.hidden {0}\\n.set {0}, {site}\\n\");",
                 hirsel_core_ir::source::site_symbol(item),
-                hirsel_core_ir::source::module_site_word(i, 0)
             )
             .unwrap();
         }
@@ -323,4 +330,14 @@ fn combine(objects: &[Vec<u8>], target: Target) -> Vec<u8> {
         String::from_utf8_lossy(&result.stderr)
     );
     std::fs::read(output).unwrap()
+}
+
+fn sites(checked: &Checked, joined: &Module) -> Vec<u64> {
+    let anchored = hirsel_core_ir::source::anchored_items(joined);
+    checked
+        .product
+        .native_sources(&anchored)
+        .unwrap()
+        .item_sites(&joined.items)
+        .unwrap()
 }

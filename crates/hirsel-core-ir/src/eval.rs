@@ -159,13 +159,6 @@ const CELL_NEXT: u64 = 32;
 const CAUSE_CAPACITY: u64 = 16;
 const CAUSE_SITE: u64 = 24;
 
-/// A cause's `Site` word (SITES.md): `(item + 1) << 32 | start` for an anchor in
-/// item `item` starting `start` bytes into it, 0 for none.
-fn site_word(site: Option<Anchor>) -> u64 {
-    site.map_or(0, |a| {
-        ((a.item.index() as u64 + 1) << 32) | u64::from(a.start)
-    })
-}
 const CAUSE_KIND_START: u64 = 1 << 63;
 
 /// The evaluator's gap for every tape row (D-B3): a run stop by name.
@@ -595,6 +588,9 @@ struct Machine<'m> {
     task_call_depth: usize,
     /// Whether each function inherits its caller's site (`source::inherits_site`).
     inherits: Vec<bool>,
+    /// By item, its first site word (`SourceMap::item_sites`), by default the
+    /// module's own (`source::module_sites`).
+    sites: Arc<[u64]>,
     /// [`Nans::Scrambled`]: the count of NaNs stored so far, which picks the next one's
     /// pattern; None in the canonical placement.
     scrambled: Option<u64>,
@@ -890,6 +886,8 @@ pub fn run_nans_into(
 
 /// Run an entry with the root task's startup charge and teardown, as the native
 /// process entry does. May supply a deterministic network and record CONC-10 events.
+/// A cause's site word is `sites[item] + start` (`SourceMap::item_sites` over the
+/// module's items); an empty `sites` means the module's own (`source::module_sites`).
 #[allow(clippy::too_many_arguments)]
 pub fn run_entry(
     m: &Module,
@@ -901,6 +899,7 @@ pub fn run_entry(
     revisions: &Revisions,
     network: Option<Network>,
     events: bool,
+    sites: &[u64],
 ) -> (Report, Checked) {
     run_world(
         m,
@@ -915,6 +914,7 @@ pub fn run_entry(
             network,
             events,
             process_entry: true,
+            sites,
             ..WorldInput::default()
         },
     )
@@ -1037,6 +1037,7 @@ struct WorldInput<'a> {
     copy_size: Option<u64>,
     events: bool,
     process_entry: bool,
+    sites: &'a [u64],
 }
 impl Default for WorldInput<'_> {
     fn default() -> Self {
@@ -1053,6 +1054,7 @@ impl Default for WorldInput<'_> {
             copy_size: None,
             events: false,
             process_entry: false,
+            sites: &[],
         }
     }
 }
@@ -1494,6 +1496,11 @@ impl<'m> Machine<'m> {
                 .iter()
                 .map(|f| crate::source::inherits_site(&m.instances[f.instance.index()]))
                 .collect(),
+            sites: if input.sites.is_empty() {
+                crate::source::module_sites(m).into()
+            } else {
+                input.sites.into()
+            },
             scrambled: (input.nans == Nans::Scrambled).then_some(0),
             sched: Sched {
                 next: 1,
@@ -1537,6 +1544,7 @@ impl<'m> Machine<'m> {
             task_stack_peak: 0,
             task_call_depth: 0,
             inherits: Vec::new(),
+            sites: self.sites.clone(),
             scrambled: None,
             sched: Sched::default(),
             links: Vec::new(),
@@ -2838,6 +2846,15 @@ impl Machine<'_> {
         }
         cells
     }
+    /// A cause's `Site` word (SITES.md), as a linked native unit's: the anchor
+    /// item's first site word plus the anchor's start, 0 for none.
+    fn site_word(&self, site: Option<Anchor>) -> u64 {
+        site.and_then(|a| {
+            let first = *self.sites.get(a.item.index())?;
+            (first != 0).then(|| first + u64::from(a.start))
+        })
+        .unwrap_or(0)
+    }
     /// A chain as the run time delivers it, a `Causes` owning `cells`: one cell per
     /// cause, each a `Cause` in core's layout then the next cell (crate docs,
     /// "Causes"). The head cell.
@@ -2853,7 +2870,8 @@ impl Machine<'_> {
             } else {
                 self.store(cell + CAUSE_CAPACITY, 8, CAUSE_KIND_START + tag as u64);
             }
-            self.store(cell + CAUSE_SITE, 8, site_word(c.site));
+            let site = self.site_word(c.site);
+            self.store(cell + CAUSE_SITE, 8, site);
             self.store(cell + CELL_NEXT, 8, head);
             head = cell;
         }

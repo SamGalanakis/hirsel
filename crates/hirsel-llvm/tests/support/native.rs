@@ -1,15 +1,21 @@
+/// The site word of an evaluator anchor under `sites`, 0 for none.
+fn anchor_word(sites: &[u64], anchor: Option<hirsel_core_ir::Anchor>) -> u64 {
+    anchor.map_or(0, |a| sites[a.item.index()] + u64::from(a.start))
+}
 trait NativeInput {
     fn module(&self) -> &Module;
     fn site_bindings(&self) -> String { String::new() }
+    /// By item, its first site word (`SourceMap::item_sites`).
+    fn sites(&self) -> Vec<u64> { hirsel_core_ir::source::module_sites(self.module()) }
     fn object(&self, target: Target, optimization: Optimization, observing: bool) -> Vec<u8>;
     fn verify(&self, target: Target, observing: bool) {
-        verify_ir(&emit_ir_for_target(self.module(), target, observing).unwrap());
+        verify_ir(&emit_ir_for_target(self.module(), target, observing, &self.sites()).unwrap());
     }
 }
 impl NativeInput for Module {
     fn module(&self) -> &Module { self }
     fn object(&self, target: Target, optimization: Optimization, observing: bool) -> Vec<u8> {
-        emit_object_for_target(self, target, optimization, observing).unwrap()
+        emit_object_for_target(self, target, optimization, observing, &self.sites()).unwrap()
     }
 }
 fn output(command: &mut Command) -> String {
@@ -552,10 +558,16 @@ fn call_results_match_callees(ir: &str) {
 fn agree_cases(input: &impl NativeInput, cases: &[Case], memory: bool) {
     let module = input.module();
     call_results_match_callees(&emit_ir(module).unwrap());
-    check_native_reports(module, cases, execute(input, cases), memory);
+    check_native_reports(module, &input.sites(), cases, execute(input, cases), memory);
 }
 
-fn check_native_reports(module: &Module, cases: &[Case], got: Vec<NativeReport>, memory: bool) {
+fn check_native_reports(
+    module: &Module,
+    sites: &[u64],
+    cases: &[Case],
+    got: Vec<NativeReport>,
+    memory: bool,
+) {
     assert_eq!(got.len(), cases.len());
     for (case, got) in cases.iter().zip(got) {
         let expected = eval::run_injected(
@@ -570,25 +582,13 @@ fn check_native_reports(module: &Module, cases: &[Case], got: Vec<NativeReport>,
             "f{}({:?})",
             case.function.0, case.args
         );
-        let actual_sites = got
-            .sites
-            .iter()
-            .map(|word| {
-                (*word != 0).then(|| {
-                    {
-                        let (item, start) = hirsel_core_ir::source::module_site_parts(*word);
-                        (module.items[item].clone(), start)
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
         let expected_sites = expected
             .sites
             .iter()
-            .map(|a| a.map(|a| (module.items[a.item.index()].clone(), a.start)))
+            .map(|a| anchor_word(sites, *a))
             .collect::<Vec<_>>();
         assert_eq!(
-            actual_sites, expected_sites,
+            got.sites, expected_sites,
             "failure sites f{}",
             case.function.0
         );

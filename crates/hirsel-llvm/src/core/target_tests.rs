@@ -314,6 +314,7 @@ int main(void) {{
                         test_hooks: true,
                         relocatable_sites: false,
                         debug_lines: true,
+                        fixed_sites: &[],
                     },
                 )
                 .unwrap();

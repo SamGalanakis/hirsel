@@ -99,6 +99,13 @@ fn run(
     // A capability parameter gets handle 0 of a fresh model world. A Result's
     // leading destination is supplied separately by its caller, never a wrapper.
     let handles = vec![0; signature.params.len()];
+    // Sites as a native link binds them to this request's sources.
+    let anchored = hirsel_core_ir::source::anchored_items(module);
+    let sources = product.native_sources(&anchored).ok();
+    let sites = match &sources {
+        Some(sources) => sources.item_sites(&module.items)?,
+        None => Vec::new(),
+    };
     let (report, checked) = eval::run_entry(
         module,
         function,
@@ -109,6 +116,7 @@ fn run(
         revisions,
         setting.network,
         setting.events,
+        &sites,
     );
     let outcome = match report.outcome {
         eval::Outcome::Returned(values) => {
@@ -133,13 +141,6 @@ fn run(
         eval::Outcome::Failed(causes) => json!({"kind":"failed", "causes":causes}),
         eval::Outcome::Stopped(name) => json!({"kind":"stopped", "name":name}),
     };
-    let items = report
-        .sites
-        .iter()
-        .flatten()
-        .map(|site| module.items[site.item.index()].clone())
-        .collect::<Vec<_>>();
-    let sources = product.native_sources(&items).ok();
     let sites = report
         .sites
         .iter()

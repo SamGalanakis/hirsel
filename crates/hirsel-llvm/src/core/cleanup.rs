@@ -58,6 +58,7 @@ pub(super) fn glue_emitter<'a>(
         debug_location: None,
         anchor: None,
         relocatable_sites: false,
+        fixed_sites: &[],
         test_hooks: cfg!(test),
         value_slots: Vec::new(),
         static_vectors: None,

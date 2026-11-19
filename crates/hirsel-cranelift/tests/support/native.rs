@@ -1,6 +1,8 @@
 trait NativeInput {
     fn module(&self) -> &c::Module;
     fn object(&self, optimize: bool, debug: bool, observing: bool) -> Vec<u8>;
+    /// By item, its first site word (`SourceMap::item_sites`).
+    fn sites(&self) -> Vec<u64> { c::source::module_sites(self.module()) }
 }
 impl NativeInput for c::Module {
     fn module(&self) -> &c::Module { self }
@@ -28,6 +30,10 @@ use std::{
 #[allow(dead_code)] // The shared fixture also exposes the pre-site ABI for LLVM's cutover.
 #[path = "../../../hirsel-core-rt/testdata/host_memory.rs"]
 mod host_memory;
+/// The site word of an evaluator anchor under `sites`, 0 for none.
+fn anchor_word(sites: &[u64], anchor: Option<hirsel_core_ir::Anchor>) -> u64 {
+    anchor.map_or(0, |a| sites[a.item.index()] + u64::from(a.start))
+}
 
 fn result_layout(s: &c::Signature) -> (bool, Vec<u32>, u32) {
     let mut offset = 0u32;
@@ -69,7 +75,7 @@ fn ctype(t: Ty) -> &'static str {
         Ty::Vector(_) => unreachable!("vector calls use an internal Hirsel signature"),
     }
 }
-fn declare_functions(source: &mut String, module: &c::Module) {
+fn declare_functions(source: &mut String, module: &c::Module, sites: &[u64]) {
     for (i, s) in module.signatures.iter().enumerate() {
         if !s.has_vectors() && !s.results.is_empty() {
             write!(source, "struct r{i} {{ ").unwrap();
@@ -111,32 +117,15 @@ fn declare_functions(source: &mut String, module: &c::Module) {
         }
         source.push_str(",uint64_t);\n");
     }
-    for (i, item) in module.items.iter().enumerate() {
+    for (item, site) in module.items.iter().zip(sites) {
         writeln!(
             source,
-            "__asm__(\".globl {0}\\n.hidden {0}\\n.set {0}, {1}\\n\");",
+            "__asm__(\".globl {0}\\n.hidden {0}\\n.set {0}, {site}\\n\");",
             c::source::site_symbol(item),
-            c::source::module_site_word(i, 0)
         )
         .unwrap();
     }
-    source.push_str("static const uint64_t test_site_items[][4]={");
-    if module.items.is_empty() {
-        source.push_str("{0,0,0,0}");
-    }
-    for item in &module.items {
-        source.push('{');
-        for chunk in item.fingerprint().0.chunks_exact(8) {
-            write!(
-                source,
-                "UINT64_C({}),",
-                u64::from_le_bytes(chunk.try_into().unwrap())
-            )
-            .unwrap();
-        }
-        source.push_str("},");
-    }
-    write!(source, "}};\nstatic void emit_test_site(uint64_t site) {{ uint64_t present=site!=0, start=site&{mask}, empty[4]={{0}}; fwrite(&present,8,1,stdout); fwrite(present?test_site_items[(site>>{shift})-1]:empty,8,4,stdout); fwrite(&start,8,1,stdout); }}\n", mask = (1u64 << c::source::MODULE_SITE_SHIFT) - 1, shift = c::source::MODULE_SITE_SHIFT).unwrap();
+    source.push_str("static void emit_test_site(uint64_t site) { uint64_t present=site!=0; fwrite(&present,8,1,stdout); fwrite(&site,8,1,stdout); }\n");
 }
 
 fn execute(input: &impl NativeInput, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
@@ -256,7 +245,8 @@ fn execute_cases_with_bindings(
     if observing {
         source.push_str("extern void *hirsel_core_test_observe_begin(const HirselCoreContext *); extern uint64_t hirsel_core_test_observe_end(void *);\n");
     }
-    declare_functions(&mut source, module);
+    let sites = input.sites();
+    declare_functions(&mut source, module, &sites);
     if scheduled {
         source.push_str("extern uint8_t hirsel_core_test_run(HirselCoreContext *,uint8_t (*)(HirselCoreContext*,void*,void*),void*,void*,size_t,size_t);\n");
         let mut wrappers = std::collections::BTreeSet::new();
@@ -379,18 +369,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
                     });
                     let site = report.sites.get(cause_index).copied().flatten();
                     expected.push(u64::from(site.is_some()));
-                    if let Some(anchor) = site {
-                        for chunk in module.items[anchor.item.index()]
-                            .fingerprint()
-                            .0
-                            .chunks_exact(8)
-                        {
-                            expected.push(u64::from_le_bytes(chunk.try_into().unwrap()));
-                        }
-                        expected.push(u64::from(anchor.start));
-                    } else {
-                        expected.extend([0; 5]);
-                    }
+                    expected.push(anchor_word(&sites, site));
                 }
             }
             Outcome::Stopped(name) => {
@@ -633,7 +612,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             *words = &words[end..];
             return Some(report);
         }
-        let payload = count.checked_mul(if *words.first()? == 0 { 1 } else { 7 })?;
+        let payload = count.checked_mul(if *words.first()? == 0 { 1 } else { 3 })?;
         let trace_at = payload.checked_add(3)?;
         let trace = usize::try_from(*words.get(trace_at)?).ok()?;
         let end = trace_at.checked_add(trace)?.checked_add(2)?;

@@ -6,6 +6,9 @@ impl NativeInput for hirsel_core_program_tests::SourceProgram {
     fn object(&self, optimize: bool, debug: bool, observing: bool) -> Vec<u8> {
         self.cranelift_object(NATIVE_TARGET, optimize, debug, observing)
     }
+    fn sites(&self) -> Vec<u64> {
+        self.sites.clone()
+    }
 }
 fn check_front_end_run_cases() {
     fn files(path: &std::path::Path, out: &mut Vec<PathBuf>) {

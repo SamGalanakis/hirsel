@@ -111,9 +111,7 @@ fn probe(s: u64, divisor: u64) -> u64 {
                 .sites
                 .iter()
                 .map(|anchor| {
-                    anchor.map_or(0, |a| {
-                        hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
-                    })
+                    anchor.map_or(0, |a| program.sites[a.item.index()] + u64::from(a.start))
                 })
                 .collect();
             assert_eq!(native.sites, sites, "{:?}", case.args);
@@ -340,11 +338,7 @@ fn unknown(j: u64, n: u64) -> u64 {
         let sites: Vec<_> = evaluated
             .sites
             .iter()
-            .map(|anchor| {
-                anchor.map_or(0, |a| {
-                    hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
-                })
-            })
+            .map(|anchor| anchor.map_or(0, |a| program.sites[a.item.index()] + u64::from(a.start)))
             .collect();
         assert_eq!(native.sites, sites, "f{}{:?}", case.function.0, case.args);
     }
@@ -493,6 +487,9 @@ impl NativeInput for hirsel_core_program_tests::SourceProgram {
     }
     fn site_bindings(&self) -> String {
         self.site_bindings()
+    }
+    fn sites(&self) -> Vec<u64> {
+        self.sites.clone()
     }
     fn verify(&self, target: Target, observing: bool) {
         for module in &self.modules {
@@ -843,16 +840,7 @@ fn site_fixture(target: Target) {
         let fail_start = source[function_start..].find("fail(take message)").unwrap();
         (item, fail_start as u32)
     });
-    let mut bindings = String::new();
-    for (i, item) in module.items.iter().enumerate() {
-        writeln!(
-            bindings,
-            "__asm__(\".globl {0}\\n.hidden {0}\\n.set {0}, {1}\\n\");",
-            hirsel_core_ir::source::site_symbol(item),
-            hirsel_core_ir::source::module_site_word(i, 0)
-        )
-        .unwrap();
-    }
+    let bindings = module.site_bindings();
     let fixtures = [
         (Optimization::None, false, true),
         (Optimization::Speed, false, true),
@@ -1080,23 +1068,13 @@ fn site_fixture(target: Target) {
         for (case, got) in cases.iter().zip(reports) {
             let expected = eval::run(&module, case.function, &case.args, u64::MAX);
             assert_eq!(got.outcome, expected.outcome);
-            let actual = got
-                .sites
-                .iter()
-                .map(|word| {
-                    (*word != 0).then(|| {
-                        let (item, start) = hirsel_core_ir::source::module_site_parts(*word);
-                        (module.items[item].clone(), start)
-                    })
-                })
-                .collect::<Vec<_>>();
             let expected = expected
                 .sites
                 .iter()
-                .map(|a| a.map(|a| (module.items[a.item.index()].clone(), a.start)))
+                .map(|a| a.map_or(0, |a| module.sites[a.item.index()] + u64::from(a.start)))
                 .collect::<Vec<_>>();
             assert_eq!(
-                actual, expected,
+                got.sites, expected,
                 "resolved cause sites, function {}",
                 case.function.0
             );
@@ -1875,11 +1853,7 @@ fn probe(n: u64, extra: u64, k: u64) -> u64 {
             let expected = expected
                 .sites
                 .iter()
-                .map(|a| {
-                    a.map_or(0, |a| {
-                        hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
-                    })
-                })
+                .map(|a| a.map_or(0, |a| module.sites[a.item.index()] + u64::from(a.start)))
                 .collect::<Vec<_>>();
             assert_eq!(
                 report.sites, expected,
@@ -1947,11 +1921,7 @@ fn probe(n: u64, d: u64) -> u64 {
             let expected = expected
                 .sites
                 .iter()
-                .map(|a| {
-                    a.map_or(0, |a| {
-                        hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
-                    })
-                })
+                .map(|a| a.map_or(0, |a| module.sites[a.item.index()] + u64::from(a.start)))
                 .collect::<Vec<_>>();
             assert_eq!(
                 report.sites, expected,
@@ -2157,11 +2127,7 @@ fn probe(s: u64, mode: u64, repeats: u64) -> u64 {
                 let sites = expected
                     .sites
                     .iter()
-                    .map(|a| {
-                        a.map_or(0, |a| {
-                            hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
-                        })
-                    })
+                    .map(|a| a.map_or(0, |a| module.sites[a.item.index()] + u64::from(a.start)))
                     .collect::<Vec<_>>();
                 assert_eq!(report.sites, sites, "failure site, args={:?}", case.args);
             }
@@ -2287,11 +2253,7 @@ fn failing(s: u64, n: u64) -> u64 {
                 let sites = expected
                     .sites
                     .iter()
-                    .map(|a| {
-                        a.map_or(0, |a| {
-                            hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
-                        })
-                    })
+                    .map(|a| a.map_or(0, |a| module.sites[a.item.index()] + u64::from(a.start)))
                     .collect::<Vec<_>>();
                 assert_eq!(report.sites, sites, "failure site, args={:?}", case.args);
             }
@@ -2400,11 +2362,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
                 let sites = expected
                     .sites
                     .iter()
-                    .map(|a| {
-                        a.map_or(0, |a| {
-                            hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
-                        })
-                    })
+                    .map(|a| a.map_or(0, |a| module.sites[a.item.index()] + u64::from(a.start)))
                     .collect::<Vec<_>>();
                 assert_eq!(report.sites, sites, "failure site, args={:?}", case.args);
             }
@@ -2766,11 +2724,7 @@ fn probe(s: u64, n: u64, d: u64, mode: u64) -> u64 {
             let sites = expected
                 .sites
                 .iter()
-                .map(|a| {
-                    a.map_or(0, |a| {
-                        hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
-                    })
-                })
+                .map(|a| a.map_or(0, |a| module.sites[a.item.index()] + u64::from(a.start)))
                 .collect::<Vec<_>>();
             assert_eq!(report.sites, sites, "args={:?}", case.args);
         }
@@ -3276,7 +3230,7 @@ fn simd_llvm_matches_evaluator() {
         for optimization in [Optimization::None, Optimization::Speed] {
             let reports =
                 execute_target_object(&module, &cases, "", "", optimization, None, target);
-            check_native_reports(&module, &cases, reports, true);
+            check_native_reports(&module, &module.sites, &cases, reports, true);
         }
 
         let units: Vec<_> = module.modules.iter().collect();
@@ -3341,7 +3295,7 @@ __attribute__((constructor)) static void simd_test_level(void) {{
                     "native byte balance at cap {cap}"
                 );
             }
-            check_native_reports(&module, &cases, reports, false);
+            check_native_reports(&module, &module.sites, &cases, reports, false);
         }
     }
 }

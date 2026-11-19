@@ -1128,6 +1128,7 @@ fn carrier_ir(
             test_hooks: true,
             relocatable_sites: relocatable,
             debug_lines: false,
+            fixed_sites: &[],
         },
         Some(facts),
     )
@@ -1977,7 +1978,9 @@ b3:
     );
     let module = text::parse(&source).unwrap();
     wf::module(&module).unwrap();
-    let object = emit_object_for_target(&module, target, Optimization::None, false).unwrap();
+    let object =
+        emit_object_for_target(&module, target, Optimization::None, false, &module.sites())
+            .unwrap();
     let dir = std::env::temp_dir().join(format!(
         "hirsel-core-llvm-isolate-cancel-{}",
         std::process::id()
@@ -2705,6 +2708,7 @@ fn aarch64_memory_custody_and_calls_match_the_evaluator() {
                         test_hooks: true,
                         relocatable_sites: false,
                         debug_lines: true,
+                        fixed_sites: &[],
                     },
                 )
                 .unwrap();
@@ -2811,7 +2815,8 @@ b0(v0: u64):
     )
     .unwrap();
     hirsel_core_ir::wf::module(&module).unwrap();
-    let ir = emit_ir_for_target(&module, target, false).unwrap();
+    let sites = module.sites();
+    let ir = emit_ir_for_target(&module, target, false, &sites).unwrap();
     let callee = symbol(&module, FuncId(2));
     let direct = ir
         .lines()
@@ -2823,13 +2828,13 @@ b0(v0: u64):
     );
     let expected = [
         0,
-        hirsel_core_ir::source::module_site_word(0, 20),
-        hirsel_core_ir::source::module_site_word(1, 35),
-        hirsel_core_ir::source::module_site_word(1, 35),
+        sites[0] + 20,
+        sites[1] + 35,
+        sites[1] + 35,
         0,
-        hirsel_core_ir::source::module_site_word(0, 50),
-        hirsel_core_ir::source::module_site_word(0, 60),
-        hirsel_core_ir::source::module_site_word(1, 35),
+        sites[0] + 50,
+        sites[0] + 60,
+        sites[1] + 35,
     ];
     let cases = (0..8)
         .map(|f| Case {
@@ -2840,7 +2845,7 @@ b0(v0: u64):
         })
         .collect::<Vec<_>>();
     for opt in [Optimization::None, Optimization::Speed] {
-        let bytes = emit_object_for_target(&module, target, opt, false).unwrap();
+        let bytes = emit_object_for_target(&module, target, opt, false, &sites).unwrap();
         let reports = execute_target_object(&module, &cases, "", "", opt, Some(bytes), target);
         for ((case, actual), site) in cases.iter().zip(reports).zip(expected) {
             let oracle = eval::run(&module, case.function, &case.args, u64::MAX);
@@ -2892,6 +2897,7 @@ fn check_consuming_growth(target: Target) {
                 test_hooks: true,
                 relocatable_sites: false,
                 debug_lines: false,
+                fixed_sites: &[],
             },
         )
         .unwrap();
@@ -2957,6 +2963,7 @@ fn aarch64_consuming_growth_host_memory_refusal_is_a_reported_run_stop() {
                     test_hooks: true,
                     relocatable_sites: false,
                     debug_lines: false,
+                    fixed_sites: &[],
                 },
             )
             .unwrap();

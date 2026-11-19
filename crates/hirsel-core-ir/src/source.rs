@@ -49,6 +49,20 @@ impl SourceMap {
         }
         Ok(starts)
     }
+    /// Each item's first site word (`site_starts` plus its file offset), 0 for
+    /// an item these sources do not bind. A cause anchored `start` bytes into
+    /// item `i` has the site word `sites[i] + start`, as a linked native unit's.
+    pub fn item_sites(&self, items: &[DefPath]) -> Result<Vec<u64>, String> {
+        let starts = self.site_starts()?;
+        Ok(items
+            .iter()
+            .map(|item| {
+                self.items.get(item).map_or(0, |binding| {
+                    starts[binding.file as usize] + u64::from(binding.file_offset)
+                })
+            })
+            .collect())
+    }
     /// Resolve an item-relative byte offset in the current checked source.
     /// Lines and Unicode scalar columns start at one; a tab counts as one.
     pub fn position(&self, item: &DefPath, start: u32) -> Option<(&SourceFile, u32, u32)> {
@@ -61,25 +75,71 @@ impl SourceMap {
     }
 }
 
-/// The module-local site word of literal (non-relocatable) emission and of
-/// native test bindings: the item ordinal plus one above `MODULE_SITE_SHIFT`,
-/// the item-relative start below. Like a linked word it is below `SITE_END`.
-pub fn module_site_word(item: usize, start: u32) -> u64 {
-    let word = ((item as u64 + 1) << MODULE_SITE_SHIFT) | u64::from(start);
-    assert!(
-        start < 1 << MODULE_SITE_SHIFT && word < hirsel_core_layout::source_positions::SITE_END,
-        "module site word for item {item} at {start} exceeds the site bound"
-    );
-    word
+/// The items a failure anchor in `module` names, outside core@1 (whose anchors
+/// a native unit never emits): the items whose first sites a run needs.
+pub fn anchored_items(module: &crate::Module) -> Vec<DefPath> {
+    let mut named = vec![false; module.items.len()];
+    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
+        let blocks = body.blocks.iter().map(|b| &b.anchor);
+        for anchor in body.inst_anchors.iter().chain(blocks).flatten() {
+            named[anchor.item.index()] = true;
+        }
+    }
+    module
+        .items
+        .iter()
+        .zip(named)
+        .filter(|(item, named)| *named && !item.package_is("core", "1"))
+        .map(|(item, _)| item.clone())
+        .collect()
 }
-/// The item ordinal and item-relative start of a nonzero `module_site_word`.
-pub fn module_site_parts(word: u64) -> (usize, u32) {
-    (
-        (word >> MODULE_SITE_SHIFT) as usize - 1,
-        (word & ((1 << MODULE_SITE_SHIFT) - 1)) as u32,
-    )
+
+/// Sources for a module that has none: one blank file per item, each one byte
+/// longer than the item's furthest anchor, so distinct anchors keep distinct
+/// site words (a program can compare `Site`s) under the one dense encoding.
+pub fn module_sources(module: &crate::Module) -> SourceMap {
+    let mut ends = vec![0u32; module.items.len()];
+    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
+        let blocks = body.blocks.iter().map(|b| &b.anchor);
+        for anchor in body.inst_anchors.iter().chain(blocks).flatten() {
+            let end = &mut ends[anchor.item.index()];
+            *end = (*end).max(anchor.end.max(anchor.start) + 1);
+        }
+    }
+    SourceMap {
+        files: module
+            .items
+            .iter()
+            .zip(&ends)
+            .map(|(item, &end)| SourceFile {
+                path: item.to_string(),
+                text: " ".repeat(end as usize),
+            })
+            .collect(),
+        items: module
+            .items
+            .iter()
+            .enumerate()
+            .map(|(file, item)| {
+                let file = u32::try_from(file).expect("item count fits a file index");
+                (
+                    item.clone(),
+                    ItemSource {
+                        file,
+                        file_offset: 0,
+                    },
+                )
+            })
+            .collect(),
+    }
 }
-pub const MODULE_SITE_SHIFT: u32 = 20;
+
+/// Each item's first site word under `module_sources`.
+pub fn module_sites(module: &crate::Module) -> Vec<u64> {
+    module_sources(module)
+        .item_sites(&module.items)
+        .expect("a module's anchors fit the site bound")
+}
 
 /// A cached native unit addresses this item's linked site, plus the anchor's
 /// item-relative start. The fresh entry unit defines the symbol as the item's

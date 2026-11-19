@@ -288,15 +288,24 @@ fn expect_byte(b: Bytes, i: u64, c: u8) -> Result[(), Error] {
 }
 
 fn digits_at(b: Bytes, start: u64, width: u64) -> Result[u16, Error] {
-    let mut value: u16 = 0
-    for i in start .. start + width {
-        let c = byte(b, i)?
-        if !is_digit(c) {
-            return Error(Invalid(i))
-        }
-        value = value * 10 + int.widen(c - b'0')
+    let end = start + width
+    let n = list.len(b)
+    let stop = if n < start {
+        start
+    } else if n < end {
+        n
+    } else {
+        end
     }
-    Ok(value)
+    match int.parse_decimal_span(b, start, stop, 65535) {
+        Ok(value) => if stop == end {
+            Ok(int.narrow(value))
+        } else {
+            Error(Invalid(stop))
+        },
+        Error(Invalid(i)) => Error(Invalid(i)),
+        Error(_) => Error(Range),
+    }
 }
 
 fn date_fields(b: Bytes) -> Result[(u16, u8, u8), Error] {
@@ -509,25 +518,14 @@ const HOUR: u64 = 3600000000000
 
 fn leading_int(b: Bytes, start: u64) -> (u64, Option[u64]) {
     let mut i = start
-    let mut value: u64 = 0
+    let mut value: Option[u64] = Some(0)
     while i < list.len(b) && is_digit(b[i]) {
-        if value > DURATION_LIMIT / 10 {
-            break
+        if let Some(prefix) = value {
+            value = int.accumulate_digit(prefix, 10, b[i] - b'0', DURATION_LIMIT)
         }
-        let next = value * 10 + int.widen(b[i] - b'0')
-        if next > DURATION_LIMIT {
-            break
-        }
-        value = next
         i += 1
     }
-    if i == list.len(b) || !is_digit(b[i]) {
-        return (i, Some(value))
-    }
-    while i < list.len(b) && is_digit(b[i]) {
-        i += 1
-    }
-    (i, None)
+    (i, value)
 }
 
 fn leading_fraction(b: Bytes, start: u64) -> (u64, u64, f64) {
@@ -537,16 +535,14 @@ fn leading_fraction(b: Bytes, start: u64) -> (u64, u64, f64) {
     let mut overflow = false
     while i < list.len(b) && is_digit(b[i]) {
         if !overflow {
-            if value > (DURATION_LIMIT - 1) / 10 {
-                overflow = true
-            } else {
-                let next = value * 10 + int.widen(b[i] - b'0')
-                if next > DURATION_LIMIT {
-                    overflow = true
-                } else {
+            match int.accumulate_digit(value, 10, b[i] - b'0', DURATION_LIMIT) {
+                Some(next) => {
                     value = next
                     scale *= 10.0
-                }
+                },
+                None => {
+                    overflow = true
+                },
             }
         }
         i += 1

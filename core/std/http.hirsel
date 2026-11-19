@@ -409,14 +409,10 @@ fn authority(b: Bytes) -> bool {
     if b[at] != b':' || n - at < 2 || n - at > 6 {
         return false
     }
-    let mut port: u32 = 0
-    for i in at + 1 .. n {
-        if !int.is_ascii_digit(b[i]) {
-            return false
-        }
-        port = port * 10 + int.widen(b[i] - b'0')
+    match int.parse_decimal_span(b, at + 1, n, 65535) {
+        Ok(_) => true,
+        Error(_) => false,
     }
-    port <= 65535
 }
 
 type RequestHead {
@@ -2612,14 +2608,8 @@ fn frame_fields(b: Bytes, h: View[http1.Head], fields: FramingFields, body_max: 
     if n == 0 || n > 19 {
         return Error(failure(400))
     }
-    let mut size: u64 = 0
-    for i in length.start .. length.end {
-        let c = b[i]
-        if !int.is_ascii_digit(c) {
-            return Error(failure(400))
-        }
-        let digit: u64 = int.widen(c - b'0')
-        size = size * 10 + digit
+    let Ok(size) = int.parse_decimal_span(b, length.start, length.end, 18446744073709551615) else {
+        return Error(failure(400))
     }
     if size > body_max {
         return Error(failure(413))

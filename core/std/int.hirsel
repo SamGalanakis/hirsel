@@ -20,7 +20,7 @@ pub fn parse_uint(s: String, base: u32) -> Result[u64, ParseError] {
     if list.len(b) == 0 {
         return Error(Empty)
     }
-    digits(b, 0, base, 18446744073709551615)
+    digits(b, 0, list.len(b), base, 18446744073709551615)
 }
 
 /// As parse_uint, with an optional leading '-'; "-" alone is Error(Invalid(1)), and the
@@ -48,7 +48,7 @@ pub fn parse_int(s: String, base: u32) -> Result[i64, ParseError] {
     } else {
         9223372036854775807
     }
-    let m = digits(b, start, base, limit)?
+    let m = digits(b, start, n, base, limit)?
     if !negative {
         Ok(int.narrow(m))
     } else if m == 9223372036854775808 {
@@ -59,30 +59,38 @@ pub fn parse_int(s: String, base: u32) -> Result[i64, ParseError] {
     }
 }
 
-/// The digits b[start..] in base, up to limit; b[start..] is not empty.
-fn digits(b: Bytes, start: u64, base: u32, limit: u64) -> Result[u64, ParseError] {
-    let radix: u64 = int.widen(base)
-    let cutoff = limit / radix
-    let last_digit = limit % radix
+/// Reads ASCII decimal digits in b[start .. end] up to limit. An empty span
+/// reads as zero. Fails with Invalid at a reversed span's start or at the first
+/// nondigit, OutOfRange at the first excess digit, or Bounds when it needs a
+/// byte beyond b. Alloc: nothing. Cost: O(end - start).
+pub fn parse_decimal_span(b: Bytes, start: u64, end: u64, limit: u64) -> Result[u64, ParseError] {
+    if start > end {
+        return Error(Invalid(start))
+    }
+    digits(b, start, end, 10, limit)
+}
+
+fn digits(b: Bytes, start: u64, end: u64, base: u32, limit: u64) -> Result[u64, ParseError] {
     let mut v: u64 = 0
-    for i in start .. list.len(b) {
+    for i in start .. end {
         let x = b[i]
-        let d: u64 = if x >= b'0' && x <= b'9' {
-            int.widen(x - b'0')
+        let d: u8 = if x >= b'0' && x <= b'9' {
+            x - b'0'
         } else if x >= b'a' && x <= b'z' {
-            int.widen(x - b'a' + 10)
+            x - b'a' + 10
         } else if x >= b'A' && x <= b'Z' {
-            int.widen(x - b'A' + 10)
+            x - b'A' + 10
         } else {
             return Error(Invalid(i))
         }
-        if d >= radix {
+        let digit: u32 = int.widen(d)
+        if digit >= base {
             return Error(Invalid(i))
         }
-        if v > cutoff || (v == cutoff && d > last_digit) {
+        let Some(next) = int.accumulate_digit(v, base, d, limit) else {
             return Error(OutOfRange)
         }
-        v = v * radix + d
+        v = next
     }
     Ok(v)
 }

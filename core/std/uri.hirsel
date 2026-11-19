@@ -99,18 +99,11 @@ fn scan_part(data: Bytes, start: u64, end: u64, set: Set, query_delimits: bool) 
 }
 
 fn digits_port(data: Bytes, s: http1.Span) -> Result[u16, Error] {
-    let mut value: u32 = 0
-    for i in s.start .. s.end {
-        let b = data[i]
-        if !digit(b) {
-            return Error(Invalid(i))
-        }
-        value = value * 10 + int.widen(b - b'0')
-        if value > 65535 {
-            return Error(Invalid(s.start))
-        }
+    match int.parse_decimal_span(data, s.start, s.end, 65535) {
+        Ok(value) => Ok(int.narrow(value)),
+        Error(Invalid(i)) => Error(Invalid(i)),
+        Error(_) => Error(Invalid(s.start)),
     }
-    Ok(int.narrow(value))
 }
 
 fn parse_authority(data: Bytes, start: u64, text_end: u64) -> Result[(Option[http1.Span], Host, Option[http1.Span], u64), Error] {

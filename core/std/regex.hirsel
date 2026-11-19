@@ -437,14 +437,14 @@ fn decimal(s: String, mut p: Parser) -> Result[u64, Error] {
         p.at = successor
     }
     let start = p.at
-    let mut n: u64 = 0
+    let mut n: Option[u64] = Some(0)
     while p.at < p.width {
         let c = byte(s, p.at)
         if c < b'0' || c > b'9' {
             break
         }
-        if n <= 4294967295 {
-            n = n * 10 + int.widen(c - b'0')
+        if let Some(prefix) = n {
+            n = int.accumulate_digit(prefix, 10, c - b'0', 4294967295)
         }
         p.at += 1
         skip(s, mut p)
@@ -459,10 +459,10 @@ fn decimal(s: String, mut p: Parser) -> Result[u64, Error] {
         }
         p.at = advance_space(s, successor, p.free_space)
     }
-    if n > 4294967295 {
-        return Error(syntax(start, DecimalInvalid))
+    match n {
+        Some(value) => Ok(value),
+        None => Error(syntax(start, DecimalInvalid)),
     }
-    Ok(n)
 }
 
 fn counted(s: String, mut p: Parser, start: u64) -> Result[(u64, u64), Error] {

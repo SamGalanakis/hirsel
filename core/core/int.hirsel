@@ -41,6 +41,25 @@ pub fn try_narrow[T: integer, U: integer](x: T) -> Option[U]
 
 pub fn truncate[T: integer, U: integer](x: T) -> U
 
+/// Accumulates one numeric digit as value times radix plus digit. Returns None
+/// when the result exceeds limit, including arithmetic overflow. The caller
+/// checks that the digit and radix belong to its grammar. Alloc: nothing.
+pub fn accumulate_digit(value: u64, radix: u32, digit: u8, limit: u64) -> Option[u64] {
+    let base: u64 = int.widen(radix)
+    let d: u64 = int.widen(digit)
+    let Some(product) = int.checked_mul(value, base) else {
+        return None
+    }
+    let Some(sum) = int.checked_add(product, d) else {
+        return None
+    }
+    if sum > limit {
+        None
+    } else {
+        Some(sum)
+    }
+}
+
 pub fn parse[T: integer](s: String) -> Result[T, ParseError] {
     let b = string.as_bytes(s)
     let n = list.len(b)
@@ -61,10 +80,8 @@ pub fn parse[T: integer](s: String) -> Result[T, ParseError] {
     if start == n {
         return Error(Invalid(0))
     }
-    // The magnitude in u64, which holds every T's magnitude (|i64 MIN| = 2^63). Up to
-    // 1844674407370955160 (floor((2^64 - 1) / 10) - 1), ten times it plus a digit is at most
-    // 2^64 - 7, so that step cannot wrap; past it the step is checked and a magnitude past
-    // 2^64 - 1 only sets big. The grammar is still read to the end before the range.
+    // The magnitude in u64 holds every T's magnitude. The grammar is still
+    // read to the end before reporting a range error.
     let mut mag: u64 = 0
     let mut big = false
     for i in start .. n {
@@ -72,18 +89,10 @@ pub fn parse[T: integer](s: String) -> Result[T, ParseError] {
         if x < b'0' || x > b'9' {
             return Error(Invalid(i))
         }
-        let d: u64 = int.widen(x - b'0')
-        if mag <= 1844674407370955160 {
-            mag = int.wrapping_add(int.wrapping_mul(mag, 10), d)
-        } else if !big {
-            match int.checked_mul(mag, 10) {
-                Some(m) => match int.checked_add(m, d) {
-                    Some(v) => {
-                        mag = v
-                    },
-                    None => {
-                        big = true
-                    },
+        if !big {
+            match accumulate_digit(mag, 10, x - b'0', 18446744073709551615) {
+                Some(v) => {
+                    mag = v
                 },
                 None => {
                     big = true

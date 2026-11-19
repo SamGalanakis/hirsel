@@ -38,21 +38,22 @@ fn parse_ipv4(b: Bytes, start: u64) -> Result[u32, ParseIpError] {
     let mut address: u32 = 0
     for part in 0u64 .. 4u64 {
         let begin = at
-        let mut octet: u32 = 0
+        let mut octet: u64 = 0
         while at < n && int.is_ascii_digit(b[at]) {
             if at - begin == 3 || at > begin && b[begin] == b'0' {
                 return Error(Invalid(at))
             }
-            octet = octet * 10 + int.widen(b[at] - b'0')
-            if octet > 255 {
+            let Some(next) = int.accumulate_digit(octet, 10, b[at] - b'0', 255) else {
                 return Error(Invalid(at))
             }
+            octet = next
             at += 1
         }
         if at == begin {
             return Error(Invalid(at))
         }
-        address = (address << 8) | octet
+        let part_value: u32 = int.narrow(octet)
+        address = (address << 8) | part_value
         if part < 3 {
             if at == n || b[at] != b'.' {
                 return Error(Invalid(at))

@@ -192,11 +192,10 @@ fn parse_grammar_before_range() -> u64 {
     unsigned_error(r)
 }
 
-// The body's u64 accumulator: up to 1844674407370955160 a step cannot wrap, so
-// 18446744073709551609 is the largest value read without a check. 18446744073709551610 is
-// read through the checked step and fits; 18446744073709551619 (whose last step starts past
-// the bound, and would wrap to 3 without a check) and a 21-digit numeral do not (3). Leading zeros
-// past 20 digits are still 42. A numeral too big for u64 is read to its bad byte at 30 (130).
+// Both 18446744073709551609 and 18446744073709551610 fit. The last digit of
+// 18446744073709551619 overflows the sum and a 21-digit numeral overflows the
+// product. Leading zeros past 20 digits are still 42. The bad byte at 30
+// still wins over overflow.
 // expect: run parse_u64_accumulator_edge() = true
 fn parse_u64_accumulator_edge() -> bool {
     let a: Result[u64, ParseError] = int.parse("18446744073709551609")
@@ -216,6 +215,19 @@ fn parse_i64_range_edges() -> bool {
     let high: Result[i64, ParseError] = int.parse("9223372036854775808")
     let one: Result[i64, ParseError] = int.parse("-1")
     signed_error(low) == 3 && signed_error(high) == 3 && result.unwrap(one) == -1
+}
+
+// A span counts offsets from the original input. The fifth digit of 65536
+// exceeds 65535 before the following '!' is read.
+// expect: run decimal_span_errors() = true
+fn decimal_span_errors() -> bool {
+    let b = string.as_bytes("x65536!42")
+    result.unwrap(int.parse_decimal_span(b, 7, 9, 42)) == 42 && result.unwrap(int.parse_decimal_span(b, 9, 9, 0)) == 0 && unsigned_error(int.parse_decimal_span(b, 1, 7, 65535)) == 3 && unsigned_error(int.parse_decimal_span(b, 1, 7, 65536)) == 106 && unsigned_error(int.parse_decimal_span(b, 7, 6, 42)) == 107
+}
+
+// expect: run decimal_span_bounds() = fail Bounds
+fn decimal_span_bounds() -> u64 {
+    result.unwrap(int.parse_decimal_span(string.as_bytes("42"), 0, 3, 999))
 }
 
 // The byte ASCII tests agree with the char ones (an independent body over the scalar) on

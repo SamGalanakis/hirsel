@@ -485,19 +485,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<Option<ValueId>> {
-        if self.p.core_operations[f] == Some(u16::MAX - 2) {
+        let binding = self.p.core_operations[f]?;
+        if binding == u16::MAX - 2 {
             return Some(
                 self.runtime_row(RtOp::DescribeEmit, &[Arg::Value(vals[0]?)], n)
                     .map(|v| v[0]),
             );
         }
-        if self.p.core_operations[f] == Some(u16::MAX - 1) {
+        if binding == u16::MAX - 1 {
             let view = self.runtime_type(result, n)?;
             let output = self.new_slot(PlaceTy::Declared(view), n);
             self.runtime_row(RtOp::LaunchTarget { view }, &[Arg::Address(output)], n)?;
             return Some(Some(self.pointer(output, n)));
         }
-        if self.p.core_operations[f] == Some(u16::MAX) {
+        if binding == u16::MAX {
             return Some(
                 self.runtime_row(
                     RtOp::LaunchWord,
@@ -507,22 +508,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .map(|v| v[0]),
             );
         }
-        match OPERATIONS[self.p.core_operations[f]? as usize].lane {
+        let entry = &OPERATIONS[binding as usize];
+        match entry.lane {
             Lane::Runtime(kernel) => Some(self.runtime_kernel(kernel, f, types, vals, result, n)),
-            Lane::PendingCode => self.pending_code(f, types, vals, result, n),
+            Lane::PendingCode => self.pending_code(entry, f, types, vals, result, n),
             _ => None,
         }
     }
 
     fn pending_code(
         &mut self,
+        entry: &Entry,
         f: usize,
-        _types: &[TyId],
+        types: &[TyId],
         vals: &[Option<ValueId>],
-        _result: TyId,
+        result: TyId,
         n: NodeId,
     ) -> Option<Option<ValueId>> {
-        let entry = &OPERATIONS[self.p.core_operations[f]? as usize];
         let args = self.kids(n);
         match (entry.module, entry.name) {
             ("core", "isolate") => {
@@ -554,10 +556,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     let body_ty = self.p.fns[f]
                         .params
                         .first()
-                        .map(|p| subst(&mut self.t, p.ty, _types))
+                        .map(|p| subst(&mut self.t, p.ty, types))
                         .unwrap_or(ERROR);
                     if let Some(body) = vals.first().copied().flatten() {
-                        return Some(self.lower_isolate(body_ty, body, _result, n));
+                        return Some(self.lower_isolate(body_ty, body, result, n));
                     }
                 }
                 Some(None)

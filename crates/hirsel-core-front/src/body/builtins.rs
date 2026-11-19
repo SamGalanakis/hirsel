@@ -13,7 +13,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<Option<ValueId>> {
         let g = &self.p.fns[f];
-        if !g.path.package_is("core", "1") || g.body.is_some() {
+        if g.body.is_some() || !g.path.package_is("core", "1") {
             return None;
         }
         let module = g.path.0.modules.as_slice();

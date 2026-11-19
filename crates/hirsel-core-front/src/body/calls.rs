@@ -1312,15 +1312,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// call of `of`'s instance row, which substitution replaces by the instance's maker.
     fn codec_of(
         &mut self,
-        f: usize,
+        path: &DefPath,
         types: &[TyId],
         vals: &[Option<ValueId>],
         result: TyId,
         n: NodeId,
     ) -> Option<Option<ValueId>> {
-        if !is_codec_of(&self.p.fns[f].path) {
-            return None;
-        }
         let mut ty = types[0];
         while let TyKind::Anchored(x, _) | TyKind::View(x) = *self.t.kind(ty) {
             ty = x;
@@ -1364,7 +1361,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // A sibling read of `of` (`crate::SIBLING_READS`).
         let name = crate::decls::layout_name(&self.p.decls, &self.t, ty);
         let maker = templates::builtin_codec(&name).and_then(|maker| {
-            let mut path = self.p.fns[f].path.clone();
+            let mut path = path.clone();
             path.0.name = maker.into();
             self.p.function_id(&path)
         });
@@ -1440,7 +1437,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        if let Some(value) = self.codec_of(f, types, vals, result, n) {
+        let g = &self.p.fns[f];
+        let codec = is_codec_of(&g.path);
+        if codec && let Some(value) = self.codec_of(&g.path, types, vals, result, n) {
             return value;
         }
         if let Some(value) = self.core_operation(f, types, vals, result, n) {
@@ -1459,8 +1458,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        let g = &self.p.fns[f];
-        if is_codec_of(&g.path) {
+        if codec {
             // `of` at a type parameter P: the instance's P chooses the maker (9.1).
             let Some(row) = self.e.type_row(self.p, &mut self.t, types[0]) else {
                 self.gap(n, "codec type layout is not built");
@@ -1470,7 +1468,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 call.operation = Some(CallOperation::CodecOf(row));
             }
         }
-        let g = &self.p.fns[f];
         if !g.generics.is_empty() && g.body.is_none() && g.path.package_is("core", "1") {
             self.gap(n, "this generic core operation is not built");
             return None;
@@ -2369,5 +2366,5 @@ fn contained(
 
 /// Whether `path` is `std.codec.of`, whose calls name a maker per instance.
 pub(super) fn is_codec_of(path: &DefPath) -> bool {
-    path.0.package.name == "std" && path.0.modules == ["codec"] && path.0.name == "of"
+    path.0.name == "of" && path.0.package.name == "std" && path.0.modules == ["codec"]
 }

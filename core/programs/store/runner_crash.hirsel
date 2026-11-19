@@ -187,14 +187,14 @@ fn options() -> store.Options {
 // and searches the files after the last acknowledged call and checkpoint.
 type SecretClient: send {
     tasks: Tasks, net: Net, clock: Clock, random: Random, policy: ingress.Ingress,
-    head: Sender[runner.Req], post: Sender[runner.PubIn], token: Bytes
+    head: Sender[runner.Req], post: Sender[runner.PubIn], authority: store.AuthorityReader, token: Bytes
 }
 
 fn secret_client(take d: SecretClient) -> String waits {
-    let SecretClient(tasks: tasks, net: n, clock: c, random: r, policy: take policy, head: take head, post: take post, token: take token) = take d
+    let SecretClient(tasks: tasks, net: n, clock: c, random: r, policy: take policy, head: take head, post: take post, authority: take authority, token: take token) = take d
     let mut keys: List[Bytes] = list.new()
     result.unwrap(list.push(mut keys, body_key(0u64)))
-    let pair = wire_client.pair(tasks, n, c, r, policy, head, post, code.describe(place), keys, Some(take token), 1u64, 2097152u64)
+    let pair = wire_client.pair(tasks, n, c, r, policy, head, post, authority, code.describe(place), keys, Some(take token), 1u64, 2097152u64)
     let (take wire, take server) = match take pair {
         Ok(take connected) => take connected,
         Error(Allocation(_)) => return "L31: client allocation refused",
@@ -230,7 +230,7 @@ pub fn no_secret_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, 
     let mail = result.unwrap(runner.mailbox(4u64))
     let (policy, take policy_task) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
     let mut policy_handle = take policy_task
-    let seed = SecretClient(tasks: tasks, net: n, clock: c, random: r, policy: take policy, head: take head, post: runner.post(mail), token: take token)
+    let seed = SecretClient(tasks: tasks, net: n, clock: c, random: r, policy: take policy, head: take head, post: runner.post(mail), authority: store.authority_reader(db), token: take token)
     let driving = result.unwrap(task.spawn(tasks, bytes 33554432u64, take seed, secret_client))
     result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 1048576u64))
     clean(result.unwrap(task.join(take driving)))
@@ -393,10 +393,10 @@ fn keyed(take done: List[runner.Done]) -> List[runner.KeyedDone] {
     out
 }
 
-type Accept: send { listener: Listener, tasks: Tasks, clock: Clock, policy: ingress.Ingress, head: Sender[runner.Req], post: Sender[runner.PubIn], sessions: u64 }
+type Accept: send { listener: Listener, tasks: Tasks, clock: Clock, policy: ingress.Ingress, head: Sender[runner.Req], post: Sender[runner.PubIn], authority: store.AuthorityReader, sessions: u64 }
 
 fn accept(take seed: Accept) -> () waits {
-    let Accept(listener: take listener, tasks: tasks, clock: c, policy: take policy, head: take head, post: take post, sessions: sessions) = take seed
+    let Accept(listener: take listener, tasks: tasks, clock: c, policy: take policy, head: take head, post: take post, authority: take authority, sessions: sessions) = take seed
     let mut l = take listener
     let mut config = runner.wire_defaults(65536u64, N_PLACE)
     // The replay sends up to three calls per owner. Reserve those outcomes
@@ -409,7 +409,7 @@ fn accept(take seed: Accept) -> () waits {
         let (socket, peer) = result.unwrap(host.accept(mut l, Never))
         let lease = option.unwrap(result.unwrap(std.wsock.acquire(pool)))
         let up = result.unwrap(std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c)))
-        let service = runner.wire_place_target(code.describe(place), policy, head, c, tasks, config, "crash fixture")
+        let service = runner.wire_place_target(code.describe(place), policy, head, authority, c, tasks, config, "crash fixture")
         let owner = result.unwrap(runner.serve_connection(tasks, take up, take service, post, config, c))
         result.unwrap(list.push(mut owners, take owner))
     }
@@ -425,7 +425,7 @@ fn served(take db: store.Db, c: Clock, r: Random, tasks: Tasks, n: Net, out: Std
     let mail = result.unwrap(runner.mailbox(4u64))
     let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
     let mut policy_task = take policy_handle
-    let seed = Accept(listener: take listener, tasks: tasks, clock: c, policy: ingress.share(policy), head: take head, post: runner.post(mail), sessions: sessions)
+    let seed = Accept(listener: take listener, tasks: tasks, clock: c, policy: ingress.share(policy), head: take head, post: runner.post(mail), authority: store.authority_reader(db), sessions: sessions)
     let mut driving = result.unwrap(task.spawn(tasks, bytes 33554432u64, take seed, accept))
     let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 1048576u64)
     if let Error(_) = opened { task.cancel(mut driving) }

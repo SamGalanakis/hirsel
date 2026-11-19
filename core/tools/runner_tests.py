@@ -35,7 +35,7 @@ CHUNK = 500
 # evaluator (the registry's map grows to 2 MiB while its old table is live).
 N_PLACE = 16 * 1024 * 1024
 
-CALLS = ('release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
+CALLS = ('authority_receipt', 'release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
          'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'calls_retired_head', 'l14_handles', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'publisher_never_blocks', 'owed_ended_delivered')
 NATIVE_ONLY_CALLS = {'drain_reopened', 'lag_window'}
 

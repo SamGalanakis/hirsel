@@ -141,7 +141,7 @@ pub fn caller(token: Bytes) -> Result[Option[runner.Caller], Capacity] {
     let digest = std.sha256.finish(h)
     let mut subject: Bytes = list.with_capacity(16u64)?
     for i in 0u64 .. 16u64 { let _ = list.push(mut subject, digest[i]) }
-    Ok(Some(runner.Caller(issuer: 1u8, subject: take subject)))
+    Ok(Some(store.Caller(issuer: 1u8, subject: take subject)))
 }
 
 // The HTTP Authorization parser passes the unpadded base64url value after Bearer.

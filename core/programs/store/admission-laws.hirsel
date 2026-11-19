@@ -36,11 +36,11 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
     let transact_key = w3c_key(code.identity(code.describe(w3c_tx)), std.codec.of_u32(), carried)
     let codec: std.codec.Codec[Bytes] = std.codec.of()
     let key = w3c_key(code.identity(code.describe(w3c_bytes)), std.codec.of_u32(), codec)
-    let (policy, take handle) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
+    let (access_gate, take handle) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
     let mut policy_handle = take handle
-    let principal = option.unwrap(ingress.hello(policy, V4(1u32), None))
+    let principal = option.unwrap(ingress.hello(access_gate, V4(1u32), None))
     let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(5u64))
-    let service = wire_service_seed(take reg, policy, head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
+    let service = wire_service_seed(take reg, access_gate, head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
     let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
     let mut s = take initial
     let mut work = wire_work()
@@ -135,11 +135,11 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool w
     let mut reg: Registry[(), ()] = registry()
     result.unwrap(compute(mut reg, code.describe(w3c_bytes), 65536u64, DEFAULT_STEPS))
     result.unwrap(transact(mut reg, code.describe(w3c_tx), 65536u64, DEFAULT_STEPS))
-    let (policy, take handle) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
+    let (access_gate, take handle) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
     let mut policy_handle = take handle
-    let principal = option.unwrap(ingress.hello(policy, V4(1u32), None))
+    let principal = option.unwrap(ingress.hello(access_gate, V4(1u32), None))
     let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
-    let service = wire_service_seed(take reg, policy, head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
+    let service = wire_service_seed(take reg, access_gate, head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
     let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
     let mut s = take initial
     let mut work = wire_work()
@@ -244,15 +244,15 @@ fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
     let mut db = store.memory(clock, random, store.defaults())
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u32())))
     let data = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), std.codec.of_u32()))
-    let (policy, take h) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
-    let principal = option.unwrap(ingress.hello(policy, V4(1u32), None))
+    let (access_gate, take h) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
+    let principal = option.unwrap(ingress.hello(access_gate, V4(1u32), None))
     let (take caller, _) = ingress.welcome(take principal)
     let stream = wire_stream(caller, 77u32)
     let _ = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(w3c_retired(), list.new())))
     let (to_head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(5u64))
     let (to_pub, releases): (Sender[PubIn], Receiver[PubIn]) = result.unwrap(channel.new(5u64))
     let (to_owner, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
-    let service = wire_service_seed(w3c_registry(), policy, to_head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
+    let service = wire_service_seed(w3c_registry(), access_gate, to_head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
     let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
     let mut owner = take initial
     owner.phase = 3u8
@@ -321,8 +321,8 @@ fn w3c_ok(version: u64) -> Outcome {
 }
 
 fn w3c_close(take rig: W3cRig) -> () waits {
-    let W3cRig(head: take hd, owner: _, work: _, requests: _, releases: _, inbox: _, policy: take policy) = take rig
-    let mut h = take policy
+    let W3cRig(head: take hd, owner: _, work: _, requests: _, releases: _, inbox: _, policy: take access_gate) = take rig
+    let mut h = take access_gate
     task.cancel(mut h)
     let _ = task.join(take h)
     let Head(db: take db, r: _, h: _, out: _, busy: _, waiting: _, group: _, last: _, minted: _) = take hd
@@ -439,11 +439,11 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
         h: result.unwrap(subs_handles(mut db)), base: take base, from: take from, ready: take ready_to)
     let publishing = result.unwrap(task.spawn(tasks, bytes 8388608u64, take pub_job, publish))
     if let Ok(None) = channel.receive(ready_from) {} else { return false }
-    let (policy, take policy_task) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
+    let (access_gate, take policy_task) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
     let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let config = wire_defaults(1048576u64, 1048576u64)
-    let service = wire_service_seed(take reg, policy, head, c, tasks, config, string.new())
+    let service = wire_service_seed(take reg, access_gate, head, c, tasks, config, string.new())
     let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
     let mut owner = take initial
     let mut work = wire_work()

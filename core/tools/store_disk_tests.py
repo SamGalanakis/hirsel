@@ -10,14 +10,14 @@ import tempfile
 
 from case_progress import run_case
 from std_native import ROOT, Evaluator
-from store_tests import inputs
+from store_tests import authority_publication_order, inputs
 from store_crash_tests import run_crashes
 
 # Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
 INSTRUCTION_ALLOWANCES = {'pack_bound': 1_622_341_249}  # measured 1_297_872_999
 
 LAWS = ('frames', 'manifest', 'nodes', 'graph', 'packs', 'load', 'compact',
-        'draft_refusal', 'worker_refusal', 'opening', 'db', 'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound', 'branches', 'migrate')
+        'draft_refusal', 'worker_refusal', 'opening', 'db', 'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound', 'branches', 'migrate', 'authority_publish')
 NATIVE_TESTS = {'store@1/store/disk_test_' + name for name in LAWS if name != 'pack_bound'}
 
 # Orchestrator ruling: these evaluator assembly defects ride with owner914.
@@ -57,12 +57,15 @@ def main():
                     p.error('evaluator backend requires --evaluator')
                 for name in LAWS:
                     result = evaluator.evaluate(manifest, 'store@1/store/disk_law_' + name,
-                                                instructions=INSTRUCTION_ALLOWANCES.get(name))
+                                                instructions=INSTRUCTION_ALLOWANCES.get(name),
+                                                events=name == 'authority_publish')
                     try:
                         report = json.loads(result.stdout)
                     except ValueError:
                         report = {'stdout': result.stdout.decode(errors='replace'), 'stderr': result.stderr.decode(errors='replace')}
                     good = result.returncode == 0 and report.get('outcome') == {'kind': 'returned', 'values': [1]}
+                    if name == 'authority_publish':
+                        good = good and authority_publication_order(report)
                     rows.append(dict(engine=engine, law=name, passed=good, result=report))
                     print(f'{engine} {name}: {"PASS" if good else "FAIL"}', flush=True)
             else:

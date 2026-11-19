@@ -27,11 +27,11 @@ pub type Row: codec + send { sub: u32, key: Bytes, value: Option[Bytes] }
 
 pub type Frame: codec + send = Hello(Option[Bytes], List[Want]) | Call(u32, u64, u32, u32, Bytes) | Subscribe(u32, u32, Bytes, Option[Bytes]) | Unsubscribe(u32) | Welcome(Bytes, u32, u64, Bytes, String, u64) | Placed(Entry) | Batch(u64, List[u32], List[Row], List[Done]) | Ended(u32, Outcome) | Reset(u64, List[Done])
 
-pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes)
+pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes) | PolicyTwice
 
 pub const DEFAULT_STEPS: u64 = 1 << 30
 
-pub type Caller: codec + send { issuer: u8, subject: Bytes }
+pub type Caller = store.Caller
 pub const SUBJECT_MAX: u64 = 64u64
 
 pub fn caller_key(c: Caller, mut out: Bytes) -> Result[(), Capacity] {
@@ -50,7 +50,7 @@ pub fn stream_key(c: Caller, number: u32) -> Result[Bytes, Capacity] {
     Ok(take stream)
 }
 
-pub type OpenError: send = Store(store.Error) | Place(RegisterError)
+pub type OpenError: send = Store(store.Error) | Place(RegisterError) | PolicyTable(String)
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Draining
@@ -177,7 +177,7 @@ fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
 
 fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
     let PlaceConfig(backing: take backing, place: place, handles: handles, query_handles: query_handles, n_place: n_place, n_publisher: n_publisher,
-        session: session_config, max_sessions: limit, proxies: take proxies, policy: take policy,
+        session: session_config, max_sessions: limit, proxies: take proxies, policy: take access_gate,
         listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config) = take p
     if limit == 0u64 || limit > WIRE_OWNER_LIMIT || !wire_configuration(session_config) { return Error(Missing("socket")) }
     let watch = status_watch(take watching)?
@@ -215,8 +215,8 @@ fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receive
     }
     let mut serving: Option[Task[()]] = None
     let mut drain_waiter: Option[Task[()]] = None
-    let mut ready: Option[(Listener, Sender[PubIn])] = None
-    let mut unused_listener_inputs = Some((take proxies, take policy, take inbox_serve))
+    let mut ready: Option[(Listener, Sender[PubIn], store.AuthorityReader)] = None
+    let mut unused_listener_inputs = Some((take proxies, take access_gate, take inbox_serve))
     let mut stopped = false
     let mut online = false
     let mut expired = false
@@ -255,11 +255,11 @@ fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receive
         let event = match take next {
             Some(take event) => take event,
             None => {
-                if let Some((take listener, take pub_to)) = replace(mut ready, None) {
+                if let Some((take listener, take pub_to, take authority)) = replace(mut ready, None) {
                     let (take addresses, take ingress_policy, take from_serve) = option.unwrap(replace(mut unused_listener_inputs, None))
                     let target = match string.from(current.target) { Ok(take name) => take name, Error(cap) => return Error(Full(cap)) }
                     let serving_config = ServePlace(listener: take listener, config: session_config, tasks: tasks, clock: clock, policy: take ingress_policy,
-                        max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, place: place,
+                        max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, place: place, authority: take authority,
                         head: channel.sender(head_to), inbox: take from_serve, to: channel.sender(serve_to), events: channel.sender(to), drain: latest.handle(drain))
                     let run: fn(take ServePlace[G, H]) -> () waits = run_serve_place
                     serving = match task.spawn(tasks, bytes serving_reserve, take serving_config, run) {
@@ -289,12 +289,12 @@ fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receive
                     let _ = channel.try_send(head_to, HeadContinue)
                 }
             },
-            Published(take pub_to) => if stopped { let _ = channel.try_send(head_to, HeadClose) } else {
+            Published(take pub_to, take authority) => if stopped { let _ = channel.try_send(head_to, HeadClose) } else {
                 match host.listen(net, listen, 128u16) {
                     Ok((take listener, address)) => {
                         current.addr = Some(address)
                         publish_phase(status, watch, mut current, Starting(Listening(address)))?
-                        ready = Some((take listener, take pub_to))
+                        ready = Some((take listener, take pub_to, take authority))
                     },
                     Error(problem) => { start_failure = Some(Listen(problem)); let _ = channel.try_send(head_to, HeadClose) },
                 }
@@ -348,7 +348,15 @@ fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receive
 // entry's step bound and its code.revision, which each call record carries (R5, §7).
 type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes) -> Result[Task[Outcome], Capacity]) | Transact(u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Bytes) -> Ran) | Query(u64, u64, own[send] fn(store.Snapshot, H, Bytes, store.Snapshot, Option[View[Cover]], u32, Log[Row]) -> Queried)
 
+type KeyPolicy: send {
+    f: StaticFn[fn(store.Tx, Caller) -> Result[store.KeyScope, Capacity]],
+    reads: List[String],
+    n: u64,
+    s: u64
+}
+
 pub opaque type Registry[G: send, H: send]: send {
+    key_policy: Option[KeyPolicy],
     slots: Map[Bytes, Slot[G, H]],
     exported: List[Exported],
     checks: Map[Bytes, own[send] fn(Bytes) -> Option[Refusal]],
@@ -356,7 +364,19 @@ pub opaque type Registry[G: send, H: send]: send {
 }
 
 pub fn registry[G: send, H: send]() -> Registry[G, H] {
-    Registry(slots: map.new(), exported: list.new(), checks: map.new(), gone: map.new())
+    Registry(key_policy: None, slots: map.new(), exported: list.new(), checks: map.new(), gone: map.new())
+}
+
+pub fn policy[G: send, H: send](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, Caller) -> Result[store.KeyScope, Capacity]], reads: List[String], n: u64, s: u64) -> Result[(), RegisterError] {
+    if let Some(_) = r.key_policy { return Error(PolicyTwice) }
+    let held: Result[List[String], Capacity] = clone(reads)
+    match take held {
+        Ok(take names) => {
+            r.key_policy = Some(KeyPolicy(f: f, reads: take names, n: n, s: s))
+            Ok(())
+        },
+        Error(c) => Error(Full(c))
+    }
 }
 
 fn room(c: Capacity) -> Room {
@@ -567,7 +587,7 @@ pub fn release_digest(exported: List[Exported]) -> Result[Bytes, Capacity] {
 
 pub type Describe: codec + send { digest: Bytes, target: String, n_place: u64, exported: List[Exported] }
 
-pub type DescribeError: codec + send = PlaceCapacity(Room) | AlreadyRegistered(Bytes)
+pub type DescribeError: codec + send = PlaceCapacity(Room) | AlreadyRegistered(Bytes) | PolicyTwice
 
 fn launch_emit(data: Bytes) -> bool { false }
 
@@ -681,6 +701,7 @@ pub fn main[G: send, H: send](a: Args, place: StaticFn[fn(mut Registry[G, H]) ->
             let error: DescribeError = match take e {
                 Full(c) => PlaceCapacity(room(c)),
                 AlreadyRegistered(take key) => AlreadyRegistered(take key),
+                PolicyTwice => PolicyTwice,
             }
             let codec: std.codec.Codec[DescribeError] = std.codec.of()
             let mut out: Bytes = list.new()
@@ -1395,7 +1416,7 @@ fn run_head[G: send, H: send](take db: store.Db, take r: Registry[G, H], take h:
     }
     if let Some(control) = drain {
         if let ManagedRequests(from) = inbox {
-            if !head_advance(control.events, from, Published(channel.sender(out))) {
+            if !head_advance(control.events, from, Published(channel.sender(out), store.authority_reader(owned))) {
                 let mut stopping = take publisher_task
                 task.cancel(mut stopping)
                 let _ = task.join(take stopping)
@@ -1460,7 +1481,7 @@ fn start_publisher[G: send, H: send](owned: store.Db, place: StaticFn[fn(mut Reg
 
 type DrainWindow: shareable + send { admission: u64, deadline: u64 }
 
-type LifeEvent: send = StopRequested | Recovered | Activated(Bytes) | Published(Sender[PubIn]) | ServePrepared | Settled | HeadEnded(Result[(), StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
+type LifeEvent: send = StopRequested | Recovered | Activated(Bytes) | Published(Sender[PubIn], store.AuthorityReader) | ServePrepared | Settled | HeadEnded(Result[(), StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
 
 pub type HeadInput: send = RunRequest(Req) | HeadContinue | HeadClose | HeadFinish
 
@@ -1538,7 +1559,18 @@ fn prepare_registry[G: send, H: send](mut db: store.Db, place: StaticFn[fn(mut R
     handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H], n_place: u64) -> Result[(Registry[G, H], H, H), OpenError] waits {
     let reg = match placed(place, n_place) { Ok(take reg) => take reg, Error(take problem) => return Error(Place(take problem)) }
     let (local, published_handles) = open_handles(mut db, handles, query_handles)?
+    if let Some(settings) = reg.key_policy {
+        declare_policy(mut db, settings)?
+    }
     Ok((take reg, take local, take published_handles))
+}
+
+fn declare_policy(mut db: store.Db, settings: KeyPolicy) -> Result[(), OpenError] {
+    match store.declare_authority(mut db, settings.reads) {
+        Ok(()) => Ok(()),
+        Error(Missing(take name)) => Error(PolicyTable(take name)),
+        Error(take problem) => Error(Store(take problem)),
+    }
 }
 
 fn closing_at(drain: Latest[Option[DrainWindow]], clock: Clock) -> bool {
@@ -3030,9 +3062,9 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
     let (head, heads): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
     let (down_to, down): (Sender[Down], Receiver[Down]) = result.unwrap(channel.new(16u64))
     let (inbox, events): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(16u64))
-    let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
+    let (access_gate, take policy_handle) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let mut service = wire_service_seed(take reg, policy, head, c, tasks, wire_defaults(1048576u64, 1048576u64), "fixture")
+    let mut service = wire_service_seed(take reg, access_gate, head, c, tasks, wire_defaults(1048576u64, 1048576u64), "fixture")
     service.context.marked = true
     service.context.phase = 3u8
     service.context.me = Some(channel.sender(inbox))
@@ -4185,11 +4217,11 @@ type WireAccept[C: send]: send {
 
 fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] waits {
     let WireAccept(completion: take completion, socket: take socket, peer: peer, accepted: accepted, slot: take slot, proxies: take proxies,
-        policy: take policy, service: take service, publisher: take pub_to, c: c, clock: clock, tasks: tasks, control: take control, allocation: take allocation) = take x
+        policy: take access_gate, service: take service, publisher: take pub_to, c: c, clock: clock, tasks: tasks, control: take control, allocation: take allocation) = take x
     let mut active: Option[ingress.Lease] = None
     let admission = scoped fn(ip: Ip) -> bool waits {
         if let Some(life) = control { if closing_at(life.drain, clock) { return false } }
-        if let Some(i) = policy {
+        if let Some(i) = access_gate {
             active = ingress.open(i, ip)
             match active { Some(_) => true, None => false }
         } else { true }
@@ -4211,8 +4243,8 @@ pub fn serve[C: send](take listener: Listener, tasks: Tasks, clock: Clock, to_pu
     serve_ingress(take listener, tasks, clock, to_publisher, c, max_sessions, take proxies, None, make)
 }
 
-pub fn serve_admitted[C: send](take listener: Listener, tasks: Tasks, clock: Clock, to_publisher: Sender[PubIn], c: WireConfig, max_sessions: u64, take proxies: List[std.wsock.Prefix], policy: ingress.Ingress, make: scoped[view] fn() -> Service[C]) -> Result[(), std.wsock.Error] waits {
-    serve_ingress(take listener, tasks, clock, to_publisher, c, max_sessions, take proxies, Some(ingress.share(policy)), make)
+pub fn serve_admitted[C: send](take listener: Listener, tasks: Tasks, clock: Clock, to_publisher: Sender[PubIn], c: WireConfig, max_sessions: u64, take proxies: List[std.wsock.Prefix], access_gate: ingress.Ingress, make: scoped[view] fn() -> Service[C]) -> Result[(), std.wsock.Error] waits {
+    serve_ingress(take listener, tasks, clock, to_publisher, c, max_sessions, take proxies, Some(ingress.share(access_gate)), make)
 }
 
 type ServeInput: send = AcceptedSocket(Socket, Ip, u64) | AcceptEnded(NetError) | OwnerReady(u64, Sender[WireEvent], Sender[()]) | OwnerEnded(u64, u64) | ServeStart | ServeWake
@@ -4260,7 +4292,7 @@ fn serve_closing(lifecycle: Option[ServeDrain], clock: Clock) -> bool {
 type ServePlace[G: send, H: send]: send {
     listener: Listener, config: WireConfig, tasks: Tasks, clock: Clock, policy: ingress.Ingress,
     max_sessions: u64, proxies: List[std.wsock.Prefix], target: String, publisher: Sender[PubIn],
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], head: Sender[HeadInput],
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], authority: store.AuthorityReader, head: Sender[HeadInput],
     inbox: Receiver[ServeInput], to: Sender[ServeInput], events: Sender[LifeEvent], drain: Latest[Option[DrainWindow]],
 }
 
@@ -4271,16 +4303,16 @@ fn run_serve_place[G: send, H: send](take seed: ServePlace[G, H]) -> () waits {
 }
 
 fn supervise_serve[G: send, H: send](take seed: ServePlace[G, H]) -> Result[u64, StartError] waits {
-    let ServePlace(listener: take listener, config: config, tasks: tasks, clock: clock, policy: take policy,
-        max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place,
+    let ServePlace(listener: take listener, config: config, tasks: tasks, clock: clock, policy: take access_gate,
+        max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place, authority: take authority,
         head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain) = take seed
     let make: scoped[view] fn() -> Service[WireSession[G, H]] = fn() -> Service[WireSession[G, H]] {
         let initial: Registry[G, H] = registry()
-        let mut service = wire_service_with_head(take initial, policy, LifecycleHead(channel.sender(head_to)), clock, tasks, config, result.unwrap(clone(target)))
+        let mut service = wire_service_with_head(take initial, access_gate, LifecycleHead(channel.sender(head_to)), Some(store.dup(authority)), clock, tasks, config, result.unwrap(clone(target)))
         service.context.place = Some(place)
         take service
     }
-    let transport = ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock, policy: Some(ingress.share(policy)),
+    let transport = ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock, policy: Some(ingress.share(access_gate)),
         limit: limit, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to)
     match serve_sockets(take transport, Some(ServeDrain(events: take events, window: take drain)), make) {
         Ok(count) => Ok(count), Error(Allocation(cap)) => Error(Full(cap)), Error(Network(problem)) => Error(Listen(problem)), _ => Error(Missing("socket")),
@@ -4288,7 +4320,7 @@ fn supervise_serve[G: send, H: send](take seed: ServePlace[G, H]) -> Result[u64,
 }
 
 fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[ServeDrain], make: scoped[view] fn() -> Service[C]) -> Result[u64, std.wsock.Error] waits {
-    let ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock, policy: take policy,
+    let ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock, policy: take access_gate,
         limit: limit, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to) = take seed
     let pool = std.wsock.pending(config.socket)?
     let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, config.n_pool, 1024u64)
@@ -4368,7 +4400,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                     Some(life) => Some(OwnerControl(id: id, to: channel.sender(to), drain: latest.handle(life.window))), _ => None,
                 }
                 let job = WireAccept(socket: take socket, peer: peer, accepted: at, slot: take slot, proxies: take prefixes,
-                    policy: match policy { Some(rules) => Some(ingress.share(rules)), _ => None }, service: take boxed, publisher: channel.sender(pub_to), c: config,
+                    policy: match access_gate { Some(rules) => Some(ingress.share(rules)), _ => None }, service: take boxed, publisher: channel.sender(pub_to), c: config,
                     clock: clock, tasks: tasks, control: take control, completion: take completion, allocation: channel.sender(allocation))
                 let run: fn(take WireAccept[C]) -> Result[(), std.wsock.Error] waits = wire_accepted
                 match task.spawn(tasks, bytes (WIRE_OWNER_FLOOR - WIRE_OWNER_TASK_BYTES), take job, run) {
@@ -4392,13 +4424,13 @@ fn start_socket_refusal(tasks: Tasks, take socket: Socket, clock: Clock, at: u64
     }
 }
 
-fn serve_ingress[C: send](take listener: Listener, tasks: Tasks, clock: Clock, to_publisher: Sender[PubIn], c: WireConfig, max_sessions: u64, take proxies: List[std.wsock.Prefix], take policy: Option[ingress.Ingress], make: scoped[view] fn() -> Service[C]) -> Result[(), std.wsock.Error] waits {
+fn serve_ingress[C: send](take listener: Listener, tasks: Tasks, clock: Clock, to_publisher: Sender[PubIn], c: WireConfig, max_sessions: u64, take proxies: List[std.wsock.Prefix], take access_gate: Option[ingress.Ingress], make: scoped[view] fn() -> Service[C]) -> Result[(), std.wsock.Error] waits {
     if max_sessions == 0u64 || max_sessions > WIRE_OWNER_LIMIT || !wire_configuration(c) { return Error(Configuration) }
     let required = match serving_bytes(c, max_sessions) { Ok(total) => total, Error(cap) => return Error(Allocation(cap)) }
     let served: Result[Result[(), std.wsock.Error], Capacity] = bound bytes required {
         let messages: Result[(Sender[ServeInput], Receiver[ServeInput]), Capacity] = channel.new(serve_inbox_capacity(max_sessions))
         let (to, inbox) = match take messages { Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)) }
-        let transport = ServeTransport(listener: take listener, config: c, tasks: tasks, clock: clock, policy: take policy,
+        let transport = ServeTransport(listener: take listener, config: c, tasks: tasks, clock: clock, policy: take access_gate,
             limit: max_sessions, proxies: take proxies, publisher: channel.sender(to_publisher), inbox: take inbox, to: take to)
         match serve_sockets(take transport, None, make) { Ok(_) => Ok(()), Error(problem) => Error(problem) }
     }
@@ -4509,10 +4541,10 @@ type WireAsk: send = Bind(Option[Bytes]) | CheckRate(Caller)
 type WirePolicy: send { policy: ingress.Ingress, source: Ip, request: WireAsk, to: Sender[WireEvent] }
 
 fn wire_policy(take job: WirePolicy) -> () waits {
-    let WirePolicy(policy: take policy, source: source, request: take request, to: take to) = take job
+    let WirePolicy(policy: take access_gate, source: source, request: take request, to: take to) = take job
     let answer = match take request {
-        CheckRate(caller) => Rate(ingress.call(policy, caller)),
-        Bind(take token) => Authenticated(ingress.hello(policy, source, take token)),
+        CheckRate(caller) => Rate(ingress.call(access_gate, caller)),
+        Bind(take token) => Authenticated(ingress.hello(access_gate, source, take token)),
     }
     let _ = channel.send(to, wire_event(take answer))
 }
@@ -4580,24 +4612,24 @@ fn subscription_hold(mut quota: SubscriptionRoom, take key: Bytes, take arg: Byt
 
 pub opaque type WireSession[G: send, H: send]: send {
     registry: Registry[G, H], place: Option[StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]]], policy: ingress.Ingress, head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, target: String,
-    source: Ip, me: Option[Sender[WireEvent]], publisher: Option[Sender[PubIn]], caller: Option[Caller], welcome_token: Option[Bytes],
+    source: Ip, me: Option[Sender[WireEvent]], publisher: Option[Sender[PubIn]], authority: Option[store.AuthorityReader], caller: Option[Caller], welcome_token: Option[Bytes],
     phase: u8, wants: List[Want], entries: List[Bytes], placing: u64,
     asking: bool, pending: Option[WirePending],
     held: Map[Bytes, WireHeld], refusals: u64, last: u64, generation: u64,
     joined: Option[u64], joining: Option[Receiver[u64]], join_lease: Option[WireJoinLease], marked: bool, mark: Option[Sender[()]], subscription: Option[(u32, SubscriptionInput)], subscription_room: Option[SubscriptionRoom], sub_generation: u64, subs: List[(u32, u64)], pub_subs: List[u32], reset_seen: bool
 }
 
-pub fn wire_service[G: send, H: send](take reg: Registry[G, H], policy: ingress.Ingress, head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H]] {
-    wire_service_seed(take reg, policy, head, clock, tasks, config, result.unwrap(launch_target(a)))
+pub fn wire_service[G: send, H: send](take reg: Registry[G, H], access_gate: ingress.Ingress, head: Sender[Req], authority: store.AuthorityReader, clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H]] {
+    wire_service_with_head(take reg, access_gate, LegacyHead(channel.sender(head)), Some(store.dup(authority)), clock, tasks, config, result.unwrap(launch_target(a)))
 }
 
-fn wire_service_seed[G: send, H: send](take reg: Registry[G, H], policy: ingress.Ingress, head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H]] {
-    wire_service_with_head(take reg, policy, LegacyHead(channel.sender(head)), clock, tasks, config, take target)
+fn wire_service_seed[G: send, H: send](take reg: Registry[G, H], access_gate: ingress.Ingress, head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H]] {
+    wire_service_with_head(take reg, access_gate, LegacyHead(channel.sender(head)), None, clock, tasks, config, take target)
 }
 
-fn wire_service_with_head[G: send, H: send](take reg: Registry[G, H], policy: ingress.Ingress, take head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H]] {
-    let context = WireSession(registry: take reg, place: None, policy: ingress.share(policy), head: take head, clock: clock, tasks: tasks, config: config, target: take target,
-        source: V4(0u32), me: None, publisher: None, caller: None, welcome_token: None, phase: 0u8, wants: list.new(), entries: list.new(), placing: 0u64,
+fn wire_service_with_head[G: send, H: send](take reg: Registry[G, H], access_gate: ingress.Ingress, take head: WireHead, take authority: Option[store.AuthorityReader], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H]] {
+    let context = WireSession(registry: take reg, place: None, policy: ingress.share(access_gate), head: take head, clock: clock, tasks: tasks, config: config, target: take target,
+        source: V4(0u32), me: None, publisher: None, authority: take authority, caller: None, welcome_token: None, phase: 0u8, wants: list.new(), entries: list.new(), placing: 0u64,
         asking: false, pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64,
         joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false)
     Service(context: take context, step: wire_step, ready: wire_can_read, allocate: wire_service_allocate, finish: wire_finish, check: wire_check_live)
@@ -5397,14 +5429,14 @@ fn wire_finish[G: send, H: send](mut s: WireSession[G, H]) -> Option[PubIn] {
 }
 
 // Production sessions build place inside the owner, after source admission.
-pub fn wire_place_service[G: send, H: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], policy: ingress.Ingress, head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H]] {
-    wire_place_target(place, policy, head, clock, tasks, config, result.unwrap(launch_target(a)))
+pub fn wire_place_service[G: send, H: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], access_gate: ingress.Ingress, head: Sender[Req], authority: store.AuthorityReader, clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H]] {
+    wire_place_target(place, access_gate, head, authority, clock, tasks, config, result.unwrap(launch_target(a)))
 }
 
 // Embedded hosts and socket fixtures supply their launch target directly.
-pub fn wire_place_target[G: send, H: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], policy: ingress.Ingress, head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H]] {
+pub fn wire_place_target[G: send, H: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], access_gate: ingress.Ingress, head: Sender[Req], authority: store.AuthorityReader, clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H]] {
     let initial: Registry[G, H] = registry()
-    let mut service = wire_service_seed(take initial, policy, head, clock, tasks, config, take target)
+    let mut service = wire_service_with_head(take initial, access_gate, LegacyHead(channel.sender(head)), Some(store.dup(authority)), clock, tasks, config, take target)
     service.context.place = Some(place)
     take service
 }
@@ -5446,7 +5478,7 @@ fn wire_stop_sub[G: send, H: send](mut s: WireSession[G, H], mut output: List[Wi
 }
 
 
-// A second digest at a live position closes before waiting for policy. Otherwise
+// A second digest at a live position closes before waiting for access_gate. Otherwise
 // a head answer could reach the writer while that conflicting send awaits a rate decision.
 fn wire_check_live[G: send, H: send](s: WireSession[G, H], f: Frame) -> Option[u16] {
     if let Call(stream, p, slot, _, arg) = f {

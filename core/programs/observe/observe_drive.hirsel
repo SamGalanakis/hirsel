@@ -2,7 +2,7 @@
 // runner's wire client; it adds no observer hooks to the runner or store.
 pub type Mix: codec + send = Correct | ReuseWhileLive | RecoverNewBytes | NoDirectory | AdvanceOnRefusal
 type Reg = runner.Registry[(), observe_fixture.Handles]
-type Drive: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, policy: ingress.Ingress, token: Bytes, out: Stdout, err: Stderr, seed: u64, mix: Mix }
+type Drive: send { authority: store.AuthorityReader, head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, policy: ingress.Ingress, token: Bytes, out: Stdout, err: Stderr, seed: u64, mix: Mix }
 type Conn { id: u64, clock: Clock, out: Stdout, wire: wire_client.Conn, task: Task[Result[(), std.wsock.Error]] }
 const NEVER: u64 = 18446744073709551615u64
 const LATER: u64 = 10000000000u64
@@ -43,12 +43,12 @@ fn emit(out: Stdout, trace: Log[observe.Obs], take e: observe.Obs) -> () waits {
     result.unwrap(log.append(trace, take e))
 }
 
-fn drive_input(take head: Sender[runner.Req], take post: Sender[runner.PubIn], clock: Clock, random: Random, tasks: Tasks, net: Net, out: Stdout, err: Stderr, seed: u64, mix: Mix) -> (Drive, Task[()]) waits {
+fn drive_input(take head: Sender[runner.Req], take post: Sender[runner.PubIn], authority: store.AuthorityReader, clock: Clock, random: Random, tasks: Tasks, net: Net, out: Stdout, err: Stderr, seed: u64, mix: Mix) -> (Drive, Task[()]) waits {
     let mut config = ingress.defaults()
     config.call_period_ns = 1u64
     let (policy, take handle) = result.unwrap(ingress.start(tasks, clock, random, config, 1048576u64))
     let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
-    let d = Drive(head: take head, post: take post, clock: clock, tasks: tasks, net: net, random: random,
+    let d = Drive(head: take head, post: take post, authority: store.dup(authority), clock: clock, tasks: tasks, net: net, random: random,
         policy: ingress.share(policy), token: result.unwrap(clone(ingress.principal(principal))),
         out: out, err: err, seed: seed, mix: mix)
     (take d, take handle)
@@ -68,7 +68,7 @@ fn connect(d: Drive, id: u64) -> Conn waits {
 
 fn connect_in(d: Drive, id: u64, q: u64) -> Conn waits {
     let (take wire, take session) = result.unwrap(wire_client.pair(d.tasks, d.net, d.clock, d.random,
-        d.policy, d.head, d.post, code.describe(place), keys(), Some(result.unwrap(clone(d.token))), q, 2097152u64))
+        d.policy, d.head, d.post, d.authority, code.describe(place), keys(), Some(result.unwrap(clone(d.token))), q, 2097152u64))
     Conn(id: id, clock: d.clock, out: d.out, wire: take wire, task: take session)
 }
 
@@ -215,7 +215,7 @@ pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks,
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let mail = result.unwrap(runner.mailbox(4u64))
-    let (take input, take policy_handle) = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, seed, mix)
+    let (take input, take policy_handle) = drive_input(take head, runner.post(mail), store.authority_reader(db), clock, random, tasks, net, out, err, seed, mix)
     let mut policy_task = take policy_handle
     let body = match task.spawn(tasks, bytes 33554432u64, take input, drive) {
         Ok(take t) => take t,
@@ -237,9 +237,10 @@ type JoinDrive: send { drive: Drive, scenario: JoinCase }
 // The original early-then-late observer case retains its 1000 ns timing oracle
 // on the evaluator's virtual Clock. Wire ordering is checked separately.
 pub fn deadline_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let db = store.memory(clock, random, store.defaults())
     let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(64u64))
     let mail = result.unwrap(runner.mailbox(64u64))
-    let (take d, take policy_handle) = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, 0u64, Correct)
+    let (take d, take policy_handle) = drive_input(take head, runner.post(mail), store.authority_reader(db), clock, random, tasks, net, out, err, 0u64, Correct)
     let mut policy_task = take policy_handle
     let trace: Log[observe.Obs] = result.unwrap(log.new())
     let cn = connect_in(d, 99u64, 1u64)
@@ -326,7 +327,7 @@ pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: T
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let mail = result.unwrap(runner.mailbox(4u64))
-    let (take d, take policy_handle) = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, 0u64, Correct)
+    let (take d, take policy_handle) = drive_input(take head, runner.post(mail), store.authority_reader(db), clock, random, tasks, net, out, err, 0u64, Correct)
     let mut policy_task = take policy_handle
     let input = JoinDrive(drive: take d, scenario: scenario)
     let body = match task.spawn(tasks, bytes 33554432u64, take input, drive_join) {

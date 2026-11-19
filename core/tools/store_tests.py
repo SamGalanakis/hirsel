@@ -9,7 +9,7 @@ import shutil
 import tempfile
 
 from case_progress import run_case
-from std_native import ROOT
+from std_native import ROOT, Evaluator
 
 
 BYTE_LAWS = ('refused_reply',
@@ -18,9 +18,25 @@ BYTE_LAWS = ('refused_reply',
              'typed_foreign', 'drop_recreate', 'typed_resident', 'typed_model', 'close_follow', 'abort_budget',
              'look', 'look_faults', 'changes', 'changes_identity', 'info_mut', 'changes_rewritten_equal',
              'assembly_indexed_recreate', 'read_liveness', 'overwrite_account', 'index_writes', 'read_cover', 'read_spans', 'published_value',
-             'frame_size', 'frame_size_boundary', 'stored_size', 'shared_payload_copy', 'branches', 'pin_settle', 'pinned_delete', 'migrate', 'step_bounds', 'streams', 'scopes', 'request_digest', 'keyset_pages')
+             'frame_size', 'frame_size_boundary', 'stored_size', 'shared_payload_copy', 'branches', 'pin_settle', 'pinned_delete', 'migrate', 'step_bounds', 'streams', 'scopes', 'request_digest', 'keyset_pages',
+             'authority_publish', 'authority_meter', 'authority_equal_seq')
 NATIVE_TESTS = {*('test_' + name for name in BYTE_LAWS if name != 'frame_size_boundary'),
                 'test_reader_task', 'test_memory_identity', 'test_typed_snapshot_task', 'test_look_task'}
+
+
+def authority_publication_order(report):
+    # The observer reads its followed snapshot and then its authority reader.
+    # Both publications must already have happened, in register/snapshot order.
+    latest_publish, latest_read = 18, 19  # hirsel-core-layout/src/event.rs
+    events = report.get('events', [])
+    reads = [(task, obj) for kind, task, obj, _ in events if kind == latest_read]
+    if len(reads) < 2:
+        return False
+    (reader, snapshot), (same_reader, register) = reads[-2:]
+    if reader != same_reader or reader == 0 or snapshot == register:
+        return False
+    publications = [obj for kind, _, obj, _ in events if kind == latest_publish and obj in (register, snapshot)]
+    return publications[-2:] == [register, snapshot]
 
 
 def inputs(root):
@@ -65,13 +81,6 @@ def main():
         if args.compiler is not None:
             for control in ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused', 'index_rows_write_refused'):
                 negative = inputs(args.root.resolve())
-                if control == 'look_info_refused':
-                    # Check the fields of an opaque Tx before that change ships.
-                    store = negative['packages'][-1]['sources'][0]
-                    opaque_tx = work / 'store-with-opaque-tx.hirsel'
-                    source = Path(store['file']).read_text()
-                    opaque_tx.write_text(source.replace('pub scoped type Tx {', 'pub opaque scoped type Tx {', 1))
-                    store['file'] = str(opaque_tx)
                 negative['packages'][-1]['sources'].append(dict(
                     file=str(args.root.resolve() / ('core/programs/store/' + control + '.hirsel')),
                     modules=[control], signatures=False))
@@ -101,13 +110,19 @@ def main():
                 if args.evaluator is None:
                     p.error('evaluator backend requires --evaluator')
                 for name in BYTE_LAWS:
-                    result = run_case(name, engine, [str(args.evaluator.resolve()), str(manifest),
-                                             'store@1/store/law_' + name], capture_output=True, text=True)
+                    command = [str(args.evaluator.resolve()), str(manifest), 'store@1/store/law_' + name]
+                    if name == 'authority_publish':
+                        with Evaluator(args.evaluator.resolve()) as evaluator:
+                            result = evaluator.evaluate(manifest, command[-1], events=True)
+                    else:
+                        result = run_case(name, engine, command, capture_output=True, text=True)
                     try:
                         report = json.loads(result.stdout)
                     except ValueError:
                         report = {'stdout': result.stdout, 'stderr': result.stderr}
                     good = result.returncode == 0 and report.get('outcome') == {'kind': 'returned', 'values': [1]}
+                    if name == 'authority_publish':
+                        good = good and authority_publication_order(report)
                     rows.append(dict(engine=engine, law=name, passed=good, result=report))
                     print(f'{engine} {name}: {"PASS" if good else "FAIL"}; admitted={report.get("used")}'
                           + (f'; {report.get("error")}' if not good else ''), flush=True)

@@ -50,7 +50,7 @@ fn arg(n: u64) -> Bytes {
     a
 }
 
-type D: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, policy: ingress.Ingress, covered: u64 }
+type D: send { authority: store.AuthorityReader, head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, policy: ingress.Ingress, covered: u64 }
 
 // The initial Batch of `sub`, whole: it names sub complete and carries `rows` rows.
 fn initial(cn: wire_client.Conn, sub: u32, rows: u64) -> () waits {
@@ -75,7 +75,7 @@ fn drive(take d: D) -> () waits {
     // The session task funds the connection owner's floor and its pool, which at 128 KiB
     // frames is above 2 MiB.
     let (cn, session) = result.unwrap(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, d.policy,
-        d.head, d.post, code.describe(place), keys, None, config, 8388608u64))
+        d.head, d.post, d.authority, code.describe(place), keys, None, config, 8388608u64))
     wire_client.send_frame(cn, Subscribe(1u32, 0u32, arg(d.covered), None))
     initial(cn, 1u32, d.covered)
     wire_client.send_frame(cn, Subscribe(2u32, 0u32, arg(0u64), None))
@@ -118,7 +118,7 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, net: Net, argv: Args) ->
     let (head, inbox) = result.unwrap(take made)
     let mail = result.unwrap(runner.mailbox(4u64))
     let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
-    let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, net: net, random: random, policy: ingress.share(policy), covered: covered)
+    let d = D(authority: store.authority_reader(db), head: take head, post: runner.post(mail), clock: clock, tasks: tasks, net: net, random: random, policy: ingress.share(policy), covered: covered)
     let driving = match task.spawn(tasks, bytes 33554432u64, take d, drive) {
         Ok(take t) => take t,
         Error(_) => return Error(Exit(status: 3)),

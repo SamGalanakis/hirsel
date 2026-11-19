@@ -52,10 +52,10 @@ fn place(mut r: Reg) -> Result[(), store.runner.RegisterError] {
     store.runner.retain_gone(mut r, retired())
 }
 
-type Server: send { net: Net, clock: Clock, tasks: Tasks, random: Random, args: Args, head: Sender[store.runner.Req], post: Sender[store.runner.PubIn] }
+type Server: send { net: Net, clock: Clock, tasks: Tasks, random: Random, args: Args, head: Sender[store.runner.Req], post: Sender[store.runner.PubIn], authority: store.store.AuthorityReader }
 
 fn server(take seed: Server) -> () waits {
-    let Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: take post) = take seed
+    let Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: take post, authority: take authority) = take seed
     let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) { Ok((take l, _)) => take l, Error(_) => return }
     let (policy, take policy_handle) = result.unwrap(store.ingress.start(tasks, c, random, store.ingress.defaults(), 8388608u64))
     let mut handle = take policy_handle
@@ -65,7 +65,7 @@ fn server(take seed: Server) -> () waits {
         if mode == "welcome_with_small_budget" { config.budget = 65536u64 }
     }
     let make: scoped[view] fn() -> store.runner.Service[store.runner.WireSession[(), H]] = fn() -> store.runner.Service[store.runner.WireSession[(), H]] {
-        store.runner.wire_place_service(code.describe(place), policy, head, c, tasks, config, a)
+        store.runner.wire_place_service(code.describe(place), policy, head, authority, c, tasks, config, a)
     }
     let _ = store.runner.serve_admitted(take listener, tasks, c, post, config, 128u64, list.new(), policy, make)
     task.cancel(mut handle)
@@ -121,7 +121,7 @@ pub fn main(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(
     let _ = result.unwrap(store.store.admit(mut db, stream, 0u64, store.store.request_digest(retired(), list.new())))
     let (head, inbox): (Sender[store.runner.Req], Receiver[store.runner.Req]) = result.unwrap(channel.new(64u64))
     let mail = result.unwrap(store.runner.mailbox(64u64))
-    let seed = Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: store.runner.post(mail))
+    let seed = Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: store.runner.post(mail), authority: store.store.authority_reader(db))
     let h = result.unwrap(task.spawn(tasks, bytes 1073741824u64, take seed, server))
     let _ = store.runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 8388608u64)
     let _ = task.join(take h)

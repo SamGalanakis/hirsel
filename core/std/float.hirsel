@@ -1502,6 +1502,9 @@ pub fn push_fixed64(mut s: String, x: f64, digits: u64) -> Result[(), Capacity] 
         string.push(mut s, "-")?
     }
     let (m, e) = parts(bits)
+    if let Some(q) = fixed_scaled(m, e, digits) {
+        return push_scaled(mut s, q, digits)
+    }
     let d = exact(m, e)
     let whole: u64 = if d.count != 0 && d.point > 0 {
         int.narrow(d.point)
@@ -1593,9 +1596,13 @@ pub fn shortest64(x: f64) -> (u64, i64) {
     if !is_finite(x) {
         fail("float.shortest64: x is not finite")
     }
-    let (m, e) = parts(float.to_bits64(x))
+    let bits = float.to_bits64(x)
+    let (m, e) = parts(bits)
     if m == 0 {
         return (0, 0)
+    }
+    if let Some((c, p)) = ryu(bits) {
+        return strip(c, p)
     }
     let v = exact(m, e)
     // x rounds from the open interval (lower, upper), closed when m is even (ties to even);
@@ -1738,6 +1745,178 @@ fn prefix(d: Decimal, p: i64) -> (u64, bool) {
 }
 
 /// (c, p) with c's trailing zeros moved into p.
+// 5^k for k in 0..=27, the powers below 2^64.
+const POW5_U64: Inline[u64, 28] =[1, 5, 25, 125, 625, 3125, 15625, 78125, 390625, 1953125, 9765625, 48828125, 244140625, 1220703125, 6103515625, 30517578125, 152587890625, 762939453125, 3814697265625, 19073486328125, 95367431640625, 476837158203125, 2384185791015625, 11920928955078125, 59604644775390625, 298023223876953125, 1490116119384765625, 7450580596923828125]
+
+// 10^k for k in 0..=19, the powers below 2^64.
+const POW10_U64: Inline[u64, 20] =[1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000, 10000000000, 100000000000, 1000000000000, 10000000000000, 100000000000000, 1000000000000000, 10000000000000000, 100000000000000000, 1000000000000000000, 10000000000000000000]
+
+/// shortest64's (c, p), c possibly with trailing zeros, for a normal |x| = m x 2^(b - 1075)
+/// where 5^k fits a u64 and one shift lands x x 10^k on 18 or 19 digits (about
+/// 1e-10 <= |x| < 2^51); None elsewhere. Ryu's digit loop (Adams 2018, d2s.c) on exact
+/// values instead of Ryu's tables, as Goose stdlib/json.goose ryu_digits: x x 10^k and the
+/// bounds of the interval that reads back as x (half an ulp each side, a quarter below a
+/// power of two) are 4m x 5^k and 2 x 5^k apart in units of 2^(k - sh - 2), sh = 1075 - b,
+/// so one 64 x 64 product gives Ryu's vr, vp and vm and the bits below them say whether
+/// each is exact. Same digits as the exact path: the shortest, nearer x, ties to even.
+fn ryu(bits: u64) -> Option[(u64, i64)] {
+    let biased: i64 = int.narrow((bits >> 52) & 0x7ff)
+    let fraction = bits & 0xfffffffffffff
+    // 17 - floor(log10(2^(b - 1023))).
+    let k = 17 - (int.wrapping_mul(biased - 1023, 78913) >> 18)
+    let t = 1077 - biased - k
+    if biased == 0 || k < 0 || k > 27 || t < 1 || t > 63 {
+        return None
+    }
+    let m = fraction | 4503599627370496
+    let even = (m & 1) == 0
+    let ku: u64 = int.narrow(k)
+    let p = POW5_U64[ku]
+    let (nh, nl) = int.mul_wide(m, p)
+    // 4 m 5^k, then the upper bound + 2 x 5^k and the lower bound - 2 x 5^k (- 5^k at a
+    // power of two).
+    let xh = (nh << 2) | (nl >> 62)
+    let xl = nl << 2
+    let mut uh = xh
+    let mut ul = xl
+    for _ in 0u64 .. 2u64 {
+        ul = int.wrapping_add(ul, p)
+        if ul < p {
+            uh += 1
+        }
+    }
+    let mut lh = xh
+    let mut ll = xl
+    let below: u64 = if fraction != 0 {
+        2
+    } else {
+        1
+    }
+    for _ in 0u64 .. below {
+        if ll < p {
+            lh -= 1
+        }
+        ll = int.wrapping_sub(ll, p)
+    }
+    let tu: u64 = int.narrow(t)
+    let low = (1u64 << tu) - 1
+    let mut vr = (xh << (64 - tu)) | (xl >> tu)
+    let mut vp = (uh << (64 - tu)) | (ul >> tu)
+    let mut vm = (lh << (64 - tu)) | (ll >> tu)
+    let mut vr_exact = (xl & low) == 0
+    let mut vm_exact = even && (ll & low) == 0
+    if !even && (ul & low) == 0 {
+        vp -= 1
+    }
+    let mut removed: i64 = 0
+    if !vr_exact && !vm_exact {
+        // The common case: the dropped digits only round, two at a step first.
+        let mut round_up = false
+        if vp / 100 > vm / 100 {
+            let vr100 = vr / 100
+            round_up = vr - 100 * vr100 >= 50
+            vr = vr100
+            vp = vp / 100
+            vm = vm / 100
+            removed = 2
+        }
+        while vp / 10 > vm / 10 {
+            let vr10 = vr / 10
+            round_up = vr - 10 * vr10 >= 5
+            vr = vr10
+            vp = vp / 10
+            vm = vm / 10
+            removed += 1
+        }
+        let c = if vr == vm || round_up {
+            vr + 1
+        } else {
+            vr
+        }
+        return Some((c, removed - k))
+    }
+    let mut last: u64 = 0
+    while vp / 10 > vm / 10 {
+        let vm10 = vm / 10
+        let vr10 = vr / 10
+        vm_exact = vm_exact && vm - 10 * vm10 == 0
+        vr_exact = vr_exact && last == 0
+        last = vr - 10 * vr10
+        vr = vr10
+        vp = vp / 10
+        vm = vm10
+        removed += 1
+    }
+    if vm_exact {
+        while vm % 10 == 0 {
+            let vr10 = vr / 10
+            vr_exact = vr_exact && last == 0
+            last = vr - 10 * vr10
+            vr = vr10
+            vp = vp / 10
+            vm = vm / 10
+            removed += 1
+        }
+    }
+    if vr_exact && last == 5 && vr % 2 == 0 {
+        last = 4
+    }
+    let c = if (vr == vm && !vm_exact) || last >= 5 {
+        vr + 1
+    } else {
+        vr
+    }
+    Some((c, removed - k))
+}
+
+/// m x 2^e x 10^digits rounded half to even, when digits <= 19 and that is m x 5^digits
+/// shifted right by 1 to 63 bits into a u64; None elsewhere. Exact: the remainder is
+/// the bits shifted out.
+fn fixed_scaled(m: u64, e: i64, digits: u64) -> Option[u64] {
+    if digits > 19 || m == 0 {
+        return None
+    }
+    let d: i64 = int.narrow(digits)
+    let shift = -e - d
+    if shift < 1 || shift > 63 {
+        return None
+    }
+    let (hi, lo) = int.mul_wide(m, POW5_U64[digits])
+    let s: u64 = int.narrow(shift)
+    let q = (hi << (64 - s)) | (lo >> s)
+    // The rounded value must fit too.
+    if hi >> s != 0 || q == ALL_ONES {
+        return None
+    }
+    let rest = lo & ((1u64 << s) - 1)
+    let half: u64 = 1 << (s - 1)
+    if rest > half || (rest == half && (q & 1) == 1) {
+        Some(q + 1)
+    } else {
+        Some(q)
+    }
+}
+
+/// q / 10^digits with `digits` places, as push_fixed64 writes it.
+fn push_scaled(mut s: String, q: u64, digits: u64) -> Result[(), Capacity] {
+    if digits == 0 {
+        return string.push_u64(mut s, q)
+    }
+    let scale = POW10_U64[digits]
+    let places = q % scale
+    string.push_u64(mut s, q / scale)?
+    string.push(mut s, ".")?
+    let mut width: u64 = 1
+    while width < digits && places >= POW10_U64[width] {
+        width += 1
+    }
+    if places == 0 {
+        return string.push(mut s, string.slice("0000000000000000000", 0, digits))
+    }
+    string.push(mut s, string.slice("0000000000000000000", 0, digits - width))?
+    string.push_u64(mut s, places)
+}
+
 fn strip(c: u64, p: i64) -> (u64, i64) {
     let mut v = c
     let mut q = p

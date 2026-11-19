@@ -328,9 +328,12 @@ fn release_part_alone_is_the_part_beside_other_misses() {
 /// build of the same source: the same executable bytes. Each kind reuses
 /// unchanged functions' cached post-O3 tails beside the edited ones: a body
 /// edit, an edit to a helper its caller inlines, a signature change, and a
-/// core (std-visible) body edit. Bug caught: a tail key that misses the
-/// function's IR at the cut reuses a stale tail and links different code
-/// (red with the key's bitcode dropped). Exits hand-derived
+/// core (std-visible) body edit. With line tables on, the body edit also
+/// shifts the unchanged recursive function and its callers down two lines.
+/// Mutants caught: dropping the key's bitcode reuses a stale tail, and
+/// skipping scope rebasing on restore loses debug rows. Rebuilding each
+/// debug tail in a fresh context from its key also checks that the tail can
+/// run without the rest of the module. Exits hand-derived
 /// as in `release_part_alone_is_the_part_beside_other_misses`, with each
 /// value scaled: a = scale(1 + .. + (LAST - 1)), b = scale(1 + 2), plus
 /// the parsed suffixes of "{a} {b}" (1 each that does not parse), plus the
@@ -340,39 +343,73 @@ fn release_part_alone_is_the_part_beside_other_misses() {
 #[ignore = "explicit native integration target"]
 fn release_edit_is_the_cold_build() {
     const P: &str = "type N: shareable + send {\n    value: u64,\n    tail: Option[Arc[N]]\n}\nfn scale(x: u64) -> u64 { x }\nfn sum(node: Arc[N]) -> u64 {\n    scale(node.value) + match node.tail {\n        Some(t) => sum(t),\n        None => 0u64\n    }\n}\nfn build(last: u64) -> Option[Arc[N]] {\n    let mut root: Option[Arc[N]] = None\n    for i in 1u64 .. last {\n        let old = replace(mut root, None)\n        root = match arc.new(N(value: i, tail: take old)) {\n            Ok(a) => Some(a),\n            Error(_) => None\n        }\n    }\n    root\n}\npub fn main() -> Result[(), Exit] {\n    let a = match build(6u64) {\n        Some(r) => sum(r),\n        None => 0u64\n    }\n    let b = match build(3u64) {\n        Some(r) => sum(r),\n        None => 0u64\n    }\n    let mut s = string.new()\n    let _ = string.push_u64(mut s, a)\n    let _ = string.push_char(mut s, ' ')\n    let _ = string.push_u64(mut s, b)\n    let n = string.byte_len(s)\n    let mut acc = a + b\n    for i in 0u64 .. n {\n        let parsed: Result[i64, ParseError] = int.parse(string.slice(s, i, n))\n        acc = acc + match parsed {\n            Ok(v) => int.truncate(v),\n            Error(_) => 1u64\n        }\n    }\n    Error(exit_with(int.truncate(acc)))\n}\n";
-    let dir = tempfile::tempdir().unwrap();
-    let [a, b] = [("core-a", 0), ("core-b", 1)].map(|(name, bump)| reach_core(dir.path(), name, bump));
-    let body = P.replace("build(6u64)", "build(7u64)");
-    let inlined = body.replace("{ x }", "{ x * 2u64 }");
-    let signature = inlined
-        .replace("fn scale(x: u64) -> u64 { x * 2u64 }", "fn scale(x: u64, m: u64) -> u64 { x * m }")
-        .replace("scale(node.value)", "scale(node.value, 3u64)");
-    let steps = [
-        ("cold", P, &a, 24),
-        ("body", &body, &a, 30),
-        ("inlined helper", &inlined, &a, 57),
-        ("signature", &signature, &a, 84),
-        ("std-visible", &signature, &b, 85),
-    ];
-    let mut options = native_options(Backend::Llvm, dir.path());
-    options.optimize = true;
-    for (n, (kind, app, core, exit)) in steps.into_iter().enumerate() {
-        let (built, bytes, status) = reach_build(&record_check(app, core, dir.path(), "store"), &options);
-        let (cold, cold_bytes, _) = reach_build(
-            &record_check(app, core, dir.path(), &format!("fresh{n}")),
-            &NativeOptions {
-                store: dir.path().join(format!("fresh-native{n}")),
-                parts: dir.path().join(format!("fresh-parts{n}")),
-                output: dir.path().join(format!("fresh-program{n}")),
-                optimize: true,
-                ..native_options(Backend::Llvm, dir.path())
-            },
-        );
-        assert_eq!(status, Some(exit), "{kind}: exit");
-        if n > 0 {
-            assert!(built.compiled >= 1 && built.compiled < cold.compiled, "{kind}: {} of {} parts", built.compiled, cold.compiled);
+    for debug_lines in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let [a, b] = [("core-a", 0), ("core-b", 1)].map(|(name, bump)| reach_core(dir.path(), name, bump));
+        let body = P.replace("build(6u64)", "build(7u64)");
+        let body = if debug_lines {
+            body.replace("fn sum(", "\n\nfn sum(")
+        } else {
+            body
+        };
+        let inlined = body.replace("{ x }", "{ x * 2u64 }");
+        let signature = inlined
+            .replace("fn scale(x: u64) -> u64 { x * 2u64 }", "fn scale(x: u64, m: u64) -> u64 { x * m }")
+            .replace("scale(node.value)", "scale(node.value, 3u64)");
+        let steps = [
+            ("cold", P, &a, 24),
+            ("body", &body, &a, 30),
+            ("inlined helper", &inlined, &a, 57),
+            ("signature", &signature, &a, 84),
+            ("std-visible", &signature, &b, 85),
+        ];
+        let mut options = native_options(Backend::Llvm, dir.path());
+        options.optimize = true;
+        options.debug_lines = debug_lines;
+        for (n, (kind, app, core, exit)) in steps.into_iter().enumerate() {
+            let check_tails = debug_lines && n == 0;
+            if check_tails {
+                release::TAIL_FIXTURES.with(|fixtures| *fixtures.borrow_mut() = Some(Vec::new()));
+            }
+            let (built, bytes, status) = reach_build(&record_check(app, core, dir.path(), "store"), &options);
+            if check_tails {
+                let fixtures = release::TAIL_FIXTURES.with(|fixtures| fixtures.take().unwrap());
+                assert!(!fixtures.is_empty(), "debug release writes tail records");
+                let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+                let tool = root.join(std::env::var_os("HIRSEL_TEST_TAIL_CONTEXT").unwrap());
+                let llvm = hirsel_llvm_lazy::llvm_library().unwrap();
+                for fixture in fixtures {
+                    let paths = [("tail-key", fixture.key), ("tail-input", fixture.input), ("tail-cached", fixture.cached)]
+                        .map(|(name, data)| {
+                            let path = dir.path().join(name);
+                            std::fs::write(&path, data).unwrap();
+                            path
+                        });
+                    assert!(
+                        Command::new(&tool).args(paths)
+                            .env("LD_LIBRARY_PATH", llvm.parent().unwrap())
+                            .status().unwrap().success(),
+                        "the tail rebuilt using only the key equals the cached tail"
+                    );
+                }
+            }
+            let (cold, cold_bytes, _) = reach_build(
+                &record_check(app, core, dir.path(), &format!("fresh{n}")),
+                &NativeOptions {
+                    store: dir.path().join(format!("fresh-native{n}")),
+                    parts: dir.path().join(format!("fresh-parts{n}")),
+                    output: dir.path().join(format!("fresh-program{n}")),
+                    optimize: true,
+                    debug_lines,
+                    ..native_options(Backend::Llvm, dir.path())
+                },
+            );
+            assert_eq!(status, Some(exit), "{kind} (debug lines {debug_lines}): exit");
+            if n > 0 {
+                assert!(built.compiled >= 1 && built.compiled < cold.compiled, "{kind} (debug lines {debug_lines}): {} of {} parts", built.compiled, cold.compiled);
+            }
+            assert!(bytes == cold_bytes, "{kind} (debug lines {debug_lines}): the edited build is the cold build");
         }
-        assert!(bytes == cold_bytes, "{kind}: the edited build is the cold build");
     }
 }
 

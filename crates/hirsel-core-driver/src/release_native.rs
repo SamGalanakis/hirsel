@@ -50,7 +50,7 @@ fn tail_key(
     bitcode: &[u8],
 ) -> io::Result<ContentHash> {
     crate::native::key(
-        "hirsel.core-release-tail.v1",
+        "hirsel.core-release-tail.v2",
         &(
             generator,
             ContentHash::of_bytes(key),
@@ -68,6 +68,18 @@ struct SharedParts<'a, G> {
     parts: &'a mut Vec<ContentHash>,
     held: &'a mut Vec<Held>,
     failure: &'a mut Option<io::Error>,
+}
+
+#[cfg(test)]
+pub(super) struct TailFixture {
+    pub key: Vec<u8>,
+    pub input: Vec<u8>,
+    pub cached: Vec<u8>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static TAIL_FIXTURES: std::cell::RefCell<Option<Vec<TailFixture>>> = const { std::cell::RefCell::new(None) };
 }
 
 impl<G: serde::Serialize> hirsel_llvm_lazy::Held for SharedParts<'_, G> {
@@ -105,6 +117,16 @@ impl<G: serde::Serialize> hirsel_llvm_lazy::Held for SharedParts<'_, G> {
         if self.failure.is_some() {
             return;
         }
+        #[cfg(test)]
+        TAIL_FIXTURES.with(|fixtures| {
+            if let Some(fixtures) = fixtures.borrow_mut().as_mut() {
+                fixtures.push(TailFixture {
+                    key: key.to_vec(),
+                    input: bitcode.to_vec(),
+                    cached: tail.to_vec(),
+                });
+            }
+        });
         if let Err(error) =
             tail_key(self.generator, key, bitcode).and_then(|key| self.shared.put_keyed(key, tail))
         {

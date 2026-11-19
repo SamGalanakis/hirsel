@@ -15,6 +15,16 @@ cxx_library(
     visibility = ["PUBLIC"],
 )
 
+COMPOSE_FLAGS = [
+    "-std=c++17", "-O2", "-fvisibility=hidden",
+    "-fno-exceptions", "-fno-rtti", "-nostdinc++",
+    "--sysroot=tools/buck2/toolchains/llvm-files/sysroot",
+    "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/c++/13",
+    "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/x86_64-linux-gnu/c++/13",
+    "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include",
+    "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/x86_64-linux-gnu",
+]
+
 cxx_library(
     name = "compose",
     srcs = ["compose.cpp", "builder.cpp", "parts.cpp"],
@@ -23,18 +33,23 @@ cxx_library(
         "pass_cost.h": "//crates/hirsel-llvm/bridge:pass_cost.h",
     },
     header_namespace = "",
-    compiler_flags = [
-        "-std=c++17", "-O2", "-fvisibility=hidden",
-        "-fno-exceptions", "-fno-rtti", "-nostdinc++",
-        "--sysroot=tools/buck2/toolchains/llvm-files/sysroot",
-        "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/c++/13",
-        "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/x86_64-linux-gnu/c++/13",
-        "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include",
-        "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/x86_64-linux-gnu",
-    ],
+    compiler_flags = COMPOSE_FLAGS,
     deps = ["toolchains//:libllvm"],
     exported_linker_flags = ["-l:libstdc++.so.6"],
     preferred_linkage = "static",
+)
+
+cxx_binary(
+    name = "tail-context-test",
+    srcs = ["tail_context_test.cpp"],
+    headers = {
+        "parts.cpp": "parts.cpp",
+        "pass_cost.h": "//crates/hirsel-llvm/bridge:pass_cost.h",
+    },
+    header_namespace = "",
+    compiler_flags = COMPOSE_FLAGS,
+    deps = ["toolchains//:libllvm", "//crates/hirsel-llvm/bridge:checked-copy-static"],
+    visibility = ["PUBLIC"],
 )
 
 # Embed the actual shared artifact, with no link edge from the Rust compiler

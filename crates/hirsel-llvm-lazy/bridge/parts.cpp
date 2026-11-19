@@ -30,6 +30,7 @@
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/DiagnosticInfo.h>
 #include <llvm/IR/DiagnosticPrinter.h>
 #include <llvm/IR/Instructions.h>
@@ -203,6 +204,7 @@ struct References {
     // Whether a definition with external linkage brings its initializer: a
     // key does, since a load from a constant folds to it.
     bool initializers = false;
+    SmallVectorImpl<MDNode *> *debug = nullptr;
     std::vector<GlobalValue *> order;
     DenseSet<const Value *> seen;
     void value(const Value *v) {
@@ -232,6 +234,8 @@ struct References {
         }
         names_global[md] = false;
         open.insert(md);
+        if (debug && isa<DISubprogram, DICompileUnit>(md))
+            debug->push_back(const_cast<MDNode *>(cast<MDNode>(md)));
         bool named = false;
         if (auto *v = dyn_cast<ValueAsMetadata>(md)) {
             named = isa<Constant>(v->getValue()) && !isa<ConstantData>(v->getValue());
@@ -262,6 +266,11 @@ struct References {
         }
     }
 };
+
+// A tail carries these distinct nodes in key order. Its locations already
+// use item-relative byte offsets. Reattaching their scopes to the current
+// module lets the final link resolve them against the current source.
+constexpr StringLiteral tail_debug_bindings = "hirsel.tail.debug";
 
 // Gives `to` the uses of `from`, in their order: a use set to a value goes to
 // the front of its use list, so the last is set first.
@@ -315,15 +324,16 @@ void order_uses_like(const Function &f, const ValueToValueMapTy &map) {
 // its operands and metadata that name a global name the part's declaration
 // instead, and all of it is put back after, so `m` is as it was. The move
 // keeps every use-list order the code generator follows. A body the move
-// cannot put back exactly (a block whose address is taken, debug records, a
-// subprogram whose units the part must list) is cloned instead, and the
-// clone's values list their uses in the order `f`'s list theirs.
+// cannot put back exactly (a block whose address is taken or debug records)
+// is cloned instead, as is a codegen part with a subprogram. The clone's
+// values list their uses in the order `f`'s list theirs.
 // With `linkage`, the linkage and visibility the part does not keep of `f`
 // and of each global it names, and whether each is defined, are written to it,
 // and the part defines every variable it names with its initializer (a tail
 // folds a load from a constant): the bitcode is then a release tail's key.
 void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
-                  SmallVectorImpl<char> &out, std::string *linkage = nullptr) {
+                  SmallVectorImpl<char> &out, std::string *linkage = nullptr,
+                  SmallVectorImpl<MDNode *> *debug = nullptr) {
     LLVMContext &context = m.getContext();
     auto p = std::make_unique<Module>("hirsel-part", context);
     p->setSourceFileName("hirsel-part");
@@ -336,15 +346,21 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
     }
     References refs;
     refs.initializers = linkage != nullptr;
+    refs.debug = linkage ? debug : nullptr;
     refs.seen.insert(&f);
-    bool movable = !f.getSubprogram();
+    SmallVector<std::pair<unsigned, MDNode *>, 4> attached;
+    f.getAllMetadata(attached);
+    if (refs.debug)
+        for (auto &[kind, node] : attached) refs.metadata(node);
+    bool movable = debug || !f.getSubprogram();
     for (BasicBlock &b : f) {
         movable = movable && !b.hasAddressTaken();
         for (Instruction &i : b) {
             for (const Use &op : i.operands()) refs.value(op.get());
-            SmallVector<std::pair<unsigned, MDNode *>, 4> attached;
-            i.getAllMetadataOtherThanDebugLoc(attached);
-            for (auto &[kind, node] : attached) refs.metadata(node);
+            if (refs.debug && i.getDebugLoc()) refs.metadata(i.getDebugLoc().get());
+            SmallVector<std::pair<unsigned, MDNode *>, 4> tags;
+            i.getAllMetadataOtherThanDebugLoc(tags);
+            for (auto &[kind, node] : tags) refs.metadata(node);
             movable = movable && !i.hasDbgRecords();
         }
     }
@@ -407,11 +423,19 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
         bitcode(*p, out);
         return;
     }
-    SmallVector<std::pair<unsigned, MDNode *>, 4> attached;
-    f.getAllMetadata(attached);
+    if (debug && !debug->empty()) {
+        NamedMDNode *bindings = p->getOrInsertNamedMetadata(tail_debug_bindings);
+        NamedMDNode *units = p->getOrInsertNamedMetadata("llvm.dbg.cu");
+        for (MDNode *node : *debug) {
+            bindings->addOperand(node);
+            map.MD()[node].reset(node);
+            if (isa<DICompileUnit>(node)) units->addOperand(node);
+        }
+    } else {
+        // Match the clone of a body without debug info.
+        p->getOrInsertNamedMetadata("llvm.dbg.cu");
+    }
     for (auto &[kind, node] : attached) own->addMetadata(kind, *MapMetadata(node, map));
-    // As the clone gives it: the part lists the compile units of its body.
-    p->getOrInsertNamedMetadata("llvm.dbg.cu");
     own->splice(own->end(), &f);
     for (auto [from, to] = std::pair(f.arg_begin(), own->arg_begin()); from != f.arg_end(); ++from, ++to)
         hand_uses(*from, *to);
@@ -688,7 +712,6 @@ namespace {
 // Whether `f`'s body can be lent to a part and restored from one exactly: as
 // `part_bitcode` moves it rather than cloning it.
 bool movable(const Function &f) {
-    if (f.getSubprogram()) return false;
     for (const BasicBlock &b : f) {
         if (b.hasAddressTaken()) return false;
         for (const Instruction &i : b)
@@ -747,7 +770,7 @@ void order_uses(Function &f, StringRef orders) {
 // Puts the body of the part `code` holds in place of `f`'s, naming `m`'s
 // globals where the part names its declarations. False, with `f` unchanged,
 // when the part's definition or a global it names does not match `m`'s.
-bool restore(Module &m, Function &f, StringRef held) {
+bool restore(Module &m, Function &f, StringRef held, ArrayRef<MDNode *> debug) {
     // The part, then the use orders its bitcode cannot carry here.
     uint64_t size;
     if (held.size() < sizeof size) return false;
@@ -790,6 +813,15 @@ bool restore(Module &m, Function &f, StringRef held) {
         own->getCallingConv() != f.getCallingConv())
         return false;
     ValueToValueMapTy map;
+    if (auto *bindings = q.getNamedMetadata(tail_debug_bindings)) {
+        if (bindings->getNumOperands() != debug.size()) return false;
+        for (auto [from, to] : zip_equal(bindings->operands(), debug)) {
+            if (from->getMetadataID() != to->getMetadataID()) return false;
+            map.MD()[from].reset(to);
+        }
+    } else if (!debug.empty()) {
+        return false;
+    }
     // A body may name itself.
     map[own] = &f;
     std::vector<Function *> declare;
@@ -840,6 +872,8 @@ bool restore(Module &m, Function &f, StringRef held) {
             i.getAllMetadataOtherThanDebugLoc(tags);
             for (auto &[kind, node] : tags)
                 if (MDNode *n = MapMetadata(node, map, flags); n != node) i.setMetadata(kind, n);
+            if (DebugLoc loc = i.getDebugLoc())
+                i.setDebugLoc(DebugLoc(cast<DILocation>(MapMetadata(loc.get(), map, flags))));
         }
     order_uses(f, orders);
     return true;
@@ -871,6 +905,14 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
     for (Function &f : m)
         if (!f.isDeclaration()) bodies.push_back(&f);
     bool keyed = find && unsplittable(m).empty();
+    const bool debug_info = keyed && m.getModuleFlag("Debug Info Version");
+    // The pinned reader's UpgradeDebugInfo verifier looks up both names
+    // even on x86. The bitcode writer includes the context's kind registry,
+    // so a cache hit must not change the bytes of later parts.
+    if (debug_info) {
+        m.getContext().getMDKindID("reqd_work_group_size");
+        m.getContext().getMDKindID("amdgpu.expected.active.lanes");
+    }
     std::string machine_key = keyed ? machine_text(*reinterpret_cast<TargetMachine *>(machine)) : "";
     StringMap<std::string> sets = keyed ? asm_lines(m) : StringMap<std::string>();
     void *tail = hirsel_llvm_tail_open(module, machine);
@@ -881,15 +923,17 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
         }
         std::string key = machine_key;
         SmallVector<char, 0> code;
-        part_bitcode(m, *f, sets, code, &key);
+        SmallVector<MDNode *, 8> debug;
+        auto *bindings = debug_info ? &debug : nullptr;
+        part_bitcode(m, *f, sets, code, &key, bindings);
         const uint8_t *held = nullptr;
         size_t held_len = 0;
         if (find(context, key.data(), key.size(), (const uint8_t *)code.data(), code.size(), &held, &held_len) &&
-            restore(m, *f, StringRef((const char *)held, held_len)))
+            restore(m, *f, StringRef((const char *)held, held_len), debug))
             continue;
         hirsel_llvm_tail_run(tail, wrap(f));
         SmallVector<char, 0> after;
-        part_bitcode(m, *f, sets, after);
+        part_bitcode(m, *f, sets, after, nullptr, bindings);
         uint64_t size = after.size();
         std::string value((const char *)&size, sizeof size);
         value.append(after.data(), after.size());

@@ -564,7 +564,8 @@ pub opaque type ByteRows: send {
     cursor: std.omap.Cursor[Bytes, Arc[Bytes]]
 }
 
-fn sm(x: u64) -> u64 {
+/// Mix a SplitMix64 seed after adding the generator stride with wrapping arithmetic.
+pub fn splitmix64(x: u64) -> u64 {
     let mut z = int.wrapping_add(x, 0x9E3779B97F4A7C15u64)
     z = int.wrapping_mul(z ^ (z >> 30), 0xBF58476D1CE4E5B9u64)
     z = int.wrapping_mul(z ^ (z >> 27), 0x94D049BB133111EBu64)
@@ -576,7 +577,7 @@ fn call_info(id: StoreId, b: u32, v: u64, wall: u64, previous: u64) -> CallInfo 
         previous
     } else {
         wall
-    }, seed: sm(sm(sm(sm(id.hi) ^ id.lo) ^ int.widen(b)) ^ v))
+    }, seed: splitmix64(splitmix64(splitmix64(splitmix64(id.hi) ^ id.lo) ^ int.widen(b)) ^ v))
 }
 
 fn same(a: StoreId, b: StoreId) -> bool {
@@ -1728,7 +1729,7 @@ pub fn law_model(c: Clock) -> bool {
         result.unwrap(list.fill(mut model, 24, 0u64))
         for step in 0u64 .. 64 {
             let wall = seed * 64 + step
-            let state = sm(wall)
+            let state = splitmix64(wall)
             let k = state % 24
             let choice = (state >> 8) % 5
             let v = wall + 1
@@ -1853,7 +1854,7 @@ pub fn law_call_info(c: Clock) -> bool {
     if !seed_boundary_points() {
         return false
     }
-    if sm(0) != 0xE220A8397B1DCDAFu64 {
+    if splitmix64(0) != 0xE220A8397B1DCDAFu64 {
         return false
     }
     let id = StoreId(hi: 1, lo: 2)
@@ -1931,10 +1932,10 @@ pub fn law_foreign(c: Clock) -> bool waits {
 }
 
 fn model_step(mut db: Db, wall: u64) -> bool {
-    let outer_choice = (sm(wall) >> 8) % 5
+    let outer_choice = (splitmix64(wall) >> 8) % 5
     let outcome = execute(mut db, 0, wall, None, fn(mut tx: Tx) -> Result[u64, Error] {
         let at = info(mut tx).at
-        let state = sm(at)
+        let state = splitmix64(at)
         let choice = (state >> 8) % 5
         let k = state % 24
         let v = at + 1
@@ -4317,12 +4318,12 @@ pub fn law_typed_model(c: Clock) -> bool waits {
         result.unwrap(list.fill(mut model, 24, 0u64))
         for step in 0u64 .. 64 {
             let wall = seed * 64 + step
-            let model_state = sm(wall)
+            let model_state = splitmix64(wall)
             let k = model_state % 24
             let choice = (model_state >> 8) % 5
             let out = execute(mut db, 0, wall, None, fn(mut tx: Tx) -> Result[(u64, u64), Error] {
                 let at = info(mut tx).at
-                let state = sm(at)
+                let state = splitmix64(at)
                 let key = state % 24
                 let action = (state >> 8) % 5
                 if action == 0 {
@@ -6339,7 +6340,7 @@ pub fn law_read_cover(c: Clock) -> bool waits {
     let mut misses: u64 = 0
     let mut hits: u64 = 0
     for step in 0u64 .. 128 {
-        let state = sm(step + 1031)
+        let state = splitmix64(step + 1031)
         let first = snapshot(db)
         let initial = observe_cover(first, sa, sb, ia, ib, state)
         let (take initial_value, take reads) = take initial
@@ -6496,7 +6497,7 @@ pub fn law_frame_size(c: Clock) -> bool {
             capacity(result.capacity_only(list.push(mut model, FrameRow(present: false, op: 0, size: 0, key_size: width))))?
         }
         for step in 0u64 .. 96 {
-            let k = sm(step) % 24
+            let k = splitmix64(step) % 24
             let id: u32 = if k < 12 { 1 } else { 2 }
             let mut key = key_word(k % 12)
             if id == 2 {
@@ -6513,7 +6514,7 @@ pub fn law_frame_size(c: Clock) -> bool {
                     model[k].size = 0
                 }
             } else {
-                let size = if id == 2 { 0u64 } else { sm(step + 1) % 33 }
+                let size = if id == 2 { 0u64 } else { splitmix64(step + 1) % 33 }
                 let mut value: Bytes = capacity(list.with_capacity(size))?
                 capacity(list.fill(mut value, size, int.truncate(step)))?
                 put_bytes(mut tx, id, key, value)?

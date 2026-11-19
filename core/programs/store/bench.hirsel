@@ -21,13 +21,6 @@ fn insert(mut db: store.Db, t: store.Table[u64, Account], i: u64) -> u64 waits {
     }
 }
 
-fn sm(x: u64) -> u64 {
-    let mut z = int.wrapping_add(x, 0x9E3779B97F4A7C15u64)
-    z = int.wrapping_mul(z ^ (z >> 30), 0xBF58476D1CE4E5B9u64)
-    z = int.wrapping_mul(z ^ (z >> 27), 0x94D049BB133111EBu64)
-    z ^ (z >> 31)
-}
-
 type Reader: send {
     held: store.Snapshot,
     sh: store.Shape[u64, Account]
@@ -37,7 +30,7 @@ fn reader(take r: Reader) -> u64 {
     let mut state: u64 = 1
     let mut sum: u64 = 0
     for _ in 0u64 .. 100000 {
-        let k = sm(state) % 100000
+        let k = store.splitmix64(state) % 100000
         state = int.wrapping_add(state, 0x9E3779B97F4A7C15u64)
         let a = option.unwrap(result.unwrap(store.get(r.held, r.sh, k)))
         if a.id != k || a.balance != int.narrow(k) || a.owner != "owner000" {

@@ -8,6 +8,31 @@ set -eu
 if [ -n "${HIRSEL_TEST_REPORTER:-}" ] && [ -z "${HIRSEL_TEST_REPORT_ACTIVE:-}" ]; then
   exec python3 "$HIRSEL_TEST_REPORTER" sh "$0" "$@"
 fi
+# Every test runs in a network namespace whose only interface is lo, so only
+# the test reaches the loopback ports it listens on. Programs on a developer
+# host probe new loopback listeners (one connects and sends `GET /` to each),
+# which stopped test servers and added foreign requests to what tests
+# observed. A pool worker's action sandbox already is such a namespace, and
+# forbids nesting another. Elsewhere the launcher enters one through bwrap:
+# where AppArmor restricts unprivileged user namespaces, only bwrap's profile
+# may bring up lo. The namespace is read from /proc/self/net, which follows
+# the calling process; /sys/class/net shows whoever mounted sysfs.
+only_lo() {
+  [ "$(awk 'NR > 2 { sub(":", "", $1); print $1 }' /proc/self/net/dev)" = lo ]
+}
+if ! only_lo; then
+  # The marker only stops a second entry: the namespace itself decides.
+  if [ -n "${HIRSEL_TEST_NETNS_ENTERED:-}" ]; then
+    echo "test_launcher.sh: bwrap --unshare-net did not give a namespace with only lo" >&2
+    exit 2
+  fi
+  if ! command -v bwrap >/dev/null 2>&1; then
+    echo "test_launcher.sh: tests run in a network namespace with only lo; this one has other interfaces and bwrap (bubblewrap) is not on PATH to enter one" >&2
+    exit 2
+  fi
+  HIRSEL_TEST_NETNS_ENTERED=1 exec bwrap --unshare-net --dev-bind / / --die-with-parent sh "$0" "$@"
+fi
+unset HIRSEL_TEST_NETNS_ENTERED
 root="$(pwd)"
 # Keep SDK copies on the executor's original scratch filesystem, before the
 # recording tests select their ancestry-safe /dev/shm TMPDIR.

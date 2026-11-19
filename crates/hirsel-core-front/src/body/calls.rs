@@ -1068,7 +1068,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return;
             }
             if !p.fns[f].generics[i].region
-                && kind(&p.decls, &self.t, t, &self.params) == Kind::Scoped
+                && self.type_kind(t) == Kind::Scoped
             {
                 // OWN-19: only a user-declared generic refuses a scoped type argument. A
                 // core operation takes one, unless its signature would make the scoped
@@ -1089,7 +1089,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
             let g = &p.fns[f].generics[i];
-            let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
+            let missing = if g.bounds == 0 {
+                0
+            } else {
+                g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params)
+            };
             let path = &p.fns[f].path;
             if missing == 0
                 && path.is_core("bytebuf.append_inline")

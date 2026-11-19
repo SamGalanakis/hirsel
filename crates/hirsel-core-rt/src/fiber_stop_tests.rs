@@ -51,3 +51,35 @@ fn host_startup_stops_have_exact_names_and_skip_cleanup() {
         assert_eq!(output.stderr, expected, "{mode}");
     }
 }
+
+/// A touch deep in a stack's reservation commits it; recycling a stack that grew
+/// drops those pages (the reused stack reads zero there) and lets it grow again.
+/// Without commit-on-touch the first write is an unrelated fault; a trim that
+/// unmaps but keeps the low-water word makes the second touch one.
+#[test]
+fn grown_stack_trims_on_recycle_and_grows_again() {
+    super::arm();
+    let mut stock = super::Stock::default();
+    let touch = |stack: &super::Stack, value: Option<u64>| {
+        super::guard(stack.bounds());
+        // SAFETY: half way down the current stack's reservation, above its guard page.
+        let deep = unsafe { stack.base.as_ptr().add(stack.len / 2).cast::<u64>() };
+        // SAFETY: the fault handler commits the page before the access resumes.
+        let seen = unsafe {
+            let seen = deep.read_volatile();
+            if let Some(value) = value {
+                deep.write_volatile(value);
+            }
+            seen
+        };
+        super::guard((0, 0));
+        (deep.addr(), seen)
+    };
+    let stack = stock.take();
+    let (first, _) = touch(&stack, Some(7));
+    stock.recycle(stack);
+    let stack = stock.take();
+    let (again, seen) = touch(&stack, None);
+    assert_eq!(again, first, "the recycled stack is reused");
+    assert_eq!(seen, 0, "the trim dropped the grown page");
+}

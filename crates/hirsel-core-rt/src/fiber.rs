@@ -1,9 +1,21 @@
 //! Guarded task stacks. Both native emitters and Rust probe large frames.
 //! Non-suspending foreign OS calls run on a separate guarded host stack.
 //! Language code never runs on the launcher's stack.
+//!
+//! Every stack reserves `RESERVE` bytes above one guard page, like a Rust main
+//! thread, but only its top `COMMIT` bytes start writable. A fault below the
+//! writable part makes the next `GROW` bytes writable (Windows' commit-on-touch
+//! stack, adapted: the fault handler commits instead of a guard-page chain), so
+//! a shallow task costs what a 64 KiB stack did in RSS, the data limit and
+//! retained stock. Recycling returns a stack that grew to its first `COMMIT`.
+//! The word at the stack's top records its lowest writable address.
 use crate::retention::{RETENTION, Retained};
 use std::{cell::Cell, ptr::NonNull, sync::OnceLock};
-const USABLE: usize = 64 << 10;
+const RESERVE: usize = 8 << 20;
+const COMMIT: usize = 64 << 10;
+const GROW: usize = 256 << 10;
+/// Bytes kept at the top for the low-water word; a multiple of 16.
+const HEADER: usize = 16;
 thread_local! {
     static GUARD: Cell<(usize,usize)> = const { Cell::new((0,0)) };
     static STOP_FD: Cell<i32> = const { Cell::new(2) };
@@ -71,8 +83,8 @@ pub(crate) struct Stack {
 impl Stack {
     pub(crate) fn new() -> Self {
         let page_bytes = page();
-        let len = page_bytes + USABLE;
-        // SAFETY: fresh inaccessible private mapping, then enable only its usable pages.
+        let len = page_bytes + RESERVE;
+        // SAFETY: fresh inaccessible private mapping, then enable only its top pages.
         unsafe {
             let raw = libc::mmap(
                 std::ptr::null_mut(),
@@ -85,14 +97,16 @@ impl Stack {
             if raw == libc::MAP_FAILED {
                 crate::process::stop(b"HostMemory");
             }
+            let top = raw.addr() + len;
             if libc::mprotect(
-                raw.cast::<u8>().add(page_bytes).cast(),
-                USABLE,
+                raw.cast::<u8>().add(len - COMMIT).cast(),
+                COMMIT,
                 libc::PROT_READ | libc::PROT_WRITE,
             ) != 0
             {
                 crate::process::stop(b"HostMemory");
             }
+            low_word(top).write(top - COMMIT);
             Self {
                 base: NonNull::new_unchecked(raw.cast()),
                 len,
@@ -119,11 +133,59 @@ impl Stack {
         let words = hirsel_stack::initial_frame(entry, first, second);
         // SAFETY: 16-aligned top and sufficient space for this architecture's frame.
         unsafe {
-            let start = self.base.as_ptr().add(self.len - size_of_val(&words));
+            let start = self
+                .base
+                .as_ptr()
+                .add(self.len - HEADER - size_of_val(&words));
             std::ptr::copy_nonoverlapping(words.as_ptr().cast::<u8>(), start, size_of_val(&words));
             start
         }
     }
+    /// The end of the reservation, where the low-water word sits.
+    fn top(&self) -> usize {
+        self.base.as_ptr().addr() + self.len
+    }
+    /// Bytes an idle, trimmed stack keeps writable: its guard page and first `COMMIT`.
+    fn retained(&self) -> usize {
+        self.len - RESERVE + COMMIT
+    }
+    /// Return a stack that grew to its first `COMMIT` bytes. A stack that never
+    /// left them costs one load and compare, inlined into recycling.
+    fn trim(&self) {
+        let top = self.top();
+        // SAFETY: the stack is idle and its top word is always writable.
+        if unsafe { *low_word(top) } < top - COMMIT {
+            release(self.guard_end, top);
+        }
+    }
+}
+/// Drop the grown pages of the idle stack whose writable range starts at
+/// `guard_end` and whose reservation ends at `top`, with one fresh inaccessible
+/// mapping. Out of line, and given plain addresses, so recycling a shallow
+/// stack stays inlined and keeps the stack in registers.
+#[cold]
+#[inline(never)]
+fn release(guard_end: usize, top: usize) {
+    let committed = top - COMMIT;
+    // SAFETY: the stack is idle; the range is inside its own reservation.
+    unsafe {
+        let raw = libc::mmap(
+            guard_end as *mut libc::c_void,
+            committed - guard_end,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE | libc::MAP_FIXED,
+            -1,
+            0,
+        );
+        if raw == libc::MAP_FAILED {
+            crate::process::stop(b"HostMemory");
+        }
+        *low_word(top) = committed;
+    }
+}
+/// The low-water word of the stack whose reservation ends at `top`.
+fn low_word(top: usize) -> *mut usize {
+    std::ptr::with_exposed_provenance_mut::<usize>(top - size_of::<usize>())
 }
 impl Drop for Stack {
     fn drop(&mut self) {
@@ -158,7 +220,8 @@ impl Stock {
     }
 
     pub(crate) fn recycle(&mut self, stack: Stack) {
-        if let Some(held) = RETENTION.retain(stack.len) {
+        stack.trim();
+        if let Some(held) = RETENTION.retain(stack.retained()) {
             self.idle.push((stack, held));
         }
     }
@@ -195,9 +258,9 @@ impl Alternate {
         unsafe {
             let mut previous = std::mem::zeroed();
             let new = libc::stack_t {
-                ss_sp: stack.base.as_ptr().add(page()).cast(),
+                ss_sp: std::ptr::with_exposed_provenance_mut(stack.top() - COMMIT),
                 ss_flags: 0,
-                ss_size: USABLE,
+                ss_size: COMMIT - HEADER,
             };
             if libc::sigaltstack(&new, &mut previous) != 0 {
                 crate::process::stop(b"SignalStack");
@@ -221,6 +284,29 @@ unsafe extern "C" fn fault(signal: i32, info: *mut libc::siginfo_t, context: *mu
     let (lo, hi) = GUARD.get();
     if lo <= address && address < hi {
         crate::process::stop(b"Stack");
+    }
+    // A touch below the current stack's writable part commits the next GROW
+    // bytes (or up to the guard page) and resumes the faulting instruction.
+    if hi != 0 && hi <= address && address < hi + RESERVE {
+        let top = hi + RESERVE;
+        // SAFETY: the current stack's top word is always writable.
+        unsafe {
+            let low = low_word(top);
+            if address < *low {
+                let page = hi - lo;
+                let from = (address & !(page - 1)).min(*low - GROW).max(hi);
+                if libc::mprotect(
+                    std::ptr::with_exposed_provenance_mut(from),
+                    *low - from,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                ) != 0
+                {
+                    crate::process::stop(b"HostMemory");
+                }
+                *low = from;
+                return;
+            }
+        }
     }
     // SAFETY: chain to the process handler saved before installation; it has the
     // corresponding POSIX signature. Unrelated memory faults remain fatal.

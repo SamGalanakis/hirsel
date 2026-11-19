@@ -218,10 +218,8 @@ impl<'context> Module<'context> {
                 function = LLVMGetNextFunction(function);
             }
             unsafe extern "C" {
-                fn hirsel_llvm_fixed_width_checks(module: LLVMModuleRef);
                 fn hirsel_llvm_inline_snapshot_calls(module: LLVMModuleRef);
             }
-            hirsel_llvm_fixed_width_checks(self.raw);
             hirsel_llvm_inline_snapshot_calls(self.raw);
             let mut error = LLVMRunPasses(self.raw, pipeline.as_ptr(), machine.raw, options);
             if error.is_null() {
@@ -266,6 +264,7 @@ impl<'context> Module<'context> {
             }
             if error.is_null() {
                 unsafe extern "C" {
+                    fn hirsel_llvm_fixed_width_checks(module: LLVMModuleRef);
                     fn hirsel_llvm_finish_reads(
                         module: LLVMModuleRef,
                         machine: LLVMTargetMachineRef,
@@ -282,6 +281,7 @@ impl<'context> Module<'context> {
                         context: LLVMContextRef,
                     );
                 }
+                hirsel_llvm_fixed_width_checks(self.raw);
                 hirsel_llvm_finish_reads(self.raw, machine.raw);
                 hirsel_llvm_lower_x86_index_strides(self.raw);
                 hirsel_llvm_reuse_step_flags(self.raw);

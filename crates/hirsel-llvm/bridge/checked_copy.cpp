@@ -34,8 +34,9 @@
 using namespace llvm;
 using hirsel_llvm::versionLoop;
 
-// Keep the width guard and let LICM hoist the limit when the length is
-// invariant. The subtraction wraps on the rejected short-buffer path.
+// Let LLVM use the checked end to discharge redundant guards first. A
+// surviving end check for adjacent offsets can use a length limit without
+// replacing checks that already share an end offset with the loop.
 extern "C" void hirsel_llvm_fixed_width_checks(void *Raw) noexcept {
   using namespace llvm::PatternMatch;
   for (Function &F : *static_cast<Module *>(Raw))
@@ -43,20 +44,24 @@ extern "C" void hirsel_llvm_fixed_width_checks(void *Raw) noexcept {
       auto *Branch = dyn_cast<CondBrInst>(BB.getTerminator());
       if (!Branch) continue;
       Value *End, *Length, *Sum, *Start;
-      auto *Condition = Branch->getCondition();
-      // CoreIR booleans are bytes until LLVM promotes the branch condition.
-      auto Within = m_ZExt(m_SpecificICmp(ICmpInst::ICMP_ULE, m_Value(End), m_Value(Length)));
-      auto NoOverflow = m_c_Xor(
-          m_ZExt(m_SpecificICmp(ICmpInst::ICMP_ULT, m_Value(Sum), m_Value(Start))), m_One());
-      if (!match(Condition, m_SpecificICmp(ICmpInst::ICMP_NE, m_c_And(Within, NoOverflow), m_Zero())) ||
-          End != Sum) continue;
-      const APInt *Width;
-      if (!match(End, m_Add(m_Specific(Start), m_APInt(Width))) ||
-          Width->isZero()) continue;
+      Value *Condition = Branch->getCondition();
+      auto Within = m_SpecificICmp(ICmpInst::ICMP_ULE, m_Value(End), m_Value(Length));
+      auto NoOverflow = m_SpecificICmp(ICmpInst::ICMP_UGE, m_Value(Sum), m_Value(Start));
+      if (!match(Condition, m_c_And(Within, NoOverflow)) || End != Sum) continue;
+
+      // InstCombine has flattened (base + start) + width. The two offsets
+      // still differ by one word, so their ordered range test can use start.
+      Value *Base;
+      const APInt *StartOffset, *EndOffset;
+      if (!match(End, m_Add(m_Value(Base), m_APInt(EndOffset))) ||
+          !match(Start, m_NUWAddLike(m_Specific(Base), m_APInt(StartOffset))) ||
+          EndOffset->ule(*StartOffset) || *EndOffset - *StartOffset != 8)
+        continue;
+
       IRBuilder<> B(Branch);
-      Value *Fixed = ConstantInt::get(End->getType(), *Width);
-      Value *HasWidth = B.CreateICmpUGE(Length, Fixed);
-      Value *Limit = B.CreateSub(Length, Fixed);
+      Value *Width = ConstantInt::get(End->getType(), 8);
+      Value *HasWidth = B.CreateICmpUGE(Length, Width);
+      Value *Limit = B.CreateSub(Length, Width);
       Branch->setCondition(B.CreateAnd(HasWidth, B.CreateICmpULE(Start, Limit)));
       RecursivelyDeleteTriviallyDeadInstructions(Condition);
     }

@@ -662,7 +662,6 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         const char *pipeline = export_count
             ? "globaldce,function(sroa),hotcoldsplit,default<O3>"
             : "function(sroa),hotcoldsplit,default<O3>";
-        hirsel_llvm_fixed_width_checks(module);
         hirsel_llvm_inline_snapshot_calls(module);
         LLVMErrorRef e = LLVMRunPasses(module, pipeline, machine, options);
         if (!e) {
@@ -681,6 +680,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
                 machine, options);
         }
         if (!e) {
+            hirsel_llvm_fixed_width_checks(module);
             hirsel_llvm_finish_reads(module, machine);
             hirsel_llvm_lower_x86_index_strides(module);
             hirsel_llvm_reuse_step_flags(module);

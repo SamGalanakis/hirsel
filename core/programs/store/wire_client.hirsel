@@ -139,24 +139,24 @@ pub fn close(take cn: Conn) -> bool waits {
 // port; all listeners in one fixture share the head, publisher and admission book.
 type Server[G: send, H: send]: send {
     listener: Listener, tasks: Tasks, clock: Clock, policy: ingress.Ingress,
-    head: Sender[runner.Req], post: Sender[runner.PubIn], authority: store.AuthorityReader, config: runner.WireConfig,
+    head: Sender[runner.Req], post: Sender[runner.PubIn], config: runner.WireConfig,
     place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]
 }
 
 fn server[G: send, H: send](take seed: Server[G, H]) -> Result[(), std.wsock.Error] waits {
-    let Server(listener: take listener, tasks: tasks, clock: c, policy: take policy, head: take head, post: take post, authority: take authority, config: config, place: place) = take seed
+    let Server(listener: take listener, tasks: tasks, clock: c, policy: take policy, head: take head, post: take post, config: config, place: place) = take seed
     let mut l = take listener
     let (socket, peer) = match host.accept(mut l, deadline(c)) { Ok(take sockets) => take sockets, Error(e) => return Error(Network(e)) }
     let pending = std.wsock.pending(config.socket)?
     let lease = option.unwrap(std.wsock.acquire(pending)?)
     let up = std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c))?
-    let service = runner.wire_place_target(place, policy, head, authority, c, tasks, config, "fixture")
+    let service = runner.wire_place_target(place, policy, head, c, tasks, config, "fixture")
     let h = match runner.serve_connection(tasks, take up, take service, post, config, c) { Ok(take h) => take h, Error(cap) => return Error(Allocation(cap)) }
     match task.join(take h) { Ok(take r) => take r, Error(_) => Error(Protocol(1008u16)) }
 }
 
 pub fn pair[G: send, H: send](tasks: Tasks, n: Net, c: Clock, random: Random,
-    policy: ingress.Ingress, head: Sender[runner.Req], post: Sender[runner.PubIn], authority: store.AuthorityReader,
+    policy: ingress.Ingress, head: Sender[runner.Req], post: Sender[runner.PubIn],
     place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]],
     keys: List[Bytes], take token: Option[Bytes], q: u64, n_session: u64)
     -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
@@ -164,18 +164,18 @@ pub fn pair[G: send, H: send](tasks: Tasks, n: Net, c: Clock, random: Random,
     config.q = q
     config.budget = 65536u64
     config.socket.max_frame = 32768u64
-    pair_config(tasks, n, c, random, policy, head, post, authority, place, keys, take token, config, n_session)
+    pair_config(tasks, n, c, random, policy, head, post, place, keys, take token, config, n_session)
 }
 
 // Cover retention needs one whole initial Batch of 1,954 rows. Its fixture
 // selects the frame bound explicitly, using the same listener and owner.
 pub fn pair_config[G: send, H: send](tasks: Tasks, n: Net, c: Clock, random: Random,
-    policy: ingress.Ingress, head: Sender[runner.Req], post: Sender[runner.PubIn], authority: store.AuthorityReader,
+    policy: ingress.Ingress, head: Sender[runner.Req], post: Sender[runner.PubIn],
     place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]],
     keys: List[Bytes], take token: Option[Bytes], config: runner.WireConfig, n_session: u64)
     -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
     let (l, address) = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16) { Ok(take sockets) => take sockets, Error(e) => return Error(Network(e)) }
-    let seed = Server(listener: take l, tasks: tasks, clock: c, policy: ingress.share(policy), head: channel.sender(head), post: channel.sender(post), authority: store.dup(authority), config: config, place: place)
+    let seed = Server(listener: take l, tasks: tasks, clock: c, policy: ingress.share(policy), head: channel.sender(head), post: channel.sender(post), config: config, place: place)
     let run: fn(take Server[G, H]) -> Result[(), std.wsock.Error] waits = server
     let mut h = match task.spawn(tasks, bytes n_session, take seed, run) { Ok(take h) => take h, Error((cap, _)) => return Error(Allocation(cap)) }
     match connect(tasks, n, address, c, random, keys, take token, config.socket) {

@@ -146,19 +146,9 @@ and catalog (F2) and answers `Undone { value, ticket: Some(t) }`; past the
 admission bound it is `Refused` and keeps nothing. The I4 settle re-encodes
 every section.
 
-Scopes (§1.4, L14): `KeyScope` names the keys a Tx may touch on one store.
-`scope(t, access)` covers a table, `scope_keys(t, lo, hi, access)` a key
-range of it; `Access` is `ReadOnly` or `ReadWrite`. `union(a, b)` keeps both
-scopes' entries (`Foreign` across stores); a key is writable when any entry
-holding it is `ReadWrite`. `narrow(mut tx, within, body)` runs `body` under
-`within` and restores the scope after; `within` must have each entry inside
-one entry of the current scope with equal or greater access, else
-`OutOfScope`, and another store's scope is `Foreign`. A `fetch`, `put` or
-`delete` of a key outside the scope, or a write to a ReadOnly key, is
-`OutOfScope`, as is a `range` whose span the scope does not cover and a
-`lookup` on a table the scope has no entry for. Index rows are in scope when
-their primary key is; `next_indexed` is `OutOfScope` at the first row outside.
-A run starts with every key of its store in scope.
+The store does no authorization (STORE v2.30 AN1): a Tx may read and write
+every key of its store. A program decides access itself, from the Caller it is
+given.
 
 Branches and pins (§1.9, §1.12) are named heads of one open. `fork(mut db, name,
 from)` makes a branch at a Snapshot of this open; `branch(db, name)` finds one.

@@ -159,13 +159,10 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u32())))
     let table = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), std.codec.of_u32()))
     let mut entries: Registry[(), store.Table[u64, u32]] = registry()
-    result.unwrap(policy(mut entries, code.describe(public_access), list.new(), 65536u64, 8192u64))
     let add = code.describe(pool_durable_add)
     result.unwrap(transact(mut entries, add, 65536u64, DEFAULT_STEPS))
-    let configured = result.unwrap(take_policy(mut entries))
-    result.unwrap(store.declare_authority(mut db, configured.reads))
     let (release_to, releases): (Sender[PubIn], Receiver[PubIn]) = result.unwrap(channel.new(1u64))
-    let mut head = Head(db: take db, r: take entries, key_policy: take configured, replay_identity: list.new(),
+    let mut head = Head(db: take db, r: take entries, replay_identity: list.new(),
         h: table, out: take release_to, busy: map.new(), waiting: list.new(),
         group: list.new(), last: None, minted: 0u64)
 

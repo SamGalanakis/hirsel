@@ -36,7 +36,7 @@ CHUNK = 500
 # evaluator (the registry's map grows to 2 MiB while its old table is live).
 N_PLACE = 16 * 1024 * 1024
 
-CALLS = ('atomic_migration', 'authority_receipt', 'serve_bounded_and_settled', 'scope_bound_to_caller', 'withheld_after_revocation', 'release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
+CALLS = ('atomic_migration', 'serve_bounded_and_settled', 'duplicate_own_reply', 'release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
          'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'calls_retired_head', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'publisher_never_blocks', 'owed_ended_delivered')
 NATIVE_ONLY_CALLS = {'drain_reopened', 'lag_window'}
 PERSISTENT_PLACE_CALLS = {'atomic_migration', 'ready_after_activation', 'calls_recorded'}
@@ -518,6 +518,10 @@ def frame_module(root, path):
         lines += [f'    // {v["name"]}: {v["derivation"]}',
                   f'    let c_{v["name"]}: std.codec.Codec[runner.{v["type"]}] = std.codec.of()',
                   f'    if !vector(c_{v["name"]}, {v["value"]}, b("{v["hex"]}")) {{ return false }}']
+        # The admission and max_frame checks charge a frame by wire_output_size;
+        # it must count exactly the codec's bytes, which the hex fixes by hand.
+        if v['type'] == 'Frame':
+            lines += [f'    if runner.wire_output_size({v["value"]}) != {len(payload)}u64 {{ return false }}']
     lines += ['    true', '}', '', '@test', 'fn test_frame_vectors() -> Result[(), ()] {',
               '    if law_frame_vectors() { Ok(()) } else { Error(()) }', '}', '']
     path.write_text('\n'.join(lines))

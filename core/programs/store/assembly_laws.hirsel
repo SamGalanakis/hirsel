@@ -258,7 +258,6 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     let dir = disk_test_directory(d)
     let options = journal_crash_options()
     let mut db = result.unwrap(open(tasks, dir, c, r, options))
-    result.unwrap(declare_authority(mut db, list.new()))
     let stream = key_word(55)
     let rec = call_for(stream, 32)
     let request = request_digest(rec.key, rec.args)
@@ -267,17 +266,18 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     result.unwrap(durable(mut db, ticket(complete)))
     let original_at = 0x8000_0000_0000_0000u64
     db.heads[0].at = original_at
-    let plan = Plan(n_p: 8192, s_p: 8192, n_e: 4096, s_e: 8192, reply_max: 4096)
+    let plan = Plan(n_e: 4096, s_e: 8192, reply_max: 4096)
     if room_refusal { db.ceiling = db.resident }
     let fault_at = if room_refusal { original_at + 1u64 } else { original_at }
-    let tried = serve(mut db, take complete, plan, Some(take rec), law_caller(), code.describe(reserve_policy),
+    let tried = serve(mut db, take complete, plan, Some(take rec),
         scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] { settle_fault_at(mut tx, fault_at) })
     let (take stopped, way) = match take tried {
         Ok(Failed(take pending_run, Raised(2u32))) if !room_refusal => (take pending_run, 1u8),
         // The admitted row costs 118 (62 + 8 + 48). The replied row costs
-        // 158 (62 + 8 + 88). Its stream-only frame adds 140 and CALL adds
-        // 206 (22 + 32 + 16 + 8 + 32 + 96), so the refusal requests 504.
-        Ok(NoRoom(take pending_run, reason)) if room_refusal && reason.requested == 504 &&
+        // 126 (62 + 8 + 56, its value 41 + 8 rounded up). Its stream-only
+        // frame adds 108 (59 + that 49-byte value) and CALL adds 158
+        // (22 + 32 + 16 + 8 + 32 + 48), so the refusal requests 392.
+        Ok(NoRoom(take pending_run, reason)) if room_refusal && reason.requested == 392 &&
             reason.available == 118 => (take pending_run, 2u8),
         _ => return false,
     }
@@ -294,7 +294,6 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     let settled = conclude(mut db, take stopped, key_word(2), Resident)
     let Ok(Committed(receipt)) = take settled else { return false }
     if receipt.reply != key_word(2) { return false }
-    let expected_digest = receipt.digest
     result.unwrap(durable(mut db, receipt.ticket))
     result.unwrap(close(take db))
     let mut reopened = result.unwrap(open(tasks, dir, c, r, options))
@@ -306,9 +305,7 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     }
     let duplicate = result.unwrap(admit(mut reopened, stream, 0, request))
     let good = match duplicate {
-        Duplicate(stored) => stored.reply == key_word(2) &&
-            stored.scope_digest.a == expected_digest.a && stored.scope_digest.b == expected_digest.b &&
-            stored.scope_digest.c == expected_digest.c && stored.scope_digest.d == expected_digest.d,
+        Duplicate(stored) => stored.reply == key_word(2),
         _ => false,
     }
     result.unwrap(close(take reopened))

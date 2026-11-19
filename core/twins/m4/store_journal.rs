@@ -83,7 +83,7 @@ fn header(id: &[u8; 16], role: u8, seq: u64, prev_end: u64) -> Vec<u8> {
     let mut f = Vec::with_capacity(72);
     head(&mut f, 0x0001, 56);
     f.extend_from_slice(b"HIRSTORE");
-    le(&mut f, 1, 4);
+    le(&mut f, 2, 4);
     f.push(role);
     f.extend_from_slice(&[0, 0, 0]);
     f.extend_from_slice(id);

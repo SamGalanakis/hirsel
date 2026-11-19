@@ -86,7 +86,6 @@ fn board(tx: store.store.Tx, h: Handles, take _arg: ()) -> Result[store.runner.C
 }
 
 fn place(mut registry: Registry) -> Result[(), store.runner.RegisterError] {
-    store.runner.policy(mut registry, code.describe(store.runner.public_access), list.new(), 65536u64, 8192u64)?
     store.runner.transact(mut registry, code.describe(toggle), 65536u64, store.runner.DEFAULT_STEPS)?
     store.runner.query(mut registry, code.describe(board), 1048576u64, store.runner.DEFAULT_STEPS)
 }
@@ -177,16 +176,15 @@ type Server: send {
     args: Args,
     head: Sender[store.runner.Req],
     post: Sender[store.runner.PubIn],
-    authority: store.store.AuthorityReader,
     policy: store.ingress.Ingress,
     proxies: List[std.wsock.Prefix],
     config: store.runner.WireConfig,
 }
 
 fn serve(take server: Server) -> Result[(), std.wsock.Error] waits {
-    let Server(listener: take listener, clock: c, tasks: tasks, args: a, head: take head, post: take post, authority: take authority, policy: take policy, proxies: take proxies, config: config) = take server
+    let Server(listener: take listener, clock: c, tasks: tasks, args: a, head: take head, post: take post, policy: take policy, proxies: take proxies, config: config) = take server
     let service: scoped[view] fn() -> store.runner.Service[store.runner.WireSession[(), Handles]] = fn() -> store.runner.Service[store.runner.WireSession[(), Handles]] {
-        store.runner.wire_place_service(code.describe(place), policy, head, authority, c, tasks, config, a)
+        store.runner.wire_place_service(code.describe(place), policy, head, c, tasks, config, a)
     }
     store.runner.serve_admitted(take listener, tasks, c, post, config, store.runner.WIRE_OWNER_LIMIT, take proxies, policy, service)
 }
@@ -208,7 +206,7 @@ fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Task
     }
     let mut config = store.runner.wire_defaults(65536u64, N_PLACE)
     config.site = Some(std.wsock.Site(dir: web, find: asset))
-    let server = Server(listener: take listener, clock: c, tasks: tasks, args: a, head: take head, post: store.runner.post(mail), authority: store.store.authority_reader(db), policy: take policy, proxies: take proxies, config: config)
+    let server = Server(listener: take listener, clock: c, tasks: tasks, args: a, head: take head, post: store.runner.post(mail), policy: take policy, proxies: take proxies, config: config)
     let mut serving = match task.spawn(tasks, bytes 1153433600u64, take server, serve) {
         Ok(take job) => take job,
         Error(_) => return Error(failed),

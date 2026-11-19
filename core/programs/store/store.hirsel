@@ -6,10 +6,6 @@ pub type StoreId {
 
 pub type Authority = Directory()
 
-type Seq: shareable + send { v: u64 }
-
-pub opaque type AuthorityReader: send { register: Latest[Seq] }
-
 pub type Caller: codec + send { issuer: u8, subject: Bytes }
 
 pub type Options {
@@ -38,7 +34,7 @@ pub type Fault: send {
     why: Why
 }
 
-pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(Capacity) | Limit(Limit) | Schema(u64) | Stale(u32) | OutOfScope | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | OpenLimit(Capacity)
+pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(Capacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | OpenLimit(Capacity)
 
 type Roots: shareable + send {
     data: std.omap.OMap[Bytes, Arc[Bytes]],
@@ -61,10 +57,6 @@ pub opaque type Db {
     fence: u32,
     disk: List[DiskConnection],
     clock: Clock,
-    seq: u64,
-    register: Latest[Seq],
-    authority_names: List[String],
-    authority_rows: Option[Arc[AuthorityRows]],
     // Every live branch, main first, the rest ascending by id. A version is
     // compared only with the head of the branch it belongs to (AA1, Z1).
     heads: List[Head],
@@ -118,9 +110,7 @@ type Pin: shareable + send {
     name: String,
     branch: u32,
     version: u64,
-    roots: Roots,
-    authority_rows: Option[Arc[AuthorityRows]],
-    seq: u64
+    roots: Roots
 }
 
 fn main_head(take roots: Roots, head: u64, at: u64) -> Head {
@@ -167,7 +157,7 @@ fn main_state(take roots: Roots, head: u64, at: u64) -> Result[State, Capacity] 
 }
 
 fn share_pin(p: Pin) -> Result[Pin, Capacity] {
-    Ok(Pin(name: string.from(p.name)?, branch: p.branch, version: p.version, roots: share_roots(p.roots), authority_rows: share_authority(p.authority_rows), seq: p.seq))
+    Ok(Pin(name: string.from(p.name)?, branch: p.branch, version: p.version, roots: share_roots(p.roots)))
 }
 
 fn state_of(heads: List[Head], pins: List[Pin], next_branch: u32) -> Result[State, Capacity] {
@@ -275,22 +265,11 @@ fn branch_index(db: Db, b: Branch) -> Result[u64, Error] {
 }
 
 fn head_snapshot(db: Db, i: u64) -> Snapshot {
-    snapshot_from(db, i, db.heads[i].head, db.heads[i].roots, current_authority(db, i), if i == 0 { db.seq } else { 0u64 })
+    snapshot_from(db, i, db.heads[i].head, db.heads[i].roots)
 }
 
-fn current_authority(db: Db, i: u64) -> Option[Arc[AuthorityRows]] {
-    if i == 0 { share_authority(db.authority_rows) } else { None }
-}
-
-fn share_authority(rows: Option[Arc[AuthorityRows]]) -> Option[Arc[AuthorityRows]] {
-    match rows {
-        Some(a) => Some(arc.share(a)),
-        None => None
-    }
-}
-
-fn snapshot_from(db: Db, i: u64, head: u64, roots: Roots, take rows: Option[Arc[AuthorityRows]], seq: u64) -> Snapshot {
-    Snapshot(store: db.store, open: open_number(db), branch: db.heads[i].id, head: head, roots: share_roots(roots), authority_rows: take rows, seq: seq)
+fn snapshot_from(db: Db, i: u64, head: u64, roots: Roots) -> Snapshot {
+    Snapshot(store: db.store, open: open_number(db), branch: db.heads[i].id, head: head, roots: share_roots(roots))
 }
 
 pub type CallId {
@@ -357,10 +336,6 @@ pub type Resumed[K, V]: send = Paged(Page[K, V]) | Moved(u64)
 pub opaque scoped type Tx {
     store: StoreId,
     roots: Roots,
-    authority_rows: Option[Arc[AuthorityRows]],
-    seq: u64,
-    look_reads: bool,
-    policy_fault: Option[ReadFault],
     ids: u64,
     resident: u64,
     retain_old: bool,
@@ -376,232 +351,7 @@ pub opaque scoped type Tx {
     // its 5-byte head, when it has ops, plus the CALL section's bytes.
     stream_ops: std.omap.OMap[Bytes, Option[Bytes]],
     extra_bytes: u64,
-    call: Option[CallSection],
-    scope: KeyScope
-}
-
-pub type Access = ReadOnly | ReadWrite
-
-// One table's primary keys in [lo, hi), as data-tree keys under the span
-// rule of section 1.3. A whole-table entry has no bounds, so `scope` cannot
-// fail. The table's index rows are covered when their primary key is (S5
-// ruling 4 (a)).
-type ScopeEntry: shareable + send {
-    table: u32,
-    whole: bool,
-    lo: Bytes,
-    hi: Bytes,
-    write: bool
-}
-
-// The outermost scope is everything (`all`). Otherwise it is the keys of
-// `first` and of each entry in `rest`. union keeps every entry, and a key is
-// ReadWrite when any entry covering it is (ruling 4 (d)).
-pub opaque type KeyScope: send {
-    store: StoreId,
-    all: bool,
-    first: Option[ScopeEntry],
-    rest: List[ScopeEntry]
-}
-
-type AuthorityRows: shareable + send {
-    rows: std.omap.OMap[Bytes, Arc[Bytes]],
-    ids: u64,
-    tables: Arc[AuthorityTables]
-}
-
-type AuthorityTables: shareable + send {
-    physical_ids: List[u32],
-    first: Option[ScopeEntry],
-    rest: List[ScopeEntry]
-}
-
-fn full_scope(id: StoreId) -> KeyScope {
-    KeyScope(store: id, all: true, first: None, rest: list.new())
-}
-
-pub fn everything(tx: Tx) -> KeyScope { full_scope(tx.store) }
-
-pub fn none(tx: Tx) -> KeyScope {
-    KeyScope(store: tx.store, all: false, first: None, rest: list.new())
-}
-
-fn writes(a: Access) -> bool {
-    match a {
-        ReadOnly => false,
-        ReadWrite => true
-    }
-}
-
-pub fn scope[K, V](t: Table[K, V], a: Access) -> KeyScope {
-    let only = ScopeEntry(table: t.id, whole: true, lo: list.new(), hi: list.new(), write: writes(a))
-    KeyScope(store: t.store, all: false, first: Some(take only), rest: list.new())
-}
-
-pub fn scope_keys[K, V](t: Table[K, V], lo: Bound[K], hi: Bound[K], a: Access) -> Result[KeyScope, Error] {
-    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
-    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
-    let only = ScopeEntry(table: t.id, whole: false, lo: take low, hi: take high, write: writes(a))
-    Ok(KeyScope(store: t.store, all: false, first: Some(take only), rest: list.new()))
-}
-
-fn copy_entry(e: ScopeEntry) -> Result[ScopeEntry, Error] {
-    Ok(ScopeEntry(table: e.table, whole: e.whole, lo: copied(e.lo)?, hi: copied(e.hi)?, write: e.write))
-}
-
-fn add_entry(mut out: List[ScopeEntry], e: ScopeEntry) -> Result[(), Error] {
-    let made = copy_entry(e)?
-    capacity(result.capacity_only(list.push(mut out, take made)))
-}
-
-pub fn union(a: KeyScope, b: KeyScope) -> Result[KeyScope, Error] {
-    if !same(a.store, b.store) {
-        return Error(Foreign)
-    }
-    if a.all || b.all {
-        return Ok(full_scope(a.store))
-    }
-    let mut rest: List[ScopeEntry] = list.new()
-    if let Some(e) = a.first { add_entry(mut rest, e)? }
-    for e in a.rest { add_entry(mut rest, e)? }
-    if let Some(e) = b.first { add_entry(mut rest, e)? }
-    for e in b.rest { add_entry(mut rest, e)? }
-    Ok(KeyScope(store: a.store, all: false, first: None, rest: take rest))
-}
-
-fn entry_holds(e: ScopeEntry, id: u32, p: Bytes) -> bool {
-    e.table == id && (e.whole || (e.lo <= p && p < e.hi))
-}
-
-// Ruling 4 (a), (d): `p` is a data-tree key of table `id`. It is in scope
-// when an entry holds it, and writable when an entry holding it is ReadWrite.
-fn key_in(s: KeyScope, id: u32, p: Bytes, write: bool) -> bool {
-    if s.all {
-        return true
-    }
-    if let Some(e) = s.first {
-        if entry_holds(e, id, p) && (e.write || !write) { return true }
-    }
-    for e in s.rest {
-        if entry_holds(e, id, p) && (e.write || !write) { return true }
-    }
-    false
-}
-
-// Checks before any read or write (section 1.4). A put or delete of a key
-// held only ReadOnly is OutOfScope, like a key outside the scope.
-fn check_key(s: KeyScope, id: u32, key: Bytes, write: bool) -> Result[(), Error] {
-    if s.all {
-        return Ok(())
-    }
-    if key_in(s, id, physical(id, key)?, write) { Ok(()) } else { Error(OutOfScope) }
-}
-
-// Ruling 4 (b): the span [low, hi) is in scope when the entries together
-// cover it. Each step moves `at` to the end of an entry holding it, so `at`
-// grows and the loop ends.
-fn span_in(s: KeyScope, id: u32, low: Bytes, high: Bytes) -> Result[bool, Error] {
-    if s.all {
-        return Ok(true)
-    }
-    let mut at = copied(low)?
-    while at < high {
-        let mut end: Option[Bytes] = None
-        if let Some(e) = s.first {
-            if entry_holds(e, id, at) {
-                if e.whole { return Ok(true) }
-                end = Some(copied(e.hi)?)
-            }
-        }
-        for e in s.rest {
-            if entry_holds(e, id, at) {
-                if e.whole { return Ok(true) }
-                end = Some(copied(e.hi)?)
-            }
-        }
-        match take end {
-            Some(take step) => { at = take step },
-            None => return Ok(false)
-        }
-    }
-    Ok(true)
-}
-
-fn has_table(s: KeyScope, id: u32) -> bool {
-    if s.all {
-        return true
-    }
-    if let Some(e) = s.first {
-        if e.table == id { return true }
-    }
-    for e in s.rest {
-        if e.table == id { return true }
-    }
-    false
-}
-
-// The entries of table `id`, for an IndexRows that checks each row it returns.
-fn table_scope(s: KeyScope, id: u32) -> Result[KeyScope, Error] {
-    if s.all {
-        return Ok(full_scope(s.store))
-    }
-    let mut rest: List[ScopeEntry] = list.new()
-    if let Some(e) = s.first {
-        if e.table == id { add_entry(mut rest, e)? }
-    }
-    for e in s.rest {
-        if e.table == id { add_entry(mut rest, e)? }
-    }
-    Ok(KeyScope(store: s.store, all: false, first: None, rest: take rest))
-}
-
-fn entry_inside(outer: ScopeEntry, inner: ScopeEntry) -> bool {
-    if outer.table != inner.table || (inner.write && !outer.write) {
-        return false
-    }
-    outer.whole || (!inner.whole && outer.lo <= inner.lo && inner.hi <= outer.hi)
-}
-
-fn entry_within(outer: KeyScope, inner: ScopeEntry) -> bool {
-    if let Some(o) = outer.first {
-        if entry_inside(o, inner) { return true }
-    }
-    for o in outer.rest {
-        if entry_inside(o, inner) { return true }
-    }
-    false
-}
-
-// Ruling 4 (e): every inner entry lies inside one outer entry of equal or
-// greater access.
-pub fn scope_within(outer: KeyScope, inner: KeyScope) -> bool {
-    if !same(outer.store, inner.store) { return false }
-    if outer.all {
-        return true
-    }
-    if inner.all {
-        return false
-    }
-    if let Some(e) = inner.first {
-        if !entry_within(outer, e) { return false }
-    }
-    for e in inner.rest {
-        if !entry_within(outer, e) { return false }
-    }
-    true
-}
-
-pub fn narrow[R](mut tx: Tx, take within: KeyScope, body: scoped[view] fn(mut Tx) -> R) -> Result[R, Error] {
-    if !same(tx.store, within.store) {
-        return Error(Foreign)
-    }
-    if !scope_within(tx.scope, within) {
-        return Error(OutOfScope)
-    }
-    let outer = replace(mut tx.scope, take within)
-    let r = body(mut tx)
-    let _ = replace(mut tx.scope, take outer)
-    Ok(take r)
+    call: Option[CallSection]
 }
 
 pub opaque type Snapshot: shareable + send {
@@ -609,9 +359,7 @@ pub opaque type Snapshot: shareable + send {
     open: u64,
     branch: u32,
     head: u64,
-    roots: Roots,
-    authority_rows: Option[Arc[AuthorityRows]],
-    seq: u64
+    roots: Roots
 }
 
 pub opaque type ByteRows: send {
@@ -648,20 +396,14 @@ pub fn memory(c: Clock, r: Random, o: Options) -> Db {
     memory_at(c, make_id(r), o)
 }
 
-fn new_register() -> Result[Latest[Seq], Capacity] {
-    let initial = result.capacity_only(arc.new(Seq(v: 0)))?
-    result.capacity_only(latest.new(take initial))
-}
-
 fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
-    let register = result.unwrap(new_register())
-    empty_db(c, id, o, take register)
+    empty_db(c, id, o)
 }
 
-fn empty_db(c: Clock, id: StoreId, o: Options, take register: Latest[Seq]) -> Db {
+fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
     let mut heads: List[Head] = list.new()
     result.unwrap(list.push(mut heads, main_head(empty_roots(), 0, 0)))
-    Db(store: id, fence: 0, disk: list.new(), clock: c, seq: 0, register: take register, authority_names: list.new(), authority_rows: None, heads: take heads, pins: list.new(), next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, acked_bytes: 0, written: None, written_send: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, admits: std.omap.new(), admit_ids: 0)
+    Db(store: id, fence: 0, disk: list.new(), clock: c, heads: take heads, pins: list.new(), next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, acked_bytes: 0, written: None, written_send: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, admits: std.omap.new(), admit_ids: 0)
 }
 
 pub fn fence_level(db: Db) -> u32 { db.fence }
@@ -720,7 +462,7 @@ pub fn pinned(db: Db, name: String) -> Option[Snapshot] {
         return None
     }
     let p = db.pins[k]
-    Some(Snapshot(store: db.store, open: open_number(db), branch: p.branch, head: p.version, roots: share_roots(p.roots), authority_rows: share_authority(p.authority_rows), seq: p.seq))
+    Some(Snapshot(store: db.store, open: open_number(db), branch: p.branch, head: p.version, roots: share_roots(p.roots)))
 }
 
 // Section 1.9 and 1.12: fork and pin take only a Snapshot of this open, whose
@@ -789,10 +531,9 @@ pub fn adopt(mut db: Db, b: Branch) -> Result[Ticket, Error] waits {
     planned.heads[0].roots = share_roots(db.heads[i].roots)
     planned.heads[0].head = db.heads[i].head
     planned.heads[0].at = db.heads[i].at
-    let updated_authority = reconstruct_authority(db, planned.heads[0].roots)?
-    let publication = capacity(prepare_publication(db, 0, planned.heads[0].head, planned.heads[0].roots, updated_authority, true))?
+    let publication = capacity(prepare_publication(db, 0, planned.heads[0].head, planned.heads[0].roots))?
     let commit_ticket = cut_install(mut db, take planned)?
-    publish(mut db, take publication)
+    publish(take publication)
     Ok(commit_ticket)
 }
 
@@ -817,7 +558,7 @@ pub fn pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket, Error] waits
         return Error(Exists(take owned))
     }
     let mut planned = capacity(prospect(db))?
-    let kept = Pin(name: take owned, branch: s.branch, version: s.head, roots: share_roots(s.roots), authority_rows: share_authority(s.authority_rows), seq: s.seq)
+    let kept = Pin(name: take owned, branch: s.branch, version: s.head, roots: share_roots(s.roots))
     capacity(result.capacity_only(list.push(mut planned.pins, take kept)))?
     cut_install(mut db, take planned)
 }
@@ -855,273 +596,30 @@ pub fn follow(mut db: Db, b: Branch) -> Result[Latest[Snapshot], Error] {
     Ok(take h)
 }
 
-pub fn snapshot_seq(s: Snapshot) -> u64 { s.seq }
-
-pub fn authority_reader(db: Db) -> AuthorityReader {
-    AuthorityReader(register: latest.handle(db.register))
-}
-
-pub fn dup(r: AuthorityReader) -> AuthorityReader {
-    AuthorityReader(register: latest.handle(r.register))
-}
-
-pub fn load(r: AuthorityReader) -> u64 {
-    let value = latest.read(r.register)
-    value.v
-}
-
 type Publication {
-    register: Option[Arc[Seq]],
-    followed: Option[(Latest[Snapshot], Arc[Snapshot])],
-    rows: Option[Arc[AuthorityRows]]
+    followed: Option[(Latest[Snapshot], Arc[Snapshot])]
 }
 
-fn prepare_publication(db: Db, i: u64, head: u64, roots: Roots, rows: Option[Arc[AuthorityRows]], advance: bool) -> Result[Publication, Capacity] {
-    let seq_after = if i != 0 { 0u64 } else if advance { db.seq + 1 } else { db.seq }
-    let register = if advance { Some(result.capacity_only(arc.new(Seq(v: seq_after)))?) } else { None }
+// The followed snapshot is allocated before the commit, so publishing it
+// after the commit cannot fail.
+fn prepare_publication(db: Db, i: u64, head: u64, roots: Roots) -> Result[Publication, Capacity] {
     let followed = match db.heads[i].following {
-        Some(handle) => Some((latest.handle(handle), result.capacity_only(arc.new(snapshot_from(db, i, head, roots, share_authority(rows), seq_after)))?)),
+        Some(handle) => Some((latest.handle(handle), result.capacity_only(arc.new(snapshot_from(db, i, head, roots)))?)),
         None => None
     }
-    Ok(Publication(register: take register, followed: take followed, rows: if advance { share_authority(rows) } else { None }))
+    Ok(Publication(followed: take followed))
 }
 
-fn publish(mut db: Db, take publication: Publication) {
-    let Publication(register: take register, followed: take followed, rows: take rows) = take publication
-    if let Some(take higher) = take register {
-        db.seq = higher.v
-        db.authority_rows = take rows
-        latest.publish(db.register, take higher)
-    }
+fn publish(take publication: Publication) {
+    let Publication(followed: take followed) = take publication
     if let Some((take handle, take root)) = take followed {
         latest.publish(handle, take root)
     }
 }
 
-// Authority objects are derived from the main roots. Their node identities
-// are local to this tree and never enter a journal, pack or replay ID.
-fn authority_build(roots: Roots, names: List[String], require_all: bool) -> Result[Arc[AuthorityRows], Error] {
-    let mut first: Option[ScopeEntry] = None
-    let mut tables: List[ScopeEntry] = list.new()
-    let mut physical_ids: List[u32] = list.new()
-    for name in names {
-        if string.byte_len(name) > 255 {
-            if require_all { return Error(Missing(named(name)?)) }
-            continue
-        }
-        let key = table_key(name)?
-        let table_id: u32 = match std.omap.get(roots.catalog, key) {
-            Some(raw) => int.narrow(read_le(raw, 1, 4)),
-            None => {
-                if require_all { return Error(Missing(named(name)?)) }
-                continue
-            }
-        }
-        let mut declared = false
-        for physical_id in physical_ids {
-            if physical_id == table_id { declared = true; break }
-        }
-        if declared { continue }
-        let read_table = ScopeEntry(table: table_id, whole: true, lo: list.new(), hi: list.new(), write: false)
-        if list.len(physical_ids) == 0 {
-            first = Some(take read_table)
-        } else {
-            capacity(result.capacity_only(list.push(mut tables, take read_table)))?
-        }
-        capacity(result.capacity_only(list.push(mut physical_ids, table_id)))?
-        let indexes = index_catalog_in(roots.catalog, table_id)?
-        for index_row in indexes {
-            capacity(result.capacity_only(list.push(mut physical_ids, index_row.id)))?
-        }
-    }
-    let mut rows: std.omap.OMap[Bytes, Arc[Bytes]] = std.omap.new()
-    let mut ids = 0u64
-    for physical_table in physical_ids {
-        let start = prefix(physical_table)?
-        let end = prefix(physical_table + 1)?
-        let mut cursor = byte_cursor(roots.data, Included(take start), end)?
-        while let Some((take key, value)) = next_bytes(mut cursor)? {
-            rows = capacity(authority_put(mut ids, rows, take key, value))?
-        }
-    }
-    let declared = capacity(result.capacity_only(arc.new(AuthorityTables(physical_ids: take physical_ids, first: take first, rest: take tables))))?
-    capacity(result.capacity_only(arc.new(AuthorityRows(rows: take rows, ids: ids, tables: take declared))))
-}
+pub type Receipt { ticket: Ticket, reply: Bytes }
 
-fn authority_put(mut ids: u64, rows: std.omap.OMap[Bytes, Arc[Bytes]], take key: Bytes, value: Bytes) -> Result[std.omap.OMap[Bytes, Arc[Bytes]], Capacity] {
-    let copied_value: Result[Bytes, Capacity] = clone(value)
-    let owned = (take copied_value)?
-    let stored = result.capacity_only(arc.new(take owned))?
-    let (take updated, _) = result.capacity_only(std.omap.insert(mut ids, rows, take key, take stored))?
-    Ok(take updated)
-}
-
-pub fn declare_authority(mut db: Db, names: List[String]) -> Result[(), Error] {
-    if let Some(_) = db.authority_rows { return Error(Exists("authority")) }
-    let rows = authority_build(db.heads[0].roots, names, true)?
-    let held_names: Result[List[String], Capacity] = clone(names)
-    db.authority_names = capacity(take held_names)?
-    db.authority_rows = Some(take rows)
-    Ok(())
-}
-
-fn reconstruct_authority(db: Db, roots: Roots) -> Result[Option[Arc[AuthorityRows]], Error] {
-    match db.authority_rows {
-        Some(_) => Ok(Some(authority_build(roots, db.authority_names, false)?)),
-        None => Ok(None)
-    }
-}
-
-fn authority_apply(base: AuthorityRows, ops: std.omap.OMap[Bytes, Option[Bytes]]) -> Result[Option[Arc[AuthorityRows]], Capacity] {
-    if list.len(base.tables.physical_ids) == 0 || std.omap.len(ops) == 0 { return Ok(None) }
-    let mut rows = std.omap.snapshot(base.rows)
-    let mut ids = base.ids
-    let mut changed = false
-    let mut cursor = result.capacity_only(std.omap.range(ops, Unbounded, Unbounded))?
-    while let Some((take key, value)) = std.omap.next(mut cursor)? {
-        let a: u32 = int.widen(key[0])
-        let b: u32 = int.widen(key[1])
-        let c: u32 = int.widen(key[2])
-        let d: u32 = int.widen(key[3])
-        let table_id = (a << 24) | (b << 16) | (c << 8) | d
-        let mut declared = false
-        for id in base.tables.physical_ids {
-            if id == table_id { declared = true; break }
-        }
-        if !declared { continue }
-        match value {
-            Some(raw) => {
-                rows = authority_put(mut ids, rows, take key, raw)?
-                changed = true
-            },
-            None => {
-                let present = match std.omap.get(rows, key) { Some(_) => true, None => false }
-                if present {
-                    rows = std.omap.remove(mut ids, rows, key)?
-                    changed = true
-                }
-            }
-        }
-    }
-    if !changed { return Ok(None) }
-    let updated = AuthorityRows(rows: take rows, ids: ids, tables: arc.share(base.tables))
-    Ok(Some(result.capacity_only(arc.new(take updated))?))
-}
-
-fn prepare_run_publication(db: Db, i: u64, roots: Roots, ops: std.omap.OMap[Bytes, Option[Bytes]]) -> Result[Publication, Capacity] {
-    let mut updated: Option[Arc[AuthorityRows]] = None
-    if i == 0 {
-        if let Some(base) = db.authority_rows {
-            updated = authority_apply(base, ops)?
-        }
-    }
-    let advance = match updated { Some(_) => true, None => false }
-    let authority = if advance { take updated } else { current_authority(db, i) }
-    prepare_publication(db, i, db.heads[i].head + 1, roots, authority, advance)
-}
-
-pub type Digest { a: u64, b: u64, c: u64, d: u64 }
-
-pub type Authorized { scope: KeyScope, digest: Digest, seq: u64 }
-
-pub type Receipt { ticket: Ticket, reply: Bytes, digest: Digest, scope: KeyScope, seq: u64 }
-
-pub type Stop = Raised(u32) | OutOfSteps(u64) | OutOfBytes(Capacity) | Policy
-
-// A capacity failure must survive an isolate inside user policy code. Put
-// both values in the policy's budget before any read can fail.
-type ReadFault: send {
-    status: Latest[Seq],
-    failed: Arc[Seq]
-}
-
-fn policy_fault_copy(fault: Option[ReadFault]) -> Option[ReadFault] {
-    match fault {
-        Some(f) => Some(ReadFault(status: latest.handle(f.status), failed: arc.share(f.failed))),
-        None => None
-    }
-}
-
-fn metered_read[R](fault: Option[ReadFault], take result: Result[R, Error]) -> Result[R, Error] {
-    match take result {
-        Error(Full(c)) => {
-            if let Some(f) = fault {
-                latest.publish(f.status, arc.share(f.failed))
-                fail("policy read capacity")
-            }
-            Error(Full(c))
-        },
-        other => take other
-    }
-}
-
-fn policy_capacity[T](take r: Result[T, Capacity]) -> Result[T, Stop] {
-    match take r {
-        Ok(take value) => Ok(take value),
-        Error(_) => Error(Policy)
-    }
-}
-
-type PolicyView {
-    store: StoreId,
-    catalog: std.omap.OMap[Bytes, Arc[Bytes]],
-    rows: Option[Arc[AuthorityRows]],
-    seq: u64,
-    info: CallInfo
-}
-
-fn evaluate_policy(source: PolicyView, base: Arc[AuthorityRows], caller: Caller, policy: StaticFn[fn(Tx, Caller) -> Result[KeyScope, Capacity]]) -> Result[(Authorized, List[Read]), Stop] {
-    let reads: Log[Read] = policy_capacity(log.new())?
-    let issued: Log[u64] = policy_capacity(log.new())?
-    let status = policy_capacity(new_register())?
-    let failed = policy_capacity(result.capacity_only(arc.new(Seq(v: 1))))?
-    let fault = ReadFault(status: latest.handle(status), failed: take failed)
-    let first_copy: Result[Option[ScopeEntry], Capacity] = clone(base.tables.first)
-    let rest_copy: Result[List[ScopeEntry], Capacity] = clone(base.tables.rest)
-    let scoped_to = KeyScope(store: source.store, all: false, first: policy_capacity(take first_copy)?, rest: policy_capacity(take rest_copy)?)
-    let read_roots = Roots(data: std.omap.snapshot(base.rows), streams: std.omap.new(), catalog: std.omap.snapshot(source.catalog))
-    let f = code.callable(policy)
-    let grant = policy_capacity(f(Tx(store: source.store, roots: take read_roots, authority_rows: None, seq: source.seq, look_reads: false, policy_fault: Some(take fault), ids: 0, resident: 0, retain_old: false, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: source.info, stream_ops: std.omap.new(), extra_bytes: 0, call: None, scope: take scoped_to), caller))?
-    let marker = latest.read(status)
-    if marker.v != 0 || !same(source.store, grant.store) {
-        return Error(Policy)
-    }
-    let digest = policy_capacity(scope_digest(grant))?
-    Ok((Authorized(scope: take grant, digest: digest, seq: source.seq), log.finish(take reads)))
-}
-
-fn authorize_at(source: PolicyView, caller: Caller, policy: StaticFn[fn(Tx, Caller) -> Result[KeyScope, Capacity]], n: u64, s: u64) -> Result[(Authorized, List[Read]), Stop] {
-    let base = match source.rows { Some(a) => a, None => return Error(Policy) }
-    let caught = bound bytes n {
-        let run_policy = scoped fn() -> Result[Result[(Authorized, List[Read]), Stop], OutOfTime] {
-            bound steps s { evaluate_policy(source, base, caller, policy) }
-        }
-        isolate(run_policy)
-    }
-    match take caught {
-        Ok(Ok(Ok(Ok(Ok(take pair))))) => Ok(take pair),
-        _ => Error(Policy)
-    }
-}
-
-pub fn authorize(v: Tx, caller: Caller, policy: StaticFn[fn(Tx, Caller) -> Result[KeyScope, Capacity]], n: u64, s: u64) -> Result[Authorized, Stop] {
-    let source = PolicyView(store: v.store, catalog: std.omap.snapshot(v.roots.catalog), rows: share_authority(v.authority_rows), seq: v.seq, info: v.info)
-    let (take authorized, take reads) = authorize_at(source, caller, policy, n, s)?
-    if v.look_reads {
-        for take read in take reads {
-            if let Error(_) = log.append(v.reads, take read) {
-                return Error(Policy)
-            }
-        }
-    }
-    Ok(take authorized)
-}
-
-fn hash_be(mut hash: std.sha256.Sha256, value: u64, width: u64) {
-    for i in 0u64 .. width {
-        std.sha256.add_byte(mut hash, int.truncate(value >> int.truncate(8 * (width - 1 - i))))
-    }
-}
+pub type Stop = Raised(u32) | OutOfSteps(u64) | OutOfBytes(Capacity)
 
 fn append_be(mut raw: Bytes, value: u64, width: u64) -> Result[(), Capacity] {
     for i in 0u64 .. width {
@@ -1130,81 +628,20 @@ fn append_be(mut raw: Bytes, value: u64, width: u64) -> Result[(), Capacity] {
     Ok(())
 }
 
-fn encode_scope_entry(e: ScopeEntry) -> Result[Bytes, Capacity] {
-    let lo = list.len(e.lo)
-    let hi = list.len(e.hi)
-    let mut raw: Bytes = list.with_capacity(14 + lo + hi)?
-    append_be(mut raw, int.widen(e.table), 4)?
-    result.capacity_only(list.push(mut raw, if e.whole { 1u8 } else { 0u8 }))?
-    result.capacity_only(list.push(mut raw, if e.write { 1u8 } else { 0u8 }))?
-    append_be(mut raw, lo, 4)?
-    list.append(mut raw, e.lo)?
-    append_be(mut raw, hi, 4)?
-    list.append(mut raw, e.hi)?
-    Ok(take raw)
-}
-
-fn scope_digest(grant: KeyScope) -> Result[Digest, Capacity] {
-    let mut hash = std.sha256.start()
-    let domain = string.as_bytes("hirsel.scope.v1")
-    std.sha256.add_byte(mut hash, 15u8)
-    std.sha256.add(mut hash, domain, 0, list.len(domain))
-    hash_be(mut hash, grant.store.hi, 8)
-    hash_be(mut hash, grant.store.lo, 8)
-    if grant.all {
-        std.sha256.add_byte(mut hash, 1u8)
-    } else {
-        let mut entries: List[Bytes] = list.new()
-        if let Some(e) = grant.first {
-            result.capacity_only(list.push(mut entries, encode_scope_entry(e)?))?
-        }
-        for e in grant.rest {
-            result.capacity_only(list.push(mut entries, encode_scope_entry(e)?))?
-        }
-        list.sort_stable(mut entries, fn(a: Bytes, b: Bytes) -> Order {
-            if a < b { Less } else if a == b { Equal } else { Greater }
-        })?
-        let mut count = 0u64
-        for i in 0u64 .. list.len(entries) {
-            if i == 0 || entries[i] != entries[i - 1] { count += 1 }
-        }
-        std.sha256.add_byte(mut hash, 0u8)
-        hash_be(mut hash, count, 4)
-        for i in 0u64 .. list.len(entries) {
-            if i == 0 || entries[i] != entries[i - 1] {
-                std.sha256.add(mut hash, entries[i], 0, list.len(entries[i]))
-            }
-        }
-    }
-    let digest = std.sha256.finish(hash)
-    Ok(Digest(a: digest_word(digest, 0), b: digest_word(digest, 8), c: digest_word(digest, 16), d: digest_word(digest, 24)))
-}
-
-fn digest_word(digest: Inline[u8, 32], offset: u64) -> u64 {
-    let mut word = 0u64
-    for i in 0u64 .. 8 { word = (word << 8) | int.widen(digest[offset + i]) }
-    word
-}
-
-pub type Plan { n_p: u64, s_p: u64, n_e: u64, s_e: u64, reply_max: u64 }
+pub type Plan { n_e: u64, s_e: u64, reply_max: u64 }
 pub type CallReserve { retained: u64, steps: u64 }
 
-// AM5. The body isolate's cause cell is the only allocation outside P and E.
+// AM5. The body isolate's cause cell is the only allocation outside E.
 // A finalized issued ID takes one loop latch, and its log cell is eight bytes.
 const CALL_CAUSE_BYTES: u64 = 32
-// MEM-30 calls on the longest path outside the policy and body scopes:
-// draft_call and authorize_head (2), catalog snapshot (3), authority share
-// (2), CallInfo (18), authorize_at (1), both isolates (4), and log finish
-// twice plus finish_stage (3).
-const CALL_FIXED_STEPS: u64 = 33
+// MEM-30 calls on the longest path outside the body's scope: draft_call (1),
+// the isolate (2), and log finish twice plus finish_stage (3).
+const CALL_FIXED_STEPS: u64 = 6
 const ISSUED_ID_BYTES: u64 = 8
 
 pub fn call_reserves(plan: Plan) -> Option[CallReserve] {
-    let Some(scopes) = int.checked_mul(plan.n_p, 2u64) else { return None }
-    let Some(body) = int.checked_add(scopes, plan.n_e) else { return None }
-    let Some(retained) = int.checked_add(body, CALL_CAUSE_BYTES) else { return None }
-    let Some(user_steps) = int.checked_add(plan.s_p, plan.s_e) else { return None }
-    let Some(fixed) = int.checked_add(user_steps, CALL_FIXED_STEPS) else { return None }
+    let Some(retained) = int.checked_add(plan.n_e, CALL_CAUSE_BYTES) else { return None }
+    let Some(fixed) = int.checked_add(plan.s_e, CALL_FIXED_STEPS) else { return None }
     let Some(steps) = int.checked_add(fixed, plan.n_e / ISSUED_ID_BYTES) else { return None }
     Some(CallReserve(retained: retained, steps: steps))
 }
@@ -1214,7 +651,6 @@ pub type Reserve = Resident | Claim
 
 pub opaque type Pending {
     completion: Completion,
-    authorization: Authorized,
     record: Option[CallRecord],
     attempted: CallInfo,
     would_reply: Option[Bytes],
@@ -1224,22 +660,12 @@ pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | N
 
 type ServeReply = KeptReply(Bytes) | StoreFailure(Error) | BodyStop(Stop)
 
-pub fn authorize_head(db: Db, caller: Caller, policy: StaticFn[fn(Tx, Caller) -> Result[KeyScope, Capacity]], n: u64, s: u64) -> Result[Authorized, Stop] {
-    let source = PolicyView(store: db.store, catalog: std.omap.snapshot(db.heads[0].roots.catalog), rows: share_authority(db.authority_rows), seq: db.seq,
-        info: call_info(db.store, 0, db.heads[0].head, db.heads[0].at, db.heads[0].at))
-    let (take granted, _) = authorize_at(source, caller, policy, n, s)?
-    Ok(take granted)
-}
-
 pub fn next_call_info(db: Db) -> CallInfo {
     call_info(db.store, 0, db.heads[0].head + 1, host.wall_ms(db.clock), db.heads[0].at)
 }
 
 pub fn untried(take complete: Completion, take rec: Option[CallRecord], attempted: CallInfo) -> Pending {
-    let grant = KeyScope(store: complete.admitted.store, all: false, first: None, rest: list.new())
-    let witness = empty_scope_digest(complete.admitted.store)
-    Pending(completion: take complete, authorization: Authorized(scope: take grant, digest: witness, seq: 0),
-        record: take rec, attempted: attempted, would_reply: None)
+    Pending(completion: take complete, record: take rec, attempted: attempted, would_reply: None)
 }
 
 fn registered_completion(db: Db, complete: Completion) -> Result[(), ServeError] {
@@ -1277,24 +703,19 @@ fn cause_number(causes: Causes) -> u32 {
     0u32
 }
 
-fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, witness: Digest, rec: Option[CallRecord], settlement: Option[Settlement]) -> Result[(), Error] {
+fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallRecord], settlement: Option[Settlement]) -> Result[(), Error] {
     let size = match rec {
         Some(value) => {
             call_section_bytes(value, match settlement { Some(_) => true, None => false })
         },
         None => 0u64,
     }
-    let (take key, take value) = reply_row(tx, complete.stream, complete.p, witness, output)?
+    let (take key, take value) = reply_row(tx, complete.stream, complete.p, output)?
     stream_write(mut tx, take key, take value, size)
 }
 
-fn stage_reply(mut tx: Tx, complete: Completion, granted: Authorized, rec: Option[CallRecord], reply_max: u64,
+fn stage_reply(mut tx: Tx, complete: Completion, rec: Option[CallRecord], reply_max: u64,
         body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Bytes, ServeReply] {
-    let narrowed: Result[KeyScope, Capacity] = clone(granted.scope)
-    tx.scope = match take narrowed {
-        Ok(take narrowed_scope) => take narrowed_scope,
-        Error(problem) => return Error(BodyStop(OutOfBytes(problem))),
-    }
     let returned = body(mut tx)
     if let Some(problem) = tx.refusal {
         tx.refusal = None
@@ -1307,7 +728,7 @@ fn stage_reply(mut tx: Tx, complete: Completion, granted: Authorized, rec: Optio
     if list.len(output) > reply_max {
         return Error(BodyStop(OutOfBytes(Capacity(requested: list.len(output), available: reply_max))))
     }
-    match save_reply(mut tx, complete, output, granted.digest, rec, None) {
+    match save_reply(mut tx, complete, output, rec, None) {
         Ok(()) => (),
         Error(Full(problem)) => return Error(BodyStop(OutOfBytes(problem))),
         Error(take problem) => return Error(StoreFailure(take problem)),
@@ -1315,8 +736,7 @@ fn stage_reply(mut tx: Tx, complete: Completion, granted: Authorized, rec: Optio
     if success { Ok(take output) } else { Error(KeptReply(take output)) }
 }
 
-pub fn serve(mut db: Db, take complete: Completion, plan: Plan, take rec: Option[CallRecord], caller: Caller,
-        policy: StaticFn[fn(Tx, Caller) -> Result[KeyScope, Capacity]],
+pub fn serve(mut db: Db, take complete: Completion, plan: Plan, take rec: Option[CallRecord],
         body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits {
     serve_before(journal_poll(mut db))?
     serve_before(healthy(db))?
@@ -1324,15 +744,14 @@ pub fn serve(mut db: Db, take complete: Completion, plan: Plan, take rec: Option
     serve_before(check_completion_record(complete, rec))?
     let attempted = next_call_info(db)
     let Some(grant) = call_reserves(plan) else { return Error(Before(Limit(Transaction))) }
-    let metered = metered_draft(db, complete, attempted, plan, grant, rec, caller, policy, body)
-    let DraftedCall(authorization: take authorization, stage: take draft, next_id: next_id) = match take metered {
+    let metered = metered_draft(db, complete, attempted, plan, grant, rec, body)
+    let DraftedCall(stage: take draft, next_id: next_id) = match take metered {
         Error(AdmissionBytes(problem)) => return Error(Before(Full(problem))),
         Error(DraftStopped(stop)) => return Ok(Failed(untried(take complete, take rec, attempted), stop)),
         Ok(take draft) => take draft,
     }
     db.next_node = next_id
-    let pending_run = Pending(completion: take complete, authorization: take authorization, record: take rec,
-        attempted: attempted, would_reply: None)
+    let pending_run = Pending(completion: take complete, record: take rec, attempted: attempted, would_reply: None)
     match take draft {
         Ran(take staged) => finish_served(mut db, take pending_run, None, take staged),
         Over(Stopped(limit)) => Ok(Failed(take pending_run, OutOfSteps(limit.steps))),
@@ -1365,13 +784,11 @@ fn finish_served(mut db: Db, take pending_run: Pending, settlement: Option[Settl
             let committed = commit_prepared(mut db, 0, take accepted, take publication)
             serve_after(handoff(mut db))?
             serve_after(maybe_checkpoint(mut db))?
-            let Pending(authorization: take auth, ..) = take pending_run
-            let Authorized(scope: take grant, digest: witness, seq: authorized_at) = take auth
             match take committed {
                 Committed(Done(value: take output, ticket: committed_at, ..)) =>
-                    Ok(Committed(Receipt(ticket: committed_at, reply: take output, digest: witness, scope: take grant, seq: authorized_at))),
+                    Ok(Committed(Receipt(ticket: committed_at, reply: take output))),
                 Aborted(Undone(value: KeptReply(take output), ticket: Some(committed_at))) =>
-                    Ok(Kept(Receipt(ticket: committed_at, reply: take output, digest: witness, scope: take grant, seq: authorized_at))),
+                    Ok(Kept(Receipt(ticket: committed_at, reply: take output))),
                 _ => fail("store: staged reply was lost"),
             }
         },
@@ -1395,7 +812,7 @@ pub fn conclude(mut db: Db, take pending_run: Pending, take output: Bytes, reser
             Ok(take captured) => take captured,
             Error(problem) => return Error(BodyStop(OutOfBytes(problem))),
         }
-        match save_reply(mut tx, pending_run.completion, output, pending_run.authorization.digest, pending_run.record, settlement) {
+        match save_reply(mut tx, pending_run.completion, output, pending_run.record, settlement) {
             Ok(()) => Ok(take moved),
             Error(Full(problem)) => Error(BodyStop(OutOfBytes(problem))),
             Error(take problem) => Error(StoreFailure(take problem)),
@@ -1553,7 +970,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
 
 fn draft_body[R, A](db: Db, i: u64, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: Log[Read], issued: Log[u64],
         body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
-    let mut tx = Tx(store: db.store, roots: share_roots(db.heads[i].roots), authority_rows: current_authority(db, i), seq: if i == 0 { db.seq } else { 0u64 }, look_reads: false, policy_fault: None, ids: db.next_node, resident: db.resident, retain_old: retaining(db), reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: ci, stream_ops: std.omap.new(), extra_bytes: 0, call: None, scope: full_scope(db.store))
+    let mut tx = Tx(store: db.store, roots: share_roots(db.heads[i].roots), ids: db.next_node, resident: db.resident, retain_old: retaining(db), reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: ci, stream_ops: std.omap.new(), extra_bytes: 0, call: None)
     let outcome = body(mut tx)
     if let Some(c) = tx.refusal { return RolledBack(Refused(c)) }
     let value: Result[R, A] = match take outcome {
@@ -1575,7 +992,7 @@ fn draft_body[R, A](db: Db, i: u64, ci: CallInfo, keep_reply: Option[fn(A) -> bo
             Error(take a)
         }
     }
-    let Tx(store: _, roots: take roots, authority_rows: _, seq: _, look_reads: _, policy_fault: _, ids: _, resident: live, retain_old: _, reads: _, issued: _, refusal: _, frame_bytes: _, wrote: wrote, ops: take ops, op_ids: _, info: _, stream_ops: take stream_ops, extra_bytes: _, call: take call, scope: _) = take tx
+    let Tx(store: _, roots: take roots, ids: _, resident: live, retain_old: _, reads: _, issued: _, refusal: _, frame_bytes: _, wrote: wrote, ops: take ops, op_ids: _, info: _, stream_ops: take stream_ops, extra_bytes: _, call: take call) = take tx
     Prepared(Prepared(outcome: take value, roots: take roots, live: live, wrote: wrote, frame: None, ops: take ops, stream_ops: take stream_ops, call: take call))
 }
 
@@ -1608,32 +1025,27 @@ type CallDraft {
 }
 
 type DraftedCall {
-    authorization: Authorized,
     stage: Stage[Bytes, ServeReply],
     next_id: u64
 }
 
 type DraftRefusal = AdmissionBytes(Capacity) | DraftStopped(Stop)
 
-fn metered_draft(db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: CallReserve, rec: Option[CallRecord], caller: Caller,
-        policy: StaticFn[fn(Tx, Caller) -> Result[KeyScope, Capacity]],
+fn metered_draft(db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: CallReserve, rec: Option[CallRecord],
         body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[DraftedCall, DraftRefusal] {
     // These synchronous scopes cannot lose task room between admission and use.
     // Refund the admission before encoding, so frame bytes come from the head.
     let admitted = bound bytes grant.retained { () }
     if let Error(problem) = admitted { return Error(AdmissionBytes(problem)) }
-    let metered = bound steps grant.steps { draft_call(db, complete, ci, plan, rec, caller, policy, body) }
+    let metered = bound steps grant.steps { draft_call(db, complete, ci, plan, rec, body) }
     match take metered {
         Error(limit) => Error(DraftStopped(OutOfSteps(limit.steps))),
-        Ok(Error(stop)) => Error(DraftStopped(stop)),
-        Ok(Ok(take drafted)) => Ok(take drafted),
+        Ok(take drafted) => Ok(take drafted),
     }
 }
 
-fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Option[CallRecord], caller: Caller,
-        policy: StaticFn[fn(Tx, Caller) -> Result[KeyScope, Capacity]],
-        body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[DraftedCall, Stop] {
-    let granted = authorize_head(db, caller, policy, plan.n_p, plan.s_p)?
+fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Option[CallRecord],
+        body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> DraftedCall {
     let caught = isolate(fn() -> Result[Result[CallDraft, Capacity], OutOfTime] {
         let perform = scoped fn() -> Result[CallDraft, Capacity] {
             let keep: Option[fn(ServeReply) -> bool] = None
@@ -1641,7 +1053,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
                 let reads: Log[Read] = log.new()?
                 let issued: Log[u64] = log.new()?
                 let finished = draft_body(db, 0, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
-                    stage_reply(mut tx, complete, granted, rec, plan.reply_max, body)
+                    stage_reply(mut tx, complete, rec, plan.reply_max, body)
                 })
                 CallDraft(finished: take finished, reads: take reads, issued: take issued)
             }
@@ -1669,7 +1081,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
         },
     }
     // A fault or step stop drops the private roots, so none of their IDs escape.
-    Ok(DraftedCall(authorization: take granted, stage: take staged, next_id: next_id))
+    DraftedCall(stage: take staged, next_id: next_id)
 }
 
 // F2: the account after only the reply writes `ops`, against branch `i`.
@@ -1708,7 +1120,7 @@ fn prepare_run_commit[R, A](db: Db, i: u64, take ran: Ran[R, A]) -> AdmittedDraf
         let needed = commit_cost(db, ran)
         return OverLimit(take ran, Capacity(requested: needed, available: db.ceiling))
     }
-    let publication = match prepare_run_publication(db, i, ran.roots, ran.ops) {
+    let publication = match prepare_publication(db, i, db.heads[i].head + 1, ran.roots) {
         Ok(take plan) => take plan,
         Error(c) => return OverLimit(take ran, c)
     }
@@ -1737,7 +1149,7 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
     db.heads[i].head += 1
     db.heads[i].at = ci.at
     db.changes += 1
-    publish(mut db, take publication)
+    publish(take publication)
     let sent_sequence = if list.len(db.disk) == 0 {
         db.changes
     } else {
@@ -1758,7 +1170,7 @@ fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A], rec: Option[CallR
     if !over_bound(db, ran) || !retaining(db) || db.settled == db.changes {
         return Ok(prepare_run_commit(db, i, take ran))
     }
-    let publication = match prepare_run_publication(db, i, ran.roots, ran.ops) {
+    let publication = match prepare_publication(db, i, db.heads[i].head + 1, ran.roots) {
         Ok(take plan) => take plan,
         Error(c) => return Ok(OverLimit(take ran, c))
     }
@@ -2185,25 +1597,20 @@ fn digest_part(mut h: std.sha256.Sha256, part: Bytes) {
     std.sha256.add(mut h, part, 0, n)
 }
 
-// STORE AL2/AL6. An admit is 41 B, and a reply adds the 32 B scope
-// digest followed by the exact reply bytes.
-pub type Stored { reply: Bytes, scope_digest: Digest }
+// STORE AL2/AN2. An admit is 41 B, and a reply is followed by the exact
+// reply bytes.
+pub type Stored { reply: Bytes }
 
-fn stream_bytes(p: u64, request: RequestDigest, witness: Option[Digest], answer: Bytes) -> Result[Bytes, Error] {
-    let size = match witness { Some(_) => 32 + list.len(answer), None => 0u64 }
+fn stream_bytes(p: u64, request: RequestDigest, replied: bool, answer: Bytes) -> Result[Bytes, Error] {
+    let size = if replied { list.len(answer) } else { 0u64 }
     let mut value: Bytes = capacity(list.with_capacity(41 + size))?
     capacity(le(mut value, p, 8))?
     for byte in request.b { capacity(result.capacity_only(list.push(mut value, byte)))? }
-    match witness {
-        None => capacity(le(mut value, 1, 1))?,
-        Some(stamp) => {
-            capacity(le(mut value, 2, 1))?
-            capacity(append_be(mut value, stamp.a, 8))?
-            capacity(append_be(mut value, stamp.b, 8))?
-            capacity(append_be(mut value, stamp.c, 8))?
-            capacity(append_be(mut value, stamp.d, 8))?
-            capacity(list.append(mut value, answer))?
-        }
+    if replied {
+        capacity(le(mut value, 2, 1))?
+        capacity(list.append(mut value, answer))?
+    } else {
+        capacity(le(mut value, 1, 1))?
     }
     Ok(take value)
 }
@@ -2215,13 +1622,7 @@ fn word_be(raw: Bytes, offset: u64) -> u64 {
 }
 
 fn stored_reply(raw: Bytes) -> Result[Stored, Error] {
-    let witness = Digest(a: word_be(raw, 41), b: word_be(raw, 49), c: word_be(raw, 57), d: word_be(raw, 65))
-    Ok(Stored(reply: copied(list.slice(raw, 73, list.len(raw)))?, scope_digest: witness))
-}
-
-fn empty_scope_digest(store_id: StoreId) -> Digest {
-    let grant = KeyScope(store: store_id, all: false, first: None, rest: list.new())
-    result.unwrap(scope_digest(grant))
+    Ok(Stored(reply: copied(list.slice(raw, 41, list.len(raw)))?))
 }
 
 type StreamState {
@@ -2231,7 +1632,7 @@ type StreamState {
 }
 
 fn stream_state(raw: Bytes) -> Result[StreamState, Error] {
-    if list.len(raw) < 41 || (raw[40] != 1 && raw[40] != 2) || (if raw[40] == 1 { list.len(raw) != 41 } else { list.len(raw) < 73 }) {
+    if list.len(raw) < 41 || (raw[40] != 1 && raw[40] != 2) || (raw[40] == 1 && list.len(raw) != 41) {
         return Error(malformed(0))
     }
     let mut b: Inline[u8, 32] = [0u8; 32]
@@ -2285,7 +1686,7 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) 
     }
 }
 
-fn reply_row(tx: Tx, stream: Bytes, p: u64, witness: Digest, output: Bytes) -> Result[(Bytes, Bytes), Error] {
+fn reply_row(tx: Tx, stream: Bytes, p: u64, output: Bytes) -> Result[(Bytes, Bytes), Error] {
     // The reply keeps the digest bound at p (AH1).
     let held = match std.omap.get(tx.roots.streams, stream) {
         Some(raw) => {
@@ -2298,17 +1699,12 @@ fn reply_row(tx: Tx, stream: Bytes, p: u64, witness: Digest, output: Bytes) -> R
         Some(d) => d,
         None => return Error(Missing("reply"))
     }
-    let value = stream_bytes(p, d, Some(witness), output)?
+    let value = stream_bytes(p, d, true, output)?
     Ok((copied(stream)?, take value))
 }
 
 fn reply(mut tx: Tx, stream: Bytes, p: u64, take r: Bytes) -> Result[(), Error] {
-    let witness = empty_scope_digest(tx.store)
-    reply_scoped(mut tx, stream, p, take r, witness)
-}
-
-fn reply_scoped(mut tx: Tx, stream: Bytes, p: u64, take r: Bytes, witness: Digest) -> Result[(), Error] {
-    let (take key, take value) = reply_row(tx, stream, p, witness, r)?
+    let (take key, take value) = reply_row(tx, stream, p, r)?
     stream_write(mut tx, take key, take value, 0)
 }
 
@@ -2317,7 +1713,7 @@ fn reply_recorded(mut tx: Tx, p: u64, take r: Bytes, take c: CallRecord) -> Resu
     if let Some(_) = tx.call {
         return Error(Exists("call"))
     }
-    let (take key, take value) = reply_row(tx, c.stream, p, empty_scope_digest(tx.store), r)?
+    let (take key, take value) = reply_row(tx, c.stream, p, r)?
     call_checked(c)?
     let size = call_section_bytes(c, false)
     stream_write(mut tx, take key, take value, size)?
@@ -2392,7 +1788,7 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
     let key = copied(stream)?
     let b = main_branch(db)
     let outcome = run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
-        let value = stream_bytes(p, d, None, list.new())?
+        let value = stream_bytes(p, d, false, list.new())?
         stream_write(mut tx, copied(stream)?, take value, 0)
     })?
     let admitted = match take outcome {
@@ -2440,9 +1836,6 @@ fn lower_bytes(id: u32, limit: Bound[Bytes], high: bool) -> Result[Bytes, Error]
 fn range_bytes(tx: Tx, id: u32, lo: Bound[Bytes], hi: Bound[Bytes]) -> Result[ByteRows, Error] {
     let low = lower_bytes(id, lo, false)?
     let high = lower_bytes(id, hi, true)?
-    if !span_in(tx.scope, id, low, high)? {
-        return Error(OutOfScope)
-    }
     note_read(tx, Span(copied(low)?, copied(high)?))?
     byte_cursor(tx.roots.data, Included(take low), high)
 }
@@ -2735,7 +2128,7 @@ fn model_step(mut db: Db, wall: u64) -> bool {
             put_bytes(mut tx, 1, key_word(k), key_word(v))?
             let raw = option.unwrap(fetch_bytes(tx, 1, key_word(k))?)
             if decode_word(raw) != v {
-                return Error(OutOfScope)
+                return Error(Missing("law"))
             }
         }
         if choice == 3 {
@@ -2894,7 +2287,7 @@ fn encode_frame(ci: CallInfo, ops: std.omap.OMap[Bytes, Option[Bytes]], streams:
         blob(mut payload, c.stream)?
         // AD1: u32 length 0 for None, 32 for Some.
         if let Some(r) = c.revision { blob(mut payload, r)? } else { le(mut payload, 0, 4)? }
-        blob(mut payload, c.authority)?
+        blob(mut payload, c.code)?
         match settlement {
             None => le(mut payload, 0, 1)?,
             Some(context) => {
@@ -3241,8 +2634,7 @@ pub opaque type Rows[K, V]: send {
     key: std.codec.Key[K],
     readers: Arc[Readers[V]],
     data: std.omap.OMap[Bytes, Arc[Bytes]],
-    skip: Option[own[send] fn(Bytes, mut u64) -> Result[(), std.codec.Stop]],
-    policy_fault: Option[ReadFault]
+    skip: Option[own[send] fn(Bytes, mut u64) -> Result[(), std.codec.Stop]]
 }
 
 // A query only needs the selected incarnation and readers. The copy cannot
@@ -3330,16 +2722,11 @@ fn writable[K, V](tx: Tx, t: Table[K, V]) -> Result[(), Error] {
 }
 
 pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
-    metered_read(tx.policy_fault, fetch_row(tx, t, k))
-}
-
-fn fetch_row[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
     readable(tx.roots, t.catalog_key, t.id)?
     let key = encode_key(t.key, k)?
-    check_key(tx.scope, t.id, key, false)?
     let p = physical(t.id, key)?
     note_read(tx, Point(copied(p)?))?
     match std.omap.get(tx.roots.data, p) {
@@ -3401,16 +2788,12 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes) -> Result[bool, Err
 }
 
 pub fn range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
-    metered_read(tx.policy_fault, scoped_range(tx, t, lo, hi))
-}
-
-fn scoped_range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
     readable(tx.roots, t.catalog_key, t.id)?
     let cursor = range_bytes(tx, t.id, typed_bound(t.key, lo)?, typed_bound(t.key, hi)?)?
-    Ok(Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: std.omap.snapshot(tx.roots.data), skip: None, policy_fault: policy_fault_copy(tx.policy_fault)))
+    Ok(Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: std.omap.snapshot(tx.roots.data), skip: None))
 }
 
 pub fn get[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
@@ -3435,7 +2818,7 @@ pub fn scan[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Re
 }
 
 fn table_rows[K, V](s: Snapshot, t: Shape[K, V], take cursor: ByteRows) -> Rows[K, V] {
-    Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: std.omap.snapshot(s.roots.data), skip: None, policy_fault: None)
+    Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: std.omap.snapshot(s.roots.data), skip: None)
 }
 
 // RUNNER-SPEC §4 (R2): a Cover names data-tree key ranges (I1) without reading them. `key_span`
@@ -3515,7 +2898,7 @@ fn indexed_rows[J, K, V](data: std.omap.OMap[Bytes, Arc[Bytes]], ix: Index[J, K,
         Ok(take f) => take f,
         Error((c, _)) => return Error(Full(c))
     }
-    Ok(Rows(cursor: take cursor, table: ix.table, key: ix.primary, readers: arc.share(ix.readers), data: std.omap.snapshot(data), skip: Some(take skip), policy_fault: None))
+    Ok(Rows(cursor: take cursor, table: ix.table, key: ix.primary, readers: arc.share(ix.readers), data: std.omap.snapshot(data), skip: Some(take skip)))
 }
 
 fn prefix_after(raw: Bytes) -> Result[Bytes, Error] {
@@ -3562,28 +2945,16 @@ fn index_bound[J](ix: u32, key: std.codec.Key[J], limit: Bound[J], high: bool) -
 }
 
 pub fn lookup[J, K, V](tx: Tx, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -> Result[IndexRows[K, V], Error] in tx {
-    let (take rows, take within) = metered_read(tx.policy_fault, scoped_lookup(tx, ix, lo, hi))?
-    Ok(IndexRows(rows: take rows, reads: tx.reads, scope: take within))
-}
-
-fn scoped_lookup[J, K, V](tx: Tx, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -> Result[(Rows[K, V], KeyScope), Error] {
     if !same(tx.store, ix.store) {
         return Error(Foreign)
     }
     readable(tx.roots, ix.catalog_key, ix.id)?
-    // Ruling 4 (c): the index's table must be in scope up front; each row
-    // next_indexed returns is checked by its primary key.
-    if !has_table(tx.scope, ix.table) {
-        return Error(OutOfScope)
-    }
-    let within = table_scope(tx.scope, ix.table)?
     let low = index_bound(ix.id, ix.key, lo, false)?
     let high = index_bound(ix.id, ix.key, hi, true)?
     note_read(tx, Span(copied(low)?, copied(high)?))?
     let cursor = byte_cursor(tx.roots.data, Included(take low), high)?
-    let mut rows = indexed_rows(tx.roots.data, ix, take cursor)?
-    rows.policy_fault = policy_fault_copy(tx.policy_fault)
-    Ok((take rows, take within))
+    let rows = indexed_rows(tx.roots.data, ix, take cursor)?
+    Ok(IndexRows(rows: take rows, reads: tx.reads))
 }
 
 pub fn find[J, K, V](s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error] {
@@ -3903,10 +3274,6 @@ fn keep_schema(mut plan: SchemaPlan, take roots: Roots, live: u64, next_table: u
     Ok(())
 }
 
-fn publish_schema_plan(mut db: Db, take planned: SchemaPlan) -> Result[Ticket, Error] waits {
-    publish_schema_plan_with_authority(mut db, take planned, None)
-}
-
 fn application_name(name: String) -> Result[(), Error] {
     if std.string.starts_with(name, "hirsel.") { return Error(Exists("reserved")) }
     Ok(())
@@ -4010,34 +3377,29 @@ pub fn stage_activation[V](mut staged: StagedMigration, release_at: u64, previou
     stage_system_put(mut staged.plan, releases, release_at, release)
 }
 
-pub fn install_activation(mut db: Db, take staged: StagedMigration, take names: Option[List[String]]) -> Result[(), Error] waits {
+pub fn install_activation(mut db: Db, take staged: StagedMigration) -> Result[(), Error] waits {
     let StagedMigration(plan: take plan) = take staged
     let old_fence = db.fence
     if is_disk(db) { db.fence = 1 }
-    match publish_schema_plan_with_authority(mut db, take plan, take names) {
+    match publish_schema_plan(mut db, take plan) {
         Ok(_) => Ok(()),
         Error(take problem) => { db.fence = old_fence; Error(take problem) }
     }
 }
 
-fn publish_schema_plan_with_authority(mut db: Db, take prepared: SchemaPlan, take names: Option[List[String]]) -> Result[Ticket, Error] waits {
+fn publish_schema_plan(mut db: Db, take prepared: SchemaPlan) -> Result[Ticket, Error] waits {
     let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, live: live, ..) = take prepared
     over_ceiling(live, db.ceiling)?
     // Schema commits are main's (section 1.2). Installed only after the cut.
     let mut planned = capacity(prospect(db))?
     planned.heads[0].roots = take roots
     planned.heads[0].head += 1
-    let updated_authority = match names {
-        Some(declared) => Some(authority_build(planned.heads[0].roots, declared, true)?),
-        None => reconstruct_authority(db, planned.heads[0].roots)?,
-    }
-    let publication = capacity(prepare_publication(db, 0, planned.heads[0].head, planned.heads[0].roots, updated_authority, true))?
+    let publication = capacity(prepare_publication(db, 0, planned.heads[0].head, planned.heads[0].roots))?
     // On refusal both counters can keep their gaps.
     db.next_node = ids
     db.next_table = tables
     let commit_ticket = cut_install(mut db, take planned)?
-    if let Some(take declared) = take names { db.authority_names = take declared }
-    publish(mut db, take publication)
+    publish(take publication)
     Ok(commit_ticket)
 }
 
@@ -4165,10 +3527,6 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
         keep_schema(mut plan, take roots, live, next_id)?
     }
     Ok(Table(store: plan.store, id: c.id, epoch: c.epoch, complete: list.len(catalog) == 0, catalog_key: take key_handle, key: key, readers: take resolved, indexes: list.new()))
-}
-
-pub fn catalog_table[K, V](tx: Tx, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
-    metered_read(tx.policy_fault, catalog_handle(tx.store, tx.roots.catalog, false, take name, take key, take value))
 }
 
 pub fn schema_table[K, V](source: Schema, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
@@ -4675,18 +4033,18 @@ type Staged[R] {
 }
 
 fn stage_result[R](take draft: Tx, take change: Result[R, Error]) -> Staged[R] {
-    let Tx(store: _, roots: take roots, authority_rows: _, seq: _, look_reads: _, policy_fault: _, ids: ids, resident: live, retain_old: _, reads: _, issued: _, refusal: no_room, frame_bytes: size, wrote: wrote, ops: take ops, op_ids: op_ids, info: _, stream_ops: _, extra_bytes: _, call: _, scope: _) = take draft
+    let Tx(store: _, roots: take roots, ids: ids, resident: live, retain_old: _, reads: _, issued: _, refusal: no_room, frame_bytes: size, wrote: wrote, ops: take ops, op_ids: op_ids, info: _, stream_ops: _, extra_bytes: _, call: _) = take draft
     Staged(result: take change, roots: take roots, ids: ids, resident: live, refusal: no_room, frame_bytes: size, wrote: wrote, ops: take ops, op_ids: op_ids)
 }
 
 fn stage_put[K, V](tx: Tx, t: Table[K, V], key: Bytes, v: V) -> Staged[()] {
-    let mut draft = Tx(store: tx.store, roots: share_roots(tx.roots), authority_rows: share_authority(tx.authority_rows), seq: tx.seq, look_reads: false, policy_fault: None, ids: tx.ids, resident: tx.resident, retain_old: tx.retain_old, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: std.omap.snapshot(tx.ops), op_ids: tx.op_ids, info: tx.info, stream_ops: std.omap.new(), extra_bytes: tx.extra_bytes, call: None, scope: full_scope(tx.store))
+    let mut draft = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, resident: tx.resident, retain_old: tx.retain_old, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: std.omap.snapshot(tx.ops), op_ids: tx.op_ids, info: tx.info, stream_ops: std.omap.new(), extra_bytes: tx.extra_bytes, call: None)
     let changed = put_impl(mut draft, t, key, v)
     stage_result(take draft, take changed)
 }
 
 fn stage_delete[K, V](tx: Tx, t: Table[K, V], key: Bytes) -> Staged[bool] {
-    let mut draft = Tx(store: tx.store, roots: share_roots(tx.roots), authority_rows: share_authority(tx.authority_rows), seq: tx.seq, look_reads: false, policy_fault: None, ids: tx.ids, resident: tx.resident, retain_old: tx.retain_old, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: std.omap.snapshot(tx.ops), op_ids: tx.op_ids, info: tx.info, stream_ops: std.omap.new(), extra_bytes: tx.extra_bytes, call: None, scope: full_scope(tx.store))
+    let mut draft = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, resident: tx.resident, retain_old: tx.retain_old, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: std.omap.snapshot(tx.ops), op_ids: tx.op_ids, info: tx.info, stream_ops: std.omap.new(), extra_bytes: tx.extra_bytes, call: None)
     let changed = delete_impl(mut draft, t, key)
     stage_result(take draft, take changed)
 }
@@ -4713,7 +4071,6 @@ fn install[R](mut tx: Tx, take staged: Staged[R]) -> Result[R, Error] {
 pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     writable(tx, t)?
     let key = encode_key(t.key, k)?
-    check_key(tx.scope, t.id, key, true)?
     if list.len(t.indexes) == 0 {
         return put_impl(mut tx, t, key, v)
     }
@@ -4724,7 +4081,6 @@ pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
 pub fn delete[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
     writable(tx, t)?
     let key = encode_key(t.key, k)?
-    check_key(tx.scope, t.id, key, true)?
     if list.len(t.indexes) == 0 {
         return delete_impl(mut tx, t, key)
     }
@@ -5427,7 +4783,7 @@ pub fn law_typed_model(c: Clock) -> bool waits {
                 } else {
                     put(mut tx, t, key, at + 1)?
                     if option.unwrap(fetch(tx, shape(t), key)?) != at + 1 {
-                        return Error(OutOfScope)
+                        return Error(Missing("law"))
                     }
                 }
                 let mut bucket_rows = range(tx, shape(t), Excluded(4), Included(17))?
@@ -5620,7 +4976,7 @@ pub fn look[R](s: Snapshot, steps: Option[u64], body: scoped[view] fn(Tx) -> R) 
     }
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
-            let tx = Tx(store: s.store, roots: share_roots(s.roots), authority_rows: share_authority(s.authority_rows), seq: s.seq, look_reads: true, policy_fault: None, ids: 0, resident: 0, retain_old: false, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: std.omap.new(), extra_bytes: 0, call: None, scope: full_scope(s.store))
+            let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, resident: 0, retain_old: false, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: std.omap.new(), extra_bytes: 0, call: None)
             body(tx)
         }
         match steps {
@@ -5762,7 +5118,7 @@ fn look_query(tx: Tx, sh: Shape[u64, u64], ix: Index[u64, u64, u64]) -> Result[u
     let a = option.unwrap(fetch(tx, sh, 1)?)
     let absent = fetch(tx, sh, 9)?
     if let Some(_) = absent {
-        return Error(OutOfScope)
+        return Error(Missing("law"))
     }
     let mut rows = range(tx, sh, Excluded(1), Included(3))?
     let mut sum = a
@@ -6010,16 +5366,16 @@ pub fn law_changes(c: Clock) -> bool {
         },
         _ => return false
     }
-    let other_branch = Snapshot(store: b.store, open: b.open, branch: 9, head: b.head, roots: share_roots(b.roots), authority_rows: None, seq: 0)
+    let other_branch = Snapshot(store: b.store, open: b.open, branch: 9, head: b.head, roots: share_roots(b.roots))
     if !check_delta(a, other_branch, before, after) {
         return false
     }
-    let other_open = Snapshot(store: b.store, open: 1, branch: 0, head: b.head, roots: share_roots(b.roots), authority_rows: None, seq: 0)
+    let other_open = Snapshot(store: b.store, open: 1, branch: 0, head: b.head, roots: share_roots(b.roots))
     if !is_foreign(changes(a, other_open)) {
         return false
     }
     let foreign = test_db(c, 1073741824)
-    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: foreign.heads[0].head, roots: share_roots(foreign.heads[0].roots), authority_rows: None, seq: 0)
+    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: foreign.heads[0].head, roots: share_roots(foreign.heads[0].roots))
     if !is_foreign(changes(a, other_store)) {
         return false
     }
@@ -6096,9 +5452,9 @@ fn test_look_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
 pub fn law_changes_identity(c: Clock) -> bool {
     let db = test_db(c, 1073741824)
     let a = snapshot(db)
-    let other_open = Snapshot(store: a.store, open: 1, branch: 0, head: 0, roots: empty_roots(), authority_rows: None, seq: 0)
-    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: 0, roots: empty_roots(), authority_rows: None, seq: 0)
-    let br = Snapshot(store: a.store, open: a.open, branch: 9, head: 0, roots: empty_roots(), authority_rows: None, seq: 0)
+    let other_open = Snapshot(store: a.store, open: 1, branch: 0, head: 0, roots: empty_roots())
+    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: 0, roots: empty_roots())
+    let br = Snapshot(store: a.store, open: a.open, branch: 9, head: 0, roots: empty_roots())
     if !is_foreign(changes(a, other_open)) || !is_foreign(changes(a, other_store)) {
         return false
     }
@@ -6372,15 +5728,13 @@ fn readable(roots: Roots, key: Bytes, id: u32) -> Result[(), Error] {
 
 pub scoped type IndexRows[K, V] {
     rows: Rows[K, V],
-    reads: View[Log[Read]],
-    scope: KeyScope
+    reads: View[Log[Read]]
 }
 
 pub fn next[K, V](mut r: Rows[K, V]) -> Result[Option[(K, V)], Error] {
-    let read = next_row(mut r, fn(key: Bytes) -> Result[(), Error] {
+    next_row(mut r, fn(key: Bytes) -> Result[(), Error] {
         Ok(())
     })
-    metered_read(r.policy_fault, take read)
 }
 
 fn next_row[K, V](mut r: Rows[K, V], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[(K, V)], Error] {
@@ -6398,16 +5752,11 @@ fn next_row[K, V](mut r: Rows[K, V], seen: scoped[view] fn(Bytes) -> Result[(), 
 }
 
 pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Error] {
-    let read = indexed_advance(mut r.rows, r.reads, r.scope)
-    metered_read(r.rows.policy_fault, take read)
+    indexed_advance(mut r.rows, r.reads)
 }
 
-fn indexed_advance[K, V](mut rows: Rows[K, V], reads: View[Log[Read]], within: KeyScope) -> Result[Option[(K, V)], Error] {
-    let owner = rows.table
+fn indexed_advance[K, V](mut rows: Rows[K, V], reads: View[Log[Read]]) -> Result[Option[(K, V)], Error] {
     next_row(mut rows, fn(key: Bytes) -> Result[(), Error] {
-        if !key_in(within, owner, key, false) {
-            return Error(OutOfScope)
-        }
         match log.append(reads, Point(copied(key)?)) {
             Ok(()) => Ok(()),
             Error((c, _)) => Error(Full(c))
@@ -6721,7 +6070,7 @@ fn stream_now(db: Db, name: Bytes) -> (u64, u64) {
 
 fn stream_reply_is(db: Db, name: Bytes, want: Bytes) -> bool {
     match std.omap.get(db.heads[0].roots.streams, name) {
-        Some(raw) => list.len(raw) >= 73 && list.slice(raw, 73, list.len(raw)) == want,
+        Some(raw) => list.len(raw) >= 41 && list.slice(raw, 41, list.len(raw)) == want,
         None => false
     }
 }
@@ -6733,7 +6082,7 @@ fn call_for(stream: Bytes, revision: u64) -> CallRecord {
     result.unwrap(list.fill(mut args, 16, 2u8))
     let mut r: Bytes = list.new()
     result.unwrap(list.fill(mut r, revision, 3u8))
-    CallRecord(key: take key, args: take args, stream: result.unwrap(copied(stream)), revision: Some(take r), authority: authority_vector())
+    CallRecord(key: take key, args: take args, stream: result.unwrap(copied(stream)), revision: Some(take r), code: code_vector())
 }
 
 // The digest of a request with call_for's entry key and these args.
@@ -6797,8 +6146,8 @@ pub fn law_streams(c: Clock) -> bool waits {
     let kept = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
         if let Error(_) = put_bytes(mut tx, 1, key_word(2), key_word(22)) { return Error(1) }
         if let Error(_) = reply(mut tx, s, 1, result.unwrap(copied(string.as_bytes("r1")))) { return Error(2) }
-        // A 127-byte reply frame plus the 5-byte data head and one 29-byte put.
-        if tx_frame(tx) != 161 { return Error(3) }
+        // A 95-byte reply frame plus the 5-byte data head and one 29-byte put.
+        if tx_frame(tx) != 129 { return Error(3) }
         Error(7)
     }))
     match take kept {
@@ -6822,17 +6171,18 @@ pub fn law_streams(c: Clock) -> bool waits {
     }))
     match take faulted { Failed(_) => {}, _ => return false }
     match result.unwrap(admit(mut db, s, 2, d)) { Abandoned(t) => if !mark_is(ticket(t), 5) { return false }, _ => return false }
-    // An empty reply adds a scope digest. A ceiling below the initial
-    // admitted row therefore refuses it on both exits.
+    // An 8-byte reply grows the stored row's value from 41 to 49 bytes, past
+    // the admitted row's 48. A ceiling below the current resident therefore
+    // refuses it on both exits.
     let ceiling = db.ceiling
     db.ceiling = db.resident - 1
     let over = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
-        if let Error(_) = reply(mut tx, s, 2, list.new()) { return Error(1) }
+        if let Error(_) = reply(mut tx, s, 2, key_word(9)) { return Error(1) }
         Ok(())
     }))
     match take over { Refused(_) => {}, _ => return false }
     let over_abort = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
-        if let Error(_) = reply(mut tx, s, 2, list.new()) { return Error(1) }
+        if let Error(_) = reply(mut tx, s, 2, key_word(9)) { return Error(1) }
         Error(9)
     }))
     match take over_abort { Refused(_) => {}, _ => return false }
@@ -6862,19 +6212,19 @@ pub fn law_streams(c: Clock) -> bool waits {
     if db.heads[0].head != 6 { return false }
     match result.unwrap(admit(mut db, s, 3, d)) { Admitted(t) => if !mark_is(ticket(t), 7) { return false }, _ => return false }
     // L29 by section 2.4: head 16, call info 21, streams section 5 + op
-    // (1 + 4 + 1 + 4 + 75) = 90, so 127 with no data section. The CALL
-    // is 199 B (tag, five blobs of sizes 32, 16, 1, 32 and 96, and the
+    // (1 + 4 + 1 + 4 + 43) = 58, so 95 with no data section. The CALL
+    // is 151 B (tag, five blobs of sizes 32, 16, 1, 32 and 48, and the
     // settle byte). A 12-byte key and 8-byte value add 34 B for data.
     let sized = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
         if let Error(_) = reply_recorded(mut tx, 3, result.unwrap(copied(string.as_bytes("ab"))), call_for(s, 32)) { return Error(1) }
         let ci = info(mut tx)
         let one = list.len(result.unwrap(encode_sections(ci, tx.ops, tx.stream_ops, None, 1, 72)))
-        if one != 127 { return Error(2) }
+        if one != 95 { return Error(2) }
         let two = list.len(result.unwrap(encode_sections(ci, tx.ops, tx.stream_ops, tx.call, 1, 72)))
-        if tx_frame(tx) != 326 || two != 326 { return Error(4) }
+        if tx_frame(tx) != 246 || two != 246 { return Error(4) }
         if let Error(_) = put_bytes(mut tx, 1, key_word(4), key_word(44)) { return Error(5) }
         let three = list.len(result.unwrap(encode_sections(ci, tx.ops, tx.stream_ops, tx.call, 1, 72)))
-        if tx_frame(tx) != 360 || three != 360 { return Error(6) }
+        if tx_frame(tx) != 280 || three != 280 { return Error(6) }
         Ok(())
     }))
     match take sized { Committed(_) => {}, _ => return false }
@@ -6989,140 +6339,6 @@ fn test_request_digest() -> Result[(), ()] {
 @test
 fn test_streams(c: Clock) -> Result[(), ()] waits {
     if law_streams(c) { Ok(()) } else { Error(()) }
-}
-
-fn scope_out[T](r: Result[T, Error]) -> bool {
-    match r {
-        Error(OutOfScope) => true,
-        _ => false
-    }
-}
-
-fn fetched(r: Result[Option[u64], Error], want: u64) -> bool {
-    match r {
-        Ok(Some(v)) => v == want,
-        _ => false
-    }
-}
-
-fn key_sum(take r: Result[Rows[u64, u64], Error]) -> Option[u64] {
-    match take r {
-        Ok(take rows) => {
-            let mut cursor = take rows
-            let mut sum = 0u64
-            while let Ok(Some((k, _))) = next(mut cursor) {
-                sum += k
-            }
-            Some(sum)
-        },
-        Error(_) => None
-    }
-}
-
-// L14 and L20 by hand. Rows a.k = 100 + k and b.k = 200 + k, k < 8; index
-// i on a by v % 4, so J 2..3 is (2, k2), (2, k6), (3, k3), (3, k7). Wrong
-// implementations caught: a scope checked only on writes (fetch, range);
-// index rows exempted (k6 returned); a ReadOnly key written; union keeping
-// the narrower access (put a.3 refused); narrow checking the union rather
-// than one outer entry ([1, 3)); a scope not restored after narrow; a
-// KeyScope of another store accepted.
-pub fn law_scopes(c: Clock) -> bool waits {
-    let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("a", std.codec.key_u64(), std.codec.of_u64())))
-    result.unwrap(create_table(mut db, spec("b", std.codec.key_u64(), std.codec.of_u64())))
-    let mut a = result.unwrap(table(mut db, "a", std.codec.key_u64(), std.codec.of_u64()))
-    let mut b = result.unwrap(table(mut db, "b", std.codec.key_u64(), std.codec.of_u64()))
-    result.unwrap(create_index(mut db, a, "i", code.describe(bucket), std.codec.key_u64()))
-    let ia = result.unwrap(index(db, mut a, "i", code.describe(bucket), std.codec.key_u64()))
-    result.unwrap(create_index(mut db, b, "i", code.describe(bucket), std.codec.key_u64()))
-    let ib = result.unwrap(index(db, mut b, "i", code.describe(bucket), std.codec.key_u64()))
-    for k in 0u64 .. 8 {
-        if !typed_put(mut db, a, k, 100 + k) || !typed_put(mut db, b, k, 200 + k) {
-            return false
-        }
-    }
-    let sa = shape(a)
-    let sb = shape(b)
-    let first = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[u64, u64] {
-        let mid = match scope_keys(a, Included(2u64), Excluded(5u64), ReadWrite) { Ok(take m) => take m, Error(_) => return Error(1) }
-        let inner = narrow(mut tx, take mid, fn(mut t: Tx) -> u64 {
-            if !fetched(fetch(t, sa, 3), 103) || !scope_out(fetch(t, sa, 5)) || !scope_out(fetch(t, sa, 1)) || !scope_out(fetch(t, sb, 3)) { return 2 }
-            if key_sum(range(t, sa, Included(2u64), Excluded(5u64))) != Some(9u64) { return 3 }
-            if !scope_out(range(t, sa, Included(2u64), Excluded(6u64))) || !scope_out(range(t, sa, Unbounded, Unbounded)) { return 4 }
-            match lookup(t, ia, Included(2u64), Included(3u64)) {
-                Ok(take rows) => {
-                    let mut cursor = take rows
-                    match next_indexed(mut cursor) { Ok(Some((k, v))) => if k != 2 || v != 102 { return 5 }, _ => return 6 }
-                    if !scope_out(next_indexed(mut cursor)) { return 7 }
-                },
-                Error(_) => return 8
-            }
-            match lookup(t, ib, Unbounded, Unbounded) { Error(OutOfScope) => {}, _ => return 9 }
-            if let Error(_) = put(mut t, a, 4, 999) { return 10 }
-            if !scope_out(put(mut t, a, 5, 999)) || !scope_out(delete(mut t, a, 7)) || !scope_out(put(mut t, b, 1, 999)) { return 11 }
-            0
-        })
-        match inner { Ok(0) => {}, Ok(n) => return Error(n), Error(_) => return Error(12) }
-        if !fetched(fetch(tx, sb, 3), 203) { return Error(13) }
-        // put a.4 = 999 moves its J from 0 to 3: the row and two index ops.
-        Ok(std.omap.len(tx.ops))
-    }))
-    match take first { Committed(done) => if done.value != 3 { return false }, _ => return false }
-    let now = snapshot(db)
-    if result.unwrap(get(now, sa, 4)) != Some(999u64) || result.unwrap(get(now, sa, 5)) != Some(105u64) || result.unwrap(get(now, sb, 1)) != Some(201u64) { return false }
-    let second = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
-        let read = narrow(mut tx, scope(a, ReadOnly), fn(mut t: Tx) -> u64 {
-            if !fetched(fetch(t, sa, 7), 107) || !scope_out(put(mut t, a, 7, 1)) || !scope_out(delete(mut t, a, 7)) { return 1 }
-            let up = match scope_keys(a, Included(3u64), Excluded(4u64), ReadWrite) { Ok(take m) => take m, Error(_) => return 2 }
-            if !scope_out(narrow(mut t, take up, fn(mut u: Tx) -> u64 { 0 })) { return 3 }
-            let down = match scope_keys(a, Included(3u64), Excluded(4u64), ReadOnly) { Ok(take m) => take m, Error(_) => return 4 }
-            match narrow(mut t, take down, fn(mut u: Tx) -> u64 {
-                if fetched(fetch(u, sa, 3), 103) && scope_out(fetch(u, sa, 4)) { 0 } else { 5 }
-            }) { Ok(0) => {}, _ => return 6 }
-            if !scope_out(narrow(mut t, scope(b, ReadOnly), fn(mut u: Tx) -> u64 { 0 })) { return 7 }
-            0
-        })
-        match read { Ok(0) => {}, Ok(n) => return Error(n), Error(_) => return Error(8) }
-        // Ruling 4 (d): a ReadWrite entry over a ReadOnly one writes.
-        let three = match scope_keys(a, Included(3u64), Excluded(4u64), ReadWrite) { Ok(take m) => take m, Error(_) => return Error(9) }
-        let both = match union(scope(a, ReadOnly), three) { Ok(take m) => take m, Error(_) => return Error(10) }
-        let wrote = narrow(mut tx, take both, fn(mut t: Tx) -> u64 {
-            if let Error(_) = put(mut t, a, 3, 33) { return 1 }
-            if !scope_out(put(mut t, a, 2, 22)) { return 2 }
-            0
-        })
-        match wrote { Ok(0) => {}, Ok(n) => return Error(20 + n), Error(_) => return Error(23) }
-        // Ruling 4 (b), (e): [0, 2) and [2, 4) cover a span across both, but
-        // an inner [1, 3) lies inside neither.
-        let low = match scope_keys(a, Included(0u64), Excluded(2u64), ReadWrite) { Ok(take m) => take m, Error(_) => return Error(24) }
-        let high = match scope_keys(a, Included(2u64), Excluded(4u64), ReadWrite) { Ok(take m) => take m, Error(_) => return Error(25) }
-        let pair = match union(low, high) { Ok(take m) => take m, Error(_) => return Error(26) }
-        let spans = narrow(mut tx, take pair, fn(mut t: Tx) -> u64 {
-            if key_sum(range(t, sa, Included(0u64), Excluded(4u64))) != Some(6u64) || !scope_out(range(t, sa, Included(0u64), Excluded(5u64))) { return 1 }
-            let across = match scope_keys(a, Included(1u64), Excluded(3u64), ReadOnly) { Ok(take m) => take m, Error(_) => return 2 }
-            if !scope_out(narrow(mut t, take across, fn(mut u: Tx) -> u64 { 0 })) { return 3 }
-            let inside = match scope_keys(a, Included(1u64), Excluded(2u64), ReadOnly) { Ok(take m) => take m, Error(_) => return 4 }
-            match narrow(mut t, take inside, fn(mut u: Tx) -> u64 { 0 }) { Ok(0) => 0, _ => 5 }
-        })
-        match spans { Ok(0) => Ok(()), Ok(n) => Error(30 + n), Error(_) => Error(36) }
-    }))
-    match take second { Committed(_) => {}, _ => return false }
-    if result.unwrap(get(snapshot(db), sa, 3)) != Some(33u64) || result.unwrap(get(snapshot(db), sa, 2)) != Some(102u64) { return false }
-    // L20: a KeyScope of another store.
-    let mut other = memory_at(c, StoreId(hi: 3, lo: 4), defaults())
-    result.unwrap(create_table(mut other, spec("a", std.codec.key_u64(), std.codec.of_u64())))
-    let theirs = result.unwrap(table(mut other, "a", std.codec.key_u64(), std.codec.of_u64()))
-    match union(scope(a, ReadOnly), scope(theirs, ReadOnly)) { Error(Foreign) => {}, _ => return false }
-    let head = db.heads[0].head
-    let foreign = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
-        match narrow(mut tx, scope(theirs, ReadWrite), fn(mut t: Tx) -> u64 { 0 }) { Error(Foreign) => Ok(()), _ => Error(1) }
-    }))
-    match take foreign { Committed(_) => db.heads[0].head == head + 1, _ => false }
-}
-
-@test
-fn test_scopes(c: Clock) -> Result[(), ()] waits {
-    if law_scopes(c) { Ok(()) } else { Error(()) }
 }
 
 // J1: same J rewrites only the primary key; changing J rewrites old+new index
@@ -7840,7 +7056,7 @@ fn disk_read_frame(file: String, ctx: DiskContext, raw: Bytes, at: u64) -> Resul
 fn disk_header_bytes(ctx: DiskContext, prev_end: u64) -> Result[Bytes, Capacity] {
     let mut payload: Bytes = list.with_capacity(56)?
     list.append(mut payload, string.as_bytes("HIRSTORE"))?
-    le(mut payload, 1, 4)?
+    le(mut payload, 2, 4)?
     le(mut payload, int.widen(ctx.role), 1)?
     le(mut payload, 0, 1)?
     le(mut payload, 0, 2)?
@@ -7866,7 +7082,7 @@ fn disk_read_header(file: String, raw: Bytes, role: u8, seq: Option[u64], expect
         return Error(disk_fault(file, 0, Header))
     }
     let format = read_le(raw, 24, 4)
-    if format != 1 {
+    if format != 2 {
         return Error(Unsupported(format))
     }
     if raw[29] != 0 {
@@ -7907,7 +7123,7 @@ pub fn disk_law_frames() -> bool {
     let id = StoreId(hi: 1, lo: 2)
     let ctx = DiskContext(store: id, role: 3, seq: 7)
     let raw = result.unwrap(disk_header_bytes(ctx, 0))
-    let expected: Inline[u8, 72] =[1, 0, 1, 0, 56, 0, 0, 0, 83, 182, 203, 170, 91, 139, 51, 224, 72, 73, 82, 83, 84, 79, 82, 69, 1, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let expected: Inline[u8, 72] =[1, 0, 1, 0, 56, 0, 0, 0, 126, 117, 153, 141, 12, 209, 102, 126, 72, 73, 82, 83, 84, 79, 82, 69, 2, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     if list.len(raw) != 72 {
         return false
     }
@@ -8250,7 +7466,7 @@ pub fn disk_law_manifest() -> bool {
     let id = StoreId(hi: 1, lo: 2)
     let m = disk_genesis_fixture()
     let raw = result.unwrap(disk_manifest_bytes(id, m))
-    if list.len(raw) != 228 || std.check.xxh3(raw, 0, list.len(raw)) != 0xef84b5cbe926a0a1u64 {
+    if list.len(raw) != 228 || std.check.xxh3(raw, 0, list.len(raw)) != 0x567b9774d4ec83f8u64 {
         return false
     }
     let decoded_manifest = result.unwrap(disk_read_manifest("MANIFEST", raw))
@@ -9713,8 +8929,7 @@ pub fn open_export(d: Dir, c: Clock, attempt: Bytes, options: Options) -> Result
     if state.tips[0].head != stamp.head { return Error(ExportMismatch) }
     let live = deploy_result(capacity(state_account(state)))?
     deploy_result(over_ceiling(live, options.resident_limit))?
-    let register = deploy_result(capacity(new_register()))?
-    let mut db = empty_db(c, id, options, take register)
+    let mut db = empty_db(c, id, options)
     deploy_result(open_heads(mut db, take state))?
     db.resident = live
     db.next_node = ids
@@ -10747,7 +9962,7 @@ fn manifest_state(m: DiskManifest, all: List[Roots]) -> Result[State, Capacity] 
     }
     let mut pins: List[Pin] = list.with_capacity(list.len(m.pins))?
     for held in m.pins {
-        result.capacity_only(list.push(mut pins, Pin(name: string.from(held.name)?, branch: held.branch, version: held.version, roots: share_roots(all[k]), authority_rows: None, seq: 0)))?
+        result.capacity_only(list.push(mut pins, Pin(name: string.from(held.name)?, branch: held.branch, version: held.version, roots: share_roots(all[k]))))?
         k += 1
     }
     Ok(State(tips: take tips, pins: take pins, next_branch: m.next_branch))
@@ -11025,11 +10240,10 @@ fn open_heads(mut db: Db, take state: State) -> Result[(), Error] {
 pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
     if options.group_commits == 0 { return Error(Missing("group_commits")) }
     if options.group_bytes == 0 { return Error(Missing("group_bytes")) }
-    let register = capacity(new_register())?
     let session = disk_session(tasks, d, c, r, options)?
     let DiskSession(lock: take lock, startup: take startup, send: take send, acks: take acks, worker: take worker) = take session
     let DiskStartup(store: id, fence: fence, state: take state, live: live, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, seq: seq, segment: take segment, end_file: take end_file) = take startup
-    let mut db = empty_db(c, id, options, take register)
+    let mut db = empty_db(c, id, options)
     open_heads(mut db, take state)?
     db.fence = fence
     db.next_node = next_node
@@ -11866,7 +11080,7 @@ fn crash_install_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let mut staging = stage_migration(db, tasks, code.describe(install_old))?
     let description = install_fixture_bytes(32u64, 65u8)
     stage_activation(mut staging, 1u64, None, description, std.codec.of_bytes(), description)?
-    install_activation(mut db, take staging, None)?
+    install_activation(mut db, take staging)?
     let target = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 96u64 {
         if !typed_put(mut db, target, k, k + 1) { fail("install seed row") }
@@ -12078,7 +11292,9 @@ pub type CallRecord: codec {
     // AD1: code.revision of the entry that ran, exactly 32 bytes; None only
     // when the program was assembled without revisions. Never 32 zero bytes.
     revision: Option[Bytes],
-    authority: Bytes
+    // The code that ran: u64 n ‖ u64 s, big-endian, then the replay identity
+    // (32 bytes, or none when the launch has no identity), RUNNER-SPEC §7.
+    code: Bytes
 }
 
 // Tag 2 carries the original execution context only when a later frame
@@ -12090,7 +11306,7 @@ pub type Recorded { record: CallRecord, settle: u8, branch: Branch, base: u64, a
 
 fn call_section_bytes(rec: CallRecord, shifted: bool) -> u64 {
     let revision = match rec.revision { Some(raw) => list.len(raw), None => 0u64 }
-    22 + list.len(rec.key) + list.len(rec.args) + list.len(rec.stream) + revision + list.len(rec.authority) +
+    22 + list.len(rec.key) + list.len(rec.args) + list.len(rec.stream) + revision + list.len(rec.code) +
         (if shifted { 24u64 } else { 0u64 })
 }
 
@@ -12100,7 +11316,7 @@ fn call_checked(c: CallRecord) -> Result[(), Error] {
     if let Some(r) = c.revision {
         if list.len(r) != 32 { return Error(Missing("revision")) }
     }
-    if !call_authority_size(list.len(c.authority)) { return Error(Missing("authority")) }
+    if !call_code_size(list.len(c.code)) { return Error(Missing("code")) }
     Ok(())
 }
 
@@ -12112,7 +11328,7 @@ fn check_completion_record(complete: Completion, rec: Option[CallRecord]) -> Res
     Ok(())
 }
 
-fn call_authority_size(size: u64) -> bool { size == 64 || size == 96 }
+fn call_code_size(size: u64) -> bool { size == 16 || size == 48 }
 
 type JournalOp: shareable + send {
     key: Bytes,
@@ -12180,9 +11396,9 @@ fn journal_decode(file: String, raw: Bytes) -> Result[JournalCommit, Error] {
                 32 => Some(take revision_bytes),
                 _ => return Error(disk_fault(file, revision_at, Malformed))
             }
-            let authority_at = at
-            let authority = disk_blob(file, raw, mut at, 96)?
-            if !call_authority_size(list.len(authority)) { return Error(disk_fault(file, authority_at, Malformed)) }
+            let code_at = at
+            let code = disk_blob(file, raw, mut at, 48)?
+            if !call_code_size(list.len(code)) { return Error(disk_fault(file, code_at, Malformed)) }
             let way: u8 = int.truncate(disk_number(file, raw, mut at, 1)?)
             let settlement: Option[Settlement] = match way {
                 0 => None,
@@ -12190,7 +11406,7 @@ fn journal_decode(file: String, raw: Bytes) -> Result[JournalCommit, Error] {
                 2 => Some(decode_settlement(file, raw, mut at, way)?),
                 _ => return Error(disk_fault(file, at - 1, Malformed)),
             }
-            let rec = CallRecord(key: take key, args: take args, stream: take stream, revision: take revision, authority: take authority)
+            let rec = CallRecord(key: take key, args: take args, stream: take stream, revision: take revision, code: take code)
             call = Some(CallSection(record: take rec, settlement: settlement))
         }
     }
@@ -12206,9 +11422,9 @@ fn journal_decode(file: String, raw: Bytes) -> Result[JournalCommit, Error] {
 }
 
 // AD1 (vi): the hand-written revision 0x00, 0x01, ..., 0x1f.
-fn authority_vector() -> Bytes {
+fn code_vector() -> Bytes {
     let mut raw: Bytes = list.new()
-    result.unwrap(list.fill(mut raw, 96, 9u8))
+    result.unwrap(list.fill(mut raw, 48, 9u8))
     raw
 }
 
@@ -12239,7 +11455,7 @@ pub fn journal_law_payload() -> bool {
     result.unwrap(blob(mut payload, string.as_bytes("arguments")))
     result.unwrap(blob(mut payload, string.as_bytes("stream")))
     result.unwrap(blob(mut payload, revision_vector()))
-    result.unwrap(blob(mut payload, authority_vector()))
+    result.unwrap(blob(mut payload, code_vector()))
     result.unwrap(le(mut payload, 0, 1))
     result.unwrap(le(mut payload, 0, 1))
     result.unwrap(le(mut payload, 2, 4))
@@ -12744,7 +11960,7 @@ fn journal_write_end(d: Dir, id: StoreId, seq: u64, end: u64, mut end_file: Opti
     journal_set(mut raw, 4, 56, 4)
     let magic = string.as_bytes("HIRSTORE")
     for i in 0u64 .. 8 { raw[16 + i] = magic[i] }
-    journal_set(mut raw, 24, 1, 4)
+    journal_set(mut raw, 24, 2, 4)
     journal_set(mut raw, 28, 4, 1)
     journal_set(mut raw, 32, id.hi, 8)
     journal_set(mut raw, 40, id.lo, 8)
@@ -13166,7 +12382,7 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(blob(mut payload, string.as_bytes("arguments")))
     result.unwrap(blob(mut payload, string.as_bytes("stream")))
     result.unwrap(blob(mut payload, revision_vector()))
-    result.unwrap(blob(mut payload, authority_vector()))
+    result.unwrap(blob(mut payload, code_vector()))
     result.unwrap(le(mut payload, 0, 1))
     if list.len(payload) != 289 { return false }
     let raw = result.unwrap(disk_seal(DiskContext(store: id, role: 2, seq: seq), 72, 0x0011, 1, payload))
@@ -13192,7 +12408,7 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     if let Some(_) = result.unwrap(recorded(reopened, b, 1)) { return false }
     if std.omap.len(reopened.heads[0].roots.streams) != 1 { return false }
     result.unwrap(close(take reopened))
-    // AD1: a one-byte entry revision is malformed even when the authority
+    // AD1: a one-byte entry revision is malformed even when the code
     // and settlement fields are present and the checksum matches.
     let bad_dir = disk_test_directory(d)
     let bad = result.unwrap(open(tasks, bad_dir, c, r, options))
@@ -13203,9 +12419,9 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(list.fill(mut one, 1, 7u8))
     let mut short = result.unwrap(copied(list.slice(payload, 0, 152)))
     result.unwrap(blob(mut short, one))
-    result.unwrap(blob(mut short, authority_vector()))
+    result.unwrap(blob(mut short, code_vector()))
     result.unwrap(le(mut short, 0, 1))
-    if list.len(short) != 258 { return false }
+    if list.len(short) != 210 { return false }
     let short_raw = result.unwrap(disk_seal(DiskContext(store: bad_id, role: 2, seq: bad_seq), 72, 0x0011, 1, short))
     let short_path = result.unwrap(disk_path("j-", bad_seq, ""))
     let mut short_file = result.unwrap(host.open(bad_dir, short_path, Append))
@@ -13662,27 +12878,27 @@ pub fn journal_law_call_vector() -> bool {
     result.unwrap(list.fill(mut entry_key, 32, 1u8))
     let mut args: Bytes = list.new()
     result.unwrap(list.fill(mut args, 16, 2u8))
-    let call = Some(CallSection(record: CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: result.unwrap(copied(stream)), revision: Some(revision_vector()), authority: authority_vector()), settlement: None))
+    let call = Some(CallSection(record: CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: result.unwrap(copied(stream)), revision: Some(revision_vector()), code: code_vector()), settlement: None))
     let ci = CallInfo(id: CallId(store: StoreId(hi: 1, lo: 2), branch: 0, version: 257), at: 1234, seed: 0)
     let raw = result.unwrap(encode_sections(ci, data, streams, call, 7, 72))
     // Independent layout using Python struct and libxxhash XXH3.
-    let expected: Inline[u8, 406] = [17, 0, 1, 0, 134, 1, 0, 0, 185, 201, 103, 251, 65, 238, 226, 240, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 210, 4, 0, 0, 0, 0, 0, 0, 3, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 34, 0, 0, 0, 0, 0, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1, 0, 0, 0, 1, 8, 0, 0, 0, 115, 116, 114, 101, 97, 109, 48, 48, 81, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 3, 3, 3, 3, 3, 3, 3, 3, 2, 32, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 8, 0, 0, 0, 115, 116, 114, 101, 97, 109, 48, 48, 32, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 96, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0]
-    if list.len(raw) != 406 { return false }
-    for i in 0u64 .. 406 { if raw[i] != expected[i] { return false } }
-    // AM7: without the replay identity the policy revision and allowances remain.
-    let available = authority_vector()
-    let without_identity = Some(CallSection(record: CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: result.unwrap(copied(stream)), revision: Some(revision_vector()), authority: result.unwrap(copied(list.slice(available, 0, 64)))), settlement: None))
+    let expected: Inline[u8, 358] = [17, 0, 1, 0, 86, 1, 0, 0, 139, 40, 59, 164, 111, 170, 41, 45, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 210, 4, 0, 0, 0, 0, 0, 0, 3, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 34, 0, 0, 0, 0, 0, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1, 0, 0, 0, 1, 8, 0, 0, 0, 115, 116, 114, 101, 97, 109, 48, 48, 81, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 3, 3, 3, 3, 3, 3, 3, 3, 2, 32, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 8, 0, 0, 0, 115, 116, 114, 101, 97, 109, 48, 48, 32, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 48, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0]
+    if list.len(raw) != 358 { return false }
+    for i in 0u64 .. 358 { if raw[i] != expected[i] { return false } }
+    // Without the replay identity the entry's two allowances remain.
+    let available = code_vector()
+    let without_identity = Some(CallSection(record: CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: result.unwrap(copied(stream)), revision: Some(revision_vector()), code: result.unwrap(copied(list.slice(available, 0, 16)))), settlement: None))
     let short = result.unwrap(encode_sections(ci, data, streams, without_identity, 7, 72))
-    if list.len(short) != 374 { return false }
-    match result.unwrap(journal_decode("j-7", list.slice(short, 16, 374))).call {
-        Some(c) => if c.record.authority != list.slice(available, 0, 64) || !revision_is_vector(c.record.revision) { return false },
+    if list.len(short) != 326 { return false }
+    match result.unwrap(journal_decode("j-7", list.slice(short, 16, 326))).call {
+        Some(c) => if c.record.code != list.slice(available, 0, 16) || !revision_is_vector(c.record.revision) { return false },
         None => return false,
     }
     // None is a zero length: 4 bytes, not 36, and reads back as None.
-    let no_revision = Some(CallSection(record: CallRecord(key: take entry_key, args: take args, stream: take stream, revision: None, authority: authority_vector()), settlement: None))
+    let no_revision = Some(CallSection(record: CallRecord(key: take entry_key, args: take args, stream: take stream, revision: None, code: code_vector()), settlement: None))
     let bare = result.unwrap(encode_sections(ci, data, streams, no_revision, 7, 72))
-    if list.len(bare) != 374 { return false }
-    match result.unwrap(journal_decode("j-7", list.slice(bare, 16, 374))).call { Some(c) => if !revision_is_none(c.record.revision) { return false }, None => return false }
+    if list.len(bare) != 326 { return false }
+    match result.unwrap(journal_decode("j-7", list.slice(bare, 16, 326))).call { Some(c) => if !revision_is_none(c.record.revision) { return false }, None => return false }
     true
 }
 
@@ -13712,7 +12928,7 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     result.unwrap(list.fill(mut entry_key, 32, 1u8))
     let mut args: Bytes = list.new()
     result.unwrap(list.fill(mut args, 16, 2u8))
-    let checked = CallRecord(key: take entry_key, args: take args, stream: take stream, revision: take revision, authority: authority_vector())
+    let checked = CallRecord(key: take entry_key, args: take args, stream: take stream, revision: take revision, code: code_vector())
     call_checked(checked)?
     let call = Some(CallSection(record: take checked, settlement: None))
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, db.heads[i].at + 1, db.heads[i].at)
@@ -14277,189 +13493,6 @@ pub fn law_step_bounds(c: Clock) -> bool waits {
 @test
 fn test_step_bounds(c: Clock) -> Result[(), ()] waits {
     if law_step_bounds(c) { Ok(()) } else { Error(()) }
-
-}
-type AuthorityObserver: send {
-    followed: Latest[Snapshot],
-    reader: AuthorityReader,
-    source: Shape[u64, u64],
-    ready: Receiver[()]
-}
-
-fn observe_authority(take observer: AuthorityObserver) -> bool waits {
-    result.unwrap(channel.receive(observer.ready))
-    let observed = latest.read(observer.followed)
-    let stamp = load(observer.reader)
-    version(observed) == 2 && stamp == 2 && snapshot_seq(observed) == stamp &&
-        result.unwrap(get(observed, observer.source, 1)) == Some(42u64)
-}
-
-fn authority_publish_law(mut db: Db, tasks: Tasks) -> bool waits {
-    result.unwrap(create_table(mut db, spec("authorities", std.codec.key_u64(), std.codec.of_u64())))
-    let source = result.unwrap(table(mut db, "authorities", std.codec.key_u64(), std.codec.of_u64()))
-    let mut names: List[String] = list.new()
-    result.unwrap(list.push(mut names, "authorities"))
-    result.unwrap(declare_authority(mut db, names))
-    let main_line = main_branch(db)
-    let followed = result.unwrap(follow(mut db, main_line))
-    let reader = authority_reader(db)
-    let (ready, seen): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
-    let observer = AuthorityObserver(followed: take followed, reader: dup(reader), source: shape(source), ready: take seen)
-    let waiting = result.unwrap(task.spawn(tasks, bytes 65536u64, take observer, observe_authority))
-    if !typed_put(mut db, source, 1, 42) { return false }
-    result.unwrap(channel.send(ready, ()))
-    result.unwrap(task.join(take waiting))
-}
-
-pub fn law_authority_publish(c: Clock, tasks: Tasks) -> bool waits {
-    let mut db = test_db(c, 1073741824)
-    authority_publish_law(mut db, tasks)
-}
-
-@test
-fn test_authority_publish(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
-    if law_authority_publish(c, tasks) { Ok(()) } else { Error(()) }
-}
-
-pub fn disk_law_authority_publish(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let mut options = defaults()
-    options.checkpoint_task_bytes = 1048576
-    options.resident_limit = 1048576
-    options.group_commits = 4
-    let mut db = result.unwrap(open(tasks, d, c, r, options))
-    let good = authority_publish_law(mut db, tasks)
-    result.unwrap(close(take db))
-    good
-}
-
-@test
-fn disk_test_authority_publish(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if disk_law_authority_publish(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
-}
-
-fn authority_fixture(mut db: Db) -> Table[u64, u64] waits {
-    result.unwrap(create_table(mut db, spec("permissions", std.codec.key_u64(), std.codec.of_u64())))
-    result.unwrap(create_table(mut db, spec("records", std.codec.key_u64(), std.codec.of_u64())))
-    let mut names: List[String] = list.new()
-    result.unwrap(list.push(mut names, "permissions"))
-    result.unwrap(declare_authority(mut db, names))
-    result.unwrap(table(mut db, "records", std.codec.key_u64(), std.codec.of_u64()))
-}
-
-fn law_caller() -> Caller { Caller(issuer: 1, subject: list.new()) }
-
-fn meter_policy(tx: Tx, who: Caller) -> Result[KeyScope, Capacity] {
-    // The miss still writes a Read::Point for this key.
-    match metered_read(tx.policy_fault, fetch_bytes(tx, 1u32, key_word(int.widen(who.issuer)))) {
-        Ok(None) => Ok(none(tx)),
-        Error(Full(_)) => Ok(everything(tx)),
-        _ => fail("expected a policy read of a missing key")
-    }
-}
-
-fn meter_accepts(take granted: Result[Authorized, Stop], fits: bool) -> bool {
-    match take granted {
-        Ok(auth) => fits && !auth.scope.all,
-        Error(Policy) => !fits,
-        Error(_) => false
-    }
-}
-
-// L26. 32 for the isolate, 48 for its two log nodes, 64 for the status
-// register and its two arcs, 8 for the key, 16 each for the physical key
-// and its copy, and 224 for the first four 56-byte read entries.
-pub fn law_authority_meter(c: Clock) -> bool waits {
-    let mut db = test_db(c, 1073741824)
-    let _ = authority_fixture(mut db)
-    let stream = key_word(24)
-    let request = request_digest(stream, stream)
-    for n in 407u64 .. 409 {
-        let fits = n == 408
-        let admission = result.unwrap(admit(mut db, stream, 0, request))
-        let complete = match take admission {
-            Admitted(take accepted) => take accepted,
-            Abandoned(take accepted) => take accepted,
-            _ => return false,
-        }
-        let plan = Plan(n_p: n, s_p: 8192, n_e: 65536, s_e: 8192, reply_max: 4096)
-        let head = result.unwrap(serve(mut db, take complete, plan, None, law_caller(), code.describe(meter_policy), fn(mut tx: Tx) -> Result[Bytes, Bytes] {
-            Ok(list.new())
-        }))
-        match head {
-            Committed(receipt) => if !fits || receipt.scope.all { return false },
-            Failed(_, Policy) => if fits { return false },
-            _ => return false
-        }
-        let observed = result.unwrap(look(snapshot(db), None, fn(tx: Tx) -> bool {
-            meter_accepts(authorize(tx, law_caller(), code.describe(meter_policy), n, 8192), fits)
-        }))
-        match observed {
-            Seen(seen) => {
-                if !seen.value || list.len(seen.reads) != (if fits { 1u64 } else { 0u64 }) { return false }
-            },
-            _ => return false
-        }
-    }
-    true
-}
-
-@test
-fn test_authority_meter(c: Clock) -> Result[(), ()] waits {
-    if law_authority_meter(c) { Ok(()) } else { Error(()) }
-}
-
-fn authority_steps_policy(tx: Tx, who: Caller) -> Result[KeyScope, Capacity] {
-    let permissions = match catalog_table(tx, "permissions", std.codec.key_u64(), std.codec.of_u64()) {
-        Ok(take t) => take t,
-        Error(_) => return Ok(none(tx))
-    }
-    // The one-leaf read takes 152 steps. Reading from the split data tree
-    // after the unrelated growth leaves it over the bound.
-    let result = bound steps 160u64 { fetch(tx, shape(permissions), int.widen(who.issuer)) }
-    match result {
-        Ok(Ok(Some(7u64))) => Ok(everything(tx)),
-        _ => Ok(none(tx))
-    }
-}
-
-fn policy_at(s: Snapshot) -> Authorized {
-    let verdict = result.unwrap(look(s, None, fn(tx: Tx) -> Result[Authorized, Stop] {
-        authorize(tx, law_caller(), code.describe(authority_steps_policy), 65536, 8192)
-    }))
-    match take verdict {
-        Seen(Seen(value: take grant, version: _, reads: _)) => result.unwrap(take grant),
-        _ => fail("expected a successful policy evaluation")
-    }
-}
-
-pub fn law_authority_equal_seq(c: Clock) -> bool waits {
-    let mut db = test_db(c, 1073741824)
-    let records = authority_fixture(mut db)
-    let permissions = result.unwrap(table(mut db, "permissions", std.codec.key_u64(), std.codec.of_u64()))
-    if !typed_put(mut db, permissions, 1, 7) { return false }
-    let before = policy_at(snapshot(db))
-    let grew = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        for i in 0u64 .. 10000 { put(mut tx, records, i, i)? }
-        Ok(())
-    }))
-    match grew { Committed(_) => {}, _ => return false }
-    let after = policy_at(snapshot(db))
-    if before.seq != after.seq || !scope_within(before.scope, after.scope) || !scope_within(after.scope, before.scope) || !before.scope.all {
-        return false
-    }
-    // Creating another grant target changes the catalog without touching the declared rows.
-    result.unwrap(create_table(mut db, spec("other", std.codec.key_u64(), std.codec.of_u64())))
-    let schema = policy_at(snapshot(db))
-    schema.seq == after.seq + 1
-}
-
-@test
-fn test_authority_equal_seq(c: Clock) -> Result[(), ()] waits {
-    if law_authority_equal_seq(c) { Ok(()) } else { Error(()) }
-}
-
-fn reserve_policy(tx: Tx, caller: Caller) -> Result[KeyScope, Capacity] {
-    Ok(everything(tx))
 }
 
 fn reserve_tx(mut tx: Tx, fault: bool) -> Result[Bytes, Bytes] {
@@ -14470,20 +13503,17 @@ fn reserve_tx(mut tx: Tx, fault: bool) -> Result[Bytes, Bytes] {
     Ok(key_word(7))
 }
 
-// L33. AM5 and MEM-24 give 2·8192 + 4096 + 32 bytes. MEM-30 gives
-// 8192 + 8192 + 33 fixed calls + at most 4096/8 issued-ID latches.
+// L33. AM5 and MEM-24 give 4096 + 32 bytes. MEM-30 gives 8192 body
+// steps + 6 fixed calls + at most 4096/8 issued-ID latches.
 pub fn law_call_reserve(c: Clock) -> bool waits {
-    let byte_total = 20512u64
-    let step_total = 16929u64
-    let plan = Plan(n_p: 8192, s_p: 8192, n_e: 4096, s_e: 8192, reply_max: 4096)
+    let byte_total = 4128u64
+    let step_total = 8710u64
+    let plan = Plan(n_e: 4096, s_e: 8192, reply_max: 4096)
     let Some(grant) = call_reserves(plan) else { return false }
     if grant.retained != byte_total || grant.steps != step_total { return false }
     let mut db = test_db(c, 1073741824)
-    let _ = authority_fixture(mut db)
     let key = key_word(23)
     let request = request_digest(key, key)
-    let author = law_caller()
-    let policy = code.describe(reserve_policy)
     let no_record: Option[CallRecord] = None
     for fault in [false, true] {
         let p = if fault { 1u64 } else { 0u64 }
@@ -14492,7 +13522,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
         let ci = next_call_info(db)
         // One step is the call of metered_draft outside its own reserve.
         let rejected = bound steps step_total {
-            metered_draft(db, complete, ci, plan, grant, no_record, author, policy,
+            metered_draft(db, complete, ci, plan, grant, no_record,
                 scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] { reserve_tx(mut tx, fault) })
         }
         match take rejected {
@@ -14500,7 +13530,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
             _ => return false,
         }
         let admitted = bound steps step_total + 1u64 {
-            metered_draft(db, complete, ci, plan, grant, no_record, author, policy,
+            metered_draft(db, complete, ci, plan, grant, no_record,
                 scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] { reserve_tx(mut tx, fault) })
         }
         match take admitted {
@@ -14512,7 +13542,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
             _ => return false,
         }
         let short = bound bytes byte_total - 1u64 {
-            serve(mut db, take complete, plan, None, author, policy,
+            serve(mut db, take complete, plan, None,
                 scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] { reserve_tx(mut tx, fault) })
         }
         match take short {
@@ -14523,7 +13553,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
         let retry = result.unwrap(admit(mut db, key, p, request))
         let Abandoned(take completion) = take retry else { return false }
         let exact = bound bytes byte_total {
-            serve(mut db, take completion, plan, None, author, policy,
+            serve(mut db, take completion, plan, None,
                 scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] { reserve_tx(mut tx, fault) })
         }
         match take exact {
@@ -14538,15 +13568,16 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
     }
     let admission = result.unwrap(admit(mut db, key, 2, request))
     let Admitted(take complete) = take admission else { return false }
-    let small = Plan(n_p: plan.n_p, s_p: plan.s_p, n_e: 1024, s_e: plan.s_e, reply_max: plan.reply_max)
-    // The two log nodes and a 944-byte reply fit in 1024. The 73-byte
-    // reply-row prefix pushes its stored copy over the same entry grant.
-    let kept_inside = match serve(mut db, take complete, small, None, author, policy, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+    let small = Plan(n_e: 1024, s_e: plan.s_e, reply_max: plan.reply_max)
+    // The two log nodes (48 bytes) and a 944-byte reply fit in 1024. The
+    // reply row's stored copy, 41 + 944 = 985 bytes rounded up to 992, does
+    // not fit in the 32 left.
+    let kept_inside = match serve(mut db, take complete, small, None, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         let mut output: Bytes = result.unwrap(list.with_capacity(944))
         result.unwrap(list.fill(mut output, 944, 7u8))
         Ok(take output)
     }) {
-        Ok(Failed(_, OutOfBytes(problem))) => problem.requested == 1024 && problem.available == 32,
+        Ok(Failed(_, OutOfBytes(problem))) => problem.requested == 992 && problem.available == 32,
         _ => false,
     }
     kept_inside && reserve_settles_pin(c, 10, plan) && reserve_settles_pin(c, 100000, plan)
@@ -14572,7 +13603,6 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let source = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    result.unwrap(declare_authority(mut db, list.new()))
     reserve_pinned_data(mut db, source, rows)
     let base = snapshot(db)
     result.unwrap(pin(mut db, "reserve", base))
@@ -14591,17 +13621,15 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     let Some(grant) = call_reserves(plan) else { return false }
     let ci = next_call_info(db)
     let no_record: Option[CallRecord] = None
-    let caller = law_caller()
-    let policy = code.describe(reserve_policy)
-    let short = bound steps 16929u64 {
-        metered_draft(db, complete, ci, plan, grant, no_record, caller, policy,
+    let short = bound steps grant.steps {
+        metered_draft(db, complete, ci, plan, grant, no_record,
             fn(mut tx: Tx) -> Result[Bytes, Bytes] { Ok(key_word(7)) })
     }
     match take short {
-        Ok(Error(DraftStopped(OutOfSteps(16929u64)))) => (),
+        Ok(Error(DraftStopped(OutOfSteps(used)))) => if used != grant.steps { return false },
         _ => return false,
     }
-    match serve(mut db, take complete, plan, None, caller, policy, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+    match serve(mut db, take complete, plan, None, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         Ok(key_word(7))
     }) {
         Ok(Committed(receipt)) => receipt.reply == key_word(7) && db.settled == unsettled,

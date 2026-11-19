@@ -218,7 +218,6 @@ fn w3c_large(mut tx: store.Tx, h: W3cHandles, author: Caller, take count: u32) -
 
 fn w3c_registry() -> Registry[(), W3cHandles] {
     let mut r: Registry[(), W3cHandles] = registry()
-    result.unwrap(policy(mut r, code.describe(public_access), list.new(), 65536u64, 8192u64))
     result.unwrap(transact(mut r, code.describe(w3c_put), 65536u64, DEFAULT_STEPS))
     result.unwrap(transact(mut r, code.describe(w3c_large), 65536u64, DEFAULT_STEPS))
     result.unwrap(compute(mut r, code.describe(w3c_bytes), 65536u64, DEFAULT_STEPS))
@@ -267,9 +266,7 @@ fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
     result.unwrap(list.push(mut owner.entries, w3c_key(code.identity(code.describe(w3c_bytes)), std.codec.of_u32(), big_codec)))
     result.unwrap(list.push(mut owner.entries, w3c_retired()))
     let mut entries = w3c_registry()
-    let configured = result.unwrap(take_policy(mut entries))
-    result.unwrap(store.declare_authority(mut db, configured.reads))
-    let head = Head(db: take db, r: take entries, key_policy: take configured, replay_identity: list.new(),
+    let head = Head(db: take db, r: take entries, replay_identity: list.new(),
         h: W3cHandles(data: data), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64)
     W3cRig(head: take head, owner: take owner, work: wire_work(), requests: take requests, releases: take releases, inbox: take inbox, policy: take h)
 }

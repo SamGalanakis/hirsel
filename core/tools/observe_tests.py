@@ -119,7 +119,7 @@ pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Ta
     let mut policy_task = take policy_handle
     let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
     let db = store.memory(c, r, store.defaults())
-    let d = Drive(out: out, err: err, authority: store.authority_reader(db), head: take head, post: runner.post(mail), clock: c,
+    let d = Drive(out: out, err: err, head: take head, post: runner.post(mail), clock: c,
         tasks: tasks, net: n, random: r, policy: ingress.share(policy),
         token: result.unwrap(clone(ingress.principal(principal))), accepted: None)
     let mut cn = conn(d, 1u64)

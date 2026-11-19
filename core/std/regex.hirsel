@@ -2000,6 +2000,8 @@ pub opaque type Regex: shareable + send {
     names: List[u32],
     name_text: Bytes,
     prefilter: Bytes,
+    pref_plan: Prefilter,
+    pref_reverse_start: u64,
     charge: u64,
     group_count: u64,
     class_count: u64,
@@ -2484,7 +2486,9 @@ type Assembler {
     rev: bool,
     ops_used: u64,
     edges_used: u64,
-    quit_non_ascii: bool
+    quit_non_ascii: bool,
+    pref_node: u64,
+    pref_start: u64
 }
 
 fn admit_u32(n: u64) -> Result[List[u32], Error] {
@@ -2770,6 +2774,9 @@ fn emit_seq(h: Hir, mut a: Assembler, first: u64, following: u64) -> u64 {
     let mut result = following
     let mut at = sequence_entry(h, first, rev)
     while at != 0 {
+        if rev && at == a.pref_node {
+            a.pref_start = result
+        }
         result = emit_atom(h, mut a, at, result)
         let n = read(h.nodes, at)
         at = if rev {
@@ -2953,54 +2960,549 @@ fn write_names(p: String, h: Hir, i: u64, mut ns: NameTable) {
     }
 }
 
-fn required_prefix(h: Hir) -> (u8, u64) {
-    let root = read(h.nodes, 0)
-    if root.first == 0 || root.more != 0 {
-        return (0, 0)
+const NO_PREFILTER: u32 = 0
+
+const MEMCHR: u32 = 1
+
+const MEMMEM: u32 = 2
+
+const TEDDY: u32 = 3
+
+const REVERSE_SUFFIX: u32 = 4
+
+const REVERSE_INNER: u32 = 5
+
+const MAX_LITERALS: u64 = 250
+
+const SHARED_LITERAL_WIDTH: u64 = 8
+
+const MAX_LITERAL_WIDTH: u64 = 100
+
+type Needle: key {
+    items: Inline[u8, 8],
+    width: u8,
+    exact: bool
+}
+
+type Needles: key {
+    values: Inline[Needle, 250],
+    linear: Inline[u8, 100],
+    end: u64,
+    full: bool
+}
+
+type Prefilter: key {
+    kind: u32,
+    width: u64,
+    literals: u64,
+    rare_a: u64,
+    rare_b: u64,
+    bytes_count: u64,
+    node_id: u64
+}
+
+fn no_prefilter() -> Prefilter {
+    Prefilter(kind: NO_PREFILTER, width: 0, literals: 0, rare_a: 0, rare_b: 0, bytes_count: 0, node_id: 0)
+}
+
+fn blank_needle() -> Needle {
+    Needle(items:[0; 8], width: 0, exact: true)
+}
+
+fn needle_width(needle: Needle) -> u64 {
+    int.widen(needle.width)
+}
+
+fn truncate_needle(mut needle: Needle, width: u64) {
+    if needle_width(needle) > width {
+        needle.width = int.narrow(width)
+        needle.exact = false
     }
-    let first = read(h.nodes, root.first)
-    if first.kind == LITERAL && first.a < 128 {
-        return (int.narrow(first.a), 1)
+}
+
+fn append_scalar(mut needle: Needle, ch: u64) {
+    if !needle.exact {
+        return
     }
-    if first.kind == REPEAT && first.a > 0 {
-        let repeated = read(h.nodes, first.first)
-        if repeated.kind == LITERAL && repeated.a < 128 {
-            return (int.narrow(repeated.a), if first.a < 10 {
-                first.a
-            } else {
-                10
-            })
+    let width = utf8_width(ch)
+    for i in 0u64 .. width {
+        if needle_width(needle) == SHARED_LITERAL_WIDTH {
+            needle.exact = false
+            break
+        }
+        needle.items[needle_width(needle)] = int.narrow(byte_scalar(ch, width, i))
+        needle.width += 1
+    }
+}
+
+fn close_needles(mut needles: Needles, first: u64) {
+    for i in first .. needles.end {
+        needles.values[i].exact = false
+    }
+}
+
+fn any_exact(needles: Needles, first: u64) -> bool {
+    for i in first .. needles.end {
+        if needles.values[i].exact {
+            return true
         }
     }
-    (0, 0)
+    false
+}
+
+fn extract_class(h: Hir, n: Node, mut needles: Needles, first: u64, max_end: u64) {
+    let old_width = needles.end - first
+    let mut items: Inline[u64, 10] =[0; 10]
+    let mut used: u64 = 0
+    for i in n.a .. n.b {
+        let lo: u64 = int.widen(h.ranges[2 * i])
+        let hi: u64 = int.widen(h.ranges[2 * i + 1])
+        if hi - lo + 1 > 10 - used {
+            close_needles(mut needles, first)
+            return
+        }
+        for ch in lo .. (hi + 1) {
+            items[used] = ch
+            used += 1
+        }
+    }
+    if used == 0 || old_width * used > max_end - first {
+        close_needles(mut needles, first)
+        return
+    }
+    let mut i = old_width
+    while i != 0 {
+        i -= 1
+        let seed = needles.values[first + i]
+        let dst = first + i * used
+        for j in 0u64 .. used {
+            needles.values[dst + j] = seed
+            append_scalar(mut needles.values[dst + j], items[j])
+        }
+    }
+    needles.end = first + old_width * used
+}
+
+fn extract_atom(h: Hir, id: u64, mut needles: Needles, first: u64, max_end: u64) {
+    let n = read(h.nodes, id)
+    if n.kind == LITERAL {
+        for i in first .. needles.end {
+            append_scalar(mut needles.values[i], n.a)
+        }
+    } else if n.kind == CHAR_SET {
+        extract_class(h, n, mut needles, first, max_end)
+    } else if n.kind == REPEAT {
+        // A zero-minimum repetition preserves the prefix accumulated so far.
+        // Its skip path can continue, but that prefix alone remains mandatory.
+        let mut i: u64 = 0
+        while i < n.a && i < 10 && any_exact(needles, first) {
+            extract_atom(h, n.first, mut needles, first, max_end)
+            i += 1
+        }
+        if n.a != n.b || n.a > 10 {
+            close_needles(mut needles, first)
+        }
+    } else if n.kind == CAPTURE || n.kind == SCOPED {
+        if n.more == 0 {
+            extract_sequence(h, n.first, mut needles, first, max_end)
+        } else {
+            // The caller's prefix survives every nested alternative.
+            close_needles(mut needles, first)
+        }
+    }
+}
+
+fn extract_sequence(h: Hir, first_atom: u64, mut needles: Needles, first: u64, max_end: u64) {
+    let mut node_id = first_atom
+    while node_id != 0 && any_exact(needles, first) {
+        extract_atom(h, node_id, mut needles, first, max_end)
+        node_id = read(h.nodes, node_id).successor
+    }
+}
+
+fn extract_prefixes(h: Hir, mut needles: Needles) {
+    let mut tail = read(h.nodes, 0).more
+    let mut branches: u64 = 1
+    while tail != 0 && branches <= MAX_LITERALS {
+        branches += 1
+        tail = read(h.nodes, tail).more
+    }
+    if branches > MAX_LITERALS {
+        needles.full = true
+        return
+    }
+    // Split the fixed arena among arms so each contributes at least one prefix.
+    let per_arm = MAX_LITERALS / branches
+    let mut arm: u64 = 0
+    loop {
+        let start = needles.end
+        needles.values[start] = blank_needle()
+        needles.end += 1
+        let n = read(h.nodes, arm)
+        extract_sequence(h, n.first, mut needles, start, start + per_arm)
+        if n.more == 0 {
+            break
+        }
+        arm = n.more
+    }
+}
+
+fn same_head(a: Needle, b: Needle, width: u64) -> bool {
+    for i in 0u64 .. width {
+        if a.items[i] != b.items[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn dedup_needles(mut needles: Needles) {
+    let mut keep: u64 = 0
+    for i in 0u64 .. needles.end {
+        let x = needles.values[i]
+        let mut j: u64 = 0
+        while j < keep {
+            let y = needles.values[j]
+            if x.width == y.width && same_head(x, y, needle_width(x)) {
+                break
+            }
+            j += 1
+        }
+        if j == keep {
+            needles.values[keep] = x
+            keep += 1
+        }
+    }
+    needles.end = keep
+}
+
+fn trim_needles(mut needles: Needles, width: u64) {
+    for i in 0u64 .. needles.end {
+        truncate_needle(mut needles.values[i], width)
+    }
+    dedup_needles(mut needles)
+}
+
+fn common_literal_prefix(needles: Needles) -> u64 {
+    let first = needles.values[0]
+    let mut width = needle_width(first)
+    for i in 1u64 .. needles.end {
+        let current = needles.values[i]
+        let other = needle_width(current)
+        let max = if other < width {
+            other
+        } else {
+            width
+        }
+        let mut same: u64 = 0
+        while same < max && first.items[same] == current.items[same] {
+            same += 1
+        }
+        width = same
+    }
+    width
+}
+
+fn byte_rank(ch: u8) -> u8 {
+    PREFILTER_RANK[int.widen(ch)]
+}
+
+fn rare_pair(needle: Needle) -> (u64, u64) {
+    let mut a: u64 = 0
+    let mut b: u64 = 1
+    if byte_rank(needle.items[b]) < byte_rank(needle.items[a]) {
+        a = 1
+        b = 0
+    }
+    for i in 2u64 .. needle_width(needle) {
+        let rank = byte_rank(needle.items[i])
+        if rank < byte_rank(needle.items[a]) {
+            b = a
+            a = i
+        } else if rank < byte_rank(needle.items[b]) {
+            b = i
+        }
+    }
+    (a, b)
+}
+
+fn choose_prefix(mut needles: Needles) -> Prefilter {
+    if needles.full || needles.end == 0 {
+        return no_prefilter()
+    }
+    let mut min_width = needle_width(needles.values[0])
+    for i in 1u64 .. needles.end {
+        let width = needle_width(needles.values[i])
+        if width < min_width {
+            min_width = width
+        }
+    }
+    if min_width == 0 {
+        return no_prefilter()
+    }
+    dedup_needles(mut needles)
+    let common = common_literal_prefix(needles)
+    if needles.end > 1 && common > 0 && common <= 3 && byte_rank(needles.values[0].items[0]) < 200 {
+        trim_needles(mut needles, 1)
+    } else if common > 4 || (common > 1 && needles.end > 16) {
+        trim_needles(mut needles, common)
+    } else {
+        let attempts: Inline[(u64, u64), 5] =[(5, 10), (4, 10), (3, 64), (2, 64), (1, 10)]
+        for (keep, limit) in attempts {
+            if needles.end <= limit {
+                break
+            }
+            trim_needles(mut needles, keep)
+        }
+    }
+    if needles.end == 1 {
+        let needle = needles.values[0]
+        if needle.width == 1 {
+            return Prefilter(kind: MEMCHR, width: 1, literals: 1, rare_a: 0, rare_b: 0, bytes_count: 1, node_id: 0)
+        }
+        let (rare_a, rare_b) = rare_pair(needle)
+        return Prefilter(kind: MEMMEM, width: needle_width(needle), literals: 1, rare_a: rare_a, rare_b: rare_b, bytes_count: needle_width(needle), node_id: 0)
+    }
+    if min_width == 1 || needles.values[0].width == 1 {
+        trim_needles(mut needles, 1)
+        if needles.end <= 3 {
+            return Prefilter(kind: MEMCHR, width: 1, literals: needles.end, rare_a: 0, rare_b: 0, bytes_count: needles.end, node_id: 0)
+        }
+        return no_prefilter()
+    }
+    if needles.end > 64 {
+        return no_prefilter()
+    }
+    let mut width: u64 = 4
+    for i in 0u64 .. needles.end {
+        let other = needle_width(needles.values[i])
+        if other < width {
+            width = other
+        }
+    }
+    trim_needles(mut needles, width)
+    Prefilter(kind: TEDDY, width: width, literals: needles.end, rare_a: 0, rare_b: 0, bytes_count: width * (32 + needles.end), node_id: 0)
+}
+
+fn mark_ascii(mut seen: Inline[bool, 128], lo: u64, hi: u64) {
+    if lo >= 128 {
+        return
+    }
+    let end: u64 = if hi >= 127 {
+        128
+    } else {
+        hi + 1
+    }
+    for c in lo .. end {
+        seen[c] = true
+    }
+}
+
+fn possible_ascii(h: Hir, id: u64, mut seen: Inline[bool, 128]) {
+    let n = read(h.nodes, id)
+    if n.kind == LITERAL {
+        if n.a < 128 {
+            seen[n.a] = true
+        }
+    } else if n.kind == CHAR_SET {
+        for i in n.a .. n.b {
+            mark_ascii(mut seen, int.widen(h.ranges[2 * i]), int.widen(h.ranges[2 * i + 1]))
+        }
+    } else if n.kind == REPEAT {
+        possible_ascii(h, n.first, mut seen)
+    } else if n.kind == CAPTURE || n.kind == SCOPED {
+        let mut arm = id
+        loop {
+            let branch = read(h.nodes, arm)
+            let mut node_id = branch.first
+            while node_id != 0 {
+                possible_ascii(h, node_id, mut seen)
+                node_id = read(h.nodes, node_id).successor
+            }
+            if branch.more == 0 {
+                break
+            }
+            arm = branch.more
+        }
+    }
+}
+
+fn choose_reverse(h: Hir, mut needles: Needles) -> Prefilter {
+    let root = read(h.nodes, 0)
+    if root.more != 0 {
+        return no_prefilter()
+    }
+    let first = read(h.nodes, root.first)
+    if first.kind == ASSERT && (first.a == START_TEXT || (first.a == START_LINE && (first.b & MULTILINE) == 0)) {
+        return no_prefilter()
+    }
+    let mut seen: Inline[bool, 128] =[false; 128]
+    let mut last: u64 = 0
+    let mut freq: u8 = 255
+    let mut node_id = root.first
+    while node_id != 0 {
+        let n = read(h.nodes, node_id)
+        if node_id != root.first && n.kind == LITERAL && n.a < 128 && !seen[n.a] {
+            let value = PREFILTER_RANK[n.a]
+            if last == 0 || value < freq || n.successor == 0 {
+                last = node_id
+                freq = value
+            }
+        }
+        possible_ascii(h, node_id, mut seen)
+        node_id = n.successor
+    }
+    if last == 0 {
+        return no_prefilter()
+    }
+    let n = read(h.nodes, last)
+    needles.values[0] = blank_needle()
+    append_scalar(mut needles.values[0], n.a)
+    needles.end = 1
+    Prefilter(kind: if n.successor == 0 {
+        REVERSE_SUFFIX
+    } else {
+        REVERSE_INNER
+    }, width: 1, literals: 1, rare_a: 0, rare_b: 0, bytes_count: 1, node_id: last)
+}
+
+// A single mandatory prefix can keep the extractor's full width. Multiple
+// prefixes share a smaller buffer because only their first lanes select Teddy.
+fn linear_atom(h: Hir, id: u64, mut output: Inline[u8, 100], mut width: u64) -> bool {
+    let n = read(h.nodes, id)
+    if n.kind == LITERAL {
+        let scalar_width = utf8_width(n.a)
+        for offset in 0u64 .. scalar_width {
+            if width == MAX_LITERAL_WIDTH {
+                return false
+            }
+            output[width] = int.narrow(byte_scalar(n.a, scalar_width, offset))
+            width += 1
+        }
+        return true
+    }
+    if n.kind == CAPTURE || n.kind == SCOPED {
+        return n.more == 0 && linear_sequence(h, n.first, mut output, mut width)
+    }
+    if n.kind == REPEAT {
+        let mut repeated: u64 = 0
+        while repeated < n.a && repeated < 10 {
+            if !linear_atom(h, n.first, mut output, mut width) {
+                return false
+            }
+            repeated += 1
+        }
+        return repeated == n.a && n.a == n.b
+    }
+    n.kind == EMPTY || n.kind == ASSERT
+}
+
+fn linear_sequence(h: Hir, id: u64, mut output: Inline[u8, 100], mut width: u64) -> bool {
+    let mut at = id
+    while at != 0 {
+        if !linear_atom(h, at, mut output, mut width) {
+            return false
+        }
+        at = read(h.nodes, at).successor
+    }
+    true
+}
+
+fn linear_pair(output: Inline[u8, 100], width: u64) -> (u64, u64) {
+    let mut a: u64 = 0
+    let mut b: u64 = 1
+    if byte_rank(output[b]) < byte_rank(output[a]) {
+        a = 1
+        b = 0
+    }
+    for i in 2u64 .. width {
+        let rank = byte_rank(output[i])
+        if rank < byte_rank(output[a]) {
+            b = a
+            a = i
+        } else if rank < byte_rank(output[b]) {
+            b = i
+        }
+    }
+    (a, b)
+}
+
+fn choose_prefilter(h: Hir, mut needles: Needles) -> Prefilter {
+    let root = read(h.nodes, 0)
+    if root.more == 0 {
+        let mut width: u64 = 0
+        let _ = linear_sequence(h, root.first, mut needles.linear, mut width)
+        if width > SHARED_LITERAL_WIDTH {
+            let (a, b) = linear_pair(needles.linear, width)
+            return Prefilter(kind: MEMMEM, width: width, literals: 1, rare_a: a, rare_b: b, bytes_count: width, node_id: 0)
+        }
+    }
+    extract_prefixes(h, mut needles)
+    let p = choose_prefix(mut needles)
+    if p.kind == NO_PREFILTER {
+        choose_reverse(h, mut needles)
+    } else {
+        p
+    }
+}
+
+fn write_prefilter(mut table: Bytes, p: Prefilter, needles: Needles) {
+    if p.kind == TEDDY {
+        for i in 0u64 .. p.literals {
+            let shift: u8 = int.narrow(i % 8)
+            let bit: u8 = 1 << shift
+            for j in 0u64 .. p.width {
+                let ch = needles.values[i].items[j]
+                let low: u64 = int.widen(ch & 15)
+                let high: u64 = int.widen(ch >> 4)
+                table[32 * j + low] |= bit
+                table[32 * j + 16 + high] |= bit
+                table[32 * p.width + i * p.width + j] = ch
+            }
+        }
+    } else if p.kind == MEMCHR {
+        for i in 0u64 .. p.literals {
+            table[i] = needles.values[i].items[0]
+        }
+    } else if p.width > SHARED_LITERAL_WIDTH {
+        for i in 0u64 .. p.width {
+            table[i] = needles.linear[i]
+        }
+    } else {
+        for i in 0u64 .. p.width {
+            table[i] = needles.values[0].items[i]
+        }
+    }
 }
 
 pub fn new(pattern: String) -> Result[Regex, Error] {
-    let mut hir = compile_hir(pattern)?
+    let hir = compile_hir(pattern)?
+    compile_new(pattern, take hir)
+}
+
+fn compile_new(pattern: String, take input_hir: Hir) -> Result[Regex, Error] {
+    let mut hir = take input_hir
     let f = sized_alts(hir, 0, false)?
     let r = sized_alts(hir, 0, true)?
     let nf = FORWARD_BASE + f.states
     let nr = REVERSE_BASE + r.states
-    let (prefix_byte, prefix_len) = required_prefix(hir)
+    let mut candidates = Needles(values:[blank_needle(); 250], linear:[0; 100], end: 0, full: false)
+    let plan = choose_prefilter(hir, mut candidates)
     let mut ns = NameLayout(total_count: 0, length: 0)
     names_size(pattern, hir, 0, mut ns)
-    let charge = check_size(nf, nr, f.edges + r.edges, ns.total_count, ns.length, prefix_len)?
+    let charge = check_size(nf, nr, f.edges + r.edges, ns.total_count, ns.length, plan.bytes_count)?
     let forward = admit_u32(NFA_WORDS * nf)?
     let reverse = admit_u32(NFA_WORDS * nr)?
     let edges = admit_u32(EDGE_WORDS * (f.edges + r.edges))?
     let mut map = admit_u8(256)?
     let index = admit_u32(2 * ns.total_count)?
     let text = admit_u8(ns.length)?
-    let mut pref = admit_u8(prefix_len)?
-    let mut j: u64 = 0
-    while j < prefix_len {
-        pref[j] = prefix_byte
-        j += 1
-    }
+    let mut pref = admit_u8(plan.bytes_count)?
+    write_prefilter(mut pref, plan, candidates)
     let mut metadata = NameTable(index: take index, text: take text, pos: 0, slot: 0)
     write_names(pattern, hir, 0, mut metadata)
     link_backwards(mut hir.nodes)
-    let mut a = Assembler(fw: take forward, rv: take reverse, sparse_edges: take edges, boundaries:[false; 257], rev: false, ops_used: 0, edges_used: 0, quit_non_ascii: false)
+    let mut a = Assembler(fw: take forward, rv: take reverse, sparse_edges: take edges, boundaries:[false; 257], rev: false, ops_used: 0, edges_used: 0, quit_non_ascii: false, pref_node: plan.node_id, pref_start: 0)
     let end = emit(mut a, OP_MATCH, 0, 0, 0)
     let save_end = emit(mut a, OP_SAVE, 0, end, 1)
     let body = emit_alts(hir, mut a, 0, save_end)
@@ -3024,9 +3526,9 @@ pub fn new(pattern: String) -> Result[Regex, Error] {
         map[b] = int.narrow(classes - 1)
         b += 1
     }
-    let Assembler(fw: take f_program, rv: take r_program, sparse_edges: take transitions, quit_non_ascii: quit, ..) = take a
+    let Assembler(fw: take f_program, rv: take r_program, sparse_edges: take transitions, quit_non_ascii: quit, pref_start: pre_reverse, ..) = take a
     let NameTable(index: take name_index, text: take name_text, ..) = take metadata
-    Ok(Regex(owner: unique.new(), forward: take f_program, reverse: take r_program, edges: take transitions, class_map: take map, names: take name_index, name_text: take name_text, prefilter: take pref, charge: charge, group_count: f.pgroup + 1, class_count: classes, start: unanchored, reverse_start: anchored_r, quit_non_ascii: quit))
+    Ok(Regex(owner: unique.new(), forward: take f_program, reverse: take r_program, edges: take transitions, class_map: take map, names: take name_index, name_text: take name_text, prefilter: take pref, pref_plan: plan, pref_reverse_start: pre_reverse, charge: charge, group_count: f.pgroup + 1, class_count: classes, start: unanchored, reverse_start: anchored_r, quit_non_ascii: quit))
 }
 
 const ABSENT: u64 = 0xFFFFFFFFFFFFFFFF
@@ -3570,15 +4072,17 @@ fn dfa_intern(mut work: List[u32], d: DfaLayout, from: u32, base: u64, len: u64,
     (from, dfa_add(mut work, d, base, len, context, slot))
 }
 
-fn dfa_start(mut work: List[u32], d: DfaLayout, entry: u64, context: u32) -> u32 {
+fn dfa_start(mut work: List[u32], d: DfaLayout, entry: u64, context: u32, remember: bool) -> u32 {
     let kind: u64 = int.widen(context)
-    let stored = work[d.starts + kind]
-    if stored != 0 {
-        return stored
+    if remember {
+        let stored = work[d.starts + kind]
+        if stored != 0 {
+            return stored
+        }
     }
     work[d.scratch] = int.narrow(entry)
     let (_, start) = dfa_intern(mut work, d, DFA_DEAD, d.scratch, 1, context)
-    if start != DFA_UNKNOWN {
+    if remember && start != DFA_UNKNOWN {
         work[d.starts + kind] = start
     }
     start
@@ -3698,31 +4202,216 @@ fn dfa_transition(program: List[u32], edges: List[u32], mut work: List[u32], d: 
 
 type Half: key = Found(u64) | Missing | Retry
 
-fn dfa_search(program: List[u32], edges: List[u32], map: Bytes, mut work: List[u32], d: DfaLayout, entry: u64, s: String, begin: u64, limit: u64, quit: bool,) -> Half {
+fn literal_at(data: Bytes, table: Bytes, pos: u64, first: u64, width: u64) -> bool {
+    for i in 0u64 .. width {
+        if data[pos + i] != table[first + i] {
+            return false
+        }
+    }
+    true
+}
+
+fn memchr_at(data: Bytes, table: Bytes, literals: u64, at: u64) -> Option[u64] {
+    let end = list.len(data)
+    let mut pos = at
+    let x = table[0]
+    let y = if literals >= 2 {
+        table[1]
+    } else {
+        x
+    }
+    let z = if literals == 3 {
+        table[2]
+    } else {
+        x
+    }
+    let xs: Simd[u8, 16] = simd.splat(x)
+    let ys: Simd[u8, 16] = simd.splat(y)
+    let zs: Simd[u8, 16] = simd.splat(z)
+    while end - pos >= 16 {
+        let input: Simd[u8, 16] = list.lanes(data, pos)
+        let candidates = simd.bitmask(simd.eq(input, xs) | simd.eq(input, ys) | simd.eq(input, zs))
+        if candidates != 0 {
+            let low: u64 = int.widen(int.trailing_zeros(candidates))
+            return Some(pos + low)
+        }
+        pos += 16
+    }
+    while pos < end {
+        let ch = data[pos]
+        if ch == x || ch == y || ch == z {
+            return Some(pos)
+        }
+        pos += 1
+    }
+    None
+}
+
+fn memmem_at(data: Bytes, table: Bytes, p: Prefilter, at: u64) -> Option[u64] {
+    let width = list.len(data)
+    if width - at < p.width {
+        return None
+    }
+    let end = width - p.width + 1
+    let mut pos = at
+    let a = p.rare_a
+    let b = p.rare_b
+    let left: Simd[u8, 16] = simd.splat(table[a])
+    let right: Simd[u8, 16] = simd.splat(table[b])
+    while end - pos >= 16 {
+        let lhs: Simd[u8, 16] = list.lanes(data, pos + a)
+        let rhs: Simd[u8, 16] = list.lanes(data, pos + b)
+        let mut hits = simd.bitmask(simd.eq(lhs, left) & simd.eq(rhs, right))
+        while hits != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(hits))
+            let candidate = pos + offset
+            if literal_at(data, table, candidate, 0, p.width) {
+                return Some(candidate)
+            }
+            hits &= int.wrapping_sub(hits, 1)
+        }
+        pos += 16
+    }
+    while pos < end {
+        if data[pos + a] == table[a] && data[pos + b] == table[b] && literal_at(data, table, pos, 0, p.width) {
+            return Some(pos)
+        }
+        pos += 1
+    }
+    None
+}
+
+fn teddy_confirm(data: Bytes, table: Bytes, p: Prefilter, pos: u64) -> bool {
+    let first = 32 * p.width
+    for i in 0u64 .. p.literals {
+        if literal_at(data, table, pos, first + i * p.width, p.width) {
+            return true
+        }
+    }
+    false
+}
+
+fn teddy_at(data: Bytes, table: Bytes, p: Prefilter, at: u64) -> Option[u64] {
+    let width = list.len(data)
+    if width - at < p.width {
+        return None
+    }
+    let end = width - p.width + 1
+    let mask: Simd[u8, 16] = simd.splat(15)
+    let mut pos = at
+    while end - pos >= 16 {
+        let mut votes: Simd[u8, 16] = simd.splat(255)
+        for i in 0u64 .. p.width {
+            let input: Simd[u8, 16] = list.lanes(data, pos + i)
+            let low: Simd[u8, 16] = list.lanes(table, 32 * i)
+            let high: Simd[u8, 16] = list.lanes(table, 32 * i + 16)
+            votes &= simd.swizzle(low, input & mask) & simd.swizzle(high, input >> 4)
+        }
+        let mut hits = simd.bitmask(~simd.eq(votes, simd.splat(0)))
+        while hits != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(hits))
+            let candidate = pos + offset
+            if teddy_confirm(data, table, p, candidate) {
+                return Some(candidate)
+            }
+            hits &= int.wrapping_sub(hits, 1)
+        }
+        pos += 16
+    }
+    while pos < end {
+        if teddy_confirm(data, table, p, pos) {
+            return Some(pos)
+        }
+        pos += 1
+    }
+    None
+}
+
+fn prefilter_at(data: Bytes, table: Bytes, p: Prefilter, at: u64) -> Option[u64] {
+    if p.kind == MEMMEM {
+        return memmem_at(data, table, p, at)
+    }
+    if p.kind == TEDDY {
+        return teddy_at(data, table, p, at)
+    }
+    memchr_at(data, table, p.literals, at)
+}
+
+type DfaQuery: key {
+    begin: u64,
+    limit: u64,
+    entry: u64,
+    remember: bool,
+    skip_enabled: bool,
+}
+
+type DfaRun: key {
+    half: Half,
+    stopped_at: u64,
+}
+
+fn dfa_initial_byte(data: Bytes, width: u64, pos: u64, reverse: bool) -> u64 {
+    if reverse {
+        if pos == width {
+            DFA_INPUT_END
+        } else {
+            int.widen(data[pos])
+        }
+    } else if pos == 0 {
+        DFA_INPUT_END
+    } else {
+        int.widen(data[pos - 1])
+    }
+}
+
+fn dfa_is_start(work: List[u32], d: DfaLayout, state: u32, entry: u64) -> bool {
+    let id: u64 = int.widen(state)
+    let offset: u64 = int.widen(work[d.spans + 2 * (id - 1)])
+    let key = d.keys + 8 * offset
+    work[key] == 1 && work[key + 2] == int.narrow(entry)
+}
+
+fn dfa_search(re: Regex, program: List[u32], mut work: List[u32], d: DfaLayout, query: DfaQuery, s: String) -> DfaRun {
     let data = string.as_bytes(s)
     let width = list.len(data)
     let reverse = d.reverse
-    let context: u64 = if reverse {
-        if begin == width {
-            DFA_INPUT_END
-        } else {
-            int.widen(data[begin])
-        }
-    } else if begin == 0 {
-        DFA_INPUT_END
-    } else {
-        int.widen(data[begin - 1])
+    let skip_enabled = query.skip_enabled && re.pref_plan.kind != NO_PREFILTER && re.pref_plan.kind < REVERSE_SUFFIX
+    let mut pos = query.begin
+    let mut behind = dfa_initial_byte(data, width, pos, reverse)
+    if re.quit_non_ascii && behind >= 128 && behind != DFA_INPUT_END {
+        return DfaRun(half: Retry, stopped_at: pos)
     }
-    if quit && context >= 128 && context != DFA_INPUT_END {
-        return Retry
-    }
-    let mut pos = begin
-    let mut state = dfa_start(mut work, d, entry, dfa_context(context))
+    let mut state = dfa_start(mut work, d, query.entry, dfa_context(behind), query.remember)
     let mut matched: Option[u64] = None
     let mut scanned: u64 = 0
     while state != DFA_DEAD {
         if state == DFA_UNKNOWN {
-            return Retry
+            return DfaRun(half: Retry, stopped_at: pos)
+        }
+        if skip_enabled && dfa_is_start(work, d, state, query.entry) {
+            match prefilter_at(data, re.prefilter, re.pref_plan, pos) {
+                None => {
+                    scanned += width - pos
+                    pos = width
+                    break
+                },
+                Some(hit) => {
+                    if hit != pos {
+                        scanned += hit - pos
+                        pos = hit
+                        behind = dfa_initial_byte(data, width, pos, false)
+                        dfa_bytes(mut work, d, scanned)
+                        scanned = 0
+                        if re.quit_non_ascii && behind >= 128 && behind != DFA_INPUT_END {
+                            return DfaRun(half: Retry, stopped_at: pos)
+                        }
+                        state = dfa_start(mut work, d, query.entry, dfa_context(behind), true)
+                        if state == DFA_UNKNOWN {
+                            return DfaRun(half: Retry, stopped_at: pos)
+                        }
+                    }
+                },
+            }
         }
         let ch: u64 = if reverse {
             if pos == 0 {
@@ -3735,14 +4424,14 @@ fn dfa_search(program: List[u32], edges: List[u32], map: Bytes, mut work: List[u
         } else {
             int.widen(data[pos])
         }
-        if quit && ch >= 128 && ch != DFA_INPUT_END {
+        if re.quit_non_ascii && ch >= 128 && ch != DFA_INPUT_END {
             dfa_bytes(mut work, d, scanned)
-            return Retry
+            return DfaRun(half: Retry, stopped_at: pos)
         }
         let col: u64 = if ch == DFA_INPUT_END {
             d.columns - 1
         } else {
-            int.widen(map[ch])
+            int.widen(re.class_map[ch])
         }
         let valid = pos == width || (data[pos] & 0xC0) != 0x80
         let id: u64 = int.widen(state)
@@ -3750,17 +4439,17 @@ fn dfa_search(program: List[u32], edges: List[u32], map: Bytes, mut work: List[u
         let edge = if !valid || cached == DFA_UNKNOWN {
             dfa_bytes(mut work, d, scanned)
             scanned = 0
-            dfa_transition(program, edges, mut work, d, state, col, ch, valid)
+            dfa_transition(program, re.edges, mut work, d, state, col, ch, valid)
         } else {
             cached
         }
         if edge == DFA_UNKNOWN {
-            return Retry
+            return DfaRun(half: Retry, stopped_at: pos)
         }
         if (edge & DFA_MATCH) != 0 {
             matched = Some(pos)
         }
-        if pos == limit {
+        if pos == query.limit {
             break
         }
         state = edge & DFA_TARGET
@@ -3772,23 +4461,72 @@ fn dfa_search(program: List[u32], edges: List[u32], map: Bytes, mut work: List[u
         scanned += 1
     }
     dfa_bytes(mut work, d, scanned)
-    match matched {
+    let half = match matched {
         Some(at) => Found(at),
         None => Missing,
     }
+    DfaRun(half: half, stopped_at: pos)
 }
 
 fn forward_end(re: Regex, mut c: Cache, s: String, at: u64) -> Half {
     let d = dfa_layout(re, c, false)
-    dfa_search(re.forward, re.edges, re.class_map, mut c.work, d, re.start, s, at, string.byte_len(s), re.quit_non_ascii)
+    let q = DfaQuery(begin: at, limit: string.byte_len(s), entry: re.start, remember: true, skip_enabled: true)
+    dfa_search(re, re.forward, mut c.work, d, q, s).half
 }
 
 fn reverse_start(re: Regex, mut c: Cache, s: String, end: u64, limit: u64) -> Half {
     let d = dfa_layout(re, c, true)
-    dfa_search(re.reverse, re.edges, re.class_map, mut c.work, d, re.reverse_start, s, end, limit, re.quit_non_ascii)
+    let q = DfaQuery(begin: end, limit: limit, entry: re.reverse_start, remember: true, skip_enabled: false)
+    dfa_search(re, re.reverse, mut c.work, d, q, s).half
+}
+
+fn reverse_prefilter(re: Regex, mut c: Cache, s: String, at: u64) -> Result[Option[Match], ()] {
+    let f = dfa_layout(re, c, false)
+    let r = dfa_layout(re, c, true)
+    let data = string.as_bytes(s)
+    let end = list.len(data)
+    let mut lo = at
+    let mut from = at
+    let mut min_pre_start = at
+    while let Some(needle) = prefilter_at(data, re.prefilter, re.pref_plan, from) {
+        if needle < min_pre_start {
+            // A failed forward confirmation read into this candidate's region.
+            return Error(())
+        }
+        let q = DfaQuery(begin: needle, limit: lo, entry: re.pref_reverse_start, remember: false, skip_enabled: false)
+        match dfa_search(re, re.reverse, mut c.work, r, q, s).half {
+            Found(start) => {
+                if re.pref_plan.kind == REVERSE_SUFFIX {
+                    return Ok(Some(Match(start: start, end: needle + re.pref_plan.width)))
+                }
+                let confirm = DfaQuery(begin: start, limit: end, entry: re.start - 1, remember: false, skip_enabled: false)
+                let observed = dfa_search(re, re.forward, mut c.work, f, confirm, s)
+                match observed.half {
+                    Found(end_at) => return Ok(Some(Match(start: start, end: end_at))),
+                    Retry => return Error(()),
+                    Missing => {
+                        min_pre_start = observed.stopped_at
+                    },
+                }
+            },
+            Missing => {},
+            Retry => return Error(()),
+        }
+        from = needle + 1
+        // The eligibility proof excludes the needle's first byte from the
+        // prefix, so a later prefix cannot cross this rejected literal.
+        lo = from
+    }
+    Ok(None)
 }
 
 fn match_span(re: Regex, mut c: Cache, s: String, at: u64) -> Result[Option[Match], ()] {
+    if re.pref_plan.kind >= REVERSE_SUFFIX {
+        match reverse_prefilter(re, mut c, s, at) {
+            Ok(span) => return Ok(span),
+            Error(()) => {},
+        }
+    }
     match forward_end(re, mut c, s, at) {
         Found(end) => match reverse_start(re, mut c, s, end, at) {
             Found(start) => Ok(Some(Match(start: start, end: end))),
@@ -3835,7 +4573,7 @@ fn publish_groups(re: Regex, c: Cache, mut g: Groups, span: Match) {
 pub fn is_match(re: Regex, mut c: Cache, s: String, at: u64) -> bool {
     check_cache(re, c)
     check_start(s, at)
-    search(re, mut c, s, at, 1) != None
+    search_end(re, mut c, s, at) != None
 }
 
 pub fn find(re: Regex, mut c: Cache, s: String, at: u64) -> Option[Match] {
@@ -3907,17 +4645,63 @@ pub fn next_captures(re: Regex, mut c: Cache, s: String, mut k: Cursor, mut g: G
     }
 }
 
+fn search_end(re: Regex, mut c: Cache, s: String, at: u64) -> Option[u64] {
+    let width = string.byte_len(s)
+    if re.pref_plan.kind >= REVERSE_SUFFIX {
+        match reverse_prefilter(re, mut c, s, at) {
+            Ok(Some(span)) => return Some(span.end),
+            Ok(None) => return None,
+            Error(()) => {},
+        }
+    }
+    match forward_end(re, mut c, s, at) {
+        Found(end) => Some(end),
+        Missing => None,
+        Retry => match pike_search(re, mut c, s, at, width, re.start, 1) {
+            Some(span) => Some(span.end),
+            None => None,
+        },
+    }
+}
+
+fn next_end(re: Regex, mut c: Cache, s: String, mut k: Cursor) -> Option[u64] {
+    if k.finished {
+        return None
+    }
+    let mut end = search_end(re, mut c, s, k.at)
+    if k.after_match && end == Some(k.at) {
+        if k.at == string.byte_len(s) {
+            end = None
+        } else {
+            let (_, boundary_at) = scalar(s, k.at)
+            end = search_end(re, mut c, s, boundary_at)
+        }
+    }
+    match end {
+        Some(at) => {
+            k.at = at
+            k.after_match = true
+        },
+        None => {
+            k.finished = true
+        },
+    }
+    end
+}
+
 pub fn count(re: Regex, mut c: Cache, s: String) -> u64 {
     check_cache(re, c)
     let mut k = cursor(0)
     let mut matches_found: u64 = 0
-    while next_search(re, mut c, s, mut k, 1) != None {
+    while next_end(re, mut c, s, mut k) != None {
         matches_found += 1
     }
     matches_found
 }
 
 // Unicode tables generated by core/tools/regex_oracle.rs.
+const PREFILTER_RANK: Inline[u8, 256] =[55, 52, 51, 50, 49, 48, 47, 46, 45, 103, 242, 66, 67, 229, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 56, 32, 31, 30, 29, 28, 255, 148, 164, 149, 136, 160, 155, 173, 221, 222, 134, 122, 232, 202, 215, 224, 208, 220, 204, 187, 183, 179, 177, 168, 178, 200, 226, 195, 154, 184, 174, 126, 120, 191, 157, 194, 170, 189, 162, 161, 150, 193, 142, 137, 171, 176, 185, 167, 186, 112, 175, 192, 188, 156, 140, 143, 123, 133, 128, 147, 138, 146, 114, 223, 151, 249, 216, 238, 236, 253, 227, 218, 230, 247, 135, 180, 241, 233, 246, 244, 231, 139, 245, 243, 251, 235, 201, 196, 240, 214, 152, 182, 205, 181, 127, 27, 212, 211, 210, 213, 228, 197, 169, 159, 131, 172, 105, 80, 98, 96, 97, 81, 207, 145, 116, 115, 144, 130, 153, 121, 107, 132, 109, 110, 124, 111, 82, 108, 118, 141, 113, 129, 119, 125, 165, 117, 92, 106, 83, 72, 99, 93, 65, 79, 166, 237, 163, 199, 190, 225, 209, 203, 198, 217, 219, 206, 234, 248, 158, 239, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,]
+
 // Perl classes, folds, and property aliases are from regex-syntax's Unicode tables.
 // Unicode data is licensed under Unicode-3.0 (https://www.unicode.org/license.txt).
 const DECIMAL_LO: u64 = 0

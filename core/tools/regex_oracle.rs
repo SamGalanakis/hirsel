@@ -26,6 +26,9 @@ mod space {
 mod word {
     include!(concat!(env!("REGEX_SYNTAX_TABLES"), "/perl_word.rs"));
 }
+mod prefilter_rank {
+    include!(concat!(env!("REGEX_SYNTAX_TABLES"), "/../rank.rs"));
+}
 mod folds {
     include!(concat!(
         env!("REGEX_SYNTAX_TABLES"),
@@ -738,6 +741,12 @@ fn alias_table(out: &mut String, rows: impl IntoIterator<Item = (u64, &'static s
 
 fn tables() -> String {
     let mut out = TABLE_MARKER.to_owned();
+    inline(
+        &mut out,
+        "PREFILTER_RANK",
+        "u8",
+        &prefilter_rank::BYTE_FREQUENCIES.map(u64::from),
+    );
     out.push_str(
         "// Perl classes, folds, and property aliases are from regex-syntax's Unicode tables.\n",
     );

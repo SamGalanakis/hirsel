@@ -15,7 +15,8 @@ fn regex_dfa_clear() -> bool {
 
 // expect: run regex_dfa_oversize() = true
 fn regex_dfa_oversize() -> bool {
-    let re = result.unwrap(new("a?{130}b"))
+    // The second arm prevents a common suffix from bypassing the wide key.
+    let re = result.unwrap(new("a?{130}b|c"))
     let mut c = result.unwrap(cache(re, 0))
     let d = dfa_layout(re, c, false)
     let outcome = forward_end(re, mut c, "ab", 0)

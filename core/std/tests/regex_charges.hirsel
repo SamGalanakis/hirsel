@@ -149,8 +149,10 @@ fn regex_scratch_is_capacity() -> bool {
 // expect: run regex_literal_ninety_thousand() = true
 fn regex_literal_ninety_thousand() -> bool {
     let p = result.unwrap(string.repeat("a", 90000))
+    // The two automata use (2 * 90000 + 8) * 16 bytes. The byte map uses
+    // 256 bytes and the 100-byte prefix rounds up to 104.
     match new(p) {
-        Ok(re) => size(re) == 2880392,
+        Ok(re) => size(re) == 2880488,
         Error(_) => false,
     }
 }

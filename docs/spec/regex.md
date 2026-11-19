@@ -1,6 +1,6 @@
 # Regex
 
-This chapter specifies std `regex`: regular expressions over `String`. The API uses the lazy DFA and PikeVM. Literal prefilters are pending.
+This chapter specifies std `regex`: regular expressions over `String`. The API uses a lazy DFA with literal prefilters and falls back to the PikeVM.
 
 **Reference.** The pattern language and its meaning are those of the Rust `regex` crate at commit fde4946 (2026-11-18), built with default features off and the features `std`, `perf`, `unicode-case` and `unicode-perl`: its `regex::Regex` type, with the `*_at` semantics of `find_at`, `is_match_at` and `captures_at`. Where this chapter says "the crate", it means that build. A conformance corpus generated from it is the oracle for every answer below. std regex differs from it in one place only, the start-offset precondition of RE-3.
 

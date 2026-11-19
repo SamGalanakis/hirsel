@@ -7,6 +7,7 @@
 
 #include "counted_exit.h"
 #include "counter_range.h"
+#include "guarded_check.h"
 #include "implied_check.h"
 #include "pass_cost.h"
 
@@ -369,6 +370,12 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
 
     release.run(pipeline, "release");
     return LLVMErrorSuccess;
+}
+
+// See guarded_check.h. Runs on the final IR, before failure edges are weighted.
+extern "C" void hirsel_llvm_if_convert_guarded_checks(LLVMModuleRef module) {
+    for (Function &function : *unwrap(module))
+        if (!function.isDeclaration()) hirsel_llvm::ifConvertGuardedChecks(function);
 }
 
 extern "C" LLVMErrorRef hirsel_llvm_growth_arms_back(LLVMModuleRef module,

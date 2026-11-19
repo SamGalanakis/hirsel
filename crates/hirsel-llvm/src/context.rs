@@ -253,6 +253,7 @@ impl<'context> Module<'context> {
             }
             if error.is_null() {
                 unsafe extern "C" {
+                    fn hirsel_llvm_if_convert_guarded_checks(module: LLVMModuleRef);
                     fn hirsel_llvm_share_cold_sites(module: LLVMModuleRef);
                     fn hirsel_llvm_share_cold_step_sync(
                         module: LLVMModuleRef,
@@ -268,6 +269,7 @@ impl<'context> Module<'context> {
                     ) -> LLVMErrorRef;
                     fn hirsel_llvm_align_release_functions(module: LLVMModuleRef);
                 }
+                hirsel_llvm_if_convert_guarded_checks(self.raw);
                 hirsel_llvm_share_cold_sites(self.raw);
                 hirsel_llvm_cold_failure_edges(self.raw, self.context.raw);
                 hirsel_llvm_share_cold_step_sync(self.raw, machine.raw);

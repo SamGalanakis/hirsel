@@ -25,6 +25,7 @@ fn main() {
         &shared.join("counted_exit.h"),
         &shared.join("counter_range.h"),
         &shared.join("forward_reads.h"),
+        &shared.join("guarded_check.h"),
         &shared.join("implied_check.h"),
         &shared.join("loop_version.h"),
         &shared.join("pass_cost.h"),

@@ -20,6 +20,7 @@ extern void hirsel_llvm_promote_development_slots(void *module);
 extern void hirsel_llvm_inline_recursive_leaves(void *module);
 extern void hirsel_llvm_inline_snapshot_calls(void *module);
 extern void hirsel_llvm_share_cold_sites(void *module);
+extern void hirsel_llvm_if_convert_guarded_checks(LLVMModuleRef module);
 extern void hirsel_llvm_share_cold_step_sync(void *module, void *machine);
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 extern void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool frame_pointers);
@@ -548,6 +549,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             e = hirsel_llvm_sweep_release(module, machine);
         }
         if (!e) {
+            hirsel_llvm_if_convert_guarded_checks(module);
             hirsel_llvm_share_cold_sites(module);
             hirsel_cold_failure_edges(module, context);
             hirsel_llvm_share_cold_step_sync(module, machine);

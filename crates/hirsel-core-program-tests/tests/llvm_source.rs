@@ -350,7 +350,9 @@ fn unknown(j: u64, n: u64) -> u64 {
 /// resets `pos` at 8, so `7u8 - pos` and `pos += 1` never fail; a reset at 9,
 /// a reset on only one path, and a second write to `pos` each let `pos` reach
 /// 8 at the shift, which still fails with the evaluator's text and site on
-/// both native engines.
+/// both native engines. `guarded` counts under a data-dependent guard, which
+/// release LLVM if-converts (`guarded_check.h`): the count fails only when the
+/// guard holds at 255, never when it is skipped there.
 #[test]
 fn counter_resets_keep_reachable_failures() {
     let source = r#"
@@ -430,6 +432,16 @@ fn bumped(n: u64, skip: u64) -> u64 {
     }
     total * 16u64 + int.widen(pos)
 }
+
+fn guarded(n: u64, every: u64, start: u64) -> u64 {
+    let mut count: u8 = int.narrow(start)
+    for i in 0u64 .. n {
+        if i % every == 0u64 {
+            count += 1
+        }
+    }
+    int.widen(count)
+}
 "#;
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     // Hand-derived. Bit i is set when i % 3 != 0, at bit 7 - pos. With a reset
@@ -439,7 +451,9 @@ fn bumped(n: u64, skip: u64) -> u64 {
     // extra step at i = 3 or 6 shifts the bytes to 102 (i 0..6) or 108
     // (i 0..5), then 219 (i 7..14); at i = 7 it moves pos to 8 before a set
     // bit, and at i = 15 (pos 7, no bit) it carries pos past 8 to 9, so the
-    // set bit at i = 16 fails.
+    // set bit at i = 16 fails. `guarded` adds one per i in 0..n divisible by
+    // `every`: from 254 every 5th of 4 reaches 255 at i = 0 and skips at 255
+    // for i = 1..3; every 4th of 6 reaches 256 at i = 4.
     let overflow = || eval::Outcome::Failed(vec!["Overflow".into()]);
     let returned = |x: u64| eval::Outcome::Returned(vec![x]);
     let laws = [
@@ -459,6 +473,11 @@ fn bumped(n: u64, skip: u64) -> u64 {
         ("bumped", vec![9, 7], overflow()),
         ("bumped", vec![16, 15], returned(109 * 16 + 9)),
         ("bumped", vec![17, 15], overflow()),
+        ("guarded", vec![6, 2, 250], returned(253)),
+        ("guarded", vec![4, 5, 254], returned(255)),
+        ("guarded", vec![6, 3, 253], returned(255)),
+        ("guarded", vec![6, 4, 254], overflow()),
+        ("guarded", vec![7, 3, 253], overflow()),
     ];
     let cases: Vec<_> = laws
         .iter()
@@ -478,7 +497,8 @@ fn bumped(n: u64, skip: u64) -> u64 {
             run
         })
         .collect();
-    let exports = ["packed", "reset_at_nine", "one_path", "bumped"].map(|name| names[name]);
+    let exports =
+        ["packed", "reset_at_nine", "one_path", "bumped", "guarded"].map(|name| names[name]);
     let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
     let llvm = program.llvm_program(Target::X86_64Linux, false, false, &exports);
     for (optimization, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {

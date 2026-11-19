@@ -233,6 +233,28 @@ fn cleanup_visits_owned_fields_in_reverse_declaration_order() {
         ],
     );
     assert_eq!(order(&[plain, plain2()], 0), vec![(0, 0), (1, 8)]);
+    // The map is not send. Its key's cleanup is order-free, but the
+    // value's cleanup reaches a task handle and makes the outer order visible.
+    let map = FieldTy::Map(
+        Box::new(FieldTy::Box(TypeRef(1))),
+        Box::new(FieldTy::Box(TypeRef(2))),
+    );
+    let key = record("Key", Repr::Own, vec![field("n", u(Scalar::U64))]);
+    let value = record(
+        "Value",
+        Repr::Own,
+        vec![field("task", FieldTy::Handle(Handle::Task))],
+    );
+    let table = record(
+        "Table",
+        Repr::Own,
+        vec![
+            field("map", map),
+            field("scratch", FieldTy::Box(TypeRef(1))),
+        ],
+    );
+    assert_eq!(order(&[table, key, value], 0), vec![(1, 24), (0, 0)]);
+
     let bare = record("Lock", Repr::Resource, vec![field("n", u(Scalar::U64))]);
     assert!(
         !compute(&[bare]).unwrap()[0].plain,
@@ -783,6 +805,37 @@ fn appended_layout_visit_state_is_linear_and_retry_resets_the_suffix() {
     scratch.extend(&shapes, &mut recipes).unwrap();
     assert_eq!(recipes, compute(&shapes).unwrap());
     assert_eq!(scratch.initialized_rows, 1028);
+
+    let first = shapes.len();
+    let key = TypeRef(0);
+    let local_box = || FieldTy::Box(key);
+    shapes.push(record(
+        "Order",
+        Repr::Own,
+        vec![
+            field("a", local_box()),
+            field("b", FieldTy::Seq(Box::new(u(Scalar::U8)))),
+        ],
+    ));
+    let mut invalid = record("Invalid", Repr::Own, vec![field("n", u(Scalar::U64))]);
+    invalid.carried = Carried::Nothing;
+    shapes.push(invalid);
+    assert_eq!(
+        scratch.extend(&shapes, &mut recipes),
+        Err(LayoutError::Carried {
+            ty: "Invalid".into()
+        })
+    );
+    assert_eq!(recipes.len(), first);
+    shapes.pop();
+    shapes[first] = record(
+        "Order",
+        Repr::Own,
+        vec![field("a", local_box()), field("b", local_box())],
+    );
+    scratch.extend(&shapes, &mut recipes).unwrap();
+    let steps = &recipes[first].drop.as_ref().unwrap().fields[0];
+    assert_eq!([steps[0].field, steps[1].field], [0, 1]);
 }
 
 /// Bug: a `View[String]` field is laid out as a pointer (8) instead of the String's

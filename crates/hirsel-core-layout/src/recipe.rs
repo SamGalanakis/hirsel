@@ -393,7 +393,15 @@ impl RecipeScratch {
             effects: &self.effects,
         };
         for &t in &self.order {
-            out.suffix[t.index() - prefix] = Some(recipe(shapes, t, &out)?);
+            match recipe(shapes, t, &out) {
+                Ok(recipe) => out.suffix[t.index() - prefix] = Some(recipe),
+                Err(error) => {
+                    let mut effects = out.effects.borrow_mut();
+                    effects.rows.truncate(prefix);
+                    effects.send.rows.truncate(prefix);
+                    return Err(error);
+                }
+            }
         }
         recipes.extend(self.suffix.drain(..).map(|r| r.expect("visited")));
         Ok(())
@@ -412,8 +420,8 @@ struct Computed<'a> {
 struct Effects {
     /// Per row: 0 unknown, 1 order-free, 2 effectful.
     rows: Vec<u8>,
-    stack: Vec<(TypeRef, usize)>,
-    seen: Vec<TypeRef>,
+    pending: Vec<(TypeRef, usize)>,
+    targets: Vec<TypeRef>,
     send: Sendable,
 }
 
@@ -428,8 +436,8 @@ impl Effects {
     fn effectful(&mut self, shapes: &[Shape], root: TypeRef) -> bool {
         let Effects {
             rows,
-            stack,
-            seen,
+            pending,
+            targets,
             send,
         } = self;
         if rows.len() < shapes.len() {
@@ -440,29 +448,27 @@ impl Effects {
             2 => return true,
             _ => {}
         }
-        // Depth-first over owning edges. Reaching an effectful row marks every
-        // row on the path; exhausting the closure marks every row seen free.
-        stack.clear();
-        seen.clear();
+
+        // Each pending row retains its parent. A witness proves its path
+        // effectful. Only exhausting every edge proves the closure order-free.
+        pending.clear();
         rows[root.index()] = 3;
-        seen.push(root);
-        stack.push((root, 0));
+        pending.push((root, 0));
+        let mut cursor = 0;
         let mut found = false;
-        'walk: while let Some(&mut (t, ref mut next)) = stack.last_mut() {
+        'walk: while let Some(&(t, _)) = pending.get(cursor) {
             let shape = &shapes[t.index()];
             if shape.repr == Repr::Resource || shape.finalizer.is_some() {
                 found = true;
                 break;
             }
-            let fields = cases(shape).into_iter().flatten();
-            for f in fields.skip(*next) {
-                *next += 1;
-                let mut targets = vec![];
-                if !owned_rows(shapes, send, &f.ty, &mut targets) {
+            for f in shape_fields(shape) {
+                targets.clear();
+                if !owned_rows(shapes, send, &f.ty, targets) {
                     found = true;
                     break 'walk;
                 }
-                for d in targets {
+                for &d in targets.iter() {
                     match rows[d.index()] {
                         2 => {
                             found = true;
@@ -470,27 +476,30 @@ impl Effects {
                         }
                         0 => {
                             rows[d.index()] = 3;
-                            seen.push(d);
-                            stack.push((d, 0));
-                            continue 'walk;
+                            pending.push((d, cursor));
                         }
                         _ => {}
                     }
                 }
             }
-            stack.pop();
+            cursor += 1;
         }
         if found {
-            for &(t, _) in stack.iter() {
+            loop {
+                let (t, parent) = pending[cursor];
                 rows[t.index()] = 2;
+                if cursor == 0 {
+                    break;
+                }
+                cursor = parent;
             }
-            for &t in seen.iter() {
+            for &(t, _) in pending.iter() {
                 if rows[t.index()] == 3 {
                     rows[t.index()] = 0;
                 }
             }
         } else {
-            for &t in seen.iter() {
+            for &(t, _) in pending.iter() {
                 rows[t.index()] = 1;
             }
         }
@@ -520,11 +529,7 @@ impl Sendable {
         }
         let shape = &shapes[t.index()];
         self.rows[t.index()] = 3;
-        let send = shape.send
-            && cases(shape)
-                .into_iter()
-                .flatten()
-                .all(|f| self.ty(shapes, &f.ty));
+        let send = shape.send && shape_fields(shape).all(|f| self.ty(shapes, &f.ty));
         self.rows[t.index()] = if send { 1 } else { 2 };
         send
     }
@@ -646,6 +651,10 @@ fn visit(
 }
 
 fn inline_deps(shape: &Shape) -> impl Iterator<Item = TypeRef> + '_ {
+    shape_fields(shape).filter_map(|f| inline_target(&f.ty))
+}
+
+fn shape_fields(shape: &Shape) -> impl Iterator<Item = &Field> {
     let (fields, cases): (&[Field], &[_]) = match &shape.body {
         Body::Record(f) => (f, &[]),
         Body::Variant(c) => (&[], c),
@@ -653,7 +662,6 @@ fn inline_deps(shape: &Shape) -> impl Iterator<Item = TypeRef> + '_ {
     fields
         .iter()
         .chain(cases.iter().flat_map(|c| c.fields.iter()))
-        .filter_map(|f| inline_target(&f.ty))
 }
 
 fn inline_target(ty: &FieldTy) -> Option<TypeRef> {
@@ -1525,18 +1533,11 @@ fn drop_recipe(
     out: &Computed<'_>,
     this: TypeRef,
 ) -> Option<DropRecipe> {
-    // FAIL-8 order (reverse declaration) where cleanup can observe it. Elsewhere
-    // the steps commute and SEM-8's as-if rule applies, so cleanup follows
-    // declaration order, the order LANG-9
-    // constructs and so allocates in: a drain then walks owned blocks forward
-    // through memory, as Rust drops fields.
-    let forward = !out.effects.borrow_mut().effectful(shapes, this);
-    let fields: Vec<Vec<FieldDrop>> = rows
+    let mut fields: Vec<Vec<FieldDrop>> = rows
         .iter()
         .zip(offsets)
         .map(|(row, offs)| {
-            let mut fields: Vec<FieldDrop> = row
-                .iter()
+            row.iter()
                 .enumerate()
                 .filter(|(_, f)| needs_drop(shapes, &f.ty, out))
                 .map(|(i, f)| FieldDrop {
@@ -1544,13 +1545,15 @@ fn drop_recipe(
                     offset: offs[i],
                     ty: f.ty.clone(),
                 })
-                .collect();
-            if !forward {
-                fields.reverse();
-            }
-            fields
+                .collect()
         })
         .collect();
+    // Order only needs proving when one case has more than one drop.
+    if fields.iter().any(|r| r.len() > 1) && out.effects.borrow_mut().effectful(shapes, this) {
+        for row in &mut fields {
+            row.reverse();
+        }
+    }
     // A resource always has cleanup: its block, cell and grant are freed and refunded.
     let any = shape.repr == Repr::Resource || shape.finalizer.is_some();
     (any || fields.iter().any(|r| !r.is_empty())).then_some(DropRecipe {

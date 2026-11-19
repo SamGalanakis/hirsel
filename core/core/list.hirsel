@@ -158,6 +158,26 @@ fn sorted_run_end[T](mut g: Hole[T], lo: u64, n: u64, before: scoped fn(T, T) ->
             b -= 1
         }
     }
+    // A run shorter than 16 is extended to 16 by insertion, as in Goose's stable_sort and
+    // Timsort's minrun: random input otherwise merges runs of two, a full pass per doubling.
+    // Adjacent swaps keep xs whole at every comparator call. Moves only past strictly
+    // preceding elements keep it stable.
+    let stop = if n - lo <= 16 {
+        n
+    } else {
+        lo + 16
+    }
+    while end < stop {
+        let mut j = end
+        while j > lo && precedes(slots_list_view(g.xs, j), slots_list_view(g.xs, j - 1), before) {
+            slots_from_list(g.xs, j - 1, mut g.scratch, 0, 1)
+            slots_from_list(g.xs, j, mut g.scratch, 1, 1)
+            slots_to_list(mut g.scratch, 0, g.xs, j, 1)
+            slots_to_list(mut g.scratch, 1, g.xs, j - 1, 1)
+            j -= 1
+        }
+        end += 1
+    }
     end
 }
 

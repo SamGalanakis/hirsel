@@ -32,7 +32,7 @@ class InstructionGuard(unittest.TestCase):
             "marker": stdout,
             "stdout": stdout,
             "sample": {"status": "ok", "verified": True, "instructions": 69_882_571,
-                       "pmu_active_percent": {"instructions:u": 100}},
+                       "pmu_times_ns": {"instructions:u": [[1_000_000, 1_000_000]]}},
         }]
         with tempfile.TemporaryDirectory() as temp:
             base, candidate = (Path(temp) / name for name in ("base.json", "candidate.json"))
@@ -73,6 +73,14 @@ class InstructionGuard(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("base.json: arena/CLBG::Mandelbrot requires a verified build record", result.stderr)
 
+            for running in (500_000, 999_999):
+                with self.subTest(running=running):
+                    inactive = deepcopy(baseline)
+                    inactive["rows"][0]["sample"]["pmu_times_ns"]["instructions:u"][0][1] = running
+                    result = compare(inactive)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("inactive-counter", result.stderr)
+
             record_build(baseline)
             base.write_text(json.dumps(baseline))
             result = compare(paired)
@@ -111,6 +119,19 @@ class InstructionGuard(unittest.TestCase):
             result = compare(missing)
             self.assertEqual(result.returncode, 2)
             self.assertIn("missing: ['arena/CLBG::Mandelbrot']", result.stderr)
+
+            second = deepcopy(baseline["rows"][0])
+            second["key"] = "arena/CLBG::Spectralnorm"
+            baseline["expected_rows"].append(second["key"])
+            baseline["rows"].append(second)
+            base.write_text(json.dumps(baseline))
+            mixed = deepcopy(baseline)
+            mixed["rows"][0]["affinity"] = [11]
+            mixed["rows"][1]["sample"]["instructions"] *= 2
+            result = compare(mixed)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("arena/CLBG::Mandelbrot REFUSED", result.stderr)
+            self.assertIn("arena/CLBG::Spectralnorm 69,882,571 -> 139,765,142 (+100.000%) FAIL", result.stdout)
 
 
 class ProfileSelfCosts(unittest.TestCase):

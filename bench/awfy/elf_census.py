@@ -7,6 +7,7 @@ import tempfile
 
 from build import sha256
 
+STRIP_FLAGS = ("--strip-all", "-R", ".comment")
 RELOCATIONS = {"SHT_REL", "SHT_RELA", "SHT_RELR"}
 UNWIND = (".eh_frame", ".gcc_except_table", ".debug_frame", ".ARM.exidx", ".ARM.extab")
 
@@ -74,7 +75,7 @@ def inspect(path, symbols=False):
 
 
 def strip_image(source, target):
-    subprocess.run(["strip", "--strip-all", "-R", ".comment", "-o", target, source], check=True)
+    subprocess.run(["strip", *STRIP_FLAGS, "-o", target, source], check=True)
 
 
 def image(path):

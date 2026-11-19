@@ -14,8 +14,8 @@ import tempfile
 import time
 
 from arena import group, root_mib
-from build import ROOT
-from elf_census import strip_image
+from build import ROOT, sha256
+from elf_census import STRIP_FLAGS, strip_image
 
 
 SIDES = ("hirsel", "rust", "goose")
@@ -96,11 +96,16 @@ def probe(pattern, command):
     return 0
 
 
-def stripped_size(binary):
+def stripped_image(binary):
     with tempfile.TemporaryDirectory() as temp:
         output = Path(temp) / "stripped"
         strip_image(binary, output)
-        return output.stat().st_size
+        return {"bytes": output.stat().st_size, "image_sha256": sha256(output),
+                "binary_sha256": sha256(binary)}
+
+
+def stripped_size(binary):
+    return stripped_image(binary)["bytes"]
 
 
 def startup(command, marker, log):
@@ -196,10 +201,13 @@ def size_board(build, upstream):
 
 
 def verified_sizes(build, names):
-    sizes = {side: stripped_size(build / f"{side}-harness") for side in SIDES}
+    images = {side: stripped_image(build / f"{side}-harness") for side in SIDES}
+    sizes = {side: image["bytes"] for side, image in images.items()}
+    strip_version = subprocess.check_output(["strip", "--version"], text=True).splitlines()[0]
     native = json.loads((build / "hirsel-harness-build.json").read_text())["native"]
     certified = native.get("step_charging_elided", False)
-    return {"verified_workloads": names, "stripped_bytes": sizes,
+    return {"verified_workloads": names, "stripped_bytes": sizes, "images": images,
+            "strip_version": strip_version, "strip_flags": list(STRIP_FLAGS),
             "hirsel_certified": dict.fromkeys(names, certified),
             "hirsel_over_rust": sizes["hirsel"] / sizes["rust"],
             "hirsel_over_goose": sizes["hirsel"] / sizes["goose"]}

@@ -131,15 +131,45 @@ peers, then samples AWFY original-14, AWFY pool/index (8), and LangArena
 (50). Each runtime row runs adjacent Rust, Hirsel and Goose samples, with
 the order reversed on alternate rows. The size row reuses verification of
 all 14 original workloads. The cold and edit compile rows compare the whole
-LangArena suite against Cargo. The checkbox rows compare the same wire load
-against a fresh private Hirsel server and the Rust reference, never port 7700.
+LangArena suite against Cargo. The warm build changes Spectralnorm's checksum
+from 1051192944 to 1051192945. It must compile at least one Hirsel part and
+rebuild the Cargo benchmark crate. Both executables must pass the new checksum
+fixture. The checkbox rows compare the same wire load on a fresh private Hirsel
+server and the Rust reference, using an ephemeral port.
 
 The board uses CPUs 20–21 for builds and 10–11 for samples. It holds
 `/run/user/1000/hirsel-board.lock` while measuring. It needs Linux perf user
 counters, CMake, Clang, Rust 1.99.0 with the pinned Cargo dependencies
 available, Node.js, and GNU strip and time. Keep `board.json` and `board.md`
-with the captured logs. An incomplete comparison has no ratio and makes the
-command exit nonzero.
+with the captured logs. Add `--baseline PREVIOUS/board.json` to check each
+nightly gate.
+
+- The instruction gate flags a Hirsel increase greater than 2% on any row.
+  Hirsel and peer CPU counters require equal enabled and running times.
+  A refused row is reported alongside comparisons for the remaining rows.
+- The size gate reports changes for each stripped original-14 harness and
+  flags Hirsel growth of 2,048 bytes or more. The receipt includes the strip
+  version and options and SHA-256 hashes of the stripped and original binaries.
+- The checkbox gate flags RSS per live session growth greater than 10% on
+  either server, for both subscribed and unsubscribed sessions. The board
+  reports toggles/s and its change from the baseline as a trend.
+
+Exit 0 means the board is complete and clean. Exit 1 means measurements are
+incomplete, exit 2 means a comparison or counter was refused, and exit 3
+means a gate reported a regression. A refusal takes precedence over a
+regression. The wrapper promotes only exit 0. A refusal holds automatic
+promotion until an explicit rebaseline.
+
+When a workload or measurement changes, produce a complete run by leaving
+out `--baseline` in the command above. Review that run, then promote it with:
+
+```sh
+python3 bench/awfy/board.py rebaseline "$out"
+```
+
+The command validates the run and prints its commit and the reason it was
+promoted. It also accepts a clean wrapper run directory and updates
+`~/.local/share/hirsel-board/last-complete.json` atomically.
 
 ## Paired instruction guard
 
@@ -161,7 +191,7 @@ python3 bench/awfy/receipt.py compare "$out/base-samples/receipt.json" \
 ```
 
 The guard requires checked stdout, complete row coverage and instruction
-counters active for at least 99% of their enabled time. It checks the exact
+counters with equal enabled and running times. It checks the exact
 execution argv and CPU affinity, as well as certification, build flags and the
 release compiler, runtime and fixture hashes. When the compiler or runtime
 changes, both rows must carry verified build records for their respective
@@ -171,8 +201,7 @@ row above +0.5% exits 1. Use `--threshold PERCENT` to set another limit.
 
 The same command reads two complete `board.json` files. It compares Hirsel
 instructions on the 72 runtime rows and the cold and warm-edit compile rows.
-`board.py --baseline PREVIOUS/board.json` records a nightly +2% triage result
-and uses exit 3 for a comparable regression. An incomplete board exits 1.
+The board uses this same comparator for its nightly +2% instruction gate.
 
 ### Profile a runtime delta
 

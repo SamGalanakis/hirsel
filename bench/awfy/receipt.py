@@ -20,8 +20,9 @@ import measure
 import profile_diff
 from measurement_artifacts import SHIPPING, check
 
-VERSION = 1
-MIN_ACTIVE = 99
+VERSION = 2
+REFUSED = 2
+INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
 IDENTITY = ("suite", "mode", "certified", "flags", "argv", "affinity", *ARTIFACT_HASHES, "fixture_sha256")
 
@@ -123,13 +124,18 @@ def runtime_case(suite, name, directory, command, marker, fixture, tools):
 
 
 def counter_ready(sample, event):
-    active = sample["pmu_active_percent"].get(event, 0)
-    return MIN_ACTIVE <= active <= 100
+    counters = sample.get("pmu_times_ns")
+    times = counters.get(event) if isinstance(counters, dict) else None
+    return isinstance(times, list) and bool(times) and all(
+        isinstance(pair, list) and len(pair) == 2 and all(type(value) is int for value in pair)
+        and pair[0] == pair[1] > 0 for pair in times
+    )
 
 
 def observe(row, target, env, *, cycles=False):
     row["affinity"] = sorted(os.sched_getaffinity(0))
-    sample = measure.core_measure.sample(row["argv"], target, env=env, cwd=row["cwd"], cycles=cycles)
+    sample = measure.core_measure.sample(row["argv"], target, env=env, cwd=row["cwd"], cycles=cycles,
+                                        pmu_times=True)
     sample["verified"] = (
         sample["status"] in ("ok", "missing-counter")
         and re.fullmatch(row["marker"].encode(), (target / "stdout").read_bytes()) is not None
@@ -208,90 +214,128 @@ def sample(args):
     return int(bool(receipt["failures"]))
 
 
-def rows_from(path):
-    receipt = read(path)
-    if "instruction_receipt" in receipt:
-        if receipt["complete"] is not True:
+def instruction_rows(path, expected=None, *, allow_incomplete=False):
+    data = read(path)
+    if "instruction_receipt" in data:
+        if data["complete"] is not True and not allow_incomplete:
             raise ValueError(f"{path}: incomplete board")
-        receipt = receipt["instruction_receipt"]
-    if receipt["version"] != VERSION:
+        data = data["instruction_receipt"]
+    if data["version"] != VERSION:
         raise ValueError(f"{path}: unsupported instruction receipt")
-    expected = receipt["expected_rows"]
-    rows = {row["key"]: row for row in receipt["rows"]}
-    if (not expected or len(set(expected)) != len(expected) or len(rows) != len(receipt["rows"])
-            or rows.keys() != set(expected) or receipt["failures"]):
-        raise ValueError(f"{path}: incomplete or duplicate rows "
-                         f"(missing: {sorted(set(expected) - rows.keys())}, "
-                         f"unexpected: {sorted(rows.keys() - set(expected))}, "
-                         f"failed: {sorted(receipt['failures'])})")
+    declared = data["expected_rows"]
+    if (not isinstance(declared, list) or not declared
+            or not all(isinstance(key, str) and key for key in declared)
+            or len(set(declared)) != len(declared)):
+        raise ValueError(f"{path}: invalid expected rows")
+
+    keys = set(declared) if expected is None else set(expected)
+    rows, refusals = {}, {}
+    for index, row in enumerate(data["rows"], 1):
+        key = row.get("key") if isinstance(row, dict) else None
+        if not isinstance(key, str) or not key:
+            refusals[f"{path} row {index}"] = "missing or invalid row key"
+            continue
+        if key in rows:
+            refusals[key] = f"{path}: duplicate row"
+        rows[key] = row
+    for key in rows.keys() - keys:
+        refusals[key] = f"{path}: unexpected row"
+    for key in keys - rows.keys():
+        refusals[key] = f"{path}: missing row (missing: {[key]})"
+    for key in keys ^ set(declared):
+        refusals[key] = f"{path}: row declaration differs"
+    for key, reason in data["failures"].items():
+        refusals[key] = f"{path}: failed sample: {reason}"
+    return rows, refusals
+
+
+def validate_row(key, row):
+    for field in IDENTITY:
+        if field not in row or row[field] is None or (field != "certified" and not row[field]):
+            raise ValueError(f"missing {field}")
+    suite, mode, certified = row["suite"], row["mode"], row["certified"]
+    if (suite not in measure.SUITES or not key.startswith(suite + "/")
+            or type(certified) is not bool
+            or (mode not in ("cold", "edit") if suite == "compile"
+                else mode != ("certified" if certified else "bounded"))
+            or any(not re.fullmatch("[a-f0-9]{64}", row[field])
+                   for field in (*ARTIFACT_HASHES, "fixture_sha256"))
+            or not all(isinstance(row[field], list)
+                       and all(isinstance(value, str) and value for value in row[field])
+                       for field in ("argv", "flags"))
+            or not isinstance(row["affinity"], list)
+            or any(type(cpu) is not int or cpu < 0 for cpu in row["affinity"])):
+        raise ValueError("invalid identity")
+    sample = row["sample"]
+    if sample["status"] == "inactive-counter" or not counter_ready(sample, "instructions:u"):
+        raise ValueError("inactive-counter (instructions:u must be fully active)")
+    if (sample["status"] != "ok" or sample["verified"] is not True
+            or type(sample["instructions"]) is not int or sample["instructions"] <= 0
+            or not row["stdout"] or not re.fullmatch(row["marker"], row["stdout"])):
+        raise ValueError("lacks a verified instruction sample")
+
+
+def rows_from(path):
+    rows, refusals = instruction_rows(path)
+    if refusals:
+        raise ValueError(str(refusals))
     for key, row in rows.items():
-        for field in IDENTITY:
-            if field not in row or row[field] is None or (field != "certified" and not row[field]):
-                raise ValueError(f"{path}: {key} missing {field}")
-        suite, mode, certified = row["suite"], row["mode"], row["certified"]
-        if (suite not in measure.SUITES or not key.startswith(suite + "/")
-                or type(certified) is not bool
-                or (mode not in ("cold", "edit") if suite == "compile"
-                    else mode != ("certified" if certified else "bounded"))
-                or any(not re.fullmatch("[a-f0-9]{64}", row[field])
-                       for field in (*ARTIFACT_HASHES, "fixture_sha256"))
-                or not all(isinstance(row[field], list)
-                           and all(isinstance(value, str) and value for value in row[field])
-                           for field in ("argv", "flags"))
-                or not isinstance(row["affinity"], list)
-                or any(type(cpu) is not int or cpu < 0 for cpu in row["affinity"])):
-            raise ValueError(f"{path}: {key} invalid identity")
-        sample = row["sample"]
-        if (sample["status"] != "ok" or sample["verified"] is not True
-                or type(sample["instructions"]) is not int or sample["instructions"] <= 0
-                or not counter_ready(sample, "instructions:u")
-                or not row["stdout"] or not re.fullmatch(row["marker"], row["stdout"])):
-            raise ValueError(f"{path}: {key} lacks a verified instruction sample")
+        validate_row(key, row)
     return rows
 
 
-def compare(before_path, after_path, threshold):
-    before, after = rows_from(before_path), rows_from(after_path)
-    if before.keys() != after.keys():
-        raise ValueError(f"row sets differ (missing: {sorted(before.keys() - after.keys())}, "
-                         f"unexpected: {sorted(after.keys() - before.keys())})")
-    differences = {}
-    artifact_pairs = set()
-    for key, left in before.items():
-        right = after[key]
-        fields = [field for field in (*IDENTITY, "marker", "stdout")
-                  if field not in ARTIFACT_HASHES and left[field] != right[field]]
-        if fields:
-            differences[key] = fields
-        elif any(left[field] != right[field] for field in ARTIFACT_HASHES):
-            for path, row in ((before_path, left), (after_path, right)):
-                if not verified_build(row):
-                    raise ValueError(f"{path}: {key} requires a verified build record for an artifact pair")
-            if left["manifest_sha256"] != right["manifest_sha256"]:
-                differences[key] = ["manifest_sha256"]
-                continue
-            artifact_pairs.add(tuple(row[field] for row in (left, right) for field in ARTIFACT_HASHES))
-    if differences:
-        raise ValueError("identity differs: " + "; ".join(
-            f"{key}: {', '.join(fields)}" for key, fields in differences.items()))
-    for base_compiler, base_runtime, candidate_compiler, candidate_runtime in sorted(artifact_pairs):
-        if base_compiler != candidate_compiler:
-            print(f"Variable compiler_sha256 {base_compiler} -> {candidate_compiler}")
-        runtime = "unchanged" if base_runtime == candidate_runtime else f"{base_runtime} -> {candidate_runtime}"
-        print(f"Paired runtime_archive_sha256 {runtime}")
+def compare(before_path, after_path, threshold, *, expected=None, blocked=None):
+    before, before_refusals = instruction_rows(before_path, expected)
+    after, after_refusals = instruction_rows(after_path, expected, allow_incomplete=expected is not None)
+    refusals = (blocked or {}) | before_refusals | after_refusals
     failed = False
     ratios = []
-    for key, left in sorted(before.items()):
+    artifact_pairs = set()
+    for key in sorted(before.keys() | after.keys() | refusals.keys()):
+        try:
+            if key in refusals:
+                raise ValueError(refusals[key])
+            if key not in before or key not in after:
+                raise ValueError("row sets differ")
+            left, right = before[key], after[key]
+            for path, row in ((before_path, left), (after_path, right)):
+                try:
+                    validate_row(key, row)
+                except INVALID_RECEIPT as error:
+                    raise ValueError(f"{path}: {error}") from error
+            fields = [field for field in (*IDENTITY, "marker", "stdout")
+                      if field not in ARTIFACT_HASHES and left[field] != right[field]]
+            if not fields and any(left[field] != right[field] for field in ARTIFACT_HASHES):
+                for path, row in ((before_path, left), (after_path, right)):
+                    if not verified_build(row):
+                        raise ValueError(f"{path}: {key} requires a verified build record for an artifact pair")
+                if left["manifest_sha256"] != right["manifest_sha256"]:
+                    fields = ["manifest_sha256"]
+                else:
+                    artifact_pairs.add(tuple(row[field] for row in (left, right) for field in ARTIFACT_HASHES))
+            if fields:
+                raise ValueError(f"identity differs: {key}: {', '.join(fields)}")
+        except INVALID_RECEIPT as error:
+            refusals[key] = str(error)
+            print(f"{key} REFUSED ({error})", file=sys.stderr)
+            continue
+
         baseline = left["sample"]["instructions"]
-        candidate = after[key]["sample"]["instructions"]
+        candidate = right["sample"]["instructions"]
         percent = Decimal(100) * (candidate - baseline) / baseline
         breach = percent > threshold
         failed |= breach
         ratios.append(candidate / baseline)
         print(f"{key} {baseline:,} -> {candidate:,} ({percent:+.3f}%){' FAIL' if breach else ''}")
-    geomean = math.expm1(math.fsum(map(math.log, ratios)) / len(ratios)) * 100
-    print(f"{len(ratios)} rows, geomean {geomean:+.3f}%, threshold +{threshold}%")
-    return int(failed)
+    for base_compiler, base_runtime, candidate_compiler, candidate_runtime in sorted(artifact_pairs):
+        if base_compiler != candidate_compiler:
+            print(f"Variable compiler_sha256 {base_compiler} -> {candidate_compiler}")
+        runtime = "unchanged" if base_runtime == candidate_runtime else f"{base_runtime} -> {candidate_runtime}"
+        print(f"Paired runtime_archive_sha256 {runtime}")
+    if ratios:
+        geomean = math.expm1(math.fsum(map(math.log, ratios)) / len(ratios)) * 100
+        print(f"{len(ratios)} rows compared, geomean {geomean:+.3f}%, threshold +{threshold}%")
+    return REFUSED if refusals else int(failed)
 
 
 def profile(args):
@@ -393,7 +437,7 @@ def main():
         return compare(args.baseline, args.candidate, args.threshold)
     except (KeyError, OSError, ValueError, TypeError, AttributeError, re.error, subprocess.SubprocessError) as error:
         print(f"{args.action}: {error}", file=sys.stderr)
-        return 2
+        return REFUSED
 
 
 if __name__ == "__main__":

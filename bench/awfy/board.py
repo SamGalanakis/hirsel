@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build and run the matched Hirsel goal board. Keep outputs outside the checkout."""
 import argparse
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from decimal import Decimal
 from io import StringIO
 import importlib.util
@@ -15,6 +15,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 import arena
@@ -36,18 +37,30 @@ PINS = {
 }
 COUNTERS = ("instructions", "cycles")
 EXPECTED = measure.EXPECTED
+INSTRUCTION_LIMIT = Decimal(2)
+SIZE_LIMIT = 2048
+SIZE_ROW = "AWFY original-14 harness"
+CHECKBOX_METRICS = {
+    "converge": "toggles_per_second",
+    "memory-subscribed": "server_rss_bytes",
+    "memory-unsubscribed": "server_rss_bytes",
+}
+CHECKBOX_CLIENTS = 64
 NOTES = (
     "Instructions and cycles count user-space CPU work; seconds measures elapsed time. "
     "Hirsel checks bounds and overflow and admits bytes. Certified images elide Step charging. "
     "Rust and Goose have no Hirsel replay, Host or budget machinery. The ports use different "
     "libraries and layouts. Each AWFY port checks the reference result internally; LangArena "
     "checks the same one-iteration Rust oracle.",
-    "The size row counts each complete original-14 harness once after GNU strip. "
-    "The compile rows leave dependencies built, use one Cargo codegen unit with release "
-    "incremental enabled, and apply the same unused binding for the edit.",
+    "The nightly instruction gate flags Hirsel increases above 2%. All CPU counters must be fully active. "
+    "The size row measures each original-14 harness after GNU strip, reports growth, and flags Hirsel "
+    "increases of 2,048 bytes or more. The compile rows keep dependencies built and use one Cargo "
+    "codegen unit with release incremental enabled. The warm edit rebuilds code and changes "
+    "the Spectralnorm checksum from 1051192944 to 1051192945.",
     "Checkbox runs use the same checked wire driver and durable workload on both servers. "
     "Throughput is toggles/s including connection and convergence time; higher is better. "
-    "RSS is sampled with the requested sessions live. Goose has no compile or checkbox peer here.",
+    "Throughput is reported as a trend. The board flags RSS per live session rising by more "
+    "than 10%. Goose has no compile or checkbox peer here.",
 )
 
 
@@ -98,13 +111,87 @@ def ratios(samples, fields):
     return result
 
 
+def rows_by_label(report):
+    rows = {}
+    for row in report["rows"]:
+        label = (row["goal"], row["row"])
+        if label in rows:
+            raise ValueError(f"duplicate board row {'/'.join(label)}")
+        rows[label] = row
+    return rows
+
+
+def inactive_counters(report):
+    suites = {title: suite for suite, title in measure.SUITES.items()}
+    blocked = {}
+    for row in report["rows"]:
+        goal, name = row["goal"], row["row"]
+        if goal not in suites:
+            continue
+        for side, sample in row["samples"].items():
+            if sample["status"] == "inactive-counter" or (sample["status"] == "ok" and not all(
+                receipt.counter_ready(sample, f"{counter}:u") for counter in COUNTERS if counter in row["metrics"]
+            )):
+                key = f"{suites[goal]}/{name}"
+                blocked.setdefault(key, []).append(f"{goal}/{name}/{side}: inactive-counter (must be fully active)")
+    return {key: ", ".join(reasons) for key, reasons in blocked.items()}
+
+
+def size_changes(reference, candidate):
+    previous_measurement = reference.get("size_measurement", {})
+    current_measurement = candidate.get("size_measurement", {})
+    for field in ("strip_version", "strip_flags", "verified_workloads", "pins"):
+        previous = previous_measurement.get(field)
+        if not previous or previous != current_measurement.get(field):
+            raise ValueError(f"size identity differs: {field}")
+    left, right = (rows_by_label(report)["Size", SIZE_ROW] for report in (reference, candidate))
+    if left["certified"] != right["certified"]:
+        raise ValueError("size identity differs: certification")
+    changes = []
+    for side in measure.SIDES:
+        previous, current = (row["samples"][side] for row in (left, right))
+        for sample in (previous, current):
+            if (sample["status"] != "ok" or type(sample["bytes"]) is not int or sample["bytes"] <= 0
+                    or not all(re.fullmatch("[a-f0-9]{64}", sample[field])
+                               for field in ("image_sha256", "binary_sha256"))):
+                raise ValueError(f"{side} lacks a verified size sample")
+        before, after = previous["bytes"], current["bytes"]
+        if previous["image_sha256"] == current["image_sha256"] and before != after:
+            raise ValueError(f"{side} has inconsistent byte counts for the same stripped image")
+        changes.append((side, before, after))
+    return changes
+
+
+def checkbox_value(sample, metric):
+    value = Decimal(str(sample[metric]))
+    if sample["status"] != "ok" or not value.is_finite() or value <= 0:
+        raise ValueError(f"invalid {metric} sample")
+    if metric == "server_rss_bytes":
+        if sample["connections"] != CHECKBOX_CLIENTS:
+            raise ValueError(f"RSS must cover {CHECKBOX_CLIENTS} live sessions")
+        value /= CHECKBOX_CLIENTS
+    return value
+
+
+def checkbox_changes(reference, candidate, metric):
+    for row in (reference, candidate):
+        if row["status"] != "ok" or tuple(row["metrics"]) != (metric,):
+            raise ValueError("checkbox row has a different metric or an incomplete sample")
+    for side in ("hirsel", "rust"):
+        before, after = (checkbox_value(row["samples"][side], metric) for row in (reference, candidate))
+        percent = Decimal(100) * (after - before) / before
+        yield side, before, after, percent
+
+
+def instruction_keys():
+    return [f"{suite}/{name}" for suite, goal in measure.SUITES.items() for name in EXPECTED[goal]]
+
+
 class Board:
     def __init__(self, out, commit):
         self.out = out
         self.report = {"commit": commit, "pins": PINS, "notes": NOTES, "rows": [], "failures": {},
-                       "instruction_receipt": receipt.make_receipt(
-                           f"{suite}/{name}" for suite, goal in measure.SUITES.items() for name in EXPECTED[goal]
-                       )}
+                       "instruction_receipt": receipt.make_receipt(instruction_keys())}
 
     def save(self):
         observed = {(row["goal"], row["row"]): row for row in self.report["rows"]}
@@ -137,30 +224,105 @@ class Board:
         missing = [f"{row['goal']}/{row['row']}" for row in expected if row["status"] == "missing"]
         if missing:
             lines += ["", "## Missing rows", "", *[f"- {label}" for label in missing]]
+        if "exit_status" in self.report:
+            lines += ["", f"Board exit status {self.report['exit_status']}"]
         comparison = self.report.get("instruction_comparison")
         if comparison:
             lines += ["", "## Nightly instruction comparison", "", comparison["status"], "",
                       *comparison["details"]]
+        for gate in ("size", "checkbox"):
+            if comparison := self.report.get(f"{gate}_comparison"):
+                lines += ["", f"## Nightly {gate} comparison", "", *comparison]
         (self.out / "board.md").write_text("\n".join(lines) + "\n")
 
     def finish(self, baseline=None):
         self.save()
-        print(self.out / "board.md", flush=True)
-        if not self.report["complete"]:
-            return 1
-        status, details = "No prior complete receipt", []
-        if baseline is not None:
-            output = StringIO()
+        blocked = inactive_counters(self.report)
+        if not self.report["complete"] and not blocked:
+            status = 1
+        elif baseline is not None:
+            status = self.compare_previous(baseline, blocked)
+        elif blocked:
+            status = receipt.REFUSED
+            for reason in blocked.values():
+                print(reason, file=sys.stderr)
+        else:
             try:
-                with redirect_stdout(output):
-                    breached = receipt.compare(baseline, self.out / "board.json", Decimal(2))
-                status = "Instruction regression" if breached else "Within +2% on every row"
-                details = output.getvalue().splitlines()
-            except (KeyError, OSError, ValueError, TypeError, AttributeError, re.error) as error:
-                status, details = "Incomparable", [str(error)]
-        self.report["instruction_comparison"] = {"status": status, "details": details}
+                validate_baseline(self.out / "board.json", self.report)
+                self.report["instruction_comparison"] = {"status": "No baseline supplied", "details": []}
+                status = 0
+            except (*receipt.INVALID_RECEIPT, ArithmeticError) as error:
+                status = receipt.REFUSED
+                details = [f"REFUSED ({error})"]
+                self.report["instruction_comparison"] = {"status": "Refused", "details": details}
+                print(details[0], file=sys.stderr)
+        self.report["exit_status"] = status
         self.save()
-        return 3 if status == "Instruction regression" else 0
+        print(self.out / "board.md", flush=True)
+        return status
+
+    def compare_previous(self, baseline, blocked):
+        output = StringIO()
+        reference = {}
+        try:
+            reference = receipt.read(baseline)
+            if reference["complete"] is not True:
+                reference = {}
+                raise ValueError("incomplete board baseline")
+            blocked = inactive_counters(reference) | blocked
+            with redirect_stdout(output), redirect_stderr(output):
+                instructions = receipt.compare(
+                    baseline, self.out / "board.json", INSTRUCTION_LIMIT,
+                    expected=self.report["instruction_receipt"]["expected_rows"], blocked=blocked)
+        except receipt.INVALID_RECEIPT as error:
+            instructions = receipt.REFUSED
+            print(f"REFUSED ({error})", file=output)
+        status = ("Within +2% on every row", "Instruction regression", "Refused")[instructions]
+        details = output.getvalue().splitlines()
+        self.report["instruction_comparison"] = {"status": status, "details": details}
+
+        size, checkbox = [], []
+        refused, failed = instructions == receipt.REFUSED, instructions == 1
+        try:
+            for side, before, after in size_changes(reference, self.report):
+                delta = after - before
+                breach = side == "hirsel" and delta >= SIZE_LIMIT
+                failed |= breach
+                line = f"{side} {before:,} -> {after:,} B ({delta:+,} B){' FAIL' if breach else ''}"
+                size.append(line)
+                if delta > 0:
+                    print(line)
+        except receipt.INVALID_RECEIPT as error:
+            refused = True
+            size.append(f"REFUSED ({error})")
+
+        try:
+            previous = rows_by_label(reference)
+            current = rows_by_label(self.report)
+            for mode, metric in CHECKBOX_METRICS.items():
+                label = ("Checkbox", f"{mode}, {CHECKBOX_CLIENTS} clients")
+                try:
+                    rss = metric == "server_rss_bytes"
+                    unit = "B/session" if rss else "toggles/s"
+                    for side, before, after, percent in checkbox_changes(previous[label], current[label], metric):
+                        breach = rss and percent > 10
+                        failed |= breach
+                        checkbox.append(f"{label[1]}/{side} {before:,.2f} -> {after:,.2f} {unit} "
+                                        f"({percent:+.3f}%){' FAIL' if breach else ''}")
+                except (*receipt.INVALID_RECEIPT, ArithmeticError) as error:
+                    refused = True
+                    checkbox.append(f"{label[1]} REFUSED ({error})")
+        except receipt.INVALID_RECEIPT as error:
+            refused = True
+            checkbox.append(f"REFUSED ({error})")
+
+        self.report["size_comparison"], self.report["checkbox_comparison"] = size, checkbox
+        for line in (*details, *size, *checkbox):
+            if "REFUSED" in line:
+                print(line, file=sys.stderr)
+        if refused:
+            return receipt.REFUSED
+        return 3 if failed else 0
 
     def row(self, goal, name, certified, samples, fields):
         label = f"{goal}/{name}"
@@ -178,8 +340,13 @@ class Board:
                 for field in fields
             ):
                 status = "missing-or-invalid-metric"
-                sample["status"] = status
+            if status == "ok" and not all(
+                receipt.counter_ready(sample, f"{counter}:u") for counter in COUNTERS if counter in fields
+            ):
+                status = "inactive-counter"
             if status != "ok":
+                if side in samples:
+                    sample["status"] = status
                 self.report["failures"][f"{label}/{side}"] = status
                 complete = False
         self.report["rows"].append({"goal": goal, "row": name, "certified": certified,
@@ -218,7 +385,7 @@ def runtime_rows(board, suite, directory, upstream, tools):
                 board.report["instruction_receipt"]["rows"].append(row)
                 samples[side] = sample
                 continue
-            sample = measure.core_measure.sample(command, target, env=env, cycles=True, cwd=directory)
+            sample = measure.core_measure.sample(command, target, env=env, cycles=True, cwd=directory, pmu_times=True)
             output = (target / "stdout").read_bytes().splitlines(keepends=True)
             sample["verified"] = sample["status"] in ("ok", "missing-counter") and any(
                 re.fullmatch(marker, line) for line in output)
@@ -238,9 +405,13 @@ def awfy_rows(board, out, upstream, tools):
     verified = runtime_rows(board, "awfy", out, upstream, tools)
     if len(verified) == len(originals):
         result = measure.verified_sizes(out, verified)
-        board.row("Size", "AWFY original-14 harness", result["hirsel_certified"][verified[0]],
-                  {side: {"status": "ok", "bytes": size}
-                   for side, size in result["stripped_bytes"].items()}, ("bytes",))
+        board.report["size_measurement"] = {
+            "verified_workloads": sorted(verified), "strip_version": result["strip_version"],
+            "strip_flags": result["strip_flags"],
+            "pins": {peer: PINS[peer] for peer in ("awfy", "resid", "goose")},
+        }
+        board.row("Size", SIZE_ROW, result["hirsel_certified"][verified[0]],
+                  {side: {"status": "ok", **image} for side, image in result["images"].items()}, ("bytes",))
     else:
         board.report["failures"]["Size"] = "not all original harness results verified"
         board.save()
@@ -268,7 +439,8 @@ def compile_commands(out):
               "--inputs", "inputs.json",
               "--core-product", "packages", "--store", "store", "--entry", "langarena@1/suite/main",
               "--dir", ".", "--grant", "Stdout", "--grant", "Tasks", "--limit", str(256 << 20), "-o", "hirsel"]
-    return (out / "rust", out / "helper.hirsel", hirsel, cargo("build", "-j1", *compile_profile(target)),
+    return (out / "rust", out / "clbg.hirsel", hirsel,
+            cargo("build", "-j1", "--message-format=json", *compile_profile(target)),
             executable, target / "release/benchmarks")
 
 
@@ -295,6 +467,11 @@ def prepare_hirsel_compile(out, artifacts, env):
     helper = out / "helper.hirsel"
     shutil.copyfile(ROOT / "core/langarena/helper.hirsel", helper)
     manifest = suite.inputs(ROOT, "helper", helper)
+    clbg = out / "clbg.hirsel"
+    shutil.copyfile(ROOT / "core/langarena/clbg.hirsel", clbg)
+    for source in manifest["packages"][-1]["sources"]:
+        if source["modules"] == ["clbg"]:
+            source["file"] = str(clbg)
     for package in manifest["packages"]:
         package["sources"] = [entry for entry in package["sources"] if len(entry["modules"]) == 1]
     source = out / "suite.hirsel"
@@ -305,20 +482,33 @@ def prepare_hirsel_compile(out, artifacts, env):
     (out / "pinned-runtime.a").symlink_to(artifacts["runtime"])
 
 
+def edit_checksum(path, old, new):
+    source = path.read_text()
+    if source.count(old) != 1:
+        raise ValueError(f"{path}: expected one Spectralnorm checksum expression")
+    path.write_text(source.replace(old, new))
+
+
 def compile_rows(board, out, prepared, fixture, tools):
-    rust, helper, hirsel, cargo_build, exe, rust_exe = prepared
+    rust, clbg, hirsel, cargo_build, exe, rust_exe = prepared
     env = build.capped_env(out) | {"LD_LIBRARY_PATH": str(build.llvm_path() / "lib")}
     config = out / "fixture.json"
     shutil.copyfile(fixture, config)
-    task = next(row for row in json.loads(config.read_text()) if row["name"] == "CLBG::Spectralnorm")
-    name, expected = task["name"], task["checksum"]
+    tasks = receipt.read(config)
+    name, expected = "CLBG::Spectralnorm", 1051192944
+    task = next(row for row in tasks if row["name"] == name)
+    if task["checksum"] != expected:
+        raise ValueError(f"{name}: expected the pinned cold checksum {expected}")
     for mode in ("cold", "edit"):
         if mode == "edit":
-            for path, signature, edit in ((helper, "pub fn config_i64(", "\n    let _ = 0u8"),
-                                           (rust / "src/main.rs", "fn config_i64(", "\n    let _ = 0u8;")):
-                body = path.read_text()
-                offset = body.index("{", body.index(signature)) + 1
-                path.write_text(body[:offset] + edit + body[offset:])
+            edit_checksum(clbg, "helper.checksum_f64(float.sqrt(vbv / vv))",
+                          "Ok(int.wrapping_add(helper.checksum_f64(float.sqrt(vbv / vv))?, 1u32))")
+            edit_checksum(rust / "src/benchmarks/spectralnorm.rs", "helper::checksum_f64(result_value)",
+                          "helper::checksum_f64(result_value).wrapping_add(1)")
+            expected += 1
+            task["checksum"] = expected
+            config = out / "fixture-edit.json"
+            write_json(config, tasks)
         samples = {}
         certified = None
         label = f"LangArena {mode}"
@@ -329,7 +519,7 @@ def compile_rows(board, out, prepared, fixture, tools):
             commands.reverse()
         for side, command, cwd, executable in commands:
             target = out / f"{mode}-{side}"
-            sample = measure.core_measure.sample(command, target, env=cargo_scope(env), cycles=True, cwd=cwd)
+            sample = measure.core_measure.sample(command, target, env=cargo_scope(env), cycles=True, cwd=cwd, pmu_times=True)
             samples[side] = sample
             if sample["status"] not in ("ok", "missing-counter"):
                 continue
@@ -339,6 +529,13 @@ def compile_rows(board, out, prepared, fixture, tools):
                 report = build.write_native_report(executable, native_path.read_bytes(), provenance,
                                                    path=target / "build.json")
                 record = receipt.build_record(report)
+                sample["compiled_parts"] = report["native"]["compiled"]
+                rebuilt = sample["compiled_parts"] > 0
+            else:
+                messages = (json.loads(line) for line in (target / "stdout").read_text().splitlines())
+                rebuilt = any(message["reason"] == "compiler-artifact" and message["target"]["name"] == "benchmarks"
+                              and message["executable"] and message["fresh"] is False for message in messages)
+                sample["rebuilt_crate"] = bool(rebuilt)
             verify = subprocess.run([CAP, executable, config.name, name], env=env, cwd=out,
                                     capture_output=True, text=True)
             (target / "verification").write_text(verify.stdout + verify.stderr)
@@ -350,10 +547,8 @@ def compile_rows(board, out, prepared, fixture, tools):
                 sample["status"] = "wrong-result"
             elif sample["status"] == "ok" and not sample["seconds"]:
                 sample["status"] = "missing-duration"
-            elif sample["status"] == "ok" and not all(
-                receipt.counter_ready(sample, f"{counter}:u") for counter in COUNTERS
-            ):
-                sample["status"] = "inactive-counter"
+            elif mode == "edit" and not rebuilt:
+                sample["status"] = "no-parts-compiled" if side == "hirsel" else "crate-not-rebuilt"
             if side == "hirsel":
                 board.report["instruction_receipt"]["rows"].append({
                     "key": f"compile/{label}", "suite": "compile", "mode": mode, "certified": certified,
@@ -455,10 +650,8 @@ def checkbox_rows(board, out, prepared):
     checkbox, executable, address, wants, tools = prepared
     env = build.capped_env(out)
     overrides = ["--per-ip-sessions", "20000", "--per-ip-new-principals", "20000", "--principal-rate", "1000000000"]
-    clients, toggles = 64, 200
-    for index, (mode, metric) in enumerate((("converge", "toggles_per_second"),
-                                            ("memory-subscribed", "server_rss_bytes"),
-                                            ("memory-unsubscribed", "server_rss_bytes"))):
+    clients, toggles = CHECKBOX_CLIENTS, 200
+    for index, (mode, metric) in enumerate(CHECKBOX_METRICS.items()):
         samples = {}
         for side in (("hirsel", "rust") if index % 2 == 0 else ("rust", "hirsel")):
             directory = out / f"{mode}-{side}"
@@ -584,10 +777,62 @@ def run_board(board, args):
             board.attempt("Checkbox measurement", checkbox_rows, board, checkbox_dir, checkbox_ready)
 
 
+def validate_baseline(path, report):
+    rows = rows_by_label(report)
+    if (report["complete"] is not True
+            or rows.keys() != {(goal, name) for goal, names in EXPECTED.items() for name in names}
+            or any(row["status"] != "ok" for row in rows.values()) or inactive_counters(report)
+            or receipt.rows_from(path).keys() != set(instruction_keys())):
+        raise ValueError(f"{path}: a baseline requires all current rows and fully active counters")
+    if report["size_measurement"]["verified_workloads"] != sorted(EXPECTED["AWFY original"]):
+        raise ValueError(f"{path}: size requires all original-14 workloads")
+    size_changes(report, report)
+    for mode, metric in CHECKBOX_METRICS.items():
+        row = rows["Checkbox", f"{mode}, {CHECKBOX_CLIENTS} clients"]
+        list(checkbox_changes(row, row, metric))
+
+
+def rebaseline(run):
+    path = run / "board.json"
+    if not path.is_file():
+        path = run / "board/board.json"
+    path = path.resolve()
+    report = receipt.read(path)
+    if report["complete"] is not True or report["exit_status"] != 0:
+        raise ValueError(f"{path}: rebaseline requires a complete, clean run (exit 0)")
+    validate_baseline(path, report)
+    base = Path.home() / ".local/share/hirsel-board"
+    base.mkdir(parents=True, exist_ok=True)
+    refused = base / "baseline-refused"
+    with measurement_slot(base / "baseline.lock"):
+        previous = refused.read_text().strip() if refused.exists() else None
+        with tempfile.TemporaryDirectory(dir=base) as scratch:
+            link = Path(scratch) / "baseline"
+            link.symlink_to(path)
+            link.replace(base / "last-complete.json")
+        refused.unlink(missing_ok=True)
+    print(f"Promoted {path} ({report['commit']}) because it is a complete, clean board.")
+    if previous:
+        print(f"Cleared the promotion hold from {previous}.")
+    return 0
+
+
 def main():
+    if sys.argv[1:2] == ["rebaseline"]:
+        parser = argparse.ArgumentParser(prog=f"{sys.argv[0]} rebaseline",
+                                         description="Promote a complete, clean board and clear a promotion hold")
+        parser.add_argument("run", type=Path)
+        args = parser.parse_args(sys.argv[2:])
+        try:
+            return rebaseline(args.run)
+        except (*receipt.INVALID_RECEIPT, ArithmeticError) as error:
+            print(f"rebaseline refused: {error}", file=sys.stderr)
+            return receipt.REFUSED
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("out", type=Path)
-    parser.add_argument("--baseline", type=Path, help="prior complete board.json for +2% instruction triage")
+    parser.add_argument("--baseline", type=lambda path: Path(path).resolve(),
+                        help="prior complete board.json for instruction, size and checkbox gates")
     for name in PINS:
         parser.add_argument(f"--{name}", type=lambda path: Path(path).resolve(), required=True,
                             help=f"clean checkout at {PINS[name]}")

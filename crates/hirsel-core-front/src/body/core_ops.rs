@@ -111,6 +111,7 @@ operations! {
     ("list", "fill", Lane::PendingCode, "A", "core-check-calls-910", false),
     ("string", "from", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "from_utf8", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "is_utf8", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "into_bytes", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "next_scalar", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "push_scalar", Lane::PendingCode, "C", "std-seed-api-889", true),

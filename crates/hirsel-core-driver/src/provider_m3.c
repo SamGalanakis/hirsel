@@ -61,6 +61,12 @@ HirselCoreHostOutcome __wrap_hirsel_core_host_io(HirselCoreContext *ctx,uint8_t 
     HirselCoreHostOutcome out=__real_hirsel_core_host_io(ctx,op,handle,b,mode,site);
     s.active=old;return out;
 }
+extern HirselCoreHostOutcome __real_hirsel_core_host_clock(HirselCoreContext*,uint8_t,uint64_t,HirselCoreBuffer*,uint8_t,uint64_t);
+HirselCoreHostOutcome __wrap_hirsel_core_host_clock(HirselCoreContext *ctx,uint8_t op,uint64_t handle,HirselCoreBuffer *b,uint8_t mode,uint64_t site) {
+    HirselCoreContext *old=s.active; s.active=ctx;
+    HirselCoreHostOutcome out=__real_hirsel_core_host_clock(ctx,op,handle,b,mode,site);
+    s.active=old;return out;
+}
 extern HirselCoreHostOutcome __real_hirsel_core_host_op(HirselCoreContext*,uint8_t,uint64_t,HirselCoreBuffer*,uint8_t,uint64_t);
 HirselCoreHostOutcome __wrap_hirsel_core_host_op(HirselCoreContext *ctx,uint8_t op,uint64_t handle,HirselCoreBuffer *b,uint8_t mode,uint64_t site) {
     HirselCoreContext *old=s.active; s.active=ctx;

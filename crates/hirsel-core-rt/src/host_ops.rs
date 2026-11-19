@@ -29,7 +29,7 @@ unsafe fn carrier(operand: *mut Buffer) -> Buffer {
     }
 }
 
-/// Clock, random and stream operations. The checked operation determines the
+/// Random and stream operations. The checked operation determines the
 /// shape of its operands, as for `hirsel_core_host_op`.
 ///
 /// # Safety
@@ -50,15 +50,34 @@ pub unsafe extern "C" fn hirsel_core_host_io(
         let mut request = request(op, mode, site, buffer);
         let provider = hirsel_core_capability_provider(context, handle);
         request.handle = hirsel_core_capability_handle(context, handle);
-        let result = if matches!(op, WALL_MS | MONO_NS) {
-            crate::provider::clock(context, provider, &mut request)
-        } else {
-            drive(context, provider, &mut request, None)
-        };
+        let result = drive(context, provider, &mut request, None);
         if op == crate::provider::RANDOM && request.buffer.len != buffer.len {
             (*operand).len = request.buffer.len;
         }
         result
+    }
+}
+
+/// Read a clock through the capability's provider.
+///
+/// # Safety
+/// Context is running, op is WallMs or MonoNs, and handle designates the
+/// checked Clock capability. Operand follows the common host ABI.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_clock(
+    context: *mut Context,
+    op: u8,
+    handle: u64,
+    operand: *mut Buffer,
+    mode: u8,
+    site: u64,
+) -> Outcome {
+    // SAFETY: the checked clock row supplies its capability and request.
+    unsafe {
+        let mut request = request(op, mode, site, carrier(operand));
+        let provider = hirsel_core_capability_provider(context, handle);
+        request.handle = hirsel_core_capability_handle(context, handle);
+        crate::provider::clock(context, provider, &mut request)
     }
 }
 
@@ -103,11 +122,10 @@ pub unsafe extern "C" fn hirsel_core_host_op(
                     result
                 }
             }
-            crate::provider::RANDOM
-            | WALL_MS
-            | MONO_NS
-            | crate::provider::STDOUT
-            | crate::provider::STDERR => {
+            WALL_MS | MONO_NS => {
+                return hirsel_core_host_clock(context, op, handle, operand, mode, site);
+            }
+            crate::provider::RANDOM | crate::provider::STDOUT | crate::provider::STDERR => {
                 return hirsel_core_host_io(context, op, handle, operand, mode, site);
             }
             _ => unreachable!(),

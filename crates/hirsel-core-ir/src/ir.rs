@@ -868,9 +868,8 @@ impl HostOp {
     /// Native entry for rows that use the common operand signature.
     pub fn io_symbol(self) -> &'static str {
         match self {
-            Self::WallMs | Self::MonoNs | Self::Random | Self::Stdout | Self::Stderr => {
-                "hirsel_core_host_io"
-            }
+            Self::WallMs | Self::MonoNs => "hirsel_core_host_clock",
+            Self::Random | Self::Stdout | Self::Stderr => "hirsel_core_host_io",
             _ => "hirsel_core_host_op",
         }
     }

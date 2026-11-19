@@ -4504,39 +4504,68 @@ fn wire_connection_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.
     served
 }
 
+// The owner's state across its event loop. wire_owner_setup builds it and
+// returns, so the setup's temporaries leave the stack before the loop runs, and
+// each event kind is handled in a call of its own, so the loop's frame holds
+// one event's temporaries rather than every arm's.
+type WireLoop[C: send] {
+    apply_input: fn(mut C, mut WireWork, take ServiceInput) -> Result[Option[Frame], u16],
+    work: WireWork, c: WireConfig, clock: Clock, tasks: Tasks, managed: Option[OwnerControl], pub_to: Sender[PubIn],
+    to: Sender[WireEvent], inbox: Receiver[WireEvent], credit: Sender[()], write: Sender[WireUnit],
+    encoded_to: Sender[Result[Bytes, std.wsock.Error]], encoded_from: Receiver[Result[Bytes, std.wsock.Error]],
+    allocation_to: Sender[Option[AllocatedState[C]]], allocation_from: Receiver[Option[AllocatedState[C]]],
+    encoder: std.wsock.Outbound, rh: Task[()], wh: Task[()], lease: Option[std.wsock.Pending],
+    hello_at: Option[u64], hello_seen: bool, hello_alarm: Option[Task[()]],
+    run: u64, held_credit: bool, deferred: List[(Frame, u64)], busy: bool, control: Option[Bytes], closing: bool, alarm: Option[Task[()]],
+    read_back: Option[std.wsock.Reader], write_back: Option[std.wsock.Writer], read_closed: bool, write_closed: bool, close_at: Option[u64], expired: bool,
+}
+
+// What one step of the owner's loop asks of it: go on with this frame (if
+// any), start the next event, or leave the loop with this result.
+type WireStep = Go(Option[Frame]) | Again | Stop(Result[(), std.wsock.Error])
+
 fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]], mut abandoned: u64) -> Result[(), std.wsock.Error] waits {
+    let (take st, take service) = match wire_owner_setup(take x, pool) {
+        Ok(take ready) => take ready,
+        Error(take done) => return take done,
+    }
+    wire_owner_run(take st, take service, pool, mut abandoned)
+}
+
+// Error(r) is the owner's result when it ends before its loop.
+fn wire_owner_setup[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]]) -> Result[(WireLoop[C], Box[Service[C]]), Result[(), std.wsock.Error]] waits {
     let WireOwner(upgraded: take up, service: take initial_service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take managed) = take x
     let std.wsock.Upgraded(reader: take reader, writer: take writer, source: source, timers: timers, pending: take pending) = take up
     let new_events: Result[(Sender[WireEvent], Receiver[WireEvent]), Capacity] = channel.new(1u64 + c.q)
-    let mut lease = Some(take pending)
+    let lease = Some(take pending)
     let (to, inbox) = match take new_events {
-        Ok(take p) => take p, Error(cap) => return Error(Allocation(cap)),
+        Ok(take p) => take p, Error(cap) => return Error(Error(Allocation(cap))),
     }
     if let Some(life) = managed {
         let handoff: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
-        let (ready_to, ready_from) = match take handoff { Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)) }
-        if let Error(_) = channel.send(life.to, OwnerReady(life.id, channel.sender(to), take ready_to)) { return Ok(()) }
-        if let Error(_) = channel.receive(ready_from) { return Ok(()) }
+        let (ready_to, ready_from) = match take handoff { Ok(take pair) => take pair, Error(cap) => return Error(Error(Allocation(cap))) }
+        if let Error(_) = channel.send(life.to, OwnerReady(life.id, channel.sender(to), take ready_to)) { return Error(Ok(())) }
+        if let Error(_) = channel.receive(ready_from) { return Error(Ok(())) }
     }
     let new_credits: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64 + c.q)
     let (credit, credits) = match take new_credits {
-        Ok(take p) => take p, Error(cap) => return Error(Allocation(cap)),
+        Ok(take p) => take p, Error(cap) => return Error(Error(Allocation(cap))),
     }
     for _ in 0u64 .. 1u64 + c.q { let _ = channel.try_send(credit, ()) }
     let new_writes: Result[(Sender[WireUnit], Receiver[WireUnit]), Capacity] = channel.new(1u64)
     let (write, writes) = match take new_writes {
-        Ok(take p) => take p, Error(cap) => return Error(Allocation(cap)),
+        Ok(take p) => take p, Error(cap) => return Error(Error(Allocation(cap))),
     }
     let results: Result[(Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]), Capacity] = channel.new(1u64)
-    let (encoded_to, encoded_from) = match take results { Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)) }
+    let (encoded_to, encoded_from) = match take results { Ok(take pair) => take pair, Error(cap) => return Error(Error(Allocation(cap))) }
     let allocation_results: Result[(Sender[Option[AllocatedState[C]]], Receiver[Option[AllocatedState[C]]]), Capacity] = channel.new(1u64)
-    let (allocation_to, allocation_from) = match take allocation_results { Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)) }
-    let out = std.wsock.outbound(Server, c.socket, None)?
-    let mut encoder = std.wsock.outbound(Server, c.socket, None)?
+    let (allocation_to, allocation_from) = match take allocation_results { Ok(take pair) => take pair, Error(cap) => return Error(Error(Allocation(cap))) }
+    let out = match std.wsock.outbound(Server, c.socket, None) { Ok(o) => o, Error(e) => return Error(Error(e)) }
+    let encoder = match std.wsock.outbound(Server, c.socket, None) { Ok(o) => o, Error(e) => return Error(Error(e)) }
     let reading = WireRead(reader: take reader, to: channel.sender(to), credits: take credits, clock: clock, config: c.socket, pool: channel.sender(pool))
     let read_task: fn(take WireRead[C]) -> () waits = wire_read
     let mut rh = match task.spawn(tasks, bytes reader_bytes(), take reading, read_task) {
-        Ok(take h) => take h, Error((cap, _)) => return Error(Allocation(cap)),
+        Ok(take h) => take h, Error((cap, _)) => return Error(Error(Allocation(cap))),
     }
     let writing = WireWrite(writer: take writer, from: take writes, to: channel.sender(to), out: out, clock: clock, config: c.socket)
     let wh = match task.spawn(tasks, bytes writer_bytes(), take writing, wire_write) {
@@ -4544,321 +4573,405 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]], mu
         Error((cap, _)) => {
             task.cancel(mut rh)
             let _ = task.join(take rh)
-            return Error(Allocation(cap))
+            return Error(Error(Allocation(cap)))
         },
     }
     let mut service = take initial_service
     let apply_input = service.step
     let mut work = wire_work()
     if let Some(life) = managed { work.drain = Some(latest.handle(life.drain)) }
-    if let Error(code) = apply_input(mut service.context, mut work, WAttach(source, channel.sender(to), channel.sender(pub_to))) { wire_join(take rh, take wh); return Error(Protocol(code)) }
+    if let Error(code) = apply_input(mut service.context, mut work, WAttach(source, channel.sender(to), channel.sender(pub_to))) { wire_join(take rh, take wh); return Error(Error(Protocol(code))) }
     let hello_at = std.wsock.hello_deadline(timers)
-    let mut hello_seen = false
     let mut hello_alarm: Option[Task[()]] = None
     if let Some(at) = hello_at {
         let timing = WireAlarm(clock: clock, at: at, to: channel.sender(to))
-        match task.spawn(tasks, bytes 4096u64, take timing, wire_hello_alarm) { Ok(take h) => { hello_alarm = Some(take h) }, Error((cap, _)) => { wire_join(take rh, take wh); return Error(Allocation(cap)) } }
+        match task.spawn(tasks, bytes 4096u64, take timing, wire_hello_alarm) { Ok(take h) => { hello_alarm = Some(take h) }, Error((cap, _)) => { wire_join(take rh, take wh); return Error(Error(Allocation(cap))) } }
     }
-    let mut run = 0u64
-    let mut held_credit = false
-    let mut deferred: List[(Frame, u64)] = list.new()
-    let mut busy = false
-    let mut control: Option[Bytes] = None
-    let mut closing = false
-    let mut alarm: Option[Task[()]] = None
-    let mut read_back: Option[std.wsock.Reader] = None
-    let mut write_back: Option[std.wsock.Writer] = None
-    let mut read_closed = false
-    let mut write_closed = false
-    let mut close_at: Option[u64] = None
-    let mut expired = false
+    let st = WireLoop(apply_input: apply_input, work: take work, c: c, clock: clock, tasks: tasks, managed: take managed, pub_to: take pub_to,
+        to: take to, inbox: take inbox, credit: take credit, write: take write,
+        encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from,
+        encoder: encoder, rh: take rh, wh: take wh, lease: take lease, hello_at: hello_at, hello_seen: false, hello_alarm: take hello_alarm,
+        run: 0u64, held_credit: false, deferred: list.new(), busy: false, control: None, closing: false, alarm: None,
+        read_back: None, write_back: None, read_closed: false, write_closed: false, close_at: None, expired: false)
+    Ok((take st, take service))
+}
+
+fn wire_owner_run[C: send](take initial: WireLoop[C], take initial_service: Box[Service[C]], pool: Sender[WireAllocation[C]], mut abandoned: u64) -> Result[(), std.wsock.Error] waits {
+    let mut st = take initial
+    let mut service = take initial_service
     // Every normal exit goes through wire_join, including service refusal and
     // either child's Ended. Cancellation uses CONC-8 on the two owned handles.
     let result: Result[(), std.wsock.Error] = loop {
-        let event = if (service.ready)(service.context) && list.len(deferred) != 0u64 {
-            let (take pending_frame, at) = list.remove(mut deferred, 0u64)
-            wire_event(Input(take pending_frame, at))
-        } else {
-            let e = match channel.try_receive(inbox) {
-                Ok(take e) => take e,
-                Error(Empty) => { run = 0u64; match channel.receive(inbox) { Ok(take e) => take e, Error(_) => break Ok(()) } },
-                _ => break Ok(()),
-            }
-            if wire_taken(mut run, 1u64 + c.q) { let _ = apply_input(mut service.context, mut work, WDrained) }
-            take e
+        let received = match wire_owner_next(mut st, mut service) {
+            Some(take e) => take e,
+            None => break Ok(()),
         }
-        if wire_cut(work, clock) {
-            let _ = apply_input(mut service.context, mut work, WForce)
-            abandoned = work.abandoned
-            expired = true
-            break Ok(())
-        }
-        if let Some(life) = managed {
-            if let Some(window) = drain_window(latest.read(life.drain)) {
-                if host.mono_ns(clock) >= window.admission && (match work.deadline { None => true, _ => false }) {
-                    let _ = apply_input(mut service.context, mut work, WClose(window.deadline))
-                }
-            }
-        }
-        let WireEvent(e: take received) = take event
         let frame = match take received {
             Input(take f, at) => {
-                if closing { let _ = channel.try_send(credit, ()); continue }
-                let mut checked = (service.check)(service.context, f)
-                if let Hello(_, _) = f {
-                    if !hello_seen {
-                        if let Some(end) = hello_at { if at >= end { checked = Some(1008u16) } }
-                        hello_seen = true
-                    }
-                }
-                if match checked { None => true, _ => false } && !(service.ready)(service.context) {
-                    if let Error(_) = list.push(mut deferred, (take f, at)) { break Ok(()) }
-                    continue
-                }
-                if let Hello(_, _) = f { let _ = replace(mut hello_alarm, None) }
-                let handled: Result[Option[Frame], u16] = match checked {
-                    Some(code) => Error(code),
-                    None => if let Subscribe(sub, slot, take arg, take resume) = f {
-                        let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, allocation_to, allocation_from, take service, ValidateSubscribe(sub, slot, take arg, take resume)) {
-                            Some(take returned) => take returned,
-                            None => { wire_join(take rh, take wh); return Error(Protocol(1013u16)) },
-                        }
-                        service = take restored
-                        match take status {
-                            Ok(take plan) => apply_input(mut service.context, mut work, WPrepared(take plan)),
-                            Error(code) => Error(code),
-                        }
-                    } else { apply_input(mut service.context, mut work, WClient(take f, at)) },
-                }
-                if (service.ready)(service.context) { let _ = channel.try_send(credit, ()) } else { held_credit = true }
-                match take handled {
-                    Ok(take next) => take next,
-                    Error(code) => {
-                        let payload = wire_close_payload(code)
-                        match std.wsock.encode(mut encoder, true, 8u8, payload) {
-                            Ok(take refused) => { control = Some(take refused) },
-                            Error(e) => break Error(e),
-                        }
-                        closing = true
-                        None
+                if st.closing { let _ = channel.try_send(st.credit, ()); continue }
+                match wire_owner_input(mut st, take service, pool, take f, at) {
+                    Some((take kept, take outcome)) => {
+                        service = take kept
+                        match take outcome { Go(take next) => take next, Again => continue, Stop(take r) => break take r }
                     },
+                    None => return wire_owner_lost(take st),
                 }
             },
             FromRunner(take e) => {
-                if closing { continue }
-                let applied = if let Notice(e: Updated(take published)) = e {
-                    let drain: Option[Latest[Option[DrainWindow]]] = match work.drain { Some(root) => Some(latest.handle(root)), None => None }
-                    let output = replace(mut work.output, list.new())
-                    let job = DeliveryJob(update: take published, output: take output, drain: take drain)
-                    let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, allocation_to, allocation_from, take service, DeliverUpdate(take job)) {
-                        Some(take returned) => take returned,
-                        None => { wire_join(take rh, take wh); return Error(Protocol(1013u16)) },
-                    }
-                    service = take restored
-                    match take status {
-                        Ok(take plan) => apply_input(mut service.context, mut work, WPrepared(take plan)),
-                        Error(code) => Error(code),
-                    }
-                } else {
-                    apply_input(mut service.context, mut work, WRunner(take e))
-                }
-                match take applied {
-                    Ok(take f) => take f, Error(code) => { control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(code)))); closing = true; None },
+                if st.closing { continue }
+                match wire_owner_runner(mut st, take service, pool, take e) {
+                    Some((take kept, take next)) => { service = take kept; take next },
+                    None => return wire_owner_lost(take st),
                 }
             },
             Authenticated(take p) => {
-                let _ = replace(mut work.asking, None)
-                let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, allocation_to, allocation_from, take service, BindPrincipal(take p)) {
-                    Some(take returned) => take returned,
-                    None => { wire_join(take rh, take wh); return Error(Protocol(1013u16)) },
+                let _ = replace(mut st.work.asking, None)
+                match wire_owner_principal(mut st, take service, pool, take p) {
+                    Some(take kept) => { service = take kept; None },
+                    None => return wire_owner_lost(take st),
                 }
-                service = take restored
-                if let Error(code) = status {
-                    control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(code))))
-                    closing = true
-                }
-                None
             },
             JoinReady => None,
             DrainWake => None,
             HelloExpired => {
-                if hello_seen { continue }
-                control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(1008u16))))
-                closing = true
+                if st.hello_seen { continue }
+                wire_owner_refuse(mut st, 1008u16)
                 None
             },
             Rate(allowed) => {
-                let _ = replace(mut work.asking, None)
-                if closing { continue }
-                let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, allocation_to, allocation_from, take service, ValidateCall(allowed)) {
-                    Some(take returned) => take returned,
-                    None => { wire_join(take rh, take wh); return Error(Protocol(1013u16)) },
-                }
-                service = take restored
-                let applied = match take status {
-                    Ok(take plan) => apply_input(mut service.context, mut work, WPrepared(take plan)),
-                    Error(code) => Error(code),
-                }
-                match take applied {
-                    Ok(take f) => take f, Error(code) => { control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(code)))); closing = true; None },
+                let _ = replace(mut st.work.asking, None)
+                if st.closing { continue }
+                match wire_owner_rate(mut st, take service, pool, allowed) {
+                    Some((take kept, take next)) => { service = take kept; take next },
+                    None => return wire_owner_lost(take st),
                 }
             },
-            Published(take f) => { if closing { continue }; Some(take f) },
-            Control(op, payload) => {
-                let _ = channel.try_send(credit, ())
-                if closing { continue }
-                let mut b: Bytes = result.unwrap(list.with_capacity(125u64))
-                for i in 0u64 .. payload.len { let _ = list.push(mut b, payload.data[i]) }
-                match std.wsock.encode(mut encoder, true, op, b) {
-                    Ok(take encoded_control) => { control = Some(take encoded_control) },
-                    Error(e) => break Error(e),
-                }
-                if op == 8u8 { closing = true }
-                None
-            },
+            Published(take f) => { if st.closing { continue }; Some(take f) },
+            Control(op, payload) => match wire_owner_control(mut st, op, payload) { Go(take next) => take next, Again => continue, Stop(take r) => break take r },
             Sent => {
-                busy = false
-                let _ = apply_input(mut service.context, mut work, WSent)
+                st.busy = false
+                let _ = (st.apply_input)(mut service.context, mut st.work, WSent)
                 None
             },
             Dropped => {
-                busy = false
-                if let Error(code) = apply_input(mut service.context, mut work, WDropped) {
-                    control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(code))))
-                    closing = true
-                }
+                st.busy = false
+                if let Error(code) = (st.apply_input)(mut service.context, mut st.work, WDropped) { wire_owner_refuse(mut st, code) }
                 None
             },
-            WriteTimedOut(end) => {
-                if !closing {
-                    close_at = Some(end)
-                    match std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(1001u16)) {
-                        Ok(take close_frame) => { control = Some(take close_frame) },
-                        Error(e) => break Error(e),
-                    }
-                    closing = true
-                }
-                None
-            },
-            ReadClosed(payload, take returned) => {
-                read_back = Some(take returned)
-                read_closed = true
-                if write_closed { break Ok(()) }
-                if !closing {
-                    let mut b: Bytes = result.unwrap(list.with_capacity(125u64))
-                    for i in 0u64 .. payload.len { result.unwrap(list.push(mut b, payload.data[i])) }
-                    match std.wsock.encode(mut encoder, true, 8u8, b) {
-                        Ok(take close_bytes) => { control = Some(take close_bytes) },
-                        Error(e) => break Error(e),
-                    }
-                }
-                closing = true
-                None
-            },
+            WriteTimedOut(end) => match wire_owner_write_timeout(mut st, end) { Go(take next) => take next, Again => continue, Stop(take r) => break take r },
+            ReadClosed(payload, take returned) => match wire_owner_read_closed(mut st, payload, take returned) { Go(take next) => take next, Again => continue, Stop(take r) => break take r },
             WriteClosed(take returned) => {
-                write_back = Some(take returned)
-                write_closed = true
-                if read_closed { break Ok(()) }
+                st.write_back = Some(take returned)
+                st.write_closed = true
+                if st.read_closed { break Ok(()) }
                 None
             },
             Ended(_) => break Ok(()),
         }
-        if wire_cut(work, clock) {
-            let _ = apply_input(mut service.context, mut work, WForce)
-            abandoned = work.abandoned
-            expired = true
-            break Ok(())
+        let outgoing = match wire_owner_poll(mut st, mut service, take frame) { Go(take next) => take next, Again => continue, Stop(take r) => break take r }
+        match wire_owner_send(mut st, mut service, pool, take outgoing) { Stop(take r) => break take r, _ => {} }
+    }
+    if st.expired { abandoned = st.work.abandoned }
+    wire_owner_end(take st, mut service, take result)
+}
+
+// The next event, or None when the loop ends: the inbox closed, or the work's
+// cut passed (the owner then expires).
+fn wire_owner_next[C: send](mut st: WireLoop[C], mut service: Box[Service[C]]) -> Option[WireInput] waits {
+    let event = if (service.ready)(service.context) && list.len(st.deferred) != 0u64 {
+        let (take pending_frame, at) = list.remove(mut st.deferred, 0u64)
+        wire_event(Input(take pending_frame, at))
+    } else {
+        let e = match channel.try_receive(st.inbox) {
+            Ok(take e) => take e,
+            Error(Empty) => { st.run = 0u64; match channel.receive(st.inbox) { Ok(take e) => take e, Error(_) => return None } },
+            _ => return None,
         }
-        let mut outgoing: Option[Frame] = None
-        if !closing {
-            if let Some(take f) = take frame {
-                if let Error(e) = wire_queue_external(mut work, c, take f, None) { break Error(e) }
-            }
-            let writable = wire_ready(busy) && !write_closed && none(control)
-                && (list.len(work.output) == 0u64 || !work.output[0u64].external)
-            match apply_input(mut service.context, mut work, WPoll(writable)) {
-                Ok(Some(take f)) => {
-                    if writable { outgoing = Some(take f) }
-                    else {
-                        let held_check = replace(mut work.check, None)
-                        if let Error(e) = wire_queue_external(mut work, c, take f, held_check) { break Error(e) }
-                    }
-                },
-                Ok(None) => {},
-                Error(code) => { control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(code)))); closing = true },
-            }
-        }
-        if held_credit && (service.ready)(service.context) { let _ = channel.try_send(credit, ()); held_credit = false }
-        if !closing && map.len(work.timers) == 0u64 && wire_ready(busy) && list.len(work.output) == 0u64 &&
-            (service.ready)(service.context) && list.len(deferred) == 0u64 {
-            if let Some(_) = work.deadline {
-                if let None = outgoing {
-                    control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(1001u16))))
-                    closing = true
-                }
-            }
-        }
-        let mut data_frame: Option[(Bytes, bool, Option[u64])] = None
-        if wire_ready(busy) && !write_closed && !closing && none(control) {
-            let next = match take outgoing {
-                Some(take f) => Some(take f),
-                None => if list.len(work.output) != 0u64 && work.output[0u64].external {
-                    let WireOutput(frame: take f, marks: _, generations: _, external: _, check: held_check) = list.remove(mut work.output, 0u64)
-                    work.check = held_check
-                    Some(take f)
-                } else { None },
-            }
-            if let Some(take f) = take next {
-                let welcome = match f { Welcome(_, _, _, _, _, _) => true, _ => false }
-                let check = replace(mut work.check, None)
-                match wire_pack(pool, encoded_to, encoded_from, take f) {
-                    Ok(take b) => { data_frame = Some((take b, welcome, check)) },
-                    Error(Protocol(1013u16)) => {
-                        match std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(1013u16)) {
-                            Ok(take refused) => { control = Some(take refused) },
-                            Error(e) => break Error(e),
-                        }
-                        closing = true
-                    },
-                    Error(e) => break Error(e),
-                }
-                if wire_cut(work, clock) {
-                    let _ = apply_input(mut service.context, mut work, WForce)
-                    abandoned = work.abandoned
-                    expired = true
-                    break Ok(())
-                }
-            }
-        }
-        let unarmed = match alarm { None => true, _ => false }
-        if closing && unarmed {
-            let own_close = match close_at {
-                Some(end) => end,
-                None => std.clock.deadline_after_ms(host.mono_ns(clock), c.socket.close_ms),
-            }
-            let deadline = match work.deadline { Some(cut) => if cut < own_close { cut } else { own_close }, None => own_close }
-            close_at = Some(deadline)
-            let close_wait = WireAlarm(clock: clock, at: deadline, to: channel.sender(to))
-            match task.spawn(tasks, bytes 4096u64, take close_wait, wire_alarm) {
-                Ok(take h) => { alarm = Some(take h) },
-                Error(_) => break Ok(()),
-            }
-        }
-        if wire_ready(busy) && !write_closed {
-            if let Some(take b) = replace(mut control, None) {
-                if let Error(_) = wire_offer(write, mut busy, WireUnit(frame: take b, check: None)) { break Ok(()) }
-                continue
-            }
-            if let Some((take packed, welcome, check)) = take data_frame {
-                // The check version travels with the unit; WSent or WDropped clears the copy.
-                work.check = check
-                if let Error(_) = wire_offer(write, mut busy, wire_unit(work, take packed, check)) { break Ok(()) }
-                if welcome {
-                    if let Some(take accepted) = replace(mut lease, None) { std.wsock.hello_accepted(take accepted) }
-                }
+        if wire_taken(mut st.run, 1u64 + st.c.q) { let _ = (st.apply_input)(mut service.context, mut st.work, WDrained) }
+        take e
+    }
+    if wire_owner_cut(mut st, mut service) { return None }
+    if let Some(life) = st.managed {
+        if let Some(window) = drain_window(latest.read(life.drain)) {
+            if host.mono_ns(st.clock) >= window.admission && (match st.work.deadline { None => true, _ => false }) {
+                let _ = (st.apply_input)(mut service.context, mut st.work, WClose(window.deadline))
             }
         }
     }
+    let WireEvent(e: take received) = take event
+    Some(take received)
+}
+
+// Whether the work's cut has passed; the service is then forced and the owner
+// expires.
+fn wire_owner_cut[C: send](mut st: WireLoop[C], mut service: Box[Service[C]]) -> bool {
+    if !wire_cut(st.work, st.clock) { return false }
+    let _ = (st.apply_input)(mut service.context, mut st.work, WForce)
+    st.expired = true
+    true
+}
+
+// Queues a close with this code and starts closing.
+fn wire_owner_refuse[C: send](mut st: WireLoop[C], code: u16) {
+    st.control = Some(result.unwrap(std.wsock.encode(mut st.encoder, true, 8u8, wire_close_payload(code))))
+    st.closing = true
+}
+
+// The service's answer to a frame from the client. None when the allocation
+// pool is gone with the service.
+fn wire_owner_input[C: send](mut st: WireLoop[C], take held: Box[Service[C]], pool: Sender[WireAllocation[C]], take f: Frame, at: u64) -> Option[(Box[Service[C]], WireStep)] waits {
+    let mut service = take held
+    let mut checked = (service.check)(service.context, f)
+    if let Hello(_, _) = f {
+        if !st.hello_seen {
+            if let Some(end) = st.hello_at { if at >= end { checked = Some(1008u16) } }
+            st.hello_seen = true
+        }
+    }
+    if match checked { None => true, _ => false } && !(service.ready)(service.context) {
+        if let Error(_) = list.push(mut st.deferred, (take f, at)) { return Some((take service, Stop(Ok(())))) }
+        return Some((take service, Again))
+    }
+    if let Hello(_, _) = f { let _ = replace(mut st.hello_alarm, None) }
+    let handled: Result[Option[Frame], u16] = match checked {
+        Some(code) => Error(code),
+        None => if let Subscribe(sub, slot, take arg, take resume) = f {
+            let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, st.allocation_to, st.allocation_from, take service, ValidateSubscribe(sub, slot, take arg, take resume)) {
+                Some(take returned) => take returned,
+                None => return None,
+            }
+            service = take restored
+            match take status {
+                Ok(take plan) => (st.apply_input)(mut service.context, mut st.work, WPrepared(take plan)),
+                Error(code) => Error(code),
+            }
+        } else { (st.apply_input)(mut service.context, mut st.work, WClient(take f, at)) },
+    }
+    if (service.ready)(service.context) { let _ = channel.try_send(st.credit, ()) } else { st.held_credit = true }
+    let outcome = match take handled {
+        Ok(take next) => Go(take next),
+        Error(code) => {
+            let payload = wire_close_payload(code)
+            match std.wsock.encode(mut st.encoder, true, 8u8, payload) {
+                Ok(take refused) => { st.control = Some(take refused) },
+                Error(e) => return Some((take service, Stop(Error(e)))),
+            }
+            st.closing = true
+            Go(None)
+        },
+    }
+    Some((take service, take outcome))
+}
+
+// The service's answer to a publisher notice. None when the allocation pool is
+// gone with the service.
+fn wire_owner_runner[C: send](mut st: WireLoop[C], take held: Box[Service[C]], pool: Sender[WireAllocation[C]], take e: Notice) -> Option[(Box[Service[C]], Option[Frame])] waits {
+    let mut service = take held
+    let applied = if let Notice(e: Updated(take published)) = e {
+        let drain: Option[Latest[Option[DrainWindow]]] = match st.work.drain { Some(root) => Some(latest.handle(root)), None => None }
+        let output = replace(mut st.work.output, list.new())
+        let job = DeliveryJob(update: take published, output: take output, drain: take drain)
+        let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, st.allocation_to, st.allocation_from, take service, DeliverUpdate(take job)) {
+            Some(take returned) => take returned,
+            None => return None,
+        }
+        service = take restored
+        match take status {
+            Ok(take plan) => (st.apply_input)(mut service.context, mut st.work, WPrepared(take plan)),
+            Error(code) => Error(code),
+        }
+    } else {
+        (st.apply_input)(mut service.context, mut st.work, WRunner(take e))
+    }
+    let next = match take applied {
+        Ok(take f) => take f, Error(code) => { wire_owner_refuse(mut st, code); None },
+    }
+    Some((take service, take next))
+}
+
+// Binds the authenticated principal. None when the allocation pool is gone
+// with the service.
+fn wire_owner_principal[C: send](mut st: WireLoop[C], take held: Box[Service[C]], pool: Sender[WireAllocation[C]], take p: Option[ingress.Principal]) -> Option[Box[Service[C]]] waits {
+    let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, st.allocation_to, st.allocation_from, take held, BindPrincipal(take p)) {
+        Some(take returned) => take returned,
+        None => return None,
+    }
+    if let Error(code) = status { wire_owner_refuse(mut st, code) }
+    Some(take restored)
+}
+
+// Validates a call the rate limiter decided. None when the allocation pool is
+// gone with the service.
+fn wire_owner_rate[C: send](mut st: WireLoop[C], take held: Box[Service[C]], pool: Sender[WireAllocation[C]], allowed: bool) -> Option[(Box[Service[C]], Option[Frame])] waits {
+    let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, st.allocation_to, st.allocation_from, take held, ValidateCall(allowed)) {
+        Some(take returned) => take returned,
+        None => return None,
+    }
+    let mut service = take restored
+    let applied = match take status {
+        Ok(take plan) => (st.apply_input)(mut service.context, mut st.work, WPrepared(take plan)),
+        Error(code) => Error(code),
+    }
+    let next = match take applied {
+        Ok(take f) => take f, Error(code) => { wire_owner_refuse(mut st, code); None },
+    }
+    Some((take service, take next))
+}
+
+fn wire_owner_control[C: send](mut st: WireLoop[C], op: u8, payload: std.websocket.Control) -> WireStep {
+    let _ = channel.try_send(st.credit, ())
+    if st.closing { return Again }
+    let mut b: Bytes = result.unwrap(list.with_capacity(125u64))
+    for i in 0u64 .. payload.len { let _ = list.push(mut b, payload.data[i]) }
+    match std.wsock.encode(mut st.encoder, true, op, b) {
+        Ok(take encoded_control) => { st.control = Some(take encoded_control) },
+        Error(e) => return Stop(Error(e)),
+    }
+    if op == 8u8 { st.closing = true }
+    Go(None)
+}
+
+fn wire_owner_write_timeout[C: send](mut st: WireLoop[C], end: u64) -> WireStep {
+    if !st.closing {
+        st.close_at = Some(end)
+        match std.wsock.encode(mut st.encoder, true, 8u8, wire_close_payload(1001u16)) {
+            Ok(take close_frame) => { st.control = Some(take close_frame) },
+            Error(e) => return Stop(Error(e)),
+        }
+        st.closing = true
+    }
+    Go(None)
+}
+
+fn wire_owner_read_closed[C: send](mut st: WireLoop[C], payload: std.websocket.Control, take returned: std.wsock.Reader) -> WireStep {
+    st.read_back = Some(take returned)
+    st.read_closed = true
+    if st.write_closed { return Stop(Ok(())) }
+    if !st.closing {
+        let mut b: Bytes = result.unwrap(list.with_capacity(125u64))
+        for i in 0u64 .. payload.len { result.unwrap(list.push(mut b, payload.data[i])) }
+        match std.wsock.encode(mut st.encoder, true, 8u8, b) {
+            Ok(take close_bytes) => { st.control = Some(take close_bytes) },
+            Error(e) => return Stop(Error(e)),
+        }
+    }
+    st.closing = true
+    Go(None)
+}
+
+// After an event: queues its frame, polls the service, and decides the frame to
+// write now, if any.
+fn wire_owner_poll[C: send](mut st: WireLoop[C], mut service: Box[Service[C]], take frame: Option[Frame]) -> WireStep {
+    if wire_owner_cut(mut st, mut service) { return Stop(Ok(())) }
+    let mut outgoing: Option[Frame] = None
+    if !st.closing {
+        if let Some(take f) = take frame {
+            if let Error(e) = wire_queue_external(mut st.work, st.c, take f, None) { return Stop(Error(e)) }
+        }
+        let writable = wire_ready(st.busy) && !st.write_closed && none(st.control)
+            && (list.len(st.work.output) == 0u64 || !st.work.output[0u64].external)
+        match (st.apply_input)(mut service.context, mut st.work, WPoll(writable)) {
+            Ok(Some(take f)) => {
+                if writable { outgoing = Some(take f) }
+                else {
+                    let held_check = replace(mut st.work.check, None)
+                    if let Error(e) = wire_queue_external(mut st.work, st.c, take f, held_check) { return Stop(Error(e)) }
+                }
+            },
+            Ok(None) => {},
+            Error(code) => wire_owner_refuse(mut st, code),
+        }
+    }
+    if st.held_credit && (service.ready)(service.context) { let _ = channel.try_send(st.credit, ()); st.held_credit = false }
+    if !st.closing && map.len(st.work.timers) == 0u64 && wire_ready(st.busy) && list.len(st.work.output) == 0u64 &&
+        (service.ready)(service.context) && list.len(st.deferred) == 0u64 {
+        if let Some(_) = st.work.deadline {
+            if let None = outgoing { wire_owner_refuse(mut st, 1001u16) }
+        }
+    }
+    Go(take outgoing)
+}
+
+// Packs and offers the next data frame or the queued control frame, and arms
+// the close alarm once closing.
+fn wire_owner_send[C: send](mut st: WireLoop[C], mut service: Box[Service[C]], pool: Sender[WireAllocation[C]], take outgoing: Option[Frame]) -> WireStep waits {
+    let mut data_frame: Option[(Bytes, bool, Option[u64])] = None
+    if wire_ready(st.busy) && !st.write_closed && !st.closing && none(st.control) {
+        let next = match take outgoing {
+            Some(take f) => Some(take f),
+            None => if list.len(st.work.output) != 0u64 && st.work.output[0u64].external {
+                let WireOutput(frame: take f, marks: _, generations: _, external: _, check: held_check) = list.remove(mut st.work.output, 0u64)
+                st.work.check = held_check
+                Some(take f)
+            } else { None },
+        }
+        if let Some(take f) = take next {
+            let welcome = match f { Welcome(_, _, _, _, _, _) => true, _ => false }
+            let check = replace(mut st.work.check, None)
+            match wire_pack(pool, st.encoded_to, st.encoded_from, take f) {
+                Ok(take b) => { data_frame = Some((take b, welcome, check)) },
+                Error(Protocol(1013u16)) => {
+                    match std.wsock.encode(mut st.encoder, true, 8u8, wire_close_payload(1013u16)) {
+                        Ok(take refused) => { st.control = Some(take refused) },
+                        Error(e) => return Stop(Error(e)),
+                    }
+                    st.closing = true
+                },
+                Error(e) => return Stop(Error(e)),
+            }
+            if wire_owner_cut(mut st, mut service) { return Stop(Ok(())) }
+        }
+    }
+    let unarmed = match st.alarm { None => true, _ => false }
+    if st.closing && unarmed {
+        let own_close = match st.close_at {
+            Some(end) => end,
+            None => std.clock.deadline_after_ms(host.mono_ns(st.clock), st.c.socket.close_ms),
+        }
+        let deadline = match st.work.deadline { Some(cut) => if cut < own_close { cut } else { own_close }, None => own_close }
+        st.close_at = Some(deadline)
+        let close_wait = WireAlarm(clock: st.clock, at: deadline, to: channel.sender(st.to))
+        match task.spawn(st.tasks, bytes 4096u64, take close_wait, wire_alarm) {
+            Ok(take h) => { st.alarm = Some(take h) },
+            Error(_) => return Stop(Ok(())),
+        }
+    }
+    if wire_ready(st.busy) && !st.write_closed {
+        if let Some(take b) = replace(mut st.control, None) {
+            if let Error(_) = wire_offer(st.write, mut st.busy, WireUnit(frame: take b, check: None)) { return Stop(Ok(())) }
+            return Again
+        }
+        if let Some((take packed, welcome, check)) = take data_frame {
+            // The check version travels with the unit; WSent or WDropped clears the copy.
+            st.work.check = check
+            if let Error(_) = wire_offer(st.write, mut st.busy, wire_unit(st.work, take packed, check)) { return Stop(Ok(())) }
+            if welcome {
+                if let Some(take accepted) = replace(mut st.lease, None) { std.wsock.hello_accepted(take accepted) }
+            }
+        }
+    }
+    Go(None)
+}
+
+// The allocation pool went with the service: join both children and refuse.
+fn wire_owner_lost[C: send](take st: WireLoop[C]) -> Result[(), std.wsock.Error] waits {
+    // Every owned field stays bound, so it drops after the join as it did
+    // when the loop was inline.
+    let WireLoop(pub_to: take pub_to, managed: take managed, lease: take lease, to: take to, inbox: take inbox, credit: take credit, write: take write,
+        encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from,
+        encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, deferred: take deferred, control: take control,
+        alarm: take alarm, read_back: take read_back, write_back: take write_back, clock: clock, close_at: close_at, expired: expired, ..) = take st
+    wire_join(take rh, take wh)
+    Error(Protocol(1013u16))
+}
+
+fn wire_owner_end[C: send](take st: WireLoop[C], mut service: Box[Service[C]], take result: Result[(), std.wsock.Error]) -> Result[(), std.wsock.Error] waits {
+    // Every owned field stays bound, so it drops at the end as it did when the
+    // loop was inline; only copyable fields are left out.
+    let WireLoop(pub_to: take pub_to, managed: take managed, lease: take lease, to: take to, inbox: take inbox, credit: take credit, write: take write,
+        encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from,
+        encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, deferred: take deferred, control: take control,
+        alarm: take alarm, read_back: take read_back, write_back: take write_back, clock: clock, close_at: close_at, expired: expired, ..) = take st
     if let Some(take h) = take alarm {
         let mut timing = take h
         task.cancel(mut timing)

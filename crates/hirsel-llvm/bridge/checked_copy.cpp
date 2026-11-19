@@ -15,6 +15,7 @@
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/BlockFrequencyInfo.h>
+#include <llvm/Analysis/CycleAnalysis.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/IR/Dominators.h>
@@ -441,6 +442,206 @@ static bool removeBoundedCursorChecks(Function &F, FunctionAnalysisManager &AM) 
   return !Redundant.empty();
 }
 
+using RecordFields = std::map<uint64_t, StoreInst *>;
+
+// A private stack home has just one store per field. Since the stores are
+// outside CFG cycles, a field known on an incoming edge keeps its value
+// through the join. Any other use can expose or write the slot.
+static bool privateRecordFields(AllocaInst &Slot, uint64_t Size,
+                                const SmallSetVector<PHINode *, 4> &Joins,
+                                CycleInfo &Cycles, RecordFields &Fields) {
+  const auto &DL = Slot.getDataLayout();
+  auto Allocated = Slot.getAllocationSize(DL);
+  if (!Slot.isStaticAlloca() || !Allocated || Allocated->isScalable() ||
+      Allocated->getFixedValue() != Size) return false;
+
+  auto AddStore = [&](Use &U, uint64_t Offset) {
+    auto *Store = dyn_cast<StoreInst>(U.getUser());
+    if (!Store || !Store->isSimple() || &U != &Store->getOperandUse(1) ||
+        Cycles.getCycle(Store->getParent())) return false;
+    auto *Field = dyn_cast<IntegerType>(Store->getValueOperand()->getType());
+    if (!Field || Field->getBitWidth() % 8 ||
+        Field->getBitWidth() / 8 > Size - Offset) return false;
+    return Fields.try_emplace(Offset, Store).second;
+  };
+  for (Use &U : Slot.uses()) {
+    auto *Phi = dyn_cast<PHINode>(U.getUser());
+    if (Phi && Joins.contains(Phi)) continue;
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(U.getUser())) {
+      APInt Offset(DL.getIndexTypeSizeInBits(GEP->getType()), 0);
+      if (&U != &GEP->getOperandUse(0) ||
+          !GEP->accumulateConstantOffset(DL, Offset) ||
+          Offset.isNegative() || Offset.uge(Size) || !GEP->hasOneUse() ||
+          !AddStore(*GEP->use_begin(), Offset.getZExtValue())) return false;
+    } else if (!AddStore(U, 0)) {
+      return false;
+    }
+  }
+  uint64_t End = 0;
+  for (auto [Offset, S] : Fields) {
+    if (Offset < End) return false;
+    End = Offset + S->getValueOperand()->getType()->getIntegerBitWidth() / 8;
+  }
+  return !Fields.empty();
+}
+
+// Integer PHI cycles preserve the range of their non-PHI inputs.
+static bool isBitValue(Value *V) {
+  SmallSetVector<Value *, 8> Pending;
+  Pending.insert(V);
+  for (unsigned I = 0; I < Pending.size(); ++I) {
+    if (auto *Phi = dyn_cast<PHINode>(Pending[I])) {
+      for (Value *Incoming : Phi->incoming_values()) Pending.insert(Incoming);
+    } else if (auto *C = dyn_cast<ConstantInt>(Pending[I])) {
+      if (C->getValue().getActiveBits() > 1) return false;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Reuse a tested flag when the matching branch edge determines the field
+// on every path that selects a stack home.
+static Value *existingRecordFlag(MemCpyInst &Copy, uint64_t Offset, Type *T,
+                                 const SmallSetVector<PHINode *, 4> &Joins,
+                                 const MapVector<AllocaInst *, RecordFields> &Slots,
+                                 CycleInfo &Cycles, DominatorTree &DT) {
+  bool HasZero = false;
+  bool HasOne = false;
+  for (const auto &Entry : Slots) {
+    auto *C = dyn_cast<ConstantInt>(Entry.second.at(Offset)->getValueOperand());
+    if (!C || C->getValue().getActiveBits() > 1) return nullptr;
+    HasZero |= C->isZero();
+    HasOne |= C->isOne();
+  }
+  if (!HasZero || !HasOne) return nullptr;
+  for (auto *Node = DT.getNode(Copy.getParent()); Node; Node = Node->getIDom()) {
+    BasicBlock *BB = Node->getBlock();
+    auto *Branch = dyn_cast<CondBrInst>(BB->getTerminator());
+    if (!Branch || Cycles.getCycle(BB)) continue;
+    auto *Cmp = dyn_cast<ICmpInst>(Branch->getCondition());
+    if (!Cmp || !Cmp->isEquality() || Cmp->getOperand(0)->getType() != T) continue;
+    auto *Zero = dyn_cast<ConstantInt>(Cmp->getOperand(1));
+    if (!Zero || !Zero->isZero() || !isBitValue(Cmp->getOperand(0))) continue;
+    bool Matches = true;
+    for (PHINode *Join : Joins) {
+      for (unsigned I = 0; I < Join->getNumIncomingValues(); ++I) {
+        auto *Slot = dyn_cast<AllocaInst>(Join->getIncomingValue(I));
+        if (!Slot) continue;
+        auto *C = cast<ConstantInt>(Slots.find(Slot)->second.at(Offset)->getValueOperand());
+        bool TrueEdge = C->isZero() == (Cmp->getPredicate() == ICmpInst::ICMP_EQ);
+        BasicBlockEdge Edge(BB, Branch->getSuccessor(TrueEdge ? 0 : 1));
+        if (!DT.dominates(Edge, Join->getIncomingBlock(I))) Matches = false;
+      }
+    }
+    if (Matches) return Cmp->getOperand(0);
+  }
+  return nullptr;
+}
+
+static bool forwardRecordJoin(MemCpyInst &Copy, FunctionAnalysisManager &AM) {
+  auto *Root = dyn_cast<PHINode>(Copy.getRawSource());
+  auto *Length = dyn_cast<ConstantInt>(Copy.getLength());
+  if (!Root || Root->getParent() != Copy.getParent() || Copy.isVolatile() ||
+      !Length || Length->isZero() || Length->getValue().getActiveBits() > 64)
+    return false;
+
+  SmallSetVector<PHINode *, 4> Joins;
+  Joins.insert(Root);
+  MapVector<AllocaInst *, RecordFields> Slots;
+  for (unsigned I = 0; I < Joins.size(); ++I) {
+    for (Value *Incoming : Joins[I]->incoming_values()) {
+      if (auto *Join = dyn_cast<PHINode>(Incoming)) Joins.insert(Join);
+      else if (auto *Slot = dyn_cast<AllocaInst>(Incoming)) Slots.try_emplace(Slot);
+      else return false;
+    }
+  }
+  if (Slots.size() < 2) return false;
+  for (PHINode *Join : Joins)
+    for (Use &U : Join->uses()) {
+      if (U.getUser() == &Copy && &U == &Copy.getArgOperandUse(1)) continue;
+      auto *User = dyn_cast<PHINode>(U.getUser());
+      if (!User || !Joins.contains(User)) return false;
+    }
+
+  Function &F = *Copy.getFunction();
+  auto &Cycles = AM.getResult<CycleAnalysis>(F);
+  for (PHINode *Join : Joins)
+    if (Cycles.getCycle(Join->getParent())) return false;
+  auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
+  const auto &Shape = Slots.front().second;
+  for (auto &[Slot, Fields] : Slots) {
+    if (!privateRecordFields(*Slot, Length->getZExtValue(), Joins, Cycles, Fields) ||
+        Fields.size() != Shape.size()) return false;
+    for (auto [Offset, Store] : Fields) {
+      auto Pos = Shape.find(Offset);
+      if (Pos == Shape.end() ||
+          Pos->second->getValueOperand()->getType() != Store->getValueOperand()->getType())
+        return false;
+    }
+  }
+  for (PHINode *Join : Joins)
+    for (unsigned I = 0; I < Join->getNumIncomingValues(); ++I)
+      if (auto *Slot = dyn_cast<AllocaInst>(Join->getIncomingValue(I)))
+        for (auto [Offset, Store] : Slots.find(Slot)->second)
+          if (!DT.dominates(Store, Join->getIncomingBlock(I)->getTerminator()))
+            return false;
+
+  // Materialize at the original copy, including its uninitialized bytes.
+  IRBuilder<> B(&Copy);
+  B.SetCurrentDebugLocation(Copy.getDebugLoc());
+  uint64_t Covered = 0;
+  auto FillGap = [&](uint64_t End) {
+    if (Covered == End) return;
+    Value *Dest = B.CreateConstGEP1_64(B.getInt8Ty(), Copy.getRawDest(), Covered);
+    B.CreateMemSet(Dest, UndefValue::get(B.getInt8Ty()), End - Covered, Align(1));
+  };
+  for (auto [Offset, Store] : Shape) {
+    FillGap(Offset);
+    Covered = Offset + Store->getValueOperand()->getType()->getIntegerBitWidth() / 8;
+    Type *T = Store->getValueOperand()->getType();
+    Value *Dest = B.CreateConstGEP1_64(B.getInt8Ty(), Copy.getRawDest(), Offset);
+    if (Value *Flag = existingRecordFlag(Copy, Offset, T, Joins, Slots, Cycles, DT)) {
+      B.CreateAlignedStore(Flag, Dest, Align(1));
+      continue;
+    }
+    DenseMap<PHINode *, PHINode *> Fields;
+    for (PHINode *Join : Joins)
+      Fields[Join] = PHINode::Create(T, Join->getNumIncomingValues(), "record.field",
+                                    Join->getIterator());
+    for (PHINode *Join : Joins)
+      for (unsigned I = 0; I < Join->getNumIncomingValues(); ++I) {
+        Value *Incoming = Join->getIncomingValue(I);
+        Value *Field;
+        if (auto *Phi = dyn_cast<PHINode>(Incoming)) {
+          Field = Fields.lookup(Phi);
+        } else {
+          auto &IncomingFields = Slots.find(cast<AllocaInst>(Incoming))->second;
+          Field = IncomingFields.at(Offset)->getValueOperand();
+        }
+        Fields.lookup(Join)->addIncoming(Field, Join->getIncomingBlock(I));
+      }
+    B.CreateAlignedStore(Fields.lookup(Root), Dest, Align(1));
+  }
+  FillGap(Length->getZExtValue());
+  Copy.eraseFromParent();
+  for (PHINode *Join : Joins) Join->dropAllReferences();
+  for (PHINode *Join : Joins) Join->eraseFromParent();
+  for (auto &Entry : Slots)
+    for (auto &Field : Entry.second) Field.second->eraseFromParent();
+  return true;
+}
+
+static bool forwardRecordJoins(Function &F, FunctionAnalysisManager &AM) {
+  bool Changed = false;
+  for (BasicBlock &BB : F)
+    for (Instruction &I : make_early_inc_range(BB))
+      if (auto *Copy = dyn_cast<MemCpyInst>(&I))
+        Changed |= forwardRecordJoin(*Copy, AM);
+  return Changed;
+}
+
 extern "C" void hirsel_llvm_finish_reads(void *Raw, void *Machine) noexcept {
   auto &M = *static_cast<Module *>(Raw);
   runLoopPass(static_cast<TargetMachine *>(Machine), [&](PassBuilder &PB, FunctionAnalysisManager &FAM) {
@@ -466,7 +667,9 @@ extern "C" void hirsel_llvm_finish_reads(void *Raw, void *Machine) noexcept {
       if (BoundedCursors) FAM.invalidate(F, PreservedAnalyses::none());
       const bool Forwarded = hirsel_llvm::forwardSnapshotReads(F, FAM);
       if (Forwarded) FAM.invalidate(F, PreservedAnalyses::none());
-      if (BoundedCursors || Forwarded || !Done.empty()) Clean.run(F, FAM);
+      const bool Records = forwardRecordJoins(F, FAM);
+      if (Records) FAM.invalidate(F, PreservedAnalyses::none());
+      if (Records || BoundedCursors || Forwarded || !Done.empty()) Clean.run(F, FAM);
     }
   });
 }

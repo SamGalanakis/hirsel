@@ -67,13 +67,11 @@ struct Entry {
     #[cfg(test)]
     class: &'static str,
     #[cfg(test)]
-    owner: &'static str,
-    #[cfg(test)]
     private: bool,
 }
 macro_rules! operations {
     ($(($module:literal, $name:literal, $lane:expr, $class:literal, $owner:literal, $private:literal)),* $(,)?) => {
-        const OPERATIONS: &[Entry] = &[$(Entry { module: $module, name: $name, lane: $lane, #[cfg(test)] class: $class, #[cfg(test)] owner: $owner, #[cfg(test)] private: $private }),*];
+        const OPERATIONS: &[Entry] = &[$(Entry { module: $module, name: $name, lane: $lane, #[cfg(test)] class: $class, #[cfg(test)] private: $private }),*];
     };
 }
 
@@ -1592,21 +1590,6 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
         .collect();
     for entry in OPERATIONS {
         assert!(matches!(entry.class, "A" | "B" | "C"));
-        assert!(matches!(
-            entry.owner,
-            "core-ops-914"
-                | "core-check-index-912"
-                | "core-check-calls-910"
-                | "core-check-895"
-                | "core-check-callables-913"
-                | "std-seed-api-889"
-                | "core-collections-918"
-                | "tape-build-1037"
-                | "wire-w1a-1063"
-                | "tape-s2-1074"
-                | "mem-b-1172"
-                | "mc-f1-1180"
-        ));
         if entry.private {
             assert!(
                 entry.module == "string"

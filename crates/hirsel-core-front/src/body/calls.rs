@@ -1274,7 +1274,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Result<(FuncId, SigId), &'static str> {
         use std::hash::{Hash, Hasher};
         if types.is_empty() {
-            return self.e.row(self.p, f);
+            return self.e.row(self.p, &mut self.t, f);
         }
         let mut hash = std::hash::DefaultHasher::new();
         f.hash(&mut hash);

@@ -291,11 +291,16 @@ impl Emitter {
         id
     }
     /// The function row and signature of the program's definition `f`.
-    fn row(&mut self, p: &Program, f: usize) -> Result<(FuncId, SigId), &'static str> {
+    fn row(
+        &mut self,
+        p: &Program,
+        t: &mut impl TyRead,
+        f: usize,
+    ) -> Result<(FuncId, SigId), &'static str> {
         if let Some(&function) = self.rows.get(&f) {
             return Ok((function, self.source_signature(function)));
         }
-        let (sig, abi) = self.signature_recipe(p, f)?;
+        let (sig, abi) = self.signature_inst(p, t, f, &[])?;
         let key = InstanceKey {
             definition: p.fns[f].path.clone(),
             arguments: vec![],
@@ -316,7 +321,7 @@ impl Emitter {
         arguments: &[TyId],
     ) -> Result<(FuncId, SigId), &'static str> {
         if arguments.is_empty() {
-            return self.row(p, f);
+            return self.row(p, t, f);
         }
         let fd = &p.fns[f];
         // A region argument names no layout, so it is erased: every region
@@ -555,7 +560,7 @@ impl Emitter {
             let func = if arguments.is_empty() {
                 if hook == crate::layout::Hook::Codec {
                     // A maker is an ordinary function: its row has its own signature.
-                    match self.row(p, f as usize) {
+                    match self.row(p, t, f as usize) {
                         Ok((func, _)) => func,
                         Err(_) => {
                             self.module.types[row.index()].codec = None;
@@ -745,16 +750,8 @@ impl Emitter {
     /// from having one: scalars by value, declared types by address, a declared result
     /// through `dest`.
     pub fn signature(&mut self, p: &Program, f: usize) -> Result<Signature, &'static str> {
-        self.signature_recipe(p, f).map(|x| x.0)
-    }
-    fn signature_recipe(
-        &mut self,
-        p: &Program,
-        f: usize,
-    ) -> Result<(Signature, scalar_abi::SignatureAbi), &'static str> {
-        // The template signature already names its own rigid parameters.
         let mut t = Local::with_program(p);
-        self.signature_inst(p, &mut t, f, &[])
+        self.signature_inst(p, &mut t, f, &[]).map(|(sig, _)| sig)
     }
     fn signature_inst(
         &mut self,
@@ -2156,7 +2153,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
 
     // ---- the definition
     fn run(&mut self, f: usize, body: NodeId) {
-        let row = self.e.row(self.p, f);
+        let row = self.e.row(self.p, &mut self.t, f);
         self.run_row(row, body);
     }
     fn run_row(&mut self, row: Result<(FuncId, SigId), &'static str>, body: NodeId) {
@@ -2931,10 +2928,11 @@ mod row_cache_tests {
         let f = p.fns.iter().position(|f| f.path.0.name == "only").unwrap();
         assert!(f >= 64);
         let mut e = Emitter::new();
-        let row = e.row(&p, f).unwrap();
+        let mut t = Local::with_program(&p);
+        let row = e.row(&p, &mut t, f).unwrap();
         assert_eq!(e.rows.len(), 1, "unmentioned definitions took cache slots");
         assert_eq!(e.module.functions.len(), 1);
-        assert_eq!(e.row(&p, f).unwrap(), row);
+        assert_eq!(e.row(&p, &mut t, f).unwrap(), row);
         assert_eq!(e.rows.len(), 1);
     }
 }

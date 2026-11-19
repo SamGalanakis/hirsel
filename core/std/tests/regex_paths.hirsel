@@ -1,0 +1,58 @@
+// test-of: std.regex
+// test-reason: RX2 witnesses clear, oversize, give-up and quit on the existing cache.
+// expect: run regex_dfa_clear() = true
+fn regex_dfa_clear() -> bool {
+    let re = result.unwrap(new("abcdefghij"))
+    let mut c = result.unwrap(cache(re, 0))
+    let d = dfa_layout(re, c, false)
+    let run = bound bytes 0 {
+        forward_end(re, mut c, "xabcdefghij", 0)
+    }
+    let end_is_exact = result.unwrap(run) == Found(11)
+    let did_clear = dfa_clear_count(c.work, d) > 0
+    end_is_exact && did_clear && find(re, mut c, "xabcdefghij", 0) == Some(Match(start: 1, end: 11))
+}
+
+// expect: run regex_dfa_oversize() = true
+fn regex_dfa_oversize() -> bool {
+    let re = result.unwrap(new("a?{130}b"))
+    let mut c = result.unwrap(cache(re, 0))
+    let d = dfa_layout(re, c, false)
+    let outcome = forward_end(re, mut c, "ab", 0)
+    let free_keys = 16 * d.states
+    // Before this retry the table holds the single start key and no clears.
+    // The step's closure has an outgoing state for every optional a.
+    let first_key = d.keys + 2
+    let step = dfa_walk(re.forward, re.edges, mut c.work, d, first_key, 1, 97, DFA_EDGE, DFA_WORD, true)
+    let found = result.unwrap(bound bytes 0 {
+        find(re, mut c, "ab", 0)
+    })
+    outcome == Retry && 8 * dfa_key_units(step.len_out) > free_keys && found == Some(Match(start: 0, end: 2))
+}
+
+// expect: run regex_dfa_give_up() = true
+fn regex_dfa_give_up() -> bool {
+    let re = result.unwrap(new("abcdefghijklmnop"))
+    let mut c = result.unwrap(cache(re, 0))
+    let d = dfa_layout(re, c, false)
+    let s = "abcdefghijklmnop"
+    // A fresh cache succeeds, and retaining its current state spans several clears.
+    if forward_end(re, mut c, s, 0) != Found(16) {
+        return false
+    }
+    for _ in 0u64 .. 8 {
+        if forward_end(re, mut c, s, 0) == Retry {
+            let built: u64 = int.widen(c.work[d.header + 4])
+            return dfa_clear_count(c.work, d) == 3 && dfa_seen_bytes(c.work, d) < 10 * built && find(re, mut c, s, 0) == Some(Match(start: 0, end: 16))
+        }
+    }
+    false
+}
+
+// expect: run regex_dfa_quit() = true
+fn regex_dfa_quit() -> bool {
+    let re = result.unwrap(new("\\B.*"))
+    let mut c = result.unwrap(cache(re, 0))
+    let s = "!˗"
+    forward_end(re, mut c, s, 0) == Retry && find(re, mut c, s, 0) == Some(Match(start: 0, end: 3))
+}

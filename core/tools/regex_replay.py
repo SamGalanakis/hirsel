@@ -18,11 +18,11 @@ pub fn rx3_events() -> bool {
 }
 
 pub fn rx5_threshold() -> u64 {
-    regex_pike_threshold()
+    regex_step_thresholds()
 }
 
 pub fn rx5_main(out: Stdout) -> Result[(), Exit] waits {
-    let threshold = regex_pike_threshold()
+    let threshold = regex_step_thresholds()
     if threshold == 0 || !regex_cache_refusal() {
         return Error(Exit(status: 1))
     }
@@ -33,8 +33,8 @@ pub fn rx5_main(out: Stdout) -> Result[(), Exit] waits {
     Ok(())
 }
 
-pub fn rx5_failure(steps: u64, warm: bool) {
-    regex_uncaught_steps(steps, warm, 0)
+pub fn rx5_failure(steps: u64, history: u64) {
+    regex_uncaught_steps(steps, history, 0)
 }
 """
 
@@ -109,7 +109,8 @@ def run(compiler, runtime, evaluator):
                 assert result.returncode == 0 and result.stdout == f"RX5 threshold {steps}\n", result
                 result = invoke("replay", app, backend, "--tape", tape)
                 assert result.returncode == 0, result
-            print(f"RX3 three exact refusals. RX5 caught threshold {steps} on all engines and replay.", flush=True)
+            thresholds = [(steps >> (16 * i)) & 65535 for i in range(4)]
+            print(f"RX3 three exact refusals. RX5 caught thresholds {thresholds} on all engines and replay.", flush=True)
 
             app_package = {"name": "app", "version": "1"}
             inputs["packages"].append({
@@ -117,8 +118,7 @@ def run(compiler, runtime, evaluator):
                 "sources": [],
             })
             for steps, stop in enumerate(stops, 1):
-                for warm in (False, True):
-                    history = str(warm).lower()
+                for history in range(4):
                     app, main = application(f"uncaught-{steps}-{history}", f"""pub fn main() -> Result[(), Exit] {{
     std.regex.rx5_failure({steps}, {history})
     Ok(())
@@ -136,7 +136,7 @@ def run(compiler, runtime, evaluator):
                         extra = ["--record", tape] if backend == "cranelift" else []
                         check_failure(invoke("run", app, backend, *extra), body.name, expected)
                         check_failure(invoke("replay", app, backend, "--tape", tape), body.name, expected)
-            print("RX5 uncaught: four cases with exact evaluator, Cranelift, LLVM and replay sites.")
+            print("RX5 uncaught: eight cases with exact evaluator, Cranelift, LLVM and replay sites.")
 
 
 def evaluate(engine, config, entry, **options):

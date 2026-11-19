@@ -1,5 +1,6 @@
 //! std.regex oracle, pinned to Rust regex fde4946d4a3cb367338a21493ec91ec7106a12b4.
-//! Compile regex-syntax with only std, unicode-case, and unicode-perl.
+//! Use regex with std, perf, unicode-case, and unicode-perl. Use the same
+//! checkout's regex-syntax crate with std, unicode-case, and unicode-perl.
 //! Set REGEX_SYNTAX_TABLES to that checkout's regex-syntax/src/unicode_tables
 //! when compiling this tool. Run from the Hirsel root with
 //! --write FORMATTER or --check FORMATTER, where FORMATTER is the
@@ -376,8 +377,8 @@ fn show_groups(mut out: String, g: Groups, n: u64) -> Result[(), Capacity] {
     Ok(())
 }
 
-fn observe_match(re: Regex, s: String, at: u64, mut out: String) -> Result[(), Capacity] {
-    let mut c = cache(re, 0)?
+fn observe_match(re: Regex, s: String, at: u64, budget: u64, mut out: String) -> Result[(), Capacity] {
+    let mut c = cache(re, budget)?
     let mut g = groups(re)?
     string.push(mut out, if is_match(re, mut c, s, at) { "y" } else { "n" })?
     let m = find(re, mut c, s, at)
@@ -420,14 +421,22 @@ fn observe_match(re: Regex, s: String, at: u64, mut out: String) -> Result[(), C
 fn oracle_match(pattern: String, s: String, at: u64, n: u64, expected: String) -> bool {
     match new(pattern) {
         Ok(re) => {
-            let mut observed = string.new()
             if group_len(re) != n {
                 return false
             }
-            match observe_match(re, s, at, mut observed) {
-                Ok(()) => observed == expected,
-                Error(_) => false,
+            let budgets: Inline[u64, 2] = [1048576, 0]
+            for budget in budgets {
+                let mut observed = string.new()
+                match observe_match(re, s, at, budget, mut observed) {
+                    Ok(()) => {
+                        if observed != expected {
+                            return false
+                        }
+                    },
+                    Error(_) => { return false },
+                }
             }
+            true
         },
         Error(_) => false,
     }
@@ -649,8 +658,15 @@ fn log_corpus(out: &mut String) {
 fn oracle_log_count(p: String, expected: u64) -> bool {
     match new(p) {
         Ok(re) => {
-            let mut c = result.unwrap(cache(re, 0))
-            count(re, mut c, oracle_log()) == expected
+            let log = oracle_log()
+            let budgets: Inline[u64, 2] = [1048576, 0]
+            for budget in budgets {
+                let mut c = result.unwrap(cache(re, budget))
+                if count(re, mut c, log) != expected {
+                    return false
+                }
+            }
+            true
         },
         Error(_) => false,
     }

@@ -2004,7 +2004,8 @@ pub opaque type Regex: shareable + send {
     group_count: u64,
     class_count: u64,
     start: u64,
-    reverse_start: u64
+    reverse_start: u64,
+    quit_non_ascii: bool
 }
 
 pub opaque type Cache: send {
@@ -2482,7 +2483,8 @@ type Assembler {
     boundaries: Inline[bool, 257],
     rev: bool,
     ops_used: u64,
-    edges_used: u64
+    edges_used: u64,
+    quit_non_ascii: bool
 }
 
 fn admit_u32(n: u64) -> Result[List[u32], Error] {
@@ -2633,6 +2635,7 @@ fn emit_assert(mut a: Assembler, n: Node, following: u64) -> u64 {
         edge_bounds(mut a, 97, 122)
         if (modes & UNICODE) != 0 {
             edge_bounds(mut a, 128, 255)
+            a.quit_non_ascii = true
         }
     }
     emit(mut a, OP_ASSERT, n.a, modes, following)
@@ -2997,7 +3000,7 @@ pub fn new(pattern: String) -> Result[Regex, Error] {
     let mut metadata = NameTable(index: take index, text: take text, pos: 0, slot: 0)
     write_names(pattern, hir, 0, mut metadata)
     link_backwards(mut hir.nodes)
-    let mut a = Assembler(fw: take forward, rv: take reverse, sparse_edges: take edges, boundaries:[false; 257], rev: false, ops_used: 0, edges_used: 0)
+    let mut a = Assembler(fw: take forward, rv: take reverse, sparse_edges: take edges, boundaries:[false; 257], rev: false, ops_used: 0, edges_used: 0, quit_non_ascii: false)
     let end = emit(mut a, OP_MATCH, 0, 0, 0)
     let save_end = emit(mut a, OP_SAVE, 0, end, 1)
     let body = emit_alts(hir, mut a, 0, save_end)
@@ -3021,9 +3024,9 @@ pub fn new(pattern: String) -> Result[Regex, Error] {
         map[b] = int.narrow(classes - 1)
         b += 1
     }
-    let Assembler(fw: take f_program, rv: take r_program, sparse_edges: take transitions, ..) = take a
+    let Assembler(fw: take f_program, rv: take r_program, sparse_edges: take transitions, quit_non_ascii: quit, ..) = take a
     let NameTable(index: take name_index, text: take name_text, ..) = take metadata
-    Ok(Regex(owner: unique.new(), forward: take f_program, reverse: take r_program, edges: take transitions, class_map: take map, names: take name_index, name_text: take name_text, prefilter: take pref, charge: charge, group_count: f.pgroup + 1, class_count: classes, start: unanchored, reverse_start: anchored_r))
+    Ok(Regex(owner: unique.new(), forward: take f_program, reverse: take r_program, edges: take transitions, class_map: take map, names: take name_index, name_text: take name_text, prefilter: take pref, charge: charge, group_count: f.pgroup + 1, class_count: classes, start: unanchored, reverse_start: anchored_r, quit_non_ascii: quit))
 }
 
 const ABSENT: u64 = 0xFFFFFFFFFFFFFFFF
@@ -3226,22 +3229,22 @@ fn closure(re: Regex, flow: Pike, mut work: List[u32], mut into: Frontier, s: St
     }
 }
 
-fn transition(re: Regex, state: u64, ch: u32) -> Option[u64] {
+fn nfa_advance(program: List[u32], edges: List[u32], state: u64, ch: u32) -> Option[u64] {
     let i = NFA_WORDS * state
-    let op = re.forward[i]
+    let op = program[i]
     if op == OP_BYTE {
-        let interval = re.forward[i + 1]
+        let interval = program[i + 1]
         if (interval & 255) <= ch && ch <= (interval >> 8) {
-            return Some(int.widen(re.forward[i + 2]))
+            return Some(int.widen(program[i + 2]))
         }
     } else if op == OP_SPARSE {
-        let start: u64 = int.widen(re.forward[i + 1])
-        let len: u64 = int.widen(re.forward[i + 2])
+        let start: u64 = int.widen(program[i + 1])
+        let len: u64 = int.widen(program[i + 2])
         let mut j = start
         while j < start + len {
             let at = EDGE_WORDS * j
-            if re.edges[at] <= ch && ch <= re.edges[at + 1] {
-                return Some(int.widen(re.edges[at + 2]))
+            if edges[at] <= ch && ch <= edges[at + 1] {
+                return Some(int.widen(edges[at + 2]))
             }
             j += 1
         }
@@ -3249,15 +3252,14 @@ fn transition(re: Regex, state: u64, ch: u32) -> Option[u64] {
     None
 }
 
-fn pike_search(re: Regex, mut c: Cache, s: String, at: u64, groups_wanted: u64) -> Option[Match] {
+fn pike_search(re: Regex, mut c: Cache, s: String, at: u64, width: u64, entry: u64, groups_wanted: u64) -> Option[Match] {
     let flow = pike_config(re, c, groups_wanted)
     let mut now = Frontier(offset: c.slices.front, extent: 0, ready: 0)
     let mut later = Frontier(offset: c.slices.back, extent: 0, ready: 0)
     let mut pos = at
-    let width = string.byte_len(s)
     let mut found: Option[Match] = None
     clear_slots(mut c.work, flow.row, flow.slots)
-    closure(re, flow, mut c.work, mut now, s, pos, re.start)
+    closure(re, flow, mut c.work, mut now, s, pos, entry)
     while now.ready != 0 {
         let mut rank: u64 = 0
         let ch: u32 = if pos < width {
@@ -3277,7 +3279,7 @@ fn pike_search(re: Regex, mut c: Cache, s: String, at: u64, groups_wanted: u64) 
                     break
                 }
             } else if pos < width {
-                match transition(re, state, ch) {
+                match nfa_advance(re.forward, re.edges, state, ch) {
                     Some(successor) => {
                         copy_slots(mut c.work, flow.row, row, flow.slots)
                         closure(re, flow, mut c.work, mut later, s, pos + 1, successor)
@@ -3298,8 +3300,524 @@ fn pike_search(re: Regex, mut c: Cache, s: String, at: u64, groups_wanted: u64) 
     found
 }
 
-fn publish_groups(re: Regex, c: Cache, mut g: Groups) {
-    let mut i: u64 = 0
+const DFA_UNKNOWN: u32 = 0xFFFFFFFF
+
+const DFA_MATCH: u32 = 0x80000000
+
+const DFA_TARGET: u32 = 0x7FFFFFFF
+
+const DFA_DEAD: u32 = 0
+
+const DFA_INPUT_END: u64 = 256
+
+const DFA_EDGE: u32 = 0
+
+const DFA_OTHER: u32 = 1
+
+const DFA_WORD: u32 = 2
+
+const DFA_LF: u32 = 3
+
+const DFA_CR: u32 = 4
+
+type DfaLayout: key {
+    header: u64,
+    starts: u64,
+    states: u64,
+    columns: u64,
+    transitions: u64,
+    spans: u64,
+    hash: u64,
+    keys: u64,
+    scratch: u64,
+    width: u64,
+    reverse: bool,
+}
+
+fn dfa_layout(re: Regex, c: Cache, reverse: bool) -> DfaLayout {
+    let nf = list.len(re.forward) / NFA_WORDS
+    let nr = list.len(re.reverse) / NFA_WORDS
+    let s = c.slices.states
+    let columns = re.class_count + 1
+    let table = s * (columns + 20)
+    let base = if reverse {
+        24 + table
+    } else {
+        24
+    }
+    let scratch = 24 + 2 * table
+    DfaLayout(header: if reverse {
+        7
+    } else {
+        2
+    }, starts: if reverse {
+        18
+    } else {
+        12
+    }, states: s, columns: columns, transitions: base, spans: base + s * columns, hash: base + s * (columns + 2), keys: base + s * (columns + 4), scratch: if reverse {
+        scratch + 3 * nf
+    } else {
+        scratch
+    }, width: if reverse {
+        nr
+    } else {
+        nf
+    }, reverse: reverse,)
+}
+
+fn dfa_context(ch: u64) -> u32 {
+    if ch == DFA_INPUT_END {
+        return DFA_EDGE
+    }
+    if ch == 10 {
+        return DFA_LF
+    }
+    if ch == 13 {
+        return DFA_CR
+    }
+    if ascii_word(int.narrow(ch)) {
+        return DFA_WORD
+    }
+    DFA_OTHER
+}
+
+fn dfa_look(kind: u64, mode: u64, left: u32, right: u32) -> bool {
+    if kind == START_TEXT {
+        return left == DFA_EDGE
+    }
+    if kind == END_TEXT {
+        return right == DFA_EDGE
+    }
+    if kind == START_LINE || kind == END_LINE {
+        let crlf = (mode & CRLF) != 0
+        let lines = (mode & MULTILINE) != 0
+        if kind == START_LINE {
+            return left == DFA_EDGE || (lines && (left == DFA_LF || (crlf && left == DFA_CR && right != DFA_LF)))
+        }
+        return right == DFA_EDGE || (lines && ((right == DFA_LF && (!crlf || left != DFA_CR)) || (crlf && right == DFA_CR)))
+    }
+    let before = left == DFA_WORD
+    let after = right == DFA_WORD
+    match kind {
+        5 => before != after,
+        6 => before == after,
+        7 => !before && after,
+        8 => before && !after,
+        9 => !before,
+        _ => !after,
+    }
+}
+
+fn dfa_hash_step(hash: u64, word: u32) -> u64 {
+    let x: u64 = int.widen(word)
+    int.wrapping_mul(hash ^ x, 0x100000001B3)
+}
+
+fn dfa_key_hash(work: List[u32], base: u64, len: u64, context: u32) -> u64 {
+    let mut hash = dfa_hash_step(0xCBF29CE484222325, context)
+    for i in 0u64 .. len {
+        hash = dfa_hash_step(hash, work[base + i])
+    }
+    hash
+}
+
+// IDs are one-based. A cell is current only when the corresponding state's
+// backlink points here. Resetting the used length invalidates all old cells.
+fn dfa_slot(work: List[u32], d: DfaLayout, used: u64, base: u64, len: u64, context: u32) -> (u64, u32) {
+    let slots = 2 * d.states
+    let mut slot = dfa_key_hash(work, base, len, context) % slots
+    // A full probe window clears the hash section. Bounded probes keep
+    // the cost of building a state linear in its NFA key size.
+    for _ in 0u64 .. 16 {
+        let candidate = work[d.hash + slot]
+        let id: u64 = int.widen(candidate)
+        if id == 0 || id > used || work[d.spans + 2 * (id - 1) + 1] != int.narrow(slot) {
+            return (slot, DFA_DEAD)
+        }
+        let offset: u64 = int.widen(work[d.spans + 2 * (id - 1)])
+        let key = d.keys + 8 * offset
+        if work[key] == int.narrow(len) && work[key + 1] == context {
+            let mut i: u64 = 0
+            while i < len && work[key + 2 + i] == work[base + i] {
+                i += 1
+            }
+            if i == len {
+                return (slot, candidate)
+            }
+        }
+        slot += 1
+        if slot == slots {
+            slot = 0
+        }
+    }
+    (slots, DFA_DEAD)
+}
+
+fn dfa_key_units(len: u64) -> u64 {
+    (len + 9) / 8
+}
+
+fn dfa_add(mut work: List[u32], d: DfaLayout, start: u64, len: u64, context: u32, slot: u64) -> u32 {
+    let used: u64 = int.widen(work[d.header])
+    let arena_at: u64 = int.widen(work[d.header + 1])
+    let key = d.keys + 8 * arena_at
+    work[key] = int.narrow(len)
+    work[key + 1] = context
+    // Clear may move a retained key toward the start of the same arena.
+    for i in 0u64 .. len {
+        work[key + 2 + i] = work[start + i]
+    }
+    let id: u32 = int.narrow(used + 1)
+    work[d.spans + 2 * used] = int.narrow(arena_at)
+    work[d.spans + 2 * used + 1] = int.narrow(slot)
+    work[d.hash + slot] = id
+    work[d.header] = id
+    work[d.header + 1] = int.narrow(arena_at + dfa_key_units(len))
+    let built: u64 = int.widen(work[d.header + 4])
+    work[d.header + 4] = int.narrow(built + 1)
+    for c in 0u64 .. d.columns {
+        work[d.transitions + used * d.columns + c] = DFA_UNKNOWN
+    }
+    id
+}
+
+fn dfa_seen_bytes(work: List[u32], d: DfaLayout) -> u64 {
+    let hi: u64 = int.widen(work[d.header + 2] >> 2)
+    let lo: u64 = int.widen(work[d.header + 3])
+    (hi << 32) | lo
+}
+
+fn dfa_clear_count(work: List[u32], d: DfaLayout) -> u32 {
+    work[d.header + 2] & 3
+}
+
+fn dfa_clear(mut work: List[u32], d: DfaLayout, keep: u32, next_units: u64) -> bool {
+    let clears = dfa_clear_count(work, d)
+    let built: u64 = int.widen(work[d.header + 4])
+    if clears == 3 && dfa_seen_bytes(work, d) < 10 * built {
+        return false
+    }
+    let mut old: u64 = 0
+    let mut len: u64 = 0
+    let has_key = keep != DFA_DEAD
+    if has_key {
+        let id: u64 = int.widen(keep)
+        let offset: u64 = int.widen(work[d.spans + 2 * (id - 1)])
+        old = d.keys + 8 * offset
+        len = int.widen(work[old])
+        if dfa_key_units(len) + next_units > 2 * d.states {
+            return false
+        }
+    }
+    work[d.header] = 0
+    work[d.header + 1] = 0
+    work[d.header + 2] = if clears < 3 {
+        clears + 1
+    } else {
+        clears
+    }
+    work[d.header + 3] = 0
+    work[d.header + 4] = 0
+    for i in 0u64 .. 6 {
+        work[d.starts + i] = 0
+    }
+    if has_key {
+        let context = work[old + 1]
+        let (slot, _) = dfa_slot(work, d, 0, old + 2, len, context)
+        let _ = dfa_add(mut work, d, old + 2, len, context, slot)
+    }
+    true
+}
+
+fn dfa_bytes(mut work: List[u32], d: DfaLayout, n: u64) {
+    let prior = dfa_seen_bytes(work, d)
+    // After 10*S bytes, the give-up comparison cannot see any larger count.
+    let max = 10 * d.states
+    let total = if n > max - prior {
+        max
+    } else {
+        prior + n
+    }
+    let hi: u32 = int.narrow(total >> 32)
+    work[d.header + 2] = (work[d.header + 2] & 3) | (hi << 2)
+    work[d.header + 3] = int.truncate(total)
+}
+
+fn dfa_intern(mut work: List[u32], d: DfaLayout, from: u32, base: u64, len: u64, context: u32) -> (u32, u32) {
+    let units = dfa_key_units(len)
+    if units > 2 * d.states {
+        return (from, DFA_UNKNOWN)
+    }
+    let used: u64 = int.widen(work[d.header])
+    let (slot, known) = dfa_slot(work, d, used, base, len, context)
+    if known != DFA_DEAD {
+        return (from, known)
+    }
+    let key_end: u64 = int.widen(work[d.header + 1])
+    if used + 1 >= d.states || slot == 2 * d.states || key_end + units > 2 * d.states {
+        if !dfa_clear(mut work, d, from, units) {
+            return (from, DFA_UNKNOWN)
+        }
+        let retained: u32 = if from == DFA_DEAD {
+            0
+        } else {
+            1
+        }
+        let remaining: u64 = int.widen(retained)
+        let (cleared_slot, _) = dfa_slot(work, d, remaining, base, len, context)
+        return (retained, dfa_add(mut work, d, base, len, context, cleared_slot))
+    }
+    (from, dfa_add(mut work, d, base, len, context, slot))
+}
+
+fn dfa_start(mut work: List[u32], d: DfaLayout, entry: u64, context: u32) -> u32 {
+    let kind: u64 = int.widen(context)
+    let stored = work[d.starts + kind]
+    if stored != 0 {
+        return stored
+    }
+    work[d.scratch] = int.narrow(entry)
+    let (_, start) = dfa_intern(mut work, d, DFA_DEAD, d.scratch, 1, context)
+    if start != DFA_UNKNOWN {
+        work[d.starts + kind] = start
+    }
+    start
+}
+
+type DfaVisit: key {
+    len_out: u64,
+    matched: bool,
+}
+
+fn dfa_walk(program: List[u32], edges: List[u32], mut work: List[u32], d: DfaLayout, key: u64, len: u64, ch: u64, left: u32, right: u32, valid: bool,) -> DfaVisit {
+    let seen = d.scratch + d.width
+    let stack = seen + d.width
+    for i in 0u64 .. d.width {
+        work[seen + i] = 0
+    }
+    let mut len_out: u64 = 0
+    let mut matched = false
+    for seed in 0u64 .. len {
+        let mut filled: u64 = 1
+        work[stack] = work[key + seed]
+        while filled != 0 {
+            filled -= 1
+            let mut state: u64 = int.widen(work[stack + filled])
+            loop {
+                let marks = work[seen + state]
+                if (marks & 1) != 0 {
+                    break
+                }
+                work[seen + state] = marks | 1
+                let base = NFA_WORDS * state
+                let op = program[base]
+                let a: u64 = int.widen(program[base + 1])
+                let b: u64 = int.widen(program[base + 2])
+                let c: u64 = int.widen(program[base + 3])
+                if op == OP_SPLIT {
+                    work[stack + filled] = int.narrow(b)
+                    filled += 1
+                    state = a
+                } else if op == OP_UTF8_CHOICE {
+                    if ch == DFA_INPUT_END {
+                        break
+                    }
+                    state = if ch < 128 {
+                        a
+                    } else {
+                        b
+                    }
+                } else if op == OP_SAVE {
+                    state = b
+                } else if op == OP_ASSERT && dfa_look(a, b, left, right) {
+                    state = c
+                } else {
+                    if op == OP_MATCH && valid {
+                        matched = true
+                        if !d.reverse {
+                            return DfaVisit(len_out: len_out, matched: true)
+                        }
+                    } else if ch != DFA_INPUT_END {
+                        match nfa_advance(program, edges, state, int.narrow(ch)) {
+                            Some(target) => {
+                                let visit = work[seen + target]
+                                if (visit & 2) == 0 {
+                                    work[seen + target] = visit | 2
+                                    work[d.scratch + len_out] = int.narrow(target)
+                                    len_out += 1
+                                }
+                            },
+                            None => {},
+                        }
+                    }
+                    break
+                }
+            }
+        }
+    }
+    DfaVisit(len_out: len_out, matched: matched)
+}
+
+fn dfa_transition(program: List[u32], edges: List[u32], mut work: List[u32], d: DfaLayout, state: u32, col: u64, ch: u64, at_boundary: bool,) -> u32 {
+    let id: u64 = int.widen(state)
+    let i = d.transitions + (id - 1) * d.columns + col
+    let cached = work[i]
+    if at_boundary && cached != DFA_UNKNOWN {
+        return cached
+    }
+    let offset: u64 = int.widen(work[d.spans + 2 * (id - 1)])
+    let key = d.keys + 8 * offset
+    let len: u64 = int.widen(work[key])
+    let behind = work[key + 1]
+    let ahead = dfa_context(ch)
+    let (left, right) = if d.reverse {
+        (ahead, behind)
+    } else {
+        (behind, ahead)
+    }
+    let found = dfa_walk(program, edges, mut work, d, key + 2, len, ch, left, right, at_boundary)
+    let (from, target) = if found.len_out == 0 {
+        (state, DFA_DEAD)
+    } else {
+        dfa_intern(mut work, d, state, d.scratch, found.len_out, ahead)
+    }
+    if target == DFA_UNKNOWN {
+        return DFA_UNKNOWN
+    }
+    let edge = if found.matched {
+        target | DFA_MATCH
+    } else {
+        target
+    }
+    if at_boundary {
+        let current: u64 = int.widen(from)
+        work[d.transitions + (current - 1) * d.columns + col] = edge
+    }
+    edge
+}
+
+type Half: key = Found(u64) | Missing | Retry
+
+fn dfa_search(program: List[u32], edges: List[u32], map: Bytes, mut work: List[u32], d: DfaLayout, entry: u64, s: String, begin: u64, limit: u64, quit: bool,) -> Half {
+    let data = string.as_bytes(s)
+    let width = list.len(data)
+    let reverse = d.reverse
+    let context: u64 = if reverse {
+        if begin == width {
+            DFA_INPUT_END
+        } else {
+            int.widen(data[begin])
+        }
+    } else if begin == 0 {
+        DFA_INPUT_END
+    } else {
+        int.widen(data[begin - 1])
+    }
+    if quit && context >= 128 && context != DFA_INPUT_END {
+        return Retry
+    }
+    let mut pos = begin
+    let mut state = dfa_start(mut work, d, entry, dfa_context(context))
+    let mut matched: Option[u64] = None
+    let mut scanned: u64 = 0
+    while state != DFA_DEAD {
+        if state == DFA_UNKNOWN {
+            return Retry
+        }
+        let ch: u64 = if reverse {
+            if pos == 0 {
+                DFA_INPUT_END
+            } else {
+                int.widen(data[pos - 1])
+            }
+        } else if pos == width {
+            DFA_INPUT_END
+        } else {
+            int.widen(data[pos])
+        }
+        if quit && ch >= 128 && ch != DFA_INPUT_END {
+            dfa_bytes(mut work, d, scanned)
+            return Retry
+        }
+        let col: u64 = if ch == DFA_INPUT_END {
+            d.columns - 1
+        } else {
+            int.widen(map[ch])
+        }
+        let valid = pos == width || (data[pos] & 0xC0) != 0x80
+        let id: u64 = int.widen(state)
+        let cached = work[d.transitions + (id - 1) * d.columns + col]
+        let edge = if !valid || cached == DFA_UNKNOWN {
+            dfa_bytes(mut work, d, scanned)
+            scanned = 0
+            dfa_transition(program, edges, mut work, d, state, col, ch, valid)
+        } else {
+            cached
+        }
+        if edge == DFA_UNKNOWN {
+            return Retry
+        }
+        if (edge & DFA_MATCH) != 0 {
+            matched = Some(pos)
+        }
+        if pos == limit {
+            break
+        }
+        state = edge & DFA_TARGET
+        pos = if reverse {
+            pos - 1
+        } else {
+            pos + 1
+        }
+        scanned += 1
+    }
+    dfa_bytes(mut work, d, scanned)
+    match matched {
+        Some(at) => Found(at),
+        None => Missing,
+    }
+}
+
+fn forward_end(re: Regex, mut c: Cache, s: String, at: u64) -> Half {
+    let d = dfa_layout(re, c, false)
+    dfa_search(re.forward, re.edges, re.class_map, mut c.work, d, re.start, s, at, string.byte_len(s), re.quit_non_ascii)
+}
+
+fn reverse_start(re: Regex, mut c: Cache, s: String, end: u64, limit: u64) -> Half {
+    let d = dfa_layout(re, c, true)
+    dfa_search(re.reverse, re.edges, re.class_map, mut c.work, d, re.reverse_start, s, end, limit, re.quit_non_ascii)
+}
+
+fn match_span(re: Regex, mut c: Cache, s: String, at: u64) -> Result[Option[Match], ()] {
+    match forward_end(re, mut c, s, at) {
+        Found(end) => match reverse_start(re, mut c, s, end, at) {
+            Found(start) => Ok(Some(Match(start: start, end: end))),
+            Missing => Ok(None),
+            Retry => Error(()),
+        },
+        Missing => Ok(None),
+        Retry => Error(()),
+    }
+}
+
+fn search(re: Regex, mut c: Cache, s: String, at: u64, groups_wanted: u64) -> Option[Match] {
+    let width = string.byte_len(s)
+    match match_span(re, mut c, s, at) {
+        Ok(None) => None,
+        Ok(Some(span)) => {
+            if groups_wanted > 1 {
+                return pike_search(re, mut c, s, span.start, span.end, re.start - 1, groups_wanted)
+            }
+            Some(span)
+        },
+        Error(()) => pike_search(re, mut c, s, at, width, re.start, groups_wanted),
+    }
+}
+
+fn publish_groups(re: Regex, c: Cache, mut g: Groups, span: Match) {
+    g.spans[0] = span.start
+    g.spans[1] = span.end
+    let mut i: u64 = 1
     while i < re.group_count {
         let lo = read_slot(c.work, c.slices.saved + 4 * i)
         let hi = read_slot(c.work, c.slices.saved + 4 * i + 2)
@@ -3317,25 +3835,29 @@ fn publish_groups(re: Regex, c: Cache, mut g: Groups) {
 pub fn is_match(re: Regex, mut c: Cache, s: String, at: u64) -> bool {
     check_cache(re, c)
     check_start(s, at)
-    pike_search(re, mut c, s, at, 1) != None
+    search(re, mut c, s, at, 1) != None
 }
 
 pub fn find(re: Regex, mut c: Cache, s: String, at: u64) -> Option[Match] {
     check_cache(re, c)
     check_start(s, at)
-    pike_search(re, mut c, s, at, 1)
+    search(re, mut c, s, at, 1)
 }
 
 pub fn captures(re: Regex, mut c: Cache, s: String, at: u64, mut g: Groups) -> bool {
     check_cache(re, c)
     check_groups(re, g)
     check_start(s, at)
-    if pike_search(re, mut c, s, at, re.group_count) == None {
-        init_group_spans(mut g.spans)
-        return false
+    match search(re, mut c, s, at, re.group_count) {
+        Some(span) => {
+            publish_groups(re, c, mut g, span)
+            true
+        },
+        None => {
+            init_group_spans(mut g.spans)
+            false
+        },
     }
-    publish_groups(re, c, mut g)
-    true
 }
 
 fn next_search(re: Regex, mut c: Cache, s: String, mut k: Cursor, groups_wanted: u64) -> Option[Match] {
@@ -3344,13 +3866,13 @@ fn next_search(re: Regex, mut c: Cache, s: String, mut k: Cursor, groups_wanted:
     }
     check_start(s, k.at)
     let width = string.byte_len(s)
-    let mut found = pike_search(re, mut c, s, k.at, groups_wanted)
+    let mut found = search(re, mut c, s, k.at, groups_wanted)
     if k.after_match && found == Some(Match(start: k.at, end: k.at)) {
         if k.at == width {
             found = None
         } else {
             let (_, boundary_at) = scalar(s, k.at)
-            found = pike_search(re, mut c, s, boundary_at, groups_wanted)
+            found = search(re, mut c, s, boundary_at, groups_wanted)
         }
     }
     match found {
@@ -3373,12 +3895,16 @@ pub fn next(re: Regex, mut c: Cache, s: String, mut k: Cursor) -> Option[Match] 
 pub fn next_captures(re: Regex, mut c: Cache, s: String, mut k: Cursor, mut g: Groups) -> bool {
     check_cache(re, c)
     check_groups(re, g)
-    if next_search(re, mut c, s, mut k, re.group_count) == None {
-        init_group_spans(mut g.spans)
-        return false
+    match next_search(re, mut c, s, mut k, re.group_count) {
+        Some(span) => {
+            publish_groups(re, c, mut g, span)
+            true
+        },
+        None => {
+            init_group_spans(mut g.spans)
+            false
+        },
     }
-    publish_groups(re, c, mut g)
-    true
 }
 
 pub fn count(re: Regex, mut c: Cache, s: String) -> u64 {

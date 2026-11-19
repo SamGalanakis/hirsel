@@ -18,17 +18,36 @@ resource type BoundedSearch {
     re: regex.Regex,
     cache: regex.Cache,
     cursor: regex.Cursor,
+    haystack: String,
 } drop(s) {
-    let _ = regex.next(s.re, mut s.cache, "baab", mut s.cursor)
+    let _ = regex.next(s.re, mut s.cache, s.haystack, mut s.cursor)
 }
 
-fn regex_uncaught_steps(steps: u64, warm: bool, divisor: u64) {
-    let re = result.unwrap(regex.new("a+"))
-    let mut c = result.unwrap(regex.cache(re, 0))
-    if warm {
-        let _ = regex.find(re, mut c, "baab", 0)
+fn move_bounded_cache(take c: regex.Cache) -> regex.Cache {
+    take c
+}
+
+fn regex_uncaught_steps(steps: u64, history: u64, divisor: u64) {
+    let re = result.unwrap(regex.new(if history == 3 {
+        "abcdefghij"
+    } else {
+        "a+"
+    }))
+    let haystack = if history == 3 {
+        "xabcdefghij"
+    } else {
+        "baab"
     }
-    let pending = result.unwrap(BoundedSearch(re: take re, cache: take c, cursor: regex.cursor(0)))
+    let mut c = result.unwrap(regex.cache(re, 0))
+    if history > 0 {
+        let _ = regex.find(re, mut c, haystack, 0)
+    }
+    let ready = if history == 2 {
+        move_bounded_cache(take c)
+    } else {
+        take c
+    }
+    let pending = result.unwrap(BoundedSearch(re: take re, cache: take ready, cursor: regex.cursor(0), haystack: take haystack))
     // A division failure starts cleanup while the bound still has steps.
     // MEM-30 propagates the mixed cause chain past the bound to the caller.
     let _ = bound steps steps {

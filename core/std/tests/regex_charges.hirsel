@@ -155,51 +155,95 @@ fn regex_literal_ninety_thousand() -> bool {
     }
 }
 
-fn limited_find(re: Regex, take c: Cache, steps: u64) -> Result[(Cache, Cursor, Option[Match]), OutOfTime] {
+fn walk_bounded(re: Regex, take c: Cache, s: String, steps: u64,) -> Result[(Cache, Cursor, Option[Match]), OutOfTime] {
     let start = cursor(0)
     bound steps steps {
         let mut inside = take c
         let mut k = start
-        let span = next(re, mut inside, "baab", mut k)
+        let span = next(re, mut inside, s, mut k)
         (take inside, k, span)
     }
 }
 
-fn regex_pike_threshold() -> u64 {
-    let re = result.unwrap(new("a+"))
-    let mut steps: u64 = 0
-    let mut saw_stop = false
-    loop {
-        let fresh = result.unwrap(cache(re, 0))
-        let mut warmed = result.unwrap(cache(re, 0))
-        let _ = find(re, mut warmed, "baab", 0)
-        match (limited_find(re, take fresh, steps), limited_find(re, take warmed, steps)) {
-            (Ok((take cache_after, k, span)), Ok((_, warm_cursor, warm_span))) => {
-                if !saw_stop || span != Some(Match(start: 1, end: 3)) || warm_span != span || k != warm_cursor {
-                    return 0
-                }
-                let mut resumed = take cache_after
-                let mut p = k
-                if next(re, mut resumed, "bbbaa", mut p) == Some(Match(start: 3, end: 5)) {
-                    return steps
-                }
-                return 0
-            },
-            (Error(a), Error(b)) => {
-                if a.steps != steps || b.steps != steps {
-                    return 0
-                }
-                saw_stop = true
-            },
-            _ => return 0,
+fn move_cache(take c: Cache) -> Cache {
+    take c
+}
+
+fn threshold_trial(re: Regex, input: String, first: Match, probe: String, next_span: Match, history: u64, budget: u64) -> Option[bool] {
+    let mut c = result.unwrap(cache(re, 0))
+    if history != 0 {
+        if find(re, mut c, input, 0) != Some(first) {
+            return None
         }
-        steps += 1
+    }
+    let ready = if history == 2 {
+        move_cache(take c)
+    } else {
+        take c
+    }
+    match walk_bounded(re, take ready, input, budget) {
+        Ok((take used, k, span)) => {
+            let mut search_again = take used
+            let mut resumed = k
+            let second = next(re, mut search_again, probe, mut resumed)
+            if span == Some(first) && second == Some(next_span) {
+                Some(true)
+            } else {
+                None
+            }
+        },
+        Error(e) => if e.steps == budget {
+            Some(false)
+        } else {
+            None
+        },
     }
 }
 
-// expect: run regex_pike_steps() = true
-fn regex_pike_steps() -> bool {
-    regex_pike_threshold() != 0
+fn first_success(pattern: String, input: String, first: Match, probe: String, next_span: Match, history: u64) -> u64 {
+    let re = result.unwrap(new(pattern))
+    if threshold_trial(re, input, first, probe, next_span, history, 0) != Some(false) {
+        return 0
+    }
+    let mut low: u64 = 0
+    let mut high: u64 = 65535
+    if threshold_trial(re, input, first, probe, next_span, history, high) != Some(true) {
+        return 0
+    }
+    while high - low > 1 {
+        let at = low + (high - low) / 2
+        match threshold_trial(re, input, first, probe, next_span, history, at) {
+            Some(true) => {
+                high = at
+            },
+            Some(false) => {
+                low = at
+            },
+            None => {
+                return 0
+            },
+        }
+    }
+    high
+}
+
+fn regex_step_thresholds() -> u64 {
+    let first = Match(start: 1, end: 3)
+    let second = Match(start: 3, end: 5)
+    let fresh = first_success("a+", "baab", first, "bbbaa", second, 0)
+    let warm = first_success("a+", "baab", first, "bbbaa", second, 1)
+    let moved = first_success("a+", "baab", first, "bbbaa", second, 2)
+    let cleared = first_success("abcdefghij", "xabcdefghij", Match(start: 1, end: 11), "xabcdefghijabcdefghij", Match(start: 11, end: 21), 1)
+    if warm > 0 && warm < fresh && moved == warm && cleared > 0 {
+        fresh | (warm << 16) | (moved << 32) | (cleared << 48)
+    } else {
+        0
+    }
+}
+
+// expect: run regex_dfa_steps() = true
+fn regex_dfa_steps() -> bool {
+    regex_step_thresholds() != 0
 }
 
 fn regex_worker(take input: Arc[Regex]) -> Option[Match] {

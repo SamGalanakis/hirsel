@@ -864,10 +864,12 @@ impl DedicatedCache {
 impl Heap {
     #[inline(always)]
     fn try_lock(&self) -> Option<Locked<'_>> {
+        // Build the guard only on success: a guard made for a failed attempt
+        // would release the holder's lock when it drops.
         self.locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
-            .then_some(Locked(self))
+            .then(|| Locked(self))
     }
 
     #[inline(always)]
@@ -1777,6 +1779,21 @@ fn host_memory<T>() -> T {
 mod tests {
     use super::*;
     use crate::{Context, block};
+
+    /// A worker's free of a transferred block contends with the owner's
+    /// allocation. A failed attempt must leave the holder's lock held, or
+    /// both edit one free list and hand the same slot to two blocks.
+    #[test]
+    fn a_failed_try_lock_leaves_the_holder_locked() {
+        let heap = Heap::default();
+        let held = heap.lock();
+        assert!(heap.try_lock().is_none());
+        assert!(
+            heap.try_lock().is_none(),
+            "a failed attempt released the lock"
+        );
+        drop(held);
+    }
 
     fn resident_pages(base: NonNull<u8>, len: usize) -> usize {
         let mut flags = vec![0; len / page_bytes()];

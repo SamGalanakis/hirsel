@@ -125,6 +125,12 @@ operations! {
     ("string", "truncate", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "make_ascii_upper", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "make_ascii_lower", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "with_capacity", Lane::PendingCode, "C", "std-utf8-bbd839af", false),
+    ("string", "validate_utf8", Lane::PendingCode, "C", "std-utf8-603fae9f", false),
+    ("string", "utf8_head", Lane::PendingCode, "C", "std-utf8-603fae9f", false),
+    ("string", "utf8_tail", Lane::PendingCode, "C", "std-utf8-603fae9f", false),
+    ("string", "utf8_complete_prefix", Lane::PendingCode, "C", "std-utf8-603fae9f", true),
+    ("string", "utf8_block_prefix", Lane::PendingCode, "C", "std-utf8-58a13cbf", true),
     ("arc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Arc))), "A", "core-ops-914", false),
     ("arc", "share", Lane::Runtime(Kernel::Share(Counted::Arc)), "A", "core-ops-914", false),
     ("arc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Arc)), "A", "core-ops-914", false),
@@ -1658,6 +1664,8 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                             | "shorten"
                             | "push_scalar"
                             | "append_base64_blocks"
+                            | "utf8_complete_prefix"
+                            | "utf8_block_prefix"
                             | "base64_symbol"
                     )
                     || entry.module == "map"

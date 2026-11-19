@@ -393,3 +393,90 @@ pub type Shape: codec = Circle(u64) | removed Square(u64) | Line(u64, u64)   // 
 ```hirsel
 pub type Tag: codec { id: u64, removed note: String, note: u64 }   // refused: SEM-10, note is removed
 ```
+
+### SEM-11: Vectors
+
+`Simd[T, n]`, where `T` is an integer type, `n` is an integer literal and n × size(`T`) is
+16 or 32, is a **vector** of `n` **lanes** of type `T`, numbered from 0. It is plain and
+copyable, `shareable` and `send` and nothing else, and its size is n × size(`T`). Any other
+`T` or `n` is refused at the type. A vector type is the type of a local, a parameter, a
+result or an expression and of nothing else: in a field, an element, a tuple, a type
+argument, a callable type or a capture it is refused.
+
+Each operation below is typed by its own rule at the call, as `int.widen` is
+([SEM-1](#sem-1-integers)): none is a generic function, and `n`, where the rule says so, is
+taken from the expected type. Each computes each lane by SEM-1 at `T`'s width, and none
+depends on the engine, the build or the CPU.
+
+- **Bitwise.** `& | ^` and unary `~` work lane by lane. `<<` and `>>` shift every lane by
+  one count of type `T`, which fails with `Overflow` once, at the operator, when it is
+  negative or at least `T`'s width ([LANG-21](language.md#lang-21-operators)).
+- **Arithmetic** is named and never fails: `simd.wrapping_add`, `simd.wrapping_sub`,
+  `simd.saturating_add` and `simd.saturating_sub` take two vectors of one type and apply
+  their `int` namesakes to each lane. `+`, `-`, `*`, `/`, `%`, unary `-` and the comparison
+  operators are refused on vectors.
+- **Masks.** `simd.eq(a, b)` and `simd.lt(a, b)` take two vectors of one type and return a
+  **mask** of that type, whose lanes are all ones where the lanes compare true and 0 where
+  they do not; `lt` compares as `T`, signed or unsigned.
+- **Making.** `simd.splat(x)` puts the `T` `x` in every lane of the expected vector type, and
+  `simd.from(a)` turns an `Inline[T, n]` into a `Simd[T, n]`, lane i from element i.
+- **Swizzle.** `simd.swizzle(t, i)` takes a table `t: Simd[T, m]`, where `T` is `u8` or `i8`,
+  and indices `i: Simd[u8, n]`, where `m` and `n` are each 16 or 32, and returns a
+  `Simd[T, n]` whose lane k is lane `i[k]` of `t` when `i[k] < m`, and 0 otherwise.
+- **Cast.** `simd.cast(v)` reinterprets a vector as the expected vector type, which has the
+  same size: the lanes are laid out from byte 0 upward, each lane's bytes little-endian, on
+  every target.
+- **Reductions.** `simd.any(v)` is `true` when some lane is not 0. `simd.bitmask(v)` is a
+  `u64` whose bit k is the top bit of lane k; the bits from `n` upward are 0.
+- **Loads and stores.** `list.lanes(b, at)`, with `b: Bytes`, reads the `n` bytes of `b`
+  from `at` as a `Simd[u8, n]`, `n` taken from the expected type, and fails with `Bounds`
+  unless `at + n ≤ len`, checked once for the whole read. `list.put_lanes(mut b, v, k) ->
+  Result[(), Capacity]` appends lanes 0 to `k − 1` of a `Simd[u8, n]`. It fails with
+  `Bounds` when `k > n`, before changing anything; otherwise it grows `b` as
+  [MEM-24](budgets.md#mem-24-logical-charges) says with `needed` = `len + k`, and on
+  `Capacity` leaves `b` unchanged.
+
+Each `simd` and `list` operation is a core call and takes one step, and the operators take
+none ([MEM-30](budgets.md#mem-30-step-bounds)).
+
+A function is **versioned** when, after it is type-checked, any of its parameters, its
+result, a binding or an expression in it has a vector type. That is decided one function at
+a time. A closure literal is a function of its own ([LANG-14](language.md#lang-14-captures)):
+its own vector values version it, and it does not version the function that encloses it. A
+function with a vector in its signature is called only from versioned functions. An engine
+may build a versioned function more than once, one **version** for each instruction-set
+level it supports. A call between versioned functions runs the callee's version at the
+caller's level. Every other call, through a function value, an export or a task entry
+included, enters through the function's **stub**, which has no vector in its signature and
+runs the version for the widest level the CPU allows. On x86-64 the levels are those of the
+x86-64 psABI. An engine selects level k only when the CPU has every feature that list names
+for level k, with the operating system's state for them enabled, and builds level k's
+version with exactly those features.
+
+A version has no meaning of its own. By [SEM-8](#sem-8-determinism) every version gives the
+same values, failures and sites, steps and charges, and a replay on a CPU with other levels
+reproduces the run. Nothing a program can observe names a version, and every version has
+the function's revision ([PROG-9](programs.md#prog-9-code-descriptors)).
+
+```hirsel unbuilt
+const LO: Inline[u8, 16] = [0x15, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x13, 0x1A, 0x1B, 0x1B, 0x1B, 0x1A]
+const HI: Inline[u8, 16] = [0x10, 0x10, 0x01, 0x02, 0x04, 0x08, 0x04, 0x08, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10]
+// true when some byte of v is outside the Base64 alphabet
+fn invalid(v: Simd[u8, 32]) -> bool {
+    simd.any(simd.swizzle(simd.from(LO), v & simd.splat(15)) & simd.swizzle(simd.from(HI), v >> 4))
+}
+// versioned, though it writes no vector type: list.lanes(b, at) is a Simd[u8, 32]
+fn invalid_at(b: Bytes, at: u64) -> bool { invalid(list.lanes(b, at)) }
+```
+```hirsel unbuilt
+fn sum(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16] { a + b }     // refused: LANG-21, use simd.wrapping_add
+```
+```hirsel unbuilt
+type Block { lanes: Simd[u8, 16] }                                       // refused: SEM-11, a vector in a field
+```
+```hirsel unbuilt
+fn wide(v: Simd[u64, 8]) -> Simd[u64, 8] { v }                          // refused: SEM-11, 64 bytes
+```
+```hirsel unbuilt
+fn pick(t: Simd[u16, 16], i: Simd[u8, 16]) -> Simd[u16, 16] { simd.swizzle(t, i) }   // refused: SEM-11, a swizzle table of u16
+```

@@ -53,7 +53,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Failure](failure.md) | FAIL-1 to FAIL-16 |
 | [Tasks](tasks.md) | CONC-1 to CONC-13 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-9 |
-| [Semantics](semantics.md) | SEM-1 to SEM-10 |
+| [Semantics](semantics.md) | SEM-1 to SEM-11 |
 | [Programs](programs.md) | PROG-1 to PROG-6, PROG-9 |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
 | [Core library](core.md) | |
@@ -100,6 +100,7 @@ and keyed operations. It is unbuilt design.
 | identity bytes | [PROG-9](programs.md#prog-9-code-descriptors) |
 | hand-over, limit record | [MEM-20](budgets.md#mem-20-limit-records-and-hand-over) |
 | kind | [OWN-3](ownership.md#own-3-kinds) |
+| lane, mask, vector, version | [SEM-11](semantics.md#sem-11-vectors) |
 | outlives | [MEM-6](memory.md#mem-6-roots) |
 | packed, streamable | [MEM-12](memory.md#mem-12-region-sequences) |
 | pending result | [FAIL-9](failure.md#fail-9-pending-results) |

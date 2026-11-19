@@ -21,6 +21,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `core` (the prelude: every core type, `fail`, `isolate`, `replace`, `clone`, `clone_in`, `build_in`, `build_stream_in`, `emit`, `finish`, `finish_trim`) | [core.hirsel](../../core/core/core.hirsel) | LANG-7, MEM-4, MEM-17, OWN-13, FAIL-2, FAIL-16 |
 | `option`, `result` | [option](../../core/core/option.hirsel), [result](../../core/core/result.hirsel) | FAIL-2 |
 | `int`, `float`, `char` | [int](../../core/core/int.hirsel), [float](../../core/core/float.hirsel), [char](../../core/core/char.hirsel) | SEM-1 to SEM-3 |
+| `simd` | [simd](../../core/core/simd.hirsel) | SEM-11 |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
 | `bytebuf` | [bytebuf](../../core/core/bytebuf.hirsel) | MEM-21, MEM-28 |
@@ -61,6 +62,7 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | `bool`, `char`, `()` | plain | `shareable`, `send`, `key`, `ordered`, `codec` | 1, 4, 0 | nothing |
 | tuples, `Option[T]`, `Result[T, E]` | OWN-3 | `shareable`, `send`, `key`, `ordered`, `codec` when T | tuple: sum; variant rule (MEM-24) | T's |
 | `Inline[T, n]` | T's kind (plain or own) | `shareable`, `send`, `key`, `ordered` when T | n × size(T) | T's |
+| `Simd[T, n]` | plain | `shareable`, `send` | n × size(T) | nothing |
 | `Never` | plain | `shareable`, `send`, `key`, `ordered` | 0 | nothing |
 | `String` | own | `shareable`, `send`, `key`, `ordered`, `codec` | 24 | nothing |
 | `FrozenBytes` | own | `shareable`, `send` | 24 | nothing |
@@ -178,8 +180,8 @@ operations it names; nothing else about them may be inferred from an implementat
   `u64` and fails with `Bounds` unless `at + 8 ≤ len`. Its store twin, `list.put_word_le(mut
   b, x) -> Result[(), Capacity]`, appends `x` as 8 little-endian bytes, growing `b` as
   [MEM-24](budgets.md#mem-24-logical-charges) says, and on `Capacity` leaves `b` unchanged.
-  They are the only multi-byte load and store. Byte search, UTF-8 validation and other scans are ordinary Hirsel over
-  it and the bit counts of [SEM-1](semantics.md#sem-1-integers) (`string.find` is std),
+  With `list.lanes` and `list.put_lanes` ([SEM-11](semantics.md#sem-11-vectors)) they are the only multi-byte loads and stores. Byte search, UTF-8 validation, Base64 and other scans are ordinary Hirsel over
+  them, the vectors of SEM-11 and the bit counts of [SEM-1](semantics.md#sem-1-integers) (`string.find` is std),
   not engine kernels.
 - **Lists.** `list.set` returns the old element and `list.get` returns `None` out of range,
   where `xs[i]` and `list.set` fail with `Bounds`. An element is mutated in place through

@@ -166,8 +166,8 @@ pub type OutOfScope = OutOfScope                          // refused: LANG-9, an
 
 ### LANG-10: Built-in types
 
-The builtin type names are `bool`, `char`, `i8` to `i64`, `u8` to `u64`, `f32`, `f64` and
-`Inline` ([SEM-9](semantics.md#sem-9-inline-arrays)); unit `()` and tuples `(A, B, ..)` are
+The builtin type names are `bool`, `char`, `i8` to `i64`, `u8` to `u64`, `f32`, `f64`,
+`Inline` ([SEM-9](semantics.md#sem-9-inline-arrays)) and `Simd` ([SEM-11](semantics.md#sem-11-vectors)); unit `()` and tuples `(A, B, ..)` are
 written by syntax. Every other type a program names
 without declaring it is declared in the prelude ([core](core.md)), `Option`, `Result`,
 `String`, `List` and the capability types included. `Never` is the type of `return`,
@@ -566,8 +566,8 @@ installs the result ([OWN-12](ownership.md#own-12-assignment)).
 | `+ - * /` | one integer type, or one float type | the operand type |
 | `%` | one integer type | the operand type |
 | unary `-` | a signed integer type, or a float type | the operand type |
-| `& \| ^`, unary `~` | one integer type | the operand type |
-| `<< >>` | an integer left operand and a count of its type ([SEM-1](semantics.md#sem-1-integers)) | the left type |
+| `& \| ^`, unary `~` | one integer type, or one vector type ([SEM-11](semantics.md#sem-11-vectors)) | the operand type |
+| `<< >>` | an integer left operand and a count of its type ([SEM-1](semantics.md#sem-1-integers)), or a `Simd[T, n]` left operand and a count of type `T` (SEM-11) | the left type |
 | unary `!`, `&&`, `\|\|` | `bool` | `bool` |
 | `== !=` | one `key` type ([SEM-7](semantics.md#sem-7-equality-and-order)) | `bool` |
 | `< <= > >=` | one `ordered` type (SEM-7) | `bool` |

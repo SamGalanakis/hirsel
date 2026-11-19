@@ -2,27 +2,19 @@
 // Owned keys because core Map cannot retain slices into the input String.
 fn tally(source: String) -> Result[u32, helper.Error] {
     let mut frequencies: Map[String, u32] = map.new()
-    let b = string.as_bytes(source)
-    let n = list.len(b)
-    let mut i: u64 = 0
-    // The generator emits only a-z and space, so split_whitespace is a space scan.
-    while i < n {
-        while i < n && b[i] == b' ' {
-            i += 1
+    let mut at: u64 = 0
+    // The generator emits only a-z and space, so split on literal spaces.
+    while let Some((word, next)) = string.next_split(source, at, " ") {
+        at = next
+        if string.byte_len(word) == 0 {
+            continue
         }
-        let start = i
-        while i < n && b[i] != b' ' {
-            i += 1
-        }
-        if i > start {
-            let word = string.slice(source, start, i)
-            let present = map.update(mut frequencies, word, fn(mut count: u32) {
-                count += 1
-            })
-            if present == None {
-                let key = helper.mem(string.from(word))?
-                helper.mem(result.capacity_only(map.insert(mut frequencies, take key, 1u32)))?
-            }
+        let present = map.update(mut frequencies, word, fn(mut count: u32) {
+            count += 1
+        })
+        if present == None {
+            let key = helper.mem(string.from(word))?
+            helper.mem(result.capacity_only(map.insert(mut frequencies, take key, 1u32)))?
         }
     }
     let mut best = string.new()

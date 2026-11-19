@@ -1,6 +1,15 @@
 {
   "schema": 1,
   "about": "Pinned Ubuntu noble shared-library closure for LLVM 23, clang and llvm-objdump on minimal pool workers. bootstrap_llvm.py installs these verified shared objects beside libLLVM; objdump also directly links libcurl.",
+  "patchelf": {
+    "name": "patchelf_0.18.0-1.1build1_amd64.deb",
+    "sha256": "962a43e33cd56061522554898557a038ccbb8aa4e1e0f421b2d6f6adf1f80c60",
+    "size": 106300,
+    "urls": [
+      "https://archive.ubuntu.com/ubuntu/pool/universe/p/patchelf/patchelf_0.18.0-1.1build1_amd64.deb",
+      "https://launchpad.net/ubuntu/+archive/primary/+files/patchelf_0.18.0-1.1build1_amd64.deb"
+    ]
+  },
   "debs": [
     {
       "name": "libedit2_3.1-20230828-1build1_amd64.deb",

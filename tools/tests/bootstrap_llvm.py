@@ -15,7 +15,7 @@ SPEC.loader.exec_module(llvm)
 
 
 class LlvmWrappers(unittest.TestCase):
-    def test_wrappers_preserve_arguments_and_loader_path_without_path(self):
+    def test_wrappers_preserve_arguments_without_path(self):
         with tempfile.TemporaryDirectory(prefix='hirsel wrapper ') as raw:
             tree = Path(raw) / 'tree with spaces'
             (tree / 'bin').mkdir(parents=True)
@@ -25,13 +25,13 @@ class LlvmWrappers(unittest.TestCase):
                     tool.write_text('#!/bin/sh\nprintf \'%s\\n\' "$LD_LIBRARY_PATH" "$@"\n')
                     tool.chmod(0o755)
                     wrapper = tree / 'bin' / f'hirsel-{name}'
-                    wrapper.write_text(llvm.WRAPPER % (name, name))
+                    wrapper.write_text(llvm.WRAPPER % name)
                     wrapper.chmod(0o755)
                     result = subprocess.run([str(wrapper.relative_to(raw)), 'one argument', 'two'],
-                                            cwd=raw, env={'PATH': '', 'LD_LIBRARY_PATH': '/inherited libs'},
+                                            cwd=raw, env={'PATH': ''},
                                             capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(result.stdout, f'{tree}/lib:/inherited libs\none argument\ntwo\n')
+                    self.assertEqual(result.stdout, '\none argument\ntwo\n')
 
 
 if __name__ == '__main__':

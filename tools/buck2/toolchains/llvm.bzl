@@ -17,8 +17,7 @@ def _source_files(ctx):
 source_files = rule(impl = _source_files, attrs = {"srcs": attrs.list(attrs.source())})
 
 def _tools(ctx):
-    # The tree's wrappers run clang with its bundled libraries on the loader
-    # path (tools/buck2/bootstrap_llvm.py); the whole tree is a hidden input.
+    # RUNPATH reaches the bundled libraries; the whole tree is a hidden input.
     # fixed-build-date pins SOURCE_DATE_EPOCH for each compile and link.
     llvm = ctx.attrs.tree[DefaultInfo].default_outputs[0]
     clang = cmd_args(ctx.attrs.fixed_build_date, llvm.project("bin/hirsel-clang"), hidden = llvm)

@@ -8,13 +8,11 @@ symbolic links (Buck2 hashes a link, not its target):
 
     bin/                 every LLVM, clang and lld executable (RUNPATH $ORIGIN/../lib),
                          except ld.lld: the locked static PIE (`static_lld`),
-                         and hirsel-clang, hirsel-clang++, hirsel-llvm-ar: those
-                         tools with lib/ on the loader path, since libedit finds
-                         libbsd only through it; wrapper lookup uses shell builtins
-                         so it also works without PATH
+                         and hirsel-clang, hirsel-clang++, hirsel-llvm-ar: wrappers
+                         that locate their tools without PATH
     lib/                 libLLVM, libclang-cpp, the clang resource directory, and
                          the libraries they load that a minimal worker image lacks
-                         (llvm-runtime-lock.json)
+                         (llvm-runtime-lock.json), with their own relative RUNPATH
     engine/              libLLVM.so.23.1: the compiler's own LLVM (`engine_llvm`, built
                          by build-libllvm), which first-party binaries load first
                          (tools/buck2/defs.bzl LLVM_RPATH); clang and the tools keep lib/'s
@@ -36,6 +34,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import stat
 import subprocess
@@ -53,7 +52,7 @@ RUNTIME_LOCK = pathlib.Path(__file__).with_name("llvm-runtime-lock.json")
 INSTALL = ROOT / "tools/native-toolchain/install"
 DEFAULT_OUTPUT = pathlib.Path(__file__).with_name("toolchains") / "llvm-files"
 RECEIPT = ".hirsel-llvm.json"
-LAYOUT = 8
+LAYOUT = 9
 REQUIRED = (
     "sysroot/usr/include/c++/13/vector",
     "sysroot/usr/include/features.h",
@@ -77,10 +76,8 @@ REQUIRED = (
 )
 
 WRAPPER = """#!/bin/sh
-# %s from this tree, with the tree's lib/ on the loader path: libLLVM finds
-# its libraries through RUNPATH, but libedit finds libbsd only through this.
 tree="$(cd "${0%%/*}/.." && pwd)"
-LD_LIBRARY_PATH="$tree/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "$tree/bin/%s" "$@"
+exec "$tree/bin/%s" "$@"
 """
 
 
@@ -170,6 +167,37 @@ def place_runtime_libraries(stage: pathlib.Path, scratch: pathlib.Path) -> None:
             place(path, stage / "lib" / path.name)
 
 
+def relocate_tools(stage: pathlib.Path, scratch: pathlib.Path) -> None:
+    lock = json.loads(RUNTIME_LOCK.read_text(encoding="utf-8"))
+    patcher = scratch / "patchelf"
+    subprocess.run(["dpkg-deb", "-x", fetch_deb(lock["patchelf"], scratch), patcher], check=True)
+    libraries = {path.name for path in (stage / "lib").glob("*.so*")}
+    tools = sorted(path for path in (stage / "bin").iterdir() if path.is_file())
+    for path in tools + sorted((stage / "lib").glob("*.so*")):
+        with path.open("rb") as source:
+            if source.read(4) != b"\x7fELF":
+                continue
+        dynamic = subprocess.check_output(["readelf", "-d", path], env={**os.environ, "LC_ALL": "C"}, text=True)
+        needed = set(re.findall(r"\(NEEDED\).*\[(.*?)\]", dynamic))
+        existing = re.findall(r"\(RUNPATH\).*\[(.*?)\]", dynamic)
+        if path.parent.name == "bin":
+            if not needed:
+                continue
+            runpath = "$ORIGIN/../lib"
+        else:
+            if not needed & libraries or existing == ["$ORIGIN/../lib"]:
+                continue
+            runpath = "$ORIGIN"
+        if existing != [runpath]:
+            subprocess.run([patcher / "usr/bin/patchelf", "--set-rpath", runpath, path], check=True)
+
+
+def tool_version(path: pathlib.Path) -> str:
+    env = os.environ.copy()
+    env.pop("LD_LIBRARY_PATH", None)
+    return subprocess.check_output([path, "--version"], env=env, text=True).strip()
+
+
 def build(stage: pathlib.Path, wanted: dict) -> None:
     stage.mkdir()
     with tempfile.TemporaryDirectory(prefix="hirsel-llvm-") as raw:
@@ -188,18 +216,21 @@ def build(stage: pathlib.Path, wanted: dict) -> None:
         for name in ("llvm", "llvm-c"):
             place_tree(prefix / "include" / name, stage / "include" / name)
         place_runtime_libraries(stage, pathlib.Path(raw))
+        relocate_tools(stage, pathlib.Path(raw))
         headers = pathlib.Path(raw) / "cxx-headers"
         for deb in json.loads(CXX_LOCK.read_text())["debs"]:
             subprocess.run(["dpkg-deb", "-x", fetch_deb(deb, pathlib.Path(raw)), headers], check=True)
         place_tree(headers / "usr/include", stage / "sysroot/usr/include")
     for name in ("clang", "clang++", "llvm-ar"):
         wrapper = stage / "bin" / f"hirsel-{name}"
-        wrapper.write_text(WRAPPER % (name, name), encoding="utf-8")
+        wrapper.write_text(WRAPPER % name, encoding="utf-8")
         wrapper.chmod(0o755)
-    (stage / RECEIPT).write_text(json.dumps(wanted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     missing = [path for path in REQUIRED if not (stage / path).exists()]
     if missing:
         raise SystemExit("LLVM tree omits required paths: " + ", ".join(missing))
+    for name in ("clang", "llvm-ar", "llvm-objcopy", "llvm-objdump", "llvm-config"):
+        tool_version(stage / "bin" / name)
+    (stage / RECEIPT).write_text(json.dumps(wanted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def install(output: pathlib.Path, wanted: dict) -> None:
@@ -235,9 +266,7 @@ def main() -> int:
     install(output, wanted)
     if not current(output, wanted):
         raise SystemExit("installed LLVM tree did not pass its receipt check")
-    version = subprocess.run(
-        [output / "bin/llvm-config", "--version"], check=True, capture_output=True, text=True
-    ).stdout.strip()
+    version = tool_version(output / "bin/llvm-config")
     print(f"installed LLVM {version}: {output}")
     return 0
 

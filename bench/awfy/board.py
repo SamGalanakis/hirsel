@@ -494,7 +494,7 @@ def edit_checksum(path, old, new):
 
 def compile_rows(board, out, prepared, fixture, tools):
     rust, clbg, hirsel, cargo_build, exe, rust_exe = prepared
-    env = build.capped_env(out) | {"LD_LIBRARY_PATH": str(build.llvm_path() / "lib")}
+    env = build.capped_env(out)
     config = out / "fixture.json"
     shutil.copyfile(fixture, config)
     tasks = receipt.read(config)
@@ -728,7 +728,7 @@ def run_board(board, args):
         if git(checkout, "rev-parse", "HEAD") != commit or git(checkout, "status", "--porcelain", "--untracked-files=no"):
             raise ValueError(f"{checkout} must have unmodified tracked sources at {commit}")
 
-    env = build.capped_env(out, "8G", "2") | {"LD_LIBRARY_PATH": str(build.llvm_path() / "lib")}
+    env = build.capped_env(out, "8G", "2")
     artifact_file = out / "toolchain.json"
     run([sys.executable, ROOT / "tools/buck2/prepare.py"], env=env)
     with artifact_file.open("wb") as stdout:

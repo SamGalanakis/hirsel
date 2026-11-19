@@ -111,8 +111,7 @@ def hirsel(args, matched=False):
         ]
         provenance = native_provenance(command, manifest)
         result = subprocess.run([ROOT / "tools/capped", *command],
-                                env={**getattr(args, "env", capped_env(out)),
-                                     "LD_LIBRARY_PATH": str(llvm_path() / "lib")}, stdout=subprocess.PIPE)
+                                env=getattr(args, "env", capped_env(out)), stdout=subprocess.PIPE)
         if result.returncode:
             sys.stderr.buffer.write(result.stdout)
             result.check_returncode()

@@ -41,8 +41,7 @@ def build_hirsel(out, artifacts, rows, env=None, *, debug_lines=False):
         if debug_lines:
             command += ["--debug-lines", "on"]
         provenance = native_provenance(command, manifest)
-        result = subprocess.run([ROOT / "tools/capped", *command],
-                                env={**(env or capped_env(out)), "LD_LIBRARY_PATH": str(llvm_path() / "lib")},
+        result = subprocess.run([ROOT / "tools/capped", *command], env=env or capped_env(out),
                                 stdout=subprocess.PIPE)
         if result.returncode:
             binary.with_name(f"{binary.name}-build.json").write_bytes(result.stdout)

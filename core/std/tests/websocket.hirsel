@@ -627,3 +627,151 @@ fn utf8_missing_final_continuation_splits() -> bool {
     }
     true
 }
+
+// Autobahn Testsuite, autobahntestsuite/autobahntestsuite/case/case6_{1_2,1_3,2_*,3_*}.py.
+// 5092f41aaf9243052047a4f0cd53dbe30e1ea3ec, Apache-2.0, copyright typedef int GmbH, see vectors/autobahn-LICENSE.
+// The peer receives unmasked server frames. Timing and the close handshake are separate.
+// expect: run autobahn_text_messages() = true
+fn autobahn_text_messages() -> bool {
+    let rows: Inline[(String, Option[String]), 8] =[
+    // 6.1.2. Three empty fragments still produce one text message.
+    ("01 00 00 00 80 00", Some("")),
+    // 6.1.3. Only the middle fragment contains data.
+    ("01 00 00 14 6d 69 64 64 6c 65 20 66 72 61 6d 65 20 70 61 79 6c 6f 61 64 80 00", Some("6d 69 64 64 6c 65 20 66 72 61 6d 65 20 70 61 79 6c 6f 61 64")),
+    // 6.2.1. One complete frame of multibyte UTF-8.
+    ("81 1d 48 65 6c 6c 6f 2d c2 b5 40 c3 9f c3 b6 c3 a4 c3 bc c3 a0 c3 a1 2d 55 54 46 2d 38 21 21", Some("48 65 6c 6c 6f 2d c2 b5 40 c3 9f c3 b6 c3 a4 c3 bc c3 a0 c3 a1 2d 55 54 46 2d 38 21 21")),
+    // 6.2.2. Split at a code-point boundary.
+    ("01 0f 48 65 6c 6c 6f 2d c2 b5 40 c3 9f c3 b6 c3 a4 80 0e c3 bc c3 a0 c3 a1 2d 55 54 46 2d 38 21 21", Some("48 65 6c 6c 6f 2d c2 b5 40 c3 9f c3 b6 c3 a4 c3 bc c3 a0 c3 a1 2d 55 54 46 2d 38 21 21")),
+    // 6.2.3. Split inside code points, one byte per frame.
+    ("01 01 48 00 01 65 00 01 6c 00 01 6c 00 01 6f 00 01 2d 00 01 c2 00 01 b5 00 01 40 00 01 c3 00 01 9f 00 01 c3 00 01 b6 00 01 c3 00 01 a4 00 01 c3 00 01 bc 00 01 c3 00 01 a0 00 01 c3 00 01 a1 00 01 2d 00 01 55 00 01 54 00 01 46 00 01 2d 00 01 38 00 01 21 80 01 21", Some("48 65 6c 6c 6f 2d c2 b5 40 c3 9f c3 b6 c3 a4 c3 bc c3 a0 c3 a1 2d 55 54 46 2d 38 21 21")),
+    // 6.2.4. Accept the Greek text with each UTF-8 byte in its own frame.
+    ("01 01 ce 00 01 ba 00 01 e1 00 01 bd 00 01 b9 00 01 cf 00 01 83 00 01 ce 00 01 bc 00 01 ce 80 01 b5", Some("ce ba e1 bd b9 cf 83 ce bc ce b5")),
+    // 6.3.1. Reject a surrogate between otherwise valid scalars in one frame.
+    ("81 14 ce ba e1 bd b9 cf 83 ce bc ce b5 ed a0 80 65 64 69 74 65 64", None),
+    // 6.3.2. Reject the same message with every byte in its own frame.
+    ("01 01 ce 00 01 ba 00 01 e1 00 01 bd 00 01 b9 00 01 cf 00 01 83 00 01 ce 00 01 bc 00 01 ce 00 01 b5 00 01 ed 00 01 a0 00 01 80 00 01 65 00 01 64 00 01 69 00 01 74 00 01 65 80 01 64", None),]
+    for (raw, expected) in rows {
+        let mut decoder = websocket.decoder(Client, 256)
+        let mut at: u64 = 0
+        let received = result.unwrap(websocket.next(mut decoder, unhex(raw), mut at))
+        match expected {
+            Some(message) => if !payload(received, unhex(message)) || event(received) != 1 {
+                return false
+            },
+            None => if event(received) != 1007 {
+                return false
+            },
+        }
+    }
+    true
+}
+
+// Autobahn Testsuite, autobahntestsuite/autobahntestsuite/case/case6_4_[1-4].py.
+// 5092f41aaf9243052047a4f0cd53dbe30e1ea3ec, Apache-2.0, copyright typedef int GmbH, see vectors/autobahn-LICENSE.
+// The strict oracle rejects when the invalid byte arrives, before the later payload.
+// expect: run autobahn_fails_fast_on_utf8() = true
+fn autobahn_fails_fast_on_utf8() -> bool {
+    for (prefix, invalid) in[
+    // 6.4.1. Next continuation starts an out-of-range scalar.
+    ("01 0b ce ba e1 bd b9 cf 83 ce bc ce b5", "00 04 f4 90 80 80"),
+    // 6.4.2. The invalid continuation byte is in its own frame.
+    ("01 0c ce ba e1 bd b9 cf 83 ce bc ce b5 f4", "00 01 90"),
+    // 6.4.3. The same message in two transport reads within one frame.
+    ("81 15 ce ba e1 bd b9 cf 83 ce bc ce b5", "f4 90 80 80"),
+    // 6.4.4. The invalid continuation byte arrives in its own read.
+    ("81 15 ce ba e1 bd b9 cf 83 ce bc ce b5 f4", "90"),] {
+        let mut decoder = websocket.decoder(Client, 256)
+        let mut at: u64 = 0
+        let prefix_bytes = unhex(prefix)
+        let Ok(Need) = websocket.next(mut decoder, prefix_bytes, mut at) else {
+            return false
+        }
+        if at != list.len(prefix_bytes) {
+            return false
+        }
+        at = 0
+        let Ok(Reject(1007)) = websocket.next(mut decoder, unhex(invalid), mut at) else {
+            return false
+        }
+    }
+    true
+}
+
+// Autobahn Testsuite, autobahntestsuite/autobahntestsuite/case/case7_{5_1,7_X,9_X}.py.
+// 5092f41aaf9243052047a4f0cd53dbe30e1ea3ec, Apache-2.0, copyright typedef int GmbH, see vectors/autobahn-LICENSE.
+// RFC 6455 section 8.1 and Hirsel's F17 choose 1007 for an invalid reason.
+// expect: run autobahn_close_frames() = true
+fn autobahn_close_frames() -> bool {
+    for (raw, expected) in[
+    // 7.5.1. A valid close code followed by an invalid UTF-8 reason.
+    ("88 16 03 e8 ce ba e1 bd b9 cf 83 ce bc ce b5 ed a0 80 65 64 69 74 65 64", 1007u16),
+    // 7.7.1 through 7.7.13. Code 3000 already has an identical vector.
+    ("88 02 03 e8", 8u16), ("88 02 03 e9", 8u16), ("88 02 03 ea", 8u16), ("88 02 03 eb", 8u16), ("88 02 03 ef", 8u16), ("88 02 03 f0", 8u16), ("88 02 03 f1", 8u16), ("88 02 03 f2", 8u16), ("88 02 03 f3", 8u16), ("88 02 0f 9f", 8u16), ("88 02 0f a0", 8u16), ("88 02 13 87", 8u16),
+    // 7.9.1 through 7.9.9. Codes 999 and 1005 already have identical vectors.
+    ("88 02 00 00", 1002u16), ("88 02 03 ec", 1002u16), ("88 02 03 ee", 1002u16), ("88 02 03 f8", 1002u16), ("88 02 04 4c", 1002u16), ("88 02 07 d0", 1002u16), ("88 02 0b b7", 1002u16),] {
+        if first(unhex(raw), Client, 256) != expected {
+            return false
+        }
+    }
+    true
+}
+
+// Autobahn Testsuite, autobahntestsuite/autobahntestsuite/case/case{3_*,4_*}.py.
+// 5092f41aaf9243052047a4f0cd53dbe30e1ea3ec, Apache-2.0, copyright typedef int GmbH, see vectors/autobahn-LICENSE.
+// The decoder refuses each offending frame when no extension was negotiated.
+// expect: run autobahn_reserved_frame_headers() = true
+fn autobahn_reserved_frame_headers() -> bool {
+    for raw in[
+    // Cases 3.1 through 3.7. All seven nonzero RSV combinations.
+    "91 0d 48 65 6c 6c 6f 2c 20 77 6f 72 6c 64 21", "a1 0d 48 65 6c 6c 6f 2c 20 77 6f 72 6c 64 21", "b1 0d 48 65 6c 6c 6f 2c 20 77 6f 72 6c 64 21", "c1 0d 48 65 6c 6c 6f 2c 20 77 6f 72 6c 64 21", "d2 08 00 ff fe fd fc fb 00 ff", "e2 0d 48 65 6c 6c 6f 2c 20 77 6f 72 6c 64 21", "f8 00",
+    // Cases 4.1.2 through 4.2.5. Case 4.1.1 is already in rejects_reserved_opcode.
+    "84 17 72 65 73 65 72 76 65 64 20 6f 70 63 6f 64 65 20 70 61 79 6c 6f 61 64", "85 00", "86 0d 48 65 6c 6c 6f 2c 20 77 6f 72 6c 64 21", "87 0d 48 65 6c 6c 6f 2c 20 77 6f 72 6c 64 21", "8b 00", "8c 17 72 65 73 65 72 76 65 64 20 6f 70 63 6f 64 65 20 70 61 79 6c 6f 61 64", "8d 00", "8e 0d 48 65 6c 6c 6f 2c 20 77 6f 72 6c 64 21", "8f 0d 48 65 6c 6c 6f 2c 20 77 6f 72 6c 64 21",] {
+        if first(unhex(raw), Client, 256) != 1002 {
+            return false
+        }
+    }
+    true
+}
+
+fn autobahn_received_length_frames(text: bool, opcode: u8, fill: u8) -> bool {
+    for (header, n) in[
+    // Case 1.x.1 and 1.x.2. Inline payload length.
+    ("00", 0u64), ("7d", 125u64),
+    // Case 1.x.3 through 1.x.6. Two-byte extended length.
+    ("7e 00 7e", 126u64), ("7e 00 7f", 127u64), ("7e 00 80", 128u64), ("7e ff ff", 65535u64),
+    // Case 1.x.7. Eight-byte extended length.
+    ("7f 00 00 00 00 00 01 00 00", 65536u64),] {
+        let mut frame: Bytes = list.new()
+        result.unwrap(list.push(mut frame, opcode))
+        result.unwrap(list.append(mut frame, unhex(header)))
+        let mut want: Bytes = list.new()
+        result.unwrap(list.fill(mut want, n, fill))
+        result.unwrap(list.append(mut frame, want))
+        let mut decoder = websocket.decoder(Client, 65536)
+        let mut at: u64 = 0
+        let got = result.unwrap(websocket.next(mut decoder, frame, mut at))
+        let matches = match got {
+            Text(data) => text && data == want,
+            Message(data) => !text && data == want,
+            _ => false,
+        }
+        if !matches || at != list.len(frame) {
+            return false
+        }
+    }
+    true
+}
+
+// Autobahn Testsuite, autobahntestsuite/autobahntestsuite/case/case1_1_[1-7].py.
+// 5092f41aaf9243052047a4f0cd53dbe30e1ea3ec, Apache-2.0, copyright typedef int GmbH, see vectors/autobahn-LICENSE.
+// expect: run autobahn_text_frame_lengths() = true
+fn autobahn_text_frame_lengths() -> bool {
+    autobahn_received_length_frames(true, 0x81, b'*')
+}
+
+// Autobahn Testsuite, autobahntestsuite/autobahntestsuite/case/case1_2_[1-7].py.
+// 5092f41aaf9243052047a4f0cd53dbe30e1ea3ec, Apache-2.0, copyright typedef int GmbH, see vectors/autobahn-LICENSE.
+// expect: run autobahn_binary_frame_lengths() = true
+fn autobahn_binary_frame_lengths() -> bool {
+    autobahn_received_length_frames(false, 0x82, 0xfe)
+}

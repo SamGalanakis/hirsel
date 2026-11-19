@@ -121,8 +121,12 @@ unsafe extern "C" fn child(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 
             hirsel_core_sender_drop(input.gate);
             return 0;
         } else if (*input.trace).kind == 5 {
-            // Stay live, so each refund crosses to this task's limit.
-            while !(*input.trace).freed {
+            // Stay live, so each refund crosses to this task's limit: yield at
+            // each cancel check until the parent has freed every box.
+            loop {
+                if (*input.trace).freed {
+                    break;
+                }
                 assert_eq!(hirsel_core_check_cancel(ctx, 76), 0);
             }
             hirsel_core_sender_drop(input.ready);

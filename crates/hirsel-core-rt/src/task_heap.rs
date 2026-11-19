@@ -15,6 +15,7 @@
 //! a few per class in each nursery, so a payer's scattered small state does
 //! not hold a slab per class, even in a heap that serves many payers.
 mod slabs;
+pub(crate) use slabs::{idle_wait, release_retained};
 
 use crate::{abi_layout::own_prefix, limit::Payer};
 use std::cell::Cell;
@@ -1752,7 +1753,7 @@ mod tests {
     /// slab per class, and a payer that frees everything leaves no nursery
     /// once the task parks.
     #[test]
-    fn every_payer_nurses_its_first_blocks_and_leaves_nothing_after_purge() {
+    fn every_payer_nurses_its_first_blocks_and_leaves_nothing_once_idle() {
         const PAYERS: usize = 3 * NURSERY_BLOCKS as usize;
         const LIMIT: u64 = 1 << 20;
         let contexts: Vec<_> = (0..PAYERS).map(|_| Context::new(LIMIT)).collect();
@@ -1785,6 +1786,8 @@ mod tests {
             unsafe { block::free(pointer, bytes as u64) };
         }
         heap.purge();
+        // The worker blocks with nothing to run.
+        release_retained();
         for page in pages {
             let mut flag = 0;
             // SAFETY: mincore only reads the page tables; an unmapped range fails with ENOMEM.

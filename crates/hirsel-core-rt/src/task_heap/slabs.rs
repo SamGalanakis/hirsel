@@ -1,21 +1,49 @@
 //! Shards claim aligned task-heap slabs from bitmap-managed ranges.
+//!
+//! A dropped slab stays claimed and resident in its shard's `retained` stack,
+//! up to `RETAINED_SLABS`, and the next claim takes it first. Its native pages
+//! go back to the host once a worker has waited `RELEASE_DELAY_MS` with
+//! nothing to run (`release_retained`), or when the stack is full, so a busy
+//! server does not return and refault the same pages on every request, and
+//! an idle one holds none of them. Mimalloc likewise delays purging freed
+//! arena memory (`purge_delay`).
 use super::{Mapping, SLAB};
 use std::ptr::NonNull;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SHARD_COUNT: usize = 16;
 // Use one bitmap word per range. Mimalloc's arenas also claim fixed-size
 // slices from a bitmap; each Hirsel range has 64 independently owned slabs.
 const RANGE_BYTES: usize = SLAB * u64::BITS as usize;
+// Dropped slabs each shard keeps resident until a worker idles.
+const RETAINED_SLABS: usize = 128;
 
 static SHARDS: [Mutex<Shard>; SHARD_COUNT] = [const {
     Mutex::new(Shard {
         available: Vec::new(),
+        retained: Vec::new(),
     })
 }; SHARD_COUNT];
+// Slabs on every shard's retained stack, so an idle worker with none skips the locks.
+static RETAINED: AtomicUsize = AtomicUsize::new(0);
+/// How long a worker waits with nothing to run before it releases retained slabs.
+pub(crate) const RELEASE_DELAY_MS: i32 = 100;
+
+/// The poll timeout for a worker about to wait `timeout` ms (-1: no limit),
+/// and whether it should release retained slabs if that wait finds nothing.
+pub(crate) fn idle_wait(timeout: i32) -> (i32, bool) {
+    if RETAINED.load(Ordering::Relaxed) == 0 || (0..=RELEASE_DELAY_MS).contains(&timeout) {
+        (timeout, false)
+    } else {
+        (RELEASE_DELAY_MS, true)
+    }
+}
 
 struct Shard {
     available: Vec<NonNull<Range>>,
+    /// Dropped slabs, still claimed in their range's bitmap and resident.
+    retained: Vec<(NonNull<Range>, u32)>,
 }
 
 // SAFETY: all access to a shard's ranges holds the shard mutex. Each live
@@ -38,6 +66,19 @@ impl Slab {
     pub(super) fn allocate(heap_address: usize) -> (Self, NonNull<u8>) {
         let shard = (heap_address ^ (heap_address >> 12)) / 16 % SHARD_COUNT;
         let mut pool = SHARDS[shard].lock().unwrap();
+        if let Some((range, index)) = pool.retained.pop() {
+            RETAINED.fetch_sub(1, Ordering::Relaxed);
+            // SAFETY: a retained slab's claimed bit pins its range.
+            let start = unsafe { range.as_ref() }.start(index);
+            return (
+                Self {
+                    range,
+                    index,
+                    shard,
+                },
+                start,
+            );
+        }
         let mut range = pool
             .available
             .last()
@@ -65,30 +106,57 @@ impl Slab {
 impl Drop for Slab {
     fn drop(&mut self) {
         let mut shard = SHARDS[self.shard].lock().unwrap();
-        // SAFETY: this handle's claimed bit pins the range. The shard lock
-        // serializes bitmap updates and releasing the range.
-        let range = unsafe { self.range.as_mut() };
-        let was_full = range.free == 0;
-        range.free |= 1 << self.index;
-        if range.free == u64::MAX {
-            shard.remove(range.available_index);
-            // SAFETY: all slab handles are gone and the shard unlinked it.
-            drop(unsafe { Box::from_raw(self.range.as_ptr()) });
-        } else {
-            // A live neighbor pins the address range. Give back the physical
-            // pages in this slot before another heap can claim it.
-            let start = range.start(self.index);
-            // SAFETY: this slab is empty and still withheld by the shard lock.
-            unsafe { Mapping::discard(start, SLAB) };
-            if was_full {
-                range.available_index = shard.available.len();
-                shard.available.push(self.range);
-            }
+        if shard.retained.len() < RETAINED_SLABS {
+            shard.retained.push((self.range, self.index));
+            RETAINED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        shard.release(self.range, self.index);
+    }
+}
+
+/// Return every retained slab's native pages to the host. A worker calls
+/// this after an `idle_wait` that found nothing, or before it parks without
+/// a poller.
+pub(crate) fn release_retained() {
+    if RETAINED.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    for shard in &SHARDS {
+        let mut shard = shard.lock().unwrap();
+        while let Some((range, index)) = shard.retained.pop() {
+            RETAINED.fetch_sub(1, Ordering::Relaxed);
+            shard.release(range, index);
         }
     }
 }
 
 impl Shard {
+    /// Unclaim an empty slab: unmap its range once every slab is free,
+    /// otherwise discard its pages.
+    fn release(&mut self, mut range_pointer: NonNull<Range>, index: u32) {
+        // SAFETY: this slab's claimed bit pins the range. The shard lock
+        // serializes bitmap updates and releasing the range.
+        let range = unsafe { range_pointer.as_mut() };
+        let was_full = range.free == 0;
+        range.free |= 1 << index;
+        if range.free == u64::MAX {
+            self.remove(range.available_index);
+            // SAFETY: all slab handles are gone and the shard unlinked it.
+            drop(unsafe { Box::from_raw(range_pointer.as_ptr()) });
+        } else {
+            // A live neighbor pins the address range. Give back the physical
+            // pages in this slot before another heap can claim it.
+            let start = range.start(index);
+            // SAFETY: this slab is empty and still withheld by the shard lock.
+            unsafe { Mapping::discard(start, SLAB) };
+            if was_full {
+                range.available_index = self.available.len();
+                self.available.push(range_pointer);
+            }
+        }
+    }
+
     fn map_range(&mut self) -> NonNull<Range> {
         let (mapping, _) = Mapping::aligned(RANGE_BYTES, SLAB, 0, false);
         let range = NonNull::from(Box::leak(Box::new(Range {

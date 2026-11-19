@@ -1578,14 +1578,19 @@ impl Scheduler {
         }
         // The scheduler thread waits here, never in a provider: readiness from
         // any thread unparks it (hirsel_core_ready).
-        match deadline {
+        let release = match deadline {
             Some(deadline) => {
                 if !self.net.is_null() {
-                    self.poll_net(poll_timeout(Some(deadline)));
+                    let (timeout, release) =
+                        crate::task_heap::idle_wait(poll_timeout(Some(deadline)));
+                    self.poll_net(timeout);
+                    release
                 } else {
+                    crate::task_heap::release_retained();
                     std::thread::park_timeout(Duration::from_nanos(
                         deadline.saturating_sub(crate::os::monotonic_ns()),
                     ));
+                    false
                 }
             }
             None => {
@@ -1593,11 +1598,18 @@ impl Scheduler {
                     self.stop_quiescent();
                 }
                 if !self.net.is_null() {
-                    self.poll_net(-1);
+                    let (timeout, release) = crate::task_heap::idle_wait(-1);
+                    self.poll_net(timeout);
+                    release
                 } else {
+                    crate::task_heap::release_retained();
                     std::thread::park();
+                    false
                 }
             }
+        };
+        if release && !self.readies.pending.load(Ordering::Acquire) {
+            crate::task_heap::release_retained();
         }
     }
 
@@ -3528,14 +3540,19 @@ impl RunPtr {
                         && run.cancels.is_empty()
                         && !run.readies.pending.load(Ordering::Acquire)
                         && run.has_outside_wait();
-                    let timeout = if wait_for_net {
-                        poll_timeout(run.timers.as_ref().and_then(|task| task.timer_deadline))
+                    let (timeout, release) = if wait_for_net {
+                        crate::task_heap::idle_wait(poll_timeout(
+                            run.timers.as_ref().and_then(|task| task.timer_deadline),
+                        ))
                     } else {
-                        0
+                        (0, false)
                     };
                     run.take_wakes(timeout);
                     let task = run.pop();
                     if task.is_null() {
+                        if release {
+                            crate::task_heap::release_retained();
+                        }
                         if !wait_for_net {
                             let flow_pending =
                                 pool.is_some_and(|pool| pool.units.load(Ordering::Acquire) != 0);
@@ -3738,19 +3755,29 @@ impl RunPtr {
             let poller = run.readies.net.lock().unwrap().clone();
             (deadline, poller)
         };
+        let (timeout, release) = match poller {
+            Some(_) => crate::task_heap::idle_wait(poll_timeout(deadline)),
+            None => {
+                crate::task_heap::release_retained();
+                (poll_timeout(deadline), false)
+            }
+        };
         if let Some(poller) = poller
             && let Some(events) = poller
-                .poll(poll_timeout(deadline))
+                .poll(timeout)
                 .unwrap_or_else(|_| crate::process::stop(b"HostPoll"))
         {
             let _commit = crate::sequencer::enter();
             // SAFETY: the commit owns the socket registry and the poll batch
             // belongs to this run's driver. Re-armed tags are filtered there.
-            unsafe {
+            let readied = unsafe {
                 let run = &mut *self.0;
-                if let Some(net) = run.net.as_mut() {
-                    net.dispatch_polled(events, |token| run.readies.push(token));
-                }
+                run.net.as_mut().map_or(0, |net| {
+                    net.dispatch_polled(events, |token| run.readies.push(token))
+                })
+            };
+            if release && readied == 0 {
+                crate::task_heap::release_retained();
             }
         } else if let Some(deadline) = deadline {
             std::thread::park_timeout(Duration::from_nanos(

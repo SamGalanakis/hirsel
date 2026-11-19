@@ -87,7 +87,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 
     pub(super) fn outside_vector(&mut self, n: NodeId, ty: TyId, context: &'static str) -> TyId {
-        if matches!(self.t.kind(ty), TyKind::Vector(_)) {
+        if ty > HOLE && matches!(self.t.kind(ty), TyKind::Vector(_)) {
             self.refuse("SEM-11", n, format!("a vector cannot be {context}"));
             ERROR
         } else {

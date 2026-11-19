@@ -148,7 +148,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.put_form(n, f, args, want);
         }
         let g = &p.fns[f];
-        if let Some(op) = core_ops::simd_call(p.core_operations[f]) {
+        if g.body.is_none()
+            && let Some(op) = core_ops::simd_call(p.core_operations[f])
+        {
             return self.simd_call(op, f, n, args, want);
         }
         if g.path.is_core("code.callable") {

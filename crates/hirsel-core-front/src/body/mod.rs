@@ -2641,7 +2641,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn checked(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let outer = std::mem::replace(&mut self.node, n);
         let (t, v) = self.expr_inner(n, want);
-        self.versioned |= matches!(self.t.kind(t), TyKind::Vector(_));
+        if !self.versioned && t > HOLE && matches!(self.t.kind(t), TyKind::Vector(_)) {
+            self.versioned = true;
+        }
         self.flow_expression(n, t);
         if matches!(self.kind(n), NodeKind::Closure | NodeKind::ScopedClosure)
             && let Some(v) = v

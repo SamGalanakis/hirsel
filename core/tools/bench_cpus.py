@@ -53,7 +53,7 @@ def sibling_cpus(measure_cpus, build_cpus=()):
     return sorted(siblings)
 
 
-def validate_cpu_sets(parser, args, *, width=1):
+def validate_cpu_sets(parser, args, *, width=1, sequential=False):
     if args.build_cpus is None or args.measure_cpus is None:
         parser.error("--build-cpus and --measure-cpus are required to measure")
     if len(args.measure_cpus) < width:
@@ -62,7 +62,7 @@ def validate_cpu_sets(parser, args, *, width=1):
     if outside:
         parser.error(f"CPUs outside the caller's affinity: {sorted(outside)}")
     try:
-        return sibling_cpus(args.measure_cpus, args.build_cpus)
+        return sibling_cpus(args.measure_cpus, () if sequential else args.build_cpus)
     except (ValueError, OSError) as error:
         parser.error(str(error))
 

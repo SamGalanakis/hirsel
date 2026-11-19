@@ -202,8 +202,9 @@ def main():
     parser.add_argument("out", type=Path)
     parser.add_argument("--upstream", type=Path, required=True, help="pinned AWFY checkout")
     parser.add_argument("--artifacts", type=Path, help="JSON from core/tools/measurement_artifacts.py")
-    parser.add_argument("--hirsel-entries", nargs="+", default=["hello", "harness", "pools"])
-    parser.add_argument("--goose-entries", choices=["hello", "harness", "pools"], nargs="+",
+    parser.add_argument("--hirsel-entries", nargs="+", default=["hello", "harness", "pools"],
+                        help="Hirsel entry modules, including pool_index")
+    parser.add_argument("--goose-entries", choices=["hello", "harness", "pools", "pool_index"], nargs="+",
                         default=["hello", "harness", "pools"])
     parser.add_argument("--goose", type=Path, help="Goose release compiler")
     parser.add_argument("--rust", type=Path, help="Resid's bench/v2/t1-awfy/rust directory")
@@ -211,9 +212,9 @@ def main():
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
     if args.artifacts:
-        hirsel(args)
+        hirsel(args, matched="pool_index" in args.hirsel_entries)
     if args.goose:
-        goose(args)
+        goose(args, matched="pool_index" in args.goose_entries)
     if args.rust:
         rust(args, matched=True)
 

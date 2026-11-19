@@ -50,15 +50,20 @@ class InstructionGuard(unittest.TestCase):
             baseline["rows"][0].update(fixture_identity(manifest, fixture))
             base.write_text(json.dumps(baseline))
 
-            def compare(value):
+            def compare(value, *options):
                 candidate.write_text(json.dumps(value))
                 return subprocess.run([sys.executable, Path(__file__).with_name("receipt.py"),
-                                       "compare", base, candidate], capture_output=True, text=True)
+                                       "compare", base, candidate, *options], capture_output=True, text=True)
 
-            self.assertEqual(compare(baseline).returncode, 0)
+            result = compare(baseline)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("nothing differs: A/A", result.stderr)
+            for field in ("compiler_sha256", "runtime_archive_sha256", "std_sha256"):
+                self.assertIn(f"{field}={baseline['rows'][0][field]}", result.stderr)
+            self.assertEqual(compare(baseline, "--aa").returncode, 0)
             injected = deepcopy(baseline)
             injected["rows"][0]["sample"]["instructions"] = 71_302_841
-            result = compare(injected)
+            result = compare(injected, "--aa")
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("CLBG::Mandelbrot 69,882,571 -> 71,302,841 (+2.032%) FAIL", result.stdout)
 
@@ -133,6 +138,10 @@ class InstructionGuard(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("Variable std_sha256 ", result.stdout)
                     self.assertIn("(+0.000%)", result.stdout)
+                    result = compare(changed, "--aa")
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("--aa requires identical candidate hashes", result.stderr)
+                    self.assertIn("std_sha256", result.stderr)
 
             for source, content in ((directory / "clbg.hirsel", "// revised benchmark\n"),
                                     (fixture, '{"iterations": 2}')):

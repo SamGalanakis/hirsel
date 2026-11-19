@@ -297,18 +297,18 @@ def match_rows(key, left, right):
     fields = [field for field in (*WORKLOAD_IDENTITY, "marker", "stdout") if left[field] != right[field]]
     if fields:
         raise ValueError(f"identity differs: {key}: {', '.join(fields)}")
-    candidate_changed = any(left[field] != right[field] for field in CANDIDATE_HASHES)
-    if candidate_changed and not all(verified_build(row) for row in (left, right)):
+    base_hashes = tuple(left[field] for field in CANDIDATE_HASHES)
+    candidate_hashes = tuple(right[field] for field in CANDIDATE_HASHES)
+    if base_hashes != candidate_hashes and not all(verified_build(row) for row in (left, right)):
         raise ValueError(f"{key} requires a verified build record for a candidate pair")
-    return candidate_changed
+    return base_hashes, candidate_hashes
 
 
-def compare(before_path, after_path, threshold, *, expected=None, blocked=None):
+def compare(before_path, after_path, threshold, *, aa=False, expected=None, blocked=None):
     before, before_refusals = instruction_rows(before_path, expected)
     after, after_refusals = instruction_rows(after_path, expected, allow_incomplete=expected is not None)
     refusals = (blocked or {}) | before_refusals | after_refusals
-    failed = False
-    ratios = []
+    matched = []
     candidate_pairs = set()
     for key in sorted(before.keys() | after.keys() | refusals.keys()):
         try:
@@ -322,21 +322,35 @@ def compare(before_path, after_path, threshold, *, expected=None, blocked=None):
                     validate_row(key, row)
                 except INVALID_RECEIPT as error:
                     raise ValueError(f"{path}: {error}") from error
-            if match_rows(key, left, right):
-                candidate_pairs.add(tuple(tuple(row[field] for field in CANDIDATE_HASHES) for row in (left, right)))
+            candidate_pairs.add(match_rows(key, left, right))
         except INVALID_RECEIPT as error:
             refusals[key] = str(error)
             print(f"{key} REFUSED ({error})", file=sys.stderr)
             continue
 
-        baseline = left["sample"]["instructions"]
-        candidate = right["sample"]["instructions"]
+        matched.append((key, left["sample"]["instructions"], right["sample"]["instructions"]))
+
+    changed_pairs = sorted((left, right) for left, right in candidate_pairs if left != right)
+    if aa and changed_pairs:
+        fields = [field for index, field in enumerate(CANDIDATE_HASHES)
+                  if any(left[index] != right[index] for left, right in changed_pairs)]
+        print(f"--aa requires identical candidate hashes. Differing hashes: {', '.join(fields)}", file=sys.stderr)
+        return REFUSED
+    if not aa and not changed_pairs and not refusals:
+        print("nothing differs: A/A. Use --aa for deliberate A/A comparisons.", file=sys.stderr)
+        for hashes, _ in sorted(candidate_pairs):
+            print(", ".join(f"{field}={value}" for field, value in zip(CANDIDATE_HASHES, hashes)), file=sys.stderr)
+        return REFUSED
+
+    failed = False
+    ratios = []
+    for key, baseline, candidate in matched:
         percent = Decimal(100) * (candidate - baseline) / baseline
         breach = percent > threshold
         failed |= breach
         ratios.append(candidate / baseline)
         print(f"{key} {baseline:,} -> {candidate:,} ({percent:+.3f}%){' FAIL' if breach else ''}")
-    for (base_compiler, base_runtime, base_std), (candidate_compiler, candidate_runtime, candidate_std) in sorted(candidate_pairs):
+    for (base_compiler, base_runtime, base_std), (candidate_compiler, candidate_runtime, candidate_std) in changed_pairs:
         if base_compiler != candidate_compiler:
             print(f"Variable compiler_sha256 {base_compiler} -> {candidate_compiler}")
         runtime = "unchanged" if base_runtime == candidate_runtime else f"{base_runtime} -> {candidate_runtime}"
@@ -582,10 +596,11 @@ def main():
     for suite in ("awfy", "pool", "arena"):
         sampling.add_argument(f"--candidate-{suite}-build", type=lambda path: Path(path).resolve())
     sampling.add_argument("--threshold", type=threshold, metavar="PERCENT")
-    comparison = commands.add_parser("compare", help="compare matched rows, including verified compiler pairs")
+    comparison = commands.add_parser("compare", help="compare matched instruction receipts")
     comparison.add_argument("baseline", type=Path)
     comparison.add_argument("candidate", type=Path)
     comparison.add_argument("--threshold", type=threshold, default=INSTRUCTION_LIMIT, metavar="PERCENT")
+    comparison.add_argument("--aa", action="store_true", help="require identical compiler, runtime and std/core hashes")
     profiling = commands.add_parser("profile-diff", help="attribute one matched runtime row with Callgrind")
     profiling.add_argument("row", metavar="SUITE/ROW")
     profiling.add_argument("baseline", type=Path)
@@ -614,7 +629,7 @@ def main():
         if args.action == "elf-census":
             print(json.dumps(elf_census.census(args.baseline, args.candidate), indent=2))
             return 0
-        return compare(args.baseline, args.candidate, args.threshold)
+        return compare(args.baseline, args.candidate, args.threshold, aa=args.aa)
     except (KeyError, OSError, ValueError, TypeError, AttributeError, re.error, subprocess.SubprocessError) as error:
         print(f"{args.action}: {error}", file=sys.stderr)
         return REFUSED

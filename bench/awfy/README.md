@@ -70,6 +70,10 @@ charging could be elided for each Hirsel image.
 
 ## Matched document pools
 
+To build the matched pool/index harnesses, include `pool_index` in
+`--hirsel-entries` and `--goose-entries` when invoking `build.py`. The `--rust`
+option already builds `rust-pool_index`.
+
 The separate Hirsel and Goose pool harnesses accept `JsonPool` and `StoragePool`. Both use
 one document owner per inner iteration. Their append-only collections hold
 fixed-size descriptors and typed, one-based links. Links never leave the
@@ -217,10 +221,12 @@ python3 bench/awfy/receipt.py compare "$out/base-samples/receipt.json" \
 The guard requires checked stdout, complete row coverage and instruction
 counters with equal enabled and running times. It checks the exact
 execution argv and CPU affinity, as well as certification, build flags and the
-release compiler, runtime and fixture hashes. When the compiler or runtime
-changes, both rows must carry verified build records for their respective
-artifacts. The report names every changed artifact.
-All other identity fields still match exactly. An identity refusal exits 2. A comparable
+release compiler, runtime, std/core source and fixture hashes. When the compiler,
+runtime or std/core source changes, both rows must carry verified build records.
+The report names the changed hashes. Identical candidate hashes across all
+rows cause an A/A refusal. Use `compare --aa` for a deliberate run with
+identical compiler, runtime and std/core hashes.
+An identity refusal exits 2. A comparable
 row above +0.5% exits 1. Use `--threshold PERCENT` to set another limit.
 
 The same command reads two complete `board.json` files. It compares Hirsel
@@ -256,8 +262,11 @@ temporary GNU-stripped copies for the shipping-size comparison.
 ### Profile a cold compile
 
 Use `python3 bench/awfy/cold_phases.py OUT --artifacts TOOLCHAIN
---fixture ONE_ITERATION_JSON --build-cpus BUILD_CPUS --measure-cpus MEASURE_CPUS` on the board host. It prepares the std product
-on the build CPUs, compiles the suite with a fresh request store and checks
+--fixture ONE_ITERATION_JSON --cpus LANE_CPUS --lock LANE_LOCK` to profile on
+your assigned CPUs. Setup uses the whole list and profiling uses the first
+CPU. To supply separate lists, use `--build-cpus` and `--measure-cpus`.
+The tool prepares the std product on the build CPUs, compiles the suite with
+a fresh request store and checks
 the Spectralnorm result. The receipt carries the compiler's stage metrics
 and a separate breakdown of process-tree PMU instruction stack samples.
 Entries in `other` have no recognized phase frame. The samples estimate

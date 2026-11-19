@@ -6,6 +6,8 @@ import io
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -13,6 +15,8 @@ from pathlib import Path
 
 from board import Board, measure, measurement_slot, receipt
 import bench_cpus
+import build
+import cold_phases
 from cold_phases import pass_costs
 
 
@@ -44,6 +48,37 @@ class PassCostAccounting(unittest.TestCase):
 
 
 class WorkloadMatching(unittest.TestCase):
+    def test_build_cli_selects_pool_index_images(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            out = root / "out"
+            clang = root / "bin/clang"
+            clang.parent.mkdir()
+            clang.write_bytes(b"toolchain fixture")
+            toolchain = root / "toolchain.json"
+            toolchain.write_text(json.dumps({"compiler": str(clang), "runtime": str(clang)}))
+            rap = root / "benchmarks/JavaScript/json.js"
+            rap.parent.mkdir(parents=True)
+            rap.write_text('const RAP_BENCHMARK_MINIFIED = "{}";\n')
+
+            def compile_image(command, **kwargs):
+                Path(command[command.index("-o") + 1]).write_bytes(b"image")
+                return subprocess.CompletedProcess(command, 0, stdout=b"{}")
+
+            argv = ["build.py", str(out), "--upstream", str(root),
+                    "--artifacts", str(toolchain), "--hirsel-entries", "pool_index",
+                    "--goose", "goose", "--goose-entries", "pool_index"]
+            with (patch.object(sys, "argv", argv), patch.object(build, "llvm_path", return_value=root),
+                  patch.object(build.subprocess, "run", side_effect=compile_image)):
+                build.main()
+            build_report = json.loads((out / "hirsel-pool_index-build.json").read_text())
+            self.assertIn("awfy@1/pool_index/main", build_report["measurement"]["flags"])
+            sources = json.loads((out / "hirsel-inputs.json").read_text())["packages"][-1]["sources"]
+            self.assertIn(["pool_index"], [source["modules"] for source in sources])
+            self.assertIn("havlak_pool.benchmark(inner)", (out / "pool_index.hirsel").read_text())
+            self.assertIn("import havlak_pool;", (out / "goose-src/pool_index.goose").read_text())
+            self.assertEqual((out / "goose-pool_index").read_bytes(), b"image")
+
     def test_document_pools_do_not_use_original_rust_rows(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -137,6 +172,22 @@ class BoardCompletion(unittest.TestCase):
 
 
 class SiblingActivity(unittest.TestCase):
+    def test_cold_phases_reuses_the_lane_cpu_set(self):
+        original = os.sched_getaffinity(0)
+        cpus = sorted(original)[:2]
+        self.addCleanup(os.sched_setaffinity, 0, original)
+
+        def collect(args, scratch):
+            self.assertEqual(os.sched_getaffinity(0), set(cpus))
+            self.assertEqual(args.measure_cpus, (cpus[0],))
+            return 0
+
+        with tempfile.TemporaryDirectory() as temp:
+            argv = ["cold_phases.py", str(Path(temp) / "out"), "--artifacts", "toolchain.json",
+                    "--fixture", "fixture.json", "--cpus", ",".join(map(str, cpus))]
+            with patch.object(sys, "argv", argv), patch.object(cold_phases, "collect", side_effect=collect):
+                self.assertEqual(cold_phases.main(), 0)
+
     def test_records_busy_sibling_from_linux_ticks(self):
         # CPU 18 sees four active ticks out of twenty. Linux already
         # includes guest time in user time. CPU 19 only sees I/O wait.

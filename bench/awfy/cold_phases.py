@@ -15,7 +15,7 @@ import board
 import build
 import receipt
 from request_profile import frames
-from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
+from bench_cpus import add_cpu_sets, cpu_list, sibling_cpus, smt_activity, validate_cpu_sets
 
 STAGES = (
     ("link", r"link_objects|direct_link|native_entry::Plan.*::emit"),
@@ -175,7 +175,7 @@ def collect(args, scratch):
     directory = scratch / "profile"
     profile_evidence = args.out / "profile"
     profile_evidence.mkdir()
-    prepare_env = build.capped_env(directory, "8G", "2") | ld
+    prepare_env = build.capped_env(directory, "8G", str(min(2, len(args.build_cpus)))) | ld
     command, exe = prepare(directory, artifacts, prepare_env)
 
     with receipt.measurement_slot(args.lock):
@@ -234,11 +234,18 @@ def main():
     parser.add_argument("--fixture", required=True, type=lambda path: Path(path).resolve())
     parser.add_argument("--pass-trace", action="store_true", help="compare fresh-store builds with LLVM pass counters off and on")
     parser.add_argument("--top", type=positive_int, default=10)
-    add_cpu_sets(parser)
+    add_cpu_sets(parser, required=False)
+    parser.add_argument("--cpus", type=cpu_list, help="lane CPUs for sequential setup and profiling (profiles on the first CPU)")
     parser.add_argument("--lock", type=Path, default=board.LOCK)
     args = parser.parse_args()
-    validate_cpu_sets(parser, args)
-    args.siblings = sibling_cpus(args.measure_cpus[:1])
+    if args.cpus is not None:
+        if args.build_cpus is not None or args.measure_cpus is not None:
+            parser.error("--cpus cannot be combined with --build-cpus or --measure-cpus")
+        args.build_cpus, args.measure_cpus = args.cpus, args.cpus[:1]
+        args.siblings = validate_cpu_sets(parser, args, sequential=True)
+    else:
+        validate_cpu_sets(parser, args)
+        args.siblings = sibling_cpus(args.measure_cpus[:1])
     if args.out.is_relative_to(build.ROOT):
         parser.error("use a new evidence directory outside the checkout")
     os.sched_setaffinity(0, args.build_cpus)

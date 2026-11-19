@@ -654,10 +654,23 @@ fn value_start(s: String, mut i: u64) -> Result[ValueStart, Error] {
 }
 
 fn value_size(s: String, mut i: u64) -> Result[u64, Error] {
+    let (n, after) = sized_value(s, i)?
+    i = after
+    Ok(n)
+}
+
+// One value from byte `from`: its size and the byte after it. Iterative, with
+// serde_json's depth limit: each open container's closing bracket is one bit
+// (1 = '}') of a 128-bit shift register, so nothing is initialized per call. The
+// position comes in and goes out by value, so the walk stays one shared copy that
+// size and every skip_value call, the way the recursive sizer did.
+fn sized_value(s: String, from: u64) -> Result[(u64, u64), Error] {
+    let mut i = from
     let mut n: u64 = 0
     let mut close: u8 = 0
     let mut depth: u64 = 0
-    let mut outer: Inline[u8, 128] =[0; 128]
+    let mut low: u64 = 0
+    let mut high: u64 = 0
     loop {
         let opened: u8 = match value_start(s, mut i)? {
             ReadNull => {
@@ -690,17 +703,31 @@ fn value_size(s: String, mut i: u64) -> Result[u64, Error] {
             n += 9
         }
         if opened != 0 && !ends(s, mut i, opened) {
-            outer[depth] = close
+            let bit: u64 = if close == b'}' {
+                1
+            } else {
+                0
+            }
+            high = (high << 1) | (low >> 63)
+            low = (low << 1) | bit
             depth += 1
             close = opened
         } else {
             while close != 0 && after_item(s, mut i, close)? {
                 depth -= 1
-                close = outer[depth]
+                close = if depth == 0 {
+                    0
+                } else if low & 1 == 1 {
+                    b'}'
+                } else {
+                    b']'
+                }
+                low = (low >> 1) | (high << 63)
+                high = high >> 1
             }
         }
         if close == 0 {
-            return Ok(n)
+            return Ok((n, i))
         }
         n += 4
         if close == b'}' {

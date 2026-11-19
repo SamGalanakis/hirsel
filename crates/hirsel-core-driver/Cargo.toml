@@ -16,7 +16,7 @@ cranelift-codegen = { version = "=0.136.3", default-features = false, features =
 cranelift-frontend = { version = "=0.136.3", default-features = false, features = ["std"] }
 cranelift-module = { version = "=0.136.3", default-features = false, features = ["std"] }
 cranelift-object = { version = "=0.136.3", default-features = false }
-mimalloc = { version = "=0.1.52", default-features = false }
+mimalloc = { version = "=0.1.52", default-features = false, features = ["override"] }
 rustc-hash = "2"
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-diag = { path = "../hirsel-core-diag" }

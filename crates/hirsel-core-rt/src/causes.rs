@@ -36,7 +36,10 @@ pub struct Cause {
 impl Cause {
     /// A cause of `kind`, which is not [`FAIL`] (a failure has a message).
     pub fn new(kind: u8, site: u64) -> Self {
-        assert_ne!(kind, FAIL, "a Fail cause carries its message");
+        assert!(
+            kind != FAIL,
+            "assertion `left != right` failed: a Fail cause carries its message"
+        );
         Self {
             message: StringMessage {
                 capacity: crate::abi_layout::cause_kind_word(kind),

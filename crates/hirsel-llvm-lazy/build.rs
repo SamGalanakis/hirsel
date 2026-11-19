@@ -21,18 +21,19 @@ fn main() {
         prefix.join("lib/libLLVM.so.23.1").display()
     );
     println!("cargo:rerun-if-env-changed=LLVM_SYS_231_PREFIX");
-    let copy_source = shared.join("checked_copy.cpp");
     for source in [
-        &copy_source,
         &shared.join("forward_reads.h"),
         &shared.join("loop_version.h"),
+        &shared.join("step_tree.h"),
     ] {
         println!("cargo:rerun-if-changed={}", source.display());
     }
-    let copy_object = out.join("checked_copy.o");
     let sysroot = prefix.join("sysroot");
-    assert!(
-        Command::new(prefix.join("bin/hirsel-clang++"))
+    let shared_objects = ["checked_copy", "release_pipeline"].map(|name| {
+        let source = shared.join(format!("{name}.cpp"));
+        println!("cargo:rerun-if-changed={}", source.display());
+        let object = out.join(format!("{name}.o"));
+        assert!(Command::new(prefix.join("bin/hirsel-clang++"))
             .args([
                 "-std=c++17",
                 "-fPIC",
@@ -49,13 +50,14 @@ fn main() {
             .arg("-I")
             .arg(prefix.join("include"))
             .arg("-c")
-            .arg(copy_source)
+            .arg(source)
             .arg("-o")
-            .arg(&copy_object)
+            .arg(&object)
             .status()
             .unwrap()
-            .success()
-    );
+            .success());
+        object
+    });
     let compose = source.with_file_name("compose.cpp");
     println!("cargo:rerun-if-changed={}", compose.display());
     let compose_object = out.join("compose.o");
@@ -123,7 +125,7 @@ fn main() {
             .arg("-I")
             .arg(&shared)
             .arg(&source)
-            .arg(&copy_object)
+            .args(&shared_objects)
             .arg(&compose_object)
             .arg(&builder_object)
             .arg(&parts_object)

@@ -28,7 +28,10 @@ extern void hirsel_llvm_share_cold_step_sync(void *module, void *machine);
 extern void hirsel_llvm_reuse_step_flags(void *module);
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 extern void hirsel_llvm_fixed_width_checks(void *module);
-extern void hirsel_llvm_prepay_step_trees(void *module);
+extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
+                                                LLVMBool prune, LLVMBool prepay_steps);
+extern LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
+extern LLVMErrorRef hirsel_llvm_cleanup_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
 typedef struct { const uint8_t *data; size_t len; LLVMModuleRef module; } HirselLlvmUnit;
@@ -633,45 +636,21 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     LLVMTargetDataRef layout = LLVMCreateTargetDataLayout(machine);
     LLVMSetModuleDataLayout(module, layout); LLVMDisposeTargetData(layout);
     if (speed) {
-        LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
-        LLVMPassBuilderOptionsSetLoopInterleaving(options, 1);
-        LLVMPassBuilderOptionsSetLoopUnrolling(options, 1);
-        LLVMPassBuilderOptionsSetLoopVectorization(options, 1);
-        LLVMPassBuilderOptionsSetSLPVectorization(options, 1);
-        LLVMPassBuilderOptionsSetMergeFunctions(options, 1);
         unsigned hint = LLVMGetEnumAttributeKindForName("inlinehint", 10);
         for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f))
             if (LLVMCountBasicBlocks(f))
                 LLVMAddAttributeAtIndex(f, LLVMAttributeFunctionIndex,
                     LLVMCreateEnumAttribute(context, hint, 0));
-        // The ordinary pipeline infers nonrecursive cleanup attributes after
-        // argument promotion. Revisit those arguments, then expose their local
+        // The optimizer infers nonrecursive cleanup attributes after argument
+        // promotion. Revisit those arguments, then expose their local
         // carrier values and fold checks implied by the caller's room test.
-        // Scalar cleanup also exposes checked end offsets to constraints again.
-        // A typed empty-drop guard can disappear in that round. DSE then
-        // removes carrier clears/restores that its cleanup used to observe.
-        // Composition leaves local bodies that no export reaches. Remove
-        // them before SROA and instruction combining visit the whole module.
         hirsel_llvm_inline_snapshot_calls(module);
         LLVMValueRef refill = LLVMGetNamedFunction(module, "hirsel_core_step_out");
-        LLVMErrorRef e;
-        if (refill && LLVMGetFirstUse(refill)) {
-            e = LLVMRunPasses(module, export_count ? "globaldce,function(sroa)" : "function(sroa)",
-                              machine, options);
-            if (!e) {
-                hirsel_llvm_prepay_step_trees(module);
-                e = LLVMRunPasses(module, "hotcoldsplit,default<O3>", machine, options);
-            }
-        } else {
-            const char *pipeline = export_count
-                ? "globaldce,function(sroa),hotcoldsplit,default<O3>"
-                : "function(sroa),hotcoldsplit,default<O3>";
-            e = LLVMRunPasses(module, pipeline, machine, options);
-        }
+        LLVMErrorRef e = hirsel_llvm_optimize_release(module, machine, export_count != 0,
+                                                      refill && LLVMGetFirstUse(refill));
         if (!e) {
             hirsel_llvm_mark_loop_callbacks(module);
-            e = LLVMRunPasses(module,
-                "cgscc(argpromotion),ipsccp,partial-inliner,cgscc(inline)", machine, options);
+            e = hirsel_llvm_specialize_release(module, machine);
         }
         if (!e) {
             hirsel_llvm_inline_loop_callbacks(module);
@@ -679,9 +658,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             hirsel_llvm_guard_copy_loops(module, machine);
             hirsel_llvm_promote_step_window(module);
             hirsel_scalarize_aggregate_phis(module, context);
-            e = LLVMRunPasses(module,
-                "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,gvn,simplifycfg,dse,loop-simplify,lcssa,instcombine<no-verify-fixpoint>,simplifycfg,dse)",
-                machine, options);
+            e = hirsel_llvm_cleanup_release(module, machine);
         }
         if (!e) {
             hirsel_llvm_fixed_width_checks(module);
@@ -692,7 +669,6 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             hirsel_cold_failure_edges(module, context);
             hirsel_llvm_share_cold_step_sync(module, machine);
         }
-        LLVMDisposePassBuilderOptions(options);
         if (e) {
             char *text = LLVMGetErrorMessage(e); error(out, text);
             LLVMDisposeErrorMessage(text); goto done;

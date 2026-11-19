@@ -12,9 +12,9 @@ use std::sync::OnceLock;
 #[cfg(test)]
 use llvm_sys::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
 use llvm_sys::core::*;
-use llvm_sys::error::{LLVMDisposeErrorMessage, LLVMGetErrorMessage};
+use llvm_sys::error::{LLVMDisposeErrorMessage, LLVMErrorRef, LLVMGetErrorMessage};
 use llvm_sys::ir_reader::LLVMParseIRInContext2;
-use llvm_sys::prelude::{LLVMContextRef, LLVMMemoryBufferRef, LLVMModuleRef};
+use llvm_sys::prelude::{LLVMBool, LLVMContextRef, LLVMMemoryBufferRef, LLVMModuleRef};
 use llvm_sys::target::{
     LLVMDisposeTargetData, LLVMInitializeAArch64AsmPrinter, LLVMInitializeAArch64Target,
     LLVMInitializeAArch64TargetInfo, LLVMInitializeAArch64TargetMC, LLVMInitializeX86AsmParser,
@@ -25,12 +25,6 @@ use llvm_sys::target_machine::{
     LLVMCodeGenFileType, LLVMCodeGenOptLevel, LLVMCodeModel, LLVMCreateTargetDataLayout,
     LLVMCreateTargetMachine, LLVMDisposeTargetMachine, LLVMGetTargetFromTriple, LLVMRelocMode,
     LLVMTargetMachineEmitToMemoryBuffer, LLVMTargetMachineRef, LLVMTargetRef,
-};
-use llvm_sys::transforms::pass_builder::{
-    LLVMCreatePassBuilderOptions, LLVMDisposePassBuilderOptions,
-    LLVMPassBuilderOptionsSetLoopInterleaving, LLVMPassBuilderOptionsSetLoopUnrolling,
-    LLVMPassBuilderOptionsSetLoopVectorization, LLVMPassBuilderOptionsSetMergeFunctions,
-    LLVMPassBuilderOptionsSetSLPVectorization, LLVMRunPasses,
 };
 
 #[cfg(test)]
@@ -186,25 +180,11 @@ impl<'context> Module<'context> {
         if failed != 0 { Err(message) } else { Ok(()) }
     }
 
-    /// Ordinary O3 followed by promotion and local cleanup of arguments whose
-    /// properties were inferred late. Revisit constraints after scalar cleanup
-    /// exposes checked end offsets. Final DSE removes carrier clears/restores
-    /// after typed empty-drop elimination. Keep this in sync with the lazy component;
-    /// object parity covers both entries. No retained count/ahead extensions.
+    /// Runs the shared release pipeline and its native lowering passes.
     pub(crate) fn run_core_passes(&self, machine: &TargetMachine) -> Result<(), String> {
-        // Metering fallbacks can dwarf the hot helper before the inliner
-        // prices it. Promote the emitted slots, then outline cold regions so
-        // ordinary O3 sees the helper's hot body.
-        let pipeline = c_string("function(sroa),hotcoldsplit,default<O3>");
-        // SAFETY: handles are live; these are per-invocation options, disposed
-        // after LLVM consumes them. The default pipeline does not verify IR.
+        // SAFETY: the module, its context and the target machine are live for
+        // the duration of the bridge calls.
         unsafe {
-            let options = LLVMCreatePassBuilderOptions();
-            LLVMPassBuilderOptionsSetLoopInterleaving(options, 1);
-            LLVMPassBuilderOptionsSetLoopUnrolling(options, 1);
-            LLVMPassBuilderOptionsSetLoopVectorization(options, 1);
-            LLVMPassBuilderOptionsSetSLPVectorization(options, 1);
-            LLVMPassBuilderOptionsSetMergeFunctions(options, 1);
             let hint = LLVMGetEnumAttributeKindForName(b"inlinehint".as_ptr().cast(), 10);
             let mut function = LLVMGetFirstFunction(self.raw);
             while !function.is_null() {
@@ -219,9 +199,23 @@ impl<'context> Module<'context> {
             }
             unsafe extern "C" {
                 fn hirsel_llvm_inline_snapshot_calls(module: LLVMModuleRef);
+                fn hirsel_llvm_optimize_release(
+                    module: LLVMModuleRef,
+                    machine: LLVMTargetMachineRef,
+                    prune: LLVMBool,
+                    prepay_steps: LLVMBool,
+                ) -> LLVMErrorRef;
+                fn hirsel_llvm_specialize_release(
+                    module: LLVMModuleRef,
+                    machine: LLVMTargetMachineRef,
+                ) -> LLVMErrorRef;
+                fn hirsel_llvm_cleanup_release(
+                    module: LLVMModuleRef,
+                    machine: LLVMTargetMachineRef,
+                ) -> LLVMErrorRef;
             }
             hirsel_llvm_inline_snapshot_calls(self.raw);
-            let mut error = LLVMRunPasses(self.raw, pipeline.as_ptr(), machine.raw, options);
+            let mut error = hirsel_llvm_optimize_release(self.raw, machine.raw, 0, 0);
             if error.is_null() {
                 unsafe extern "C" {
                     fn hirsel_llvm_scalarize_aggregate_phis(
@@ -242,14 +236,11 @@ impl<'context> Module<'context> {
                     fn hirsel_llvm_inline_recursive_leaves(module: LLVMModuleRef);
                 }
                 hirsel_llvm_mark_loop_callbacks(self.raw);
-                let specialize =
-                    c_string("cgscc(argpromotion),ipsccp,partial-inliner,cgscc(inline)");
-                error = LLVMRunPasses(self.raw, specialize.as_ptr(), machine.raw, options);
+                error = hirsel_llvm_specialize_release(self.raw, machine.raw);
                 if !error.is_null() {
                     let message = LLVMGetErrorMessage(error);
                     let text = CStr::from_ptr(message).to_string_lossy().into_owned();
                     LLVMDisposeErrorMessage(message);
-                    LLVMDisposePassBuilderOptions(options);
                     return Err(text);
                 }
                 hirsel_llvm_inline_loop_callbacks(self.raw);
@@ -257,10 +248,7 @@ impl<'context> Module<'context> {
                 hirsel_llvm_guard_copy_loops(self.raw, machine.raw);
                 hirsel_llvm_promote_step_window(self.raw);
                 hirsel_llvm_scalarize_aggregate_phis(self.raw, self.context.raw);
-                let cleanup = c_string(
-                    "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,gvn,simplifycfg,dse,loop-simplify,lcssa,instcombine<no-verify-fixpoint>,simplifycfg,dse)",
-                );
-                error = LLVMRunPasses(self.raw, cleanup.as_ptr(), machine.raw, options);
+                error = hirsel_llvm_cleanup_release(self.raw, machine.raw);
             }
             if error.is_null() {
                 unsafe extern "C" {
@@ -289,7 +277,6 @@ impl<'context> Module<'context> {
                 hirsel_llvm_cold_failure_edges(self.raw, self.context.raw);
                 hirsel_llvm_share_cold_step_sync(self.raw, machine.raw);
             }
-            LLVMDisposePassBuilderOptions(options);
             if error.is_null() {
                 return Ok(());
             }

@@ -517,6 +517,8 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
         let value: std.codec.Codec[u64] = std.codec.of()
         let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), value)))
         let _ = result.unwrap(store.create_table(mut db, store.spec("hirsel.runner.activation", std.codec.key_u8(), codec)))
+        let release_codec: std.codec.Codec[runner.ReleaseRecord] = std.codec.of()
+        let _ = result.unwrap(store.create_table(mut db, store.spec("hirsel.runner.releases", std.codec.key_u64(), release_codec)))
         let table = result.unwrap(store.table(mut db, "hirsel.runner.activation", std.codec.key_u8(), codec))
         let written = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
             store.put(mut tx, table, 0u8, old_current)?
@@ -535,18 +537,25 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
         let snap = store.snapshot(db)
         let current = option.unwrap(result.unwrap(store.get(snap, store.shape(table), 0u8)))
         let previous = option.unwrap(result.unwrap(store.get(snap, store.shape(table), 1u8)))
-        let same_release = current != old_current
-        if same_release {
+        let releases: store.Table[u64, runner.ReleaseRecord] = result.unwrap(store.table(mut db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of()))
+        let version = store.version(snap)
+        let history = result.unwrap(store.get(snap, store.shape(releases), version))
+        let activated = current != old_current
+        if activated {
             want(previous == old_current, "activation: current changed but previous did not")
             let describe: std.codec.Codec[runner.Describe] = std.codec.of()
             let decoded = result.unwrap(result.unwrap(std.codec.decode(describe, current)))
             want(list.len(decoded.exported) == 3u64 && decoded.exported[0u64].described.identity == code.identity(code.describe(bump)) &&
                  decoded.exported[1u64].described.identity == code.identity(code.describe(deny)) &&
                  decoded.exported[2u64].described.identity == code.identity(code.describe(trip)), "activation: incorrect new release")
+            let row = option.unwrap(take history)
+            want(row.release == result.unwrap(runner.release_digest(decoded.exported)) &&
+                row.digest == decoded.digest, "activation: new release history differs from current")
         } else {
             want(!uncut && previous == old_previous, "activation: previous changed without current or acknowledged release missing")
+            if let Some(_) = history { fail("activation: history committed without current") }
         }
-        expected_version = store.version(snap) + if same_release { 0u64 } else { 1u64 }
+        expected_version = version + if activated { 0u64 } else { 1u64 }
         result.unwrap(store.close(take db))
     }
     let (policy, policy_handle) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))

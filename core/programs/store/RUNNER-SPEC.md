@@ -916,7 +916,7 @@ Admission checks a 16 MiB per-session ceiling on pooled work. The bound includes
 ## 5. Exported entries, the generator and non-termination
 
 - **D1 (ruled by Sam 2026-11-16, gavel 2; the server half is built, W4a).** `hirsel sdk ts <pkg>` builds the package, then launches **the built server executable** in describe mode (`--hirsel-describe`, with `--hirsel-n-place=<bytes>`, default 16 MiB). Describe is the first branch of `runner.main(a, place, start_server)`, before any store, listener or capability use.
-  - It runs `place` under `n_place` and answers `Describe{digest, target, n_place, exported: List[Exported{described, args_fp, result_fp}]}`.
+  - It runs `place` under `n_place` and answers `Describe{digest, target, n_place, exported: List[Exported{described, args_fp, result_fp, revision}]}`.
   - Or it answers `DescribeError = PlaceCapacity(Room) | AlreadyRegistered(Bytes)` and exits with status 2.
   - The generator records the digest, target and `n_place` in the bindings (rule 10). Laws `place_run_bounded`, `identity_stable` and `identity_unavailable` (W4a). RUN p09 does this by hand: 447 B for three entries.
 - **Bounding `place`.** The generator runs it in a child process with a wall-clock limit T (default 10 s, GUESS) and the byte limit `n_place`:
@@ -944,15 +944,12 @@ Admission checks a 16 MiB per-session ceiling on pooled work. The bound includes
 
 An upgrade is a process restart on new code.
 
-- **Activation (rewritten in v2.2).** The runner owns one ordinary table, `hirsel.runner.activation: Table[u8, Bytes]`. Key 0 holds `current` and key 1 `previous`, each a `describe` byte list. No reserved key space and no store change are involved.
-  1. `operate`'s head runs `handles` once and derives the query handles (rule 12). The head also calls `create_table` for its table if the catalog lacks it (a schema commit, first open only), then `table`.
-  2. Open reads both rows through the Shape.
-  3. One `run` writes activation. If `current` equals this registry's `describe` bytes, it writes nothing (a restart on the same code). Otherwise one commit writes `previous := current` and `current := new`.
-  4. Then the head serves.
-- **What a crash leaves:**
-  - before the step-3 commit: the old rows, and the next open repeats step 3;
-  - after it, before serving: the new rows, and the next open writes nothing;
-  - the store's crash cuts never show half a commit, so the pair is always (old previous, old current) or (old current, new).
+- **Activation.** The runner owns two ordinary tables. In `hirsel.runner.activation: Table[u8, Bytes]`, key 0 holds `current` and key 1 holds `previous`, each an encoded `Describe`. The append-only `hirsel.runner.releases: Table[u64, ReleaseRecord]` maps each activation commit version to `{ release: Bytes, digest: Bytes }`. The row holds the existing release digest of the export list, including entry revisions, and the launch digest identifying the image.
+  1. The head runs `handles` and derives the query handles (rule 12). It creates each runner-owned table if missing, then resolves their handles.
+  2. Open reads both activation rows through the Shape.
+  3. If `current` equals the new `Describe` bytes, the restart writes nothing. Otherwise a single transaction writes `previous := current`, `current := new` and the new releases row keyed by that transaction's version. A body-only edit changes the edited entry's revision and the release digest while keeping the entry key.
+  4. The head serves after activation is durable.
+- **What a crash leaves.** Before the activation commit the previous and current rows and release history stay as they were. The next open repeats the activation. After the commit all three writes are visible and the next open of the same image appends no release.
 - **The gone-key set.** The head computes the keys in `previous ∪ current` minus this registry's keys and gives each session a shareable copy at connect.
 - **Gone keys.** A call whose key is in the gone-key set goes to the head as a gone call; the session does not refuse it (V5). The head runs `admit(p)`: `Admitted` or `Abandoned` gives a reply-only commit of `Failed(Gone)`, and `Duplicate(r)` answers `r`. So the stream passes every gone position with a reply, and a re-send returns it. A key in neither list is `Refused(NoEntry)` at the session, with nothing recorded. **Slots (v2.11, F9):** a session slot keeps the requested entry key from its Hello `Want`, not only its `Entry` answer, so a gone key is still known at `Call`. A slot out of range is `Refused(NoEntry)`. A `Subscribe` on a gone slot is answered `Ended(sub, Failed(Gone))` at the session, with nothing recorded. A pending request is never remapped to a new entry. A stale client costs at most one commit per stream before `Upgrade`. RUN: mutant `gone_refused_at_session` (v1's rule) is CAUGHT (C8).
 - **Matching an old client:**

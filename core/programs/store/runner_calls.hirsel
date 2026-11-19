@@ -35,17 +35,19 @@ fn digest_bytes(text: String) -> Bytes {
 pub fn law_release_digest() -> bool {
     let no_exports: List[runner.Exported] = list.new()
     if !digest_matches(no_exports, "eab2586620e88429ab011d50b6feaa03da24133743c844bbb7f35208df7c5c35") { return false }
-    let left = runner.Exported(described: runner.Described(kind: Compute, identity: digest_bytes("a"), args: digest_bytes("ab"), result: digest_bytes("c")), args_fp: 4u64, result_fp: 5u64)
-    let right = runner.Exported(described: runner.Described(kind: Query, identity: digest_bytes("b"), args: list.new(), result: digest_bytes("d")), args_fp: 7u64, result_fp: 8u64)
+    let left = runner.Exported(described: runner.Described(kind: Compute, identity: digest_bytes("a"), args: digest_bytes("ab"), result: digest_bytes("c")), args_fp: 4u64, result_fp: 5u64, revision: digest_bytes("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
+    let right = runner.Exported(described: runner.Described(kind: Query, identity: digest_bytes("b"), args: list.new(), result: digest_bytes("d")), args_fp: 7u64, result_fp: 8u64, revision: digest_bytes("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"))
     let mut exported: List[runner.Exported] = result.unwrap(list.with_capacity(2u64))
     result.unwrap(list.push(mut exported, take left))
     result.unwrap(list.push(mut exported, take right))
-    if !digest_matches(exported, "8774818adaac8ae5e9e690fd1213c84ac72e81ea8061b013ed2e81796a6200fa") { return false }
+    if !digest_matches(exported, "733dcaf399e0bc57b9ad79b0245dc2f30673271337edc80d5d66c1b53adad2fc") { return false }
     let second = list.remove(mut exported, 1u64)
     let first = list.remove(mut exported, 0u64)
     result.unwrap(list.push(mut exported, take second))
     result.unwrap(list.push(mut exported, take first))
-    digest_matches(exported, "55c61b6b49d120a0c75f7e16a244da5d59b9a9dca7ca55d99828cfbc10f1c01e")
+    if !digest_matches(exported, "ecfa56f2b7013163dbe7a52d8aa2b2f346751d7619af96ca2d476bdcb4cade39") { return false }
+    exported[1u64].revision = digest_bytes("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")
+    digest_matches(exported, "ffc3202a22ae75d9f4c3a24b7ddfd0ab94d912ef6dd2cf7ff6f03597c6c52a48")
 }
 
 @test
@@ -1127,7 +1129,7 @@ fn start_managed(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd], stop_p
     (take running, take stop_to, result.unwrap(channel.receive(phase_rx)), take status)
 }
 
-pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> u64 waits {
     let mut name = result.unwrap(string.with_capacity(32u64))
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let (policy, policy_task) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
@@ -1172,22 +1174,32 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     let codec: std.codec.Codec[Bytes] = std.codec.of_list()
     let table = result.unwrap(store.table(mut reopened, "hirsel.runner.activation", std.codec.key_u8(), codec))
     let stored = result.unwrap(store.get(store.snapshot(reopened), store.shape(table), 0u8))
-    let version = store.version(store.snapshot(reopened))
+    let releases: store.Table[u64, runner.ReleaseRecord] = result.unwrap(store.table(mut reopened, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of()))
+    let snap = store.snapshot(reopened)
+    let version = store.version(snap)
+    let record = result.unwrap(store.get(snap, store.shape(releases), version))
     result.unwrap(store.close(take reopened))
     result.unwrap(std.dir.remove_all(parent, name))
     if let Some(raw) = stored {
         let described: std.codec.Codec[runner.Describe] = std.codec.of()
         let activation = result.unwrap(result.unwrap(std.codec.decode(described, raw)))
-        return version >= 2u64 && result.unwrap(runner.release_digest(activation.exported)) == managed_release(latest.read(status))
+        let release = result.unwrap(runner.release_digest(activation.exported))
+        let revision = option.unwrap(code.revision(code.describe(write)))
+        if let Some(row) = record {
+            if version >= 2u64 && activation.exported[0u64].revision == revision && row.release == release &&
+                row.digest == activation.digest && release == managed_release(latest.read(status)) {
+                return std.codec.fingerprint_of(release)
+            }
+        }
     }
-    false
+    0u64
 }
 
 fn managed_release(status: runner.Status) -> Bytes { result.unwrap(clone(status.release)) }
 
 @test
 fn test_ready_after_activation(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_ready_after_activation(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+    if law_ready_after_activation(parent, clock, random, tasks, net) != 0u64 { Ok(()) } else { Error(()) }
 }
 
 @test

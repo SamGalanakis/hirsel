@@ -352,13 +352,13 @@ type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Gr
 
 pub opaque type Registry[G: send, H: send]: send {
     slots: Map[Bytes, Slot[G, H]],
-    described: List[Described],
+    exported: List[Exported],
     checks: Map[Bytes, own[send] fn(Bytes) -> Option[Refusal]],
     gone: Map[Bytes, ()]
 }
 
 pub fn registry[G: send, H: send]() -> Registry[G, H] {
-    Registry(slots: map.new(), described: list.new(), checks: map.new(), gone: map.new())
+    Registry(slots: map.new(), exported: list.new(), checks: map.new(), gone: map.new())
 }
 
 fn room(c: Capacity) -> Room {
@@ -466,24 +466,29 @@ fn adapt_granted[G: send, A, R](take j: Job[G, A, R]) -> Outcome waits {
 // Key = identity ++ fingerprint(A) ++ fingerprint(reply), each fingerprint u64 little-endian.
 // The reply is the type the Returned bytes carry: Result[R, E] for transact, R for compute
 // and granted (RUNNER-SPEC v2.11.2), so a change to E alone changes the Key.
-fn described[A, R](identity: View[Bytes], kind: Kind, ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Result[(Bytes, Described), Capacity] {
+fn described[A, R](identity: View[Bytes], revision: Option[View[Bytes]], kind: Kind, ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Result[(Bytes, Exported), Capacity] {
     let args = std.codec.schema(ca)?
     let result = std.codec.schema(cr)?
     let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)?
     list.append(mut key, identity)?
-    std.codec.put_u64(std.codec.fingerprint_of(args), mut key)?
-    std.codec.put_u64(std.codec.fingerprint_of(result), mut key)?
+    let args_fp = std.codec.fingerprint_of(args)
+    let result_fp = std.codec.fingerprint_of(result)
+    std.codec.put_u64(args_fp, mut key)?
+    std.codec.put_u64(result_fp, mut key)?
     let mut id: Bytes = list.with_capacity(list.len(identity))?
     list.append(mut id, identity)?
-    Ok((take key, Described(kind: kind, identity: take id, args: take args, result: take result)))
+    let mut rev: Bytes = list.new()
+    if let Some(digest) = revision { list.append(mut rev, digest)? }
+    let d = Described(kind: kind, identity: take id, args: take args, result: take result)
+    Ok((take key, Exported(described: take d, args_fp: args_fp, result_fp: result_fp, revision: take rev)))
 }
 
 // The one insertion: a key already present is refused and the registry is unchanged.
-fn insert[G: send, H: send](mut r: Registry[G, H], take key: Bytes, take d: Described, take s: Slot[G, H]) -> Result[(), RegisterError] {
+fn insert[G: send, H: send](mut r: Registry[G, H], take key: Bytes, take d: Exported, take s: Slot[G, H]) -> Result[(), RegisterError] {
     if map.contains(r.slots, key) {
         return Error(AlreadyRegistered(take key))
     }
-    match list.reserve(mut r.described, 1u64) {
+    match list.reserve(mut r.exported, 1u64) {
         Ok(()) => (),
         Error(c) => return Error(Full(c)),
     }
@@ -491,7 +496,7 @@ fn insert[G: send, H: send](mut r: Registry[G, H], take key: Bytes, take d: Desc
         Ok(()) => (),
         Error((c, _)) => return Error(Full(c)),
     }
-    match list.push(mut r.described, take d) {
+    match list.push(mut r.exported, take d) {
         Ok(()) => Ok(()),
         Error((c, _)) => Error(Full(c)),
     }
@@ -500,7 +505,7 @@ fn insert[G: send, H: send](mut r: Registry[G, H], take key: Bytes, take d: Desc
 pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
-    let (take key, take d) = match described(code.identity(f), Compute, ca, cr) {
+    let (take key, take d) = match described(code.identity(f), code.revision(f), Compute, ca, cr) {
         Ok(take kd) => take kd,
         Error(c) => return Error(Full(c)),
     }
@@ -515,7 +520,7 @@ pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: S
 pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, take A) -> Result[R, Capacity] waits], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
-    let (take key, take d) = match described(code.identity(f), Granted, ca, cr) {
+    let (take key, take d) = match described(code.identity(f), code.revision(f), Granted, ca, cr) {
         Ok(take kd) => take kd,
         Error(c) => return Error(Full(c)),
     }
@@ -536,10 +541,14 @@ pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: S
 // The export list in registration order: the codec of List[Described].
 pub fn describe[G: send, H: send](r: Registry[G, H], mut out: Bytes) -> Result[(), Capacity] {
     let c: std.codec.Codec[Described] = std.codec.of()
-    std.codec.put_list(r.described, c, mut out)
+    let count = list.len(r.exported)
+    if count > 0xffffffffu64 { return Error(Capacity(requested: count, available: 0xffffffffu64)) }
+    std.codec.put_u32(int.truncate(count), mut out)?
+    for entry in r.exported { std.codec.put_with(entry.described, c, mut out)? }
+    Ok(())
 }
 
-pub type Exported: codec + send { described: Described, args_fp: u64, result_fp: u64 }
+pub type Exported: codec + send { described: Described, args_fp: u64, result_fp: u64, revision: Bytes }
 
 pub fn release_digest(exported: List[Exported]) -> Result[Bytes, Capacity] {
     let codec: std.codec.Codec[List[Exported]] = std.codec.of_list()
@@ -564,19 +573,6 @@ pub type DescribeError: codec + send = PlaceCapacity(Room) | AlreadyRegistered(B
 
 fn launch_emit(data: Bytes) -> bool { false }
 
-fn export_descriptions(take descriptions: List[Described]) -> Result[List[Exported], Capacity] {
-    let mut exported: List[Exported] = list.with_capacity(list.len(descriptions))?
-    for take d in descriptions {
-        let args_fp = std.codec.fingerprint_of(d.args)
-        let result_fp = std.codec.fingerprint_of(d.result)
-        match list.push(mut exported, Exported(described: take d, args_fp: args_fp, result_fp: result_fp)) {
-            Ok(()) => (),
-            Error((c, _)) => return Error(c),
-        }
-    }
-    Ok(take exported)
-}
-
 fn encode_describe(description: Describe) -> Result[Bytes, Capacity] {
     let codec: std.codec.Codec[Describe] = std.codec.of()
     let mut out: Bytes = list.new()
@@ -585,30 +581,30 @@ fn encode_describe(description: Describe) -> Result[Bytes, Capacity] {
 }
 
 fn describe_registered[G: send, H: send](a: Args, take r: Registry[G, H]) -> Result[Bytes, Capacity] {
-    let Registry(slots: take held_slots, described: take descriptions, checks: _, gone: _) = take r
-    let exported = export_descriptions(take descriptions)?
+    let Registry(exported: take exported, ..) = take r
     encode_describe(Describe(digest: launch_digest()?, target: launch_target(a)?, n_place: launch_word(0u64, 0u64), exported: take exported))
 }
 
-fn exported_entries[G: send, H: send](r: Registry[G, H]) -> Result[List[Exported], Capacity] {
-    let descriptions: List[Described] = clone(r.described)?
-    export_descriptions(take descriptions)
-}
+pub type ReleaseRecord: codec + send { release: Bytes, digest: Bytes }
 
-fn activation_table(mut db: store.Db) -> Result[store.Table[u8, Bytes], store.Error] waits {
-    let value_codec: std.codec.Codec[Bytes] = std.codec.of_list()
-    match store.table(mut db, "hirsel.runner.activation", std.codec.key_u8(), value_codec) {
+fn activation_table[K, V](mut db: store.Db, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[store.Table[K, V], store.Error] waits {
+    match store.table(mut db, name, key, value) {
         Error(Missing(_)) => {
-            let made = store.create_table(mut db, store.spec("hirsel.runner.activation", std.codec.key_u8(), value_codec))?
+            let owned_name = match string.from(name) {
+                Ok(take text) => take text,
+                Error(cap) => return Error(Full(cap)),
+            }
+            let made = store.create_table(mut db, store.spec(take owned_name, key, value))?
             store.durable(mut db, made)?
-            store.table(mut db, "hirsel.runner.activation", std.codec.key_u8(), value_codec)
+            store.table(mut db, name, key, value)
         },
         take accessed => take accessed,
     }
 }
 
-fn commit_activation(mut db: store.Db, next_description: Bytes) -> Result[(), store.Error] waits {
-    let table = activation_table(mut db)?
+fn commit_activation(mut db: store.Db, next_description: Bytes, record: ReleaseRecord) -> Result[(), store.Error] waits {
+    let table = activation_table(mut db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
+    let releases: store.Table[u64, ReleaseRecord] = activation_table(mut db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of())?
     let shape = store.shape(table)
     let snap = store.snapshot(db)
     let current = store.get(snap, shape, 0u8)?
@@ -620,7 +616,9 @@ fn commit_activation(mut db: store.Db, next_description: Bytes) -> Result[(), st
         if let Some(old) = current {
             store.put(mut tx, table, 1u8, old)?
         }
-        store.put(mut tx, table, 0u8, next_description)
+        store.put(mut tx, table, 0u8, next_description)?
+        let version = store.info(mut tx).id.version
+        store.put(mut tx, releases, version, record)
     })?
     match take written {
         Committed(done) => store.durable(mut db, done.ticket),
@@ -634,14 +632,24 @@ fn commit_activation(mut db: store.Db, next_description: Bytes) -> Result[(), st
 }
 
 fn activate[G: send, H: send](mut db: store.Db, r: Registry[G, H], n_place: u64) -> Result[Bytes, OpenError] waits {
-    let exported = match exported_entries(r) { Ok(take entries) => take entries, Error(cap) => return Error(Store(Full(cap))) }
-    let release = match release_digest(exported) { Ok(take hash) => take hash, Error(cap) => return Error(Store(Full(cap))) }
-    let activation_bytes = match activation_description(n_place, take exported) { Ok(take payload) => take payload, Error(cap) => return Error(Store(Full(cap))) }
-    match commit_activation(mut db, activation_bytes) { Ok(()) => Ok(take release), Error(take problem) => Error(Store(take problem)) }
+    let prepared = prepare_activation(r, n_place)
+    let (take activation_bytes, take record) = match take prepared {
+        Ok(take activation) => take activation,
+        Error(cap) => return Error(Store(Full(cap))),
+    }
+    if let Error(take problem) = commit_activation(mut db, activation_bytes, record) {
+        return Error(Store(take problem))
+    }
+    let ReleaseRecord(release: take release, ..) = take record
+    Ok(take release)
 }
 
-fn activation_description(n_place: u64, take exported: List[Exported]) -> Result[Bytes, Capacity] {
-    encode_describe(Describe(digest: launch_digest()?, target: launch_owned_target()?, n_place: n_place, exported: take exported))
+fn prepare_activation[G: send, H: send](r: Registry[G, H], n_place: u64) -> Result[(Bytes, ReleaseRecord), Capacity] {
+    let release = release_digest(r.exported)?
+    let description = Describe(digest: launch_digest()?, target: launch_owned_target()?, n_place: n_place, exported: clone(r.exported)?)
+    let payload = encode_describe(description)?
+    let Describe(digest: take digest, ..) = take description
+    Ok((take payload, ReleaseRecord(release: take release, digest: take digest)))
 }
 
 fn describe_response[G: send, H: send](a: Args, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]]) -> Result[Bytes, RegisterError] {
@@ -797,19 +805,18 @@ pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[
     let cr: std.codec.Codec[R] = std.codec.of()
     let ce: std.codec.Codec[E] = std.codec.of()
     let carried: std.codec.Codec[Result[R, E]] = std.codec.of()
-    let (take key, take d) = match described(code.identity(f), Transact, ca, carried) {
+    let (take key, take d) = match described(code.identity(f), code.revision(f), Transact, ca, carried) {
         Ok(take kd) => take kd,
         Error(c) => return Error(Full(c)),
     }
-    let revision: Option[Bytes] = match code.revision(f) {
-        Some(v) => {
-            let mut b: Bytes = list.new()
-            if let Error(c) = list.append(mut b, v) {
-                return Error(Full(c))
-            }
-            Some(take b)
-        },
-        None => None,
+    let revision: Option[Bytes] = if list.len(d.revision) == 0u64 {
+        None
+    } else {
+        let copied: Result[Bytes, Capacity] = clone(d.revision)
+        match take copied {
+            Ok(take digest) => Some(take digest),
+            Error(c) => return Error(Full(c)),
+        }
     }
     register_check(mut r, key, ca, n, s)?
     let check = fn(arg: Bytes) -> Option[Refusal] { check_arg(ca, arg, n) }
@@ -899,7 +906,7 @@ fn adapt_query[H: send, A](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, 
 pub fn query[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[()] = std.codec.of_unit()
-    let (take key, take d) = match described(code.identity(f), Query, ca, cr) {
+    let (take key, take d) = match described(code.identity(f), code.revision(f), Query, ca, cr) {
         Ok(take kd) => take kd,
         Error(c) => return Error(Full(c)),
     }
@@ -2401,7 +2408,7 @@ fn subs_handles(mut db: store.Db) -> Result[Qh, store.Error] waits {
 fn query_key(f: StaticFn[fn(store.Tx, Qh, take u32) -> Result[Cover, Capacity]]) -> Bytes {
     let ca: std.codec.Codec[u32] = std.codec.of()
     let cr: std.codec.Codec[()] = std.codec.of_unit()
-    let (take k, _) = result.unwrap(described(code.identity(f), Query, ca, cr))
+    let (take k, _) = result.unwrap(described(code.identity(f), None, Query, ca, cr))
     k
 }
 
@@ -3303,7 +3310,7 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
     }
     let ca: std.codec.Codec[u32] = std.codec.of()
     let cr: std.codec.Codec[()] = std.codec.of_unit()
-    let (take key, _) = result.unwrap(described(code.identity(code.describe(accounts_q)), Query, ca, cr))
+    let (take key, _) = result.unwrap(described(code.identity(code.describe(accounts_q)), None, Query, ca, cr))
     let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: list.new())
     // G3: the initial result, from span_changes, holds row 1 normalized from schema 0.
     let initial = at_base(mut b, 0u64, 7u32, take key, no_arg())
@@ -3351,7 +3358,7 @@ fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
     let h = Ah(t: store.shape(current))
     let reg = result.unwrap(placed(code.describe(projection_place), 1048576u64))
     let ca: std.codec.Codec[u32] = std.codec.of()
-    let (take key, _) = result.unwrap(described(code.identity(code.describe(accounts_q)), Query, ca, std.codec.of_unit()))
+    let (take key, _) = result.unwrap(described(code.identity(code.describe(accounts_q)), None, Query, ca, std.codec.of_unit()))
     let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: list.new())
     let o = at_base(mut b, 1u64, 7u32, take key, no_arg())
     !o.reset && list.len(o.rows) == 0u64 && list.len(o.complete) == 0u64

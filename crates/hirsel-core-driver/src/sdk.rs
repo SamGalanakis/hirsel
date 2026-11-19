@@ -230,6 +230,7 @@ pub struct Exported {
     pub result: Vec<u8>,
     pub args_fp: u64,
     pub result_fp: u64,
+    pub revision: Vec<u8>,
 }
 pub struct Describe {
     pub digest: Vec<u8>,
@@ -257,6 +258,7 @@ impl Describe {
                 result: r.bytes()?,
                 args_fp: r.word()?,
                 result_fp: r.word()?,
+                revision: r.bytes()?,
             });
         }
         r.done()?;
@@ -431,6 +433,7 @@ mod tests {
             result: scalar(6),
             args_fp: u64::MAX,
             result_fp: 7,
+            revision: vec![1; 32],
         }
     }
     #[test]
@@ -601,9 +604,11 @@ mod tests {
         blob(&mut bytes, &[3, 0, 0, 0, 0, 17, 6, 13]);
         bytes.extend_from_slice(&e.args_fp.to_le_bytes());
         bytes.extend_from_slice(&e.result_fp.to_le_bytes());
+        blob(&mut bytes, &e.revision);
         let description = Describe::read(&bytes).unwrap();
         assert_eq!(description.exported[0].args_fp, u64::MAX);
         assert_eq!(description.exported[0].result_fp, 7);
+        assert_eq!(description.exported[0].revision, e.revision);
         let files = generate(&description).unwrap();
         assert!(files["codec.d.ts"].contains("export type Result0 = Result<bigint, string>"));
         assert!(files["entries.js"].contains("codec.Result0.decode"));

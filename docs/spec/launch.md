@@ -70,7 +70,7 @@ store or listener. It encodes this record with the ordinary value codec:
 ```hirsel
 type Kind: codec + send = Compute | Transact | Query | Granted
 type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }
-type Exported: codec + send { described: Described, args_fp: u64, result_fp: u64 }
+type Exported: codec + send { described: Described, args_fp: u64, result_fp: u64, revision: Bytes }
 type Describe: codec + send { digest: Bytes, target: String, n_place: u64, exported: List[Exported] }
 type Release: codec + send { describe: Describe, release: Bytes, grants: List[String], root_limit: u64 }
 ```
@@ -80,6 +80,9 @@ Entries are in registration order. `Described` has the fields `kind`, `identity`
 is the schema of the value carried by `Returned`: `Result[R, E]` for transact,
 and `R` for compute and granted. The two fingerprints come from
 `std.codec.fingerprint_of` applied to `args` and `result`, respectively.
+`revision` is the entry's 32-byte `code.revision` (PROG-9). It is empty in
+programs assembled without revisions. It contributes to `release` and does
+not enter the entry key or the client's `Want`.
 Registration and encoding are bounded. A successful child writes exactly one
 Describe and exits 0. A place capacity error is `PlaceCapacity(Room)` and a
 duplicate registration is `AlreadyRegistered(identity)`. The child encodes

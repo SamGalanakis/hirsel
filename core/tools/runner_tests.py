@@ -417,6 +417,24 @@ def evaluate(evaluator, inputs_path, definition):
     return value, report
 
 
+def activation_body_edit(root, work):
+    """Keep the entry name, signature and schemas, and change only its body."""
+    cases = root / 'core/programs/store/runner_calls.hirsel'
+    edited = work / cases.name
+    source = cases.read_text()
+    original = '    match store.put(mut tx, h.t, k, k) {'
+    assert source.count(original) == 1
+    edited.write_text(source.replace(original, '    match store.put(mut tx, h.t, k, 42u64) {'))
+    selection = inputs(root)
+    for module in selection['packages'][-1]['sources']:
+        if module['modules'] == ['runner_calls']:
+            module['file'] = str(edited)
+            break
+    selected = work / 'activation-body-edit.json'
+    selected.write_text(json.dumps(selection))
+    return selected
+
+
 def frame_module(root, path):
     """Construct values beside the shared, hand-derived byte oracle, never from it."""
     vectors = json.loads((root / 'core/programs/store/frame-vectors.json').read_text())['vectors']
@@ -745,8 +763,14 @@ def main():
             for name in selected_calls:
                 if name in NATIVE_ONLY_CALLS:
                     continue
-                value, report = evaluate(evaluator, base, 'store@1/runner_calls/law_' + name)
-                row(engine='evaluator', law=name, passed=value == 1 and counted(name, report), result=report)
+                definition = 'store@1/runner_calls/law_' + name
+                value, report = evaluate(evaluator, base, definition)
+                if name == 'ready_after_activation':
+                    changed, edited = evaluate(evaluator, activation_body_edit(root, work), definition)
+                    row(engine='evaluator', law=name, passed=bool(value and changed and value != changed),
+                        result={'base': report, 'body_edit': edited})
+                else:
+                    row(engine='evaluator', law=name, passed=value == 1 and counted(name, report), result=report)
             for name in (() if args.part == 'calls' else SUBS):
                 value, report = evaluate(evaluator, base, 'store@1/runner/law_' + name)
                 row(engine='evaluator', law=name, passed=value == 1, result=report)

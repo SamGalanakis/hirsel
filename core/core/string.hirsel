@@ -214,7 +214,8 @@ pub fn push_u64(mut s: String, n: u64) -> Result[(), Capacity] {
     // The digit count w: low = floor(bits x log10(2)) is w or w - 1, and n reaches 10^low exactly when
     // it is w (low = 0 only below 8, where w is 1: its threshold is 0).
     let lz: u64 = int.widen(int.leading_zeros(n))
-    let low = (64 - lz) * 1233 >> 12
+    // lz <= 64 (the zeros of a u64), so 64 - lz <= 64 and the product <= 78912: neither wraps.
+    let low = int.wrapping_mul(int.wrapping_sub(64, lz), 1233) >> 12
     let reach: u64 = match low {
         0 => 0,
         1 => 10,
@@ -238,7 +239,8 @@ pub fn push_u64(mut s: String, n: u64) -> Result[(), Capacity] {
         _ => 10000000000000000000,
     }
     let w = if n >= reach {
-        low + 1
+        // low <= 78912 >> 12 = 19, so this never wraps.
+        int.wrapping_add(low, 1)
     } else {
         low
     }
@@ -317,21 +319,25 @@ pub fn push_u64(mut s: String, n: u64) -> Result[(), Capacity] {
         b[base + 2] = int.truncate(digits >> 16 & 0xFF)
     } else {
         if m >= 100 {
+            // m < 1000 here, so hundreds <= 9 and the digit <= b'9' never wraps.
             let hundreds: u8 = int.truncate(m / 100)
-            b[base] = b'0' + hundreds
+            b[base] = int.wrapping_add(b'0', hundreds)
             m = m % 100
             i = base + 1
         } else {
             i = base
         }
         if m >= 10 || i > base {
+            // m < 100 here (below 1000 and either below 100 or just taken % 100), so tens <= 9;
+            // ones = m % 10 <= 9: neither digit wraps.
             let tens: u8 = int.truncate(m / 10)
             let ones: u8 = int.truncate(m % 10)
-            b[i] = b'0' + tens
-            b[i + 1] = b'0' + ones
+            b[i] = int.wrapping_add(b'0', tens)
+            b[i + 1] = int.wrapping_add(b'0', ones)
         } else {
+            // m < 10 here (m >= 10 took the branch above), so the digit never wraps.
             let d: u8 = int.truncate(m)
-            b[i] = b'0' + d
+            b[i] = int.wrapping_add(b'0', d)
         }
     }
     s = of_bytes(take b)

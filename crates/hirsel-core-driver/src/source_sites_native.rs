@@ -170,7 +170,7 @@ fn failure_sites_relocated(backend: Backend) {
         assert!(other == first, "{project} under {cache} is another executable; its report: {report}");
     }
     assert_eq!(output.status.code(), Some(101), "{output:?}");
-    assert_eq!(report, "Bounds at std@1/list.hirsel:167:13\n");
+    assert_eq!(report, "Bounds at std@1/list.hirsel:290:13\n");
 }
 
 #[test]

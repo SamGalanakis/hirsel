@@ -19,6 +19,8 @@
 #undef _GLIBCXX_USE_PTHREAD_MUTEX_CLOCKLOCK
 #undef _GLIBCXX_USE_PTHREAD_RWLOCK_CLOCKLOCK
 #endif
+#include "pass_cost.h"
+
 #include <llvm-c/Core.h>
 #include <llvm-c/TargetMachine.h>
 #include <llvm/ADT/DenseMap.h>
@@ -53,6 +55,8 @@
 #include <vector>
 
 using namespace llvm;
+extern "C" LLVMBool hirsel_llvm_emit_object(LLVMTargetMachineRef machine, LLVMModuleRef module,
+                                          char **message, LLVMMemoryBufferRef *buffer);
 
 namespace {
 
@@ -519,6 +523,7 @@ void generate(TargetMachine &tm, Miss &miss) {
     Module &p = **parsed;
     p.setDataLayout(tm.createDataLayout());
     raw_svector_ostream os(miss.object);
+    hirsel_llvm::PassCost cost("object-emission", p);
     legacy::PassManager passes;
     if (tm.addPassesToEmitFile(passes, os, nullptr, CodeGenFileType::ObjectFile)) {
         miss.error = "the target machine cannot emit an object";
@@ -651,7 +656,7 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
     }
     if (misses.empty()) return 0;
     LLVMMemoryBufferRef object = nullptr;
-    if (LLVMTargetMachineEmitToMemoryBuffer(machine, module, LLVMObjectFile, error, &object)) return 1;
+    if (hirsel_llvm_emit_object(machine, module, error, &object)) return 1;
     deliver(context, (const uint8_t *)LLVMGetBufferStart(object), LLVMGetBufferSize(object));
     LLVMDisposeMemoryBuffer(object);
     return 0;

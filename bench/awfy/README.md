@@ -263,7 +263,19 @@ and a separate breakdown of process-tree PMU instruction stack samples.
 Entries in `other` have no recognized phase frame. The samples estimate
 where instruction work occurs.
 
-Add `--pass-trace` for a second fresh-store build with LLVM's pass debug
-logging. The compressed JSON Lines trace names the passes and their IR units.
-The extra instrumentation
-is confined to that diagnostic build.
+Add `--pass-trace --top 10` to count a fresh-store build with the LLVM
+trace off and another with it on. Both builds use the same prebuilt std
+product and must emit byte-identical images. The cold-phase receipt records
+the process-tree instruction delta and each LLVM pipeline's counter total.
+The compressed JSON Lines trace records the pass, IR unit, pipeline and
+exclusive instructions for each instrumented invocation. LLVM's legacy
+object emitter contributes a pipeline total. The unattributed column
+includes pass-manager work between callbacks and trace bookkeeping.
+
+Read a trace or rank the changes between two traces by absolute instruction
+delta with the same command.
+
+```sh
+python3 bench/awfy/cold_phases.py report TRACE --top 10
+python3 bench/awfy/cold_phases.py report AFTER --baseline BEFORE --top 10
+```

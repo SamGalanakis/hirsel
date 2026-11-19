@@ -1,6 +1,6 @@
-"""Capture cold LangArena build phases with checked outputs and optional LLVM pass logs."""
+"""Capture cold LangArena build phases and exclusive LLVM pass instruction counts."""
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 import gzip
 import json
 import os
@@ -57,33 +57,101 @@ def run_profile(directory, evidence, command, env):
     return data
 
 
-def build_tracer(out, env):
-    llvm = build.llvm_path()
-    trace = out / "llvm-pass-trace.so"
-    libraries = list((llvm / "engine").glob("libLLVM.so.*"))
-    if len(libraries) != 1:
-        raise ValueError("expected one pinned LLVM engine")
-    soname = f'-DHIRSEL_LLVM_SONAME="{libraries[0].name}"'
-    board.run([llvm / "bin/clang", "-shared", "-fPIC", "-O2", "-I", llvm / "include", soname,
-               Path(__file__).with_name("llvm_pass_trace.c"), "-o", trace, "-ldl"], env=env)
-    return trace
-
-
-def run_pass_trace(directory, evidence, command, trace, env):
-    log = evidence / "llvm-passes.log"
-    with (evidence / "build.json").open("wb") as output, log.open("wb") as error:
-        board.run(["env", f"LD_PRELOAD={trace}", *command], cwd=directory, env=env, stdout=output, stderr=error)
-    records = evidence / "llvm-passes.jsonl.gz"
-    count = 0
-    with log.open() as stream, gzip.open(records, "wt") as compact:
+def pass_costs(path):
+    passes = defaultdict(Counter)
+    pipeline = Counter()
+    exclusive = Counter()
+    with gzip.open(path, "rt") as stream:
         for line in stream:
-            if match := re.match(r"\s*Running pass: (.+?) on (.+)", line):
-                compact.write(json.dumps({"pass": match[1], "ir_unit": match[2]}) + "\n")
-                count += 1
-    if not count:
-        raise ValueError("the LLVM tracer emitted no pass records")
-    log.unlink()
-    return {"records": count, "trace": str(records)}
+            row = json.loads(line)
+            phase = row["phase"]
+            if "pass" in row:
+                name = row["pass"]
+                count = row["instructions"]
+                passes[name].update(count=1, instructions=count)
+                exclusive[phase] += count
+            else:
+                pipeline[phase] += row["pipeline_instructions"]
+    if not any(row["instructions"] > 0 for row in passes.values()):
+        raise ValueError(f"{path}: no LLVM pass costs")
+    if exclusive.keys() - pipeline.keys() or any(exclusive[phase] > total for phase, total in pipeline.items()):
+        raise ValueError(f"{path}: exclusive pass costs exceed their pipeline counters")
+    phases = {phase: {"instructions": total, "pass_instructions": exclusive[phase],
+                      "unattributed_instructions": total - exclusive[phase]}
+              for phase, total in sorted(pipeline.items())}
+    return passes, phases
+
+
+def print_pass_costs(trace, top, baseline=None):
+    passes, phases = pass_costs(trace)
+    total = sum(row["instructions"] for row in passes.values())
+    if baseline is None:
+        ranked = sorted(passes.items(), key=lambda item: (-item[1]["instructions"], item[0]))
+        print(f"{'Pass':<52} {'Count':>8} {'Instructions':>16} {'Share':>8}")
+        for name, row in ranked[:top]:
+            print(f"{name:<52} {row['count']:>8,} {row['instructions']:>16,} "
+                  f"{row['instructions'] / total:>8.2%}")
+        shown = sum(row["instructions"] for _, row in ranked[:top])
+        print(f"Top {min(top, len(ranked))} instructions: {shown:,} of {total:,} attributed")
+        for phase, row in phases.items():
+            print(f"{phase:<24} {row['instructions']:>16,} instructions, "
+                  f"{row['unattributed_instructions']:,} unattributed")
+        return
+
+    before, _ = pass_costs(baseline)
+    before_total = sum(row["instructions"] for row in before.values())
+    changes = []
+    for name in before.keys() | passes.keys():
+        old, new = before.get(name, Counter()), passes.get(name, Counter())
+        changes.append((new["instructions"] - old["instructions"], name, old, new))
+    print(f"{'Pass':<52} {'Before N':>8} {'After N':>8} {'Before':>16} {'After':>16} "
+          f"{'Delta':>16} {'Share Δ':>9}")
+    for delta, name, old, new in sorted(changes, key=lambda row: (-abs(row[0]), row[1]))[:top]:
+        share_delta = 100 * (new["instructions"] / total - old["instructions"] / before_total)
+        print(f"{name:<52} {old['count']:>8,} {new['count']:>8,} {old['instructions']:>16,} "
+              f"{new['instructions']:>16,} {delta:>+16,} {share_delta:>+6.2f} pp")
+    print(f"Total attributed instructions: {before_total:,} -> {total:,} ({total - before_total:+,})")
+
+
+def counted_build(directory, evidence, command, env):
+    sample = board.measure.core_measure.sample(command, evidence, env=env, cwd=directory, pmu_times=True)
+    (evidence / "stdout").replace(evidence / "build.json")
+    if sample["status"] != "ok" or not receipt.counter_ready(sample, "instructions:u"):
+        raise ValueError(f"{evidence}: cold build needs a fully active instructions:u counter")
+    return sample["instructions"]
+
+
+def collect_pass_costs(args, directory, command, exe, ld):
+    instructions = {}
+    images = {}
+    raw = directory / "llvm-pass-costs.jsonl"
+    trace = args.out / "llvm-pass-costs.jsonl.gz"
+    for name in ("untraced", "traced"):
+        evidence = args.out / name
+        env = build.capped_env(directory / name) | ld
+        if name == "traced":
+            env["HIRSEL_LLVM_PASS_COST"] = str(raw)
+        cold_command = command.copy()
+        cold_command[cold_command.index("--store") + 1] = f"{name}-store"
+        instructions[name] = counted_build(directory, evidence, cold_command, env)
+        checked(directory, evidence, exe, args.fixture, env)
+        images[name] = build.sha256(exe)
+    if images["traced"] != images["untraced"]:
+        raise ValueError("traced and untraced cold builds emitted different images")
+    if not raw.is_file():
+        raise ValueError("compiler did not emit LLVM pass costs")
+    with raw.open("rb") as source, gzip.open(trace, "wb") as output:
+        shutil.copyfileobj(source, output)
+    passes, phases = pass_costs(trace)
+    if not all(phase in phases for phase in ("release", "object-emission")):
+        raise ValueError("trace must cover the release optimizer and object emission")
+    overhead = instructions["traced"] - instructions["untraced"]
+    return {
+        "trace": str(trace), "records": sum(row["count"] for row in passes.values()),
+        "image_sha256": images["traced"], "compile_instructions": instructions,
+        "overhead_instructions": overhead, "overhead_percent": 100 * overhead / instructions["untraced"],
+        "phases": phases,
+    }
 
 
 def checked(directory, evidence, executable, fixture, env):
@@ -109,13 +177,6 @@ def collect(args, scratch):
     profile_evidence.mkdir()
     prepare_env = build.capped_env(directory, "8G", "2") | ld
     command, exe = prepare(directory, artifacts, prepare_env)
-    trace_args = None
-    if args.pass_trace:
-        pass_dir = scratch / "passes"
-        pass_evidence = args.out / "passes"
-        pass_evidence.mkdir()
-        pass_command, pass_exe = prepare(pass_dir, artifacts, build.capped_env(pass_dir, "8G", "2") | ld)
-        trace_args = pass_dir, pass_evidence, pass_command, pass_exe, build_tracer(scratch, prepare_env)
 
     with receipt.measurement_slot(args.lock):
         try:
@@ -126,12 +187,9 @@ def collect(args, scratch):
             stdout = checked(directory, profile_evidence, exe, args.fixture, env)
             passes = None
             pass_busy = None
-            if trace_args is not None:
-                pass_dir, pass_evidence, pass_command, pass_exe, tracer = trace_args
-                pass_env = build.capped_env(pass_dir) | ld
-                with smt_activity(args.siblings, "LLVM pass trace") as pass_busy:
-                    passes = run_pass_trace(pass_dir, pass_evidence, pass_command, tracer, pass_env)
-                checked(pass_dir, pass_evidence, pass_exe, args.fixture, pass_env)
+            if args.pass_trace:
+                with smt_activity(args.siblings, "LLVM pass costs") as pass_busy:
+                    passes = collect_pass_costs(args, directory, command, exe, ld)
         finally:
             os.sched_setaffinity(0, args.build_cpus)
 
@@ -148,15 +206,34 @@ def collect(args, scratch):
         "driver_metrics": receipt.read(profile_evidence / "driver-metrics.json"), "llvm_pass_trace": passes,
     })
     print(output)
+    if passes:
+        print_pass_costs(Path(passes["trace"]), args.top)
     return 0
 
 
+def positive_int(text):
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("expected a positive integer")
+    return value
+
+
 def main():
+    if sys.argv[1:2] == ["report"]:
+        parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} report")
+        parser.add_argument("trace", type=Path)
+        parser.add_argument("--baseline", type=Path, help="compare against this trace")
+        parser.add_argument("--top", type=positive_int, default=10)
+        args = parser.parse_args(sys.argv[2:])
+        print_pass_costs(args.trace, args.top, args.baseline)
+        return 0
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("out", type=lambda path: Path(path).resolve())
     parser.add_argument("--artifacts", required=True, type=Path)
     parser.add_argument("--fixture", required=True, type=lambda path: Path(path).resolve())
-    parser.add_argument("--pass-trace", action="store_true", help="compile in a second fresh store with LLVM pass logging")
+    parser.add_argument("--pass-trace", action="store_true", help="compare fresh-store builds with LLVM pass counters off and on")
+    parser.add_argument("--top", type=positive_int, default=10)
     add_cpu_sets(parser)
     parser.add_argument("--lock", type=Path, default=board.LOCK)
     args = parser.parse_args()

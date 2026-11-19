@@ -1,6 +1,7 @@
 from argparse import Namespace
 from contextlib import redirect_stdout
 import fcntl
+import gzip
 import io
 import json
 import os
@@ -12,6 +13,34 @@ from pathlib import Path
 
 from board import Board, measure, measurement_slot, receipt
 import bench_cpus
+from cold_phases import pass_costs
+
+
+class PassCostAccounting(unittest.TestCase):
+    def test_rejects_double_counted_nested_passes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            trace = Path(temp) / "passes.jsonl.gz"
+            rows = [
+                {"phase": "release", "pass": "child", "ir_unit": "f", "instructions": 70},
+                {"phase": "release", "pass": "parent", "ir_unit": "m", "instructions": 20},
+                {"phase": "release", "ir_unit": "m", "pipeline_instructions": 100},
+                {"phase": "object-emission", "ir_unit": "part", "pipeline_instructions": 40},
+            ]
+
+            def write_trace():
+                with gzip.open(trace, "wt") as stream:
+                    for row in rows:
+                        stream.write(json.dumps(row) + "\n")
+
+            write_trace()
+            passes, phases = pass_costs(trace)
+            self.assertEqual(sum(row["instructions"] for row in passes.values()), 90)
+            self.assertEqual(phases["release"]["unattributed_instructions"], 10)
+            self.assertEqual(phases["object-emission"]["unattributed_instructions"], 40)
+            rows[1]["instructions"] = 90
+            write_trace()
+            with self.assertRaisesRegex(ValueError, "exceed their pipeline counters"):
+                pass_costs(trace)
 
 
 class WorkloadMatching(unittest.TestCase):

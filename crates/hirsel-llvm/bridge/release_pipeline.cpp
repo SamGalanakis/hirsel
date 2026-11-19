@@ -5,7 +5,9 @@
 #undef _GLIBCXX_USE_PTHREAD_RWLOCK_CLOCKLOCK
 #endif
 
-#include <llvm-c/Transforms/PassBuilder.h>
+#include "pass_cost.h"
+
+#include <llvm-c/TargetMachine.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Passes/PassBuilder.h>
@@ -24,11 +26,45 @@ extern "C" void hirsel_llvm_prepay_step_trees(void *module);
 
 namespace {
 
-LLVMErrorRef runPasses(LLVMModuleRef module, LLVMTargetMachineRef machine, const char *pipeline) {
-    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
-    LLVMErrorRef error = LLVMRunPasses(module, pipeline, machine, options);
-    LLVMDisposePassBuilderOptions(options);
-    return error;
+class ReleasePipeline {
+    Module &module;
+    PassInstrumentationCallbacks callbacks;
+    LoopAnalysisManager loops;
+    FunctionAnalysisManager functions;
+    CGSCCAnalysisManager calls;
+    ModuleAnalysisManager modules;
+    StandardInstrumentations instrumentation;
+
+public:
+    PassBuilder builder;
+
+    ReleasePipeline(LLVMModuleRef raw_module, LLVMTargetMachineRef raw_machine)
+        : module(*unwrap(raw_module)), instrumentation(module.getContext(), /*DebugLogging=*/false),
+          builder(reinterpret_cast<TargetMachine *>(raw_machine), PipelineTuningOptions(),
+                  std::nullopt, &callbacks) {
+        builder.registerLoopAnalyses(loops);
+        builder.registerFunctionAnalyses(functions);
+        builder.registerCGSCCAnalyses(calls);
+        builder.registerModuleAnalyses(modules);
+        builder.crossRegisterProxies(loops, functions, calls, modules);
+        instrumentation.registerCallbacks(callbacks, &modules);
+    }
+
+    void run(ModulePassManager &pipeline, StringRef phase) {
+        hirsel_llvm::PassCost cost(phase, module);
+        cost.registerCallbacks(callbacks);
+        pipeline.run(module, modules);
+    }
+};
+
+LLVMErrorRef runPasses(LLVMModuleRef module, LLVMTargetMachineRef machine,
+                       StringRef phase, StringRef pipeline_text) {
+    ReleasePipeline release(module, machine);
+    ModulePassManager pipeline;
+    if (auto error = release.builder.parsePassPipeline(pipeline, pipeline_text))
+        return wrap(std::move(error));
+    release.run(pipeline, phase);
+    return LLVMErrorSuccess;
 }
 
 class PrepayStepTreesPass : public OptionalPassInfoMixin<PrepayStepTreesPass> {
@@ -81,23 +117,9 @@ extern "C" void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool fra
 extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
     LLVMModuleRef raw_module, LLVMTargetMachineRef raw_machine, LLVMBool prune,
     LLVMBool prepay_steps) {
-    Module &module = *unwrap(raw_module);
-    auto *machine = reinterpret_cast<TargetMachine *>(raw_machine);
-    PassInstrumentationCallbacks callbacks;
-    PassBuilder builder(machine, PipelineTuningOptions(), std::nullopt, &callbacks);
+    ReleasePipeline release(raw_module, raw_machine);
+    PassBuilder &builder = release.builder;
     registerReleasePasses(builder);
-
-    LoopAnalysisManager loops;
-    FunctionAnalysisManager functions;
-    CGSCCAnalysisManager calls;
-    ModuleAnalysisManager modules;
-    builder.registerLoopAnalyses(loops);
-    builder.registerFunctionAnalyses(functions);
-    builder.registerCGSCCAnalyses(calls);
-    builder.registerModuleAnalyses(modules);
-    builder.crossRegisterProxies(loops, functions, calls, modules);
-    StandardInstrumentations instrumentation(module.getContext(), /*DebugLogging=*/false);
-    instrumentation.registerCallbacks(callbacks, &modules);
 
     ModulePassManager pipeline;
     // Promote slots before outlining the cold metering path so the inliner
@@ -161,21 +183,28 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
         "globaldce,constmerge,mergefunc,rel-lookup-table-converter"))
         return wrap(std::move(error));
 
-    pipeline.run(module, modules);
+    release.run(pipeline, "release");
     return LLVMErrorSuccess;
 }
 
 extern "C" LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module,
                                                       LLVMTargetMachineRef machine) {
-    return runPasses(module, machine, "cgscc(argpromotion),ipsccp,partial-inliner,cgscc(inline)");
+    return runPasses(module, machine, "specialize", "cgscc(argpromotion),ipsccp,partial-inliner,cgscc(inline)");
 }
 
 extern "C" LLVMErrorRef hirsel_llvm_cleanup_release(LLVMModuleRef module,
                                                    LLVMTargetMachineRef machine) {
     // DSE removes carrier clears/restores after scalar cleanup eliminates typed
     // empty-drop guards. The final CFG and loop cleanup needs no second DSE.
-    return runPasses(module, machine,
+    return runPasses(module, machine, "cleanup",
         "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,"
         "instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,gvn,simplifycfg,dse,"
         "loop-simplify,lcssa,instcombine<no-verify-fixpoint>,simplifycfg)");
+}
+
+extern "C" LLVMBool hirsel_llvm_emit_object(LLVMTargetMachineRef machine, LLVMModuleRef module,
+                                          char **message, LLVMMemoryBufferRef *buffer) {
+    // LLVM's legacy codegen pass manager exposes no before/after callbacks.
+    hirsel_llvm::PassCost cost("object-emission", *unwrap(module));
+    return LLVMTargetMachineEmitToMemoryBuffer(machine, module, LLVMObjectFile, message, buffer);
 }

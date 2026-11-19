@@ -22,9 +22,9 @@ use llvm_sys::target::{
     LLVMInitializeX86TargetMC, LLVMSetModuleDataLayout,
 };
 use llvm_sys::target_machine::{
-    LLVMCodeGenFileType, LLVMCodeGenOptLevel, LLVMCodeModel, LLVMCreateTargetDataLayout,
-    LLVMCreateTargetMachine, LLVMDisposeTargetMachine, LLVMGetTargetFromTriple, LLVMRelocMode,
-    LLVMTargetMachineEmitToMemoryBuffer, LLVMTargetMachineRef, LLVMTargetRef,
+    LLVMCodeGenOptLevel, LLVMCodeModel, LLVMCreateTargetDataLayout, LLVMCreateTargetMachine,
+    LLVMDisposeTargetMachine, LLVMGetTargetFromTriple, LLVMRelocMode, LLVMTargetMachineRef,
+    LLVMTargetRef,
 };
 
 #[cfg(test)]
@@ -291,6 +291,12 @@ impl<'context> Module<'context> {
         unsafe extern "C" {
             fn hirsel_llvm_promote_development_slots(module: LLVMModuleRef);
             fn hirsel_llvm_configure_codegen(module: LLVMModuleRef, frame_pointers: LLVMBool);
+            fn hirsel_llvm_emit_object(
+                machine: LLVMTargetMachineRef,
+                module: LLVMModuleRef,
+                message: *mut *mut c_char,
+                buffer: *mut LLVMMemoryBufferRef,
+            ) -> LLVMBool;
         }
         // SAFETY: both calls mutate this live module and retain no references.
         unsafe {
@@ -303,15 +309,8 @@ impl<'context> Module<'context> {
         let mut buffer: LLVMMemoryBufferRef = ptr::null_mut();
         // SAFETY: the module and machine are live; LLVM writes either an error message or a
         // buffer that we own.
-        let failed = unsafe {
-            LLVMTargetMachineEmitToMemoryBuffer(
-                machine.raw,
-                self.raw,
-                LLVMCodeGenFileType::LLVMObjectFile,
-                &mut message,
-                &mut buffer,
-            )
-        };
+        let failed =
+            unsafe { hirsel_llvm_emit_object(machine.raw, self.raw, &mut message, &mut buffer) };
         // SAFETY: the message is null or ours to dispose of.
         let message = unsafe { take_message(message) };
         if failed != 0 || buffer.is_null() {

@@ -29,6 +29,8 @@ extern void hirsel_llvm_reuse_step_flags(void *module);
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 extern void hirsel_llvm_fixed_width_checks(void *module);
 extern void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool frame_pointers);
+extern LLVMBool hirsel_llvm_emit_object(LLVMTargetMachineRef machine, LLVMModuleRef module,
+                                       char **message, LLVMMemoryBufferRef *buffer);
 extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
                                                 LLVMBool prune, LLVMBool prepay_steps);
 extern LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
@@ -562,7 +564,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     // one object.
     if (export_count) failed = hirsel_llvm_emit_parts(module, machine, jobs, reuse, deliver, receiver, &message);
     else {
-        failed = LLVMTargetMachineEmitToMemoryBuffer(machine, module, LLVMObjectFile, &message, &buffer);
+        failed = hirsel_llvm_emit_object(machine, module, &message, &buffer);
         if (!failed && buffer) {
             if (deliver) deliver(receiver, (const uint8_t *)LLVMGetBufferStart(buffer), LLVMGetBufferSize(buffer));
             else copy(out, LLVMGetBufferStart(buffer), LLVMGetBufferSize(buffer), 0);

@@ -24,12 +24,13 @@ fn main() {
     for source in [
         &shared.join("forward_reads.h"),
         &shared.join("loop_version.h"),
+        &shared.join("pass_cost.h"),
         &shared.join("step_tree.h"),
     ] {
         println!("cargo:rerun-if-changed={}", source.display());
     }
     let sysroot = prefix.join("sysroot");
-    let shared_objects = ["checked_copy", "release_pipeline"].map(|name| {
+    let shared_objects = ["checked_copy", "release_pipeline", "pass_cost"].map(|name| {
         let source = shared.join(format!("{name}.cpp"));
         println!("cargo:rerun-if-changed={}", source.display());
         let object = out.join(format!("{name}.o"));
@@ -108,6 +109,7 @@ fn main() {
         .arg("-isystem").arg(sysroot.join("usr/include/c++/13"))
         .arg("-isystem").arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
         .arg("-I").arg(prefix.join("include"))
+        .arg("-I").arg(&shared)
         .arg("-c").arg(&parts).arg("-o").arg(&parts_object)
         .status().unwrap().success());
     let component = out.join("libhirsel_llvm_engine.so");

@@ -6,6 +6,7 @@
 #undef _GLIBCXX_USE_PTHREAD_MUTEX_CLOCKLOCK
 #undef _GLIBCXX_USE_PTHREAD_RWLOCK_CLOCKLOCK
 #endif
+#include "pass_cost.h"
 #include "forward_reads.h"
 #include "loop_version.h"
 #include "step_tree.h"
@@ -217,8 +218,9 @@ public:
 };
 
 template <typename Run>
-static void runLoopPass(TargetMachine *Machine, Run RunPass) {
-  PassBuilder PB(Machine);
+static void runLoopPass(TargetMachine *Machine, const Module &M, StringRef Phase, Run RunPass) {
+  PassInstrumentationCallbacks Callbacks;
+  PassBuilder PB(Machine, PipelineTuningOptions(), std::nullopt, &Callbacks);
   LoopAnalysisManager LAM;
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;
@@ -228,12 +230,14 @@ static void runLoopPass(TargetMachine *Machine, Run RunPass) {
   PB.registerFunctionAnalyses(FAM);
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+  hirsel_llvm::PassCost Cost(Phase, M);
+  Cost.registerCallbacks(Callbacks);
   RunPass(PB, FAM);
 }
 
 extern "C" void hirsel_llvm_guard_copy_loops(void *Raw, void *Machine) noexcept {
   auto &M = *static_cast<Module *>(Raw);
-  runLoopPass(static_cast<TargetMachine *>(Machine), [&](PassBuilder &PB, FunctionAnalysisManager &FAM) {
+  runLoopPass(static_cast<TargetMachine *>(Machine), M, "checked-copy", [&](PassBuilder &PB, FunctionAnalysisManager &FAM) {
     FunctionPassManager PM;
     PM.addPass(CheckedCopyPass(PB));
     for (Function &F : M) if (!F.isDeclaration()) PM.run(F, FAM);
@@ -644,7 +648,7 @@ static bool forwardRecordJoins(Function &F, FunctionAnalysisManager &AM) {
 
 extern "C" void hirsel_llvm_finish_reads(void *Raw, void *Machine) noexcept {
   auto &M = *static_cast<Module *>(Raw);
-  runLoopPass(static_cast<TargetMachine *>(Machine), [&](PassBuilder &PB, FunctionAnalysisManager &FAM) {
+  runLoopPass(static_cast<TargetMachine *>(Machine), M, "finish-reads", [&](PassBuilder &PB, FunctionAnalysisManager &FAM) {
     FunctionPassManager Clean;
     cantFail(PB.parsePassPipeline(Clean,
         "simplifycfg,loop-mssa(licm),instcombine<no-verify-fixpoint>,simplifycfg"));
@@ -1286,7 +1290,7 @@ static void shareColdStepSites(Module &M, FunctionAnalysisManager &FAM) {
 extern "C" void hirsel_llvm_share_cold_step_sync(void *Raw, void *Machine) {
   auto &M = *static_cast<Module *>(Raw);
   if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return;
-  runLoopPass(static_cast<TargetMachine *>(Machine),
+  runLoopPass(static_cast<TargetMachine *>(Machine), M, "cold-step-sync",
               [&](PassBuilder &, FunctionAnalysisManager &FAM) {
                 shareColdStepSites(M, FAM);
               });

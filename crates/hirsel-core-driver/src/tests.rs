@@ -3287,6 +3287,7 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
                 "dispatch",
                 "dispatch",
                 "helper_laws",
+                "run_regex",
                 "tally",
             ]),
         ),

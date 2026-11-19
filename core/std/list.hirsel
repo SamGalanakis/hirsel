@@ -26,6 +26,107 @@ pub fn get_or[T: plain](xs: List[T], i: u64, x: T) -> T {
     }
 }
 
+// Long searches amortize one dispatch over several vectors. Return at the
+// first matching lane, preserving order across the four masks.
+fn find_byte_blocks(xs: Bytes, start: u64, byte: u8) -> Option[u64] {
+    let end = list.len(xs)
+    let needle: Simd[u8, 32] = simd.splat(byte)
+    let first_block: Simd[u8, 32] = list.lanes(xs, start)
+    let first_mask = simd.bitmask(simd.eq(first_block, needle))
+    if first_mask != 0 {
+        let offset: u64 = int.widen(int.trailing_zeros(first_mask))
+        return Some(start + offset)
+    }
+    let mut i = start + 32
+    while end - i >= 128 {
+        let block = list.slice(xs, i, i + 128)
+        let a: Simd[u8, 32] = list.lanes(block, 0)
+        let b: Simd[u8, 32] = list.lanes(block, 32)
+        let c: Simd[u8, 32] = list.lanes(block, 64)
+        let d: Simd[u8, 32] = list.lanes(block, 96)
+        let ma = simd.eq(a, needle)
+        let mb = simd.eq(b, needle)
+        let mc = simd.eq(c, needle)
+        let md = simd.eq(d, needle)
+        if simd.any(ma | mb | mc | md) {
+            let low = simd.bitmask(ma) | (simd.bitmask(mb) << 32)
+            if low != 0 {
+                let offset: u64 = int.widen(int.trailing_zeros(low))
+                return Some(i + offset)
+            }
+            let high = simd.bitmask(mc) | (simd.bitmask(md) << 32)
+            let offset: u64 = int.widen(int.trailing_zeros(high))
+            return Some(i + 64 + offset)
+        }
+        i += 128
+    }
+    while end - i >= 32 {
+        let block: Simd[u8, 32] = list.lanes(xs, i)
+        let mask = simd.bitmask(simd.eq(block, needle))
+        if mask != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(mask))
+            return Some(i + offset)
+        }
+        i += 32
+    }
+    if i < end {
+        // The last full vector overlaps bytes already known to miss.
+        let at = end - 32
+        let tail: Simd[u8, 32] = list.lanes(xs, at)
+        let mask = simd.bitmask(simd.eq(tail, needle))
+        if mask != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(mask))
+            return Some(at + offset)
+        }
+    }
+    None
+}
+
+fn byte_word_mask(xs: Bytes, at: u64, spread: u64) -> u64 {
+    let word = list.word_le(xs, at) ^ spread
+    // A borrow can mark higher bytes. The lowest marked byte is exact.
+    int.wrapping_sub(word, 0x0101010101010101) & ~word & 0x8080808080808080
+}
+
+/// The first index of byte in xs[start..end], or None. Fails with Bounds for
+/// an invalid range. Alloc: nothing. Cost: O(end - start).
+pub fn find_byte(xs: Bytes, start: u64, end: u64, byte: u8) -> Option[u64] {
+    let hay = list.slice(xs, start, end)
+    let n = list.len(hay)
+    let one: u64 = int.widen(byte)
+    let spread = one * 0x0101010101010101
+    let mut i: u64 = 0
+    if n >= 8 {
+        let mask = byte_word_mask(hay, 0, spread)
+        if mask != 0 {
+            let bit: u64 = int.widen(int.trailing_zeros(mask))
+            return Some(start + (bit >> 3))
+        }
+        i = 8
+    }
+    if n - i >= 32 {
+        if let Some(at) = find_byte_blocks(hay, i, byte) {
+            return Some(start + at)
+        }
+        return None
+    }
+    while n - i >= 8 {
+        let mask = byte_word_mask(hay, i, spread)
+        if mask != 0 {
+            let bit: u64 = int.widen(int.trailing_zeros(mask))
+            return Some(start + i + (bit >> 3))
+        }
+        i += 8
+    }
+    while i < n {
+        if hay[i] == byte {
+            return Some(start + i)
+        }
+        i += 1
+    }
+    None
+}
+
 /// A view of the last element, or None when empty. View: anchored to xs; FREEZE xs.
 /// Cost: O(1). Ex: `if let Some(top) = list.last(stack) { .. }`
 pub fn last[T](xs: List[T]) -> Option[View[T]] in xs {

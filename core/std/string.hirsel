@@ -136,13 +136,18 @@ pub fn clear(mut s: String) {
 /// The first byte position at or after `start` where pat occurs, or None. An empty pat is
 /// found at `start`. Fails: Bounds (failure) when start > byte_len (`list.slice`).
 /// Alloc: nothing.
-/// Cost: O(len x len(pat)) worst case (naive search, as Go for short patterns).
+/// Cost: O(len x len(pat)) worst case. For multiple bytes, test both endpoints
+/// before checking the remaining bytes.
 /// Ex: `let Some(colon) = string.find(line, 0, ":") else { return Error(Malformed) }`
 pub fn find(s: String, start: u64, pat: String) -> Option[u64] {
     let n = string.byte_len(s)
-    let hay = list.slice(string.as_bytes(s), start, n)
+    let source = string.as_bytes(s)
     let needle = string.as_bytes(pat)
     let m = list.len(needle)
+    if m == 1 {
+        return list.find_byte(source, start, n, needle[0])
+    }
+    let hay = list.slice(source, start, n)
     let rest = list.len(hay)
     if m > rest {
         return None
@@ -150,51 +155,57 @@ pub fn find(s: String, start: u64, pat: String) -> Option[u64] {
     if m == 0 {
         return Some(start)
     }
-    // Scan for the first byte alone; compare the rest only at a candidate.
-    let first = needle[0]
-    let one: u64 = int.widen(first)
-    let spread = one * 0x0101010101010101
-    let last = rest - m
+    let at = find_pattern(hay, needle)
+    if at <= rest - m {
+        Some(start + at)
+    } else {
+        None
+    }
+}
+
+fn pattern_middle(hay: Bytes, needle: Bytes, at: u64, gap: u64) -> bool {
+    for j in 1u64 .. gap {
+        if hay[at + j] != needle[j] {
+            return false
+        }
+    }
+    true
+}
+
+// A pair of endpoint bytes rejects candidates before checking their middle.
+// The starting positions must fit the full pattern in the haystack.
+// A miss returns the number of possible starts.
+fn find_pattern(hay: Bytes, needle: Bytes) -> u64 {
+    let gap = list.len(needle) - 1
+    let ends = list.slice(hay, gap, list.len(hay))
+    let end = list.len(ends)
+    let starts = list.slice(hay, 0, end)
+    let head = needle[0]
+    let tail = needle[gap]
+    let heads: Simd[u8, 32] = simd.splat(head)
+    let tails: Simd[u8, 32] = simd.splat(tail)
     let mut i: u64 = 0
-    while i <= last {
-        // Two words at a time while neither holds the first byte. A word w holds it where
-        // w ^ spread has a zero byte; (v - 0x01..) & ~v & 0x80.. marks the lowest zero byte
-        // of v exactly (a borrow can mark only bytes above it).
-        while i + 16 <= rest {
-            let v0 = list.word_le(hay, i) ^ spread
-            let v1 = list.word_le(hay, i + 8) ^ spread
-            let z0 = int.wrapping_sub(v0, 0x0101010101010101) & ~v0 & 0x8080808080808080
-            let z1 = int.wrapping_sub(v1, 0x0101010101010101) & ~v1 & 0x8080808080808080
-            if z0 | z1 != 0 {
-                // Bit 8j + 7 marks byte j of its word.
-                let low: u64 = int.widen(int.trailing_zeros(z0))
-                let high: u64 = int.widen(int.trailing_zeros(z1))
-                if z0 != 0 {
-                    i += low >> 3
-                } else {
-                    i += 8 + (high >> 3)
-                }
-                break
+    while end - i >= 32 {
+        let a: Simd[u8, 32] = list.lanes(starts, i)
+        let b: Simd[u8, 32] = list.lanes(ends, i)
+        let mut candidates = simd.bitmask(simd.eq(a, heads) & simd.eq(b, tails))
+        while candidates != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(candidates))
+            let at = i + offset
+            if pattern_middle(hay, needle, at, gap) {
+                return at
             }
-            i += 16
+            candidates &= int.wrapping_sub(candidates, 1)
         }
-        // At a candidate, or within 16 bytes of the end: byte steps to the next candidate.
-        while i <= last && hay[i] != first {
-            i += 1
-        }
-        if i > last {
-            return None
-        }
-        let mut k: u64 = 1
-        while k < m && hay[i + k] == needle[k] {
-            k += 1
-        }
-        if k == m {
-            return Some(start + i)
+        i += 32
+    }
+    while i < end {
+        if starts[i] == head && ends[i] == tail && pattern_middle(hay, needle, i, gap) {
+            return i
         }
         i += 1
     }
-    None
+    end
 }
 
 /// Whether s begins with p. Cost: O(len(p)). Ex: `string.starts_with(line, "GET ")`

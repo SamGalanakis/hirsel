@@ -29,6 +29,65 @@ fn present(o: Option[View[u64]]) -> u64 {
     }
 }
 
+// Every lane of a four-vector group and its tail can hold the first hit.
+// The second adjacent hit must lose even when it occupies the next vector.
+// expect: run find_byte_order_and_range() = true
+fn find_byte_order_and_range() -> bool {
+    let n: u64 = 195
+    let mut xs: Bytes = result.unwrap(list.with_capacity(n))
+    result.unwrap(list.fill(mut xs, n, 1))
+    for at in 0u64 .. n - 1 {
+        xs[at] = 255
+        xs[at + 1] = 255
+        let matched = bound bytes 0 {
+            list.find_byte(xs, 0, n, 255) == Some(at) && list.find_byte(xs, 0, at, 255) == None && list.find_byte(xs, at + 1, n, 255) == Some(at + 1)
+        }
+        match matched {
+            Ok(true) => (),
+            _ => return false,
+        }
+        xs[at] = 1
+        xs[at + 1] = 1
+    }
+    list.find_byte(xs, 1, n, 0) == None
+}
+
+fn find_byte_scalar(xs: Bytes, start: u64, end: u64, byte: u8) -> Option[u64] {
+    for i in start .. end {
+        if xs[i] == byte {
+            return Some(i)
+        }
+    }
+    None
+}
+
+// expect: run find_byte_matches_scalar() = true
+fn find_byte_matches_scalar() -> bool {
+    let len: u64 = 277
+    let mut xs: Bytes = result.unwrap(list.with_capacity(len))
+    let mut state: u32 = 0x8c11d14b
+    for _ in 0u64 .. len {
+        state = int.wrapping_add(int.wrapping_mul(state, 1664525), 1013904223)
+        let byte: u8 = int.narrow(state >> 24)
+        result.unwrap(list.push(mut xs, byte))
+    }
+    for start in 0u64 .. 128 {
+        state = int.wrapping_add(int.wrapping_mul(state, 1664525), 1013904223)
+        let span: u64 = int.widen(state)
+        let end = start + span % (len - start + 1)
+        let byte: u8 = int.narrow(state >> 24)
+        if list.find_byte(xs, start, end, byte) != find_byte_scalar(xs, start, end, byte) {
+            return false
+        }
+    }
+    true
+}
+
+// expect: run find_byte_reversed_range() = fail Bounds
+fn find_byte_reversed_range() -> Option[u64] {
+    list.find_byte(result.unwrap(b"abc"), 2, 1, b'b')
+}
+
 // expect: run first_of_five() = 7
 fn first_of_five() -> u64 {
     let xs = five(7, 1, 2, 3, 4)

@@ -800,8 +800,9 @@ pub fn scoped_slots(b: &Body, signatures: &[Signature]) -> ScopedSlots {
         .map(|e| !e)
         .collect();
     let slots = slots_with(b, &from);
+    let register = register_slots(b);
     for s in 0..k {
-        if slots.lives[s].is_empty() {
+        if slots.lives[s].is_empty() || register[s] {
             out[s] = false;
         }
     }
@@ -851,6 +852,54 @@ pub fn scoped_slots(b: &Body, signatures: &[Signature]) -> ScopedSlots {
         words,
         may,
     }
+}
+
+/// Slots that hold one scalar and are reached only by whole-place reads and
+/// stores through unstepped addresses of their own: no step, derived address,
+/// `pointer`, call argument, copy or other use. An engine keeps such a slot in a
+/// register, so it holds no frame bytes to share and needs no storage markers.
+fn register_slots(b: &Body) -> Vec<bool> {
+    let n = b.values.len();
+    let mut out: Vec<bool> = b
+        .slots
+        .iter()
+        .map(|t| matches!(t, PlaceTy::Value(_)))
+        .collect();
+    // The slot each address is the bare home of, if any.
+    let home: Vec<Option<usize>> = b
+        .addresses
+        .iter()
+        .map(|info| match info.base {
+            AddressBase::Slot(s) => Some(s.index()),
+            _ => None,
+        })
+        .collect();
+    for info in &b.addresses {
+        match info.base {
+            AddressBase::Slot(s) if info.steps.len != 0 => out[s.index()] = false,
+            AddressBase::Address(x) => {
+                if let Some(s) = home[x.index()] {
+                    out[s] = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut other = |name: usize| {
+        if let Some(s) = name.checked_sub(n).and_then(|a| home[a]) {
+            out[s] = false;
+        }
+    };
+    for inst in &b.insts {
+        match *inst {
+            Inst::Read { .. } | Inst::Store { .. } | Inst::Address { .. } => {}
+            _ => operands(b, inst).0.into_iter().for_each(&mut other),
+        }
+    }
+    for bi in 0..b.terminators.len() {
+        terminator_uses(b, bi).into_iter().for_each(&mut other);
+    }
+    out
 }
 
 /// [`scoped_slots`]'s answer.

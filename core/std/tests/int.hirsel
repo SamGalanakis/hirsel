@@ -240,3 +240,24 @@ fn byte_ascii_matches_char() -> u64 {
     }
     bad
 }
+
+// Source: Rust library/coretests/tests/num/int_macros.rs,
+// test_from_str and test_from_str_radix, a7c37f9f0ee5e93396106e9de20f4a86b4154e63, MIT.
+// expect: run rust_integer_radix_cases() = true
+fn rust_integer_radix_cases() -> bool {
+    let valid: Inline[(String, u32, i64), 8] =[("00100", 10, 100), ("-00100", 10, -100), ("1001", 2, 9), ("123", 8, 83), ("-1001", 2, -9), ("-123", 8, -83), ("-ffff", 16, -65535), ("-Z", 36, -35),]
+    for row in valid {
+        let (input, radix, value) = row
+        if result.unwrap(int.parse_int(input, radix)) != value {
+            return false
+        }
+    }
+    let invalid: Inline[(String, u32, u64), 3] =[("Z", 35, 100), ("-9", 2, 101), ("10_0", 10, 102),]
+    for row in invalid {
+        let (input, radix, error) = row
+        if signed_error(int.parse_int(input, radix)) != error {
+            return false
+        }
+    }
+    unsigned_error(int.parse_uint("-9", 10)) == 100
+}

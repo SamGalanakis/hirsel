@@ -1,3 +1,4 @@
+// test-vectors
 // Contract tests for `float` (core/std/float.hirsel), written to run once an engine runs
 // library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
 // gives the result derived by hand from the contract, or `fail Cause` for the failure the
@@ -442,4 +443,47 @@ fn exp_nan(b: u64) -> bool {
     let inf = float.from_bits64(b)
     let n = inf - inf
     float.to_bits64(float.exp(n)) == 0x7ff8000000000000 && float.to_bits64(float.exp(-n)) == 0x7ff8000000000000
+}
+
+// Source: Nigel Tao's parse-number-fxx-test-data, data/more-test-cases.txt,
+// 55d79b184b7d8fac2e143e89dc19b766ec4e54b8, Apache-2.0.
+// expect: run nigel_parse_numbers() = true
+fn nigel_parse_numbers() -> bool {
+    let data = nigel_parse_number_data()
+    let mut at: u64 = 0
+    while at < string.byte_len(data) {
+        let end = option.unwrap(string.find(data, at, "\n"))
+        let want32: u32 = int.narrow(result.unwrap(int.parse_uint(string.slice(data, at + 5, at + 13), 16)))
+        let want64 = result.unwrap(int.parse_uint(string.slice(data, at + 14, at + 30), 16))
+        let input = string.slice(data, at + 31, end)
+        let pass32 = match float.parse32(input) {
+            Ok(x) => float.to_bits32(x) == want32,
+            Error(OutOfRange) => want32 & 0x7fffffff == 0x7f800000,
+            Error(_) => false,
+        }
+        let pass64 = match float.parse64(input) {
+            Ok(x) => float.to_bits64(x) == want64,
+            Error(OutOfRange) => want64 & 0x7fffffffffffffff == 0x7ff0000000000000,
+            Error(_) => false,
+        }
+        if !pass32 || !pass64 {
+            fail(result.unwrap(string.from(input)))
+        }
+        at = end + 1
+    }
+    true
+}
+
+// Source: Ryū tests/d2s_test.rs, 75f9e707e77c89717ffb9c2a01fe2c28a016cc82,
+// Apache-2.0. Convert the expected spelling to coefficient and power of ten.
+// expect: run ryu_shortest64() = true
+fn ryu_shortest64() -> bool {
+    let cases: Inline[(u64, u64, i64), 19] =[(0x431189440e9c8000, 1234, 12), (0x4345eb951243a000, 1234, 13), (0x5a8450037881b9b7, 11, 127), (0x32a72b3032405190, 11, -65), (0x4005bf0a8b145769, 2718281828459045, -15), (0x3e60000000000000, 29802322387695312, -24), (0xc352bd2668e077c4, 2109808898695963, 1), (0x00000000000f4240, 4940656, -324), (0x00000000016e3600, 118575755, -324), (0x0000008cdcdea440, 2989102097996, -324), (0x434018601510c000, 90608011534336, 2), (0x43d055dc36f24000, 4708356024711512, 3), (0x43e052961c6f8000, 9409340012568248, 3), (0x4830f0cf064dd592, 5764607523034235, 24), (0x4840f0cf064dd592, 1152921504606847, 25), (0x4850f0cf064dd592, 2305843009213694, 25), (0x40112e0be8047a7d, 4294967294, -9), (0x40112e0be815a889, 4294967295, -9), (0x40112e0be826d695, 4294967296, -9),]
+    for row in cases {
+        let (bits, coefficient, exponent) = row
+        if float.shortest64(float.from_bits64(bits)) != (coefficient, exponent) {
+            return false
+        }
+    }
+    true
 }

@@ -1,18 +1,18 @@
 // Shared port entry. The application supplies a direct match/if dispatcher, not a table
 // of callable constants. A task prepares once, warms up and runs on the same state.
-pub fn main(out: Stdout, d: Dir, argv: Args, dispatch: scoped fn(String, String, u64, u64) -> Result[u32, helper.Error]) -> Result[(), Exit] waits {
+pub fn main(out: Stdout, d: Dir, argv: Args, dispatch: scoped fn(helper.Settings, String, u64, u64) -> Result[u32, helper.Error]) -> Result[(), Exit] waits {
     main_wait(out, d, argv, dispatch)
 }
 
 // Waiting dispatchers may borrow Tasks or other capabilities from their main.
-pub fn main_wait(out: Stdout, d: Dir, argv: Args, dispatch: scoped fn(String, String, u64, u64) -> Result[u32, helper.Error] waits) -> Result[(), Exit] waits {
+pub fn main_wait(out: Stdout, d: Dir, argv: Args, dispatch: scoped fn(helper.Settings, String, u64, u64) -> Result[u32, helper.Error] waits) -> Result[(), Exit] waits {
     match execute(out, d, argv, dispatch) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 1)),
     }
 }
 
-fn execute(out: Stdout, d: Dir, argv: Args, dispatch: scoped fn(String, String, u64, u64) -> Result[u32, helper.Error] waits) -> Result[(), helper.Error] waits {
+fn execute(out: Stdout, d: Dir, argv: Args, dispatch: scoped fn(helper.Settings, String, u64, u64) -> Result[u32, helper.Error] waits) -> Result[(), helper.Error] waits {
     let Some(path) = args.get(argv, 0) else {
         return Error(Config)
     }
@@ -23,13 +23,14 @@ fn execute(out: Stdout, d: Dir, argv: Args, dispatch: scoped fn(String, String, 
         Ok(take s) => take s,
         Error(_) => return Error(Config)
     }
-    let count = helper.config_i64(config, name, "iterations")?
-    let expected = helper.config_i64(config, name, "checksum")?
+    let settings = helper.read_settings(config, name)?
+    let count = helper.config_i64(settings, "iterations")?
+    let expected = helper.config_i64(settings, "checksum")?
     if count < 0 || expected < 0 || expected > 4294967295 {
         return Error(Config)
     }
     let iterations: u64 = int.narrow(count)
-    let warmup: u64 = match helper.config_i64(config, name, "warmup_iterations") {
+    let warmup: u64 = match helper.config_i64(settings, "warmup_iterations") {
         Ok(n) => if n < 0 {
             return Error(Config)
         } else {
@@ -38,7 +39,7 @@ fn execute(out: Stdout, d: Dir, argv: Args, dispatch: scoped fn(String, String, 
         Error(Config) => default_warmup(iterations),
         Error(take e) => return Error(take e),
     }
-    let actual = dispatch(config, name, warmup, iterations)?
+    let actual = dispatch(settings, name, warmup, iterations)?
     let observed: i64 = int.widen(actual)
     let actual_word: u64 = int.widen(actual)
     let expected_word: u64 = int.narrow(expected)

@@ -137,7 +137,7 @@ def suite_source():
     exact = [('Etc::CacheSimulation', 'cache_simulation'), ('Etc::Words', 'words'),
              ('Etc::LogParser', 'log_parser'), ('Etc::GameOfLife', 'game_of_life'),
              ('Etc::Sieve', 'sieve'), ('Etc::TextRaytracer', 'text_raytracer'), ('Etc::NeuralNet', 'neural_net')]
-    lines = ['pub fn dispatch(tasks:Tasks,c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] waits {']
+    lines = ['pub fn dispatch(tasks:Tasks,c:helper.Settings,n:String,w:u64,i:u64)->Result[u32,helper.Error] waits {']
     for prefix, module in groups:
         lines.append(f'if string.starts_with(n,"{prefix}") {{return {module}.dispatch(c,n,w,i)}}')
     for name, module in exact:
@@ -145,7 +145,7 @@ def suite_source():
     lines += ['if string.starts_with(n,"Matmul::") {return matmul.dispatch_wait(tasks,c,n,w,i)}',
               'Error(UnknownTask)', '}',
               'pub fn main(tasks:Tasks,out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {',
-              'harness.main_wait(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] waits {dispatch(tasks,c,n,w,i)})', '}']
+              'harness.main_wait(out,d,argv,fn(c:helper.Settings,n:String,w:u64,i:u64)->Result[u32,helper.Error] waits {dispatch(tasks,c,n,w,i)})', '}']
     return '\n'.join(lines) + '\n'
 
 

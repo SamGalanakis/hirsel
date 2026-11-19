@@ -77,11 +77,11 @@ fn run_regex(source: String, vars: Map[String, String], runs: u64) -> Result[u32
     Ok(int.wrapping_add(checksum, helper.checksum_str(rendered)))
 }
 
-pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
     if name != "Template::Parse" && name != "Template::Regex" {
         return Error(UnknownTask)
     }
-    let count = helper.config_i64(config, name, "count")?
+    let count = helper.config_i64(config, "count")?
     if count < 0 {
         return Error(Config)
     }
@@ -127,7 +127,7 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
 }
 
 pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
-    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+    harness.main(out, d, argv, fn(c: helper.Settings, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
         dispatch(c, n, w, i)
     })
 }

@@ -1,9 +1,9 @@
 // kostya/LangArena 3c9f84d benchmarks/sieve.rs.
-pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
     if name != "Etc::Sieve" {
         return Error(UnknownTask)
     }
-    let size = helper.config_i64(config, name, "limit")?
+    let size = helper.config_i64(config, "limit")?
     if size < 2 {
         return Error(Config)
     }
@@ -42,7 +42,7 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
 }
 
 pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
-    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+    harness.main(out, d, argv, fn(c: helper.Settings, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
         dispatch(c, n, w, i)
     })
 }

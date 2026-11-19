@@ -39,12 +39,12 @@ fn sha256(data: Bytes) -> u32 {
     a | (b << 8u32) | (c << 16u32) | (d << 24u32)
 }
 
-pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
     let sha = name == "Hash::SHA256"
     if !sha && name != "Hash::CRC32" {
         return Error(UnknownTask)
     }
-    let n = helper.config_i64(config, name, "size")?
+    let n = helper.config_i64(config, "size")?
     if n < 0 {
         return Error(Config)
     }
@@ -66,7 +66,7 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
 }
 
 pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
-    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+    harness.main(out, d, argv, fn(c: helper.Settings, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
         dispatch(c, n, w, i)
     })
 }

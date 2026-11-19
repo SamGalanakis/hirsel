@@ -120,12 +120,12 @@ fn step(mut c: Cache, mut g: helper.Lcg, iteration: u64, values: i32, mut hits: 
     Ok(())
 }
 
-pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
     if name != "Etc::CacheSimulation" {
         return Error(UnknownTask)
     }
-    let values = helper.config_i64(config, name, "values")?
-    let capacity = helper.config_i64(config, name, "size")?
+    let values = helper.config_i64(config, "values")?
+    let capacity = helper.config_i64(config, "size")?
     if values <= 0 || values > 2147483647 || capacity < 0 {
         return Error(Config)
     }
@@ -146,7 +146,7 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
 }
 
 pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
-    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+    harness.main(out, d, argv, fn(c: helper.Settings, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
         dispatch(c, n, w, i)
     })
 }

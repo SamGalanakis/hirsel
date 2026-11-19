@@ -58,9 +58,9 @@ fn fannkuch(n: u64) -> (i32, i32) {
     }
 }
 
-fn mandelbrot(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
-    let wi = helper.config_i64(config, name, "w")?
-    let hi = helper.config_i64(config, name, "h")?
+fn mandelbrot(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+    let wi = helper.config_i64(config, "w")?
+    let hi = helper.config_i64(config, "h")?
     if wi <= 0 || hi <= 0 {
         return Error(Config)
     }
@@ -223,8 +223,8 @@ fn ata(u: List[f64]) -> Result[List[f64], helper.Error] {
     times(temp, true)
 }
 
-fn spectral(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
-    let ni = helper.config_i64(config, name, "size")?
+fn spectral(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+    let ni = helper.config_i64(config, "size")?
     if ni <= 0 {
         return Error(Config)
     }
@@ -246,7 +246,7 @@ fn spectral(config: String, name: String, warmup: u64, iterations: u64) -> Resul
     helper.checksum_f64(float.sqrt(vbv / vv))
 }
 
-pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
     if name == "CLBG::Nbody" {
         return nbody(warmup, iterations)
     }
@@ -259,7 +259,7 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
     if name != "CLBG::Fannkuchredux" {
         return Error(UnknownTask)
     }
-    let size = helper.config_i64(config, name, "n")?
+    let size = helper.config_i64(config, "n")?
     if size < 1 || size > 32 {
         return Error(Config)
     }
@@ -272,7 +272,7 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
 }
 
 pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
-    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+    harness.main(out, d, argv, fn(c: helper.Settings, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
         dispatch(c, n, w, i)
     })
 }

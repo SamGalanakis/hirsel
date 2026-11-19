@@ -53,11 +53,11 @@ fn multiply(a: List[List[f64]], b: List[List[f64]]) -> Result[List[List[f64]], h
     Ok(take c)
 }
 
-pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
     if name != "Matmul::Single" {
         return Error(UnknownTask)
     }
-    let ni = helper.config_i64(config, name, "n")?
+    let ni = helper.config_i64(config, "n")?
     if ni <= 0 {
         return Error(Config)
     }
@@ -156,7 +156,7 @@ fn parallel(tasks: Tasks, a: Arc[Matrix], b: List[List[f64]], threads: u64) -> R
     Error(Config)
 }
 
-pub fn dispatch_wait(tasks: Tasks, config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] waits {
+pub fn dispatch_wait(tasks: Tasks, config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] waits {
     if name == "Matmul::Single" {
         return dispatch(config, name, warmup, iterations)
     }
@@ -169,7 +169,7 @@ pub fn dispatch_wait(tasks: Tasks, config: String, name: String, warmup: u64, it
     } else {
         return Error(UnknownTask)
     }
-    let ni = helper.config_i64(config, name, "n")?
+    let ni = helper.config_i64(config, "n")?
     if ni <= 0 {
         return Error(Config)
     }
@@ -194,7 +194,7 @@ pub fn parallel_work(tasks: Tasks, n: u64, threads: u64, rounds: u64) -> Result[
 }
 
 pub fn main(tasks: Tasks, out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
-    harness.main_wait(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] waits {
+    harness.main_wait(out, d, argv, fn(c: helper.Settings, n: String, w: u64, i: u64) -> Result[u32, helper.Error] waits {
         dispatch_wait(tasks, c, n, w, i)
     })
 }

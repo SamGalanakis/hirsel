@@ -35,7 +35,12 @@ PINS = {
     "langarena": "3c9f84ddaeec834c0631747cb789e8cfd602f993",
 }
 COUNTERS = ("instructions", "cycles")
-EXPECTED = measure.EXPECTED
+STARTUP = {
+    "awfy": ("Bounce", "AWFY original (Bounce)"),
+    "pool": ("List", "AWFY pool/index (List)"),
+    "arena": ("CLBG::Nbody", "LangArena (CLBG::Nbody)"),
+}
+EXPECTED = {**measure.EXPECTED, "Startup": tuple(label for _, label in STARTUP.values())}
 INSTRUCTION_LIMIT = Decimal(2)
 SIZE_LIMIT = 2048
 SIZE_ROW = "AWFY original-14 harness"
@@ -46,11 +51,14 @@ CHECKBOX_METRICS = {
 }
 CHECKBOX_CLIENTS = 64
 NOTES = (
-    "Instructions and cycles count user-space CPU work; seconds measures elapsed time. "
-    "Hirsel checks bounds and overflow and admits bytes. Certified images elide Step charging. "
-    "Rust and Goose have no Hirsel replay, Host or budget machinery. The ports use different "
-    "libraries and layouts. Each AWFY port checks the reference result internally; LangArena "
-    "checks the same one-iteration Rust oracle.",
+    "Hirsel checks bounds and overflow and admits bytes; Step charging is elided on certified rows; "
+    "Rust and Goose check bounds only.",
+    "Runtime counters count user-space CPU work. Seconds use perf duration_time around the same "
+    "whole-process command on each side, including startup, setup, warmups, measured iterations, "
+    "verification and exit. The LangArena runtime fixture is the pinned upstream run.js, copied byte "
+    "for byte, with upstream checksums. Each AWFY row verifies the reference result internally. "
+    "The startup rows report a representative whole process with one iteration and no warmup. "
+    "LangArena startup uses the one-iteration Rust oracle. The ports use different libraries and layouts.",
     "The nightly instruction gate flags Hirsel increases above 2%. All CPU counters must be fully active. "
     "The size row measures each original-14 harness after GNU strip, reports growth, and flags Hirsel "
     "increases of 2,048 bytes or more. The compile rows keep dependencies built and use one Cargo "
@@ -217,6 +225,10 @@ class Board:
                 certified = {True: "yes", False: "no", None: "unknown"}[row["certified"]]
                 lines.append("| " + " | ".join((row["goal"], row["row"], metric, *cells,
                                                   certified, row["commit"][:8])) + " |")
+        notes = [f"- {row['goal']}/{row['row']}. {row['notes']}"
+                 for row in self.report["rows"] if row.get("notes")]
+        if notes:
+            lines += ["", "## Runtime notes", "", *notes]
         if self.report["failures"]:
             lines += ["", "## Incomplete samples", ""]
             lines += [f"- {label}: {reason}" for label, reason in self.report["failures"].items()]
@@ -323,7 +335,7 @@ class Board:
             return receipt.REFUSED
         return 3 if failed else 0
 
-    def row(self, goal, name, certified, samples, fields):
+    def row(self, goal, name, certified, samples, fields, *, notes=None):
         label = f"{goal}/{name}"
         if name not in EXPECTED.get(goal, ()) or any(
             (row["goal"], row["row"]) == (goal, name) for row in self.report["rows"]
@@ -351,7 +363,7 @@ class Board:
         self.report["rows"].append({"goal": goal, "row": name, "certified": certified,
                                     "status": "ok" if complete else "failed",
                                     "commit": self.report["commit"], "samples": samples,
-                                    "metrics": fields, "ratios": ratios(samples, fields)})
+                                    "metrics": fields, "ratios": ratios(samples, fields), "notes": notes})
         self.save()
 
     def attempt(self, label, operation, *args):
@@ -363,30 +375,17 @@ class Board:
             self.save()
 
 
-def runtime_rows(board, suite, directory, upstream, tools):
-    goal = measure.SUITES[suite]
-    rows = measure.runtime_cases(suite, directory, upstream)
-    fixture = receipt.runtime_fixture(suite, directory, upstream)
-    samples_dir = board.out / "runtime" / goal
-    samples_dir.mkdir(parents=True)
-    siblings = sibling_cpus(os.sched_getaffinity(0))
-    verified = []
-    for index, (name, commands) in enumerate(rows):
-        row = receipt.runtime_case(suite, name, directory, *commands["hirsel"], fixture, tools)
-        certified = row["certified"]
-        samples = {}
-        order = ("rust", "hirsel", "goose") if index % 2 == 0 else ("goose", "hirsel", "rust")
-        for side in order:
-            command, marker = commands[side]
-            target = samples_dir / f"{name.replace('::', '-')}-{side}"
-            env = build.capped_env(board.out)
-            label = f"{goal}/{name}/{side}"
-            if side == "hirsel":
-                sample = receipt.observe(row, target, env, siblings, label=label)
-                board.report["instruction_receipt"]["rows"].append(row)
-                samples[side] = sample
-                continue
-            with smt_activity(siblings, label) as busy:
+def sample_runtime(row, commands, directory, samples_dir, env, siblings, index, label):
+    samples = {}
+    order = ("rust", "hirsel", "goose") if index % 2 == 0 else ("goose", "hirsel", "rust")
+    for side in order:
+        command, marker = commands[side]
+        target = samples_dir.with_name(f"{samples_dir.name}-{side}")
+        if side == "hirsel":
+            sample = receipt.observe(row, target, env, siblings, label=f"{label}/{side}")
+            output = row["stdout"].encode().splitlines(keepends=True)
+        else:
+            with smt_activity(siblings, f"{label}/{side}") as busy:
                 sample = measure.core_measure.sample(command, target, env=env, cwd=directory, pmu_times=True)
             sample["smt_busy_percent"] = busy
             output = (target / "stdout").read_bytes().splitlines(keepends=True)
@@ -394,10 +393,55 @@ def runtime_rows(board, suite, directory, upstream, tools):
                 re.fullmatch(marker, line) for line in output)
             if sample["status"] == "ok" and not sample["verified"]:
                 sample["status"] = "wrong-result"
-            samples[side] = sample
+        if row["suite"] == "arena" and not sample["verified"]:
+            name = row["argv"][-1].encode()
+            if any(line.startswith(name + b": ERR[") or
+                   (line.startswith(name + b" checksum=") and line.endswith(b" status=ERR\n"))
+                   for line in output):
+                sample["status"] = "wrong-checksum"
+        samples[side] = sample
+    if not row["certified"] and samples["hirsel"]["status"] == "ok":
+        samples["hirsel"]["status"] = "step-not-certified"
+    return samples
+
+
+def matmul_notes(name):
+    widths = {"Matmul::T4": 4, "Matmul::T8": 8, "Matmul::T16": 16}
+    if name in widths:
+        width = widths[name]
+        return (f"Hirsel submits {width} row blocks to one worker for the process run. "
+                f"Rust creates and drops a {width}-worker Rayon pool each iteration. "
+                f"Goose starts {width} workers at construction and joins them at checksum time. "
+                "All workers share the measurement CPU.")
+
+
+def runtime_rows(board, suite, directory, upstream, tools, *, config=None, startup=False):
+    goal = measure.SUITES[suite]
+    rows = (measure.arena_rows(directory, config) if config is not None
+            else measure.runtime_cases(suite, directory, upstream))
+    fixture = receipt.runtime_fixture(suite, directory, upstream, config=config)
+    startup_name, startup_label = STARTUP[suite]
+    samples_dir = board.out / "runtime" / ("Startup" if startup else goal)
+    samples_dir.mkdir(parents=True)
+    siblings = sibling_cpus(os.sched_getaffinity(0))
+    env = build.capped_env(board.out)
+    verified = []
+    for index, (name, commands) in enumerate(rows):
+        if startup and name != startup_name:
+            continue
+        row = receipt.runtime_case(suite, name, directory, *commands["hirsel"], fixture, tools)
+        title, label = ("Startup", startup_label) if startup else (goal, name)
+        target = samples_dir / name.replace("::", "-")
+        samples = sample_runtime(row, commands, directory, target, env, siblings, index, f"{title}/{label}")
+        if not startup:
+            board.report["instruction_receipt"]["rows"].append(row)
         if all(sample["verified"] for sample in samples.values()):
             verified.append(name)
-        board.row(goal, name, certified, samples, ("instructions",))
+        metrics = ("seconds",) if startup else ("seconds", "instructions") if suite == "arena" else ("instructions",)
+        board.row(title, label, row["certified"], samples, metrics, notes=matmul_notes(name))
+        if suite != "arena" and name == startup_name:
+            board.row("Startup", startup_label, row["certified"],
+                      {side: sample.copy() for side, sample in samples.items()}, ("seconds",))
     return verified
 
 
@@ -710,8 +754,9 @@ def prepare_arena(out, args, compiler, artifacts, env):
         cwd=rust, env=cargo_scope(env))
     shutil.copy2(target / "release/benchmarks", out / "rust")
     build.goose_executable(compiler, args.goose / "bench/kostya/goose/src/main.goose", out / "goose", env)
-    rows = [dict(row, iterations=1, warmup_iterations=0, checksum=0)
-            for row in json.loads((args.langarena / "run.js").read_text())]
+    config = out / "run.js"
+    shutil.copyfile(args.langarena / config.name, config)
+    rows = json.loads(config.read_text())
     if sorted(row["name"] for row in rows) != sorted(EXPECTED["LangArena"]):
         raise ValueError("LangArena requires 50 distinct workloads")
     arena.build_hirsel(out, artifacts, rows, env)
@@ -773,17 +818,21 @@ def run_board(board, args):
         if awfy_ready:
             board.attempt("AWFY measurement", awfy_rows, board, awfy, args.awfy, tools)
         if arena_rows:
-            def sample_arena():
-                arena.oracle(arena_dir, arena_dir / "rust", arena_rows)
-                return runtime_rows(board, "arena", arena_dir, None, tools)
-            verified = board.attempt("LangArena runtime", sample_arena)
-        else:
-            verified = None
-        if compile_ready and verified and "CLBG::Spectralnorm" in verified:
-            board.attempt("Compile measurement", compile_rows, board, compile_dir, compile_ready,
-                          arena_dir / "one-iteration.json", tools)
+            fixture = arena_dir / "one-iteration.json"
+            startup_rows = [dict(row, iterations=1, warmup_iterations=0, checksum=0)
+                            for row in arena_rows]
+            board.attempt("LangArena one-iteration fixture",
+                          arena.oracle, arena_dir, arena_dir / "rust", startup_rows)
+            if "LangArena one-iteration fixture" not in board.report["failures"]:
+                board.attempt("LangArena startup", lambda: runtime_rows(
+                    board, "arena", arena_dir, None, tools, config=fixture, startup=True))
+                if compile_ready:
+                    board.attempt("Compile measurement", compile_rows, board, compile_dir, compile_ready,
+                                  fixture, tools)
+            board.attempt("LangArena runtime", lambda: runtime_rows(
+                board, "arena", arena_dir, None, tools, config=arena_dir / "run.js"))
         elif compile_ready:
-            board.report["failures"]["Compile measurement"] = "no verified Spectralnorm fixture"
+            board.report["failures"]["Compile measurement"] = "no one-iteration Spectralnorm fixture"
         if checkbox_ready:
             os.sched_setaffinity(0, args.measure_cpus[:2])
             board.attempt("Checkbox measurement", checkbox_rows, board, checkbox_dir, checkbox_ready,

@@ -139,8 +139,17 @@ python3 bench/awfy/board.py "$out" \
 The board builds the release compiler and shipping runtime, builds fresh
 peers, then samples AWFY original-14, AWFY pool/index (8), and LangArena
 (50). Each runtime row runs adjacent Rust, Hirsel and Goose samples, with
-the order reversed on alternate rows. The size row reuses verification of
-all 14 original workloads. The cold and edit compile rows compare the whole
+the order reversed on alternate rows. LangArena runtime uses the byte-for-byte
+upstream run.js and verifies its checksums. A checksum mismatch fails the row.
+Elapsed seconds cover the whole process on every side, including startup,
+setup, warmups, measured iterations, verification and exit. The Startup rows
+report Bounce, pool List and LangArena CLBG::Nbody with one iteration and zero
+warmups. LangArena startup and compile verification use the one-iteration
+Rust oracle.
+
+Hirsel checks bounds and overflow and admits bytes; Step charging is elided on certified rows; Rust and Goose check bounds only.
+
+The size row reuses verification of all 14 original workloads. The cold and edit compile rows compare the whole
 LangArena suite against Cargo. The warm build changes Spectralnorm's checksum
 from 1051192944 to 1051192945. It must compile at least one Hirsel part and
 rebuild the Cargo benchmark crate. Both executables must pass the new checksum

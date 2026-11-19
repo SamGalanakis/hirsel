@@ -59,80 +59,80 @@ fn named[in a](ms: IndexedSpan[std.json.Member] in a, name: String) -> bool {
     false
 }
 
-fn field[in a](ms: IndexedSpan[std.json.Member] in a, key: String) -> Option[View[std.json.Json]] in ms {
-    // JSON's last-value rule for repeated fields.
-    let mut found: Option[View[std.json.Json]] in ms = None
-    for m in ms {
-        if text.as_string(m.key) == key {
-            found = Some(m.value)
-        }
-    }
-    found
+type Setting = Integer(i64) | StringValue(String) | Invalid
+
+pub opaque type Settings {
+    fields: Map[String, Setting]
 }
 
-fn setting[in a](j: std.json.Json in a, name: String, key: String) -> Option[View[std.json.Json]] in j {
+fn own_fields[in a](fields: IndexedSpan[std.json.Member] in a) -> Result[Settings, Error] {
+    let mut owned: Map[String, Setting] = map.new()
+    for field in fields {
+        let key = mem(string.from(text.as_string(field.key)))?
+        let value = match field.value {
+            Num(t) => {
+                let parsed: Result[i64, ParseError] = int.parse(text.as_string(t))
+                match parsed {
+                    Ok(n) => Integer(n),
+                    Error(_) => Invalid
+                }
+            },
+            Str(t) => StringValue(mem(string.from(text.as_string(t)))?),
+            _ => Invalid,
+        }
+        mem(result.capacity_only(map.insert(mut owned, take key, take value)))?
+    }
+    Ok(Settings(fields: take owned))
+}
+
+fn task_settings[in a](j: std.json.Json in a, name: String) -> Result[Settings, Error] {
     match j {
         Arr(items) => {
             for item in items {
-                if let Obj(ms) = item {
-                    if named(ms, name) {
-                        return field(ms, key)
+                if let Obj(fields) = item {
+                    if named(fields, name) {
+                        return own_fields(fields)
                     }
                 }
             }
-            None
+            Error(Config)
         },
         Obj(ms) => {
             for m in ms {
                 if text.as_string(m.key) == name {
                     if let Obj(fields) = m.value {
-                        return field(fields, key)
+                        return own_fields(fields)
                     }
                 }
             }
-            None
+            Error(Config)
         },
-        _ => None,
+        _ => Error(Config),
     }
 }
 
-/// Reads one signed integer from the unchanged upstream array or object config.
-pub fn config_i64(config: String, name: String, key: String) -> Result[i64, Error] {
+/// Parses the upstream array or object config and keeps the selected task's fields.
+pub fn read_settings(config: String, name: String) -> Result[Settings, Error] {
     region r {
         let j = match std.json.parse(r, config) {
             Ok(x) => x,
             Error(_) => return Error(Config)
         }
-        let Some(value) = setting(j, name, key) else {
-            return Error(Config)
-        }
-        match value {
-            Num(t) => {
-                let parsed: Result[i64, ParseError] = int.parse(text.as_string(t))
-                match parsed {
-                    Ok(n) => Ok(n),
-                    Error(_) => Error(Config)
-                }
-            },
-            _ => Error(Config),
-        }
+        task_settings(j, name)
     }
 }
 
-/// Returns an owned configuration string; it outlives the temporary JSON region.
-pub fn config_s(config: String, name: String, key: String) -> Result[String, Error] {
-    region r {
-        let j = match std.json.parse(r, config) {
-            Ok(x) => x,
-            Error(_) => return Error(Config)
-        }
-        let Some(value) = setting(j, name, key) else {
-            return Error(Config)
-        }
-        match value {
-            Str(t) => mem(string.from(text.as_string(t))),
-            _ => Error(Config)
-        }
+pub fn config_i64(settings: Settings, key: String) -> Result[i64, Error] {
+    match map.get(settings.fields, key) {
+        Some(Integer(n)) => Ok(n),
+        _ => Error(Config),
+    }
+}
+
+pub fn config_s(settings: Settings, key: String) -> Result[String, Error] {
+    match map.get(settings.fields, key) {
+        Some(StringValue(s)) => mem(string.from(s)),
+        _ => Error(Config),
     }
 }
 

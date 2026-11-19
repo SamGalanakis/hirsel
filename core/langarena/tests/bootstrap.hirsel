@@ -34,11 +34,11 @@ fn encode(s: String) -> Result[String, helper.Error] {
     Ok(take result)
 }
 
-pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
     if name != "Base64::Encode" {
         return Error(UnknownTask)
     }
-    let size = helper.config_i64(config, name, "size")?
+    let size = helper.config_i64(config, "size")?
     if size < 0 {
         return Error(Config)
     }
@@ -72,7 +72,7 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
 }
 
 pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
-    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+    harness.main(out, d, argv, fn(c: helper.Settings, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
         dispatch(c, n, w, i)
     })
 }
@@ -100,10 +100,11 @@ pub fn helper_laws() -> bool {
         return false
     }
     let cfg = "{\"Probe\":{\"count\":-3,\"word\":\"hé\"}}"
-    if result.unwrap(helper.config_i64(cfg, "Probe", "count")) != -3i64 {
+    let settings = result.unwrap(helper.read_settings(cfg, "Probe"))
+    if result.unwrap(helper.config_i64(settings, "count")) != -3i64 {
         return false
     }
-    if result.unwrap(helper.config_s(cfg, "Probe", "word")) != "hé" {
+    if result.unwrap(helper.config_s(settings, "word")) != "hé" {
         return false
     }
     if helper.checksum_str("") != 5381u32 || helper.checksum_str("a") != 177670u32 || helper.checksum_str("abc") != 193485963u32 {

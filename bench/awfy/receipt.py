@@ -75,9 +75,9 @@ def source_fixture(manifest, files):
     }
 
 
-def runtime_fixture(suite, directory, upstream):
+def runtime_fixture(suite, directory, upstream, *, config=None):
     if suite == "arena":
-        path = directory / "one-iteration.json"
+        path = config if config is not None else directory / "one-iteration.json"
         return {"fixture_files": {str(path): sha256(path)}}
     return fixture_identity(directory / "hirsel-inputs.json", upstream / "rebench.conf")
 
@@ -515,7 +515,11 @@ def peer_cycle_pairs(key, hirsel, args, siblings, env):
         raise ValueError("--upstream is required for AWFY and pool peer commands")
     name = key.split("/", 1)[1]
     cwd = Path(hirsel["cwd"])
-    cases = dict(measure.runtime_cases(suite, cwd, args.upstream))
+    if suite == "arena":
+        config, = map(Path, hirsel["fixture_files"])
+        cases = dict(measure.arena_rows(cwd, config))
+    else:
+        cases = dict(measure.runtime_cases(suite, cwd, args.upstream))
     commands = cases[name]
     command, marker = commands["hirsel"]
     argv = [f"./{command[0].name}", *map(str, command[1:])]

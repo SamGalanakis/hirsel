@@ -126,19 +126,22 @@ def runtime(command, marker, directory, exact_output=False):
     return result
 
 
+def arena_rows(root, config):
+    for row in json.loads(config.read_text()):
+        name = row["name"]
+        prefix = re.escape(name).encode()
+        native = root / f"{group(name)}-{root_mib(name)}"
+        marker = prefix + f" checksum={row['checksum']} expected={row['checksum']} status=OK".encode()
+        yield name, {
+            "hirsel": ([native, config.name, name], marker + rb"\n"),
+            **{side: ([root / side, config, name], prefix + rb": OK in [0-9.]+s\n")
+               for side in ("rust", "goose")},
+        }
+
+
 def rows(root, arena, upstream):
     if arena:
-        config = root / "one-iteration.json"
-        for row in json.loads(config.read_text()):
-            name = row["name"]
-            prefix = re.escape(name).encode()
-            native = root / f"{group(name)}-{root_mib(name)}"
-            marker = prefix + f" checksum={row['checksum']} expected={row['checksum']} status=OK".encode()
-            yield name, {
-                "hirsel": ([native, config.name, name], marker + rb"\n"),
-                **{side: ([root / side, config, name], prefix + rb": OK in [0-9.]+s\n")
-                   for side in ("rust", "goose")},
-            }
+        yield from arena_rows(root, root / "one-iteration.json")
         return
     yield "Hello", {side: ([root / f"{side}-hello"], HELLO) for side in SIDES}
     config = (upstream / "rebench.conf").read_text().split("# VMs have a name")[0]

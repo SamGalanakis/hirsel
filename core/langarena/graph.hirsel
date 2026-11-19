@@ -119,13 +119,13 @@ fn astar(adj: List[List[i32]]) -> Result[i32, helper.Error] {
     Ok(-1)
 }
 
-pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
     if name != "Graph::BFS" && name != "Graph::DFS" && name != "Graph::AStar" {
         return Error(UnknownTask)
     }
-    let vertices = helper.config_i64(config, name, "vertices")?
-    let jumps = helper.config_i64(config, name, "jumps")?
-    let jump_len = helper.config_i64(config, name, "jump_len")?
+    let vertices = helper.config_i64(config, "vertices")?
+    let jumps = helper.config_i64(config, "jumps")?
+    let jump_len = helper.config_i64(config, "jump_len")?
     if vertices <= 0 || vertices > 1073741823 || jumps < 0 || jumps > 2147483647 || jump_len < 0 || jump_len > 1073741823 {
         return Error(Config)
     }
@@ -164,7 +164,7 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
 }
 
 pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
-    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+    harness.main(out, d, argv, fn(c: helper.Settings, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
         dispatch(c, n, w, i)
     })
 }

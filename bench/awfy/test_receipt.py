@@ -258,32 +258,32 @@ class QuietCyclePairs(unittest.TestCase):
     def test_peer_pairs_use_the_same_workload_and_peer_checksum(self):
         args = Namespace(peer=["rust", "goose"], upstream=None, pairs=1,
                          max_attempts=1, sibling_busy_threshold=None)
-        cwd = Path("/benchmark")
-        name = "Sort::Merge"
-        native = {"suite": "arena", "cwd": str(cwd), "argv": ["./sort-64", "one-iteration.json", name],
-                  "marker": "checksum\n"}
-        commands = {"hirsel": ([cwd / "sort-64", *native["argv"][1:]], b"checksum\n"),
-                    "rust": ([cwd / "rust", cwd / "one-iteration.json", name], b"rust checksum\n"),
-                    "goose": ([cwd / "goose", cwd / "one-iteration.json", name], b"goose checksum\n")}
+        with tempfile.TemporaryDirectory() as temp:
+            cwd = Path(temp)
+            name = "Sort::Merge"
+            config = cwd / "run.js"
+            config.write_text(json.dumps([{"name": name, "iterations": 100, "checksum": 793}]))
+            native = {"suite": "arena", "cwd": str(cwd), "argv": ["./sort-64", config.name, name],
+                      "fixture_files": {str(config): build.sha256(config)},
+                      "marker": r"Sort::Merge checksum=793 expected=793 status=OK\n"}
 
-        def pair(peer, candidate, *_):
-            command, marker = commands[Path(peer["argv"][0]).name]
-            self.assertEqual(peer["argv"], list(map(str, command)))
-            self.assertEqual(peer["marker"], marker.decode())
-            self.assertTrue(peer["line_marker"])
-            self.assertEqual(candidate, native)
-            base = {"cycles": 100, "instructions": 150, "smt_busy_percent": {}}
-            return [(base, base | {"cycles": 200})], 1
+            def pair(peer, candidate, *_):
+                self.assertIn(Path(peer["argv"][0]).name, args.peer)
+                self.assertEqual(peer["argv"][1:], [str(config), name])
+                self.assertRegex("Sort::Merge: OK in 1.234s\n", peer["marker"])
+                self.assertTrue(peer["line_marker"])
+                self.assertEqual(candidate, native)
+                base = {"cycles": 100, "instructions": 150, "smt_busy_percent": {}}
+                return [(base, base | {"cycles": 200})], 1
 
-        with (patch.object(receipt.measure, "runtime_cases", return_value=[(name, commands)]),
-              patch.object(receipt, "cycle_samples", side_effect=pair) as sample,
-              redirect_stdout(io.StringIO()) as output):
-            self.assertEqual(receipt.peer_cycle_pairs(f"arena/{name}", native, args, (), {}), 0)
-            self.assertEqual(sample.call_count, 2)
-            self.assertIn("Hirsel/rust: 1/1 unfiltered pairs, cycles 2.000000x", output.getvalue())
-            self.assertIn("Hirsel/goose: 1/1 unfiltered pairs, cycles 2.000000x", output.getvalue())
-            with self.assertRaisesRegex(ValueError, "do not match"):
-                receipt.peer_cycle_pairs(f"arena/{name}", native | {"marker": "other\n"}, args, (), {})
+            with (patch.object(receipt, "cycle_samples", side_effect=pair) as sample,
+                  redirect_stdout(io.StringIO()) as output):
+                self.assertEqual(receipt.peer_cycle_pairs(f"arena/{name}", native, args, (), {}), 0)
+                self.assertEqual(sample.call_count, 2)
+                self.assertIn("Hirsel/rust: 1/1 unfiltered pairs, cycles 2.000000x", output.getvalue())
+                self.assertIn("Hirsel/goose: 1/1 unfiltered pairs, cycles 2.000000x", output.getvalue())
+                with self.assertRaisesRegex(ValueError, "do not match"):
+                    receipt.peer_cycle_pairs(f"arena/{name}", native | {"marker": "other\n"}, args, (), {})
 
     def test_peer_observation_requires_the_checksum_line(self):
         row = {"argv": ["peer"], "cwd": ".", "marker": "Sort::Merge: OK in [0-9.]+s\n",

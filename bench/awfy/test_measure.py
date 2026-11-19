@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from board import Board, measure, measurement_slot, receipt
+from board import EXPECTED, Board, measure, measurement_slot, receipt
 import bench_cpus
 import build
 import cold_phases
@@ -116,7 +116,7 @@ class BoardCompletion(unittest.TestCase):
                         "pins": board.report["pins"],
                     }
                     suites = {goal: suite for suite, goal in measure.SUITES.items()}
-                    for goal, names in measure.EXPECTED.items():
+                    for goal, names in EXPECTED.items():
                         for name in names:
                             if name == "LangArena edit" and omit_edit:
                                 continue

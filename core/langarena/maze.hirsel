@@ -267,12 +267,12 @@ fn astar(m: Maze) -> Result[List[(u64, u64)], helper.Error] {
     Ok(list.new())
 }
 
-pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
     if name != "Maze::Generator" && name != "Maze::BFS" && name != "Maze::AStar" {
         return Error(UnknownTask)
     }
-    let w = helper.config_i64(config, name, "w")?
-    let h = helper.config_i64(config, name, "h")?
+    let w = helper.config_i64(config, "w")?
+    let h = helper.config_i64(config, "h")?
     if w < 0 || h < 0 {
         return Error(Config)
     }
@@ -310,7 +310,7 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
 }
 
 pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
-    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+    harness.main(out, d, argv, fn(c: helper.Settings, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
         dispatch(c, n, w, i)
     })
 }

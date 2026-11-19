@@ -156,13 +156,13 @@ fn recursive_run(source: String) -> Result[u32, helper.Error] {
     Ok(int.truncate(result))
 }
 
-pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
     let recursive = name == "Brainfuck::Recursion"
     if !recursive && name != "Brainfuck::Array" {
         return Error(UnknownTask)
     }
-    let program = helper.config_s(config, name, "program")?
-    let warmup_program = helper.config_s(config, name, "warmup_program")?
+    let program = helper.config_s(config, "program")?
+    let warmup_program = helper.config_s(config, "warmup_program")?
     for _ in 0 .. warmup {
         let _ = if recursive {
             recursive_run(warmup_program)?
@@ -183,7 +183,7 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
 }
 
 pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
-    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+    harness.main(out, d, argv, fn(c: helper.Settings, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
         dispatch(c, n, w, i)
     })
 }

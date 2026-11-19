@@ -373,11 +373,19 @@ fn matches_bundle(
 fn matches_source(path: &Path, expected: &str, bytes: &mut Vec<u8>) -> bool {
     use std::io::Read;
 
-    bytes.clear();
-    // One extra byte distinguishes an exact match from a longer file.
-    std::fs::File::open(path)
-        .and_then(|file| file.take(expected.len() as u64 + 1).read_to_end(bytes))
-        .is_ok_and(|_| bytes.as_slice() == expected.as_bytes())
+    if bytes.len() < expected.len() {
+        bytes.resize(expected.len(), 0);
+    }
+    let bytes = &mut bytes[..expected.len()];
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    // An exact prefix by itself would also accept a longer file.
+    file.read_exact(bytes).is_ok()
+        && bytes == expected.as_bytes()
+        && file
+            .read_exact(&mut [0])
+            .is_err_and(|err| err.kind() == std::io::ErrorKind::UnexpectedEof)
 }
 
 pub(crate) fn normalized(path: &Path) -> PathBuf {

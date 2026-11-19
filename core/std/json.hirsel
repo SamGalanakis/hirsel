@@ -463,10 +463,68 @@ fn value_size(s: String, mut i: u64) -> Result[u64, Error] {
     }
 }
 
+// Stop before the first quote, escape or control in the complete blocks.
+fn scan_string_blocks(input: Bytes, start: u64) -> u64 {
+    let quote: Simd[u8, 32] = simd.splat(b'"')
+    let slash: Simd[u8, 32] = simd.splat(b'\\')
+    let space: Simd[u8, 32] = simd.splat(0x20)
+    let end = list.len(input)
+    let mut i = start
+    while end - i >= 32 {
+        let block: Simd[u8, 32] = list.lanes(input, i)
+        let special = simd.eq(block, quote) | simd.eq(block, slash) | simd.lt(block, space)
+        let mask = simd.bitmask(special)
+        if mask != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(mask))
+            return i + offset
+        }
+        i += 32
+    }
+    i
+}
+
+// The first marked byte is exact. A borrow can only mark higher bytes.
+fn string_word_prefix(b: Bytes, i: u64) -> u64 {
+    let v = list.word_le(b, i)
+    let q = v ^ 0x2222222222222222
+    let slash = v ^ 0x5c5c5c5c5c5c5c5c
+    let controls = int.wrapping_sub(v, 0x2020202020202020) & ~v
+    let quotes = int.wrapping_sub(q, 0x0101010101010101) & ~q
+    let slashes = int.wrapping_sub(slash, 0x0101010101010101) & ~slash
+    let mark = (controls | quotes | slashes) & 0x8080808080808080
+    let bit: u64 = int.widen(int.trailing_zeros(mark))
+    bit >> 3
+}
+
 /// At the opening '"': the decoded UTF-8 length of the string.
 fn string_size(s: String, mut i: u64) -> Result[u64, Error] {
     i += 1
-    let mut n: u64 = 0
+    let start = i
+    let b = string.as_bytes(s)
+    let end = list.len(b)
+    // Size short, unescaped strings without entering the escape loop.
+    // The cursor starts at an opening quote and each step stays within b.
+    for _ in 0u32 .. 2 {
+        if int.wrapping_sub(end, i) < 8 {
+            break
+        }
+        let run = string_word_prefix(b, i)
+        i = int.wrapping_add(i, run)
+        if run != 8 {
+            if b[i] == b'"' {
+                let n = int.wrapping_sub(i, start)
+                i += 1
+                return Ok(n)
+            }
+            break
+        }
+    }
+    let prefix = int.wrapping_sub(i, start)
+    string_size_rest(s, mut i, prefix)
+}
+
+fn string_size_rest(s: String, mut i: u64, prefix: u64) -> Result[u64, Error] {
+    let mut n = prefix
     let b = string.as_bytes(s)
     let end = list.len(b)
     loop {
@@ -480,24 +538,18 @@ fn string_size(s: String, mut i: u64) -> Result[u64, Error] {
             return Error(Syntax(i))
         }
         if c != b'\\' {
-            // serde_json read.rs::skip_to_escape (Mycroft): the lowest marked byte
-            // is a control, quote or backslash. UTF-8 high bytes cannot be marked.
             if i + 8 <= end {
-                let v = list.word_le(b, i)
-                let q = v ^ 0x2222222222222222
-                let slash = v ^ 0x5c5c5c5c5c5c5c5c
-                let controls = int.wrapping_sub(v, 0x2020202020202020) & ~v
-                let quotes = int.wrapping_sub(q, 0x0101010101010101) & ~q
-                let slashes = int.wrapping_sub(slash, 0x0101010101010101) & ~slash
-                let mark = (controls | quotes | slashes) & 0x8080808080808080
-                if mark != 0 {
-                    let bit: u64 = int.widen(int.trailing_zeros(mark))
-                    let run = bit >> 3
+                let run = string_word_prefix(b, i)
+                if run != 8 {
                     n += run
                     i += run
                 } else {
-                    n += 8
+                    let start = i
                     i += 8
+                    if end - i >= 32 {
+                        i = scan_string_blocks(b, i)
+                    }
+                    n += i - start
                 }
                 continue
             }

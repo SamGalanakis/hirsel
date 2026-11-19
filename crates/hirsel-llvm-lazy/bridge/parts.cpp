@@ -748,28 +748,49 @@ void use_orders(Function &f, std::string &out) {
     }
 }
 
-// Lists each shared constant's uses in `f` in the order `use_orders` wrote,
-// after the program's other uses, whose order stays.
-void order_uses(Function &f, StringRef orders) {
-    auto word = [&](size_t i) {
+using SharedUses = MapVector<Constant *, SmallVector<Use *, 4>>;
+
+// The order `use_orders` wrote for each of `shared`'s constants, or false when
+// `orders` is not exactly one permutation of each constant's uses, in order.
+bool read_orders(const SharedUses &shared, StringRef orders, std::vector<uint32_t> &out) {
+    if (orders.size() % 4) return false;
+    size_t i = 0, n = orders.size() / 4;
+    auto word = [&](size_t at) {
         uint32_t v;
-        memcpy(&v, orders.data() + 4 * i, sizeof v);
+        memcpy(&v, orders.data() + 4 * at, sizeof v);
         return v;
     };
-    size_t i = 0, n = orders.size() / 4;
-    for (auto &[c, uses] : shared_uses(f)) {
-        if (i >= n || word(i) != uses.size() || i + 1 + uses.size() > n) return;
-        DenseMap<const Use *, uint32_t> rank;
-        for (uint32_t k = 0; k < uses.size(); ++k) rank[uses[word(i + 1 + k)]] = k;
-        auto of = [&](const Use &u) { return rank.lookup_or(&u, UINT32_MAX); };
-        c->sortUseList([&](const Use &l, const Use &r) { return of(l) < of(r); });
+    for (auto &[c, uses] : shared) {
+        if (i >= n || word(i) != uses.size() || n - i - 1 < uses.size()) return false;
+        std::vector<bool> seen(uses.size());
+        for (size_t k = 0; k < uses.size(); ++k) {
+            uint32_t at = word(i + 1 + k);
+            if (at >= uses.size() || seen[at]) return false;
+            seen[at] = true;
+            out.push_back(at);
+        }
         i += 1 + uses.size();
+    }
+    return i == n;
+}
+
+// Lists each shared constant's uses in the order `read_orders` read, after the
+// program's other uses, whose order stays. `shared` holds the uses themselves,
+// which now name the constant they were mapped to.
+void order_uses(const SharedUses &shared, ArrayRef<uint32_t> order) {
+    for (auto &[c, uses] : shared) {
+        DenseMap<const Use *, uint32_t> rank;
+        for (uint32_t k = 0; k < uses.size(); ++k) rank[uses[order[k]]] = k;
+        order = order.drop_front(uses.size());
+        auto of = [&](const Use &u) { return rank.lookup_or(&u, UINT32_MAX); };
+        cast<Constant>(uses.front()->get())->sortUseList([&](const Use &l, const Use &r) { return of(l) < of(r); });
     }
 }
 
 // Puts the body of the part `code` holds in place of `f`'s, naming `m`'s
-// globals where the part names its declarations. False, with `f` unchanged,
-// when the part's definition or a global it names does not match `m`'s.
+// globals where the part names its declarations. False, with `m` unchanged,
+// when the part's definition, a global it names, its debug bindings or its use
+// orders do not match `m`'s: all are checked before `m` changes.
 bool restore(Module &m, Function &f, StringRef held, ArrayRef<MDNode *> debug) {
     // The part, then the use orders its bitcode cannot carry here.
     uint64_t size;
@@ -838,6 +859,11 @@ bool restore(Module &m, Function &f, StringRef held, ArrayRef<MDNode *> debug) {
         if (isa<Function>(to) != isa<Function>(&g) || to->getValueType() != g.getValueType()) return false;
         map[&g] = to;
     }
+    // The part's uses move with its instructions, so `shared` keeps naming
+    // them in `f` once they name `m`'s constants.
+    SharedUses shared = shared_uses(*own);
+    std::vector<uint32_t> order;
+    if (!read_orders(shared, orders, order)) return false;
     for (Function *d : declare) {
         Function *n = Function::Create(d->getFunctionType(), GlobalValue::ExternalLinkage,
                                        d->getAddressSpace(), d->getName(), &m);
@@ -875,7 +901,7 @@ bool restore(Module &m, Function &f, StringRef held, ArrayRef<MDNode *> debug) {
             if (DebugLoc loc = i.getDebugLoc())
                 i.setDebugLoc(DebugLoc(cast<DILocation>(MapMetadata(loc.get(), map, flags))));
         }
-    order_uses(f, orders);
+    order_uses(shared, order);
     return true;
 }
 }  // namespace

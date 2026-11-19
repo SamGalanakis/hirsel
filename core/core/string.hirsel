@@ -242,10 +242,29 @@ pub fn push_u64(mut s: String, n: u64) -> Result[(), Capacity] {
     } else {
         low
     }
-    // w zeros in one copy from a prefix of a static literal (w <= 20), then the digits over them from
-    // the last. One literal, not a literal per width: a match yields a slot per arm, and inlining
-    // copied those slots into every caller.
-    string.push(mut s, string.slice("00000000000000000000", 0, w))?
+    // w zeros in one copy from a static literal, then the digits over them from the last.
+    string.push(mut s, match w {
+        1 => "0",
+        2 => "00",
+        3 => "000",
+        4 => "0000",
+        5 => "00000",
+        6 => "000000",
+        7 => "0000000",
+        8 => "00000000",
+        9 => "000000000",
+        10 => "0000000000",
+        11 => "00000000000",
+        12 => "000000000000",
+        13 => "0000000000000",
+        14 => "00000000000000",
+        15 => "000000000000000",
+        16 => "0000000000000000",
+        17 => "00000000000000000",
+        18 => "000000000000000000",
+        19 => "0000000000000000000",
+        _ => "00000000000000000000",
+    })?
     let owned = replace(mut s, string.new())
     let mut b = to_bytes(take owned)
     let base = list.len(b) - w

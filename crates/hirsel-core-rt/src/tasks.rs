@@ -87,6 +87,10 @@ pub use hirsel_core_layout::event::{
 };
 /// Only no-effect polls count; effectful operations never consume this allowance.
 pub(crate) const POLLS_PER_TURN: u32 = 64;
+/// A live run asks the kernel for readiness at one event in this many; the
+/// dispatcher still polls at every turn before timers, and idle still waits
+/// in the poll. Tokio's current-thread `event_interval` default.
+const LIVE_PROBE_INTERVAL: u32 = 61;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Event {
@@ -1009,6 +1013,8 @@ struct Scheduler {
     tapes: Tapes,
     net: *mut hirsel_core_net::Sockets,
     model: Option<Arc<dyn ModelClock>>,
+    /// Events left before a live run's next in-task kernel probe.
+    probes_left: u32,
     parked: WaitArms<*mut Task>,
 }
 const _: () =
@@ -1049,7 +1055,7 @@ impl Scheduler {
     /// Whether `task`'s inline Arc count events must take their hook even
     /// with no posted credit: its tape records them, an open LATEST pair
     /// closes on them, something else observes them, or a serial run with
-    /// sockets polls the network at every event.
+    /// sockets checks for readiness at every event.
     fn arc_hooks(&self, task: &Task) -> bool {
         task.group.is_some()
             || task.latest_pair
@@ -2596,16 +2602,23 @@ pub(crate) unsafe fn event_in(context: *const Context, kind: u8, object: u64, va
 unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
     // SAFETY: this synchronous poll only queues tokens, never invokes task callbacks.
     unsafe {
-        if !(*(*task).run).net.is_null()
-            && ((*(*task).run).pool.is_none() || hirsel_core_layout::event::is_poll(kind, value))
+        let run = (*task).run;
+        if !(*run).net.is_null()
+            && ((*run).pool.is_none() || hirsel_core_layout::event::is_poll(kind, value))
         {
-            (*(*task).run).poll_net(0);
-            if (*(*task).run)
-                .readies
-                .as_ref()
-                .pending
-                .load(Ordering::Acquire)
-            {
+            // A model's readiness is part of the replayed input, so it is read at
+            // every event; a live kernel is asked at one event in an interval.
+            if (*run).model.is_some() {
+                (*run).poll_net(0);
+            } else {
+                (*run).probes_left -= 1;
+                if (*run).probes_left == 0 {
+                    (*run).probes_left = LIVE_PROBE_INTERVAL;
+                    (*run).poll_net(0);
+                }
+            }
+            // Readiness another worker already queued is taken at every event.
+            if (*run).readies.as_ref().pending.load(Ordering::Acquire) {
                 checkpoint();
             }
         }
@@ -3214,6 +3227,7 @@ pub unsafe fn run_root(
         tapes: Tapes::default(),
         net: ptr::null_mut(),
         model: None,
+        probes_left: LIVE_PROBE_INTERVAL,
         parked: WaitArms::default(),
     };
     let pool = (workers > 1).then(|| {
@@ -4224,6 +4238,7 @@ mod ready_routing_laws {
                 tapes: Tapes::default(),
                 net: ptr::null_mut(),
                 model: None,
+                probes_left: LIVE_PROBE_INTERVAL,
                 parked: WaitArms::default(),
             };
             let mut context = Context::new(1 << 20);

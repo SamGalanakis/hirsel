@@ -1,6 +1,7 @@
 # hirsel-core-ir
 
-CoreIR: the lowered form the one-pass front end emits and both native emitters read.
+CoreIR is the lowered form the one-pass front end emits and the evaluator, Cranelift
+and LLVM consume.
 Data types (`src/ir.rs`), the text form (`src/text.rs`),
 a test-only well-formedness function (`src/wf.rs`, feature `wf`) and one sample per
 operation family (`samples/*.core`, each with its source program and hand-derived
@@ -22,3 +23,14 @@ recv and send. Network readiness precedes virtual timers, and idle time jumps
 to the next model event or deadline. Network harnesses configure the shared
 model through `Network.sockets`; descriptor-only ownership fixtures remain
 supported by the same registry.
+
+SEM-11 vectors are 16- or 32-byte values of a fixed integer lane type. The
+text form prints them as `v16xu8`, `v8xi16`, and so on. Each vector value
+operation has its own `SimdOp`, and `PutLanes` writes a prefix of a byte vector.
+The front end emits one bounds check for each list block operation before
+the load or store. The store reserves only the appended length.
+
+A function's text header carries `versioned` when the checker finds a vector
+type after typing, including those it inferred. Closures carry their own
+marks. The evaluator and Cranelift operate lane by lane. LLVM emits fixed
+vector IR and one function body for the target.

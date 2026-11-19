@@ -24,6 +24,7 @@ mod flow;
 mod forward;
 mod growth;
 mod scalar;
+mod simd;
 mod sink;
 mod sites;
 mod steps;
@@ -378,9 +379,6 @@ fn emit_module(
     provided: EmissionFacts<'_>,
     sink: &mut dyn Sink,
 ) -> Result<Vec<source::ReleaseSite>> {
-    if module.functions.iter().any(|f| f.versioned) {
-        return Err(Error::Unsupported("SIMD".into()));
-    }
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
     let native = hirsel_core_ir::native_layout::resolve(module, &recipes);
     let module = native.as_ref();
@@ -592,6 +590,7 @@ fn emit_module(
             relocatable_sites: source.relocatable_sites,
             test_hooks: source.test_hooks,
             value_slots: values::slots(body, &flow),
+            static_vectors: f.versioned.then(|| simd::static_vectors(body)),
             literals: Vec::new(),
             address_slots: values::address_slots(body, &flow),
             scoped: hirsel_core_ir::extent::scoped_slots(body, &module.signatures),
@@ -1311,7 +1310,7 @@ fn ty(t: Ty) -> Type {
         Ty::Scalar(Scalar::F32) => Type::Float,
         Ty::Scalar(Scalar::F64) => Type::Double,
         Ty::Scalar(s) => Type::Int(s.size() as u32 * 8),
-        Ty::Vector(_) => unreachable!("SIMD functions need a vector lowering"),
+        Ty::Vector(v) => simd::vector_type(v.lanes(), v.lane().size() as u32 * 8),
     }
 }
 fn bits_ty(t: Ty) -> Type {
@@ -1363,6 +1362,8 @@ struct FunctionEmitter<'a> {
     relocatable_sites: bool,
     test_hooks: bool,
     value_slots: Vec<bool>,
+    /// Static inline arrays converted directly into constant vectors.
+    static_vectors: Option<Box<[(ValueId, StaticId)]>>,
     /// Each constant's literal, used in place of the value.
     literals: Vec<Option<Value>>,
     address_slots: Vec<bool>,
@@ -1900,6 +1901,14 @@ impl FunctionEmitter<'_> {
                 );
                 self.put(result, &x);
             }
+            Inst::Simd {
+                result,
+                op,
+                first,
+                second,
+                fail,
+            } => self.simd(result, op, first, second, fail)?,
+            Inst::PutLanes { to, vector, count } => self.put_lanes(to, vector, count),
             Inst::Address { address, fail } => self.project(address, fail)?,
             Inst::Read {
                 result, address, ..

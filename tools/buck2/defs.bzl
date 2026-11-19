@@ -734,7 +734,7 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
         _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
     _suite(name = name, tests = [":" + name + "-pool"] + host_targets)
 
-def hirsel_core_llvm_native_test(name, data, selection = None, runtime = "//:core-native-runtime-fixture-pic", binary = "hirsel-llvm-unittest", cwd = "crates/hirsel-llvm"):
+def hirsel_core_llvm_native_test(name, data, selection = None, runtime = "//:core-native-runtime-fixture-pic", binary = "hirsel-llvm-unittest", cwd = "crates/hirsel-llvm", extra_env = {}):
     """CoreIR executable agreement uses the core runtime, with no old std products."""
     _rust_test(
         name = name,
@@ -742,6 +742,7 @@ def hirsel_core_llvm_native_test(name, data, selection = None, runtime = "//:cor
         data = data + [cwd + "/Cargo.toml"],
         files_env = {"HIRSEL_CORE_RT_ARCHIVE": runtime},
         args = selection if selection != None else ["core::", "context::probe_tests::"],
+        extra_env = extra_env,
         native_tools = native_tool_inputs(),
         cwd = cwd,
         test_binary = binary,

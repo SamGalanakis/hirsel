@@ -3231,3 +3231,87 @@ fn static_bytes_preserve_budget_law() {
         assert_eq!(report.used, 0);
     }
 }
+
+#[test]
+fn simd_llvm_matches_evaluator() {
+    let target = if std::env::var_os("HIRSEL_TEST_SIMD_AARCH64").is_some() {
+        Target::Aarch64Linux
+    } else {
+        Target::X86_64Linux
+    };
+    let observing = std::env::var_os("HIRSEL_TEST_CHARGE_OBSERVATION").is_some();
+    for source in [
+        include_str!("../../../core/front/fixtures/simd-operations.hirsel"),
+        include_str!("../../../core/front/fixtures/simd-differential.hirsel"),
+    ] {
+        let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+        let cases: Vec<_> = source
+            .lines()
+            .filter_map(|line| line.strip_prefix("// expect: run "))
+            .map(|run| {
+                let (call, _) = run.split_once(" = ").unwrap();
+                let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
+                let function = names[name];
+                let signature =
+                    &module.signatures[module.functions[function.index()].signature.index()];
+                let args = args
+                    .split(',')
+                    .filter(|arg| !arg.is_empty())
+                    .zip(&signature.params)
+                    .map(|(arg, param)| {
+                        let Param::Value(ty) = param else {
+                            panic!("scalar run")
+                        };
+                        eval::scalar(*ty, arg.trim())
+                    })
+                    .collect();
+                Case {
+                    function,
+                    args,
+                    limit: u64::MAX,
+                    injection: None,
+                }
+            })
+            .collect();
+        for optimization in [Optimization::None, Optimization::Speed] {
+            let reports =
+                execute_target_object(&module, &cases, "", "", optimization, None, target);
+            check_native_reports(&module, &cases, reports, true);
+        }
+
+        let units: Vec<_> = module.modules.iter().collect();
+        let facts = hirsel_core_ir::roles::Facts::program(&units, &[]);
+        let units: Vec<_> = units
+            .into_iter()
+            .zip(&facts)
+            .map(|(module, facts)| hirsel_llvm_lazy::Unit::Core {
+                module,
+                facts,
+                observe_charge: observing,
+                debug_lines: false,
+            })
+            .collect();
+        let exports: std::collections::BTreeSet<_> = cases
+            .iter()
+            .map(|case| symbol(&module, case.function))
+            .collect();
+        let exports: Vec<_> = exports.into_iter().collect();
+        let release = hirsel_llvm_lazy::emit_program_for_target(&units, &exports, target).unwrap();
+        let reports = execute_target_object(
+            &module,
+            &cases,
+            "",
+            "",
+            Optimization::Speed,
+            Some(release),
+            target,
+        );
+        // The production builder has no allocation-injection test hooks.
+        // Compare its byte balance and observable bounds/capacity results.
+        for (case, report) in cases.iter().zip(&reports) {
+            let expected = eval::run(&module, case.function, &case.args, case.limit);
+            assert_eq!(report.used, expected.used, "native byte balance");
+        }
+        check_native_reports(&module, &cases, reports, false);
+    }
+}

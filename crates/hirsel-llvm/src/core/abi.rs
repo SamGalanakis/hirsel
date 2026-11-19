@@ -240,7 +240,7 @@ impl Return {
     }
 }
 
-fn memcpy(to: &Value, from: &Value, bytes: Value) -> [CArg; 4] {
+pub(super) fn memcpy(to: &Value, from: &Value, bytes: Value) -> [CArg; 4] {
     [
         ptr(to.clone()),
         ptr(from.clone()),

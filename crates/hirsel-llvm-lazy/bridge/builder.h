@@ -91,6 +91,9 @@ typedef struct {
                                      LLVMMetadataRef, LLVMMetadataRef, LLVMMetadataRef);
     LLVMMetadataRef (*di_location)(HirselLlvmBuilder *, unsigned, unsigned, LLVMMetadataRef);
     LLVMMetadataRef (*di_lexical_block_file)(HirselLlvmBuilder *, LLVMMetadataRef, LLVMMetadataRef);
+    LLVMValueRef (*shuffle)(HirselLlvmBuilder *, LLVMValueRef, LLVMValueRef, const int32_t *, size_t);
+    LLVMValueRef (*extract_element)(HirselLlvmBuilder *, LLVMValueRef, unsigned);
+    LLVMValueRef (*insert_element)(HirselLlvmBuilder *, LLVMValueRef, LLVMValueRef, unsigned);
 } HirselLlvmBuilderApi;
 const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api(void);
 #ifdef __cplusplus

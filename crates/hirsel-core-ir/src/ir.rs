@@ -3,7 +3,7 @@
 //! arguments, source anchors); WHY-NEW-FORM.md lists, per LIR opcode, what was kept,
 //! rewritten or deleted.
 //!
-//! Values are defined exactly once and hold a scalar or a pointer; aggregates live in
+//! Values are defined exactly once and hold a scalar, pointer or fixed vector; aggregates live in
 //! slots or behind pointers and are reached through addresses. Slots are ordinary
 //! memory: a read names no "reaching version", so a producer need not build SSA for
 //! slots or prove liveness before emitting.

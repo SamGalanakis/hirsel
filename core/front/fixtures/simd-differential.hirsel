@@ -129,3 +129,23 @@ fn zero_append() -> bool {
     result.unwrap(list.put_lanes(mut b, v, 0))
     list.capacity(b) == 0 && list.len(b) == 0
 }
+
+// expect: run swizzle_constant(128) = 1
+// expect: run swizzle_constant(127) = 0
+// expect: run wide_sat(1) = true
+
+const INDICES: Inline[u8, 16] = [15, 16, 31, 32, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+fn swizzle_constant(marker: u8) -> u64 {
+    let table: Simd[u8, 16] = simd.from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, marker])
+    simd.bitmask(simd.swizzle(table, simd.from(INDICES)))
+}
+
+fn wide_sat(delta: i64) -> bool {
+    let lo: Simd[i64, 4] = simd.splat(-9223372036854775808)
+    let hi: Simd[i64, 4] = simd.splat(9223372036854775807)
+    let by: Simd[i64, 4] = simd.splat(delta)
+    let sum = simd.saturating_add(hi, by)
+    let diff = simd.saturating_sub(lo, by)
+    simd.bitmask(simd.eq(sum, hi) & simd.eq(diff, lo)) == 15
+}

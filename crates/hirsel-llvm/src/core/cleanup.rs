@@ -59,6 +59,7 @@ pub(super) fn glue_emitter<'a>(
         relocatable_sites: false,
         test_hooks: cfg!(test),
         value_slots: Vec::new(),
+        static_vectors: None,
         literals: Vec::new(),
         address_slots: Vec::new(),
         scoped: hirsel_core_ir::extent::ScopedSlots::none(body.slots.len()),

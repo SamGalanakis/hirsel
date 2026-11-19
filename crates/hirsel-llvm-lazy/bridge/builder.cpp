@@ -257,6 +257,15 @@ static LLVMValueRef gep(HirselLlvmBuilder *u, LLVMTypeRef t, LLVMValueRef p, LLV
 }
 static LLVMValueRef extract(HirselLlvmBuilder *u, LLVMValueRef v, unsigned i) { return wrap(u->builder.Insert(ExtractValueInst::Create(unwrap(v), {i}))); }
 static LLVMValueRef insert(HirselLlvmBuilder *u, LLVMValueRef a, LLVMValueRef v, unsigned i) { return wrap(u->builder.Insert(InsertValueInst::Create(unwrap(a), unwrap(v), {i}))); }
+static LLVMValueRef extract_element(HirselLlvmBuilder *u, LLVMValueRef vector, unsigned i) {
+    return wrap(u->builder.Insert(ExtractElementInst::Create(unwrap(vector), u->builder.getInt32(i))));
+}
+static LLVMValueRef insert_element(HirselLlvmBuilder *u, LLVMValueRef vector, LLVMValueRef value, unsigned i) {
+    return wrap(u->builder.Insert(InsertElementInst::Create(unwrap(vector), unwrap(value), u->builder.getInt32(i))));
+}
+static LLVMValueRef shuffle(HirselLlvmBuilder *u, LLVMValueRef a, LLVMValueRef b, const int32_t *mask, size_t size) {
+    return wrap(u->builder.Insert(new ShuffleVectorInst(unwrap(a), unwrap(b), ArrayRef<int>(mask, size))));
+}
 static LLVMValueRef phi(HirselLlvmBuilder *u, LLVMTypeRef type, LLVMValueRef const *values, LLVMBasicBlockRef const *blocks, size_t n) {
     auto *p = PHINode::Create(unwrap(type), n); for (size_t i = 0; i < n; ++i) p->addIncoming(unwrap(values[i]), unwrap(blocks[i]));
     return wrap(u->builder.Insert(p));
@@ -348,6 +357,6 @@ extern "C" const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api() {
         atomic_rmw, fence, branch, conditional, switch_value, return_value, unreachable,
         module_asm, metadata_ref, metadata_string, metadata_integer, metadata_tuple, metadata_bind, named_metadata,
         attach, location, metadata_value, di_file, di_compile_unit, di_subroutine_type, di_subprogram, di_location,
-        di_lexical_block_file};
+        di_lexical_block_file, shuffle, extract_element, insert_element};
     return &api;
 }

@@ -102,6 +102,9 @@ pub(crate) struct Api {
         unsafe extern "C" fn(Raw, *const c_char, usize, *const c_char, usize, Raw, Raw, Raw) -> Raw,
     pub di_location: unsafe extern "C" fn(Raw, u32, u32, Raw) -> Raw,
     pub di_lexical_block_file: unsafe extern "C" fn(Raw, Raw, Raw) -> Raw,
+    pub shuffle: unsafe extern "C" fn(Raw, Raw, Raw, *const i32, usize) -> Raw,
+    pub extract_element: unsafe extern "C" fn(Raw, Raw, u32) -> Raw,
+    pub insert_element: unsafe extern "C" fn(Raw, Raw, Raw, u32) -> Raw,
 }
 
 pub(crate) struct Context {

@@ -681,6 +681,10 @@ pub(super) enum Operation<'a> {
     Cast(Cast, &'a Type, &'a Value, &'a Type),
     Compare(Predicate, &'a Type, &'a Value, &'a Value),
     Select(&'a Type, &'a Value, &'a Value, &'a Value),
+    VectorSelect(&'a Type, &'a Type, &'a Value, &'a Value, &'a Value),
+    Shuffle(&'a Type, &'a Value, &'a Value, &'a [i32]),
+    ExtractElement(&'a Type, &'a Value, u32),
+    InsertElement(&'a Type, &'a Value, &'a Type, &'a Value, u32),
     FNeg(&'a Type, &'a Value),
     Load(&'a Type, &'a Value, &'a Memory),
     Store(&'a Type, &'a Value, &'a Value, &'a Memory),
@@ -1056,6 +1060,24 @@ impl Sink for TextSink {
             Operation::Select(ty, condition, yes, no) => {
                 write!(out, "select i1 {condition}, {ty} {yes}, {ty} {no}").unwrap()
             }
+            Operation::VectorSelect(ty, mask, condition, yes, no) => {
+                write!(out, "select {mask} {condition}, {ty} {yes}, {ty} {no}").unwrap()
+            }
+            Operation::Shuffle(ty, a, b, mask) => {
+                write!(
+                    out,
+                    "shufflevector {ty} {a}, {ty} {b}, <{} x i32> <",
+                    mask.len()
+                )
+                .unwrap();
+                for (i, lane) in mask.iter().enumerate() {
+                    if i != 0 {
+                        out.push_str(", ");
+                    }
+                    write!(out, "i32 {lane}").unwrap();
+                }
+                out.push('>');
+            }
             Operation::FNeg(ty, value) => write!(out, "fneg {ty} {value}").unwrap(),
             Operation::Load(ty, p, m) => {
                 match m.ordering {
@@ -1091,6 +1113,14 @@ impl Sink for TextSink {
             Operation::Insert(ty, aggregate, field, value, index) => write!(
                 out,
                 "insertvalue {ty} {aggregate}, {field} {value}, {index}"
+            )
+            .unwrap(),
+            Operation::ExtractElement(ty, vector, index) => {
+                write!(out, "extractelement {ty} {vector}, i32 {index}").unwrap()
+            }
+            Operation::InsertElement(ty, vector, lane, value, index) => write!(
+                out,
+                "insertelement {ty} {vector}, {lane} {value}, i32 {index}"
             )
             .unwrap(),
             Operation::Phi(ty, incoming) => {

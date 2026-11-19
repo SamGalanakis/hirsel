@@ -566,6 +566,24 @@ impl Sink for NativeSink {
                     let (yes, no) = (self.value(yes, ty), self.value(no, ty));
                     (api.select)(u, c, yes, no)
                 }
+                Operation::VectorSelect(ty, mask, condition, yes, no) => {
+                    let condition = self.value(condition, mask);
+                    let (yes, no) = (self.value(yes, ty), self.value(no, ty));
+                    (api.select)(u, condition, yes, no)
+                }
+                Operation::Shuffle(ty, a, b, mask) => {
+                    let (a, b) = (self.value(a, ty), self.value(b, ty));
+                    (api.shuffle)(u, a, b, mask.as_ptr(), mask.len())
+                }
+                Operation::ExtractElement(ty, vector, index) => {
+                    let vector = self.value(vector, ty);
+                    (api.extract_element)(u, vector, index)
+                }
+                Operation::InsertElement(ty, vector, lane, value, index) => {
+                    let vector = self.value(vector, ty);
+                    let value = self.value(value, lane);
+                    (api.insert_element)(u, vector, value, index)
+                }
                 Operation::FNeg(ty, v) => {
                     let v = self.value(v, ty);
                     (api.fneg)(u, v)

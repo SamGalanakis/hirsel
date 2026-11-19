@@ -172,8 +172,10 @@ fn execute_target_object_checked(
     if observing {
         c.push_str("extern void *hirsel_core_test_observe_begin(const HirselCoreContext *); extern uint64_t hirsel_core_test_observe_end(void *);\n");
     }
-    for (i, f) in module.functions.iter().enumerate() {
-        let s = &module.signatures[f.signature.index()];
+    let called: std::collections::BTreeSet<_> =
+        cases.iter().map(|case| case.function.index()).collect();
+    for i in called {
+        let s = &module.signatures[module.functions[i].signature.index()];
         let mut fields = s.results.clone();
         fields.push(Ty::Scalar(Scalar::U8));
         let ret = if fields.len() == 1 {
@@ -348,7 +350,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         )
         .unwrap();
         for (j, &t) in sig.results.iter().enumerate() {
-            writeln!(c,"uint64_t b{k}_{j}=0; memcpy(&b{k}_{j},&r{k}.r{j},{}); printf(\" %llu\",(unsigned long long)b{k}_{j});",match t { Ty::Ptr => 8, Ty::Scalar(s) => s.size() as u64, Ty::Vector(v) => v.size() as u64 }).unwrap();
+            writeln!(c,"uint64_t b{k}_{j}=0; memcpy(&b{k}_{j},&r{k}.r{j},{}); printf(\" %llu\",(unsigned long long)b{k}_{j});",match t { Ty::Ptr => 8, Ty::Scalar(s) => s.size(), Ty::Vector(_) => unreachable!("vectors cannot cross the test's C boundary") }).unwrap();
         }
         c.push_str("}\n");
         writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_kind(hirsel_core_cause_value(p))]); printf(\"|%llu|\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); for(size_t i=0;i<traces;i++) printf(\" %llu\",(unsigned long long)trace[i]); printf(\"|%zu|\",hirsel_core_test_attempts(ctx)); for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) if(hirsel_core_cause_kind(hirsel_core_cause_value(p))==4) {{ const HirselCoreStringMessage *msg=&hirsel_core_cause_value(p)->message; for(uint64_t i=0;i<msg->len;i++) printf(\"%02x\",((const unsigned char *)msg->data)[i]); printf(\" \"); }} printf(\"|\"); for(size_t j=0;j<arc_count;j++) printf(\" %u:%llu\",arc_events[j].kind,(unsigned long long)arc_events[j].value); printf(\"|\"); for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %llu\",(unsigned long long)hirsel_core_cause_value(p)->site); printf(\"\\n\"); hirsel_core_causes_drop(chain); return 0; }}").unwrap();
@@ -543,7 +545,10 @@ fn call_results_match_callees(ir: &str) {
 fn agree_cases(input: &impl NativeInput, cases: &[Case], memory: bool) {
     let module = input.module();
     call_results_match_callees(&emit_ir(module).unwrap());
-    let got = execute(input, cases);
+    check_native_reports(module, cases, execute(input, cases), memory);
+}
+
+fn check_native_reports(module: &Module, cases: &[Case], got: Vec<NativeReport>, memory: bool) {
     assert_eq!(got.len(), cases.len());
     for (case, got) in cases.iter().zip(got) {
         let expected = eval::run_injected(

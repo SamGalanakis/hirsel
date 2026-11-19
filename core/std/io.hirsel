@@ -213,13 +213,7 @@ pub fn flush(mut w: Out) -> Result[(), WriteError] waits {
             Ok(())
         },
         Error(e) => {
-            let n = list.len(w.buffer)
-            for i in e.written .. n {
-                w.buffer[i - e.written] = w.buffer[i]
-            }
-            for _ in 0 .. e.written {
-                let _ = list.pop(mut w.buffer)
-            }
+            list.drop_prefix(mut w.buffer, e.written)
             Error(e)
         },
     }

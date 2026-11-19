@@ -1160,21 +1160,6 @@ type Step = Keep(u64, u64) | RepliedAndClose | CloseConnection | MoveSocket(Hand
 
 fn discard(take bytes_to_drop: Bytes) {}
 
-fn compact(mut b: Bytes, at: u64) {
-    let used = list.len(b)
-    if at == used {
-        list.clear(mut b)
-    } else if at > 0 {
-        for i in at .. used {
-            let c = b[i]
-            let _ = list.set(mut b, i - at, c)
-        }
-        for _ in 0u64 .. at {
-            let _ = list.pop(mut b)
-        }
-    }
-}
-
 fn write_succeeded(r: Result[(), NetError]) -> bool {
     match r {
         Ok(()) => true,
@@ -1824,7 +1809,7 @@ fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Confi
                 break
             }
         }
-        compact(mut input, input_at)
+        list.drop_prefix(mut input, input_at)
         let _ = list.append(mut input, list.slice(scratch, scratch_at, list.len(scratch)))
         first = false
         batch += 1

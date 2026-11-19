@@ -486,3 +486,23 @@ pub fn binary_search_by[T](xs: List[T], compare: scoped fn(T) -> Order) -> Resul
         Error(lo)
     }
 }
+
+/// Removes the first n elements in place, retaining the suffix in order and
+/// keeping the original capacity. Fails: Bounds when n > len.
+/// Alloc: nothing. Cost: O(len) for a partial prefix.
+/// Ex: `list.drop_prefix(mut buffer, written)`.
+pub fn drop_prefix[T: plain](mut xs: List[T], n: u64) {
+    if n == 0 {
+        return
+    }
+    let len = list.len(xs)
+    if n == len {
+        list.clear(mut xs)
+    } else {
+        check_index(xs, n - 1)
+        for i in n .. len {
+            xs[i - n] = xs[i]
+        }
+        truncate(mut xs, len - n)
+    }
+}

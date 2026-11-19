@@ -156,6 +156,11 @@ fn swap_past_end() -> u64 {
 fn truncate_shorter() -> u64 {
     let mut xs = five(1, 2, 3, 4, 5)
     list.truncate(mut xs, 2)
+    let mut suffix = five(1, 2, 3, 4, 5)
+    list.drop_prefix(mut suffix, 2)
+    if digits(suffix) != 345 || list.capacity(suffix) != 5 {
+        return 0
+    }
     digits(xs)
 }
 

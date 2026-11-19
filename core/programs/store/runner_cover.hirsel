@@ -29,8 +29,9 @@ fn span(tx: store.Tx, h: Hc, take n: u64) -> Result[runner.Cover, Capacity] {
     runner.cover(store.shape(h.t), Included(0u64), Excluded(n))
 }
 
+// The query's bound also holds the rows it projects into the initial Batch: 1,954 in mode 1.
 fn place(mut r: Spans) -> Result[(), runner.RegisterError] {
-    runner.query(mut r, code.describe(span), 65536u64, runner.DEFAULT_STEPS)
+    runner.query(mut r, code.describe(span), 524288u64, runner.DEFAULT_STEPS)
 }
 
 // identity ++ fingerprint(A) ++ fingerprint(()), as a client builds a query's key.
@@ -71,8 +72,10 @@ fn drive(take d: D) -> () waits {
     config.q = 0u64
     config.budget = 262144u64
     config.socket.max_frame = 131072u64
+    // The session task funds the connection owner's floor and its pool, which at 128 KiB
+    // frames is above 2 MiB.
     let (cn, session) = result.unwrap(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, d.policy,
-        d.head, d.post, code.describe(place), keys, None, config, 2097152u64))
+        d.head, d.post, code.describe(place), keys, None, config, 8388608u64))
     wire_client.send_frame(cn, Subscribe(1u32, 0u32, arg(d.covered), None))
     initial(cn, 1u32, d.covered)
     wire_client.send_frame(cn, Subscribe(2u32, 0u32, arg(0u64), None))

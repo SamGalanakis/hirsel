@@ -1107,7 +1107,7 @@ struct Frame {
 struct BodyInstance {
     definition: usize,
     arguments: PoolRange<TyId>,
-    next: Option<usize>,
+    hash: u64,
     row: (FuncId, SigId),
 }
 
@@ -1221,8 +1221,7 @@ struct Cx<'c, 'a, 'e> {
     call_scratch: Vec<calls::CallScratch>,
     /// Completed array elements still owned separately during construction.
     array_parts: Vec<ValueId>,
-    instance_heads: HashMap<u64, usize>,
-    instance_rows: Vec<BodyInstance>,
+    instance_rows: hashbrown::HashTable<BodyInstance>,
     instance_args: Vec<TyId>,
     binder_at: HashMap<(u32, u32), u32>,
     frames: Vec<Frame>,
@@ -1381,8 +1380,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             patterns: patterns::Patterns::default(),
             call_scratch: vec![],
             array_parts: vec![],
-            instance_heads: HashMap::default(),
-            instance_rows: vec![],
+            instance_rows: hashbrown::HashTable::new(),
             instance_args: vec![],
             binder_at,
             frames: vec![],

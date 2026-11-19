@@ -1279,31 +1279,28 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         f: usize,
         types: &[TyId],
     ) -> Result<(FuncId, SigId), &'static str> {
-        use std::hash::{Hash, Hasher};
+        use std::hash::BuildHasher;
         if types.is_empty() {
             return self.e.row(self.p, &mut self.t, f);
         }
-        let mut hash = std::hash::DefaultHasher::new();
-        f.hash(&mut hash);
-        types.hash(&mut hash);
-        let hash = hash.finish();
-        let mut next = self.instance_heads.get(&hash).copied();
-        while let Some(i) = next {
-            let row = &self.instance_rows[i];
-            if row.definition == f && row.arguments.get(&self.instance_args) == Some(types) {
-                return Ok(row.row);
-            }
-            next = row.next;
+        let hash = rustc_hash::FxBuildHasher.hash_one((f, types));
+        if let Some(instance) = self.instance_rows.find(hash, |instance| {
+            instance.definition == f && instance.arguments.get(&self.instance_args) == Some(types)
+        }) {
+            return Ok(instance.row);
         }
         let row = self.e.instance(self.p, &mut self.t, f, types)?;
         let arguments = PoolRange::push(&mut self.instance_args, types.iter().copied());
-        let next = self.instance_heads.insert(hash, self.instance_rows.len());
-        self.instance_rows.push(BodyInstance {
-            definition: f,
-            arguments,
-            next,
-            row,
-        });
+        self.instance_rows.insert_unique(
+            hash,
+            BodyInstance {
+                definition: f,
+                arguments,
+                hash,
+                row,
+            },
+            |instance| instance.hash,
+        );
         Ok(row)
     }
 

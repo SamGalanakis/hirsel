@@ -26,13 +26,13 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | allocator-api2-0.2.21 | MIT OR Apache-2.0 | `hirsel` | `683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923` |
 | anyhow-1.0.104 | MIT OR Apache-2.0 | `hirsel` | `330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470` |
 | arbitrary-1.5.0 | MIT OR Apache-2.0 | `hirsel` | `3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed` |
-| bincode-1.3.3 | MIT | `hirsel` | `b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad` |
+| bincode-1.3.3 | MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad` |
 | bitflags-2.13.2 | MIT OR Apache-2.0 | `hirsel` | `3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06` |
-| block-buffer-0.10.4 | MIT OR Apache-2.0 | `hirsel` | `3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71` |
+| block-buffer-0.10.4 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71` |
 | bumpalo-3.20.3 | MIT OR Apache-2.0 | `hirsel` | `72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649` |
 | cc-1.7.0 | MIT OR Apache-2.0 | none | `50a649af8a827553c29fb0cb4bd4a6f1a0dd695bd3232b9bc98bd9c8a3ffbb8b` |
-| cfg-if-1.0.5 | MIT OR Apache-2.0 | `hirsel` | `4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600` |
-| cpufeatures-0.2.17 | MIT OR Apache-2.0 | `hirsel` | `59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280` |
+| cfg-if-1.0.5 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600` |
+| cpufeatures-0.2.17 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280` |
 | cranelift-assembler-x64-0.136.3 | Apache-2.0 WITH LLVM-exception | `hirsel` | `f6d504c8c7ba3f3accaf8e98b7096beb98e1a271404357744c7e9e730c6865ff` |
 | cranelift-assembler-x64-meta-0.136.3 | Apache-2.0 WITH LLVM-exception | none | `c065757905596bc06e82969ebd7b92d691b7fd710a7e9e8181ae0c30dab588d0` |
 | cranelift-bforest-0.136.3 | Apache-2.0 WITH LLVM-exception | `hirsel` | `5ca7162cd4d4fc5f9f2f88d1459d939882203d93a8c5a19ef2c405b2e82ef13f` |
@@ -48,15 +48,15 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | cranelift-object-0.136.3 | Apache-2.0 WITH LLVM-exception | `hirsel` | `14087a9ba54a083e7513584b7d095d2931a83f014e041cc19d6af2ffe8109f5d` |
 | cranelift-srcgen-0.136.3 | Apache-2.0 WITH LLVM-exception | none | `fc173168f291ff3b95b5d0769d6a05b1eaef5e6d74c2600affab8396b4e7b420` |
 | crc32fast-1.5.2 | MIT OR Apache-2.0 | `hirsel` | `01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78` |
-| crypto-common-0.1.7 | MIT OR Apache-2.0 | `hirsel` | `78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a` |
-| digest-0.10.7 | MIT OR Apache-2.0 | `hirsel` | `9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292` |
+| crypto-common-0.1.7 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a` |
+| digest-0.10.7 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292` |
 | equivalent-1.0.3 | Apache-2.0 OR MIT | `hirsel` | `00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826` |
 | errno-0.3.14 | MIT OR Apache-2.0 | none | `39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb` |
 | fastrand-2.5.0 | Apache-2.0 OR MIT | `hirsel` | `da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223` |
 | find-msvc-tools-0.1.14 | MIT OR Apache-2.0 | none | `aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484` |
 | fnv-1.0.7 | Apache-2.0 / MIT | `hirsel` | `3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1` |
-| foldhash-0.2.0 | Zlib | `hirsel` | `77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb` |
-| generic-array-0.14.7 | MIT | `hirsel` | `85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a` |
+| foldhash-0.2.0 | Zlib | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb` |
+| generic-array-0.14.7 | MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a` |
 | getrandom-0.4.3 | MIT OR Apache-2.0 | `hirsel` | `300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099` |
 | gimli-0.33.0 | MIT OR Apache-2.0 | `hirsel` | `0bf7f043f89559805f8c7cacc432749b2fa0d0a0a9ee46ce47164ed5ba7f126c` |
 | hashbrown-0.16.1 | MIT OR Apache-2.0 | `hirsel` | `841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100` |
@@ -77,13 +77,13 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | quote-1.0.47 | MIT OR Apache-2.0 | none | `1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001` |
 | r-efi-6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | none | `f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf` |
 | regalloc2-0.15.2 | Apache-2.0 WITH LLVM-exception | `hirsel` | `757712e8e61590d6d4f5d563483755538b5aa13467837a3b41cd9832509a7f85` |
-| rustc-hash-2.1.3 | Apache-2.0 OR MIT | `hirsel` | `6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d` |
+| rustc-hash-2.1.3 | Apache-2.0 OR MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d` |
 | rustix-1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | `hirsel` | `891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d` |
 | serde-1.0.229 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba` |
 | serde_core-1.0.229 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48` |
 | serde_derive-1.0.229 | MIT OR Apache-2.0 | none | `e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348` |
 | serde_json-1.0.151 | MIT OR Apache-2.0 | `hirsel` | `c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14` |
-| sha2-0.10.9 | MIT OR Apache-2.0 | `hirsel` | `a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283` |
+| sha2-0.10.9 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283` |
 | shlex-2.0.1 | MIT OR Apache-2.0 | none | `f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba` |
 | smallvec-1.16.3 | MIT OR Apache-2.0 | `hirsel` | `5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b` |
 | stable_deref_trait-1.2.1 | MIT OR Apache-2.0 | none | `6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596` |
@@ -91,8 +91,8 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | syn-3.0.6 | MIT OR Apache-2.0 | none | `8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee` |
 | target-lexicon-0.13.5 | Apache-2.0 WITH LLVM-exception | `hirsel` | `adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca` |
 | tempfile-3.27.0 | MIT OR Apache-2.0 | `hirsel` | `32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd` |
-| twox-hash-2.1.5 | MIT | `hirsel` | `86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2` |
-| typenum-1.20.1 | MIT OR Apache-2.0 | `hirsel` | `b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20` |
+| twox-hash-2.1.5 | MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2` |
+| typenum-1.20.1 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20` |
 | unicode-ident-1.0.26 | (MIT OR Apache-2.0) AND Unicode-3.0 | none | `d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954` |
 | version_check-0.9.5 | MIT/Apache-2.0 | none | `0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a` |
 | wasmtime-internal-core-49.0.3 | Apache-2.0 WITH LLVM-exception | `hirsel` | `ba00c5db77adb0749ee059068e5a417bfac3d8969f5a3479d9bd1ca8c1ba248d` |
@@ -228,7 +228,8 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "bincode-1.3.3",
    "license": "MIT",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {
@@ -244,7 +245,8 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "block-buffer-0.10.4",
    "license": "MIT OR Apache-2.0",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {
@@ -266,7 +268,8 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "cfg-if-1.0.5",
    "license": "MIT OR Apache-2.0",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {
@@ -274,7 +277,8 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "cpufeatures-0.2.17",
    "license": "MIT OR Apache-2.0",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {
@@ -394,7 +398,8 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "crypto-common-0.1.7",
    "license": "MIT OR Apache-2.0",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {
@@ -402,7 +407,8 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "digest-0.10.7",
    "license": "MIT OR Apache-2.0",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {
@@ -446,7 +452,8 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "foldhash-0.2.0",
    "license": "Zlib",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {
@@ -454,7 +461,8 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "generic-array-0.14.7",
    "license": "MIT",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {
@@ -615,7 +623,8 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "rustc-hash-2.1.3",
    "license": "Apache-2.0 OR MIT",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {
@@ -663,7 +672,8 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "sha2-0.10.9",
    "license": "MIT OR Apache-2.0",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {
@@ -719,7 +729,8 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "twox-hash-2.1.5",
    "license": "MIT",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {
@@ -727,7 +738,8 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "typenum-1.20.1",
    "license": "MIT OR Apache-2.0",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {

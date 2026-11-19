@@ -7,6 +7,7 @@
 #undef _GLIBCXX_USE_PTHREAD_RWLOCK_CLOCKLOCK
 #endif
 #include "pass_cost.h"
+#include "failure_edges.h"
 #include "forward_reads.h"
 #include "loop_version.h"
 #include "step_tree.h"
@@ -391,14 +392,144 @@ static bool versionReadLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
 }
 }
 
-// A private cursor which advances by at most one on a back edge stays behind
-// the counted cursor. The exit test bounds that cursor by the same length SSA
-// value as the write check, including when the length originally came from memory.
+// The zero extension of the narrow loop-invariant N to Wide, where a
+// truncated wide value that entry bounds below the narrow range is itself.
+static const SCEV *widened(ScalarEvolution &SE, Loop &L, const SCEV *N, Type *Wide) {
+  auto *T = dyn_cast<SCEVTruncateExpr>(N);
+  if (T && T->getOperand()->getType() == Wide &&
+      SE.isLoopEntryGuardedByCond(
+          &L, ICmpInst::ICMP_ULT, T->getOperand(),
+          SE.getConstant(APInt::getOneBitSet(SE.getTypeSizeInBits(Wide),
+                                             SE.getTypeSizeInBits(N->getType())))))
+    return T->getOperand();
+  return SE.getZeroExtendExpr(N, Wide);
+}
+
+// An upper bound of the loop-invariant E: a shift or unsigned division by a
+// constant is at most its dividend, a non-negative arithmetic shift is a
+// logical one, and a zero extension keeps the order. A narrow sum is at most
+// the wide sum of its extended terms when the wide type holds the carries.
+static const SCEV *invariantBound(ScalarEvolution &SE, Loop &L, const SCEV *E) {
+  using namespace llvm::PatternMatch;
+  if (auto *Z = dyn_cast<SCEVZeroExtendExpr>(E)) {
+    const SCEV *Inner = invariantBound(SE, L, Z->getOperand());
+    auto *Sum = dyn_cast<SCEVAddExpr>(Inner);
+    if (Sum && SE.getTypeSizeInBits(E->getType()) >=
+                   SE.getTypeSizeInBits(Inner->getType()) + Log2_32_Ceil(Sum->getNumOperands())) {
+      SmallVector<SCEVUse, 4> Terms;
+      for (const SCEV *Term : Sum->operands())
+        Terms.push_back(widened(SE, L, Term, E->getType()));
+      return SE.getAddExpr(Terms);
+    }
+    return widened(SE, L, Inner, E->getType());
+  }
+  if (auto *D = dyn_cast<SCEVUDivExpr>(E))
+    if (auto *C = dyn_cast<SCEVConstant>(D->getRHS()); C && !C->getValue()->isZero())
+      return invariantBound(SE, L, D->getLHS());
+  auto *U = dyn_cast<SCEVUnknown>(E);
+  Value *X;
+  if (!U || !match(U->getValue(), m_AShr(m_Value(X), m_ConstantInt())) ||
+      !SE.isLoopEntryGuardedByCond(&L, ICmpInst::ICMP_SGE, E, SE.getZero(E->getType())))
+    return E;
+  return invariantBound(SE, L, SE.getSCEV(X));
+}
+
+// A unit-step counter {S,+,1} of L whose single latch continues only while
+// the counter's successor is below N (by `ult`, or by `ne` from a first
+// successor at most N) is S on its first iteration and below N on every later
+// one, with or without wrap flags: each taken back edge saw the value below N.
+struct CountedLoop {
+  const SCEVAddRecExpr *Counter = nullptr;
+  const SCEV *Limit = nullptr;
+};
+
+static CountedLoop countedLoop(ScalarEvolution &SE, Loop &L) {
+  auto *Latch = L.getLoopLatch();
+  auto *Exit = Latch ? dyn_cast<CondBrInst>(Latch->getTerminator()) : nullptr;
+  auto *Cmp = Exit ? dyn_cast<ICmpInst>(Exit->getCondition()) : nullptr;
+  if (!Cmp || !Cmp->getOperand(0)->getType()->isIntegerTy()) return {};
+  ICmpInst::Predicate Stay = Cmp->getPredicate();
+  if (Exit->getSuccessor(0) != L.getHeader()) {
+    if (Exit->getSuccessor(1) != L.getHeader()) return {};
+    Stay = ICmpInst::getInversePredicate(Stay);
+  }
+  const SCEV *Next = SE.getSCEV(Cmp->getOperand(0));
+  const SCEV *Limit = SE.getSCEV(Cmp->getOperand(1));
+  if (!SE.isLoopInvariant(Limit, &L)) {
+    std::swap(Next, Limit);
+    Stay = ICmpInst::getSwappedPredicate(Stay);
+  }
+  auto *Step = dyn_cast<SCEVAddRecExpr>(Next);
+  if (!Step || Step->getLoop() != &L || !Step->isAffine() ||
+      !Step->getStepRecurrence(SE)->isOne() || !SE.isLoopInvariant(Limit, &L))
+    return {};
+  if (Stay == ICmpInst::ICMP_NE) {
+    if (!SE.isLoopEntryGuardedByCond(&L, ICmpInst::ICMP_ULE, Step->getStart(), Limit))
+      return {};
+  } else if (Stay != ICmpInst::ICMP_ULT) {
+    return {};
+  }
+  auto *Counter = dyn_cast<SCEVAddRecExpr>(SE.getMinusSCEV(Step, SE.getOne(Step->getType())));
+  if (!Counter || Counter->getLoop() != &L) return {};
+  return {Counter, Limit};
+}
+
+// `Value Pass Bound` holds in every iteration of L when Value is L's counter,
+// Bound is invariant, the first value passes, and every later value, being
+// below the limit, passes: the limit is at most Bound (for `ne` and `ult`) or
+// Bound + 1 (for `ule`; when that wraps to zero, only a zero limit qualifies,
+// which leaves no later value).
+static bool countedCheckHolds(ScalarEvolution &SE, Loop &L, const CountedLoop &Counted,
+                              ICmpInst::Predicate Pass, const SCEV *Value,
+                              const SCEV *Bound) {
+  if (!SE.isLoopInvariant(Bound, &L)) {
+    std::swap(Value, Bound);
+    Pass = ICmpInst::getSwappedPredicate(Pass);
+  }
+  if (Value != Counted.Counter || !SE.isLoopInvariant(Bound, &L) ||
+      (Pass != ICmpInst::ICMP_NE && Pass != ICmpInst::ICMP_ULT && Pass != ICmpInst::ICMP_ULE) ||
+      !SE.isLoopEntryGuardedByCond(&L, Pass, Counted.Counter->getStart(), Bound))
+    return false;
+  if (Pass == ICmpInst::ICMP_ULE) Bound = SE.getAddExpr(Bound, SE.getOne(Bound->getType()));
+  return SE.isLoopEntryGuardedByCond(&L, ICmpInst::ICMP_ULE, Counted.Limit, Bound) ||
+         SE.isLoopEntryGuardedByCond(&L, ICmpInst::ICMP_ULE,
+                                     invariantBound(SE, L, Counted.Limit), Bound);
+}
+
+// Two proofs remove a check. A private cursor which advances by at most one
+// on a back edge stays behind the counted cursor: the exit test bounds that
+// cursor by the same length SSA value as the write check, including when the
+// length originally came from memory. And a failure compare of a loop's
+// counter against an invariant bound never fails when ScalarEvolution shows
+// the bound covers the counter's whole range in that loop or an enclosing one.
 static bool removeBoundedCursorChecks(Function &F, FunctionAnalysisManager &AM) {
   using namespace llvm::PatternMatch;
   auto &LI = AM.getResult<LoopAnalysis>(F);
   auto &SE = AM.getResult<ScalarEvolutionAnalysis>(F);
   SmallVector<CondBrInst *, 4> Redundant;
+  SmallVector<std::pair<CondBrInst *, bool>, 4> Proven;
+  DenseMap<Loop *, CountedLoop> Counted;
+  for (BasicBlock &BB : F) {
+    auto *Check = dyn_cast<CondBrInst>(BB.getTerminator());
+    Loop *L = LI.getLoopFor(&BB);
+    auto *Cmp = Check ? dyn_cast<ICmpInst>(Check->getCondition()) : nullptr;
+    if (!L || !Cmp || !Cmp->getOperand(0)->getType()->isIntegerTy()) continue;
+    const bool FailsOnTrue = hirsel_failure_reaches_raise(wrap(Check->getSuccessor(0)));
+    if (FailsOnTrue == bool(hirsel_failure_reaches_raise(wrap(Check->getSuccessor(1)))))
+      continue;
+    const ICmpInst::Predicate Pass =
+        FailsOnTrue ? Cmp->getInversePredicate() : Cmp->getPredicate();
+    for (Loop *Scope = L; Scope; Scope = Scope->getParentLoop()) {
+      auto [Facts, New] = Counted.try_emplace(Scope);
+      if (New) Facts->second = countedLoop(SE, *Scope);
+      if (Facts->second.Counter &&
+          countedCheckHolds(SE, *Scope, Facts->second, Pass, SE.getSCEV(Cmp->getOperand(0)),
+                            SE.getSCEV(Cmp->getOperand(1)))) {
+        Proven.push_back({Check, !FailsOnTrue});
+        break;
+      }
+    }
+  }
   for (Loop *L : LI.getLoopsInPreorder()) {
     auto *Entry = L->getLoopPredecessor();
     auto *Latch = L->getLoopLatch();
@@ -445,7 +576,9 @@ static bool removeBoundedCursorChecks(Function &F, FunctionAnalysisManager &AM) 
   }
   for (CondBrInst *Check : Redundant)
     Check->setCondition(ConstantInt::getTrue(F.getContext()));
-  return !Redundant.empty();
+  for (auto [Check, Passes] : Proven)
+    Check->setCondition(ConstantInt::getBool(F.getContext(), Passes));
+  return !Redundant.empty() || !Proven.empty();
 }
 
 using RecordFields = std::map<uint64_t, StoreInst *>;

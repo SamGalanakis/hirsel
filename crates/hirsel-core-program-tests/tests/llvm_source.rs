@@ -121,6 +121,156 @@ fn probe(s: u64, divisor: u64) -> u64 {
     }
 }
 
+/// Release LLVM drops a loop's failure check only when ScalarEvolution proves it
+/// never fires. The Fannkuch flip (`j - i` for `i < (k + 1) >> 1`) agrees with
+/// the evaluator; variants that reach the boundary (an extra trip, a trip count
+/// only data decides, an overflow at the type's top bit) still fail with the
+/// evaluator's text and site.
+#[test]
+fn proven_loop_checks_keep_reachable_failures() {
+    let source = r#"
+fn flip(kw: u64) -> u64 {
+    let mut perm: Inline[i32, 32] = [0i32; 32]
+    for i in 0u64 .. 32u64 {
+        perm[i] = int.narrow(i)
+    }
+    let k: i32 = int.narrow(kw)
+    let half: u64 = int.narrow((k + 1) >> 1i32)
+    for i in 0 .. half {
+        let j: u64 = int.narrow(k)
+        let x = perm[i]
+        perm[i] = perm[j - i]
+        perm[j - i] = x
+    }
+    let mut total: u64 = 0
+    for at in 0u64 .. 32u64 {
+        let v: u32 = int.truncate(perm[at])
+        total = int.wrapping_add(int.wrapping_mul(total, 31u64), int.widen(v))
+    }
+    total
+}
+
+fn flip_over(kw: u64, extra: u64) -> u64 {
+    let mut perm: Inline[i32, 32] = [0i32; 32]
+    for i in 0u64 .. 32u64 {
+        perm[i] = int.narrow(i)
+    }
+    let k: i32 = int.narrow(kw)
+    let half: u64 = int.narrow((k + 1) >> 1i32)
+    for i in 0 .. half + extra {
+        let j: u64 = int.narrow(k)
+        let x = perm[i]
+        perm[i] = perm[j - i]
+        perm[j - i] = x
+    }
+    let mut total: u64 = 0
+    for at in 0u64 .. 32u64 {
+        let v: u32 = int.truncate(perm[at])
+        total = int.wrapping_add(int.wrapping_mul(total, 31u64), int.widen(v))
+    }
+    total
+}
+
+fn reach(j: u64, extra: u64) -> u64 {
+    let mut perm: Inline[i32, 32] = [0i32; 32]
+    for i in 0u64 .. 32u64 {
+        perm[i] = int.narrow(i)
+    }
+    for i in 0 .. j + extra {
+        let x = perm[i]
+        perm[i] = perm[j - i]
+        perm[j - i] = x
+    }
+    let mut total: u64 = 0
+    for at in 0u64 .. 32u64 {
+        let v: u32 = int.truncate(perm[at])
+        total = int.wrapping_add(int.wrapping_mul(total, 31u64), int.widen(v))
+    }
+    total
+}
+
+fn unknown(j: u64, n: u64) -> u64 {
+    let mut perm: Inline[i32, 32] = [0i32; 32]
+    for i in 0u64 .. 32u64 {
+        perm[i] = int.narrow(i)
+    }
+    let stop: i32 = int.narrow(n)
+    let mut i: u64 = 0
+    while perm[i] != stop {
+        let x = perm[i]
+        perm[i] = perm[j - i]
+        perm[j - i] = x
+        i += 1
+    }
+    let mut total: u64 = 0
+    for at in 0u64 .. 32u64 {
+        let v: u32 = int.truncate(perm[at])
+        total = int.wrapping_add(int.wrapping_mul(total, 31u64), int.widen(v))
+    }
+    int.wrapping_add(total, i)
+}
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let mut calls = Vec::new();
+    for k in (0..34).chain([2_147_483_647, 2_147_483_648]) {
+        calls.push(("flip", vec![k]));
+    }
+    for k in [0, 1, 2, 7, 30, 31] {
+        for extra in [0, 1, 2, 9] {
+            calls.push(("flip_over", vec![k, extra]));
+        }
+    }
+    for j in [0, 1, 2, 5, 31] {
+        for extra in 0..4 {
+            calls.push(("reach", vec![j, extra]));
+        }
+        for n in [0, 1, 3, 40] {
+            calls.push(("unknown", vec![j, n]));
+        }
+    }
+    let cases: Vec<_> = calls
+        .into_iter()
+        .map(|(name, args)| Case {
+            function: names[name],
+            args,
+            limit: u64::MAX,
+            injection: None,
+        })
+        .collect();
+    let exports = ["flip", "flip_over", "reach", "unknown"].map(|name| names[name]);
+    let object = program.llvm_program(Target::X86_64Linux, false, false, &exports);
+    let reports = execute_object(&program, &cases, "", "", Optimization::Speed, Some(object));
+    let mut failed = 0;
+    for (case, native) in cases.iter().zip(reports) {
+        let evaluated = eval::run(&program, case.function, &case.args, case.limit);
+        // The flip never underflows: i < (k + 1) >> 1 <= k for every k >= 1.
+        if case.function == names["flip"] && case.args[0] < 32 {
+            assert!(
+                matches!(evaluated.outcome, eval::Outcome::Returned(_)),
+                "{:?}",
+                case.args
+            );
+        }
+        failed += usize::from(matches!(evaluated.outcome, eval::Outcome::Failed(_)));
+        assert_eq!(
+            native.outcome, evaluated.outcome,
+            "f{}{:?}",
+            case.function.0, case.args
+        );
+        let sites: Vec<_> = evaluated
+            .sites
+            .iter()
+            .map(|anchor| {
+                anchor.map_or(0, |a| {
+                    ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                })
+            })
+            .collect();
+        assert_eq!(native.sites, sites, "f{}{:?}", case.function.0, case.args);
+    }
+    assert!(failed > 0, "no case reaches a boundary");
+}
+
 #[test]
 fn native_flow_corpus_agrees_with_the_owner_laws() {
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(FLOW_SOURCE, None);

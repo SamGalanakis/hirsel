@@ -29,6 +29,7 @@ extern void hirsel_llvm_share_cold_step_sync(void *module, void *machine);
 extern void hirsel_llvm_reuse_step_flags(void *module);
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 extern void hirsel_llvm_fixed_width_checks(void *module);
+extern void hirsel_llvm_prepay_step_trees(void *module);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
 typedef struct { const uint8_t *data; size_t len; LLVMModuleRef module; } HirselLlvmUnit;
@@ -659,11 +660,22 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         // removes carrier clears/restores that its cleanup used to observe.
         // Composition leaves local bodies that no export reaches. Remove
         // them before SROA and instruction combining visit the whole module.
-        const char *pipeline = export_count
-            ? "globaldce,function(sroa),hotcoldsplit,default<O3>"
-            : "function(sroa),hotcoldsplit,default<O3>";
         hirsel_llvm_inline_snapshot_calls(module);
-        LLVMErrorRef e = LLVMRunPasses(module, pipeline, machine, options);
+        LLVMValueRef refill = LLVMGetNamedFunction(module, "hirsel_core_step_out");
+        LLVMErrorRef e;
+        if (refill && LLVMGetFirstUse(refill)) {
+            e = LLVMRunPasses(module, export_count ? "globaldce,function(sroa)" : "function(sroa)",
+                              machine, options);
+            if (!e) {
+                hirsel_llvm_prepay_step_trees(module);
+                e = LLVMRunPasses(module, "hotcoldsplit,default<O3>", machine, options);
+            }
+        } else {
+            const char *pipeline = export_count
+                ? "globaldce,function(sroa),hotcoldsplit,default<O3>"
+                : "function(sroa),hotcoldsplit,default<O3>";
+            e = LLVMRunPasses(module, pipeline, machine, options);
+        }
         if (!e) {
             hirsel_llvm_mark_loop_callbacks(module);
             e = LLVMRunPasses(module,

@@ -158,7 +158,7 @@ fn exposed_helpers_keep_imported_carrier_facts() {
     let facts = hirsel_core_ir::roles::Facts::new(&module);
     let mut caller = module.clone();
     caller.functions[1].body = None;
-    assert!(expose::module(&caller).is_some());
+    assert!(expose::module(&caller, true).is_some());
     assert!(facts.place_blind(FuncId(1), 0));
     assert!(!hirsel_core_ir::roles::Facts::new(&caller).place_blind(FuncId(1), 0));
     let ir = carrier_ir(&caller, &facts, Target::X86_64Linux, false);

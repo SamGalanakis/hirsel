@@ -8,6 +8,7 @@
 #endif
 #include "forward_reads.h"
 #include "loop_version.h"
+#include "step_tree.h"
 #include <map>
 #include <memory>
 #include <llvm/ADT/MapVector.h>
@@ -65,6 +66,10 @@ extern "C" void hirsel_llvm_fixed_width_checks(void *Raw) noexcept {
       Branch->setCondition(B.CreateAnd(HasWidth, B.CreateICmpULE(Start, Limit)));
       RecursivelyDeleteTriviallyDeadInstructions(Condition);
     }
+}
+
+extern "C" void hirsel_llvm_prepay_step_trees(void *Raw) {
+  hirsel_llvm::prepayStepTrees(*static_cast<Module *>(Raw));
 }
 
 static bool versionCopy(Loop &L, LoopInfo &LI, DominatorTree &DT,

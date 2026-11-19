@@ -343,6 +343,7 @@ struct EmissionFacts<'a> {
     roles: Option<&'a hirsel_core_ir::roles::Facts>,
     neutral: Option<&'a BTreeSet<hirsel_core_ids::ContentHash>>,
     elide_steps: bool,
+    prepay_step_trees: bool,
 }
 #[cfg(hirsel_lazy_core)]
 pub(crate) fn step_neutral_program(modules: &[&Module]) -> BTreeSet<hirsel_core_ids::ContentHash> {
@@ -362,7 +363,10 @@ fn emit_module(
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
     let native = hirsel_core_ir::native_layout::resolve(module, &recipes);
     let module = native.as_ref();
-    let exposed = source.batch_steps.then(|| expose::module(module)).flatten();
+    let exposed = source
+        .batch_steps
+        .then(|| expose::module(module, provided.prepay_step_trees))
+        .flatten();
     let module = exposed.as_ref().unwrap_or(module);
     let batch_steps = source.batch_steps && !provided.elide_steps;
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
@@ -921,6 +925,7 @@ pub(crate) fn emit_native_module_in_context(
             roles: Some(roles),
             neutral,
             elide_steps: neutral.is_none(),
+            prepay_step_trees: neutral.is_some(),
         },
     )
 }

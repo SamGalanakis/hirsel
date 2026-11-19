@@ -21,6 +21,10 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest.join("bridge/forward_reads.h").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest.join("bridge/step_tree.h").display()
+    );
     let sysroot = prefix.join("sysroot");
     assert!(
         sysroot.join("usr/include/c++/13/vector").is_file(),

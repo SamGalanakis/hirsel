@@ -10,7 +10,7 @@ LLVM_BRIDGE_FLAGS = [
 cxx_library(
     name = "bridge",
     srcs = ["core_passes.cpp", "checked_copy.cpp"],
-    headers = ["aggregate_phi.h", "failure_edges.h", "forward_reads.h", "loop_version.h"],
+    headers = ["aggregate_phi.h", "failure_edges.h", "forward_reads.h", "loop_version.h", "step_tree.h"],
     header_namespace = "",
     compiler_flags = LLVM_BRIDGE_FLAGS,
     deps = ["toolchains//:libllvm"],
@@ -27,7 +27,7 @@ export_file(name = "loop_version.h", mode = "reference", visibility = ["PUBLIC"]
 cxx_library(
     name = "checked-copy-static",
     srcs = ["checked_copy.cpp"],
-    headers = ["forward_reads.h", "loop_version.h"],
+    headers = ["forward_reads.h", "loop_version.h", "step_tree.h"],
     header_namespace = "",
     compiler_flags = LLVM_BRIDGE_FLAGS,
     deps = ["toolchains//:libllvm"],

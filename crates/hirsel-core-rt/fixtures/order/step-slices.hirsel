@@ -6,20 +6,44 @@
 // can yield on its own, and entering/leaving the scope takes no step.
 fn ready(take out: Stdout) waits { let _ = stdout.write(out, "B") }
 
+fn visit(mut count: u64, depth: u64) {
+    count += 1
+    if depth != 0 {
+        visit(mut count, depth - 1)
+        visit(mut count, depth - 1)
+    }
+}
+
+fn fixed_tree() -> u64 {
+    let mut count = 0u64
+    visit(mut count, 6)
+    count
+}
+
+fn fit_tree(steps: u64) -> u64 {
+    match (bound steps steps { fixed_tree() }) {
+        Ok(count) => 1000 + count,
+        Error(e) => e.steps,
+    }
+}
+
 // The inner scope reserves N-1 and spends N-2. The refund pays for the
 // second send. The third send would take Step N+1 and must have no effect.
 fn boundary(n: u64, tx: Sender[u64]) -> bool {
     match (bound steps n {
         let inner = bound steps (n - 1) {
-            for _ in 0u64 .. (n - 2) {}
+            // The tree has 127 nodes and 126 edges. The two entry calls
+            // make it 128 Steps, so the latches and tree spend N-2.
+            for _ in 0u64 .. (n - 130) {}
+            fixed_tree()
         }
         match inner {
-            Ok(()) => {
+            Ok(127) => {
                 let _ = channel.try_send(tx, 1u64)
                 let _ = channel.try_send(tx, 2u64)
                 let _ = channel.try_send(tx, 3u64)
             },
-            Error(_) => {},
+            _ => {},
         }
     }) {
         Error(e) => e.steps == n,
@@ -42,6 +66,9 @@ pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     // three scopes yield zero, one and two times respectively.
     if !boundary(65535, tx) || !boundary(65536, tx) || !boundary(65537, tx) {
         return Error(Exit(status: 2))
+    }
+    if fit_tree(127) != 127 || fit_tree(128) != 1127 || fit_tree(129) != 1127 {
+        return Error(Exit(status: 3))
     }
     Ok(())
 }

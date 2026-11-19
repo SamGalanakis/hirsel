@@ -440,7 +440,83 @@ fn merge_blocks(body: &mut Body) {
     }
 }
 
-pub(super) fn module(module: &Module) -> Option<Module> {
+fn isolated_step_bodies(module: &Module) -> Vec<bool> {
+    let mut isolated = vec![false; module.functions.len()];
+    let mut callers = vec![Vec::new(); module.functions.len()];
+    let mut excluded = Vec::new();
+    for (i, f) in module.functions.iter().enumerate() {
+        if let Some(body) = &f.body {
+            isolated[i] = body.insts.iter().all(supported)
+                && body
+                    .pools
+                    .steps
+                    .iter()
+                    .all(|step| !matches!(step, Step::Deref | Step::Seq(_)));
+            for call in &body.calls {
+                match call.callee {
+                    Callee::Direct(callee) => callers[callee.index()].push(i),
+                    Callee::Indirect(_) | Callee::Runtime(_) => isolated[i] = false,
+                }
+            }
+        }
+        if !isolated[i] {
+            excluded.push(i);
+        }
+    }
+    while let Some(callee) = excluded.pop() {
+        for &caller in &callers[callee] {
+            if isolated[caller] {
+                isolated[caller] = false;
+                excluded.push(caller);
+            }
+        }
+    }
+    isolated
+}
+
+fn literal_recursive_entries(module: &Module) -> Vec<bool> {
+    let isolated = isolated_step_bodies(module);
+    let recursive = module
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            isolated[i]
+                && f.body.as_ref().is_some_and(|body| {
+                    body.calls
+                        .iter()
+                        .any(|c| c.callee == Callee::Direct(FuncId(i as u32)))
+                })
+        })
+        .collect::<Vec<_>>();
+    module
+        .functions
+        .iter()
+        .map(|f| {
+            f.body.as_ref().is_some_and(|body| {
+                let literals = body
+                    .insts
+                    .iter()
+                    .filter_map(|inst| match *inst {
+                        Inst::Const { result, bits } if bits != 0 => Some(result),
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                body.calls.iter().any(|call| {
+                    matches!(call.callee, Callee::Direct(f) if recursive[f.index()])
+                        && call
+                            .args
+                            .get(&body.pools.args)
+                            .unwrap()
+                            .iter()
+                            .any(|arg| matches!(arg, Arg::Value(v) if literals.contains(v)))
+                })
+            })
+        })
+        .collect()
+}
+
+pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Module> {
     // Marks have no runtime meaning. Remove them before eligibility, budgets
     // or block merging can let one change the exposed program.
     let unmarked = module
@@ -454,12 +530,21 @@ pub(super) fn module(module: &Module) -> Option<Module> {
         })
         .then(|| hirsel_core_ir::without_marks(module));
     let module = unmarked.as_ref().unwrap_or(module);
+    // Keep a literal entry to isolated recursion visible to the LLVM Step
+    // proof, including the entry's private storage initialization. LLVM can
+    // still inline the call after the proof has run.
+    let step_entries = preserve_step_trees.then(|| literal_recursive_entries(module));
+    let step_entry = |i: usize| step_entries.as_ref().is_some_and(|entries| entries[i]);
     let eligible = module
         .functions
         .iter()
-        .map(|f| {
+        .enumerate()
+        .map(|(i, f)| {
             f.body.as_ref().filter(|b| {
-                b.insts.len() <= 192 && b.blocks.len() <= 24 && b.insts.iter().all(supported)
+                !step_entry(i)
+                    && b.insts.len() <= 192
+                    && b.blocks.len() <= 24
+                    && b.insts.iter().all(supported)
             })
         })
         .collect::<Vec<_>>();
@@ -469,7 +554,7 @@ pub(super) fn module(module: &Module) -> Option<Module> {
         let Some(original) = &f.body else {
             continue;
         };
-        if original.calls.is_empty() {
+        if original.calls.is_empty() || step_entry(i) {
             continue;
         }
         // An unmetered terminal call already has FORM's forwarding ABI. Keep

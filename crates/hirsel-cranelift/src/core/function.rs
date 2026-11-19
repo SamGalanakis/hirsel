@@ -55,6 +55,8 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub signature: &'c abi::Signature,
     pub result_storage: Option<Value>,
     record_dest: Option<Value>,
+    /// By value: the constant an `Inst::Const` defines.
+    pub constants: Vec<Option<u64>>,
     pub raise_blocks: Vec<PendingRaise>,
     pub raise_lookup: std::collections::HashMap<(u8, Option<BlockId>, Option<Anchor>), ir::Block>,
     pub site_reference: Option<ir::GlobalValue>,
@@ -258,6 +260,7 @@ pub(super) fn emit(
         signature,
         result_storage,
         record_dest,
+        constants: c::failure::constants(body),
         raise_blocks: Vec::with_capacity(4),
         raise_lookup: Default::default(),
         site_reference: None,
@@ -537,7 +540,8 @@ impl Function<'_, '_, '_> {
                 let l = self.get(left);
                 let r = self.get(right);
                 let v = if op.can_fail(t) {
-                    self.checked_binary(op, t, l, r, fail)?
+                    let safe = c::failure::constant_safe(op, t, self.constants[right.index()]);
+                    self.checked_binary(op, t, l, r, safe, fail)?
                 } else {
                     self.binary(op, t, l, r)?
                 };

@@ -299,11 +299,10 @@ pub(super) fn pure(
         Inst::Step { .. } => true,
         Inst::Store { address, .. } => stores && local(body, address),
         Inst::Binary {
-            op: BinaryOp::Shl | BinaryOp::Shr,
-            left,
-            right,
-            ..
-        } => failure::bounded_shift(body.values[left.index()], constants[right.index()]),
+            op, left, right, ..
+        } if failure::constant_safe(op, body.values[left.index()], constants[right.index()]) => {
+            true
+        }
         Inst::Call { call } => {
             let Callee::Direct(f) = body.calls[call.index()].callee else {
                 return false;
@@ -325,12 +324,7 @@ pub(super) fn pure(
             let Some(callee) = &function.body else {
                 return false;
             };
-            let mut values = vec![None; callee.values.len()];
-            for i in &callee.insts {
-                if let Inst::Const { result, bits } = *i {
-                    values[result.index()] = Some(bits);
-                }
-            }
+            let values = failure::constants(callee);
             empty::loop_free(callee)
                 && callee.terminators.iter().all(|t| {
                     matches!(

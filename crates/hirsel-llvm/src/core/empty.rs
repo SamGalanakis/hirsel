@@ -51,11 +51,10 @@ pub(super) fn loop_free(body: &Body) -> bool {
 fn pure(body: &Body, constants: &[Option<u64>], inst: &Inst) -> bool {
     match inst {
         Inst::Binary {
-            op: BinaryOp::Shl | BinaryOp::Shr,
-            left,
-            right,
-            ..
-        } => failure::bounded_shift(body.values[left.index()], constants[right.index()]),
+            op, left, right, ..
+        } if failure::constant_safe(*op, body.values[left.index()], constants[right.index()]) => {
+            true
+        }
         Inst::Const { .. }
         | Inst::ReadStatic { .. }
         | Inst::FunctionRef { .. }

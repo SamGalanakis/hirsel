@@ -144,6 +144,7 @@ impl FunctionEmitter<'_> {
             return Ok(ordered);
         }
         let (signed, w) = t.int().unwrap_or((false, (size(t) * 8) as u32));
+        let safe = failure::constant_safe(op, t, self.constants[right.index()]);
         Ok(match op {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
                 let op = match op {
@@ -156,8 +157,10 @@ impl FunctionEmitter<'_> {
                 x
             }
             BinaryOp::Rem => {
-                let zero = self.cmp(Predicate::Eq, &tt, b, &int(0));
-                self.fail_if(&zero, fail, 2)?;
+                if !safe {
+                    let zero = self.cmp(Predicate::Eq, &tt, b, &int(0));
+                    self.fail_if(&zero, fail, 2)?;
+                }
                 let safe = if signed {
                     let minus_one = self.cmp(Predicate::Eq, &tt, b, &int(-1));
                     self.select(&tt, &minus_one, &int(1), b)
@@ -168,15 +171,19 @@ impl FunctionEmitter<'_> {
                 self.bin(rem, &tt, a, &safe)
             }
             BinaryOp::Div => {
-                let zero = self.cmp(Predicate::Eq, &tt, b, &int(0));
-                self.fail_if(&zero, fail, 2)?;
-                let over = self.div_overflow(t, a, b);
-                self.fail_if(&over, fail, 0)?;
+                if !safe {
+                    let zero = self.cmp(Predicate::Eq, &tt, b, &int(0));
+                    self.fail_if(&zero, fail, 2)?;
+                    if signed {
+                        let over = self.div_overflow(t, a, b);
+                        self.fail_if(&over, fail, 0)?;
+                    }
+                }
                 let div = if signed { Binary::SDiv } else { Binary::UDiv };
                 self.bin(div, &tt, a, b)
             }
             BinaryOp::Shl | BinaryOp::Shr => {
-                if !failure::bounded_shift(t, self.constants[right.index()]) {
+                if !safe {
                     let outside = self.cmp(Predicate::Uge, &tt, b, &int(w));
                     self.fail_if(&outside, fail, 0)?;
                 }

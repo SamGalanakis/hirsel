@@ -162,6 +162,7 @@ impl Function<'_, '_, '_> {
         t: Ty,
         l: Value,
         r: Value,
+        safe: bool,
         fail: Option<BlockId>,
     ) -> Result<Value> {
         use BinaryOp::*;
@@ -178,11 +179,13 @@ impl Function<'_, '_, '_> {
             return Ok(value);
         }
         if matches!(op, Shl | Shr) {
-            let outside =
-                self.b
-                    .ins()
-                    .icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, r, i64::from(width));
-            self.guard(outside, 0, fail)?;
+            if !safe {
+                let outside =
+                    self.b
+                        .ins()
+                        .icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, r, i64::from(width));
+                self.guard(outside, 0, fail)?;
+            }
             return Ok(if op == Shl {
                 self.b.ins().ishl(l, r)
             } else if signed {
@@ -191,16 +194,19 @@ impl Function<'_, '_, '_> {
                 self.b.ins().ushr(l, r)
             });
         }
-        let zero = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
-        self.guard(zero, 2, fail)?;
-        let minus_one = self.b.ins().icmp_imm_s(IntCC::Equal, r, -1);
-        if signed && op != Rem {
-            let min = self.b.ins().iconst(native, (1u64 << (width - 1)) as i64);
-            let is_min = self.b.ins().icmp(IntCC::Equal, l, min);
-            let overflow = self.b.ins().band(is_min, minus_one);
-            self.guard(overflow, 0, fail)?;
+        if !safe {
+            let zero = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
+            self.guard(zero, 2, fail)?;
+            if signed && op != Rem {
+                let minus_one = self.b.ins().icmp_imm_s(IntCC::Equal, r, -1);
+                let min = self.b.ins().iconst(native, (1u64 << (width - 1)) as i64);
+                let is_min = self.b.ins().icmp(IntCC::Equal, l, min);
+                let overflow = self.b.ins().band(is_min, minus_one);
+                self.guard(overflow, 0, fail)?;
+            }
         }
         let divisor = if signed && op == Rem {
+            let minus_one = self.b.ins().icmp_imm_s(IntCC::Equal, r, -1);
             let one = self.b.ins().iconst(native, 1);
             self.b.ins().select(minus_one, one, r)
         } else {

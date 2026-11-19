@@ -1,7 +1,7 @@
 //! Within-module failure reachability (crate docs, "Failure"): which functions
 //! may fail. Recursive components without a failure source stay infallible;
 //! bodies defined elsewhere and indirect calls are sources.
-use crate::{BinaryOp, Callee, Inst, Module, Terminator, Ty};
+use crate::{BinaryOp, Body, Callee, Inst, Module, Terminator, Ty};
 
 pub struct Failures {
     /// By function: whether a call of it may fail.
@@ -14,18 +14,7 @@ impl Failures {
         let constants: Vec<_> = module
             .functions
             .iter()
-            .map(|f| {
-                let Some(body) = &f.body else {
-                    return vec![];
-                };
-                let mut values = vec![None; body.values.len()];
-                for inst in &body.insts {
-                    if let Inst::Const { result, bits } = *inst {
-                        values[result.index()] = Some(bits);
-                    }
-                }
-                values
-            })
+            .map(|f| f.body.as_ref().map_or_else(Vec::new, constants))
             .collect();
         let mut may_fail = vec![false; module.functions.len()];
         let mut callers = vec![vec![]; module.functions.len()];
@@ -48,11 +37,12 @@ impl Failures {
                         Callee::Runtime(op) => fails |= op.fails(),
                     },
                     Inst::Binary {
-                        op: BinaryOp::Shl | BinaryOp::Shr,
-                        left,
-                        right,
-                        ..
-                    } if bounded_shift(body.values[left.index()], constants[i][right.index()]) => {}
+                        op, left, right, ..
+                    } if constant_safe(
+                        op,
+                        body.values[left.index()],
+                        constants[i][right.index()],
+                    ) => {}
                     _ => fails |= inst.can_fail(body),
                 }
             }
@@ -75,8 +65,28 @@ impl Failures {
         }
     }
 }
-/// A shift by a constant below its type's width, which cannot fail (SEM-1).
-pub fn bounded_shift(ty: Ty, amount: Option<u64>) -> bool {
-    ty.int()
-        .is_some_and(|(_, width)| amount.is_some_and(|n| n < u64::from(width)))
+/// By value: the constant an `Inst::Const` defines.
+pub fn constants(body: &Body) -> Vec<Option<u64>> {
+    let mut values = vec![None; body.values.len()];
+    for inst in &body.insts {
+        if let Inst::Const { result, bits } = *inst {
+            values[result.index()] = Some(bits);
+        }
+    }
+    values
+}
+/// An integer op whose constant right operand rules out its failure (SEM-1): a
+/// shift below the width, a remainder by nonzero, or a quotient by nonzero that
+/// is not -1 when signed (the one overflowing divisor).
+pub fn constant_safe(op: BinaryOp, ty: Ty, right: Option<u64>) -> bool {
+    let (Some((signed, width)), Some(n)) = (ty.int(), right) else {
+        return false;
+    };
+    let ones = u64::MAX >> (64 - width);
+    match op {
+        BinaryOp::Shl | BinaryOp::Shr => n < u64::from(width),
+        BinaryOp::Rem => n & ones != 0,
+        BinaryOp::Div => n & ones != 0 && !(signed && n & ones == ones),
+        _ => false,
+    }
 }

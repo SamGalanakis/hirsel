@@ -17,12 +17,7 @@ pub(super) fn byte_fills(body: &Body) -> Vec<Option<ByteFill>> {
     }) {
         return Vec::new();
     }
-    let mut constants = vec![None; body.values.len()];
-    for inst in &body.insts {
-        if let Inst::Const { result, bits } = *inst {
-            constants[result.index()] = Some(bits);
-        }
-    }
+    let constants = c::failure::constants(body);
     let mut predecessors = vec![0usize; body.blocks.len()];
     for edge in &body.edges {
         predecessors[edge.target.index()] += 1;

@@ -642,6 +642,8 @@ fn emit_module(
             inline: match definition.as_str() {
                 "core@1/string/push_char" => Inline::Always,
                 "core@1/string/push_scalar" => Inline::Never,
+                // pivot.rs leaves the recursive sample to the inliner.
+                "core@1/list/median3_rec" => Inline::Default,
                 "std@1/float/shortest64" | "std@1/float/push_fixed64" => Inline::Always,
                 "std@1/float/shortest_decimal64" | "std@1/float/push_fixed_decimal64" => Inline::Never,
                 // Revisit bounded mutable loops after borrow-scope emission.

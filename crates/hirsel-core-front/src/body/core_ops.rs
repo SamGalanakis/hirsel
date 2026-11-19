@@ -113,6 +113,10 @@ operations! {
     ("string", "from", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "from_utf8", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "is_utf8", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "encode_base64", Lane::PendingCode, "C", "std-base64-1d2503c0", false),
+    ("string", "append_base64_bytes", Lane::PendingCode, "C", "std-base64-1d2503c0", false),
+    ("string", "append_base64_blocks", Lane::PendingCode, "C", "std-base64-1d2503c0", true),
+    ("string", "base64_symbol", Lane::PendingCode, "C", "std-base64-1d2503c0", true),
     ("string", "into_bytes", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "next_scalar", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "push_scalar", Lane::PendingCode, "C", "std-seed-api-889", true),
@@ -1644,7 +1648,13 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                 entry.module == "string"
                     && matches!(
                         entry.name,
-                        "of_bytes" | "to_bytes" | "view_string" | "shorten" | "push_scalar"
+                        "of_bytes"
+                            | "to_bytes"
+                            | "view_string"
+                            | "shorten"
+                            | "push_scalar"
+                            | "append_base64_blocks"
+                            | "base64_symbol"
                     )
                     || entry.module == "map"
                     || entry.module == "list"

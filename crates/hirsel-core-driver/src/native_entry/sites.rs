@@ -2,7 +2,7 @@
 use super::*;
 use object::{Object as _, ObjectSymbol as _};
 
-use hirsel_core_ir::source::site_symbol;
+use hirsel_core_ir::source::{site_item_symbol, site_symbol};
 use object::ObjectSection as _;
 use std::{collections::HashSet, fs::File, path::PathBuf};
 
@@ -33,8 +33,10 @@ pub(crate) fn retain_referenced(
                     .symbol_by_index(index)
                     .map_err(std::io::Error::other)?;
                 let name = symbol.name_bytes().map_err(std::io::Error::other)?;
-                if name.starts_with(b"hirsel_core_site_") && !names.contains(name) {
-                    names.insert(name.to_vec());
+                if let Some(item) = site_item_symbol(name)
+                    && !names.contains(item)
+                {
+                    names.insert(item.to_vec());
                 }
             }
         }
@@ -63,20 +65,53 @@ pub(crate) fn retain_referenced(
 
 pub(super) fn define(object: &mut object::write::Object<'_>, sources: &SourceMap) {
     for (i, path) in sources.items.keys().enumerate() {
-        object.add_symbol(object::write::Symbol {
-            name: hirsel_core_ir::source::site_symbol(path).into_bytes(),
-            value: (i as u64 + 1) << 32,
-            size: 0,
-            kind: object::SymbolKind::Unknown,
-            scope: object::SymbolScope::Linkage,
-            weak: false,
-            section: object::write::SymbolSection::Absolute,
-            flags: object::SymbolFlags::Elf {
-                st_info: object::elf::SymbolInfo(object::elf::STB_GLOBAL.0 << 4),
-                st_other: object::elf::SymbolOther(object::elf::STV_HIDDEN.0),
-            },
-        });
+        absolute(
+            object,
+            hirsel_core_ir::source::site_symbol(path),
+            (i as u64 + 1) << 32,
+        );
     }
+}
+
+pub(super) fn define_release(
+    object: &mut object::write::Object<'_>,
+    sources: &SourceMap,
+    bindings: &[hirsel_core_ir::source::ReleaseSite],
+) {
+    if bindings.is_empty() {
+        return;
+    }
+    let items = sources
+        .items
+        .keys()
+        .enumerate()
+        .map(|(index, path)| (path, index + 1))
+        .collect::<std::collections::HashMap<_, _>>();
+    for binding in bindings {
+        if let Some(&item) = items.get(&binding.item) {
+            absolute(
+                object,
+                hirsel_core_ir::source::release_site_symbol(&binding.item, binding.ordinal),
+                ((item as u64) << 32) | u64::from(binding.start),
+            );
+        }
+    }
+}
+
+fn absolute(object: &mut object::write::Object<'_>, name: String, value: u64) {
+    object.add_symbol(object::write::Symbol {
+        name: name.into_bytes(),
+        value,
+        size: 0,
+        kind: object::SymbolKind::Unknown,
+        scope: object::SymbolScope::Linkage,
+        weak: false,
+        section: object::write::SymbolSection::Absolute,
+        flags: object::SymbolFlags::Elf {
+            st_info: object::elf::SymbolInfo(object::elf::STB_GLOBAL.0 << 4),
+            st_other: object::elf::SymbolOther(object::elf::STV_HIDDEN.0),
+        },
+    });
 }
 
 pub(crate) fn check_linked_sites(bytes: &[u8]) -> Result<()> {

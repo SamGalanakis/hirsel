@@ -43,6 +43,7 @@ pub(crate) struct Plan<'a> {
     parameters: Vec<Requirement<'a>>,
     cleanup: Option<String>,
     launch_digest_unused: bool,
+    release_sites: &'a [hirsel_core_ir::source::ReleaseSite],
     root_limit: u64,
     grant_mask: u64,
     net_rules: &'a [hirsel_core_net::Rule],
@@ -124,6 +125,7 @@ impl<'a> Plan<'a> {
             exit_offset: binding.exit_offset,
             parameters,
             launch_digest_unused: launch_digest_unused && cleanup.is_none(),
+            release_sites: &[],
             cleanup,
             root_limit: options.root_limit,
             grant_mask: options.grant_mask,
@@ -135,6 +137,14 @@ impl<'a> Plan<'a> {
                 .as_ref()
                 .map(|p| p.as_os_str().as_bytes().to_vec()),
         })
+    }
+
+    pub(crate) fn with_release_sites(
+        mut self,
+        sites: &'a [hirsel_core_ir::source::ReleaseSite],
+    ) -> Self {
+        self.release_sites = sites;
+        self
     }
 
     /// The entry object of the executable. It also defines
@@ -192,6 +202,7 @@ impl<'a> Plan<'a> {
         start::emit(&mut object, self, &data, entry)?;
         let mut product = object.finish();
         sites::define(&mut product.object, sources);
+        sites::define_release(&mut product.object, sources, self.release_sites);
         product.object.write().map_err(error)
     }
 }

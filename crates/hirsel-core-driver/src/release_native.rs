@@ -43,8 +43,37 @@ fn part_key(
 struct Parts {
     schema: u32,
     parts: Vec<ContentHash>,
+    sites: Vec<hirsel_core_ir::source::ReleaseSite>,
 }
-const PARTS_SCHEMA: u32 = 2;
+const PARTS_SCHEMA: u32 = 3;
+
+type Held = (
+    crate::store::Bare,
+    hirsel_core_ir::source::NativeObject,
+    std::fs::File,
+    bool,
+);
+
+fn load_parts(
+    store: &Store,
+    shared: &Store,
+    key: ContentHash,
+) -> io::Result<Option<(Parts, Vec<Held>)>> {
+    let Some(record) = store.get(key)?.and_then(|bytes| decode::<Parts>(&bytes)) else {
+        return Ok(None);
+    };
+    if record.schema != PARTS_SCHEMA || record.parts.is_empty() {
+        return Ok(None);
+    }
+    let mut held = Vec::with_capacity(record.parts.len());
+    for &key in &record.parts {
+        let Some((bare, object, file)) = crate::native_object::load(shared, key)? else {
+            return Ok(None);
+        };
+        held.push((bare, object, file, false));
+    }
+    Ok(Some((record, held)))
+}
 /// Whether a stored payload is a release unit's record.
 #[cfg(test)]
 pub(crate) fn is_unit_record(payload: &[u8]) -> bool {
@@ -310,19 +339,37 @@ impl CheckProduct {
             definition: entry.clone(),
             message,
         };
-        // An unchanged rebuild reads the unit's record and every part it names.
         let mut held = Vec::new();
-        if let Some(record) = store.get(unit)?.and_then(|b| decode::<Parts>(&b))
-            && record.schema == PARTS_SCHEMA
+        let mut sites = Vec::new();
+        let mut lowered = None;
+        let mut optimized_key = None;
+        if let Some((record, objects)) = load_parts(store, &shared, unit)? {
+            sites = record.sites;
+            held = objects;
+        } else if closed_executable
+            && !options.debug_lines
+            && target == hirsel_core_layout::Target::X86_64Linux
+            && std::env::var_os("HIRSEL_LLVM_PRINTED_ORACLE").is_none()
         {
-            for &key in &record.parts {
-                match crate::native_object::load(&shared, key)? {
-                    Some((bare, object, file)) => held.push((bare, object, file, false)),
-                    None => break,
-                }
-            }
-            if held.len() != record.parts.len() {
-                held.clear();
+            let mut release = hirsel_llvm_lazy::ReleaseUnit::lower(
+                &modules[0],
+                &facts[0],
+                options.logical_charge_report.is_some(),
+                elide_steps,
+            )
+            .map_err(emit)?;
+            sites = std::mem::take(&mut release.sites);
+            let key = crate::native::key(
+                "hirsel.core-release-bitcode.v1",
+                &(&generator, runtime, instance, release.bitcode_hash()),
+            )?;
+            if let Some((mut record, objects)) = load_parts(store, &shared, key)? {
+                record.sites.clone_from(&sites);
+                store.put_keyed(unit, &encode(&record)?)?;
+                held = objects;
+            } else {
+                optimized_key = Some(key);
+                lowered = Some(release);
             }
         }
         if held.is_empty() {
@@ -340,30 +387,35 @@ impl CheckProduct {
             let mut failure = None;
             // One code generator thread per CPU this process may run on.
             let jobs = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
-            let program = hirsel_llvm_lazy::emit_program_parts(
-                &units,
-                &[instance.symbol()],
-                target,
-                jobs,
-                elide_steps,
-                &mut |_, machine, bitcode| {
-                    let loaded = part_key(&generator, machine, bitcode).and_then(|key| {
-                        parts.push(key);
-                        crate::native_object::load(&shared, key)
-                    });
-                    match loaded {
-                        Ok(Some((bare, object, file))) => {
-                            held.push((bare, object, file, false));
-                            true
-                        }
-                        Ok(None) => false,
-                        Err(error) => {
-                            failure.get_or_insert(error);
-                            true
-                        }
+            let mut reuse = |_: &str, machine: &str, bitcode: &[u8]| {
+                let loaded = part_key(&generator, machine, bitcode).and_then(|key| {
+                    parts.push(key);
+                    crate::native_object::load(&shared, key)
+                });
+                match loaded {
+                    Ok(Some((bare, object, file))) => {
+                        held.push((bare, object, file, false));
+                        true
                     }
-                },
-            )
+                    Ok(None) => false,
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                        true
+                    }
+                }
+            };
+            let exports = [instance.symbol()];
+            let program = match lowered {
+                Some(release) => release.emit(&exports, jobs, &mut reuse),
+                None => hirsel_llvm_lazy::emit_program_parts(
+                    &units,
+                    &exports,
+                    target,
+                    jobs,
+                    elide_steps,
+                    &mut reuse,
+                ),
+            }
             .map_err(emit)?;
             if let Some(error) = failure {
                 return Err(error.into());
@@ -404,13 +456,16 @@ impl CheckProduct {
                     }
                 });
             }
-            store.put_keyed(
-                unit,
-                &encode(&Parts {
-                    schema: PARTS_SCHEMA,
-                    parts,
-                })?,
-            )?;
+            let mut record = Parts {
+                schema: PARTS_SCHEMA,
+                parts,
+                sites: Vec::new(),
+            };
+            if let Some(key) = optimized_key {
+                store.put_keyed(key, &encode(&record)?)?;
+            }
+            record.sites.clone_from(&sites);
+            store.put_keyed(unit, &encode(&record)?)?;
         }
         let mut private_variants = modules
             .iter()
@@ -440,6 +495,7 @@ impl CheckProduct {
             table: None,
             step_charging_elided: elide_steps,
             launch_digest_unused,
+            release_sites: sites,
         })
     }
 }

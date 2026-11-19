@@ -41,11 +41,32 @@ impl SourceMap {
 /// entry unit defines the symbol as `(ordinal + 1) << 32` beside its source table.
 pub fn site_symbol(item: &DefPath) -> String {
     let hash = item.fingerprint();
-    let mut symbol = String::from("hirsel_core_site_");
+    let mut symbol = String::from(SITE_SYMBOL_PREFIX);
     for byte in hash.0 {
         write!(symbol, "{byte:02x}").unwrap();
     }
     symbol
+}
+
+const SITE_SYMBOL_PREFIX: &str = "hirsel_core_site_";
+
+pub fn site_item_symbol(name: &[u8]) -> Option<&[u8]> {
+    let suffix = name.strip_prefix(SITE_SYMBOL_PREFIX.as_bytes())?;
+    Some(match suffix.iter().position(|&byte| byte == b'_') {
+        Some(index) => &name[..SITE_SYMBOL_PREFIX.len() + index],
+        None => name,
+    })
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ReleaseSite {
+    pub item: DefPath,
+    pub start: u32,
+    pub ordinal: u32,
+}
+
+pub fn release_site_symbol(item: &DefPath, ordinal: u32) -> String {
+    format!("{}_release_{ordinal}", site_symbol(item))
 }
 
 /// SITES.md 6(b): whether a function reads its caller's site. Only a core@1

@@ -484,6 +484,7 @@ struct Emitted {
     table: Option<Table>,
     step_charging_elided: bool,
     launch_digest_unused: bool,
+    release_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
 }
 
 impl CheckProduct {
@@ -533,6 +534,7 @@ impl CheckProduct {
             table,
             step_charging_elided: false,
             launch_digest_unused: false,
+            release_sites: Vec::new(),
         })
     }
     /// Emit `instances` for `options`, each a hit on its stored object or
@@ -841,6 +843,7 @@ impl CheckProduct {
             table,
             step_charging_elided,
             launch_digest_unused,
+            release_sites,
         } = self.emit_reached(entry, reached, options, true)?;
         let store = Store::new(&options.store)?;
         let (link, cleanup) = match (reach, prior) {
@@ -923,7 +926,8 @@ impl CheckProduct {
             link.cleanup.as_ref().map(|c| c.identity.symbol()),
             launch_digest_unused,
             options,
-        )?;
+        )?
+        .with_release_sites(&release_sites);
         let image = self
             .image
             .as_ref()

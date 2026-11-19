@@ -74,6 +74,46 @@ pub struct Part {
     pub reused: bool,
 }
 
+pub struct ReleaseUnit {
+    module: construction::NativeModule,
+    pub sites: Vec<hirsel_core_ir::source::ReleaseSite>,
+}
+
+impl ReleaseUnit {
+    pub fn lower(
+        module: &hirsel_core_ir::Module,
+        facts: &hirsel_core_ir::roles::Facts,
+        observe_charge: bool,
+        elide_steps: bool,
+    ) -> Result<Self, String> {
+        let context = std::rc::Rc::new(construction::Context::with_anonymous_locals(true)?);
+        let neutral = (!elide_steps).then(|| core::step_neutral_program(&[module]));
+        let (module, sites) =
+            core::emit_release_unit(module, context, facts, observe_charge, neutral.as_ref())
+                .map_err(|error| error.to_string())?;
+        Ok(Self { module, sites })
+    }
+
+    pub fn bitcode_hash(&self) -> hirsel_core_ids::ContentHash {
+        self.module.bitcode_hash()
+    }
+
+    pub fn emit(
+        self,
+        exports: &[String],
+        jobs: u32,
+        reuse: &mut dyn FnMut(&str, &str, &[u8]) -> bool,
+    ) -> Result<Program, String> {
+        loader::program(
+            vec![loader::ProgramUnit::Native(self.module)],
+            exports,
+            hirsel_core_layout::Target::X86_64Linux,
+            jobs,
+            reuse,
+        )
+    }
+}
+
 /// Compose a release program for `target` and generate it in parts, one per
 /// out-of-line definition after whole-program optimisation. `reuse` sees each
 /// part's definition name, the code generator's machine text and the part's

@@ -24,12 +24,13 @@ impl Default for Output {
 /// Mirrors `HirselLlvmBuilderApi` in bridge/builder.h field for field.
 #[repr(C)]
 pub(crate) struct Api {
-    pub context_new: unsafe extern "C" fn() -> Raw,
+    pub context_new: unsafe extern "C" fn(u8) -> Raw,
     pub context_drop: unsafe extern "C" fn(Raw),
     pub unit_new: unsafe extern "C" fn(Raw, *const c_char, usize) -> Raw,
     pub unit_drop: unsafe extern "C" fn(Raw),
     pub unit_take: unsafe extern "C" fn(Raw, *mut Output) -> Raw,
     pub module_drop: unsafe extern "C" fn(Raw),
+    pub bitcode: unsafe extern "C" fn(Raw, *mut Output),
     pub print: unsafe extern "C" fn(Raw, *mut Output),
     pub print_text: unsafe extern "C" fn(*const c_char, usize, *mut Output),
     pub integer_type: unsafe extern "C" fn(Raw, u32) -> Raw,
@@ -109,9 +110,12 @@ pub(crate) struct Context {
 }
 impl Context {
     pub fn new() -> Result<Self, String> {
+        Self::with_anonymous_locals(false)
+    }
+    pub fn with_anonymous_locals(anonymous_locals: bool) -> Result<Self, String> {
         let api = crate::loader::construction_api()?;
         // SAFETY: this function table comes from the embedded same-build component.
-        let raw = unsafe { (api.context_new)() };
+        let raw = unsafe { (api.context_new)(u8::from(anonymous_locals)) };
         Ok(Self { raw, api })
     }
     /// A fresh unit whose module identifier is the parser's, "hirsel-core".
@@ -148,6 +152,11 @@ impl NativeModule {
     }
     pub(crate) fn consume(&self) {
         self.consumed.set(true);
+    }
+    pub(crate) fn bitcode_hash(&self) -> hirsel_core_ids::ContentHash {
+        let mut out = Output::default();
+        unsafe { (self.context.api.bitcode)(self.raw, &mut out) };
+        hirsel_core_ids::ContentHash::of_bytes(&output_bytes(out).0)
     }
 }
 impl Drop for NativeModule {

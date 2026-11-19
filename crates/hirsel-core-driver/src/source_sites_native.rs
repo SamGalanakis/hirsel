@@ -74,6 +74,24 @@ fn failure_sites_rebind(backend: Backend, optimize: bool, debug_lines: bool) {
     assert_eq!(built.compiled, 0, "a line move must reuse every reached body object");
     assert!(built.linked, "current source belongs in the fresh link product");
     run(&built, 5);
+
+    if matches!(backend, Backend::Llvm) && optimize && !debug_lines && options.target == TARGET {
+        let shifted = moved.replace("    x + 1", "    let _ = 0u8\n    x + 1");
+        let product = check(&shifted);
+        assert!(product.rechecked.contains(&overflow));
+        let built = product.build(&entry, &options).unwrap();
+        assert_eq!(built.compiled, 0);
+        assert!(built.linked);
+        run(&built, 6);
+
+        let changed = shifted.replace("x + 1", "x + 0");
+        let built = check(&changed).build(&entry, &options).unwrap();
+        assert!(built.compiled > 0 && built.linked);
+        let output = Command::new(&built.executable).output().unwrap();
+        assert_eq!(output.status.code(), Some(7), "{output:?}");
+        assert_eq!(output.stdout, b"before\n");
+        assert!(output.stderr.is_empty());
+    }
 }
 
 #[test]

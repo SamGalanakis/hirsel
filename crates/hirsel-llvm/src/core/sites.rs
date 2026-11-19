@@ -90,6 +90,27 @@ impl FunctionEmitter<'_> {
                 ((u64::from(anchor.item.0) + 1) << 32) | u64::from(anchor.start)
             ));
         }
+        if let Some(sites) = &mut self.items.release_sites {
+            let name = sites
+                .names
+                .entry((anchor.item, anchor.start))
+                .or_insert_with(|| {
+                    let next = sites.next.entry(anchor.item).or_default();
+                    let ordinal = *next;
+                    *next += 1;
+                    let item = self.module.items[anchor.item.index()].clone();
+                    let name = hirsel_core_ir::source::release_site_symbol(&item, ordinal);
+                    sites.bindings.push(hirsel_core_ir::source::ReleaseSite {
+                        item,
+                        start: anchor.start,
+                        ordinal,
+                    });
+                    name
+                })
+                .clone();
+            self.absolute_symbol(name.clone());
+            return Some(Value::PtrToInt(name.into()));
+        }
         let symbol = hirsel_core_ir::source::site_symbol(&self.module.items[anchor.item.index()]);
         Some(match self.abi.target {
             Target::X86_64Linux => {

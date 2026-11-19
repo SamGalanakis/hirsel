@@ -12,12 +12,13 @@ typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselBuilderOutpu
 /* Same-build component ABI. Each operation builds what the LLVM assembly
    parser builds for the corresponding text; CoreIR rules stay in Rust. */
 typedef struct {
-    LLVMContextRef (*context_new)(void);
+    LLVMContextRef (*context_new)(uint8_t);
     void (*context_drop)(LLVMContextRef);
     HirselLlvmBuilder *(*unit_new)(LLVMContextRef, const char *, size_t);
     void (*unit_drop)(HirselLlvmBuilder *);
     LLVMModuleRef (*unit_take)(HirselLlvmBuilder *, HirselBuilderOutput *);
     void (*module_drop)(LLVMModuleRef);
+    void (*bitcode)(LLVMModuleRef, HirselBuilderOutput *);
     void (*print)(HirselLlvmBuilder *, HirselBuilderOutput *);
     void (*print_text)(const char *, size_t, HirselBuilderOutput *);
     LLVMTypeRef (*integer_type)(HirselLlvmBuilder *, unsigned);

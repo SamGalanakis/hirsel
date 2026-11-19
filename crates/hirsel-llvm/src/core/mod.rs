@@ -259,6 +259,13 @@ fn emit_ir_target_with_role_facts(
 struct Items {
     function_symbols: Vec<String>,
     pending: std::collections::BTreeMap<String, Item>,
+    release_sites: Option<ReleaseSites>,
+}
+#[derive(Default)]
+struct ReleaseSites {
+    names: std::collections::HashMap<(ItemId, u32), String>,
+    next: std::collections::HashMap<ItemId, u32>,
+    bindings: Vec<source::ReleaseSite>,
 }
 enum Item {
     Global(Global),
@@ -274,6 +281,7 @@ impl Items {
         Self {
             function_symbols: module.link_symbols(),
             pending: Default::default(),
+            release_sites: None,
         }
     }
     fn function_symbol(&self, function: FuncId) -> &str {
@@ -325,7 +333,7 @@ impl Items {
     pub fn asm(&mut self, text: String) {
         self.insert(format!("module asm \"{text}\""), Item::Asm(text));
     }
-    fn emit(self, sink: &mut dyn Sink) {
+    fn emit(self, sink: &mut dyn Sink) -> Vec<source::ReleaseSite> {
         for item in self.pending.into_values() {
             match item {
                 Item::Global(global) => sink.global(&global),
@@ -335,6 +343,8 @@ impl Items {
                 Item::ReleaseLast(..) => unreachable!("last releases are defined before items"),
             }
         }
+        self.release_sites
+            .map_or_else(Vec::new, |sites| sites.bindings)
     }
 }
 
@@ -351,6 +361,7 @@ struct EmissionFacts<'a> {
     neutral: Option<&'a BTreeSet<hirsel_core_ids::ContentHash>>,
     elide_steps: bool,
     prepay_step_trees: bool,
+    release_sites: bool,
 }
 #[cfg(hirsel_lazy_core)]
 pub(crate) fn step_neutral_program(modules: &[&Module]) -> BTreeSet<hirsel_core_ids::ContentHash> {
@@ -366,7 +377,7 @@ fn emit_module(
     source: SourceEmission,
     provided: EmissionFacts<'_>,
     sink: &mut dyn Sink,
-) -> Result<()> {
+) -> Result<Vec<source::ReleaseSite>> {
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
     let native = hirsel_core_ir::native_layout::resolve(module, &recipes);
     let module = native.as_ref();
@@ -376,6 +387,7 @@ fn emit_module(
         .flatten();
     let module = exposed.as_ref().unwrap_or(module);
     let mut items = Items::new(module);
+    items.release_sites = provided.release_sites.then(ReleaseSites::default);
     let batch_steps = source.batch_steps && !provided.elide_steps;
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
     sink.metadata(
@@ -499,7 +511,13 @@ fn emit_module(
         (!provided.elide_steps).then(|| steps::neutral_functions(module, provided.neutral));
     let neutral_functions = step_neutral.as_deref().unwrap_or_default();
     let debug = if source.debug_lines {
-        sites::debug_plan(module, &items.function_symbols, &failures, &mut next_scope, sink)
+        sites::debug_plan(
+            module,
+            &items.function_symbols,
+            &failures,
+            &mut next_scope,
+            sink,
+        )
     } else {
         module.functions.iter().map(|_| None).collect()
     };
@@ -903,8 +921,7 @@ fn emit_module(
     cleanup::release_lasts(
         module, target, &recipes, &failures, facts, &lasts, sink, &mut items,
     )?;
-    items.emit(sink);
-    Ok(())
+    Ok(items.emit(sink))
 }
 
 /// Lower one owned unit directly into a native module of `context`.
@@ -934,8 +951,41 @@ pub(crate) fn emit_native_module_in_context(
             neutral,
             elide_steps: neutral.is_none(),
             prepay_step_trees: neutral.is_some(),
+            release_sites: false,
         },
     )
+}
+
+#[cfg(hirsel_lazy_core)]
+pub(crate) fn emit_release_unit(
+    module: &Module,
+    context: std::rc::Rc<crate::construction::Context>,
+    roles: &hirsel_core_ir::roles::Facts,
+    observe_charge: bool,
+    neutral: Option<&BTreeSet<hirsel_core_ids::ContentHash>>,
+) -> Result<(crate::construction::NativeModule, Vec<source::ReleaseSite>)> {
+    let mut native = sink::native::NativeSink::new(context);
+    let sites = emit_module(
+        module,
+        Target::X86_64Linux,
+        observe_charge,
+        facts_enabled(),
+        SourceEmission {
+            batch_steps: true,
+            test_hooks: cfg!(test),
+            relocatable_sites: true,
+            debug_lines: false,
+        },
+        EmissionFacts {
+            roles: Some(roles),
+            neutral,
+            elide_steps: neutral.is_none(),
+            prepay_step_trees: neutral.is_some(),
+            release_sites: true,
+        },
+        &mut native,
+    )?;
+    Ok((native.finish().map_err(Error::Llvm)?, sites))
 }
 
 #[cfg(hirsel_lazy_core)]
@@ -973,6 +1023,7 @@ fn native_module(
                     provided,
                     text,
                 )
+                .map(|_| ())
             },
         )?;
     }
@@ -1605,8 +1656,13 @@ impl FunctionEmitter<'_> {
         // AAPCS64 needs an explicit private copy before passing its pointer.
         // Neither convention lets the callee mutate the shared constant.
         let suffix = if fixed && self.relocatable_sites && site != int(0) {
-            let anchor = self.anchor.unwrap();
-            format!("{}_{}", anchor.item.0, anchor.start)
+            if let Some(sites) = &self.items.release_sites {
+                let anchor = self.anchor.unwrap();
+                sites.names[&(anchor.item, anchor.start)].clone()
+            } else {
+                let anchor = self.anchor.unwrap();
+                format!("{}_{}", anchor.item.0, anchor.start)
+            }
         } else {
             match site {
                 Value::Int(n) => n.to_string(),

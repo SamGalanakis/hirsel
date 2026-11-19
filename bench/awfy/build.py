@@ -2,6 +2,7 @@
 """Build the AWFY binaries with the LangArena release profiles."""
 import argparse
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,44 @@ def llvm_path():
 def capped_env(out, limit="2G", jobs="1"):
     return {**os.environ, "HIRSEL_MEMORY_LIMIT": limit, "HIRSEL_JOBS": jobs,
             "XDG_DATA_HOME": str(out / "data"), "XDG_CACHE_HOME": str(out / "cache")}
+
+
+def sha256(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def manifest_sha256(manifest):
+    inputs = json.loads(manifest.read_text())
+    for package in inputs["packages"]:
+        for source in package["sources"]:
+            source["file"] = sha256(Path(source["file"]))
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def native_provenance(command, manifest):
+    # Keep every option, with private directory paths represented by their
+    # roles. The files that affect the build have separate content identities.
+    flags = list(map(str, command[2:]))
+    path_roles = {"--inputs": "manifest", "--store": "store", "--runtime": "runtime",
+                  "--dir": "workload directory", "-o": "image"}
+    for index, flag in enumerate(flags[:-1]):
+        if flag in path_roles:
+            flags[index + 1] = path_roles[flag]
+        elif flag == "--cc":
+            flags[index + 1] = sha256(Path(flags[index + 1]))
+    return {
+        "flags": flags,
+        "manifest_sha256": manifest_sha256(manifest),
+        "compiler_sha256": sha256(Path(command[0])),
+        "runtime_archive_sha256": sha256(Path(command[command.index("--runtime") + 1])),
+    }
+
+
+def write_native_report(binary, stdout, provenance):
+    report = json.loads(stdout)
+    report["measurement"] = provenance | {"image_sha256": sha256(binary)}
+    binary.with_name(f"{binary.name}-build.json").write_text(json.dumps(report) + "\n")
 
 
 def fixture(upstream):
@@ -58,18 +97,22 @@ def hirsel(args, matched=False):
     manifest = out / "hirsel-inputs.json"
     manifest.write_text(json.dumps(spec))
     for module in args.hirsel_entries:
-        result = subprocess.run([
-            str(ROOT / "tools/capped"), compiler, "build", "--inputs", str(manifest),
+        binary = out / f"hirsel-{module}"
+        command = [
+            compiler, "build", "--inputs", str(manifest),
             "--entry", f"awfy@1/{module}/main", "--store", str(out / "store"),
             "--backend", "llvm", "--release", "--debug-lines", "on", "--runtime", runtime,
             "--cc", str(llvm_path() / "bin/clang"),
-            "--grant", "Stdout", "--json", "-o", str(out / f"hirsel-{module}"),
-        ], env={**getattr(args, "env", capped_env(out)), "LD_LIBRARY_PATH": str(llvm_path() / "lib")},
-            stdout=subprocess.PIPE)
+            "--grant", "Stdout", "--json", "-o", str(binary),
+        ]
+        provenance = native_provenance(command, manifest)
+        result = subprocess.run([ROOT / "tools/capped", *command],
+                                env={**getattr(args, "env", capped_env(out)),
+                                     "LD_LIBRARY_PATH": str(llvm_path() / "lib")}, stdout=subprocess.PIPE)
         if result.returncode:
             sys.stderr.buffer.write(result.stdout)
             result.check_returncode()
-        (out / f"hirsel-{module}-build.json").write_bytes(result.stdout)
+        write_native_report(binary, result.stdout, provenance)
 
 
 def port(source, destination, replacements):

@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 import build
+from build import sha256
 import measure
 import profile_diff
 from measurement_artifacts import SHIPPING, check
@@ -41,11 +42,6 @@ def measurement_slot(path):
         yield
 
 
-def sha256(path):
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
 def release_tools(artifacts):
     if (artifacts["compiler_build_profile"] != "release" or artifacts["runtime_archive_profile"] != SHIPPING
             or artifacts["diagnostic"]):
@@ -56,17 +52,11 @@ def release_tools(artifacts):
 
 
 def fixture_identity(manifest, runtime_fixture):
-    inputs = read(manifest)
-    # File names in a manifest can include the checkout and build directory.
-    # Compare the complete ordered package graph and contents at those paths.
-    for package in inputs["packages"]:
-        for source in package["sources"]:
-            source["file"] = sha256(Path(source["file"]))
+    manifest_digest = build.manifest_sha256(manifest)
     digest = sha256(runtime_fixture)
     return {
-        "fixture_sha256": hashlib.sha256(json.dumps(
-            [inputs, digest], sort_keys=True, separators=(",", ":")
-        ).encode()).hexdigest(),
+        "manifest_sha256": manifest_digest,
+        "fixture_sha256": hashlib.sha256(bytes.fromhex(manifest_digest + digest)).hexdigest(),
         "fixture_files": {str(runtime_fixture): digest},
     }
 
@@ -77,37 +67,32 @@ def runtime_fixture(suite, directory, upstream):
     return fixture_identity(directory / "hirsel-inputs.json", upstream / "rebench.conf")
 
 
-def native_report(path):
-    result = read(path)
-    if result.get("accepted") is not True or result.get("stopped") or not result["native"]["linked"]:
-        raise ValueError(f"build not accepted and linked: {path}")
-    return result["native"]
-
-
-def runtime_case(suite, name, directory, command, marker, fixture, tools, flags=()):
+def runtime_case(suite, name, directory, command, marker, fixture, tools):
     binary = command[0]
-    native = native_report(directory / f"{binary.name}-build.json")
+    path = binary.with_name(f"{binary.name}-build.json")
+    report = read(path)
+    if report.get("accepted") is not True or report.get("stopped") or not report["native"]["linked"]:
+        raise ValueError(f"build not accepted and linked: {path}")
+    native = report["native"]
     if Path(native["executable"]).resolve() != binary.resolve():
         raise ValueError(f"{binary}: native build receipt names a different executable")
+    provenance = report.get("measurement")
+    if provenance is None:
+        raise ValueError(f"{path}: build with the release row adapter to record measurement provenance")
+    image = sha256(binary)
+    for field, value in (tools | {"image_sha256": image, "manifest_sha256": fixture["manifest_sha256"]}).items():
+        if provenance[field] != value:
+            raise ValueError(f"{path}: {field} differs from the build")
     certified = native.get("step_charging_elided", False)
-    if suite == "arena":
-        module, mib = binary.name.rsplit("-", 1)
-        entry = f"langarena@1/{module}/main"
-        grants = ["--grant", "Tasks", "--dir", ".", "--limit", str(int(mib) << 20)]
-    else:
-        entry = f"awfy@1/{binary.name.removeprefix('hirsel-')}/main"
-        grants = []
-    build_flags = ["--backend", "llvm", "--release", "--entry", entry, "--grant", "Stdout",
-                   "--debug-lines", "on" if native.get("debug_lines", False) else "off", *grants]
     return {
         "key": f"{suite}/{name}",
         "suite": suite,
         "mode": "certified" if certified else "bounded",
         "certified": certified,
-        "flags": [*build_flags, *flags],
+        "flags": provenance["flags"],
         "argv": [f"./{binary.name}", *map(str, command[1:])],
         "cwd": str(directory),
-        "image_sha256": sha256(binary),
+        "image_sha256": image,
         "marker": marker.decode(),
         **fixture,
         **tools,
@@ -178,7 +163,7 @@ def sample(args):
         try:
             if suite not in fixtures:
                 fixtures[suite] = runtime_fixture(suite, directory, args.upstream)
-            rows[key] = runtime_case(suite, name, directory, command, marker, fixtures[suite], tools, args.flag)
+            rows[key] = runtime_case(suite, name, directory, command, marker, fixtures[suite], tools)
         except (OSError, ValueError, KeyError) as error:
             receipt["failures"][key] = str(error)
     env = build.capped_env(out)
@@ -345,7 +330,6 @@ def main():
     for option in ("upstream", "awfy-build", "pool-build", "arena-build"):
         sampling.add_argument(f"--{option}", type=lambda path: Path(path).resolve())
     sampling.add_argument("--only", nargs="+", metavar="SUITE/ROW")
-    sampling.add_argument("--flag", action="append", default=[], help="additional build flag, e.g. --flag=--example")
     comparison = commands.add_parser("compare", help="fail on differing identity, missing rows or a threshold breach")
     comparison.add_argument("baseline", type=Path)
     comparison.add_argument("candidate", type=Path)

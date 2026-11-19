@@ -6,7 +6,8 @@ import sys
 import tempfile
 import unittest
 
-from receipt import make_receipt
+import build
+from receipt import make_receipt, runtime_case
 
 
 class InstructionGuard(unittest.TestCase):
@@ -99,3 +100,32 @@ totals: 56
             path.write_text(capture.replace("totals: 56", "totals: 88"))
             with self.assertRaises(ValueError):
                 self_counts(path)
+
+
+class NativeProvenance(unittest.TestCase):
+    def test_runtime_receipt_refuses_a_replaced_binary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            compiler = directory / "compiler"
+            runtime = directory / "runtime"
+            binary = directory / "hirsel-harness"
+            manifest = directory / "hirsel-inputs.json"
+            compiler.write_bytes(b"compiler")
+            runtime.write_bytes(b"runtime")
+            binary.write_bytes(b"linked image")
+            manifest.write_text('{"packages": []}')
+            toolchain = {"compiler_sha256": build.sha256(compiler), "runtime_archive_sha256": build.sha256(runtime)}
+            command = [compiler, "build", "--release", "--runtime", runtime, "--inputs", manifest, "-o", binary]
+            provenance = build.native_provenance(command, manifest)
+            build.write_native_report(binary, json.dumps({
+                "accepted": True, "native": {"linked": True, "executable": str(binary)},
+            }), provenance)
+
+            def row():
+                return runtime_case("awfy", "Mandelbrot", directory, [binary, "Mandelbrot", "1", "500"],
+                                    b"verified\n", {"manifest_sha256": build.manifest_sha256(manifest)}, toolchain)
+
+            self.assertEqual(row()["flags"], ["--release", "--runtime", "runtime", "--inputs", "manifest", "-o", "image"])
+            binary.write_bytes(b"replacement image")
+            with self.assertRaisesRegex(ValueError, "image_sha256 differs from the build"):
+                row()

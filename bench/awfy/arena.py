@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 
-from build import ROOT, capped_env, inputs, llvm_path
+from build import ROOT, capped_env, inputs, llvm_path, native_provenance, write_native_report
 
 
 def group(name):
@@ -24,22 +24,30 @@ def root_mib(name):
     return 64
 
 
-def build_hirsel(out, artifacts, rows, env=None):
+def build_hirsel(out, artifacts, rows, env=None, *, debug_lines=False):
     manifest = out / "inputs.json"
     manifest.write_text(json.dumps(inputs(ROOT, "harness")))
     for module, mib in sorted({(group(row["name"]), root_mib(row["name"])) for row in rows}):
         print(f"building {module} at {mib} MiB", flush=True)
-        result = subprocess.run([
-            ROOT / "tools/capped", artifacts["compiler"], "build",
+        binary = out / f"{module}-{mib}"
+        command = [
+            artifacts["compiler"], "build",
             "--inputs", manifest, "--entry", f"langarena@1/{module}/main",
             "--store", out / "store", "--backend", "llvm", "--release",
             "--runtime", artifacts["runtime"], "--cc", llvm_path() / "bin/clang",
             "--dir", out, "--grant", "Stdout", "--grant", "Tasks", "--limit", str(mib << 20),
-            "--json", "-o", out / f"{module}-{mib}",
-        ], env={**(env or capped_env(out)), "LD_LIBRARY_PATH": str(llvm_path() / "lib")},
-            stdout=subprocess.PIPE)
-        (out / f"{module}-{mib}-build.json").write_bytes(result.stdout)
-        result.check_returncode()
+            "--json", "-o", binary,
+        ]
+        if debug_lines:
+            command += ["--debug-lines", "on"]
+        provenance = native_provenance(command, manifest)
+        result = subprocess.run([ROOT / "tools/capped", *command],
+                                env={**(env or capped_env(out)), "LD_LIBRARY_PATH": str(llvm_path() / "lib")},
+                                stdout=subprocess.PIPE)
+        if result.returncode:
+            binary.with_name(f"{binary.name}-build.json").write_bytes(result.stdout)
+            result.check_returncode()
+        write_native_report(binary, result.stdout, provenance)
 
 
 def oracle(out, binary, rows):
@@ -67,13 +75,14 @@ def main():
     parser.add_argument("--config", type=Path, required=True, help="unchanged upstream run.js")
     parser.add_argument("--artifacts", type=Path)
     parser.add_argument("--rust", type=Path)
+    parser.add_argument("--debug-lines", action="store_true")
     args = parser.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     rows = [dict(row, iterations=1, warmup_iterations=0, checksum=0)
             for row in json.loads(args.config.read_text())]
     if args.artifacts:
-        build_hirsel(out, json.loads(args.artifacts.read_text()), rows)
+        build_hirsel(out, json.loads(args.artifacts.read_text()), rows, debug_lines=args.debug_lines)
     if args.rust:
         oracle(out, args.rust.resolve(), rows)
 

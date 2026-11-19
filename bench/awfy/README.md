@@ -163,8 +163,8 @@ python3 bench/awfy/receipt.py compare "$out/base-samples/receipt.json" \
 The guard requires checked stdout, complete row coverage and instruction
 counters active for at least 99% of their enabled time. It checks the exact
 execution argv and CPU affinity, as well as certification, build flags and the
-release compiler, runtime and fixture hashes. Supply any extra native build
-flags with repeated `--flag=VALUE`. A changed identity exits 2. A comparable
+release compiler, runtime and fixture hashes. The build adapters record the
+actual flags and image hash. A changed identity exits 2. A comparable
 row above +0.5% exits 1. Use `--threshold PERCENT` to set another limit.
 
 The same command reads two complete `board.json` files. It compares Hirsel
@@ -175,7 +175,8 @@ and uses exit 3 for a comparable regression. An incomplete board exits 1.
 ### Profile a runtime delta
 
 Build both images with `--debug-lines on` for authored and inlined Hirsel
-locations. AWFY's release build adapter already sets it. Measure both images
+locations. AWFY's build adapter already sets it. Pass `--debug-lines` to
+`arena.py` for LangArena builds. Measure both images
 with the sampling command above. Then use the same measurement CPUs and lock.
 
 ```sh

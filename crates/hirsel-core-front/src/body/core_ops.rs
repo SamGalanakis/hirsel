@@ -432,6 +432,11 @@ operations! {
     ("writer", "close", Lane::Language, "A", "core-check-895", false),
     ("writer", "completed", Lane::Language, "A", "core-check-895", false),
     ("writer", "last_completed", Lane::Language, "A", "core-check-895", false),
+    ("int", "radix_digits", Lane::PendingCode, "C", "dedup-1357", false),
+    ("int", "decimal_four", Lane::PendingCode, "C", "dedup-1357", true),
+    ("int", "decimal_digits", Lane::PendingCode, "C", "dedup-1357", true),
+    ("int", "accumulate_digit", Lane::PendingCode, "C", "dedup-1357", false),
+    ("int", "ascii_digit", Lane::PendingCode, "C", "dedup-1357", false),
 }
 
 pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
@@ -1672,6 +1677,8 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                             | "utf8_block_prefix"
                             | "base64_symbol"
                     )
+                    || entry.module == "int"
+                        && matches!(entry.name, "decimal_four" | "decimal_digits")
                     || entry.module == "map"
                     || entry.module == "list"
                         && (entry.name.starts_with("slots_")

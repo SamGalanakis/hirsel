@@ -296,7 +296,9 @@ fn memory_snapshot(
     std::fs::create_dir_all(&output)?;
     let process = std::path::PathBuf::from(format!("/proc/{pid}"));
     for file in ["smaps", "smaps_rollup", "status"] {
-        std::fs::write(output.join(file), std::fs::read(process.join(file))?)?;
+        let mut source = std::fs::File::open(process.join(file))?;
+        let mut snapshot = std::fs::File::create(output.join(file))?;
+        std::io::copy(&mut source, &mut snapshot)?;
     }
     let mut sockets = HashSet::new();
     for entry in std::fs::read_dir(process.join("fd"))? {

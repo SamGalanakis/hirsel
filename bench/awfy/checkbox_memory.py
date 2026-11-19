@@ -25,13 +25,24 @@ def resident_bytes(directory):
     }
 
 
-def sample(work, output, prepared, mode, clients):
+def retain_snapshots(scratch, out):
+    for path in scratch.glob("*/*/*"):
+        case, phase, name = path.relative_to(scratch).parts
+        target = out / case / "snapshots" / phase / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if name == "smaps":
+            with path.open("rb") as source, gzip.open(target.with_suffix(".gz"), "wb", compresslevel=1) as compressed:
+                shutil.copyfileobj(source, compressed)
+        else:
+            shutil.copyfile(path, target)
+
+
+def sample(work, output, snapshots, prepared, mode, clients):
     checkbox, executable, address, wants, tools = prepared
     overrides = ["--per-ip-sessions", "20000", "--per-ip-new-principals", "20000", "--principal-rate", "1000000000"]
     env = build.capped_env(work)
     command = checkbox.command(executable, address, overrides)
     output.mkdir()
-    snapshots = output / "snapshots"
     try:
         with board.private_server(command, address, output, env) as pid:
             load = [tools / "wire-load", mode, "--url", f"ws://{address}/hirsel", "--wants", wants,
@@ -63,9 +74,10 @@ def collect(args, work):
         "loader_sha256": build.sha256(tools / "wire-load"),
         "wants_sha256": build.sha256(wants),
         "server_cpu": 10, "loader_cpu": 11,
-        "points": args.clients, "rows": [], "highest_complete": dict.fromkeys(MODES, 0),
+        "points": args.clients, "complete": False, "rows": [], "highest_complete": dict.fromkeys(MODES, 0),
     }
     target = args.out / "memory-sweep.json"
+    snapshots = work.parent / "snapshots"
     with receipt.measurement_slot(board.LOCK):
         try:
             os.sched_setaffinity(0, board.MEASURE_CPUS)
@@ -73,7 +85,7 @@ def collect(args, work):
                 for mode in MODES:
                     directory = args.out / f"{mode}-{clients}"
                     try:
-                        row = sample(work, directory, prepared, mode, clients)
+                        row = sample(work, directory, snapshots / directory.name, prepared, mode, clients)
                     except (OSError, ValueError, RuntimeError, KeyError, StopIteration, subprocess.SubprocessError) as error:
                         row = {"complete": False, "error": str(error)}
                     report["rows"].append({"mode": mode, "clients": clients, **row})
@@ -83,12 +95,11 @@ def collect(args, work):
                     print(f"{mode} {clients} {'complete' if row['complete'] else 'incomplete'}", flush=True)
         finally:
             os.sched_setaffinity(0, board.BUILD_CPUS)
-    for path in args.out.glob("*/snapshots/*/smaps"):
-        with path.open("rb") as source, gzip.open(path.with_suffix(".gz"), "wb") as compressed:
-            shutil.copyfileobj(source, compressed)
-        path.unlink()
+    retain_snapshots(snapshots, args.out)
+    report["complete"] = all(row["complete"] for row in report["rows"])
+    receipt.write(target, report)
     print(target)
-    return int(not all(row["complete"] for row in report["rows"]))
+    return int(not report["complete"])
 
 
 def main():

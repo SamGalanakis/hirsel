@@ -12,6 +12,7 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
+MANIFEST_HASHES = ("manifest_sha256", "workload_sources_sha256", "std_sha256")
 sys.path.append(str(ROOT / "core/tools"))
 from langarena import inputs
 
@@ -30,12 +31,25 @@ def sha256(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def manifest_sha256(manifest):
+def manifest_digests(manifest):
     inputs = json.loads(manifest.read_text())
+    std, workload = [], []
     for package in inputs["packages"]:
         for source in package["sources"]:
             source["file"] = sha256(Path(source["file"]))
-    return hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if package["package"]["name"] in ("core", "std"):
+            std.append(package)
+        else:
+            workload.append(package)
+
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    return {
+        "manifest_sha256": digest(inputs),
+        "workload_sources_sha256": digest(inputs | {"packages": workload}),
+        "std_sha256": digest(std),
+    }
 
 
 def native_provenance(command, manifest, *, cwd=None):
@@ -53,7 +67,7 @@ def native_provenance(command, manifest, *, cwd=None):
             flags[index + 1] = sha256(cwd / flags[index + 1])
     return {
         "flags": flags,
-        "manifest_sha256": manifest_sha256(manifest),
+        **manifest_digests(manifest),
         "compiler_sha256": sha256(cwd / command[0]),
         "runtime_archive_sha256": sha256(cwd / command[command.index("--runtime") + 1]),
     }

@@ -22,12 +22,14 @@ import profile_diff
 from bench_cpus import positive_int, sibling_cpus, smt_activity
 from measurement_artifacts import SHIPPING, check
 
-VERSION = 2
+VERSION = 3
 REFUSED = 2
 INSTRUCTION_LIMIT = Decimal("0.5")
 INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
-IDENTITY = ("suite", "mode", "certified", "flags", "argv", "affinity", *ARTIFACT_HASHES, "fixture_sha256")
+CANDIDATE_HASHES = (*ARTIFACT_HASHES, "std_sha256")
+WORKLOAD_IDENTITY = ("suite", "mode", "certified", "flags", "argv", "affinity", "fixture_sha256")
+IDENTITY = (*WORKLOAD_IDENTITY, *CANDIDATE_HASHES)
 
 
 def read(path):
@@ -57,11 +59,11 @@ def release_tools(artifacts):
 
 
 def fixture_identity(manifest, runtime_fixture):
-    manifest_digest = build.manifest_sha256(manifest)
+    sources = build.manifest_digests(manifest)
     digest = sha256(runtime_fixture)
     return {
-        "manifest_sha256": manifest_digest,
-        "fixture_sha256": hashlib.sha256(bytes.fromhex(manifest_digest + digest)).hexdigest(),
+        **sources,
+        "fixture_sha256": hashlib.sha256(bytes.fromhex(sources["workload_sources_sha256"] + digest)).hexdigest(),
         "fixture_files": {str(runtime_fixture): digest},
     }
 
@@ -86,7 +88,7 @@ def verified_build(row):
     record = row.get("build_record")
     if not isinstance(record, dict) or record.get("accepted") is not True or record.get("linked") is not True:
         return False
-    for field in (*ARTIFACT_HASHES, "manifest_sha256", "image_sha256"):
+    for field in (*ARTIFACT_HASHES, *build.MANIFEST_HASHES, "image_sha256"):
         value = row.get(field)
         if not isinstance(value, str) or not re.fullmatch("[a-f0-9]{64}", value) or record.get(field) != value:
             return False
@@ -106,7 +108,8 @@ def runtime_case(suite, name, directory, command, marker, fixture, tools):
     if provenance is None:
         raise ValueError(f"{path}: build with the release row adapter to record measurement provenance")
     image = sha256(binary)
-    for field, value in (tools | {"image_sha256": image, "manifest_sha256": fixture["manifest_sha256"]}).items():
+    checked = tools | {field: fixture[field] for field in build.MANIFEST_HASHES} | {"image_sha256": image}
+    for field, value in checked.items():
         if provenance[field] != value:
             raise ValueError(f"{path}: {field} differs from the build")
     certified = native.get("step_charging_elided", False)
@@ -265,7 +268,7 @@ def validate_row(key, row):
             or (mode not in ("cold", "edit") if suite == "compile"
                 else mode != ("certified" if certified else "bounded"))
             or any(not re.fullmatch("[a-f0-9]{64}", row[field])
-                   for field in (*ARTIFACT_HASHES, "fixture_sha256"))
+                   for field in (*CANDIDATE_HASHES, "fixture_sha256"))
             or not all(isinstance(row[field], list)
                        and all(isinstance(value, str) and value for value in row[field])
                        for field in ("argv", "flags"))
@@ -291,17 +294,13 @@ def rows_from(path):
 
 
 def match_rows(key, left, right):
-    fields = [field for field in (*IDENTITY, "marker", "stdout")
-              if field not in ARTIFACT_HASHES and left[field] != right[field]]
-    artifacts_changed = any(left[field] != right[field] for field in ARTIFACT_HASHES)
-    if not fields and artifacts_changed:
-        if not all(verified_build(row) for row in (left, right)):
-            raise ValueError(f"{key} requires a verified build record for an artifact pair")
-        if left["manifest_sha256"] != right["manifest_sha256"]:
-            fields = ["manifest_sha256"]
+    fields = [field for field in (*WORKLOAD_IDENTITY, "marker", "stdout") if left[field] != right[field]]
     if fields:
         raise ValueError(f"identity differs: {key}: {', '.join(fields)}")
-    return artifacts_changed
+    candidate_changed = any(left[field] != right[field] for field in CANDIDATE_HASHES)
+    if candidate_changed and not all(verified_build(row) for row in (left, right)):
+        raise ValueError(f"{key} requires a verified build record for a candidate pair")
+    return candidate_changed
 
 
 def compare(before_path, after_path, threshold, *, expected=None, blocked=None):
@@ -310,7 +309,7 @@ def compare(before_path, after_path, threshold, *, expected=None, blocked=None):
     refusals = (blocked or {}) | before_refusals | after_refusals
     failed = False
     ratios = []
-    artifact_pairs = set()
+    candidate_pairs = set()
     for key in sorted(before.keys() | after.keys() | refusals.keys()):
         try:
             if key in refusals:
@@ -324,7 +323,7 @@ def compare(before_path, after_path, threshold, *, expected=None, blocked=None):
                 except INVALID_RECEIPT as error:
                     raise ValueError(f"{path}: {error}") from error
             if match_rows(key, left, right):
-                artifact_pairs.add(tuple(row[field] for row in (left, right) for field in ARTIFACT_HASHES))
+                candidate_pairs.add(tuple(tuple(row[field] for field in CANDIDATE_HASHES) for row in (left, right)))
         except INVALID_RECEIPT as error:
             refusals[key] = str(error)
             print(f"{key} REFUSED ({error})", file=sys.stderr)
@@ -337,11 +336,13 @@ def compare(before_path, after_path, threshold, *, expected=None, blocked=None):
         failed |= breach
         ratios.append(candidate / baseline)
         print(f"{key} {baseline:,} -> {candidate:,} ({percent:+.3f}%){' FAIL' if breach else ''}")
-    for base_compiler, base_runtime, candidate_compiler, candidate_runtime in sorted(artifact_pairs):
+    for (base_compiler, base_runtime, base_std), (candidate_compiler, candidate_runtime, candidate_std) in sorted(candidate_pairs):
         if base_compiler != candidate_compiler:
             print(f"Variable compiler_sha256 {base_compiler} -> {candidate_compiler}")
         runtime = "unchanged" if base_runtime == candidate_runtime else f"{base_runtime} -> {candidate_runtime}"
         print(f"Paired runtime_archive_sha256 {runtime}")
+        if base_std != candidate_std:
+            print(f"Variable std_sha256 {base_std} -> {candidate_std}")
     if ratios:
         geomean = math.expm1(math.fsum(map(math.log, ratios)) / len(ratios)) * 100
         print(f"{len(ratios)} rows compared, geomean {geomean:+.3f}%, threshold +{threshold}%")
@@ -507,10 +508,7 @@ def profile(args):
     left, right = before[args.row], after[args.row]
     if left["suite"] == "compile":
         raise ValueError("profile-diff requires a runtime row")
-    fields = [field for field in (*IDENTITY, "marker", "stdout")
-              if field not in ARTIFACT_HASHES and left[field] != right[field]]
-    if fields:
-        raise ValueError(f"{args.row}: identity differs: {', '.join(fields)}")
+    match_rows(args.row, left, right)
     affinity = set(left["affinity"])
     assigned = os.sched_getaffinity(0)
     if not affinity <= assigned:
@@ -522,7 +520,7 @@ def profile(args):
     candidate = right["sample"]["instructions"]
     percent = Decimal(100) * (candidate - baseline) / baseline
     print(f"{args.row} PMU instructions:u {baseline:,} -> {candidate:,} ({percent:+.3f}%)", flush=True)
-    for field in ARTIFACT_HASHES:
+    for field in CANDIDATE_HASHES:
         if left[field] != right[field]:
             print(f"{field} {left[field]} -> {right[field]}")
     sides = []

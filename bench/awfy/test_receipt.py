@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 import build
-from receipt import build_record, make_receipt, runtime_case
+from receipt import build_record, fixture_identity, make_receipt, runtime_case
 
 
 class InstructionGuard(unittest.TestCase):
@@ -26,8 +26,6 @@ class InstructionGuard(unittest.TestCase):
             "affinity": [10],
             "compiler_sha256": "a" * 64,
             "runtime_archive_sha256": "b" * 64,
-            "fixture_sha256": "c" * 64,
-            "manifest_sha256": "e" * 64,
             "image_sha256": "f" * 64,
             "marker": stdout,
             "stdout": stdout,
@@ -35,7 +33,21 @@ class InstructionGuard(unittest.TestCase):
                        "pmu_times_ns": {"instructions:u": [[1_000_000, 1_000_000]]}},
         }]
         with tempfile.TemporaryDirectory() as temp:
-            base, candidate = (Path(temp) / name for name in ("base.json", "candidate.json"))
+            directory = Path(temp)
+            base, candidate = (directory / name for name in ("base.json", "candidate.json"))
+            manifest, fixture = (directory / name for name in ("inputs.json", "one-iteration.json"))
+            packages = []
+            for package, module in (("core", "list"), ("std", "math"), ("langarena", "clbg")):
+                source = directory / f"{module}.hirsel"
+                source.write_text(f"// {module}\n")
+                packages.append({
+                    "package": {"name": package, "version": "1"},
+                    "sources": [{"file": str(source), "modules": [module], "signatures": package != "langarena"}],
+                    "dependencies": [],
+                })
+            manifest.write_text(json.dumps({"core": packages[0]["package"], "packages": packages}))
+            fixture.write_text('{"iterations": 1}')
+            baseline["rows"][0].update(fixture_identity(manifest, fixture))
             base.write_text(json.dumps(baseline))
 
             def compare(value):
@@ -63,7 +75,7 @@ class InstructionGuard(unittest.TestCase):
                 row["build_record"] = build_record({
                     "accepted": True, "native": {"linked": True, "step_charging_elided": True},
                     "measurement": {key: row[key] for key in ("compiler_sha256", "runtime_archive_sha256",
-                                                              "manifest_sha256", "image_sha256", "flags")},
+                                                              *build.MANIFEST_HASHES, "image_sha256", "flags")},
                 })
 
             paired = deepcopy(injected)
@@ -71,7 +83,7 @@ class InstructionGuard(unittest.TestCase):
             record_build(paired)
             result = compare(paired)
             self.assertEqual(result.returncode, 2)
-            self.assertIn("base.json: arena/CLBG::Mandelbrot requires a verified build record", result.stderr)
+            self.assertIn("arena/CLBG::Mandelbrot requires a verified build record", result.stderr)
 
             for running in (500_000, 999_999):
                 with self.subTest(running=running):
@@ -91,7 +103,7 @@ class InstructionGuard(unittest.TestCase):
             paired["rows"][0]["runtime_archive_sha256"] = "e" * 64
             result = compare(paired)
             self.assertEqual(result.returncode, 2)
-            self.assertIn("candidate.json: arena/CLBG::Mandelbrot requires a verified build record", result.stderr)
+            self.assertIn("arena/CLBG::Mandelbrot requires a verified build record", result.stderr)
 
             record_build(paired)
             result = compare(paired)
@@ -102,11 +114,37 @@ class InstructionGuard(unittest.TestCase):
             runtime_only["rows"][0]["runtime_archive_sha256"] = "e" * 64
             result = compare(runtime_only)
             self.assertEqual(result.returncode, 2)
-            self.assertIn("candidate.json: arena/CLBG::Mandelbrot requires a verified build record", result.stderr)
+            self.assertIn("arena/CLBG::Mandelbrot requires a verified build record", result.stderr)
             record_build(runtime_only)
             result = compare(runtime_only)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn(f"Paired runtime_archive_sha256 {'b' * 64} -> {'e' * 64}", result.stdout)
+
+            changed = deepcopy(baseline)
+            for module in ("list", "math"):
+                with self.subTest(std_source=module):
+                    (directory / f"{module}.hirsel").write_text(f"// revised {module}\n")
+                    changed["rows"][0].update(fixture_identity(manifest, fixture))
+                    result = compare(changed)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("requires a verified build record", result.stderr)
+                    record_build(changed)
+                    result = compare(changed)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("Variable std_sha256 ", result.stdout)
+                    self.assertIn("(+0.000%)", result.stdout)
+
+            for source, content in ((directory / "clbg.hirsel", "// revised benchmark\n"),
+                                    (fixture, '{"iterations": 2}')):
+                with self.subTest(workload_file=source.name):
+                    original = source.read_text()
+                    source.write_text(content)
+                    changed["rows"][0].update(fixture_identity(manifest, fixture))
+                    record_build(changed)
+                    result = compare(changed)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("identity differs: arena/CLBG::Mandelbrot: fixture_sha256", result.stderr)
+                    source.write_text(original)
 
             paired["rows"][0]["flags"] += ["--debug-lines", "on"]
             record_build(paired)
@@ -184,6 +222,8 @@ class NativeProvenance(unittest.TestCase):
             runtime.write_bytes(b"runtime")
             binary.write_bytes(b"linked image")
             manifest.write_text('{"packages": []}')
+            fixture = directory / "rebench.conf"
+            fixture.write_text("fixture")
             toolchain = {"compiler_sha256": build.sha256(compiler), "runtime_archive_sha256": build.sha256(runtime)}
             command = [compiler, "build", "--release", "--runtime", runtime, "--inputs", manifest, "-o", binary]
             provenance = build.native_provenance(command, manifest)
@@ -193,7 +233,7 @@ class NativeProvenance(unittest.TestCase):
 
             def row():
                 return runtime_case("awfy", "Mandelbrot", directory, [binary, "Mandelbrot", "1", "500"],
-                                    b"verified\n", {"manifest_sha256": build.manifest_sha256(manifest)}, toolchain)
+                                    b"verified\n", fixture_identity(manifest, fixture), toolchain)
 
             self.assertEqual(row()["flags"], ["--release", "--runtime", "runtime", "--inputs", "manifest", "-o", "image"])
             binary.write_bytes(b"replacement image")

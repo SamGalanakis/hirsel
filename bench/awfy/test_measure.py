@@ -98,6 +98,7 @@ class BoardCompletion(unittest.TestCase):
                                     "certified": True, "flags": ["--release"], "argv": ["./sample"],
                                     "affinity": [10], "compiler_sha256": "a" * 64,
                                     "runtime_archive_sha256": "b" * 64, "fixture_sha256": "c" * 64,
+                                    "std_sha256": "d" * 64,
                                     "marker": "verified\n", "stdout": "verified\n",
                                     "sample": samples["hirsel"],
                                 })
@@ -166,7 +167,7 @@ class PairedSampling(unittest.TestCase):
             "key": key, "suite": "awfy", "mode": "certified", "certified": True,
             "flags": ["--release"], "argv": ["./sample", "List"], "marker": "verified\n",
             "compiler_sha256": "a" * 64, "runtime_archive_sha256": "b" * 64,
-            "fixture_sha256": "c" * 64, "image_sha256": "d" * 64,
+            "fixture_sha256": "c" * 64, "image_sha256": "d" * 64, "std_sha256": "e" * 64,
         }
         candidate = base | {"image_sha256": "e" * 64}
         cpu = min(os.sched_getaffinity(0))

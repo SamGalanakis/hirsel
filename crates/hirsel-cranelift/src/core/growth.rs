@@ -1,5 +1,6 @@
-//! One shared runtime call above the native payload threshold. Small buffers
-//! retain the inline classic allocation/copy/install/free sequence.
+//! One shared runtime call above the native payload threshold, the entry LLVM
+//! uses for every growth it does not complete inline. Small buffers retain the
+//! inline classic allocation/copy/install/free sequence.
 use super::function::Function;
 use super::*;
 use cranelift_codegen::ir::{StackSlotData, StackSlotKind, Value, condcodes::IntCC};
@@ -45,6 +46,7 @@ impl Function<'_, '_, '_> {
             self.b.ins().brif(large, native, &[], classic, &[]);
             self.b.switch_to_block(native);
             let alignment = self.b.ins().iconst(types::I64, align as i64);
+            let stride_word = self.b.ins().iconst(types::I64, stride as i64);
             let kind = self.b.ins().iconst(types::I8, i64::from(kind));
             let over = overflow.unwrap_or_else(|| self.b.ins().iconst(types::I8, 0));
             let slot = self.b.create_sized_stack_slot(StackSlotData::new(
@@ -58,14 +60,15 @@ impl Function<'_, '_, '_> {
             self.store_word(shadow, 8, length);
             self.store_word(shadow, 16, cap);
             let values = self.c_call(
-                "hirsel_core_grow",
-                &[P, P, U, U, U, U, U, U, B, K],
+                "hirsel_core_grow_cold",
+                &[P, P, U, U, U, U, U, U, U, B, K],
                 &[P, U],
                 &[
                     self.context,
                     shadow,
                     size,
                     alignment,
+                    stride_word,
                     charge,
                     capacity,
                     moved,

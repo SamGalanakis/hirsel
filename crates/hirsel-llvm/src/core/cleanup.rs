@@ -41,7 +41,6 @@ pub(super) fn glue_emitter<'a>(
         function: None,
         call_layouts: None,
         append_fast: false,
-        outline_byte_growth: None,
         shadow_callee: None,
         module,
         body,

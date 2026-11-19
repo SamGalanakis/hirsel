@@ -1,13 +1,12 @@
-//! Byte buffers share their cold growth path. Other sequences keep the
-//! inline small-buffer replacement and call the runtime for large buffers.
+//! A small sequence backing whose charge fits grows inline: admit, allocate,
+//! copy, free. Every other case (native reuse of a large backing, refusal,
+//! overflow) shares one cold runtime call that makes the same decisions, as
+//! Rust's `RawVec` keeps one non-generic `finish_grow` behind each element
+//! type's `grow_one`. Zero-sized elements keep the inline replacement.
 use super::memory_layout::*;
 use super::storage::{Payer, zeroext};
 use super::*;
 use hirsel_core_layout::{FieldTy, field_size};
-
-// Large writers repeat the entire allocation and refund path at each site.
-// Keep the inline small-buffer path in functions with fewer growth sites.
-const OUTLINE_BYTE_GROWTH_SITES: usize = 10;
 
 impl FunctionEmitter<'_> {
     #[allow(clippy::too_many_arguments)]
@@ -31,50 +30,86 @@ impl FunctionEmitter<'_> {
         let i64 = Type::I64;
         let stride = field_size(&self.module.types, self.recipes, item).0;
         let dispatch = stride != 0;
-        let outlined = matches!(item.as_ref(), FieldTy::Scalar(Scalar::U8))
-            && *self.outline_byte_growth.get_or_insert_with(|| {
-                self.body
-                    .insts
-                    .iter()
-                    .filter(|inst| {
-                        let Inst::Grow { carrier, .. } = inst else {
-                            return false;
-                        };
-                        let ty = self.body.addresses[carrier.index()].ty;
-                        matches!(
-                            hirsel_core_ir::sequence_edge(&self.module.types, ty),
-                            Some(FieldTy::Seq(item)) if matches!(item.as_ref(), FieldTy::Scalar(Scalar::U8))
-                        )
-                    })
-                    .nth(OUTLINE_BYTE_GROWTH_SITES - 1)
-                    .is_some()
-            });
         let n = self.counter();
         let done = Label::new("grow_done", n);
         let refused_label = Label::new("grow_refused", n);
         let native_copy = Label::new("grow_native_copy", n);
         let native_refused = Label::new("grow_native_refused", n);
-        let native = if dispatch {
+        if dispatch {
+            let kind =
+                match hirsel_core_layout::cleanup_class(&self.module.types, self.recipes, &edge) {
+                    Some(hirsel_core_layout::Cleanup::Terminal) => NATIVE_PLAIN,
+                    _ => NATIVE_GRAPH,
+                };
+            // Hot arm: a small backing whose charge fits is admitted, allocated,
+            // copied and freed inline, exactly as an own allocation would be.
+            let payer = self.current_payer();
             let cap = self.load_native(at, 16, Type::I64);
-            let classic = if outlined {
-                None
-            } else {
-                let large = self.cmp(
-                    Predicate::Uge,
-                    &i64,
-                    &cap,
-                    &int(GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride)),
-                );
-                let native_label = Label::new("grow_native", n);
-                let classic = Label::new("grow_classic", n);
-                self.cond(&large, native_label, classic);
-                self.block(native_label);
-                Some(classic)
-            };
+            let small = self.cmp(
+                Predicate::Ult,
+                &i64,
+                &cap,
+                &int(GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride)),
+            );
             let over = overflow.map_or(FALSE, |v| {
                 let flag = self.numeric(v);
                 self.cmp(Predicate::Ne, &Type::I8, &flag, &int(0))
             });
+            let eligible = if over == FALSE {
+                small
+            } else {
+                let checked = self.bin(Binary::Xor, &Type::I1, &over, &true.into());
+                self.bin(Binary::And, &Type::I1, &small, &checked)
+            };
+            let admit = Label::new("grow_admit", n);
+            let cold = Label::new("grow_cold", n);
+            let allocate = Label::new("grow_allocate", n);
+            let probe = Label::new("grow_probe", n);
+            let probe_refused = Label::new("grow_probe_refused", n);
+            let copied = Label::new("grow_copied", n);
+            let refused_done = Label::new("grow_refused_done", n);
+            self.likely(&eligible, admit, cold);
+            self.block(admit);
+            let available = self.load_native(&payer, LIMIT_AVAILABLE, Type::I64);
+            // Unsigned charge-1 < room is exactly charge != 0 && charge <= room.
+            let last = self.bin(Binary::Sub, &i64, charge, &int(1));
+            let fits = self.cmp(Predicate::Ult, &i64, &last, &available);
+            self.likely(&fits, if self.test_hooks { probe } else { allocate }, cold);
+            if self.test_hooks {
+                self.block(probe);
+                let allowed = self.admission_probe(charge);
+                self.likely(&allowed, allocate, probe_refused);
+            }
+            self.block(allocate);
+            self.admit_balance(&payer, charge, &available);
+            let fresh = self.allocate_admitted(payer, size.clone(), align, kind);
+            if self.facts {
+                let distinct = self.cmp(Predicate::Ne, &Type::Ptr, &fresh, old);
+                self.runtime_void("llvm.assume", &[arg(Type::I1, distinct)]);
+            }
+            self.runtime_void(
+                "llvm.memcpy.p0.p0.i64",
+                &[
+                    ptr(fresh.clone()),
+                    ptr(old.clone()),
+                    word(moved.clone()),
+                    arg(Type::I1, FALSE),
+                ],
+            );
+            self.store_native(at, 0, Type::Ptr, &fresh);
+            self.store_native(at, 16, Type::I64, capacity);
+            self.free_block(old, refund);
+            self.br(copied);
+            self.block(copied);
+            self.br(done);
+            if self.test_hooks {
+                self.block(probe_refused);
+                self.br(refused_label);
+            }
+            // Cold arm: large backings (native reuse), refusal, overflow and
+            // zero charges share one runtime call, which makes the same
+            // admission and threshold decisions.
+            self.block(cold);
             // The runtime borrows only this call-lifetime carrier. Keep the
             // source carrier's address out of the call so local homes promote.
             let shadow = self.temp(Type::words(3));
@@ -84,52 +119,28 @@ impl FunctionEmitter<'_> {
             self.store_native(&shadow, 8, Type::I64, &length);
             self.store_native(&shadow, 16, Type::I64, &cap);
             let grown = Type::structure([Type::Ptr, Type::I64]);
-            let pair = if outlined {
-                self.call_declared(
-                    "hirsel_core_grow_bytes",
-                    grown.clone(),
-                    &[
-                        ptr(CONTEXT),
-                        ptr(shadow.clone()),
-                        word(size.clone()),
-                        word(charge.clone()),
-                        word(capacity.clone()),
-                        word(moved.clone()),
-                        word(refund.clone()),
-                        zeroext(Type::I1, over),
-                    ],
-                    FnAttrs::default(),
-                    &CallAttrs {
-                        cold: true,
-                        ..CallAttrs::default()
-                    },
-                )
-            } else {
-                let kind = match hirsel_core_layout::cleanup_class(
-                    &self.module.types,
-                    self.recipes,
-                    &edge,
-                ) {
-                    Some(hirsel_core_layout::Cleanup::Terminal) => NATIVE_PLAIN,
-                    _ => NATIVE_GRAPH,
-                };
-                self.intrinsic(
-                    "hirsel_core_grow",
-                    grown.clone(),
-                    &[
-                        ptr(CONTEXT),
-                        ptr(shadow.clone()),
-                        word(size.clone()),
-                        word(int(align)),
-                        word(charge.clone()),
-                        word(capacity.clone()),
-                        word(moved.clone()),
-                        word(refund.clone()),
-                        zeroext(Type::I1, over),
-                        zeroext(Type::I8, int(kind)),
-                    ],
-                )
-            };
+            let pair = self.call_declared(
+                "hirsel_core_grow_cold",
+                grown.clone(),
+                &[
+                    ptr(CONTEXT),
+                    ptr(shadow.clone()),
+                    word(size.clone()),
+                    word(int(align)),
+                    word(int(stride)),
+                    word(charge.clone()),
+                    word(capacity.clone()),
+                    word(moved.clone()),
+                    word(refund.clone()),
+                    zeroext(Type::I1, over),
+                    zeroext(Type::I8, int(kind)),
+                ],
+                FnAttrs::default(),
+                &CallAttrs {
+                    cold: true,
+                    ..CallAttrs::default()
+                },
+            );
             let block = self.extract(&grown, &pair, 0);
             let room = self.extract(&grown, &pair, 1);
             let present = self.cmp(Predicate::Ne, &Type::Ptr, &block, &Value::Null);
@@ -148,29 +159,47 @@ impl FunctionEmitter<'_> {
             self.br(done);
             self.block(native_refused);
             self.runtime_void("llvm.lifetime.end.p0", &[ptr(shadow)]);
-            let Some(classic) = classic else {
-                let status = self.call_declared(
-                    "hirsel_core_allocation_status",
-                    Type::I8,
-                    &[ptr(CONTEXT), ptr(Value::Null)],
-                    FnAttrs::default(),
-                    &CallAttrs {
-                        cold: true,
-                        ..CallAttrs::default()
-                    },
-                );
-                let failed = self.cmp(Predicate::Ne, &Type::I8, &status, &int(0));
-                self.branch_failure(&failed, fail, Some(6));
-                self.br(done);
-                self.block(done);
-                return (block, room);
-            };
             self.br(refused_label);
-            self.block(classic);
-            Some((block, room))
-        } else {
-            None
-        };
+            self.block(refused_label);
+            let mut rooms = vec![(room, native_refused)];
+            if self.test_hooks {
+                rooms.push((available, probe_refused));
+            }
+            let refused_room = self.emit(Operation::Phi(&i64, &rooms));
+            let status = self.call_declared(
+                "hirsel_core_allocation_status",
+                Type::I8,
+                &[ptr(CONTEXT), ptr(Value::Null)],
+                FnAttrs::default(),
+                &CallAttrs {
+                    cold: true,
+                    ..CallAttrs::default()
+                },
+            );
+            let failed = self.cmp(Predicate::Ne, &Type::I8, &status, &int(0));
+            self.branch_failure(&failed, fail, Some(6));
+            self.br(refused_done);
+            self.block(refused_done);
+            self.br(done);
+            self.block(done);
+            let block = self.emit(Operation::Phi(
+                &Type::Ptr,
+                &[
+                    (fresh, copied),
+                    (block, native_copy),
+                    (Value::Null, refused_done),
+                ],
+            ));
+            let room = self.emit(Operation::Phi(
+                &i64,
+                &[
+                    (int(0), copied),
+                    (int(0), native_copy),
+                    (refused_room, refused_done),
+                ],
+            ));
+            return (block, room);
+        }
         let (block, room) = self.allocate_raw(
             &AllocKind::Own { edge },
             &Payer::Current,
@@ -208,11 +237,7 @@ impl FunctionEmitter<'_> {
         self.block(copied);
         self.br(done);
         self.block(refused_label);
-        let mut refused = vec![(room, allocated)];
-        if let Some((_, room)) = &native {
-            refused.push((room.clone(), native_refused));
-        }
-        let room = self.emit(Operation::Phi(&i64, &refused));
+        let room = self.emit(Operation::Phi(&i64, &[(room, allocated)]));
         let status = self.call_declared(
             "hirsel_core_allocation_status",
             Type::I8,
@@ -229,14 +254,14 @@ impl FunctionEmitter<'_> {
         self.block(refused_done);
         self.br(done);
         self.block(done);
-        let mut pointers = vec![(block, copied), (Value::Null, refused_done)];
-        let mut rooms = vec![(int(0), copied), (room, refused_done)];
-        if let Some((block, _)) = native {
-            pointers.push((block, native_copy));
-            rooms.push((int(0), native_copy));
-        }
-        let block = self.emit(Operation::Phi(&Type::Ptr, &pointers));
-        let room = self.emit(Operation::Phi(&i64, &rooms));
+        let block = self.emit(Operation::Phi(
+            &Type::Ptr,
+            &[(block, copied), (Value::Null, refused_done)],
+        ));
+        let room = self.emit(Operation::Phi(
+            &i64,
+            &[(int(0), copied), (room, refused_done)],
+        ));
         (block, room)
     }
 }

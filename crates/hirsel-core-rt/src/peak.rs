@@ -575,7 +575,7 @@ mod tests {
             // and initialized prefix; the byte to transfer is initialized here.
             let replacement = unsafe {
                 old.as_ptr().write(42);
-                crate::growth::grow(
+                crate::growth::replace(
                     &context,
                     carrier.as_mut_ptr().cast(),
                     2048,
@@ -586,6 +586,7 @@ mod tests {
                     1024,
                     false,
                     kind,
+                    true,
                 )
                 .unwrap()
             };

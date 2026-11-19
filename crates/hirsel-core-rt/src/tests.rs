@@ -768,7 +768,7 @@ fn repeated_sequence_growth_keeps_peak_rss_bounded() {
         // SAFETY: the fixture owns the sequence backing and passes its exact
         // charge and layout. The initialized prefix is empty.
         unsafe {
-            let grown = crate::growth::grow(
+            let grown = crate::growth::replace(
                 &context,
                 (&raw mut carrier).cast(),
                 END,
@@ -779,6 +779,7 @@ fn repeated_sequence_growth_keeps_peak_rss_bounded() {
                 START as u64,
                 false,
                 PLAIN,
+                true,
             )
             .unwrap();
             grown.as_ptr().write_bytes(0x5a, END);

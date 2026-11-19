@@ -127,7 +127,7 @@ impl FunctionEmitter<'_> {
         self.br(done);
         self.block(done);
     }
-    fn admission_probe(&mut self, charge: &Value) -> Value {
+    pub(super) fn admission_probe(&mut self, charge: &Value) -> Value {
         if self.test_hooks {
             self.intrinsic(
                 "hirsel_core_test_probe_admission",
@@ -150,7 +150,7 @@ impl FunctionEmitter<'_> {
         };
         (fits, available)
     }
-    fn admit_balance(&mut self, payer: &Value, charge: &Value, available: &Value) {
+    pub(super) fn admit_balance(&mut self, payer: &Value, charge: &Value, available: &Value) {
         let left = self.bin(Binary::Sub, &Type::I64, available, charge);
         self.store_native(payer, LIMIT_AVAILABLE, Type::I64, &left);
         let outstanding = self.load_native(payer, LIMIT_OUTSTANDING, Type::I64);
@@ -169,7 +169,13 @@ impl FunctionEmitter<'_> {
         let room = self.select(&Type::I64, &fits, &int(0), &available);
         (admitted, room)
     }
-    fn allocate_admitted(&mut self, payer: Value, bytes: Value, align: u64, kind: u8) -> Value {
+    pub(super) fn allocate_admitted(
+        &mut self,
+        payer: Value,
+        bytes: Value,
+        align: u64,
+        kind: u8,
+    ) -> Value {
         let name = "hirsel_core_alloc_admitted";
         let sig = FnSig {
             nonnull: self.facts,

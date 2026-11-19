@@ -6,13 +6,17 @@ use std::ptr::NonNull;
 /// # Safety
 /// Exclusive live nonzero-capacity sequence carrier; kind, alignment, moved
 /// prefix and both charges are the exact FORM operands. Fixed/resource/region
-/// storage and static data cannot reach this operation.
+/// storage and static data cannot reach this operation. `stride` is the
+/// element's native size, so the old carrier's capacity times `stride` is its
+/// native payload: from the shared threshold upward the backing may be reused
+/// in place, below it it is replaced.
 #[allow(clippy::too_many_arguments)]
-pub(crate) unsafe fn grow(
+pub(crate) unsafe fn grow_cold(
     context: &Context,
     carrier: *mut u8,
     bytes: usize,
     align: usize,
+    stride: u64,
     charge: u64,
     capacity: u64,
     moved: usize,
@@ -20,50 +24,23 @@ pub(crate) unsafe fn grow(
     overflow: bool,
     kind: u8,
 ) -> Result<NonNull<u8>, Capacity> {
-    // SAFETY: forwarded from the caller. This entry selects native reuse.
+    // SAFETY: this is the capacity word of the caller's live carrier.
+    let old_capacity = unsafe { carrier.add(16).cast::<u64>().read() };
+    let reuse =
+        old_capacity.saturating_mul(stride) >= crate::abi_layout::GROW_CALL_MIN_PAYLOAD_BYTES;
+    // SAFETY: forwarded from the caller.
     unsafe {
         replace(
-            context, carrier, bytes, align, charge, capacity, moved, refund, overflow, kind, true,
+            context, carrier, bytes, align, charge, capacity, moved, refund, overflow, kind, reuse,
         )
     }
 }
 
 /// # Safety
-/// As for `grow`. The old carrier's capacity is also its native byte size.
+/// As for `grow_cold`; `reuse` permits growing the backing in place.
 #[allow(clippy::too_many_arguments)]
-pub(crate) unsafe fn grow_bytes(
-    context: &Context,
-    carrier: *mut u8,
-    bytes: usize,
-    charge: u64,
-    capacity: u64,
-    moved: usize,
-    refund: u64,
-    overflow: bool,
-) -> Result<NonNull<u8>, Capacity> {
-    // SAFETY: this is the capacity word of the caller's live byte carrier.
-    let old_capacity = unsafe { carrier.add(16).cast::<u64>().read() };
-    let reuse = old_capacity >= crate::abi_layout::GROW_CALL_MIN_PAYLOAD_BYTES;
-    // SAFETY: the caller supplies a terminal byte sequence, with alignment 1.
-    unsafe {
-        replace(
-            context,
-            carrier,
-            bytes,
-            1,
-            charge,
-            capacity,
-            moved,
-            refund,
-            overflow,
-            crate::abi_layout::NATIVE_PLAIN,
-            reuse,
-        )
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-unsafe fn replace(
+#[inline]
+pub(crate) unsafe fn replace(
     context: &Context,
     carrier: *mut u8,
     bytes: usize,

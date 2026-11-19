@@ -294,7 +294,7 @@ fn a_join_result_grows_from_the_joiners_bound_while_its_funder_is_live() {
             let mut list = joined.assume_init();
             let old = list.data;
             assert!(!hirsel_core_limit_enter(context, bytes).pointer.is_null());
-            let grew = crate::growth::grow(
+            let grew = crate::growth::replace(
                 &*context,
                 (&raw mut list).cast(),
                 64,
@@ -305,6 +305,7 @@ fn a_join_result_grows_from_the_joiners_bound_while_its_funder_is_live() {
                 32,
                 false,
                 crate::block::PLAIN,
+                true,
             );
             let paid = match grew {
                 Ok(data) => {

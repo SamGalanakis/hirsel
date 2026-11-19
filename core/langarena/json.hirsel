@@ -8,14 +8,33 @@ type Coordinate {
 
 // serde_json's ryu spelling, from the public shortest digits/exponent API.
 // Generated coordinates are finite and non-negative; names use fixed7 separately.
+// Coordinates lie in [0, 1) at 8 places, so the spelling is almost always "0."
+// and the digits after a few zeros. That case is written here, where the caller
+// inlines it; zero, exponent and integer-part spellings go to number_rare.
 fn number(mut out: String, value: f64) -> Result[(), helper.Error] {
     let (coefficient, power) = float.shortest64(value)
+    let mut digits = string.new()
+    helper.mem(string.push_u64(mut digits, coefficient))?
+    let width: i64 = int.narrow(string.byte_len(digits))
+    let point = width + power
+    if coefficient == 0 || point <= -5i64 || point > 0 {
+        return number_rare(mut out, coefficient, digits, power)
+    }
+    helper.mem(string.push(mut out, "0."))?
+    for _ in 0 .. -point {
+        helper.mem(string.push(mut out, "0"))?
+    }
+    helper.mem(string.push(mut out, digits))?
+    Ok(())
+}
+
+// Every spelling but the fraction below one. Loop-free, so it stays one shared
+// copy: serde_json likewise keeps ryu's formatting out of its value writer.
+fn number_rare(mut out: String, coefficient: u64, digits: String, power: i64) -> Result[(), helper.Error] {
     if coefficient == 0 {
         helper.mem(string.push(mut out, "0.0"))?;
         return Ok(())
     }
-    let mut digits = string.new()
-    helper.mem(string.push_u64(mut digits, coefficient))?
     let size = string.byte_len(digits)
     let width: i64 = int.narrow(size)
     let point = width + power
@@ -28,22 +47,16 @@ fn number(mut out: String, value: f64) -> Result[(), helper.Error] {
         helper.mem(string.push(mut out, "e"))?
         helper.mem(string.push_i64(mut out, point - 1))?
     } else if power >= 0 {
+        // point <= 16 bounds the zeros at 15.
+        let zeros: u64 = int.narrow(power)
         helper.mem(string.push(mut out, digits))?
-        for _ in 0 .. power {
-            helper.mem(string.push(mut out, "0"))?
-        }
+        helper.mem(string.push(mut out, string.slice("0000000000000000", 0, zeros)))?
         helper.mem(string.push(mut out, ".0"))?
-    } else if point > 0 {
+    } else {
         let cut: u64 = int.narrow(point)
         helper.mem(string.push(mut out, string.slice(digits, 0, cut)))?
         helper.mem(string.push(mut out, "."))?
         helper.mem(string.push(mut out, string.slice(digits, cut, size)))?
-    } else {
-        helper.mem(string.push(mut out, "0."))?
-        for _ in 0 .. -point {
-            helper.mem(string.push(mut out, "0"))?
-        }
-        helper.mem(string.push(mut out, digits))?
     }
     Ok(())
 }

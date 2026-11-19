@@ -93,3 +93,40 @@ fn narrow_map_keys_use_value_parameters() -> u64 {
         None => 0,
     }
 }
+
+// Insertion uses the supplied initial value. A second call updates the same
+// entry and ignores its initial value. Both calls return the callback's result.
+// expect: run update_or_insert_once() = true
+fn update_or_insert_once() -> bool {
+    let mut m: Map[u64, u64] = map.new()
+    let mut calls: u64 = 0
+    let (first, second) = {
+        let bump = scoped fn(mut value: u64) -> u64 {
+            calls += 1
+            value += 1
+            value
+        }
+        let first = result.unwrap(map.update_or_insert(mut m, 5u64, 7u64, bump))
+        let second = result.unwrap(map.update_or_insert(mut m, 5u64, 50u64, bump))
+        (first, second)
+    }
+    let saved = option.unwrap(map.get(m, 5u64))
+    first == 8 && second == 9 && saved == 9 && calls == 2 && map.len(m) == 1
+}
+
+// Admission refusal returns both owned inputs and skips the callback.
+// expect: run update_or_insert_refused() = true
+fn update_or_insert_refused() -> bool {
+    result.unwrap(bound bytes 0 {
+        let mut m: Map[String, String] = map.new()
+        let mut called = false
+        let response = map.update_or_insert(mut m, "key", "value", scoped fn(mut value: String) {
+            called = true
+            value = "changed"
+        })
+        match take response {
+            Error((c, (key, value))) => c.available == 0 && key == "key" && value == "value" && !called && map.len(m) == 0,
+            Ok(()) => false,
+        }
+    })
+}

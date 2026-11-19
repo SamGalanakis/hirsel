@@ -273,3 +273,31 @@ fn undo_clone[K: key, V](mut m: Map[K, V]) {
         let _ = pop_entry(mut m)
     }
 }
+
+// Insert initial only for an absent key, then call f once on the entry.
+// On Capacity, return k and initial untouched and leave m unchanged.
+pub fn update_or_insert[K: key, V, R](mut m: Map[K, V], take k: K, take initial: V, f: scoped fn(mut V) -> R) -> Result[R, (Capacity, (K, V))] {
+    let (h, index, existing) = probe_insert(m, k)
+    let entry = if existing {
+        let _ = take k
+        let _ = take initial
+        index
+    } else {
+        let full = slots(m) == capacity(m)
+        if full {
+            if let Error(c) = make_room(mut m) {
+                return Error((c, (take k, take initial)))
+            }
+        }
+        let i = slots(m)
+        let entry_word = int.wrapping_add(i, 1)
+        push_entry(mut m, h, take k, take initial)
+        if full {
+            install_index(mut m, h, entry_word)
+        } else {
+            index_set(mut m, index, entry_word)
+        }
+        i
+    }
+    Ok(with_value(mut m, entry, f))
+}

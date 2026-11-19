@@ -222,15 +222,16 @@ operations it names; nothing else about them may be inferred from an implementat
   unspecified order. A heap compares with `<` on an `ordered` type, which never fails, so
   only `sort_stable` calls a caller's comparator. Both are core Hirsel code over private
   bodiless functions, as `Map` is; no library module provides a deque or a heap.
-- **Maps.** `map.insert` inserts an absent key or replaces a present key's value, and is the
-  only operation that writes a whole value; it returns its key and value with `Capacity`, as
+- **Maps.** `map.insert` inserts an absent key or replaces a present key's value.
+  It returns its key and value with `Capacity`, as
   `(Capacity, (K, V))`, and a present key admits nothing. `map.update(mut m, k, f)`, where
   `f: scoped fn(mut V) -> R`, runs `f` once on the value of `k` in place and returns
   `Some(r)`, or returns `None` without calling `f` when `k` is absent; it makes one lookup,
-  never inserts and admits nothing. `m` is lent to `update` for the call, so `f` cannot
-  name `m` ([OWN-9](ownership.md#own-9-overlap)). No core operation inserts or updates in
-  one call: a tally is `update`, then `insert` when it returns `None`, so a present key
-  costs one lookup and no owned key. `map.remove` drops the stored key
+  never inserts and admits nothing. `map.update_or_insert(mut m, take k, take initial, f)`
+  makes one lookup. It inserts `initial` only if `k` is absent, then calls `f` once on
+  the entry and returns `Ok(r)`. On `Capacity` it returns `(k, initial)` untouched,
+  leaves `m` unchanged and does not call `f`. Both operations lend `m` for the call,
+  so `f` cannot name `m` ([OWN-9](ownership.md#own-9-overlap)). `map.remove` drops the stored key
   and returns the value. `map.reserve(mut m, n)` makes room for `n` absent keys: after it
   returns `Ok`, the next `n` insertions admit nothing, whatever removals, replacements and updates
   come between. It grows by [MEM-24](budgets.md#mem-24-logical-charges) from a need of

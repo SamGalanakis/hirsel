@@ -87,12 +87,6 @@ fn gram(b: Bytes, i: u64) -> u32 {
     (a << 24u32) | (c << 16u32) | (d << 8u32) | e
 }
 
-fn bump(mut counts: Map[u32, u64], key: u32) -> Result[u64, helper.Error] {
-    let old = map.get_or(counts, key, 0u64)
-    helper.mem(result.capacity_only(map.insert(mut counts, key, old + 1)))?
-    Ok(old + 1)
-}
-
 fn ngram(a: String, b: String) -> Result[f64, helper.Error] {
     let x = string.as_bytes(a)
     let y = string.as_bytes(b)
@@ -102,16 +96,24 @@ fn ngram(a: String, b: String) -> Result[f64, helper.Error] {
         return Ok(0.0)
     }
     let mut first: Map[u32, u64] = map.new()
-    let mut second: Map[u32, u64] = map.new()
-    for i in 0 .. n - 3 {
-        let _ = bump(mut first, gram(x, i))?
+    helper.mem(map.reserve(mut first, n))?
+    let increment = fn(mut count: u64) -> u64 {
+        count += 1
+        count
     }
+    for i in 0 .. n - 3 {
+        let _ = helper.mem(result.capacity_only(map.update_or_insert(mut first, gram(x, i), 0u64, increment)))?
+    }
+    let mut second: Map[u32, u64] = map.new()
+    helper.mem(map.reserve(mut second, m))?
     let mut intersection: u64 = 0
     for i in 0 .. m - 3 {
         let key = gram(y, i)
-        let count = bump(mut second, key)?
-        if count <= map.get_or(first, key, 0u64) {
-            intersection += 1
+        let count = helper.mem(result.capacity_only(map.update_or_insert(mut second, key, 0u64, increment)))?
+        if let Some(first_count) = map.get(first, key) {
+            if count <= first_count {
+                intersection += 1
+            }
         }
     }
     let total = map.len(first) + map.len(second)

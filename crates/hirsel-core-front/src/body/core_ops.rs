@@ -362,6 +362,7 @@ operations! {
     ("map", "insert", Lane::Value, "C", "core-check-callables-913", false),
     ("map", "remove", Lane::Value, "C", "core-check-callables-913", false),
     ("map", "update", Lane::Value, "C", "core-collections-918", false),
+    ("map", "update_or_insert", Lane::PendingCode, "C", "port-fidelity-1360", false),
     ("map", "reserve", Lane::Value, "C", "std-seed-api-889", false),
     ("float", "sqrt", Lane::Numeric, "A", "core-check-895", false),
     ("float", "abs", Lane::Numeric, "A", "core-check-895", false),

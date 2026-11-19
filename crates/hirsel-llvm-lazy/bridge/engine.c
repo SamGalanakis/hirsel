@@ -52,8 +52,13 @@ static void initialize(void) {
     // Dense control flow leaves many copies of the same rematerializable
     // register. Batch its live-interval updates before the coalescer visits
     // every copy separately.
-    const char *options[] = {"hirsel", "-late-remat-update-threshold=16"};
-    LLVMParseCommandLineOptions(2, options, NULL);
+    // Hirsel's debug info is line rows only; it emits no variable records.
+    // Instruction-referencing variable locations still run a machine-location
+    // dataflow over every block and stack slot for them. The DBG_VALUE-based
+    // tracker has nothing to do without variable records.
+    const char *options[] = {"hirsel", "-late-remat-update-threshold=16",
+        "-experimental-debug-variable-locations=false"};
+    LLVMParseCommandLineOptions(3, options, NULL);
     LLVMInitializeX86TargetInfo(); LLVMInitializeX86Target();
     LLVMInitializeX86TargetMC(); LLVMInitializeX86AsmPrinter();
     LLVMInitializeX86AsmParser();

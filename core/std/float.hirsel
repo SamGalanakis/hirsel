@@ -187,7 +187,7 @@ fn scan(s: String) -> Result[Scanned, ParseError] {
         0
     }
     let mut i = at
-    if i >= n || !is_digit(b[i]) {
+    if i >= n || !int.is_ascii_digit(b[i]) {
         return Error(Invalid(i))
     }
     let mut mantissa: u64 = 0
@@ -220,13 +220,13 @@ fn scan(s: String) -> Result[Scanned, ParseError] {
         if i < n && (b[i] == b'-' || b[i] == b'+') {
             i += 1
         }
-        if i >= n || !is_digit(b[i]) {
+        if i >= n || !int.is_ascii_digit(b[i]) {
             return Error(Invalid(i))
         }
         // A point displacement cannot exceed the number of significand digits.
         // A magnitude past this limit stays out of range after any cancellation.
         let limit = count + EXPONENT_MARGIN
-        while i < n && is_digit(b[i]) {
+        while i < n && int.is_ascii_digit(b[i]) {
             if written.magnitude < limit {
                 let digit: u64 = int.widen(b[i] - b'0')
                 let next = int.saturating_add(int.saturating_mul(written.magnitude, 10), digit)
@@ -301,7 +301,7 @@ fn long(b: Bytes, negative: bool, at: u64, written: WrittenExponent) -> Scanned 
     let n = list.len(b)
     let mut x: u64 = 0
     let mut i = at
-    while i < n && is_digit(b[i]) && x < 1000000000000000000 {
+    while i < n && int.is_ascii_digit(b[i]) && x < 1000000000000000000 {
         let wide: u64 = int.widen(b[i] - b'0')
         x = x * 10 + wide
         i += 1
@@ -310,7 +310,7 @@ fn long(b: Bytes, negative: bool, at: u64, written: WrittenExponent) -> Scanned 
     if x >= 1000000000000000000 {
         // 19 digits in the integer part: the rest of it only scales.
         let mut j = i
-        while j < n && is_digit(b[j]) {
+        while j < n && int.is_ascii_digit(b[j]) {
             j += 1
         }
         exponent = int.narrow(j - i)
@@ -318,7 +318,7 @@ fn long(b: Bytes, negative: bool, at: u64, written: WrittenExponent) -> Scanned 
         // Fewer: the rest are in the fraction, after the point at i.
         i += 1
         let first = i
-        while i < n && is_digit(b[i]) && x < 1000000000000000000 {
+        while i < n && int.is_ascii_digit(b[i]) && x < 1000000000000000000 {
             let wide: u64 = int.widen(b[i] - b'0')
             x = x * 10 + wide
             i += 1
@@ -327,10 +327,6 @@ fn long(b: Bytes, negative: bool, at: u64, written: WrittenExponent) -> Scanned 
         exponent = -places
     }
     Scanned(negative: negative, mantissa: x, exponent: add_written(exponent, written), many: true, at: at, written: written)
-}
-
-fn is_digit(x: u8) -> bool {
-    x >= b'0' && x <= b'9'
 }
 
 /// The rounded (mantissa, biased exponent) of a scanned number that missed the exact fast
@@ -542,7 +538,7 @@ fn decimal(b: Bytes, at: u64, written: WrittenExponent) -> Decimal {
     while i < n && b[i] == b'0' {
         i += 1
     }
-    while i < n && is_digit(b[i]) {
+    while i < n && int.is_ascii_digit(b[i]) {
         add_digit(mut d, b[i] - b'0')
         i += 1
     }
@@ -554,7 +550,7 @@ fn decimal(b: Bytes, at: u64, written: WrittenExponent) -> Decimal {
                 i += 1
             }
         }
-        while i < n && is_digit(b[i]) {
+        while i < n && int.is_ascii_digit(b[i]) {
             add_digit(mut d, b[i] - b'0')
             i += 1
         }

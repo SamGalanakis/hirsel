@@ -571,21 +571,20 @@ fn primitive(s: String, mut p: Parser, in_class: bool) -> Result[Node, Error] {
     Ok(node(LITERAL, start, successor, c, 0))
 }
 
-fn alpha(c: u64) -> bool {
-    (65 <= c && c <= 90) || (97 <= c && c <= 122)
-}
-
 fn escape(s: String, mut p: Parser, start: u64) -> Result[Node, Error] {
     if p.at == p.width {
         return Error(syntax(start, EscapeUnexpectedEof))
     }
     let (c, successor) = scalar(s, p.at)
     p.at = successor
-    if c >= 48 && c <= 57 {
-        return Error(syntax(start, UnsupportedBackreference))
-    }
-    if c < 128 && !alpha(c) && c != 60 && c != 62 {
-        return Ok(node(LITERAL, start, successor, c, 0))
+    if c < 128 {
+        let b: u8 = int.narrow(c)
+        if int.is_ascii_digit(b) {
+            return Error(syntax(start, UnsupportedBackreference))
+        }
+        if !int.is_ascii_alpha(b) && b != b'<' && b != b'>' {
+            return Ok(node(LITERAL, start, successor, c, 0))
+        }
     }
     match c {
         120 => hexadecimal(s, mut p, start, c),
@@ -740,7 +739,7 @@ fn word_boundary(s: String, mut p: Parser, start: u64) -> Result[u64, Error] {
     let mut total_count: u64 = 0
     while p.at < p.width {
         let c = byte(s, p.at)
-        if !alpha(int.widen(c)) && c != b'-' {
+        if !int.is_ascii_alpha(c) && c != b'-' {
             break
         }
         if total_count < 10 {
@@ -990,7 +989,7 @@ fn ascii_class(s: String, at: u64) -> Option[Node] {
         if byte(s, hi) == b':' {
             break
         }
-        if !alpha(int.widen(byte(s, hi))) {
+        if !int.is_ascii_alpha(byte(s, hi)) {
             return None
         }
         hi += 1
@@ -3578,7 +3577,7 @@ fn boundary(s: String, at: u64) -> bool {
 }
 
 fn ascii_word(c: u8) -> bool {
-    (c >= b'A' && c <= b'Z') || (c >= b'a' && c <= b'z') || (c >= b'0' && c <= b'9') || c == b'_'
+    int.is_ascii_alpha(c) || int.is_ascii_digit(c) || c == b'_'
 }
 
 fn unicode_word(s: String, at: u64) -> bool {

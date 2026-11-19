@@ -78,20 +78,12 @@ fn skip(source: String, mut pos: u64) {
     }
 }
 
-fn digit(b: u8) -> bool {
-    b >= b'0' && b <= b'9'
-}
-
-fn letter(b: u8) -> bool {
-    b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z'
-}
-
 fn factor(source: String, mut pos: u64) -> Result[Node, helper.Error] {
     skip(source, mut pos)
     let b = at(source, pos)
-    if digit(b) {
+    if int.is_ascii_digit(b) {
         let start = pos
-        while digit(at(source, pos)) {
+        while int.is_ascii_digit(at(source, pos)) {
             pos += 1
         }
         let parsed: Result[i64, ParseError] = int.parse(string.slice(source, start, pos))
@@ -100,9 +92,9 @@ fn factor(source: String, mut pos: u64) -> Result[Node, helper.Error] {
             Error(_) => 0
         }))
     }
-    if letter(b) {
+    if int.is_ascii_alpha(b) {
         let start = pos
-        while letter(at(source, pos)) || digit(at(source, pos)) {
+        while int.is_ascii_alpha(at(source, pos)) || int.is_ascii_digit(at(source, pos)) {
             pos += 1
         }
         let name = helper.mem(string.from(string.slice(source, start, pos)))?

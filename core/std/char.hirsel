@@ -38,13 +38,15 @@ pub fn to_ascii_lower(c: char) -> char {
 
 /// Whether c is '0'..='9' (Rust is_ascii_digit). Cost: O(1). Ex: `char.is_ascii_digit('7')` is true
 pub fn is_ascii_digit(c: char) -> bool {
-    c >= '0' && c <= '9'
+    let v = char.to_u32(c)
+    v < 128 && int.is_ascii_digit(int.narrow(v))
 }
 
 /// Whether c is 'A'..='Z' or 'a'..='z' (Rust is_ascii_alphabetic). Cost: O(1).
 /// Ex: `char.is_ascii_alpha('é')` is false
 pub fn is_ascii_alpha(c: char) -> bool {
-    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+    let v = char.to_u32(c)
+    v < 128 && int.is_ascii_alpha(int.narrow(v))
 }
 
 /// Whether c is space, tab, line feed, form feed or carriage return; U+000B is not

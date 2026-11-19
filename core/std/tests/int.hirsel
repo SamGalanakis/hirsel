@@ -230,25 +230,29 @@ fn decimal_span_bounds() -> u64 {
     result.unwrap(int.parse_decimal_span(string.as_bytes("42"), 0, 3, 999))
 }
 
-// The byte ASCII tests agree with the char ones (an independent body over the scalar) on
-// every byte, so an edge off by one at 0x2F/0x3A, 0x40/0x5B, 0x60/0x7B or a fold that
-// admits '@', '[', '`' or '{' gives the count of disagreeing bytes.
+// Independent ASCII ranges for both entry points. The wider scalars below
+// would project to '0' and 'A' if the scalar input were truncated to a byte.
 // expect: run byte_ascii_matches_char() = 0
 fn byte_ascii_matches_char() -> u64 {
     let mut bad: u64 = 0
     for v in 0u32 .. 256u32 {
         let b: u8 = int.narrow(v)
         let c = option.unwrap(char.from_u32(v))
-        if int.is_ascii_digit(b) != char.is_ascii_digit(c) {
+        let digit = v >= 0x30 && v <= 0x39
+        let alpha = (v >= 0x41 && v <= 0x5A) || (v >= 0x61 && v <= 0x7A)
+        if int.is_ascii_digit(b) != digit || char.is_ascii_digit(c) != digit {
             bad += 1
         }
-        if int.is_ascii_alpha(b) != char.is_ascii_alpha(c) {
+        if int.is_ascii_alpha(b) != alpha || char.is_ascii_alpha(c) != alpha {
             bad += 1
         }
         let l: u32 = int.widen(int.to_ascii_lower(b))
         if l != char.to_u32(char.to_ascii_lower(c)) {
             bad += 1
         }
+    }
+    if char.is_ascii_digit('\u{130}') || char.is_ascii_alpha('\u{141}') {
+        bad += 1
     }
     bad
 }

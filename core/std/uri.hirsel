@@ -24,16 +24,8 @@ fn width(s: http1.Span) -> u64 {
     s.end - s.start
 }
 
-fn alpha(b: u8) -> bool {
-    b >= b'A' && b <= b'Z' || b >= b'a' && b <= b'z'
-}
-
-fn digit(b: u8) -> bool {
-    b >= b'0' && b <= b'9'
-}
-
 fn unreserved(b: u8) -> bool {
-    alpha(b) || digit(b) || b == b'-' || b == b'.' || b == b'_' || b == b'~'
+    int.is_ascii_alpha(b) || int.is_ascii_digit(b) || b == b'-' || b == b'.' || b == b'_' || b == b'~'
 }
 
 fn sub_delim(b: u8) -> bool {
@@ -162,7 +154,7 @@ pub fn parse(text: String) -> Result[Uri, Error] {
     let end = list.len(data)
     let mut i: u64 = 0
     let mut scheme: Option[http1.Span] = None
-    let mut scheme_possible = end > 0 && alpha(data[0])
+    let mut scheme_possible = end > 0 && int.is_ascii_alpha(data[0])
     while i < end {
         let b = data[i]
         if b == b'/' || b == b'?' || b == b'#' {
@@ -176,7 +168,7 @@ pub fn parse(text: String) -> Result[Uri, Error] {
             i += 1
             break
         }
-        scheme_possible = scheme_possible && (alpha(b) || digit(b) || b == b'+' || b == b'-' || b == b'.')
+        scheme_possible = scheme_possible && (int.is_ascii_alpha(b) || int.is_ascii_digit(b) || b == b'+' || b == b'-' || b == b'.')
         if b == b'%' {
             let _ = escaped(data, i, end)?
             i += 3

@@ -216,7 +216,7 @@ fn tree_value[T, E](s: String, mut i: u64, before: scoped fn() -> Result[(), E],
 pub fn read_f64(s: String, mut c: Cursor) -> Result[f64, Error] {
     skip(s, mut c.at)
     let first = at(s, c.at)
-    if first != b'-' && !is_digit(first) {
+    if first != b'-' && !int.is_ascii_digit(first) {
         return Error(Syntax(c.at))
     }
     read_number(s, mut c.at)
@@ -657,7 +657,7 @@ fn value_start(s: String, mut i: u64) -> Result[ValueStart, Error] {
             i += 1
             Ok(ReadObject)
         },
-        _ => if c == b'-' || is_digit(c) {
+        _ => if c == b'-' || int.is_ascii_digit(c) {
             Ok(ReadNumber)
         } else {
             Error(Syntax(i))
@@ -1107,13 +1107,9 @@ fn skip(s: String, mut i: u64) {
     }
 }
 
-fn is_digit(x: u8) -> bool {
-    x >= b'0' && x <= b'9'
-}
-
 /// A byte that can appear in a number's spelling. float.parse64 checks where each one may go.
 fn is_number_byte(x: u8) -> bool {
-    is_digit(x) || x == b'-' || x == b'+' || x == b'.' || x == b'e' || x == b'E'
+    int.is_ascii_digit(x) || x == b'-' || x == b'+' || x == b'.' || x == b'e' || x == b'E'
 }
 
 fn is_escape(e: u8) -> bool {

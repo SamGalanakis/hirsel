@@ -269,10 +269,6 @@ pub fn timestamp(c: Civil, offset: i32) -> Option[Timestamp] {
     from_unix(days(c.date) * DAY_SECONDS + h * 3600 + m * 60 + s - east, c.nanos)
 }
 
-fn is_digit(c: u8) -> bool {
-    c >= b'0' && c <= b'9'
-}
-
 fn byte(b: Bytes, i: u64) -> Result[u8, Error] {
     if i >= list.len(b) {
         return Error(Invalid(i))
@@ -391,11 +387,11 @@ pub fn parse_rfc3339(s: String) -> Result[(Timestamp, i32), Error] {
     let mut fraction: u32 = 0
     if byte(b, i)? == b'.' {
         i += 1
-        if !is_digit(byte(b, i)?) {
+        if !int.is_ascii_digit(byte(b, i)?) {
             return Error(Invalid(i))
         }
         let mut count: u8 = 0
-        while i < list.len(b) && is_digit(b[i]) {
+        while i < list.len(b) && int.is_ascii_digit(b[i]) {
             if count < 9 {
                 fraction = fraction * 10 + int.widen(b[i] - b'0')
                 count += 1
@@ -519,7 +515,7 @@ const HOUR: u64 = 3600000000000
 fn leading_int(b: Bytes, start: u64) -> (u64, Option[u64]) {
     let mut i = start
     let mut value: Option[u64] = Some(0)
-    while i < list.len(b) && is_digit(b[i]) {
+    while i < list.len(b) && int.is_ascii_digit(b[i]) {
         if let Some(prefix) = value {
             value = int.accumulate_digit(prefix, 10, b[i] - b'0', DURATION_LIMIT)
         }
@@ -533,7 +529,7 @@ fn leading_fraction(b: Bytes, start: u64) -> (u64, u64, f64) {
     let mut value: u64 = 0
     let mut scale: f64 = 1.0
     let mut overflow = false
-    while i < list.len(b) && is_digit(b[i]) {
+    while i < list.len(b) && int.is_ascii_digit(b[i]) {
         if !overflow {
             match int.accumulate_digit(value, 10, b[i] - b'0', DURATION_LIMIT) {
                 Some(next) => {
@@ -666,7 +662,7 @@ pub fn parse_duration(s: String) -> Result[i64, Error] {
             return Error(Invalid(i))
         }
         let unit_start = i
-        while i < len && b[i] != b'.' && !is_digit(b[i]) {
+        while i < len && b[i] != b'.' && !int.is_ascii_digit(b[i]) {
             i += 1
         }
         let unit = duration_unit(b, unit_start, i)?

@@ -429,6 +429,10 @@ fn m1_program_manifest() {
             source.file = workspace.join(&source.file);
         }
     }
+    manifest.packages.insert(
+        0,
+        PackageManifest::directory(&workspace.join("core/core"), package("core"), true).unwrap(),
+    );
     let corpus = manifest.load().unwrap();
     let parsed = corpus.parse();
     let index = corpus.index(&parsed);

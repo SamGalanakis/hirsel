@@ -2592,6 +2592,10 @@ fn every_reached_instance_imports_its_closures() {
     for s in m1.packages.iter_mut().flat_map(|p| &mut p.sources) {
         s.file = root.join(&s.file);
     }
+    m1.packages.insert(
+        0,
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap(),
+    );
     let langarena = langarena_inputs(&root, &root.join("core/core"), &root.join("core/langarena"));
     let dir = tempfile::tempdir().unwrap();
     let mut requests: Vec<(String, CheckRequest)> = [("langarena", langarena), ("m1", m1)]

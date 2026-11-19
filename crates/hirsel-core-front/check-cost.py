@@ -96,7 +96,8 @@ def finished_forecast(process, lines, projection, budget):
 
 
 def sample_sources(compiler, output, profile_front=False):
-    manifest = json.loads((ROOT / 'core/programs/m1/manifest.json').read_text())
+    import m1
+    manifest = m1.load_manifest(ROOT / 'core/programs/m1/manifest.json')
     manifest.pop('entries', None)
     for package in manifest['packages']:
         for source in package['sources']:
@@ -219,7 +220,7 @@ def run_product(compiler, directory, ceilings):
     os.environ['HIRSEL_MEMORY_LIMIT'] = '2G'
     os.environ['HIRSEL_JOBS'] = '1'
     directory.mkdir()
-    manifest = json.loads((ROOT / 'core/programs/m1/manifest.json').read_text())
+    manifest = m1.load_manifest(ROOT / 'core/programs/m1/manifest.json')
     inputs = m1.inputs_for(manifest, manifest['entries'][0], ROOT)
     cache = directory / 'packages'
     prepare = directory / 'prepare.json'

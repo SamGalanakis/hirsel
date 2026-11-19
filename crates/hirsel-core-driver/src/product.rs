@@ -944,6 +944,7 @@ mod agreement {
                 s.file = root.join(&s.file);
             }
         }
+        inputs.packages.insert(0, core.clone());
         for (i, entry) in manifest["entries"].as_array().unwrap().iter().enumerate() {
             let name = entry["package"]["name"].as_str().unwrap();
             let mut selected = inputs.clone();

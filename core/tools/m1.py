@@ -38,15 +38,24 @@ def inputs_for(manifest, entry, root):
 
 
 
-def library_inputs(root, core):
-    """Canonical images contain installed root sources, excluding contract tests."""
-    packages = []
-    for name in ['core', 'std']:
-        packages.append({'package': core if name == 'core' else {'name': 'std', 'version': '1'},
+def installed(root, core, name):
+    """An installed package: its root sources, excluding contract tests, as the bundle holds them."""
+    return {'package': core if name == 'core' else {'name': 'std', 'version': '1'},
             'dependencies': [] if name == 'core' else [core],
             'sources': [{'file': str(path.resolve()), 'modules': [path.stem], 'signatures': True}
-                        for path in sorted((root / 'core' / name).glob('*.hirsel'))]})
-    return {'core': core, 'packages': packages}
+                        for path in sorted((root / 'core' / name).glob('*.hirsel'))]}
+
+
+def library_inputs(root, core):
+    """Canonical images contain installed root sources, excluding contract tests."""
+    return {'core': core, 'packages': [installed(root, core, name) for name in ['core', 'std']]}
+
+
+def load_manifest(path, root=ROOT):
+    """A program manifest with core's package derived from core/core, never listed by hand."""
+    manifest = json.loads(path.read_text())
+    manifest['packages'].insert(0, installed(root, manifest['core'], 'core'))
+    return manifest
 
 
 def first_stop(product, entry):
@@ -192,7 +201,7 @@ def compare_case(binary, directory, case, scratch, timeout=None, runner=(), engi
 
 def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=None, case_timeouts=None, include_libraries=True, target=None, emulator=None, sysroot=None, debug_lines=None):
     runner = [str(emulator), "-L", str(sysroot)] if emulator else []
-    manifest = json.loads(manifest_path.read_text())
+    manifest = load_manifest(manifest_path, root)
     entries = [e for e in manifest['entries'] if not only or e['workload'] in only]
     if not entries:
         raise ValueError('manifest selection contains no entries')

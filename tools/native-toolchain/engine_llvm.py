@@ -67,7 +67,7 @@ def training(out):
     (out / 'arena.json').write_text(json.dumps(spec))
     jobs.append(('arena', ['--inputs', str(out / 'arena.json'), '--entry', 'langarena@1/suite/main', '--dir', str(host),
                            '--grant', 'Stdout', '--grant', 'Tasks', '--limit', '1073741824']))
-    manifest = json.loads((ROOT / 'core/programs/m1/manifest.json').read_text())
+    manifest = m1.load_manifest(ROOT / 'core/programs/m1/manifest.json')
     for e in manifest['entries']:
         tag = f"{e['workload']}-{e['variant']}"
         file = out / f'{tag}.json'

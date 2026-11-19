@@ -6,7 +6,8 @@ idiomatic entry; `matched.hirsel`, where present, is the matched entry. Sources 
 the canonical declarations in `core/` and the seed API in `std/`; shared fixture
 I/O, explicit Capacity conversion and resource traces live in `programs/m1/support.hirsel`.
 `programs/m1/manifest.json` maps packages, modules and exact dependencies for the
-real parser/resolver. Each package uses `charge-v1`. Per-workload `DERIVATION.md`
+real parser/resolver; core's package is not listed there but derived from `core/core`,
+as the bundle is. Each package uses `charge-v1`. Per-workload `DERIVATION.md`
 contains the hand-check output and named-site charge calculation. These programs
 cannot execute until the new compiler's memory, task and native slices land.
 

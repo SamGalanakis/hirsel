@@ -101,28 +101,57 @@ fn slots_forget_ring_law() -> bool {
     empty
 }
 
-// Hand a restored prefix back to ordinary List mutation. The scratch is empty
-// before free; tail reuse/growth expose stale marks if the handoff is omitted.
+fn slots_box_value(b: Box[u64]) -> u64 {
+    match b {
+        value => value,
+    }
+}
+
+// Move every owner through the fixed-header sort buffers, then reuse and grow
+// the restored List. The peak charge is (4 + 11 + 3) * 8 bytes (MEM-24).
 // expect: run slots_list_handoff_law() = 37
 fn slots_list_handoff_law() -> u64 {
-    let mut xs: List[u64] = result.unwrap(list.with_capacity(4))
-    for i in 1u64 .. 4 {
-        result.unwrap(list.push(mut xs, i))
+    let checked = bound bytes 144 {
+        let mut xs: List[Box[u64]] = result.unwrap(list.with_capacity(4))
+        for i in 1u64 .. 4 {
+            result.unwrap(list.push(mut xs, result.unwrap(box.new(i))))
+        }
+        let scratch: Slots[Box[u64]] = result.unwrap(slots_new(3))
+        slots_list_move(view xs, 0, view scratch.raw, 0, 3)
+        let mut valid = list.len(xs) == 3 && list.capacity(xs) == 4 && list.len(scratch.raw) == 0
+        for i in 0u64 .. 3 {
+            valid = valid && slots_box_value(slots_list_view(view scratch.raw, i)) == i + 1
+        }
+        slots_list_move(view scratch.raw, 0, view xs, 0, 3)
+        slots_finish_list(view xs)
+        slots_free(take scratch)
+        for i in 0u64 .. 3 {
+            valid = valid && slots_box_value(xs[i]) == i + 1
+        }
+        let a = {
+            let item = option.unwrap(list.pop(mut xs))
+            slots_box_value(item)
+        }
+        result.unwrap(list.push(mut xs, result.unwrap(box.new(7u64))))
+        result.unwrap(list.reserve(mut xs, 8))
+        let b = {
+            let item = option.unwrap(list.pop(mut xs))
+            slots_box_value(item)
+        }
+        list.clear(mut xs)
+        // Only the 11-slot backing remains charged. Fill the other 56 bytes,
+        // then require the next allocation to be refused.
+        let probe: Bytes = result.unwrap(list.with_capacity(56))
+        let extra: Result[Bytes, Capacity] = list.with_capacity(1)
+        let exact_refund = match extra {
+            Error(_) => list.capacity(probe) == 56,
+            Ok(_) => false,
+        }
+        if valid && exact_refund {
+            a * 10 + b
+        } else {
+            99
+        }
     }
-    let mut scratch: Slots[u64] = result.unwrap(slots_new(1))
-    slots_from_list(view xs, 1, mut scratch, 0, 1)
-    let fixed_header = list.len(xs) == 3 && list.len(scratch.raw) == 0
-    slots_to_list(mut scratch, 0, view xs, 1, 1)
-    slots_finish_list(view xs)
-    slots_free(take scratch)
-    let a = option.unwrap(list.pop(mut xs))
-    result.unwrap(list.push(mut xs, 7))
-    result.unwrap(list.reserve(mut xs, 8))
-    let b = option.unwrap(list.pop(mut xs))
-    list.clear(mut xs)
-    if fixed_header {
-        a * 10 + b
-    } else {
-        99
-    }
+    result.unwrap(checked)
 }

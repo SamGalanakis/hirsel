@@ -74,6 +74,80 @@ fn generate(n: u64) -> Result[String, helper.Error] {
     Ok(take out)
 }
 
+type NamedCoordinate {
+    point: Coordinate,
+    name: String,
+    opts: Map[String, (i32, bool)]
+}
+
+type Document {
+    coordinates: List[NamedCoordinate],
+    info: String
+}
+
+fn prepare(n: u64) -> Result[Document, helper.Error] {
+    let mut coordinates: List[NamedCoordinate] = list.new()
+    let mut g = helper.lcg()
+    for _ in 0 .. n {
+        let x = float.round(helper.next_float(mut g, 1.0) * 100000000.0) / 100000000.0
+        let y = float.round(helper.next_float(mut g, 1.0) * 100000000.0) / 100000000.0
+        let z = float.round(helper.next_float(mut g, 1.0) * 100000000.0) / 100000000.0
+        let mut name = string.new()
+        helper.mem(float.push_fixed64(mut name, helper.next_float(mut g, 1.0), 7))?
+        helper.mem(string.push(mut name, " "))?
+        helper.mem(string.push_i64(mut name, int.widen(helper.next_int(mut g, 10000))))?
+        let mut opts: Map[String, (i32, bool)] = map.new()
+        let key = helper.mem(string.from("1"))?
+        helper.mem(result.capacity_only(map.insert(mut opts, take key, (1i32, true))))?
+        helper.mem(result.capacity_only(list.push(mut coordinates, NamedCoordinate(point: Coordinate(x: x, y: y, z: z), name: take name, opts: take opts))))?
+    }
+    Ok(Document(coordinates: take coordinates, info: "some info"))
+}
+
+// The generator only produces ASCII names, keys and info with no JSON escapes.
+fn render(data: Document) -> Result[String, helper.Error] {
+    let mut out = string.new()
+    helper.mem(string.push(mut out, "{\"coordinates\":["))?
+    let mut first = true
+    for c in data.coordinates {
+        if !first {
+            helper.mem(string.push(mut out, ","))?
+        }
+        helper.mem(string.push(mut out, "{\"x\":"))?
+        number(mut out, c.point.x)?
+        helper.mem(string.push(mut out, ",\"y\":"))?
+        number(mut out, c.point.y)?
+        helper.mem(string.push(mut out, ",\"z\":"))?
+        number(mut out, c.point.z)?
+        helper.mem(string.push(mut out, ",\"name\":\""))?
+        helper.mem(string.push(mut out, c.name))?
+        helper.mem(string.push(mut out, "\",\"opts\":{"))?
+        let mut first_opt = true
+        for (key, opt) in c.opts {
+            if !first_opt {
+                helper.mem(string.push(mut out, ","))?
+            }
+            let (count, enabled) = opt
+            helper.mem(string.push(mut out, "\""))?
+            helper.mem(string.push(mut out, key))?
+            helper.mem(string.push(mut out, "\":["))?
+            helper.mem(string.push_i64(mut out, int.widen(count)))?
+            helper.mem(string.push(mut out, if enabled {
+                ",true]"
+            } else {
+                ",false]"
+            }))?
+            first_opt = false
+        }
+        helper.mem(string.push(mut out, "}}"))?
+        first = false
+    }
+    helper.mem(string.push(mut out, "],\"info\":\""))?
+    helper.mem(string.push(mut out, data.info))?
+    helper.mem(string.push(mut out, "\"}"))?
+    Ok(take out)
+}
+
 fn coordinate(j: std.json.Json) -> Result[Coordinate, helper.Error] {
     let mut x: f64 = 0.0
     let mut y: f64 = 0.0
@@ -192,24 +266,19 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
     if n < 0 {
         return Error(Config)
     }
-    let source = generate(int.narrow(n))?
+    let count: u64 = int.narrow(n)
     let mut checksum: u32 = 0
     if name == "Json::Generate" {
-        region r {
-            let j = match std.json.parse(r, source) {
-                Ok(v) => v,
-                Error(_) => return Error(Config)
-            }
-            let mut rendered = string.new()
-            for _ in 0 .. warmup + iterations {
-                rendered = string.new()
-                helper.mem(std.json.push_json(mut rendered, j))?
-                if string.starts_with(rendered, "{\"coordinates\":") {
-                    checksum += 1
-                }
+        let data = prepare(count)?
+        let mut rendered = string.new()
+        for _ in 0 .. warmup + iterations {
+            rendered = render(data)?
+            if string.starts_with(rendered, "{\"coordinates\":") {
+                checksum += 1
             }
         }
     } else {
+        let source = generate(count)?
         for _ in 0 .. warmup + iterations {
             let c = if name == "Json::ParseMapping" {
                 average_mapping(source)?

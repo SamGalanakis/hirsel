@@ -874,12 +874,19 @@ fn place_row(
     measured: &[(u64, u64, u64)],
     start: u64,
 ) -> Result<(Vec<u64>, u64), LayoutError> {
-    place_in_order(measured, &field_order(shape.repr, measured), start).map_err(|(i, bytes)| {
-        LayoutError::NativeRange {
-            ty: shape.name.clone(),
-            field: row[i].name.clone(),
-            bytes,
+    let order;
+    let order = match measured.len() {
+        0 => &[][..],
+        1 => &[0],
+        _ => {
+            order = field_order(shape.repr, measured);
+            &order
         }
+    };
+    place_in_order(measured, order, start).map_err(|(i, bytes)| LayoutError::NativeRange {
+        ty: shape.name.clone(),
+        field: row[i].name.clone(),
+        bytes,
     })
 }
 

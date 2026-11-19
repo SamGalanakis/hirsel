@@ -158,9 +158,11 @@ def observe(row, target, env, siblings, *, cycles=False, label=None, quiet_windo
                                             pmu_times=True, **options)
     if not quiet_window:
         sample["smt_busy_percent"] = busy
-    sample["verified"] = (
-        sample["status"] in ("ok", "missing-counter")
-        and re.fullmatch(row["marker"].encode(), (target / "stdout").read_bytes()) is not None
+    output = (target / "stdout").read_bytes()
+    lines = output.splitlines(keepends=True) if row.get("line_marker") else [output]
+    marker = row["marker"].encode()
+    sample["verified"] = sample["status"] in ("ok", "missing-counter") and any(
+        re.fullmatch(marker, line) for line in lines
     )
     if sample["status"] == "ok":
         if not sample["verified"]:
@@ -168,7 +170,7 @@ def observe(row, target, env, siblings, *, cycles=False, label=None, quiet_windo
         elif not all(counter_ready(sample, event + ("" if quiet_window else ":u"))
                      for event in (("instructions", "cycles") if cycles else ("instructions",))):
             sample["status"] = "inactive-counter"
-    row["stdout"] = (target / "stdout").read_text(errors="replace")
+    row["stdout"] = output.decode(errors="replace")
     row["sample"] = sample
     return sample
 
@@ -522,7 +524,7 @@ def peer_cycle_pairs(key, hirsel, args, siblings, env):
     status = 0
     for peer in args.peer:
         command, marker = commands[peer]
-        row = {"argv": list(map(str, command)), "cwd": str(cwd), "marker": marker.decode()}
+        row = {"argv": list(map(str, command)), "cwd": str(cwd), "marker": marker.decode(), "line_marker": True}
         kept, attempted = cycle_samples(row, hirsel, args, siblings, env)
         status = max(status, report_cycle_pairs(f"{key} Hirsel/{peer}", kept, attempted, args.pairs,
                                                filtered=args.sibling_busy_threshold is not None, peer=True))

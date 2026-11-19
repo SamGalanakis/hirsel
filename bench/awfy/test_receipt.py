@@ -270,6 +270,7 @@ class QuietCyclePairs(unittest.TestCase):
             command, marker = commands[Path(peer["argv"][0]).name]
             self.assertEqual(peer["argv"], list(map(str, command)))
             self.assertEqual(peer["marker"], marker.decode())
+            self.assertTrue(peer["line_marker"])
             self.assertEqual(candidate, native)
             base = {"cycles": 100, "instructions": 150, "smt_busy_percent": {}}
             return [(base, base | {"cycles": 200})], 1
@@ -283,6 +284,24 @@ class QuietCyclePairs(unittest.TestCase):
             self.assertIn("Hirsel/goose: 1/1 unfiltered pairs, cycles 2.000000x", output.getvalue())
             with self.assertRaisesRegex(ValueError, "do not match"):
                 receipt.peer_cycle_pairs(f"arena/{name}", native | {"marker": "other\n"}, args, (), {})
+
+    def test_peer_observation_requires_the_checksum_line(self):
+        row = {"argv": ["peer"], "cwd": ".", "marker": "Sort::Merge: OK in [0-9.]+s\n",
+               "line_marker": True}
+        with tempfile.TemporaryDirectory() as temp:
+            for status in ("OK", "ERR"):
+                with self.subTest(status=status):
+                    directory = Path(temp) / status
+
+                    def run(_, target, **_kwargs):
+                        target.mkdir()
+                        (target / "stdout").write_text(f"start: 123\nSort::Merge: {status} in 0.1s\nSummary: 0.1s\n")
+                        return {"status": "ok", "pmu_times_ns": {"instructions:u": [[1, 1]]}}
+
+                    with patch.object(receipt.measure.core_measure, "sample", side_effect=run):
+                        observed = receipt.observe(row.copy(), directory, {}, ())
+                    self.assertEqual(observed["verified"], status == "OK")
+                    self.assertEqual(observed["status"], "ok" if status == "OK" else "wrong-result")
 
 
 class ProfileSelfCosts(unittest.TestCase):

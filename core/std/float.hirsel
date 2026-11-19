@@ -2015,107 +2015,92 @@ fn push_ascii(mut s: String, take o: Bytes) -> Result[(), Capacity] {
     }
 }
 
-// fdlibm constants: ln2 split into high/low parts, its inverse, and Remez coefficients.
-const EXP_LN2_HI: f64 = 6.93147180369123816490e-01 // 0x3fe62e42fee00000
+// Arm optimized-routines exp (Szabolcs Nagy, 2018; MIT; musl's and glibc's exp carry the
+// same code and data): N = 128, x = k ln2/N + r, Shift = 1.5 x 2^52 rounds k into kd's
+// low bits, and C2..C5 approximate e^r - 1 - r on |r| <= ln2/256.
+const EXP_INVLN2N: f64 = 184.6649652337873 // 0x40671547652b82fe, N/ln2
 
-const EXP_LN2_LO: f64 = 1.90821492927058770002e-10 // 0x3dea39ef35793c76
+const EXP_NEGLN2HIN: f64 = -0.005415212348111709 // 0xbf762e42fefa0000, -ln2/N high bits
 
-const EXP_INVLN2: f64 = 1.44269504088896338700e+00 // 0x3ff71547652b82fe
+const EXP_NEGLN2LON: f64 = -1.2864023111638346e-14 // 0xbd0cf79abc9e3b3a, its low part
 
-const EXP_P1: f64 = 1.66666666666666019037e-01 // 0x3FC555555555553E
+const EXP_SHIFT: f64 = 6755399441055744.0 // 0x4338000000000000
 
-const EXP_P2: f64 = -2.77777777770155933842e-03 // 0xBF66C16C16BEBD93
+const EXP_C2: f64 = 0.49999999999996786 // 0x3fdffffffffffdbd
 
-const EXP_P3: f64 = 6.61375632143793436117e-05 // 0x3F11566AAF25DE2C
+const EXP_C3: f64 = 0.16666666666665886 // 0x3fc555555555543c
 
-const EXP_P4: f64 = -1.65339022054652515390e-06 // 0xBEBBBD41C5D26BF1
+const EXP_C4: f64 = 0.0416666808410674 // 0x3fa55555cf172b91
 
-const EXP_P5: f64 = 4.13813679705723846039e-08 // 0x3E66376972BEA4D0
+const EXP_C5: f64 = 0.008333335853059549 // 0x3f81111167a4d017
 
-/// e^x within 1 ulp, after fdlibm's e_exp.c (Sun, 1993; FreeBSD's msun and Rust's libm
-/// crate carry the same code): x = k ln2 + r with |r| <= 0.5 ln2, a degree-5 Remez
-/// polynomial for e^r, then k added to the exponent. Overflows to inf above
-/// 709.782712893384, underflows to 0 below -745.1332191019411; exp(NaN) is NaN,
-/// exp(-inf) is 0. Alloc: nothing. Cost: O(1).
+// For i in 0..N: [2i] is tail and [2i + 1] is the bits of scale minus i << 45, where
+// 2^(i/N) = scale x (1 + tail) and scale is 2^(i/N) rounded to a double.
+const EXP_TAB: Inline[u64, 256] =[0x0000000000000000, 0x3ff0000000000000, 0x3c9b3b4f1a88bf6e, 0x3feff63da9fb3335, 0xbc7160139cd8dc5d, 0x3fefec9a3e778061, 0xbc905e7a108766d1, 0x3fefe315e86e7f85, 0x3c8cd2523567f613, 0x3fefd9b0d3158574, 0xbc8bce8023f98efa, 0x3fefd06b29ddf6de, 0x3c60f74e61e6c861, 0x3fefc74518759bc8, 0x3c90a3e45b33d399, 0x3fefbe3ecac6f383, 0x3c979aa65d837b6d, 0x3fefb5586cf9890f, 0x3c8eb51a92fdeffc, 0x3fefac922b7247f7, 0x3c3ebe3d702f9cd1, 0x3fefa3ec32d3d1a2, 0xbc6a033489906e0b, 0x3fef9b66affed31b, 0xbc9556522a2fbd0e, 0x3fef9301d0125b51, 0xbc5080ef8c4eea55, 0x3fef8abdc06c31cc, 0xbc91c923b9d5f416, 0x3fef829aaea92de0, 0x3c80d3e3e95c55af, 0x3fef7a98c8a58e51, 0xbc801b15eaa59348, 0x3fef72b83c7d517b, 0xbc8f1ff055de323d, 0x3fef6af9388c8dea, 0x3c8b898c3f1353bf, 0x3fef635beb6fcb75, 0xbc96d99c7611eb26, 0x3fef5be084045cd4, 0x3c9aecf73e3a2f60, 0x3fef54873168b9aa, 0xbc8fe782cb86389d, 0x3fef4d5022fcd91d, 0x3c8a6f4144a6c38d, 0x3fef463b88628cd6, 0x3c807a05b0e4047d, 0x3fef3f49917ddc96, 0x3c968efde3a8a894, 0x3fef387a6e756238, 0x3c875e18f274487d, 0x3fef31ce4fb2a63f, 0x3c80472b981fe7f2, 0x3fef2b4565e27cdd, 0xbc96b87b3f71085e, 0x3fef24dfe1f56381, 0x3c82f7e16d09ab31, 0x3fef1e9df51fdee1, 0xbc3d219b1a6fbffa, 0x3fef187fd0dad990, 0x3c8b3782720c0ab4, 0x3fef1285a6e4030b, 0x3c6e149289cecb8f, 0x3fef0cafa93e2f56, 0x3c834d754db0abb6, 0x3fef06fe0a31b715, 0x3c864201e2ac744c, 0x3fef0170fc4cd831, 0x3c8fdd395dd3f84a, 0x3feefc08b26416ff, 0xbc86a3803b8e5b04, 0x3feef6c55f929ff1, 0xbc924aedcc4b5068, 0x3feef1a7373aa9cb, 0xbc9907f81b512d8e, 0x3feeecae6d05d866, 0xbc71d1e83e9436d2, 0x3feee7db34e59ff7, 0xbc991919b3ce1b15, 0x3feee32dc313a8e5, 0x3c859f48a72a4c6d, 0x3feedea64c123422, 0xbc9312607a28698a, 0x3feeda4504ac801c, 0xbc58a78f4817895b, 0x3feed60a21f72e2a, 0xbc7c2c9b67499a1b, 0x3feed1f5d950a897, 0x3c4363ed60c2ac11, 0x3feece086061892d, 0x3c9666093b0664ef, 0x3feeca41ed1d0057, 0x3c6ecce1daa10379, 0x3feec6a2b5c13cd0, 0x3c93ff8e3f0f1230, 0x3feec32af0d7d3de, 0x3c7690cebb7aafb0, 0x3feebfdad5362a27, 0x3c931dbdeb54e077, 0x3feebcb299fddd0d, 0xbc8f94340071a38e, 0x3feeb9b2769d2ca7, 0xbc87deccdc93a349, 0x3feeb6daa2cf6642, 0xbc78dec6bd0f385f, 0x3feeb42b569d4f82, 0xbc861246ec7b5cf6, 0x3feeb1a4ca5d920f, 0x3c93350518fdd78e, 0x3feeaf4736b527da, 0x3c7b98b72f8a9b05, 0x3feead12d497c7fd, 0x3c9063e1e21c5409, 0x3feeab07dd485429, 0x3c34c7855019c6ea, 0x3feea9268a5946b7, 0x3c9432e62b64c035, 0x3feea76f15ad2148, 0xbc8ce44a6199769f, 0x3feea5e1b976dc09, 0xbc8c33c53bef4da8, 0x3feea47eb03a5585, 0xbc845378892be9ae, 0x3feea34634ccc320, 0xbc93cedd78565858, 0x3feea23882552225, 0x3c5710aa807e1964, 0x3feea155d44ca973, 0xbc93b3efbf5e2228, 0x3feea09e667f3bcd, 0xbc6a12ad8734b982, 0x3feea012750bdabf, 0xbc6367efb86da9ee, 0x3fee9fb23c651a2f, 0xbc80dc3d54e08851, 0x3fee9f7df9519484, 0xbc781f647e5a3ecf, 0x3fee9f75e8ec5f74, 0xbc86ee4ac08b7db0, 0x3fee9f9a48a58174, 0xbc8619321e55e68a, 0x3fee9feb564267c9, 0x3c909ccb5e09d4d3, 0x3feea0694fde5d3f, 0xbc7b32dcb94da51d, 0x3feea11473eb0187, 0x3c94ecfd5467c06b, 0x3feea1ed0130c132, 0x3c65ebe1abd66c55, 0x3feea2f336cf4e62, 0xbc88a1c52fb3cf42, 0x3feea427543e1a12, 0xbc9369b6f13b3734, 0x3feea589994cce13, 0xbc805e843a19ff1e, 0x3feea71a4623c7ad, 0xbc94d450d872576e, 0x3feea8d99b4492ed, 0x3c90ad675b0e8a00, 0x3feeaac7d98a6699, 0x3c8db72fc1f0eab4, 0x3feeace5422aa0db, 0xbc65b6609cc5e7ff, 0x3feeaf3216b5448c, 0x3c7bf68359f35f44, 0x3feeb1ae99157736, 0xbc93091fa71e3d83, 0x3feeb45b0b91ffc6, 0xbc5da9b88b6c1e29, 0x3feeb737b0cdc5e5, 0xbc6c23f97c90b959, 0x3feeba44cbc8520f, 0xbc92434322f4f9aa, 0x3feebd829fde4e50, 0xbc85ca6cd7668e4b, 0x3feec0f170ca07ba, 0x3c71affc2b91ce27, 0x3feec49182a3f090, 0x3c6dd235e10a73bb, 0x3feec86319e32323, 0xbc87c50422622263, 0x3feecc667b5de565, 0x3c8b1c86e3e231d5, 0x3feed09bec4a2d33, 0xbc91bbd1d3bcbb15, 0x3feed503b23e255d, 0x3c90cc319cee31d2, 0x3feed99e1330b358, 0x3c8469846e735ab3, 0x3feede6b5579fdbf, 0xbc82dfcd978e9db4, 0x3feee36bbfd3f37a, 0x3c8c1a7792cb3387, 0x3feee89f995ad3ad, 0xbc907b8f4ad1d9fa, 0x3feeee07298db666, 0xbc55c3d956dcaeba, 0x3feef3a2b84f15fb, 0xbc90a40e3da6f640, 0x3feef9728de5593a, 0xbc68d6f438ad9334, 0x3feeff76f2fb5e47, 0xbc91eee26b588a35, 0x3fef05b030a1064a, 0x3c74ffd70a5fddcd, 0x3fef0c1e904bc1d2, 0xbc91bdfbfa9298ac, 0x3fef12c25bd71e09, 0x3c736eae30af0cb3, 0x3fef199bdd85529c, 0x3c8ee3325c9ffd94, 0x3fef20ab5fffd07a, 0x3c84e08fd10959ac, 0x3fef27f12e57d14b, 0x3c63cdaf384e1a67, 0x3fef2f6d9406e7b5, 0x3c676b2c6c921968, 0x3fef3720dcef9069, 0xbc808a1883ccb5d2, 0x3fef3f0b555dc3fa, 0xbc8fad5d3ffffa6f, 0x3fef472d4a07897c, 0xbc900dae3875a949, 0x3fef4f87080d89f2, 0x3c74a385a63d07a7, 0x3fef5818dcfba487, 0xbc82919e2040220f, 0x3fef60e316c98398, 0x3c8e5a50d5c192ac, 0x3fef69e603db3285, 0x3c843a59ac016b4b, 0x3fef7321f301b460, 0xbc82d52107b43e1f, 0x3fef7c97337b9b5f, 0xbc892ab93b470dc9, 0x3fef864614f5a129, 0x3c74b604603a88d3, 0x3fef902ee78b3ff6, 0x3c83c5ec519d7271, 0x3fef9a51fbc74c83, 0xbc8ff7128fd391f0, 0x3fefa4afa2a490da, 0xbc8dae98e223747d, 0x3fefaf482d8e67f1, 0x3c8ec3bc41aa2008, 0x3fefba1bee615a27, 0x3c842b94c3a9eb32, 0x3fefc52b376bba97, 0x3c8a64a931d185ee, 0x3fefd0765b6e4540, 0xbc8e37bae43be3ed, 0x3fefdbfdad9cbe14, 0x3c77893b4d91cd9d, 0x3fefe7c1819e90d8, 0x3c5305c14160cc89, 0x3feff3c22b8f71f1]
+
+/// e^x within 0.511 ulp, after Arm's optimized-routines exp (musl and glibc carry the
+/// same code): x = k ln2/128 + r with |r| <= ln2/256, 2^(k/128) from a 128-entry table,
+/// a degree-5 polynomial for e^r, no division. Overflows to inf above 709.782712893384,
+/// underflows to 0 below -745.1332191019411; exp(NaN) is NaN, exp(-inf) is 0.
+/// Alloc: nothing. Cost: O(1).
 /// Ex: `let decay = float.exp(-t / tau)`
 pub fn exp(x: f64) -> f64 {
     let bits = float.to_bits64(x)
-    let hx = (bits >> 32) & 0x7fffffff
-    let negative = bits >> 63 != 0
-    if hx >= 0x40862E42 {
-        // |x| >= 709.78...
-        if hx >= 0x7ff00000 {
-            if bits & 0xfffffffffffff != 0 {
-                return x + x
-            }
-            return if negative {
-                0.0
-            } else {
-                x
-            }
-        }
-        // Same-sign finite f64s order as their bits: x > 7.09782712893383973096e+02
-        // (0x40862E42FEFA39EF) overflows, x < -7.45133219101941108420e+02
-        // (0xC0874910D52D3051) underflows.
-        if !negative && bits > 0x40862E42FEFA39EF {
-            return float.from_bits64(0x7ff0000000000000)
-        }
-        if negative && bits > 0xC0874910D52D3051 {
-            return 0.0
-        }
-    }
-    let mut hi: f64 = 0.0
-    let mut lo: f64 = 0.0
-    let mut k: i64 = 0
-    let mut r = x
-    if hx > 0x3fd62e42 {
-        // |x| > 0.5 ln2: reduce.
-        if hx < 0x3FF0A2B2 {
-            // and |x| < 1.5 ln2: k is 1 or -1.
-            if negative {
-                hi = x + EXP_LN2_HI
-                lo = -EXP_LN2_LO
-                k = -1
-            } else {
-                hi = x - EXP_LN2_HI
-                lo = EXP_LN2_LO
-                k = 1
-            }
-        } else {
-            let half: f64 = if negative {
-                -0.5
-            } else {
-                0.5
-            }
-            let nearest: Result[i64, FloatError] = float.to_int(EXP_INVLN2 * x + half)
-            k = match nearest {
-                Ok(v) => v,
-                Error(_) => fail("float.exp: |x| < 746 makes k fit"),
-            }
-            let t: f64 = float.from_int(k)
-            // t x EXP_LN2_HI is exact: EXP_LN2_HI has 32 significant bits and |k| < 1076.
-            hi = x - t * EXP_LN2_HI
-            lo = t * EXP_LN2_LO
-        }
-        r = hi - lo
-    } else if hx < 0x3e300000 {
-        // |x| < 2^-28: e^x rounds to 1 + x.
+    // Top 12 bits of |x|: 0x3c9 is 2^-54's, 0x408 is 512's and 0x409 is 1024's.
+    let abstop = (bits >> 52) & 0x7ff
+    let large = abstop >= 0x408
+    if abstop < 0x3c9 {
+        // |x| < 2^-54: e^x rounds to 1 + x.
         return 1.0 + x
     }
-    let t = r * r
-    let c = r - t * (EXP_P1 + t * (EXP_P2 + t * (EXP_P3 + t * (EXP_P4 + t * EXP_P5))))
-    if k == 0 {
-        return 1.0 - ((r * c) / (c - 2.0) - r)
+    if abstop >= 0x409 {
+        if bits == 0xfff0000000000000 {
+            return 0.0
+        }
+        if abstop == 0x7ff {
+            return 1.0 + x
+        }
+        return if bits >> 63 != 0 {
+            0.0
+        } else {
+            float.from_bits64(0x7ff0000000000000)
+        }
     }
-    let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi)
-    // Add k to y's exponent; below the normal range add k + 1000 and scale by 2^-1000.
-    if k >= -1021 {
-        let shift: u64 = int.wrapping_shl(int.truncate(k), 52)
-        float.from_bits64(int.wrapping_add(float.to_bits64(y), shift))
-    } else {
-        let shift: u64 = int.wrapping_shl(int.truncate(k + 1000), 52)
-        float.from_bits64(int.wrapping_add(float.to_bits64(y), shift)) * float.from_bits64(0x0170000000000000)
+    let shifted = EXP_INVLN2N * x + EXP_SHIFT
+    let ki = float.to_bits64(shifted)
+    let kd = shifted - EXP_SHIFT
+    let r = x + kd * EXP_NEGLN2HIN + kd * EXP_NEGLN2LON
+    let idx = 2 * (ki % 128)
+    let tail = float.from_bits64(EXP_TAB[idx])
+    // The bits of 2^(k/N): a valid double while -1023 N < k < 1024 N.
+    let sbits = int.wrapping_add(EXP_TAB[idx + 1], int.wrapping_shl(ki, 45))
+    let r2 = r * r
+    // e^x = 2^(k/N) e^r ~= scale + scale x (tail + e^r - 1).
+    let tmp = tail + r + r2 * (EXP_C2 + r * EXP_C3) + r2 * r2 * (EXP_C4 + r * EXP_C5)
+    if large {
+        return exp_near_range_end(tmp, sbits, ki)
     }
+    let scale = float.from_bits64(sbits)
+    scale + scale * tmp
+}
+
+// 512 <= |x| < 1024: scale's exponent may be out of range, so it is formed 2^1009 lower
+// (k > 0) or 2^1022 higher (k < 0) and multiplied back last. Below 1, the sum is rounded
+// once at 1's precision first, so the subnormal result is not rounded twice.
+fn exp_near_range_end(tmp: f64, sbits: u64, ki: u64) -> f64 {
+    if ki & 0x80000000 == 0 {
+        let scale = float.from_bits64(int.wrapping_sub(sbits, 0x3f10000000000000))
+        return float.from_bits64(0x7f00000000000000) * (scale + scale * tmp)
+    }
+    let scale = float.from_bits64(int.wrapping_add(sbits, 0x3fe0000000000000))
+    let mut y = scale + scale * tmp
+    if float.lt(y, 1.0) {
+        let mut lo = scale - y + scale * tmp
+        let hi = 1.0 + y
+        lo = 1.0 - hi + y + lo
+        y = hi + lo - 1.0
+    }
+    float.from_bits64(0x0010000000000000) * y
 }
 
 // Ported from Rust libm 0.2.16, math/{sin,cos,sincos,k_sin,k_cos,rem_pio2,rem_pio2_large}.rs.

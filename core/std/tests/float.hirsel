@@ -402,7 +402,7 @@ fn shortest_pairs() -> bool {
     c == 3 && p == -1 && d == 1 && q == 2 && z == 0 && w == 0
 }
 
-// exp, within 1 ulp of the correctly rounded value (fdlibm's bound). Each expected bit
+// exp, within 1 ulp of the correctly rounded value (the contract's bound). Each expected bit
 // pattern is e^x computed by Python's decimal module to 80 digits and rounded once.
 fn ulps(x: f64, want: u64) -> u64 {
     let got = float.to_bits64(float.exp(x))

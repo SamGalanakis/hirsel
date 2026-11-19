@@ -354,11 +354,6 @@ fn arith_decode(encoded: Arith) -> Result[Bytes, helper.Error] {
     Ok(take output)
 }
 
-type Phrase {
-    lo: u64,
-    hi: u64
-}
-
 fn lzw_decode(encoded: Bytes) -> Result[Bytes, helper.Error] {
     let n = list.len(encoded)
     if n == 0 {
@@ -367,42 +362,36 @@ fn lzw_decode(encoded: Bytes) -> Result[Bytes, helper.Error] {
     if n % 2 != 0 {
         return Error(Config)
     }
-    let mut phrases: Bytes = list.new()
-    let mut dict: List[Phrase] = helper.mem(list.with_capacity(4096))?
+    let mut dict: List[Bytes] = helper.mem(list.with_capacity(4096))?
     for i in 0u64 .. 256u64 {
-        push(mut phrases, int.narrow(i))?
-        push(mut dict, Phrase(lo: i, hi: i + 1))?
+        let mut phrase: Bytes = helper.mem(list.with_capacity(1))?
+        push(mut phrase, int.narrow(i))?
+        push(mut dict, take phrase)?
     }
     let mut output: Bytes = helper.mem(list.with_capacity(n * 2))?
     let first: u64 = int.widen(encoded[0])
     let second: u64 = int.widen(encoded[1])
-    let initial = dict[(first << 8u64) | second]
-    helper.mem(list.append(mut output, list.slice(phrases, initial.lo, initial.hi)))?
-    let mut previous: u64 = 0
+    let mut old_code = (first << 8u64) | second
+    helper.mem(list.append(mut output, dict[old_code]))?
     let mut i: u64 = 2
     while i < n {
         let hi: u64 = int.widen(encoded[i])
         let lo: u64 = int.widen(encoded[i + 1])
         let code = (hi << 8u64) | lo
         let next = list.len(dict)
-        if code > next {
+        let mut phrase: Bytes = helper.mem(clone(dict[old_code]))?
+        if code < next {
+            push(mut phrase, dict[code][0])?
+            helper.mem(list.append(mut output, dict[code]))?
+        } else if code == next {
+            let byte = phrase[0]
+            push(mut phrase, byte)?
+            helper.mem(list.append(mut output, phrase))?
+        } else {
             return Ok(list.new())
         }
-        let start = list.len(phrases)
-        let end = list.len(output)
-        let byte = if code == next {
-            output[previous]
-        } else {
-            phrases[dict[code].lo]
-        }
-        // The previous phrase is also the latest output suffix. Copy from
-        // there so the two buffers being lent to append remain distinct.
-        helper.mem(list.append(mut phrases, list.slice(output, previous, end)))?
-        push(mut phrases, byte)?
-        push(mut dict, Phrase(lo: start, hi: list.len(phrases)))?
-        let phrase = dict[code]
-        helper.mem(list.append(mut output, list.slice(phrases, phrase.lo, phrase.hi)))?
-        previous = end
+        push(mut dict, take phrase)?
+        old_code = code
         i += 2
     }
     Ok(take output)

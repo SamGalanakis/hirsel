@@ -3593,7 +3593,18 @@ impl Machine<'_> {
                 );
                 self.instructions -= 1;
                 t.at.last_mut().unwrap().0 = b.inst_anchors[first + k];
-                let r = self.inst(t, b, slots, &mut vals, &mut vectors, &mut places, inst);
+                // Keep the large instruction dispatcher off the recursive call stack.
+                let r = match *inst {
+                    Inst::Call { call } => self.call_inst(
+                        t,
+                        b,
+                        &mut vals,
+                        &mut vectors,
+                        &places,
+                        &b.calls[call.index()],
+                    ),
+                    _ => self.inst(t, b, slots, &mut vals, &mut vectors, &mut places, inst),
+                };
                 if let Err(stop) = r {
                     if let Stop::Cause(c) = stop {
                         let site = self.site(t);
@@ -3771,6 +3782,37 @@ impl Machine<'_> {
             chunk.copy_from_slice(&self.load(ptr + 8 * i as u64, 8).to_le_bytes());
         }
         bytes
+    }
+
+    fn call_inst(
+        &mut self,
+        t: &mut Task,
+        b: &Body,
+        vals: &mut [u64],
+        vectors: &mut simd::Vectors,
+        places: &[(u64, At)],
+        site: &CallSite,
+    ) -> X<()> {
+        let args = site.args.get(&b.pools.args).unwrap();
+        let mut words = Vec::with_capacity(args.len());
+        for arg in args {
+            match *arg {
+                Arg::Value(v) => vectors.push(b, vals, v, &mut words),
+                Arg::Address(a) => words.push(places[a.index()].0),
+            }
+        }
+        let args = words;
+        let held = self.frozen.len();
+        self.lend(&self.m.signatures[site.signature.index()], &args);
+        let r = match site.callee {
+            Callee::Direct(f) => self.call(t, f, &args),
+            Callee::Indirect(v) => self.call(t, FuncId((vals[v.index()] - FN_BASE) as u32), &args),
+            Callee::Runtime(op) => self.rt(t, op, &args),
+        };
+        self.frozen.truncate(held);
+        let r = r?;
+        vectors.unpack(b, vals, site.results.get(&b.pools.values).unwrap(), &r);
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4114,30 +4156,7 @@ impl Machine<'_> {
                     x & !(1 << field)
                 };
             }
-            Inst::Call { call } => {
-                let site = &b.calls[call.index()];
-                let args = site.args.get(&b.pools.args).unwrap();
-                let mut words = Vec::with_capacity(args.len());
-                for arg in args {
-                    match *arg {
-                        Arg::Value(v) => vectors.push(b, vals, v, &mut words),
-                        Arg::Address(a) => words.push(places[a.index()].0),
-                    }
-                }
-                let args = words;
-                let held = self.frozen.len();
-                self.lend(&self.m.signatures[site.signature.index()], &args);
-                let r = match site.callee {
-                    Callee::Direct(f) => self.call(t, f, &args),
-                    Callee::Indirect(v) => {
-                        self.call(t, FuncId((vals[v.index()] - FN_BASE) as u32), &args)
-                    }
-                    Callee::Runtime(op) => self.rt(t, op, &args),
-                };
-                self.frozen.truncate(held);
-                let r = r?;
-                vectors.unpack(b, vals, site.results.get(&b.pools.values).unwrap(), &r);
-            }
+            Inst::Call { .. } => unreachable!("calls dispatch from the block loop"),
             Inst::Alloc {
                 result,
                 available,

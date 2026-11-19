@@ -47,16 +47,42 @@ fn rfc_row(reference: String, expected: String, prefix: String) -> bool {
     resolved("http://a/b/c/d;p?q", reference, expected, prefix)
 }
 
-// RFC 3986 §5.4.1, rfc3986.txt:1967-1991.
+// RFC Editor, rfc3986.txt (January 2005), RFC text, §5.4.1.
 fn rfc_normal_rows(prefix: String) -> bool {
-    rfc_row("g:h", "g:h", prefix) && rfc_row("g", "http://a/b/c/g", prefix) && rfc_row("./g", "http://a/b/c/g", prefix) && rfc_row("g/", "http://a/b/c/g/", prefix) && rfc_row("/g", "http://a/g", prefix) && rfc_row("//g", "http://g", prefix) && rfc_row("?y", "http://a/b/c/d;p?y", prefix) && rfc_row("g?y", "http://a/b/c/g?y", prefix) && rfc_row("#s", "http://a/b/c/d;p?q#s", prefix) && rfc_row("g#s", "http://a/b/c/g#s", prefix) && rfc_row("g?y#s", "http://a/b/c/g?y#s", prefix) && rfc_row(";x", "http://a/b/c/;x", prefix) && rfc_row("g;x", "http://a/b/c/g;x", prefix) && rfc_row("g;x?y#s", "http://a/b/c/g;x?y#s", prefix) && rfc_row("", "http://a/b/c/d;p?q", prefix) && rfc_row(".", "http://a/b/c/", prefix) && rfc_row("./", "http://a/b/c/", prefix) && rfc_row("..", "http://a/b/", prefix) && rfc_row("../", "http://a/b/", prefix) && rfc_row("../g", "http://a/b/g", prefix) && rfc_row("../..", "http://a/", prefix) && rfc_row("../../", "http://a/", prefix) && rfc_row("../../g", "http://a/g", prefix)
+    for (reference, expected) in[
+    // Absolute references, path replacement, and new authority.
+    ("g:h", "g:h"), ("g", "http://a/b/c/g"), ("./g", "http://a/b/c/g"), ("g/", "http://a/b/c/g/"), ("/g", "http://a/g"), ("//g", "http://g"),
+    // Query and fragment inheritance.
+    ("?y", "http://a/b/c/d;p?y"), ("g?y", "http://a/b/c/g?y"), ("#s", "http://a/b/c/d;p?q#s"), ("g#s", "http://a/b/c/g#s"), ("g?y#s", "http://a/b/c/g?y#s"),
+    // Path parameters and the empty reference.
+    (";x", "http://a/b/c/;x"), ("g;x", "http://a/b/c/g;x"), ("g;x?y#s", "http://a/b/c/g;x?y#s"), ("", "http://a/b/c/d;p?q"),
+    // Whole dot segments.
+    (".", "http://a/b/c/"), ("./", "http://a/b/c/"), ("..", "http://a/b/"), ("../", "http://a/b/"), ("../g", "http://a/b/g"), ("../..", "http://a/"), ("../../", "http://a/"), ("../../g", "http://a/g"),] {
+        if !rfc_row(reference, expected, prefix) {
+            return false
+        }
+    }
+    true
 }
 
-// RFC 3986 §5.4.2, rfc3986.txt:1993-2063.
+// RFC Editor, rfc3986.txt (January 2005), RFC text, §5.4.2 (strict http:g result).
 fn rfc_abnormal_rows(prefix: String) -> bool {
-    rfc_row("../../../g", "http://a/g", prefix) && rfc_row("../../../../g", "http://a/g", prefix) && rfc_row("/./g", "http://a/g", prefix) && rfc_row("/../g", "http://a/g", prefix) && rfc_row("g.", "http://a/b/c/g.", prefix) && rfc_row(".g", "http://a/b/c/.g", prefix) && rfc_row("g..", "http://a/b/c/g..", prefix) && rfc_row("..g", "http://a/b/c/..g", prefix) && rfc_row("./../g", "http://a/b/g", prefix) && rfc_row("./g/.", "http://a/b/c/g/", prefix) && rfc_row("g/./h", "http://a/b/c/g/h", prefix) && rfc_row("g/../h", "http://a/b/c/h", prefix) && rfc_row("g;x=1/./y", "http://a/b/c/g;x=1/y", prefix) && rfc_row("g;x=1/../y", "http://a/b/c/y", prefix) && rfc_row("g?y/./x", "http://a/b/c/g?y/./x", prefix) && rfc_row("g?y/../x", "http://a/b/c/g?y/../x", prefix) && rfc_row("g#s/./x", "http://a/b/c/g#s/./x", prefix) && rfc_row("g#s/../x", "http://a/b/c/g#s/../x", prefix) &&
-    // RFC 3986 §5.4.2 selects its strict spelling.
-    rfc_row("http:g", "http:g", prefix)
+    for (reference, expected) in[
+    // Parents above the root.
+    ("../../../g", "http://a/g"), ("../../../../g", "http://a/g"),
+    // Complete dot segments and ordinary names containing dots.
+    ("/./g", "http://a/g"), ("/../g", "http://a/g"), ("g.", "http://a/b/c/g."), (".g", "http://a/b/c/.g"), ("g..", "http://a/b/c/g.."), ("..g", "http://a/b/c/..g"),
+    // Dot segments around names and path parameters.
+    ("./../g", "http://a/b/g"), ("./g/.", "http://a/b/c/g/"), ("g/./h", "http://a/b/c/g/h"), ("g/../h", "http://a/b/c/h"), ("g;x=1/./y", "http://a/b/c/g;x=1/y"), ("g;x=1/../y", "http://a/b/c/y"),
+    // Query and fragment bytes remain literal.
+    ("g?y/./x", "http://a/b/c/g?y/./x"), ("g?y/../x", "http://a/b/c/g?y/../x"), ("g#s/./x", "http://a/b/c/g#s/./x"), ("g#s/../x", "http://a/b/c/g#s/../x"),
+    // Strict scheme interpretation.
+    ("http:g", "http:g"),] {
+        if !rfc_row(reference, expected, prefix) {
+            return false
+        }
+    }
+    true
 }
 
 fn scheme_rows(prefix: String) -> bool {
@@ -97,17 +123,65 @@ fn presence() -> bool {
     bare.host == Some(Name(span(7, 8))) && bare.port == None && bare.query == None && bare.fragment == None && empty_query.query == Some(span(9, 9)) && empty_fragment.fragment == Some(span(9, 9)) && empty_port.port == Some(span(9, 9)) && uri.port_number("http://h:", empty_port) == None && no_authority.host == None && no_authority.path == span(5, 5) && no_scheme.scheme == None && no_scheme.host == Some(Name(span(2, 3))) && recomposes("http://h") && recomposes("http://h?") && recomposes("http://h#") && recomposes("http://h:") && recomposes("http:") && recomposes("//h")
 }
 
-// U2. Go src/net/url/url_test.go:30-665, strict RFC 3986 inputs.
-// Mutants: normalize the scheme or escapes, insert a slash, or drop an empty port.
+// Go src/net/url/url_test.go, 46b62495e1bf4d56e0313320772ae588d9119aed.
+// Copyright 2009 The Go Authors. BSD-3-Clause, see vectors/go-LICENSE.
+// These RFC 3986 inputs retain their original bytes through parse and push.
 // expect: run go_round_trips() = true
 fn go_round_trips() -> bool {
-    recomposes("http://www.google.com") && recomposes("http://www.google.com/") && recomposes("http://www.google.com/file%20one%26two") && recomposes("http://www.google.com/#file%20one%26two") && recomposes("ftp://webmaster@www.google.com/") && recomposes("ftp://john%20doe@www.google.com/") && recomposes("http://www.google.com/?") && recomposes("http://www.google.com/?foo=bar?") && recomposes("http://www.google.com/?q=go+language") && recomposes("http://www.google.com/?q=go%20language") && recomposes("http://www.google.com/a%20b?q=c+d") && recomposes("http:www.google.com/?q=go+language") && recomposes("http:%2f%2fwww.google.com/?q=go+language") && recomposes("mailto:/webmaster@golang.org") && recomposes("mailto:webmaster@golang.org") && recomposes("/foo?query=http://bad") && recomposes("//foo") && recomposes("//user@foo/path?a=b") &&
-    // RFC 3986 keeps the empty authority and all three slashes.
-    recomposes("///threeslashes") && recomposes("http://user:password@google.com") && recomposes("http://www.google.com/?q=go+language#foo") && recomposes("http://www.google.com/?q=go+language#foo&bar") && recomposes("http://www.google.com/?q=go+language#foo%26bar") && recomposes("file:///home/adg/rabbits") && recomposes("file:///C:/FooBar/Baz.txt") &&
-    // The raw scheme keeps its original case.
-    recomposes("MaIlTo:webmaster@golang.org") && recomposes("a/b/c") && recomposes("http://%3Fam:pa%3Fsword@google.com") && recomposes("http://192.168.0.1/") && recomposes("http://192.168.0.1:8080/") && recomposes("http://[fe80::1]/") && recomposes("http://[fe80::1]:8080/") && recomposes("https://[2001:db8::1]:8443/test/path") && recomposes("http://rest.rsc.io/foo%2fbar/baz%2Fquux?alt=media") && recomposes("mysql://a,b,c/bar") && recomposes("scheme://!$&'()*+,;=hello!:1/path") && recomposes("http://192.168.0.2:8080/foo") && recomposes("http://192.168.0.2:/foo") && recomposes("http://[2b01:e34:ef40:7730:8e70:5aff:fefe:edac]:8080/foo") && recomposes("http://[2b01:e34:ef40:7730:8e70:5aff:fefe:edac]:/foo") &&
-    // The raw reg-name keeps the original hex case.
-    recomposes("http://hello.%e4%b8%96%e7%95%8c.com/foo") && recomposes("http://hello.%E4%B8%96%E7%95%8C.com/foo") && recomposes("http://example.com//foo") && recomposes("magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a&dn") && recomposes("mailto:?subject=hi")
+    for input in[
+    // Ordinary paths, escaped components, and user information.
+    "http://www.google.com", "http://www.google.com/", "http://www.google.com/file%20one%26two", "http://www.google.com/#file%20one%26two", "ftp://webmaster@www.google.com/", "ftp://john%20doe@www.google.com/",
+    // Empty queries, literal plus, and opaque paths.
+    "http://www.google.com/?", "http://www.google.com/?foo=bar?", "http://www.google.com/?q=go+language", "http://www.google.com/?q=go%20language", "http://www.google.com/a%20b?q=c+d", "http:www.google.com/?q=go+language", "http:%2f%2fwww.google.com/?q=go+language",
+    // References with and without an authority.
+    "mailto:/webmaster@golang.org", "mailto:webmaster@golang.org", "/foo?query=http://bad", "//foo", "//user@foo/path?a=b", "///threeslashes",
+    // User information and fragments.
+    "http://user:password@google.com", "http://www.google.com/?q=go+language#foo", "http://www.google.com/?q=go+language#foo&bar", "http://www.google.com/?q=go+language#foo%26bar",
+    // Empty hosts, raw scheme spelling, and IPv4 reg-names.
+    "file:///home/adg/rabbits", "file:///C:/FooBar/Baz.txt", "MaIlTo:webmaster@golang.org", "a/b/c", "http://%3Fam:pa%3Fsword@google.com", "http://192.168.0.1/", "http://192.168.0.1:8080/",
+    // Bracketed IPv6 and raw escaped paths.
+    "http://[fe80::1]/", "http://[fe80::1]:8080/", "https://[2001:db8::1]:8443/test/path", "http://rest.rsc.io/foo%2fbar/baz%2Fquux?alt=media", "mysql://a,b,c/bar", "scheme://!$&'()*+,;=hello!:1/path",
+    // Present, empty, and absent ports and escaped reg-names.
+    "http://192.168.0.2:8080/foo", "http://192.168.0.2:/foo", "http://[2b01:e34:ef40:7730:8e70:5aff:fefe:edac]:8080/foo", "http://[2b01:e34:ef40:7730:8e70:5aff:fefe:edac]:/foo", "http://hello.%e4%b8%96%e7%95%8c.com/foo", "http://hello.%E4%B8%96%E7%95%8C.com/foo",
+    // Repeated separators and opaque URIs.
+    "http://example.com//foo", "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a&dn", "mailto:?subject=hi",] {
+        if !recomposes(input) {
+            return false
+        }
+    }
+    true
+}
+
+// Go src/net/url/url_test.go, 46b62495e1bf4d56e0313320772ae588d9119aed.
+// Copyright 2009 The Go Authors. BSD-3-Clause, see vectors/go-LICENSE.
+// TestInvalidParse, excluding the bare colon already covered by rejects_strictly.
+// expect: run go_rejects_invalid_references() = true
+fn go_rejects_invalid_references() -> bool {
+    for input in["http://example.com/\0", "http://example.com/\t", "http://example.com/%zz", "http://example.com:port", "http://[::1/",] {
+        if let Ok(_) = uri.parse(input) {
+            return false
+        }
+    }
+    true
+}
+
+// Go src/net/url/url_test.go, 46b62495e1bf4d56e0313320772ae588d9119aed.
+// Copyright 2009 The Go Authors. BSD-3-Clause, see vectors/go-LICENSE.
+// resolveReferenceTests rows for escaped slashes and consecutive separators.
+// expect: run go_resolves_escaped_paths() = true
+fn go_resolves_escaped_paths() -> bool {
+    for (base, reference, expected) in[
+    // Preserve repeated raw slashes in an absolute reference.
+    ("http://foo.com/bar", "http://foo.com///baz/quux", "http://foo.com///baz/quux"),
+    // Split directory components only at literal slashes.
+    ("http://foo.com/foo%2fbar/", "../baz", "http://foo.com/baz"), ("http://foo.com/1/2%2f/3%2f4/5", "../../a/b/c", "http://foo.com/1/a/b/c"), ("http://foo.com/1/2/3", "./a%2f../../b/..%2fc", "http://foo.com/1/2/b/..%2fc"), ("http://foo.com/1/2%2f/3%2f4/5", "./a%2f../b/../c", "http://foo.com/1/2%2f/3%2f4/a%2f../c"),
+    // Preserve escaped byte spelling through a merge.
+    ("http://foo.com/foo%20bar/", "../baz", "http://foo.com/baz"), ("http://foo.com/foo", "../bar%2fbaz", "http://foo.com/bar%2fbaz"), ("http://foo.com/foo%2dbar/", "./baz-quux", "http://foo.com/foo%2dbar/baz-quux"),] {
+        if !resolved(base, reference, expected, "") {
+            return false
+        }
+    }
+    true
 }
 
 fn host_is(text: String, expected: String) -> bool {

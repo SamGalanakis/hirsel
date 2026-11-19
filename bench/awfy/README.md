@@ -163,9 +163,9 @@ python3 bench/awfy/receipt.py compare "$out/base-samples/receipt.json" \
 The guard requires checked stdout, complete row coverage and instruction
 counters active for at least 99% of their enabled time. It checks the exact
 execution argv and CPU affinity, as well as certification, build flags and the
-release compiler, runtime and fixture hashes. When the compiler changes,
-both rows must carry verified build records for their respective compiler
-and runtime. The report names the compiler pair and any change in its runtime.
+release compiler, runtime and fixture hashes. When the compiler or runtime
+changes, both rows must carry verified build records for their respective
+artifacts. The report names every changed artifact.
 All other identity fields still match exactly. An identity refusal exits 2. A comparable
 row above +0.5% exits 1. Use `--threshold PERCENT` to set another limit.
 

@@ -105,6 +105,7 @@ pub struct Provider {
 /// callback stops the run (`Provider`) before main, never at an operation.
 /// # Safety
 /// A non-null provider points at six readable pointer-sized words.
+#[cfg_attr(hirsel_runtime_size, optimize(size))]
 pub(crate) unsafe fn install(provider: *const Provider) {
     if provider.is_null() {
         return;

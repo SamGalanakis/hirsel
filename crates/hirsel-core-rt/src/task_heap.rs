@@ -142,19 +142,21 @@ unsafe impl Send for IndexedPage {}
 // common arena, so route them by slice address through independent shards.
 type DedicatedIndex = HashMap<usize, IndexedPage, foldhash::fast::FixedState>;
 
-fn dedicated_index(payload: NonNull<u8>) -> &'static Mutex<DedicatedIndex> {
-    static SHARDS: [Mutex<DedicatedIndex>; 64] = [const {
-        Mutex::new(HashMap::with_hasher(foldhash::fast::FixedState::with_seed(
-            0,
-        )))
-    }; 64];
+fn dedicated_index(payload: NonNull<u8>) -> &'static Mutex<Option<DedicatedIndex>> {
+    static SHARDS: [Mutex<Option<DedicatedIndex>>; 64] = [const { Mutex::new(None) }; 64];
     let slice = payload.addr().get() / SLAB;
     &SHARDS[(slice ^ (slice >> 6) ^ (slice >> 12)) % SHARDS.len()]
 }
 
 #[cold]
 fn dedicated_page(payload: NonNull<u8>) -> PagePointer {
-    dedicated_index(payload).lock().unwrap()[&payload.addr().get()].0
+    dedicated_index(payload)
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|index| index.get(&payload.addr().get()))
+        .expect("no entry found for key")
+        .0
 }
 
 pub(crate) struct Page {
@@ -258,6 +260,9 @@ impl Page {
             dedicated_index(start)
                 .lock()
                 .unwrap()
+                .get_or_insert_with(|| {
+                    HashMap::with_hasher(foldhash::fast::FixedState::with_seed(0))
+                })
                 .insert(start.addr().get(), IndexedPage(page));
             page
         }
@@ -311,7 +316,8 @@ impl Page {
                 dedicated_index(first)
                     .lock()
                     .unwrap()
-                    .remove(&first.addr().get());
+                    .as_mut()
+                    .and_then(|index| index.remove(&first.addr().get()));
                 *Box::from_raw(page.as_ptr())
             } else {
                 page.as_ptr().read()

@@ -60,6 +60,7 @@ pub use crate::entry::hirsel_core_os_run_with_sources;
 /// # Safety
 /// Same borrowed table contract as set_sources; the cause pins its message.
 /// Only the failure-report boundary calls this function.
+#[cfg_attr(hirsel_runtime_size, optimize(size))]
 pub(crate) unsafe fn format_cause(cause: &Cause, sources: *const SourceTable) -> String {
     if sources.is_null() || cause.site == 0 {
         // SAFETY: cause's message remains pinned throughout reporting.

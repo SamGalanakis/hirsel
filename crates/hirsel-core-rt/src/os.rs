@@ -43,6 +43,7 @@ impl OsProvider {
     pub(crate) fn file_descriptor(&self, handle: u64) -> i32 {
         self.files[&handle].as_raw_fd()
     }
+    #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub fn new(stdout: OwnedFd, stderr: OwnedFd) -> Self {
         Self {
             issue_file: None,
@@ -56,6 +57,7 @@ impl OsProvider {
         }
     }
     /// Only run configuration can acquire a root from an ambient host path.
+    #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub fn grant(&mut self, path: &Path) -> io::Result<u64> {
         let file = std::fs::File::open(path)?;
         if !file.metadata()?.is_dir() {
@@ -66,6 +68,7 @@ impl OsProvider {
         Ok(id)
     }
     /// Startup-only capability probe. The per-operation confined open is unchanged.
+    #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub(crate) fn probe_directory(&self, handle: u64) -> io::Result<()> {
         drop(beneath(
             self.directories[&handle].as_raw_fd(),
@@ -86,6 +89,7 @@ impl OsProvider {
         self.provider_with(Some(issue_file))
     }
 
+    #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub(crate) fn provider_with(&mut self, issue_file: Option<IssueFile>) -> Provider {
         self.issue_file = issue_file;
         Provider {

@@ -63,6 +63,7 @@ pub(crate) unsafe fn format_cause(cause: &crate::causes::Cause) -> String {
 /// # Safety
 /// Same pinned Cause/message contract as format_cause.
 #[cold]
+#[cfg_attr(hirsel_runtime_size, optimize(size))]
 pub(crate) unsafe fn format_cause_at(
     cause: &crate::causes::Cause,
     site: std::fmt::Arguments<'_>,

@@ -194,6 +194,7 @@ impl StartupError {
     }
 }
 impl OsProcess {
+    #[cfg_attr(hirsel_runtime_size, optimize(size))]
     unsafe fn new(
         input: &OsConfig,
         probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
@@ -409,12 +410,14 @@ pub unsafe extern "C" fn hirsel_core_os_process_config(process: *const OsProcess
 /// Consume the sole constructor owner after run and every operand/view has ended.
 /// Run already closes the grants; this frees host argv/metadata and unused setup.
 #[unsafe(no_mangle)]
+#[cfg_attr(hirsel_runtime_size, optimize(size))]
 pub unsafe extern "C" fn hirsel_core_os_process_free(process: *mut OsProcess) {
     // SAFETY: transfers ownership of the process object exactly once.
     unsafe {
         drop(Box::from_raw(process));
     }
 }
+#[cfg_attr(hirsel_runtime_size, optimize(size))]
 unsafe extern "C" fn close_grants(state: *mut u8) {
     // SAFETY: main and all descendants have ended. Descriptor drop allocates and
     // admits nothing, ignores OS close errors, and cannot add a language cause.
@@ -528,6 +531,7 @@ unsafe fn run_with_probe(
         )
     }
 }
+#[cfg_attr(hirsel_runtime_size, optimize(size))]
 unsafe fn run_with_sources_and_probe(
     input: &OsConfig,
     names: *const View,

@@ -39,6 +39,11 @@ COLD_RUNTIME_CRATES = [
 ]
 
 def runtime_profile_flags(crate):
+    if crate == "hirsel_core_rt":
+        return ["--check-cfg=cfg(hirsel_runtime_size)"] + select({
+            "root//tools/buck2:profile_runtime": ["--cfg=hirsel_runtime_size", "-Zcrate-attr=feature(optimize_attribute)"],
+            "DEFAULT": [],
+        })
     return select({
         "root//tools/buck2:profile_runtime": ["-Copt-level=s"] if crate in COLD_RUNTIME_CRATES else [],
         "DEFAULT": [],

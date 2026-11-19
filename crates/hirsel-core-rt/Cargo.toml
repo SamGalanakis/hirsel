@@ -16,6 +16,9 @@ memcheck = []
 charge-observation = []
 mimalloc = ["dep:libmimalloc-sys"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(hirsel_runtime_size)"] }
+
 [dependencies]
 foldhash = { version = "0.2.0", default-features = false }
 hirsel-core-net = { path = "../hirsel-core-net" }

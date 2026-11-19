@@ -256,27 +256,27 @@ def compare(before_path, after_path, threshold):
         raise ValueError(f"row sets differ (missing: {sorted(before.keys() - after.keys())}, "
                          f"unexpected: {sorted(after.keys() - before.keys())})")
     differences = {}
-    compiler_pairs = set()
+    artifact_pairs = set()
     for key, left in before.items():
         right = after[key]
-        compiler_changed = left["compiler_sha256"] != right["compiler_sha256"]
         fields = [field for field in (*IDENTITY, "marker", "stdout")
-                  if left[field] != right[field] and not (compiler_changed and field in ARTIFACT_HASHES)]
+                  if field not in ARTIFACT_HASHES and left[field] != right[field]]
         if fields:
             differences[key] = fields
-        elif compiler_changed:
+        elif any(left[field] != right[field] for field in ARTIFACT_HASHES):
             for path, row in ((before_path, left), (after_path, right)):
                 if not verified_build(row):
-                    raise ValueError(f"{path}: {key} requires a verified build record for a compiler pair")
+                    raise ValueError(f"{path}: {key} requires a verified build record for an artifact pair")
             if left["manifest_sha256"] != right["manifest_sha256"]:
                 differences[key] = ["manifest_sha256"]
                 continue
-            compiler_pairs.add(tuple(row[field] for row in (left, right) for field in ARTIFACT_HASHES))
+            artifact_pairs.add(tuple(row[field] for row in (left, right) for field in ARTIFACT_HASHES))
     if differences:
         raise ValueError("identity differs: " + "; ".join(
             f"{key}: {', '.join(fields)}" for key, fields in differences.items()))
-    for base_compiler, base_runtime, candidate_compiler, candidate_runtime in sorted(compiler_pairs):
-        print(f"Variable compiler_sha256 {base_compiler} -> {candidate_compiler}")
+    for base_compiler, base_runtime, candidate_compiler, candidate_runtime in sorted(artifact_pairs):
+        if base_compiler != candidate_compiler:
+            print(f"Variable compiler_sha256 {base_compiler} -> {candidate_compiler}")
         runtime = "unchanged" if base_runtime == candidate_runtime else f"{base_runtime} -> {candidate_runtime}"
         print(f"Paired runtime_archive_sha256 {runtime}")
     failed = False

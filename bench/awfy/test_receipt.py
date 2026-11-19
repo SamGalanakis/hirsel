@@ -50,8 +50,7 @@ class InstructionGuard(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("CLBG::Mandelbrot 69,882,571 -> 71,302,841 (+2.032%) FAIL", result.stdout)
 
-            for field, value in (("affinity", [11]), ("runtime_archive_sha256", "d" * 64),
-                                 ("argv", ["./clbg-64", "one-iteration.json", "other"])):
+            for field, value in (("affinity", [11]), ("argv", ["./clbg-64", "one-iteration.json", "other"])):
                 with self.subTest(field=field):
                     changed = deepcopy(baseline)
                     changed["rows"][0][field] = value
@@ -88,6 +87,16 @@ class InstructionGuard(unittest.TestCase):
 
             record_build(paired)
             result = compare(paired)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn(f"Paired runtime_archive_sha256 {'b' * 64} -> {'e' * 64}", result.stdout)
+
+            runtime_only = deepcopy(injected)
+            runtime_only["rows"][0]["runtime_archive_sha256"] = "e" * 64
+            result = compare(runtime_only)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("candidate.json: arena/CLBG::Mandelbrot requires a verified build record", result.stderr)
+            record_build(runtime_only)
+            result = compare(runtime_only)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn(f"Paired runtime_archive_sha256 {'b' * 64} -> {'e' * 64}", result.stdout)
 

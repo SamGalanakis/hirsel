@@ -422,7 +422,7 @@ fn accept(take seed: Accept) -> () waits {
     for take owner in owners { let _ = task.join(take owner) }
 }
 
-fn served(take db: store.Db, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, sessions: u64) -> Result[(), runner.OpenError] waits {
+fn served(take db: store.Db, selection: runner.Selection, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, sessions: u64) -> Result[(), runner.OpenError] waits {
     let (listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16))
     let mut port = result.unwrap(string.from("PORT "))
     result.unwrap(string.push_u64(mut port, int.widen(address.port)))
@@ -433,7 +433,7 @@ fn served(take db: store.Db, c: Clock, r: Random, tasks: Tasks, n: Net, out: Std
     let mut policy_task = take policy_handle
     let seed = Accept(listener: take listener, tasks: tasks, clock: c, policy: ingress.share(policy), head: take head, post: runner.post(mail), authority: store.authority_reader(db), sessions: sessions)
     let mut driving = result.unwrap(task.spawn(tasks, bytes 33554432u64, take seed, accept))
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head_selected(take db, selection, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), DirectRequests(take inbox), take mail, tasks, 1048576u64)
     if let Error(_) = opened { task.cancel(mut driving) }
     let _ = task.join(take driving)
     task.cancel(mut policy_task)
@@ -772,7 +772,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
         let cv: std.codec.Codec[u64] = std.codec.of()
         result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-        let opened = served(take db, c, r, tasks, n, out, 1u64)
+        let opened = served(take db, Current(0u64), c, r, tasks, n, out, 1u64)
         want(match opened { Ok(()) => true, Error(_) => false }, "runner_crash: the first head failed")
         return Ok(())
     }
@@ -786,7 +786,8 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
         let mut o = options()
         if scenario == "poison-segment" { o.group_commits = 1u32 }
         let db = match store.open(tasks, d, c, r, o) { Ok(take x) => take x, Error(_) => return Ok(()) }
-        let opened = served(take db, c, r, tasks, n, out, 2u64)
+        // The data table is version 1 and the initial activation is version 2.
+        let opened = served(take db, Current(2u64), c, r, tasks, n, out, 2u64)
         match opened {
             Ok(()) => want(scenario != "poison-segment", "runner_crash: a failed journal sync did not stop the head"),
             Error(_) => (),
@@ -800,7 +801,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
     let mut o = options()
     o.create = false
     let db = result.unwrap(store.open(tasks, d, c, r, o))
-    let opened = served(take db, c, r, tasks, n, out, 1u64)
+    let opened = served(take db, Current(2u64), c, r, tasks, n, out, 1u64)
     want(match opened { Ok(()) => true, Error(_) => false }, "runner_crash: the re-send head failed")
     let (_, total) = resends(scenario)
     let (after, value) = count(d, c, r, tasks)

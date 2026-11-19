@@ -477,6 +477,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         request.entry = None;
     }
     let selected_entry = request.entry.clone();
+    let sources = crate::SourceFiles::of(&request);
     let native_store = request.store.join("native");
     let store_root = request.store.clone();
     meter.finish("startup/discovery");
@@ -574,6 +575,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 &hit,
                 command,
                 json,
+                &sources,
                 output.as_deref(),
                 &runner,
                 run_args,
@@ -763,7 +765,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         meter.finish("request record/publish");
     }
     finish(
-        &output, command, json, &runner, run_args, &mut meter, metrics,
+        &output, command, json, &sources, &runner, run_args, &mut meter, metrics,
     )
 }
 /// The output path of a native request's options.
@@ -783,6 +785,7 @@ fn answer_hit(
     hit: &crate::request_record::Hit,
     command: &str,
     json: bool,
+    sources: &crate::SourceFiles,
     output_path: Option<&Path>,
     runner: &crate::Runner,
     run_args: Vec<String>,
@@ -834,14 +837,18 @@ fn answer_hit(
         stopped,
         reachable,
     };
-    finish(&output, command, json, runner, run_args, meter, metrics)
+    finish(
+        &output, command, json, sources, runner, run_args, meter, metrics,
+    )
 }
 /// Print `output`, run a `run` request's executable, and exit with the
 /// request's status.
+#[allow(clippy::too_many_arguments)]
 fn finish(
     output: &Output<'_>,
     command: &str,
     json: bool,
+    sources: &crate::SourceFiles,
     runner: &crate::Runner,
     run_args: Vec<String>,
     meter: &mut Meter,
@@ -851,34 +858,19 @@ fn finish(
         println!("{}", serde_json::to_string(output)?);
     } else {
         for d in &output.diagnostics {
-            eprintln!(
-                "{} {} {}..{}: {}",
-                d.rule, d.primary.module, d.primary.span.start, d.primary.span.end, d.message
-            );
+            eprintln!("{}: {} {}", sources.render(&d.primary), d.rule, d.message);
             for site in &d.causal {
-                eprintln!(
-                    "  caused by {} {}..{}",
-                    site.module, site.span.start, site.span.end
-                );
+                eprintln!("  caused by {}", sources.render(site));
             }
         }
         for g in &output.incomplete {
-            eprintln!(
-                "incomplete {} {}..{}: {}",
-                g.primary.module, g.primary.span.start, g.primary.span.end, g.message
-            );
+            eprintln!("{}: incomplete {}", sources.render(&g.primary), g.message);
             for site in &g.causal {
-                eprintln!(
-                    "  caused by {} {}..{}",
-                    site.module, site.span.start, site.span.end
-                );
+                eprintln!("  caused by {}", sources.render(site));
             }
         }
         for r in &output.resources {
-            eprintln!(
-                "resource {} {}..{}: {}",
-                r.primary.module, r.primary.span.start, r.primary.span.end, r.message
-            );
+            eprintln!("{}: resource {}", sources.render(&r.primary), r.message);
         }
         if let Some(stop) = &output.stopped {
             eprintln!("{stop}");

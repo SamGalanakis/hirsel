@@ -21,6 +21,16 @@ Sites are a module path with a byte span; a source that is not valid UTF-8 is re
 the span of its first invalid bytes. The encoding is a tool format outside the
 language; the rule explanations shown with refusals are generated from this specification.
 
+**Terminal sites.** Without `--json`, the CLI prints each site of a file the request read
+as `path:line:column`, adding `-column` or `-line:column` for a span end that differs. The
+path is the file as the request named it. Lines and columns start at 1. A line ends at LF,
+and a CR immediately before that LF is part of the line end, not a column. Columns count
+Unicode scalar values, so a multi-byte character is one column; an invalid UTF-8 byte that
+does not continue a sequence also counts as one. A site in a file the request did not read,
+such as a library image's source, keeps its module path and byte span (`module start..end`).
+The primary site leads the line, followed by the rule ID and message; each causal site
+follows on its own `caused by` line. `--json` keeps the byte spans above.
+
 ### PROG-8: No global order
 
 An implementation reports at least one refusal for every refused program and may report

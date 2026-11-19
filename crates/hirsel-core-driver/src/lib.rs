@@ -47,7 +47,9 @@ pub use reach::ReachCounters;
 pub use reachability::{GapStop, Reachable};
 pub use test_run::{Runner, TestOutcome};
 mod meter;
-pub use diagnostics::{Diagnostic, IncompleteDiagnostic, ResourceDiagnostic, SourceSite};
+pub use diagnostics::{
+    Diagnostic, IncompleteDiagnostic, ResourceDiagnostic, SourceFiles, SourceSite, line_column,
+};
 pub use image::{CoreImage, LibraryInput};
 pub use instances::{InstanceStop, Units, collect_instances};
 mod reuse;

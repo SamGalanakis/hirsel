@@ -1109,6 +1109,31 @@ fn prog7_machine_refusal_spans_point_into_current_file_bytes() {
     assert_eq!(json["causal"], serde_json::json!([]));
 }
 #[test]
+fn prog7_terminal_sites_count_scalar_columns_and_crlf_lines() {
+    // Bugs: a column that counts bytes, and a CR before LF counted as a column.
+    // Oracle: positions counted by hand below (docs/spec/diagnostics.md,
+    // "Terminal sites"). On line 3, 44 scalars (50 bytes) precede the refused
+    // `n`, so it is column 45; a byte count would say 51.
+    let dir = tempfile::tempdir().unwrap();
+    let source = "// \u{fc}\r\nfn good() -> u64 { 42 }\r\nfn bad() -> u64 { /* \u{e9}\u{2192}\u{1f600} */ let n: u16 = 7; n }\r\n";
+    let req = request(source, dir.path());
+    let files = crate::SourceFiles::of(&req);
+    let path = req.inputs.packages[0].sources[0].file.clone();
+    let result = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    let diagnostics = result.machine_diagnostics().unwrap();
+    let refusal = diagnostics.iter().find(|d| d.rule == "LANG-11").unwrap();
+    assert_eq!(
+        files.render(&refusal.primary),
+        format!("{}:3:45-46", path.display())
+    );
+    // "// \u{fc}" is four scalars: its CR is the line end, so the LF is column 5.
+    let lf = source.find('\n').unwrap();
+    assert_eq!(crate::line_column(source.as_bytes(), lf), (1, 5));
+    assert_eq!(crate::line_column(source.as_bytes(), lf + 1), (2, 1));
+}
+#[test]
 fn instance_collection_is_finite_deduplicated_and_order_independent() {
     use hirsel_core_ids::ContentHash;
     use hirsel_core_ir::Identity;

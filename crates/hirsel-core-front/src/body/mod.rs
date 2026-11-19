@@ -182,6 +182,8 @@ pub struct Emitter {
     rows: HashMap<usize, FuncId>,
     /// The row interner shared by source shapes and materialized templates.
     types: crate::layout::ShapeNames,
+    /// Successful row lookups for types in the program's immutable type arena.
+    program_type_rows: HashMap<TyId, TypeId>,
     /// The recipes of `module.types`, recomputed when rows were added.
     recipes: Vec<Recipe>,
     recipe_scratch: hirsel_core_layout::RecipeScratch,
@@ -502,9 +504,16 @@ impl Emitter {
     /// inline; None when some part has no field type yet.
     fn type_row(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Option<TypeId> {
         crate::cost_scope!("query", "type row");
+        let program_type = (ty.0 as usize) < p.types.len();
+        if program_type && let Some(&row) = self.program_type_rows.get(&ty) {
+            return Some(row);
+        }
         let row = self.shaped(p, t, |s| s.shape(ty))?;
         let row = TypeId(row.0);
         self.remember_generic_types(p, t, ty);
+        if program_type {
+            self.program_type_rows.insert(ty, row);
+        }
         Some(row)
     }
     /// The place a `mut` parameter of type `ty` lends (#88): one of scalar
@@ -551,6 +560,7 @@ impl Emitter {
         let r = f(&mut s);
         if r.is_none() {
             s.truncate(mark);
+            self.program_type_rows.retain(|_, row| row.index() < mark);
         }
         let hooks = std::mem::take(&mut s.hooks);
         let tuples = std::mem::take(&mut s.tuple_codecs);
@@ -623,6 +633,7 @@ impl Emitter {
                 Err(_) => {
                     self.module.types.truncate(mark);
                     self.types.retain(|_, r| (r.0 as usize) < mark);
+                    self.program_type_rows.retain(|_, row| row.index() < mark);
                     self.generic_names.retain(|id, _| id.index() < mark);
                     self.runs.truncate(mark);
                     return None;

@@ -516,9 +516,13 @@ fn partition_hole[T](mut g: Hole[T], lo: u64, hi: u64, p: u64, equal: bool, befo
     }
     let mut k: u64 = 0
     let right = size - left
+    // k < right <= hi - lo, so neither index wraps; checked steps would keep
+    // this copy from vectorizing.
+    let back = hi - 1
+    let front = lo + left
     while k < right {
-        slots_list_move(view g.scratch.raw, hi - 1 - k, g.xs, lo + left + k, 1)
-        k += 1
+        slots_list_move(view g.scratch.raw, int.wrapping_sub(back, k), g.xs, int.wrapping_add(front, k), 1)
+        k = int.wrapping_add(k, 1)
     }
     // Equal: the pivot follows the left keys scanned before it. Normal: it follows the
     // left block and the right keys scanned before it.

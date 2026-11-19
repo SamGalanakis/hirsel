@@ -772,3 +772,75 @@ fn resume_exact_prefix_progress() -> bool {
     result.unwrap(list.push(mut values, result.unwrap(b"x")))
     request_case(raw, Complete, 27, Some(result.unwrap(b"GET")), Some(result.unwrap(b"/")), Some(1), names, values)
 }
+
+// llhttp test/request/uri.md, 36151b9a7d6320072e24e472a769a5e09f9e969d.
+// Copyright Fedor Indutny, 2018. MIT, see vectors/llhttp-LICENSE.
+// These heads carry the full request target to the caller, including its
+// second question mark, absolute authority, vertical bar, or fragment.
+// expect: run llhttp_request_targets() = true
+fn llhttp_request_targets() -> bool {
+    for (input, target, end) in[("GET /test.cgi?foo=bar?baz HTTP/1.1\r\n\r\n", "/test.cgi?foo=bar?baz", 38u64), ("GET http://hypnotoad.org:1234?hail=all HTTP/1.1\r\n\r\n", "http://hypnotoad.org:1234?hail=all", 51u64), ("GET /test.cgi?query=| HTTP/1.1\r\n\r\n", "/test.cgi?query=|", 34u64), ("GET /forums/1/topics/2375?page=1#posts-17408 HTTP/1.1\r\n\r\n", "/forums/1/topics/2375?page=1#posts-17408", 57u64),] {
+        let b = string.as_bytes(input)
+        let mut h = http1.head()
+        if http1.request(b, mut h) != Complete || h.end != end || h.version != 1 || h.count != 0 {
+            return false
+        }
+        if string.slice(input, h.method.start, h.method.end) != "GET" || string.slice(input, h.target.start, h.target.end) != target {
+            return false
+        }
+    }
+    true
+}
+
+// llhttp test/response/sample.md, 36151b9a7d6320072e24e472a769a5e09f9e969d.
+// Copyright Fedor Indutny, 2018. MIT, see vectors/llhttp-LICENSE.
+// httparse src/lib.rs, 9f29e79f9832dbd0ae5220acb17c1866745bdecd.
+// Copyright Sean McArthur. MIT, see vectors/httparse-LICENSE.
+// Missing reasons, LF-only heads, and partial heads retain committed fields.
+// expect: run upstream_response_heads() = true
+fn upstream_response_heads() -> bool {
+    for (input, progress, end, version, status, reason, count, fields) in[
+    // llhttp simple response.
+    ("HTTP/1.1 200 OK\r\nHeader1: Value1\r\nHeader2:\t Value2\r\nContent-Length: 0\r\n\r\n", Complete, 73u64, 1u8, 200u16, "OK", 3u64,[("Header1", "Value1"), ("Header2", "Value2"), ("Content-Length", "0")]),
+    // httparse test_response_reason_missing_no_space_with_headers and test_response_no_cr.
+    ("HTTP/1.1 200\r\nFoo: bar\r\n\r\n", Complete, 26u64, 1u8, 200u16, "", 1u64,[("Foo", "bar"), ("", ""), ("", "")]), ("HTTP/1.0 200\nContent-type: text/html\n\n", Complete, 38u64, 0u8, 200u16, "", 1u64,[("Content-type", "text/html"), ("", ""), ("", "")]),
+    // httparse test_response_partial_parses_headers_as_much_as_it_can.
+    ("HTTP/1.1 200 OK\r\nServer: yolo\r\n", Partial, 0u64, 1u8, 200u16, "OK", 1u64,[("Server", "yolo"), ("", ""), ("", "")]),] {
+        let b = string.as_bytes(input)
+        let mut h = http1.head()
+        if http1.response(b, mut h) != progress || h.version != version || h.status != status || h.count != count {
+            return false
+        }
+        if (progress == Complete && h.end != end) || string.slice(input, h.reason.start, h.reason.end) != reason {
+            return false
+        }
+        for i in 0u64 .. h.count {
+            let f = h.fields[i]
+            let (name, value) = fields[i]
+            if string.slice(input, f.name.start, f.name.end) != name || string.slice(input, f.value.start, f.value.end) != value {
+                return false
+            }
+        }
+    }
+    true
+}
+
+// httparse src/lib.rs, 9f29e79f9832dbd0ae5220acb17c1866745bdecd.
+// Copyright Sean McArthur. MIT, see vectors/httparse-LICENSE.
+// These are the default strict parser results.
+// expect: run httparse_rejects_malformed_response_heads() = true
+fn httparse_rejects_malformed_response_heads() -> bool {
+    for input in[
+    // test_response_reason_with_nul_byte.
+    "HTTP/1.1 200 \0\r\n\r\n",
+    // test_forbid_response_with_whitespace_between_header_name_and_colon.
+    "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Credentials : true\r\nBread: baguette\r\n\r\n",
+    // test_forbid_response_with_obsolete_line_folding_at_start.
+    "HTTP/1.1 200 OK\r\nLine-Folded-Header: \r\n   \r\n hello there\r\n\r\n",] {
+        let mut h = http1.head()
+        if http1.response(string.as_bytes(input), mut h) != Bad {
+            return false
+        }
+    }
+    true
+}

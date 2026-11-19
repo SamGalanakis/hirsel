@@ -46,7 +46,7 @@ typedef void (*HirselLlvmKeepTail)(void *, const char *, size_t, const uint8_t *
                                    const uint8_t *, size_t);
 extern void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachineRef machine,
     HirselLlvmFindTail find, HirselLlvmKeepTail keep, void *context);
-extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine, uint8_t split_objects,
+extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *context, char **error);
 static pthread_once_t initialized = PTHREAD_ONCE_INIT;
 static void initialize(void) {
@@ -446,7 +446,7 @@ static int public_body(LLVMValueRef f) {
 static void emit_program(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
                           uint8_t speed, const char *triple, const char *cpu,
-                          const char *features, uint8_t split_objects,
+                          const char *features, unsigned jobs,
                           HirselLlvmFindTail find, HirselLlvmKeepTail keep,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
                           HirselLlvmOutput *out) {
@@ -567,9 +567,10 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
 #endif
     buffer = NULL; message = NULL;
     // A program is keyed in parts, one per definition, and what no caller
-    // holds is generated per part with split_objects, or as one object for
-    // the caller to cut. A standalone module keeps its order in one object.
-    if (export_count) failed = hirsel_llvm_emit_parts(module, machine, split_objects, reuse, deliver, receiver, &message);
+    // holds is generated per part on `jobs` threads, or with `jobs` 0 as one
+    // object to cut per part; a standalone module, which keeps its order, as
+    // one object.
+    if (export_count) failed = hirsel_llvm_emit_parts(module, machine, jobs, reuse, deliver, receiver, &message);
     else {
         failed = hirsel_llvm_emit_object(machine, module, &message, &buffer);
         if (!failed && buffer) {
@@ -590,18 +591,18 @@ done:
 }
 // Emit units as parts (exports given) or as one standalone object: `find`
 // is asked for each definition's release tail and `keep` gets each one run,
-// `reuse` is asked for each part, `deliver` gets the missed parts' objects
-// (one per part with split_objects, or one for the module), and `out` is empty
-// or holds the error.
+// `reuse` is asked first for each part, `deliver` gets each missed part's object on
+// `jobs` threads, or with `jobs` 0 the one object generated, if any, and `out`
+// is empty or holds the error.
 __attribute__((visibility("default")))
-void hirsel_llvm_program_v9(const HirselLlvmUnit *units, size_t count,
+void hirsel_llvm_program_v8(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
                           uint8_t speed, const char *triple, const char *cpu,
-                          const char *features, uint8_t split_objects,
+                          const char *features, unsigned jobs,
                           HirselLlvmFindTail find, HirselLlvmKeepTail keep,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
                           HirselLlvmOutput *out) {
-    emit_program(units, count, exports, export_count, speed, triple, cpu, features, split_objects, find, keep,
+    emit_program(units, count, exports, export_count, speed, triple, cpu, features, jobs, find, keep,
                  reuse, deliver, receiver, out);
 }
 __attribute__((visibility("default")))

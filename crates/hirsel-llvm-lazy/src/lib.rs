@@ -50,7 +50,7 @@ pub fn emit_program_for_target(
     target: hirsel_core_layout::Target,
 ) -> Result<Vec<u8>, String> {
     Ok(
-        emit_program_parts(units, exports, target, false, false, &mut Unheld)?
+        emit_program_parts(units, exports, target, 0, false, &mut Unheld)?
             .objects
             .pop()
             .expect("an unreused program is generated"),
@@ -131,12 +131,17 @@ impl ReleaseUnit {
         self.module.ir_key()
     }
 
-    pub fn emit(self, exports: &[String], held: &mut dyn Held) -> Result<Program, String> {
+    pub fn emit(
+        self,
+        exports: &[String],
+        jobs: u32,
+        held: &mut dyn Held,
+    ) -> Result<Program, String> {
         loader::program(
             vec![loader::ProgramUnit::Native(self.module)],
             exports,
             hirsel_core_layout::Target::X86_64Linux,
-            true,
+            jobs,
             held,
         )
     }
@@ -145,15 +150,15 @@ impl ReleaseUnit {
 /// Compose a release program for `target` and generate it in parts, one per
 /// out-of-line definition after whole-program optimisation. `held` is asked
 /// for each definition's release tail and each part's object ([`Held`]). Each
-/// missed part is generated from its module with `split_objects`. Otherwise
-/// all missed parts are generated together as one object.
+/// part not held is generated from its bitcode alone on up to `jobs` threads;
+/// with `jobs` 0 they are generated together as one object.
 /// `elide_steps` requires a closed executable where no call or runtime entry
 /// can make a Step bound current or hold a receive grant at a refill.
 pub fn emit_program_parts(
     units: &[Unit<'_>],
     exports: &[String],
     target: hirsel_core_layout::Target,
-    split_objects: bool,
+    jobs: u32,
     elide_steps: bool,
     held: &mut dyn Held,
 ) -> Result<Program, String> {
@@ -196,7 +201,7 @@ pub fn emit_program_parts(
             Unit::Text(ir) => lowered.push(loader::ProgramUnit::Text(ir)),
         }
     }
-    loader::program(lowered, exports, target, split_objects, held)
+    loader::program(lowered, exports, target, jobs, held)
 }
 
 #[cfg(test)]
@@ -252,7 +257,7 @@ b0(v0: u64):
             }],
             &[core::symbol(&module, hirsel_core_ir::FuncId(0))],
             hirsel_core_layout::Target::X86_64Linux,
-            true,
+            1,
             true,
             &mut super::Unheld,
         )

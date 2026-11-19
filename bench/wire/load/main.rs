@@ -26,6 +26,7 @@ async fn main() -> Result<()> {
     let mut pace = 10;
     let mut samples = 2000;
     let mut server_pid = None;
+    let mut server_snapshots = None;
     while let Some(arg) = args.next() {
         let value = args.next().ok_or("missing option value")?;
         match arg.as_str() {
@@ -38,8 +39,14 @@ async fn main() -> Result<()> {
             "--pace" => pace = value.parse()?,
             "--samples" => samples = value.parse()?,
             "--server-pid" => server_pid = Some(value.parse()?),
+            "--server-snapshots" => server_snapshots = Some(std::path::PathBuf::from(value)),
             _ => return Err(format!("unknown option {arg}").into()),
         }
+    }
+    if server_snapshots.is_some()
+        && !matches!(mode.as_str(), "memory-subscribed" | "memory-unsubscribed")
+    {
+        return Err("--server-snapshots requires a memory mode".into());
     }
     match mode.as_str() {
         "echo" => println!("{}", load::echo(samples).await?),
@@ -58,6 +65,7 @@ async fn main() -> Result<()> {
                 config.clients,
                 mode == "memory-subscribed",
                 pid,
+                server_snapshots.as_deref(),
             )
             .await?;
             println!("{result}");

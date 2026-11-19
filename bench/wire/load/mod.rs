@@ -196,6 +196,7 @@ pub async fn memory(
     count: usize,
     subscribed: bool,
     pid: u32,
+    snapshots: Option<&std::path::Path>,
 ) -> Result<Value> {
     let wall = Instant::now();
     // At most 32 calls per principal, below the default burst of 40.
@@ -217,6 +218,12 @@ pub async fn memory(
     }
     let version = witness.version;
     witness.socket.close(None).await?;
+    let idle_sockets = if let Some(out) = snapshots {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        Some(memory_snapshot(out, "seeded-idle", pid)?)
+    } else {
+        None
+    };
     let mut sockets = JoinSet::new();
     let mut setup_error = None;
     for _ in 0..count {
@@ -252,7 +259,7 @@ pub async fn memory(
             .ok_or_else(|| format!("missing process metric {name}"))?
             .parse()?)
     };
-    Ok(json!({
+    let mut result = json!({
         "complete": setup_error.is_none() && sockets.len() == count,
         "connections": sockets.len(), "requested_connections": count, "subscribed": subscribed,
         "setup_error": setup_error, "seeded_chunks": rows, "seed_version": version,
@@ -261,7 +268,53 @@ pub async fn memory(
         "server_peak_rss_bytes": field(&status, "VmHWM:")? * 1024,
         "server_threads": field(&status, "Threads:")?,
         "wall_seconds": wall.elapsed().as_secs_f64(),
-    }))
+    });
+    if let Some(out) = snapshots {
+        let live_sockets = memory_snapshot(out, "held", pid)?;
+        sockets.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let after_sockets = memory_snapshot(out, "after-close", pid)?;
+        result["socket_counts"] = json!({
+            "seeded_idle": idle_sockets.as_ref().map(HashSet::len),
+            "held": live_sockets.len(), "after_close": after_sockets.len(),
+        });
+        let drained = idle_sockets.as_ref() == Some(&after_sockets);
+        result["drained"] = json!(drained);
+        if !drained {
+            result["complete"] = json!(false);
+        }
+    }
+    Ok(result)
+}
+
+fn memory_snapshot(
+    out: &std::path::Path,
+    name: &str,
+    pid: u32,
+) -> Result<HashSet<std::path::PathBuf>> {
+    let output = out.join(name);
+    std::fs::create_dir_all(&output)?;
+    let process = std::path::PathBuf::from(format!("/proc/{pid}"));
+    for file in ["smaps", "smaps_rollup", "status"] {
+        std::fs::write(output.join(file), std::fs::read(process.join(file))?)?;
+    }
+    let mut sockets = HashSet::new();
+    for entry in std::fs::read_dir(process.join("fd"))? {
+        match entry?.path().read_link() {
+            Ok(target)
+                if target
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .starts_with(b"socket:[") =>
+            {
+                sockets.insert(target);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(sockets)
 }
 
 // Service ping/pong while a socket waits for the memory sample.

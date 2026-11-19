@@ -132,3 +132,16 @@ mistakes; the independent XOR and durable version oracles catch lost rows and
 duplicate effects; fault injection checks that a failed sync emits nothing; the
 synthetic timing test catches omitted scheduling delay and answer/observer
 reordering. They assert behavior and remain valid across internal refactors.
+
+## Private checkbox memory sweep
+
+Run `python3 bench/awfy/checkbox_memory.py OUT --artifacts TOOLCHAIN` on the
+board host. It launches a new private Hirsel server for each subscribed and
+unsubscribed point at 64, 1,000 and 10,000 sessions. Use `--clients 64` for
+the smallest point or `--wire-tools DIRECTORY` to reuse a release wire build.
+The sweep retains the verified session count, highest
+complete point per mode, and Linux `smaps`, `smaps_rollup` and `status`
+snapshots with the seeded server idle, the sessions held, and 500 ms after
+closing their transports. A completed point requires the server's socket set
+to match its seeded-idle state. The snapshots describe process mappings
+and OS threads.

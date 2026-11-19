@@ -367,7 +367,7 @@ def compile_rows(board, out, prepared, fixture, tools):
             raise ValueError("cannot measure a warm edit without two verified cold builds")
 
 
-def prepare_checkbox(out, artifacts, env):
+def prepare_checkbox(out, artifacts, env, *, wire_tools=None):
     checkbox = load("checkbox_run", ROOT / "core/programs/checkbox/run.py")
     out.mkdir()
     web = out / "web"
@@ -393,10 +393,12 @@ const {Frame} = await import(new URL("frame.js", base));
 const {want} = await import(new URL("entries.js", base));
 await writeFile(process.argv[2], Frame.encode({tag:"Hello", values:[{tag:"None"}, want]}));
 ''', web, wants], env=env)
-    target = out / "wire-target"
-    run(cargo("build", "--release", "--locked", "-j2", "--target-dir", target),
-        cwd=ROOT / "bench/wire", env=cargo_scope(env))
-    return checkbox, executable, address, wants, target / "release"
+    if wire_tools is None:
+        target = out / "wire-target"
+        run(cargo("build", "--release", "--locked", "-j2", "--target-dir", target),
+            cwd=ROOT / "bench/wire", env=cargo_scope(env))
+        wire_tools = target / "release"
+    return checkbox, executable, address, wants, wire_tools
 
 
 def owns_listener(pid, address):

@@ -91,10 +91,7 @@ fn mandelbrot(config: String, name: String, warmup: u64, iterations: u64) -> Res
                 let mut tr: f64 = 0.0
                 let mut ti: f64 = 0.0
                 let mut i: u32 = 0
-                while i < 50 && (match float.total_order(tr + ti, 4.0) {
-                    Greater => false,
-                    _ => true
-                }) {
+                while i < 50 && float.le(tr + ti, 4.0) {
                     zi = 2.0 * zr * zi + ci
                     zr = tr - ti + cr
                     tr = zr * zr
@@ -102,10 +99,7 @@ fn mandelbrot(config: String, name: String, warmup: u64, iterations: u64) -> Res
                     i += 1
                 }
                 byte = byte << 1u8
-                if (match float.total_order(tr + ti, 4.0) {
-                    Greater => false,
-                    _ => true
-                }) {
+                if float.le(tr + ti, 4.0) {
                     byte = byte | 1u8
                 }
                 bit += 1

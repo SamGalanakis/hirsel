@@ -1,3 +1,4 @@
+// test-vectors
 fn matches(d: Inline[u8, 32], hex: String) -> bool {
     let alphabet = string.as_bytes("0123456789abcdef")
     let expected = string.as_bytes(hex)
@@ -157,4 +158,16 @@ fn lengths_180_199() -> bool {
 // expect: run lengths_200_200() = true
 fn lengths_200_200() -> bool {
     differential(200, 201)
+}
+
+// Source: NIST CAVP SHA256ShortMsg.rsp and SHA256LongMsg.rsp, CAVS 11.0, public domain.
+// expect: run cavp_sha256() = true
+fn cavp_sha256() -> bool {
+    for row in sha256_cavp_data() {
+        let (input, hex) = row
+        if !matches(sha256.hash(input), hex) {
+            return false
+        }
+    }
+    true
 }

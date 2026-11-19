@@ -1,3 +1,4 @@
+// test-vectors
 fn digest(b: Bytes, hex: Bytes) -> bool {
     let d = result.unwrap(sha1.hash(b))
     let alphabet = result.unwrap(b"0123456789abcdef")
@@ -29,4 +30,16 @@ fn rfc3174_repeat() -> bool {
         result.unwrap(list.append(mut b, result.unwrap(b"0123456701234567012345670123456701234567012345670123456701234567")))
     }
     digest(b, result.unwrap(b"dea356a2cddd90c7a7ecedc5ebb563934f460452"))
+}
+
+// Source: NIST CAVP SHA1ShortMsg.rsp and SHA1LongMsg.rsp, CAVS 11.0, public domain.
+// expect: run cavp_sha1() = true
+fn cavp_sha1() -> bool {
+    for row in sha1_cavp_data() {
+        let (input, hex) = row
+        if !digest(input, string.as_bytes(hex)) {
+            return false
+        }
+    }
+    true
 }

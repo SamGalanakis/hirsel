@@ -232,15 +232,15 @@ python3 bench/awfy/receipt.py compare "$out/base-samples/receipt.json" \
 The guard requires checked stdout, complete row coverage and instruction
 counters with equal enabled and running times. It checks the exact
 execution argv and CPU affinity, as well as certification, build flags and the
-release compiler, runtime, std/core source and fixture hashes. When the compiler,
-runtime or std/core source changes, both rows must carry verified build records.
-The report names the changed hashes. Identical candidate hashes across all
-rows cause an A/A refusal. Use `compare --aa` for a deliberate run with
-identical compiler, runtime and std/core hashes.
-Each LangArena image uses an application manifest containing its benchmark
-group and the shared harness and helper. The runtime fixture identity combines
-those sources with the configuration file. A port edit refuses comparisons for
-that group while rows from other groups can still be compared.
+release compiler, runtime, source and fixture hashes. When the compiler,
+runtime, std/core or workload sources change, both rows must carry verified
+build records. The report names the changed hashes. Identical candidate hashes
+across all rows cause an A/A refusal. Use `compare --aa` for a deliberate run
+with identical compiler, runtime and source hashes.
+Each LangArena image's workload source hash covers its benchmark group and the
+shared harness and helper. Its fixture hash covers the configuration file's
+bytes. AWFY's JSON rows include the generated JSON payload in their fixture
+hash. A changed fixture refuses comparison even when the output still matches.
 An identity refusal exits 2. A comparable
 row above +0.5% exits 1. Use `--threshold PERCENT` to set another limit.
 

@@ -24,13 +24,13 @@ import profile_diff
 from bench_cpus import positive_int, sibling_cpus, smt_activity
 from measurement_artifacts import SHIPPING, check
 
-VERSION = 3
+VERSION = 4
 REFUSED = 2
 INSTRUCTION_LIMIT = Decimal("0.5")
 CYCLE_RIDE_RATIO = Decimal("1.01")
 INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
-CANDIDATE_HASHES = (*ARTIFACT_HASHES, "std_sha256")
+CANDIDATE_HASHES = (*ARTIFACT_HASHES, "std_sha256", "workload_sources_sha256")
 WORKLOAD_IDENTITY = ("suite", "mode", "certified", "flags", "argv", "affinity", "fixture_sha256")
 IDENTITY = (*WORKLOAD_IDENTITY, *CANDIDATE_HASHES)
 
@@ -62,23 +62,27 @@ def release_tools(artifacts):
 
 
 def fixture_identity(manifest, runtime_fixture):
-    return source_fixture(manifest, {str(runtime_fixture): sha256(runtime_fixture)})
+    return build.manifest_digests(manifest) | data_fixture({str(runtime_fixture): sha256(runtime_fixture)})
 
 
-def source_fixture(manifest, files):
-    sources = build.manifest_digests(manifest)
-    digest, = files.values()
-    return {
-        **sources,
-        "fixture_sha256": hashlib.sha256(bytes.fromhex(sources["workload_sources_sha256"] + digest)).hexdigest(),
-        "fixture_files": files,
-    }
+def fixture_digest(files):
+    # Callers record inputs in workload order. Paths are local to each build.
+    digests = [bytes.fromhex(digest) for digest in files.values()]
+    if not digests or any(len(digest) != 32 for digest in digests):
+        raise ValueError("invalid fixture file hashes")
+    if len(digests) == 1:
+        return digests[0].hex()
+    return hashlib.sha256(b"".join(digests)).hexdigest()
+
+
+def data_fixture(files):
+    return {"fixture_sha256": fixture_digest(files), "fixture_files": files}
 
 
 def runtime_fixture(suite, directory, upstream, *, config=None):
     if suite == "arena":
         path = config if config is not None else directory / "one-iteration.json"
-        return {"fixture_files": {str(path): sha256(path)}}
+        return data_fixture({str(path): sha256(path)})
     return fixture_identity(directory / "hirsel-inputs.json", upstream / "rebench.conf")
 
 
@@ -117,7 +121,13 @@ def runtime_case(suite, name, directory, command, marker, fixture, tools):
         raise ValueError(f"{path}: build with the release row adapter to record measurement provenance")
     if suite == "arena":
         manifest = binary.with_name(f"{binary.name}-inputs.json")
-        fixture = source_fixture(manifest, fixture["fixture_files"])
+        fixture = fixture | build.manifest_digests(manifest)
+    if (suite, name) in {("awfy", "Json"), ("pool", "JsonPool")}:
+        data = directory / "rap.json"
+        digest = sha256(data)
+        if digest != provenance.get("rap_sha256"):
+            raise ValueError(f"{data}: JSON fixture differs from the build")
+        fixture = fixture | data_fixture(fixture["fixture_files"] | {str(data): digest})
     image = sha256(binary)
     checked = tools | {field: fixture[field] for field in build.MANIFEST_HASHES} | {"image_sha256": image}
     for field, value in checked.items():
@@ -296,6 +306,8 @@ def validate_row(key, row):
             or not isinstance(row["affinity"], list)
             or any(type(cpu) is not int or cpu < 0 for cpu in row["affinity"])):
         raise ValueError("invalid identity")
+    if row["fixture_sha256"] != fixture_digest(row["fixture_files"]):
+        raise ValueError("fixture_sha256 differs from the recorded fixture files")
     sample = row["sample"]
     if sample["status"] == "inactive-counter" or not counter_ready(sample, "instructions:u"):
         raise ValueError("inactive-counter (instructions:u must be fully active)")
@@ -371,13 +383,17 @@ def compare(before_path, after_path, threshold, *, aa=False, expected=None, bloc
         failed |= breach
         ratios.append(candidate / baseline)
         print(f"{key} {baseline:,} -> {candidate:,} ({percent:+.3f}%){' FAIL' if breach else ''}")
-    for (base_compiler, base_runtime, base_std), (candidate_compiler, candidate_runtime, candidate_std) in changed_pairs:
+    for (base_compiler, base_runtime, base_std, base_sources), (
+        candidate_compiler, candidate_runtime, candidate_std, candidate_sources
+    ) in changed_pairs:
         if base_compiler != candidate_compiler:
             print(f"Variable compiler_sha256 {base_compiler} -> {candidate_compiler}")
         runtime = "unchanged" if base_runtime == candidate_runtime else f"{base_runtime} -> {candidate_runtime}"
         print(f"Paired runtime_archive_sha256 {runtime}")
         if base_std != candidate_std:
             print(f"Variable std_sha256 {base_std} -> {candidate_std}")
+        if base_sources != candidate_sources:
+            print(f"Variable workload_sources_sha256 {base_sources} -> {candidate_sources}")
     if ratios:
         geomean = math.expm1(math.fsum(map(math.log, ratios)) / len(ratios)) * 100
         print(f"{len(ratios)} rows compared, geomean {geomean:+.3f}%, threshold +{threshold}%")
@@ -811,7 +827,7 @@ def main():
     comparison.add_argument("baseline", type=Path)
     comparison.add_argument("candidate", type=Path)
     comparison.add_argument("--threshold", type=threshold, default=INSTRUCTION_LIMIT, metavar="PERCENT")
-    comparison.add_argument("--aa", action="store_true", help="require identical compiler, runtime and std/core hashes")
+    comparison.add_argument("--aa", action="store_true", help="require identical compiler, runtime and source hashes")
     cycles = commands.add_parser("cycle-pairs", help="qualify named runtime rows with interleaved counter pairs")
     cycles.add_argument("baseline", type=Path, help="base receipt directory or --multicore build directory")
     cycles.add_argument("candidate", nargs="?", type=Path,

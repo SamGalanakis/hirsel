@@ -94,7 +94,11 @@ def hirsel(args, matched=False):
     compiler, runtime = (artifacts[key] for key in ("compiler", "runtime"))
     spec = inputs(ROOT, "harness")
     rap = args.out / "rap.hirsel"
-    rap.write_text(f"pub fn document() -> String {{ {fixture(args.upstream)} }}\n")
+    literal = fixture(args.upstream)
+    rap.write_text(f"pub fn document() -> String {{ {literal} }}\n")
+    rap_data = args.out / "rap.json"
+    rap_data.write_bytes(json.loads(literal).encode("utf-8"))
+    rap_digest = sha256(rap_data)
     sources = list((HERE / "hirsel").glob("*.hirsel"))
     if matched:
         variants = HERE / "pool-ports/hirsel"
@@ -123,7 +127,7 @@ def hirsel(args, matched=False):
             "--cc", str(llvm_path() / "bin/clang"),
             "--grant", "Stdout", "--json", "-o", str(binary),
         ]
-        provenance = native_provenance(command, manifest)
+        provenance = native_provenance(command, manifest) | {"rap_sha256": rap_digest}
         result = subprocess.run([ROOT / "tools/capped", *command],
                                 env=getattr(args, "env", capped_env(out)), stdout=subprocess.PIPE)
         if result.returncode:

@@ -65,7 +65,7 @@ class InstructionGuard(unittest.TestCase):
             result = compare(baseline)
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("nothing differs: A/A", result.stderr)
-            for field in ("compiler_sha256", "runtime_archive_sha256", "std_sha256"):
+            for field in receipt.CANDIDATE_HASHES:
                 self.assertIn(f"{field}={baseline['rows'][0][field]}", result.stderr)
             self.assertEqual(compare(baseline, "--aa").returncode, 0)
             injected = deepcopy(baseline)
@@ -149,18 +149,29 @@ class InstructionGuard(unittest.TestCase):
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertIn("--aa requires identical candidate hashes", result.stderr)
                     self.assertIn("std_sha256", result.stderr)
+                    (directory / f"{module}.hirsel").write_text(f"// {module}\n")
 
-            for source, content in ((directory / "clbg.hirsel", "// revised benchmark\n"),
-                                    (fixture, '{"iterations": 2}')):
-                with self.subTest(workload_file=source.name):
-                    original = source.read_text()
-                    source.write_text(content)
-                    changed["rows"][0].update(fixture_identity(manifest, fixture))
-                    record_build(changed)
-                    result = compare(changed)
-                    self.assertEqual(result.returncode, 2)
-                    self.assertIn("identity differs: arena/CLBG::Mandelbrot: fixture_sha256", result.stderr)
-                    source.write_text(original)
+            (directory / "clbg.hirsel").write_text("// revised benchmark\n")
+            changed["rows"][0].update(fixture_identity(manifest, fixture))
+            result = compare(changed)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("requires a verified build record", result.stderr)
+            record_build(changed)
+            result = compare(changed)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Variable workload_sources_sha256 ", result.stdout)
+            self.assertNotIn("Variable std_sha256 ", result.stdout)
+
+            fixture.write_text('{"iterations": 2}')
+            changed["rows"][0].update(fixture_identity(manifest, fixture))
+            record_build(changed)
+            result = compare(changed)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("identity differs: arena/CLBG::Mandelbrot: fixture_sha256", result.stderr)
+            changed["rows"][0]["fixture_sha256"] = baseline["rows"][0]["fixture_sha256"]
+            result = compare(changed)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("fixture_sha256 differs from the recorded fixture files", result.stderr)
 
             paired["rows"][0]["flags"] += ["--debug-lines", "on"]
             record_build(paired)
@@ -343,21 +354,23 @@ totals: 56
 
 
 class NativeProvenance(unittest.TestCase):
-    def test_arena_fixture_hashes_the_built_group_and_its_shared_sources(self):
+    def test_arena_build_hashes_the_built_group_and_its_shared_sources(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
             source = directory / "core/langarena"
             source.mkdir(parents=True)
             for module in ("sort", "clbg", "harness", "helper"):
                 (source / f"{module}.hirsel").write_text(f"// {module}\n")
-            (directory / "one-iteration.json").write_text("fixture")
+            config = directory / "one-iteration.json"
+            config.write_text("fixture")
             fixture = receipt.runtime_fixture("arena", directory, None)
+            self.assertEqual(fixture["fixture_sha256"], build.sha256(config))
 
             def identity(module):
                 manifest = directory / f"{module}-64-inputs.json"
                 with patch.object(arena, "ROOT", directory):
                     manifest.write_text(json.dumps(arena.group_inputs(module)))
-                return receipt.source_fixture(manifest, fixture["fixture_files"])["fixture_sha256"]
+                return build.manifest_digests(manifest)["workload_sources_sha256"]
 
             sort, clbg = identity("sort"), identity("clbg")
             (source / "clbg.hirsel").write_text("// revised CLBG\n")
@@ -365,8 +378,9 @@ class NativeProvenance(unittest.TestCase):
             self.assertNotEqual(identity("clbg"), clbg)
             (source / "helper.hirsel").write_text("// revised shared helper\n")
             self.assertNotEqual(identity("sort"), sort)
+            self.assertEqual(receipt.runtime_fixture("arena", directory, None), fixture)
 
-    def test_runtime_receipt_refuses_a_replaced_binary(self):
+    def test_runtime_receipt_refuses_replaced_data_and_binary(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
             compiler = directory / "compiler"
@@ -379,18 +393,27 @@ class NativeProvenance(unittest.TestCase):
             manifest.write_text('{"packages": []}')
             fixture = directory / "rebench.conf"
             fixture.write_text("fixture")
+            data = directory / "rap.json"
+            data.write_bytes(b'{"input": 1}')
             toolchain = {"compiler_sha256": build.sha256(compiler), "runtime_archive_sha256": build.sha256(runtime)}
             command = [compiler, "build", "--release", "--runtime", runtime, "--inputs", manifest, "-o", binary]
-            provenance = build.native_provenance(command, manifest)
+            provenance = build.native_provenance(command, manifest) | {"rap_sha256": build.sha256(data)}
             build.write_native_report(binary, json.dumps({
                 "accepted": True, "native": {"linked": True, "executable": str(binary)},
             }), provenance)
 
-            def row():
-                return runtime_case("awfy", "Mandelbrot", directory, [binary, "Mandelbrot", "1", "500"],
+            def row(name):
+                return runtime_case("awfy", name, directory, [binary, name, "1", "500"],
                                     b"verified\n", fixture_identity(manifest, fixture), toolchain)
 
-            self.assertEqual(row()["flags"], ["--release", "--runtime", "runtime", "--inputs", "manifest", "-o", "image"])
+            mandelbrot = row("Mandelbrot")
+            self.assertEqual(mandelbrot["flags"], ["--release", "--runtime", "runtime", "--inputs", "manifest", "-o", "image"])
+            json_row = row("Json")
+            self.assertEqual(json_row["fixture_files"][str(data)], build.sha256(data))
+            self.assertNotEqual(json_row["fixture_sha256"], mandelbrot["fixture_sha256"])
+            data.write_bytes(b'{"input": 2}')
+            with self.assertRaisesRegex(ValueError, "JSON fixture differs from the build"):
+                row("Json")
             binary.write_bytes(b"replacement image")
             with self.assertRaisesRegex(ValueError, "image_sha256 differs from the build"):
-                row()
+                row("Mandelbrot")

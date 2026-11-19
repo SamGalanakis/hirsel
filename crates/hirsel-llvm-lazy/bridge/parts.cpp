@@ -913,6 +913,10 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
         m.getContext().getMDKindID("reqd_work_group_size");
         m.getContext().getMDKindID("amdgpu.expected.active.lanes");
     }
+    // A held part whose debug info the reader strips (always without line
+    // tables, where it reads as version 0) has "heapallocsite" cleared by
+    // name on every instruction that carries metadata, registering it.
+    if (keyed) m.getContext().getMDKindID("heapallocsite");
     std::string machine_key = keyed ? machine_text(*reinterpret_cast<TargetMachine *>(machine)) : "";
     StringMap<std::string> sets = keyed ? asm_lines(m) : StringMap<std::string>();
     void *tail = hirsel_llvm_tail_open(module, machine);

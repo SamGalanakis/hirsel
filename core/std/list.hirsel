@@ -124,8 +124,29 @@ pub fn find_byte4(xs: Bytes, start: u64, end: u64, a: u8, b: u8, c: u8, d: u8) -
 
 /// Whether xs begins with prefix. Alloc: nothing. Cost: O(len(prefix)).
 pub fn starts_with[T: key](xs: List[T], prefix: List[T]) -> bool {
+    starts_with_at(xs, 0, prefix)
+}
+
+/// Whether prefix matches xs at the element offset at. Returns false when at
+/// is past the end or the prefix does not fit. An empty prefix matches at len(xs).
+/// Alloc: nothing. Cost: O(len(prefix)).
+/// Ex: `list.starts_with_at(xs, offset, prefix)`.
+pub fn starts_with_at[T: key](xs: List[T], at: u64, prefix: List[T]) -> bool {
+    let len = list.len(xs)
     let n = list.len(prefix)
-    n <= list.len(xs) && list.slice(xs, 0, n) == prefix
+    if at > len || n > len - at {
+        return false
+    }
+    let window = list.slice(xs, at, at + n)
+    if n > 7 {
+        return window == prefix
+    }
+    for i in 0 .. n {
+        if window[i] != prefix[i] {
+            return false
+        }
+    }
+    true
 }
 
 /// A view of the last element, or None when empty. View: anchored to xs; FREEZE xs.

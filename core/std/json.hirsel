@@ -625,7 +625,7 @@ fn member[in a](ms: IndexedSpan[Member] in a, o: u32) -> View[Member] in ms {
 type ValueStart: key = ReadNull | ReadTrue | ReadFalse | ReadNumber | ReadString | ReadArray | ReadObject
 
 fn literal(s: String, mut i: u64, word: String) -> Result[(), Error] {
-    if !is(s, i, word) {
+    if !list.starts_with_at(string.as_bytes(s), i, string.as_bytes(word)) {
         return Error(Syntax(i))
     }
     i += string.byte_len(word)
@@ -1094,22 +1094,6 @@ fn at(s: String, i: u64) -> u8 {
     } else {
         0
     }
-}
-
-/// Whether w is in s at byte i.
-fn is(s: String, i: u64, w: String) -> bool {
-    let b = string.as_bytes(s)
-    let word = string.as_bytes(w)
-    let n = list.len(word)
-    if i + n > list.len(b) {
-        return false
-    }
-    for j in 0 .. n {
-        if b[i + j] != word[j] {
-            return false
-        }
-    }
-    true
 }
 
 /// Skips JSON whitespace: space, tab, line feed, carriage return.

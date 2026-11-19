@@ -4245,12 +4245,8 @@ fn dfa_transition(program: List[NfaState], edges: List[NfaEdge], mut work: List[
 type Half: key = Found(u64) | Missing | Retry
 
 fn literal_at(data: Bytes, table: Bytes, pos: u64, first: u64, width: u64) -> bool {
-    for i in 0u64 .. width {
-        if data[pos + i] != table[first + i] {
-            return false
-        }
-    }
-    true
+    let needle = list.slice(table, first, first + width)
+    list.starts_with_at(data, pos, needle)
 }
 
 fn memchr_at(data: Bytes, table: Bytes, literals: u64, at: u64) -> Option[u64] {

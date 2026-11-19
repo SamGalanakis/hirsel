@@ -302,7 +302,11 @@ fn find_start_past_end() -> u64 {
 
 // expect: run starts_with_prefix() = true
 fn starts_with_prefix() -> bool {
-    string.starts_with("GET /", "GET ")
+    let data = string.as_bytes("xabcdefgh")
+    let seven = string.as_bytes("abcdefg")
+    let eight = string.as_bytes("abcdefgh")
+    let empty = string.as_bytes("")
+    string.starts_with("GET /", "GET ") && list.starts_with_at(data, 1, seven) && list.starts_with_at(data, 1, eight) && !list.starts_with_at(data, 0, eight) && !list.starts_with_at(data, 2, eight) && list.starts_with_at(data, 9, empty) && !list.starts_with_at(data, 10, empty)
 }
 
 // expect: run starts_with_longer() = false

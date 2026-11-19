@@ -31,6 +31,7 @@ extern void hirsel_llvm_fixed_width_checks(void *module);
 extern void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool frame_pointers);
 extern LLVMBool hirsel_llvm_emit_object(LLVMTargetMachineRef machine, LLVMModuleRef module,
                                        char **message, LLVMMemoryBufferRef *buffer);
+extern void hirsel_llvm_align_release_functions(LLVMModuleRef module);
 extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
                                                 LLVMBool prune, LLVMBool prepay_steps);
 extern LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
@@ -545,6 +546,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             hirsel_llvm_share_cold_sites(module);
             hirsel_cold_failure_edges(module, context);
             hirsel_llvm_share_cold_step_sync(module, machine);
+            hirsel_llvm_align_release_functions(module);
         }
         if (e) {
             char *text = LLVMGetErrorMessage(e); error(out, text);

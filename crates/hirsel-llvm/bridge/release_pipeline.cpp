@@ -114,6 +114,22 @@ extern "C" void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool fra
     }
 }
 
+// Start every warm generated function on a 64 B line, as Go starts every
+// function on a 32 B boundary. The decoded-op caches (Zen's op cache, Intel's
+// uop cache) hold ops per aligned window, so a hot loop that straddles a
+// window costs extra fetches each iteration. At LLVM's 16 B function
+// alignment, whether a loop straddled depended on how much unrelated code was
+// linked in front of it: AWFY Sieve's cycles moved from -14% to +36% with
+// identical instructions. With each start fixed modulo 64, a function has the
+// same line layout in every program. The padding lies between functions and
+// is never executed. Cold and size-optimized bodies keep the default.
+extern "C" void hirsel_llvm_align_release_functions(LLVMModuleRef module) {
+    for (Function &f : *unwrap(module)) {
+        if (f.isDeclaration() || f.hasFnAttribute(Attribute::Cold) || f.hasOptSize()) continue;
+        if (f.getAlign().valueOrOne() < Align(64)) f.setAlignment(Align(64));
+    }
+}
+
 extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
     LLVMModuleRef raw_module, LLVMTargetMachineRef raw_machine, LLVMBool prune,
     LLVMBool prepay_steps) {

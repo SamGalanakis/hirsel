@@ -323,6 +323,7 @@ fn bundled_std_selection(input: &PackageManifest) -> Option<Vec<(&'static str, &
         return None;
     }
     let mut selected = Vec::with_capacity(input.sources.len());
+    let mut bytes = Vec::new();
     for source in &input.sources {
         if !source.signatures || source.modules.len() != 1 {
             return None;
@@ -332,7 +333,7 @@ fn bundled_std_selection(input: &PackageManifest) -> Option<Vec<(&'static str, &
             .binary_search_by_key(&name, |(module, _)| module)
             .ok()?;
         let expected = bundled::STD_SOURCES[at];
-        if std::fs::read_to_string(&source.file).ok()?.as_bytes() != expected.1.as_bytes() {
+        if !matches_source(&source.file, expected.1, &mut bytes) {
             return None;
         }
         selected.push(expected);
@@ -358,21 +359,25 @@ fn matches_bundle(
     }
     let mut selected = input.sources.iter().collect::<Vec<_>>();
     selected.sort_by(|a, b| a.modules.cmp(&b.modules));
+    let mut bytes = Vec::new();
     selected
         .into_iter()
         .zip(sources)
-        .all(|(source, (module, _))| {
+        .all(|(source, (module, text))| {
             source.signatures
                 && source.modules == [*module]
-                && std::fs::read_to_string(&source.file)
-                    .ok()
-                    .is_some_and(|text| {
-                        text == sources
-                            .iter()
-                            .find(|(candidate, _)| *candidate == *module)
-                            .map_or("", |(_, text)| *text)
-                    })
+                && matches_source(&source.file, text, &mut bytes)
         })
+}
+
+fn matches_source(path: &Path, expected: &str, bytes: &mut Vec<u8>) -> bool {
+    use std::io::Read;
+
+    bytes.clear();
+    // One extra byte distinguishes an exact match from a longer file.
+    std::fs::File::open(path)
+        .and_then(|file| file.take(expected.len() as u64 + 1).read_to_end(bytes))
+        .is_ok_and(|_| bytes.as_slice() == expected.as_bytes())
 }
 
 pub(crate) fn normalized(path: &Path) -> PathBuf {

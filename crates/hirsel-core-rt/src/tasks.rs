@@ -956,7 +956,7 @@ pub(crate) fn wait_for_peer_idle_check() {
 
 /// Use the worker's idle stack after publishing a park under its commit.
 /// The dispatcher adopts the token before it inspects or recycles the stack.
-/// The heap of a task that switched out to wait, if it has pages to purge.
+/// The heap of a task that switched out to wait, if it has pages to trim.
 /// # Safety
 /// The dispatcher has just switched out of `task`, which no other worker can
 /// resume until the caller releases its commit.
@@ -1586,7 +1586,7 @@ impl Scheduler {
                     self.poll_net(timeout);
                     release
                 } else {
-                    crate::task_heap::release_retained();
+                    crate::task_heap::purge();
                     std::thread::park_timeout(Duration::from_nanos(
                         deadline.saturating_sub(crate::os::monotonic_ns()),
                     ));
@@ -1602,14 +1602,14 @@ impl Scheduler {
                     self.poll_net(timeout);
                     release
                 } else {
-                    crate::task_heap::release_retained();
+                    crate::task_heap::purge();
                     std::thread::park();
                     false
                 }
             }
         };
         if release && !self.readies.pending.load(Ordering::Acquire) {
-            crate::task_heap::release_retained();
+            crate::task_heap::purge();
         }
     }
 
@@ -3551,7 +3551,7 @@ impl RunPtr {
                     let task = run.pop();
                     if task.is_null() {
                         if release {
-                            crate::task_heap::release_retained();
+                            crate::task_heap::purge();
                         }
                         if !wait_for_net {
                             let flow_pending =
@@ -3580,7 +3580,7 @@ impl RunPtr {
                     _ => {}
                 }
                 if let Some(heap) = waiting_heap(task, direct) {
-                    heap.purge();
+                    heap.trim();
                 }
             }
             #[cfg(feature = "testing")]
@@ -3676,13 +3676,13 @@ impl RunPtr {
                     State::Provider if (*run).wake_operation(task, Wake::Parked) => direct = task,
                     _ => {}
                 }
-                let purge = waiting_heap(task, direct).cloned();
+                let trim = waiting_heap(task, direct).cloned();
                 // The outgoing active unit is live across release. This
                 // publishes every receiver's already-counted hand-off first.
                 drop(commit);
                 // A woken task that resumes elsewhere meanwhile waits on the heap lock.
-                if let Some(heap) = purge {
-                    heap.purge();
+                if let Some(heap) = trim {
+                    heap.trim();
                 }
                 // The worker-private stock unmaps an excess stack outside the commit.
                 if let Some(stack) = ended {
@@ -3758,7 +3758,7 @@ impl RunPtr {
         let (timeout, release) = match poller {
             Some(_) => crate::task_heap::idle_wait(poll_timeout(deadline)),
             None => {
-                crate::task_heap::release_retained();
+                crate::task_heap::purge();
                 (poll_timeout(deadline), false)
             }
         };
@@ -3777,7 +3777,7 @@ impl RunPtr {
                 })
             };
             if release && readied == 0 {
-                crate::task_heap::release_retained();
+                crate::task_heap::purge();
             }
         } else if let Some(deadline) = deadline {
             std::thread::park_timeout(Duration::from_nanos(

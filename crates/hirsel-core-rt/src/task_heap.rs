@@ -18,7 +18,7 @@
 //! Emptied slabs and emptied dedicated pages follow one retention rule, as
 //! mimalloc's `purge_delay` does for freed arena memory: they stay resident
 //! for reuse, and their native pages go back to the host once a worker has
-//! waited `RELEASE_DELAY_MS` with nothing to run (`release_retained`). A
+//! waited `RELEASE_DELAY_MS` with nothing to run (`purge`). A
 //! heap's retained dedicated payload never takes its dedicated footprint
 //! (live plus retained) above its peak live dedicated bytes, so a program
 //! that repeats the same work reuses the same resident pages.
@@ -61,8 +61,8 @@ pub(crate) fn idle_wait(timeout: i32) -> (i32, bool) {
 /// Return every retained slab's and dedicated page's native pages to the
 /// host. A worker calls this after an `idle_wait` that found nothing, or
 /// before it parks without a poller.
-pub(crate) fn release_retained() {
-    slabs::release_retained();
+pub(crate) fn purge() {
+    slabs::purge();
     if RETAINING_HEAPS.load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -237,7 +237,7 @@ struct Spread {
     touched: usize,
     /// `touched` reaches a third native page.
     spread: bool,
-    /// On the heap's purge list.
+    /// On the heap's trim list.
     listed: bool,
 }
 
@@ -256,12 +256,12 @@ impl Backing {
 }
 
 /// A slab page's slots below `bump` are live, on the free list, or lost:
-/// a lost slot overlaps a native page in `discarded`, which a purge returned
+/// a lost slot overlaps a native page in `discarded`, which a trim returned
 /// while no live slot overlapped it. Lost slots rejoin the free list once
 /// the frontier reaches `limit`. A nursery has stride 0, keeps `limit` equal
 /// to `live` so every release takes the slow path, and bumps by bytes.
 /// A release that leaves `watch` or fewer live slots takes the slow path,
-/// where a spread page is purged or listed for purging.
+/// where a spread page is trimmed or listed for trimming.
 struct Slots {
     first: NonNull<u8>,
     limit: usize,
@@ -519,11 +519,11 @@ struct State {
     partial: HashMap<PartialKey, PagePointer, foldhash::fast::FixedState>,
     empty_slabs: VecDeque<PagePointer>,
     dedicated: DedicatedCache,
-    /// Spread pages to purge when the task parks.
+    /// Spread pages to trim when the task parks.
     listed: Vec<PagePointer>,
     /// The nursery that takes new blocks, by payer and kind.
     nurseries: HashMap<(usize, u8), Nursery, foldhash::fast::FixedState>,
-    /// A nursery emptied or filled since the last purge.
+    /// A nursery emptied or filled since the last trim.
     idle_nurseries: bool,
 }
 
@@ -1111,7 +1111,7 @@ impl Heap {
         }
     }
 
-    /// Whether the task's heap has pages to purge while it waits.
+    /// Whether the task's heap has pages to trim while it waits.
     #[inline]
     pub(crate) fn pending(&self) -> bool {
         self.pending.load(Ordering::Relaxed)
@@ -1122,14 +1122,14 @@ impl Heap {
     /// beyond `EMPTY_SLAB_LIMIT`.
     #[cold]
     #[inline(never)]
-    pub(crate) fn purge(&self) {
+    pub(crate) fn trim(&self) {
         let mut state = self.lock();
         self.pending.store(false, Ordering::Relaxed);
         let mut listed = std::mem::take(&mut state.listed);
         for page in listed.drain(..) {
             // SAFETY: listed pages are live slab pages owned by this heap;
             // close empties the list before destroying any of them.
-            unsafe { purge(page) };
+            unsafe { trim_page(page) };
         }
         state.listed = listed;
         if std::mem::take(&mut state.idle_nurseries) {
@@ -1150,7 +1150,7 @@ impl Heap {
         while state.empty_slabs.len() > EMPTY_SLAB_LIMIT {
             let oldest = state.empty_slabs.pop_front().unwrap();
             // SAFETY: the cache held the empty slab's only reference, and the
-            // purge list, just emptied, no longer names it.
+            // trim list, just emptied, no longer names it.
             unsafe { Page::destroy(oldest) };
         }
     }
@@ -1332,7 +1332,7 @@ unsafe fn push_free(slots: &mut Slots, payload: NonNull<u8>) {
     slots.free = payload.as_ptr();
 }
 
-/// Put a spread page on its heap's purge list.
+/// Put a spread page on its heap's trim list.
 /// # Safety
 /// The heap lock is held as `state` and owns `page`.
 unsafe fn list(state: &mut Locked<'_>, page: PagePointer) {
@@ -1408,7 +1408,7 @@ fn overlaps(mask: u16, start: usize, stride: usize, native: usize) -> bool {
 /// its frontier to just past its highest live slot.
 /// # Safety
 /// The heap lock is held, and `page` is a live slab page of this heap.
-unsafe fn purge(page: PagePointer) {
+unsafe fn trim_page(page: PagePointer) {
     // SAFETY: the heap lock owns the slots, free list and spread record.
     // Free slots are not live, so their native pages may be discarded.
     unsafe {
@@ -1521,7 +1521,7 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
                         .get(&(key.payer, class.kind))
                         .is_some_and(|nursery| nursery.page == Some(page))
                 {
-                    // Kept for the payer's next block; the park purge
+                    // Kept for the payer's next block; the park trim
                     // returns it if the payer allocates nothing until then.
                     slots.bump = 0;
                     state.idle_nurseries = true;
@@ -1554,13 +1554,13 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
         }
         push_free(slots, payload);
         if (*page.as_ref().spread.get()).spread && slots.live <= slots.watch {
-            // The owner purges its listed pages when it parks. Another task's
-            // release may come after that park, so it purges here.
+            // The owner trims its listed pages when it parks. Another task's
+            // release may come after that park, so it trims here.
             if ptr::eq(crate::tasks::current_heap(), state.0) {
                 slots.watch = 1;
                 list(&mut state, page);
             } else {
-                purge(page);
+                trim_page(page);
                 slots.watch = if (*page.as_ref().spread.get()).spread {
                     (slots.live / 8).max(1)
                 } else {
@@ -1792,7 +1792,7 @@ mod tests {
         resident_pages(payload, page_bytes()) != 0
     }
 
-    // Tests that observe residency against `release_retained`, which is
+    // Tests that observe residency against `purge`, which is
     // process-wide.
     static IDLE: Mutex<()> = Mutex::new(());
 
@@ -1808,7 +1808,7 @@ mod tests {
     /// slab per class, and a payer that frees everything leaves no nursery
     /// once the task parks.
     #[test]
-    fn every_payer_nurses_its_first_blocks_and_leaves_nothing_once_idle() {
+    fn every_payer_nurses_its_first_blocks_and_leaves_nothing_after_purge() {
         let _idle = IDLE.lock().unwrap_or_else(|poison| poison.into_inner());
         const PAYERS: usize = 3 * NURSERY_BLOCKS as usize;
         const LIMIT: u64 = 1 << 20;
@@ -1841,9 +1841,9 @@ mod tests {
             // SAFETY: the test frees each block once with its full charge.
             unsafe { block::free(pointer, bytes as u64) };
         }
-        heap.purge();
+        heap.trim();
         // The worker blocks with nothing to run.
-        release_retained();
+        purge();
         for page in pages {
             let mut flag = 0;
             // SAFETY: mincore only reads the page tables; an unmapped range fails with ENOMEM.
@@ -1896,7 +1896,7 @@ mod tests {
         free(large, LARGE);
         assert!(resident(large));
         // However long the heap stays busy, its payload stays until a worker idles.
-        release_retained();
+        purge();
         assert_eq!(heap.lock().dedicated.retained_bytes, 0);
         assert_eq!(resident_pages(base, len), 0);
 
@@ -1908,7 +1908,7 @@ mod tests {
         unsafe { graph.as_ptr().sub(own_prefix(block::GRAPH)).write(0x5a) };
         free(graph, OVERSIZED);
         assert!(resident(base));
-        release_retained();
+        purge();
         let resident = resident_pages(base, len);
         assert_eq!(
             resident, 0,

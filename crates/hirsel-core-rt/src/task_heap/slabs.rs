@@ -3,7 +3,7 @@
 //! A dropped slab stays claimed and resident in its shard's `retained` stack,
 //! up to `RETAINED_SLABS`, and the next claim takes it first. Its native pages
 //! go back to the host when the stack is full or when an idle worker calls
-//! `super::release_retained`, which releases retained dedicated pages too.
+//! `super::purge`, which releases retained dedicated pages too.
 use super::{Mapping, SLAB};
 use std::ptr::NonNull;
 use std::sync::Mutex;
@@ -105,7 +105,7 @@ impl Drop for Slab {
 }
 
 /// Return every retained slab's native pages to the host.
-pub(super) fn release_retained() {
+pub(super) fn purge() {
     if RETAINED.load(Ordering::Relaxed) == 0 {
         return;
     }

@@ -647,13 +647,13 @@ fn cross_task_slots_return_to_the_allocating_heap_and_survive_its_exit() {
     drop((survivor, block));
 }
 
-/// Releasing most slots of a spread page from outside its task purges the
+/// Releasing most slots of a spread page from outside its task trims the
 /// page: native pages without a live slot go back to the host, and the free
-/// list is rebuilt below the highest live slot. A purge that returned a page
+/// list is rebuilt below the highest live slot. A trim that returned a page
 /// under a live slot, or threaded a live or straddling slot, would zero a
 /// survivor or hand out a slot twice.
 #[test]
-fn purged_slab_pages_keep_survivors_and_hand_each_slot_out_once() {
+fn trimmed_slab_pages_keep_survivors_and_hand_each_slot_out_once() {
     const WORDS: usize = 5;
     let context = Context::new(10_000_000);
     let page = crate::task_heap::page_bytes();

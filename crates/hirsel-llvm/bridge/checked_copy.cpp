@@ -1121,6 +1121,11 @@ extern "C" void hirsel_llvm_inline_recursive_leaves(void *Raw) {
       if (!hasSmallLeaf(F, *Arg, *Value, Recursions)) continue;
       ValueToValueMapTy Map;
       auto *Leaf = CloneFunction(&F, Map);
+      // The inliner names its noalias scopes after the callee, and those names
+      // reach the part bitcode. The clone's default name carries the module's
+      // unique-name counter, which any edit elsewhere renumbers; name it from
+      // its function instead: one leaf of F exists at a time, erased below.
+      Leaf->setName(F.getName() + ".leaf");
       Leaf->setLinkage(GlobalValue::InternalLinkage);
       Leaf->setComdat(nullptr);
       auto &LeafArg = *Leaf->getArg(Arg->getArgNo());

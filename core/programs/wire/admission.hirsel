@@ -112,10 +112,12 @@ pub fn main(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(
     let codec: std.codec.Codec[u32] = std.codec.of()
     let _ = result.unwrap(store.store.create_table(mut db, store.store.spec("data", std.codec.key_u64(), codec)))
     // An admitted, unreplied position on the retained key exercises V5 on resend.
-    let mut stream: Bytes = list.new()
-    result.unwrap(list.append(mut stream, string.as_bytes("anon:")))
-    for _ in 0u64 .. 16u64 { result.unwrap(list.push(mut stream, 0u8)) }
-    result.unwrap(list.push(mut stream, 0u8)); result.unwrap(list.push(mut stream, 0u8)); result.unwrap(list.push(mut stream, 0u8)); result.unwrap(list.push(mut stream, 77u8))
+    // The key is the runner's own stream key for the client's fixed token and stream 77.
+    let mut token: Bytes = list.new()
+    result.unwrap(list.append(mut token, string.as_bytes("anon:")))
+    for _ in 0u64 .. 16u64 { result.unwrap(list.push(mut token, 0u8)) }
+    let caller = option.unwrap(result.unwrap(store.ingress.caller(token)))
+    let stream = result.unwrap(store.runner.stream_key(caller, 77u32))
     let _ = result.unwrap(store.store.admit(mut db, stream, 0u64, store.store.request_digest(retired(), list.new())))
     let (head, inbox): (Sender[store.runner.Req], Receiver[store.runner.Req]) = result.unwrap(channel.new(64u64))
     let mail = result.unwrap(store.runner.mailbox(64u64))

@@ -43,7 +43,7 @@ pub fn caller_key(c: Caller, mut out: Bytes) -> Result[(), Capacity] {
     list.append(mut out, c.subject)
 }
 
-fn stream_key(c: Caller, number: u32) -> Result[Bytes, Capacity] {
+pub fn stream_key(c: Caller, number: u32) -> Result[Bytes, Capacity] {
     let mut stream: Bytes = list.with_capacity(list.len(c.subject) + 6u64)?
     caller_key(c, mut stream)?
     std.codec.encode_key(std.codec.key_u32(), number, mut stream)?

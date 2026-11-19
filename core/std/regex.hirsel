@@ -4581,6 +4581,7 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
             }
         }
         if !reverse && (!skip_enabled || d.start_bit != 0) {
+            let columns: u32 = int.narrow(d.columns)
             let begin = pos
             // Follow only ordinary cached ASCII transitions. The outer loop
             // handles the first special transition and the end of input.
@@ -4589,9 +4590,11 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
                 if ch >= 128 {
                     break
                 }
-                let col: u64 = int.widen(re.class_map[int.widen(ch)])
-                let id: u64 = int.widen(state)
-                let transition = work[d.transitions + (id - 1) * d.columns + col]
+                let col: u32 = int.widen(re.class_map[int.widen(ch)])
+                // The cache layout bounds states * columns by OFFSET_LIMIT.
+                let row = int.wrapping_mul(int.wrapping_sub(state, 1), columns)
+                let offset: u64 = int.widen(int.wrapping_add(row, col))
+                let transition = work[d.transitions + offset]
                 if transition == DFA_DEAD || (transition & tags) != 0 {
                     break
                 }

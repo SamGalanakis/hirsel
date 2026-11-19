@@ -38,15 +38,8 @@ const fn size_bin(stride: usize) -> u8 {
 // Like Go's size_to_class8 and mimalloc's direct pages, word-aligned blocks
 // up to DIRECT_WORDS words take their stride and bin from a table.
 const DIRECT_WORDS: usize = 128;
-#[derive(Clone, Copy)]
-#[repr(C, packed)]
-struct DirectClass {
-    stride: u16,
-    bin: u8,
-}
-
-const DIRECT: [DirectClass; DIRECT_WORDS + 1] = {
-    let mut table = [DirectClass { stride: 0, bin: 0 }; DIRECT_WORDS + 1];
+const DIRECT: [(u16, u8); DIRECT_WORDS + 1] = {
+    let mut table = [(0, 0); DIRECT_WORDS + 1];
     let mut words = 1;
     while words <= DIRECT_WORDS {
         let bytes = words * 8;
@@ -56,10 +49,7 @@ const DIRECT: [DirectClass; DIRECT_WORDS + 1] = {
             bytes.next_power_of_two()
         } / 8;
         let stride = bytes.next_multiple_of(unit);
-        table[words] = DirectClass {
-            stride: stride as u16,
-            bin: size_bin(stride),
-        };
+        table[words] = (stride as u16, size_bin(stride));
         words += 1;
     }
     table
@@ -67,8 +57,8 @@ const DIRECT: [DirectClass; DIRECT_WORDS + 1] = {
 
 // Direct classes are below the smallest native page and fit a slab.
 const _: () = assert!(
-    DIRECT[DIRECT_WORDS].stride as usize <= MIN_PAGE_BYTES
-        && (DIRECT[DIRECT_WORDS].bin as usize) < SLAB_BINS
+    DIRECT[DIRECT_WORDS].0 as usize <= MIN_PAGE_BYTES
+        && (DIRECT[DIRECT_WORDS].1 as usize) < SLAB_BINS
 );
 
 #[derive(Clone, Copy)]
@@ -110,12 +100,12 @@ impl Class {
             return None;
         }
         let words = (bytes.max(1) + own_prefix(kind)).div_ceil(8);
-        let class = DIRECT.get(words)?;
+        let &(stride, bin) = DIRECT.get(words)?;
         Some(Self {
-            stride: usize::from(class.stride),
+            stride: usize::from(stride),
             align: 8,
             kind,
-            bin: class.bin,
+            bin,
             growable,
         })
     }

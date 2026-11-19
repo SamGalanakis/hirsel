@@ -30,12 +30,14 @@ static int item_named(uint64_t site, const char *name) {
     if (item.file >= source_table->files_len) return 0;
     // Compact positions retain byte coordinates but omit declaration text.
     // Source names are relative to the fixture manifest.
-    HirselCoreView path = source_table->files[item.file].path;
+    HirselCoreSourceView path = source_table->files[item.file].path;
     if (!path.len) return 0;
-    size_t prefix_len = path.data[0] == '/' ? 0 : sizeof(source_dir) - 1;
+    // Views are byte ranges from the start of the files allocation.
+    const char *path_data = (const char *)source_table->files + path.offset;
+    size_t prefix_len = path_data[0] == '/' ? 0 : sizeof(source_dir) - 1;
     char filename[prefix_len + path.len + 1];
     memcpy(filename, source_dir, prefix_len);
-    memcpy(filename + prefix_len, path.data, path.len);
+    memcpy(filename + prefix_len, path_data, path.len);
     filename[prefix_len + path.len] = '\0';
     FILE *file = fopen(filename, "rb");
     if (!file) return 0;

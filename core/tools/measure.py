@@ -95,7 +95,8 @@ def sources(name, layout):
     return [base/name/(layout+'.rs'), base/name/'program.rs', base/'support.rs']
 
 
-def sample(command, directory, compiler_only=False, env=None, *, cycles=False, cwd=None, pmu_times=False):
+def sample(command, directory, compiler_only=False, env=None, *, cycles=False, cwd=None, pmu_times=False,
+           smt_siblings=None):
     directory.mkdir()
     perf = directory/'perf.csv'
     stats = directory/'time.txt'
@@ -103,6 +104,8 @@ def sample(command, directory, compiler_only=False, env=None, *, cycles=False, c
     # acknowledgment stops counting before diagnostic time-metrics formatting.
     env = os.environ | (env or {})
     control = directory / 'perf-control'
+    instructions_event, cycles_event = ('instructions:u', 'cycles:u') if smt_siblings is None else ('instructions', 'cycles')
+    activity = directory / 'smt.json'
     if compiler_only:
         os.mkfifo(control)
         os.mkfifo(control.with_suffix('.ack'))
@@ -114,9 +117,14 @@ def sample(command, directory, compiler_only=False, env=None, *, cycles=False, c
                   '--', *map(str, command)]
     else:
         # Other benchmarks retain their existing measurement contract.
-        events = '{instructions:u,cycles:u},duration_time' if cycles else 'instructions:u,duration_time'
+        events = f'{{{instructions_event},{cycles_event}}}' if cycles else instructions_event
         verbose = ['-vv'] if pmu_times else []
-        launch = [str(REPO/'tools/capped'), 'perf', 'stat', *verbose, '-x', ';', '-e', events, '-o', str(perf), '--', '/usr/bin/time', '-f', '%e\t%M', '-o', str(stats), *map(str, command)]
+        launch = [str(REPO/'tools/capped')]
+        if smt_siblings is not None:
+            launch.extend([sys.executable, str(ROOT/'tools/bench_cpus.py'), str(activity), ','.join(map(str, smt_siblings))])
+        launch.extend(['perf', 'stat', *verbose, '-x', ';', '-e', events + ',duration_time',
+                       '-o', str(perf), '--', '/usr/bin/time', '-f', '%e\t%M',
+                       '-o', str(stats), *map(str, command)])
     started = time.monotonic()
     with contextlib.ExitStack() as stack:
         if compiler_only:
@@ -145,24 +153,24 @@ def sample(command, directory, compiler_only=False, env=None, *, cycles=False, c
             # Verbose perf emits the raw value, time enabled and time running.
             # The CSV percentage is rounded and can display 100 for a multiplexed event.
             if pmu_times and (raw := re.fullmatch(
-                r'(instructions:u|cycles:u): (?:-?\d+: )?\d+ (\d+) (\d+)', line
+                rf'({instructions_event}|{cycles_event}): (?:-?\d+: )?\d+ (\d+) (\d+)', line
             )):
                 event, enabled, running = raw.groups()
                 counter_times.setdefault(event, []).append([int(enabled), int(running)])
             fields = line.split(';')
             if not compiler_only and len(fields) > 2 and fields[2] == 'duration_time' and fields[0].strip().isdigit():
                 seconds = f'{int(fields[0])/1e9:.9f}'
-            if len(fields) > 4 and fields[2] in ('instructions:u', 'cycles:u'):
+            if len(fields) > 4 and fields[2] in (instructions_event, cycles_event):
                 try:
                     active_percent[fields[2]] = float(fields[4])
                 except ValueError:
                     pass
-            if len(fields) > 2 and fields[2] == 'instructions:u':
+            if len(fields) > 2 and fields[2] == instructions_event:
                 if fields[0].strip().isdigit():
                     instructions = int(fields[0])
                 else:
                     status = 'missing-counter' if status == 'ok' else status
-            if len(fields) > 2 and fields[2] == 'cycles:u' and fields[0].strip().isdigit():
+            if len(fields) > 2 and fields[2] == cycles_event and fields[0].strip().isdigit():
                 cycle_count = int(fields[0])
     if not instructions or (cycles and not cycle_count):
         status = 'missing-counter' if status == 'ok' else status
@@ -173,6 +181,8 @@ def sample(command, directory, compiler_only=False, env=None, *, cycles=False, c
         status = 'memory-censored'
     peak = re.search(r'capped: peak (\d+) MiB of', stderr)
     counters = {'cycles': cycle_count} if cycles else {}
+    if smt_siblings is not None and activity.is_file():
+        counters['smt_busy_percent'] = {int(cpu): busy for cpu, busy in json.loads(activity.read_text()).items()}
     if pmu_times:
         counters['pmu_times_ns'] = counter_times
     return dict(status=status, instructions=instructions, pmu_active_percent=active_percent, seconds=seconds, max_rss_kib=rss, tree_peak_mib=peak[1] if peak else '', wrapper_seconds=f'{elapsed:.6f}', directory=directory, **counters)

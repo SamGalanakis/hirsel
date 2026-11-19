@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sample checked release rows and compare their user-instruction receipts."""
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from decimal import Decimal, InvalidOperation
 import fcntl
 import hashlib
@@ -9,10 +9,12 @@ import json
 import math
 import os
 from pathlib import Path
+import random
 import re
 from statistics import median
 import subprocess
 import sys
+import tempfile
 
 import build
 from build import sha256
@@ -25,6 +27,7 @@ from measurement_artifacts import SHIPPING, check
 VERSION = 3
 REFUSED = 2
 INSTRUCTION_LIMIT = Decimal("0.5")
+CYCLE_RIDE_RATIO = Decimal("1.01")
 INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
 CANDIDATE_HASHES = (*ARTIFACT_HASHES, "std_sha256")
@@ -138,12 +141,15 @@ def counter_ready(sample, event):
     )
 
 
-def observe(row, target, env, siblings, *, cycles=False, label=None):
+def observe(row, target, env, siblings, *, cycles=False, label=None, quiet_window=False):
     row["affinity"] = sorted(os.sched_getaffinity(0))
-    with smt_activity(siblings, label) as busy:
+    activity = nullcontext() if quiet_window else smt_activity(siblings, label)
+    options = {"smt_siblings": siblings} if quiet_window else {}
+    with activity as busy:
         sample = measure.core_measure.sample(row["argv"], target, env=env, cwd=row["cwd"], cycles=cycles,
-                                            pmu_times=True)
-    sample["smt_busy_percent"] = busy
+                                            pmu_times=True, **options)
+    if not quiet_window:
+        sample["smt_busy_percent"] = busy
     sample["verified"] = (
         sample["status"] in ("ok", "missing-counter")
         and re.fullmatch(row["marker"].encode(), (target / "stdout").read_bytes()) is not None
@@ -151,7 +157,8 @@ def observe(row, target, env, siblings, *, cycles=False, label=None):
     if sample["status"] == "ok":
         if not sample["verified"]:
             sample["status"] = "wrong-result"
-        elif not counter_ready(sample, "instructions:u") or (cycles and not counter_ready(sample, "cycles:u")):
+        elif not all(counter_ready(sample, event + ("" if quiet_window else ":u"))
+                     for event in (("instructions", "cycles") if cycles else ("instructions",))):
             sample["status"] = "inactive-counter"
     row["stdout"] = (target / "stdout").read_text(errors="replace")
     row["sample"] = sample
@@ -373,6 +380,110 @@ def select_pair_rows(value, cases):
     return keys
 
 
+def verify_runtime_files(row, label):
+    if not row["argv"][0].startswith("./"):
+        raise ValueError(f"{label}: expected a runtime executable relative to cwd")
+    path = (Path(row["cwd"]) / row["argv"][0]).resolve()
+    if sha256(path) != row["image_sha256"]:
+        raise ValueError(f"{label}: executable no longer matches the measured image")
+    for fixture, digest in row["fixture_files"].items():
+        if sha256(Path(fixture)) != digest:
+            raise ValueError(f"{label}: measured fixture has changed: {fixture}")
+    return path
+
+
+def receipt_in(directory):
+    path = directory / "receipt.json"
+    return instruction_rows(path if path.is_file() else directory / "board.json")
+
+
+def quiet_cycle_samples(base, candidate, args, siblings, env):
+    kept = []
+    for attempt in range(1, args.max_attempts + 1):
+        sides = [("base", base), ("candidate", candidate)]
+        random.shuffle(sides)
+        samples = {}
+        with tempfile.TemporaryDirectory() as temporary:
+            for side, row in sides:
+                sample = observe(row.copy(), Path(temporary) / side, env, siblings, cycles=True, quiet_window=True)
+                if sample["status"] != "ok":
+                    detail = (Path(temporary) / side / "stderr").read_text().strip()
+                    raise ValueError(f"attempt {attempt}, {side}: {sample['status']}\n{detail}")
+                samples[side] = sample
+        if all((busy := sample["smt_busy_percent"][cpu]) is not None and busy < args.sibling_busy_threshold
+               for sample in samples.values() for cpu in siblings):
+            kept.append((samples["base"], samples["candidate"]))
+            if len(kept) == args.pairs:
+                break
+    return kept, attempt
+
+
+def report_cycle_pairs(key, kept, attempted, wanted):
+    if kept:
+        cycles, instructions = (
+            [Decimal(right[event]) / left[event] for left, right in kept] for event in ("cycles", "instructions")
+        )
+        center = median(cycles)
+        print(f"{key}: {len(kept)}/{attempted} quiet pairs, cycles {center:.6f}x "
+              f"[{min(cycles):.6f}x, {max(cycles):.6f}x], instructions {median(instructions):.6f}x")
+        for cpu in kept[0][0]["smt_busy_percent"]:
+            rates = [sample["smt_busy_percent"][cpu] for pair in kept for sample in pair]
+            print(f"  CPU {cpu} busy {min(rates):.2f}% to {max(rates):.2f}% in kept runs")
+    else:
+        print(f"{key}: 0/{attempted} quiet pairs")
+    if len(kept) < wanted:
+        verdict, status = "TOO FEW QUIET PAIRS", REFUSED
+    elif center > CYCLE_RIDE_RATIO:
+        verdict, status = "FAILS", 1
+    else:
+        verdict, status = "RIDES", 0
+    print(f"{key} {verdict}", flush=True)
+    return status
+
+
+def cycle_pairs(args):
+    if not 0 < args.sibling_busy_threshold <= 100:
+        raise ValueError("sibling busy threshold must be above 0 and at most 100 percent")
+    affinity = os.sched_getaffinity(0)
+    if args.cpu not in affinity:
+        raise ValueError(f"CPU {args.cpu} is outside the assigned affinity")
+    with measurement_slot(args.lock), tempfile.TemporaryDirectory() as temporary:
+        siblings = sibling_cpus((args.cpu,))
+        base, base_refusals = receipt_in(args.baseline)
+        after, after_refusals = receipt_in(args.candidate)
+        keys = select_pair_rows(args.rows, base)
+        env = build.capped_env(Path(temporary))
+        print(f"CPU {args.cpu}; SMT siblings {', '.join(map(str, siblings)) or 'none'}; "
+              f"quiet means below {args.sibling_busy_threshold}% busy per run", flush=True)
+        status = 0
+        try:
+            os.sched_setaffinity(0, {args.cpu})
+            for key in keys:
+                try:
+                    if key in base_refusals or key in after_refusals:
+                        raise ValueError((base_refusals | after_refusals)[key])
+                    left, right = base[key].copy(), after[key].copy()
+                    for label, row in (("base", left), ("candidate", right)):
+                        validate_row(key, row)
+                        if row["suite"] == "compile" or not verified_build(row):
+                            raise ValueError(f"{label}: expected a verified runtime build")
+                        verify_runtime_files(row, label)
+                        row["affinity"] = [args.cpu]
+                    match_rows(key, left, right)
+                    same = all(left[field] == right[field] for field in (*CANDIDATE_HASHES, "image_sha256"))
+                    if same != args.aa:
+                        raise ValueError("--aa requires identical builds and images" if args.aa
+                                         else "identical builds and images; pass --aa for a deliberate A/A run")
+                    kept, attempted = quiet_cycle_samples(left, right, args, siblings, env)
+                    status = max(status, report_cycle_pairs(key, kept, attempted, args.pairs))
+                except (*INVALID_RECEIPT, subprocess.SubprocessError) as error:
+                    print(f"{key} REFUSED ({error})", file=sys.stderr)
+                    status = REFUSED
+        finally:
+            os.sched_setaffinity(0, affinity)
+        return status
+
+
 def prepare_pair_rows(cases, keys, artifacts, upstream):
     tools = release_tools(read(artifacts))
     fixtures = {}
@@ -539,15 +650,7 @@ def profile(args):
             print(f"{field} {left[field]} -> {right[field]}")
     sides = []
     for label, row in (("baseline", left), ("candidate", right)):
-        if not row["argv"][0].startswith("./"):
-            raise ValueError(f"{label}: expected a runtime executable relative to cwd")
-        path = (Path(row["cwd"]) / row["argv"][0]).resolve()
-        if sha256(path) != row["image_sha256"]:
-            raise ValueError(f"{label}: executable no longer matches the measured image")
-        for fixture, digest in row["fixture_files"].items():
-            if sha256(Path(fixture)) != digest:
-                raise ValueError(f"{label}: measured fixture has changed: {fixture}")
-        sides.append((out / label, row, path))
+        sides.append((out / label, row, verify_runtime_files(row, label)))
     out.mkdir(parents=True)
     try:
         with measurement_slot(args.lock):
@@ -601,6 +704,18 @@ def main():
     comparison.add_argument("candidate", type=Path)
     comparison.add_argument("--threshold", type=threshold, default=INSTRUCTION_LIMIT, metavar="PERCENT")
     comparison.add_argument("--aa", action="store_true", help="require identical compiler, runtime and std/core hashes")
+    cycles = commands.add_parser("cycle-pairs", help="qualify named runtime rows with quiet interleaved counter pairs")
+    cycles.add_argument("baseline", type=Path, help="base directory containing receipt.json or board.json")
+    cycles.add_argument("candidate", type=Path, help="candidate directory containing receipt.json or board.json")
+    cycles.add_argument("--rows", required=True, metavar="ROW,ROW", help="comma-separated runtime row names")
+    cycles.add_argument("--cpu", type=int, required=True, help="measurement CPU")
+    cycles.add_argument("--pairs", type=positive_int, default=9, metavar="N", help="quiet pairs per row (default: 9)")
+    cycles.add_argument("--max-attempts", type=positive_int, default=60, metavar="N",
+                        help="attempted pairs per row (default: 60)")
+    cycles.add_argument("--sibling-busy-threshold", type=threshold, default=Decimal(5), metavar="PERCENT",
+                        help="each run must be strictly below this SMT sibling busy percentage (default: 5)")
+    cycles.add_argument("--lock", type=Path, required=True)
+    cycles.add_argument("--aa", action="store_true", help="require identical builds and images")
     profiling = commands.add_parser("profile-diff", help="attribute one matched runtime row with Callgrind")
     profiling.add_argument("row", metavar="SUITE/ROW")
     profiling.add_argument("baseline", type=Path)
@@ -626,6 +741,8 @@ def main():
             return sample(args)
         if args.action == "profile-diff":
             return profile(args)
+        if args.action == "cycle-pairs":
+            return cycle_pairs(args)
         if args.action == "elf-census":
             print(json.dumps(elf_census.census(args.baseline, args.candidate), indent=2))
             return 0

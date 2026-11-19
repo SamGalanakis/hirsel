@@ -1,9 +1,11 @@
 """CPU assignments and Linux SMT activity for benchmark runners."""
 import argparse
 from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 
@@ -83,25 +85,38 @@ def cpu_ticks(cpus):
     return ticks
 
 
-def busy_percent(before, after):
+def busy_percent(before, after, *, unobserved=0.0):
     result = {}
     for cpu, (busy, idle) in before.items():
         active = after[cpu][0] - busy
         elapsed = active + max(0, after[cpu][1] - idle)
         if active < 0:
             raise ValueError(f"CPU {cpu} busy ticks went backwards")
-        result[cpu] = 100 * active / elapsed if elapsed else 0.0
+        result[cpu] = 100 * active / elapsed if elapsed else unobserved
     return result
 
 
 @contextmanager
-def smt_activity(siblings, label=None):
+def smt_activity(siblings, label=None, *, unobserved=0.0):
     before = cpu_ticks(siblings)
     busy = {}
     try:
         yield busy
     finally:
-        busy.update(busy_percent(before, cpu_ticks(siblings)))
+        busy.update(busy_percent(before, cpu_ticks(siblings), unobserved=unobserved))
         if busy and label is not None:
             details = ", ".join(f"CPU {cpu} {value:.2f}% busy" for cpu, value in busy.items())
             print(f"{label}: SMT {details}", file=sys.stderr, flush=True)
+
+
+def run_with_smt(siblings, output, command):
+    # Run inside the cap so slot admission and teardown cannot mask busy ticks.
+    with smt_activity(siblings, unobserved=None) as busy:
+        result = subprocess.run(command)
+    output.write_text(json.dumps(busy))
+    return result.returncode
+
+
+if __name__ == "__main__":
+    output, cpus, *command = sys.argv[1:]
+    sys.exit(run_with_smt(cpu_list(cpus) if cpus else (), Path(output), command))

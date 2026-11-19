@@ -126,7 +126,9 @@ standalone executable and root limit.
 
 From a dedicated checkout of main, run the board with clean source checkouts
 at the four pins printed by `board.py --help`. The output directory must be
-new and outside the checkout.
+new and outside the checkout. The nightly host uses `build_cpus=20,21` and
+`measure_cpus=10,11` and passes both lists explicitly. Use your lane's lists
+for standalone measurements, checkbox memory, and multicore runs.
 
 ```sh
 python3 bench/awfy/board.py "$out" \
@@ -232,6 +234,23 @@ row above +0.5% exits 1. Use `--threshold PERCENT` to set another limit.
 The same command reads two complete `board.json` files. It compares Hirsel
 instructions on the 72 runtime rows and the cold and warm-edit compile rows.
 The board uses this same comparator for its nightly +2% instruction gate.
+
+### Qualify a cycle regression
+
+Pass the directories containing the base and candidate `receipt.json` or
+`board.json`, with the recorded images and fixtures still in place.
+
+```sh
+python3 bench/awfy/receipt.py cycle-pairs "$out/base-samples" "$out/candidate-samples" \
+  --rows awfy/Mandelbrot --cpu "$cpu" --pairs 9 --max-attempts 60 --lock "$lock"
+```
+
+Each pair runs both images in random order on the measurement CPU. By
+default, both runs must record less than 5% busy time on every SMT sibling.
+Use `--sibling-busy-threshold` to change that limit and `--aa` to measure
+identical builds deliberately. The command exits 0 if every row has enough
+quiet pairs and its median cycle ratio is at most 1.01x, 1 if a row exceeds
+that ratio, or 2 if a row has too few quiet pairs or the comparison is refused.
 
 ### Profile a runtime delta
 

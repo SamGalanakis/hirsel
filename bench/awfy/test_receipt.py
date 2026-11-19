@@ -1,12 +1,18 @@
+from argparse import Namespace
+from contextlib import redirect_stdout
 from copy import deepcopy
+import io
 import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import build
+import bench_cpus
+import receipt
 from receipt import build_record, fixture_identity, make_receipt, runtime_case
 
 
@@ -179,6 +185,69 @@ class InstructionGuard(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("arena/CLBG::Mandelbrot REFUSED", result.stderr)
             self.assertIn("arena/CLBG::Spectralnorm 69,882,571 -> 139,765,142 (+100.000%) FAIL", result.stdout)
+
+
+class QuietCyclePairs(unittest.TestCase):
+    def test_a_busy_sibling_in_either_run_discards_the_pair(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            topology = root / "thread_siblings_list"
+            topology.write_text("7,23\n")
+            stat = root / "stat"
+            # Each run advances 20 ticks. CPU 7 is always busy. CPU 23 is
+            # busy in run two of the first pair and run one of the second.
+            windows = iter((0, 1, 2, 0, 0, 0))
+            busy, idle = 10, 100
+
+            def snapshot():
+                stat.write_text(f"cpu7 {busy + idle} 0 0 0 0 0 0 0\n"
+                                f"cpu23 {busy} 0 0 {idle} 0 0 0 0\n")
+
+            def run(command):
+                nonlocal busy, idle
+                active = next(windows)
+                busy += active
+                idle += 20 - active
+                snapshot()
+                return subprocess.CompletedProcess(command, 0)
+
+            def sample(command, directory, *, env, cwd, cycles, pmu_times, smt_siblings):
+                directory.mkdir()
+                activity = directory / "smt.json"
+                bench_cpus.run_with_smt(smt_siblings, activity, command)
+                (directory / "stdout").write_text("verified\n")
+                return {"status": "ok", "cycles": 100, "instructions": 100,
+                        "smt_busy_percent": {int(cpu): value for cpu, value in receipt.read(activity).items()},
+                        "pmu_times_ns": {event: [[100, 100]] for event in ("cycles", "instructions")}}
+
+            snapshot()
+            row = {"argv": ["./sample"], "cwd": str(root), "marker": "verified\n"}
+            args = Namespace(max_attempts=3, pairs=1, sibling_busy_threshold=5)
+
+            def linux_file(path):
+                if path == "/proc/stat":
+                    return stat
+                self.assertEqual(path, "/sys/devices/system/cpu/cpu7/topology/thread_siblings_list")
+                return topology
+
+            with (patch.object(bench_cpus, "Path", side_effect=linux_file),
+                  patch.object(bench_cpus.subprocess, "run", side_effect=run),
+                  patch.object(receipt.measure.core_measure, "sample", side_effect=sample)):
+                siblings = bench_cpus.sibling_cpus([7])
+                kept, attempts = receipt.quiet_cycle_samples(row, row, args, siblings, {})
+            self.assertEqual((len(kept), attempts), (1, 3))
+            self.assertEqual([run["smt_busy_percent"] for run in kept[0]], [{23: 0.0}, {23: 0.0}])
+
+    def test_ride_uses_the_median_of_the_paired_cycle_ratios(self):
+        for center, verdict, expected in ((1009, "RIDES", 0), (1011, "FAILS", 1)):
+            with self.subTest(verdict=verdict), redirect_stdout(io.StringIO()) as output:
+                samples = [
+                    ({"cycles": 1000 * scale, "instructions": 100, "smt_busy_percent": {}},
+                     {"cycles": count * scale, "instructions": 100, "smt_busy_percent": {}})
+                    for scale, count in ((100, 1130), (1, center), (1, 910))
+                ]
+                self.assertEqual(receipt.report_cycle_pairs("awfy/List", samples, 3, 3), expected)
+                self.assertIn(f"awfy/List {verdict}\n", output.getvalue())
 
 
 class ProfileSelfCosts(unittest.TestCase):

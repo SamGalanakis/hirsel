@@ -49,6 +49,73 @@ fn line_end(text: Bytes, at: u64, eof: bool) -> Result[Next, Error] {
     Error(Invalid(at))
 }
 
+// Scan only complete blocks. A quote ends a quoted run, whereas an
+// unquoted run ends at any of the four structural bytes.
+fn scan_field_blocks(text: Bytes, start: u64, delimiter: u8, quoted: bool) -> u64 {
+    let quote: Simd[u8, 32] = simd.splat(b'"')
+    let sep: Simd[u8, 32] = simd.splat(delimiter)
+    let cr: Simd[u8, 32] = simd.splat(13)
+    let lf: Simd[u8, 32] = simd.splat(10)
+    let n = list.len(text)
+    let mut i = start
+    while n - i >= 32 {
+        let block: Simd[u8, 32] = list.lanes(text, i)
+        let quotes = simd.eq(block, quote)
+        let mask = if quoted {
+            simd.bitmask(quotes)
+        } else {
+            simd.bitmask(quotes | simd.eq(block, sep) | simd.eq(block, cr) | simd.eq(block, lf))
+        }
+        if mask != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(mask))
+            return i + offset
+        }
+        i += 32
+    }
+    i
+}
+
+fn zero_byte_mask(word: u64) -> u64 {
+    // Borrow can add higher bits. The first marked byte is always exact.
+    int.wrapping_sub(word, 0x0101010101010101) & ~word & 0x8080808080808080
+}
+
+fn field_stop(text: Bytes, start: u64, delimiter: u8, quoted: bool) -> u64 {
+    let n = list.len(text)
+    let sep: u64 = int.widen(delimiter)
+    let spread = sep * 0x0101010101010101
+    let mut i = start
+    // Test nearby terminators before taking the vector path.
+    for _ in 0u32 .. 2 {
+        if n - i < 8 {
+            break
+        }
+        let word = list.word_le(text, i)
+        let quotes = zero_byte_mask(word ^ 0x2222222222222222)
+        let mask = if quoted {
+            quotes
+        } else {
+            quotes | zero_byte_mask(word ^ spread) | zero_byte_mask(word ^ 0x0d0d0d0d0d0d0d0d) | zero_byte_mask(word ^ 0x0a0a0a0a0a0a0a0a)
+        }
+        if mask != 0 {
+            let bit: u64 = int.widen(int.trailing_zeros(mask))
+            return i + (bit >> 3)
+        }
+        i += 8
+    }
+    if n - i >= 32 {
+        i = scan_field_blocks(text, i, delimiter, quoted)
+    }
+    while i < n {
+        let c = text[i]
+        if c == b'"' || (!quoted && (c == delimiter || c == 13 || c == 10)) {
+            return i
+        }
+        i += 1
+    }
+    i
+}
+
 /// Clears fields and scans the record at at. Record(next) advances past its line end.
 /// End means EOF at at. Need means re-offer the same at after appending input,
 /// including when a final CR could still be followed by LF.
@@ -83,6 +150,7 @@ pub fn record(text: Bytes, at: u64, d: Dialect, eof: bool, mut fields: List[Fiel
         let mut stop = start
         if quoted {
             loop {
+                stop = field_stop(text, stop, d.delimiter, true)
                 if stop == n {
                     return if eof {
                         Error(Invalid(i))
@@ -90,26 +158,16 @@ pub fn record(text: Bytes, at: u64, d: Dialect, eof: bool, mut fields: List[Fiel
                         Ok(Need)
                     }
                 }
-                if text[stop] == b'"' {
-                    if stop + 1 == n || text[stop + 1] != b'"' {
-                        break
-                    }
-                    stop += 2
-                } else {
-                    stop += 1
+                if stop + 1 == n || text[stop + 1] != b'"' {
+                    break
                 }
+                stop += 2
             }
             i = stop + 1
         } else {
-            while stop < n {
-                let b = text[stop]
-                if b == d.delimiter || b == 13 || b == 10 {
-                    break
-                }
-                if b == b'"' {
-                    return Error(Invalid(stop))
-                }
-                stop += 1
+            stop = field_stop(text, stop, d.delimiter, false)
+            if stop < n && text[stop] == b'"' {
+                return Error(Invalid(stop))
             }
             i = stop
         }

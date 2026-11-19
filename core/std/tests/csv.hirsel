@@ -153,6 +153,42 @@ fn grammar_offsets() -> bool {
     invalid_at(result.unwrap(b"a\"b"), 1) && invalid_at(result.unwrap(b"\"a\"b"), 3) && invalid_at(result.unwrap(b"\"ab"), 0) && invalid_at(result.unwrap(b"a\rb"), 1)
 }
 
+// The quoted field starts at 1 and has n+3 raw bytes (a doubled quote and a).
+// The second field ends at CR. A bare quote in the same lane is invalid.
+// expect: run field_markers_cross_blocks() = true
+fn field_markers_cross_blocks() -> bool {
+    let padding = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    let d = dialect(b';', true)
+    let mut fields: List[csv.Field] = list.new()
+    for n in 0u64 .. 80 {
+        let prefix = result.unwrap(string.repeat("x", n))
+        let mut input = result.unwrap(string.from("\""))
+        result.unwrap(string.push(mut input, prefix))
+        result.unwrap(string.push(mut input, "\"\"a\";"))
+        result.unwrap(string.push(mut input, prefix))
+        result.unwrap(string.push(mut input, "\r\n"))
+        result.unwrap(string.push(mut input, padding))
+        let next = result.unwrap(csv.record(string.as_bytes(input), 0, d, true, mut fields))
+        if next != Record(2 * n + 8) || list.len(fields) != 2 {
+            return false
+        }
+        let first = fields[0]
+        let second = fields[1]
+        if !first.quoted || first.span.start != 1 || first.span.end != n + 4 || second.quoted || second.span.start != n + 6 || second.span.end != 2 * n + 6 {
+            return false
+        }
+        let mut bad = result.unwrap(string.from(prefix))
+        result.unwrap(string.push(mut bad, "\""))
+        result.unwrap(string.push(mut bad, padding))
+        if !invalid_at(string.as_bytes(bad), n) {
+            // At n=0 the quote is an opening quote with no closing one; it
+            // still reports the offset of that opener.
+            return false
+        }
+    }
+    true
+}
+
 // C8. core/std/api/csv.md, Field and Error. Mutant: append before validating UTF-8.
 // expect: run invalid_utf8_is_atomic() = true
 fn invalid_utf8_is_atomic() -> bool {

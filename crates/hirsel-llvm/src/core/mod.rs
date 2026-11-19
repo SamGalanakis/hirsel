@@ -592,6 +592,7 @@ fn emit_module(
             literals: Vec::new(),
             address_slots: values::address_slots(body, &flow),
             scoped: hirsel_core_ir::extent::scoped_slots(body, &module.signatures),
+            live: None,
             scoped_ended: false,
             step_labels: Default::default(),
             unchecked_steps: false,
@@ -803,6 +804,7 @@ fn emit_module(
         e.br(Label::block(0u32));
         for (i, b) in body.blocks.iter().enumerate() {
             e.block(Label::block(i));
+            e.enter_block(i);
             if e.receive_loops.exit(i) {
                 e.native_call("hirsel_core_receive_loop_end", &[], &[]);
             }
@@ -1358,9 +1360,13 @@ struct FunctionEmitter<'a> {
     literals: Vec<Option<Value>>,
     address_slots: Vec<bool>,
     /// Slots whose `StorageLive` and `StorageDead` begin and end their storage
-    /// (hirsel_core_ir::extent::scoped_slots). Every return ends them too, so
-    /// an inlined copy's storage ends where the callee would have returned.
-    scoped: Vec<bool>,
+    /// (hirsel_core_ir::extent::scoped_slots). Every return ends those that
+    /// may be live there too, so an inlined copy's storage ends where the
+    /// callee would have returned.
+    scoped: hirsel_core_ir::extent::ScopedSlots,
+    /// The slots that may be live at the point being emitted, one bit per
+    /// slot, or `None` where unknown (a return then ends every scoped slot).
+    live: Option<Vec<u64>>,
     /// Whether a forwarded tail call has already ended the scoped slots
     /// before the return that follows it.
     scoped_ended: bool,
@@ -1497,13 +1503,17 @@ impl FunctionEmitter<'_> {
         self.end_scoped();
         self.effect(Operation::Return(None));
     }
-    /// Ends every scoped slot's storage before a return, once.
+    /// Ends every scoped slot's storage that may be live before a return, once.
     fn end_scoped(&mut self) {
         if std::mem::take(&mut self.scoped_ended) {
             return;
         }
-        for slot in 0..self.scoped.len() {
-            if !self.scoped[slot] {
+        for slot in 0..self.scoped.slots.len() {
+            let ended = self
+                .live
+                .as_ref()
+                .is_some_and(|live| live[slot / 64] & (1 << (slot % 64)) == 0);
+            if !self.scoped.slots[slot] || ended {
                 continue;
             }
             let home = Value::from(Local::Slot(slot));
@@ -1728,8 +1738,23 @@ impl FunctionEmitter<'_> {
         );
     }
 
+    /// Starts tracking which slots may be live at `block`'s entry.
+    fn enter_block(&mut self, block: usize) {
+        self.live = Some(self.scoped.may_live_at(block));
+    }
+
     fn inst(&mut self, inst: &Inst, index: usize) -> Result<()> {
         self.anchor = self.body.inst_anchors[index];
+        if let (Inst::StorageLive { slot } | Inst::StorageDead { slot }, Some(live)) =
+            (inst, self.live.as_mut())
+        {
+            let (word, bit) = (slot.index() / 64, 1u64 << (slot.index() % 64));
+            if matches!(inst, Inst::StorageLive { .. }) {
+                live[word] |= bit;
+            } else {
+                live[word] &= !bit;
+            }
+        }
         match *inst {
             // Its literal stands at each use.
             Inst::Const { .. } => {}
@@ -1906,11 +1931,11 @@ impl FunctionEmitter<'_> {
                 };
                 self.store_with(&ty(self.vty(value)), &x, &p, &memory);
             }
-            Inst::StorageLive { slot } if self.scoped[slot.index()] => {
+            Inst::StorageLive { slot } if self.scoped.slots[slot.index()] => {
                 let home = Value::from(Local::Slot(slot.index()));
                 self.runtime_void("llvm.lifetime.start.p0", &[ptr(home)]);
             }
-            Inst::StorageDead { slot } if self.scoped[slot.index()] => {
+            Inst::StorageDead { slot } if self.scoped.slots[slot.index()] => {
                 let home = Value::from(Local::Slot(slot.index()));
                 self.runtime_void("llvm.lifetime.end.p0", &[ptr(home)]);
             }

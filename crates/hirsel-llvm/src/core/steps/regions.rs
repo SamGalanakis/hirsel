@@ -185,6 +185,7 @@ impl FunctionEmitter<'_> {
         });
         for &b in &plan.nodes {
             self.block(label(number, self.body.blocks.len(), b));
+            self.enter_block(b);
             let row = &self.body.blocks[b];
             for (offset, inst) in row.insts.get(&self.body.insts).unwrap().iter().enumerate() {
                 if !matches!(inst, Inst::Const { .. }) {
@@ -199,6 +200,7 @@ impl FunctionEmitter<'_> {
         }
         self.step_labels.clear();
         self.unchecked_steps = false;
+        self.live = None;
         for &exit in &plan.exits {
             self.block(exit_label(number, self.body.blocks.len(), exit));
             self.step_refund();

@@ -1457,6 +1457,7 @@ impl FunctionEmitter<'_> {
             let done = Label::new("step_chunk_done", n);
             for &block in &plan.nodes {
                 self.block(self.step_label(block));
+                self.enter_block(block);
                 if let Some(prefixes) = &prefixes {
                     let Stride::Constant(stride) = plan.stride else {
                         unreachable!();
@@ -1526,6 +1527,7 @@ impl FunctionEmitter<'_> {
             }
             self.step_labels.clear();
             self.unchecked_steps = false;
+            self.live = None;
             self.block(done);
             if prefixes.is_some() {
                 let Stride::Constant(stride) = plan.stride else {
@@ -1682,7 +1684,10 @@ impl FunctionEmitter<'_> {
         self.block(fast);
         let after = self.bin(Binary::Sub, &Type::I64, &before, &int(group.cost));
         self.store_steps(&after, &counter);
+        // Both copies start with the same slots live.
+        let live = self.live.clone();
         for prepaid in [true, false] {
+            self.live = live.clone();
             self.precharge = prepaid.then_some(Precharge::Group {
                 remaining: group.cost,
             });

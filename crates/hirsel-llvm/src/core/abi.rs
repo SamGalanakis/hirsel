@@ -644,7 +644,8 @@ impl FunctionEmitter<'_> {
         self.debug_location = debug.map(|(_, location)| location);
         self.view_invariants.clear();
         // The wrapper has no slots of its own.
-        self.scoped.clear();
+        self.scoped = hirsel_core_ir::extent::ScopedSlots::none(0);
+        self.live = None;
         self.next = 0;
         self.has_status = true;
         self.abi = Return::for_signature(self.abi.target, sig, layouts, true);

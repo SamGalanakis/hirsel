@@ -771,14 +771,18 @@ fn escaping(b: &Body, signatures: &[Signature], from: &[Vec<u32>], loans: bool) 
 ///
 /// No use follows a `StorageDead` without a new `StorageLive` (wf), so between
 /// a slot's end and its next begin nothing reaches its bytes.
-pub fn scoped_slots(b: &Body, signatures: &[Signature]) -> Vec<bool> {
+///
+/// The result also holds the slots that may be live at each block's entry, so
+/// an engine ends at a return only the scoped slots that may be live there.
+pub fn scoped_slots(b: &Body, signatures: &[Signature]) -> ScopedSlots {
     let k = b.slots.len();
+    let words = k.div_ceil(64);
     if !b
         .insts
         .iter()
         .any(|i| matches!(i, Inst::StorageLive { .. }))
     {
-        return vec![false; k];
+        return ScopedSlots::none(k);
     }
     let from = provenance(b);
     let mut out: Vec<bool> = escaping(b, signatures, &from, true)
@@ -791,7 +795,6 @@ pub fn scoped_slots(b: &Body, signatures: &[Signature]) -> Vec<bool> {
             out[s] = false;
         }
     }
-    let words = k.div_ceil(64);
     let bit = |s: usize| (s / 64, 1u64 << (s % 64));
     // Live on every path into each block (`must`, a meet) and on some path
     // (`may`, a join).
@@ -833,7 +836,39 @@ pub fn scoped_slots(b: &Body, signatures: &[Signature]) -> Vec<bool> {
             }
         }
     }
-    out
+    ScopedSlots {
+        slots: out,
+        words,
+        may,
+    }
+}
+
+/// [`scoped_slots`]'s answer.
+pub struct ScopedSlots {
+    /// Whether each slot is scoped.
+    pub slots: Vec<bool>,
+    words: usize,
+    /// The slots live on some path into each block, `words` words per block;
+    /// empty when the body begins no slot.
+    may: Vec<u64>,
+}
+
+impl ScopedSlots {
+    /// No scoped slot among `k`.
+    pub fn none(k: usize) -> Self {
+        ScopedSlots {
+            slots: vec![false; k],
+            words: k.div_ceil(64),
+            may: Vec::new(),
+        }
+    }
+    /// The slots that may be live at `block`'s entry, one bit per slot.
+    pub fn may_live_at(&self, block: usize) -> Vec<u64> {
+        if self.may.is_empty() {
+            return vec![0; self.words];
+        }
+        self.may[block * self.words..(block + 1) * self.words].to_vec()
+    }
 }
 
 /// Each block's slots live at its entry, as bit sets of `words` words: live on

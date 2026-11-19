@@ -281,7 +281,7 @@ fn decode_string(s: String, start: u64, end: u64) -> Result[String, Error] {
     Ok(take key)
 }
 
-type EmitKind = Raw | Quoted
+type EmitKind = Raw | Quoted | Key | Signed(i64) | Double(f64)
 
 /// A scoped serializer that appends directly to the caller's String.
 pub scoped type Writer {
@@ -303,6 +303,16 @@ pub fn write(mut out: String, pretty: bool, build: scoped fn(json.Writer) -> Res
         match kind {
             Raw => string.push(mut out, s),
             Quoted => push_quoted(mut out, s),
+            Key => {
+                push_quoted(mut out, s)?
+                string.push(mut out, if pretty {
+                    ": "
+                } else {
+                    ":"
+                })
+            },
+            Signed(n) => string.push_i64(mut out, n),
+            Double(n) => float.push_json_f64(mut out, n),
         }
     }, pretty: pretty)
     build(w)
@@ -320,6 +330,16 @@ pub fn write_string_value(w: json.Writer, s: String) -> Result[(), Capacity] {
 /// Appends the original spelling of a number accepted by the JSON reader.
 pub fn write_number_spelling(w: json.Writer, spelling: String) -> Result[(), Capacity] {
     raw(w, spelling)
+}
+
+/// Appends a signed integer as JSON.
+pub fn write_i64(w: json.Writer, n: i64) -> Result[(), Capacity] {
+    (w.emit)(Signed(n), "")
+}
+
+/// Appends a binary64 using float.push_json_f64, including null for nonfinite.
+pub fn write_f64(w: json.Writer, n: f64) -> Result[(), Capacity] {
+    (w.emit)(Double(n), "")
 }
 
 /// Appends the JSON spelling of a boolean.
@@ -381,12 +401,7 @@ pub fn element(w: json.Writer, mut items: Items) -> Result[(), Capacity] {
 /// Writes the separator, escaped key, and colon before the next member value.
 pub fn write_member(w: json.Writer, mut items: Items, key: String) -> Result[(), Capacity] {
     element(w, mut items)?
-    write_string_value(w, key)?
-    raw(w, if w.pretty {
-        ": "
-    } else {
-        ":"
-    })
+    (w.emit)(Key, key)
 }
 
 /// Appends compact JSON, with members and duplicates in document order. Numbers keep

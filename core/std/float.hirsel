@@ -1441,23 +1441,48 @@ const POW5: Inline[(u64, u64), 651] =[(0xeef453d6923bd65a, 0x113faa2906a13b3f), 
 /// Alloc: at most 330 bytes for the text, then the push into s. Cost: O(digits of x).
 /// Ex: `float.push_f64(mut line, 0.1)?` appends "0.1"
 pub fn push_f64(mut s: String, x: f64) -> Result[(), Capacity] {
+    push_shortest(mut s, x, false)
+}
+
+/// Appends the shortest round-trip number with serde_json's spelling. Finite
+/// values keep a fractional digit in integral decimal form and use scientific
+/// notation below 1e-5 or at or above 1e16. Nonfinite values append null.
+/// Fails: Capacity. Alloc: the decimal text and growth of s. Cost: O(digits).
+pub fn push_json_f64(mut s: String, x: f64) -> Result[(), Capacity] {
+    push_shortest(mut s, x, true)
+}
+
+fn push_shortest(mut s: String, x: f64, json: bool) -> Result[(), Capacity] {
     let bits = float.to_bits64(x)
     if !is_finite(x) {
-        return string.push(mut s, special(bits))
+        let representation = if json {
+            "null"
+        } else {
+            special(bits)
+        }
+        return string.push(mut s, representation)
     }
     if bits >> 63 != 0 {
         string.push(mut s, "-")?
     }
     let (c, p) = shortest64(x)
     if c == 0 {
-        return string.push(mut s, "0")
+        return string.push(mut s, if json {
+            "0.0"
+        } else {
+            "0"
+        })
     }
     let mut t: Inline[u8, 20] =[0; 20]
     let len = digits_of(c, mut t)
     let width: i64 = int.narrow(len)
     let point = width + p
+    if json && (point <= -5 || point > 16) {
+        return push_scientific(mut s, t, len, point - 1)
+    }
+    let fractional_zero = json && p >= 0
     // Three layouts: 0.000ddd, dd.ddd, ddd000.
-    let n: u64 = if point <= 0 {
+    let decimal_width: u64 = if point <= 0 {
         let lead: u64 = int.narrow(-point)
         2 + lead + len
     } else if point < width {
@@ -1465,6 +1490,11 @@ pub fn push_f64(mut s: String, x: f64) -> Result[(), Capacity] {
     } else {
         let tail: u64 = int.narrow(point)
         tail
+    }
+    let n = decimal_width + if fractional_zero {
+        2
+    } else {
+        0
     }
     let mut o: Bytes = list.with_capacity(n)?
     list.fill(mut o, n, b'0')?
@@ -1476,6 +1506,9 @@ pub fn push_f64(mut s: String, x: f64) -> Result[(), Capacity] {
         let dot: u64 = int.narrow(point)
         o[dot] = b'.'
     }
+    if fractional_zero {
+        o[decimal_width] = b'.'
+    }
     for i in 0 .. len {
         if o[at] == b'.' {
             at += 1
@@ -1484,6 +1517,42 @@ pub fn push_f64(mut s: String, x: f64) -> Result[(), Capacity] {
         at += 1
     }
     push_ascii(mut s, take o)
+}
+
+// serde_json 1.0.154 uses Zmij's signed exponent spelling.
+fn push_scientific(mut s: String, digits: Inline[u8, 20], len: u64, exponent: i64) -> Result[(), Capacity] {
+    let magnitude: u64 = int.narrow(if exponent < 0 {
+        -exponent
+    } else {
+        exponent
+    })
+    let mut exponent_digits: Inline[u8, 20] =[0; 20]
+    let power_len = digits_of(magnitude, mut exponent_digits)
+    let mantissa_len = len + if len > 1 {
+        1
+    } else {
+        0
+    }
+    let n = mantissa_len + 2 + power_len
+    let mut out: Bytes = list.with_capacity(n)?
+    list.fill(mut out, n, b'0')?
+    out[0] = b'0' + digits[0]
+    if len > 1 {
+        out[1] = b'.'
+        for i in 1u64 .. len {
+            out[i + 1] = b'0' + digits[i]
+        }
+    }
+    out[mantissa_len] = b'e'
+    out[mantissa_len + 1] = if exponent < 0 {
+        b'-'
+    } else {
+        b'+'
+    }
+    for i in 0u64 .. power_len {
+        out[mantissa_len + 2 + i] = b'0' + exponent_digits[i]
+    }
+    push_ascii(mut s, take out)
 }
 
 /// Appends x rounded to `digits` places after the point, as Rust's `{:.N}` prints an f64:

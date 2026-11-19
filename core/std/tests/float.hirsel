@@ -363,10 +363,16 @@ fn fixed_huge() -> bool {
     string.byte_len(s) == 309 && string.starts_with(s, "1000000000000000052504760255204420") && string.ends_with(s, "6865459400540160.0000000")
 }
 
+fn shown_json(x: f64) -> String {
+    let mut out = string.new()
+    result.unwrap(float.push_json_f64(mut out, x))
+    take out
+}
+
 // Shortest digits in Rust's `{}` layout: no exponent, no ".0".
 // expect: run shown_plain() = true
 fn shown_plain() -> bool {
-    shown(0.1) == "0.1" && shown(1.0) == "1" && shown(-0.0) == "-0" && shown(0.0) == "0" && shown(123.456) == "123.456" && shown(1e21) == "1000000000000000000000" && shown(1e-7) == "0.0000001" && shown(0.1 + 0.2) == "0.30000000000000004"
+    shown(0.1) == "0.1" && shown(1.0) == "1" && shown(-0.0) == "-0" && shown(0.0) == "0" && shown(123.456) == "123.456" && shown(1e21) == "1000000000000000000000" && shown(1e-7) == "0.0000001" && shown(0.1 + 0.2) == "0.30000000000000004" && shown_json(1.0) == "1.0" && shown_json(-0.0) == "-0.0" && shown_json(1e-5) == "0.00001" && shown_json(1e-6) == "1e-6" && shown_json(1e16) == "1e+16" && shown_json(float.from_bits64(0x7ff0000000000000)) == "null"
 }
 
 // Powers of two: below 2^64 the gap is half the gap above, which makes the shortest

@@ -6,87 +6,6 @@ type Coordinate {
     z: f64
 }
 
-// serde_json's ryu spelling, from the public shortest digits/exponent API.
-// Generated coordinates are finite and non-negative; names use fixed7 separately.
-// Coordinates lie in [0, 1) at 8 places, so the spelling is almost always "0."
-// and the digits after a few zeros. That case is written here, where the caller
-// inlines it; zero, exponent and integer-part spellings go to number_rare.
-fn number(mut out: String, value: f64) -> Result[(), helper.Error] {
-    let (coefficient, power) = float.shortest64(value)
-    let mut digits = string.new()
-    helper.mem(string.push_u64(mut digits, coefficient))?
-    let width: i64 = int.narrow(string.byte_len(digits))
-    let point = width + power
-    if coefficient == 0 || point <= -5i64 || point > 0 {
-        return number_rare(mut out, coefficient, digits, power)
-    }
-    helper.mem(string.push(mut out, "0."))?
-    for _ in 0 .. -point {
-        helper.mem(string.push(mut out, "0"))?
-    }
-    helper.mem(string.push(mut out, digits))?
-    Ok(())
-}
-
-// Every spelling but the fraction below one. Loop-free, so it stays one shared
-// copy: serde_json likewise keeps ryu's formatting out of its value writer.
-fn number_rare(mut out: String, coefficient: u64, digits: String, power: i64) -> Result[(), helper.Error] {
-    if coefficient == 0 {
-        helper.mem(string.push(mut out, "0.0"))?;
-        return Ok(())
-    }
-    let size = string.byte_len(digits)
-    let width: i64 = int.narrow(size)
-    let point = width + power
-    if point <= -5i64 || point > 16 {
-        helper.mem(string.push(mut out, string.slice(digits, 0, 1)))?
-        if size > 1 {
-            helper.mem(string.push(mut out, "."))?
-            helper.mem(string.push(mut out, string.slice(digits, 1, size)))?
-        }
-        helper.mem(string.push(mut out, "e"))?
-        helper.mem(string.push_i64(mut out, point - 1))?
-    } else if power >= 0 {
-        // point <= 16 bounds the zeros at 15.
-        let zeros: u64 = int.narrow(power)
-        helper.mem(string.push(mut out, digits))?
-        helper.mem(string.push(mut out, string.slice("0000000000000000", 0, zeros)))?
-        helper.mem(string.push(mut out, ".0"))?
-    } else {
-        let cut: u64 = int.narrow(point)
-        helper.mem(string.push(mut out, string.slice(digits, 0, cut)))?
-        helper.mem(string.push(mut out, "."))?
-        helper.mem(string.push(mut out, string.slice(digits, cut, size)))?
-    }
-    Ok(())
-}
-
-fn generate(n: u64) -> Result[String, helper.Error] {
-    let mut out = helper.mem(string.from("{\"coordinates\":["))?
-    let mut g = helper.lcg()
-    for i in 0 .. n {
-        let x = float.round(helper.next_float(mut g, 1.0) * 100000000.0) / 100000000.0
-        let y = float.round(helper.next_float(mut g, 1.0) * 100000000.0) / 100000000.0
-        let z = float.round(helper.next_float(mut g, 1.0) * 100000000.0) / 100000000.0
-        if i > 0 {
-            helper.mem(string.push(mut out, ","))?
-        }
-        helper.mem(string.push(mut out, "{\"x\":"))?
-        number(mut out, x)?
-        helper.mem(string.push(mut out, ",\"y\":"))?
-        number(mut out, y)?
-        helper.mem(string.push(mut out, ",\"z\":"))?
-        number(mut out, z)?
-        helper.mem(string.push(mut out, ",\"name\":\""))?
-        helper.mem(float.push_fixed64(mut out, helper.next_float(mut g, 1.0), 7))?
-        helper.mem(string.push(mut out, " "))?
-        helper.mem(string.push_i64(mut out, int.widen(helper.next_int(mut g, 10000))))?
-        helper.mem(string.push(mut out, "\",\"opts\":{\"1\":[1,true]}}"))?
-    }
-    helper.mem(string.push(mut out, "],\"info\":\"some info\"}"))?
-    Ok(take out)
-}
-
 type NamedCoordinate {
     point: Coordinate,
     name: String,
@@ -117,48 +36,59 @@ fn prepare(n: u64) -> Result[Document, helper.Error] {
     Ok(Document(coordinates: take coordinates, info: "some info"))
 }
 
-// The generator only produces ASCII names, keys and info with no JSON escapes.
+fn write_options(w: std.json.Writer, depth: u64, opts: Map[String, (i32, bool)]) -> Result[(), Capacity] {
+    std.json.object(w, depth, scoped fn(object: std.json.Writer, mut fields: std.json.Items) -> Result[(), Capacity] {
+        for (key, opt) in opts {
+            let (count, enabled) = opt
+            std.json.write_member(object, mut fields, key)?
+            std.json.array(object, fields.depth, scoped fn(array: std.json.Writer, mut values: std.json.Items) -> Result[(), Capacity] {
+                std.json.element(array, mut values)?
+                std.json.write_i64(array, int.widen(count))?
+                std.json.element(array, mut values)?
+                std.json.write_bool(array, enabled)
+            })?
+        }
+        Ok(())
+    })
+}
+
+fn write_coordinate(w: std.json.Writer, depth: u64, row: NamedCoordinate) -> Result[(), Capacity] {
+    std.json.object(w, depth, scoped fn(object: std.json.Writer, mut fields: std.json.Items) -> Result[(), Capacity] {
+        std.json.write_member(object, mut fields, "x")?
+        std.json.write_f64(object, row.point.x)?
+        std.json.write_member(object, mut fields, "y")?
+        std.json.write_f64(object, row.point.y)?
+        std.json.write_member(object, mut fields, "z")?
+        std.json.write_f64(object, row.point.z)?
+        std.json.write_member(object, mut fields, "name")?
+        std.json.write_string_value(object, row.name)?
+        std.json.write_member(object, mut fields, "opts")?
+        write_options(object, fields.depth, row.opts)
+    })
+}
+
 fn render(data: Document) -> Result[String, helper.Error] {
     let mut out = string.new()
-    helper.mem(string.push(mut out, "{\"coordinates\":["))?
-    let mut first = true
-    for c in data.coordinates {
-        if !first {
-            helper.mem(string.push(mut out, ","))?
-        }
-        helper.mem(string.push(mut out, "{\"x\":"))?
-        number(mut out, c.point.x)?
-        helper.mem(string.push(mut out, ",\"y\":"))?
-        number(mut out, c.point.y)?
-        helper.mem(string.push(mut out, ",\"z\":"))?
-        number(mut out, c.point.z)?
-        helper.mem(string.push(mut out, ",\"name\":\""))?
-        helper.mem(string.push(mut out, c.name))?
-        helper.mem(string.push(mut out, "\",\"opts\":{"))?
-        let mut first_opt = true
-        for (key, opt) in c.opts {
-            if !first_opt {
-                helper.mem(string.push(mut out, ","))?
-            }
-            let (count, enabled) = opt
-            helper.mem(string.push(mut out, "\""))?
-            helper.mem(string.push(mut out, key))?
-            helper.mem(string.push(mut out, "\":["))?
-            helper.mem(string.push_i64(mut out, int.widen(count)))?
-            helper.mem(string.push(mut out, if enabled {
-                ",true]"
-            } else {
-                ",false]"
-            }))?
-            first_opt = false
-        }
-        helper.mem(string.push(mut out, "}}"))?
-        first = false
-    }
-    helper.mem(string.push(mut out, "],\"info\":\""))?
-    helper.mem(string.push(mut out, data.info))?
-    helper.mem(string.push(mut out, "\"}"))?
+    helper.mem(std.json.write(mut out, false, scoped fn(w: std.json.Writer) -> Result[(), Capacity] {
+        std.json.object(w, 0, scoped fn(object: std.json.Writer, mut fields: std.json.Items) -> Result[(), Capacity] {
+            std.json.write_member(object, mut fields, "coordinates")?
+            std.json.array(object, fields.depth, scoped fn(array: std.json.Writer, mut values: std.json.Items) -> Result[(), Capacity] {
+                for c in data.coordinates {
+                    std.json.element(array, mut values)?
+                    write_coordinate(array, values.depth, c)?
+                }
+                Ok(())
+            })?
+            std.json.write_member(object, mut fields, "info")?
+            std.json.write_string_value(object, data.info)
+        })
+    }))?
     Ok(take out)
+}
+
+fn generate(n: u64) -> Result[String, helper.Error] {
+    let data = prepare(n)?
+    render(data)
 }
 
 fn coordinate(j: std.json.Json) -> Result[Coordinate, helper.Error] {

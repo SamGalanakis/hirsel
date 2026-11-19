@@ -169,7 +169,7 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
             "loop-mssa(loop-instsimplify,loop-simplifycfg,licm<no-allowspeculation>,"
                       "loop-rotate,licm<allowspeculation>,simple-loop-unswitch<nontrivial;trivial>),"
             "simplifycfg<switch-range-to-icmp>,instcombine<no-verify-fixpoint>,"
-            "loop(loop-idiom,indvars,extra-unswitch,loop-deletion,full-unroll),"
+            "loop(loop-idiom,indvars,simple-loop-unswitch<trivial>,extra-unswitch,loop-deletion,full-unroll),"
             "sroa<modify-cfg>,early-vector-combine,mldst-motion,gvn,sccp,bdce,instcombine<no-verify-fixpoint>,"
             "dfa-jump-threading,jump-threading,correlated-propagation,adce,memcpyopt,dse,"
             "loop-mssa(licm<allowspeculation>),"

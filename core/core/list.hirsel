@@ -100,7 +100,7 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
     let scratch: Slots[T] = slots_new(n)?
     let mut g = Hole(xs: view xs, scratch: take scratch, active: idle())
     if n <= small_len() {
-        insertion_sort(mut g, 0, n, before)
+        insertion_sort_hole(mut g, 0, n, before)
     } else {
         drift(mut g, 0, n, n <= 2 * small_len(), before)
     }
@@ -194,7 +194,7 @@ fn create_run[T](mut g: Hole[T], lo: u64, hi: u64, min_good: u64, eager: bool, b
         } else {
             small_len()
         }
-        insertion_sort(mut g, lo, lo + k, before)
+        insertion_sort_hole(mut g, lo, lo + k, before)
         return (k << 1) | 1
     }
     let k = if size < min_good {
@@ -330,7 +330,7 @@ fn merge_down[T](mut st: Active, xs: View[List[T]], s: View[List[T]], lo: u64, b
     }
 }
 
-fn insertion_sort[T](mut g: Hole[T], lo: u64, hi: u64, before: scoped fn(T, T) -> Order) {
+fn insertion_sort_hole[T](mut g: Hole[T], lo: u64, hi: u64, before: scoped fn(T, T) -> Order) {
     let mut i = lo + 1
     while i < hi {
         insert_tail(mut g.active, g.xs, view g.scratch.raw, lo, i, before)
@@ -389,7 +389,7 @@ fn quicksort[T](mut g: Hole[T], lo: u64, hi: u64, limit: u64, before: scoped fn(
         let size = b - a
         if size <= small_len() || budget == 0 {
             if size <= small_len() {
-                insertion_sort(mut g, a, b, before)
+                insertion_sort_hole(mut g, a, b, before)
             } else {
                 drift(mut g, a, b, true, before)
             }
@@ -409,13 +409,13 @@ fn quicksort[T](mut g: Hole[T], lo: u64, hi: u64, limit: u64, before: scoped fn(
         let mut left: u64 = 0
         let mut moved = pivot
         if !least {
-            let (l, m) = partition(mut g, a, b, pivot, false, before)
+            let (l, m) = partition_hole(mut g, a, b, pivot, false, before)
             left = l
             moved = m
         }
         if left == 0 {
             // The permutation so far is the identity, so the pivot is still at its index.
-            let (equal, _) = partition(mut g, a, b, pivot, true, before)
+            let (equal, _) = partition_hole(mut g, a, b, pivot, true, before)
             a += equal
             ancestor = hi
         } else {
@@ -481,7 +481,7 @@ fn median3[T](xs: View[List[T]], a: u64, b: u64, c: u64, before: scoped fn(T, T)
 // count and the pivot's new index. Normally keys before the pivot go left and the pivot
 // goes right; an equal partition sends left every key the pivot does not precede, the
 // pivot included.
-fn partition[T](mut g: Hole[T], lo: u64, hi: u64, p: u64, equal: bool, before: scoped fn(T, T) -> Order) -> (u64, u64) {
+fn partition_hole[T](mut g: Hole[T], lo: u64, hi: u64, p: u64, equal: bool, before: scoped fn(T, T) -> Order) -> (u64, u64) {
     let size = hi - lo
     // The right element scanned at index i goes to scratch t - i + left.
     let t = lo + hi - 1

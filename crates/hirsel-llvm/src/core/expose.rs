@@ -539,6 +539,15 @@ fn literal_recursive_entries(module: &Module) -> Vec<bool> {
         .collect()
 }
 
+/// A body's size for exposure: its instructions, less its `StorageDead`s. A
+/// slot's storage is priced once, at its `StorageLive`; ending it emits no code.
+fn price(b: &Body) -> usize {
+    b.insts
+        .iter()
+        .filter(|i| !matches!(i, Inst::StorageDead { .. }))
+        .count()
+}
+
 pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Module> {
     // Marks have no runtime meaning. Remove them before eligibility, budgets
     // or block merging can let one change the exposed program.
@@ -565,7 +574,7 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
         .map(|(i, f)| {
             f.body.as_ref().filter(|b| {
                 !step_entry(i)
-                    && b.insts.len() <= 192
+                    && price(b) <= 192
                     && b.blocks.len() <= 24
                     && b.insts.iter().all(supported)
             })
@@ -636,14 +645,14 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
                         if module.functions[f.index()].versioned && !caller_versioned {
                             return None;
                         }
-                        (!call.cold && f.index() != i && callee.insts.len().max(1) <= budget)
+                        (!call.cold && f.index() != i && price(callee).max(1) <= budget)
                             .then_some((b, offset, callee))
                     })
             });
             let Some((b, offset, callee)) = selected else {
                 break;
             };
-            budget -= callee.insts.len().max(1);
+            budget -= price(callee).max(1);
             let Inst::Call { call } = body.insts[body.blocks[b].insts.start as usize + offset]
             else {
                 unreachable!()

@@ -838,7 +838,10 @@ static bool hasSnapshotArgument(CallInst &Call, const DataLayout &DL) {
     unsigned I = Arg.getArgNo();
     if (!Arg.getType()->isPointerTy() || !Arg.onlyReadsMemory()) continue;
     auto *Slot = dyn_cast<AllocaInst>(Call.getArgOperand(I));
-    if (!Slot || !Slot->isStaticAlloca() || !Slot->hasNUses(2)) continue;
+    // The copy and the call, apart from lifetime markers, which generate no code.
+    if (!Slot || !Slot->isStaticAlloca() ||
+        count_if(Slot->users(), [](User *U) { return !isa<LifetimeIntrinsic>(U); }) != 2)
+      continue;
     auto Bytes = Slot->getAllocationSize(DL);
     // Leave small copies to the ordinary inliner.
     if (!Bytes || Bytes->isScalable() || Bytes->getFixedValue() < 32) continue;

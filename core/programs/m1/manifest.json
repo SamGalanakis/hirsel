@@ -116,6 +116,13 @@
           "signatures": true
         },
         {
+          "file": "core/core/inline.hirsel",
+          "modules": [
+            "inline"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/core/int.hirsel",
           "modules": [
             "int"

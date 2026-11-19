@@ -1,6 +1,10 @@
-// A finite, isolated call tree can spend its sole exit's exact Step cost at
-// the root. Evaluate the existing metered IR over constants and private stack
-// objects. An unsupported value, effect or path leaves the checked call alone.
+// A finite, isolated call tree can spend its exact Step cost up front. Evaluate
+// the existing metered IR over constants and private stack objects, recording
+// for every call it runs the peak reservation and consumed prefix relative to
+// the window at that call. The root and each proved call inside the tree's
+// checked copy then take a prepaid copy when the window strictly exceeds the
+// peak, and otherwise run checked. An unsupported value, effect or path leaves
+// the checked call alone.
 #ifndef HIRSEL_LLVM_STEP_TREE_H
 #define HIRSEL_LLVM_STEP_TREE_H
 
@@ -17,6 +21,7 @@
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Utils/Local.h>
+#include <map>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -133,7 +138,52 @@ struct Directions {
 struct Cost {
   uint64_t Maximum;
   uint64_t Consumed;
+  bool operator==(const Cost &Other) const {
+    return Maximum == Other.Maximum && Consumed == Other.Consumed;
+  }
+  bool operator!=(const Cost &Other) const { return !(*this == Other); }
 };
+
+// One proved execution of a call: its integer arguments, and its cost relative
+// to the window at the call when that cost is exact and worth a guard.
+struct Instance {
+  SmallVector<std::optional<uint64_t>, 4> Args;
+  std::optional<Cost> Charge;
+};
+
+// A call site's admission rule. Every run of the site has the same cost, or
+// one integer argument determines it. Values with no proved cost run checked.
+struct Summary {
+  std::optional<Cost> Fixed;
+  unsigned Key = 0;
+  SmallVector<std::pair<uint64_t, Cost>, 8> Cases;
+};
+
+static Summary summarize(ArrayRef<Instance> Runs) {
+  Summary S;
+  if (Runs.empty()) return S;
+  if (llvm::all_of(Runs, [&](const Instance &R) {
+        return R.Charge && *R.Charge == *Runs.front().Charge;
+      })) {
+    S.Fixed = Runs.front().Charge;
+    return S;
+  }
+  for (unsigned Key = 0; Key < Runs.front().Args.size(); ++Key) {
+    std::map<uint64_t, std::optional<Cost>> Table;
+    bool Determines = true;
+    for (const Instance &R : Runs) {
+      if (!R.Args[Key]) { Determines = false; break; }
+      auto [It, New] = Table.try_emplace(*R.Args[Key], R.Charge);
+      if (!New && It->second != R.Charge) { Determines = false; break; }
+    }
+    if (!Determines) continue;
+    S.Key = Key + 1;
+    for (auto &[Value, Charge] : Table)
+      if (Charge) S.Cases.emplace_back(Value, *Charge);
+    return S;
+  }
+  return S;
+}
 
 struct Tree {
   static constexpr uint64_t Slice = 65536;
@@ -147,6 +197,7 @@ struct Tree {
   SmallPtrSet<Instruction *, 32> WindowAccesses;
   SmallPtrSet<Instruction *, 32> ProgramAccesses;
   DenseMap<CondBrInst *, Directions> Branches;
+  MapVector<CallInst *, std::vector<Instance>> Runs;
   unsigned Work = 2000000;
   uint64_t Maximum = 0;
 
@@ -294,10 +345,22 @@ struct Tree {
         }
         if (Args.empty() || Args.front().Ptr.Base != &Meter || Args.front().Ptr.Offset != 0)
           return {};
-        for (auto &Arg : ArrayRef(Args).drop_front())
+        Instance Run;
+        for (auto &Arg : ArrayRef(Args).drop_front()) {
           if (Arg.Ptr.Base == &Meter) return {};
+          auto *Int = dyn_cast_or_null<ConstantInt>(Arg.Bits);
+          Run.Args.push_back(Int && Int->getBitWidth() <= 64
+              ? std::optional<uint64_t>(Int->getZExtValue()) : std::nullopt);
+        }
         Calls.insert(C);
-        return run(*F, Args, Depth + 1);
+        auto Entry = window();
+        auto Outer = std::exchange(Maximum, 0);
+        auto Result = run(*F, Args, Depth + 1);
+        auto Inner = std::exchange(Maximum, std::max(Outer, Maximum));
+        if (!Result) return {};
+        if (Entry) Run.Charge = charge(*Entry, window(), Inner);
+        Runs[C].push_back(std::move(Run));
+        return Result;
       }
       if (!overflowIntrinsic(F->getIntrinsicID())) return {};
     } else if (!isa<BinaryOperator, ICmpInst, CastInst, ExtractValueInst, InsertValueInst,
@@ -345,14 +408,29 @@ struct Tree {
     return true;
   }
 
-  std::optional<Cost> cost() const {
+  std::optional<uint64_t> window() const {
     auto Left = read({const_cast<Object *>(&Meter), WindowOffset}, Type::getInt64Ty(Context), DL);
     auto *Count = Left ? dyn_cast_or_null<ConstantInt>(Left->Bits) : nullptr;
-    if (!Count || Count->isZero() || Count->uge(Slice - 15)) return {};
+    if (!Count || Count->isZero() || Count->getValue().ugt(Slice)) return {};
+    return Count->getZExtValue();
+  }
+
+  // Maximum is absolute against a Slice-sized starting window; an invocation
+  // entered at Entry needs only the part above what was consumed before it.
+  // A guard pays for itself only over a few Steps.
+  static std::optional<Cost> charge(uint64_t Entry, std::optional<uint64_t> Exit,
+                                    uint64_t Inner) {
+    if (!Exit || *Exit > Entry || Entry - *Exit < 16) return {};
+    auto Consumed = Entry - *Exit;
+    auto Before = Slice - Entry;
+    return Cost{std::max(Inner > Before ? Inner - Before : 0, Consumed), Consumed};
+  }
+
+  // A metered branch that went both ways means some run refilled or stopped.
+  bool exact() const {
     for (auto &[Branch, Direction] : Branches)
-      if (Direction.Meter && Direction.Seen == 3) return {};
-    auto Consumed = Slice - Count->getZExtValue();
-    return Cost{std::max(Maximum, Consumed), Consumed};
+      if (Direction.Meter && Direction.Seen == 3) return false;
+    return true;
   }
 };
 
@@ -453,30 +531,104 @@ static bool initialize(AllocaInst &Root, Instruction &At, DominatorTree &DT,
   return true;
 }
 
+// Run At through Fast when the window strictly exceeds its proved peak, and
+// through Slow otherwise. Equality stays checked so the last Step can yield.
+static void admit(CallInst &At, const Summary &S, Function *Fast, Function *Slow,
+                  MDNode *Tag) {
+  At.setTailCallKind(CallInst::TCK_None);
+  if (!S.Fixed && S.Cases.empty()) {
+    At.setCalledFunction(Slow);
+    return;
+  }
+  auto &Context = At.getContext();
+  auto *Word = Type::getInt64Ty(Context);
+  auto *Original = At.getParent();
+  auto *Join = Original->splitBasicBlock(At.getNextNode(), "step.tree.join");
+  auto *Checked = Original->splitBasicBlock(At.getIterator(), "step.tree.checked");
+  auto *F = At.getFunction();
+  auto *Test = BasicBlock::Create(Context, "step.tree.test", F, Checked);
+  auto *Prepaid = BasicBlock::Create(Context, "step.tree.prepaid", F, Checked);
+  IRBuilder<> B(Test);
+  B.SetCurrentDebugLocation(At.getDebugLoc());
+  Value *Peak, *Consumed;
+  Original->getTerminator()->eraseFromParent();
+  if (S.Fixed) {
+    IRBuilder<>(Original).CreateBr(Test);
+    Peak = B.getInt64(S.Fixed->Maximum);
+    Consumed = B.getInt64(S.Fixed->Consumed);
+  } else {
+    auto *PeakPhi = B.CreatePHI(Word, S.Cases.size());
+    auto *ConsumedPhi = B.CreatePHI(Word, S.Cases.size());
+    auto *Selector = At.getArgOperand(S.Key);
+    auto *Switch = SwitchInst::Create(Selector, Checked, S.Cases.size(), Original);
+    for (auto &[Value, Charge] : S.Cases) {
+      auto *Case = BasicBlock::Create(Context, "step.tree.case", F, Test);
+      IRBuilder<>(Case).CreateBr(Test);
+      Switch->addCase(ConstantInt::get(cast<IntegerType>(Selector->getType()), Value), Case);
+      PeakPhi->addIncoming(B.getInt64(Charge.Maximum), Case);
+      ConsumedPhi->addIncoming(B.getInt64(Charge.Consumed), Case);
+    }
+    Peak = PeakPhi;
+    Consumed = ConsumedPhi;
+  }
+  auto *Field = B.CreateConstGEP1_64(B.getInt8Ty(), At.getArgOperand(0), Tree::WindowOffset);
+  auto *Before = B.CreateAlignedLoad(Word, Field, Align(8));
+  Before->setMetadata(LLVMContext::MD_tbaa, Tag);
+  B.CreateCondBr(B.CreateICmpSGT(Before, Peak), Prepaid, Checked);
+  B.SetInsertPoint(Prepaid);
+  auto *After = B.CreateSub(Before, Consumed, "", false, true);
+  B.CreateAlignedStore(After, Field, Align(8))->setMetadata(LLVMContext::MD_tbaa, Tag);
+  auto *New = cast<CallInst>(At.clone());
+  New->setCalledFunction(Fast);
+  New->addFnAttr(Attribute::get(Context, "hirsel-step-neutral"));
+  B.Insert(New);
+  B.CreateBr(Join);
+  At.setCalledFunction(Slow);
+  if (!At.getType()->isVoidTy()) {
+    auto *Result = PHINode::Create(At.getType(), 2, "", Join->begin());
+    At.replaceAllUsesWith(Result);
+    Result->addIncoming(&At, Checked);
+    Result->addIncoming(New, Prepaid);
+  }
+}
+
+// Every proved function gets a prepaid copy, without window accesses or the
+// branches no proved run took, and a checked copy reachable only from the
+// root's checked edge. That copy repeats the proved runs exactly (the refill
+// changes no program state), so each of its proved call sites can admit the
+// run it is about to make by the summary of the same site.
 static void replace(CallInst &At, Tree &Proof, Cost Charge) {
   struct Copy {
-    Function *Body;
-    std::unique_ptr<ValueToValueMapTy> Map;
+    Function *Prepaid;
+    Function *Checked;
+    std::unique_ptr<ValueToValueMapTy> PrepaidMap;
+    std::unique_ptr<ValueToValueMapTy> CheckedMap;
   };
   MapVector<Function *, Copy> Copies;
   auto &M = *At.getModule();
   auto StepNeutral = Attribute::get(M.getContext(), "hirsel-step-neutral");
+  auto *Tag = stepAccess(**Proof.WindowAccesses.begin());
   for (Function &F : M) {
     if (!Proof.Functions.contains(&F)) continue;
-    auto Map = std::make_unique<ValueToValueMapTy>();
-    auto *Body = CloneFunction(&F, *Map);
-    Body->setName(F.getName() + ".step_tree");
-    Copies.try_emplace(&F, Copy{Body, std::move(Map)});
+    Copy C{nullptr, nullptr, std::make_unique<ValueToValueMapTy>(),
+           std::make_unique<ValueToValueMapTy>()};
+    C.Prepaid = CloneFunction(&F, *C.PrepaidMap);
+    C.Prepaid->setName(F.getName() + ".step_tree");
+    C.Checked = CloneFunction(&F, *C.CheckedMap);
+    C.Checked->setName(F.getName() + ".step_tree.checked");
+    Copies.try_emplace(&F, std::move(C));
   }
+  SmallVector<std::pair<CallInst *, CallInst *>, 16> Sites;
   for (auto &[F, Copy] : Copies) {
     for (BasicBlock &B : *F) {
       for (Instruction &I : B) {
-        auto *Mapped = cast<Instruction>((*Copy.Map)[&I]);
+        auto *Mapped = cast<Instruction>((*Copy.PrepaidMap)[&I]);
         auto *Call = dyn_cast<CallInst>(&I);
         if (Call && Proof.Calls.contains(Call)) {
           auto *Nested = cast<CallInst>(Mapped);
-          Nested->setCalledFunction(Copies.find(Call->getCalledFunction())->second.Body);
+          Nested->setCalledFunction(Copies.find(Call->getCalledFunction())->second.Prepaid);
           Nested->addFnAttr(StepNeutral);
+          Sites.emplace_back(Call, cast<CallInst>((*Copy.CheckedMap)[&I]));
         } else if (Proof.WindowAccesses.contains(&I)) {
           if (isa<LoadInst>(I)) Mapped->replaceAllUsesWith(PoisonValue::get(Mapped->getType()));
           Mapped->eraseFromParent();
@@ -485,45 +637,21 @@ static void replace(CallInst &At, Tree &Proof, Cost Charge) {
       if (auto *Branch = dyn_cast<CondBrInst>(B.getTerminator())) {
         auto It = Proof.Branches.find(Branch);
         if (It != Proof.Branches.end() && It->second.Seen != 3) {
-          auto *Mapped = cast<CondBrInst>((*Copy.Map)[Branch]);
+          auto *Mapped = cast<CondBrInst>((*Copy.PrepaidMap)[Branch]);
           Mapped->setCondition(ConstantInt::getBool(M.getContext(), It->second.Seen == 1));
         }
       }
     }
   }
-  for (auto &[F, Copy] : Copies) removeUnreachableBlocks(*Copy.Body);
-
-  auto *New = cast<CallInst>(At.clone());
-  New->setCalledFunction(Copies.find(At.getCalledFunction())->second.Body);
-  New->addFnAttr(StepNeutral);
-  auto *Next = At.getNextNode();
-  auto *Original = At.getParent();
-  auto *Join = Original->splitBasicBlock(Next, "step.tree.join");
-  auto *Slow = Original->splitBasicBlock(At.getIterator(), "step.tree.checked");
-  auto *Fast = BasicBlock::Create(M.getContext(), "step.tree.prepaid", At.getFunction(), Slow);
-  IRBuilder<> Guard(Original->getTerminator());
-  Guard.SetCurrentDebugLocation(At.getDebugLoc());
-  auto *Tag = stepAccess(**Proof.WindowAccesses.begin());
-  auto *Field = Guard.CreateConstGEP1_64(Guard.getInt8Ty(), At.getArgOperand(0), Tree::WindowOffset);
-  auto *Before = Guard.CreateAlignedLoad(Guard.getInt64Ty(), Field, Align(8));
-  Before->setMetadata(LLVMContext::MD_tbaa, Tag);
-  auto *Room = Guard.CreateICmpSGT(Before, Guard.getInt64(Charge.Maximum));
-  Guard.CreateCondBr(Room, Fast, Slow);
-  Original->getTerminator()->eraseFromParent();
-  IRBuilder<> Body(Fast);
-  Body.SetCurrentDebugLocation(At.getDebugLoc());
-  auto *After = Body.CreateSub(Before, Body.getInt64(Charge.Consumed), "", false, true);
-  Body.CreateAlignedStore(After, Field, Align(8))->setMetadata(LLVMContext::MD_tbaa, Tag);
-  Body.Insert(New);
-  Body.CreateBr(Join);
-  At.setTailCallKind(CallInst::TCK_None);
-  New->setTailCallKind(CallInst::TCK_None);
-  if (!At.getType()->isVoidTy()) {
-    auto *Result = PHINode::Create(At.getType(), 2, "", Join->begin());
-    At.replaceAllUsesWith(Result);
-    Result->addIncoming(&At, Slow);
-    Result->addIncoming(New, Fast);
+  for (auto &[F, Copy] : Copies) removeUnreachableBlocks(*Copy.Prepaid);
+  for (auto &[Call, Nested] : Sites) {
+    auto &Callee = Copies.find(Call->getCalledFunction())->second;
+    admit(*Nested, summarize(Proof.Runs.lookup(Call)), Callee.Prepaid, Callee.Checked, Tag);
   }
+  auto &Root = Copies.find(At.getCalledFunction())->second;
+  Summary Whole;
+  Whole.Fixed = Charge;
+  admit(At, Whole, Root.Prepaid, Root.Checked, Tag);
 }
 
 static void tryCall(CallInst &At) {
@@ -563,8 +691,9 @@ static void tryCall(CallInst &At) {
       Args.push_back({C, {}, false});
     }
   }
-  if (!Proof.run(*At.getCalledFunction(), Args, 0)) return;
-  if (auto Cost = Proof.cost()) replace(At, Proof, *Cost);
+  if (!Proof.run(*At.getCalledFunction(), Args, 0) || !Proof.exact()) return;
+  if (auto Cost = Tree::charge(Tree::Slice, Proof.window(), Proof.Maximum))
+    replace(At, Proof, *Cost);
 }
 
 } // namespace step_tree

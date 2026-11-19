@@ -1,0 +1,24 @@
+// web-platform-tests, ac78b567f5404b6f2dc0418ea380af3946a47fca.
+// eventsource/format-{field-data,leading-space,newlines,field-id}.any.js.
+// Copyright web-platform-tests contributors. BSD-3-Clause, see vectors/wpt-LICENSE.
+// Encode the inputs that must dispatch the WPT event data and ID. The streams
+// below use the encoder's canonical LF separators and one space after a colon.
+// expect: run wpt_eventsource_data() = true
+fn wpt_eventsource_data() -> bool {
+    let rows: Inline[(String, Option[String], String), 6] =[
+    // format-field-data.any.js. Even an empty data field dispatches an event.
+    ("", None, "data: \n\n"), ("\n", None, "data: \ndata: \n\n"), ("test", None, "data: test\n\n"),
+    // format-leading-space.any.js. A tab is event data after the single separator.
+    ("\ttest\r\r\ntest", None, "data: \ttest\ndata: \ndata: test\n\n"),
+    // format-newlines.any.js. CRLF and LF are each one separator.
+    ("test\r\n\ntest", None, "data: test\ndata: \ndata: test\n\n"),
+    // format-field-id.any.js. Preserve the first event's non-ASCII ID.
+    ("hello", Some("…"), "id: …\ndata: hello\n\n"),]
+    for (data, id, wire) in rows {
+        let mut out = result.unwrap(sse.buffer(64))
+        if sse.event(mut out, None, id, string.as_bytes(data)) != Ok(()) || sse.as_bytes(out) != string.as_bytes(wire) {
+            return false
+        }
+    }
+    true
+}

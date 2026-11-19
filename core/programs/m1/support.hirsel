@@ -25,6 +25,24 @@ pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), E
     mem(result.capacity_only(map.insert(mut m, take k, take v)))
 }
 
+pub fn mapped[T, U](xs: List[T], f: scoped fn(T) -> Result[U, Error]) -> Result[List[U], Error] {
+    let mut ys: List[U] = mem(list.with_capacity(list.len(xs)))?
+    for x in xs {
+        push(mut ys, f(x)?)?
+    }
+    Ok(take ys)
+}
+
+pub fn count_if[T](xs: List[T], f: scoped fn(T) -> bool) -> u64 {
+    let mut n: u64 = 0
+    for x in xs {
+        if f(x) {
+            n += 1
+        }
+    }
+    n
+}
+
 pub fn put(out: Stdout, s: String) -> Result[(), Error] waits {
     match stdout.write(out, s) {
         Ok(()) => Ok(()),

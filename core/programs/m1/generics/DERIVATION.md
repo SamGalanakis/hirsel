@@ -45,6 +45,6 @@ These are source derivations, not executed Hirsel results.
 
 ## Source length
 
-Physical lines, including comments and blanks: 78 idiomatic and 133 matched;
+Physical lines, including comments and blanks: 66 idiomatic and 119 matched;
 Rust entry plus shared program.rs: 72 idiomatic and 109 matched.
 Shared support is counted separately in REPORT.md.

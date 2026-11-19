@@ -511,6 +511,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if ty.0 <= HOLE.0 {
             return true;
         }
+        if let Some(facts) = self.closed_type_facts.get(ty.0 as usize)
+            && let Some(kind) = facts.kind(self.p, ty)
+        {
+            return match kind {
+                Kind::Plain | Kind::Region => true,
+                Kind::Own | Kind::Resource | Kind::Counted | Kind::Generic => false,
+                Kind::Scoped => *facts
+                    .scoped_copies
+                    .get_or_init(|| copyable(&self.p.decls, &self.p.types, ty, &[])),
+            };
+        }
         let Some((kind, copies)) = self.kind_cache.get(&ty) else {
             return copyable(&self.p.decls, &self.t, ty, &self.params);
         };

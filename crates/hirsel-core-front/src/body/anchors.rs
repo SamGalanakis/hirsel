@@ -330,6 +330,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if ty.0 <= HOLE.0 {
             return Kind::Plain;
         }
+        if let Some(facts) = self.closed_type_facts.get(ty.0 as usize)
+            && let Some(kind) = facts.kind(self.p, ty)
+        {
+            return kind;
+        }
         if let Some((kind, _)) = self.kind_cache.get(&ty) {
             return *kind;
         }

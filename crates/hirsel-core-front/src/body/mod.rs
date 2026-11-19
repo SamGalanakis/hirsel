@@ -1111,6 +1111,21 @@ struct BodyInstance {
     row: (FuncId, SigId),
 }
 
+#[derive(Default)]
+pub(crate) struct ClosedTypeFacts {
+    kind: std::sync::OnceLock<Option<Kind>>,
+    scoped_copies: std::sync::OnceLock<bool>,
+}
+
+impl ClosedTypeFacts {
+    #[inline]
+    fn kind(&self, p: &Program<'_>, ty: TyId) -> Option<Kind> {
+        *self
+            .kind
+            .get_or_init(|| (!has_param(&p.types, ty)).then(|| kind(&p.decls, &p.types, ty, &[])))
+    }
+}
+
 struct Cx<'c, 'a, 'e> {
     p: &'c Program<'a>,
     at: ItemRef,
@@ -1231,6 +1246,7 @@ struct Cx<'c, 'a, 'e> {
     reps: HashMap<TyId, Result<Rep, &'static str>>,
     /// Type kinds under this body's fixed generic bounds, shared with ownership uses.
     kind_cache: HashMap<TyId, (Kind, std::cell::Cell<Option<bool>>)>,
+    closed_type_facts: &'c [ClosedTypeFacts],
     /// The owners of the body, in the order they began (FAIL-8).
     owners: Vec<cleanup::Owner>,
     owner_buf: Vec<cleanup::Owner>,
@@ -1381,6 +1397,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             clone_to: None,
             reps: HashMap::default(),
             kind_cache: HashMap::default(),
+            closed_type_facts: p.closed_type_facts.get_or_init(|| {
+                (0..p.types.len())
+                    .map(|_| ClosedTypeFacts::default())
+                    .collect()
+            }),
             owners: vec![],
             owner_buf: vec![],
             retained_owners: vec![],

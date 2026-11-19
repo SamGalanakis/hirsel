@@ -976,6 +976,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             found: &[Option<TyId>],
             roots: &[Option<TyId>],
         ) -> TyId {
+            if roots.is_empty() && !has_param(t, ty) {
+                return ty;
+            }
             match t.kind(ty).clone() {
                 TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => {
                     found[i as usize].unwrap_or(HOLE)
@@ -1015,9 +1018,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => ty,
             }
         }
-        if roots.is_empty() && !has_param(&self.t, pt) {
-            return pt;
-        }
         fill(&mut self.t, pt, s, roots)
     }
     /// `pt` with the type arguments found so far, when they determine it.
@@ -1031,6 +1031,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         roots: &[Option<TyId>],
     ) -> Option<TyId> {
         fn ready(t: &impl TyRead, ty: TyId, found: &[Option<TyId>]) -> bool {
+            if !has_param(t, ty) {
+                return true;
+            }
             match t.kind(ty) {
                 TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => found[*i as usize].is_some(),
                 TyKind::Anchored(x, root) => ready(t, *x, found) && ready(t, *root, found),
@@ -1067,9 +1070,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if self.outside_vector(n, t, "a type argument") == ERROR && t != ERROR {
                 return;
             }
-            if !p.fns[f].generics[i].region
-                && self.type_kind(t) == Kind::Scoped
-            {
+            if !p.fns[f].generics[i].region && self.type_kind(t) == Kind::Scoped {
                 // OWN-19: only a user-declared generic refuses a scoped type argument. A
                 // core operation takes one, unless its signature would make the scoped
                 // value an element of a collection or a field of a non-scoped type.

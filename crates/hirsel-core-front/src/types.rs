@@ -485,6 +485,9 @@ pub fn subst(t: &mut impl TyRead, ty: TyId, args: &[TyId]) -> TyId {
 }
 
 fn subst_at(t: &mut impl TyRead, ty: TyId, args: &[TyId], depth: u32) -> TyId {
+    if !has_param(t, ty) {
+        return ty;
+    }
     match t.kind(ty).clone() {
         TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => {
             let value = args.get(i as usize).copied().unwrap_or(ERROR);

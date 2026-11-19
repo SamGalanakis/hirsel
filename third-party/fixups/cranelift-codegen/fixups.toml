@@ -1,1 +1,3 @@
-buildscript.run = true
+# A registry crate carries its package version. Do not let its git probe
+# discover the enclosing Hirsel checkout and embed an undeclared revision.
+buildscript.run.env.GIT_DIR = "/dev/null"

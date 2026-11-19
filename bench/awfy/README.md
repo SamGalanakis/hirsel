@@ -190,3 +190,10 @@ Callgrind self-count deltas. It permits different release compiler or runtime
 hashes for attribution and prints both hashes when they differ. Each side
 keeps its raw profile, verified stdout and address map alongside offsets,
 disassembly and DWARF inline frames when available.
+
+### Compare ELF size
+
+Pass two unstripped images to `receipt.py elf-census BASELINE CANDIDATE`.
+It emits JSON with section file bytes, sized symbols and their sections,
+relocation and unwind bytes, and the bytes outside sections. It creates its own
+temporary GNU-stripped copies for the shipping-size comparison.

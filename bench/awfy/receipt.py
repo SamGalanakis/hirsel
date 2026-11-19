@@ -15,6 +15,7 @@ import sys
 
 import build
 from build import sha256
+import elf_census
 import measure
 import profile_diff
 from measurement_artifacts import SHIPPING, check
@@ -340,12 +341,18 @@ def main():
     profiling.add_argument("candidate", type=Path)
     profiling.add_argument("out", type=Path)
     profiling.add_argument("--lock", type=Path, required=True)
+    census = commands.add_parser("elf-census", help="compare file bytes and symbol owners in two ELF images")
+    census.add_argument("baseline", type=Path)
+    census.add_argument("candidate", type=Path)
     args = parser.parse_args()
     try:
         if args.action == "sample":
             return sample(args)
         if args.action == "profile-diff":
             return profile(args)
+        if args.action == "elf-census":
+            print(json.dumps(elf_census.census(args.baseline, args.candidate), indent=2))
+            return 0
         return compare(args.baseline, args.candidate, args.threshold)
     except (KeyError, OSError, ValueError, TypeError, AttributeError, re.error, subprocess.SubprocessError) as error:
         print(f"{args.action}: {error}", file=sys.stderr)

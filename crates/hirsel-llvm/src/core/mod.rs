@@ -685,6 +685,9 @@ fn emit_module(
                 scoped: hirsel_core_ir::extent::scoped_slots(body, &module.signatures),
                 live: None,
                 scoped_ended: false,
+                current: None,
+                exits: Vec::new(),
+                exit_live: Some(Vec::new()),
                 step_labels: Default::default(),
                 unchecked_steps: false,
                 precharge: None,
@@ -984,7 +987,9 @@ fn emit_module(
                     function_debug.map(|d| d.location(anchor))
                 })?;
             }
+            e.finish_exit();
             e.sink.end_function();
+            e.current = None;
             e.step_counter = None;
             if !has_status {
                 e.infallible_wrapper(
@@ -1485,6 +1490,13 @@ struct FunctionEmitter<'a> {
     /// Whether a forwarded tail call has already ended the scoped slots
     /// before the return that follows it.
     scoped_ended: bool,
+    /// The block being emitted, or `None` in the entry block.
+    current: Option<Label>,
+    /// Returns that branched to the shared exit: each one's value and block,
+    /// and the scoped slots that may be live at any of them (`None`: every
+    /// scoped slot). The exit ends those slots once and returns.
+    exits: Vec<(Option<(Type, Value)>, Label)>,
+    exit_live: Option<Vec<u64>>,
     step_labels: std::collections::BTreeMap<usize, Label>,
     unchecked_steps: bool,
     precharge: Option<steps::Precharge>,
@@ -1542,6 +1554,7 @@ impl FunctionEmitter<'_> {
         self.sink.instruction(None, op, self.debug_location);
     }
     fn block(&mut self, label: Label) {
+        self.current = Some(label);
         self.sink.block(label);
     }
     fn temp(&mut self, t: Type) -> Value {
@@ -1609,14 +1622,63 @@ impl FunctionEmitter<'_> {
     fn ret(&mut self, t: &Type, v: &Value) {
         self.end_view_invariants();
         self.flush_steps();
-        self.end_scoped();
-        self.effect(Operation::Return(Some((t, v))));
+        if !self.to_exit(Some((t, v))) {
+            self.end_scoped();
+            self.effect(Operation::Return(Some((t, v))));
+        }
     }
     fn ret_void(&mut self) {
         self.end_view_invariants();
         self.flush_steps();
+        if !self.to_exit(None) {
+            self.end_scoped();
+            self.effect(Operation::Return(None));
+        }
+    }
+    /// Branches a return to the shared exit when the function has scoped
+    /// slots, so their ends are emitted once rather than before every return.
+    /// A return after a forwarded tail call, or in the entry block, stays put.
+    fn to_exit(&mut self, v: Option<(&Type, &Value)>) -> bool {
+        let Some(from) = self.current else {
+            return false;
+        };
+        if self.scoped_ended || !self.scoped.slots.iter().any(|&s| s) {
+            return false;
+        }
+        match (&mut self.exit_live, &self.live) {
+            (Some(all), Some(live)) => {
+                all.resize(live.len(), 0);
+                for (a, l) in all.iter_mut().zip(live) {
+                    *a |= l;
+                }
+            }
+            (exit_live, _) => *exit_live = None,
+        }
+        self.exits
+            .push((v.map(|(t, v)| (t.clone(), v.clone())), from));
+        self.br(Label::plain("exit"));
+        true
+    }
+    /// Emits the shared exit, if any return branched to it: ends the scoped
+    /// slots that may be live at a return once, then returns.
+    fn finish_exit(&mut self) {
+        if self.exits.is_empty() {
+            return;
+        }
+        let exits = std::mem::take(&mut self.exits);
+        self.live = std::mem::replace(&mut self.exit_live, Some(Vec::new()));
+        self.block(Label::plain("exit"));
+        // The phi leads the block; the ends follow it.
+        let value = exits[0].0.as_ref().map(|(t, _)| t.clone()).map(|t| {
+            let incoming: Vec<(Value, Label)> = exits
+                .into_iter()
+                .map(|(v, from)| (v.unwrap().1, from))
+                .collect();
+            let v = self.emit(Operation::Phi(&t, &incoming));
+            (t, v)
+        });
         self.end_scoped();
-        self.effect(Operation::Return(None));
+        self.effect(Operation::Return(value.as_ref().map(|(t, v)| (t, v))));
     }
     /// Ends every scoped slot's storage that may be live before a return, once.
     fn end_scoped(&mut self) {

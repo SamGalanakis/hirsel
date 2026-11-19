@@ -36,17 +36,11 @@ fn normal(v: Vec3) -> Vec3 {
 }
 
 fn below(a: f64, b: f64) -> bool {
-    match float.total_order(a, b) {
-        Less => true,
-        _ => false
-    }
+    float.lt(a, b)
 }
 
 fn above(a: f64, b: f64) -> bool {
-    match float.total_order(a, b) {
-        Greater => true,
-        _ => false
-    }
+    float.gt(a, b)
 }
 
 fn intersect(dir: Vec3, obj: Sphere) -> Option[f64] {

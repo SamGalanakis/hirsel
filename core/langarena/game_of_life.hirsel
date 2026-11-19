@@ -35,10 +35,7 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
                     }
                 }
             }
-            let alive = match float.total_order(helper.next_float(mut g, 1.0), 0.1) {
-                Less => true,
-                _ => false
-            }
+            let alive = float.lt(helper.next_float(mut g, 1.0), 0.1)
             let cell = Cell(alive: alive, next_state: false, neighbors: neighbors)
             let _ = list.push(mut cells, take cell)
         }

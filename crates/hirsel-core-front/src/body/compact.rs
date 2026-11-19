@@ -172,6 +172,21 @@ impl Cx<'_, '_, '_> {
         )
         .0
     }
+    /// The offset a link at `off` refers to: one subtraction with no check (MEM-10).
+    /// Every blob that can hold a link is made by `dest.put`, which checks each
+    /// link's child identity and writes a distance back to a complete earlier
+    /// child, or is a whole-blob copy of one by `clone_in`, which keeps every
+    /// offset. Streamable documents, span builders and copied text hold no links.
+    fn link_target(&mut self, off: ValueId, distance: ValueId, n: NodeId) -> ValueId {
+        self.list_arith(
+            hirsel_core_ir::ArithOp::Sub,
+            hirsel_core_ir::ArithMode::Wrapping,
+            off,
+            distance,
+            n,
+        )
+        .0
+    }
     pub(super) fn packed_add_k(&mut self, left: ValueId, k: u64, n: NodeId) -> Option<ValueId> {
         if k == 0 {
             return Some(left);
@@ -386,17 +401,7 @@ impl Cx<'_, '_, '_> {
         let bare = self.bare(fty);
         if let Some((Role::Link, args)) = self.role_of(bare) {
             let distance = self.word_in(blob, off, w, n)?;
-            let target = self.value(Ty::Scalar(Scalar::U64));
-            self.inst(
-                Inst::Binary {
-                    result: target,
-                    op: BinaryOp::Sub,
-                    left: off,
-                    right: distance,
-                    fail: None,
-                },
-                n,
-            );
+            let target = self.link_target(off, distance, n);
             return self.new_locator(args[0], blob, target, n);
         }
         // `Option[Link[U]]` (MEM-10): distance 0 is `None`, else `Some` of a view of
@@ -434,7 +439,7 @@ impl Cx<'_, '_, '_> {
                 },
                 n,
             );
-            let target = self.word_op(BinaryOp::Sub, off, distance, n);
+            let target = self.link_target(off, distance, n);
             let payload = [Step::CaseField { case: 1, field: 0 }];
             self.put_word(AddressBase::Address(to), &payload, 0, blob, n)?;
             self.put_word(AddressBase::Address(to), &payload, 8, target, n)?;

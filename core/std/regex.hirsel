@@ -2012,6 +2012,8 @@ pub opaque type Regex: shareable + send {
     class_count: u64,
     start: u64,
     reverse_start: u64,
+    can_empty: bool,
+    has_look: bool,
     quit_non_ascii: bool
 }
 
@@ -2493,6 +2495,7 @@ type Assembler {
     rev: bool,
     ops_used: u64,
     edges_used: u64,
+    has_look: bool,
     quit_non_ascii: bool,
     pref_node: u64,
     pref_start: u64
@@ -2647,6 +2650,7 @@ fn emit_scalar(mut a: Assembler, lo: u64, hi: u64, n: u64, following: u64) -> u6
 }
 
 fn emit_assert(mut a: Assembler, n: Node, following: u64) -> u64 {
+    a.has_look = true
     let modes = n.b
     if n.a == START_LINE || n.a == END_LINE {
         if (modes & MULTILINE) != 0 {
@@ -2993,11 +2997,12 @@ type Prefilter: key {
     rare_a: u64,
     rare_b: u64,
     bytes_count: u64,
+    reverse_prev: Option[u8],
     node_id: u64
 }
 
 fn no_prefilter() -> Prefilter {
-    Prefilter(kind: NO_PREFILTER, width: 0, literals: 0, rare_a: 0, rare_b: 0, bytes_count: 0, node_id: 0)
+    Prefilter(kind: NO_PREFILTER, width: 0, literals: 0, rare_a: 0, rare_b: 0, bytes_count: 0, reverse_prev: None, node_id: 0)
 }
 
 fn blank_needle() -> Needle {
@@ -3253,15 +3258,15 @@ fn choose_prefix(mut needles: Needles) -> Prefilter {
     if needles.end == 1 {
         let needle = needles.values[0]
         if needle.width == 1 {
-            return Prefilter(kind: MEMCHR, width: 1, literals: 1, rare_a: 0, rare_b: 0, bytes_count: 1, node_id: 0)
+            return Prefilter(kind: MEMCHR, width: 1, literals: 1, rare_a: 0, rare_b: 0, bytes_count: 1, reverse_prev: None, node_id: 0)
         }
         let (rare_a, rare_b) = rare_pair(needle)
-        return Prefilter(kind: MEMMEM, width: needle_width(needle), literals: 1, rare_a: rare_a, rare_b: rare_b, bytes_count: needle_width(needle), node_id: 0)
+        return Prefilter(kind: MEMMEM, width: needle_width(needle), literals: 1, rare_a: rare_a, rare_b: rare_b, bytes_count: needle_width(needle), reverse_prev: None, node_id: 0)
     }
     if min_width == 1 || needles.values[0].width == 1 {
         trim_needles(mut needles, 1)
         if needles.end <= 3 {
-            return Prefilter(kind: MEMCHR, width: 1, literals: needles.end, rare_a: 0, rare_b: 0, bytes_count: needles.end, node_id: 0)
+            return Prefilter(kind: MEMCHR, width: 1, literals: needles.end, rare_a: 0, rare_b: 0, bytes_count: needles.end, reverse_prev: None, node_id: 0)
         }
         return no_prefilter()
     }
@@ -3276,7 +3281,7 @@ fn choose_prefix(mut needles: Needles) -> Prefilter {
         }
     }
     trim_needles(mut needles, width)
-    Prefilter(kind: TEDDY, width: width, literals: needles.end, rare_a: 0, rare_b: 0, bytes_count: width * (32 + needles.end), node_id: 0)
+    Prefilter(kind: TEDDY, width: width, literals: needles.end, rare_a: 0, rare_b: 0, bytes_count: width * (32 + needles.end), reverse_prev: None, node_id: 0)
 }
 
 fn mark_ascii(mut seen: Inline[bool, 128], lo: u64, hi: u64) {
@@ -3333,6 +3338,8 @@ fn choose_reverse(h: Hir, mut needles: Needles) -> Prefilter {
     }
     let mut seen: Inline[bool, 128] =[false; 128]
     let mut last: u64 = 0
+    let mut previous: Option[u8] = None
+    let mut needle_previous: Option[u8] = None
     let mut freq: u8 = 255
     let mut node_id = root.first
     while node_id != 0 {
@@ -3341,10 +3348,16 @@ fn choose_reverse(h: Hir, mut needles: Needles) -> Prefilter {
             let value = PREFILTER_RANK[n.a]
             if last == 0 || value < freq || n.successor == 0 {
                 last = node_id
+                needle_previous = previous
                 freq = value
             }
         }
         possible_ascii(h, node_id, mut seen)
+        previous = if n.kind == LITERAL && n.a < 128 {
+            Some(int.narrow(n.a))
+        } else {
+            None
+        }
         node_id = n.successor
     }
     if last == 0 {
@@ -3358,7 +3371,7 @@ fn choose_reverse(h: Hir, mut needles: Needles) -> Prefilter {
         REVERSE_SUFFIX
     } else {
         REVERSE_INNER
-    }, width: 1, literals: 1, rare_a: 0, rare_b: 0, bytes_count: 1, node_id: last)
+    }, width: 1, literals: 1, rare_a: 0, rare_b: 0, bytes_count: 1, reverse_prev: needle_previous, node_id: last)
 }
 
 // A single mandatory prefix can keep the extractor's full width. Multiple
@@ -3429,7 +3442,7 @@ fn choose_prefilter(h: Hir, mut needles: Needles) -> Prefilter {
         let _ = linear_sequence(h, root.first, mut needles.linear, mut width)
         if width > SHARED_LITERAL_WIDTH {
             let (a, b) = linear_pair(needles.linear, width)
-            return Prefilter(kind: MEMMEM, width: width, literals: 1, rare_a: a, rare_b: b, bytes_count: width, node_id: 0)
+            return Prefilter(kind: MEMMEM, width: width, literals: 1, rare_a: a, rare_b: b, bytes_count: width, reverse_prev: None, node_id: 0)
         }
     }
     extract_prefixes(h, mut needles)
@@ -3497,7 +3510,7 @@ fn compile_new(pattern: String, take input_hir: Hir) -> Result[Regex, Error] {
     let mut metadata = NameTable(index: take index, text: take text, pos: 0, slot: 0)
     write_names(pattern, hir, 0, mut metadata)
     link_backwards(mut hir.nodes)
-    let mut a = Assembler(fw: take forward, rv: take reverse, sparse_edges: take edges, boundaries:[false; 257], rev: false, ops_used: 0, edges_used: 0, quit_non_ascii: false, pref_node: plan.node_id, pref_start: 0)
+    let mut a = Assembler(fw: take forward, rv: take reverse, sparse_edges: take edges, boundaries:[false; 257], rev: false, ops_used: 0, edges_used: 0, has_look: false, quit_non_ascii: false, pref_node: plan.node_id, pref_start: 0)
     let end = emit(mut a, OP_MATCH, 0, 0, 0)
     let save_end = emit(mut a, OP_SAVE, 0, end, 1)
     let body = emit_alts(hir, mut a, 0, save_end)
@@ -3521,9 +3534,9 @@ fn compile_new(pattern: String, take input_hir: Hir) -> Result[Regex, Error] {
         map[b] = int.narrow(classes - 1)
         b += 1
     }
-    let Assembler(fw: take f_program, rv: take r_program, sparse_edges: take transitions, quit_non_ascii: quit, pref_start: pre_reverse, ..) = take a
+    let Assembler(fw: take f_program, rv: take r_program, sparse_edges: take transitions, has_look: has_look, quit_non_ascii: quit, pref_start: pre_reverse, ..) = take a
     let NameTable(index: take name_index, text: take name_text, ..) = take metadata
-    Ok(Regex(owner: unique.new(), forward: take f_program, reverse: take r_program, edges: take transitions, class_map: take map, names: take name_index, name_text: take name_text, prefilter: take pref, pref_plan: plan, pref_reverse_start: pre_reverse, charge: charge, group_count: f.pgroup + 1, class_count: classes, start: unanchored, reverse_start: anchored_r, quit_non_ascii: quit))
+    Ok(Regex(owner: unique.new(), forward: take f_program, reverse: take r_program, edges: take transitions, class_map: take map, names: take name_index, name_text: take name_text, prefilter: take pref, pref_plan: plan, pref_reverse_start: pre_reverse, charge: charge, group_count: f.pgroup + 1, class_count: classes, start: unanchored, reverse_start: anchored_r, can_empty: f.can_empty, has_look: has_look, quit_non_ascii: quit))
 }
 
 const ABSENT: u64 = 0xFFFFFFFFFFFFFFFF
@@ -3829,6 +3842,7 @@ type DfaLayout: key {
     keys: u64,
     scratch: u64,
     width: u64,
+    has_look: bool,
     start_bit: u32,
     start_entry: u32,
     reverse: bool,
@@ -3862,7 +3876,7 @@ fn dfa_layout(re: Regex, c: Cache, reverse: bool) -> DfaLayout {
         nr
     } else {
         nf
-    }, start_bit: if !reverse && s <= 0x40000000 {
+    }, has_look: re.has_look, start_bit: if !reverse && re.pref_plan.kind != NO_PREFILTER && re.pref_plan.kind < REVERSE_SUFFIX && s <= 0x40000000 {
         DFA_START
     } else {
         0
@@ -4074,8 +4088,20 @@ fn dfa_intern(mut work: List[u32], d: DfaLayout, from: u32, base: u64, len: u64,
     (from, dfa_add(mut work, d, base, len, context, slot))
 }
 
-fn dfa_start(mut work: List[u32], d: DfaLayout, entry: u64, context: u32, remember: bool) -> u32 {
-    let kind: u64 = int.widen(context)
+fn dfa_start(mut work: List[u32], d: DfaLayout, entry: u64, ch: u64, ordinary: bool) -> u32 {
+    let context = if d.has_look {
+        dfa_context(ch)
+    } else {
+        DFA_EDGE
+    }
+    // Without look assertions, the anchored prefilter entry can use an
+    // otherwise unused context slot. There is one such entry per direction.
+    let kind: u64 = if !d.has_look && !ordinary {
+        1
+    } else {
+        int.widen(context)
+    }
+    let remember = ordinary || !d.has_look
     if remember {
         let stored = work[d.starts + kind]
         if stored != 0 {
@@ -4175,7 +4201,11 @@ fn dfa_transition(program: List[NfaState], edges: List[NfaEdge], mut work: List[
     let key = d.keys + 8 * offset
     let len: u64 = int.widen(work[key])
     let behind = work[key + 1]
-    let ahead = dfa_context(ch)
+    let ahead = if d.has_look {
+        dfa_context(ch)
+    } else {
+        DFA_EDGE
+    }
     let (left, right) = if d.reverse {
         (ahead, behind)
     } else {
@@ -4254,7 +4284,34 @@ fn memchr_at(data: Bytes, table: Bytes, literals: u64, at: u64) -> Option[u64] {
     None
 }
 
+fn pair_at(data: Bytes, left: u8, right: u8, at: u64) -> Option[u64] {
+    let end = list.len(data)
+    let mut pos = at
+    let lhs: Simd[u8, 32] = simd.splat(left)
+    let rhs: Simd[u8, 32] = simd.splat(right)
+    while end - pos > 32 {
+        let a: Simd[u8, 32] = list.lanes(data, pos)
+        let b: Simd[u8, 32] = list.lanes(data, pos + 1)
+        let hits = simd.bitmask(simd.eq(a, lhs) & simd.eq(b, rhs))
+        if hits != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(hits))
+            return Some(pos + offset)
+        }
+        pos += 32
+    }
+    while end - pos > 1 {
+        if data[pos] == left && data[pos + 1] == right {
+            return Some(pos)
+        }
+        pos += 1
+    }
+    None
+}
+
 fn memmem_at(data: Bytes, table: Bytes, p: Prefilter, at: u64) -> Option[u64] {
+    if p.width == 2 {
+        return pair_at(data, table[0], table[1], at)
+    }
     let width = list.len(data)
     if width - at < p.width {
         return None
@@ -4272,7 +4329,7 @@ fn memmem_at(data: Bytes, table: Bytes, p: Prefilter, at: u64) -> Option[u64] {
         while hits != 0 {
             let offset: u64 = int.widen(int.trailing_zeros(hits))
             let candidate = pos + offset
-            if p.width == 2 || literal_at(data, table, candidate, 0, p.width) {
+            if literal_at(data, table, candidate, 0, p.width) {
                 return Some(candidate)
             }
             hits &= int.wrapping_sub(hits, 1)
@@ -4314,21 +4371,62 @@ fn teddy_confirm(data: Bytes, table: Bytes, p: Prefilter, pos: u64) -> bool {
     false
 }
 
+fn teddy_votes(data: Bytes, at: u64, lo: Simd[u8, 16], hi: Simd[u8, 16]) -> Simd[u8, 32] {
+    let input: Simd[u8, 32] = list.lanes(data, at)
+    let mask: Simd[u8, 32] = simd.splat(15)
+    simd.swizzle(lo, input & mask) & simd.swizzle(hi, input >> 4)
+}
+
 fn teddy_at(data: Bytes, table: Bytes, p: Prefilter, at: u64) -> Option[u64] {
     let width = list.len(data)
     if width - at < p.width {
         return None
     }
     let end = width - p.width + 1
-    let mask: Simd[u8, 32] = simd.splat(15)
+    let neutral: Simd[u8, 16] = simd.splat(255)
+    let low0: Simd[u8, 16] = list.lanes(table, 0)
+    let high0: Simd[u8, 16] = list.lanes(table, 16)
+    let low1: Simd[u8, 16] = if p.width >= 2 {
+        list.lanes(table, 32)
+    } else {
+        neutral
+    }
+    let high1: Simd[u8, 16] = if p.width >= 2 {
+        list.lanes(table, 48)
+    } else {
+        neutral
+    }
+    let low2: Simd[u8, 16] = if p.width >= 3 {
+        list.lanes(table, 64)
+    } else {
+        neutral
+    }
+    let high2: Simd[u8, 16] = if p.width >= 3 {
+        list.lanes(table, 80)
+    } else {
+        neutral
+    }
+    let low3: Simd[u8, 16] = if p.width == 4 {
+        list.lanes(table, 96)
+    } else {
+        neutral
+    }
+    let high3: Simd[u8, 16] = if p.width == 4 {
+        list.lanes(table, 112)
+    } else {
+        neutral
+    }
     let mut pos = at
     while end - pos >= 32 {
-        let mut votes: Simd[u8, 32] = simd.splat(255)
-        for i in 0u64 .. p.width {
-            let input: Simd[u8, 32] = list.lanes(data, pos + i)
-            let low: Simd[u8, 16] = list.lanes(table, 32 * i)
-            let high: Simd[u8, 16] = list.lanes(table, 32 * i + 16)
-            votes &= simd.swizzle(low, input & mask) & simd.swizzle(high, input >> 4)
+        let mut votes = teddy_votes(data, pos, low0, high0)
+        if p.width >= 2 {
+            votes &= teddy_votes(data, pos + 1, low1, high1)
+        }
+        if p.width >= 3 {
+            votes &= teddy_votes(data, pos + 2, low2, high2)
+        }
+        if p.width == 4 {
+            votes &= teddy_votes(data, pos + 3, low3, high3)
         }
         let mut hits = simd.bitmask(~simd.eq(votes, simd.splat(0)))
         while hits != 0 {
@@ -4364,7 +4462,7 @@ type DfaQuery: key {
     begin: u64,
     limit: u64,
     entry: u64,
-    remember: bool,
+    ordinary_entry: bool,
     skip_enabled: bool,
 }
 
@@ -4404,10 +4502,11 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
     if re.quit_non_ascii && behind >= 128 && behind != DFA_INPUT_END {
         return DfaRun(half: Retry, stopped_at: pos)
     }
-    let mut state = dfa_start(mut work, d, query.entry, dfa_context(behind), query.remember)
+    let mut state = dfa_start(mut work, d, query.entry, behind, query.ordinary_entry)
     let mut matched: Option[u64] = None
     let mut at_start = query.entry == re.start
     let target_mask = DFA_TARGET ^ d.start_bit
+    let tags = DFA_MATCH | d.start_bit
     let mut scanned: u64 = 0
     while state != DFA_DEAD {
         if state == DFA_UNKNOWN {
@@ -4424,19 +4523,41 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
                     if hit != pos {
                         scanned += hit - pos
                         pos = hit
-                        behind = dfa_initial_byte(data, width, pos, false)
-                        dfa_bytes(mut work, d, scanned)
-                        scanned = 0
-                        if re.quit_non_ascii && behind >= 128 && behind != DFA_INPUT_END {
-                            return DfaRun(half: Retry, stopped_at: pos)
-                        }
-                        state = dfa_start(mut work, d, query.entry, dfa_context(behind), true)
-                        if state == DFA_UNKNOWN {
-                            return DfaRun(half: Retry, stopped_at: pos)
+                        if d.has_look {
+                            behind = dfa_initial_byte(data, width, pos, false)
+                            dfa_bytes(mut work, d, scanned)
+                            scanned = 0
+                            if re.quit_non_ascii && behind >= 128 && behind != DFA_INPUT_END {
+                                return DfaRun(half: Retry, stopped_at: pos)
+                            }
+                            state = dfa_start(mut work, d, query.entry, behind, true)
+                            if state == DFA_UNKNOWN {
+                                return DfaRun(half: Retry, stopped_at: pos)
+                            }
                         }
                     }
                 },
             }
+        }
+        if !reverse && (!skip_enabled || d.start_bit != 0) {
+            let begin = pos
+            // Follow only ordinary cached ASCII transitions. The outer loop
+            // handles the first special transition and the end of input.
+            while pos < query.limit {
+                let ch = data[pos]
+                if ch >= 128 {
+                    break
+                }
+                let col: u64 = int.widen(re.class_map[int.widen(ch)])
+                let id: u64 = int.widen(state)
+                let transition = work[d.transitions + (id - 1) * d.columns + col]
+                if transition == DFA_DEAD || (transition & tags) != 0 {
+                    break
+                }
+                state = transition
+                pos += 1
+            }
+            scanned += pos - begin
         }
         let ch: u64 = if reverse {
             if pos == 0 {
@@ -4496,14 +4617,24 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
 
 fn forward_end(re: Regex, mut c: Cache, s: String, at: u64) -> Half {
     let d = dfa_layout(re, c, false)
-    let q = DfaQuery(begin: at, limit: string.byte_len(s), entry: re.start, remember: true, skip_enabled: true)
+    let q = DfaQuery(begin: at, limit: string.byte_len(s), entry: re.start, ordinary_entry: true, skip_enabled: true)
     dfa_search(re, re.forward, mut c.work, d, q, s).half
 }
 
 fn reverse_start(re: Regex, mut c: Cache, s: String, end: u64, limit: u64) -> Half {
     let d = dfa_layout(re, c, true)
-    let q = DfaQuery(begin: end, limit: limit, entry: re.reverse_start, remember: true, skip_enabled: false)
+    let q = DfaQuery(begin: end, limit: limit, entry: re.reverse_start, ordinary_entry: true, skip_enabled: false)
     dfa_search(re, re.reverse, mut c.work, d, q, s).half
+}
+
+fn reverse_needle_at(data: Bytes, table: Bytes, p: Prefilter, at: u64) -> Option[u64] {
+    match p.reverse_prev {
+        Some(left) => match pair_at(data, left, table[0], at) {
+            Some(start) => Some(start + 1),
+            None => None,
+        },
+        None => memchr_at(data, table, 1, at),
+    }
 }
 
 fn reverse_prefilter(re: Regex, mut c: Cache, s: String, at: u64) -> Result[Option[Match], ()] {
@@ -4514,18 +4645,18 @@ fn reverse_prefilter(re: Regex, mut c: Cache, s: String, at: u64) -> Result[Opti
     let mut lo = at
     let mut from = at
     let mut min_pre_start = at
-    while let Some(needle) = memchr_at(data, re.prefilter, 1, from) {
+    while let Some(needle) = reverse_needle_at(data, re.prefilter, re.pref_plan, from) {
         if needle < min_pre_start {
             // A failed forward confirmation read into this candidate's region.
             return Error(())
         }
-        let q = DfaQuery(begin: needle, limit: lo, entry: re.pref_reverse_start, remember: false, skip_enabled: false)
+        let q = DfaQuery(begin: needle, limit: lo, entry: re.pref_reverse_start, ordinary_entry: false, skip_enabled: false)
         match dfa_search(re, re.reverse, mut c.work, r, q, s).half {
             Found(start) => {
                 if re.pref_plan.kind == REVERSE_SUFFIX {
                     return Ok(Some(Match(start: start, end: needle + re.pref_plan.width)))
                 }
-                let confirm = DfaQuery(begin: start, limit: end, entry: re.start - 1, remember: false, skip_enabled: false)
+                let confirm = DfaQuery(begin: start, limit: end, entry: re.start - 1, ordinary_entry: false, skip_enabled: false)
                 let observed = dfa_search(re, re.forward, mut c.work, f, confirm, s)
                 match observed.half {
                     Found(end_at) => return Ok(Some(Match(start: start, end: end_at))),
@@ -4690,36 +4821,27 @@ fn search_end(re: Regex, mut c: Cache, s: String, at: u64) -> Option[u64] {
     }
 }
 
-fn next_end(re: Regex, mut c: Cache, s: String, mut k: Cursor) -> Option[u64] {
-    if k.finished {
-        return None
-    }
-    let mut end = search_end(re, mut c, s, k.at)
-    if k.after_match && end == Some(k.at) {
-        if k.at == string.byte_len(s) {
-            end = None
-        } else {
-            let (_, boundary_at) = scalar(s, k.at)
-            end = search_end(re, mut c, s, boundary_at)
-        }
-    }
-    match end {
-        Some(at) => {
-            k.at = at
-            k.after_match = true
-        },
-        None => {
-            k.finished = true
-        },
-    }
-    end
-}
-
 pub fn count(re: Regex, mut c: Cache, s: String) -> u64 {
     check_cache(re, c)
-    let mut k = cursor(0)
+    let mut at: u64 = 0
     let mut matches_found: u64 = 0
-    while next_end(re, mut c, s, mut k) != None {
+    while let Some(end) = search_end(re, mut c, s, at) {
+        if re.can_empty && matches_found != 0 && end == at {
+            if at == string.byte_len(s) {
+                break
+            }
+            let (_, boundary_at) = scalar(s, at)
+            match search_end(re, mut c, s, boundary_at) {
+                Some(new_end) => {
+                    at = new_end
+                },
+                None => {
+                    break
+                },
+            }
+        } else {
+            at = end
+        }
         matches_found += 1
     }
     matches_found

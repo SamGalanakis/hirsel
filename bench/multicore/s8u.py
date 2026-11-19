@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 import subprocess
 
-from run import CPUS, ROOT, wait_load
+from run import LOCK, ROOT, wait_load
+from bench_cpus import add_cpu_sets, require_idle, sibling_cpus, validate_cpu_sets
 
 MASK = (1 << 64) - 1
 CASES = ("knapsack", "portfolio")
@@ -54,7 +55,9 @@ def portfolio_oracle():
     return target, check
 
 
-def sample(case, side, width, bins, out):
+def sample(case, side, cpus, bins, out, lock_path):
+    width = len(cpus)
+    siblings = sibling_cpus(cpus)
     directory = out / f"{case}-{side}-{width}"
     directory.mkdir()
     if side == "hirsel":
@@ -64,19 +67,20 @@ def sample(case, side, width, bins, out):
     env = os.environ | {
         "LC_ALL": "C",
         "HIRSEL_MEMORY_LIMIT": "2G",
-        "HIRSEL_JOBS": "24",
+        "HIRSEL_JOBS": str(width),
         "HIRSEL_S8_WORKERS": str(width),
         "HIRSEL_S8_STATS": "0",
     }
-    cpus = ",".join(map(str, CPUS[:width]))
+    cpus = ",".join(map(str, cpus))
     command = [
-        "taskset", "-c", "0-11,16-27", ROOT / "tools/capped", "taskset", "-c", cpus,
+        "taskset", "-c", cpus, ROOT / "tools/capped",
         "perf", "stat", "-x", ";",
         "-e", "instructions:u,duration_time", "-o", directory / "perf.csv", "--", *program,
     ]
     wait_load()
-    with open("/tmp/hirsel-langarena-measure.lock", "a") as lock:
+    with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        require_idle(siblings)
         with (directory / "stdout").open("wb") as stdout, (directory / "stderr").open("wb") as stderr:
             subprocess.run(command, cwd=ROOT, env=env, stdout=stdout, stderr=stderr, check=True)
 
@@ -132,11 +136,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", type=Path)
     parser.add_argument("--out", type=Path, required=True)
+    add_cpu_sets(parser, required=False)
+    parser.add_argument("--lock", type=Path, default=LOCK)
     args = parser.parse_args()
     out = args.out.resolve()
     if out.is_relative_to(ROOT):
         parser.error("--out must be outside the repository")
     if args.bins:
+        validate_cpu_sets(parser, args, width=16)
+        os.sched_setaffinity(0, args.build_cpus)
         bins = args.bins.resolve()
         for case in CASES:
             program = bins / "hirsel" / f"s8u_{case}"
@@ -146,7 +154,10 @@ def main():
         for case in CASES:
             for width in (1, 16):
                 for side in SIDES:
-                    sample(case, side, width, bins, out)
+                    try:
+                        sample(case, side, args.measure_cpus[:width], bins, out, args.lock)
+                    except ValueError as error:
+                        parser.error(str(error))
     summarize(read_samples(out))
 
 

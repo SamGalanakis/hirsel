@@ -23,12 +23,11 @@ import build
 import measure
 import receipt
 from receipt import measurement_slot, write as write_json
+from bench_cpus import add_cpu_sets, require_idle, validate_cpu_sets
 
 ROOT = build.ROOT
 CAP = ROOT / "tools/capped"
 LOCK = Path("/run/user/1000/hirsel-board.lock")
-BUILD_CPUS = {20, 21}
-MEASURE_CPUS = {10, 11}
 PINS = {
     "awfy": "f35aed0a61171594804a44efe9d75f1f35360700",
     "resid": "0ab89f373829776d3ea285bfb25f3f1505d7be35",
@@ -381,11 +380,11 @@ def runtime_rows(board, suite, directory, upstream, tools):
             target = samples_dir / f"{name.replace('::', '-')}-{side}"
             env = build.capped_env(board.out)
             if side == "hirsel":
-                sample = receipt.observe(row, target, env, cycles=True)
+                sample = receipt.observe(row, target, env)
                 board.report["instruction_receipt"]["rows"].append(row)
                 samples[side] = sample
                 continue
-            sample = measure.core_measure.sample(command, target, env=env, cycles=True, cwd=directory, pmu_times=True)
+            sample = measure.core_measure.sample(command, target, env=env, cwd=directory, pmu_times=True)
             output = (target / "stdout").read_bytes().splitlines(keepends=True)
             sample["verified"] = sample["status"] in ("ok", "missing-counter") and any(
                 re.fullmatch(marker, line) for line in output)
@@ -394,7 +393,7 @@ def runtime_rows(board, suite, directory, upstream, tools):
             samples[side] = sample
         if all(sample["verified"] for sample in samples.values()):
             verified.append(name)
-        board.row(goal, name, certified, samples, COUNTERS)
+        board.row(goal, name, certified, samples, ("instructions",))
     return verified
 
 
@@ -613,11 +612,11 @@ def owns_listener(pid, address):
 
 
 @contextmanager
-def private_server(command, address, out, env):
+def private_server(command, address, out, env, cpu):
     pidfile = out / "server.pid"
     boot = ["sh", "-c", 'echo "$$" > "$1"; shift; exec "$@"', "checkbox-board", pidfile]
     with (out / "server.log").open("wb") as log:
-        with subprocess.Popen(["taskset", "-c", "10", CAP, *boot, *command],
+        with subprocess.Popen(["taskset", "-c", str(cpu), CAP, *boot, *command],
                               cwd=ROOT, env=env, stdout=log, stderr=log) as process:
             while not pidfile.exists() and process.poll() is None:
                 time.sleep(0.05)
@@ -646,7 +645,7 @@ def private_server(command, address, out, env):
                         pass
 
 
-def checkbox_rows(board, out, prepared):
+def checkbox_rows(board, out, prepared, server_cpu, loader_cpu):
     checkbox, executable, address, wants, tools = prepared
     env = build.capped_env(out)
     overrides = ["--per-ip-sessions", "20000", "--per-ip-new-principals", "20000", "--principal-rate", "1000000000"]
@@ -662,12 +661,12 @@ def checkbox_rows(board, out, prepared):
                 command = [tools / "wire-reference", "--listen", address, "--wal", directory / "wire.wal",
                            "--n-place", checkbox.N_PLACE, "--wants", wants, *overrides]
             try:
-                with private_server(command, address, directory, env) as pid:
+                with private_server(command, address, directory, env, server_cpu) as pid:
                     load_command = [tools / "wire-load", mode, "--url", f"ws://{address}/hirsel",
                                     "--wants", wants, "--clients", str(clients)]
                     load_command += ["--toggles", str(toggles), "--pace", "1000"] if mode == "converge" else ["--server-pid", str(pid)]
                     started = time.monotonic()
-                    result = subprocess.run(["taskset", "-c", "11", CAP, *load_command], env=env,
+                    result = subprocess.run(["taskset", "-c", str(loader_cpu), CAP, *load_command], env=env,
                                             capture_output=True, text=True)
                     (directory / "client.log").write_text(result.stdout + result.stderr)
                     seconds = time.monotonic() - started
@@ -756,8 +755,9 @@ def run_board(board, args):
     compile_ready = board.attempt("Compile preparation", prepare_compile, compile_dir, artifacts, env)
     checkbox_dir = out / "checkbox"
     checkbox_ready = board.attempt("Checkbox build", prepare_checkbox, checkbox_dir, artifacts, env)
-    with measurement_slot(LOCK):
-        os.sched_setaffinity(0, {min(MEASURE_CPUS)})
+    with measurement_slot(args.lock):
+        os.sched_setaffinity(0, {args.measure_cpus[0]})
+        require_idle(args.siblings)
         if awfy_ready:
             board.attempt("AWFY measurement", awfy_rows, board, awfy, args.awfy, tools)
         if arena_rows:
@@ -773,8 +773,9 @@ def run_board(board, args):
         elif compile_ready:
             board.report["failures"]["Compile measurement"] = "no verified Spectralnorm fixture"
         if checkbox_ready:
-            os.sched_setaffinity(0, MEASURE_CPUS)
-            board.attempt("Checkbox measurement", checkbox_rows, board, checkbox_dir, checkbox_ready)
+            os.sched_setaffinity(0, args.measure_cpus[:2])
+            board.attempt("Checkbox measurement", checkbox_rows, board, checkbox_dir, checkbox_ready,
+                          *args.measure_cpus[:2])
 
 
 def validate_baseline(path, report):
@@ -836,8 +837,11 @@ def main():
     for name in PINS:
         parser.add_argument(f"--{name}", type=lambda path: Path(path).resolve(), required=True,
                             help=f"clean checkout at {PINS[name]}")
+    add_cpu_sets(parser)
+    parser.add_argument("--lock", type=Path, default=LOCK)
     args = parser.parse_args()
-    os.sched_setaffinity(0, BUILD_CPUS)
+    args.siblings = validate_cpu_sets(parser, args, width=2)
+    os.sched_setaffinity(0, args.build_cpus)
     out = args.out.resolve()
     if out.is_relative_to(ROOT):
         parser.error("use a new evidence directory outside the checkout")

@@ -7,7 +7,8 @@ from pathlib import Path
 import re
 import subprocess
 
-from measure import CPU, ROOT, measurement_slot, rows
+from measure import ROOT, measurement_slot, rows
+from bench_cpus import add_cpu_sets, require_idle, validate_cpu_sets
 
 
 def ratios(samples):
@@ -22,11 +23,13 @@ def main():
     parser.add_argument("samples", type=Path)
     parser.add_argument("out", type=Path)
     parser.add_argument("--upstream", type=Path, required=True)
+    add_cpu_sets(parser)
     args = parser.parse_args()
+    siblings = validate_cpu_sets(parser, args)
+    os.sched_setaffinity(0, args.build_cpus)
     programs = dict(rows(args.build.resolve(), False, args.upstream))
     samples = json.loads(args.samples.read_text())
     ranked = sorted(((ratios(result), name) for name, result in samples.items()), reverse=True)
-    os.sched_setaffinity(0, {CPU})
     os.environ.update(HIRSEL_MEMORY_LIMIT="2G", HIRSEL_JOBS="1")
     args.out.mkdir(parents=True)
     failures = 0
@@ -37,7 +40,12 @@ def main():
         binary, marker = programs[name]["hirsel"]
         data = args.out / f"{name}.data"
         with measurement_slot():
+            try:
+                require_idle(siblings)
+            except ValueError as error:
+                parser.error(str(error))
             run = subprocess.run([
+                "taskset", "-c", str(args.measure_cpus[0]),
                 ROOT / "tools/capped", "perf", "record", "-e", "instructions:u",
                 "-c", "200003", "--no-buildid-cache", "--call-graph", "dwarf,4096",
                 "-o", data, "--", *binary,

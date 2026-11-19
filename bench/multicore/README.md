@@ -70,7 +70,8 @@ oracle independently on each side.
 ```sh
 taskset -c 0-1 ./bench/multicore/build.py --s0 --out "$benchmark_bins" \
   --hirsel "$release_driver" --runtime "$shipping_archive"
-taskset -c 0-11,16-27 ./bench/multicore/run.py --s0 \
+./bench/multicore/run.py --s0 \
+  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" \
   --bins "$benchmark_bins" --out "$new_evidence_directory"
 ```
 
@@ -83,7 +84,8 @@ With the binaries built, run the following command and optionally select one
 or more workloads with `--case` and widths with `--workers`. The default widths are 1, 2, 4, 8, 12 and 16.
 
 ```sh
-taskset -c 0-11,16-27 ./bench/multicore/run.py \
+./bench/multicore/run.py \
+  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" \
   --bins "$benchmark_bins" --out "$new_evidence_directory"
 ```
 
@@ -92,8 +94,10 @@ render after setup and ends before PBM output. The process-wall table and
 instruction ratios still include output and startup. The runner validates
 the whole PBM and retains its SHA-256 in the sample record. It saves the process-tree
 `perf stat` counters, GNU time RSS, output and diagnostics outside the repository.
-Width N uses the first N of `0-11,16-19`. On the measured Ryzen 9 5950X that
-means 12 distinct cores at width 16, four with both SMT siblings active.
+Set `build_cpus` and `measure_cpus` to CPU lists within your assignment.
+Width N uses the first N measurement CPUs in the order supplied. The runner
+refuses a measurement CPU with a build CPU on the same core or with a busy
+SMT sibling at sample start.
 Each point runs under `tools/capped` at 2 GiB with the matching CPU quota.
 Startup is included. Each output must match its workload oracle. K-nucleotide
 checks each frequency and exact query count. It allows either order for
@@ -108,7 +112,8 @@ from the compact shared FASTA fixture.
 ```sh
 taskset -c 0-1 ./bench/multicore/build.py --standard-rust \
   --out "$rust_scale_bins" --game /tmp/benchmarks-game
-taskset -c 0-11,16-27 ./bench/multicore/run.py --standard-rust \
+./bench/multicore/run.py --standard-rust \
+  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" \
   --bins "$rust_scale_bins" --out "$new_evidence_directory"
 ```
 
@@ -140,7 +145,8 @@ counters in each sample's stderr. For example, measure 200,000 transfers
 from 16 producers and the nested spawn workload at width 16.
 
 ```sh
-taskset -c 0-11,16-27 ./bench/multicore/run.py --test-pool \
+./bench/multicore/run.py --test-pool \
+  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" \
   --bins "$benchmark_bins" --out "$new_evidence_directory" \
   --case fan_in fan_in_cap1 ping_pong ping_pong_burst spawn_chain \
   --workers 16 --languages Hirsel Tokio
@@ -166,7 +172,8 @@ runtime width and takes one capped sample for each side at widths 1 and 16.
 ```sh
 taskset -c 0-11,16-27 python3 bench/multicore/build.py --s8u --out "$benchmark_bins" \
   --hirsel "$release_driver" --runtime "$test_pool_archive"
-taskset -c 0-11,16-27 python3 bench/multicore/s8u.py \
+python3 bench/multicore/s8u.py \
+  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" \
   --bins "$benchmark_bins" --out "$new_evidence_directory"
 ```
 

@@ -1,13 +1,17 @@
+from argparse import Namespace
 from contextlib import redirect_stdout
 import fcntl
 import io
 import json
+import os
 import re
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from board import Board, measure, measurement_slot, receipt
+import bench_cpus
 
 
 class WorkloadMatching(unittest.TestCase):
@@ -100,3 +104,70 @@ class BoardCompletion(unittest.TestCase):
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+class SiblingActivity(unittest.TestCase):
+    def test_refuses_busy_sibling_from_linux_ticks(self):
+        # CPU 18 sees four active ticks out of twenty. Linux already
+        # includes guest time in user time. CPU 19 only sees I/O wait.
+        before = "cpu18 100 0 50 300 80 0 0 0 20 0\ncpu19 100 0 50 300 80 0 0 0 20 0\n"
+        with tempfile.TemporaryDirectory() as temp:
+            stat = Path(temp) / "stat"
+            stat.write_text(before)
+
+            def advance_ticks(_interval):
+                stat.write_text("cpu18 104 0 50 316 80 0 0 0 24 0\ncpu19 100 0 50 300 100 0 0 0 20 0\n")
+
+            with patch.object(bench_cpus, "Path", return_value=stat), patch.object(
+                bench_cpus.time, "sleep", side_effect=advance_ticks
+            ):
+                with self.assertRaisesRegex(ValueError, r"CPU 18 20\.00% busy$"):
+                    bench_cpus.require_idle([18, 19])
+                stat.write_text(before)
+                bench_cpus.require_idle([19])
+
+
+class PairedSampling(unittest.TestCase):
+    def test_cycle_noise_does_not_override_instruction_regression(self):
+        key = "awfy/List"
+        base = {
+            "key": key, "suite": "awfy", "mode": "certified", "certified": True,
+            "flags": ["--release"], "argv": ["./sample", "List"], "marker": "verified\n",
+            "compiler_sha256": "a" * 64, "runtime_archive_sha256": "b" * 64,
+            "fixture_sha256": "c" * 64, "image_sha256": "d" * 64,
+        }
+        candidate = base | {"image_sha256": "e" * 64}
+        cpu = min(os.sched_getaffinity(0))
+        events = ("instructions:u", "cycles:u")
+        counts = iter((100, 96, 101, 100, 100, 104, 100, 103, 103, 100, 100, 103))
+        images = []
+
+        def observe(row, directory, env, *, cycles):
+            images.append(row["image_sha256"])
+            row["affinity"] = [cpu]
+            row["stdout"] = "verified\n"
+            row["sample"] = {
+                "status": "ok", "verified": True, "cycles": next(counts),
+                "instructions": 100 if row["image_sha256"] == base["image_sha256"] else 101,
+                "pmu_times_ns": {event: [[100, 100]] for event in events},
+            }
+
+        with (tempfile.TemporaryDirectory() as temp, redirect_stdout(io.StringIO()),
+              patch.object(receipt, "runtime_rows", return_value=[(key, ())]),
+              patch.object(receipt, "prepare_pair_rows", side_effect=[{key: base}, {key: base}, {key: candidate}]),
+              patch.object(receipt, "require_idle"), patch.object(receipt, "sibling_cpus", return_value=[]),
+              patch.object(receipt.os, "sched_setaffinity"), patch.object(receipt, "observe", side_effect=observe)):
+            root = Path(temp)
+            args = Namespace(upstream=None, candidate_awfy_build=None, candidate_pool_build=None,
+                             candidate_arena_build=None, candidate_artifacts=None, aa=None, artifacts=None,
+                             rows="List", pairs=3, cpu=cpu, lock=root / "lock", threshold=None, out=root / "aa")
+            self.assertEqual(receipt.pair_samples(args), 0)
+            args.aa = args.out / "pairs.json"
+            args.out = root / "ab"
+            args.candidate_artifacts = root / "candidate-toolchain.json"
+            self.assertEqual(receipt.pair_samples(args), 1)
+            result = receipt.read(args.out / "pairs.json")["summary"][key]
+        self.assertEqual(result["cycles"]["median_percent"], "3")
+        self.assertIn("within noise", result["cycles"]["verdict"])
+        a, b = base["image_sha256"], candidate["image_sha256"]
+        self.assertEqual(images[-6:], [a, b, b, a, a, b])

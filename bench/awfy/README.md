@@ -29,17 +29,19 @@ are part of the comparison.
 Use checkouts of the pinned AWFY and Resid revisions, and a Release CMake
 build of the pinned Goose compiler. Set `out` to a directory outside this repo
 and point `awfy`, `resid` and `goose` at the respective checkout roots. From the
-Hirsel repo root:
+Hirsel repo root, set `build_cpus` and `measure_cpus` to your assigned CPU
+lists. Measure and profile use the first measurement CPU in the list.
 
 ```sh
-taskset -c 0-11,16-27 python3 tools/buck2/prepare.py
-taskset -c 0-11,16-27 python3 core/tools/measurement_artifacts.py > "$out/toolchain.json"
-taskset -c 16-17 python3 bench/awfy/build.py "$out/build" --upstream "$awfy" \
+taskset -c "$build_cpus" python3 tools/buck2/prepare.py
+taskset -c "$build_cpus" python3 core/tools/measurement_artifacts.py > "$out/toolchain.json"
+taskset -c "$build_cpus" python3 bench/awfy/build.py "$out/build" --upstream "$awfy" \
   --artifacts "$out/toolchain.json" --goose "$goose/build/goose" \
   --rust "$resid/bench/v2/t1-awfy/rust"
-taskset -c 16 python3 bench/awfy/measure.py "$out/build" "$out/awfy" --upstream "$awfy"
-taskset -c 16 python3 bench/awfy/profiles.py "$out/build" "$out/awfy/samples.json" \
-  "$out/profiles" --upstream "$awfy"
+python3 bench/awfy/measure.py "$out/build" "$out/awfy" --upstream "$awfy" \
+  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus"
+python3 bench/awfy/profiles.py "$out/build" "$out/awfy/samples.json" \
+  "$out/profiles" --upstream "$awfy" --build-cpus "$build_cpus" --measure-cpus "$measure_cpus"
 ```
 
 Each AWFY execution selects one benchmark by name and takes an outer iteration
@@ -85,8 +87,8 @@ matched ports in `pool-ports/rust`, compiled separately from the original
 Resid harness. Do not use original `Json` or `Storage` as pool denominators.
 
 ```sh
-taskset -c 0-11,16-27 python3 bench/awfy/measure.py "$out/build" "$out/pools-before" \
-  --upstream "$awfy" --pool
+python3 bench/awfy/measure.py "$out/build" "$out/pools-before" \
+  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" --upstream "$awfy" --pool
 ```
 
 To test the MEM-32 reopen condition, rebuild the same Hirsel harness with
@@ -106,7 +108,8 @@ Hirsel group entry points with the same configuration:
 ```sh
 taskset -c 16-17 python3 bench/awfy/arena.py "$out/arena" \
   --config core/langarena/rust/run.js --artifacts "$out/toolchain.json" --rust "$out/arena/rust"
-taskset -c 16 python3 bench/awfy/measure.py "$out/arena" "$out/arena-startup" --arena
+python3 bench/awfy/measure.py "$out/arena" "$out/arena-startup" --arena \
+  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus"
 ```
 
 The startup configuration keeps every upstream input and sets one iteration
@@ -122,7 +125,8 @@ at the four pins printed by `board.py --help`. The output directory must be
 new and outside the checkout.
 
 ```sh
-taskset -c 20-21 python3 bench/awfy/board.py "$out" \
+python3 bench/awfy/board.py "$out" \
+  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" \
   --awfy "$awfy" --resid "$resid" --goose "$goose" --langarena "$langarena"
 ```
 
@@ -137,8 +141,11 @@ rebuild the Cargo benchmark crate. Both executables must pass the new checksum
 fixture. The checkbox rows compare the same wire load on a fresh private Hirsel
 server and the Rust reference, using an ephemeral port.
 
-The board uses CPUs 20–21 for builds and 10–11 for samples. It holds
-`/run/user/1000/hirsel-board.lock` while measuring. It needs Linux perf user
+Use at least two measurement CPUs. The first runs AWFY, LangArena and the
+checkbox server. The second runs the checkbox loader. The board refuses a
+measurement CPU with a build CPU on the same core or with an SMT sibling busy
+during the 200 ms check at measurement start. It holds
+`/run/user/1000/hirsel-board.lock` while measuring by default. It needs Linux perf user
 counters, CMake, Clang, Rust 1.99.0 with the pinned Cargo dependencies
 available, Node.js, and GNU strip and time. Keep `board.json` and `board.md`
 with the captured logs. Add `--baseline PREVIOUS/board.json` to check each
@@ -170,6 +177,21 @@ python3 bench/awfy/board.py rebaseline "$out"
 The command validates the run and prints its commit and the reason it was
 promoted. It also accepts a clean wrapper run directory and updates
 `~/.local/share/hirsel-board/last-complete.json` atomically.
+
+## Qualify a runtime cycle claim
+
+Run `receipt.py sample` with the base toolchain, its build directory, the
+assigned `--cpu` and `--lock`, and `--pairs 7 --rows List,Havlak,Sieve,Storage,Json`.
+This runs A/A on the same image. Repeat with the same base options and add
+`--candidate-artifacts`, the corresponding `--candidate-awfy-build` (or
+`--candidate-pool-build` or `--candidate-arena-build`), and `--aa` pointing
+to the first run's `pairs.json`. Use a new output directory for each run.
+Each checked pair runs back to back and reverses order on alternate trials.
+The receipt records SMT sibling activity for each sample, and the runner
+reports the median and min/max of the paired instruction and cycle changes.
+An A/B median cycle change inside the matching A/A min/max is "within noise".
+Check sibling activity before interpreting a change outside that range.
+Only the instruction threshold decides whether a comparable run passes.
 
 ## Paired instruction guard
 
@@ -232,7 +254,7 @@ temporary GNU-stripped copies for the shipping-size comparison.
 ### Profile a cold compile
 
 Use `python3 bench/awfy/cold_phases.py OUT --artifacts TOOLCHAIN
---fixture ONE_ITERATION_JSON` on the board host. It prepares the std product
+--fixture ONE_ITERATION_JSON --build-cpus BUILD_CPUS --measure-cpus MEASURE_CPUS` on the board host. It prepares the std product
 on the build CPUs, compiles the suite with a fresh request store and checks
 the Spectralnorm result. The receipt carries the compiler's stage metrics
 and a separate breakdown of process-tree PMU instruction stack samples.

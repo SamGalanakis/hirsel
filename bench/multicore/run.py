@@ -16,9 +16,10 @@ import sys
 from build import GAME_ROWS, ROOT, STANDARD_RUST_SIZES
 
 sys.path.insert(0, str(ROOT / "core/tools"))
+from bench_cpus import add_cpu_sets, require_idle, sibling_cpus, validate_cpu_sets
 from std_native import wait_load
 
-CPUS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 17, 18, 19)
+LOCK = Path("/tmp/hirsel-langarena-measure.lock")
 WIDTHS = (1, 2, 4, 8, 12, 16)
 LANGUAGES = ("Hirsel", "Rust", "Tokio", "Go", "Goose")
 SIZES = {
@@ -176,7 +177,9 @@ def applicable(case, s0=False):
     return ("Hirsel", "Tokio", "Go", "Goose")
 
 
-def observe(bins, out, case, language, width, size, wanted, kernel, s0=False, test_pool=False):
+def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0=False, test_pool=False):
+    width = len(cpus)
+    siblings = sibling_cpus(cpus)
     command = sample_command(bins, case, language, width, size, s0)
     if not command[0].is_file():
         return {"status": "missing-binary"}
@@ -184,7 +187,7 @@ def observe(bins, out, case, language, width, size, wanted, kernel, s0=False, te
     directory.mkdir()
     perf = directory / "perf.csv"
     rss = directory / "rss.txt"
-    cpus = ",".join(map(str, CPUS[:width]))
+    cpus = ",".join(map(str, cpus))
     env = os.environ | {
         "LC_ALL": "C",
         "HIRSEL_MEMORY_LIMIT": "2G",
@@ -201,8 +204,9 @@ def observe(bins, out, case, language, width, size, wanted, kernel, s0=False, te
               "-f", "%M", "-o", rss, *command]
     stdin = bins / "input.fasta" if case == "knucleotide" and language != "Hirsel" else Path(os.devnull)
     wait_load()
-    with open("/tmp/hirsel-langarena-measure.lock", "a") as lock:
+    with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        require_idle(siblings)
         with stdin.open("rb") as inp, (directory / "stdout").open("wb") as out_file, (directory / "stderr").open("wb") as err:
             result = subprocess.run(["taskset", "-c", cpus, *map(str, launch)],
                                     cwd=ROOT, env=env, stdin=inp, stdout=out_file, stderr=err)
@@ -354,6 +358,8 @@ def main():
     parser.add_argument("--s0", action="store_true", help="validate both fields and measure only the S0 fixtures")
     parser.add_argument("--test-pool", action="store_true", help="select workers and collect counters from an S8 test-pool archive")
     parser.add_argument("--read", nargs="+", type=Path, help="render existing sample JSON files")
+    add_cpu_sets(parser, required=False)
+    parser.add_argument("--lock", type=Path, default=LOCK)
     args = parser.parse_args()
     if args.read:
         rows = [row for file in args.read for row in json.loads(file.read_text())]
@@ -366,8 +372,8 @@ def main():
         workers = args.workers or ([1] if args.s0 else WIDTHS)
         if args.s0 and args.standard_rust:
             parser.error("--s0 and --standard-rust select different workloads")
-        if not set(CPUS[:max(workers)]) <= os.sched_getaffinity(0):
-            parser.error("the requested CPUs must be in the caller's affinity")
+        validate_cpu_sets(parser, args, width=max(workers))
+        os.sched_setaffinity(0, args.build_cpus)
         sizes = S0_SIZES if args.s0 else STANDARD_RUST_SIZES if args.standard_rust else SIZES
         languages = ("Rust",) if args.standard_rust else args.languages or LANGUAGES
         if args.test_pool and not (args.s0 or args.standard_rust):
@@ -386,7 +392,11 @@ def main():
                 for language in applicable(case, args.s0):
                     if language not in languages:
                         continue
-                    result = observe(bins, out, case, language, width, size, oracles[case], kernel, args.s0, args.test_pool)
+                    try:
+                        result = observe(bins, out, case, language, args.measure_cpus[:width], size,
+                                         oracles[case], kernel, args.lock, args.s0, args.test_pool)
+                    except ValueError as error:
+                        parser.error(str(error))
                     rows.append(result | {"case": case, "language": language, "width": width, "size": size})
                     print(f"{case} {language} {width}: {result['status']}", file=sys.stderr, flush=True)
                     (out / "samples.json").write_text(json.dumps(rows, indent=2) + "\n")

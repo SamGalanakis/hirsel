@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import re
+from statistics import median
 import subprocess
 import sys
 
@@ -18,10 +19,12 @@ from build import sha256
 import elf_census
 import measure
 import profile_diff
+from bench_cpus import busy_percent, cpu_ticks, positive_int, require_idle, sibling_cpus
 from measurement_artifacts import SHIPPING, check
 
 VERSION = 2
 REFUSED = 2
+INSTRUCTION_LIMIT = Decimal("0.5")
 INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
 IDENTITY = ("suite", "mode", "certified", "flags", "argv", "affinity", *ARTIFACT_HASHES, "fixture_sha256")
@@ -284,6 +287,20 @@ def rows_from(path):
     return rows
 
 
+def match_rows(key, left, right):
+    fields = [field for field in (*IDENTITY, "marker", "stdout")
+              if field not in ARTIFACT_HASHES and left[field] != right[field]]
+    artifacts_changed = any(left[field] != right[field] for field in ARTIFACT_HASHES)
+    if not fields and artifacts_changed:
+        if not all(verified_build(row) for row in (left, right)):
+            raise ValueError(f"{key} requires a verified build record for an artifact pair")
+        if left["manifest_sha256"] != right["manifest_sha256"]:
+            fields = ["manifest_sha256"]
+    if fields:
+        raise ValueError(f"identity differs: {key}: {', '.join(fields)}")
+    return artifacts_changed
+
+
 def compare(before_path, after_path, threshold, *, expected=None, blocked=None):
     before, before_refusals = instruction_rows(before_path, expected)
     after, after_refusals = instruction_rows(after_path, expected, allow_incomplete=expected is not None)
@@ -303,18 +320,8 @@ def compare(before_path, after_path, threshold, *, expected=None, blocked=None):
                     validate_row(key, row)
                 except INVALID_RECEIPT as error:
                     raise ValueError(f"{path}: {error}") from error
-            fields = [field for field in (*IDENTITY, "marker", "stdout")
-                      if field not in ARTIFACT_HASHES and left[field] != right[field]]
-            if not fields and any(left[field] != right[field] for field in ARTIFACT_HASHES):
-                for path, row in ((before_path, left), (after_path, right)):
-                    if not verified_build(row):
-                        raise ValueError(f"{path}: {key} requires a verified build record for an artifact pair")
-                if left["manifest_sha256"] != right["manifest_sha256"]:
-                    fields = ["manifest_sha256"]
-                else:
-                    artifact_pairs.add(tuple(row[field] for row in (left, right) for field in ARTIFACT_HASHES))
-            if fields:
-                raise ValueError(f"identity differs: {key}: {', '.join(fields)}")
+            if match_rows(key, left, right):
+                artifact_pairs.add(tuple(row[field] for row in (left, right) for field in ARTIFACT_HASHES))
         except INVALID_RECEIPT as error:
             refusals[key] = str(error)
             print(f"{key} REFUSED ({error})", file=sys.stderr)
@@ -336,6 +343,146 @@ def compare(before_path, after_path, threshold, *, expected=None, blocked=None):
         geomean = math.expm1(math.fsum(map(math.log, ratios)) / len(ratios)) * 100
         print(f"{len(ratios)} rows compared, geomean {geomean:+.3f}%, threshold +{threshold}%")
     return REFUSED if refusals else int(failed)
+
+
+def select_pair_rows(value, cases):
+    keys = []
+    for name in value.split(","):
+        matches = [key for key in cases if key == name or key.split("/", 1)[1] == name]
+        if len(matches) != 1 or matches[0] in keys:
+            raise ValueError(f"unknown, ambiguous or repeated row {name!r}; use SUITE/ROW to disambiguate")
+        keys.append(matches[0])
+    return keys
+
+
+def prepare_pair_rows(cases, keys, artifacts, upstream):
+    tools = release_tools(read(artifacts))
+    fixtures = {}
+    rows = {}
+    for key in keys:
+        suite, name, directory, command, marker = cases[key]
+        if suite not in fixtures:
+            fixtures[suite] = runtime_fixture(suite, directory, upstream)
+        rows[key] = runtime_case(suite, name, directory, command, marker, fixtures[suite], tools)
+    return rows
+
+
+def cycle_count(key, row):
+    validate_row(key, row)
+    value = row["sample"].get("cycles")
+    if type(value) is not int or value <= 0 or not counter_ready(row["sample"], "cycles:u"):
+        raise ValueError(f"{key}: cycles:u must be positive and fully active")
+    return value
+
+
+def change(before, after):
+    return Decimal(100) * (after - before) / before
+
+
+def aa_spread(key, pairs, baseline, cpu, count):
+    if len(pairs) != count:
+        raise ValueError(f"{key}: A/A control must have {count} pairs")
+    changes = []
+    for pair in pairs:
+        sides = pair["base"], pair["candidate"]
+        values = []
+        for row in sides:
+            values.append(cycle_count(key, row))
+            if row["affinity"] != [cpu] or any(
+                row[field] != baseline[field] for field in (*IDENTITY, "image_sha256", "marker")
+                if field != "affinity"
+            ):
+                raise ValueError(f"{key}: A/A does not match the baseline workload, image and CPU")
+        changes.append(change(*values))
+    return min(changes), max(changes)
+
+
+def summarize_pairs(key, pairs, noise, limit):
+    summary = {}
+    for event in ("instructions", "cycles"):
+        left = [pair["base"]["sample"][event] for pair in pairs]
+        right = [pair["candidate"]["sample"][event] for pair in pairs]
+        deltas = [change(a, b) for a, b in zip(left, right)]
+        center, low, high = median(deltas), min(deltas), max(deltas)
+        verdict = ""
+        if event == "instructions" and limit is not None and center > limit:
+            verdict = "FAIL"
+        if event == "cycles" and noise is not None:
+            verdict = "within noise" if noise[0] <= center <= noise[1] else "outside A/A spread"
+            verdict += f" (A/A {noise[0]:+.3f}% to {noise[1]:+.3f}%)"
+        print(f"{key} {event}: {median(left):,} -> {median(right):,}, paired median {center:+.3f}% "
+              f"[{low:+.3f}%, {high:+.3f}%] {verdict}", flush=True)
+        summary[event] = {"base_median": median(left), "candidate_median": median(right),
+                          "median_percent": str(center), "min_percent": str(low), "max_percent": str(high),
+                          "verdict": verdict}
+    return summary
+
+
+def pair_samples(args):
+    candidate = argparse.Namespace(
+        upstream=args.upstream, awfy_build=args.candidate_awfy_build,
+        pool_build=args.candidate_pool_build, arena_build=args.candidate_arena_build)
+    comparing = args.candidate_artifacts is not None
+    if comparing != bool(args.aa) or (not comparing and any(
+            (candidate.awfy_build, candidate.pool_build, candidate.arena_build))):
+        raise ValueError("A/B requires --candidate-artifacts, candidate build directories and --aa")
+    base_cases = dict(runtime_rows(args))
+    keys = select_pair_rows(args.rows, base_cases)
+    base = prepare_pair_rows(base_cases, keys, args.artifacts, args.upstream)
+    after, noise = base, {}
+    if comparing:
+        after = prepare_pair_rows(dict(runtime_rows(candidate)), keys, args.candidate_artifacts, args.upstream)
+        control = read(args.aa)
+        if control["comparison"] != "A/A":
+            raise ValueError("--aa must name an A/A pair receipt")
+        for key in keys:
+            if key in control["failures"]:
+                raise ValueError(f"{key}: A/A control failed: {control['failures'][key]}")
+            noise[key] = aa_spread(key, control["rows"][key], base[key], args.cpu, args.pairs)
+
+    out = args.out.resolve()
+    if out.is_relative_to(build.ROOT):
+        raise ValueError("use a new evidence directory outside the checkout")
+    if args.cpu not in os.sched_getaffinity(0):
+        raise ValueError(f"CPU {args.cpu} is outside the assigned affinity")
+    siblings = sibling_cpus((args.cpu,))
+    env = build.capped_env(out)
+    report = {"comparison": "A/B" if comparing else "A/A", "cpu": args.cpu, "pairs": args.pairs,
+              "aa": args.aa, "rows": {}, "summary": {}, "failures": {}}
+    out.mkdir(parents=True)
+    target = out / "pairs.json"
+    limit = INSTRUCTION_LIMIT if args.threshold is None else args.threshold
+    if not comparing:
+        limit = None
+    failed = False
+    with measurement_slot(args.lock):
+        os.sched_setaffinity(0, {args.cpu})
+        require_idle(siblings)
+        for key in keys:
+            pairs = report["rows"][key] = []
+            row_dir = out / key
+            row_dir.mkdir(parents=True)
+            try:
+                for index in range(args.pairs):
+                    pair = {}
+                    pairs.append(pair)
+                    sides = (("base", base[key]), ("candidate", after[key]))
+                    for side, prepared in (sides if index % 2 == 0 else reversed(sides)):
+                        row = pair[side] = prepared.copy()
+                        before = cpu_ticks(siblings)
+                        observe(row, row_dir / f"{index + 1}-{side}", env, cycles=True)
+                        row["sample"]["smt_busy_percent"] = busy_percent(before, cpu_ticks(siblings))
+                        cycle_count(key, row)
+                    match_rows(key, pair["base"], pair["candidate"])
+                summary = summarize_pairs(key, pairs, noise.get(key), limit)
+                report["summary"][key] = summary
+                failed |= summary["instructions"]["verdict"] == "FAIL"
+            except (*INVALID_RECEIPT, subprocess.SubprocessError) as error:
+                report["failures"][key] = str(error)
+                print(f"{key} REFUSED ({error})", file=sys.stderr)
+            write(target, report)
+    print(target)
+    return REFUSED if report["failures"] else int(failed)
 
 
 def profile(args):
@@ -411,11 +558,19 @@ def main():
     sampling.add_argument("--lock", type=Path, required=True)
     for option in ("upstream", "awfy-build", "pool-build", "arena-build"):
         sampling.add_argument(f"--{option}", type=lambda path: Path(path).resolve())
-    sampling.add_argument("--only", nargs="+", metavar="SUITE/ROW")
+    selection = sampling.add_mutually_exclusive_group()
+    selection.add_argument("--only", nargs="+", metavar="SUITE/ROW")
+    selection.add_argument("--rows", metavar="ROW,ROW", help="comma-separated names for paired sampling")
+    sampling.add_argument("--pairs", type=positive_int, metavar="N", help="interleaved repetitions per row")
+    sampling.add_argument("--aa", type=Path, help="matching A/A pairs.json for an A/B comparison")
+    sampling.add_argument("--candidate-artifacts", type=Path, help="release toolchain for A/B sampling")
+    for suite in ("awfy", "pool", "arena"):
+        sampling.add_argument(f"--candidate-{suite}-build", type=lambda path: Path(path).resolve())
+    sampling.add_argument("--threshold", type=threshold, metavar="PERCENT")
     comparison = commands.add_parser("compare", help="compare matched rows, including verified compiler pairs")
     comparison.add_argument("baseline", type=Path)
     comparison.add_argument("candidate", type=Path)
-    comparison.add_argument("--threshold", type=threshold, default=Decimal("0.5"), metavar="PERCENT")
+    comparison.add_argument("--threshold", type=threshold, default=INSTRUCTION_LIMIT, metavar="PERCENT")
     profiling = commands.add_parser("profile-diff", help="attribute one matched runtime row with Callgrind")
     profiling.add_argument("row", metavar="SUITE/ROW")
     profiling.add_argument("baseline", type=Path)
@@ -428,6 +583,16 @@ def main():
     args = parser.parse_args()
     try:
         if args.action == "sample":
+            if args.pairs or args.rows is not None:
+                if args.pairs is None or args.rows is None:
+                    sampling.error("--pairs and --rows are required together")
+                if args.upstream is None and any((args.awfy_build, args.pool_build,
+                                                 args.candidate_awfy_build, args.candidate_pool_build)):
+                    sampling.error("--upstream is required for the AWFY workload sizes")
+                return pair_samples(args)
+            if args.threshold is not None or any((args.aa, args.candidate_artifacts, args.candidate_awfy_build,
+                                                  args.candidate_pool_build, args.candidate_arena_build)):
+                sampling.error("pair comparison options require --pairs and --rows")
             return sample(args)
         if args.action == "profile-diff":
             return profile(args)

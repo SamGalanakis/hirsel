@@ -15,6 +15,7 @@ import time
 
 from arena import group, root_mib
 from build import ROOT, sha256
+from bench_cpus import add_cpu_sets, require_idle, validate_cpu_sets
 from elf_census import STRIP_FLAGS, strip_image
 
 
@@ -52,7 +53,6 @@ EXPECTED = {
     "Size": ("AWFY original-14 harness",),
     "Checkbox": ("converge, 64 clients", "memory-subscribed, 64 clients", "memory-unsubscribed, 64 clients"),
 }
-CPU = 16
 LOCK = Path("/tmp/hirsel-langarena-measure.lock")
 HELLO = rb"Hello, world!\n"
 CORE_MEASURE = importlib.util.spec_from_file_location("core_measure", ROOT / "core/tools/measure.py")
@@ -109,7 +109,7 @@ def stripped_size(binary):
 
 
 def startup(command, marker, log):
-    with measurement_slot(), log.open("wb") as error:
+    with log.open("wb") as error:
         result = subprocess.run([ROOT / "tools/capped", sys.executable, __file__,
                                  "_probe", marker.decode(), *command],
                                 stdout=subprocess.PIPE, stderr=error)
@@ -117,8 +117,7 @@ def startup(command, marker, log):
 
 
 def runtime(command, marker, directory, exact_output=False):
-    with measurement_slot():
-        result = core_measure.sample(command, directory)
+    result = core_measure.sample(command, directory)
     output = (directory / "stdout").read_bytes()
     lines = [output] if exact_output else output.splitlines(keepends=True)
     if result["status"] == "ok" and not any(re.fullmatch(marker, line) for line in lines):
@@ -235,13 +234,26 @@ def main():
                         help="reuse unchanged comparison samples when measuring another toolchain")
     parser.add_argument("--upstream", type=Path)
     parser.add_argument("--only", nargs="+")
+    add_cpu_sets(parser)
     args = parser.parse_args()
+    siblings = validate_cpu_sets(parser, args)
+    os.sched_setaffinity(0, args.build_cpus)
     if not args.arena and args.upstream is None:
         parser.error("--upstream is required for the AWFY workload sizes")
     out = args.out.resolve()
     if out.is_relative_to(ROOT):
         parser.error("use an evidence directory outside the repo")
-    out.mkdir(parents=True, exist_ok=False)
+    with measurement_slot():
+        try:
+            require_idle(siblings)
+        except ValueError as error:
+            parser.error(str(error))
+        os.sched_setaffinity(0, {args.measure_cpus[0]})
+        out.mkdir(parents=True, exist_ok=False)
+        return collect(parser, args, out)
+
+
+def collect(parser, args, out):
     if args.size_board:
         if args.only or set(args.sides) != set(SIDES):
             parser.error("the size board requires all original workloads on all three sides")
@@ -249,7 +261,6 @@ def main():
         write_results(out, result)
         print(json.dumps(result, indent=2))
         return 0
-    os.sched_setaffinity(0, {CPU})
     os.environ.update(HIRSEL_MEMORY_LIMIT="2G", HIRSEL_JOBS="1")
     upstream = args.upstream.resolve() if args.upstream else None
     os.chdir(args.build.resolve())

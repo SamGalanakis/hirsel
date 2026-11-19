@@ -373,9 +373,27 @@ impl RecipeScratch {
         {
             self.initialized_rows += self.state.len();
         }
+        self.suffix.clear();
+        if let [shape] = &shapes[prefix..]
+            && inline_deps(shape).all(|dep| dep.index() < prefix)
+        {
+            let mut pending = [None];
+            let out = Computed {
+                prefix: recipes,
+                suffix: &mut pending,
+                effects: &self.effects,
+            };
+            match recipe(shapes, TypeRef(prefix as u32), &out) {
+                Ok(recipe) => recipes.push(recipe),
+                Err(error) => {
+                    self.effects.get_mut().truncate(prefix);
+                    return Err(error);
+                }
+            }
+            return Ok(());
+        }
         self.order.clear();
         self.stack.clear();
-        self.suffix.clear();
         for i in prefix..shapes.len() {
             visit(
                 shapes,
@@ -396,9 +414,7 @@ impl RecipeScratch {
             match recipe(shapes, t, &out) {
                 Ok(recipe) => out.suffix[t.index() - prefix] = Some(recipe),
                 Err(error) => {
-                    let mut effects = out.effects.borrow_mut();
-                    effects.rows.truncate(prefix);
-                    effects.send.rows.truncate(prefix);
+                    out.effects.borrow_mut().truncate(prefix);
                     return Err(error);
                 }
             }
@@ -426,6 +442,11 @@ struct Effects {
 }
 
 impl Effects {
+    fn truncate(&mut self, len: usize) {
+        self.rows.truncate(len);
+        self.send.rows.truncate(len);
+    }
+
     /// Whether cleaning a value of row `root` can observe the order of its steps
     /// (SEM-8): it reaches a finalizer, a resource, a handle, an `own fn`
     /// environment, an `Arc` (its releases are task events), a region reference,

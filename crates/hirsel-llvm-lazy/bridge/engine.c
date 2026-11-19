@@ -17,8 +17,6 @@
 #include "failure_edges.h"
 extern void hirsel_llvm_promote_step_window(void *module);
 extern void hirsel_llvm_promote_development_slots(void *module);
-extern void hirsel_llvm_mark_loop_callbacks(void *module);
-extern void hirsel_llvm_inline_loop_callbacks(void *module);
 extern void hirsel_llvm_inline_recursive_leaves(void *module);
 extern void hirsel_llvm_finish_reads(void *module, void *machine);
 extern void hirsel_llvm_inline_snapshot_calls(void *module);
@@ -526,12 +524,8 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         LLVMValueRef refill = LLVMGetNamedFunction(module, "hirsel_core_step_out");
         LLVMErrorRef e = hirsel_llvm_optimize_release(module, machine, export_count != 0,
                                                       refill && LLVMGetFirstUse(refill));
+        if (!e) e = hirsel_llvm_specialize_release(module, machine);
         if (!e) {
-            hirsel_llvm_mark_loop_callbacks(module);
-            e = hirsel_llvm_specialize_release(module, machine);
-        }
-        if (!e) {
-            hirsel_llvm_inline_loop_callbacks(module);
             hirsel_llvm_inline_recursive_leaves(module);
             hirsel_llvm_guard_copy_loops(module, machine);
             hirsel_llvm_promote_step_window(module);

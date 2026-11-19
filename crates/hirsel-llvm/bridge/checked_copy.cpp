@@ -1020,50 +1020,6 @@ extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
   }
 }
 
-// Late argument promotion can expose a codec's function pointer only after the
-// ordinary inliner ran. Remember loop callbacks before constant propagation;
-// give their resolved bodies and newly exposed helpers one loop-call budget
-// before lifting fuel. The budget belongs to the whole expansion, including recursion.
-extern "C" void hirsel_llvm_mark_loop_callbacks(void *Raw) {
-  auto &M = *static_cast<Module *>(Raw);
-  for (Function &F : M) {
-    if (F.isDeclaration()) continue;
-    DominatorTree DT(F);
-    LoopInfo LI(DT);
-    for (BasicBlock &BB : F) if (LI.getLoopFor(&BB))
-      for (Instruction &I : BB) if (auto *C = dyn_cast<CallInst>(&I))
-        if (C->isIndirectCall() && !C->isInlineAsm())
-          C->setMetadata("hirsel.loop.callback", MDNode::get(M.getContext(), {}));
-  }
-}
-extern "C" void hirsel_llvm_inline_loop_callbacks(void *Raw) {
-  auto &M = *static_cast<Module *>(Raw);
-  SmallVector<CallInst *, 16> Calls;
-  for (Function &F : M) for (BasicBlock &BB : F) for (Instruction &I : BB)
-    if (auto *C = dyn_cast<CallInst>(&I))
-      if (C->getMetadata("hirsel.loop.callback")) Calls.push_back(C);
-  for (CallInst *C : Calls) {
-    C->setMetadata("hirsel.loop.callback", nullptr);
-    unsigned Budget = 1024;
-    SmallVector<CallBase *, 8> Pending{C};
-    while (!Pending.empty()) {
-      CallBase *Call = Pending.pop_back_val();
-      Function *Target = Call->getCalledFunction();
-      if (!Target || Target->isDeclaration() || Target == Call->getFunction() ||
-          Target->hasFnAttribute(Attribute::NoInline) ||
-          Call->hasFnAttr(Attribute::NoInline) || Target->getInstructionCount() > Budget)
-        continue;
-      unsigned Cost = Target->getInstructionCount();
-      InlineFunctionInfo Info;
-      if (InlineFunction(*Call, Info, true).isSuccess()) {
-        Budget -= Cost;
-        Pending.append(Info.InlinedCallSites.begin(), Info.InlinedCallSites.end());
-      }
-    }
-  }
-}
-
-
 // Inline the constant-argument leaf of a directly recursive function. Only
 // inspect branches on that argument. All effects, including failing prefixes,
 // stay in the cloned leaf and execute after dispatch.

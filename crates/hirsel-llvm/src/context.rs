@@ -227,11 +227,8 @@ impl<'context> Module<'context> {
                     );
                 }
                 unsafe extern "C" {
-                    fn hirsel_llvm_mark_loop_callbacks(module: LLVMModuleRef);
-                    fn hirsel_llvm_inline_loop_callbacks(module: LLVMModuleRef);
                     fn hirsel_llvm_inline_recursive_leaves(module: LLVMModuleRef);
                 }
-                hirsel_llvm_mark_loop_callbacks(self.raw);
                 error = hirsel_llvm_specialize_release(self.raw, machine.raw);
                 if !error.is_null() {
                     let message = LLVMGetErrorMessage(error);
@@ -239,7 +236,6 @@ impl<'context> Module<'context> {
                     LLVMDisposeErrorMessage(message);
                     return Err(text);
                 }
-                hirsel_llvm_inline_loop_callbacks(self.raw);
                 hirsel_llvm_inline_recursive_leaves(self.raw);
                 hirsel_llvm_guard_copy_loops(self.raw, machine.raw);
                 hirsel_llvm_promote_step_window(self.raw);

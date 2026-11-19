@@ -41,7 +41,11 @@ genrule(
     out = "OUT_DIR",
     cmd = """mkdir -p "$OUT"
 cp "$(location :engine[shared])" "$OUT/engine.so"
-printf '%s\\n' 'static COMPONENT: &[u8] = include_bytes!("engine.so");' 'const LLVM_LIBRARY: &str = "libLLVM.so.23.1";' > "$OUT/component.rs"
+id=`readelf -n "$(location toolchains//:engine-llvm)" | awk '/Build ID:/ {print $3}'`
+test -n "$id" || exit 1
+printf '%s\\n' 'static COMPONENT: &[u8] = include_bytes!("engine.so");' \
+    'const CARGO_ENGINE: Option<(&str, &str)> = None;' \
+    "const LLVM_BUILD_ID: &str = \\"$id\\";" > "$OUT/component.rs"
 """,
     visibility = ["PUBLIC"],
 )

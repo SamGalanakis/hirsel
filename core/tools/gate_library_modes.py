@@ -201,9 +201,6 @@ def main():
                 for tool in ['cc', 'gcc', 'clang', 'ld', 'ld.lld']:
                     (decoy / tool).write_text('#!/bin/sh\necho ' + tool + ' >> ' + repr(str(found)) + '\nexit 1\n')
                     (decoy / tool).chmod(0o755)
-                # The built compiler installs itself: a copy elsewhere would find the
-                # test environment's LD_LIBRARY_PATH (the pinned tree's lib/, the deb
-                # libLLVM) before its RPATH's engine library.
                 install = self.progress.run([str(compiler), 'std-product', '--install', str(root), '--runtime', str(runtime)],
                                          cwd=work, capture_output=True, text=True)
                 self.assertEqual(install.returncode, 0, install.stdout + install.stderr)
@@ -250,6 +247,33 @@ def main():
                           for log in work.glob('loader.*') for line in log.read_text().splitlines() if 'calling init: ' in line}
                 self.assertIn((root / 'lib/libLLVM.so.23.1').resolve(), loaded)
                 self.assertEqual([p for p in loaded if re.match(r'lib(z3|icu|xml2|edit|ffi|zstd|bsd)', p.name)], [])
+                flat_compiler = root / 'bin/hirsel'
+                shutil.copy2(installed, flat_compiler)
+                stock = ROOT / 'tools/buck2/toolchains/llvm-files/lib/libLLVM.so.23.1'
+                flat_env = clean | {'LD_LIBRARY_PATH': str(stock.parent)}
+                flat_app = work / 'flat-app'
+                invoke('new', str(flat_app))
+                def flat_build():
+                    return self.progress.run([
+                        str(flat_compiler), 'build', str(flat_app), '--backend', 'llvm', '--release',
+                        '--store', str(work / 'flat-store'), '-o', str(work / 'flat-program'),
+                    ], cwd=work, env=flat_env, capture_output=True, text=True)
+                built = flat_build()
+                self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                flat_run = self.progress.run([str(work / 'flat-program')], cwd=work, capture_output=True)
+                self.assertEqual(flat_run.returncode, 0, flat_run.stderr)
+                bundled = root / 'lib/libLLVM.so.23.1'
+                original = bundled.with_suffix('.saved')
+                bundled.rename(original)
+                bundled.symlink_to(stock)
+                refused = flat_build()
+                self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+                self.assertIn('wrong build ID', refused.stdout + refused.stderr)
+                bundled.unlink()
+                refused = flat_build()
+                self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+                self.assertIn('pinned LLVM engine missing', refused.stdout + refused.stderr)
+                original.rename(bundled)
                 # Another target links through the cross C driver it names, with
                 # the prefix's own ld.lld: never one that driver finds on PATH.
                 arm = Path(os.environ['HIRSEL_TOOLCHAIN_ARM']).resolve()

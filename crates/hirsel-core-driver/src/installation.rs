@@ -68,11 +68,17 @@ impl Installed {
         }))
     }
     pub fn discover(executable: &Path) -> io::Result<Option<Self>> {
-        Self::at(
-            executable
-                .parent()
-                .ok_or_else(|| io::Error::other("compiler has no installation directory"))?,
-        )
+        let directory = executable
+            .parent()
+            .ok_or_else(|| io::Error::other("compiler has no installation directory"))?;
+        let installed = Self::at(directory)?;
+        if installed.is_none()
+            && directory.file_name().is_some_and(|name| name == "bin")
+            && let Some(prefix) = directory.parent()
+        {
+            return Self::at(prefix);
+        }
+        Ok(installed)
     }
     pub fn cache(&self) -> PathBuf {
         self.root.join("core-packages")
@@ -354,10 +360,8 @@ fn prebuild(
     Ok(())
 }
 
-/// Copy this compiler into the prefix with its RPATH set to `$ORIGIN/lib`,
-/// so the installed copy loads the installed libraries and nothing of the
-/// tree it was built in. A compiler already copied to its place is patched
-/// there; one already patched is left as it is.
+/// Copy this compiler into the prefix with an RPATH for its shipped libraries,
+/// including when an installer puts the executable in the prefix's `bin/`.
 fn install_executable(root: &Path) -> io::Result<()> {
     let source = std::env::current_exe()?;
     let installed = root.join(EXECUTABLE);
@@ -371,10 +375,10 @@ fn install_executable(root: &Path) -> io::Result<()> {
                 source.display()
             ))
         })?;
-    const ORIGIN_LIB: &[u8] = b"$ORIGIN/lib";
+    const ORIGIN_LIB: &[u8] = b"$ORIGIN/lib:$ORIGIN/../lib";
     if rpath.value.len() < ORIGIN_LIB.len() {
         return Err(io::Error::other(format!(
-            "the compiler {}'s RPATH is too short to name $ORIGIN/lib",
+            "the compiler {}'s RPATH is too short for the installed library paths",
             source.display()
         )));
     }

@@ -139,8 +139,26 @@ fn main() {
             .unwrap()
             .success()
     );
+    let engine = prefix.join("engine/libLLVM.so.23.1").canonicalize().unwrap();
+    println!("cargo:rerun-if-changed={}", engine.display());
+    let notes = Command::new("readelf")
+        .arg("-n")
+        .arg(&engine)
+        .output()
+        .unwrap();
+    assert!(
+        notes.status.success(),
+        "cannot read LLVM engine notes: {}",
+        engine.display()
+    );
+    let notes = String::from_utf8(notes.stdout).unwrap();
+    let build_id = notes
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Build ID: "))
+        .expect("pinned LLVM engine has no build ID");
+    let profile = out.ancestors().nth(3).expect("Cargo profile directory").canonicalize().unwrap();
     std::fs::write(out.join("component.rs"), format!(
-        "static COMPONENT: &[u8] = include_bytes!(\"libhirsel_llvm_engine.so\");\nconst LLVM_LIBRARY: &str = {:?};\n",
-        prefix.join("lib/libLLVM.so.23.1").to_str().unwrap(),
+        "static COMPONENT: &[u8] = include_bytes!(\"libhirsel_llvm_engine.so\");\nconst CARGO_ENGINE: Option<(&str, &str)> = Some(({:?}, {:?}));\nconst LLVM_BUILD_ID: &str = {build_id:?};\n",
+        profile.to_str().unwrap(), engine.to_str().unwrap(),
     )).unwrap();
 }

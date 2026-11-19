@@ -436,6 +436,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         }
         std::process::exit(0);
     }
+    if native_command && (matches!(backend, Some(Backend::Llvm)) || (backend.is_none() && release))
+    {
+        hirsel_llvm_lazy::llvm_library()?;
+    }
     let image = if let Some(path) = image_path {
         Some(CoreImage::open(&path)?.ok_or("core image cache miss; rebuild the image")?)
     } else {

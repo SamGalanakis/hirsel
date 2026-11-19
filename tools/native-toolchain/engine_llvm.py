@@ -20,10 +20,9 @@ store. Cold is build 1, which also compiles core and std into the cache. Warm is
 core and std cached, which is an installed compiler's ordinary build. One sample each:
 process-tree instructions:u on one CPU (HIRSEL_MEASURE_CPU, default 16).
 
-The compiler finds libLLVM through its RPATH (llvm-files/engine, then llvm-files/lib),
-which precedes LD_LIBRARY_PATH, so each library is loaded through a shadow tree. The
-tree holds a copy of the compiler six directories deep, beside an llvm-files view whose
-engine/ holds the given library and whose lib/ is the pinned tree's.
+Each library is loaded through a shadow build tree. The compiler is six directories
+deep, beside an llvm-files view whose engine/ holds the given library and whose lib/
+is the pinned tree's. This diagnostic run supplies the engine's expected build ID.
 """
 import argparse
 import hashlib
@@ -112,7 +111,7 @@ def held_out(out):
 
 
 def shadow(library, compiler, out):
-    """A compiler copy whose RPATH resolves to LIBRARY's libLLVM.so.23.1."""
+    """A compiler copy whose build-tree engine is LIBRARY's libLLVM.so.23.1."""
     tree = out / 'tools/buck2/toolchains/llvm-files'
     (tree / 'engine').mkdir(parents=True)
     shutil.copyfile(library / 'libLLVM.so.23.1', tree / 'engine/libLLVM.so.23.1')
@@ -125,7 +124,11 @@ def shadow(library, compiler, out):
 
 def build(compiler, runtime, args, out, xdg, sample):
     out.mkdir(parents=True)
+    engine = compiler.parents[6] / 'tools/buck2/toolchains/llvm-files/engine/libLLVM.so.23.1'
+    notes = subprocess.check_output(['readelf', '-n', engine], text=True)
+    [build_id] = [line.split()[-1] for line in notes.splitlines() if 'Build ID:' in line]
     env = os.environ | dict(HIRSEL_MEMORY_LIMIT='2G', HIRSEL_JOBS='1', LD_LIBRARY_PATH=str(PIN),
+                            HIRSEL_LLVM_EXPERIMENT_BUILD_ID=build_id,
                             XDG_CACHE_HOME=str(xdg / 'cache'), XDG_DATA_HOME=str(xdg / 'data'))
     pre = ['taskset', '-c', CPU, 'perf', 'stat', '-x', ';', '-e', 'instructions:u', '-o', str(out / 'perf'), '--'] if sample else []
     command = pre + [str(compiler), 'build', *args, '--backend', 'llvm', '--release', '--runtime', str(runtime),

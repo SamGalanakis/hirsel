@@ -53,4 +53,4 @@ pub fn main_capability(a: Args, d: Dir) -> Result[(), Exit] waits { serve(d) }
 
 pub fn law_capability(a: Args, d: Dir) -> u64 waits { status(serve(d)) }
 
-fn transaction(mut tx: store.Tx, h: (), take x: u64) -> Result[u64, bool] { Ok(x) }
+fn transaction(mut tx: store.Tx, h: (), caller: store.Caller, take x: u64) -> Result[u64, bool] { Ok(x) }

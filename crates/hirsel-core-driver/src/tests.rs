@@ -196,6 +196,7 @@ fn runner_describe_capture_matches_reply_schema() {
     assert_eq!(&wire[..8], &U64_FP.to_le_bytes());
     assert_eq!(&wire[8..16], &U64_FP.to_le_bytes());
     wire = &wire[16..];
+    assert!(bytes(&mut wire).is_empty()); // The evaluator fixture has no code revision.
     assert_eq!(count(&mut wire), 1); // Transact.
     assert!(bytes(&mut wire).starts_with(b"\x01store@1/runner_launch/transaction("));
     assert_eq!(bytes(&mut wire), &[3, 0, 0, 0, 0, 6]);
@@ -203,7 +204,9 @@ fn runner_describe_capture_matches_reply_schema() {
     assert_eq!(bytes(&mut wire), &[3, 0, 0, 0, 0, 17, 6, 1]);
     assert_eq!(&wire[..8], &U64_FP.to_le_bytes());
     assert_eq!(&wire[8..16], &0xebc2239a2dc21ea8u64.to_le_bytes());
-    assert_eq!(wire.len(), 16);
+    wire = &wire[16..];
+    assert!(bytes(&mut wire).is_empty());
+    assert!(wire.is_empty());
 }
 
 /// Separate definition units must preserve generic calls and function values.

@@ -1,6 +1,9 @@
 //! Test backend for core/tools/std_native.py. Selection and oracles live in the walker.
 use hirsel_core_driver::{CheckProduct, CheckRequest, Driver, LibraryInput, Meter};
-use hirsel_core_ids::DefPath;
+use hirsel_core_ids::{
+    DefPath,
+    launch::{DEFAULT_N_PLACE, Metadata},
+};
 use hirsel_core_ir::{Identity, Module, eval};
 use hirsel_core_layout::{Layout, case_of, compute};
 use hirsel_core_resolve::CorpusManifest;
@@ -18,6 +21,7 @@ struct Setting {
     instructions: u64,
     network: Option<eval::Network>,
     events: bool,
+    launch: Option<Metadata>,
 }
 
 fn evaluate(
@@ -117,6 +121,7 @@ fn run(
         setting.network,
         setting.events,
         &sites,
+        setting.launch.as_ref(),
     );
     let outcome = match report.outcome {
         eval::Outcome::Returned(values) => {
@@ -210,6 +215,23 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
         } else {
             None
         };
+        let launch = input["launch_image"]
+            .as_str()
+            .map(|image| {
+                // The paired native test runner uses the driver's default target.
+                let launch = Metadata::artifact(
+                    Path::new(image),
+                    "x86_64-unknown-linux-gnu",
+                    DEFAULT_N_PLACE,
+                    false,
+                );
+                if let Some(reason) = launch.unavailable() {
+                    Err(format!("test image identity: {reason}"))
+                } else {
+                    Ok(launch)
+                }
+            })
+            .transpose()?;
         let run = || {
             evaluate(
                 driver,
@@ -220,6 +242,7 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
                 Setting {
                     instructions: input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
                     network,
+                    launch,
                     // CONC-10 events only for a law that reads them: a flood makes millions.
                     events: input["events"].as_bool().unwrap_or(false),
                 },

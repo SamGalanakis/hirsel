@@ -39,6 +39,7 @@ N_PLACE = 16 * 1024 * 1024
 CALLS = ('atomic_migration', 'authority_receipt', 'serve_bounded_and_settled', 'scope_bound_to_caller', 'withheld_after_revocation', 'release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
          'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'calls_retired_head', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'publisher_never_blocks', 'owed_ended_delivered')
 NATIVE_ONLY_CALLS = {'drain_reopened', 'lag_window'}
+PERSISTENT_PLACE_CALLS = {'atomic_migration', 'ready_after_activation', 'calls_recorded'}
 
 # L3 (RUNNER-SPEC v2.6): execution counts read from CONC-10 events, (event kind, count).
 # TRY_SEND is kind 7 in crates/hirsel-core-layout/src/event.rs. calls_runs_once
@@ -463,9 +464,11 @@ def manifest(root, work, name, runner=None, extra=()):
 EVENT_LAWS = {*(f'store@1/runner_calls/law_{name}' for name in COUNTS), 'store@1/runner/law_children_joined_on_close'}
 
 
-def evaluate(evaluator, inputs_path, definition):
+def evaluate(evaluator, inputs_path, definition, launch_image=None):
     request = dict(manifest=str(inputs_path), entry=definition, model_net=MODEL_NET_RULES,
                    events=definition in EVENT_LAWS)
+    if launch_image is not None:
+        request['launch_image'] = str(launch_image)
     if definition in WIRE_TEST_INSTRUCTIONS:
         request['instructions'] = WIRE_TEST_INSTRUCTIONS[definition]
     if definition in WIDE_WINDOW_LAWS:
@@ -725,7 +728,7 @@ def dir_for(store):
     return host
 
 
-def native_run(args, engine, inputs_path, store, prefix, cc=None, runtime=None):
+def native_run(args, engine, inputs_path, store, prefix, cc=None, runtime=None, output=None):
     runtime = runtime or args.runtime
     command = [str(args.compiler.resolve()), 'test', '--inputs', str(inputs_path), '--source-core',
                '--source-std', '--backend', engine, '--runtime', str(runtime.resolve()),
@@ -733,6 +736,8 @@ def native_run(args, engine, inputs_path, store, prefix, cc=None, runtime=None):
                '--limit', str(64 * 1024 * 1024), '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random',
                '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535',
                '--dir', str(dir_for(store))]
+    if output is not None:
+        command += ['-o', str(output)]
     if engine == 'llvm':
         command.append('--release')
     if cc or args.cc:
@@ -743,6 +748,19 @@ def native_run(args, engine, inputs_path, store, prefix, cc=None, runtime=None):
     except ValueError:
         report = {'stdout': result.stdout, 'stderr': result.stderr}
     return result.returncode, report
+
+
+def matched_launch(args, root, work, engine, inputs, name, label):
+    """Return the selected compiled test's image and its own native outcome."""
+    output = work / f'launch-{engine}-{label}'
+    definition = f'store@1/runner_calls/test_{name}'
+    cc = counting_cc(args, root, inputs, name) if name in PLACEMENT_OBSERVERS else None
+    native = native_run(args, engine, inputs, work / f'store-{engine}-shared', definition,
+                        cc=cc, output=output)
+    images = [p for p in output.glob('*') if p.is_file() and os.access(p, os.X_OK)]
+    if len(images) != 1:
+        raise RuntimeError(f'{definition}: expected one compiled test image, got {len(images)}: {native[1]}')
+    return images[0], native
 
 
 def main():
@@ -835,14 +853,23 @@ def main():
             value, report = evaluate(evaluator, manifest(root, work, 'p19', None, [(p19, 'runner_p19')]),
                                      'store@1/runner_p19/law_p19_place_twice')
             row(engine='evaluator', law='p19_place_twice', passed=value == 1, result=report)
+        launch_pairs = {}
+        launch_engine = next((e for e in engines if e != 'evaluator'), 'cranelift')
         if 'evaluator' in engines and r1:
             for name in selected_calls:
                 if name in NATIVE_ONLY_CALLS:
                     continue
                 definition = 'store@1/runner_calls/law_' + name
-                value, report = evaluate(evaluator, base, definition)
+                image = None
+                if name in PERSISTENT_PLACE_CALLS:
+                    if args.compiler is None or args.runtime is None:
+                        p.error('persistent-place evaluator laws require --compiler and --runtime for the launch image')
+                    image, launch_pairs[name] = matched_launch(args, root, work, launch_engine, base, name, name)
+                value, report = evaluate(evaluator, base, definition, image)
                 if name == 'ready_after_activation':
-                    changed, edited = evaluate(evaluator, activation_body_edit(root, work), definition)
+                    revised = activation_body_edit(root, work)
+                    edited_image, _ = matched_launch(args, root, work, launch_engine, revised, name, 'activation-edit')
+                    changed, edited = evaluate(evaluator, revised, definition, edited_image)
                     row(engine='evaluator', law=name, passed=bool(value and changed and value != changed),
                         result={'base': report, 'body_edit': edited})
                 else:
@@ -896,7 +923,10 @@ def main():
                     runtime = args.schedule_runtime if name == 'calls_deadline_hung' else args.runtime
                     if runtime is None:
                         p.error('calls_deadline_hung requires --schedule-runtime')
-                    code, report = native_run(args, engine, base, work / f'store-{engine}-shared', definition, cc, runtime)
+                    if engine == launch_engine and name in launch_pairs:
+                        code, report = launch_pairs[name]
+                    else:
+                        code, report = native_run(args, engine, base, work / f'store-{engine}-shared', definition, cc, runtime)
                     tests = report.get('tests', [])
                     row(engine=engine, law=name,
                         passed=code == 0 and [t['definition'] for t in tests] == [definition]

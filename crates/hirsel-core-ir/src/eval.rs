@@ -900,6 +900,7 @@ pub fn run_entry(
     network: Option<Network>,
     events: bool,
     sites: &[u64],
+    launch: Option<&hirsel_core_ids::launch::Metadata>,
 ) -> (Report, Checked) {
     run_world(
         m,
@@ -915,6 +916,7 @@ pub fn run_entry(
             events,
             process_entry: true,
             sites,
+            launch,
             ..WorldInput::default()
         },
     )

@@ -457,7 +457,7 @@ struct State {
     /// Spread pages to purge when the task parks.
     listed: Vec<PagePointer>,
     /// The nursery that takes new blocks, by payer and kind.
-    nurseries: HashMap<(usize, u8), PagePointer>,
+    nurseries: HashMap<(usize, u8), PagePointer, foldhash::fast::FixedState>,
     /// Nursery placements left per class.
     nursery_blocks: [[u8; SLAB_BINS]; 3],
 }
@@ -484,7 +484,7 @@ impl Default for State {
             empty_slabs: VecDeque::new(),
             dedicated: DedicatedCache::default(),
             listed: Vec::new(),
-            nurseries: HashMap::new(),
+            nurseries: HashMap::with_hasher(foldhash::fast::FixedState::with_seed(0)),
             nursery_blocks: [[NURSERY_BLOCKS; SLAB_BINS]; 3],
         }
     }
@@ -1092,7 +1092,7 @@ pub(crate) unsafe fn release(payload: NonNull<u8>) {
 /// # Safety
 /// The caller transfers the unique cleaned slot after its logical refund, and
 /// `page` is the owning page returned by `page_of(payload)` for that slot.
-#[inline]
+#[inline(always)]
 pub(crate) unsafe fn release_page(page: PagePointer, payload: NonNull<u8>) {
     // SAFETY: slot pins this immutable heap handle through the lock and state update.
     let heap = unsafe { &page.as_ref().heap };

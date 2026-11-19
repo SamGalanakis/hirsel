@@ -764,8 +764,10 @@ fn escaping(b: &Body, signatures: &[Signature], from: &[Vec<u32>], loans: bool) 
 ///   results, which may stay anchored to the place;
 /// - every use follows a `StorageLive` on every path from the entry, failure
 ///   edges included;
-/// - no `StorageLive` of it is reached on any path while it is live, since a
-///   `StorageLive` of a live slot keeps its bytes.
+/// - no `StorageLive` of it is reached on any path while it is live. A
+///   `StorageLive` begins the slot unwritten in every engine, but wf counts a
+///   `mut` loan, a `pointer` and any overlapping store as a write of the whole
+///   place, so a read after a re-begin may still reach bytes from before it.
 ///
 /// No use follows a `StorageDead` without a new `StorageLive` (wf), so between
 /// a slot's end and its next begin nothing reaches its bytes.

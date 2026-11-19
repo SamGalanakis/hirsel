@@ -3946,16 +3946,16 @@ impl Machine<'_> {
                     self.check_carrier(p - w.offset(), size, Some(w));
                 }
             }
-            // A slot's storage ends at `StorageDead`: a later use of an address
-            // into it is a stop until a `StorageLive` begins it again, unwritten
-            // (crate docs, "Values, slots and addresses").
+            // `StorageLive` begins the slot's storage unwritten, whether or not
+            // it was live; after `StorageDead` a use of an address into it is a
+            // stop until it begins again (crate docs, "Values, slots and
+            // addresses").
             Inst::StorageLive { slot } => {
                 let size = self.place_size(b.slots[slot.index()]) as usize;
                 let blk = &mut self.mem[split(slots[slot.index()]).0];
-                if !blk.live {
-                    blk.bytes = vec![0; size];
-                    blk.live = true;
-                }
+                blk.bytes = vec![0; size];
+                blk.marks.clear();
+                blk.live = true;
             }
             // The record stays in the table until the activation ends, so a
             // later `StorageLive` revives the same identity; reads of it stop

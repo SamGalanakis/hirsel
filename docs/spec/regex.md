@@ -166,7 +166,15 @@ fn names(re: std.regex.Regex, t: String) -> Result[u64, Capacity] {   // re from
 
 std regex is ordinary std code: it has no bodiless function and adds no core function. Its charges are the [MEM-24](budgets.md#mem-24-logical-charges) charges of its own source. This rule fixes what a caller can rely on.
 
-- **`new(p)`** never holds more than `SIZE_LIMIT` (RE-8) bytes of its own admissions at once, counting both blocks while one grows (MEM-26). This holds whether it returns `Ok`, `Syntax`, `TooBig` or `Capacity`. Its scratch is refunded before it returns. `Ok(re)` keeps the compiled program, and `size(re)` is that program's charge, a function of `p` alone. When the current limit refuses an admission, everything `new` admitted is refunded and it returns `Error(Capacity(c))` with the refused admission's `Capacity`.
+- **`new(p)`** admits exactly this sequence, with `L = string.byte_len(p)`, and nothing else:
+  1. the parse arena, one `List[u64]` of `8 × (L + 1)` words, in one admission of `64 × (L + 1)` bytes;
+  2. while parsing, the group-name list, a `List[u32]` of two words per named group, grown by `list.push`;
+  3. after a successful parse, the translation arena, one `List[u64]` of `8 × (L + 1)` words, in one admission of `64 × (L + 1)` bytes;
+  4. while translating, the class-range pool, a `List[u32]` of two words per scalar range, grown by `list.push`;
+  5. after translation, the parse arena is refunded, and a counting pass sums the program's size without admitting anything. It stops as soon as its running total exceeds `SIZE_LIMIT`; then `new` refunds everything and returns `Error(TooBig(SIZE_LIMIT))` (RE-8);
+  6. otherwise the program's lists, each in one admission at its exact size; their total is `size(re)`, a function of `p` alone. Then the translation arena, the range pool and the name list are refunded, and `new` returns `Ok(re)`.
+
+  Growth is charged as [MEM-26](budgets.md#mem-26-growth-charges-the-current-limit) says. Steps 1 to 4 are ordinary admissions under the current limit and have no size limit of their own. When the current limit refuses any admission, everything `new` admitted is refunded and it returns `Error(Capacity(c))` with the refused admission's `Capacity`. On `Syntax` everything is refunded too.
 - **`cache(re, budget)`** makes one `List[u32]` of exactly `W` words, every word written, and admits it in one admission: `cache_bytes(re, budget)` = `round8(4 × W)` bytes. On refusal it returns `Error(Capacity(requested: cache_bytes(re, budget), available: a))`, where `a` is what the current limit had, and admits nothing. `W` is the layout for `S` automaton states per direction:
   - `W(S) = 2 × S × (C + 20) + F`, with `F = 24 + 3 × (Nf + Nr) + 12 × Nf + 8 × G × (Nf + 1)`;
   - `C` is the number of byte classes of `re` plus one, `Nf` and `Nr` the states of its forward and reverse automata, and `G = group_len(re)`;
@@ -220,14 +228,15 @@ fn bounded(re: std.regex.Regex, s: String) -> Result[Result[u64, Capacity], OutO
 
 ### RE-8: Size limits
 
-`new` is bounded by one limit on its own admissions.
+`new` is bounded by one limit on the program it compiles, as the crate is.
 
-- **`SIZE_LIMIT`** is 10,485,760 bytes, the crate's default NFA size limit. Before an admission inside `new` would take the bytes `new` holds past it, counting both blocks of a growth, `new` refunds everything it admitted and returns `Error(TooBig(n))`. `n` is what it would have held after that admission. So `new` never holds more than `SIZE_LIMIT`, and a `TooBig` pattern costs no more than an accepted one.
-- The limit counts std's own charges: the program and the parser's and translator's scratch. A pattern near the limit may be refused here and accepted by the crate, or the other way round. The conformance corpus has no pattern within a factor of ten of either side's limit, and std's own threshold is checked against hand-derived charges.
+- **`SIZE_LIMIT`** is 10,485,760 bytes, the crate's default NFA size limit. `new(p)` returns `Error(TooBig(SIZE_LIMIT))` when the compiled program's size, which `size(re)` would be, exceeds it. Like the crate's `CompiledTooBig(size_limit)`, the error carries the limit, not the size. The counting pass of RE-6 stops once its running total exceeds the limit, before any of the program's lists is admitted, so a `TooBig` pattern admits no program, and a pattern whose size does not fit in `u64`, such as `a{4294967295}{4294967295}`, is `TooBig(10485760)` like any other.
+- The limit is on the program only. The parse and translation scratch of RE-6 is not counted toward it: it is admitted under the current limit, and its refusal is `Capacity`, never `TooBig`. So a 90,000-byte literal pattern is accepted, as the crate accepts it.
+- The size counts std's own charges, not the crate's memory, so a pattern near the limit may be refused here and accepted by the crate, or the other way round. The conformance corpus has no pattern within a factor of ten of either side's limit, and std's own threshold is checked against hand-derived sizes.
 - Searching has no size limit and raises no size error. The cache is bounded (RE-6), and RE-7 bounds a search's steps for every accepted pattern.
 
 ```hirsel unbuilt
 fn huge() -> Result[std.regex.Regex, std.regex.Error] {
-  std.regex.new("a{1000}{1000}")   // Error(TooBig(n)) for some n > 10485760
+  std.regex.new("a{1000}{1000}")   // Error(TooBig(10485760))
 }
 ```

@@ -348,35 +348,45 @@ fn insertion_sort[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) ->
 }
 
 fn heapsort[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) -> Order) {
-    let n = b - a
+    heap_sort_by_index(mut xs, a, b, scoped fn(items: List[T], i: u64, j: u64) -> Order {
+        before(items[i], items[j])
+    }, fn(mut items: List[T], i: u64, j: u64) {
+        list.swap(mut items, i, j)
+    })
+}
+
+/// Sorts entries at start .. end in place, without preserving the order of equal entries.
+/// compare_at orders two positions in storage. swap_at exchanges their entries.
+/// Both callbacks must accept every position in the range and cannot escape the call.
+/// Fails: Overflow if end is below start, or a failure from a callback.
+/// Alloc: nothing outside the callbacks. Cost: O(n log n) for n = end - start.
+pub fn heap_sort_by_index[C](mut storage: C, start: u64, end: u64, compare_at: scoped fn(C, u64, u64) -> Order, swap_at: scoped fn(mut C, u64, u64)) {
+    let n = end - start
     let mut i = n / 2
     while i > 0 {
         i -= 1
-        sift_down(mut xs, a, i, n, before)
+        sift_down_by_index(mut storage, start, i, n, compare_at, swap_at)
     }
-    let mut end = n
-    while end > 1 {
-        end -= 1
-        list.swap(mut xs, a, a + end)
-        sift_down(mut xs, a, 0, end, before)
+    let mut remaining = n
+    while remaining > 1 {
+        remaining -= 1
+        swap_at(mut storage, start, start + remaining)
+        sift_down_by_index(mut storage, start, 0, remaining, compare_at, swap_at)
     }
 }
 
-/// Restores the max-heap below `root` in the heap xs[base..base + n].
-fn sift_down[T](mut xs: List[T], base: u64, root: u64, n: u64, before: scoped fn(T, T) -> Order) {
+/// Restores the max-heap below root relative to base.
+fn sift_down_by_index[C](mut storage: C, base: u64, root: u64, n: u64, compare_at: scoped fn(C, u64, u64) -> Order, swap_at: scoped fn(mut C, u64, u64)) {
     let mut r = root
-    loop {
+    while r < n / 2 {
         let mut child = 2 * r + 1
-        if child >= n {
-            break
-        }
-        if child + 1 < n && less(xs, base + child, base + child + 1, before) {
+        if child + 1 < n && compare_at(storage, base + child, base + child + 1) == Less {
             child += 1
         }
-        if !less(xs, base + r, base + child, before) {
+        if compare_at(storage, base + r, base + child) != Less {
             break
         }
-        list.swap(mut xs, base + r, base + child)
+        swap_at(mut storage, base + r, base + child)
         r = child
     }
 }

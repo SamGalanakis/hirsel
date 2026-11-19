@@ -188,6 +188,35 @@ fn reverse_even() -> u64 {
     digits(xs)
 }
 
+type IndexedEntries {
+    keys: Inline[u32, 5],
+    values: Inline[u32, 5]
+}
+
+// Sorting three entries moves their values with them and leaves the entries
+// on each side of the range in place.
+// expect: run heap_sort_indexed_range() = true
+fn heap_sort_indexed_range() -> bool {
+    let mut entries = IndexedEntries(keys:[9, 4, 2, 3, 1], values:[90, 40, 20, 30, 10])
+    list.heap_sort_by_index(mut entries, 1, 4, fn(table: IndexedEntries, i: u64, j: u64) -> Order {
+        order.compare(table.keys[i], table.keys[j])
+    }, fn(mut table: IndexedEntries, i: u64, j: u64) {
+        let key = table.keys[i]
+        let value = table.values[i]
+        table.keys[i] = table.keys[j]
+        table.values[i] = table.values[j]
+        table.keys[j] = key
+        table.values[j] = value
+    })
+    let keys: Inline[u32, 5] =[9, 2, 3, 4, 1]
+    for i in 0u64 .. 5 {
+        if entries.keys[i] != keys[i] || entries.values[i] != keys[i] * 10 {
+            return false
+        }
+    }
+    true
+}
+
 // expect: run sort_ascending() = 11345
 fn sort_ascending() -> u64 {
     let mut xs = five(3, 1, 4, 1, 5)

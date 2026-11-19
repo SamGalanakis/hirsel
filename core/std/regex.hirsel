@@ -1531,22 +1531,12 @@ fn range_swap(mut pool: List[u32], a: u64, b: u64) {
     list.swap(mut pool, 2 * a + 1, 2 * b + 1)
 }
 
-fn range_less(pool: List[u32], a: u64, b: u64) -> bool {
-    pool[2 * a] < pool[2 * b] || (pool[2 * a] == pool[2 * b] && pool[2 * a + 1] < pool[2 * b + 1])
-}
-
-fn sift(mut pool: List[u32], start: u64, root: u64, cap: u64) {
-    let mut i = root
-    while i < cap / 2 {
-        let mut child = 2 * i + 1
-        if child + 1 < cap && range_less(pool, start + child, start + child + 1) {
-            child += 1
-        }
-        if !range_less(pool, start + i, start + child) {
-            break
-        }
-        range_swap(mut pool, start + i, start + child)
-        i = child
+fn range_compare(pool: List[u32], a: u64, b: u64) -> Order {
+    let by_start = order.compare(pool[2 * a], pool[2 * b])
+    if by_start == Equal {
+        order.compare(pool[2 * a + 1], pool[2 * b + 1])
+    } else {
+        by_start
     }
 }
 
@@ -1558,25 +1548,14 @@ fn canonical(mut pool: List[u32], lo: u64) {
     let mut sorted = true
     let mut scan = lo + 1
     while scan < hi {
-        if range_less(pool, scan, scan - 1) {
+        if range_compare(pool, scan, scan - 1) == Less {
             sorted = false
             break
         }
         scan += 1
     }
     if !sorted {
-        let n = hi - lo
-        let mut root = n / 2
-        while root > 0 {
-            root -= 1
-            sift(mut pool, lo, root, n)
-        }
-        let mut remaining = n
-        while remaining > 1 {
-            remaining -= 1
-            range_swap(mut pool, lo, lo + remaining)
-            sift(mut pool, lo, 0, remaining)
-        }
+        list.heap_sort_by_index(mut pool, lo, hi, range_compare, range_swap)
     }
     let mut i = lo + 1
     let mut write_at = lo

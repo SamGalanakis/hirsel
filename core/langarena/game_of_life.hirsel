@@ -1,9 +1,87 @@
 // kostya/LangArena 3c9f84d benchmarks/game_of_life.rs: toroidal grid.
-// The matched twin uses the same flat cells and eight explicit neighbor indices.
 type Cell {
     alive: bool,
     next_state: bool,
-    neighbors: Inline[u64, 8]
+    neighbors: List[(u64, u64)]
+}
+
+fn make_grid(w: u64, h: u64) -> Result[List[List[Cell]], helper.Error] {
+    let mut cells: List[List[Cell]] = helper.mem(list.with_capacity(h))?
+    for _ in 0 .. h {
+        let mut row: List[Cell] = helper.mem(list.with_capacity(w))?
+        for _ in 0 .. w {
+            let neighbors: List[(u64, u64)] = helper.mem(list.with_capacity(8))?
+            let _ = list.push(mut row, Cell(alive: false, next_state: false, neighbors: take neighbors))
+        }
+        let _ = list.push(mut cells, take row)
+    }
+    Ok(take cells)
+}
+
+fn link_neighbors(mut cells: List[List[Cell]], w: u64, h: u64) {
+    let wi: i64 = int.narrow(w)
+    let he: i64 = int.narrow(h)
+    for y in 0 .. h {
+        for x in 0 .. w {
+            let xi: i64 = int.narrow(x)
+            let yi: i64 = int.narrow(y)
+            for dy in -1i64 .. 2i64 {
+                for dx in -1i64 .. 2i64 {
+                    if dx != 0 || dy != 0 {
+                        let nx: u64 = int.narrow((xi + dx + wi) % wi)
+                        let ny: u64 = int.narrow((yi + dy + he) % he)
+                        let _ = list.push(mut cells[y][x].neighbors, (nx, ny))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn next_generation(mut cells: List[List[Cell]], w: u64, h: u64) {
+    for y in 0 .. h {
+        for x in 0 .. w {
+            let mut count: u32 = 0
+            for (nx, ny) in cells[y][x].neighbors {
+                if cells[ny][nx].alive {
+                    count += 1
+                }
+            }
+            cells[y][x].next_state = count == 3 || cells[y][x].alive && count == 2
+        }
+    }
+    for y in 0 .. h {
+        for x in 0 .. w {
+            cells[y][x].alive = cells[y][x].next_state
+        }
+    }
+}
+
+fn count_alive(cells: List[List[Cell]]) -> u32 {
+    let mut alive: u32 = 0
+    for row in cells {
+        for c in row {
+            if c.alive {
+                alive += 1
+            }
+        }
+    }
+    alive
+}
+
+fn compute_hash(cells: List[List[Cell]]) -> u32 {
+    let mut hash: u32 = 2166136261
+    for row in cells {
+        for c in row {
+            let bit: u32 = if c.alive {
+                1
+            } else {
+                0
+            }
+            hash = int.wrapping_mul(hash ^ bit, 16777619)
+        }
+    }
+    hash
 }
 
 pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
@@ -17,55 +95,19 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
     }
     let w: u64 = int.narrow(wi)
     let h: u64 = int.narrow(he)
-    let mut cells: List[Cell] = helper.mem(list.with_capacity(w * h))?
+    let mut cells = make_grid(w, h)?
+    link_neighbors(mut cells, w, h)
     let mut g = helper.lcg()
     for y in 0 .. h {
         for x in 0 .. w {
-            let mut neighbors: Inline[u64, 8] =[0u64; 8]
-            let mut k: u64 = 0
-            let xi: i64 = int.narrow(x)
-            let yi: i64 = int.narrow(y)
-            for dy in -1i64 .. 2i64 {
-                for dx in -1i64 .. 2i64 {
-                    if dx != 0 || dy != 0 {
-                        let xx: u64 = int.narrow((xi + dx + wi) % wi)
-                        let yy: u64 = int.narrow((yi + dy + he) % he)
-                        neighbors[k] = yy * w + xx
-                        k += 1
-                    }
-                }
-            }
-            let alive = float.lt(helper.next_float(mut g, 1.0), 0.1)
-            let cell = Cell(alive: alive, next_state: false, neighbors: neighbors)
-            let _ = list.push(mut cells, take cell)
+            cells[y][x].alive = float.lt(helper.next_float(mut g, 1.0), 0.1)
         }
     }
     for _ in 0 .. warmup + iterations {
-        for i in 0 .. w * h {
-            let mut count: u32 = 0
-            for j in 0u64 .. 8u64 {
-                if cells[cells[i].neighbors[j]].alive {
-                    count += 1
-                }
-            }
-            cells[i].next_state = count == 3 || cells[i].alive && count == 2
-        }
-        for i in 0 .. w * h {
-            cells[i].alive = cells[i].next_state
-        }
+        next_generation(mut cells, w, h)
     }
-    let mut hash: u32 = 2166136261
-    let mut alive: u32 = 0
-    for c in cells {
-        let bit: u32 = if c.alive {
-            1
-        } else {
-            0
-        }
-        alive += bit
-        hash = int.wrapping_mul(hash ^ bit, 16777619)
-    }
-    Ok(hash + alive)
+    let alive = count_alive(cells)
+    Ok(compute_hash(cells) + alive)
 }
 
 pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {

@@ -1,4 +1,4 @@
-//! Safe copy versioning must preserve every partial update and failure order.
+//! Release bridge rewrites must preserve every partial update, failure order and raised cause.
 use crate::context::{Context, Module, TargetMachine};
 use std::{path::PathBuf, process::Command};
 
@@ -86,4 +86,70 @@ fn guarded_copy_requires_buffer_and_carrier_alias_proofs() {
         let (ir, _) = optimized(&source);
         assert!(!ir.contains("copy.first.safe"), "{noalias}: {ir}");
     }
+}
+
+/// A built-in cause built in a stack temporary (an inherited site) reaches the
+/// runtime with the kind and site its bytes hold: two zero words, the kind word
+/// `1 << 63 | kind`, then the site, whichever raise entry the release passes
+/// leave in place.
+#[test]
+fn stack_built_cause_keeps_its_kind_and_site() {
+    let source = r#"
+target triple = "x86_64-unknown-linux-gnu"
+declare void @hirsel_core_raise(ptr, ptr byval([32 x i8]) align 8)
+define void @raise_at(ptr %context, i64 %site) {
+  %t = alloca [32 x i8], align 8
+  call void @llvm.memset.p0.i64(ptr align 8 %t, i8 0, i64 16, i1 false)
+  %kind = getelementptr inbounds i8, ptr %t, i64 16
+  store i64 -9223372036854775802, ptr %kind, align 8
+  %at = getelementptr inbounds i8, ptr %t, i64 24
+  store i64 %site, ptr %at, align 8
+  call void @hirsel_core_raise(ptr %context, ptr byval([32 x i8]) align 8 %t)
+  ret void
+}
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)
+"#;
+    let (_, object) = optimized(source);
+    let dir = std::env::temp_dir().join(format!("hirsel-stack-cause-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("raise.o"), object).unwrap();
+    std::fs::write(
+        dir.join("test.c"),
+        r#"
+#include <assert.h>
+#include <stdint.h>
+typedef struct { uint64_t data, len, kind, site; } Cause;
+static uint8_t kind; static uint64_t site; static int raised;
+void hirsel_core_raise(void *context, Cause cause) {
+    assert(cause.data == 0 && cause.len == 0 && cause.kind >> 63);
+    kind = (uint8_t)cause.kind; site = cause.site; ++raised;
+}
+void hirsel_core_raise_builtin(void *context, uint8_t k, uint64_t s) { kind = k; site = s; ++raised; }
+extern void raise_at(void *, uint64_t);
+int main(void) {
+    const uint64_t sites[] = {0, 1, 0x500000002dd, UINT64_MAX};
+    for (unsigned i = 0; i < 4; ++i) {
+        raised = 0; kind = 0; site = ~sites[i];
+        raise_at(&raised, sites[i]);
+        assert(raised == 1 && kind == 6 && site == sites[i]);
+    }
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let result = Command::new(prefix.join("bin/clang"))
+        .arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()))
+        .args(["-std=c11", "-O2", "-no-pie"])
+        .arg(dir.join("test.c"))
+        .arg(dir.join("raise.o"))
+        .arg("-o")
+        .arg(dir.join("test"))
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    let result = Command::new(dir.join("test")).output().unwrap();
+    assert!(result.status.success(), "{result:?}");
+    std::fs::remove_dir_all(dir).unwrap();
 }

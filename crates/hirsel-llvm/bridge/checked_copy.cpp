@@ -10,7 +10,9 @@
 #include "forward_reads.h"
 #include "loop_version.h"
 #include "step_tree.h"
+#include <array>
 #include <map>
+#include <optional>
 #include <memory>
 #include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/SetVector.h>
@@ -1111,6 +1113,102 @@ static void shareStepWindows(Module &M, Function &Step) {
   }
 }
 
+// A built-in cause whose site is inherited at run time is built in a stack
+// temporary: two zero words, the kind word, then the site. Read those back from
+// the temporary's only writes, all in the raise's block before it, and collect
+// the instructions that become dead once the raise no longer reads it.
+static bool stackCause(CallInst *Call, uint64_t &KindWord, Value *&Site,
+                       SmallVectorImpl<Instruction *> &Dead) {
+  auto *Slot = dyn_cast<AllocaInst>(Call->getArgOperand(1));
+  if (!Slot) return false;
+  const auto &Layout = Call->getModule()->getDataLayout();
+  DenseMap<Instruction *, int64_t> Writes;
+  SmallVector<std::pair<Value *, int64_t>, 8> Work{{Slot, 0}};
+  SmallVector<Instruction *, 8> Pointers;
+  while (!Work.empty()) {
+    auto [Pointer, Offset] = Work.pop_back_val();
+    for (auto &Use : Pointer->uses()) {
+      auto *I = dyn_cast<Instruction>(Use.getUser());
+      if (!I) return false;
+      if (I == Call) {
+        if (Pointer != Slot || Use.getOperandNo() != 1) return false;
+        continue;
+      }
+      if (auto *Gep = dyn_cast<GetElementPtrInst>(I)) {
+        APInt Delta(Layout.getIndexTypeSizeInBits(Gep->getType()), 0);
+        if (Gep->getPointerOperand() != Pointer || !Gep->accumulateConstantOffset(Layout, Delta))
+          return false;
+        Work.push_back({Gep, Offset + Delta.getSExtValue()});
+        Pointers.push_back(Gep);
+        continue;
+      }
+      if (I->isLifetimeStartOrEnd()) {
+        Dead.push_back(I);
+        continue;
+      }
+      if (I->getParent() != Call->getParent() || !I->comesBefore(Call)) return false;
+      if (auto *Store = dyn_cast<StoreInst>(I)) {
+        if (Store->getPointerOperand() != Pointer || Store->isVolatile()) return false;
+      } else if (auto *Set = dyn_cast<MemSetInst>(I)) {
+        if (Set->getDest() != Pointer || Set->isVolatile()) return false;
+      } else {
+        return false;
+      }
+      Writes[I] = Offset;
+    }
+  }
+  std::array<std::optional<uint8_t>, 32> Bytes;
+  Value *Stored = nullptr;
+  for (auto &I : *Call->getParent()) {
+    if (&I == Call) break;
+    auto Found = Writes.find(&I);
+    if (Found == Writes.end()) continue;
+    int64_t At = Found->second;
+    if (auto *Set = dyn_cast<MemSetInst>(&I)) {
+      auto *Length = dyn_cast<ConstantInt>(Set->getLength());
+      auto *Byte = dyn_cast<ConstantInt>(Set->getValue());
+      if (!Length || !Byte || At < 0 || At + Length->getZExtValue() > 32) return false;
+      for (uint64_t K = At; K < At + Length->getZExtValue(); ++K) Bytes[K] = Byte->getZExtValue();
+      if (At + (int64_t)Length->getZExtValue() > 24) Stored = nullptr;
+      continue;
+    }
+    auto *Written = cast<StoreInst>(&I)->getValueOperand();
+    uint64_t Size = Layout.getTypeStoreSize(Written->getType());
+    if (At < 0 || At + Size > 32) return false;
+    if (At == 24 && Written->getType() == Type::getInt64Ty(Call->getContext())) {
+      Stored = Written;
+      for (int K = 24; K < 32; ++K) Bytes[K].reset();
+      continue;
+    }
+    if (At + (int64_t)Size > 24) Stored = nullptr;
+    if (auto *Constant = dyn_cast<llvm::Constant>(Written); Constant && Constant->isNullValue()) {
+      for (uint64_t K = At; K < At + Size; ++K) Bytes[K] = 0;
+    } else if (auto *Int = dyn_cast<ConstantInt>(Written); Int && Size <= 8) {
+      for (uint64_t K = 0; K < Size; ++K) Bytes[At + K] = Int->getZExtValue() >> (8 * K) & 0xff;
+    } else {
+      return false;
+    }
+  }
+  for (int K = 0; K < 24; ++K)
+    if (!Bytes[K] || (K < 16 && *Bytes[K] != 0)) return false;
+  KindWord = 0;
+  for (int K = 23; K >= 16; --K) KindWord = KindWord << 8 | *Bytes[K];
+  if (Stored) {
+    Site = Stored;
+  } else {
+    uint64_t Word = 0;
+    for (int K = 31; K >= 24; --K) {
+      if (!Bytes[K]) return false;
+      Word = Word << 8 | *Bytes[K];
+    }
+    Site = ConstantInt::get(Type::getInt64Ty(Call->getContext()), Word);
+  }
+  for (auto &[Write, Offset] : Writes) Dead.push_back(Write);
+  Dead.append(Pointers.rbegin(), Pointers.rend());
+  Dead.push_back(Slot);
+  return true;
+}
+
 // A built-in cause is a constant: zero words around its kind and site. SysV
 // passes it by value, so every raise copies 32 bytes onto the outgoing stack.
 // Pass the kind and site in registers instead, after the IR pipeline: a
@@ -1118,6 +1216,7 @@ static void shareStepWindows(Module &M, Function &Step) {
 // marking loop then spills its index (+51% instructions). Raises inside a loop
 // keep the copy; their argument registers change greedy allocation of the hot
 // loop around them (StoragePool's fill counter moves to a spilled r8, +0.68%).
+// A cause built in a stack temporary (an inherited site) is passed the same way.
 static void scalarRaises(Module &M) {
   auto *Raise = M.getFunction("hirsel_core_raise");
   if (!Raise) return;
@@ -1137,25 +1236,35 @@ static void scalarRaises(Module &M) {
     auto &Info = Loops[Call->getFunction()];
     if (!Info) Info = std::make_unique<LoopInfo>(DominatorTree(*Call->getFunction()));
     if (Info->getLoopFor(Call->getParent())) continue;
+    uint64_t KindWord;
+    Value *Site;
+    SmallVector<Instruction *, 8> Dead;
     auto *Cause = dyn_cast<GlobalVariable>(Call->getArgOperand(1));
-    if (!Cause || !Cause->isConstant() || !Cause->hasInitializer() ||
-        Cause->isExternallyInitialized())
+    if (Cause) {
+      if (!Cause->isConstant() || !Cause->hasInitializer() || Cause->isExternallyInitialized())
+        continue;
+      auto *Init = dyn_cast<ConstantStruct>(Cause->getInitializer());
+      if (!Init || Init->getNumOperands() != 3 || !Init->getOperand(0)->isNullValue()) continue;
+      auto *Constant = dyn_cast<ConstantInt>(Init->getOperand(1));
+      Site = Init->getOperand(2);
+      if (!Constant || Site->getType() != Word) continue;
+      KindWord = Constant->getZExtValue();
+    } else if (!Info->empty() /* moving the site off the stack perturbs loop registers */ ||
+               !stackCause(Call, KindWord, Site, Dead) || KindWord >> 63 != 1 ||
+               (KindWord & ~(uint64_t(1) << 63)) > 0xff ||
+               (KindWord & 0xff) == 4 /* CAUSE_FAIL carries a message */) {
       continue;
-    auto *Init = dyn_cast<ConstantStruct>(Cause->getInitializer());
-    if (!Init || Init->getNumOperands() != 3 || !Init->getOperand(0)->isNullValue()) continue;
-    auto *KindWord = dyn_cast<ConstantInt>(Init->getOperand(1));
-    auto *Site = Init->getOperand(2);
-    if (!KindWord || Site->getType() != Word) continue;
+    }
     IRBuilder<> Builder(Call);
     auto *Scalar = Builder.CreateCall(
-        Builtin, {Call->getArgOperand(0),
-                  ConstantInt::get(Kind, KindWord->getZExtValue() & 0xff), Site});
+        Builtin, {Call->getArgOperand(0), ConstantInt::get(Kind, KindWord & 0xff), Site});
     Scalar->setCallingConv(Call->getCallingConv());
     Scalar->setAttributes(Call->getAttributes().removeParamAttributes(Context, 1));
     Scalar->addParamAttr(1, Attribute::ZExt);
     Scalar->copyMetadata(*Call);
     Call->eraseFromParent();
-    Causes.insert(Cause);
+    for (auto *I : Dead) I->eraseFromParent();
+    if (Cause) Causes.insert(Cause);
   }
   for (auto *Cause : Causes)
     if (Cause->use_empty()) Cause->eraseFromParent();

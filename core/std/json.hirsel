@@ -125,7 +125,7 @@ pub fn record_of[T](s: String, mut c: Cursor, take seed: T, field: scoped fn(Str
             if end - start == width {
                 field(string.slice(s, start, end), s, mut c, mut value)?
             } else {
-                let key = decode_string(s, start, end)?
+                let key = decode_string(s, start)?
                 field(key, s, mut c, mut value)?
             }
             if after_item(s, mut c.at, b'}')? {
@@ -173,7 +173,7 @@ fn tree_value[T, E](s: String, mut i: u64, before: scoped fn() -> Result[(), E],
         ReadString => {
             let start = i + 1
             let _ = result.map_err(string_size(s, mut i), wrap)?
-            let value = result.map_err(decode_string(s, start, i - 1), wrap)?
+            let value = result.map_err(decode_string(s, start), wrap)?
             Str(take value)
         },
         ReadArray => {
@@ -195,8 +195,8 @@ fn tree_value[T, E](s: String, mut i: u64, before: scoped fn() -> Result[(), E],
             let mut members: Map[String, T] = map.new()
             if !ends(s, mut i, b'}') {
                 loop {
-                    let (start, end, _) = result.map_err(member_name(s, mut i), wrap)?
-                    let key = result.map_err(decode_string(s, start, end), wrap)?
+                    let (start, _, _) = result.map_err(member_name(s, mut i), wrap)?
+                    let key = result.map_err(decode_string(s, start), wrap)?
                     let value = tree_value(s, mut i, before, make, wrap)?
                     if let Error((e, _)) = map.insert(mut members, take key, take value) {
                         return Error(wrap(Build(Capacity(e))))
@@ -250,32 +250,16 @@ fn member_name(s: String, mut i: u64) -> Result[(u64, u64, u64), Error] {
     Ok((start, end, width))
 }
 
-fn decode_string(s: String, start: u64, end: u64) -> Result[String, Error] {
+fn decode_string(s: String, start: u64) -> Result[String, Error] {
     let mut key = string.new()
     let mut i = start
-    while i < end {
-        let begin = i
-        while i < end && at(s, i) != b'\\' {
-            i += 1
+    while at(s, i) != b'"' {
+        let append = match decoded_string_part(s, mut i)? {
+            StringRun(from, end) => string.push(mut key, string.slice(s, from, end)),
+            StringEscape(c) => string.push_char(mut key, c),
         }
-        if begin < i {
-            match string.push(mut key, string.slice(s, begin, i)) {
-                Ok(()) => {},
-                Error(e) => return Error(Build(Capacity(e))),
-            }
-        }
-        if i < end {
-            let escape = at(s, i + 1)
-            let c = if escape == b'u' {
-                unicode(s, mut i)?
-            } else {
-                i += 2
-                unescape(escape)
-            }
-            match string.push_char(mut key, c) {
-                Ok(()) => {},
-                Error(e) => return Error(Build(Capacity(e))),
-            }
+        if let Error(e) = append {
+            return Error(Build(Capacity(e)))
         }
     }
     Ok(take key)
@@ -1041,27 +1025,41 @@ fn write_value[in r](s: String, mut i: u64, take w: core.core.Writer[Json, in r]
     }
 }
 
-/// At the opening '"': writes the decoded string, then closes it. Each run between
-/// escapes is one push; each escape is one scalar. The runs end at '"' or '\\', which are
-/// ASCII, so every slice is on a scalar boundary.
+type DecodedStringPart: key = StringRun(u64, u64) | StringEscape(char)
+
+// Consumes a run or escape before the closing quote accepted by string_size.
+// Runs stop at ASCII delimiters, so their offsets are String boundaries.
+fn decoded_string_part(s: String, mut i: u64) -> Result[DecodedStringPart, Error] {
+    if at(s, i) == b'\\' {
+        let escape = at(s, i + 1)
+        let c = if escape == b'u' {
+            unicode(s, mut i)?
+        } else {
+            i += 2
+            unescape(escape)
+        }
+        return Ok(StringEscape(c))
+    }
+    let start = i
+    i += 1
+    while at(s, i) != b'"' && at(s, i) != b'\\' {
+        i += 1
+    }
+    Ok(StringRun(start, i))
+}
+
+/// At the opening '"': writes the decoded string, then closes it. Each run
+/// between escapes is one push and each escape is one scalar.
 fn write_string[in r](s: String, mut i: u64, take t: core.core.Writer[Text, in r]) -> Result[Child[Text], BuildError] {
     i += 1
     while at(s, i) != b'"' {
-        if at(s, i) != b'\\' {
-            let start = i
-            while at(s, i) != b'"' && at(s, i) != b'\\' {
-                i += 1
-            }
-            writer.push(mut t, string.slice(s, start, i))?
-        } else if at(s, i + 1) == b'u' {
-            let c = match unicode(s, mut i) {
-                Ok(c) => c,
-                Error(_) => fail("json: an escape that size accepted is refused"),
-            }
-            writer.scalar(mut t, c)?
-        } else {
-            writer.scalar(mut t, unescape(at(s, i + 1)))?
-            i += 2
+        let part = match decoded_string_part(s, mut i) {
+            Ok(value) => value,
+            Error(_) => fail("json: an escape that size accepted is refused"),
+        }
+        match part {
+            StringRun(start, end) => writer.push(mut t, string.slice(s, start, end))?,
+            StringEscape(c) => writer.scalar(mut t, c)?,
         }
     }
     i += 1

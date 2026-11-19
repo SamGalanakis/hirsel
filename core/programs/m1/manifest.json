@@ -186,6 +186,13 @@
           "signatures": true
         },
         {
+          "file": "core/core/simd.hirsel",
+          "modules": [
+            "simd"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/core/span.hirsel",
           "modules": [
             "span"

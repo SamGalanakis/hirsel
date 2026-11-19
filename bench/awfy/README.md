@@ -59,7 +59,7 @@ allocation. Each Hello uses a separate binary.
 Build into a fresh output directory with the three release toolchains above.
 Run `measure.py "$out/build" "$out/size-board" --upstream "$awfy" --size-board`
 on the lane's assigned CPUs. It verifies the same 14 names, inputs and expected
-results on all three harnesses, then uses GNU `strip --strip-all` on each complete
+results on all three harnesses, then uses GNU `strip --strip-all -R .comment` on each complete
 executable. Report one Hirsel/Rust ratio and one Hirsel/Goose ratio for the
 harnesses. Each ratio uses a single pair of binaries. A per-row size geomean
 requires separately built, matched standalone executables. Report pool and

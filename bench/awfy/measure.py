@@ -15,6 +15,7 @@ import time
 
 from arena import group, root_mib
 from build import ROOT
+from elf_census import strip_image
 
 
 SIDES = ("hirsel", "rust", "goose")
@@ -98,7 +99,7 @@ def probe(pattern, command):
 def stripped_size(binary):
     with tempfile.TemporaryDirectory() as temp:
         output = Path(temp) / "stripped"
-        subprocess.run(["strip", "--strip-all", "-o", output, binary], check=True)
+        strip_image(binary, output)
         return output.stat().st_size
 
 

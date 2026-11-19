@@ -73,11 +73,15 @@ def inspect(path, symbols=False):
     }
 
 
+def strip_image(source, target):
+    subprocess.run(["strip", "--strip-all", "-R", ".comment", "-o", target, source], check=True)
+
+
 def image(path):
     full = inspect(path, symbols=True)
     with tempfile.TemporaryDirectory(prefix="hirsel-elf-") as scratch:
         stripped = Path(scratch) / "stripped"
-        subprocess.run(["strip", "--strip-all", "-o", stripped, path], check=True)
+        strip_image(path, stripped)
         shipping = inspect(stripped)
     return {"path": str(path.resolve()), "unstripped": full, "stripped": shipping}
 

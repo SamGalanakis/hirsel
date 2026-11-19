@@ -90,16 +90,35 @@ pub fn push_uint(mut s: String, n: u64, base: u32, width: u64, pad: char) -> Res
 }
 
 /// s written n times into a new string of exactly byte_len(s) * n bytes (Rust str::repeat).
-/// Fails: Error(c) when that storage is refused; Fail when byte_len(s) * n overflows u64.
-/// Alloc: byte_len(s) * n rounded to 8, current limit. Cost: O(byte_len(s) * n).
+/// Fails: Error(c) when that storage or the block is refused; Fail when byte_len(s) * n
+/// overflows u64. Alloc: byte_len(s) * n rounded to 8, plus a block of at most 256 bytes
+/// while it runs, current limit. Cost: O(byte_len(s) * n).
 /// Ex: `let rule = string.repeat("-", 40)?`
 pub fn repeat(s: String, n: u64) -> Result[String, Capacity] {
-    let total = match int.checked_mul(string.byte_len(s), n) {
+    let len = string.byte_len(s)
+    let total = match int.checked_mul(len, n) {
         Some(t) => t,
         None => fail("string.repeat: length overflows u64"),
     }
     let mut out = with_capacity(total)?
+    // Rust doubles inside its buffer; a String cannot append from itself, so a short s
+    // is first gathered into a block of at most 256 bytes and the block is appended.
+    let per: u64 = if len == 0 {
+        0
+    } else {
+        256 / len
+    }
     let mut k: u64 = 0
+    if per >= 4 && n >= 2 * per {
+        let mut block = with_capacity(per * len)?
+        for _ in 0 .. per {
+            string.push(mut block, s)?
+        }
+        while n - k >= per {
+            string.push(mut out, block)?
+            k += per
+        }
+    }
     while k < n {
         string.push(mut out, s)?
         k += 1

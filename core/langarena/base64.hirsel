@@ -34,10 +34,7 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
     if size < 0 {
         return Error(Config)
     }
-    let mut data = helper.mem(string.with_capacity(int.narrow(size)))?
-    for _ in 0 .. size {
-        helper.mem(string.push(mut data, "a"))?
-    }
+    let data = helper.mem(std.string.repeat("a", int.narrow(size)))?
     let mut encoded = encode(data)?
     let mut decoded = if decoding {
         decode(encoded)?

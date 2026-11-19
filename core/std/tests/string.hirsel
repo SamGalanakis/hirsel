@@ -141,6 +141,24 @@ fn repeat_three() -> bool {
     r == "aéaéaé" && string.byte_len(r) == 9 && list.capacity(string.as_bytes(r)) >= 9
 }
 
+// 200 copies of a 3-byte s: two blocks of 85 copies, then 30 single copies. Every 3-byte
+// window is "aé", and the length is 600.
+// expect: run repeat_blocks() = 200
+fn repeat_blocks() -> u64 {
+    let r = result.unwrap(string.repeat("aé", 200))
+    let mut windows: u64 = 0
+    for i in 0u64 .. 200 {
+        if string.slice(r, i * 3, i * 3 + 3) == "aé" {
+            windows += 1
+        }
+    }
+    if string.byte_len(r) == 600 {
+        windows
+    } else {
+        0
+    }
+}
+
 // Zero copies and the empty string both give "".
 // expect: run repeat_empty() = 0
 fn repeat_empty() -> u64 {

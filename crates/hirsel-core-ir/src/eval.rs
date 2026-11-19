@@ -44,7 +44,8 @@ pub struct Report {
     /// the anchor of the raising operation, or of the call that reached it when
     /// that operation is core's or unanchored; `None` when no such anchor exists.
     pub sites: Vec<Option<Anchor>>,
-    /// The run's CONC-10 event list, in the native recorder's kinds and ids.
+    /// The run's CONC-10 event list, in the native recorder's kinds and ids. Empty
+    /// unless the run asked for events: a long run makes millions of them.
     pub events: Vec<Event>,
 }
 
@@ -720,7 +721,8 @@ struct Sched {
     current: usize,
     /// The next task or channel id: the root is 0 (native `Scheduler::id`).
     next: u64,
-    events: Vec<Event>,
+    /// The CONC-10 events, when the run records them.
+    events: Option<Vec<Event>>,
 }
 impl Sched {
     /// One turn's wakes before its pop (native `take_wakes`): cancellations of
@@ -878,10 +880,12 @@ pub fn run_nans_into(
         instructions,
         revisions,
         None,
+        false,
     )
 }
 
-/// Like [run_nans_into], with an explicitly supplied deterministic network.
+/// Like [run_nans_into], with an explicitly supplied deterministic network, recording
+/// the CONC-10 events in its report when `events` is set.
 #[allow(clippy::too_many_arguments)]
 pub fn run_nans_into_network(
     m: &Module,
@@ -893,6 +897,7 @@ pub fn run_nans_into_network(
     instructions: u64,
     revisions: &Revisions,
     network: Option<Network>,
+    events: bool,
 ) -> (Report, Checked) {
     run_world(
         m,
@@ -905,6 +910,7 @@ pub fn run_nans_into_network(
             instructions,
             revisions: Some(revisions),
             network,
+            events,
             ..WorldInput::default()
         },
     )
@@ -1025,6 +1031,7 @@ struct WorldInput<'a> {
     destination: Option<&'a mut [u8]>,
     instructions: u64,
     copy_size: Option<u64>,
+    events: bool,
 }
 impl Default for WorldInput<'_> {
     fn default() -> Self {
@@ -1039,6 +1046,7 @@ impl Default for WorldInput<'_> {
             destination: None,
             instructions: u64::MAX,
             copy_size: None,
+            events: false,
         }
     }
 }
@@ -1233,7 +1241,7 @@ fn run_world(
         stdout: mach.world.stdout,
         stderr: mach.world.stderr,
         sites,
-        events: std::mem::take(&mut mach.sched.events),
+        events: mach.sched.events.take().unwrap_or_default(),
     };
     (report, checked)
 }
@@ -1463,6 +1471,7 @@ impl<'m> Machine<'m> {
             scrambled: (input.nans == Nans::Scrambled).then_some(0),
             sched: Sched {
                 next: 1,
+                events: input.events.then(Vec::new),
                 ..Sched::default()
             },
             links: vec![None],
@@ -1585,13 +1594,15 @@ impl Machine<'_> {
         }
         self.drain_refunds();
         let task = self.sched.tasks[k].id;
-        self.sched.events.push(Event {
-            kind,
-            task,
-            object,
-            value,
-            source: None,
-        });
+        if let Some(events) = &mut self.sched.events {
+            events.push(Event {
+                kind,
+                task,
+                object,
+                value,
+                source: None,
+            });
+        }
         if is_poll(kind, value) {
             let r = &mut self.sched.tasks[k];
             r.polls -= 1;
@@ -3237,9 +3248,12 @@ impl Machine<'_> {
                 let i = ((a[0] - CHAN_BASE) / 2) as usize;
                 let status = self.publish(i, a[1], item);
                 let source = self.site(t);
-                let event = self.sched.events.len();
+                // The send's own event: the turn it may give up can record more after it.
+                let event = self.sched.events.as_ref().map(Vec::len);
                 self.event(TRY_SEND, self.chan_id(i), status);
-                self.sched.events[event].source = source;
+                if let (Some(event), Some(events)) = (event, &mut self.sched.events) {
+                    events[event].source = source;
+                }
                 vec![status]
             }
             RtOp::Receive { .. } => {

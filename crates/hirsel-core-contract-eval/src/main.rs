@@ -21,6 +21,7 @@ fn evaluate(
     program_entry: bool,
     instructions: u64,
     network: Option<eval::Network>,
+    events: bool,
 ) -> Result<Value, String> {
     let inputs: CorpusManifest =
         serde_json::from_slice(&std::fs::read(manifest).map_err(|e| e.to_string())?)
@@ -70,6 +71,7 @@ fn evaluate(
             instructions,
             &revisions,
             network,
+            events,
             &product,
         )
     })) {
@@ -86,6 +88,7 @@ fn run(
     instructions: u64,
     revisions: &eval::Revisions,
     network: Option<eval::Network>,
+    events: bool,
     product: &CheckProduct,
 ) -> Result<Value, String> {
     let signature = &module.signatures[module.functions[function.index()].signature.index()];
@@ -111,6 +114,7 @@ fn run(
         instructions,
         revisions,
         network,
+        events,
     );
     let outcome = match report.outcome {
         eval::Outcome::Returned(values) => {
@@ -207,6 +211,8 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
                 input["program_entry"].as_bool().unwrap_or(false),
                 input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
                 network,
+                // CONC-10 events only for a law that reads them: a flood makes millions.
+                input["events"].as_bool().unwrap_or(false),
             )
         };
         let report = if let Some(bytes) = input["task_stack_bytes"].as_u64() {

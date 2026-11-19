@@ -391,8 +391,14 @@ def manifest(root, work, name, runner=None, extra=()):
     return out
 
 
+# The evaluator records CONC-10 events only for the laws that read them (counted,
+# children_joined): a wire flood makes about 7,500 per frame.
+EVENT_LAWS = {*(f'store@1/runner_calls/law_{name}' for name in COUNTS), 'store@1/runner/law_children_joined_on_close'}
+
+
 def evaluate(evaluator, inputs_path, definition):
-    request = dict(manifest=str(inputs_path), entry=definition, model_net=MODEL_NET_RULES)
+    request = dict(manifest=str(inputs_path), entry=definition, model_net=MODEL_NET_RULES,
+                   events=definition in EVENT_LAWS)
     if definition in WIRE_TEST_INSTRUCTIONS:
         request['instructions'] = WIRE_TEST_INSTRUCTIONS[definition]
     result = run_case(f'{definition} [{inputs_path.stem}]', 'evaluator', [str(evaluator)],

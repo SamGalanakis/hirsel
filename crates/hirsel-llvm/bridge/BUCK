@@ -1,5 +1,5 @@
 LLVM_BRIDGE_FLAGS = [
-        "-std=c++17", "-fno-exceptions", "-fno-rtti", "-nostdinc++",
+        "-std=c++17", "-O2", "-fno-exceptions", "-fno-rtti", "-nostdinc++",
         "--sysroot=tools/buck2/toolchains/llvm-files/sysroot",
         "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/c++/13",
         "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/x86_64-linux-gnu/c++/13",

@@ -228,7 +228,7 @@ fn loan_facts_and_diagnostic_off_preserve_abi_and_legal_aliases() {
     wf::module(&module).unwrap();
     let on = emit_ir_with_facts(&module, false, true).unwrap();
     let off = emit_ir_with_facts(&module, false, false).unwrap();
-    assert!(on.contains("ptr noalias readonly dereferenceable(8) %p0"));
+    assert!(on.contains("ptr noalias readonly dereferenceable(24) %p0"));
     assert!(on.contains("ptr noalias %dest"));
     for function in [2, 3] {
         let name = symbol(&module, FuncId(function));
@@ -236,7 +236,7 @@ fn loan_facts_and_diagnostic_off_preserve_abi_and_legal_aliases() {
             .lines()
             .find(|l| l.starts_with("define ") && l.contains(&format!("@{name}(")))
             .unwrap();
-        assert!(definition.contains("ptr noalias dereferenceable(8) %p0"));
+        assert!(definition.contains("ptr noalias dereferenceable(24) %p0"));
     }
     for fact in [
         "noalias",
@@ -1615,8 +1615,10 @@ fn terminal_results_forward_without_abandoning_cleanup_or_local_arguments() {
     assert!(ending(1).unwrap().frame_safe);
     assert!(!ending(3).unwrap().frame_safe);
     let ir = emit_ir(&module).unwrap();
+    // Pair has two leaves, so its destination crosses the call as scalars: the
+    // terminal call's results are this function's results, with no local copy.
     assert!(ir.contains(&format!(
-        "tail call zeroext i8 @{}(ptr %context, ptr %dest,",
+        "tail call {{ i64, i64, i8 }} @{}(ptr %context,",
         symbol(&module, FuncId(2))
     )));
     assert!(!ir.contains(&format!(
@@ -2372,10 +2374,23 @@ fn log_append_facts_on_and_off_never_store_through_the_handle() {
             .split_once("define")
             .and_then(|(_, rest)| rest.split_once("define").map(|(first, _)| first))
             .unwrap_or(&ir);
+        // The one-leaf handle crosses the call by value and is spilled once to
+        // its home; after that, nothing may write the home.
+        let spill = body
+            .lines()
+            .find(|line| line.trim_start().starts_with("store ptr %p0_0, ptr "))
+            .unwrap_or_else(|| panic!("handle passed by value (facts={facts}): {ir}"));
+        fn destination(line: &str) -> Option<&str> {
+            line.trim_start()
+                .starts_with("store ")
+                .then(|| line.split(", ptr ").nth(1)?.split(',').next())
+                .flatten()
+        }
+        let home = destination(spill).unwrap();
         assert!(
             !body
                 .lines()
-                .any(|line| line.contains("store") && line.contains("%p0")),
+                .any(|line| line != spill && destination(line) == Some(home)),
             "log append stored through its handle (facts={facts}): {ir}"
         );
     }

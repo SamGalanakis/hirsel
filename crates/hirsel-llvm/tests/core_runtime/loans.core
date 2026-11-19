@@ -1,5 +1,6 @@
 core v1
-type t0 = own "Number" { value: u64 }
+; Three leaves keep Number a place: records of at most two leaves cross native calls as scalars.
+type t0 = own "Number" { value: u64, spare: u64, more: u64 }
 sig g0 = () -> (u64, u64, u64)
 sig g1 = (&view t0, &view t0) -> (u64)
 sig g2 = (&mut t0) -> ()

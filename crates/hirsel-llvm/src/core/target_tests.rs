@@ -275,6 +275,10 @@ void hirsel_core_raise(HirselCoreContext *context, HirselCoreCause cause) {{
     volatile HirselCoreCause *copy=&cause;
     copy->site=123; copy->message.capacity=0;
 }}
+/* As in the runtime: a built-in kind and site, recorded through the by-value entry. */
+void hirsel_core_raise_builtin(HirselCoreContext *context, uint8_t kind, uint64_t site) {{
+    hirsel_core_raise(context, hirsel_core_cause_new(kind, site));
+}}
 typedef struct {{ int32_t value; uint8_t status; }} Add;
 typedef struct {{ int64_t quotient, remainder; uint8_t status; }} Divide;
 extern Add {add}(HirselCoreContext *, int32_t, int32_t, uint64_t);

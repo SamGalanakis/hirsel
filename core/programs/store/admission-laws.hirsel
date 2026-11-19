@@ -173,7 +173,7 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool w
     result.unwrap(std.codec.put_u32(0u32, mut old))
     let mut changed: Bytes = list.new()
     result.unwrap(std.codec.put_u32(1u32, mut changed))
-    let named: Bytes = match s.caller { Some(caller) => wire_stream(caller, 1u32), _ => return false }
+    let named: Bytes = match s.caller { Some(who) => wire_stream(who, 1u32), _ => return false }
     let digest = store.request_digest(entry, old)
     result.unwrap(map.insert(mut s.held, slot_key(named, 2u64), WireHeld(stream: 1u32, p: 2u64, digest: digest, forwarded: true, queued: 0u64, owed: list.new())))
     let mismatched = wire_check_live(s, Call(1u32, 2u64, 0u32, 10u32, take changed)) == Some(1008u16)

@@ -1,7 +1,10 @@
 //! Release composition consumes the existing reachable/materialized products.
 //! The release unit is the whole program: every reached body, the program's and
 //! each library's alike, is an internal definition of one LLVM module that the
-//! whole-program pipeline optimises. Each out-of-line definition is then a
+//! whole-program pipeline optimises. After cleanup, each definition's release
+//! tail runs alone and is held in the shared parts store under its bitcode at
+//! that cut (with the linkage facts the bitcode does not keep), so an edit
+//! reruns only the tails whose input changed. Each out-of-line definition is then a
 //! part keyed by its own bitcode and the code generator's settings; one code
 //! generation covers every part not already held, and its object is cut per
 //! part. An unchanged definition is generated once, whichever program and
@@ -35,6 +38,79 @@ fn part_key(
         "hirsel.core-release-part.v2",
         &(generator, machine, ContentHash::of_bytes(bitcode)),
     )
+}
+
+/// A release tail's key: the compiler, libLLVM, target and debug lines
+/// (`generator`), the machine text and the linkage the definition's part
+/// does not keep (`key`), and the part's bitcode at the cut, which is all the
+/// tail's output is a function of.
+fn tail_key(
+    generator: &impl serde::Serialize,
+    key: &[u8],
+    bitcode: &[u8],
+) -> io::Result<ContentHash> {
+    crate::native::key(
+        "hirsel.core-release-tail.v1",
+        &(
+            generator,
+            ContentHash::of_bytes(key),
+            ContentHash::of_bytes(bitcode),
+        ),
+    )
+}
+
+/// What the shared parts cache holds for a release program: each part's
+/// object and each definition's release tail. A store error stops the
+/// program after generation; until then nothing more is loaded or kept.
+struct SharedParts<'a, G> {
+    generator: &'a G,
+    shared: &'a Store,
+    parts: &'a mut Vec<ContentHash>,
+    held: &'a mut Vec<Held>,
+    failure: &'a mut Option<io::Error>,
+}
+
+impl<G: serde::Serialize> hirsel_llvm_lazy::Held for SharedParts<'_, G> {
+    fn part(&mut self, _: &str, machine: &str, bitcode: &[u8]) -> bool {
+        let loaded = part_key(self.generator, machine, bitcode).and_then(|key| {
+            self.parts.push(key);
+            crate::native_object::load(self.shared, key)
+        });
+        match loaded {
+            Ok(Some((bare, object, file))) => {
+                self.held.push((bare, object, file, false));
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                self.failure.get_or_insert(error);
+                true
+            }
+        }
+    }
+
+    fn tail(&mut self, key: &[u8], bitcode: &[u8]) -> Option<Vec<u8>> {
+        if self.failure.is_some() {
+            return None;
+        }
+        tail_key(self.generator, key, bitcode)
+            .and_then(|key| self.shared.get(key))
+            .unwrap_or_else(|error| {
+                self.failure.get_or_insert(error);
+                None
+            })
+    }
+
+    fn keep_tail(&mut self, key: &[u8], bitcode: &[u8], tail: &[u8]) {
+        if self.failure.is_some() {
+            return;
+        }
+        if let Err(error) =
+            tail_key(self.generator, key, bitcode).and_then(|key| self.shared.put_keyed(key, tail))
+        {
+            self.failure.get_or_insert(error);
+        }
+    }
 }
 
 /// The release unit's record: its parts' keys in link order. A program whose
@@ -387,22 +463,12 @@ impl CheckProduct {
             let mut failure = None;
             // One code generator thread per CPU this process may run on.
             let jobs = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
-            let mut reuse = |_: &str, machine: &str, bitcode: &[u8]| {
-                let loaded = part_key(&generator, machine, bitcode).and_then(|key| {
-                    parts.push(key);
-                    crate::native_object::load(&shared, key)
-                });
-                match loaded {
-                    Ok(Some((bare, object, file))) => {
-                        held.push((bare, object, file, false));
-                        true
-                    }
-                    Ok(None) => false,
-                    Err(error) => {
-                        failure.get_or_insert(error);
-                        true
-                    }
-                }
+            let mut reuse = SharedParts {
+                generator: &generator,
+                shared: &shared,
+                parts: &mut parts,
+                held: &mut held,
+                failure: &mut failure,
             };
             let exports = [instance.symbol()];
             let program = match lowered {

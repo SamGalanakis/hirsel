@@ -209,6 +209,11 @@ impl<'context> Module<'context> {
                     module: LLVMModuleRef,
                     machine: LLVMTargetMachineRef,
                 ) -> LLVMErrorRef;
+                fn hirsel_llvm_release_tail(module: LLVMModuleRef, machine: LLVMTargetMachineRef);
+                fn hirsel_llvm_sweep_release(
+                    module: LLVMModuleRef,
+                    machine: LLVMTargetMachineRef,
+                ) -> LLVMErrorRef;
             }
             hirsel_llvm_inline_snapshot_calls(self.raw);
             let mut error = hirsel_llvm_optimize_release(self.raw, machine.raw, 0, 0);
@@ -241,17 +246,14 @@ impl<'context> Module<'context> {
                 hirsel_llvm_promote_step_window(self.raw);
                 hirsel_llvm_scalarize_aggregate_phis(self.raw, self.context.raw);
                 error = hirsel_llvm_cleanup_release(self.raw, machine.raw);
+                if error.is_null() {
+                    hirsel_llvm_release_tail(self.raw, machine.raw);
+                    error = hirsel_llvm_sweep_release(self.raw, machine.raw);
+                }
             }
             if error.is_null() {
                 unsafe extern "C" {
-                    fn hirsel_llvm_fixed_width_checks(module: LLVMModuleRef);
-                    fn hirsel_llvm_finish_reads(
-                        module: LLVMModuleRef,
-                        machine: LLVMTargetMachineRef,
-                    );
                     fn hirsel_llvm_share_cold_sites(module: LLVMModuleRef);
-                    fn hirsel_llvm_lower_x86_index_strides(module: LLVMModuleRef);
-                    fn hirsel_llvm_reuse_step_flags(module: LLVMModuleRef);
                     fn hirsel_llvm_share_cold_step_sync(
                         module: LLVMModuleRef,
                         machine: LLVMTargetMachineRef,
@@ -262,10 +264,6 @@ impl<'context> Module<'context> {
                     );
                     fn hirsel_llvm_align_release_functions(module: LLVMModuleRef);
                 }
-                hirsel_llvm_fixed_width_checks(self.raw);
-                hirsel_llvm_finish_reads(self.raw, machine.raw);
-                hirsel_llvm_lower_x86_index_strides(self.raw);
-                hirsel_llvm_reuse_step_flags(self.raw);
                 hirsel_llvm_share_cold_sites(self.raw);
                 hirsel_llvm_cold_failure_edges(self.raw, self.context.raw);
                 hirsel_llvm_share_cold_step_sync(self.raw, machine.raw);

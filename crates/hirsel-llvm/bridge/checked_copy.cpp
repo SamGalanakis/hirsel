@@ -8,6 +8,7 @@
 #endif
 #include "pass_cost.h"
 #include "failure_edges.h"
+#include <llvm-c/TargetMachine.h>
 #include "forward_reads.h"
 #include "loop_version.h"
 #include "step_tree.h"
@@ -43,9 +44,8 @@ using hirsel_llvm::versionLoop;
 // Let LLVM use the checked end to discharge redundant guards first. A
 // surviving end check for adjacent offsets can use a length limit without
 // replacing checks that already share an end offset with the loop.
-extern "C" void hirsel_llvm_fixed_width_checks(void *Raw) noexcept {
+static void fixedWidthChecks(Function &F) {
   using namespace llvm::PatternMatch;
-  for (Function &F : *static_cast<Module *>(Raw))
     for (BasicBlock &BB : F) {
       auto *Branch = dyn_cast<CondBrInst>(BB.getTerminator());
       if (!Branch) continue;
@@ -781,13 +781,7 @@ static bool forwardRecordJoins(Function &F, FunctionAnalysisManager &AM) {
   return Changed;
 }
 
-extern "C" void hirsel_llvm_finish_reads(void *Raw, void *Machine) noexcept {
-  auto &M = *static_cast<Module *>(Raw);
-  runLoopPass(static_cast<TargetMachine *>(Machine), M, "finish-reads", [&](PassBuilder &PB, FunctionAnalysisManager &FAM) {
-    FunctionPassManager Clean;
-    cantFail(PB.parsePassPipeline(Clean,
-        "simplifycfg,loop-mssa(licm),instcombine<no-verify-fixpoint>,simplifycfg"));
-    for (Function &F : M) if (!F.isDeclaration()) {
+static void finishReads(Function &F, FunctionAnalysisManager &FAM, FunctionPassManager &Clean) {
       DenseSet<BasicBlock *> Done;
       for (;;) {
         auto &LI = FAM.getResult<LoopAnalysis>(F);
@@ -809,8 +803,6 @@ extern "C" void hirsel_llvm_finish_reads(void *Raw, void *Machine) noexcept {
       const bool Records = forwardRecordJoins(F, FAM);
       if (Records) FAM.invalidate(F, PreservedAnalyses::none());
       if (Records || BoundedCursors || Forwarded || !Done.empty()) Clean.run(F, FAM);
-    }
-  });
 }
 
 // The step word is private runtime storage. Once calls have been inlined,
@@ -879,12 +871,12 @@ extern "C" void hirsel_llvm_inline_snapshot_calls(void *Raw) {
 
 // Select an immediate multiply for byte strides that otherwise require an
 // x86 LEA and a shift. Keep address arithmetic visible until after IR passes.
-extern "C" void hirsel_llvm_lower_x86_index_strides(void *Raw) {
-  auto &M = *static_cast<Module *>(Raw);
+static void lowerX86IndexStrides(Function &F) {
+  auto &M = *F.getParent();
   if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return;
   const auto &DL = M.getDataLayout();
   if (DL.getIndexSizeInBits(0) != 64) return;
-  for (Function &F : M) for (BasicBlock &BB : F) {
+  for (BasicBlock &BB : F) {
     for (auto I = BB.begin(); I != BB.end();) {
       auto *GEP = dyn_cast<GetElementPtrInst>(&*I++);
       if (!GEP || GEP->getPointerAddressSpace() != 0 || GEP->getType()->isVectorTy()) continue;
@@ -1315,10 +1307,14 @@ static void scalarRaises(Module &M) {
   FunctionCallee Builtin = M.getOrInsertFunction(
       "hirsel_core_raise_builtin",
       FunctionType::get(Type::getVoidTy(Context), {Raise->getArg(0)->getType(), Kind, Word}, false));
+  // Calls in module order, as in shareColdStepSites: each new call adds a
+  // use of its context, whose order code generation follows.
   SmallVector<CallInst *, 64> Calls;
-  for (auto &Use : Raise->uses())
-    if (auto *Call = dyn_cast<CallInst>(Use.getUser()); Call && Call->isCallee(&Use))
-      Calls.push_back(Call);
+  for (Function &F : M)
+    for (BasicBlock &B : F)
+      for (Instruction &I : B)
+        if (auto *Call = dyn_cast<CallInst>(&I); Call && Call->getCalledOperand() == Raise)
+          Calls.push_back(Call);
   SmallPtrSet<GlobalVariable *, 32> Causes;
   DenseMap<Function *, std::unique_ptr<LoopInfo>> Loops;
   for (auto *Call : Calls) {
@@ -1423,11 +1419,18 @@ static void shareColdStepSites(Module &M, FunctionAnalysisManager &FAM) {
   auto *Step = M.getFunction("hirsel_core_step_out");
   if (!Step || !Step->isDeclaration()) return;
 
+  // Calls in module order: a use list's order depends on how each body was
+  // made, and a body restored from the release tail cache lists its uses in
+  // another order than one optimized in place.
+  SmallVector<CallInst *, 64> Calls;
+  for (Function &F : M)
+    for (BasicBlock &B : F)
+      for (Instruction &I : B)
+        if (auto *Call = dyn_cast<CallInst>(&I); Call && Call->getCalledOperand() == Step)
+          Calls.push_back(Call);
   MapVector<uint64_t, SmallVector<StepSite, 8>> Groups;
-  for (Use &U : Step->uses()) {
-    auto *Call = dyn_cast<CallInst>(U.getUser());
-    if (!Call || !Call->isCallee(&U) ||
-        Call->getFunctionType() != Step->getFunctionType() ||
+  for (CallInst *Call : Calls) {
+    if (Call->getFunctionType() != Step->getFunctionType() ||
         Call->getCallingConv() != CallingConv::C || Call->hasOperandBundles() ||
         Call->isMustTailCall() || Call->isConvergent())
       continue;
@@ -1512,13 +1515,13 @@ static bool exactStepRefill(BasicBlock &Slow, BinaryOperator &After,
   return false;
 }
 
-extern "C" void hirsel_llvm_reuse_step_flags(void *Raw) {
-  auto &M = *static_cast<Module *>(Raw);
+static void reuseStepFlags(Function &F) {
+  auto &M = *F.getParent();
   if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return;
   auto *Refill = M.getFunction("hirsel_core_step_out");
   if (!Refill) return;
   auto *Word = Type::getInt64Ty(M.getContext());
-  for (Function &F : M) for (BasicBlock &BB : F) {
+  for (BasicBlock &BB : F) {
     auto *Branch = dyn_cast<CondBrInst>(BB.getTerminator());
     auto *Cmp = Branch ? dyn_cast<ICmpInst>(Branch->getCondition()) : nullptr;
     if (!Cmp || !Cmp->hasOneUse()) continue;
@@ -1538,4 +1541,64 @@ extern "C" void hirsel_llvm_reuse_step_flags(void *Raw) {
         !exactStepRefill(*Slow, *After, *Refill, M.getDataLayout())) continue;
     After->setHasNoSignedWrap();
   }
+}
+
+// The release tail: cleanup's function passes and the native read and check
+// steps after them. Each reads and changes one function and the declarations
+// and constants it names, so each function's tail is a function of that alone.
+namespace {
+struct ReleaseTail {
+  PassInstrumentationCallbacks Callbacks;
+  PassBuilder PB;
+  LoopAnalysisManager LAM;
+  FunctionAnalysisManager FAM;
+  CGSCCAnalysisManager CGAM;
+  ModuleAnalysisManager MAM;
+  FunctionPassManager Passes, Clean;
+  hirsel_llvm::PassCost Cost;
+
+  ReleaseTail(Module &M, TargetMachine *Machine)
+      : PB(Machine, PipelineTuningOptions(), std::nullopt, &Callbacks), Cost("tail", M) {
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+    Cost.registerCallbacks(Callbacks);
+    // DSE removes carrier clears/restores after scalar cleanup eliminates
+    // typed empty-drop guards. The final CFG and loop cleanup needs no
+    // second DSE.
+    cantFail(PB.parsePassPipeline(Passes,
+        "sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,"
+        "constraint-elimination,gvn,simplifycfg,dse,loop-simplify,lcssa,"
+        "instcombine<no-verify-fixpoint>,simplifycfg"));
+    cantFail(PB.parsePassPipeline(Clean,
+        "simplifycfg,loop-mssa(licm),instcombine<no-verify-fixpoint>,simplifycfg"));
+  }
+
+  void run(Function &F) {
+    Passes.run(F, FAM);
+    FAM.invalidate(F, PreservedAnalyses::none());
+    fixedWidthChecks(F);
+    finishReads(F, FAM, Clean);
+    lowerX86IndexStrides(F);
+    reuseStepFlags(F);
+    FAM.clear(F, F.getName());
+  }
+};
+} // namespace
+
+extern "C" void *hirsel_llvm_tail_open(LLVMModuleRef Module, LLVMTargetMachineRef Machine) {
+  return new ReleaseTail(*unwrap(Module), reinterpret_cast<TargetMachine *>(Machine));
+}
+extern "C" void hirsel_llvm_tail_run(void *Tail, LLVMValueRef Function) {
+  static_cast<ReleaseTail *>(Tail)->run(*unwrap<llvm::Function>(Function));
+}
+extern "C" void hirsel_llvm_tail_close(void *Tail) { delete static_cast<ReleaseTail *>(Tail); }
+
+// Every function's tail, in module order.
+extern "C" void hirsel_llvm_release_tail(LLVMModuleRef Module, LLVMTargetMachineRef Machine) {
+  ReleaseTail Tail(*unwrap(Module), reinterpret_cast<TargetMachine *>(Machine));
+  for (Function &F : *unwrap(Module))
+    if (!F.isDeclaration()) Tail.run(F);
 }

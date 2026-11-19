@@ -44,6 +44,17 @@ type Reuse = unsafe extern "C" fn(
     usize,
 ) -> i32;
 type Deliver = unsafe extern "C" fn(*mut libc::c_void, *const u8, usize);
+type FindTail = unsafe extern "C" fn(
+    *mut libc::c_void,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *mut *const u8,
+    *mut usize,
+) -> i32;
+type KeepTail =
+    unsafe extern "C" fn(*mut libc::c_void, *const u8, usize, *const u8, usize, *const u8, usize);
 type Program = unsafe extern "C" fn(
     *const Input,
     usize,
@@ -53,6 +64,8 @@ type Program = unsafe extern "C" fn(
     *const libc::c_char,
     *const libc::c_char,
     u32,
+    FindTail,
+    KeepTail,
     Reuse,
     Deliver,
     *mut libc::c_void,
@@ -200,7 +213,7 @@ fn load() -> Result<Backend, String> {
     // engine.c built in this same artifact. No foreign component is selected.
     let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v1".as_ptr()) };
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
-    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v6".as_ptr()) };
+    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v7".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
     if compile.is_null() || free.is_null() || program.is_null() || construction.is_null() {
@@ -282,7 +295,7 @@ pub(crate) fn compile_module(
         speed,
         target,
         0,
-        &mut |_, _, _| false,
+        &mut crate::Unheld,
     )?;
     Ok(program
         .objects
@@ -291,21 +304,24 @@ pub(crate) fn compile_module(
 }
 
 /// A program's parts, in order, and the objects generated for the parts
-/// `reuse` did not answer true for: one per part on `jobs` threads, or with
+/// `held` did not hold: one per part on `jobs` threads, or with
 /// `jobs` 0 one for them all.
 pub(crate) fn program(
     units: Vec<ProgramUnit<'_>>,
     exports: &[String],
     target: hirsel_core_layout::Target,
     jobs: u32,
-    reuse: &mut dyn FnMut(&str, &str, &[u8]) -> bool,
+    held: &mut dyn crate::Held,
 ) -> Result<crate::Program, String> {
-    emit(units, exports, true, target, jobs, reuse)
+    emit(units, exports, true, target, jobs, held)
 }
 
 struct Receiver<'a> {
-    reuse: &'a mut dyn FnMut(&str, &str, &[u8]) -> bool,
+    held: &'a mut dyn crate::Held,
     program: crate::Program,
+    /// The last tail `find_tail` answered with, borrowed by the engine until
+    /// its next call.
+    tail: Vec<u8>,
 }
 unsafe extern "C" fn reuse_part(
     receiver: *mut libc::c_void,
@@ -323,7 +339,7 @@ unsafe extern "C" fn reuse_part(
         let receiver = &mut *(receiver as *mut Receiver<'_>);
         let text = |p, n| std::str::from_utf8(std::slice::from_raw_parts(p, n)).unwrap_or("");
         let name = text(name, name_len);
-        let reused = (receiver.reuse)(
+        let reused = receiver.held.part(
             name,
             text(machine, machine_len),
             std::slice::from_raw_parts(bitcode, len),
@@ -333,6 +349,51 @@ unsafe extern "C" fn reuse_part(
             reused,
         });
         i32::from(reused)
+    }
+}
+unsafe extern "C" fn find_tail(
+    receiver: *mut libc::c_void,
+    key: *const u8,
+    key_len: usize,
+    bitcode: *const u8,
+    len: usize,
+    tail: *mut *const u8,
+    tail_len: *mut usize,
+) -> i32 {
+    // SAFETY: as in `reuse_part`; the answer stays in the receiver until the
+    // engine's next call, which reads it before then.
+    unsafe {
+        let receiver = &mut *(receiver as *mut Receiver<'_>);
+        let key = std::slice::from_raw_parts(key, key_len);
+        let Some(held) = receiver
+            .held
+            .tail(key, std::slice::from_raw_parts(bitcode, len))
+        else {
+            return 0;
+        };
+        receiver.tail = held;
+        *tail = receiver.tail.as_ptr();
+        *tail_len = receiver.tail.len();
+        1
+    }
+}
+unsafe extern "C" fn keep_tail(
+    receiver: *mut libc::c_void,
+    key: *const u8,
+    key_len: usize,
+    bitcode: *const u8,
+    len: usize,
+    tail: *const u8,
+    tail_len: usize,
+) {
+    // SAFETY: as in `reuse_part`.
+    unsafe {
+        let receiver = &mut *(receiver as *mut Receiver<'_>);
+        receiver.held.keep_tail(
+            std::slice::from_raw_parts(key, key_len),
+            std::slice::from_raw_parts(bitcode, len),
+            std::slice::from_raw_parts(tail, tail_len),
+        );
     }
 }
 unsafe extern "C" fn deliver_part(receiver: *mut libc::c_void, object: *const u8, len: usize) {
@@ -352,7 +413,7 @@ fn emit(
     speed: bool,
     target: hirsel_core_layout::Target,
     jobs: u32,
-    reuse: &mut dyn FnMut(&str, &str, &[u8]) -> bool,
+    held: &mut dyn crate::Held,
 ) -> Result<crate::Program, String> {
     let triple = CString::new(target.triple()).unwrap();
     let cpu = CString::new(target.cpu()).unwrap();
@@ -387,8 +448,9 @@ fn emit(
         failed: 0,
     };
     let mut receiver = Receiver {
-        reuse,
+        held,
         program: crate::Program::default(),
+        tail: Vec::new(),
     };
     // SAFETY: inputs, terminated export names and the receiver stay borrowed
     // through the synchronous C call, which calls back only during it. The
@@ -403,6 +465,8 @@ fn emit(
             triple.as_ptr(),
             cpu.as_ptr(),
             jobs,
+            find_tail,
+            keep_tail,
             reuse_part,
             deliver_part,
             &mut receiver as *mut Receiver<'_> as *mut libc::c_void,

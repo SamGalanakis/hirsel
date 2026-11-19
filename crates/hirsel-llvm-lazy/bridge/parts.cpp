@@ -24,6 +24,7 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/TargetMachine.h>
 #include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Bitcode/BitcodeReader.h>
@@ -199,6 +200,9 @@ StringMap<std::string> asm_lines(const Module &m) {
 }
 
 struct References {
+    // Whether a definition with external linkage brings its initializer: a
+    // key does, since a load from a constant folds to it.
+    bool initializers = false;
     std::vector<GlobalValue *> order;
     DenseSet<const Value *> seen;
     void value(const Value *v) {
@@ -206,7 +210,7 @@ struct References {
         if (auto *g = dyn_cast<GlobalValue>(v)) {
             order.push_back(const_cast<GlobalValue *>(g));
             if (auto *var = dyn_cast<GlobalVariable>(g))
-                if (var->hasInitializer() && var->hasLocalLinkage()) value(var->getInitializer());
+                if (var->hasInitializer() && (initializers || var->hasLocalLinkage())) value(var->getInitializer());
             return;
         }
         if (auto *c = dyn_cast<Constant>(v)) {
@@ -314,8 +318,12 @@ void order_uses_like(const Function &f, const ValueToValueMapTy &map) {
 // cannot put back exactly (a block whose address is taken, debug records, a
 // subprogram whose units the part must list) is cloned instead, and the
 // clone's values list their uses in the order `f`'s list theirs.
+// With `linkage`, the linkage and visibility the part does not keep of `f`
+// and of each global it names, and whether each is defined, are written to it,
+// and the part defines every variable it names with its initializer (a tail
+// folds a load from a constant): the bitcode is then a release tail's key.
 void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
-                  SmallVectorImpl<char> &out) {
+                  SmallVectorImpl<char> &out, std::string *linkage = nullptr) {
     LLVMContext &context = m.getContext();
     auto p = std::make_unique<Module>("hirsel-part", context);
     p->setSourceFileName("hirsel-part");
@@ -327,6 +335,7 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
         for (MDNode *flag : flags->operands()) copy->addOperand(flag);
     }
     References refs;
+    refs.initializers = linkage != nullptr;
     refs.seen.insert(&f);
     bool movable = !f.getSubprogram();
     for (BasicBlock &b : f) {
@@ -340,6 +349,15 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
         }
     }
     refs.settle();
+    if (linkage) {
+        raw_string_ostream os(*linkage);
+        auto line = [&](const GlobalValue &g) {
+            os << g.getName() << ' ' << (int)g.getLinkage() << ' ' << (int)g.getVisibility() << ' '
+               << g.isDeclaration() << '\n';
+        };
+        line(f);
+        for (GlobalValue *g : refs.order) line(*g);
+    }
     ValueToValueMapTy map;
     std::string assembly;
     std::vector<std::pair<GlobalVariable *, GlobalVariable *>> constants;
@@ -357,7 +375,7 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
                 var->getThreadLocalMode(), var->getAddressSpace(), var->isExternallyInitialized());
             d->copyAttributesFrom(var);
             d->copyMetadata(var, 0);
-            if (var->hasInitializer() && var->hasLocalLinkage()) {
+            if (var->hasInitializer() && (refs.initializers || var->hasLocalLinkage())) {
                 d->setLinkage(GlobalValue::LinkOnceODRLinkage);
                 constants.push_back({var, d});
             }
@@ -660,4 +678,224 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
     deliver(context, (const uint8_t *)LLVMGetBufferStart(object), LLVMGetBufferSize(object));
     LLVMDisposeMemoryBuffer(object);
     return 0;
+}
+
+extern "C" void *hirsel_llvm_tail_open(LLVMModuleRef module, LLVMTargetMachineRef machine);
+extern "C" void hirsel_llvm_tail_run(void *tail, LLVMValueRef function);
+extern "C" void hirsel_llvm_tail_close(void *tail);
+
+namespace {
+// Whether `f`'s body can be lent to a part and restored from one exactly: as
+// `part_bitcode` moves it rather than cloning it.
+bool movable(const Function &f) {
+    if (f.getSubprogram()) return false;
+    for (const BasicBlock &b : f) {
+        if (b.hasAddressTaken()) return false;
+        for (const Instruction &i : b)
+            if (i.hasDbgRecords()) return false;
+    }
+    return true;
+}
+
+// The constants `f`'s instructions use two or more times that the context
+// shares between modules (not data, which lists no uses, nor globals, which a
+// part declares), in order of first use, each with its uses in `f` in order.
+MapVector<Constant *, SmallVector<Use *, 4>> shared_uses(Function &f) {
+    MapVector<Constant *, SmallVector<Use *, 4>> uses;
+    for (BasicBlock &b : f)
+        for (Instruction &i : b)
+            for (Use &u : i.operands())
+                if (auto *c = dyn_cast<Constant>(u.get()); c && !isa<ConstantData>(c) && !isa<GlobalValue>(c))
+                    uses[c].push_back(&u);
+    uses.remove_if([](auto &entry) { return entry.second.size() < 2; });
+    return uses;
+}
+
+// The order each shared constant lists its uses in `f`. A part's bitcode
+// states it, but reading the part into a context whose program uses the same
+// constant cannot apply it: the constant's list holds the program's uses too.
+void use_orders(Function &f, std::string &out) {
+    auto word = [&](uint32_t v) { out.append((const char *)&v, sizeof v); };
+    for (auto &[c, uses] : shared_uses(f)) {
+        DenseMap<const Use *, uint32_t> at;
+        for (uint32_t k = 0; k < uses.size(); ++k) at[uses[k]] = k;
+        word(uses.size());
+        for (const Use &u : c->uses())
+            if (auto k = at.find(&u); k != at.end()) word(k->second);
+    }
+}
+
+// Lists each shared constant's uses in `f` in the order `use_orders` wrote,
+// after the program's other uses, whose order stays.
+void order_uses(Function &f, StringRef orders) {
+    auto word = [&](size_t i) {
+        uint32_t v;
+        memcpy(&v, orders.data() + 4 * i, sizeof v);
+        return v;
+    };
+    size_t i = 0, n = orders.size() / 4;
+    for (auto &[c, uses] : shared_uses(f)) {
+        if (i >= n || word(i) != uses.size() || i + 1 + uses.size() > n) return;
+        DenseMap<const Use *, uint32_t> rank;
+        for (uint32_t k = 0; k < uses.size(); ++k) rank[uses[word(i + 1 + k)]] = k;
+        auto of = [&](const Use &u) { return rank.lookup_or(&u, UINT32_MAX); };
+        c->sortUseList([&](const Use &l, const Use &r) { return of(l) < of(r); });
+        i += 1 + uses.size();
+    }
+}
+
+// Puts the body of the part `code` holds in place of `f`'s, naming `m`'s
+// globals where the part names its declarations. False, with `f` unchanged,
+// when the part's definition or a global it names does not match `m`'s.
+bool restore(Module &m, Function &f, StringRef held) {
+    // The part, then the use orders its bitcode cannot carry here.
+    uint64_t size;
+    if (held.size() < sizeof size) return false;
+    memcpy(&size, held.data(), sizeof size);
+    if (held.size() - sizeof size < size) return false;
+    StringRef code = held.substr(sizeof size, size), orders = held.substr(sizeof size + size);
+    LLVMContext &context = m.getContext();
+    // As in `generate`: reading a part drops its empty compile unit list
+    // with a warning, which is not the program's.
+    struct Quiet : DiagnosticHandler {
+        bool failed = false;
+        bool handleDiagnostics(const DiagnosticInfo &d) override {
+            failed |= d.getSeverity() == DS_Error;
+            return true;
+        }
+    };
+    std::unique_ptr<DiagnosticHandler> handler = context.getDiagnosticHandler();
+    auto quiet = std::make_unique<Quiet>();
+    Quiet &heard = *quiet;
+    context.setDiagnosticHandler(std::move(quiet));
+    auto parsed = parseBitcodeFile(MemoryBufferRef(code, "hirsel-tail"), context);
+    bool failed = heard.failed;
+    context.setDiagnosticHandler(std::move(handler));
+    if (!parsed || failed) {
+        if (!parsed) consumeError(parsed.takeError());
+        return false;
+    }
+    Module &q = **parsed;
+    // The part's constants outlive it in the context: none may name its
+    // globals once they are gone.
+    struct Unname {
+        Module &q;
+        ~Unname() {
+            q.dropAllReferences();
+            for (GlobalValue &g : q.global_values()) g.removeDeadConstantUsers();
+        }
+    } unname{q};
+    Function *own = q.getFunction(f.getName());
+    if (!own || own->isDeclaration() || own->getFunctionType() != f.getFunctionType() ||
+        own->getCallingConv() != f.getCallingConv())
+        return false;
+    ValueToValueMapTy map;
+    // A body may name itself.
+    map[own] = &f;
+    std::vector<Function *> declare;
+    for (GlobalValue &g : q.global_values()) {
+        if (&g == own) continue;
+        GlobalValue *to = m.getNamedValue(g.getName());
+        if (!to) {
+            // A declaration the tail added (an intrinsic, a library call).
+            auto *d = dyn_cast<Function>(&g);
+            if (!d || !d->isDeclaration()) return false;
+            declare.push_back(d);
+            continue;
+        }
+        if (isa<Function>(to) != isa<Function>(&g) || to->getValueType() != g.getValueType()) return false;
+        map[&g] = to;
+    }
+    for (Function *d : declare) {
+        Function *n = Function::Create(d->getFunctionType(), GlobalValue::ExternalLinkage,
+                                       d->getAddressSpace(), d->getName(), &m);
+        n->copyAttributesFrom(d);
+        map[d] = n;
+    }
+    GlobalValue::LinkageTypes linkage = f.getLinkage();
+    GlobalValue::VisibilityTypes visibility = f.getVisibility();
+    f.deleteBody();
+    f.setLinkage(linkage);
+    f.setVisibility(visibility);
+    f.setAttributes(own->getAttributes());
+    const RemapFlags flags = RF_IgnoreMissingLocals | RF_ReuseAndMutateDistinctMDs;
+    SmallVector<std::pair<unsigned, MDNode *>, 4> attached;
+    own->getAllMetadata(attached);
+    for (auto &[kind, node] : attached) f.addMetadata(kind, *MapMetadata(node, map, flags));
+    f.splice(f.end(), own);
+    for (auto [from, to] = std::pair(own->arg_begin(), f.arg_begin()); from != own->arg_end(); ++from, ++to)
+        hand_uses(*from, *to);
+    for (BasicBlock &b : f)
+        for (Instruction &i : b) {
+            for (Use &u : i.operands()) {
+                Value *v = u.get();
+                Value *n = nullptr;
+                if (auto *md = dyn_cast<MetadataAsValue>(v))
+                    n = MetadataAsValue::get(context, MapMetadata(md->getMetadata(), map, flags));
+                else if (isa<Constant>(v) && !isa<ConstantData>(v))
+                    n = MapValue(v, map, flags);
+                if (n && n != v) u.set(n);
+            }
+            SmallVector<std::pair<unsigned, MDNode *>, 4> tags;
+            i.getAllMetadataOtherThanDebugLoc(tags);
+            for (auto &[kind, node] : tags)
+                if (MDNode *n = MapMetadata(node, map, flags); n != node) i.setMetadata(kind, n);
+        }
+    order_uses(f, orders);
+    return true;
+}
+}  // namespace
+
+// The release tail (`hirsel_llvm_tail_run`) of every definition of `module`,
+// in module order. The tail of a definition is a function of its part at the
+// cut, so a definition whose body a part can lend and take back exactly is
+// keyed by that part's bitcode, the machine text, and the linkage the part
+// does not keep: `find` answers with the part after the tail when the caller
+// holds it, the body is restored from it, and otherwise the tail runs in place
+// and `keep` gets the part after it. A module that cannot be split is not
+// keyed: a definition the parts do not hold may reach what no part carries.
+extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachineRef machine,
+    int (*find)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t **, size_t *),
+    void (*keep)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t *, size_t),
+    void *context) {
+    Module &m = *unwrap(module);
+    // Local value names label printed IR only; a key does not take them.
+    for (Function &f : m) {
+        for (Argument &a : f.args()) a.setName("");
+        for (BasicBlock &b : f) {
+            b.setName("");
+            for (Instruction &i : b) i.setName("");
+        }
+    }
+    std::vector<Function *> bodies;
+    for (Function &f : m)
+        if (!f.isDeclaration()) bodies.push_back(&f);
+    bool keyed = find && unsplittable(m).empty();
+    std::string machine_key = keyed ? machine_text(*reinterpret_cast<TargetMachine *>(machine)) : "";
+    StringMap<std::string> sets = keyed ? asm_lines(m) : StringMap<std::string>();
+    void *tail = hirsel_llvm_tail_open(module, machine);
+    for (Function *f : bodies) {
+        if (!keyed || !movable(*f)) {
+            hirsel_llvm_tail_run(tail, wrap(f));
+            continue;
+        }
+        std::string key = machine_key;
+        SmallVector<char, 0> code;
+        part_bitcode(m, *f, sets, code, &key);
+        const uint8_t *held = nullptr;
+        size_t held_len = 0;
+        if (find(context, key.data(), key.size(), (const uint8_t *)code.data(), code.size(), &held, &held_len) &&
+            restore(m, *f, StringRef((const char *)held, held_len)))
+            continue;
+        hirsel_llvm_tail_run(tail, wrap(f));
+        SmallVector<char, 0> after;
+        part_bitcode(m, *f, sets, after);
+        uint64_t size = after.size();
+        std::string value((const char *)&size, sizeof size);
+        value.append(after.data(), after.size());
+        use_orders(*f, value);
+        keep(context, key.data(), key.size(), (const uint8_t *)code.data(), code.size(),
+             (const uint8_t *)value.data(), value.size());
+    }
+    hirsel_llvm_tail_close(tail);
 }

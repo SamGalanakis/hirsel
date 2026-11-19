@@ -18,14 +18,10 @@
 extern void hirsel_llvm_promote_step_window(void *module);
 extern void hirsel_llvm_promote_development_slots(void *module);
 extern void hirsel_llvm_inline_recursive_leaves(void *module);
-extern void hirsel_llvm_finish_reads(void *module, void *machine);
 extern void hirsel_llvm_inline_snapshot_calls(void *module);
-extern void hirsel_llvm_lower_x86_index_strides(void *module);
 extern void hirsel_llvm_share_cold_sites(void *module);
 extern void hirsel_llvm_share_cold_step_sync(void *module, void *machine);
-extern void hirsel_llvm_reuse_step_flags(void *module);
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
-extern void hirsel_llvm_fixed_width_checks(void *module);
 extern void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool frame_pointers);
 extern LLVMBool hirsel_llvm_emit_object(LLVMTargetMachineRef machine, LLVMModuleRef module,
                                        char **message, LLVMMemoryBufferRef *buffer);
@@ -34,6 +30,7 @@ extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTarge
                                                 LLVMBool prune, LLVMBool prepay_steps);
 extern LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_cleanup_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
+extern LLVMErrorRef hirsel_llvm_sweep_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
 typedef struct { const uint8_t *data; size_t len; LLVMModuleRef module; } HirselLlvmUnit;
@@ -43,6 +40,10 @@ extern void hirsel_llvm_composer_free(void *composer);
 extern void hirsel_llvm_merge_glue(LLVMModuleRef module);
 typedef int (*HirselLlvmReuse)(void *, const char *, size_t, const char *, size_t, const uint8_t *, size_t);
 typedef void (*HirselLlvmDeliver)(void *, const uint8_t *, size_t);
+typedef int (*HirselLlvmFindTail)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t **, size_t *);
+typedef void (*HirselLlvmKeepTail)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t *, size_t);
+extern void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachineRef machine,
+    HirselLlvmFindTail find, HirselLlvmKeepTail keep, void *context);
 extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *context, char **error);
 static pthread_once_t initialized = PTHREAD_ONCE_INIT;
@@ -438,6 +439,7 @@ static int public_body(LLVMValueRef f) {
 static void emit_program(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
                           uint8_t speed, const char *triple, const char *cpu, unsigned jobs,
+                          HirselLlvmFindTail find, HirselLlvmKeepTail keep,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
                           HirselLlvmOutput *out) {
     unsigned major, minor, patch;
@@ -533,10 +535,11 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             e = hirsel_llvm_cleanup_release(module, machine);
         }
         if (!e) {
-            hirsel_llvm_fixed_width_checks(module);
-            hirsel_llvm_finish_reads(module, machine);
-            hirsel_llvm_lower_x86_index_strides(module);
-            hirsel_llvm_reuse_step_flags(module);
+            // Each definition's tail, held per definition by the caller.
+            hirsel_llvm_release_tails(module, machine, export_count ? find : NULL, keep, receiver);
+            e = hirsel_llvm_sweep_release(module, machine);
+        }
+        if (!e) {
             hirsel_llvm_share_cold_sites(module);
             hirsel_cold_failure_edges(module, context);
             hirsel_llvm_share_cold_step_sync(module, machine);
@@ -577,22 +580,25 @@ done:
     if (discard_names && !own_context) LLVMContextSetDiscardValueNames(context, 0);
     if (own_context) LLVMContextDispose(context); LLVMDisposeTargetMachine(machine);
 }
-// Emit units as parts (exports given) or as one standalone object: `reuse` is
-// asked first for each part, `deliver` gets each missed part's object on
+// Emit units as parts (exports given) or as one standalone object: `find`
+// is asked for each definition's release tail and `keep` gets each one run,
+// `reuse` is asked first for each part, `deliver` gets each missed part's object on
 // `jobs` threads, or with `jobs` 0 the one object generated, if any, and `out`
 // is empty or holds the error.
 __attribute__((visibility("default")))
-void hirsel_llvm_program_v6(const HirselLlvmUnit *units, size_t count,
+void hirsel_llvm_program_v7(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
                           uint8_t speed, const char *triple, const char *cpu, unsigned jobs,
+                          HirselLlvmFindTail find, HirselLlvmKeepTail keep,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
                           HirselLlvmOutput *out) {
-    emit_program(units, count, exports, export_count, speed, triple, cpu, jobs, reuse, deliver, receiver, out);
+    emit_program(units, count, exports, export_count, speed, triple, cpu, jobs, find, keep, reuse, deliver,
+                 receiver, out);
 }
 __attribute__((visibility("default")))
 void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
     HirselLlvmUnit unit = { ir, len, NULL };
-    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, 0, NULL, NULL, NULL, out);
+    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, 0, NULL, NULL, NULL, NULL, NULL, out);
 }
 
 extern const void *hirsel_llvm_no_folder_api(void);

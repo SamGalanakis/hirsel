@@ -11,10 +11,11 @@ use crate::{Checked, package};
 use hirsel_core_front::*;
 use hirsel_core_ids::PackageId;
 use hirsel_core_ir::Identity;
-use hirsel_core_resolve::{CorpusManifest, ModuleSource, PackageManifest, Refusal};
+use hirsel_core_resolve::{Corpus, CorpusManifest, ModuleSource, PackageManifest, Refusal};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -165,9 +166,45 @@ fn is_test(s: &hirsel_core_resolve::CorpusSource) -> bool {
     s.module.modules.first().is_some_and(|m| m == "tests")
 }
 
+fn seed_corpus() -> Corpus {
+    let mut corpus = manifest().load().expect("std seed reads");
+    for source in &mut corpus.sources {
+        if !is_seed(&source.module.package)
+            || !is_test(source)
+            || !source.text.starts_with("// test-vectors\n")
+        {
+            continue;
+        }
+        // The native walker appends the same generator's definitions to this module.
+        let generator = source
+            .file
+            .parent()
+            .unwrap()
+            .join("vectors")
+            .join(source.file.file_stem().unwrap())
+            .join("generate.py");
+        let output = Command::new("python3")
+            .arg(&generator)
+            .output()
+            .unwrap_or_else(|error| panic!("run {}: {error}", generator.display()));
+        assert!(
+            output.status.success(),
+            "{}: {}: {}",
+            generator.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        source.text.push('\n');
+        source.text.push_str(
+            &String::from_utf8(output.stdout).expect("fixture generator emits UTF-8 Hirsel source"),
+        );
+    }
+    corpus
+}
+
 #[test]
 fn std_seed_parses_and_resolves() {
-    let corpus = manifest().load().expect("std seed reads");
+    let corpus = seed_corpus();
     let parsed = corpus.parse();
     let index = corpus.index(&parsed);
     let report = corpus.analyze(&parsed, &index);
@@ -204,7 +241,7 @@ fn std_bodies_never_halt_silently() {
 
 /// The checker's outcome per std body and per contract test, as a markdown report.
 fn std_seed_check() -> String {
-    check_corpus(manifest().load().expect("std seed reads"))
+    check_corpus(seed_corpus())
 }
 
 fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
@@ -376,7 +413,7 @@ fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
 #[test]
 fn float_constant_tables_are_read_only_data() {
     use hirsel_core_ir::{Inst, Step};
-    let corpus = manifest().load().unwrap();
+    let corpus = seed_corpus();
     let parsed = corpus.parse();
     let index = corpus.index(&parsed);
     let modules: Vec<_> = corpus
@@ -459,7 +496,7 @@ fn float_constant_tables_are_read_only_data() {
 /// These existing core contracts exercise closed helpers with u8/i8/u64/i64 rows.
 #[test]
 fn generic_numeric_core_contracts() {
-    let corpus = manifest().load().unwrap();
+    let corpus = seed_corpus();
     let parsed = corpus.parse();
     let index = corpus.index(&parsed);
     let modules: Vec<_> = corpus

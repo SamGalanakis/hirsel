@@ -2,6 +2,65 @@
 use super::*;
 use object::{Object as _, ObjectSymbol as _};
 
+use hirsel_core_ir::source::site_symbol;
+use object::ObjectSection as _;
+use std::{collections::HashSet, fs::File, path::PathBuf};
+
+/// Keep the runtime binders used by the actual link inputs. The separate
+/// DWARF object is already bound against the complete source map.
+pub(crate) fn retain_referenced(
+    sources: &mut SourceMap,
+    inputs: &[PathBuf],
+) -> std::io::Result<()> {
+    if sources.items.is_empty() {
+        return Ok(());
+    }
+    let mut names = HashSet::new();
+    for input in inputs {
+        let cache = object::read::ReadCache::new(File::open(input)?);
+        let object = object::File::parse(&cache).map_err(std::io::Error::other)?;
+        for section in object.sections() {
+            if !matches!(section.flags(), object::SectionFlags::Elf { sh_flags, .. }
+                if sh_flags.0 & object::elf::SHF_ALLOC.0 != 0)
+            {
+                continue;
+            }
+            for (_, relocation) in section.relocations() {
+                let object::RelocationTarget::Symbol(index) = relocation.target() else {
+                    continue;
+                };
+                let symbol = object
+                    .symbol_by_index(index)
+                    .map_err(std::io::Error::other)?;
+                let name = symbol.name_bytes().map_err(std::io::Error::other)?;
+                if name.starts_with(b"hirsel_core_site_") && !names.contains(name) {
+                    names.insert(name.to_vec());
+                }
+            }
+        }
+    }
+    sources
+        .items
+        .retain(|item, _| names.contains(site_symbol(item).as_bytes()));
+    let mut file_numbers = vec![None; sources.files.len()];
+    for item in sources.items.values() {
+        file_numbers[item.file as usize] = Some(0);
+    }
+    for (file, mapped) in std::mem::take(&mut sources.files)
+        .into_iter()
+        .zip(&mut file_numbers)
+    {
+        if mapped.is_some() {
+            *mapped = Some(sources.files.len() as u32);
+            sources.files.push(file);
+        }
+    }
+    for item in sources.items.values_mut() {
+        item.file = file_numbers[item.file as usize].expect("retained source file");
+    }
+    Ok(())
+}
+
 pub(super) fn define(object: &mut object::write::Object<'_>, sources: &SourceMap) {
     for (i, path) in sources.items.keys().enumerate() {
         object.add_symbol(object::write::Symbol {

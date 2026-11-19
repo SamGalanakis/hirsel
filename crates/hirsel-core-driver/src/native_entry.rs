@@ -20,7 +20,7 @@ mod report;
 mod sites;
 mod start;
 use code::{Code, I8, I32, I64};
-pub(crate) use sites::check_linked_sites;
+pub(crate) use sites::{check_linked_sites, retain_referenced};
 type Result<T> = std::result::Result<T, String>;
 fn error(e: impl std::fmt::Display) -> String {
     e.to_string()

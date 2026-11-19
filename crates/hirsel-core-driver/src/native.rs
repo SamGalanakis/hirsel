@@ -1505,7 +1505,7 @@ fn link_objects(
     let (bytes, linked) = if let Some(bytes) = cached(&store, link_key)? {
         (bytes, false)
     } else {
-        let sources = sources()?;
+        let mut sources = sources()?;
         let temp = store.scratch()?;
         let entry = temp.path().join("entry.o");
         // The entry's and the described instances' revisions are a function
@@ -1519,10 +1519,6 @@ fn link_objects(
                 )
             })
             .collect();
-        let bytes = entry_plan
-            .emit(&options.target, &sources, &revision.0, &revisions)
-            .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
-        std::fs::write(&entry, bytes)?;
         let output = temp.path().join("program");
         let compiled = objects.iter().filter(|o| o.compiled).count();
         let debug = if options.debug_lines {
@@ -1629,6 +1625,11 @@ fn link_objects(
                 std::os::fd::AsRawFd::as_raw_fd(file)
             ))
         }));
+        crate::native_entry::retain_referenced(&mut sources, &inputs[1..])?;
+        let bytes = entry_plan
+            .emit(&options.target, &sources, &revision.0, &revisions)
+            .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
+        std::fs::write(&entry, bytes)?;
         if let Some(debug) = debug {
             let debug_path = temp.path().join("debug.o");
             std::fs::write(&debug_path, debug)?;

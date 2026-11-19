@@ -1,0 +1,38 @@
+// RX3. A one-group Regex needs a 16-byte Groups list. A finalizer
+// with a 15-byte grant raises Capacity at that admission.
+resource type RefusesGroups grant bytes 15 {
+    re: regex.Regex
+} drop(s) {
+    let _ = regex.groups(s.re)
+}
+
+// expect: run regex_groups_finalizer() = fail Capacity
+fn regex_groups_finalizer() -> bool {
+    let re = result.unwrap(regex.new("a"))
+    let value = result.unwrap(RefusesGroups(re: take re))
+    true
+}
+
+// RX5. A search that exhausts during failure cleanup reports both causes.
+resource type BoundedSearch {
+    re: regex.Regex,
+    cache: regex.Cache,
+    cursor: regex.Cursor,
+} drop(s) {
+    let _ = regex.next(s.re, mut s.cache, "baab", mut s.cursor)
+}
+
+fn regex_uncaught_steps(steps: u64, warm: bool, divisor: u64) {
+    let re = result.unwrap(regex.new("a+"))
+    let mut c = result.unwrap(regex.cache(re, 0))
+    if warm {
+        let _ = regex.find(re, mut c, "baab", 0)
+    }
+    let pending = result.unwrap(BoundedSearch(re: take re, cache: take c, cursor: regex.cursor(0)))
+    // A division failure starts cleanup while the bound still has steps.
+    // MEM-30 propagates the mixed cause chain past the bound to the caller.
+    let _ = bound steps steps {
+        let in_bound = take pending
+        let _ = 1u64 / divisor
+    }
+}

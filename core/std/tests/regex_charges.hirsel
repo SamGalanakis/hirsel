@@ -1,0 +1,227 @@
+// test-of: std.regex
+// test-reason: RX3 exercises compiled layouts and the work list shared by both engines.
+fn oracle_minimum(pattern: String, expected: u64) -> bool {
+    match new(pattern) {
+        Ok(re) => cache_bytes(re, 0) == expected,
+        Error(_) => false,
+    }
+}
+
+// expect: run regex_exact_layout() = true
+fn regex_exact_layout() -> bool {
+    // a{k}: Nf=k+5, Nr=k+3, C=4, G=1. Substitution gives 104k+2160 bytes.
+    // ab|cd: the two literal branches begin in one sparse state in each
+    // direction. Nf=8, Nr=6, C=7, G=1, so W(8)=666.
+    // (a)(b): four extra capture states in the forward direction only.
+    // Nf=11, Nr=5, C=5, G=3, so W(8)=892.
+    oracle_minimum("a", 2264) && oracle_minimum("a{2}", 2368) && oracle_minimum("a{10}", 3200) && oracle_minimum("ab|cd", 2664) && oracle_minimum("(a)(b)", 3568)
+}
+
+fn denied_cache(re: Regex, budget: u64) -> bool {
+    let requested = cache_bytes(re, budget)
+    let available = requested - 1
+    let scoped_result = bound bytes available {
+        let attempt = cache(re, budget)
+        let unchanged = bound bytes available {
+            true
+        }
+        match (take attempt, take unchanged) {
+            (Error(e), Ok(true)) => e.requested == requested && e.available == available,
+            _ => false,
+        }
+    }
+    result.unwrap(scoped_result)
+}
+
+// The limit is logical. The large list is refused before any physical
+// allocation, and the nested bound checks that the available bytes survived.
+// test-limit: 207000000000
+// expect: run regex_cache_refusal() = true
+fn regex_cache_refusal() -> bool {
+    let re = result.unwrap(new("a"))
+    // At C=4 the DFA pair uses 48S words and the fixed portion is 182 words.
+    // S=floor((2^32-1)/4)=1073741823. W=51539607686.
+    cache_bytes(re, 0xFFFFFFFFFFFFFFFF) == 206158430744 && denied_cache(re, 0) && denied_cache(re, 16384) && denied_cache(re, 0xFFFFFFFFFFFFFFFF)
+}
+
+// expect: run regex_clone_exact_and_search() = true
+fn regex_clone_exact_and_search() -> bool {
+    let re = result.unwrap(new("(?<g>a)"))
+    let c = result.unwrap(cache(re, 0))
+    let g = result.unwrap(groups(re))
+    let cache_charge = cache_bytes(re, 0)
+    let groups_charge = 16 * group_len(re)
+    let copied_cache: Result[Cache, Capacity] = result.unwrap(bound bytes cache_charge {
+        let copied: Result[Cache, Capacity] = clone(c)
+        take copied
+    })
+    let copied_groups: Result[Groups, Capacity] = result.unwrap(bound bytes groups_charge {
+        let copied: Result[Groups, Capacity] = clone(g)
+        take copied
+    })
+    let mut duplicate: Cache = result.unwrap(take copied_cache)
+    let mut slots: Groups = result.unwrap(take copied_groups)
+    let misses: Result[Cache, Capacity] = result.unwrap(bound bytes cache_charge - 1 {
+        let copied: Result[Cache, Capacity] = clone(c)
+        take copied
+    })
+    let groups_miss: Result[Groups, Capacity] = result.unwrap(bound bytes groups_charge - 1 {
+        let copied: Result[Groups, Capacity] = clone(g)
+        take copied
+    })
+    let got = result.unwrap(bound bytes 0 {
+        captures(re, mut duplicate, "za", 0, mut slots) && group(slots, 1) == Some(Match(start: 1, end: 2))
+    })
+    got && (match take misses {
+        Error(e) => e.requested == cache_charge && e.available == cache_charge - 1,
+        Ok(_) => false,
+    }) && match take groups_miss {
+        Error(e) => e.requested == groups_charge && e.available == groups_charge - 1,
+        Ok(_) => false,
+    }
+}
+
+// expect: run regex_wrong_cache_first() = fail Fail
+fn regex_wrong_cache_first() -> bool {
+    let re = result.unwrap(new("a"))
+    let other = result.unwrap(new("a"))
+    let mut c = result.unwrap(cache(other, 0))
+    find(re, mut c, "a", 2) != None
+}
+
+// expect: run regex_wrong_cache_finished() = fail Fail
+fn regex_wrong_cache_finished() -> bool {
+    let re = result.unwrap(new("a"))
+    let other = result.unwrap(new("a"))
+    let mut c = result.unwrap(cache(other, 0))
+    let mut k = cursor(0)
+    let _ = next(other, mut c, "", mut k)
+    next(re, mut c, "a", mut k) != None
+}
+
+// expect: run regex_inside_scalar() = fail Bounds
+fn regex_inside_scalar() -> bool {
+    let re = result.unwrap(new(""))
+    let mut c = result.unwrap(cache(re, 0))
+    is_match(re, mut c, "é", 1)
+}
+
+fn too_big(p: String) -> bool {
+    match new(p) {
+        Error(TooBig(n)) => n == 10485760,
+        _ => false,
+    }
+}
+
+// expect: run regex_counting_limit() = true
+fn regex_counting_limit() -> bool {
+    // Two directions contribute 32k bytes plus 128 for their eight fixed
+    // states. The byte map is 256 bytes and the 10-byte prefix rounds to 16.
+    // k=327667 gives 10,485,744; the next k is the first refusal.
+    let within = match new("a{327667}") {
+        Ok(re) => size(re) == 10485744,
+        Error(_) => false,
+    }
+    within && too_big("a{327668}") && too_big("a{327669}") && too_big("a{1000}{1000}") && too_big("a{4294967295}{4294967295}")
+}
+
+// expect: run regex_scratch_is_capacity() = true
+fn regex_scratch_is_capacity() -> bool {
+    // "abc" has L=3 and its parse arena is exactly 64*(L+1).
+    let parse_denied = bound bytes 255 {
+        new("abc")
+    }
+    // Five pattern bytes means 384 bytes each for the parse and HIR
+    // arenas. With 768 bytes, the first growth of the class pool is refused
+    // even though the class will eventually disappear under {0}.
+    let class_denied = bound bytes 768 {
+        new("\\w{0}")
+    }
+    (match take parse_denied {
+        Ok(Error(Capacity(e))) => e.requested == 256 && e.available == 255,
+        _ => false,
+    }) && match take class_denied {
+        Ok(Error(Capacity(e))) => e.requested > 0 && e.available == 0,
+        _ => false,
+    }
+}
+
+// expect: run regex_literal_ninety_thousand() = true
+fn regex_literal_ninety_thousand() -> bool {
+    let p = result.unwrap(string.repeat("a", 90000))
+    match new(p) {
+        Ok(re) => size(re) == 2880392,
+        Error(_) => false,
+    }
+}
+
+fn limited_find(re: Regex, take c: Cache, steps: u64) -> Result[(Cache, Cursor, Option[Match]), OutOfTime] {
+    let start = cursor(0)
+    bound steps steps {
+        let mut inside = take c
+        let mut k = start
+        let span = next(re, mut inside, "baab", mut k)
+        (take inside, k, span)
+    }
+}
+
+fn regex_pike_threshold() -> u64 {
+    let re = result.unwrap(new("a+"))
+    let mut steps: u64 = 0
+    let mut saw_stop = false
+    loop {
+        let fresh = result.unwrap(cache(re, 0))
+        let mut warmed = result.unwrap(cache(re, 0))
+        let _ = find(re, mut warmed, "baab", 0)
+        match (limited_find(re, take fresh, steps), limited_find(re, take warmed, steps)) {
+            (Ok((take cache_after, k, span)), Ok((_, warm_cursor, warm_span))) => {
+                if !saw_stop || span != Some(Match(start: 1, end: 3)) || warm_span != span || k != warm_cursor {
+                    return 0
+                }
+                let mut resumed = take cache_after
+                let mut p = k
+                if next(re, mut resumed, "bbbaa", mut p) == Some(Match(start: 3, end: 5)) {
+                    return steps
+                }
+                return 0
+            },
+            (Error(a), Error(b)) => {
+                if a.steps != steps || b.steps != steps {
+                    return 0
+                }
+                saw_stop = true
+            },
+            _ => return 0,
+        }
+        steps += 1
+    }
+}
+
+// expect: run regex_pike_steps() = true
+fn regex_pike_steps() -> bool {
+    regex_pike_threshold() != 0
+}
+
+fn regex_worker(take input: Arc[Regex]) -> Option[Match] {
+    let mut local = result.unwrap(cache(input, 0))
+    find(input, mut local, "xa", 0)
+}
+
+fn regex_moved_worker(take input: (Regex, Cache)) -> Option[Match] {
+    let (take re, take warmed) = take input
+    let mut local = take warmed
+    find(re, mut local, "xa", 0)
+}
+
+// expect: run regex_shared_and_moved(tasks) = true
+fn regex_shared_and_moved(tasks: Tasks) -> bool waits {
+    let shared = result.unwrap(arc.new(result.unwrap(new("a"))))
+    let a = result.unwrap(task.spawn(tasks, bytes 65536, arc.share(shared), regex_worker))
+    let b = result.unwrap(task.spawn(tasks, bytes 65536, arc.share(shared), regex_worker))
+    let re = result.unwrap(new("a"))
+    let mut c = result.unwrap(cache(re, 0))
+    let _ = find(re, mut c, "xa", 0)
+    let moved = result.unwrap(task.spawn(tasks, bytes 65536, (take re, take c), regex_moved_worker))
+    let expected = Some(Match(start: 1, end: 2))
+    result.unwrap(task.join(take a)) == expected && result.unwrap(task.join(take b)) == expected && result.unwrap(task.join(take moved)) == expected
+}

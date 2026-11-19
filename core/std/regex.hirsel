@@ -1,13 +1,13 @@
 // Syntax follows regex-syntax at fde4946. Scratch belongs to the caller's
 // byte limit. The AST uses an eight-word record for each source token.
-type SyntaxKind: key = CaptureLimitExceeded | ClassEscapeInvalid | ClassRangeInvalid | ClassRangeLiteral | ClassUnclosed | DecimalEmpty | DecimalInvalid | EscapeHexEmpty | EscapeHexInvalid | EscapeHexInvalidDigit | EscapeUnexpectedEof | EscapeUnrecognized | FlagDanglingNegation | FlagDuplicate | FlagRepeatedNegation | FlagUnexpectedEof | FlagUnrecognized | GroupNameDuplicate | GroupNameEmpty | GroupNameInvalid | GroupNameUnexpectedEof | GroupUnclosed | GroupUnopened | NestLimitExceeded | RepetitionCountInvalid | RepetitionCountDecimalEmpty | RepetitionCountUnclosed | RepetitionMissing | SpecialWordBoundaryUnclosed | SpecialWordBoundaryUnrecognized | SpecialWordOrRepetitionUnexpectedEof | UnicodeClassInvalid | UnsupportedBackreference | UnsupportedLookAround | UnicodeNotAllowed | InvalidUtf8 | UnicodePropertyNotFound | UnicodePropertyValueNotFound
+pub type SyntaxKind: key = CaptureLimitExceeded | ClassEscapeInvalid | ClassRangeInvalid | ClassRangeLiteral | ClassUnclosed | DecimalEmpty | DecimalInvalid | EscapeHexEmpty | EscapeHexInvalid | EscapeHexInvalidDigit | EscapeUnexpectedEof | EscapeUnrecognized | FlagDanglingNegation | FlagDuplicate | FlagRepeatedNegation | FlagUnexpectedEof | FlagUnrecognized | GroupNameDuplicate | GroupNameEmpty | GroupNameInvalid | GroupNameUnexpectedEof | GroupUnclosed | GroupUnopened | NestLimitExceeded | RepetitionCountInvalid | RepetitionCountDecimalEmpty | RepetitionCountUnclosed | RepetitionMissing | SpecialWordBoundaryUnclosed | SpecialWordBoundaryUnrecognized | SpecialWordOrRepetitionUnexpectedEof | UnicodeClassInvalid | UnsupportedBackreference | UnsupportedLookAround | UnicodeNotAllowed | InvalidUtf8 | UnicodePropertyNotFound | UnicodePropertyValueNotFound
 
-type SyntaxError: key {
+pub type SyntaxError: key {
     at: u64,
     kind: SyntaxKind
 }
 
-type Error = Syntax(SyntaxError) | Capacity(Capacity)
+pub type Error = Syntax(SyntaxError) | TooBig(u64) | Capacity(Capacity)
 
 const ROOT: u64 = 0
 
@@ -59,7 +59,7 @@ const FLAG_BITS: u64 = 127
 
 const UNBOUNDED: u64 = 4294967296
 
-// first/next link the contents of one arm; more links arms of a group or
+// first/successor link the contents of one arm; more links arms of a group or
 // the operands of a bracket class. While parsing, b links back to the open
 // enclosing arm. For a repetition, first links to the preceding atom.
 type Node: key {
@@ -67,7 +67,7 @@ type Node: key {
     at: u64,
     end: u64,
     first: u64,
-    next: u64,
+    successor: u64,
     a: u64,
     b: u64,
     more: u64
@@ -86,7 +86,7 @@ type Parser {
 }
 
 fn node(kind: u64, at: u64, end: u64, a: u64, b: u64) -> Node {
-    Node(kind: kind, at: at, end: end, first: 0, next: 0, a: a, b: b, more: 0)
+    Node(kind: kind, at: at, end: end, first: 0, successor: 0, a: a, b: b, more: 0)
 }
 
 fn syntax(at: u64, kind: SyntaxKind) -> Error {
@@ -95,7 +95,7 @@ fn syntax(at: u64, kind: SyntaxKind) -> Error {
 
 fn read(xs: List[u64], i: u64) -> Node {
     let base = 8 * i
-    Node(kind: xs[base], at: xs[base + 1], end: xs[base + 2], first: xs[base + 3], next: xs[base + 4], a: xs[base + 5], b: xs[base + 6], more: xs[base + 7])
+    Node(kind: xs[base], at: xs[base + 1], end: xs[base + 2], first: xs[base + 3], successor: xs[base + 4], a: xs[base + 5], b: xs[base + 6], more: xs[base + 7])
 }
 
 fn write(mut xs: List[u64], i: u64, n: Node) {
@@ -104,7 +104,7 @@ fn write(mut xs: List[u64], i: u64, n: Node) {
     xs[base + 1] = n.at
     xs[base + 2] = n.end
     xs[base + 3] = n.first
-    xs[base + 4] = n.next
+    xs[base + 4] = n.successor
     xs[base + 5] = n.a
     xs[base + 6] = n.b
     xs[base + 7] = n.more
@@ -123,7 +123,7 @@ fn insert(mut xs: List[u64], n: Node) -> Result[u64, Error] {
     append_word(mut xs, n.at)?
     append_word(mut xs, n.end)?
     append_word(mut xs, n.first)?
-    append_word(mut xs, n.next)?
+    append_word(mut xs, n.successor)?
     append_word(mut xs, n.a)?
     append_word(mut xs, n.b)?
     append_word(mut xs, n.more)?
@@ -162,7 +162,7 @@ fn starts(s: String, at: u64, text: String) -> bool {
 
 fn scalar(s: String, at: u64) -> (u64, u64) {
     match string.next_scalar(s, at) {
-        Some((c, next)) => (int.widen(char.to_u32(c)), next),
+        Some((c, successor)) => (int.widen(char.to_u32(c)), successor),
         None => (0, at),
     }
 }
@@ -172,23 +172,23 @@ fn is_space(c: u64) -> bool {
 }
 
 fn advance_space(s: String, at: u64, enabled: bool) -> u64 {
-    let mut next = at
+    let mut successor = at
     if enabled {
-        while next < string.byte_len(s) {
-            let (c, end) = scalar(s, next)
+        while successor < string.byte_len(s) {
+            let (c, end) = scalar(s, successor)
             if is_space(c) {
-                next = end
+                successor = end
             } else if c == 35 {
-                next = end
-                while next < string.byte_len(s) && byte(s, next) != b'\n' {
-                    next += 1
+                successor = end
+                while successor < string.byte_len(s) && byte(s, successor) != b'\n' {
+                    successor += 1
                 }
             } else {
                 break
             }
         }
     }
-    next
+    successor
 }
 
 fn skip(s: String, mut p: Parser) {
@@ -295,12 +295,12 @@ fn open_group(s: String, mut p: Parser) -> Result[(), Error] {
         0
     }
     let opener = node(kind, start, p.at, data, saved)
-    let group = append(mut p, opener)?
+    let opened = append(mut p, opener)?
     if kind == SCOPED {
         p.free_space = spacing(p.free_space, data)
     }
-    p.scope = group
-    p.arm = group
+    p.scope = opened
+    p.arm = opened
     p.tail = 0
     Ok(())
 }
@@ -309,8 +309,8 @@ fn close_group(mut p: Parser) -> Result[(), Error] {
     if p.scope == 0 {
         return Error(syntax(p.at, GroupUnopened))
     }
-    let group = p.scope
-    let saved = read(p.ast, group).b
+    let opened = p.scope
+    let saved = read(p.ast, opened).b
     p.free_space = (saved & 1) != 0
     p.arm = saved / 2
     let parent = read(p.ast, p.arm)
@@ -319,7 +319,7 @@ fn close_group(mut p: Parser) -> Result[(), Error] {
     } else {
         p.arm
     }
-    p.tail = group
+    p.tail = opened
     p.at += 1
     Ok(())
 }
@@ -335,11 +335,11 @@ fn capture_index(mut p: Parser, at: u64) -> Result[u64, Error] {
 fn capture_name(s: String, mut p: Parser) -> Result[(), Error] {
     let start = p.at
     while p.at < p.width && byte(s, p.at) != b'>' {
-        let (c, next) = scalar(s, p.at)
+        let (c, successor) = scalar(s, p.at)
         if !capture_char(c, p.at == start) {
             return Error(syntax(p.at, GroupNameInvalid))
         }
-        p.at = next
+        p.at = successor
     }
     if p.at == p.width {
         return Error(syntax(p.at, GroupNameUnexpectedEof))
@@ -440,11 +440,11 @@ fn apply_flags(current: u64, change: u64) -> u64 {
 
 fn decimal(s: String, mut p: Parser) -> Result[u64, Error] {
     while p.at < p.width {
-        let (c, next) = scalar(s, p.at)
+        let (c, successor) = scalar(s, p.at)
         if !is_space(c) {
             break
         }
-        p.at = next
+        p.at = successor
     }
     let start = p.at
     let mut n: u64 = 0
@@ -463,11 +463,11 @@ fn decimal(s: String, mut p: Parser) -> Result[u64, Error] {
         return Error(syntax(start, RepetitionCountDecimalEmpty))
     }
     while p.at < p.width {
-        let (c, next) = scalar(s, p.at)
+        let (c, successor) = scalar(s, p.at)
         if !is_space(c) {
             break
         }
-        p.at = advance_space(s, next, p.free_space)
+        p.at = advance_space(s, successor, p.free_space)
     }
     if n > 4294967295 {
         return Error(syntax(start, DecimalInvalid))
@@ -565,20 +565,20 @@ const WORD_END_HALF: u64 = 10
 
 fn primitive(s: String, mut p: Parser, in_class: bool) -> Result[Node, Error] {
     let start = p.at
-    let (c, next) = scalar(s, start)
-    p.at = next
+    let (c, successor) = scalar(s, start)
+    p.at = successor
     if c == 92 {
         return escape(s, mut p, start)
     }
     if !in_class {
         match c {
-            46 => return Ok(node(DOT, start, next, 0, 0)),
-            94 => return Ok(node(ASSERT, start, next, START_LINE, 0)),
-            36 => return Ok(node(ASSERT, start, next, END_LINE, 0)),
+            46 => return Ok(node(DOT, start, successor, 0, 0)),
+            94 => return Ok(node(ASSERT, start, successor, START_LINE, 0)),
+            36 => return Ok(node(ASSERT, start, successor, END_LINE, 0)),
             _ => {},
         }
     }
-    Ok(node(LITERAL, start, next, c, 0))
+    Ok(node(LITERAL, start, successor, c, 0))
 }
 
 fn alpha(c: u64) -> bool {
@@ -589,13 +589,13 @@ fn escape(s: String, mut p: Parser, start: u64) -> Result[Node, Error] {
     if p.at == p.width {
         return Error(syntax(start, EscapeUnexpectedEof))
     }
-    let (c, next) = scalar(s, p.at)
-    p.at = next
+    let (c, successor) = scalar(s, p.at)
+    p.at = successor
     if c >= 48 && c <= 57 {
         return Error(syntax(start, UnsupportedBackreference))
     }
     if c < 128 && !alpha(c) && c != 60 && c != 62 {
-        return Ok(node(LITERAL, start, next, c, 0))
+        return Ok(node(LITERAL, start, successor, c, 0))
     }
     match c {
         120 => hexadecimal(s, mut p, start, c),
@@ -603,27 +603,27 @@ fn escape(s: String, mut p: Parser, start: u64) -> Result[Node, Error] {
         85 => hexadecimal(s, mut p, start, c),
         112 => property(s, mut p, start, c == 80),
         80 => property(s, mut p, start, c == 80),
-        100 => Ok(node(PERL, start, next, c, 0)),
-        115 => Ok(node(PERL, start, next, c, 0)),
-        119 => Ok(node(PERL, start, next, c, 0)),
-        68 => Ok(node(PERL, start, next, c + 32, 1)),
-        83 => Ok(node(PERL, start, next, c + 32, 1)),
-        87 => Ok(node(PERL, start, next, c + 32, 1)),
-        97 => Ok(node(LITERAL, start, next, 7, 0)),
-        102 => Ok(node(LITERAL, start, next, 12, 0)),
-        116 => Ok(node(LITERAL, start, next, 9, 0)),
-        110 => Ok(node(LITERAL, start, next, 10, 0)),
-        114 => Ok(node(LITERAL, start, next, 13, 0)),
-        118 => Ok(node(LITERAL, start, next, 11, 0)),
-        65 => Ok(node(ASSERT, start, next, START_TEXT, 0)),
-        122 => Ok(node(ASSERT, start, next, END_TEXT, 0)),
+        100 => Ok(node(PERL, start, successor, c, 0)),
+        115 => Ok(node(PERL, start, successor, c, 0)),
+        119 => Ok(node(PERL, start, successor, c, 0)),
+        68 => Ok(node(PERL, start, successor, c + 32, 1)),
+        83 => Ok(node(PERL, start, successor, c + 32, 1)),
+        87 => Ok(node(PERL, start, successor, c + 32, 1)),
+        97 => Ok(node(LITERAL, start, successor, 7, 0)),
+        102 => Ok(node(LITERAL, start, successor, 12, 0)),
+        116 => Ok(node(LITERAL, start, successor, 9, 0)),
+        110 => Ok(node(LITERAL, start, successor, 10, 0)),
+        114 => Ok(node(LITERAL, start, successor, 13, 0)),
+        118 => Ok(node(LITERAL, start, successor, 11, 0)),
+        65 => Ok(node(ASSERT, start, successor, START_TEXT, 0)),
+        122 => Ok(node(ASSERT, start, successor, END_TEXT, 0)),
         98 => {
             let kind = word_boundary(s, mut p, start)?
             Ok(node(ASSERT, start, p.at, kind, 0))
         },
-        66 => Ok(node(ASSERT, start, next, NOT_WORD, 0)),
-        60 => Ok(node(ASSERT, start, next, WORD_START, 0)),
-        62 => Ok(node(ASSERT, start, next, WORD_END, 0)),
+        66 => Ok(node(ASSERT, start, successor, NOT_WORD, 0)),
+        60 => Ok(node(ASSERT, start, successor, WORD_START, 0)),
+        62 => Ok(node(ASSERT, start, successor, WORD_END, 0)),
         _ => Error(syntax(start, EscapeUnrecognized)),
     }
 }
@@ -719,8 +719,8 @@ fn property(s: String, mut p: Parser, start: u64, negated: bool) -> Result[Node,
         lo = p.at
         skip(s, mut p)
         while p.at < p.width && byte(s, p.at) != b'}' {
-            let (_, next) = scalar(s, p.at)
-            p.at = next
+            let (_, successor) = scalar(s, p.at)
+            p.at = successor
             skip(s, mut p)
         }
         if p.at == p.width {
@@ -732,9 +732,9 @@ fn property(s: String, mut p: Parser, start: u64, negated: bool) -> Result[Node,
         if byte(s, p.at) == b'\\' {
             return Error(syntax(p.at, UnicodeClassInvalid))
         }
-        let (_, next) = scalar(s, p.at)
-        hi = next
-        p.at = next
+        let (_, successor) = scalar(s, p.at)
+        hi = successor
+        p.at = successor
         skip(s, mut p)
     }
     let mut n = node(PROPERTY, start, p.at, lo, hi)
@@ -762,20 +762,20 @@ fn word_boundary(s: String, mut p: Parser, start: u64) -> Result[u64, Error] {
     }
     let body = p.at
     let mut token: Inline[u8, 10] =[0; 10]
-    let mut count: u64 = 0
+    let mut total_count: u64 = 0
     while p.at < p.width {
         let c = byte(s, p.at)
         if !alpha(int.widen(c)) && c != b'-' {
             break
         }
-        if count < 10 {
-            token[count] = c
+        if total_count < 10 {
+            token[total_count] = c
         }
-        count += 1
+        total_count += 1
         p.at += 1
         skip(s, mut p)
     }
-    if count == 0 {
+    if total_count == 0 {
         p.at = brace
         return Ok(WORD)
     }
@@ -783,16 +783,16 @@ fn word_boundary(s: String, mut p: Parser, start: u64) -> Result[u64, Error] {
         return Error(syntax(brace, SpecialWordBoundaryUnclosed))
     }
     p.at += 1
-    if count == 5 && word_is(token, "start") {
+    if total_count == 5 && word_is(token, "start") {
         return Ok(WORD_START)
     }
-    if count == 3 && word_is(token, "end") {
+    if total_count == 3 && word_is(token, "end") {
         return Ok(WORD_END)
     }
-    if count == 10 && word_is(token, "start-half") {
+    if total_count == 10 && word_is(token, "start-half") {
         return Ok(WORD_START_HALF)
     }
-    if count == 8 && word_is(token, "end-half") {
+    if total_count == 8 && word_is(token, "end-half") {
         return Ok(WORD_END_HALF)
     }
     Error(syntax(body, SpecialWordBoundaryUnrecognized))
@@ -861,9 +861,9 @@ fn bracket(s: String, mut p: Parser) -> Result[(), Error] {
             let op = class_operator(s, p.at, c)
             if op != 0 {
                 p.at += 2
-                let next = insert(mut p.ast, node(SEGMENT, p.at, p.at, op, class))?
-                p.ast[8 * segment + 7] = next
-                segment = next
+                let successor = insert(mut p.ast, node(SEGMENT, p.at, p.at, op, class))?
+                p.ast[8 * segment + 7] = successor
+                segment = successor
                 tail = 0
             } else {
                 let opened_at = read(p.ast, class).at
@@ -944,13 +944,13 @@ fn range_peek(s: String, start: u64, free: bool) -> u8 {
         if !free {
             return byte(s, i)
         }
-        let (c, next) = scalar(s, i)
+        let (c, successor) = scalar(s, i)
         if c == 35 && !comment {
             comment = true
         } else if !is_space(c) {
             return byte(s, i)
         }
-        i = next
+        i = successor
     }
     0
 }
@@ -1092,8 +1092,8 @@ fn check_depth(xs: List[u64]) -> Result[(), Error] {
         let n = read(xs, task.i)
         let mut d = task.depth
         if task.kind == WALK_EXPR || task.kind == WALK_CLASS_ITEMS {
-            if n.next != 0 {
-                pending[used] = Walk(kind: task.kind, i: n.next, depth: d)
+            if n.successor != 0 {
+                pending[used] = Walk(kind: task.kind, i: n.successor, depth: d)
                 used += 1
             }
             if n.kind == REPEAT {
@@ -1123,7 +1123,7 @@ fn check_depth(xs: List[u64]) -> Result[(), Error] {
                 used += 1
             }
             if n.first != 0 {
-                if read(xs, n.first).next != 0 {
+                if read(xs, n.first).successor != 0 {
                     d = descent(d, start)?
                 }
                 pending[used] = Walk(kind: WALK_EXPR, i: n.first, depth: d)
@@ -1131,15 +1131,15 @@ fn check_depth(xs: List[u64]) -> Result[(), Error] {
             }
         } else {
             if n.kind == CLASS {
-                let mut next = n.more
-                let start = if n.first != 0 && read(xs, n.first).next == 0 {
+                let mut successor = n.more
+                let start = if n.first != 0 && read(xs, n.first).successor == 0 {
                     read(xs, n.first).at
                 } else {
                     n.end
                 }
-                while next != 0 {
+                while successor != 0 {
                     d = descent(d, start)?
-                    next = read(xs, next).more
+                    successor = read(xs, successor).more
                 }
             }
             if n.more != 0 {
@@ -1152,7 +1152,7 @@ fn check_depth(xs: List[u64]) -> Result[(), Error] {
                 used += 1
             }
             if n.first != 0 {
-                if read(xs, n.first).next != 0 {
+                if read(xs, n.first).successor != 0 {
                     d = descent(d, n.end)?
                 }
                 pending[used] = Walk(kind: WALK_CLASS_ITEMS, i: n.first, depth: d)
@@ -1203,8 +1203,8 @@ fn normalize_alias(s: String, lo: u64, hi: u64, free: bool) -> Alias {
         i = advance_space(s, j + 1, free)
     }
     while i < hi {
-        let (c, next) = scalar(s, i)
-        i = advance_space(s, next, free)
+        let (c, successor) = scalar(s, i)
+        i = advance_space(s, successor, free)
         if c <= 127 && c != 32 && c != 95 && c != 45 {
             if a.len == 64 {
                 a.len = 65
@@ -1258,10 +1258,10 @@ fn alias_lookup(a: Alias, code: u32) -> u32 {
     while lower < upper {
         let mid = lower + (upper - lower) / 2
         let i = 4 * mid
-        let group = ALIASES[i]
-        let order = if code < group {
+        let alias_group = ALIASES[i]
+        let order = if code < alias_group {
             Less
-        } else if code > group {
+        } else if code > alias_group {
             Greater
         } else {
             alias_order(a, int.widen(ALIASES[i + 1]), int.widen(ALIASES[i + 2]))
@@ -1294,7 +1294,7 @@ fn property_kind(s: String, n: Node) -> Result[Property, Error] {
     let mut ne = n.b
     let mut ne_end = n.b
     while i < n.b {
-        let (c, next) = scalar(s, i)
+        let (c, successor) = scalar(s, i)
         if c == 58 && colon == n.b {
             colon = i
         } else if c == 61 {
@@ -1303,11 +1303,11 @@ fn property_kind(s: String, n: Node) -> Result[Property, Error] {
             }
             if prev != i && byte(s, prev) == b'!' && ne == n.b {
                 ne = prev
-                ne_end = next
+                ne_end = successor
             }
         }
         prev = i
-        i = advance_space(s, next, free)
+        i = advance_space(s, successor, free)
     }
     let op = if ne < n.b {
         ne
@@ -1421,8 +1421,8 @@ fn translate(s: String, tree: List[u64], mut nodes: List[u64], mut ranges: List[
                 used += 1
             }
         } else {
-            if n.next != 0 {
-                pending[used] = Translate(i: n.next, kind: ENTER, saved: 0)
+            if n.successor != 0 {
+                pending[used] = Translate(i: n.successor, kind: ENTER, saved: 0)
                 used += 1
             }
             if n.kind == CAPTURE || n.kind == SCOPED {
@@ -1449,7 +1449,7 @@ fn translate(s: String, tree: List[u64], mut nodes: List[u64], mut ranges: List[
                 n.kind = EMPTY
                 write(mut nodes, task.i, n)
             } else {
-                let mapped = translate_atom(s, tree, task.i, n, active, mut ranges)?
+                let mapped = translate_atom(s, tree, task.i, n, active, mut nodes, mut ranges)?
                 write(mut nodes, task.i, mapped)
             }
         }
@@ -1457,7 +1457,7 @@ fn translate(s: String, tree: List[u64], mut nodes: List[u64], mut ranges: List[
     Ok(())
 }
 
-fn translate_atom(s: String, tree: List[u64], i: u64, n: Node, active: u64, mut ranges: List[u32]) -> Result[Node, Error] {
+fn translate_atom(s: String, tree: List[u64], i: u64, n: Node, active: u64, mut nodes: List[u64], mut ranges: List[u32]) -> Result[Node, Error] {
     let mut result = n
     let unicode = (active & UNICODE) != 0
     let lo = list.len(ranges) / 2
@@ -1481,7 +1481,7 @@ fn translate_atom(s: String, tree: List[u64], i: u64, n: Node, active: u64, mut 
             }
         }
     } else if n.kind == CLASS {
-        translate_class(s, tree, i, active, mut ranges)?
+        translate_class(s, tree, i, active, mut nodes, mut ranges)?
     } else if n.kind == PERL || n.kind == PROPERTY {
         item_ranges(s, n, active, mut ranges)?
     } else {
@@ -1580,13 +1580,13 @@ fn canonical(mut pool: List[u32], lo: u64) {
         return
     }
     let mut sorted = true
-    let mut cursor = lo + 1
-    while cursor < hi {
-        if range_less(pool, cursor, cursor - 1) {
+    let mut scan = lo + 1
+    while scan < hi {
+        if range_less(pool, scan, scan - 1) {
             sorted = false
             break
         }
-        cursor += 1
+        scan += 1
     }
     if !sorted {
         let n = hi - lo
@@ -1916,61 +1916,1479 @@ fn combine(mut pool: List[u32], lo: u64, mid: u64, op: u64) -> Result[(), Error]
 }
 
 type ClassFrame: key {
-    class: u64,
+    parent: u64,
     segment: u64,
-    next: u64,
+    successor: u64,
     lo: u64,
     mid: u64
 }
 
-fn translate_class(s: String, tree: List[u64], root: u64, active: u64, mut pool: List[u32]) -> Result[(), Error] {
+fn class_frame(nodes: List[u64], i: u64) -> ClassFrame {
+    let at = 8 * i
+    ClassFrame(parent: nodes[at + 5], segment: nodes[at + 1], successor: nodes[at + 2], lo: nodes[at + 3], mid: nodes[at + 4])
+}
+
+fn put_class_frame(mut nodes: List[u64], i: u64, frame: ClassFrame) {
+    let at = 8 * i
+    nodes[at + 1] = frame.segment
+    nodes[at + 2] = frame.successor
+    nodes[at + 3] = frame.lo
+    nodes[at + 4] = frame.mid
+    nodes[at + 5] = frame.parent
+}
+
+// A bracket class consumes only its root HIR slot. While translating it,
+// borrow each bracket's unused HIR fields for the open class's frame.
+// Record the parent on descent because repetition can move a class root.
+fn translate_class(s: String, tree: List[u64], root: u64, active: u64, mut nodes: List[u64], mut pool: List[u32]) -> Result[(), Error] {
     let start = list.len(pool) / 2
-    let mut pending: Inline[ClassFrame, 251] =[ClassFrame(class: 0, segment: 0, next: 0, lo: 0, mid: 0); 251]
-    pending[0] = ClassFrame(class: root, segment: root, next: read(tree, root).first, lo: start, mid: start)
-    let mut used: u64 = 1
+    put_class_frame(mut nodes, root, ClassFrame(parent: 0, segment: root, successor: read(tree, root).first, lo: start, mid: start))
+    let mut open_class_id = root
     let unicode = (active & UNICODE) != 0
     let insensitive = (active & INSENSITIVE) != 0
-    while used != 0 {
-        let mut tasks = pending[used - 1]
-        if tasks.next == 0 {
-            canonical(mut pool, tasks.mid)
+    loop {
+        let mut frame = class_frame(nodes, open_class_id)
+        if frame.successor == 0 {
+            canonical(mut pool, frame.mid)
             if insensitive {
-                fold(mut pool, tasks.mid, unicode)?
+                fold(mut pool, frame.mid, unicode)?
             }
-            let segment = read(tree, tasks.segment)
+            let segment = read(tree, frame.segment)
             if segment.kind == SEGMENT {
-                combine(mut pool, tasks.lo, tasks.mid, segment.a)?
+                combine(mut pool, frame.lo, frame.mid, segment.a)?
             }
             if segment.more != 0 {
-                tasks.segment = segment.more
-                tasks.next = read(tree, segment.more).first
-                tasks.mid = list.len(pool) / 2
-                pending[used - 1] = tasks
+                frame.segment = segment.more
+                frame.successor = read(tree, segment.more).first
+                frame.mid = list.len(pool) / 2
+                put_class_frame(mut nodes, open_class_id, frame)
             } else {
-                let class = read(tree, tasks.class)
+                let class = read(tree, open_class_id)
                 if class.a != 0 {
-                    negate(mut pool, tasks.lo, unicode)?
+                    negate(mut pool, frame.lo, unicode)?
                 }
                 if !unicode {
-                    check_ascii(pool, tasks.lo, class.at)?
+                    check_ascii(pool, frame.lo, class.at)?
                 }
-                used -= 1
+                if open_class_id == root {
+                    return Ok(())
+                }
+                open_class_id = frame.parent
             }
         } else {
-            let next = tasks.next
-            let item = read(tree, next)
-            tasks.next = item.next
-            pending[used - 1] = tasks
+            let item_id = frame.successor
+            let item = read(tree, item_id)
+            frame.successor = item.successor
+            put_class_frame(mut nodes, open_class_id, frame)
             if item.kind == CLASS {
                 let lo = list.len(pool) / 2
-                pending[used] = ClassFrame(class: next, segment: next, next: item.first, lo: lo, mid: lo)
-                used += 1
+                put_class_frame(mut nodes, item_id, ClassFrame(parent: open_class_id, segment: item_id, successor: item.first, lo: lo, mid: lo))
+                open_class_id = item_id
             } else {
                 item_ranges(s, item, active, mut pool)?
             }
         }
     }
-    Ok(())
+}
+
+pub opaque type Regex: shareable + send {
+    owner: Unique,
+    forward: List[u32],
+    reverse: List[u32],
+    edges: List[u32],
+    class_map: Bytes,
+    names: List[u32],
+    name_text: Bytes,
+    prefilter: Bytes,
+    charge: u64,
+    group_count: u64,
+    class_count: u64,
+    start: u64,
+    reverse_start: u64
+}
+
+pub opaque type Cache: send {
+    owner: Unique,
+    work: List[u32],
+    slices: Layout
+}
+
+pub opaque type Groups: send {
+    owner: Unique,
+    spans: List[u64]
+}
+
+pub opaque type Cursor: key {
+    at: u64,
+    after_match: bool,
+    finished: bool
+}
+
+pub type Match: key {
+    start: u64,
+    end: u64
+}
+
+const SIZE_LIMIT: u64 = 10485760
+
+const NFA_WORDS: u64 = 4
+
+const EDGE_WORDS: u64 = 3
+
+const OFFSET_LIMIT: u64 = 4294967295
+
+fn round8(n: u64) -> u64 {
+    (n + 7) & 0xFFFFFFFFFFFFFFF8
+}
+
+pub fn size(re: Regex) -> u64 {
+    re.charge
+}
+
+type Layout: key {
+    words: u64,
+    states: u64,
+    pike: u64,
+    front: u64,
+    back: u64,
+    row: u64,
+    saved: u64,
+    stack: u64
+}
+
+fn layout(re: Regex, budget: u64) -> Layout {
+    let classes = re.class_count + 1
+    let nf = list.len(re.forward) / NFA_WORDS
+    let nr = list.len(re.reverse) / NFA_WORDS
+    let n = re.group_count
+    let headers: u64 = 24
+    let dfa_scratch = 3 * (nf + nr)
+    let frontiers = 2 * nf + 4 * n * nf
+    let pike_scratch = 2 * frontiers + 8 * n + 8 * nf
+    let fixed = headers + dfa_scratch + pike_scratch
+    let per_pair = 2 * (classes + 20)
+    let target: u64 = budget / 4
+    let fit: u64 = if target > fixed {
+        (target - fixed) / per_pair
+    } else {
+        0
+    }
+    let max_states: u64 = OFFSET_LIMIT / classes
+    let states: u64 = if fit < 8 {
+        8
+    } else if fit > max_states {
+        max_states
+    } else {
+        fit
+    }
+    let pike = headers + per_pair * states + dfa_scratch
+    let back = pike + frontiers
+    let row = back + frontiers
+    let saved = row + 4 * n
+    Layout(words: pike + pike_scratch, states: states, pike: pike, front: pike, back: back, row: row, saved: saved, stack: saved + 4 * n)
+}
+
+pub fn cache_bytes(re: Regex, budget: u64) -> u64 {
+    round8(4 * layout(re, budget).words)
+}
+
+pub fn cache(re: Regex, budget: u64) -> Result[Cache, Capacity] {
+    let slices = layout(re, budget)
+    let n = slices.words
+    let admitted: Result[List[u32], Capacity] = list.with_capacity(n)
+    let mut work = admitted?
+    list.fill(mut work, n, 0)?
+    Ok(Cache(owner: re.owner, work: take work, slices: slices))
+}
+
+pub fn groups(re: Regex) -> Result[Groups, Capacity] {
+    let n = 2 * re.group_count
+    let admitted: Result[List[u64], Capacity] = list.with_capacity(n)
+    let mut spans = admitted?
+    list.fill(mut spans, n, 0)?
+    init_group_spans(mut spans)
+    Ok(Groups(owner: re.owner, spans: take spans))
+}
+
+fn init_group_spans(mut spans: List[u64]) {
+    let mut i: u64 = 0
+    while i < list.len(spans) {
+        spans[i] = 1
+        spans[i + 1] = 0
+        i += 2
+    }
+}
+
+pub fn group_len(re: Regex) -> u64 {
+    re.group_count
+}
+
+pub fn group(g: Groups, i: u64) -> Option[Match] {
+    if i >= list.len(g.spans) / 2 {
+        return None
+    }
+    let lo = g.spans[2 * i]
+    let hi = g.spans[2 * i + 1]
+    if lo <= hi {
+        Some(Match(start: lo, end: hi))
+    } else {
+        None
+    }
+}
+
+pub fn group_index(re: Regex, name: String) -> Option[u64] {
+    let mut pos: u64 = 0
+    let mut i: u64 = 0
+    let n = string.byte_len(name)
+    while i < list.len(re.names) {
+        let end: u64 = int.widen(re.names[i + 1])
+        if end - pos == n {
+            let mut k: u64 = 0
+            while k < n && re.name_text[pos + k] == byte(name, k) {
+                k += 1
+            }
+            if k == n {
+                return Some(int.widen(re.names[i]))
+            }
+        }
+        pos = end
+        i += 2
+    }
+    None
+}
+
+pub fn cursor(at: u64) -> Cursor {
+    Cursor(at: at, after_match: false, finished: false)
+}
+
+fn check_cache(re: Regex, c: Cache) {
+    if re.owner != c.owner {
+        fail("regex: cache belongs to another regex")
+    }
+}
+
+fn check_groups(re: Regex, g: Groups) {
+    if re.owner != g.owner {
+        fail("regex: groups belong to another regex")
+    }
+}
+
+fn check_start(s: String, at: u64) {
+    let _ = string.slice(s, at, at)
+}
+
+const OP_MATCH: u32 = 0
+
+const OP_BYTE: u32 = 1
+
+const OP_SPLIT: u32 = 2
+
+const OP_SAVE: u32 = 3
+
+const OP_ASSERT: u32 = 4
+
+const OP_SPARSE: u32 = 5
+
+const OP_DEAD: u32 = 6
+
+const OP_UTF8_CHOICE: u32 = 7
+
+const FORWARD_BASE: u64 = 5
+
+const REVERSE_BASE: u64 = 3
+
+type Shape: key {
+    states: u64,
+    edges: u64,
+    pgroup: u64,
+    can_empty: bool,
+    can_consume: bool
+}
+
+fn shape(states: u64, edges: u64, nullable: bool, consuming: bool) -> Shape {
+    Shape(states: states, edges: edges, pgroup: 0, can_empty: nullable, can_consume: consuming)
+}
+
+fn check_size(f: u64, r: u64, edges: u64, names: u64, text: u64, prefix: u64) -> Result[u64, Error] {
+    let n = 16 * (f + r) + round8(12 * edges) + 256 + 8 * names + round8(text) + round8(prefix)
+    if n > SIZE_LIMIT {
+        Error(TooBig(SIZE_LIMIT))
+    } else {
+        Ok(n)
+    }
+}
+
+fn size_add(a: Shape, b: Shape, is_alt: bool) -> Result[Shape, Error] {
+    let states = a.states + b.states
+    let edges = a.edges + b.edges
+    let _ = check_size(states, 0, edges, 0, 0, 0)?
+    let pgroup = if a.pgroup > b.pgroup {
+        a.pgroup
+    } else {
+        b.pgroup
+    }
+    let nullable = if is_alt {
+        a.can_empty || b.can_empty
+    } else {
+        a.can_empty && b.can_empty
+    }
+    Ok(Shape(states: states, edges: edges, pgroup: pgroup, can_empty: nullable, can_consume: a.can_consume || b.can_consume))
+}
+
+fn sized_repeat(m: Shape, minimum: u64, maximum: u64) -> Result[Shape, Error] {
+    let zero_width = m.can_empty && !m.can_consume
+    let lo: u64 = if zero_width && minimum > 1 {
+        1
+    } else {
+        minimum
+    }
+    let hi: u64 = if zero_width && maximum > 1 {
+        1
+    } else {
+        maximum
+    }
+    if lo == 0 && hi == 0 {
+        return Ok(shape(0, 0, true, false))
+    }
+    let mut optional: u64 = 0
+    let mut copies = hi
+    if hi == UNBOUNDED {
+        copies = if lo == 0 {
+            1
+        } else {
+            lo
+        }
+        optional = if lo == 0 && m.can_empty {
+            2
+        } else {
+            1
+        }
+    } else {
+        optional = hi - lo
+    }
+    // The child already passed check_size, and copies is at most u32::MAX.
+    // This product fits u64 even when the regular expression would not.
+    let states = m.states * copies + optional
+    let edges = m.edges * copies
+    let _ = check_size(states, 0, edges, 0, 0, 0)?
+    Ok(Shape(states: states, edges: edges, pgroup: m.pgroup, can_empty: lo == 0 || m.can_empty, can_consume: m.can_consume))
+}
+
+fn sized_atom(h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
+    let n = read(h.nodes, i)
+    if n.kind == EMPTY {
+        return Ok(shape(0, 0, true, false))
+    }
+    if n.kind == LITERAL {
+        return Ok(shape(utf8_width(n.a), 0, false, true))
+    }
+    if n.kind == ASSERT {
+        return Ok(shape(1, 0, true, false))
+    }
+    if n.kind == CHAR_SET {
+        return sized_set(h.ranges, n.a, n.b)
+    }
+    if n.kind == REPEAT {
+        return sized_repeat(sized_atom(h, n.first, rev)?, n.a, n.b)
+    }
+    let mut m = sized_alts(h, i, rev)?
+    if n.kind == CAPTURE && !rev {
+        m.states += 2
+        if n.a > m.pgroup {
+            m.pgroup = n.a
+        }
+    }
+    Ok(m)
+}
+
+fn sized_seq(h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
+    let mut m = shape(0, 0, true, false)
+    let mut successor = i
+    while successor != 0 {
+        m = size_add(m, sized_atom(h, successor, rev)?, false)?
+        successor = read(h.nodes, successor).successor
+    }
+    Ok(m)
+}
+
+fn sized_alts(h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
+    let n = read(h.nodes, i)
+    let mut total = sized_seq(h, n.first, rev)?
+    if n.more == 0 {
+        return Ok(total)
+    }
+    let sparse = disjoint_literals(h.nodes, i, rev)
+    let mut arms: u64 = 1
+    let mut other = n.more
+    while other != 0 {
+        let branch = read(h.nodes, other)
+        total = size_add(total, sized_seq(h, branch.first, rev)?, true)?
+        other = branch.more
+        arms += 1
+    }
+    if sparse {
+        total.states = total.states + 1 - arms
+        total.edges += arms
+    } else {
+        total.states += arms - 1
+    }
+    let _ = check_size(total.states, 0, total.edges, 0, 0, 0)?
+    Ok(total)
+}
+
+fn chain_end(xs: List[u64], first: u64, link: u64) -> u64 {
+    let mut at = first
+    let mut successor = xs[8 * at + link]
+    while successor != 0 {
+        at = successor
+        successor = xs[8 * at + link]
+    }
+    at
+}
+
+fn disjoint_literals(xs: List[u64], i: u64, rev: bool) -> bool {
+    let mut seen: Inline[bool, 128] =[false; 128]
+    let mut here = i
+    loop {
+        let arm = read(xs, here)
+        if arm.first == 0 {
+            return false
+        }
+        let mut start: u64 = 0
+        let mut successor = arm.first
+        while successor != 0 {
+            let n = read(xs, successor)
+            if n.kind != LITERAL || n.a >= 128 {
+                return false
+            }
+            if rev || successor == arm.first {
+                start = n.a
+            }
+            successor = n.successor
+        }
+        if seen[start] {
+            return false
+        }
+        seen[start] = true
+        if arm.more == 0 {
+            return true
+        }
+        here = arm.more
+    }
+}
+
+fn utf8_width(c: u64) -> u64 {
+    if c < 0x80 {
+        1
+    } else if c < 0x800 {
+        2
+    } else if c < 0x10000 {
+        3
+    } else {
+        4
+    }
+}
+
+fn byte_scalar(c: u64, n: u64, i: u64) -> u32 {
+    if n == 1 {
+        return int.narrow(c)
+    }
+    let shift = 6 * (n - i - 1)
+    if i == 0 {
+        let prefix: u64 = if n == 2 {
+            0xC0
+        } else if n == 3 {
+            0xE0
+        } else {
+            0xF0
+        }
+        return int.narrow(prefix | (c >> shift))
+    }
+    int.narrow(0x80 | ((c >> shift) & 63))
+}
+
+// A UTF-8 scalar interval is a sorted sequence of byte rectangles. Split where
+// the width changes or a partial low-bit range crosses a higher-bit boundary.
+// The source range pool already separates the surrogate interval.
+fn rectangle_end(lo: u64, hi: u64, n: u64) -> u64 {
+    let limit = if n == 1 {
+        0x7Fu64
+    } else if n == 2 {
+        0x7FFu64
+    } else if n == 3 {
+        0xFFFFu64
+    } else {
+        0x10FFFFu64
+    }
+    let mut end = if hi < limit {
+        hi
+    } else {
+        limit
+    }
+    let mut i: u64 = 1
+    while i < n {
+        let mask = (1u64 << (6 * i)) - 1
+        let lower = lo & (0xFFFFFFFF ^ mask)
+        let upper = end & (0xFFFFFFFF ^ mask)
+        if lower != upper {
+            if (lo & mask) != 0 {
+                end = lo | mask
+            } else if (end & mask) != mask {
+                end = upper - 1
+            }
+        }
+        i += 1
+    }
+    end
+}
+
+fn sized_set(ranges: List[u32], start: u64, end: u64) -> Result[Shape, Error] {
+    if start == end {
+        return Ok(shape(1, 0, false, false))
+    }
+    if ranges[2 * end - 1] < 128 {
+        return Ok(shape(1, if end - start > 1 {
+            end - start
+        } else {
+            0
+        }, false, true))
+    }
+    let mut states: u64 = 0
+    let mut i = start
+    while i < end {
+        let mut lo: u64 = int.widen(ranges[2 * i])
+        let hi: u64 = int.widen(ranges[2 * i + 1])
+        while lo <= hi {
+            let n = utf8_width(lo)
+            let last = rectangle_end(lo, hi, n)
+            if states != 0 {
+                states += 1
+            }
+            states += n
+            if states > SIZE_LIMIT / 16 {
+                return Error(TooBig(SIZE_LIMIT))
+            }
+            lo = last + 1
+        }
+        i += 1
+    }
+    Ok(shape(states, 0, false, true))
+}
+
+type Assembler {
+    fw: List[u32],
+    rv: List[u32],
+    sparse_edges: List[u32],
+    boundaries: Inline[bool, 257],
+    rev: bool,
+    ops_used: u64,
+    edges_used: u64
+}
+
+fn admit_u32(n: u64) -> Result[List[u32], Error] {
+    let result: Result[List[u32], Capacity] = list.with_capacity(n)
+    let mut xs = match take result {
+        Ok(take x) => take x,
+        Error(e) => return Error(Capacity(e)),
+    }
+    match list.fill(mut xs, n, 0) {
+        Ok(()) => Ok(take xs),
+        Error(e) => Error(Capacity(e)),
+    }
+}
+
+fn admit_u8(n: u64) -> Result[Bytes, Error] {
+    let result: Result[Bytes, Capacity] = list.with_capacity(n)
+    let mut xs = match take result {
+        Ok(take x) => take x,
+        Error(e) => return Error(Capacity(e)),
+    }
+    match list.fill(mut xs, n, 0) {
+        Ok(()) => Ok(take xs),
+        Error(e) => Error(Capacity(e)),
+    }
+}
+
+fn put_op(mut a: Assembler, i: u64, tag: u32, x: u32, y: u32, z: u32) {
+    let at = NFA_WORDS * i
+    if a.rev {
+        a.rv[at] = tag
+        a.rv[at + 1] = x
+        a.rv[at + 2] = y
+        a.rv[at + 3] = z
+    } else {
+        a.fw[at] = tag
+        a.fw[at + 1] = x
+        a.fw[at + 2] = y
+        a.fw[at + 3] = z
+    }
+}
+
+fn emit(mut a: Assembler, tag: u32, x: u64, y: u64, z: u64) -> u64 {
+    let i = a.ops_used
+    a.ops_used += 1
+    put_op(mut a, i, tag, int.narrow(x), int.narrow(y), int.narrow(z))
+    i
+}
+
+fn edge_bounds(mut a: Assembler, lower: u32, upper: u32) {
+    a.boundaries[int.widen(lower)] = true
+    a.boundaries[int.widen(upper + 1)] = true
+}
+
+fn emit_byte(mut a: Assembler, lo: u32, hi: u32, following: u64) -> u64 {
+    edge_bounds(mut a, lo, hi)
+    emit(mut a, OP_BYTE, int.widen(lo | (hi << 8)), following, 0)
+}
+
+fn emit_edge(mut a: Assembler, lo: u32, hi: u32, following: u64) {
+    let offset = EDGE_WORDS * a.edges_used
+    a.edges_used += 1
+    edge_bounds(mut a, lo, hi)
+    a.sparse_edges[offset] = lo
+    a.sparse_edges[offset + 1] = hi
+    a.sparse_edges[offset + 2] = int.narrow(following)
+}
+
+fn emit_set(mut a: Assembler, ranges: List[u32], start: u64, end: u64, following: u64) -> u64 {
+    if start == end {
+        return emit(mut a, OP_DEAD, 0, 0, 0)
+    }
+    if ranges[2 * end - 1] < 128 {
+        if end == start + 1 {
+            return emit_byte(mut a, ranges[2 * start], ranges[2 * start + 1], following)
+        }
+        let offset = a.edges_used
+        let mut i = start
+        while i < end {
+            emit_edge(mut a, ranges[2 * i], ranges[2 * i + 1], following)
+            i += 1
+        }
+        return emit(mut a, OP_SPARSE, offset, end - start, 0)
+    }
+    let mut ascii: u64 = OFFSET_LIMIT
+    let mut unicode: u64 = OFFSET_LIMIT
+    let mut i = start
+    while i < end {
+        let mut lo: u64 = int.widen(ranges[2 * i])
+        let hi: u64 = int.widen(ranges[2 * i + 1])
+        while lo <= hi {
+            let n = utf8_width(lo)
+            let last = rectangle_end(lo, hi, n)
+            let successor = emit_scalar(mut a, lo, last, n, following)
+            if n == 1 {
+                ascii = merge_disjoint(mut a, ascii, successor)
+            } else {
+                unicode = merge_disjoint(mut a, unicode, successor)
+            }
+            lo = last + 1
+        }
+        i += 1
+    }
+    if ascii == OFFSET_LIMIT {
+        return unicode
+    }
+    // ASCII and multibyte sequences start with disjoint byte sets in both
+    // directions. This choice replaces their epsilon split using one state.
+    emit(mut a, OP_UTF8_CHOICE, ascii, unicode, 0)
+}
+
+fn merge_disjoint(mut a: Assembler, root: u64, successor: u64) -> u64 {
+    if root == OFFSET_LIMIT {
+        successor
+    } else {
+        emit(mut a, OP_SPLIT, root, successor, 0)
+    }
+}
+
+fn emit_scalar(mut a: Assembler, lo: u64, hi: u64, n: u64, following: u64) -> u64 {
+    let mut head = following
+    let mut i: u64 = 0
+    let rev = a.rev
+    while i < n {
+        let p = if rev {
+            i
+        } else {
+            n - i - 1
+        }
+        head = emit_byte(mut a, byte_scalar(lo, n, p), byte_scalar(hi, n, p), head)
+        i += 1
+    }
+    head
+}
+
+fn emit_assert(mut a: Assembler, n: Node, following: u64) -> u64 {
+    let modes = n.b
+    if n.a == START_LINE || n.a == END_LINE {
+        if (modes & MULTILINE) != 0 {
+            edge_bounds(mut a, 10, 10)
+            if (modes & CRLF) != 0 {
+                edge_bounds(mut a, 13, 13)
+            }
+        }
+    } else if n.a >= WORD {
+        edge_bounds(mut a, 48, 57)
+        edge_bounds(mut a, 65, 90)
+        edge_bounds(mut a, 95, 95)
+        edge_bounds(mut a, 97, 122)
+        if (modes & UNICODE) != 0 {
+            edge_bounds(mut a, 128, 255)
+        }
+    }
+    emit(mut a, OP_ASSERT, n.a, modes, following)
+}
+
+fn ordered_split(mut a: Assembler, lazy: bool, first: u64, second: u64) -> u64 {
+    if lazy {
+        emit(mut a, OP_SPLIT, second, first, 0)
+    } else {
+        emit(mut a, OP_SPLIT, first, second, 0)
+    }
+}
+
+fn emit_repeat(h: Hir, mut a: Assembler, n: Node, following: u64) -> u64 {
+    let lazy = n.more != 0
+    let mut begin = following
+    let child = sized_atom(h, n.first, a.rev)
+    let zero_width = match child {
+        Ok(m) => m.can_empty && !m.can_consume,
+        Error(_) => false,
+    }
+    let mut mandatory: u64 = if zero_width && n.a > 1 {
+        1
+    } else {
+        n.a
+    }
+    let maximum: u64 = if zero_width && n.b > 1 {
+        1
+    } else {
+        n.b
+    }
+    if maximum == UNBOUNDED {
+        let loop_at = emit(mut a, OP_SPLIT, 0, 0, 0)
+        let first = emit_atom(h, mut a, n.first, loop_at)
+        let short = if lazy {
+            following
+        } else {
+            first
+        }
+        let long = if lazy {
+            first
+        } else {
+            following
+        }
+        put_op(mut a, loop_at, OP_SPLIT, int.narrow(short), int.narrow(long), 0)
+        if mandatory == 0 {
+            if nullable_atom(h, n.first) {
+                return ordered_split(mut a, lazy, first, following)
+            }
+            return loop_at
+        }
+        mandatory -= 1
+        begin = first
+    } else {
+        let mut remaining = maximum - mandatory
+        while remaining != 0 {
+            let first = emit_atom(h, mut a, n.first, begin)
+            begin = ordered_split(mut a, lazy, first, following)
+            remaining -= 1
+        }
+    }
+    while mandatory != 0 {
+        begin = emit_atom(h, mut a, n.first, begin)
+        mandatory -= 1
+    }
+    begin
+}
+
+fn nullable_atom(h: Hir, i: u64) -> bool {
+    let n = read(h.nodes, i)
+    if n.kind == EMPTY || n.kind == ASSERT {
+        return true
+    }
+    if n.kind == REPEAT {
+        return n.a == 0 || nullable_atom(h, n.first)
+    }
+    if n.kind == CAPTURE || n.kind == SCOPED {
+        let mut arm = i
+        loop {
+            let branch = read(h.nodes, arm)
+            let mut at = branch.first
+            while at != 0 && nullable_atom(h, at) {
+                at = read(h.nodes, at).successor
+            }
+            if at == 0 {
+                return true
+            }
+            if branch.more == 0 {
+                return false
+            }
+            arm = branch.more
+        }
+    }
+    false
+}
+
+fn emit_atom(h: Hir, mut a: Assembler, i: u64, following: u64) -> u64 {
+    let n = read(h.nodes, i)
+    if n.kind == EMPTY {
+        return following
+    }
+    if n.kind == LITERAL {
+        return emit_scalar(mut a, n.a, n.a, utf8_width(n.a), following)
+    }
+    if n.kind == CHAR_SET {
+        return emit_set(mut a, h.ranges, n.a, n.b, following)
+    }
+    if n.kind == ASSERT {
+        return emit_assert(mut a, n, following)
+    }
+    if n.kind == REPEAT {
+        return emit_repeat(h, mut a, n, following)
+    }
+    if n.kind == CAPTURE && !a.rev {
+        let end = emit(mut a, OP_SAVE, n.a, following, 1)
+        let inner = emit_alts(h, mut a, i, end)
+        return emit(mut a, OP_SAVE, n.a, inner, 0)
+    }
+    emit_alts(h, mut a, i, following)
+}
+
+fn sequence_entry(h: Hir, first: u64, rev: bool) -> u64 {
+    if rev || first == 0 {
+        first
+    } else {
+        chain_end(h.nodes, first, 4)
+    }
+}
+
+fn emit_seq(h: Hir, mut a: Assembler, first: u64, following: u64) -> u64 {
+    let rev = a.rev
+    let mut result = following
+    let mut at = sequence_entry(h, first, rev)
+    while at != 0 {
+        result = emit_atom(h, mut a, at, result)
+        let n = read(h.nodes, at)
+        at = if rev {
+            n.successor
+        } else {
+            n.end
+        }
+    }
+    result
+}
+
+fn emit_alts(h: Hir, mut a: Assembler, first: u64, following: u64) -> u64 {
+    let root = read(h.nodes, first)
+    if root.more == 0 {
+        return emit_seq(h, mut a, root.first, following)
+    }
+    let rev = a.rev
+    if disjoint_literals(h.nodes, first, rev) {
+        let offset = a.edges_used
+        let mut at = first
+        loop {
+            let branch = read(h.nodes, at)
+            let mut i = sequence_entry(h, branch.first, rev)
+            let mut target = following
+            let mut n = read(h.nodes, i)
+            let mut successor = if rev {
+                n.successor
+            } else {
+                n.end
+            }
+            while successor != 0 {
+                target = emit_atom(h, mut a, i, target)
+                i = successor
+                n = read(h.nodes, i)
+                successor = if rev {
+                    n.successor
+                } else {
+                    n.end
+                }
+            }
+            let ch: u32 = int.narrow(n.a)
+            emit_edge(mut a, ch, ch, target)
+            if branch.more == 0 {
+                break
+            }
+            at = branch.more
+        }
+        let total_count = a.edges_used - offset
+        return emit(mut a, OP_SPARSE, offset, total_count, 0)
+    }
+    let mut at = chain_end(h.nodes, first, 7)
+    let mut start = emit_seq(h, mut a, read(h.nodes, at).first, following)
+    while at != first {
+        at = read(h.nodes, at).end
+        let branch = emit_seq(h, mut a, read(h.nodes, at).first, following)
+        start = emit(mut a, OP_SPLIT, branch, start, 0)
+    }
+    start
+}
+
+fn link_backwards(mut xs: List[u64]) {
+    let mut i: u64 = 0
+    while i < list.len(xs) / 8 {
+        let n = read(xs, i)
+        if n.kind == ROOT || n.kind == ARM || n.kind == CAPTURE || n.kind == SCOPED {
+            let mut previous: u64 = 0
+            let mut child = n.first
+            while child != 0 {
+                xs[8 * child + 2] = previous
+                previous = child
+                child = read(xs, child).successor
+            }
+            if n.more != 0 {
+                xs[8 * n.more + 2] = i
+            }
+        }
+        i += 1
+    }
+}
+
+fn pattern_capture_name(p: String, n: Node) -> Option[(u64, u64)] {
+    let opening = advance_space(p, n.at + 1, (n.b & 1) != 0)
+    let lo = if starts(p, opening, "?P<") {
+        opening + 3
+    } else if starts(p, opening, "?<") {
+        opening + 2
+    } else {
+        return None
+    }
+    let mut hi = lo
+    while byte(p, hi) != b'>' {
+        hi += 1
+    }
+    Some((lo, hi))
+}
+
+type NameLayout: key {
+    total_count: u64,
+    length: u64
+}
+
+fn names_atom(p: String, h: Hir, i: u64, mut ns: NameLayout) {
+    let n = read(h.nodes, i)
+    if n.kind == REPEAT {
+        names_atom(p, h, n.first, mut ns)
+    } else if n.kind == CAPTURE || n.kind == SCOPED {
+        if n.kind == CAPTURE {
+            match pattern_capture_name(p, n) {
+                Some((lo, hi)) => {
+                    ns.total_count += 1
+                    ns.length += hi - lo
+                },
+                None => {},
+            }
+        }
+        names_size(p, h, i, mut ns)
+    }
+}
+
+fn names_size(p: String, h: Hir, i: u64, mut ns: NameLayout) {
+    let mut al = i
+    loop {
+        let arm = read(h.nodes, al)
+        let mut at = arm.first
+        while at != 0 {
+            names_atom(p, h, at, mut ns)
+            at = read(h.nodes, at).successor
+        }
+        if arm.more == 0 {
+            break
+        }
+        al = arm.more
+    }
+}
+
+type NameTable {
+    index: List[u32],
+    text: Bytes,
+    pos: u64,
+    slot: u64
+}
+
+fn write_name_atom(p: String, h: Hir, i: u64, mut ns: NameTable) {
+    let n = read(h.nodes, i)
+    if n.kind == REPEAT {
+        write_name_atom(p, h, n.first, mut ns)
+    } else if n.kind == CAPTURE || n.kind == SCOPED {
+        if n.kind == CAPTURE {
+            match pattern_capture_name(p, n) {
+                Some((lo, hi)) => {
+                    let mut j = lo
+                    while j < hi {
+                        ns.text[ns.pos] = byte(p, j)
+                        ns.pos += 1
+                        j += 1
+                    }
+                    ns.index[2 * ns.slot] = int.narrow(n.a)
+                    ns.index[2 * ns.slot + 1] = int.narrow(ns.pos)
+                    ns.slot += 1
+                },
+                None => {},
+            }
+        }
+        write_names(p, h, i, mut ns)
+    }
+}
+
+fn write_names(p: String, h: Hir, i: u64, mut ns: NameTable) {
+    let mut al = i
+    loop {
+        let arm = read(h.nodes, al)
+        let mut at = arm.first
+        while at != 0 {
+            write_name_atom(p, h, at, mut ns)
+            at = read(h.nodes, at).successor
+        }
+        if arm.more == 0 {
+            break
+        }
+        al = arm.more
+    }
+}
+
+fn required_prefix(h: Hir) -> (u8, u64) {
+    let root = read(h.nodes, 0)
+    if root.first == 0 || root.more != 0 {
+        return (0, 0)
+    }
+    let first = read(h.nodes, root.first)
+    if first.kind == LITERAL && first.a < 128 {
+        return (int.narrow(first.a), 1)
+    }
+    if first.kind == REPEAT && first.a > 0 {
+        let repeated = read(h.nodes, first.first)
+        if repeated.kind == LITERAL && repeated.a < 128 {
+            return (int.narrow(repeated.a), if first.a < 10 {
+                first.a
+            } else {
+                10
+            })
+        }
+    }
+    (0, 0)
+}
+
+pub fn new(pattern: String) -> Result[Regex, Error] {
+    let mut hir = compile_hir(pattern)?
+    let f = sized_alts(hir, 0, false)?
+    let r = sized_alts(hir, 0, true)?
+    let nf = FORWARD_BASE + f.states
+    let nr = REVERSE_BASE + r.states
+    let (prefix_byte, prefix_len) = required_prefix(hir)
+    let mut ns = NameLayout(total_count: 0, length: 0)
+    names_size(pattern, hir, 0, mut ns)
+    let charge = check_size(nf, nr, f.edges + r.edges, ns.total_count, ns.length, prefix_len)?
+    let forward = admit_u32(NFA_WORDS * nf)?
+    let reverse = admit_u32(NFA_WORDS * nr)?
+    let edges = admit_u32(EDGE_WORDS * (f.edges + r.edges))?
+    let mut map = admit_u8(256)?
+    let index = admit_u32(2 * ns.total_count)?
+    let text = admit_u8(ns.length)?
+    let mut pref = admit_u8(prefix_len)?
+    let mut j: u64 = 0
+    while j < prefix_len {
+        pref[j] = prefix_byte
+        j += 1
+    }
+    let mut metadata = NameTable(index: take index, text: take text, pos: 0, slot: 0)
+    write_names(pattern, hir, 0, mut metadata)
+    link_backwards(mut hir.nodes)
+    let mut a = Assembler(fw: take forward, rv: take reverse, sparse_edges: take edges, boundaries:[false; 257], rev: false, ops_used: 0, edges_used: 0)
+    let end = emit(mut a, OP_MATCH, 0, 0, 0)
+    let save_end = emit(mut a, OP_SAVE, 0, end, 1)
+    let body = emit_alts(hir, mut a, 0, save_end)
+    let anchored = emit(mut a, OP_SAVE, 0, body, 0)
+    let skip_at = a.ops_used + 1
+    let unanchored = emit(mut a, OP_SPLIT, anchored, skip_at, 0)
+    let _ = emit_byte(mut a, 0, 255, unanchored)
+    a.rev = true
+    a.ops_used = 0
+    let rev_end = emit(mut a, OP_MATCH, 0, 0, 0)
+    let anchored_r = emit_alts(hir, mut a, 0, rev_end)
+    let skip_r = a.ops_used + 1
+    let unanchored_r = emit(mut a, OP_SPLIT, anchored_r, skip_r, 0)
+    let _ = emit_byte(mut a, 0, 255, unanchored_r)
+    let mut classes: u64 = 0
+    let mut b: u64 = 0
+    while b < 256 {
+        if a.boundaries[b] {
+            classes += 1
+        }
+        map[b] = int.narrow(classes - 1)
+        b += 1
+    }
+    let Assembler(fw: take f_program, rv: take r_program, sparse_edges: take transitions, ..) = take a
+    let NameTable(index: take name_index, text: take name_text, ..) = take metadata
+    Ok(Regex(owner: unique.new(), forward: take f_program, reverse: take r_program, edges: take transitions, class_map: take map, names: take name_index, name_text: take name_text, prefilter: take pref, charge: charge, group_count: f.pgroup + 1, class_count: classes, start: unanchored, reverse_start: anchored_r))
+}
+
+const ABSENT: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn read_slot(work: List[u32], i: u64) -> u64 {
+    let lo: u64 = int.widen(work[i])
+    let hi: u64 = int.widen(work[i + 1])
+    (hi << 32) | lo
+}
+
+fn store_slot(mut work: List[u32], i: u64, value: u64) {
+    work[i] = int.narrow(value & OFFSET_LIMIT)
+    work[i + 1] = int.narrow(value >> 32)
+}
+
+fn copy_slots(mut work: List[u32], dest: u64, src: u64, slots: u64) {
+    let mut i: u64 = 0
+    while i < 2 * slots {
+        work[dest + i] = work[src + i]
+        i += 1
+    }
+}
+
+fn clear_slots(mut work: List[u32], first: u64, slots: u64) {
+    let mut i: u64 = 0
+    while i < 2 * slots {
+        work[first + i] = 0xFFFFFFFF
+        i += 1
+    }
+}
+
+fn boundary(s: String, at: u64) -> bool {
+    at == string.byte_len(s) || (byte(s, at) & 0xC0) != 0x80
+}
+
+fn ascii_word(c: u8) -> bool {
+    (c >= b'A' && c <= b'Z') || (c >= b'a' && c <= b'z') || (c >= b'0' && c <= b'9') || c == b'_'
+}
+
+fn unicode_word(s: String, at: u64) -> bool {
+    let (ch, _) = scalar(s, at)
+    table_contains(WORD_LO, WORD_HI, ch)
+}
+
+fn assertion(kind: u64, mode: u64, s: String, at: u64) -> bool {
+    let width = string.byte_len(s)
+    if kind == START_TEXT {
+        return at == 0
+    }
+    if kind == END_TEXT {
+        return at == width
+    }
+    let prev: u8 = if at != 0 {
+        byte(s, at - 1)
+    } else {
+        0
+    }
+    let successor: u8 = if at != width {
+        byte(s, at)
+    } else {
+        0
+    }
+    if kind == START_LINE || kind == END_LINE {
+        let crlf = (mode & CRLF) != 0
+        let lines = (mode & MULTILINE) != 0
+        if kind == START_LINE {
+            return at == 0 || (lines && (prev == 10 || (crlf && prev == 13 && successor != 10)))
+        }
+        return at == width || (lines && ((successor == 10 && (!crlf || prev != 13)) || (crlf && successor == 13)))
+    }
+    let mut left = ascii_word(prev)
+    let mut right = ascii_word(successor)
+    if (mode & UNICODE) != 0 {
+        if !boundary(s, at) {
+            return false
+        }
+        if at != 0 {
+            let mut before = at - 1
+            while !boundary(s, before) {
+                before -= 1
+            }
+            left = unicode_word(s, before)
+        }
+        if at != width {
+            right = unicode_word(s, at)
+        }
+    }
+    match kind {
+        5 => left != right,
+        6 => left == right,
+        7 => !left && right,
+        8 => left && !right,
+        9 => !left,
+        _ => !right,
+    }
+}
+
+type Frontier: key {
+    offset: u64,
+    extent: u64,
+    ready: u64
+}
+
+fn slot_row(f: Frontier, capacity: u64, slots: u64, rank: u64) -> u64 {
+    f.offset + 2 * capacity + 2 * slots * rank
+}
+
+type Pike: key {
+    width: u64,
+    slots: u64,
+    row: u64,
+    saved: u64,
+    stack: u64
+}
+
+fn pike_config(re: Regex, c: Cache, groups_wanted: u64) -> Pike {
+    Pike(width: list.len(re.forward) / NFA_WORDS, slots: 2 * groups_wanted, row: c.slices.row, saved: c.slices.saved, stack: c.slices.stack)
+}
+
+fn closure(re: Regex, flow: Pike, mut work: List[u32], mut into: Frontier, s: String, at: u64, entry: u64) {
+    let mut filled: u64 = 1
+    work[flow.stack] = 0
+    work[flow.stack + 1] = int.narrow(entry)
+    while filled != 0 {
+        filled -= 1
+        let head = flow.stack + 4 * filled
+        let mode = work[head]
+        if mode != 0 {
+            let hi: u64 = int.widen(mode - 1)
+            let lo: u64 = int.widen(work[head + 1])
+            let value = read_slot(work, head + 2)
+            store_slot(mut work, flow.row + 2 * ((hi << 32) | lo), value)
+        } else {
+            let mut state: u64 = int.widen(work[head + 1])
+            loop {
+                let rank: u64 = int.widen(work[into.offset + flow.width + state])
+                let id: u32 = int.narrow(state)
+                if rank < into.extent && work[into.offset + rank] == id {
+                    break
+                }
+                let base = NFA_WORDS * state
+                let op = re.forward[base]
+                let left: u64 = int.widen(re.forward[base + 1])
+                let right: u64 = int.widen(re.forward[base + 2])
+                let third: u64 = int.widen(re.forward[base + 3])
+                if op == OP_BYTE || op == OP_SPARSE || op == OP_MATCH {
+                    // Keep consuming and match states first in priority order.
+                    // The remaining dense entries deduplicate epsilon paths.
+                    let position = into.ready
+                    if position < into.extent {
+                        let displaced = work[into.offset + position]
+                        let displaced_id: u64 = int.widen(displaced)
+                        work[into.offset + into.extent] = displaced
+                        work[into.offset + flow.width + displaced_id] = int.narrow(into.extent)
+                    }
+                    work[into.offset + position] = id
+                    work[into.offset + flow.width + state] = int.narrow(position)
+                    into.ready += 1
+                    into.extent += 1
+                    copy_slots(mut work, slot_row(into, flow.width, flow.slots, position), flow.row, flow.slots)
+                    break
+                }
+                work[into.offset + into.extent] = id
+                work[into.offset + flow.width + state] = int.narrow(into.extent)
+                into.extent += 1
+                if op == OP_SPLIT {
+                    let pending = flow.stack + 4 * filled
+                    work[pending] = 0
+                    work[pending + 1] = int.narrow(right)
+                    filled += 1
+                    state = left
+                } else if op == OP_UTF8_CHOICE {
+                    if at == string.byte_len(s) {
+                        break
+                    }
+                    state = if byte(s, at) < 128 {
+                        left
+                    } else {
+                        right
+                    }
+                } else if op == OP_SAVE {
+                    let slot = 2 * left + third
+                    if slot < flow.slots {
+                        let pending = flow.stack + 4 * filled
+                        work[pending] = int.narrow((slot >> 32) + 1)
+                        work[pending + 1] = int.narrow(slot & OFFSET_LIMIT)
+                        let old = read_slot(work, flow.row + 2 * slot)
+                        store_slot(mut work, pending + 2, old)
+                        store_slot(mut work, flow.row + 2 * slot, at)
+                        filled += 1
+                    }
+                    state = right
+                } else if op == OP_ASSERT && assertion(left, right, s, at) {
+                    state = third
+                } else {
+                    break
+                }
+            }
+        }
+    }
+}
+
+fn transition(re: Regex, state: u64, ch: u32) -> Option[u64] {
+    let i = NFA_WORDS * state
+    let op = re.forward[i]
+    if op == OP_BYTE {
+        let interval = re.forward[i + 1]
+        if (interval & 255) <= ch && ch <= (interval >> 8) {
+            return Some(int.widen(re.forward[i + 2]))
+        }
+    } else if op == OP_SPARSE {
+        let start: u64 = int.widen(re.forward[i + 1])
+        let len: u64 = int.widen(re.forward[i + 2])
+        let mut j = start
+        while j < start + len {
+            let at = EDGE_WORDS * j
+            if re.edges[at] <= ch && ch <= re.edges[at + 1] {
+                return Some(int.widen(re.edges[at + 2]))
+            }
+            j += 1
+        }
+    }
+    None
+}
+
+fn pike_search(re: Regex, mut c: Cache, s: String, at: u64, groups_wanted: u64) -> Option[Match] {
+    let flow = pike_config(re, c, groups_wanted)
+    let mut now = Frontier(offset: c.slices.front, extent: 0, ready: 0)
+    let mut later = Frontier(offset: c.slices.back, extent: 0, ready: 0)
+    let mut pos = at
+    let width = string.byte_len(s)
+    let mut found: Option[Match] = None
+    clear_slots(mut c.work, flow.row, flow.slots)
+    closure(re, flow, mut c.work, mut now, s, pos, re.start)
+    while now.ready != 0 {
+        let mut rank: u64 = 0
+        let ch: u32 = if pos < width {
+            int.widen(byte(s, pos))
+        } else {
+            0
+        }
+        while rank < now.ready {
+            let state: u64 = int.widen(c.work[now.offset + rank])
+            let row = slot_row(now, flow.width, flow.slots, rank)
+            if re.forward[NFA_WORDS * state] == OP_MATCH {
+                if boundary(s, pos) {
+                    let lo = read_slot(c.work, row)
+                    let hi = read_slot(c.work, row + 2)
+                    found = Some(Match(start: lo, end: hi))
+                    copy_slots(mut c.work, flow.saved, row, flow.slots)
+                    break
+                }
+            } else if pos < width {
+                match transition(re, state, ch) {
+                    Some(successor) => {
+                        copy_slots(mut c.work, flow.row, row, flow.slots)
+                        closure(re, flow, mut c.work, mut later, s, pos + 1, successor)
+                    },
+                    None => {},
+                }
+            }
+            rank += 1
+        }
+        if pos == width {
+            break
+        }
+        let previous_offset = now.offset
+        now = later
+        later = Frontier(offset: previous_offset, extent: 0, ready: 0)
+        pos += 1
+    }
+    found
+}
+
+fn publish_groups(re: Regex, c: Cache, mut g: Groups) {
+    let mut i: u64 = 0
+    while i < re.group_count {
+        let lo = read_slot(c.work, c.slices.saved + 4 * i)
+        let hi = read_slot(c.work, c.slices.saved + 4 * i + 2)
+        if lo == ABSENT || hi == ABSENT {
+            g.spans[2 * i] = 1
+            g.spans[2 * i + 1] = 0
+        } else {
+            g.spans[2 * i] = lo
+            g.spans[2 * i + 1] = hi
+        }
+        i += 1
+    }
+}
+
+pub fn is_match(re: Regex, mut c: Cache, s: String, at: u64) -> bool {
+    check_cache(re, c)
+    check_start(s, at)
+    pike_search(re, mut c, s, at, 1) != None
+}
+
+pub fn find(re: Regex, mut c: Cache, s: String, at: u64) -> Option[Match] {
+    check_cache(re, c)
+    check_start(s, at)
+    pike_search(re, mut c, s, at, 1)
+}
+
+pub fn captures(re: Regex, mut c: Cache, s: String, at: u64, mut g: Groups) -> bool {
+    check_cache(re, c)
+    check_groups(re, g)
+    check_start(s, at)
+    if pike_search(re, mut c, s, at, re.group_count) == None {
+        init_group_spans(mut g.spans)
+        return false
+    }
+    publish_groups(re, c, mut g)
+    true
+}
+
+fn next_search(re: Regex, mut c: Cache, s: String, mut k: Cursor, groups_wanted: u64) -> Option[Match] {
+    if k.finished {
+        return None
+    }
+    check_start(s, k.at)
+    let width = string.byte_len(s)
+    let mut found = pike_search(re, mut c, s, k.at, groups_wanted)
+    if k.after_match && found == Some(Match(start: k.at, end: k.at)) {
+        if k.at == width {
+            found = None
+        } else {
+            let (_, boundary_at) = scalar(s, k.at)
+            found = pike_search(re, mut c, s, boundary_at, groups_wanted)
+        }
+    }
+    match found {
+        Some(m) => {
+            k.at = m.end
+            k.after_match = true
+        },
+        None => {
+            k.finished = true
+        },
+    }
+    found
+}
+
+pub fn next(re: Regex, mut c: Cache, s: String, mut k: Cursor) -> Option[Match] {
+    check_cache(re, c)
+    next_search(re, mut c, s, mut k, 1)
+}
+
+pub fn next_captures(re: Regex, mut c: Cache, s: String, mut k: Cursor, mut g: Groups) -> bool {
+    check_cache(re, c)
+    check_groups(re, g)
+    if next_search(re, mut c, s, mut k, re.group_count) == None {
+        init_group_spans(mut g.spans)
+        return false
+    }
+    publish_groups(re, c, mut g)
+    true
+}
+
+pub fn count(re: Regex, mut c: Cache, s: String) -> u64 {
+    check_cache(re, c)
+    let mut k = cursor(0)
+    let mut matches_found: u64 = 0
+    while next_search(re, mut c, s, mut k, 1) != None {
+        matches_found += 1
+    }
+    matches_found
 }
 
 // Unicode tables generated by core/tools/regex_oracle.rs.

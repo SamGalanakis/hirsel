@@ -1,6 +1,6 @@
 # Regex
 
-This chapter specifies std `regex`: regular expressions over `String`. It is unbuilt design. Every sample is marked `hirsel unbuilt` until the operations it calls are built.
+This chapter specifies std `regex`: regular expressions over `String`. The API is available on the PikeVM. The lazy DFA described below is pending.
 
 **Reference.** The pattern language and its meaning are those of the Rust `regex` crate at commit fde4946 (2026-11-18), built with default features off and the features `std`, `perf`, `unicode-case` and `unicode-perl`: its `regex::Regex` type, with the `*_at` semantics of `find_at`, `is_match_at` and `captures_at`. Where this chapter says "the crate", it means that build. A conformance corpus generated from it is the oracle for every answer below. std regex differs from it in one place only, the start-offset precondition of RE-3.
 
@@ -88,7 +88,7 @@ pub type SyntaxKind: key = CaptureLimitExceeded | ClassEscapeInvalid | ClassRang
   | UnicodePropertyValueNotFound
 ```
 
-```hirsel unbuilt
+```hirsel
 fn compile() -> Result[std.regex.Regex, std.regex.Error] {
   std.regex.new("[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}")   // Ok
 }
@@ -110,7 +110,7 @@ A search of `s` from `at` gives the crate's `find_at(s, at)` answer: the **leftm
 - `is_match(re, mut c, s, at)` is whether `find` would return a match.
 - `find(re, mut c, s, at)` returns the match, or `None`.
 
-```hirsel unbuilt
+```hirsel
 fn leftmost_first(re: std.regex.Regex) -> Result[Option[std.regex.Match], Capacity] {   // re from new("ab|abc")
   let mut c = std.regex.cache(re, 0)?
   Ok(std.regex.find(re, mut c, "xabc", 0))                                              // Some(Match(start: 1, end: 3))
@@ -128,7 +128,7 @@ A `Cursor` walks the non-overlapping matches of `s` in order, as the crate's `fi
 - **What a cursor holds.** A cursor holds only its position and its two marks, and is not tied to a regex or a haystack. A call may pass a different `s` or `re` than the last one did; it searches that haystack from the held position with the held marks, and fails with `Bounds` when the position is not a valid `at` for it (RE-3).
 - `count(re, mut c, s)` is the number of matches `next` returns from `cursor(0)`. It is the crate's `find_iter(s).count()`.
 
-```hirsel unbuilt
+```hirsel
 fn errors(re: std.regex.Regex, log: String) -> Result[u64, Capacity] {   // re from new(" [5][0-9]{2} | [4][0-9]{2} ")
   let mut c = std.regex.cache(re, 1048576)?
   Ok(std.regex.count(re, mut c, log))
@@ -146,7 +146,7 @@ A `Groups` holds one span or none for each group of its regex. `groups(re)` make
 - `next_captures(re, mut c, s, mut k, mut g)` is to `captures` what `next` is to `find`. When it returns `false`, every group of `g` is none.
 - `group(g, i)` is group `i`'s span, or `None` when it is none or `i` is not below `group_len`.
 
-```hirsel unbuilt
+```hirsel
 fn names(re: std.regex.Regex, t: String) -> Result[u64, Capacity] {   // re from new("\\{\\{(.*?)\\}\\}")
   let mut c = std.regex.cache(re, 0)?
   let mut g = std.regex.groups(re)?
@@ -188,7 +188,7 @@ std regex is ordinary std code: it has no bodiless function and adds no core fun
 
 **Answers do not depend on the cache.** When the cache is full, it is cleared and keeps the state the search is in. When a state cannot fit even in a cleared cache, or clearing does not pay (RE-7), or a word boundary meets a non-ASCII byte, the search starts again from its own `at` on the fallback engine. So a completed search returns the same answer whatever the cache's size and whatever it held before. Steps are not covered by this: RE-7 says how they depend on the cache.
 
-```hirsel unbuilt
+```hirsel
 fn exact(re: std.regex.Regex) -> Result[std.regex.Cache, Capacity] {
   bound bytes std.regex.cache_bytes(re, 0) { std.regex.cache(re, 0)? }   // Ok; with one byte less, Error
 }
@@ -215,7 +215,7 @@ std code is user code to [MEM-30](budgets.md#mem-30-step-bounds): every call and
 - **Sites.** `Fail` and `Bounds` are sited inside the std operation, at the check that raised them: [FAIL-2](failure.md#fail-2-causes) moves sites out of core functions only, and std is not core. `OutOfTime` is sited where MEM-30 puts it. The step of the call into a std regex operation is the caller's call expression, so a bound exhausted there stops at the caller's call, and a bound exhausted inside stops at the call or loop inside std that took it.
 - **Capacity.** Outside a finalizer, `Capacity` is never a failure here: it is an error of `new`, `cache` and `groups` only (RE-6). Inside a finalizer, the failure rules of [FAIL-12](failure.md#fail-12-finalizer-failure) and MEM-27 apply to these operations as to any other.
 
-```hirsel unbuilt
+```hirsel
 fn bounded(re: std.regex.Regex, s: String) -> Result[Result[u64, Capacity], OutOfTime] {
   bound steps 1000000 {
     match std.regex.cache(re, 0) {
@@ -235,7 +235,7 @@ fn bounded(re: std.regex.Regex, s: String) -> Result[Result[u64, Capacity], OutO
 - The size counts std's own charges, not the crate's memory, so a pattern near the limit may be refused here and accepted by the crate, or the other way round. The conformance corpus has no pattern within a factor of ten of either side's limit, and std's own threshold is checked against hand-derived sizes.
 - Searching has no size limit and raises no size error. The cache is bounded (RE-6), and RE-7 bounds a search's steps for every accepted pattern.
 
-```hirsel unbuilt
+```hirsel
 fn huge() -> Result[std.regex.Regex, std.regex.Error] {
   std.regex.new("a{1000}{1000}")   // Error(TooBig(10485760))
 }

@@ -63,6 +63,7 @@ fn literal(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            c if c.is_control() => write!(out, "\\u{{{:x}}}", c as u32).unwrap(),
             c => out.push(c),
         }
     }
@@ -291,7 +292,7 @@ fn corpus() -> String {
          \x20   match compile_hir(p) {\n\
          \x20       Ok(_) => expected == None,\n\
          \x20       Error(Syntax(e)) => expected == Some(e),\n\
-         \x20       Error(Capacity(_)) => false,\n\
+         \x20       Error(_) => false,\n\
          \x20   }\n\
          }\n",
     );
@@ -317,7 +318,366 @@ fn corpus() -> String {
         }
         out.push_str("    true\n}\n");
     }
+    match_corpus(&mut out);
     out
+}
+
+fn span_text(found: Option<regex::Match<'_>>) -> String {
+    found.map_or_else(
+        || "-;".to_owned(),
+        |m| format!("{},{};", m.start(), m.end()),
+    )
+}
+
+fn captures_text(re: &regex::Regex, found: Option<regex::Captures<'_>>, out: &mut String) {
+    for i in 0..re.captures_len() {
+        out.push_str(&span_text(found.as_ref().and_then(|m| m.get(i))));
+    }
+}
+
+fn observations(re: &regex::Regex, text: &str, at: usize) -> String {
+    let mut out = String::new();
+    let yes = re.is_match_at(text, at);
+    out.push(if yes { 'y' } else { 'n' });
+    out.push_str(&span_text(re.find_at(text, at)));
+    captures_text(re, re.captures_at(text, at), &mut out);
+    out.push('|');
+    for m in re.find_iter(text) {
+        out.push_str(&span_text(Some(m)));
+    }
+    out.push('|');
+    for g in re.captures_iter(text) {
+        captures_text(re, Some(g), &mut out);
+    }
+    write!(out, "|{}", re.find_iter(text).count()).unwrap();
+    out
+}
+
+const MATCH_HELPERS: &str = r#"
+fn show_span(mut out: String, found: Option[Match]) -> Result[(), Capacity] {
+    match found {
+        Some(m) => {
+            string.push_u64(mut out, m.start)?
+            string.push(mut out, ",")?
+            string.push_u64(mut out, m.end)?
+            string.push(mut out, ";")?
+        },
+        None => { string.push(mut out, "-;")? },
+    }
+    Ok(())
+}
+
+fn show_groups(mut out: String, g: Groups, n: u64) -> Result[(), Capacity] {
+    let mut i: u64 = 0
+    while i < n {
+        show_span(mut out, group(g, i))?
+        i += 1
+    }
+    Ok(())
+}
+
+fn observe_match(re: Regex, s: String, at: u64, mut out: String) -> Result[(), Capacity] {
+    let mut c = cache(re, 0)?
+    let mut g = groups(re)?
+    string.push(mut out, if is_match(re, mut c, s, at) { "y" } else { "n" })?
+    let m = find(re, mut c, s, at)
+    show_span(mut out, m)?
+    let matched = captures(re, mut c, s, at, mut g)
+    if matched != (m != None) || group(g, 0) != m {
+        string.push(mut out, "capture disagreement")?
+    }
+    show_groups(mut out, g, group_len(re))?
+    string.push(mut out, "|")?
+    let mut k = cursor(0)
+    loop {
+        match next(re, mut c, s, mut k) {
+            Some(span) => { show_span(mut out, Some(span))? },
+            None => { break },
+        }
+    }
+    if next(re, mut c, s, mut k) != None || next_captures(re, mut c, s, mut k, mut g) {
+        string.push(mut out, "finished cursor continued")?
+    }
+    k = cursor(0)
+    string.push(mut out, "|")?
+    while next_captures(re, mut c, s, mut k, mut g) {
+        show_groups(mut out, g, group_len(re))?
+    }
+    if next_captures(re, mut c, s, mut k, mut g) || next(re, mut c, s, mut k) != None {
+        string.push(mut out, "finished cursor continued")?
+    }
+    let mut i: u64 = 0
+    while i < group_len(re) {
+        if group(g, i) != None {
+            string.push(mut out, "capture survived a miss")?
+        }
+        i += 1
+    }
+    string.push(mut out, "|")?
+    string.push_u64(mut out, count(re, mut c, s))
+}
+
+fn oracle_match(pattern: String, s: String, at: u64, n: u64, expected: String) -> bool {
+    match new(pattern) {
+        Ok(re) => {
+            let mut observed = string.new()
+            if group_len(re) != n {
+                return false
+            }
+            match observe_match(re, s, at, mut observed) {
+                Ok(()) => observed == expected,
+                Error(_) => false,
+            }
+        },
+        Error(_) => false,
+    }
+}
+"#;
+
+fn pinned_rows() -> Vec<(String, String, usize)> {
+    // The pinned TOML describes row eligibility and inputs only. The pinned
+    // Regex executes every selected search; no TOML expected span is used.
+    const READ: &str = r#"
+from pathlib import Path
+import re
+import sys
+import tomllib
+
+def unescape(text):
+    tokens = re.split(rb'(\\x[0-9a-fA-F]{2}|\\[rnt\\])', text.encode())
+    special = {b'\\r': b'\r', b'\\n': b'\n', b'\\t': b'\t', b'\\\\': b'\\'}
+    return b''.join(special.get(token, token) if not token.startswith(b'\\x') or len(token)!=4
+                    else bytes([int(token[2:], 16)]) for token in tokens)
+
+for path in sorted(Path(sys.argv[1]).glob('*.toml')):
+    if path.stem in ('anchored', 'bytes', 'earliest', 'expensive', 'leftmost-all',
+                     'line-terminator', 'overlapping', 'set'):
+        continue
+    for row in tomllib.loads(path.read_text()).get('test', []):
+        p = row['regex']
+        if (not isinstance(p, str) or row.get('anchored', False)
+            or not row.get('utf8', True) or row.get('match-kind', 'leftmost-first') != 'leftmost-first'
+            or row.get('search-kind', 'leftmost') != 'leftmost'
+            or row.get('line-terminator', '\n') != '\n'):
+            continue
+        t = row['haystack']
+        if not isinstance(t, str):
+            continue
+        t = unescape(t) if row.get('unescape', False) else t.encode()
+        try:
+            t.decode()
+        except UnicodeDecodeError:
+            continue
+        start, end = row.get('bounds', [0, len(t)])
+        if end != len(t) or start not in range(len(t)+1) or start < len(t) and t[start] & 0xc0 == 0x80:
+            continue
+        p = ('(?i)' if row.get('case-insensitive', False) else '') + ('(?-u)' if not row.get('unicode', True) else '') + p
+        print(p.encode().hex(), t.hex(), start, sep='\t')
+"#;
+    let repo = Path::new(env!("REGEX_SYNTAX_TABLES"))
+        .ancestors()
+        .nth(3)
+        .unwrap();
+    let output = std::process::Command::new("python3")
+        .args(["-c", READ])
+        .arg(repo.join("testdata"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fn from_hex(s: &str) -> String {
+        let bytes: Vec<_> = s
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        String::from_utf8(bytes).unwrap()
+    }
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut fields = line.split('\t');
+            let p = from_hex(fields.next().unwrap());
+            let s = from_hex(fields.next().unwrap());
+            (p, s, fields.next().unwrap().parse().unwrap())
+        })
+        .collect()
+}
+
+fn match_corpus(out: &mut String) {
+    out.push_str(MATCH_HELPERS);
+    let mut rows: BTreeSet<_> = pinned_rows().into_iter().collect();
+    let explicit = [
+        ("(a)|b(?<gone>c){0}", "a b c ab"),
+        ("(?<gone>a){0}(?<live>a)", "a"),
+        ("(?<empty>)a", "a"),
+        ("(?P<x>^a)|(?P<y>a)", "ba"),
+        ("a*", "baaab"),
+        ("", "é"),
+        ("b|ab", "xab"),
+        ("(?m)^x", "a\nx"),
+        ("(?m)^x", "aax"),
+        ("a.@Z", "a@@Z"),
+        ("\\B.*", "!˗"),
+        ("(?i:k)", "K"),
+        ("(?i:[^k])", "K"),
+        ("(?i:ss)", "ß"),
+        ("\\p{Nd}", "٣"),
+        ("\\p{White_Space}", "\u{a0}"),
+        ("[a-z&&[^aeiou]]+", "abecdef"),
+        ("[a-z--[aeiou]]+", "abecdef"),
+        ("[a-z~~[x-z]]+", "_abxy_"),
+    ];
+    for (p, s) in explicit {
+        let mut points: Vec<_> = s.char_indices().map(|(i, _)| i).collect();
+        points.push(s.len());
+        for at in points {
+            rows.insert((p.to_owned(), s.to_owned(), at));
+        }
+    }
+    let mut seed = 0xd7d9_f6cc_u64;
+    let atoms = [
+        "a", "é", "π", "字", "🐑", "[a-z]", r"\d", r"\w", ".", "(?:a|b)",
+    ];
+    let scalars = ["a", "é", "π", "字", "🐑", "3", " ", "\n"];
+    for _ in 0..64 {
+        let mut choose = |limit| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((seed >> 32) as usize) % limit
+        };
+        let first = atoms[choose(atoms.len())];
+        let second = atoms[choose(atoms.len())];
+        let p = match choose(4) {
+            0 => format!("{first}+{second}?"),
+            1 => format!("({first})|(?:{second}){{2,4}}"),
+            2 => format!("(?i:{first}{second}*?)"),
+            _ => format!(r"{first}\b|{second}"),
+        };
+        let tail: String = (0..6).map(|_| scalars[choose(scalars.len())]).collect();
+        rows.insert((p.clone(), format!("x{tail}"), 0));
+        rows.insert((p, format!("x{tail}"), 1));
+    }
+    let cases: Vec<_> = rows
+        .into_iter()
+        .filter_map(|(p, s, at)| {
+            let re = regex::RegexBuilder::new(&p)
+                .size_limit(1_048_576)
+                .build()
+                .ok()?;
+            if re.find_iter(&s).count() > 1000 || s.len() > 10000 {
+                return None;
+            }
+            Some(format!(
+                "({}, {}, {at}, {}, {})",
+                literal(&p),
+                literal(&s),
+                re.captures_len(),
+                literal(&observations(&re, &s, at))
+            ))
+        })
+        .collect();
+    for (i, chunk) in cases.chunks(32).enumerate() {
+        write!(
+            out,
+            "\n// expect: run regex_search_{i}() = true\nfn regex_search_{i}() -> bool {{\n    let cases: Inline[(String, String, u64, u64, String), {}] =[\n",
+            chunk.len()
+        ).unwrap();
+        for test in chunk {
+            writeln!(out, "        {test},").unwrap();
+        }
+        out.push_str("    ]\n    for (p, s, at, n, expected) in cases {\n        if !oracle_match(p, s, at, n, expected) { return false }\n    }\n    true\n}\n");
+    }
+    group_names(out);
+    log_corpus(out);
+}
+
+fn group_names(out: &mut String) {
+    out.push_str(
+        r#"
+fn oracle_name(pattern: String, name: String, expected: Option[u64]) -> bool {
+    match new(pattern) {
+        Ok(re) => group_index(re, name) == expected,
+        Error(_) => false,
+    }
+}
+
+// expect: run regex_group_names() = true
+fn regex_group_names() -> bool {
+"#,
+    );
+    for (pattern, name) in [
+        ("(a)|b(?<gone>c){0}", "gone"),
+        ("(?<gone>a){0}(?<live>a)", "gone"),
+        ("(?<gone>a){0}(?<live>a)", "live"),
+        ("(?<empty>)a", "empty"),
+        ("(?P<x>^a)|(?P<y>a)", "x"),
+        ("(?P<x>^a)|(?P<y>a)", "y"),
+        ("(?<é.2[3]>a)", "é.2[3]"),
+    ] {
+        let re = regex::Regex::new(pattern).unwrap();
+        let expected = re.capture_names().position(|n| n == Some(name));
+        let result = expected.map_or_else(|| "None".to_owned(), |i| format!("Some({i})"));
+        writeln!(
+            out,
+            "    if !oracle_name({}, {}, {result}) {{ return false }}",
+            literal(pattern),
+            literal(name)
+        )
+        .unwrap();
+    }
+    out.push_str("    true\n}\n");
+}
+
+fn log_corpus(out: &mut String) {
+    let mut log = String::new();
+    for i in 0..2000 {
+        let status = [200, 404, 500, 302][i % 4];
+        let agent = ["Mozilla", "Googlebot", "crawler", "scanner"][i % 4];
+        let path = ["/api/users", "/login", "/wp-admin", "/signin"][i % 4];
+        let method = ["GET", "POST", "PUT"][i % 3];
+        let time = 11 + i % 9;
+        writeln!(log, "192.168.1.{} [1/Oct/2023:{time}:55:36 +0000] {method} {path} HTTP/1.1 {status} {agent} user@x.io password=key{}&token=tok{}&session_id=s{}",
+                 if i % 11 == 0 { 35 } else { 1 + i % 247 }, i % 13, i % 7, i % 19).unwrap();
+    }
+    writeln!(out, "\nfn oracle_log() -> String {{ {} }}", literal(&log)).unwrap();
+    out.push_str(
+        r#"
+fn oracle_log_count(p: String, expected: u64) -> bool {
+    match new(p) {
+        Ok(re) => {
+            let mut c = result.unwrap(cache(re, 0))
+            count(re, mut c, oracle_log()) == expected
+        },
+        Error(_) => false,
+    }
+}
+"#,
+    );
+    for (i, p) in [
+        r" [5][0-9]{2} | [4][0-9]{2} ",
+        r"(?i)bot|crawler|scanner|spider|indexing|crawl|robot|spider",
+        r"(?i)etc/passwd|wp-admin|\.\./",
+        r"\d+\.\d+\.\d+\.35",
+        r#"/api/[^ "]+"#,
+        r"POST [^ ]* HTTP",
+        r"(?i)/login|/signin",
+        r"(?i)get|post|put",
+        r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+        r#"password=[^&\s"]+"#,
+        r#"token=[^&\s"]+|api[_-]?key=[^&\s"]+"#,
+        r#"session[_-]?id=[^&\s"]+"#,
+        r"\[\d+/\w+/\d+:1[3-7]:\d+:\d+ [+\-]\d+\]",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let n = regex::Regex::new(p).unwrap().find_iter(&log).count();
+        write!(out, "\n// test-instructions: 6000000000\n// expect: run regex_log_{i}() = true\nfn regex_log_{i}() -> bool {{\n    oracle_log_count({}, {n})\n}}\n", literal(p)).unwrap();
+    }
 }
 
 fn inline(out: &mut String, name: &str, ty: &str, values: &[u64]) {

@@ -78,7 +78,7 @@ capability and its explicit grant syntax.
 The [HTTP specification](http.md) defines std `http`, the runner's HTTP bindings
 and keyed operations. It is unbuilt design.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over
-`String` with the Rust `regex` crate's syntax and meaning. It is unbuilt design.
+`String` with the Rust `regex` crate's syntax and meaning.
 
 ## Glossary
 

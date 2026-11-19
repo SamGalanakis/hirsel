@@ -7,9 +7,13 @@ fn every_live_spec_fence_parses_and_resolves_or_names_its_refusal() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let core = package("core");
     let library = PackageManifest::directory(&repo.join("core/core"), core.clone(), true).unwrap();
+    let std = package("std");
+    let mut standard =
+        PackageManifest::directory(&repo.join("core/std"), std.clone(), false).unwrap();
+    standard.dependencies.push(core.clone());
     let mut corpus = CorpusManifest {
         core: core.clone(),
-        packages: vec![library],
+        packages: vec![library, standard],
     }
     .load()
     .unwrap();
@@ -62,10 +66,14 @@ fn every_live_spec_fence_parses_and_resolves_or_names_its_refusal() {
                     corpus.manifest.packages[0].sources.push(source);
                     core_rules += 1;
                 } else {
+                    let mut dependencies = vec![core.clone()];
+                    if code.contains("std.regex.") {
+                        dependencies.push(std.clone());
+                    }
                     corpus.manifest.packages.push(PackageManifest {
                         package: name.clone(),
                         sources: vec![source],
-                        dependencies: vec![core.clone()],
+                        dependencies,
                     });
                 }
                 corpus.sources.push(CorpusSource {
@@ -159,7 +167,7 @@ fn every_live_spec_fence_parses_and_resolves_or_names_its_refusal() {
         }
     }
     println!(
-        "live spec: {examples} examples, {rules} rule snippets ({core_rules} core declarations), {} core files; {} intentional refusals",
+        "live spec: {examples} examples, {rules} rule snippets ({core_rules} core declarations), {} library files; {} intentional refusals",
         report.files.len() - origins.len(),
         report
             .files

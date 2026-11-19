@@ -56,6 +56,8 @@ class Contract:
     # `// schedule: seeds N [max_events M]` before the law: the native run repeats the
     # law under N seeded schedules (core/tools/std_schedule.c).
     schedule: tuple[int, int | None] | None = None
+    root_limit: int = 64 << 20
+    evaluator_instructions: int = 1_000_000_000
 
     @property
     def name(self):
@@ -142,7 +144,17 @@ def discover(root, filters):
         host_op = 0
         engine_fact = None
         schedule = None
+        root_limit = 64 << 20
+        evaluator_instructions = 1_000_000_000
         for line, text in enumerate(source.splitlines(), 1):
+            if text.startswith("// test-limit: "):
+                root_limit = int(text.removeprefix("// test-limit: "))
+                if not 0 < root_limit < 1 << 64:
+                    raise ValueError(f'{file}:{line}: test limit is outside u64')
+            if text.startswith("// test-instructions: "):
+                evaluator_instructions = int(text.removeprefix("// test-instructions: "))
+                if not 0 < evaluator_instructions < 1 << 64:
+                    raise ValueError(f'{file}:{line}: evaluator instruction limit is outside u64')
             if text.startswith("// schedule: "):
                 words = text.removeprefix("// schedule: ").split()
                 if len(words) not in (2, 4) or words[0] != 'seeds' or words[2:3] not in ([], ['max_events']):
@@ -178,8 +190,10 @@ def discover(root, filters):
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
             package = 'store' if file.parent == root / 'core/programs/store/tests' else file.relative_to(root).parts[1]
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule)
+            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule, root_limit, evaluator_instructions)
             schedule = None
+            root_limit = 64 << 20
+            evaluator_instructions = 1_000_000_000
             stdout = stderr = b""
             first_write = None
             host_op = 0
@@ -537,14 +551,12 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 inputs.write_text(json.dumps(manifest(root, case, adapted)))
                 entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
                 command = [str(compiler), 'test', '--inputs', str(inputs), '--backend', engine,
-                           '--runtime', str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(64 * 1024 * 1024),
+                           '--runtime', str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit),
                            '--test-timeout', str(timeout), '--dir', str(host), '-o', str(scratch / 'programs')]
                 if evaluating:
                     law_started = time.monotonic()
-                    if model_network(case):
-                        result = resident.evaluate(inputs, entry, network=True, progress=progress)
-                    else:
-                        result = resident.evaluate(inputs, entry, progress=progress)
+                    result = resident.evaluate(inputs, entry, network=model_network(case),
+                                               instructions=case.evaluator_instructions, progress=progress)
                     row['ran'], row['cause'] = evaluator_observation(case, result)
                     try:
                         row['revision'] = json.loads(result.stdout).get('revision')
@@ -554,7 +566,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     if compare_revisions:
                         reference = [str(compiler), 'build', '--source-core', '--inputs', str(inputs), '--entry', entry,
                                      '--backend', 'cranelift', '--runtime', str(runtime), '--store', str(work / 'revision-store'),
-                                     '--json', '--limit', str(64 * 1024 * 1024), '-o', str(scratch / 'revision-program')]
+                                     '--json', '--limit', str(case.root_limit), '-o', str(scratch / 'revision-program')]
                         if model_network(case):
                             reference.extend(model_grants())
                         else:
@@ -578,7 +590,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                                      f'build exited {built.returncode}: {built.stdout!r} {built.stderr!r}')
                             row['cause'] = (row['cause'] + '; L1: ' + row['revision_cause']) if row['cause'] else row['revision_cause']
                         (scratch / 'revision-program').unlink(missing_ok=True)
-                    row['instruction_budget'] = 1_000_000_000
+                    row['instruction_budget'] = case.evaluator_instructions
                     row['passed'] = row['cause'] is None
                     if row['cause']:
                         row['owner'] = ('core-ops-914' if any(message in row['cause'] for message in ('external functions do not run here', 'duplicate closed type rows')) else

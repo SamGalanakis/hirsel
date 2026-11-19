@@ -9,6 +9,14 @@ pub fn from(s: String) -> Result[String, Capacity] {
     Ok(of_bytes(take b))
 }
 
+/// An empty string with storage for n bytes. The byte list starts empty.
+/// Fails: Capacity. Alloc: n bytes rounded to 8. Cost: O(1).
+/// Ex: `let mut reply = string.with_capacity(256)?`
+pub fn with_capacity(n: u64) -> Result[String, Capacity] {
+    let b: Bytes = list.with_capacity(n)?
+    Ok(of_bytes(take b))
+}
+
 pub fn from_utf8(take b: Bytes) -> Result[String, Bytes] {
     if is_utf8(b) {
         Ok(of_bytes(take b))
@@ -116,7 +124,7 @@ fn utf8_complete_prefix(b: Bytes, boundary: u64, carry: u64) -> u64 {
     start
 }
 
-// For buffers of at least 128 bytes, validate a prefix ending at a scalar
+// For buffers of at least 256 bytes, validate a prefix ending at a scalar
 // boundary. On a mismatch the scalar validator resumes at the start of
 // the suspect block or the scalar that crosses its leading edge.
 fn utf8_block_prefix(b: Bytes) -> u64 {
@@ -250,24 +258,27 @@ pub fn utf8_tail(head: Utf8Head, available: u64, read: scoped fn(u64) -> u8) -> 
 
 pub fn validate_utf8(b: Bytes) -> Result[(), Utf8Error] {
     let n = list.len(b)
-    let mut i: u64 = if n >= 128 {
+    // Below the SIMD crossover, start with the scalar ASCII word scan.
+    let mut i: u64 = if n >= 256 {
         utf8_block_prefix(b)
     } else {
         0
     }
     while i < n {
-        let x = b[i]
-        if x < 0x80 {
-            if i & 7 == 0 {
-                while i + 16 <= n && (list.word_le(b, i) | list.word_le(b, i + 8)) & 0x8080808080808080 == 0 {
-                    i += 16
-                }
-                while i < n && b[i] < 0x80 {
-                    i += 1
-                }
-            } else {
+        if i & 7 == 0 {
+            while i + 16 <= n && (list.word_le(b, i) | list.word_le(b, i + 8)) & 0x8080808080808080 == 0 {
+                i += 16
+            }
+            while i < n && b[i] < 0x80 {
                 i += 1
             }
+            if i == n {
+                break
+            }
+        }
+        let x = b[i]
+        if x < 0x80 {
+            i += 1
             continue
         }
         let Some(head) = utf8_head(x) else {

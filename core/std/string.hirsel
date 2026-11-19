@@ -14,17 +14,6 @@
 // `string.slice`, returning the sub-view the call gave for s (OWN-20); they allocate
 // nothing and FREEZE s for the result's extent. Scalars are read with `next_scalar` in a
 // `while let` loop; `for` iterates only built-in sources (SEM-6).
-/// An empty string with storage for n bytes: `string.from_utf8` of `list.with_capacity(n)`.
-/// Fails: Error(c). Alloc: n rounded to 8, current limit. Cost: O(1).
-/// Ex: `let mut reply = string.with_capacity(256)?`
-pub fn with_capacity(n: u64) -> Result[String, Capacity] {
-    let b: Bytes = list.with_capacity(n)?
-    match string.from_utf8(take b) {
-        Ok(take s) => Ok(take s),
-        Error(_) => fail("string.with_capacity: empty bytes are UTF-8"),
-    }
-}
-
 /// Whether i is a scalar boundary: i == byte_len, or i < byte_len and byte i is not a
 /// continuation byte. Cost: O(1). Ex: `if !string.is_boundary(text, at) { return Error(BadPosition) }`
 pub fn is_boundary(s: String, i: u64) -> bool {
@@ -100,7 +89,7 @@ pub fn repeat(s: String, n: u64) -> Result[String, Capacity] {
         Some(t) => t,
         None => fail("string.repeat: length overflows u64"),
     }
-    let mut out = with_capacity(total)?
+    let mut out = string.with_capacity(total)?
     // Rust doubles inside its buffer; a String cannot append from itself, so a short s
     // is first gathered into a block of at most 256 bytes and the block is appended.
     let per: u64 = if len == 0 {
@@ -110,7 +99,7 @@ pub fn repeat(s: String, n: u64) -> Result[String, Capacity] {
     }
     let mut k: u64 = 0
     if per >= 4 && n >= 2 * per {
-        let mut block = with_capacity(per * len)?
+        let mut block = string.with_capacity(per * len)?
         for _ in 0 .. per {
             string.push(mut block, s)?
         }

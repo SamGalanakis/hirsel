@@ -3039,13 +3039,16 @@ fn program_inputs_rebuild_bodies_like_fresh() {
                 let relative = at.join(entry.unwrap().file_name());
                 if shipped.join(&relative).is_dir() {
                     pending.push(relative);
-                } else {
+                } else if relative.extension().is_some_and(|e| e == "hirsel") {
                     let text = std::fs::read_to_string(shipped.join(&relative)).unwrap();
                     let text = text.replace(
                         &format!("pub fn {maker}{next}"),
                         &format!("pub fn {maker}_renamed{next}"),
                     );
                     std::fs::write(copy.join(&relative), text).unwrap();
+                } else {
+                    // Test vectors are bytes, some of them deliberately not UTF-8.
+                    std::fs::copy(shipped.join(&relative), copy.join(&relative)).unwrap();
                 }
             }
         }

@@ -1190,22 +1190,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if pt == at && roots.is_empty() && !has_param(&self.t, pt) {
             return true;
         }
-        self.unify_part(pt, at, s, roots)
+        let mut comparisons = 0;
+        let equal = self.unify_part(pt, at, s, roots, &mut comparisons);
+        self.out.counts.types += comparisons;
+        equal
     }
     fn unify_part(
-        &mut self,
+        &self,
         pt: TyId,
         at: TyId,
         s: &mut [Option<TyId>],
         roots: &[Option<TyId>],
+        comparisons: &mut u64,
     ) -> bool {
-        self.out.counts.types += 1;
+        *comparisons += 1;
         if at == ERROR || at == HOLE {
             return true;
         }
-        match (self.t.kind(pt).clone(), self.t.kind(at).clone()) {
+        match (self.t.kind(pt), self.t.kind(at)) {
             (TyKind::Region(Root::Parameter(i)), _)
-                if let Some(root) = roots.get(i as usize).copied().flatten() =>
+                if let Some(root) = roots.get(*i as usize).copied().flatten() =>
             {
                 root == at
             }
@@ -1214,9 +1218,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 true
             }
             (TyKind::Param(i), _) | (TyKind::Region(Root::Generic(i)), TyKind::Region(_)) => {
-                match s[i as usize] {
+                match s[*i as usize] {
                     None => {
-                        s[i as usize] = Some(at);
+                        s[*i as usize] = Some(at);
                         true
                     }
                     Some(x) => x == at || x == ERROR,
@@ -1224,34 +1228,38 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             (TyKind::Tuple(a), TyKind::Tuple(b)) if a.len() == b.len() => a
                 .iter()
-                .zip(&b)
-                .all(|(&x, &y)| self.unify_part(x, y, s, roots)),
+                .zip(b)
+                .all(|(&x, &y)| self.unify_part(x, y, s, roots, comparisons)),
             (TyKind::Adt(d, a), TyKind::Adt(e, b)) if d == e && a.len() == b.len() => a
                 .iter()
-                .zip(&b)
-                .all(|(&x, &y)| self.unify_part(x, y, s, roots)),
+                .zip(b)
+                .all(|(&x, &y)| self.unify_part(x, y, s, roots, comparisons)),
             (TyKind::Adt(d, a), TyKind::Adt(e, b))
                 if is_core_prelude(&self.p.decls[d.index()].path, &["SeqSpan"])
                     && is_core_prelude(&self.p.decls[e.index()].path, &["IndexedSpan"])
                     && a.len() == b.len() =>
             {
                 a.iter()
-                    .zip(&b)
-                    .all(|(&x, &y)| self.unify_part(x, y, s, roots))
+                    .zip(b)
+                    .all(|(&x, &y)| self.unify_part(x, y, s, roots, comparisons))
             }
-            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => self.unify_part(a, b, s, roots),
-            (TyKind::View(a), TyKind::View(b)) => self.unify_part(a, b, s, roots),
-            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => self.unify_part(a, b, s, roots),
+            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => {
+                self.unify_part(*a, *b, s, roots, comparisons)
+            }
+            (TyKind::View(a), TyKind::View(b)) => self.unify_part(*a, *b, s, roots, comparisons),
             (TyKind::Anchored(a, ar), TyKind::Anchored(b, br)) => {
-                self.unify_part(a, b, s, roots) && self.unify_part(ar, br, s, roots)
+                self.unify_part(*a, *b, s, roots, comparisons)
+                    && self.unify_part(*ar, *br, s, roots, comparisons)
             }
-            (_, TyKind::Anchored(b, _)) if self.type_kind(b) == Kind::Region => {
-                self.unify_part(pt, b, s, roots)
+            (_, TyKind::Anchored(b, _))
+                if crate::decls::kind(&self.p.decls, &self.t, *b, &self.params) == Kind::Region =>
+            {
+                self.unify_part(pt, *b, s, roots, comparisons)
             }
             (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
                 if (ak == bk
-                    || ak == Callable::Scoped && bk == Callable::ScopedView
-                    || bk == Callable::Plain
+                    || *ak == Callable::Scoped && *bk == Callable::ScopedView
+                    || *bk == Callable::Plain
                         && matches!(
                             ak,
                             Callable::Own
@@ -1260,12 +1268,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 | Callable::ScopedView
                         ))
                     && a.len() == b.len()
-                    && (!bw || aw) =>
+                    && (!*bw || *aw) =>
             {
-                a.iter()
-                    .zip(&b)
-                    .all(|(&(am, at), &(bm, bt))| am == bm && self.unify_part(at, bt, s, roots))
-                    && self.unify_part(ar, br, s, roots)
+                a.iter().zip(b).all(|(&(am, at), &(bm, bt))| {
+                    am == bm && self.unify_part(at, bt, s, roots, comparisons)
+                }) && self.unify_part(*ar, *br, s, roots, comparisons)
             }
             _ => pt == at || pt == ERROR || pt == HOLE,
         }

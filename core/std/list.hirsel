@@ -26,6 +26,108 @@ pub fn get_or[T: plain](xs: List[T], i: u64, x: T) -> T {
     }
 }
 
+/// The first absolute index of byte in xs[start..end], or None (Rust memchr).
+/// Fails: Bounds for an invalid range. Alloc: nothing. Cost: O(end - start).
+pub fn find_byte(xs: Bytes, start: u64, end: u64, byte: u8) -> Option[u64] {
+    let b = list.slice(xs, start, end)
+    let n = list.len(b)
+    let one: u64 = int.widen(byte)
+    let spread = one * 0x0101010101010101
+    let mut at: u64 = 0
+    if n >= 16 {
+        let last_block = n - 16
+        while at <= last_block {
+            let low = int.zero_byte_marks(list.word_le(b, at) ^ spread)
+            let high = int.zero_byte_marks(list.word_le(b, at + 8) ^ spread)
+            if low | high != 0 {
+                let low_bit: u64 = int.widen(int.trailing_zeros(low))
+                let high_bit: u64 = int.widen(int.trailing_zeros(high))
+                return Some(if low != 0 {
+                    start + at + (low_bit >> 3)
+                } else {
+                    start + at + 8 + (high_bit >> 3)
+                })
+            }
+            at += 16
+        }
+    }
+    if n - at >= 8 {
+        let marks = int.zero_byte_marks(list.word_le(b, at) ^ spread)
+        if marks != 0 {
+            let bit: u64 = int.widen(int.trailing_zeros(marks))
+            return Some(start + at + (bit >> 3))
+        }
+        at += 8
+    }
+    while at < n {
+        if b[at] == byte {
+            return Some(start + at)
+        }
+        at += 1
+    }
+    None
+}
+
+/// As find_byte, matching either byte. Rust memchr2.
+pub fn find_byte2(xs: Bytes, start: u64, end: u64, a: u8, b: u8) -> Option[u64] {
+    find_byte4(xs, start, end, a, b, a, b)
+}
+
+/// As find_byte, matching any of three bytes. Rust memchr3.
+pub fn find_byte3(xs: Bytes, start: u64, end: u64, a: u8, b: u8, c: u8) -> Option[u64] {
+    find_byte4(xs, start, end, a, b, c, c)
+}
+
+/// As find_byte, matching any of four bytes. Repeated needles are equivalent to one.
+pub fn find_byte4(xs: Bytes, start: u64, end: u64, a: u8, b: u8, c: u8, d: u8) -> Option[u64] {
+    let hay = list.slice(xs, start, end)
+    let n = list.len(hay)
+    let mut i: u64 = 0
+    if n >= 16 {
+        let block: Simd[u8, 16] = list.lanes(hay, 0)
+        let va: Simd[u8, 16] = simd.splat(a)
+        let vb: Simd[u8, 16] = simd.splat(b)
+        let vc: Simd[u8, 16] = simd.splat(c)
+        let vd: Simd[u8, 16] = simd.splat(d)
+        let marks = simd.bitmask(simd.eq(block, va) | simd.eq(block, vb) | simd.eq(block, vc) | simd.eq(block, vd))
+        if marks != 0 {
+            let offset: u64 = int.widen(int.trailing_zeros(marks))
+            return Some(start + offset)
+        }
+        i = 16
+    }
+    if n - i >= 32 {
+        let va: Simd[u8, 32] = simd.splat(a)
+        let vb: Simd[u8, 32] = simd.splat(b)
+        let vc: Simd[u8, 32] = simd.splat(c)
+        let vd: Simd[u8, 32] = simd.splat(d)
+        let last_block = n - 32
+        while i <= last_block {
+            let block: Simd[u8, 32] = list.lanes(hay, i)
+            let marks = simd.bitmask(simd.eq(block, va) | simd.eq(block, vb) | simd.eq(block, vc) | simd.eq(block, vd))
+            if marks != 0 {
+                let offset: u64 = int.widen(int.trailing_zeros(marks))
+                return Some(start + i + offset)
+            }
+            i += 32
+        }
+    }
+    while i < n {
+        let byte = hay[i]
+        if byte == a || byte == b || byte == c || byte == d {
+            return Some(start + i)
+        }
+        i += 1
+    }
+    None
+}
+
+/// Whether xs begins with prefix. Alloc: nothing. Cost: O(len(prefix)).
+pub fn starts_with[T: key](xs: List[T], prefix: List[T]) -> bool {
+    let n = list.len(prefix)
+    n <= list.len(xs) && list.slice(xs, 0, n) == prefix
+}
+
 /// A view of the last element, or None when empty. View: anchored to xs; FREEZE xs.
 /// Cost: O(1). Ex: `if let Some(top) = list.last(stack) { .. }`
 pub fn last[T](xs: List[T]) -> Option[View[T]] in xs {

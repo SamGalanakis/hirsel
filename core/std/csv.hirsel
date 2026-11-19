@@ -82,59 +82,14 @@ pub fn record(text: Bytes, at: u64, d: Dialect, eof: bool, mut fields: List[Fiel
         }
         let mut stop = start
         loop {
-            let found = if n - stop >= 16 {
-                let quote: Simd[u8, 16] = simd.splat(b'"')
-                let block: Simd[u8, 16] = list.lanes(text, stop)
-                let quotes = simd.eq(block, quote)
-                let mask = if quoted {
-                    simd.bitmask(quotes)
-                } else {
-                    let sep: Simd[u8, 16] = simd.splat(d.delimiter)
-                    let cr: Simd[u8, 16] = simd.splat(13)
-                    let lf: Simd[u8, 16] = simd.splat(10)
-                    simd.bitmask(quotes | simd.eq(block, sep) | simd.eq(block, cr) | simd.eq(block, lf))
-                }
-                if mask != 0 {
-                    let offset: u64 = int.widen(int.trailing_zeros(mask))
-                    stop = int.wrapping_add(stop, offset)
-                    true
-                } else {
-                    stop = int.wrapping_add(stop, 16)
-                    false
-                }
+            let found = if quoted {
+                list.find_byte(text, stop, n, b'"')
             } else {
-                false
+                list.find_byte4(text, stop, n, b'"', d.delimiter, 13, 10)
             }
-            if !found {
-                if n - stop >= 32 {
-                    let quote32: Simd[u8, 32] = simd.splat(b'"')
-                    let last = n - 32
-                    while stop <= last {
-                        let block32: Simd[u8, 32] = list.lanes(text, stop)
-                        let quoted32 = simd.eq(block32, quote32)
-                        let mask = if quoted {
-                            simd.bitmask(quoted32)
-                        } else {
-                            let sep32: Simd[u8, 32] = simd.splat(d.delimiter)
-                            let cr32: Simd[u8, 32] = simd.splat(13)
-                            let lf32: Simd[u8, 32] = simd.splat(10)
-                            simd.bitmask(quoted32 | simd.eq(block32, sep32) | simd.eq(block32, cr32) | simd.eq(block32, lf32))
-                        }
-                        if mask != 0 {
-                            let offset: u64 = int.widen(int.trailing_zeros(mask))
-                            stop = int.wrapping_add(stop, offset)
-                            break
-                        }
-                        stop = int.wrapping_add(stop, 32)
-                    }
-                }
-                while stop < n {
-                    let c = text[stop]
-                    if c == b'"' || (!quoted && (c == d.delimiter || c == 13 || c == 10)) {
-                        break
-                    }
-                    stop += 1
-                }
+            stop = match found {
+                Some(found_at) => found_at,
+                None => n,
             }
             if !quoted {
                 if stop < n && text[stop] == b'"' {

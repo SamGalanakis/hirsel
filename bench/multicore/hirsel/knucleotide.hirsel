@@ -18,25 +18,12 @@ fn base(c: u8) -> u8 {
     (c & 6u8) >> 1u8
 }
 
-fn record_three(line: Bytes) -> bool {
-    let key = string.as_bytes(">THREE")
-    if list.len(line) < list.len(key) {
-        return false
-    }
-    for i in 0 .. list.len(key) {
-        if line[i] != key[i] {
-            return false
-        }
-    }
-    true
-}
-
 fn extract(take file: HostFile) -> Bytes waits {
     let mut input = result.unwrap(std.io.buffered_input(take file, 8192))
     let mut dna: Bytes = result.unwrap(list.with_capacity(65536))
     let mut line: Bytes = result.unwrap(list.with_capacity(64))
     while result.unwrap(std.io.read_until_lf(mut input, mut line)) {
-        if record_three(line) {
+        if list.starts_with(line, string.as_bytes(">THREE")) {
             break
         }
         list.clear(mut line)

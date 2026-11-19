@@ -369,14 +369,13 @@ fn authority(b: Bytes) -> bool {
     }
     let mut at: u64 = 0
     if b[0] == b'[' {
-        at = 1
-        while at < n && b[at] != b']' {
-            at += 1
-        }
-        if at == n || !ip_literal(list.slice(b, 1, at)) {
+        let Some(close) = list.find_byte(b, 1, n, b']') else {
             return false
         }
-        at += 1
+        if !ip_literal(list.slice(b, 1, close)) {
+            return false
+        }
+        at = close + 1
     } else {
         let high_bits: u64 = 0x8080808080808080
         while at + 8 <= n {
@@ -560,9 +559,8 @@ fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[(RequestHead, Framing
             return Error(400)
         }
     } else if b[start] != b'/' {
-        let mut colon = start
-        while colon < end && b[colon] != b':' && b[colon] != b'/' && b[colon] != b'?' {
-            colon += 1
+        let Some(colon) = list.find_byte3(b, start, end, b':', b'/', b'?') else {
+            return Error(501)
         }
         if end - colon < 3 || b[colon + 1] != b'/' || b[colon + 2] != b'/' {
             return Error(501)
@@ -577,9 +575,9 @@ fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[(RequestHead, Framing
             }
         }
         let host_start = colon + 3
-        start = host_start
-        while start < end && b[start] != b'/' && b[start] != b'?' {
-            start += 1
+        start = match list.find_byte2(b, host_start, end, b'/', b'?') {
+            Some(at) => at,
+            None => end,
         }
         let absolute = http1.Span(start: host_start, end: start)
         if host == None || !authority(part(b, absolute)) {
@@ -587,12 +585,14 @@ fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[(RequestHead, Framing
         }
         host = Some(absolute)
     }
-    let mut path_end = start
-    while path_end < end && b[path_end] != b'?' {
-        if b[path_end] == b'#' {
-            return Error(400)
-        }
-        path_end += 1
+    let path_end = match list.find_byte2(b, start, end, b'?', b'#') {
+        Some(at) => {
+            if b[at] == b'#' {
+                return Error(400)
+            }
+            at
+        },
+        None => end,
     }
     let query_at = if path_end == end {
         end
@@ -654,9 +654,9 @@ fn segments_of(raw_path: Bytes) -> Result[List[String], TargetError] {
     }
     let mut start: u64 = 1
     while start <= n {
-        let mut end = start
-        while end < n && raw_path[end] != b'/' {
-            end += 1
+        let end = match list.find_byte(raw_path, start, n, b'/') {
+            Some(at) => at,
+            None => n,
         }
         if end == start && end < n {
             return Error(BadTarget)

@@ -13,3 +13,8 @@ outcomes precede mutation as stated in each source contract.
 refused growth. In a function returning `Result[_, Capacity]`, use
 `result.capacity_only(list.push(mut xs, take x))?` to clean the returned element
 and propagate only Capacity. Plain elements may be passed as `x` without `take`.
+
+`list.find_byte` returns the first absolute byte index in a checked range.
+`list.find_byte2`, `list.find_byte3` and `list.find_byte4` accept several byte values.
+`list.starts_with` compares the list with a prefix of the same element type.
+Both allocate nothing.

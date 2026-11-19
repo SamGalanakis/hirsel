@@ -29,13 +29,10 @@ fn valid_field(value: String, id_field: bool) -> bool {
 
 fn line(raw: Bytes, from: u64) -> (u64, u64) {
     let n = list.len(raw)
-    let mut end = from
-    while end < n && raw[end] != b'\r' && raw[end] != b'\n' {
-        end += 1
+    let Some(end) = list.find_byte2(raw, from, n, b'\r', b'\n') else {
+        return (n, n)
     }
-    if end == n {
-        (end, end)
-    } else if raw[end] == b'\r' && end + 1 < n && raw[end + 1] == b'\n' {
+    if raw[end] == b'\r' && end + 1 < n && raw[end + 1] == b'\n' {
         (end, end + 2)
     } else {
         (end, end + 1)

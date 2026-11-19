@@ -9,15 +9,16 @@
 
 #include <llvm-c/TargetMachine.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Passes/StandardInstrumentations.h>
-#include <llvm/Transforms/IPO/AlwaysInliner.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/IPO/Inliner.h>
 #include <llvm/Transforms/Scalar/LoopUnrollPass.h>
 #include <llvm/Transforms/Scalar/SROA.h>
 #include <llvm/Transforms/Scalar/SimpleLoopUnswitch.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Utils/ExtraPassManager.h>
 #include <llvm/Transforms/Vectorize/VectorCombine.h>
 
@@ -70,38 +71,50 @@ LLVMErrorRef runPasses(LLVMModuleRef module, LLVMTargetMachineRef machine,
 
 // HotColdSplit outlines each growth arm (a `cold` call into a body this
 // module defines: list/grow and its carrier twin) before the inliner, so every
-// inlining decision prices the hot body. Once the last inlining pass is done,
-// each outline holding a growth call goes back into its caller: a sequence that
-// fills inside a hot loop keeps its header next to the loop instead of behind
-// an outlined call (awfy/Havlak's identify_edges, 2% of its instructions). The
-// arm keeps its 2000:1 edge and its `cold` call for block placement.
+// inlining decision prices the hot body. Once the last inlining pass is done, an
+// arm goes back into its caller when the sequence it fills is held behind a
+// pointer the caller does not own, such as an element of a heap array: the loop
+// then shares the header's loads with the arm instead of reloading them past an
+// outlined call (awfy/Havlak's identify_edges, 2% of its instructions). An arm
+// whose sequence is the caller's own stack slot stays outlined: the loop reaches
+// that header through memory either way, and the returned arm only adds register
+// pressure to the loop (langarena Maze's queue, Compress's output buffers). The
+// header is the parameter the outline both loads and stores back. A returned arm
+// keeps its 2000:1 edge and its `cold` call for block placement.
 class GrowthArmsBackPass : public OptionalPassInfoMixin<GrowthArmsBackPass> {
 public:
     PreservedAnalyses run(Module &module, ModuleAnalysisManager &) {
-        bool any = false;
+        SmallVector<CallBase *> back;
         for (Function &f : module) {
             if (f.isDeclaration() || !f.getName().contains(".cold.")) continue;
             bool growth = false;
+            SmallPtrSet<Value *, 4> loaded, stored;
             for (BasicBlock &block : f)
-                for (Instruction &i : block)
+                for (Instruction &i : block) {
                     if (auto *call = dyn_cast<CallBase>(&i))
                         if (call->hasFnAttr(Attribute::Cold) && call->getCalledFunction() &&
                             !call->getCalledFunction()->isDeclaration())
                             growth = true;
-            if (!growth) continue;
-            f.removeFnAttr(Attribute::NoInline);
-            f.removeFnAttr(Attribute::Cold);
-            f.removeFnAttr(Attribute::MinSize);
-            f.removeFnAttr(Attribute::OptimizeForSize);
-            f.addFnAttr(Attribute::AlwaysInline);
-            for (User *user : f.users())
-                if (auto *call = dyn_cast<CallBase>(user)) {
-                    call->removeFnAttr(Attribute::NoInline);
-                    call->removeFnAttr(Attribute::Cold);
+                    if (auto *load = dyn_cast<LoadInst>(&i)) loaded.insert(load->getPointerOperand());
+                    if (auto *store = dyn_cast<StoreInst>(&i)) stored.insert(store->getPointerOperand());
                 }
-            any = true;
+            if (!growth) continue;
+            int header = -1;
+            for (Argument &arg : f.args())
+                if (loaded.contains(&arg) && stored.contains(&arg)) header = arg.getArgNo();
+            if (header < 0) continue;
+            for (User *user : f.users())
+                if (auto *call = dyn_cast<CallBase>(user))
+                    if (call->getCalledFunction() == &f &&
+                        !isa<AllocaInst>(getUnderlyingObject(call->getArgOperand(header))))
+                        back.push_back(call);
         }
-        return any ? PreservedAnalyses::none() : PreservedAnalyses::all();
+        for (CallBase *call : back) {
+            InlineFunctionInfo info;
+            InlineFunction(*call, info, /*MergeAttributes=*/false, /*CalleeAAR=*/nullptr,
+                           /*InsertLifetime=*/false);
+        }
+        return back.empty() ? PreservedAnalyses::all() : PreservedAnalyses::none();
     }
 };
 
@@ -246,7 +259,6 @@ extern "C" LLVMErrorRef hirsel_llvm_growth_arms_back(LLVMModuleRef module,
     ReleasePipeline release(module, machine);
     ModulePassManager pipeline;
     pipeline.addPass(GrowthArmsBackPass());
-    pipeline.addPass(AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/false));
     pipeline.addPass(GlobalDCEPass());
     release.run(pipeline, "growth-arms-back");
     return LLVMErrorSuccess;

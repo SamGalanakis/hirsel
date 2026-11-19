@@ -309,10 +309,8 @@ void order_uses_like(const Function &f, const ValueToValueMapTy &map) {
 // keeps every use-list order the code generator follows. A body the move
 // cannot put back exactly (a block whose address is taken, debug records, a
 // subprogram whose units the part must list) is cloned instead, and the
-// clone's values list their uses in the order `f`'s list theirs. With
-// `unwind_tables` the part's definition has an unwind table, as its frame
-// moves are in the program's.
-void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets, bool unwind_tables,
+// clone's values list their uses in the order `f`'s list theirs.
+void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
                   SmallVectorImpl<char> &out) {
     LLVMContext &context = m.getContext();
     auto p = std::make_unique<Module>("hirsel-part", context);
@@ -374,10 +372,6 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets, bo
         own->setLinkage(GlobalValue::ExternalLinkage);
         own->setVisibility(GlobalValue::HiddenVisibility);
     }
-    auto unwind = [&] {
-        if (unwind_tables && !own->needsUnwindTableEntry()) own->setUWTableKind(UWTableKind::Async);
-    };
-    unwind();
     map[&f] = own;
     // After `f` is mapped: a constant may point back at it.
     for (auto &[from, to] : constants) to->setInitializer(MapValue(from->getInitializer(), map));
@@ -388,7 +382,6 @@ void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets, bo
         SmallVector<ReturnInst *, 8> returns;
         CloneFunctionInto(own, &f, map, CloneFunctionChangeType::DifferentModule, returns);
         order_uses_like(f, map);
-        unwind(); // The clone takes `f`'s attributes.
         bitcode(*p, out);
         return;
     }
@@ -628,16 +621,11 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
         // then carries each constant it reaches with its initializer, which
         // the part's object holds a copy of.
         StringMap<std::string> sets = asm_lines(m);
-        // A program with debug information gives every function its frame
-        // moves, in the unwind tables when a function of it needs one there:
-        // a part without such a function then needs an unwind table of its own.
-        bool unwind_tables = !m.debug_compile_units().empty() &&
-            any_of(m, [](const Function &g) { return !g.isDeclaration() && g.needsUnwindTableEntry(); });
         std::vector<Function *> held;
         for (Function &f : m) {
             if (f.isDeclaration()) continue;
             Miss miss;
-            part_bitcode(m, f, sets, unwind_tables, miss.code);
+            part_bitcode(m, f, sets, miss.code);
             if (ask(f.getName(), miss.code)) held.push_back(&f);
             else misses.push_back(std::move(miss));
         }

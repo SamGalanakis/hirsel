@@ -113,6 +113,8 @@ llvm-symbolizer --obj=./program "$(printf '%#x' "$((pc - load_bias - 1))")"
 
 Use the return PC and load bias from the same panic. Frames from other shared
 objects need the corresponding object and mapping from the process.
+The trace can stop at the first generated Hirsel frame. Build with
+`--debug-lines on` to resolve that frame to a Hirsel source position.
 
 ## Run tests
 

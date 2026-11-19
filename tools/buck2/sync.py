@@ -839,12 +839,16 @@ def first_party(meta: dict) -> str:
         name = "core-native-laws-" + engine
         out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/gate_native_laws.py",
                                 host=True, args=["--backend", engine, "--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel",
+                                                             "--evaluator", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core-contract-eval",
+                                                             "--node", "buck-out/tmp/cargo-bin-exe/" + name + "/node",
                                                              "--model-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/model-runtime.a",
                                                              "--schedule-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/schedule-runtime.a"],
-                                bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel", "model-runtime.a": "//:core-native-runtime-fixture-pic",
+                                bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
+                                          "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval",
+                                          "node": "//tools/buck2:sdk-node[bin/node]", "model-runtime.a": "//:core-native-runtime-fixture-pic",
                                           "schedule-runtime.a": "//:core-scripted-runtime-pic"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                                data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c"] + ["core/tools/case_progress.py"]')))
+                                data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/tests/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c", "core/tools/case_progress.py", "crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/store/runner.hirsel", "core/programs/store/store.hirsel", "core/programs/store/ingress.hirsel"]')))
     out.append("\n" + call("hirsel_script_test", name="test-measurement-artifacts", script="tools/tests/measurement_artifacts.py",
                             data=["core/tools/measurement_artifacts.py", "core/tools/std_native.py", "core/tools/case_progress.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-core-sweep", script="tools/tests/core_sweep.py",

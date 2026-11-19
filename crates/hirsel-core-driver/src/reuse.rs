@@ -241,6 +241,7 @@ pub(crate) struct Keys {
     anchors: hirsel_core_ids::published::Map<crate::ItemAt, DefPath>,
     // One closure hash per definition, memoised across the bodies of a request.
     closures: std::cell::RefCell<rustc_hash::FxHashMap<u32, ContentHash>>,
+    signature_reads: std::cell::RefCell<SignatureReads>,
     // Contextual constructor candidates in index order, per (module, name).
     constructors: std::cell::RefCell<rustc_hash::FxHashMap<(u32, Symbol), Arc<[DefinitionId]>>>,
     // The core prelude types every body's signatures read
@@ -257,6 +258,27 @@ pub(crate) struct Keys {
     /// `forms`' definitions as a bit set, tested for every name of every body.
     form_bits: Vec<u64>,
 }
+/// Marks definition IDs for the body whose signature reads are being collected.
+#[derive(Default)]
+struct SignatureReads {
+    stamps: Vec<u8>,
+    epoch: u8,
+}
+
+impl SignatureReads {
+    fn begin(&mut self, definitions: usize) -> u8 {
+        if self.stamps.len() < definitions {
+            self.stamps.resize(definitions, 0);
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            self.stamps.fill(0);
+            self.epoch = 1;
+        }
+        self.epoch
+    }
+}
+
 /// What a form's lowering reads beyond its names.
 /// One `hirsel_core_front::SIBLING_READS` callee: its row, its module, and
 /// the hash of its siblings' closures once a body names it.
@@ -500,6 +522,7 @@ impl Keys {
             modules,
             packages: Demand::new(index.packages.base_len(), index.packages.len()),
             closures: Default::default(),
+            signature_reads: Default::default(),
             constructors: Default::default(),
             prelude: vec![],
             prelude_closure: Default::default(),
@@ -727,29 +750,40 @@ impl Keys {
         resolution: &Resolution,
     ) -> Vec<usize> {
         let mut pending = Vec::with_capacity(1 + resolution.names.len() + resolution.reads.len());
-        pending.push(own.0 as usize);
-        let target = |t: Target, pending: &mut Vec<usize>| match t {
-            Target::Definition(d) => pending.push(d.0 as usize),
-            Target::ContextualConstructor { name } => pending.extend(
-                self.constructors(index, module, name)
-                    .iter()
-                    .map(|d| d.0 as usize),
-            ),
+        let mut reads = self.signature_reads.borrow_mut();
+        let epoch = reads.begin(index.definitions.len());
+        let mut insert = |id: DefinitionId| {
+            let row = id.0 as usize;
+            let stamp = &mut reads.stamps[row];
+            if *stamp != epoch {
+                *stamp = epoch;
+                pending.push(row);
+            }
+        };
+        insert(own);
+        let mut target = |t: Target| match t {
+            Target::Definition(id) => insert(id),
+            Target::ContextualConstructor { name } => {
+                for &id in self.constructors(index, module, name).iter() {
+                    insert(id);
+                }
+            }
             _ => {}
         };
         for name in &resolution.names {
-            target(name.target, &mut pending);
+            target(name.target);
         }
         // Negative, ambiguous and shadowed lookup dependencies remain unchanged.
         for read in &resolution.reads {
             match &read.result {
-                LookupResult::Found(t) | LookupResult::Shadowed(t) => target(*t, &mut pending),
-                LookupResult::Private(p) | LookupResult::Opaque(p) => pending.push(p.0 as usize),
+                LookupResult::Found(t) | LookupResult::Shadowed(t) => target(*t),
+                LookupResult::Private(p) | LookupResult::Opaque(p) => {
+                    target(Target::Definition(*p))
+                }
                 LookupResult::Ambiguous | LookupResult::Missing => {}
             }
         }
         pending.sort_unstable();
-        pending.dedup();
         pending
     }
     /// One hash over the closures of the core prelude types, which lowering

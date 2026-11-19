@@ -1,0 +1,5 @@
+// L26 B4. A transact body receives a Tx. It cannot forge the Completion even
+// with the stream, position, request digest and an authentic ticket.
+pub fn rejected(tx: store.Tx, certified: store.Ticket, take stream: Bytes, digest: store.RequestDigest) -> store.Completion {
+    store.Completion(admitted: certified, stream: take stream, p: 0u64, request: digest)
+}

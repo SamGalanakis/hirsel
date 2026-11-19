@@ -1,4 +1,4 @@
-// Public-API regression law appended by core/tools/store_tests.py only.
+// Store regression laws appended by the store and runner test drivers.
 // Store identity/catalog rules: write, read, drop and recreate twice. Each
 // iteration must find exactly its newly written (1, i), so the result is true.
 fn assembly_bucket(v: u64) -> Result[u64, Capacity] {
@@ -238,4 +238,87 @@ pub fn law_keyset_pages(c: Clock) -> bool waits {
 @test
 fn test_keyset_pages(c: Clock) -> Result[(), ()] waits {
     if law_keyset_pages(c) { Ok(()) } else { Error(()) }
+}
+
+fn settle_fault_at(mut tx: Tx, attempted_at: u64) -> Result[Bytes, Bytes] {
+    if info(mut tx).at == attempted_at {
+        let no_values: List[u64] = list.new()
+        let _ = no_values[0]
+    }
+    Ok(key_word(19))
+}
+
+// L33/AM6. Two intervening commits put the attempted base three versions
+// behind the settle frame. Set the previous times to known wall-clock floors.
+pub fn law_settled_callinfo(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    settled_callinfo_case(d, c, r, tasks, false) && settled_callinfo_case(d, c, r, tasks, true)
+}
+
+fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal: bool) -> bool waits {
+    let dir = disk_test_directory(d)
+    let options = journal_crash_options()
+    let mut db = result.unwrap(open(tasks, dir, c, r, options))
+    result.unwrap(declare_authority(mut db, list.new()))
+    let stream = key_word(55)
+    let rec = call_for(stream, 32)
+    let request = request_digest(rec.key, rec.args)
+    let admission = result.unwrap(admit(mut db, stream, 0, request))
+    let Admitted(take complete) = take admission else { return false }
+    result.unwrap(durable(mut db, ticket(complete)))
+    let original_at = 0x8000_0000_0000_0000u64
+    db.heads[0].at = original_at
+    let plan = Plan(n_p: 8192, s_p: 8192, n_e: 4096, s_e: 8192, reply_max: 4096)
+    if room_refusal { db.ceiling = db.resident }
+    let fault_at = if room_refusal { original_at + 1u64 } else { original_at }
+    let tried = serve(mut db, take complete, plan, Some(take rec), law_caller(), code.describe(reserve_policy),
+        scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] { settle_fault_at(mut tx, fault_at) })
+    let (take stopped, way) = match take tried {
+        Ok(Failed(take pending_run, Raised(2u32))) if !room_refusal => (take pending_run, 1u8),
+        // The admitted row costs 118 (62 + 8 + 48). The replied row costs
+        // 158 (62 + 8 + 88). Its stream-only frame adds 140 and CALL adds
+        // 206 (22 + 32 + 16 + 8 + 32 + 96), so the refusal requests 504.
+        Ok(NoRoom(take pending_run, reason)) if room_refusal && reason.requested == 504 &&
+            reason.available == 118 => (take pending_run, 2u8),
+        _ => return false,
+    }
+    if version(snapshot(db)) != 1 || stream_now(db, stream) != (0u64, 1u64) {
+        return false
+    }
+    if let Some(_) = result.unwrap(recorded(db, main_branch(db), 2)) { return false }
+    db.ceiling = options.resident_limit
+    db.heads[0].at = original_at + 1u64
+    for _ in 0u64 .. 2 {
+        let advanced = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), ()] { Ok(()) }))
+        if let Committed(_) = advanced {} else { return false }
+    }
+    let settled = conclude(mut db, take stopped, key_word(2), Resident)
+    let Ok(Committed(receipt)) = take settled else { return false }
+    if receipt.reply != key_word(2) { return false }
+    let expected_digest = receipt.digest
+    result.unwrap(durable(mut db, receipt.ticket))
+    result.unwrap(close(take db))
+    let mut reopened = result.unwrap(open(tasks, dir, c, r, options))
+    let line = main_branch(reopened)
+    let Some(found) = result.unwrap(recorded(reopened, line, 4)) else { return false }
+    let ctx = call_info(reopened.store, 0, 2, original_at, original_at)
+    if found.settle != way || found.base != 1 || found.at != original_at || found.seed != ctx.seed || reopened.heads[0].at != original_at + 1u64 {
+        return false
+    }
+    let duplicate = result.unwrap(admit(mut reopened, stream, 0, request))
+    let good = match duplicate {
+        Duplicate(stored) => stored.reply == key_word(2) &&
+            stored.scope_digest.a == expected_digest.a && stored.scope_digest.b == expected_digest.b &&
+            stored.scope_digest.c == expected_digest.c && stored.scope_digest.d == expected_digest.d,
+        _ => false,
+    }
+    result.unwrap(close(take reopened))
+    good
+}
+
+// Disconnect the writer after the runner has admitted a position.
+pub fn fixture_broken_handoff(mut db: Db) {
+    let (to, abandoned): (Sender[JournalMsg], Receiver[JournalMsg]) = result.unwrap(channel.new(1))
+    let mut disconnected = Some(take abandoned)
+    disconnected = None
+    db.journal = Some(take to)
 }

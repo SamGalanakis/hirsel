@@ -120,18 +120,12 @@ fn flood(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[
     Ok(k)
 }
 
-// L7/deadline_hung: s=65536, e=208 or 209 pre-loop calls/latches. Send k is
-// Step e+2*k-1, so exactly32664 TRY_SEND events.
-// Source tally: Tx/snapshots/retaining19, runner adapters5, decode7,
-// this prelude3, put/checks19, key encoding60, row reads32,
-// write bookkeeping35, ordered-map updates44, value encoding2.
-// S5 added six: the Tx's scope (everything and its empty list) and
-// streams map, put's check_key, and in replace_physical the extra-bytes
-// saturating_add and the tree_height call reserve_ids now takes. That tally gave e=226
-// and 32655. With store S5b's admit and no runner streams table, e fell by 17 or 18; the
-// new count was measured on the evaluator and checked natively, and which pre-loop calls
-// went is not yet re-tallied (followups.md).
-// core/tools/runner_tests.py and runner_count.c enforce this independent oracle.
+// L7/MEM-30. The 65,536-step entry bound spends 165 before the loop:
+// draft setup 23, entry adapters and scope clone 8, argument decode 8,
+// put 124, and channel creation and unwrap 2. The put is its entry
+// (1), writable catalog check (18), encoded key (6), scope and index
+// checks (2), and put_impl (97). The data and operation trees start empty.
+// Send k is step 165 + 2*k - 1, so the body attempts exactly 32,686 sends.
 fn hung(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     let _ = store.put(mut tx, h.t, k, k)
     let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)

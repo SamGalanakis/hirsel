@@ -79,7 +79,8 @@ def main():
         library['file'] = str(adapted)
         manifest.write_text(json.dumps(corpus))
         if args.compiler is not None:
-            for control in ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused', 'index_rows_write_refused'):
+            for control in ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused',
+                            'index_rows_write_refused', 'completion_unreachable'):
                 negative = inputs(args.root.resolve())
                 negative['packages'][-1]['sources'].append(dict(
                     file=str(args.root.resolve() / ('core/programs/store/' + control + '.hirsel')),
@@ -92,6 +93,7 @@ def main():
                 report = json.loads(result.stdout)
                 ds = report.get('diagnostics', [])
                 expected = {
+                    'completion_unreachable': [('PROG-2', '`store@1/store/Completion` is private or opaque')],
                     'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
                     'index_rows_write_refused': [('OWN-10', 'a place of `tx` is viewed')],
                     'look_info_refused': [('OWN-5', '`tx` is not writable'),

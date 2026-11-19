@@ -198,7 +198,7 @@ pub fn law_join_cleanup() -> bool {
     let mut joined: List[Joiner] = list.new()
     result.unwrap(list.push(mut joined, Joiner(who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), reset: false, mark: None, identity: None)))
     let _ = take lease
-    let mut subs: List[Sub] = list.new()
+    let mut subs = subscriptions()
     let mut waiting: List[Replies] = list.new()
     settle(mut subs, mut joined, mut waiting, list.new(), 0u64)
     list.len(joined) == 0u64 && match channel.try_receive(from) { Ok(PubIn(e: Drained)) => true, _ => false }
@@ -291,7 +291,7 @@ fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, slot: u32, take arg: Bytes) ->
     let PubIn(e: take released) = take release
     let answers = match take released { Released(Release(version: _, snapshot: _, answers: take a)) => take a, _ => fail("W3c: expected release") }
     let mut waiting: List[Replies] = list.new()
-    let mut subs: List[Sub] = list.new()
+    let mut subs = subscriptions()
     let mut joined: List[Joiner] = list.new()
     let version = store.version(store.snapshot(rig.head.db))
     keep_answers(mut waiting, take answers)
@@ -514,4 +514,49 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
 @test
 fn test_wire_replacement_generation(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
     if law_wire_replacement_generation(tasks, clock, random) { Ok(()) } else { Error(()) }
+}
+
+// L33. The store has published new roots, then the frame handoff fails.
+// The head leaves without any Release for the outstanding caller.
+pub fn law_after_publication(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+    let mut rig = w3c_rig(tasks, clock, random)
+    let caller = store.Caller(issuer: 1u8, subject: list.new())
+    let stream = result.unwrap(stream_key(caller, 51u32))
+    let codec: std.codec.Codec[Result[u64, u32]] = std.codec.of()
+    let chosen = w3c_key(code.identity(code.describe(w3c_put)), std.codec.of_u32(), codec)
+    let (to, from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(1))
+    let req = head_request(take caller, take stream, 0u64, take chosen, w3c_arg(7u32), take to)
+    let Req(e: Requested(take request)) = take req else { return false }
+    let admission = result.unwrap(store.admit(mut rig.head.db, request.stream, request.p, request.digest))
+    let Admitted(take complete) = take admission else { return false }
+    let before = store.version(store.snapshot(rig.head.db))
+    store.fixture_broken_handoff(mut rig.head.db)
+    let observed = execute(mut rig.head, take request, take complete)
+    let poisoned = match observed { Error(Poisoned(Closed)) => true, _ => false }
+    let no_release = match channel.try_receive(rig.releases) { Error(Empty) => true, _ => false }
+    let no_outcome = match channel.try_receive(from) { Error(Closed) => true, _ => false }
+    let after = store.snapshot(rig.head.db)
+    let published = store.version(after) == before + 1u64 &&
+        result.unwrap(store.get(after, store.shape(rig.head.h.data), 0u64)) == Some(7u32)
+    let W3cRig(head: take owned, policy: take ingress_task, ..) = take rig
+    let mut stopping = take ingress_task
+    task.cancel(mut stopping)
+    let _ = task.join(take stopping)
+    let Head(db: take db, ..) = take owned
+    let _ = store.close(take db)
+    poisoned && no_release && no_outcome && published
+}
+
+@test
+fn test_after_publication(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+    if law_after_publication(tasks, clock, random) { Ok(()) } else { Error(()) }
+}
+
+pub fn law_settled_callinfo(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
+    store.law_settled_callinfo(d, clock, random, tasks)
+}
+
+@test
+fn test_settled_callinfo(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_settled_callinfo(d, clock, random, tasks) { Ok(()) } else { Error(()) }
 }

@@ -108,7 +108,7 @@ HirselCoreChannelNew __wrap_hirsel_core_channel_new(HirselCoreContext *ctx, uint
 #endif
     HirselCoreChannelNew out = __real_hirsel_core_channel_new(ctx, capacity, layout, site);
     if (item_named(site, "answer")) marker_channel = out.sender;
-    if (!head_channel && item_named(site, "served_with_handles")) head_channel = out.sender;
+    if (!head_channel && item_named(site, "served_on")) head_channel = out.sender;
 #if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
     permit_create = 0;
 #endif

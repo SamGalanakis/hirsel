@@ -46,13 +46,14 @@ NATIVE_ONLY_CALLS = {'drain_reopened', 'lag_window'}
 # wake to the head, so the total is 1 + 4 + 1. The evaluator's count comes from
 # its event log; natively, core/tools/runner_count.c is linked into the case's test
 # executable as its event sink and fails the run on any other count.
-# L7 adds 32664 sends by the hung body and one marker by the other session's
+# L7 adds the source-derived sends from hung and one marker by the other session's
 # compute body. RUNNER-SPEC.md §8, L6+L7 orders the compute before the hung
 # call's stop, observed at its first publisher offer. MEM-30 makes the slice
 # a scheduling point. The three answers to s0 go to one inbox.
-COUNTS = {'calls_runs_once': (7, 6), 'calls_deadline_hung': (7, 32669)}
-PLACEMENT_OBSERVERS = {'ready_after_activation': 'READY_BEFORE_ACCEPT', 'lag_window': 'LAG_ADMISSION'}
+HUNG_BODY_SENDS = (65536 - 165 + 1) // 2
 HUNG_TOLDS = 3
+COUNTS = {'calls_runs_once': (7, 6), 'calls_deadline_hung': (7, HUNG_BODY_SENDS + HUNG_TOLDS + 2)}
+PLACEMENT_OBSERVERS = {'ready_after_activation': 'READY_BEFORE_ACCEPT', 'lag_window': 'LAG_ADMISSION'}
 
 # Wire floods retain all 10,000 frames. The evaluator's generic 1B test envelope
 # predates framing. At 1/100 frames, refusals use 8,148,075/20,157,978 steps,
@@ -97,14 +98,14 @@ def counted(name, report):
         for at, (e, site) in enumerate(attributed):
             if e[0] == kind:
                 sends.setdefault(e[2], []).append((at, e[1], site))
-        if sorted(map(len, sends.values())) != [1, 1, HUNG_TOLDS, 32664]:
+        if sorted(map(len, sends.values())) != [1, 1, HUNG_TOLDS, HUNG_BODY_SENDS]:
             return False
         told = next(v for v in sends.values() if len(v) == HUNG_TOLDS)
         marker = next((v[0] for v in sends.values() if len(v) == 1
                        and v[0][2] == 'store@1/runner_calls/answer'), None)
         retirement = next((v[0] for v in sends.values() if len(v) == 1
                            and v[0][2] == 'store@1/runner/try_head'), None)
-        body = next(v for v in sends.values() if len(v) == 32664)
+        body = next(v for v in sends.values() if len(v) == HUNG_BODY_SENDS)
         slices = [(at, e[1]) for at, (e, _) in enumerate(attributed) if e[0] == 21]
         return (marker is not None and retirement is not None and len(slices) == 1
                 and marker[0] < told[0][0]
@@ -595,15 +596,25 @@ def ingress_laws(args, root, work, engines, row):
             and all(t.get('passed') for t in tests), result=report)
 
 
+SETTLEMENT_LAWS = ('after_publication', 'settled_callinfo')
+
+
 def admission_laws(args, root, work, engines, row):
     text = (root / 'core/programs/store/runner.hirsel').read_text()
     laws = (root / 'core/programs/store/admission-laws.hirsel').read_text()
     adapted = work / 'admission-runner.hirsel'
     adapted.write_text(text + '\n' + laws)
     selected = manifest(root, work, 'admission-laws', adapted)
+    selection = json.loads(selected.read_text())
+    store = next(source for source in selection['packages'][-1]['sources'] if source['modules'] == ['store'])
+    store_source = Path(store['file'])
+    with_faults = work / 'admission-store.hirsel'
+    with_faults.write_text(store_source.read_text() + '\n' + store_source.with_name('assembly_laws.hirsel').read_text())
+    store['file'] = str(with_faults)
+    selected.write_text(json.dumps(selection))
     durable = ('gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max')
     state = ('unread_client', 'hello_and_slots', 'join_cleanup', 'refused_send_releases_timer')
-    names = args.admission_law or (*state, *durable, 'wire_replacement_generation')
+    names = args.admission_law or (*state, *durable, 'wire_replacement_generation', *SETTLEMENT_LAWS)
     if 'evaluator' in engines:
         for name in names:
             value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/runner/law_' + name)
@@ -611,6 +622,7 @@ def admission_laws(args, root, work, engines, row):
     for engine in (e for e in engines if e != 'evaluator'):
         groups = [('wire_admission', state), ('durable_wire_admission', durable),
                   ('wire_replacement_generation', ('wire_replacement_generation',))]
+        groups.extend((name, (name,)) for name in SETTLEMENT_LAWS)
         for group, members in groups:
             if not any(name in names for name in members):
                 continue
@@ -697,7 +709,7 @@ def counting_cc(args, root, inputs_path, name):
                     '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want}',
                     f'-DSOURCE_MANIFEST_DIR={json.dumps(str(work), ensure_ascii=False)}',
                     *([f'-D{PLACEMENT_OBSERVERS[name]}'] if name in PLACEMENT_OBSERVERS else []),
-                    *(['-DHUNG_BODY_SENDS=32664', f'-DHUNG_TOLDS={HUNG_TOLDS}'] if name == 'calls_deadline_hung' else []),
+                    *([f'-DHUNG_BODY_SENDS={HUNG_BODY_SENDS}', f'-DHUNG_TOLDS={HUNG_TOLDS}'] if name == 'calls_deadline_hung' else []),
                     '-o', str(support)], check=True)
     wrapper = work / f'count_{name}-cc'
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
@@ -752,7 +764,7 @@ def main():
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     p.add_argument('--session-law', action='append', choices=SESSION_LAWS)
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
-                   'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
+                   'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max', *SETTLEMENT_LAWS])
     p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1'])
     args = p.parse_args()
     r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1', 'calls')

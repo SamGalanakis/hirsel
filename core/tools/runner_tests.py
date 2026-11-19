@@ -17,6 +17,7 @@ import os
 import sys
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 
 from case_progress import run_case
@@ -345,12 +346,74 @@ def crashes(args, root, work, engine, name):
 def drain_deadline(args, root, work, engine, name, runner=None, activation=False):
     inputs_path = manifest(root, work, name, runner,
                            [(root / 'core/programs/store/runner_crash.hirsel', 'runner_crash')])
+    if activation and args.activation_legacy_rev:
+        add_legacy_activation(root, work, inputs_path, args.activation_legacy_rev)
     build = work / name
     build.mkdir()
     return run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc, inputs_path, build, engine,
                        entry='store@1/runner_crash/main', adapter='runner_crash.c',
-                       scenarios=('runner-activation',) if activation else (),
-                       count_only=() if activation else ('runner-deadline',))
+                       scenarios=('runner-activation', 'runner-activation-genesis') if activation else (),
+                       count_only=('runner-unavailable-genesis', 'runner-unavailable-install') if activation else ('runner-deadline',))
+
+
+def add_legacy_activation(root, work, manifest_path, revision):
+    """Compile the pre-fence store and runner for the recovered W2 generations."""
+    model = json.loads(manifest_path.read_text())
+    store = model['packages'][-1]
+    store['dependencies'].append({'name': 'legacy', 'version': '1'})
+    legacy = {'package': {'name': 'legacy', 'version': '1'},
+              'dependencies': [{'name': n, 'version': '1'} for n in ('core', 'std')],
+              'sources': []}
+    for module in ('store', 'runner', 'ingress'):
+        path = work / f'legacy-{module}.hirsel'
+        path.write_bytes(subprocess.check_output([
+            'git', '-C', str(root), 'show', f'{revision}:core/programs/store/{module}.hirsel'
+        ]))
+        legacy['sources'].append(dict(file=str(path), modules=[module], signatures=False))
+    model['packages'].insert(-1, legacy)
+    fixture = next(s for s in store['sources'] if s['modules'] == ['runner_crash'])
+    crash = Path(fixture['file']).read_text()
+    marker = '        if !activated && !genesis {'
+    assert crash.count(marker) == 1
+    crash = crash.replace(marker, '        probe_pre_fence(d, c, r, tasks, activated)\n' + marker)
+    crash += """
+fn old_place(mut _reg: legacy.runner.Registry[(), ()]) -> Result[(), legacy.runner.RegisterError] { Ok(()) }
+
+fn old_migrate(mut _phase: legacy.store.Migration) -> Result[(), legacy.store.Error] {
+    Error(Missing("legacy reached app code"))
+}
+
+fn old_handles(_schema: legacy.store.Schema) -> Result[(), legacy.store.Error] {
+    fail("legacy continued past the migration witness")
+}
+
+fn probe_pre_fence(d: Dir, c: Clock, r: Random, tasks: Tasks, fenced: bool) -> () waits {
+    let mut opt = legacy.store.defaults()
+    opt.checkpoint_task_bytes = 1048576u64
+    opt.resident_limit = 1048576u64
+    opt.pack_bytes = 512u64
+    let attempted = legacy.store.open(tasks, d, c, r, opt)
+    match take attempted {
+        Error(Unsupported(0x0070)) => want(fenced, "legacy rejected the unfenced generation"),
+        Ok(take db) => {
+            want(!fenced, "legacy recovered a fenced generation")
+            let (_sender, from): (Sender[legacy.runner.Req], Receiver[legacy.runner.Req]) = result.unwrap(channel.new(1u64))
+            let mail = result.unwrap(legacy.runner.mailbox(1u64))
+            let opened = legacy.runner.place_head(take db, code.describe(old_place), N_PLACE, code.describe(old_migrate),
+                code.describe(old_handles), take from, take mail, tasks, 1048576u64)
+            match take opened {
+                Error(Migrate(Missing(_))) => (),
+                _ => fail("legacy did not reach app code on the unfenced generation"),
+            }
+        },
+        _ => fail("legacy open returned the wrong error"),
+    }
+}
+"""
+    path = work / 'runner-crash-with-legacy.hirsel'
+    path.write_text(crash)
+    fixture['file'] = str(path)
+    manifest_path.write_text(json.dumps(model))
 
 
 def no_secret_at_rest(args, root, work, engine, row):
@@ -683,6 +746,7 @@ def main():
     p.add_argument('--bridge', type=Path, default=os.environ.get('HIRSEL_STORE_CRASH_BRIDGE'))
     p.add_argument('--cc', type=Path)
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm'])
+    p.add_argument('--activation-legacy-rev')
     p.add_argument('--call-law', action='append', choices=CALLS)
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)

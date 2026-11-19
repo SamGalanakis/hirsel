@@ -50,7 +50,9 @@ pub fn stream_key(c: Caller, number: u32) -> Result[Bytes, Capacity] {
     Ok(take stream)
 }
 
-pub type OpenError: send = Store(store.Error) | Place(RegisterError) | PolicyTable(String) | Migrate(store.Error)
+pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes)
+pub type Selection: send = Current(u64) | Install
+pub type OpenError: send = Store(store.Error) | Place(RegisterError) | PolicyTable(String) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Draining
@@ -58,7 +60,7 @@ pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String,
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 pub type Backing: send = Memory | Disk(Dir, store.Options) | Temp(Dir)
 pub type PlaceConfig[G: send, H: send]: send {
-    backing: Backing, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
+    backing: Backing, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], policy: ingress.Ingress, n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
@@ -176,7 +178,7 @@ fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
 }
 
 fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
-    let PlaceConfig(backing: take backing, place: place, migrate: migrate, handles: handles, n_place: n_place, n_publisher: n_publisher,
+    let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_place: n_place, n_publisher: n_publisher,
         session: session_config, max_sessions: limit, proxies: take proxies, policy: take access_gate,
         listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config) = take p
     if limit == 0u64 || limit > WIRE_OWNER_LIMIT || !wire_configuration(session_config) { return Error(Missing("socket")) }
@@ -207,7 +209,7 @@ fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receive
         _ => { let _ = channel.try_send(to, StopRequested); None },
     }
     let allowance = head_bytes(backing, n_place, n_publisher)
-    let head_job = ManagedHead(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
+    let head_job = ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain))
     let head_run: fn(take ManagedHead[G, H]) -> () waits = head_ended
     let mut heading: Option[Task[()]] = match task.spawn(tasks, bytes allowance, take head_job, head_run) {
@@ -605,61 +607,42 @@ fn describe_registered[G: send, H: send](a: Args, take r: Registry[G, H]) -> Res
 
 pub type ReleaseRecord: codec + send { release: Bytes, digest: Bytes }
 
-fn activation_table[K, V](mut db: store.Db, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[store.Table[K, V], store.Error] waits {
-    match store.table(mut db, name, key, value) {
-        Error(Missing(_)) => {
-            let owned_name = match string.from(name) {
-                Ok(take text) => take text,
-                Error(cap) => return Error(Full(cap)),
-            }
-            let made = store.create_table(mut db, store.spec(take owned_name, key, value))?
-            store.durable(mut db, made)?
-            store.table(mut db, name, key, value)
-        },
-        take accessed => take accessed,
+fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] {
+    match store.system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes()) {
+        Ok(take table) => store.get(store.snapshot(db), store.shape(table), 0u8),
+        Error(Missing(_)) => Ok(None),
+        Error(take problem) => Error(take problem),
     }
 }
 
-fn commit_activation(mut db: store.Db, next_description: Bytes, record: ReleaseRecord) -> Result[(), store.Error] waits {
-    let table = activation_table(mut db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
-    let releases: store.Table[u64, ReleaseRecord] = activation_table(mut db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of())?
-    let shape = store.shape(table)
-    let snap = store.snapshot(db)
-    let current = store.get(snap, shape, 0u8)?
-    let _ = store.get(snap, shape, 1u8)?
-    if let Some(old) = current {
-        if old == next_description { return Ok(()) }
-    }
-    let written = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        if let Some(old) = current {
-            store.put(mut tx, table, 1u8, old)?
+pub fn activation_version(db: store.Db) -> Result[u64, store.Error] {
+    let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
+    let table = store.system_table(db, "hirsel.runner.releases", std.codec.key_u64(), codec)?
+    let mut rows = store.scan(store.snapshot(db), store.shape(table), Unbounded, Unbounded)?
+    let mut latest: u64 = 0
+    while let Some((version, _)) = store.next(mut rows)? { latest = version }
+    if latest == 0u64 { return Error(Missing("activation version")) }
+    Ok(latest)
+}
+
+// Keep these options in Args so they are also present during Run tape replay.
+pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
+    let mut selected: Option[Selection] = None
+    for i in 0u64 .. args.len(a) {
+        let name = option.unwrap(args.get(a, i))
+        let choice = if name == "--hirsel-install" {
+            Install
+        } else if let Some(value) = std.string.strip_prefix(name, "--hirsel-activation=") {
+            let version: Result[u64, ParseError] = int.parse(value)
+            let Ok(v) = version else { return Error(Exit(status: 1u8)) }
+            Current(v)
+        } else {
+            continue
         }
-        store.put(mut tx, table, 0u8, next_description)?
-        let version = store.info(mut tx).id.version
-        store.put(mut tx, releases, version, record)
-    })?
-    match take written {
-        Committed(done) => store.durable(mut db, done.ticket),
-        Refused(problem) => Error(Full(problem)),
-        Aborted(take undone) => {
-            let store.Undone(value: take problem, ..) = take undone
-            Error(take problem)
-        },
-        _ => fail("runner: activation transaction faulted"),
+        if let Some(_) = selected { return Error(Exit(status: 1u8)) }
+        selected = Some(choice)
     }
-}
-
-fn activate[G: send, H: send](mut db: store.Db, r: Registry[G, H], n_place: u64) -> Result[Bytes, OpenError] waits {
-    let prepared = prepare_activation(r, n_place)
-    let (take activation_bytes, take record) = match take prepared {
-        Ok(take activation) => take activation,
-        Error(cap) => return Error(Store(Full(cap))),
-    }
-    if let Error(take problem) = commit_activation(mut db, activation_bytes, record) {
-        return Error(Store(take problem))
-    }
-    let ReleaseRecord(release: take release, ..) = take record
-    Ok(take release)
+    Ok(match selected { Some(choice) => choice, None => Current(0u64) })
 }
 
 fn prepare_activation[G: send, H: send](r: Registry[G, H], n_place: u64) -> Result[(Bytes, ReleaseRecord), Capacity] {
@@ -1393,16 +1376,20 @@ fn publish[G: send, H: send](take p: Publish[G, H]) -> () waits {
     publisher(take r, take h, take base, take from)
 }
 
-// The head runs the migration once and opens handles for both tasks against
-// the resulting catalog. Each task runs place under n_place.
+// The head selects the release under the store's LOCK before opening handles.
 pub fn place_head[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: Receiver[Req], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
-    place_head_requests(take db, place, n_place, migrate, handles, DirectRequests(take inbox), take mail, tasks, n_publisher)
+    place_head_selected(take db, Current(0u64), place, n_place, migrate, handles, DirectRequests(take inbox), take mail, tasks, n_publisher)
 }
 
 pub fn place_head_requests[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: HeadRequests, take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
+    place_head_selected(take db, Current(0u64), place, n_place, migrate, handles, take inbox, take mail, tasks, n_publisher)
+}
+
+pub fn place_head_selected[G: send, H: send](take db: store.Db, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: HeadRequests, take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
     let mut owned = take db
-    let prepared = prepare_registry(mut owned, place, migrate, handles, n_place, tasks)
-    let (r, h, h2) = match take prepared {
+    let persistent = store.is_disk(owned)
+    let prepared = head_prepare(mut owned, selection, persistent, place, migrate, handles, n_place, tasks)
+    let (r, h, h2, _) = match take prepared {
         Ok(take ready) => take ready,
         Error(take problem) => { let _ = close_store(take owned); return Error(take problem) },
     }
@@ -1490,7 +1477,7 @@ pub type HeadRequests = DirectRequests(Receiver[Req]) | ManagedRequests(Receiver
 type HeadDrain { finish: Receiver[()], events: Sender[LifeEvent], window: Latest[Option[DrainWindow]], clock: Clock }
 
 type ManagedHead[G: send, H: send]: send {
-    backing: Backing, tasks: Tasks, clock: Clock, random: Random,
+    backing: Backing, selection: Selection, tasks: Tasks, clock: Clock, random: Random,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     n_place: u64, n_publisher: u64, inbox: Receiver[HeadInput], finish_from: Receiver[()],
@@ -1509,8 +1496,9 @@ fn head_ended[G: send, H: send](take job: ManagedHead[G, H]) -> () waits {
 }
 
 fn managed_head[G: send, H: send](take job: ManagedHead[G, H]) -> Result[(), StartError] waits {
-    let ManagedHead(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
+    let ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain) = take job
+    let persistent = match backing { Disk(_, _) => true, _ => false }
     let mut temporary: Option[TemporaryBacking] = None
     let opened: Result[store.Db, store.Error] = match backing {
         Memory => Ok(store.memory(clock, random, store.defaults())),
@@ -1525,7 +1513,7 @@ fn managed_head[G: send, H: send](take job: ManagedHead[G, H]) -> Result[(), Sta
     }
     let mut db = match take opened { Ok(take db) => take db, Error(take problem) => return Error(Open(Store(take problem))) }
     if !head_advance(to, inbox, Recovered) { return head_closed(take db) }
-    let prepared = head_prepare(mut db, place, migrate, handles, n_place, tasks)
+    let prepared = head_prepare(mut db, selection, persistent, place, migrate, handles, n_place, tasks)
     let (reg, local, publisher_handles, release) = match take prepared {
         Ok(take values) => take values,
         Error(take problem) => { let _ = close_store(take db); return Error(Open(take problem)) },
@@ -1549,23 +1537,80 @@ fn head_closed(take db: store.Db) -> Result[(), StartError] waits {
     match close_store(take db) { Ok(()) => Ok(()), Error(take problem) => Error(Open(take problem)) }
 }
 
-fn head_prepare[G: send, H: send](mut db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persistent: bool,
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, H, Bytes), OpenError] waits {
-    let (reg, local, published_handles) = prepare_registry(mut db, place, migrate, handles, n_place, tasks)?
-    let release = activate(mut db, reg, n_place)?
-    Ok((take reg, take local, take published_handles, take release))
+    if !store.is_disk(db) {
+        if let Error(take problem) = store.run_migration(mut db, tasks, migrate) { return Error(Migrate(take problem)) }
+        let local_registry = match placed(place, n_place) { Ok(take registered) => take registered, Error(take problem) => return Error(Place(take problem)) }
+        let h = open_handles(db, handles)?
+        let h2 = open_handles(db, handles)?
+        if let Some(settings) = local_registry.key_policy { declare_policy(mut db, settings)? }
+        let release = match release_digest(local_registry.exported) { Ok(take value) => take value, Error(cap) => return Error(Store(Full(cap))) }
+        return Ok((take local_registry, take h, take h2, take release))
+    }
+    let current = activation_result(current_description(db))?
+    let selected: Option[u64] = match selection {
+        Install => None,
+        Current(expected) => match current {
+            None => {
+                if expected != 0u64 { return Error(NotCurrent(Empty)) }
+                None
+            },
+            Some(_) => {
+                if store.fence_level(db) == 0 && persistent { return Error(NotCurrent(Legacy)) }
+                let version = activation_result(activation_version(db))?
+                if version != expected { return Error(NotCurrent(Active(version, option.unwrap(take current)))) }
+                Some(version)
+            },
+        },
+    }
+    if persistent && selected == None && launch_word(1u64, 0u64) == 0u64 { return Error(IdentityUnknown) }
+    let reg = match placed(place, n_place) { Ok(take reg) => take reg, Error(take problem) => return Error(Place(take problem)) }
+    let payload = prepare_activation(reg, n_place)
+    let (description, record) = match take payload {
+        Ok(take pair) => take pair,
+        Error(cap) => return Error(Store(Full(cap))),
+    }
+    if let Some(version) = selected {
+        let old = option.unwrap(take current)
+        if old != description { return Error(NotCurrent(Active(version, take old))) }
+        let h = open_handles(db, handles)?
+        let h2 = open_handles(db, handles)?
+        if let Some(settings) = reg.key_policy { declare_policy(mut db, settings)? }
+        let ReleaseRecord(release: take release, ..) = take record
+        return Ok((take reg, take h, take h2, take release))
+    }
+    let mut stage = match store.stage_migration(db, tasks, migrate) {
+        Ok(take staged) => take staged,
+        Error(take problem) => return Error(Migrate(take problem)),
+    }
+    let version = store.version(store.snapshot(db)) + 1u64
+    let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
+    activation_result(store.stage_activation(mut stage, version, current, description, release_codec, record))?
+    let h = activation_result(store.with_staged_schema(stage, handles))?
+    let h2 = activation_result(store.with_staged_schema(stage, handles))?
+    let names = match reg.key_policy {
+        Some(settings) => {
+            let copied: Result[List[String], Capacity] = clone(settings.reads)
+            match take copied { Ok(take names) => Some(take names), Error(cap) => return Error(Store(Full(cap))) }
+        },
+        None => None,
+    }
+    match store.install_activation(mut db, take stage, take names) {
+        Ok(()) => (),
+        Error(Missing(take name)) => return Error(PolicyTable(take name)),
+        Error(take problem) => return Error(Store(take problem)),
+    }
+    let ReleaseRecord(release: take release, ..) = take record
+    Ok((take reg, take h, take h2, take release))
 }
 
-fn prepare_registry[G: send, H: send](mut db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, H), OpenError] waits {
-    if let Error(take problem) = store.run_migration(mut db, tasks, migrate) { return Error(Migrate(take problem)) }
-    let reg = match placed(place, n_place) { Ok(take reg) => take reg, Error(take problem) => return Error(Place(take problem)) }
-    let local = open_handles(db, handles)?
-    let published_handles = open_handles(db, handles)?
-    if let Some(settings) = reg.key_policy {
-        declare_policy(mut db, settings)?
+fn activation_result[T](take answer: Result[T, store.Error]) -> Result[T, OpenError] {
+    match take answer {
+        Ok(take value) => Ok(take value),
+        Error(take problem) => Error(Store(take problem)),
     }
-    Ok((take reg, take local, take published_handles))
 }
 
 fn declare_policy(mut db: store.Db, settings: KeyPolicy) -> Result[(), OpenError] {
@@ -1788,7 +1833,7 @@ fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, q: Reques
         }, scoped fn(mut tx: store.Tx) -> Result[Outcome, Kept] {
             match go(mut tx, h, q.arg) {
                 Commit(take b) => {
-                    let o = Returned(take b)
+                    let o: Outcome = Returned(take b)
                     match answered(mut tx, q, o, revision) {
                         Ok(()) => Ok(take o),
                         Error(_) => Error(Nothing(Overloaded)),
@@ -5212,7 +5257,7 @@ fn wire_stage_update[G: send, H: send](mut s: WireSession[G, H], mut output: Lis
                 return wire_reset_rows(mut s, mut output, version, take done, take marks)
             }
         }
-        let frame = Batch(version, take live_complete, take live_rows, take done)
+        let frame: Frame = Batch(version, take live_complete, take live_rows, take done)
         wire_queue(mut output, take frame, take marks, take generations)
     }
     for take e in ended {
@@ -5240,11 +5285,12 @@ fn wire_answer[G: send, H: send](mut s: WireSession[G, H], mut completed: List[u
         for take owing in owed {
             let WireOwed(generation: generation, reply: take backing) = take owing
             if let Error(_) = list.push(mut completed, generation) { return Error(1013u16) }
-            let outcome = match told.outcome {
+            let outcome: Outcome = match told.outcome {
                 Returned(payload) => {
                     let mut reply = take backing
                     if let Error(_) = list.append(mut reply, payload) { return Error(1013u16) }
-                    Returned(take reply)
+                    let updated: Outcome = Returned(take reply)
+                    take updated
                 },
                 _ => result.unwrap(clone(told.outcome)),
             }

@@ -101,6 +101,7 @@ static Child launch(const HirselCoreOsConfig *input,const HirselCoreSourceTable 
         HirselCoreBuffer argv[6];if(argc>6) abort();
         for(size_t i=0;i<argc;i++) argv[i]=(HirselCoreBuffer){(uint8_t *)args[i],strlen(args[i]),0};
         cfg.capabilities=caps;cfg.args=argv;cfg.args_len=argc;
+        if(argc>=2 && !strncmp(args[1],"runner-unavailable-",19)) cfg.launch=NULL;
         uint8_t status=hirsel_core_run(&cfg,entry);
         hirsel_core_os_process_free(open.process);
         close(rpc);_exit(status);

@@ -1103,7 +1103,7 @@ fn managed_address(status: runner.Status) -> Addr { option.unwrap(status.addr) }
 fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, policy: ingress.Ingress, listen: Addr, stop: runner.Stop) -> runner.PlaceConfig[(), Hd] {
     let mut wire = runner.wire_defaults(65536u64, N_PLACE)
     wire.n_pool = 4194304u64
-    runner.PlaceConfig(backing: Disk(dir, disk_options()), place: code.describe(place), n_place: N_PLACE,
+    runner.PlaceConfig(backing: Disk(dir, disk_options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
         migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), policy: ingress.share(policy), n_publisher: 1048576u64, listen: listen,
         net: net, tasks: tasks, clock: clock, random: random, stop: stop)
@@ -1142,9 +1142,11 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
         Ok(Error(_)) => fail("place returned a start error"),
         Error(_) => fail("operate task failed"),
     }
+    let mut restarted_settings = managed_settings(dir, clock, random, tasks, net, policy, address, bounds)
+    restarted_settings.selection = Current(1u64)
     let (blocking, rebound) = result.unwrap(host.listen(net, address, 1u16))
     want(rebound.port == port, "ready: place left listener bound")
-    let (failed_bind, held_stop, failed_phases, _) = start_managed(tasks, managed_settings(dir, clock, random, tasks, net, policy, address, bounds), false)
+    let (failed_bind, held_stop, failed_phases, _) = start_managed(tasks, take restarted_settings, false)
     if let Ok(Error(Listen(InUse))) = task.join(take failed_bind) {} else { fail("ready: occupied address not reported") }
     while let Ok(phase) = channel.try_receive(failed_phases) {
         if let Ready = phase { fail("ready: published despite listen failure") }
@@ -1176,7 +1178,7 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
         let release = result.unwrap(runner.release_digest(activation.exported))
         let revision = option.unwrap(code.revision(code.describe(write)))
         if let Some(row) = record {
-            if version >= 2u64 && activation.exported[0u64].revision == revision && row.release == release &&
+            if version == 1u64 && activation.exported[0u64].revision == revision && row.release == release &&
                 row.digest == activation.digest && release == managed_release(latest.read(status)) {
                 return std.codec.fingerprint_of(release)
             }

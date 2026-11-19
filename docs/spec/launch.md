@@ -115,6 +115,20 @@ store or listener; `identity_stable` keeps the launch digest after executable
 replacement; `identity_unavailable` launches with an empty digest and produces
 no mismatch diagnostic when the image is unreadable or evaluation is source-only.
 
+## Place activation
+
+A place passes the result of `runner.launch_selection(Args)` to its runner. The
+ordinary place option `--hirsel-activation=<version>` selects the activation
+version that must match the current image under STORE's LOCK. Omitting the
+option selects version zero for empty activation. `--hirsel-install` requests a
+standalone install and is mutually exclusive with an activation version. Use it
+after `--` with `hirsel run`. Both options remain in the argument snapshot for
+Run tape replay.
+
+A refused selection returns `NotCurrent(found)` before handles run. A disk
+genesis or standalone install requires a known executable identity and returns
+`IdentityUnknown` if it is unavailable.
+
 ## Release manifest
 
 `hirsel build --manifest PATH` writes the release manifest after it links the

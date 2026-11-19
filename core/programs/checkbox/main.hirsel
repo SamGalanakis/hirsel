@@ -122,6 +122,10 @@ fn settings(a: Args) -> Result[Settings, Exit] {
     let mut i = 0u64
     while i < args.len(a) {
         let name = option.unwrap(args.get(a, i))
+        if name == "--hirsel-install" || std.string.starts_with(name, "--hirsel-activation=") {
+            i += 1u64
+            continue
+        }
         let Some(value) = args.get(a, i + 1u64) else {
             return Error(invalid)
         }
@@ -187,6 +191,7 @@ fn serve(take server: Server) -> Result[(), std.wsock.Error] waits {
 }
 
 fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
+    let selection = store.runner.launch_selection(a)?
     let Settings(listen: listen, proxies: take proxies, policy: options) = settings(a)?
     let failed = Exit(status: 1u8)
     let db = match store.store.open(tasks, directory, c, random, store.store.defaults()) {
@@ -207,7 +212,7 @@ fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Task
         Ok(take job) => take job,
         Error(_) => return Error(failed),
     }
-    let ended = store.runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 67108864u64)
+    let ended = store.runner.place_head_selected(take db, selection, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), DirectRequests(take inbox), take mail, tasks, 67108864u64)
     task.cancel(mut serving)
     let _ = task.join(take serving)
     let mut admission = take admission_task

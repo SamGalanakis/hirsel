@@ -14,6 +14,7 @@ pub type Caller: codec + send { issuer: u8, subject: Bytes }
 
 pub type Options {
     create: bool,
+    lock_wait_ms: u64,
     group_commits: u32,
     group_bytes: u32,
     checkpoint_bytes: u64,
@@ -24,7 +25,7 @@ pub type Options {
 }
 
 pub fn defaults() -> Options {
-    Options(create: true, group_commits: 64, group_bytes: 4194304, checkpoint_bytes: 67108864, checkpoint_task_bytes: 262400276, pack_bytes: 67108864, resident_limit: 1073741824, authority: Directory())
+    Options(create: true, lock_wait_ms: 0, group_commits: 64, group_bytes: 4194304, checkpoint_bytes: 67108864, checkpoint_task_bytes: 262400276, pack_bytes: 67108864, resident_limit: 1073741824, authority: Directory())
 }
 
 pub type Limit = Key | Value | Transaction | Name
@@ -57,6 +58,7 @@ type Ack: send = Journaled(u64, u64) | Checkpointed(u64, u64) | Broken(IoError)
 
 pub opaque type Db {
     store: StoreId,
+    fence: u32,
     disk: List[DiskConnection],
     clock: Clock,
     seq: u64,
@@ -659,8 +661,12 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 fn empty_db(c: Clock, id: StoreId, o: Options, take register: Latest[Seq]) -> Db {
     let mut heads: List[Head] = list.new()
     result.unwrap(list.push(mut heads, main_head(empty_roots(), 0, 0)))
-    Db(store: id, disk: list.new(), clock: c, seq: 0, register: take register, authority_names: list.new(), authority_rows: None, heads: take heads, pins: list.new(), next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, acked_bytes: 0, written: None, written_send: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, admits: std.omap.new(), admit_ids: 0)
+    Db(store: id, fence: 0, disk: list.new(), clock: c, seq: 0, register: take register, authority_names: list.new(), authority_rows: None, heads: take heads, pins: list.new(), next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, acked_bytes: 0, written: None, written_send: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, admits: std.omap.new(), admit_ids: 0)
 }
+
+pub fn fence_level(db: Db) -> u32 { db.fence }
+
+pub fn is_disk(db: Db) -> bool { list.len(db.disk) != 0 }
 
 pub fn identity(db: Db) -> StoreId {
     db.store
@@ -3511,6 +3517,8 @@ pub opaque type Schema {
 
 pub opaque type Migration { plan: SchemaPlan }
 
+pub opaque type StagedMigration { plan: SchemaPlan }
+
 type SchemaPlan: send {
     store: StoreId,
     roots: Roots,
@@ -3536,13 +3544,8 @@ fn keep_schema(mut plan: SchemaPlan, take roots: Roots, live: u64, next_table: u
     Ok(())
 }
 
-fn publish_schema_plan(mut db: Db, take plan: SchemaPlan) -> Result[Ticket, Error] waits {
-    let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, live: live, ..) = take plan
-    // A cut records these high-water marks. On refusal both counters can keep
-    // their gaps, just as with a single schema operation.
-    db.next_node = ids
-    db.next_table = tables
-    schema_publish(mut db, take roots, live)
+fn publish_schema_plan(mut db: Db, take planned: SchemaPlan) -> Result[Ticket, Error] waits {
+    publish_schema_plan_with_authority(mut db, take planned, None)
 }
 
 fn application_name(name: String) -> Result[(), Error] {
@@ -3575,7 +3578,7 @@ fn prepare_migration(take job: MigrationJob) -> () waits {
     let _ = channel.send(answer, take completed)
 }
 
-pub fn run_migration(mut db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[(), Error] waits {
+pub fn stage_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[StagedMigration, Error] waits {
     healthy(db)?
     let (answer, from): (Sender[Result[SchemaPlan, Error]], Receiver[Result[SchemaPlan, Error]]) = capacity(channel.new(1))?
     let job = MigrationJob(plan: schema_plan(db), configure: configure, answer: take answer)
@@ -3594,24 +3597,87 @@ pub fn run_migration(mut db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migrat
         },
     }
     if let Error(_) = task.join(take running) { return Error(MigrationFault) }
-    let plan = result.unwrap(channel.receive(from))?
+    Ok(StagedMigration(plan: result.unwrap(channel.receive(from))?))
+}
+
+pub fn run_migration(mut db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[(), Error] waits {
+    let StagedMigration(plan: take plan) = stage_migration(db, tasks, configure)?
     if plan.changed {
         let _ = publish_schema_plan(mut db, take plan)?
     }
     Ok(())
 }
 
-fn schema_publish(mut db: Db, take roots: Roots, live: u64) -> Result[Ticket, Error] waits {
-    if live > db.ceiling {
-        return Error(Full(Capacity(requested: live, available: db.ceiling)))
+pub fn system_table[K, V](db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+    healthy(db)?
+    catalog_handle(db.store, db.heads[0].roots.catalog, false, named(name)?, take key, take value)
+}
+
+pub fn with_staged_schema[H](staged: StagedMigration, make: StaticFn[fn(Schema) -> Result[H, Error]]) -> Result[H, Error] {
+    (code.callable(make))(Schema(store: staged.plan.store, catalog: std.omap.snapshot(staged.plan.roots.catalog)))
+}
+
+fn stage_system_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+    let exists = match std.omap.get(plan.roots.catalog, table_key(name)?) { Some(_) => true, None => false }
+    if !exists {
+        stage_create_table(mut plan, spec(named(name)?, key, value))?
     }
+    stage_table(mut plan, name, key, value)
+}
+
+fn stage_system_put[K, V](mut plan: SchemaPlan, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
+    let p = physical(t.id, encode_key(t.key, k)?)?
+    let mut raw: Bytes = list.new()
+    capacity(le(mut raw, int.widen(t.readers.current), 2))?
+    capacity(std.codec.encode(t.readers.codec, v, mut raw))?
+    if list.len(raw) > 1048576 { return Error(Limit(Value)) }
+    let mut live = plan.live
+    if !plan.retained {
+        if let Some(old) = std.omap.get(plan.roots.data, p) { live -= entry(p, old) }
+    }
+    live = int.saturating_add(live, entry(p, raw))
+    over_ceiling(live, plan.ceiling)?
+    let _ = insert_row(mut plan.next_node, mut plan.roots, take p, take raw)?
+    plan.live = live
+    plan.changed = true
+    Ok(())
+}
+
+pub fn stage_activation[V](mut staged: StagedMigration, release_at: u64, previous: Option[Bytes], current: Bytes, codec: std.codec.Codec[V], release: V) -> Result[(), Error] {
+    let activation = stage_system_table(mut staged.plan, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
+    let releases = stage_system_table(mut staged.plan, "hirsel.runner.releases", std.codec.key_u64(), codec)?
+    if let Some(old) = previous { stage_system_put(mut staged.plan, activation, 1u8, old)? }
+    stage_system_put(mut staged.plan, activation, 0u8, current)?
+    stage_system_put(mut staged.plan, releases, release_at, release)
+}
+
+pub fn install_activation(mut db: Db, take staged: StagedMigration, take names: Option[List[String]]) -> Result[(), Error] waits {
+    let StagedMigration(plan: take plan) = take staged
+    let old_fence = db.fence
+    if is_disk(db) { db.fence = 1 }
+    match publish_schema_plan_with_authority(mut db, take plan, take names) {
+        Ok(_) => Ok(()),
+        Error(take problem) => { db.fence = old_fence; Error(take problem) }
+    }
+}
+
+fn publish_schema_plan_with_authority(mut db: Db, take prepared: SchemaPlan, take names: Option[List[String]]) -> Result[Ticket, Error] waits {
+    let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, live: live, ..) = take prepared
+    over_ceiling(live, db.ceiling)?
     // Schema commits are main's (section 1.2). Installed only after the cut.
     let mut planned = capacity(prospect(db))?
     planned.heads[0].roots = take roots
     planned.heads[0].head += 1
-    let updated_authority = reconstruct_authority(db, planned.heads[0].roots)?
+    let updated_authority = match names {
+        Some(declared) => Some(authority_build(planned.heads[0].roots, declared, true)?),
+        None => reconstruct_authority(db, planned.heads[0].roots)?,
+    }
     let publication = capacity(prepare_publication(db, 0, planned.heads[0].head, planned.heads[0].roots, updated_authority, true))?
+    // On refusal both counters can keep their gaps.
+    db.next_node = ids
+    db.next_table = tables
     let ticket = cut_install(mut db, take planned)?
+    if let Some(take declared) = take names { db.authority_names = take declared }
     publish(mut db, take publication)
     Ok(ticket)
 }
@@ -7355,6 +7421,7 @@ fn disk_kind_limit(kind: u16) -> Option[u64] {
         0x0012 => Some(8),
         0x0020 => Some(33686028),
         0x0030 => Some(67108864),
+        0x0070 => Some(4),
         _ => None
     }
 }
@@ -7368,6 +7435,9 @@ fn disk_read_frame(file: String, ctx: DiskContext, raw: Bytes, at: u64) -> Resul
     let size = read_le(raw, at + 4, 4)
     if kind == 0 {
         return Error(disk_fault(file, at, Kind(0)))
+    }
+    if kind == 0x0070 && ctx.role != 1 {
+        return Error(disk_fault(file, at, Malformed))
     }
     if flags & 65534 != 0 {
         return Error(disk_fault(file, at, Flags))
@@ -7576,6 +7646,7 @@ type DiskPin: shareable + send {
 
 type DiskManifest: shareable + send {
     generation: u64,
+    fence: u32,
     next_node: u64,
     next_branch: u32,
     next_table: u32,
@@ -7680,6 +7751,12 @@ fn disk_manifest_bytes(id: StoreId, m: DiskManifest) -> Result[Bytes, Capacity] 
     }
     let frame = disk_seal(ctx, 72, 0x0030, 1, payload)?
     list.append(mut out, frame)?
+    if m.fence != 0 {
+        let mut level: Bytes = list.with_capacity(4)?
+        le(mut level, int.widen(m.fence), 4)?
+        let fence = disk_seal(ctx, list.len(out), 0x0070, 1, level)?
+        list.append(mut out, fence)?
+    }
     Ok(take out)
 }
 
@@ -7688,12 +7765,19 @@ fn disk_read_manifest(file: String, raw: Bytes) -> Result[(StoreId, DiskManifest
     let mut at: u64 = 72
     let mut room: u64 = 0
     let mut found: Option[DiskManifest] = None
+    let mut fence: u32 = 0
     while at < list.len(raw) {
         let frame = disk_read_frame(file, header.context, raw, at)?
         if frame.kind == 0x0030 {
             if let Some(_) = found { return Error(disk_fault(file, at, Malformed)) }
             let manifest = disk_manifest_payload(file, raw, header, frame, at)?
             found = Some(take manifest)
+        } else if frame.kind == 0x0070 {
+            if fence != 0 || frame.flags != 1 || frame.end - frame.payload != 4 {
+                return Error(disk_fault(file, at, Malformed))
+            }
+            fence = int.narrow(read_le(raw, frame.payload, 4))
+            if fence == 0 { return Error(disk_fault(file, at, Malformed)) }
         } else {
             room = int.saturating_add(room, frame.end - at)
             if room > 1048576 { return Error(disk_fault(file, at, Malformed)) }
@@ -7701,7 +7785,12 @@ fn disk_read_manifest(file: String, raw: Bytes) -> Result[(StoreId, DiskManifest
         at = frame.end
     }
     match take found {
-        Some(take m) => Ok((header.context.store, take m)),
+        Some(take m) => {
+            if fence > 1 { return Error(Unsupported(0x0070)) }
+            let mut manifest = take m
+            manifest.fence = fence
+            Ok((header.context.store, take manifest))
+        },
         None => Error(disk_fault(file, 72, Malformed))
     }
 }
@@ -7784,13 +7873,13 @@ fn disk_manifest_payload(file: String, raw: Bytes, header: DiskHeader, frame: Di
     if at != list.len(payload) {
         return Error(disk_fault(file, at, Malformed))
     }
-    Ok(DiskManifest(generation: generation, next_node: next_node, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, packs: take packs, retired: take retired, branches: take branches, pins: take pins))
+    Ok(DiskManifest(generation: generation, fence: 0, next_node: next_node, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, packs: take packs, retired: take retired, branches: take branches, pins: take pins))
 }
 
 fn disk_genesis_fixture() -> DiskManifest {
     let mut branches: List[DiskBranch] = list.new()
     result.unwrap(list.push(mut branches, DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 0, at: 0, roots: DiskRoots(data: 0, streams: 0, catalog: 0))))
-    DiskManifest(generation: 1, next_node: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, packs: list.new(), retired: list.new(), branches: take branches, pins: list.new())
+    DiskManifest(generation: 1, fence: 0, next_node: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, packs: list.new(), retired: list.new(), branches: take branches, pins: list.new())
 }
 
 // Independent fixed-layout genesis vector. No schema codec participates.
@@ -8570,7 +8659,7 @@ pub fn disk_law_pack_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     }
     let cut = result.unwrap(checkpoint(mut db))
     result.unwrap(durable(mut db, cut))
-    let encoded = result.unwrap(disk_read_file(d, "MANIFEST", 68157528))
+    let encoded = result.unwrap(disk_read_file(d, "MANIFEST", 68157548))
     let pair = result.unwrap(disk_read_manifest("MANIFEST", encoded))
     let mut large_pack = false
     for pack in pair.1.packs {
@@ -8682,7 +8771,7 @@ fn disk_track_roots(mut graph: DiskGraph, all: List[Roots]) -> Result[List[Arc[s
 }
 
 fn disk_load(d: Dir, ceiling: u64) -> Result[DiskLoaded, Error] waits {
-    let raw = disk_read_file(d, "MANIFEST", 68157528)?
+    let raw = disk_read_file(d, "MANIFEST", 68157548)?
     disk_load_manifest(d, raw, ceiling)
 }
 
@@ -9059,6 +9148,7 @@ fn disk_test_draft_refusal(c: Clock) -> Result[(), ()] {
 
 type DiskCut: send {
     generation: u64,
+    fence: u32,
     state: State,
     next_node: u64,
     next_table: u32,
@@ -9109,7 +9199,7 @@ fn disk_prepare(d: Dir, state: DiskState, cut: DiskCut, cap: u64) -> Result[Disk
         let kept = DiskPin(name: capacity(string.from(held.name))?, branch: held.branch, version: held.version, roots: disk_root_ids(held.roots))
         capacity(result.capacity_only(list.push(mut pins, take kept)))?
     }
-    let manifest = DiskManifest(generation: cut.generation, next_node: cut.next_node, next_branch: cut.state.next_branch, next_table: cut.next_table, next_pack: next_pack, first_live: cut.first_live, prev_first: state.manifest.first_live, packs: take packs, retired: take retired, branches: take branches, pins: take pins)
+    let manifest = DiskManifest(generation: cut.generation, fence: cut.fence, next_node: cut.next_node, next_branch: cut.state.next_branch, next_table: cut.next_table, next_pack: next_pack, first_live: cut.first_live, prev_first: state.manifest.first_live, packs: take packs, retired: take retired, branches: take branches, pins: take pins)
     let names = capacity(disk_removals(manifest))?
     let raw = capacity(disk_manifest_bytes(state.store, manifest))?
     let ack = Saved(cut.generation, graph.live)
@@ -9173,7 +9263,7 @@ fn disk_worker(take input: DiskWorker) -> Result[(), Error] waits {
 }
 
 fn disk_cut(db: Db, generation: u64, first_live: u64) -> DiskCut {
-    DiskCut(generation: generation, state: result.unwrap(current_state(db)), next_node: db.next_node + 1, next_table: db.next_table, first_live: first_live)
+    DiskCut(generation: generation, fence: db.fence, state: result.unwrap(current_state(db)), next_node: db.next_node + 1, next_table: db.next_table, first_live: first_live)
 }
 
 // L28 worker component: the task refuses a1MiB NODE under128KiB, preserves
@@ -9274,7 +9364,7 @@ fn disk_test_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> Result[(), ()] wa
 fn disk_manifest_empty() -> Result[DiskManifest, Capacity] {
     let mut branches: List[DiskBranch] = list.new()
     result.capacity_only(list.push(mut branches, DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 0, at: 0, roots: DiskRoots(data: 0, streams: 0, catalog: 0))))?
-    Ok(DiskManifest(generation: 1, next_node: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, packs: list.new(), retired: list.new(), branches: take branches, pins: list.new()))
+    Ok(DiskManifest(generation: 1, fence: 0, next_node: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, packs: list.new(), retired: list.new(), branches: take branches, pins: list.new()))
 }
 
 fn disk_identity(r: Random) -> Result[StoreId, Capacity] {
@@ -9444,6 +9534,7 @@ fn disk_exists(d: Dir, path: String) -> Result[bool, Error] waits {
 
 type DiskStartup: send {
     store: StoreId,
+    fence: u32,
     state: State,
     live: u64,
     next_node: u64,
@@ -9482,7 +9573,7 @@ fn manifest_state(m: DiskManifest, all: List[Roots]) -> Result[State, Capacity] 
 }
 
 fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskDecoded), Error] waits {
-    let raw = disk_read_file(d, "MANIFEST", 68157528)
+    let raw = disk_read_file(d, "MANIFEST", 68157548)
     let loaded = match take raw {
         Ok(take existing) => {
             let manifest_bytes = disk_read_manifest("MANIFEST", existing)?
@@ -9503,7 +9594,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskD
             disk_publish_manifest(d, id, manifest)?
             disk_io(host.sync_dir(d))?
             let genesis = capacity(main_state(empty_roots(), 0, 0))?
-            let startup = DiskStartup(store: id, state: take genesis, live: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, seq: 1, segment: take segment, end_file: take end_file)
+            let startup = DiskStartup(store: id, fence: 0, state: take genesis, live: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, seq: 1, segment: take segment, end_file: take end_file)
             let mut all: List[Roots] = list.new()
             capacity(result.capacity_only(list.push(mut all, empty_roots())))?
             let preload = DiskDecoded(store: id, manifest: take manifest, roots: empty_roots(), all: take all,
@@ -9527,7 +9618,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskD
     // NotFound also needs the fence if an interrupted open already unlinked it.
     disk_io(host.sync_dir(d))?
     let (take segment, take end_file) = disk_new_segment(d, loaded.store, seq, last_end)?
-    let startup = DiskStartup(store: loaded.store, state: take state, live: live, next_node: next_node, next_table: loaded.manifest.next_table, generation: loaded.manifest.generation, cut_first: loaded.manifest.first_live, seq: seq, segment: take segment, end_file: take end_file)
+    let startup = DiskStartup(store: loaded.store, fence: loaded.manifest.fence, state: take state, live: live, next_node: next_node, next_table: loaded.manifest.next_table, generation: loaded.manifest.generation, cut_first: loaded.manifest.first_live, seq: seq, segment: take segment, end_file: take end_file)
     Ok((take startup, take loaded))
 }
 
@@ -9561,11 +9652,22 @@ type DiskSession {
     worker: Task[Result[(), Error]]
 }
 
-fn disk_session(tasks: Tasks, d: Dir, r: Random, options: Options) -> Result[DiskSession, Error] waits {
+fn disk_lock(d: Dir, c: Clock, wait_ms: u64) -> Result[HostFile, Error] waits {
     let mut lock = disk_io(host.open(d, "LOCK", Write))?
-    if !disk_io(host.try_lock(mut lock))? {
-        return Error(Held)
+    if disk_io(host.try_lock(mut lock))? { return Ok(take lock) }
+    if wait_ms == 0 { return Error(Held) }
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(c), wait_ms)
+    loop {
+        let now = host.mono_ns(c)
+        if now >= deadline { return Error(Held) }
+        let poll = int.saturating_add(now, 1000000)
+        host.sleep_until(c, if poll < deadline { poll } else { deadline })
+        if disk_io(host.try_lock(mut lock))? { return Ok(take lock) }
     }
+}
+
+fn disk_session(tasks: Tasks, d: Dir, clock: Clock, r: Random, options: Options) -> Result[DiskSession, Error] waits {
+    let lock = disk_lock(d, clock, options.lock_wait_ms)?
     let (send, receive): (Sender[DiskCut], Receiver[DiskCut]) = capacity(channel.new(1))?
     let (acks, received): (Sender[DiskCutAck], Receiver[DiskCutAck]) = capacity(channel.new(1))?
     let (ready, waiting): (Sender[Result[DiskStartup, Error]], Receiver[Result[DiskStartup, Error]]) = capacity(channel.new(1))?
@@ -9589,45 +9691,71 @@ fn disk_session_close(take session: DiskSession) -> Result[(), Error] waits {
     result.unwrap(take joined)
 }
 
+type WaitedLock: send { d: Dir, clock: Clock }
+
+fn wait_lock(take waiting: WaitedLock) -> bool waits {
+    match disk_lock(waiting.d, waiting.clock, 1000u64) {
+        Ok(take held) => { let _ = take held; true },
+        Error(_) => false,
+    }
+}
+
 // L19/L21 bootstrap: create=false is NotFound and releases LOCK; a live
 // opener excludes another, close and drop release it, identity survives and
 // every successful reopen has a distinct segment/open number.
-pub fn disk_law_opening(d: Dir, r: Random, tasks: Tasks) -> bool waits {
+pub fn disk_law_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut options = defaults()
     options.resident_limit = 1048576
     options.checkpoint_task_bytes = 1048576
     options.pack_bytes = 512
     options.create = false
-    match disk_session(tasks, d, r, options) {
+    match disk_session(tasks, d, c, r, options) {
         Error(NotFound) => {},
         _ => return false
     }
     options.create = true
-    let first = result.unwrap(disk_session(tasks, d, r, options))
+    let first = result.unwrap(disk_session(tasks, d, c, r, options))
     let id = first.startup.store
     if first.startup.seq != 1 || first.startup.state.tips[0].head != 0 || first.startup.next_node != 0 || first.startup.next_table != 1 {
         return false
     }
-    match disk_session(tasks, d, r, options) {
+    match disk_session(tasks, d, c, r, options) {
         Error(Held) => {},
         _ => return false
     }
     result.unwrap(disk_session_close(take first))
-    let second = result.unwrap(disk_session(tasks, d, r, options))
+    let second = result.unwrap(disk_session(tasks, d, c, r, options))
     if second.startup.seq != 2 || !same(second.startup.store, id) {
         return false
     }
     result.unwrap(disk_session_close(take second))
     {
-        let third = result.unwrap(disk_session(tasks, d, r, options))
+        let third = result.unwrap(disk_session(tasks, d, c, r, options))
         if third.startup.seq != 3 || !same(third.startup.store, id) {
             return false
         }
     }
-    let fourth = result.unwrap(disk_session(tasks, d, r, options))
+    let fourth = result.unwrap(disk_session(tasks, d, c, r, options))
     let good = fourth.startup.seq == 4 && same(fourth.startup.store, id)
     result.unwrap(disk_session_close(take fourth))
     if !good { return false }
+    {
+        let held = result.unwrap(disk_lock(d, c, 0u64))
+        let waiting = result.unwrap(task.spawn(tasks, bytes 16384, WaitedLock(d: d, clock: c), wait_lock))
+        host.sleep_until(c, std.clock.deadline_after_ms(host.mono_ns(c), 20u64))
+        let _ = take held
+        if !result.unwrap(task.join(take waiting)) { return false }
+    }
+    let mut too_new = disk_genesis_fixture()
+    too_new.fence = 2
+    result.unwrap(disk_publish_manifest(d, id, too_new))
+    let left: Bytes = list.new()
+    result.unwrap(disk_write_synced(d, "MANIFEST.tmp", left))
+    match open(tasks, d, c, r, options) {
+        Error(Unsupported(0x0070)) => {},
+        _ => return false
+    }
+    if !result.unwrap(disk_exists(d, "MANIFEST.tmp")) { return false }
     // Step3 runs even when the first listed pack is corrupt. The old
     // load-before-cleanup order leaves these two files behind on failure.
     let mut damaged = disk_genesis_fixture()
@@ -9638,7 +9766,7 @@ pub fn disk_law_opening(d: Dir, r: Random, tasks: Tasks) -> bool waits {
     result.unwrap(disk_write_synced(d, "p-1", empty))
     result.unwrap(disk_write_synced(d, "p-2", empty))
     result.unwrap(disk_write_synced(d, "MANIFEST.tmp", empty))
-    match disk_session(tasks, d, r, options) {
+    match disk_session(tasks, d, c, r, options) {
         Error(Corrupt(_)) => {},
         _ => return false
     }
@@ -9646,8 +9774,8 @@ pub fn disk_law_opening(d: Dir, r: Random, tasks: Tasks) -> bool waits {
 }
 
 @test
-fn disk_test_opening(d: Dir, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if disk_law_opening(disk_test_directory(d), r, tasks) {
+fn disk_test_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_opening(disk_test_directory(d), c, r, tasks) {
         Ok(())
     } else {
         Error(())
@@ -9699,9 +9827,9 @@ pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Resu
     if options.group_commits == 0 { return Error(Missing("group_commits")) }
     if options.group_bytes == 0 { return Error(Missing("group_bytes")) }
     let register = capacity(new_register())?
-    let session = disk_session(tasks, d, r, options)?
+    let session = disk_session(tasks, d, c, r, options)?
     let DiskSession(lock: take lock, startup: take startup, send: take send, acks: take acks, worker: take worker) = take session
-    let DiskStartup(store: id, state: take state, live: live, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, seq: seq, segment: take segment, end_file: take end_file) = take startup
+    let DiskStartup(store: id, fence: fence, state: take state, live: live, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, seq: seq, segment: take segment, end_file: take end_file) = take startup
     let mut db = empty_db(c, id, options, take register)
     let State(tips: take tips, pins: take pins, next_branch: next_branch) = take state
     let mut heads: List[Head] = capacity(list.with_capacity(list.len(tips)))?
@@ -9711,6 +9839,7 @@ pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Resu
     }
     db.heads = take heads
     db.pins = take pins
+    db.fence = fence
     db.next_branch = next_branch
     db.next_node = next_node
     db.next_table = next_table
@@ -9837,7 +9966,7 @@ fn disk_begin_cut(mut db: Db, take s: State) -> Result[Ticket, Error] waits {
     }
     db.file_seq = seq
     db.file_end = 72
-    let cut = DiskCut(generation: generation, state: take s, next_node: db.next_node + 1, next_table: db.next_table, first_live: seq)
+    let cut = DiskCut(generation: generation, fence: db.fence, state: take s, next_node: db.next_node + 1, next_table: db.next_table, first_live: seq)
     let record_previous = db.disk[0].record_cut
     db.disk[0].previous_record_cut = record_previous
     db.disk[0].record_cut = seq
@@ -10222,7 +10351,7 @@ pub fn disk_law_publish_refusal(d: Dir) -> bool waits {
         let manifest = disk_genesis_fixture()
         result.unwrap(disk_publish_manifest(child, id, manifest))
         let state = DiskState(store: id, manifest: take manifest, graph: disk_graph())
-        let cut = DiskCut(generation: 2, state: result.unwrap(main_state(share_roots(roots), 0, 0)), next_node: 1, next_table: 1, first_live: 97)
+        let cut = DiskCut(generation: 2, fence: 0, state: result.unwrap(main_state(share_roots(roots), 0, 0)), next_node: 1, next_table: 1, first_live: 97)
         let trial: Result[Result[(), Error], Capacity] = bound bytes (step * 512) {
             disk_try_publish(child, state, cut)
         }

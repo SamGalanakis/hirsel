@@ -511,7 +511,7 @@ fn deadline_place(take fixture: DeadlinePlace) -> Result[runner.Ended, runner.St
 
 fn status_address(status: runner.Status) -> Addr { option.unwrap(status.addr) }
 
-fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, phase: String, uncut: bool) -> () waits {
+fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, phase: String, uncut: bool, genesis: bool) -> () waits {
     let codec: std.codec.Codec[Bytes] = std.codec.of_list()
     let mut old_previous: Bytes = list.new()
     let mut old_current: Bytes = list.new()
@@ -519,6 +519,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     result.unwrap(list.append(mut old_current, string.as_bytes("current release")))
     if phase == "init" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
+        if genesis { result.unwrap(store.close(take db)); return }
         let value: std.codec.Codec[u64] = std.codec.of()
         let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), value)))
         let _ = result.unwrap(store.create_table(mut db, store.spec("hirsel.runner.activation", std.codec.key_u8(), codec)))
@@ -535,40 +536,65 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     }
     let mut existing = options()
     existing.create = false
-    let mut expected_version = 0u64
+    let base = if genesis { 0u64 } else { 4u64 }
+    let mut chosen: runner.Selection = if genesis { Current(0u64) } else { Install }
+    let expected_version = base + 1u64
     if phase == "read" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, existing))
-        let table = result.unwrap(store.table(mut db, "hirsel.runner.activation", std.codec.key_u8(), codec))
         let snap = store.snapshot(db)
-        let current = option.unwrap(result.unwrap(store.get(snap, store.shape(table), 0u8)))
-        let previous = option.unwrap(result.unwrap(store.get(snap, store.shape(table), 1u8)))
-        let releases: store.Table[u64, runner.ReleaseRecord] = result.unwrap(store.table(mut db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of()))
         let version = store.version(snap)
-        let history = result.unwrap(store.get(snap, store.shape(releases), version))
-        let activated = current != old_current
-        if activated {
-            want(previous == old_current, "activation: current changed but previous did not")
-            let describe: std.codec.Codec[runner.Describe] = std.codec.of()
-            let decoded = result.unwrap(result.unwrap(std.codec.decode(describe, current)))
-            want(list.len(decoded.exported) == 3u64 && decoded.exported[0u64].described.identity == code.identity(code.describe(bump)) &&
-                 decoded.exported[1u64].described.identity == code.identity(code.describe(deny)) &&
-                 decoded.exported[2u64].described.identity == code.identity(code.describe(trip)), "activation: incorrect new release")
-            let row = option.unwrap(take history)
-            want(row.release == result.unwrap(runner.release_digest(decoded.exported)) &&
-                row.digest == decoded.digest, "activation: new release history differs from current")
+        let activated = version == base + 1u64
+        want((activated && store.fence_level(db) == 1) ||
+            (!activated && !uncut && version == base && store.fence_level(db) == 0), "activation and fence disagree")
+        if activated || !genesis {
+            let table = result.unwrap(store.system_table(db, "hirsel.runner.activation", std.codec.key_u8(), codec))
+            let current = option.unwrap(result.unwrap(store.get(snap, store.shape(table), 0u8)))
+            let previous = result.unwrap(store.get(snap, store.shape(table), 1u8))
+            let releases: store.Table[u64, runner.ReleaseRecord] = result.unwrap(store.system_table(db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of()))
+            let history = result.unwrap(store.get(snap, store.shape(releases), base + 1u64))
+            if activated {
+                if genesis {
+                    if let Some(_) = previous { fail("genesis: unexpected previous release") }
+                } else {
+                    want(option.unwrap(take previous) == old_current, "activation: current changed but previous did not")
+                }
+                let describe: std.codec.Codec[runner.Describe] = std.codec.of()
+                let decoded = result.unwrap(result.unwrap(std.codec.decode(describe, current)))
+                want(list.len(decoded.exported) == 3u64 && decoded.exported[0u64].described.identity == code.identity(code.describe(bump)) &&
+                     decoded.exported[1u64].described.identity == code.identity(code.describe(deny)) &&
+                     decoded.exported[2u64].described.identity == code.identity(code.describe(trip)), "activation: incorrect new release")
+                let row = option.unwrap(take history)
+                want(row.release == result.unwrap(runner.release_digest(decoded.exported)) &&
+                    row.digest == decoded.digest, "activation: new release history differs from current")
+                let _ = result.unwrap(store.checkpoint(mut db))
+                chosen = Current(version)
+            } else {
+                want(current == old_current && option.unwrap(take previous) == old_previous, "activation: legacy rows changed")
+                if let Some(_) = history { fail("activation: history committed without current") }
+                chosen = Current(0u64)
+            }
         } else {
-            want(!uncut && previous == old_previous, "activation: previous changed without current or acknowledged release missing")
-            if let Some(_) = history { fail("activation: history committed without current") }
+            match store.with_schema(db, code.describe(handles)) {
+                Error(Missing(_)) => (),
+                _ => fail("activation: genesis catalog committed without activation")
+            }
         }
-        expected_version = version + if activated { 0u64 } else { 1u64 }
         result.unwrap(store.close(take db))
+        if !activated && !genesis {
+            refused_open(d, c, r, tasks, Current(0u64), N_PLACE, base, true)
+            return
+        }
+        if activated {
+            refused_open(d, c, r, tasks, Current(base), N_PLACE, base + 1u64, false)
+            refused_open(d, c, r, tasks, Current(base + 1u64), N_PLACE + 1u64, base + 1u64, false)
+        }
     }
     let (policy, policy_handle) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
     let (stop, stopping): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
     let mut wire = runner.wire_defaults(131072u64, N_PLACE)
     wire.n_pool = 4194304u64
-    let settings = runner.PlaceConfig(backing: Disk(d, existing), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
+    let settings = runner.PlaceConfig(backing: Disk(d, existing), selection: chosen, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
@@ -587,6 +613,49 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     if phase == "read" {
         let db = result.unwrap(store.open(tasks, d, c, r, existing))
         want(store.version(store.snapshot(db)) == expected_version, "activation: wrong write count on restart")
+        want(store.fence_level(db) == 1, "activation: a later cut lost the fence")
+        result.unwrap(store.close(take db))
+    }
+}
+
+fn unreachable_handles(_catalog: store.Schema) -> Result[Hd, store.Error] {
+    fail("a refused opener called handles")
+}
+
+fn refused_open(d: Dir, c: Clock, r: Random, tasks: Tasks, selected: runner.Selection, allowance: u64, v: u64, legacy: bool) -> () waits {
+    let db = result.unwrap(store.open(tasks, d, c, r, options()))
+    let (_sender, from): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(1u64))
+    let mail = result.unwrap(runner.mailbox(1u64))
+    let tried = runner.place_head_selected(take db, selected, code.describe(place), allowance, code.describe(migrate),
+        code.describe(unreachable_handles), DirectRequests(take from), take mail, tasks, 1048576u64)
+    match take tried {
+        Error(NotCurrent(Legacy)) => want(legacy, "activation: fenced store reported legacy"),
+        Error(NotCurrent(Active(found, _))) => want(!legacy && found == v, "activation: wrong active version"),
+        _ => fail("activation: unexpected selection result")
+    }
+    let reopened = result.unwrap(store.open(tasks, d, c, r, options()))
+    want(store.version(store.snapshot(reopened)) == v, "activation: refusal advanced the head")
+    result.unwrap(store.close(take reopened))
+}
+
+fn unavailable_identity(d: Dir, c: Clock, r: Random, tasks: Tasks, grow: bool, phase: String, out: Stdout) -> () waits {
+    if phase == "init" {
+        let db = result.unwrap(store.open(tasks, d, c, r, options()))
+        result.unwrap(store.close(take db))
+        return
+    }
+    let db = result.unwrap(store.open(tasks, d, c, r, options()))
+    if phase == "write" {
+        let chosen: runner.Selection = if grow { Install } else { Current(0u64) }
+        let (_sender, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(1u64))
+        let attempted = runner.place_head_selected(take db, chosen, code.describe(place), N_PLACE, code.describe(migrate),
+            code.describe(unreachable_handles), DirectRequests(take inbox), result.unwrap(runner.mailbox(1u64)), tasks, 1048576u64)
+        match take attempted {
+            Error(IdentityUnknown) => result.unwrap(stdout.write(out, "DONE")),
+            _ => fail("disk install accepted an unavailable identity"),
+        }
+    } else {
+        want(store.version(store.snapshot(db)) == 0u64 && store.fence_level(db) == 0, "identity refusal committed the install")
         result.unwrap(store.close(take db))
     }
 }
@@ -599,7 +668,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     let mut wire = runner.wire_defaults(131072u64, N_PLACE)
     wire.n_pool = 4194304u64
     wire.socket.max_frame = 65536u64
-    let config = runner.PlaceConfig(backing: Disk(d, options()), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
+    let config = runner.PlaceConfig(backing: Disk(d, options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64))
@@ -663,8 +732,12 @@ fn deadline_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args) -> () 
 pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, n: Net) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0u64))
     let scenario = option.unwrap(args.get(argv, 1u64))
-    if scenario == "runner-activation" {
-        activation_pairs(d, c, r, tasks, n, out, result.unwrap(string.from(phase)), option.unwrap(args.get(argv, 2u64)) == "new")
+    if scenario == "runner-activation" || scenario == "runner-activation-genesis" {
+        activation_pairs(d, c, r, tasks, n, out, result.unwrap(string.from(phase)), option.unwrap(args.get(argv, 2u64)) == "new", scenario == "runner-activation-genesis")
+        return Ok(())
+    }
+    if scenario == "runner-unavailable-genesis" || scenario == "runner-unavailable-install" {
+        unavailable_identity(d, c, r, tasks, scenario == "runner-unavailable-install", phase, out)
         return Ok(())
     }
     if scenario == "runner-deadline" {

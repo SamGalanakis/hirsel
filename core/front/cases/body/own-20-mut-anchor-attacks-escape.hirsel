@@ -79,7 +79,6 @@ fn provider(mut f: HostFile, mut b: Bytes) waits {
 // expect: compared OWN-19 at 52:27 | View[core@1/core/String] | not scoped
 // expect: refuse OWN-19 at 52:51
 // expect: compared OWN-19 at 52:51 | View[core@1/core/String] | not scoped
-// expect: gap values of this type are not built
 // 29: the provider's `mut b` crosses the freeze.
 // expect: refuse OWN-10 at 62:30
 // expect: cause OWN-10 at 62:30 from 61:13

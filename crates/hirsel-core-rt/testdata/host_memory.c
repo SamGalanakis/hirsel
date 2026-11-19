@@ -35,13 +35,17 @@ int main(int argc, char **argv) {
     assert(old.pointer);
     void *argument = old.pointer;
     unsigned body = mode;
+    /* Native code holds a region as a slot: null until its first admitted allocation. */
+    HirselCoreRegion *slot = NULL;
     if (mode == 1) {
         /* Fund the growth from a different current limit before testing host refusal. */
         assert(hirsel_core_limit_enter(ctx, bytes).pointer);
     } else if (mode == 2 || mode == 3) {
-        HirselCoreRegion *region = hirsel_core_region_open(ctx);
-        if (mode == 3) assert(hirsel_core_region_alloc(ctx, region, 8, 8, 8, false).pointer);
-        argument = region;
+        if (mode == 3) {
+            slot = hirsel_core_region_open(ctx);
+            assert(hirsel_core_region_alloc(ctx, slot, 8, 8, 8, false).pointer);
+        }
+        argument = &slot;
         body = 2;
     } else if (mode >= 4) {
         body = mode - 1;

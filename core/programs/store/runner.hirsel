@@ -1553,6 +1553,25 @@ fn head_next(inbox: HeadRequests, waiting: bool) -> Option[HeadInput] waits {
     }
 }
 
+// H3's group ends when the inbox stays empty while every task that was ready
+// has had its turn: arrivals that a reader or owner is already carrying join
+// this group instead of each paying a durable, a Release and a fan-out round.
+// A try_receive that finds Empty is a poll, and CONC-10's fairness lets ready
+// tasks reach their events while the head polls. The bound stays well inside
+// one CONC-10 turn (64 polls), so the gate follows the probes in the head's
+// own turn: at 63 or more, a poisoned journal's failure overtakes the gate and
+// R1b's poison_answers mutant goes uncaught. 32 measures the same as 64-192.
+const SETTLE_PROBES: u64 = 32
+
+fn settle_probe(inbox: HeadRequests) -> Option[HeadInput] waits {
+    let mut probe = 0u64
+    while probe < SETTLE_PROBES {
+        if let Some(take more) = head_next(inbox, false) { return Some(take more) }
+        probe += 1u64
+    }
+    None
+}
+
 fn close_head_admission[G: send, H: send](mut head: Head[G, H]) -> Result[(), store.Error] waits {
     let waiting = replace(mut head.waiting, list.new())
     for take entry in take waiting {
@@ -1590,7 +1609,11 @@ fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, 
             None => (),
         }
         if !closed && next_waiting(mut head)? { continue }
-        if list.len(head.group) > 0u64 { gate(mut head)?; continue }
+        if list.len(head.group) > 0u64 {
+            if let Some(take more) = settle_probe(inbox) { input = Some(take more); continue }
+            gate(mut head)?
+            continue
+        }
         match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => return Ok(()) }
     }
 }

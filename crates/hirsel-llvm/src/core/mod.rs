@@ -750,7 +750,14 @@ fn emit_module(
                 | "std@1/regex/translate"
                 | "std@1/regex/translate_atom"
                 | "std@1/regex/compile_hir"
+                | "std@1/regex/sized_alts"
+                | "std@1/regex/emit_alts"
+                | "std@1/regex/choose_prefilter"
+                | "std@1/regex/names_size"
+                | "std@1/regex/write_names"
                 | "std@1/regex/compile_new" => Inline::Never,
+                // Keep lazy DFA misses off the cached transition path.
+                "std@1/regex/dfa_transition" => Inline::Never,
                 // Revisit bounded mutable loops after borrow-scope emission.
                 // LLVM inlining carries their parameter scopes into the caller.
                 _ if source.batch_steps

@@ -40,7 +40,11 @@ Per mechanism:
   `left_partition_len == 0` rule. No element is copied.
 - Branchless stable partition (left keys fill scratch upward, right keys downward,
   right block reversed on copy-back; the pivot is never compared with itself):
-  ADOPTED, with checked indices and no four-way unroll.
+  ADOPTED, with checked indices.
+- Four-way unroll of the partition scan (`stable_partition`, `UNROLL_LEN = 4`):
+  ADAPTED. Rust unrolls only when `size_of::<T>() <= 16`; Hirsel cannot ask the size
+  of `T`, so every element type takes the unrolled loop and pays its code size. Each
+  step still updates the Hole state before the next comparison.
 - `choose_pivot` / `median3_rec` / `median3`: ADOPTED, as indices into the list.
 - Shorter-run buffered merge with branchless source selection (`merge_up`,
   `merge_down`): ADOPTED. Rust's `MergeState` drop becomes the `Hole` restore arms.

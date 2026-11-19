@@ -534,48 +534,69 @@ fn partition_hole[T](mut g: Hole[T], lo: u64, hi: u64, p: u64, equal: bool, befo
     (left, moved)
 }
 
-// The comparison chooses the destination index without a branch.
+// quicksort.rs `stable_partition`: each comparison chooses the destination index
+// without a branch. The scan is unrolled four times, as Rust does for keys of at most
+// 16 bytes; Hirsel cannot ask the size of T, so every T takes the unrolled loop. Each
+// step updates st before the next comparison, so a failure restores from any of them.
 fn partition_scan[T](mut st: Active, xs: View[List[T]], s: View[List[T]], pivot_in_scratch: bool, at: u64, end: u64, t: u64, equal: bool, before: scoped fn(T, T) -> Order) {
     let pc = if pivot_in_scratch {
         s
     } else {
         xs
     }
+    let unroll_end = if end >= 3 {
+        int.wrapping_sub(end, 3)
+    } else {
+        0
+    }
     if equal {
+        while st.c < unroll_end {
+            let l0 = !precedes(slots_list_view(pc, at), slots_list_view(xs, st.c), before)
+            partition_one(mut st, xs, s, t, l0)
+            let l1 = !precedes(slots_list_view(pc, at), slots_list_view(xs, st.c), before)
+            partition_one(mut st, xs, s, t, l1)
+            let l2 = !precedes(slots_list_view(pc, at), slots_list_view(xs, st.c), before)
+            partition_one(mut st, xs, s, t, l2)
+            let l3 = !precedes(slots_list_view(pc, at), slots_list_view(xs, st.c), before)
+            partition_one(mut st, xs, s, t, l3)
+        }
         while st.c < end {
             let left = !precedes(slots_list_view(pc, at), slots_list_view(xs, st.c), before)
-            let base = if left {
-                st.a
-            } else {
-                int.wrapping_sub(t, st.c)
-            }
-            slots_list_move(xs, st.c, s, int.wrapping_add(base, st.d), 1)
-            let step: u64 = if left {
-                1
-            } else {
-                0
-            }
-            st.d = int.wrapping_add(st.d, step)
-            st.c = int.wrapping_add(st.c, 1)
+            partition_one(mut st, xs, s, t, left)
         }
     } else {
+        while st.c < unroll_end {
+            let l0 = precedes(slots_list_view(xs, st.c), slots_list_view(pc, at), before)
+            partition_one(mut st, xs, s, t, l0)
+            let l1 = precedes(slots_list_view(xs, st.c), slots_list_view(pc, at), before)
+            partition_one(mut st, xs, s, t, l1)
+            let l2 = precedes(slots_list_view(xs, st.c), slots_list_view(pc, at), before)
+            partition_one(mut st, xs, s, t, l2)
+            let l3 = precedes(slots_list_view(xs, st.c), slots_list_view(pc, at), before)
+            partition_one(mut st, xs, s, t, l3)
+        }
         while st.c < end {
             let left = precedes(slots_list_view(xs, st.c), slots_list_view(pc, at), before)
-            let base = if left {
-                st.a
-            } else {
-                int.wrapping_sub(t, st.c)
-            }
-            slots_list_move(xs, st.c, s, int.wrapping_add(base, st.d), 1)
-            let step: u64 = if left {
-                1
-            } else {
-                0
-            }
-            st.d = int.wrapping_add(st.d, step)
-            st.c = int.wrapping_add(st.c, 1)
+            partition_one(mut st, xs, s, t, left)
         }
     }
+}
+
+// Left keys go to scratch up from st.a, right keys down from t - st.c.
+fn partition_one[T](mut st: Active, xs: View[List[T]], s: View[List[T]], t: u64, left: bool) {
+    let base = if left {
+        st.a
+    } else {
+        int.wrapping_sub(t, st.c)
+    }
+    slots_list_move(xs, st.c, s, int.wrapping_add(base, st.d), 1)
+    let step: u64 = if left {
+        1
+    } else {
+        0
+    }
+    st.d = int.wrapping_add(st.d, step)
+    st.c = int.wrapping_add(st.c, 1)
 }
 
 // The first i in [lo, mid] with xs[mid] before every key of xs[i..mid).

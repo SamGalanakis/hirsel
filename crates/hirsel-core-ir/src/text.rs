@@ -398,6 +398,9 @@ impl Printer {
         for v in &b.callable_parameters {
             self.line(&format!("  callable v{}", v.0));
         }
+        for root in &b.compact_roots {
+            self.line(&format!("  root t{} {}", root.ty.0, root.width));
+        }
         for (i, s) in b.slots.iter().enumerate() {
             self.line(&format!("  slot s{i} = {}", place(*s)));
         }
@@ -517,6 +520,9 @@ impl Printer {
                             function.0,
                             identity.0
                         )
+                    }
+                    Inst::CompactWidth { result, word, ty } => {
+                        format!("{} = width {} t{}", def(*result), v(word), ty.0)
                     }
                     Inst::Unary {
                         result,
@@ -1750,6 +1756,14 @@ impl BodyParser {
                 field: l.num()?,
                 initialized: op == "set_mask",
             }
+        } else if op == "width" {
+            one(&defs)?;
+            let word = l.value()?;
+            Inst::CompactWidth {
+                result,
+                word,
+                ty: TypeId(l.id('t')?),
+            }
         } else if let Some(op) = UnaryOp::from_name(op) {
             one(&defs)?;
             Inst::Unary {
@@ -2189,6 +2203,13 @@ impl Parser {
                     l.next()?;
                     b.body.callable_parameters.push(l.value()?);
                     l.end()?;
+                }
+                Some("root") if b.body.blocks.is_empty() => {
+                    l.next()?;
+                    let ty = TypeId(l.id('t')?);
+                    let width: u8 = l.num()?;
+                    l.end()?;
+                    b.body.compact_roots.push(CompactRoot { ty, width });
                 }
                 Some("slot") if b.body.blocks.is_empty() => {
                     l.next()?;

@@ -938,10 +938,15 @@ fn fill(
             Inst::FunctionRef { function, .. } | Inst::DescriptorRef { function, .. } => {
                 *function = s.function(*function)
             }
-            Inst::Drop { ty, .. } | Inst::Release { ty, .. } => *ty = s.ty(*ty),
+            Inst::Drop { ty, .. } | Inst::Release { ty, .. } | Inst::CompactWidth { ty, .. } => {
+                *ty = s.ty(*ty)
+            }
             Inst::Mark { ty, .. } | Inst::Unmark { ty, .. } => s.place(ty),
             _ => {}
         }
+    }
+    for root in &mut body.compact_roots {
+        root.ty = s.ty(root.ty);
     }
     let sizes = template
         .copies

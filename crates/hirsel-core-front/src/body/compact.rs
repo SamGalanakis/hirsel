@@ -85,6 +85,25 @@ impl Cx<'_, '_, '_> {
         let w = self.read_sequence_word(blob, 8, Ty::Scalar(Scalar::U64), n);
         Some((blob, at, w))
     }
+    /// The `W` of a blob holding a `ty`, from its header word `word`: tagged with
+    /// `ty`'s row, so a release unit whose roots reaching `ty` write one `W` reads
+    /// it as that constant (`hirsel_core_ir::widths`).
+    fn compact_width(&mut self, word: ValueId, ty: TyId, n: NodeId) -> ValueId {
+        let ty = self.bare(ty);
+        let Ok(Rep::Place(row)) = self.rep(ty) else {
+            return word;
+        };
+        let result = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(
+            Inst::CompactWidth {
+                result,
+                word,
+                ty: row,
+            },
+            n,
+        );
+        result
+    }
     /// A new locator of `ty` for `{blob, at}`.
     pub(super) fn new_locator(
         &mut self,
@@ -364,6 +383,7 @@ impl Cx<'_, '_, '_> {
     ) -> Option<(AddressId, TyId)> {
         let fields = self.compact_fields(ty, case)?;
         let (blob, at, w) = self.locator(header, n)?;
+        let w = self.compact_width(w, ty, n);
         let mut off = at;
         if case.is_some() {
             let cases = self.variant_cases(ty)?;

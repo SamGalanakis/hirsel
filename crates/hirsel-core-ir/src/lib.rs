@@ -1062,6 +1062,7 @@ mod static_data;
 pub mod text;
 #[cfg(any(test, feature = "wf"))]
 pub mod wf;
+pub mod widths;
 
 pub use hirsel_core_layout::{FuncRef, TypeRef, intern_shape};
 pub use ir::*;

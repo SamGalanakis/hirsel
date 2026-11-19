@@ -8,6 +8,7 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
         for (index, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
             let result = match *inst {
                 Inst::Unary { result, .. }
+                | Inst::CompactWidth { result, .. }
                 | Inst::Binary { result, .. }
                 | Inst::Compare { result, .. }
                 | Inst::Convert { result, .. }
@@ -120,6 +121,7 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                     read(count);
                 }
                 Inst::Unary { operand, .. }
+                | Inst::CompactWidth { word: operand, .. }
                 | Inst::ScalarUnary { operand, .. }
                 | Inst::Convert { operand, .. } => read(operand),
                 Inst::Binary { left, right, .. }
@@ -368,6 +370,7 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::FunctionRef { .. }
                 | Inst::DescriptorRef { .. }
                 | Inst::Unary { .. }
+                | Inst::CompactWidth { .. }
                 | Inst::Binary { .. }
                 | Inst::Compare { .. }
                 | Inst::Convert { .. }

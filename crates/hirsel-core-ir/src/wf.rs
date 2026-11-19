@@ -963,6 +963,14 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 || "bad descriptor reference".into(),
             )
         }
+        Inst::CompactWidth { result, word, ty } => {
+            c.def(result)?;
+            need(c.m.types.get(ty.index()).is_some(), || {
+                "unknown type".into()
+            })?;
+            c.is(word, Ty::Scalar(Scalar::U64))?;
+            c.is(result, Ty::Scalar(Scalar::U64))
+        }
         Inst::Unary {
             result,
             op,

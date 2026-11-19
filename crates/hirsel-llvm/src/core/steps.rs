@@ -272,6 +272,7 @@ fn borrowed_index(
                     | Inst::FunctionRef { .. }
                     | Inst::DescriptorRef { .. }
                     | Inst::Unary { .. }
+                    | Inst::CompactWidth { .. }
                     | Inst::Binary { .. }
                     | Inst::Compare { .. }
                     | Inst::Convert { .. }
@@ -342,6 +343,7 @@ pub(super) fn pure(
         | Inst::FunctionRef { .. }
         | Inst::DescriptorRef { .. }
         | Inst::Unary { .. }
+        | Inst::CompactWidth { .. }
         | Inst::Binary { .. }
         | Inst::Compare { .. }
         | Inst::Convert { .. }

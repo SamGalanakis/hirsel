@@ -3891,6 +3891,7 @@ impl Machine<'_> {
             } => vals[result.index()] = self.descriptors[function.index()],
             // Statics are the first blocks, in module order.
             Inst::ReadStatic { result, data } => vals[result.index()] = ptr(data.index(), 0),
+            Inst::CompactWidth { result, word, .. } => vals[result.index()] = vals[word.index()],
             Inst::Unary {
                 result,
                 op,

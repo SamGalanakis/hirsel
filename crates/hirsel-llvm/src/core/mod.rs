@@ -1988,6 +1988,10 @@ impl FunctionEmitter<'_> {
                 result,
                 &Value::global(descriptor_symbol(self.items.function_symbol(function))),
             ),
+            Inst::CompactWidth { result, word, .. } => {
+                let x = self.numeric(word);
+                self.put(result, &x)
+            }
             Inst::Unary {
                 result,
                 op,

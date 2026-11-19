@@ -43,6 +43,11 @@ pub(crate) fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
         Inst::Unary {
             result, operand, ..
         }
+        | Inst::CompactWidth {
+            result,
+            word: operand,
+            ..
+        }
         | Inst::ScalarUnary {
             result, operand, ..
         } => {

@@ -73,7 +73,9 @@ impl Remap {
                     *function = self.functions[function.index()];
                     *identity = self.statics[identity.index()];
                 }
-                Inst::Drop { ty, .. } | Inst::Release { ty, .. } => *ty = self.types[ty.index()],
+                Inst::Drop { ty, .. }
+                | Inst::Release { ty, .. }
+                | Inst::CompactWidth { ty, .. } => *ty = self.types[ty.index()],
                 Inst::Mark { ty, .. } | Inst::Unmark { ty, .. } => self.place(ty),
                 Inst::Alloc {
                     kind: AllocKind::Own { edge },
@@ -87,6 +89,9 @@ impl Remap {
                 } => *ty = TypeRef(self.types[ty.index()].0),
                 _ => {}
             }
+        }
+        for root in &mut body.compact_roots {
+            root.ty = self.types[root.ty.index()];
         }
         for call in &mut body.calls {
             call.signature = self.signatures[call.signature.index()];

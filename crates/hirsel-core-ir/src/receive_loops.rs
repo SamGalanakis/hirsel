@@ -246,6 +246,7 @@ impl Region<'_> {
             | Inst::StorageLive { .. }
             | Inst::StorageDead { .. }
             | Inst::Unary { .. }
+            | Inst::CompactWidth { .. }
             | Inst::Binary { .. }
             | Inst::IntArith { .. }
             | Inst::Compare { .. }

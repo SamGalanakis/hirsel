@@ -1246,6 +1246,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.pointer(to, n))
     }
 
+    /// Record that this body roots a blob of `ty` whose `W` is `w` bytes: what
+    /// `hirsel_core_ir::widths` reads to make a read of `W` a constant.
+    fn compact_root(&mut self, ty: TyId, w: u64, n: NodeId) -> Option<()> {
+        let ty = self.place_row(ty, "a blob root without a place is not built", n)?;
+        let root = hirsel_core_ir::CompactRoot { ty, width: w as u8 };
+        if !self.b.compact_roots.contains(&root) {
+            self.b.compact_roots.push(root);
+        }
+        Some(())
+    }
     /// The byte width of a compact type's declared `W` (MEM-9).
     fn compact_w(&self, ty: TyId) -> Option<u64> {
         let (d, _) = self.compact_adt(ty)?;
@@ -1285,6 +1295,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
+        self.compact_root(ty, w, n)?;
         let (to, eid) = self.build_result(result, n)?;
         let join = self.new_block(&[]);
         let mut sinks = Sinks::default();
@@ -1854,6 +1865,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.refuse("MEM-4", n, "`build_in` builds a value of a compact type");
             return None;
         };
+        self.compact_root(ty, w, n)?;
         let (to, eid) = self.build_result(result, n)?;
         let join = self.new_block(&[]);
         let (blob, _) = self.admit_blob(region, bytes, false, to, eid, join, n)?;

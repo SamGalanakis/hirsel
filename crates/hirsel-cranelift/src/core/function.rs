@@ -537,6 +537,10 @@ impl Function<'_, '_, '_> {
                 let v = self.b.ins().symbol_value(types::I64, global);
                 self.set(result, v);
             }
+            Inst::CompactWidth { result, word, .. } => {
+                let v = self.get(word);
+                self.set(result, v);
+            }
             Inst::Unary {
                 result,
                 op,

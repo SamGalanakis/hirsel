@@ -255,6 +255,27 @@ fn release_part_constant_names_its_own_function() {
     assert_eq!(status, Some(10));
 }
 
+/// A compact blob's `W` resolved over the release unit (MEM-9) is a constant
+/// only when every root that can hold the type writes one `W`. `E` (u16) is
+/// streamed alone, a blob of `W` 2, and as the elements of a sequence root, a
+/// blob of `W` 8, so each read of `E`'s fields keeps the header word: reading
+/// `id` skips the span's `W`-wide count. Mutants
+/// caught: lowering to a constant when the roots of `E` write two `W`s reads
+/// one blob at the other's width; a sequence root missing from the roots
+/// makes `W` 2 the constant and misreads the sequence's elements. Exit
+/// hand-derived: alone, id 7, 3 elements, the third 9: 7309 (1); the
+/// sequence's second element, id 8: 8309 (2); 1 + 2 = 3.
+#[test]
+#[ignore = "explicit native integration target"]
+fn release_compact_width_is_constant_only_under_one_root_width() {
+    const APP: &str = "@compact(u16)\ntype E {\n    xs: FixedSpan[u32],\n    id: u16\n}\n\nfn value(e: E) -> u64 {\n    match span.get(e.xs, 2) {\n        Some(k) => {\n            let id: u64 = int.widen(e.id)\n            let x: u64 = int.widen(k)\n            id * 1000 + span.len(e.xs) * 100 + x\n        },\n        None => 0\n    }\n}\n\nfn three() -> List[u32] {\n    let mut xs: List[u32] = list.new()\n    let _ = list.push(mut xs, 4)\n    let _ = list.push(mut xs, 6)\n    let _ = list.push(mut xs, 9)\n    xs\n}\n\nfn alone(r: Region) -> Result[E in r, BuildError] {\n    match build_stream_in(r, bytes 64, fn(take w: Writer[E, in r]) -> Result[Child[E], BuildError] {\n        emit(take w, E(xs: three(), id: 7))\n    }) {\n        Ok(take b) => Ok(finish(take b)),\n        Error(e) => Error(e),\n    }\n}\n\nfn many(r: Region) -> Result[SeqSpan[E] in r, BuildError] {\n    match build_stream_in(r, bytes 256, fn(take w: Writer[SeqSpan[E], in r]) -> Result[Child[SeqSpan[E]], BuildError] {\n        writer.append(mut w, fn(take x: Writer[E, in r]) -> Result[Child[E], BuildError] {\n            emit(take x, E(xs: three(), id: 5))\n        })?\n        writer.append(mut w, fn(take x: Writer[E, in r]) -> Result[Child[E], BuildError] {\n            emit(take x, E(xs: three(), id: 8))\n        })?\n        writer.close(take w)\n    }) {\n        Ok(take b) => Ok(finish(take b)),\n        Error(e) => Error(e),\n    }\n}\n\npub fn main() -> Result[(), Exit] {\n    let got = region r {\n        let a = match alone(r) {\n            Ok(e) => value(e),\n            Error(_) => 1,\n        }\n        let b = match many(r) {\n            Ok(xs) => match seq.index_in(r, xs) {\n                Ok(ix) => match seq.get(ix, 1) {\n                    Some(e) => value(e),\n                    None => 2,\n                },\n                Error(_) => 3,\n            },\n            Error(_) => 4,\n        }\n        let ok_a: u64 = if a == 7309 { 1 } else { 0 }\n        let ok_b: u64 = if b == 8309 { 2 } else { 0 }\n        ok_a + ok_b\n    }\n    Error(Exit(status: int.truncate(got)))\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = native_options(Backend::Llvm, dir.path());
+    options.optimize = true;
+    let (_, _, status) = reach_build(&record_check(APP, &core_sources(), dir.path(), "store"), &options);
+    assert_eq!(status, Some(3));
+}
+
 /// A release part is a function of its own key: its object is the same
 /// bytes whether it was generated alone or beside the program's other
 /// misses. The second build of `P` (same parts, a different `main`) reuses

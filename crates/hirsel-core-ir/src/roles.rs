@@ -837,6 +837,7 @@ impl<'a> Seal<'a> {
                 self.used(count, Use::Other);
             }
             Inst::Unary { operand, .. }
+            | Inst::CompactWidth { word: operand, .. }
             | Inst::Convert { operand, .. }
             | Inst::ScalarUnary { operand, .. } => self.used(operand, Use::Other),
             Inst::Binary { left, right, .. } | Inst::IntArith { left, right, .. } => {

@@ -738,6 +738,15 @@ pub enum Inst {
         result: ValueId,
         query: LayoutQuery,
     },
+    /// The `W` of a compact blob holding an encoding of `ty` (a compact type's
+    /// place row, MEM-9): `word`, the blob's header word the body read. A release
+    /// unit in which every root reaching `ty` writes one `W` replaces it with
+    /// that constant ([`crate::widths::resolve`]); anywhere else it is `word`.
+    CompactWidth {
+        result: ValueId,
+        word: ValueId,
+        ty: TypeId,
+    },
     /// One vector value operation. The two loads take the address of the first
     /// lane, after the source operation's bounds check for Lanes.
     Simd {
@@ -1530,6 +1539,17 @@ pub struct Body {
     pub calls: Vec<CallSite>,
     pub edges: Vec<Edge>,
     pub pools: Pools,
+    /// The blobs this body roots (MEM-4): each root's type, as a place row, and
+    /// the `W` its blob records. Only [`crate::widths::resolve`] reads them.
+    pub compact_roots: Vec<CompactRoot>,
+}
+
+/// One blob root a body creates: `build_in` or `build_stream_in` of `ty`, whose
+/// blob records `width` (2, 4 or 8) as its `W`.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct CompactRoot {
+    pub ty: TypeId,
+    pub width: u8,
 }
 
 /// How a parameter is passed.

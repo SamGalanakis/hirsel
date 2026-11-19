@@ -27,6 +27,7 @@ fn supported(i: &Inst) -> bool {
             | Inst::FunctionRef { .. }
             | Inst::DescriptorRef { .. }
             | Inst::Unary { .. }
+            | Inst::CompactWidth { .. }
             | Inst::Binary { .. }
             | Inst::Compare { .. }
             | Inst::Convert { .. }
@@ -104,6 +105,10 @@ impl Rename {
                 v(result);
                 v(operand);
                 *fail = self.f(*fail);
+            }
+            Inst::CompactWidth { result, word, .. } => {
+                v(result);
+                v(word);
             }
             Inst::Binary {
                 result,

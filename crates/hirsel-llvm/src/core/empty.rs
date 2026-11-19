@@ -60,6 +60,7 @@ fn pure(body: &Body, constants: &[Option<u64>], inst: &Inst) -> bool {
         | Inst::FunctionRef { .. }
         | Inst::DescriptorRef { .. }
         | Inst::Unary { .. }
+        | Inst::CompactWidth { .. }
         | Inst::Binary { .. }
         | Inst::Compare { .. }
         | Inst::Convert { .. }

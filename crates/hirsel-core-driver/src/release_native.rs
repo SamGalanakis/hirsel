@@ -214,6 +214,7 @@ fn cannot_install_step_bound(module: &Module) -> bool {
                     | Inst::LayoutConst { .. }
                     | Inst::ReadStatic { .. }
                     | Inst::Unary { .. }
+                    | Inst::CompactWidth { .. }
                     | Inst::Binary { .. }
                     | Inst::Compare { .. }
                     | Inst::Convert { .. }
@@ -390,13 +391,17 @@ impl CheckProduct {
                 },
             )
             .collect::<Vec<_>>();
-        let (joined, _) =
+        let (mut joined, _) =
             hirsel_core_materialize::join(&units, entry_identity).map_err(|message| {
                 NativeStop::Emit {
                     definition: entry.clone(),
                     message,
                 }
             })?;
+        // The unit holds every body the program can run, so a blob's `W` that every
+        // root reaching its type writes alike is a constant; the unit key below
+        // reads the module after this.
+        hirsel_core_ir::widths::resolve(&mut joined);
         let elide_steps = closed_executable && cannot_install_step_bound(&joined);
         // The closed-unit walk above proves calls, function references and
         // finalizers stay in the image. The separate result cleanup is

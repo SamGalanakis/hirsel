@@ -37,6 +37,11 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
         Inst::Unary {
             result, operand, ..
         }
+        | Inst::CompactWidth {
+            result,
+            word: operand,
+            ..
+        }
         | Inst::ScalarUnary {
             result, operand, ..
         } => {

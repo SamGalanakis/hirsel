@@ -31,8 +31,8 @@ const BODY_HEADER: usize = 28;
 /// framed as one part. A body record's IR part is hashed by it, and so is a
 /// module no record carries.
 const IR: &str = "hirsel.core-ir.v1";
-// Physical byte counts and aggregate constants are resolved at engine emission.
-const VERSION: u32 = 36;
+// A body records the blobs it roots and tags each compact read of `W` (`CompactWidth`).
+const VERSION: u32 = 37;
 pub(crate) const HEADER: usize = 12;
 /// The payload length, the checksum of everything before it, and the address.
 const TRAILER: usize = 48;

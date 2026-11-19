@@ -61,6 +61,9 @@ WIRE_TEST_INSTRUCTIONS = {
     'store@1/runner_calls/law_calls_refusals': 2_500_000_000,
     'store@1/runner_calls/law_calls_session_charge': 50_000_000_000,
 }
+# Flood laws read through an 8 KiB model window. Byte-split reads stay on every other wire law:
+# under the default 8-byte window a 4 KiB frame costs about 830 Decode round trips.
+WIDE_WINDOW_LAWS = {'store@1/runner_calls/law_calls_session_charge'}
 
 # R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
 SUBS = ('subs_main', 'subs_reset_keeps_diff', 'rows_normalized', 'projection_isolated', 'subscribe_order', 'retired_without_waiting')
@@ -401,6 +404,8 @@ def evaluate(evaluator, inputs_path, definition):
                    events=definition in EVENT_LAWS)
     if definition in WIRE_TEST_INSTRUCTIONS:
         request['instructions'] = WIRE_TEST_INSTRUCTIONS[definition]
+    if definition in WIDE_WINDOW_LAWS:
+        request['model_window'] = 8192
     result = run_case(f'{definition} [{inputs_path.stem}]', 'evaluator', [str(evaluator)],
                       input=json.dumps(request) + '\n', capture_output=True, text=True)
     try:

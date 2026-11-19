@@ -13,15 +13,20 @@ hirsel_guard::install!();
 // user loops independently of process scheduling or the host's current load.
 const INSTRUCTIONS: u64 = 1_000_000_000;
 
+/// What one law's run is given: its budget, its model world and whether it records events.
+struct Setting {
+    instructions: u64,
+    network: Option<eval::Network>,
+    events: bool,
+}
+
 fn evaluate(
     driver: &mut Driver,
     store: &Path,
     manifest: &Path,
     entry: DefPath,
     program_entry: bool,
-    instructions: u64,
-    network: Option<eval::Network>,
-    events: bool,
+    setting: Setting,
 ) -> Result<Value, String> {
     let inputs: CorpusManifest =
         serde_json::from_slice(&std::fs::read(manifest).map_err(|e| e.to_string())?)
@@ -65,15 +70,7 @@ fn evaluate(
         return Ok(json!({"error":format!("not well formed: {error}"), "revision":revision}));
     }
     let mut result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run(
-            &module,
-            function,
-            instructions,
-            &revisions,
-            network,
-            events,
-            &product,
-        )
+        run(&module, function, &revisions, setting, &product)
     })) {
         Ok(result) => result?,
         Err(fault) => fault_report(fault),
@@ -85,10 +82,8 @@ fn evaluate(
 fn run(
     module: &Module,
     function: hirsel_core_ir::FuncId,
-    instructions: u64,
     revisions: &eval::Revisions,
-    network: Option<eval::Network>,
-    events: bool,
+    setting: Setting,
     product: &CheckProduct,
 ) -> Result<Value, String> {
     let signature = &module.signatures[module.functions[function.index()].signature.index()];
@@ -111,10 +106,10 @@ fn run(
         u64::MAX,
         eval::Nans::Scrambled,
         destination.as_deref_mut(),
-        instructions,
+        setting.instructions,
         revisions,
-        network,
-        events,
+        setting.network,
+        setting.events,
     );
     let outcome = match report.outcome {
         eval::Outcome::Returned(values) => {
@@ -189,9 +184,22 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
                 .collect::<Result<Vec<_>, _>>()?;
             // These laws observe runner events, not the network explorer's
             // per-byte choice trace. Keep identical prefixes and seed choices.
+            let defaults = hirsel_core_net::model::Config::default();
+            // A flood law's window: its queues and reads, in bytes. The 8-byte
+            // default splits every read, which is what framing laws explore.
+            let window = match input.get("model_window") {
+                None => defaults.queue_bytes,
+                Some(bytes) => bytes
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .filter(|&n| n > 0)
+                    .ok_or("model_window must be a positive byte count")?,
+            };
             let model = hirsel_core_net::model::Model::new(hirsel_core_net::model::Config {
                 record_decisions: false,
-                ..Default::default()
+                queue_bytes: window,
+                max_prefix: window,
+                ..defaults
             });
             let mut net = eval::Network {
                 grants: Default::default(),
@@ -209,10 +217,12 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
                 Path::new(manifest),
                 entry,
                 input["program_entry"].as_bool().unwrap_or(false),
-                input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
-                network,
-                // CONC-10 events only for a law that reads them: a flood makes millions.
-                input["events"].as_bool().unwrap_or(false),
+                Setting {
+                    instructions: input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
+                    network,
+                    // CONC-10 events only for a law that reads them: a flood makes millions.
+                    events: input["events"].as_bool().unwrap_or(false),
+                },
             )
         };
         let report = if let Some(bytes) = input["task_stack_bytes"].as_u64() {

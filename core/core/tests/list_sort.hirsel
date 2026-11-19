@@ -223,9 +223,12 @@ fn stable_generated_runs() -> bool {
             if n > 1 {
                 reference(mut expected)
             }
-            result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
-                compare(a / 128, b / 128)
-            }))
+            let sorted = bound bytes (n * 8) {
+                list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+                    compare(a / 128, b / 128)
+                })
+            }
+            result.unwrap(result.unwrap(sorted))
             if xs != expected {
                 return false
             }

@@ -419,9 +419,9 @@ fn seven_plain_failure_12() -> u64 {
 }
 
 // n=20 keys (3i mod 5 for i < 16, then 3,1,4,0): the first 16 sort by insertion into one
-// run, the last four into another, and calls 74-93 are the one merge (74 its in-order
-// check). Failing at each merge call leaves holes in both runs; the audit checks that
-// every item is still present exactly once with its key.
+// run, the last four into another. Calls 74-93 merge from scratch into xs,
+// starting with the in-order check. The audit checks original keys and single ownership
+// when cleanup has to finish moving either or both tails into xs.
 fn twenty_key(id: u64) -> u64 {
     if id < 16 {
         (id * 3) % 5
@@ -436,14 +436,28 @@ fn twenty_key(id: u64) -> u64 {
     }
 }
 
-resource type TwentyAudit {
+fn merge_key(count: u64, id: u64) -> u64 {
+    if count == 20 {
+        return twenty_key(id)
+    }
+    if id < 32 {
+        80 - id / 16 * 16 + id % 16
+    } else if id < 48 {
+        2 * (id - 32) + 1
+    } else {
+        2 * (id - 48)
+    }
+}
+
+resource type MergeAudit {
     out: Stdout,
-    values: List[SortItem]
+    values: List[SortItem],
+    count: u64
 } drop(t) {
-    let mut valid = list.len(t.values) == 20
+    let mut valid = list.len(t.values) == t.count
     let mut mask: u64 = 0
     for x in t.values {
-        if x.id >= 20 || x.key != twenty_key(x.id) {
+        if x.id >= t.count || x.key != merge_key(t.count, x.id) {
             valid = false
         } else {
             let bit = 1u64 << x.id
@@ -453,7 +467,7 @@ resource type TwentyAudit {
             mask |= bit
         }
     }
-    let _ = stdout.write(t.out, if valid && mask == 1048575 {
+    let _ = stdout.write(t.out, if valid && mask == (1u64 << t.count) - 1 {
         "ok"
     } else {
         "bad"
@@ -461,12 +475,12 @@ resource type TwentyAudit {
 }
 
 // Stable sorted: keys never decrease and ids rise within a key.
-fn twenty_fail_at(out: Stdout, failure: u64) -> bool {
+fn merge_fail_at(out: Stdout, count: u64, failure: u64) -> bool {
     let mut xs: List[SortItem] = list.new()
-    for i in 0u64 .. 20 {
-        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out: out, id: i, key: twenty_key(i)))))
+    for i in 0u64 .. count {
+        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out: out, id: i, key: merge_key(count, i)))))
     }
-    let mut audit = result.unwrap(TwentyAudit(out: out, values: take xs))
+    let mut audit = result.unwrap(MergeAudit(out: out, values: take xs, count: count))
     let mut calls: u64 = 0
     result.unwrap(list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
         calls += 1
@@ -483,7 +497,7 @@ fn twenty_fail_at(out: Stdout, failure: u64) -> bool {
         }
     }))
     let mut sorted = true
-    for i in 1u64 .. 20 {
+    for i in 1u64 .. count {
         let (ak, ai) = (audit.values[i - 1].key, audit.values[i - 1].id)
         let (bk, bi) = (audit.values[i].key, audit.values[i].id)
         if ak > bk || (ak == bk && ai > bi) {
@@ -494,10 +508,10 @@ fn twenty_fail_at(out: Stdout, failure: u64) -> bool {
 }
 
 // Host-free twin: the evaluator checks scratch and source live slots on failure.
-fn twenty_plain_fail_at(failure: u64) -> bool {
+fn merge_plain_fail_at(count: u64, failure: u64) -> bool {
     let mut xs: List[u64] = list.new()
-    for i in 0u64 .. 20 {
-        result.unwrap(list.push(mut xs, twenty_key(i)))
+    for i in 0u64 .. count {
+        result.unwrap(list.push(mut xs, merge_key(count, i)))
     }
     let mut calls: u64 = 0
     result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
@@ -514,13 +528,50 @@ fn twenty_plain_fail_at(failure: u64) -> bool {
             Equal
         }
     }))
-    let mut sorted = list.len(xs) == 20
-    for i in 1u64 .. 20 {
+    let mut sorted = list.len(xs) == count
+    for i in 1u64 .. count {
         if xs[i - 1] > xs[i] {
             sorted = false
         }
     }
     sorted
+}
+
+fn twenty_fail_at(out: Stdout, failure: u64) -> bool {
+    merge_fail_at(out, 20, failure)
+}
+
+fn twenty_plain_fail_at(failure: u64) -> bool {
+    merge_plain_fail_at(20, failure)
+}
+
+// The four runs are ascending, with the second preceding the first and the
+// last two interleaved. Powersort detects three runs, merges the first pair
+// into scratch, then detects the fourth run. Calls 69-72 begin the second
+// merge into scratch, selecting right, left, right. Failure on call 73
+// leaves holes in both input runs while the first pair is still in scratch.
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run failure_after_completed_pair(out) = fail Unwrap
+fn failure_after_completed_pair(out: Stdout) -> bool {
+    merge_fail_at(out, 52, 73)
+}
+
+// expect: run plain_failure_after_completed_pair() = fail Unwrap
+fn plain_failure_after_completed_pair() -> bool {
+    merge_plain_fail_at(52, 73)
+}
+
+// The second merge exhausts its right run on call 76. The root check
+// on call 77 sees both complete runs in scratch before starting its merge.
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+// expect: run failure_at_final_merge_check(out) = fail Unwrap
+fn failure_at_final_merge_check(out: Stdout) -> bool {
+    merge_fail_at(out, 52, 77)
+}
+
+// expect: run plain_failure_at_final_merge_check() = fail Unwrap
+fn plain_failure_at_final_merge_check() -> bool {
+    merge_plain_fail_at(52, 77)
 }
 
 // expect: stdout "okXXXXXXXXXXXXXXXXXXXX"

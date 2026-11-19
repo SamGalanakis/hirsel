@@ -86,46 +86,96 @@ fn slots_free[T](take s: Slots[T])
 // Discard only a no-drop element ring; preserves evaluator liveness.
 fn slots_forget_ring[T](mut s: Slots[T], head: u64)
 
-// Stable natural merges, ordered by the first differing bit of adjacent
-// run midpoints (Powersort, as used in Rust's driftsort).
+// Stable natural merges in Powersort order. A run may stay in either buffer
+// until the next merge needs it. The last merge writes to xs.
 pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Result[(), Capacity] {
     let n = list.len(xs)
     if n < 2 {
         return Ok(())
     }
     let scratch: Slots[T] = slots_new(n)?
-    let mut g = Hole(xs: view xs, scratch: take scratch, state: empty_merge())
-    let mut lo: u64 = 0
-    let mut mid = sorted_run_end(mut g, lo, n, before)
-    // Powers strictly increase up the stack. A u64 bit position has only 64 values.
-    let mut starts: Inline[u64, 64] =[0; 64]
+    let mut g = Hole(xs: view xs, scratch: take scratch, pending:[Run(lo: 0, end: 0, in_scratch: false); 64], depth: 0, run: Run(lo: 0, end: 0, in_scratch: false), active: empty_merge())
+    // Powers strictly increase on the stack and occupy only 64 bit positions.
     let mut powers: Inline[u32, 64] =[0; 64]
-    let mut depth: u64 = 0
+    let mut mid = sorted_run_end(mut g, 0, n, before)
+    g.run.end = mid
     while mid < n {
         let end = sorted_run_end(mut g, mid, n, before)
-        let left = lo + (mid - lo) / 2
+        let left = g.run.lo + (mid - g.run.lo) / 2
         let right = mid + (end - mid) / 2
         let power = int.leading_zeros(left ^ right)
-        while depth > 0 && powers[depth - 1] >= power {
-            depth -= 1
-            let earlier = starts[depth]
-            merge_runs(mut g, earlier, lo, mid, before)
-            lo = earlier
+        while g.depth > 0 && powers[g.depth - 1] >= power {
+            merge_top(mut g, false, before)
         }
-        starts[depth] = lo
-        powers[depth] = power
-        depth += 1
-        lo = mid
+        g.pending[g.depth] = g.run
+        powers[g.depth] = power
+        g.depth += 1
+        g.run = Run(lo: mid, end: end, in_scratch: false)
         mid = end
     }
-    while depth > 0 {
-        depth -= 1
-        let earlier = starts[depth]
-        merge_runs(mut g, earlier, lo, n, before)
-        lo = earlier
+    while g.depth > 0 {
+        let last = g.depth == 1
+        merge_top(mut g, last, before)
     }
     let _ = take g
     Ok(())
+}
+
+fn merge_top[T](mut g: Hole[T], last: bool, before: scoped fn(T, T) -> Order) {
+    let top = g.depth - 1
+    let lo = g.pending[top].lo
+    let mid = g.run.lo
+    let end = g.run.end
+    let left = g.pending[top].in_scratch
+    let right = g.run.in_scratch
+    let needs_merge = {
+        let l = if left {
+            view g.scratch.raw
+        } else {
+            g.xs
+        }
+        let r = if right {
+            view g.scratch.raw
+        } else {
+            g.xs
+        }
+        precedes(slots_list_view(r, mid), slots_list_view(l, mid - 1), before)
+    }
+    g.depth = top
+    // If the two inputs are in different buffers, stage the smaller one beside
+    // the larger. The last join always targets xs, even when no merge is needed.
+    let larger_in_scratch = if mid - lo < end - mid {
+        right
+    } else {
+        left
+    }
+    let output_in_scratch = !last && larger_in_scratch != needs_merge
+    let source_in_scratch = output_in_scratch != needs_merge
+    if left != source_in_scratch {
+        move_run(mut g, left, lo, mid)
+    }
+    if right != source_in_scratch {
+        move_run(mut g, right, mid, end)
+    }
+    if needs_merge {
+        g.active = MergeState(lo: lo, left: lo, mid: mid, right: mid, end: end, from_scratch: source_in_scratch)
+        if source_in_scratch {
+            merge_runs(mut g.active, view g.scratch.raw, g.xs, mid, end, before)
+        } else {
+            merge_runs(mut g.active, g.xs, view g.scratch.raw, mid, end, before)
+        }
+        g.active = empty_merge()
+    }
+    g.run = Run(lo: lo, end: end, in_scratch: output_in_scratch)
+}
+
+fn move_run[T](mut g: Hole[T], from_scratch: bool, lo: u64, end: u64) {
+    let count = int.wrapping_sub(end, lo)
+    if from_scratch {
+        slots_list_move(view g.scratch.raw, lo, g.xs, lo, count)
+    } else {
+        slots_list_move(g.xs, lo, view g.scratch.raw, lo, count)
+    }
 }
 
 fn precedes[T](a: T, b: T, before: scoped fn(T, T) -> Order) -> bool {
@@ -150,10 +200,9 @@ fn sorted_run_end[T](mut g: Hole[T], lo: u64, n: u64, before: scoped fn(T, T) ->
         let mut a = lo
         let mut b = end - 1
         while a < b {
-            slots_from_list(g.xs, a, mut g.scratch, 0, 1)
-            slots_from_list(g.xs, b, mut g.scratch, 1, 1)
-            slots_to_list(mut g.scratch, 0, g.xs, b, 1)
-            slots_to_list(mut g.scratch, 1, g.xs, a, 1)
+            slots_list_move(g.xs, a, view g.scratch.raw, lo, 1)
+            slots_list_move(g.xs, b, g.xs, a, 1)
+            slots_list_move(view g.scratch.raw, lo, g.xs, b, 1)
             a += 1
             b -= 1
         }
@@ -170,10 +219,9 @@ fn sorted_run_end[T](mut g: Hole[T], lo: u64, n: u64, before: scoped fn(T, T) ->
     while end < stop {
         let mut j = end
         while j > lo && precedes(slots_list_view(g.xs, j), slots_list_view(g.xs, j - 1), before) {
-            slots_from_list(g.xs, j - 1, mut g.scratch, 0, 1)
-            slots_from_list(g.xs, j, mut g.scratch, 1, 1)
-            slots_to_list(mut g.scratch, 0, g.xs, j, 1)
-            slots_to_list(mut g.scratch, 1, g.xs, j - 1, 1)
+            slots_list_move(g.xs, j - 1, view g.scratch.raw, lo, 1)
+            slots_list_move(g.xs, j, g.xs, j - 1, 1)
+            slots_list_move(view g.scratch.raw, lo, g.xs, j, 1)
             j -= 1
         }
         end += 1
@@ -181,68 +229,100 @@ fn sorted_run_end[T](mut g: Hole[T], lo: u64, n: u64, before: scoped fn(T, T) ->
     end
 }
 
-fn merge_runs[T](mut g: Hole[T], lo: u64, mid: u64, end: u64, before: scoped fn(T, T) -> Order) {
-    if !precedes(slots_list_view(g.xs, mid), slots_list_view(g.xs, mid - 1), before) {
-        return
-    }
-    g.state = MergeState(lo: lo, left: lo, mid: mid, right: mid)
-    while g.state.left < mid && g.state.right < end {
-        let at = int.wrapping_add(g.state.left, int.wrapping_sub(g.state.right, mid))
-        if precedes(slots_list_view(g.xs, g.state.right), slots_list_view(g.xs, g.state.left), before) {
-            slots_from_list(g.xs, g.state.right, mut g.scratch, at, 1)
-            g.state.right = int.wrapping_add(g.state.right, 1)
+fn merge_runs[T](mut state: MergeState, src: View[List[T]], dst: View[List[T]], mid: u64, end: u64, before: scoped fn(T, T) -> Order) {
+    let mut at = state.left
+    while state.left < mid && state.right < end {
+        if precedes(slots_list_view(src, state.right), slots_list_view(src, state.left), before) {
+            slots_list_move(src, state.right, dst, at, 1)
+            state.right = int.wrapping_add(state.right, 1)
         } else {
-            slots_from_list(g.xs, g.state.left, mut g.scratch, at, 1)
-            g.state.left = int.wrapping_add(g.state.left, 1)
+            slots_list_move(src, state.left, dst, at, 1)
+            state.left = int.wrapping_add(state.left, 1)
         }
+        at = int.wrapping_add(at, 1)
     }
-    let at = int.wrapping_add(g.state.left, int.wrapping_sub(g.state.right, mid))
-    if g.state.left < mid {
-        slots_from_list(g.xs, g.state.left, mut g.scratch, at, int.wrapping_sub(mid, g.state.left))
-    } else if g.state.right < end {
-        slots_from_list(g.xs, g.state.right, mut g.scratch, at, int.wrapping_sub(end, g.state.right))
+    if state.left < mid {
+        slots_list_move(src, state.left, dst, at, int.wrapping_sub(mid, state.left))
+    } else if state.right < end {
+        slots_list_move(src, state.right, dst, at, int.wrapping_sub(end, state.right))
     }
-    slots_to_list(mut g.scratch, lo, g.xs, lo, int.wrapping_sub(end, lo))
-    g.state = empty_merge()
 }
 
-// Only the comparator can fail while the pair has holes. The consumed
-// prefixes of the two runs are then empty, and scratch holds exactly that
-// many elements starting at lo. Restore those slots before dropping xs.
+type Run {
+    lo: u64,
+    end: u64,
+    in_scratch: bool
+}
+
+// In an active merge the destination owns the prefix up to
+// left + (right - mid). The source owns [left, mid) and [right, end).
 type MergeState {
     lo: u64,
     left: u64,
     mid: u64,
-    right: u64
+    right: u64,
+    end: u64,
+    from_scratch: bool
 }
 
 fn empty_merge() -> MergeState {
-    MergeState(lo: 0, left: 0, mid: 0, right: 0)
+    MergeState(lo: 0, left: 0, mid: 0, right: 0, end: 0, from_scratch: false)
 }
 
+// Pending runs and the current run retain their original index ranges.
+// Between comparator calls a merge may split its two inputs across buffers;
+// only the active cursors then describe which slots need restoration.
 scoped type Hole[T] {
     xs: View[List[T]],
     scratch: Slots[T],
-    state: MergeState
+    pending: Inline[Run, 64],
+    depth: u64,
+    run: Run,
+    active: MergeState
 } drop(g) {
-    if g.state.lo < g.state.left {
-        slots_to_list(mut g.scratch, g.state.lo, g.xs, g.state.lo, int.wrapping_sub(g.state.left, g.state.lo))
+    let state = g.active
+    if state.end != 0 {
+        let left = state.left
+        let mid = state.mid
+        let right = state.right
+        if state.from_scratch {
+            let left_count = int.wrapping_sub(mid, left)
+            if left_count != 0 {
+                let at = int.wrapping_add(left, int.wrapping_sub(right, mid))
+                slots_list_move(view g.scratch.raw, left, g.xs, at, left_count)
+            }
+            if right < state.end {
+                slots_list_move(view g.scratch.raw, right, g.xs, right, int.wrapping_sub(state.end, right))
+            }
+        } else {
+            if state.lo < left {
+                slots_list_move(view g.scratch.raw, state.lo, g.xs, state.lo, int.wrapping_sub(left, state.lo))
+            }
+            if mid < right {
+                slots_list_move(view g.scratch.raw, left, g.xs, mid, int.wrapping_sub(right, mid))
+            }
+        }
+    } else if g.run.in_scratch {
+        slots_list_move(view g.scratch.raw, g.run.lo, g.xs, g.run.lo, int.wrapping_sub(g.run.end, g.run.lo))
     }
-    if g.state.mid < g.state.right {
-        slots_to_list(mut g.scratch, g.state.left, g.xs, g.state.mid, int.wrapping_sub(g.state.right, g.state.mid))
+    let mut remaining = g.depth
+    for run in g.pending {
+        if remaining == 0 {
+            break
+        }
+        if run.in_scratch {
+            slots_list_move(view g.scratch.raw, run.lo, g.xs, run.lo, int.wrapping_sub(run.end, run.lo))
+        }
+        remaining = int.wrapping_sub(remaining, 1)
     }
     slots_finish_list(g.xs)
 }
 
-// Header access is trusted and private. xs stays frozen by Hole's view while
-// its live set is temporarily holed. Both headers stay fixed: xs retains n,
-// scratch retains0, and Hole restores every original slot before field cleanup.
+// These private aliases keep both headers fixed while Hole tracks liveness.
+// xs retains its original length and capacity, and the empty scratch header
+// frees only the backing allocation after Hole has restored every live slot.
 fn slots_list_view[T](xs: View[List[T]], i: u64) -> View[T] in xs
 
-fn slots_from_list[T](src: View[List[T]], i: u64, mut dst: Slots[T], j: u64, n: u64)
+fn slots_list_move[T](src: View[List[T]], i: u64, dst: View[List[T]], j: u64, n: u64)
 
-fn slots_to_list[T](mut src: Slots[T], i: u64, dst: View[List[T]], j: u64, n: u64)
-
-// Sort touches only the original prefix and restores it before handing back.
-// No tail slot was marked, so unmark live over the restored prefix is complete.
 fn slots_finish_list[T](xs: View[List[T]])

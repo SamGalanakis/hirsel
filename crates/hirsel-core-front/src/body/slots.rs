@@ -217,7 +217,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let (at, _) = self.slots_at(item, vals[0]?, vals[1]?, n)?;
                 Some(self.read_carried(at, item, n))
             }
-            "slots_move" | "slots_shift" | "slots_from_list" | "slots_to_list" => {
+            "slots_move" | "slots_shift" | "slots_list_move" => {
                 let source_header = vals[0]?;
                 let (target_header, to) = if name == "slots_shift" {
                     (source_header, vals[2]?)

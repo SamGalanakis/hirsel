@@ -84,10 +84,10 @@ def run(argv, out, log, tools):
         raise SystemExit(f'failed ({code}): {log}')
 
 
-def frames(data):
+def frames(data, *, env=None):
     """Each sample as (command, [frame leaf to root])."""
     raw = subprocess.run(['perf', 'script', '-i', str(data), '-F', 'comm,ip,sym'], capture_output=True,
-                         text=True, check=True).stdout
+                         text=True, env=env, check=True).stdout
     raw = subprocess.run(['rustfilt'], input=raw, capture_output=True, text=True, check=True).stdout
     samples, current = [], None
     for line in raw.splitlines():

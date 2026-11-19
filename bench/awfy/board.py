@@ -273,7 +273,6 @@ def compile_commands(out):
 
 
 def prepare_compile(out, artifacts, env):
-    suite = load("arena_suite", ROOT / "core/langarena/run.py")
     out.mkdir()
     rust = out / "rust"
     source = ROOT / "core/langarena/rust"
@@ -285,6 +284,12 @@ def prepare_compile(out, artifacts, env):
     run(cargo("build", "-j2", *compile_profile(target)), cwd=rust, env=cargo_scope(env))
     run(cargo("clean", "--release", "--target-dir", target, "-p", "benchmarks"), cwd=rust, env=cargo_scope(env))
 
+    prepare_hirsel_compile(out, artifacts, env)
+    return compile_commands(out)
+
+
+def prepare_hirsel_compile(out, artifacts, env):
+    suite = load("arena_suite", ROOT / "core/langarena/run.py")
     packages = out / "packages"
     run([artifacts["compiler"], "std-product", "--store", packages], env=env)
     helper = out / "helper.hirsel"
@@ -298,7 +303,6 @@ def prepare_compile(out, artifacts, env):
     write_json(out / "inputs.json", manifest)
     (out / "pinned-compiler").symlink_to(artifacts["compiler"])
     (out / "pinned-runtime.a").symlink_to(artifacts["runtime"])
-    return compile_commands(out)
 
 
 def compile_rows(board, out, prepared, fixture, tools):

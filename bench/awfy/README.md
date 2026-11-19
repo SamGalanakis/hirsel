@@ -199,3 +199,18 @@ Pass two unstripped images to `receipt.py elf-census BASELINE CANDIDATE`.
 It emits JSON with section file bytes, sized symbols and their sections,
 relocation and unwind bytes, and the bytes outside sections. It creates its own
 temporary GNU-stripped copies for the shipping-size comparison.
+
+### Profile a cold compile
+
+Use `python3 bench/awfy/cold_phases.py OUT --artifacts TOOLCHAIN
+--fixture ONE_ITERATION_JSON` on the board host. It prepares the std product
+on the build CPUs, compiles the suite with a fresh request store and checks
+the Spectralnorm result. The receipt carries the compiler's stage metrics
+and a separate breakdown of process-tree PMU instruction stack samples.
+Entries in `other` have no recognized phase frame. The samples estimate
+where instruction work occurs.
+
+Add `--pass-trace` for a second fresh-store build with LLVM's pass debug
+logging. The compressed JSON Lines trace names the passes and their IR units.
+The extra instrumentation
+is confined to that diagnostic build.

@@ -924,25 +924,256 @@ resource type SubscriptionLease: send { refund: Sender[u64], charge: u64 } drop(
     let _ = channel.try_send(lease.refund, lease.charge)
 }
 
-type Sub { session: u64, sub: u32, generation: u64, input: SubscriptionInput, cover: Cover, reads: List[store.Read] }
+type Sub { generation: u64, input: SubscriptionInput, cover: Cover, routes: List[RouteKey] }
+
+type SubId { who: u64, sub: u32, serial: u64 }
+
+// The publisher holds one balanced interval tree for the data-tree keys of its open.
+// Points have an inclusive upper endpoint and Covers and Spans have an exclusive one.
+// Each node also holds the greatest upper endpoint in its subtree.
+type RouteEnd { at: Arc[Bytes], included: bool }
+type RouteKey { low: Arc[Bytes], serial: u64, slot: u64 }
+type Route {
+    key: RouteKey,
+    id: SubId,
+    end: RouteEnd,
+    max: RouteEnd,
+    height: u64,
+    left: Option[Box[Route]],
+    right: Option[Box[Route]]
+}
+
+type Subscriptions { by_session: Map[u64, Map[u32, Sub]], root: Option[Box[Route]], serial: u64 }
+
+fn subscriptions() -> Subscriptions {
+    Subscriptions(by_session: map.new(), root: None, serial: 0u64)
+}
+
+fn route_before(a: RouteKey, b: RouteKey) -> bool {
+    let low_a: View[Bytes] = a.low
+    let low_b: View[Bytes] = b.low
+    if low_a != low_b { return low_a < low_b }
+    if a.serial != b.serial { return a.serial < b.serial }
+    a.slot < b.slot
+}
+
+fn end_reaches(end: RouteEnd, key: Bytes) -> bool {
+    let high: View[Bytes] = end.at
+    key < high || (end.included && key == high)
+}
+
+fn raise_end(mut end: RouteEnd, candidate: RouteEnd) {
+    let high: View[Bytes] = candidate.at
+    if !end_reaches(end, high) {
+        end.at = arc.share(candidate.at)
+        end.included = candidate.included
+    }
+}
+
+fn route_height(root: Option[Box[Route]]) -> u64 {
+    match root { Some(node) => node.height, None => 0u64 }
+}
+
+fn measure_route(mut node: Box[Route]) {
+    let left = route_height(node.left)
+    let right = route_height(node.right)
+    node.height = 1u64 + if left > right { left } else { right }
+    let mut far = RouteEnd(at: arc.share(node.end.at), included: node.end.included)
+    if let Some(child) = node.left { raise_end(mut far, child.max) }
+    if let Some(child) = node.right { raise_end(mut far, child.max) }
+    node.max = take far
+}
+
+fn rotate_route_left(take node: Box[Route]) -> Box[Route] {
+    let mut parent = take node
+    let mut next = option.unwrap(replace(mut parent.right, None))
+    parent.right = replace(mut next.left, None)
+    measure_route(mut parent)
+    next.left = Some(take parent)
+    measure_route(mut next)
+    take next
+}
+
+fn rotate_route_right(take node: Box[Route]) -> Box[Route] {
+    let mut parent = take node
+    let mut next = option.unwrap(replace(mut parent.left, None))
+    parent.left = replace(mut next.right, None)
+    measure_route(mut parent)
+    next.right = Some(take parent)
+    measure_route(mut next)
+    take next
+}
+
+fn balance_route(take node: Box[Route]) -> Box[Route] {
+    let mut root = take node
+    let left = route_height(root.left)
+    let right = route_height(root.right)
+    if left > right + 1u64 {
+        let child = option.unwrap(replace(mut root.left, None))
+        root.left = Some(if route_height(child.right) > route_height(child.left) {
+            rotate_route_left(take child)
+        } else { take child })
+        return rotate_route_right(take root)
+    }
+    if right > left + 1u64 {
+        let child = option.unwrap(replace(mut root.right, None))
+        root.right = Some(if route_height(child.left) > route_height(child.right) {
+            rotate_route_right(take child)
+        } else { take child })
+        return rotate_route_left(take root)
+    }
+    measure_route(mut root)
+    take root
+}
+
+fn put_route(take top: Option[Box[Route]], take node: Box[Route]) -> Box[Route] {
+    let Some(take old) = take top else { return take node }
+    let mut root = take old
+    if route_before(node.key, root.key) {
+        let child = replace(mut root.left, None)
+        root.left = Some(put_route(take child, take node))
+    } else {
+        let child = replace(mut root.right, None)
+        root.right = Some(put_route(take child, take node))
+    }
+    balance_route(take root)
+}
+
+fn take_first_route(take root: Box[Route], mut rest: Option[Box[Route]]) -> Box[Route] {
+    let mut node = take root
+    if let Some(take left) = replace(mut node.left, None) {
+        let first = take_first_route(take left, mut node.left)
+        rest = Some(balance_route(take node))
+        take first
+    } else {
+        rest = replace(mut node.right, None)
+        take node
+    }
+}
+
+fn drop_route(take top: Option[Box[Route]], key: RouteKey) -> Option[Box[Route]] {
+    let mut root = option.unwrap(take top)
+    if route_before(key, root.key) {
+        let child = replace(mut root.left, None)
+        root.left = drop_route(take child, key)
+    } else if route_before(root.key, key) {
+        let child = replace(mut root.right, None)
+        root.right = drop_route(take child, key)
+    } else {
+        let right = replace(mut root.right, None)
+        let Some(take child) = take right else { return replace(mut root.left, None) }
+        let mut rest: Option[Box[Route]] = None
+        let mut next = take_first_route(take child, mut rest)
+        next.left = replace(mut root.left, None)
+        next.right = take rest
+        return Some(balance_route(take next))
+    }
+    Some(balance_route(take root))
+}
+
+// Allocate before changing the tree. An insertion or removal only moves boxes.
+fn stage_route(mut nodes: List[Box[Route]], id: SubId, slot: u64, take interval: store.Read) -> Result[(), Capacity] {
+    let (take low, take end) = match take interval {
+        Point(take point) => {
+            let endpoint = result.capacity_only(arc.new(take point))?
+            (arc.share(endpoint), RouteEnd(at: take endpoint, included: true))
+        },
+        Span(take lo, take hi) => {
+            if hi <= lo { return Ok(()) }
+            let upper = result.capacity_only(arc.new(take hi))?
+            (result.capacity_only(arc.new(take lo))?, RouteEnd(at: take upper, included: false))
+        },
+    }
+    let max = RouteEnd(at: arc.share(end.at), included: end.included)
+    let node = Route(key: RouteKey(low: take low, serial: id.serial, slot: slot), id: id,
+        end: take end, max: take max, height: 1u64, left: None, right: None)
+    result.capacity_only(list.push(mut nodes, result.capacity_only(box.new(take node))?))
+}
+
+fn stage_routes(id: SubId, c: Cover, take reads: List[store.Read]) -> Result[(List[Box[Route]], List[RouteKey]), Capacity] {
+    let mut nodes: List[Box[Route]] = list.with_capacity(list.len(reads) + 1u64)?
+    stage_route(mut nodes, id, 0u64, Span(clone(c.low)?, clone(c.high)?))?
+    let mut slot = 0u64
+    for take read in reads {
+        slot += 1u64
+        stage_route(mut nodes, id, slot, take read)?
+    }
+    let mut keys: List[RouteKey] = list.with_capacity(list.len(nodes))?
+    for node in nodes {
+        let key = node.key
+        result.unwrap(list.push(mut keys, RouteKey(low: arc.share(key.low), serial: key.serial, slot: key.slot)))
+    }
+    Ok((take nodes, take keys))
+}
+
+fn install_routes(mut root: Option[Box[Route]], take nodes: List[Box[Route]]) {
+    for take node in nodes {
+        let previous = replace(mut root, None)
+        root = Some(put_route(take previous, take node))
+    }
+}
+
+fn unregister_routes(mut root: Option[Box[Route]], keys: List[RouteKey]) {
+    for key in keys {
+        let previous = replace(mut root, None)
+        root = drop_route(take previous, key)
+    }
+}
+
+fn route_key(root: Option[Box[Route]], key: Bytes, mut hits: Map[u64, (SubId, bool)]) -> Result[(), Capacity] {
+    let Some(node) = view root else { return Ok(()) }
+    if !end_reaches(node.max, key) { return Ok(()) }
+    route_key(node.left, key, mut hits)?
+    let low: View[Bytes] = node.key.low
+    if key < low { return Ok(()) }
+    if end_reaches(node.end, key) {
+        let read = node.key.slot != 0u64
+        if read || !map.contains(hits, node.id.serial) {
+            result.capacity_only(map.insert(mut hits, node.id.serial, (node.id, read)))?
+        }
+    }
+    route_key(node.right, key, mut hits)
+}
+
+fn sub_at(subs: Subscriptions, who: u64, sub: u32) -> Option[View[Sub]] in subs {
+    match map.get(subs.by_session, who) {
+        Some(group) => map.get(group, sub),
+        None => None,
+    }
+}
+
+fn put_sub(mut subs: Subscriptions, id: SubId, take value: Sub) -> Result[(), Capacity] {
+    if !map.contains(subs.by_session, id.who) {
+        result.capacity_only(map.insert(mut subs.by_session, id.who, map.new()))?
+    }
+    let mut incoming = Some(take value)
+    let inserted = option.unwrap(map.update(mut subs.by_session, id.who, scoped fn(mut group: Map[u32, Sub]) -> Result[(), Capacity] {
+        let pending_sub = option.unwrap(replace(mut incoming, None))
+        result.capacity_only(map.insert(mut group, id.sub, take pending_sub))
+    }))
+    if let Error(_) = inserted {
+        if map.len(option.unwrap(map.get(subs.by_session, id.who))) == 0u64 {
+            let _ = map.remove(mut subs.by_session, id.who)
+        }
+    }
+    inserted
+}
+
+fn remove_sub(mut subs: Subscriptions, who: u64, sub: u32) -> Option[Sub] {
+    let Some((take removed, empty)) = map.update(mut subs.by_session, who, scoped fn(mut group: Map[u32, Sub]) -> (Option[Sub], bool) {
+        let removed = map.remove(mut group, sub)
+        (take removed, map.len(group) == 0u64)
+    }) else { return None }
+    if empty { let _ = map.remove(mut subs.by_session, who) }
+    if let Some(s) = view removed { unregister_routes(mut subs.root, s.routes) }
+    take removed
+}
 
 // What one step owes one session: at `version`, the subs whose whole initial result it
 // carries, its rows and its Ended subs; or, with `reset`, a Reset and nothing else.
 type Owe: send { session: u64, version: u64, generations: List[(u32, u64)], complete: List[u32], rows: List[Row], ended: List[(u32, u64, Outcome)], reset: bool }
 
-type Board[G: send, H: send] { r: Registry[G, H], h: H, base: store.Snapshot, newest: Option[store.Snapshot], subs: List[Sub] }
-
-// A Subscribe on a live (session, sub) replaces it.
-fn find(subs: List[Sub], who: u64, sub: u32) -> Option[u64] {
-    let mut i = 0u64
-    while i < list.len(subs) {
-        if subs[i].session == who && subs[i].sub == sub {
-            return Some(i)
-        }
-        i += 1u64
-    }
-    None
-}
+type Board[G: send, H: send] { r: Registry[G, H], h: H, base: store.Snapshot, newest: Option[store.Snapshot], subs: Subscriptions }
 
 fn sub_generation(generations: List[(u32, u64)], sub: u32) -> Option[u64] {
     for (id, generation) in generations { if id == sub { return Some(generation) } }
@@ -970,11 +1201,6 @@ fn run_query[G: send, H: send](r: Registry[G, H], h: H, s: store.Snapshot, key: 
         Some(Query(_, _, go)) => go(s, h, arg, prior, old, sub, rows),
         _ => Stopped(Refused(NoEntry)),
     }
-}
-
-fn rerun_query[G: send, H: send](b: Board[G, H], newest: store.Snapshot, i: u64, rows: Log[Row]) -> Queried {
-    let sub = b.subs[i]
-    run_query(b.r, b.h, newest, sub.input.key, sub.input.arg, b.base, Some(view sub.cover), sub.sub, rows)
 }
 
 fn projection_error(take e: store.Error) -> Queried {
@@ -1022,9 +1248,7 @@ fn at_base[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, take key: B
 }
 
 fn at_base_generation[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, generation: u64, take input: SubscriptionInput) -> Owe {
-    if let Some(i) = find(b.subs, who, sub) {
-        let _ = list.remove(mut b.subs, i)
-    }
+    let _ = remove_sub(mut b.subs, who, sub)
     let version = store.version(b.base)
     let mut o = Owe(session: who, version: version, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), reset: false)
     let rows = match row_log() {
@@ -1037,10 +1261,14 @@ fn at_base_generation[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, 
     match run_query(b.r, b.h, b.base, input.key, input.arg, b.base, None, sub, rows) {
         Covered(take v) => {
             let Viewed(cover: take c, reads: take reads) = take v
-            o.rows = read_rows(take rows)
-            stamp_rows(mut o.generations, sub, generation)
-            result.unwrap(list.push(mut o.complete, sub))
-            result.unwrap(list.push(mut b.subs, Sub(session: who, sub: sub, generation: generation, input: take input, cover: take c, reads: take reads)))
+            match add_subscription(mut b.subs, who, sub, generation, take input, take c, take reads) {
+                Ok(()) => {
+                    o.rows = read_rows(take rows)
+                    stamp_rows(mut o.generations, sub, generation)
+                    result.unwrap(list.push(mut o.complete, sub))
+                },
+                Error(f) => result.unwrap(list.push(mut o.ended, (sub, generation, Refused(Budget(room(f)))))),
+            }
         },
         Stopped(take why) => result.unwrap(list.push(mut o.ended, (sub, generation, take why))),
         Lost(_) => {
@@ -1050,15 +1278,13 @@ fn at_base_generation[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, 
     take o
 }
 
-fn read_hit(reads: List[store.Read], d: List[store.Change]) -> bool {
-    for ch in d {
-        for r in reads {
-            if store.reads_key(r, ch.tree_key) {
-                return true
-            }
-        }
-    }
-    false
+fn add_subscription(mut subs: Subscriptions, who: u64, sub: u32, generation: u64, take input: SubscriptionInput, take c: Cover, take reads: List[store.Read]) -> Result[(), Capacity] {
+    subs.serial += 1u64
+    let id = SubId(who: who, sub: sub, serial: subs.serial)
+    let (take nodes, take keys) = stage_routes(id, c, take reads)?
+    put_sub(mut subs, id, Sub(generation: generation, input: take input, cover: take c, routes: take keys))?
+    install_routes(mut subs.root, take nodes)
+    Ok(())
 }
 
 // The rerun's difference: the keys inside the old Cover at a against the keys inside the new
@@ -1098,38 +1324,39 @@ fn rerun_rows(a: store.Snapshot, old: Cover, b: store.Snapshot, new: Cover, sub:
     }
 }
 
-fn covers(c: Cover, ch: store.Change) -> bool {
-    c.low <= ch.tree_key && ch.tree_key < c.high
-}
-
 // The changed keys inside a Cover, with their published values at b.
 fn covered_rows(d: List[store.Change], c: Cover, sub: u32, out: Log[Row]) -> Result[(), store.Error] {
     for ch in d {
-        if covers(c, ch) {
-            let v = (c.value)(ch)?
-            let copied: Result[Bytes, Capacity] = clone(ch.tree_key)
-            let key = match take copied {
-                Ok(take x) => take x,
-                Error(f) => return Error(Full(f)),
-            }
-            if let Error((f, _)) = log.append(out, Row(sub: sub, key: take key, value: take v)) {
-                return Error(Full(f))
-            }
+        let v = (c.value)(ch)?
+        let copied: Result[Bytes, Capacity] = clone(ch.tree_key)
+        let key = match take copied {
+            Ok(take x) => take x,
+            Error(f) => return Error(Full(f)),
+        }
+        if let Error((f, _)) = log.append(out, Row(sub: sub, key: take key, value: take v)) {
+            return Error(Full(f))
         }
     }
     Ok(())
 }
 
-fn project_changes[G: send, H: send](r: Registry[G, H], key: Bytes, d: List[store.Change], c: Cover, sub: u32, rows: Log[Row]) -> Result[(), Queried] {
-    for ch in d {
-        if covers(c, ch) {
-            return match map.get(r.slots, key) {
-                Some(Query(allowance, steps, _)) => bounded_changes(allowance, steps, d, c, sub, rows),
-                _ => Error(Stopped(Refused(NoEntry))),
-            }
-        }
+fn change_offset(d: List[store.Change], key: Bytes) -> u64 {
+    match list.binary_search_by(d, scoped fn(ch: store.Change) -> Order {
+        if ch.tree_key < key { Less } else { Greater }
+    }) {
+        Ok(i) => i,
+        Error(i) => i,
     }
-    Ok(())
+}
+
+fn project_changes[G: send, H: send](r: Registry[G, H], key: Bytes, d: List[store.Change], c: Cover, sub: u32, rows: Log[Row]) -> Result[(), Queried] {
+    // changes walks the two data trees in key order, with at most one change per key.
+    let first = change_offset(d, c.low)
+    let past = change_offset(d, c.high)
+    match map.get(r.slots, key) {
+        Some(Query(allowance, steps, _)) => bounded_changes(allowance, steps, list.slice(d, first, past), c, sub, rows),
+        _ => Error(Stopped(Refused(NoEntry))),
+    }
 }
 
 fn bounded_changes(allowance: u64, steps: u64, d: List[store.Change], c: Cover, sub: u32, rows: Log[Row]) -> Result[(), Queried] {
@@ -1148,106 +1375,116 @@ fn bounded_changes(allowance: u64, steps: u64, d: List[store.Change], c: Cover, 
     }
 }
 
-// A session Reset loses all its subscriptions. Return the number of already
-// visited subscriptions that survive, so the round resumes at the first unvisited one.
-fn reset_session(mut b: List[Sub], mut owes: List[Owe], who: u64, version: u64, cursor: u64) -> u64 {
-    let mut i = 0u64
-    let mut resume = cursor
-    while i < list.len(b) {
-        if b[i].session == who {
-            if i < resume {
-                resume -= 1u64
-            }
-            let _ = list.remove(mut b, i)
-        } else {
-            i += 1u64
+// A session Reset loses all its subscriptions and replaces its owed content.
+fn reset_session(mut subs: Subscriptions, mut owes: List[Owe], who: u64, version: u64) {
+    forget_subs(mut subs, who)
+    let k = owe(mut owes, who, version)
+    owes[k] = Owe(session: who, version: version, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), reset: true)
+}
+
+fn reset_subscriptions(mut subs: Subscriptions, mut owes: List[Owe], version: u64) {
+    let groups = replace(mut subs.by_session, map.new())
+    subs.root = None
+    for (who, _) in groups { reset_session(mut subs, mut owes, who, version) }
+}
+
+fn affected_subscriptions(subs: Subscriptions, changes: List[store.Change]) -> Result[List[(SubId, bool)], Capacity] {
+    let mut hits: Map[u64, (SubId, bool)] = map.new()
+    for ch in changes { route_key(subs.root, ch.tree_key, mut hits)? }
+    let mut ordered: List[(SubId, bool)] = list.with_capacity(map.len(hits))?
+    for (_, hit) in hits { result.unwrap(list.push(mut ordered, hit)) }
+    // Both projection and reruns observe the same subscription order as G3.
+    list.sort(mut ordered, scoped fn(a: (SubId, bool), b: (SubId, bool)) -> Order {
+        if a.0.serial < b.0.serial { Less } else if a.0.serial > b.0.serial { Greater } else { Equal }
+    })
+    Ok(take ordered)
+}
+
+fn replace_routes(mut subs: Subscriptions, id: SubId, take c: Cover, take reads: List[store.Read]) -> Result[(), Capacity] {
+    let (take nodes, take keys) = stage_routes(id, c, take reads)?
+    let mut incoming = Some((take c, take keys))
+    let old = option.unwrap(option.unwrap(map.update(mut subs.by_session, id.who, scoped fn(mut group: Map[u32, Sub]) -> Option[List[RouteKey]] {
+        map.update(mut group, id.sub, scoped fn(mut entry: Sub) -> List[RouteKey] {
+            let (take cover_next, take routes_next) = option.unwrap(replace(mut incoming, None))
+            entry.cover = take cover_next
+            replace(mut entry.routes, take routes_next)
+        })
+    })))
+    unregister_routes(mut subs.root, old)
+    install_routes(mut subs.root, take nodes)
+    Ok(())
+}
+
+fn end_round_sub(mut subs: Subscriptions, mut out: Owe, id: SubId, generation: u64, take why: Outcome) {
+    result.unwrap(list.push(mut out.ended, (id.sub, generation, take why)))
+    let _ = remove_sub(mut subs, id.who, id.sub)
+}
+
+fn append_round_rows(mut out: Owe, id: SubId, generation: u64, take rows: Log[Row]) {
+    let before = list.len(out.rows)
+    for take row in read_rows(take rows) { result.unwrap(list.push(mut out.rows, take row)) }
+    if list.len(out.rows) != before { stamp_rows(mut out.generations, id.sub, generation) }
+}
+
+type SubUpdate = Rows(Log[Row]) | Refreshed(Viewed, Log[Row]) | EndSub(Outcome) | ResetSubs
+
+fn advance_sub[G: send, H: send](b: Board[G, H], newest: store.Snapshot, d: List[store.Change], id: SubId, read: bool) -> Option[(u64, SubUpdate)] {
+    let Some(entry) = sub_at(b.subs, id.who, id.sub) else { return None }
+    let generation = entry.generation
+    let rows = match row_log() {
+        Ok(take x) => take x,
+        Error(f) => return Some((generation, EndSub(Refused(Budget(room(f)))))),
+    }
+    let advanced = if read {
+        match run_query(b.r, b.h, newest, entry.input.key, entry.input.arg, b.base, Some(view entry.cover), id.sub, rows) {
+            Covered(take v) => Refreshed(take v, take rows),
+            Stopped(take why) => EndSub(take why),
+            Lost(_) => ResetSubs,
+        }
+    } else {
+        match project_changes(b.r, entry.input.key, d, entry.cover, id.sub, rows) {
+            Ok(()) => Rows(take rows),
+            Error(Stopped(take why)) => EndSub(take why),
+            Error(_) => ResetSubs,
         }
     }
-    let k = owe(mut owes, who, version)
-    owes[k].generations = list.new()
-    owes[k].complete = list.new()
-    owes[k].rows = list.new()
-    owes[k].ended = list.new()
-    owes[k].reset = true
-    resume
+    Some((generation, take advanced))
 }
 
 // G2: one round from the base to the newest snapshot released.
 fn round[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
     let mut owes: List[Owe] = list.new()
-    let newest = match replace(mut b.newest, None) {
-        Some(take s) => take s,
-        None => return take owes,
-    }
+    let Some(take newest) = replace(mut b.newest, None) else { return take owes }
     let version = store.version(newest)
     let d = match store.changes(b.base, newest) {
         Ok(take x) => take x,
         Error(_) => {
-            while list.len(b.subs) > 0u64 {
-                let who = b.subs[0].session
-                let _ = reset_session(mut b.subs, mut owes, who, version, 0u64)
-            }
+            reset_subscriptions(mut b.subs, mut owes, version)
             b.base = take newest
             return take owes
         },
     }
-    let mut i = 0u64
-    while i < list.len(b.subs) {
-        let who = b.subs[i].session
-        let sub = b.subs[i].sub
-        let generation = b.subs[i].generation
-        let k = owe(mut owes, who, version)
-        if owes[k].reset {
-            i += 1u64
-            continue
-        }
-        let before = list.len(owes[k].rows)
-        let rows = match row_log() {
-            Ok(take x) => take x,
-            Error(f) => {
-                result.unwrap(list.push(mut owes[k].ended, (sub, generation, Refused(Budget(room(f))))))
-                let _ = list.remove(mut b.subs, i)
-                continue
-            },
-        }
-        if !read_hit(b.subs[i].reads, d) {
-            match project_changes(b.r, b.subs[i].input.key, d, b.subs[i].cover, sub, rows) {
-                Ok(()) => {
-                    for take row in read_rows(take rows) {
-                        result.unwrap(list.push(mut owes[k].rows, take row))
-                    }
-                    if list.len(owes[k].rows) != before { stamp_rows(mut owes[k].generations, sub, generation) }
-                    i += 1u64
-                },
-                Error(Stopped(take why)) => {
-                    result.unwrap(list.push(mut owes[k].ended, (sub, generation, take why)))
-                    let _ = list.remove(mut b.subs, i)
-                },
-                Error(_) => {
-                    i = reset_session(mut b.subs, mut owes, who, version, i)
-                },
-            }
-            continue
-        }
-        let rerun = rerun_query(b, newest, i, rows)
-        match take rerun {
-            Covered(take v) => {
-                let Viewed(cover: take c, reads: take reads) = take v
-                for take row in read_rows(take rows) {
-                    result.unwrap(list.push(mut owes[k].rows, take row))
+    let hits = match affected_subscriptions(b.subs, d) {
+        Ok(take x) => take x,
+        Error(_) => {
+            reset_subscriptions(mut b.subs, mut owes, version)
+            b.base = take newest
+            return take owes
+        },
+    }
+    for (id, read) in hits {
+        let Some((generation, take advanced)) = advance_sub(b, newest, d, id, read) else { continue }
+        let k = owe(mut owes, id.who, version)
+        match take advanced {
+            Rows(take rows) => append_round_rows(mut owes[k], id, generation, take rows),
+            Refreshed(Viewed(cover: take c, reads: take reads), take rows) => {
+                match replace_routes(mut b.subs, id, take c, take reads) {
+                    Ok(()) => append_round_rows(mut owes[k], id, generation, take rows),
+                    Error(f) => end_round_sub(mut b.subs, mut owes[k], id, generation, Refused(Budget(room(f)))),
                 }
-                if list.len(owes[k].rows) != before { stamp_rows(mut owes[k].generations, sub, generation) }
-                b.subs[i].cover = take c
-                b.subs[i].reads = take reads
-                i += 1u64
             },
-            Stopped(take why) => {
-                result.unwrap(list.push(mut owes[k].ended, (sub, generation, take why)))
-                let _ = list.remove(mut b.subs, i)
-            },
-            Lost(_) => {
-                i = reset_session(mut b.subs, mut owes, who, version, i)
-            },
+            EndSub(take why) => end_round_sub(mut b.subs, mut owes[k], id, generation, take why),
+            ResetSubs => reset_session(mut b.subs, mut owes, id.who, version),
         }
     }
     b.base = take newest
@@ -2066,7 +2303,7 @@ fn offer(to: Sender[WireEvent], take e: Notice) -> Offered {
 
 fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: store.Snapshot, take from: Receiver[PubIn]) -> () waits {
     let mut at = store.version(base)
-    let mut b = Board(r: take r, h: take h, base: take base, newest: None, subs: list.new())
+    let mut b = Board(r: take r, h: take h, base: take base, newest: None, subs: subscriptions())
     let mut joined: List[Joiner] = list.new()
     let mut waiting: List[Replies] = list.new()
     let mut minted = 0u64
@@ -2100,9 +2337,7 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 publish_subscription(mut b, mut joined, mut owes, who, sub, 0u64, take key, take arg),
             WireSubscribed(who, sub, generation, take input) =>
                 publish_wire_subscription(mut b, mut joined, mut owes, who, sub, generation, take input),
-            Unsubscribed(who, sub) => if let Some(i) = find(b.subs, who, sub) {
-                let _ = list.remove(mut b.subs, i)
-            },
+            Unsubscribed(who, sub) => { let _ = remove_sub(mut b.subs, who, sub) },
             Left(who) => forget(mut b.subs, mut joined, who),
             // An owner made room (v2.13), or a marked session ended (v2.14): the sweep and the
             // retry below are the whole of it.
@@ -2162,7 +2397,7 @@ fn unend(mut ended: List[(u32, u64, Outcome)], sub: u32) {
 }
 
 // Fold the ledger and this round into the same attempt as the owner's pending outcomes.
-fn settle(mut subs: List[Sub], mut joined: List[Joiner], mut waiting: List[Replies], take owes: List[Owe], at: u64) {
+fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[Replies], take owes: List[Owe], at: u64) {
     let mut contents = take owes
     let mut bounced: List[Replies] = list.new()
     let mut i = 0u64
@@ -2239,7 +2474,7 @@ fn settle(mut subs: List[Sub], mut joined: List[Joiner], mut waiting: List[Repli
 
 // A full inbox bounced this content: each sub it named (complete or a row) ends Overloaded,
 // its Ended subs wait, and a Reset waits and covers them all.
-fn overloaded(mut subs: List[Sub], mut j: Joiner, take o: Owe) {
+fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
     let Owe(session: who, version: _, generations: take generations, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
     let mut cut: List[u32] = take complete
     for r in rows {
@@ -2248,9 +2483,7 @@ fn overloaded(mut subs: List[Sub], mut j: Joiner, take o: Owe) {
         }
     }
     for sub in cut {
-        if let Some(i) = find(subs, who, sub) {
-            let _ = list.remove(mut subs, i)
-        }
+        let _ = remove_sub(mut subs, who, sub)
     }
     if reset || j.reset {
         j.reset = true
@@ -2280,7 +2513,7 @@ fn joiner(joined: List[Joiner], who: u64) -> Option[u64] {
 // v2.14: after every message but Halt, in join order, a marked session whose mark answers
 // Closed has ended, and is retired: its subscriptions, its ledger and mark (in its Joiner)
 // go. The retry pass that follows drops its waiting replies, whose inbox is closed (Shut).
-fn sweep(mut subs: List[Sub], mut joined: List[Joiner]) {
+fn sweep(mut subs: Subscriptions, mut joined: List[Joiner]) {
     let mut i = 0u64
     while i < list.len(joined) {
         let ended = match joined[i].mark {
@@ -2299,18 +2532,13 @@ fn sweep(mut subs: List[Sub], mut joined: List[Joiner]) {
     }
 }
 
-fn forget_subs(mut subs: List[Sub], who: u64) {
-    let mut i = 0u64
-    while i < list.len(subs) {
-        if subs[i].session == who {
-            let _ = list.remove(mut subs, i)
-        } else {
-            i += 1u64
-        }
+fn forget_subs(mut subs: Subscriptions, who: u64) {
+    if let Some(take group) = map.remove(mut subs.by_session, who) {
+        for (_, sub) in group { unregister_routes(mut subs.root, sub.routes) }
     }
 }
 
-fn forget(mut subs: List[Sub], mut joined: List[Joiner], who: u64) {
+fn forget(mut subs: Subscriptions, mut joined: List[Joiner], who: u64) {
     forget_subs(mut subs, who)
     if let Some(j) = joiner(joined, who) {
         let _ = list.remove(mut joined, j)
@@ -2513,9 +2741,18 @@ fn qf(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Cover, Capacity] {
     cover(h.t, Included(2u64), Included(2u64))
 }
 
+fn q_moving(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Cover, Capacity] {
+    let selector = option.unwrap(result.unwrap(store.fetch(tx, h.t, 0u64)))
+    let key = if selector == 0u64 { 3u64 } else { 4u64 }
+    let mut scan = result.unwrap(store.range(tx, h.t, Included(key), Excluded(key + 1u64)))
+    let chosen = match result.unwrap(store.next(mut scan)) { Some((_, _)) => 2u64, None => 1u64 }
+    cover(h.t, Included(chosen), Included(chosen))
+}
+
 fn subs_place(mut r: Registry[(), Qh]) -> Result[(), RegisterError] {
     query(mut r, code.describe(q1), 65536u64, DEFAULT_STEPS)?
-    query(mut r, code.describe(qf), 65536u64, DEFAULT_STEPS)
+    query(mut r, code.describe(qf), 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(q_moving), 65536u64, DEFAULT_STEPS)
 }
 
 fn subs_handles(mut db: store.Db) -> Result[Qh, store.Error] waits {
@@ -2701,7 +2938,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
         Ok(take x) => take x,
         Error(_) => return false,
     }
-    let mut b = Board(r: take reg, h: take h, base: take base, newest: None, subs: list.new())
+    let mut b = Board(r: take reg, h: take h, base: take base, newest: None, subs: subscriptions())
     let mut cl = Client(caches: list.new(), last: list.new())
     let k1 = query_key(code.describe(q1))
     let kf = query_key(code.describe(qf))
@@ -2755,7 +2992,20 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
             }
         }
     }
-    faulted && apply_all(mut cl, take owes) && cached(cl, 0u64, 2u32) == None && holds(cl, keys, 0u64, 1u32, Some(1u8), Some(2u8)) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(2u8))
+    if !faulted || !apply_all(mut cl, take owes) || cached(cl, 0u64, 2u32) != None || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(2u8)) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(2u8)) {
+        return false
+    }
+    // Moving the selector invalidates the Point and moves the read Span from [4,5) to
+    // [3,4). A write at the old lower bound must miss both Spans. The new lower bound
+    // must rerun the query and move its Cover from row0 to row1.
+    let moving = at_base(mut b, 2u64, 1u32, query_key(code.describe(q_moving)), no_arg())
+    if !apply(mut cl, take moving) || !holds(cl, keys, 2u64, 1u32, Some(1u8), None) { return false }
+    set(mut db, t, 0u64, 0u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 2u64, 1u32, Some(1u8), None) { return false }
+    set(mut db, t, 4u64, 20u64)
+    if list.len(step(mut b, db)) != 0u64 { return false }
+    set(mut db, t, 3u64, 21u64)
+    apply_all(mut cl, step(mut b, db)) && holds(cl, keys, 2u64, 1u32, None, Some(2u8))
 }
 
 pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
@@ -2766,14 +3016,19 @@ pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
     set(mut db, t, 0u64, 1u64)
     let h = result.unwrap(subs_handles(mut db))
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: list.new())
+    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
     let _ = at_base(mut b, 1u64, 1u32, query_key(code.describe(q1)), no_arg())
     let _ = at_base(mut b, 2u64, 1u32, query_key(code.describe(q1)), no_arg())
     let _ = at_base(mut b, 3u64, 1u32, query_key(code.describe(q1)), no_arg())
     let schema = 7u64
     let rejected = fn(_ch: store.Change) -> Result[Option[Bytes], store.Error] { Error(Schema(schema)) }
     let value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error] = result.unwrap(result.capacity_only(take rejected))
-    b.subs[1].cover.value = take value
+    let mut next = Some(take value)
+    let _ = map.update(mut b.subs.by_session, 2u64, scoped fn(mut group: Map[u32, Sub]) {
+        let _ = map.update(mut group, 1u32, scoped fn(mut entry: Sub) {
+            entry.cover.value = option.unwrap(replace(mut next, None))
+        })
+    })
     set(mut db, t, 1u64, 7u64)
     let owes = step(mut b, db)
     list.len(owes) == 3u64
@@ -2818,6 +3073,8 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let c1 = store.snapshot(db)
     set(mut db, t, 2u64, 7u64)
     let c2 = store.snapshot(db)
+    set(mut db, t, 4u64, 1u64)
+    let outside = store.snapshot(db)
     let v1 = store.version(c1)
     let v2 = store.version(c2)
     let Mailbox(to: take to, from: take from) = result.unwrap(mailbox(8u64))
@@ -2828,6 +3085,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     result.unwrap(list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new()))))
     result.unwrap(list.push(mut queue, Subscribed(1u64, 1u32, query_key(code.describe(q1)), no_arg())))
     result.unwrap(list.push(mut queue, Released(Release(version: v2, snapshot: Some(take c2), answers: list.new()))))
+    result.unwrap(list.push(mut queue, Released(Release(version: store.version(outside), snapshot: Some(take outside), answers: list.new()))))
     result.unwrap(list.push(mut queue, Halt))
     for take e in queue {
         if let Error(_) = channel.send(to, PubIn(e: take e)) {
@@ -3031,7 +3289,7 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
         Ok(take x) => take x,
         Error(_) => return false,
     }
-    let mut b = Board(r: take reg, h: take h, base: take base, newest: None, subs: list.new())
+    let mut b = Board(r: take reg, h: take h, base: take base, newest: None, subs: subscriptions())
     let k1 = query_key(code.describe(q1))
     let _ = at_base(mut b, 1u64, 1u32, result.unwrap(clone(k1)), no_arg())
     let _ = at_base(mut b, 2u64, 1u32, result.unwrap(clone(k1)), no_arg())
@@ -3056,15 +3314,8 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
     result.unwrap(list.push(mut waiting, Replies(recipient: Recipient(owner: 2u64, to: take m_told), rows: take outcomes)))
     sweep(mut b.subs, mut joined)
     settle(mut b.subs, mut joined, mut waiting, list.new(), at)
-    let mut live = 0u64
-    for s in b.subs {
-        if s.session != 1u64 {
-            return false
-        }
-        live += 1u64
-    }
     let _ = (l_send, l_from)
-    live == 1u64 && list.len(joined) == 1u64 && joined[0].who == 1u64 && list.len(waiting) == 0u64 && none(m_keep) && none(m_inbox)
+    map.len(b.subs.by_session) == 1u64 && map.contains(b.subs.by_session, 1u64) && list.len(joined) == 1u64 && joined[0].who == 1u64 && list.len(waiting) == 0u64 && none(m_keep) && none(m_inbox)
 }
 
 fn none[T](x: Option[T]) -> bool {
@@ -3430,7 +3681,7 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
     let ca: std.codec.Codec[u32] = std.codec.of()
     let cr: std.codec.Codec[()] = std.codec.of_unit()
     let (take key, _) = result.unwrap(described(code.identity(code.describe(accounts_q)), None, Query, ca, cr))
-    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: list.new())
+    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
     // G3: the initial result, from span_changes, holds row 1 normalized from schema 0.
     let initial = at_base(mut b, 0u64, 7u32, take key, no_arg())
     if list.len(initial.complete) != 1u64 || list.len(initial.rows) != 1u64 || !row_is(initial.rows[0], account_key(1u8), account_value(10u8, 7u8)) {
@@ -3478,10 +3729,10 @@ fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
     let reg = result.unwrap(placed(code.describe(projection_place), 1048576u64))
     let ca: std.codec.Codec[u32] = std.codec.of()
     let (take key, _) = result.unwrap(described(code.identity(code.describe(accounts_q)), None, Query, ca, std.codec.of_unit()))
-    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: list.new())
+    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
     let o = at_base(mut b, 1u64, 7u32, take key, no_arg())
     !o.reset && list.len(o.rows) == 0u64 && list.len(o.complete) == 0u64
-        && list.len(o.ended) == 1u64 && o.ended[0].0 == 7u32 && list.len(b.subs) == 0u64
+        && list.len(o.ended) == 1u64 && o.ended[0].0 == 7u32 && map.len(b.subs.by_session) == 0u64
         && match o.ended[0].2 {
             Failed(Raised(5u32)) => balance == 10u64,
             Failed(OutOfTime(4096u64)) => balance == 11u64,

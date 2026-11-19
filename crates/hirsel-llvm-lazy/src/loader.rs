@@ -74,7 +74,7 @@ type Program = unsafe extern "C" fn(
     *const libc::c_char,
     *const libc::c_char,
     *const libc::c_char,
-    u32,
+    u8,
     FindTail,
     KeepTail,
     Reuse,
@@ -224,7 +224,7 @@ fn load() -> Result<Backend, String> {
     // engine.c built in this same artifact. No foreign component is selected.
     let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v2".as_ptr()) };
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
-    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v8".as_ptr()) };
+    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v9".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
     if compile.is_null() || free.is_null() || program.is_null() || construction.is_null() {
@@ -307,7 +307,7 @@ pub(crate) fn compile_module(
         &[],
         speed,
         target,
-        0,
+        false,
         &mut crate::Unheld,
     )?;
     Ok(program
@@ -317,16 +317,15 @@ pub(crate) fn compile_module(
 }
 
 /// A program's parts, in order, and the objects generated for the parts
-/// `held` did not hold: one per part on `jobs` threads, or with
-/// `jobs` 0 one for them all.
+/// `held` did not hold: one per part with `split_objects` or one for them all.
 pub(crate) fn program(
     units: Vec<ProgramUnit<'_>>,
     exports: &[String],
     target: hirsel_core_layout::Target,
-    jobs: u32,
+    split_objects: bool,
     held: &mut dyn crate::Held,
 ) -> Result<crate::Program, String> {
-    emit(units, exports, true, target, jobs, held)
+    emit(units, exports, true, target, split_objects, held)
 }
 
 struct Receiver<'a> {
@@ -439,7 +438,7 @@ fn emit(
     exports: &[String],
     speed: bool,
     target: hirsel_core_layout::Target,
-    jobs: u32,
+    split_objects: bool,
     held: &mut dyn crate::Held,
 ) -> Result<crate::Program, String> {
     let triple = CString::new(target.triple()).unwrap();
@@ -493,7 +492,7 @@ fn emit(
             triple.as_ptr(),
             cpu.as_ptr(),
             features.as_ptr(),
-            jobs,
+            u8::from(split_objects),
             find_tail,
             keep_tail,
             reuse_part,

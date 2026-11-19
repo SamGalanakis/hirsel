@@ -491,8 +491,6 @@ impl CheckProduct {
                 .collect::<Vec<_>>();
             let mut parts = Vec::new();
             let mut failure = None;
-            // One code generator thread per CPU this process may run on.
-            let jobs = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
             let mut reuse = SharedParts {
                 generator: &generator,
                 shared: &shared,
@@ -502,12 +500,12 @@ impl CheckProduct {
             };
             let exports = [instance.symbol()];
             let program = match lowered {
-                Some(release) => release.emit(&exports, jobs, &mut reuse),
+                Some(release) => release.emit(&exports, &mut reuse),
                 None => hirsel_llvm_lazy::emit_program_parts(
                     &units,
                     &exports,
                     target,
-                    jobs,
+                    true,
                     elide_steps,
                     &mut reuse,
                 ),

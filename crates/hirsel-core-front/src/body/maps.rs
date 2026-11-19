@@ -203,11 +203,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let one = self.konst(u, 1, n)?;
         let next = self.map_binary(BinaryOp::Add, count, one, n);
         let recipe = self.map_entry(types[0], types[1], n)?;
+        // core.map's index word: the hash's bits above the index mask over the
+        // one-based slot. A spare slot means a nonempty block, so the index
+        // length is stored.
+        let len_at = self.map_metadata_at(header, recipe, 1, n)?;
+        let len = self.read_bits(len_at, u, n);
+        let mask = self.map_binary(BinaryOp::Sub, len, one, n);
+        let high = self.konst(u, u64::MAX, n)?;
+        let high = self.map_binary(BinaryOp::BitXor, mask, high, n);
+        let tag = self.map_binary(BinaryOp::BitAnd, hash, high, n);
+        let word = self.map_binary(BinaryOp::BitOr, tag, next, n);
         let index = self.map_index_at(header, recipe, insertion.index, n)?;
         self.inst(
             Inst::Store {
                 address: index,
-                value: next,
+                value: word,
             },
             n,
         );

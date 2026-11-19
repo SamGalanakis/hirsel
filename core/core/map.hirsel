@@ -13,13 +13,15 @@ pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
     let mask = int.wrapping_sub(index_len(m), 1)
     let mut j = h & mask
     loop {
-        let s = index_get(m, j)
-        if s == 0 {
+        let w = index_get(m, j)
+        if w == 0 {
             return None
         }
-        let i = s - 1
-        if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
-            return Some(slot_value(m, i))
+        if (w ^ h) <= mask {
+            let i = int.wrapping_sub(w & mask, 1)
+            if slot_live(m, i) && slot_key(m, i) == k {
+                return Some(slot_value(m, i))
+            }
         }
         j = int.wrapping_add(j, 1) & mask
     }
@@ -49,8 +51,9 @@ pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (
     // adding the one-based index cannot overflow. Nonzero index words and lengths
     // similarly justify the wrapping subtractions above.
     let s = int.wrapping_add(slots(m), 1)
+    let w = index_word(m, h, s)
     push_entry(mut m, h, take k, take v)
-    index_set(mut m, j, s)
+    index_set(mut m, j, w)
     Ok(())
 }
 
@@ -63,13 +66,15 @@ fn probe_insert[K: key, V](m: Map[K, V], k: K) -> (u64, u64, bool) {
         let mask = int.wrapping_sub(n, 1)
         j = h & mask
         loop {
-            let s = index_get(m, j)
-            if s == 0 {
+            let w = index_get(m, j)
+            if w == 0 {
                 break
             }
-            let i = int.wrapping_sub(s, 1)
-            if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
-                return (h, i, true)
+            if (w ^ h) <= mask {
+                let i = int.wrapping_sub(w & mask, 1)
+                if slot_live(m, i) && slot_key(m, i) == k {
+                    return (h, i, true)
+                }
             }
             j = int.wrapping_add(j, 1) & mask
         }
@@ -144,7 +149,14 @@ fn index_len[K: key, V](m: Map[K, V]) -> u64
 
 fn index_get[K: key, V](m: Map[K, V], j: u64) -> u64
 
-fn index_set[K: key, V](mut m: Map[K, V], j: u64, s: u64)
+fn index_set[K: key, V](mut m: Map[K, V], j: u64, w: u64)
+
+// An index word keeps the hash's bits above the index mask over the one-based
+// entry slot (at most capacity, below the index length), so a probe rejects
+// most other keys without loading their entries. Zero stays the empty word.
+fn index_word[K: key, V](m: Map[K, V], h: u64, s: u64) -> u64 {
+    (h & ~int.wrapping_sub(index_len(m), 1)) | s
+}
 
 fn find[K: key, V](m: Map[K, V], k: K, h: u64) -> Option[u64] {
     let n = index_len(m)
@@ -154,13 +166,15 @@ fn find[K: key, V](m: Map[K, V], k: K, h: u64) -> Option[u64] {
     let mask = n - 1
     let mut j = h & mask
     loop {
-        let s = index_get(m, j)
-        if s == 0 {
+        let w = index_get(m, j)
+        if w == 0 {
             return None
         }
-        let i = s - 1
-        if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
-            return Some(i)
+        if (w ^ h) <= mask {
+            let i = int.wrapping_sub(w & mask, 1)
+            if slot_live(m, i) && slot_key(m, i) == k {
+                return Some(i)
+            }
         }
         j = int.wrapping_add(j, 1) & mask
     }
@@ -213,7 +227,7 @@ fn reindex[K: key, V](mut m: Map[K, V]) {
             j = int.wrapping_add(j, 1) & mask
         }
         let s = int.wrapping_add(i, 1)
-        index_set(mut m, j, s)
+        index_set(mut m, j, (stored_hash & ~mask) | s)
         i = s
     }
 }
@@ -224,7 +238,7 @@ fn install_index[K: key, V](mut m: Map[K, V], h: u64, s: u64) {
     while index_get(m, j) != 0 {
         j = int.wrapping_add(j, 1) & mask
     }
-    index_set(mut m, j, s)
+    index_set(mut m, j, (h & ~mask) | s)
 }
 
 // Core-private clone item in core.map; declaration-only MEM-17 eligibility.
@@ -295,7 +309,8 @@ pub fn update_or_insert[K: key, V, R](mut m: Map[K, V], take k: K, take initial:
         if full {
             install_index(mut m, h, entry_word)
         } else {
-            index_set(mut m, index, entry_word)
+            let w = index_word(m, h, entry_word)
+            index_set(mut m, index, w)
         }
         i
     }

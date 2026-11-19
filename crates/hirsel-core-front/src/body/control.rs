@@ -647,7 +647,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return (ERROR, None);
             }
             let (ty, lo, hi) = self.operands(ungrouped, None);
-            if ty != ERROR && int_of(&self.t, ty).is_none() {
+            if ty != ERROR && int_of(ty).is_none() {
                 self.refuse(
                     "SEM-6",
                     ungrouped,

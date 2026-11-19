@@ -27,9 +27,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return (t, None);
                 }
                 // Unary minus is for signed integers and floats (LANG-21).
-                let r = match int_of(&self.t, t) {
+                let r = match int_of(t) {
                     Some((true, _)) => self.emit_unary(UnaryOp::Neg, t, v, n),
-                    None if is_float(&self.t, t) => self.emit_unary(UnaryOp::Neg, t, v, n),
+                    None if is_float(t) => self.emit_unary(UnaryOp::Neg, t, v, n),
                     _ => return self.no_operator(n, t),
                 };
                 (t, r)
@@ -42,14 +42,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 (t, self.emit_unary(UnaryOp::Not, t, v, n))
             }
             "~" => {
-                let hint = want.filter(|w| {
-                    int_of(&self.t, w.ty).is_some() || self.vector_shape(w.ty).is_some()
-                });
+                let hint =
+                    want.filter(|w| int_of(w.ty).is_some() || self.vector_shape(w.ty).is_some());
                 let (t, v) = self.expr(e, hint);
                 if self.vector_shape(t).is_some() {
                     return (t, self.emit_simd(SimdOp::BitNot, t, v, None, n));
                 }
-                if int_of(&self.t, t).is_none() {
+                if int_of(t).is_none() {
                     return self.no_operator(n, t);
                 }
                 (t, self.emit_unary(UnaryOp::BitNot, t, v, n))
@@ -441,8 +440,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             return self.emit_simd(op, t, l, r, n);
         }
-        let int = int_of(&self.t, t).is_some();
-        let float = is_float(&self.t, t);
+        let int = int_of(t).is_some();
+        let float = is_float(t);
         let bop = match op {
             "+" => BinaryOp::Add,
             "-" => BinaryOp::Sub,

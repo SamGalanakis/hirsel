@@ -386,7 +386,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             Some(TokenKind::Byte) if ty == scalar(Scalar::U8) => byte_value(text).map(i128::from),
             Some(TokenKind::Integer) => {
-                if int_of(&self.t, ty).is_none() {
+                if int_of(ty).is_none() {
                     self.refuse(
                         "LANG-17",
                         n,
@@ -453,7 +453,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if ty == scalar(Scalar::Char) {
             return Some((0, 0x10ffff));
         }
-        let (signed, bits) = int_of(&self.t, ty)?;
+        let (signed, bits) = int_of(ty)?;
         Some(if signed {
             (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
         } else {

@@ -1697,7 +1697,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             tys[0]
         };
-        let (signed, width) = int_of(&self.t, input)?;
+        let (signed, width) = int_of(input)?;
         let ty = value_ty(&self.t, input).ok().flatten()?;
         let op = match name {
             "wrapping_add" => Some((ArithMode::Wrapping, ArithOp::Add)),
@@ -1842,7 +1842,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let mode = match name {
             "widen" => {
-                let (ts, b) = int_of(&self.t, target)?;
+                let (ts, b) = int_of(target)?;
                 if !((signed == ts && width <= b) || (!signed && ts && width < b)) {
                     let (x, y) = (self.shown(input), self.shown(target));
                     self.refuse("SEM-1", n, format!("not every `{x}` fits `{y}`"));
@@ -1850,7 +1850,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 ConvertMode::Widen
             }
-            "truncate" if int_of(&self.t, target)?.1 <= width => ConvertMode::Truncate,
+            "truncate" if int_of(target)?.1 <= width => ConvertMode::Truncate,
             "truncate" => {
                 let (x, y) = (self.shown(input), self.shown(target));
                 self.refuse("SEM-1", n, format!("`{y}` is wider than `{x}`"));

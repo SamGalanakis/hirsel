@@ -635,6 +635,9 @@ impl Emitter {
     /// whose cleanup may run a finalizer (a resource, or one held inside) is not built.
     fn rep(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Result<Rep, &'static str> {
         crate::cost_scope!("phase", "layout/drop recipes");
+        if let Some(scalar) = scalar_kind(ty) {
+            return Ok(Rep::Scalar(Ty::Scalar(scalar)));
+        }
         match t.kind(ty) {
             TyKind::Anchored(x, _) | TyKind::View(x) => {
                 let x = *x;
@@ -879,15 +882,12 @@ fn value_ty(t: &impl TyRead, ty: TyId) -> Result<Option<Ty>, &'static str> {
     }
 }
 
-fn int_of(t: &impl TyRead, ty: TyId) -> Option<(bool, u32)> {
-    match t.kind(ty) {
-        TyKind::Scalar(s) => Ty::Scalar(*s).int(),
-        _ => None,
-    }
+fn int_of(ty: TyId) -> Option<(bool, u32)> {
+    Ty::Scalar(scalar_kind(ty)?).int()
 }
 
-fn is_float(t: &impl TyRead, ty: TyId) -> bool {
-    matches!(t.kind(ty), TyKind::Scalar(Scalar::F32 | Scalar::F64))
+fn is_float(ty: TyId) -> bool {
+    matches!(scalar_kind(ty), Some(Scalar::F32 | Scalar::F64))
 }
 
 /// Lay out emitted instructions in block order after control-flow construction.

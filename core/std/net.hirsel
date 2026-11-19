@@ -27,3 +27,143 @@ pub fn finish(take w: WriteHalf, take r: ReadHalf, c: Clock, deadline_ns: u64) -
         }
     }
 }
+
+/// Invalid(i) identifies the byte where a numeric IP literal is refused,
+/// or the input length when another byte was required.
+pub type ParseIpError = Invalid(u64)
+
+fn parse_ipv4(b: Bytes, start: u64) -> Result[u32, ParseIpError] {
+    let n = list.len(b)
+    let mut at = start
+    let mut address: u32 = 0
+    for part in 0u64 .. 4u64 {
+        let begin = at
+        let mut octet: u32 = 0
+        while at < n && int.is_ascii_digit(b[at]) {
+            if at - begin == 3 || at > begin && b[begin] == b'0' {
+                return Error(Invalid(at))
+            }
+            octet = octet * 10 + int.widen(b[at] - b'0')
+            if octet > 255 {
+                return Error(Invalid(at))
+            }
+            at += 1
+        }
+        if at == begin {
+            return Error(Invalid(at))
+        }
+        address = (address << 8) | octet
+        if part < 3 {
+            if at == n || b[at] != b'.' {
+                return Error(Invalid(at))
+            }
+            at += 1
+        }
+    }
+    if at != n {
+        return Error(Invalid(at))
+    }
+    Ok(address)
+}
+
+/// Parses a whole IPv4 or IPv6 literal in the grammar of Rust's Ipv4Addr
+/// and Ipv6Addr FromStr. IPv4 octets forbid leading zeroes. IPv6 may have
+/// one :: replacing one or more groups and a trailing dotted IPv4 address.
+/// Alloc: nothing. Cost: O(len). Fails: Invalid(i). Returns mapped addresses as V6.
+/// Ex: `let ip = std.net.parse_ip(string.as_bytes("2001:db8::1"))?`
+pub fn parse_ip(b: Bytes) -> Result[Ip, ParseIpError] {
+    let n = list.len(b)
+    let mut words: Inline[u16, 8] =[0; 8]
+    let mut groups: u64 = 0
+    let mut gap: Option[u64] = None
+    let mut at: u64 = 0
+    if n != 0 && b[0] == b':' {
+        if n < 2 || b[1] != b':' {
+            return Error(Invalid(0))
+        }
+        gap = Some(0)
+        at = 2
+    }
+    while at < n {
+        let start = at
+        let mut word: u16 = 0
+        while at < n {
+            let c = option.unwrap(char.from_u32(int.widen(b[at])))
+            let Some(digit) = char.digit(c, 16) else {
+                break
+            }
+            if at - start == 4 {
+                return Error(Invalid(at))
+            }
+            word = (word << 4) | int.narrow(digit)
+            at += 1
+        }
+        if at == start {
+            return Error(Invalid(at))
+        }
+        if at < n && b[at] == b'.' {
+            if groups >= 7 || gap != None && groups >= 6 {
+                return Error(Invalid(at))
+            }
+            let addr = parse_ipv4(b, start)?
+            if groups == 0 && gap == None {
+                return Ok(V4(addr))
+            }
+            words[groups] = int.truncate(addr >> 16)
+            words[groups + 1] = int.truncate(addr)
+            groups += 2
+            at = n
+            break
+        }
+        words[groups] = word
+        groups += 1
+        if at == n || b[at] != b':' {
+            break
+        }
+        if groups == 8 || gap != None && groups == 7 {
+            return Error(Invalid(at))
+        }
+        if n - at >= 2 && b[at + 1] == b':' {
+            if gap != None {
+                return Error(Invalid(at + 1))
+            }
+            gap = Some(groups)
+            at += 2
+        } else {
+            at += 1
+            if at == n {
+                return Error(Invalid(at))
+            }
+        }
+    }
+    if at != n {
+        return Error(Invalid(at))
+    }
+    match gap {
+        Some(first) => {
+            let missing = 8 - groups
+            if missing == 0 {
+                return Error(Invalid(at))
+            }
+            while groups > first {
+                groups -= 1
+                words[groups + missing] = words[groups]
+            }
+            for i in first .. first + missing {
+                words[i] = 0
+            }
+        },
+        None => if groups != 8 {
+            return Error(Invalid(at))
+        },
+    }
+    let mut hi: u64 = 0
+    let mut lo: u64 = 0
+    for i in 0u64 .. 4u64 {
+        let high: u64 = int.widen(words[i])
+        let low: u64 = int.widen(words[i + 4])
+        hi = (hi << 16) | high
+        lo = (lo << 16) | low
+    }
+    Ok(V6(hi, lo))
+}

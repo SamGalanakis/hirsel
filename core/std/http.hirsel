@@ -334,32 +334,6 @@ fn sub_delim(x: u8) -> bool {
     x == b'!' || x == b'$' || x == b'&' || x == 39 || x == b'(' || x == b')' || x == b'*' || x == b'+' || x == b',' || x == b';' || x == b'='
 }
 
-fn ipv4(b: Bytes) -> bool {
-    let n = list.len(b)
-    let mut at: u64 = 0
-    for word in 0u64 .. 4 {
-        let start = at
-        let mut value: u16 = 0
-        while at < n && int.is_ascii_digit(b[at]) {
-            if at - start == 3 {
-                return false
-            }
-            value = value * 10 + int.widen(b[at] - b'0')
-            at += 1
-        }
-        if at == start || at - start > 1 && b[start] == b'0' || value > 255 {
-            return false
-        }
-        if word != 3 {
-            if at == n || b[at] != b'.' {
-                return false
-            }
-            at += 1
-        }
-    }
-    at == n
-}
-
 // RFC 3986 IP-literal accepts every IPv6 spelling (including an embedded
 // IPv4 tail) and the IPvFuture grammar. It has no scope ID or DNS step.
 fn ip_literal(b: Bytes) -> bool {
@@ -382,53 +356,9 @@ fn ip_literal(b: Bytes) -> bool {
         }
         return true
     }
-    let mut at: u64 = 0
-    let mut words: u64 = 0
-    let mut compressed = false
-    if b[0] == b':' {
-        if n < 2 || b[1] != b':' {
-            return false
-        }
-        at = 2
-        compressed = true
-    }
-    while at < n {
-        let start = at
-        while at < n && hex_digit(b[at]) != None {
-            at += 1
-        }
-        if at < n && b[at] == b'.' {
-            if !ipv4(list.slice(b, start, n)) {
-                return false
-            }
-            words += 2
-            break
-        }
-        if at == start || at - start > 4 {
-            return false
-        }
-        words += 1
-        if at == n {
-            break
-        }
-        if b[at] != b':' {
-            return false
-        }
-        at += 1
-        if at < n && b[at] == b':' {
-            if compressed {
-                return false
-            }
-            compressed = true
-            at += 1
-        } else if at == n {
-            return false
-        }
-    }
-    if compressed {
-        words < 8
-    } else {
-        words == 8
+    match net.parse_ip(b) {
+        Ok(V6(_, _)) => true,
+        _ => false,
     }
 }
 

@@ -113,92 +113,6 @@ fn digits_port(data: Bytes, s: http1.Span) -> Result[u16, Error] {
     Ok(int.narrow(value))
 }
 
-fn ipv4_tail(data: Bytes, start: u64, end: u64) -> Result[u64, Error] {
-    let mut i = start
-    for octet in 0u64 .. 4 {
-        let begin = i
-        let mut value: u16 = 0
-        while i < end && digit(data[i]) {
-            if i - begin == 3 || i > begin && data[begin] == b'0' {
-                return Error(Invalid(i))
-            }
-            value = value * 10 + int.widen(data[i] - b'0')
-            if value > 255 {
-                return Error(Invalid(i))
-            }
-            i += 1
-        }
-        if i == begin {
-            return Error(Invalid(i))
-        }
-        if octet < 3 {
-            if i == end || data[i] != b'.' {
-                return Error(Invalid(i))
-            }
-            i += 1
-        }
-    }
-    Ok(i)
-}
-
-// RFC 3986 §3.2.2. Count explicit 16-bit pieces. The optional :: fills one
-// or more pieces, and a final IPv4 address counts as two.
-fn ipv6_end(data: Bytes, start: u64, end: u64) -> Result[u64, Error] {
-    let mut i = start
-    let mut groups: u8 = 0
-    let mut compressed = false
-    if i < end && data[i] == b':' {
-        if end - i < 2 || data[i + 1] != b':' {
-            return Error(Invalid(i))
-        }
-        compressed = true
-        i += 2
-    }
-    while i < end && data[i] != b']' {
-        let begin = i
-        while i < end && hex(data[i]) != None {
-            if i - begin == 4 {
-                return Error(Invalid(i))
-            }
-            i += 1
-        }
-        if i == begin {
-            return Error(Invalid(i))
-        }
-        if i < end && data[i] == b'.' {
-            if groups >= 7 || compressed && groups >= 6 {
-                return Error(Invalid(i))
-            }
-            i = ipv4_tail(data, begin, end)?
-            groups += 2
-            break
-        }
-        groups += 1
-        if i == end || data[i] != b':' {
-            break
-        }
-        if groups == 8 || compressed && groups == 7 {
-            return Error(Invalid(i))
-        }
-        if end - i >= 2 && data[i + 1] == b':' {
-            if compressed {
-                return Error(Invalid(i + 1))
-            }
-            compressed = true
-            i += 2
-        } else {
-            i += 1
-            if i == end || data[i] == b']' {
-                return Error(Invalid(i))
-            }
-        }
-    }
-    if i == end || data[i] != b']' || !compressed && groups != 8 {
-        return Error(Invalid(i))
-    }
-    Ok(i)
-}
-
 fn parse_authority(data: Bytes, start: u64, text_end: u64) -> Result[(Option[http1.Span], Host, Option[http1.Span], u64), Error] {
     // Until the first @, a colon can belong to userinfo or introduce a port.
     let may_have_user = start < text_end && data[start] != b'['
@@ -219,9 +133,20 @@ fn parse_authority(data: Bytes, start: u64, text_end: u64) -> Result[(Option[htt
     }
     let mut i = host_start
     let host = if i < end && data[i] == b'[' {
-        let close = ipv6_end(data, i + 1, end)?
+        let literal_start = i + 1
+        let mut close = literal_start
+        while close < end && data[close] != b']' {
+            close += 1
+        }
+        match net.parse_ip(list.slice(data, literal_start, close)) {
+            Ok(V6(_, _)) => if close == end {
+                return Error(Invalid(close))
+            },
+            Ok(V4(_)) => return Error(Invalid(close)),
+            Error(Invalid(relative)) => return Error(Invalid(literal_start + relative)),
+        }
         i = close + 1
-        Ip6(span(host_start + 1, close))
+        Ip6(span(literal_start, close))
     } else {
         while i < end && data[i] != b':' {
             let b = data[i]

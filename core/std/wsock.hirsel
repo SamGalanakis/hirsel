@@ -54,173 +54,78 @@ fn contains(prefix: Prefix, ip: Ip) -> bool {
     }
 }
 
-fn ipv4(b: Bytes) -> Option[u32] {
-    let mut at: u64 = 0
-    let mut address: u32 = 0
-    for part in 0u64 .. 4u64 {
-        let start = at
-        let mut value: u32 = 0
-        while at < list.len(b) && b[at] >= b'0' && b[at] <= b'9' {
-            if at - start == 3 {
-                return None
-            }
-            let digit: u32 = int.widen(b[at] - b'0')
-            value = value * 10 + digit
-            at += 1
-        }
-        if at == start || value > 255 || at - start > 1 && b[start] == b'0' {
+// RFC 5952 canonical spelling. RFC 4291 mapped addresses normalize to V4.
+fn literal(b: Bytes) -> Option[Ip] {
+    let n = list.len(b)
+    if n > 256 {
+        return None
+    }
+    let (hi, lo) = match net.parse_ip(b) {
+        Ok(V4(addr)) => return Some(V4(addr)),
+        Ok(V6(hi, lo)) => (hi, lo),
+        Error(_) => return None,
+    }
+    let mut explicit: u64 = 0
+    let mut gap: Option[u64] = None
+    let mut dotted = false
+    for i in 0u64 .. n {
+        let c = b[i]
+        if c >= b'A' && c <= b'F' {
             return None
         }
-        address = (address << 8) | value
-        if part < 3 {
-            if at == list.len(b) || b[at] != b'.' {
-                return None
+        if c == b'0' && (i == 0 || b[i - 1] == b':') && i + 1 < n && b[i + 1] != b':' && b[i + 1] != b'.' {
+            return None
+        }
+        if c == b':' {
+            if i != 0 && b[i - 1] != b':' {
+                explicit += 1
             }
-            at += 1
+            if i + 1 < n && b[i + 1] == b':' {
+                gap = Some(explicit)
+            }
+        } else if c == b'.' {
+            dotted = true
         }
     }
-    if at != list.len(b) {
+    if dotted && !(hi == 0 && lo >> 32 == 65535) {
         return None
     }
-    Some(address)
-}
-
-// RFC 5952 canonical spelling, with RFC 4291 mapped addresses normalized to V4.
-// Fixed eight-word storage, no allocation or DNS, and at most 256 input bytes.
-fn literal(b: Bytes) -> Option[Ip] {
-    let size = list.len(b)
-    if size == 0 || size > 256 {
-        return None
+    if b[n - 1] != b':' {
+        explicit += 1
     }
-    if let Some(v4) = ipv4(b) {
-        return Some(V4(v4))
+    if dotted {
+        explicit += 1
     }
     let mut words: Inline[u16, 8] =[0; 8]
-    let mut count: u64 = 0
-    let mut at: u64 = 0
-    let mut gap: Option[u64] = None
-    let mut mixed = false
-    if b[0] == b':' {
-        if size < 2 || b[1] != b':' {
-            return None
-        }
-        gap = Some(0)
-        at = 2
-    }
-    while at < size {
-        if count == 8 {
-            return None
-        }
-        let start = at
-        while at < size && b[at] != b':' {
-            at += 1
-        }
-        let end = at
-        let mut dotted = false
-        for i in start .. end {
-            dotted = dotted || b[i] == b'.'
-        }
-        if dotted {
-            mixed = true
-            if end != size || count > 6 {
-                return None
-            }
-            let v4 = match ipv4(list.slice(b, start, end)) {
-                Some(x) => x,
-                None => return None
-            }
-            words[count] = int.truncate(v4 >> 16)
-            words[count + 1] = int.truncate(v4)
-            count += 2
-        } else {
-            if end == start || end - start > 4 || end - start > 1 && b[start] == b'0' {
-                return None
-            }
-            let mut value: u16 = 0
-            for i in start .. end {
-                let x = b[i]
-                let digit: u16 = if x >= b'0' && x <= b'9' {
-                    int.widen(x - b'0')
-                } else if x >= b'a' && x <= b'f' {
-                    int.widen(x - b'a' + 10)
-                } else {
-                    return None
-                }
-                value = (value << 4) | digit
-            }
-            words[count] = value
-            count += 1
-        }
-        if at < size {
-            at += 1
-            if at < size && b[at] == b':' {
-                if gap != None {
-                    return None
-                }
-                gap = Some(count)
-                at += 1
-            } else if at == size {
-                return None
-            }
-        }
-    }
-    let missing = 8 - count
-    match gap {
-        Some(g) => {
-            if missing == 0 {
-                return None
-            }
-            let mut i = count
-            while i > g {
-                i -= 1
-                words[i + missing] = words[i]
-            }
-            for z in g .. g + missing {
-                words[z] = 0
-            }
-        },
-        None => if count != 8 {
-            return None
-        }
-    }
-    let mut hi: u64 = 0
-    let mut lo: u64 = 0
     for i in 0u64 .. 4u64 {
-        let x: u64 = int.widen(words[i])
-        let y: u64 = int.widen(words[i + 4])
-        hi = (hi << 16) | x
-        lo = (lo << 16) | y
+        let shift = (3 - i) * 16
+        words[i] = int.truncate(hi >> shift)
+        words[i + 4] = int.truncate(lo >> shift)
     }
-    let mapped = hi == 0 && lo >> 32 == 65535
-    // RFC 5952 4.2: compress the longest zero run, ties to the left, never
-    // compress a single zero. Mapped forms have the same normalized key.
-    if mixed && !mapped {
-        return None
-    }
-    {
-        let mut best: u64 = 8
-        let mut length: u64 = 1
-        let mut i: u64 = 0
-        while i < 8 {
-            let start = i
-            while i < 8 && words[i] == 0 {
-                i += 1
-            }
-            if i - start > length {
-                best = start
-                length = i - start
-            }
-            if i == start {
-                i += 1
-            }
+    // Compress the longest zero run, taking the first on ties and requiring
+    // at least two groups. The numeric parser already checked the placement.
+    let mut best: u64 = 8
+    let mut length: u64 = 1
+    let mut i: u64 = 0
+    while i < 8 {
+        let start = i
+        while i < 8 && words[i] == 0 {
+            i += 1
         }
-        if best == 8 {
-            if gap != None {
-                return None
-            }
-        } else if gap != Some(best) || missing != length {
+        if i - start > length {
+            best = start
+            length = i - start
+        }
+        if i == start {
+            i += 1
+        }
+    }
+    if best == 8 {
+        if gap != None {
             return None
         }
+    } else if gap != Some(best) || 8 - explicit != length {
+        return None
     }
     Some(normalize(V6(hi, lo)))
 }

@@ -448,10 +448,11 @@ fn parses_ipv6() -> bool {
 }
 
 // U7. RFC 3986 §3.2.2, rfc3986.txt:1081-1110.
+// Each :: alternative replaces at least one group.
 // Mutants: allow a second compression run or a decimal octet larger than 255.
 // expect: run rejects_invalid_ipv6() = true
 fn rejects_invalid_ipv6() -> bool {
-    invalid("//[1:2:3:4:5:6:7:8:9]", 18) && invalid("//[1::2::3]", 8) && invalid("//[::ffff:256.0.0.1]", 12) && invalid("//[12345::]", 7) && invalid("//[::1]x", 7) && invalid("//[::ffff:01.2.3.4]", 11) && invalid("//[::ffff:192.0.2.1:7]", 19) && invalid("//[]", 3) && invalid("//[1:2:3:4:5:6:7]", 16) && invalid("//[::1:2:3:4:5:6:7:8]", 18)
+    invalid("//[1:2:3:4:5:6:7:8:9]", 18) && invalid("//[1::2::3]", 8) && invalid("//[::ffff:256.0.0.1]", 12) && invalid("//[12345::]", 7) && invalid("//[::1]x", 7) && invalid("//[::ffff:01.2.3.4]", 11) && invalid("//[::ffff:192.0.2.1:7]", 19) && invalid("//[]", 3) && invalid("//[1:2:3:4:5:6:7]", 16) && invalid("//[::1:2:3:4:5:6:7:8]", 18) && invalid("http://[1:2:3:4:5:6:7::8]", 24)
 }
 
 // U8. RFC 3986 §5.4, rfc3986.txt:1967-2063, and uri.resolve's output contract.

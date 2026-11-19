@@ -610,7 +610,7 @@ fn syscall(rc: isize) -> io::Result<isize> {
         Ok(rc)
     }
 }
-fn write_all(fd: i32, bytes: &[u8]) -> Outcome {
+pub(crate) fn write_all(fd: i32, bytes: &[u8]) -> Outcome {
     let mut written = 0;
     while written < bytes.len() {
         // SAFETY: live descriptor and remaining readable bytes.

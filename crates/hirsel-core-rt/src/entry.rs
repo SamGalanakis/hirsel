@@ -203,17 +203,15 @@ impl OsProcess {
     ) -> Result<Box<Self>, StartupError> {
         // SAFETY: copy launcher input before acquiring any program grant.
         unsafe {
-            let mut args = Vec::with_capacity(input.args_len);
-            for index in 0..input.args_len {
-                let value = bytes(*input.args.add(index));
+            let argv = (0..input.args_len).map(|index| bytes(*input.args.add(index)));
+            for value in argv.clone() {
                 std::str::from_utf8(value)
                     .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
-                args.push(value.to_vec());
             }
             let mut n_place = hirsel_core_ids::launch::DEFAULT_N_PLACE;
             let mut describe_mode = false;
             let mut prefix = 0;
-            for argument in &args {
+            for argument in argv.clone() {
                 if argument == b"--hirsel-describe" {
                     describe_mode = true;
                 } else if let Some(value) = argument.strip_prefix(b"--hirsel-n-place=") {
@@ -226,7 +224,7 @@ impl OsProcess {
                 }
                 prefix += 1;
             }
-            args.drain(..prefix);
+            let args: Vec<_> = argv.skip(prefix).map(<[u8]>::to_vec).collect();
             let target = std::str::from_utf8(bytes(input.target))
                 .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
             let launch = Box::new(launch_metadata(target, n_place, describe_mode));
@@ -553,10 +551,9 @@ unsafe fn run_with_sources_and_probe(
             let mut line = b"not started: ".to_vec();
             match error {
                 StartupError::NetRules => {
-                    line.extend_from_slice(
-                        format!("Net requires --grant {}\n", hirsel_core_net::RULE_SYNTAX)
-                            .as_bytes(),
-                    );
+                    line.extend_from_slice(b"Net requires --grant ");
+                    line.extend_from_slice(hirsel_core_net::RULE_SYNTAX.as_bytes());
+                    line.push(b'\n');
                 }
                 StartupError::MissingGrant(index) => {
                     line.extend_from_slice(b"grant `");
@@ -597,20 +594,6 @@ unsafe extern "C" fn describe_output(state: *mut u8, data: *const u8, len: usize
         let Some(out) = &process.describe_out else {
             return false;
         };
-        let mut sent = 0;
-        while sent < len {
-            let count = libc::write(out.as_raw_fd(), data.add(sent).cast(), len - sent);
-            if count < 0 {
-                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return false;
-            }
-            if count == 0 {
-                return false;
-            }
-            sent += count as usize;
-        }
-        true
+        crate::os::write_all(out.as_raw_fd(), bytes(View { data, len })).error == IoError::OK
     }
 }

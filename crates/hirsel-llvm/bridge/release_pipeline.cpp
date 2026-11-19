@@ -9,7 +9,10 @@
 
 #include <llvm-c/TargetMachine.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
+#include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ValueTracking.h>
+#include <llvm/IR/Dominators.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Passes/StandardInstrumentations.h>
@@ -126,10 +129,76 @@ public:
     }
 };
 
+// Nontrivial unswitching prices a loop-invariant switch at the loop body its
+// arms share, times one clone per extra successor. A pure value computed above
+// the switch and used only inside some arms counts as shared, so a seven-way
+// match over one byte stayed unswitched though each clone keeps one small arm
+// (langarena LogParser's `candidate` folds the byte's case before its match on
+// the pattern: 2.19G instructions, 1.81G once unswitched). Each such value is
+// recomputed at the head of every arm that uses it instead: the shared body is
+// then what every arm really runs, and an arm that never uses the value never
+// computes it. Values with any other user, memory access or side effect stay.
+class InvariantArmSinkPass : public OptionalPassInfoMixin<InvariantArmSinkPass> {
+public:
+    PreservedAnalyses run(Function &f, FunctionAnalysisManager &analyses) {
+        LoopInfo &loops = analyses.getResult<LoopAnalysis>(f);
+        DominatorTree &tree = analyses.getResult<DominatorTreeAnalysis>(f);
+        bool changed = false;
+        for (BasicBlock &block : f) {
+            auto *choice = dyn_cast<SwitchInst>(block.getTerminator());
+            Loop *loop = loops.getLoopFor(&block);
+            if (!choice || !loop || !loop->isLoopInvariant(choice->getCondition())) continue;
+            SmallVector<BasicBlock *, 8> arms;
+            for (BasicBlock *arm : successors(&block))
+                if (arm->getUniquePredecessor() == &block && loop->contains(arm) &&
+                    !is_contained(arms, arm))
+                    arms.push_back(arm);
+            for (Instruction &value : make_early_inc_range(reverse(block))) {
+                if (value.isTerminator() || isa<PHINode>(value) || value.mayReadOrWriteMemory() ||
+                    value.mayHaveSideEffects() || value.use_empty())
+                    continue;
+                // The arm each use lies in, or none when a use is shared.
+                SmallVector<std::pair<Use *, BasicBlock *>, 8> uses;
+                for (Use &use : value.uses()) {
+                    auto *user = cast<Instruction>(use.getUser());
+                    BasicBlock *at = user->getParent();
+                    if (auto *phi = dyn_cast<PHINode>(user)) at = phi->getIncomingBlock(use);
+                    BasicBlock *home = nullptr;
+                    for (BasicBlock *arm : arms)
+                        if (tree.dominates(arm, at)) home = arm;
+                    if (!home) break;
+                    uses.push_back({&use, home});
+                }
+                if (uses.size() != value.getNumUses()) continue;
+                SmallDenseMap<BasicBlock *, Instruction *, 8> copies;
+                for (auto [use, home] : uses) {
+                    Instruction *&copy = copies[home];
+                    if (!copy) {
+                        copy = value.clone();
+                        copy->setName(value.getName());
+                        copy->insertBefore(home->getFirstInsertionPt());
+                    }
+                    use->set(copy);
+                }
+                value.eraseFromParent();
+                changed = true;
+            }
+        }
+        if (!changed) return PreservedAnalyses::all();
+        PreservedAnalyses kept;
+        kept.preserveSet<CFGAnalyses>();
+        return kept;
+    }
+};
+
 // These LLVM 23.1 O3 pass settings have no equivalent in the pipeline parser.
 void registerReleasePasses(PassBuilder &builder) {
     builder.registerPipelineParsingCallback(
         [](StringRef name, FunctionPassManager &passes, ArrayRef<PassBuilder::PipelineElement>) {
+            if (name == "invariant-arm-sink") {
+                passes.addPass(InvariantArmSinkPass());
+                return true;
+            }
             if (name != "early-vector-combine") return false;
             passes.addPass(VectorCombinePass(/*TryEarlyFoldsOnly=*/true));
             return true;
@@ -216,7 +285,7 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
             "sroa<modify-cfg>,early-cse<memssa>,jump-threading,correlated-propagation,"
             "jump-table-to-switch,simplifycfg<switch-range-to-icmp>,instcombine<no-verify-fixpoint>,"
             "aggressive-instcombine,libcalls-shrinkwrap,tailcallelim,"
-            "simplifycfg<switch-range-to-icmp>,reassociate,constraint-elimination,"
+            "simplifycfg<switch-range-to-icmp>,reassociate,constraint-elimination,invariant-arm-sink,"
             "loop-mssa(loop-instsimplify,loop-simplifycfg,licm<no-allowspeculation>,"
                       "loop-rotate,licm<allowspeculation>,simple-loop-unswitch<nontrivial;trivial>),"
             "simplifycfg<switch-range-to-icmp>,instcombine<no-verify-fixpoint>,"

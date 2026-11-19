@@ -1,5 +1,4 @@
 // kostya/LangArena 3c9f84d benchmarks/template.rs:49-216.
-// Regex uses a hand matcher for {{(.*?)}}. A capture cannot cross a newline.
 fn numbered(prefix: String, i: u64) -> Result[String, helper.Error] {
     let mut key = helper.mem(string.from(prefix))?
     helper.mem(string.push_u64(mut key, i))?
@@ -11,7 +10,7 @@ fn bind(mut vars: Map[String, String], take key: String, value: String) -> Resul
     helper.mem(result.capacity_only(map.insert(mut vars, take key, take owned)))
 }
 
-fn render(source: String, vars: Map[String, String], regex: bool) -> Result[String, helper.Error] {
+fn render_parse(source: String, vars: Map[String, String]) -> Result[String, helper.Error] {
     let n = string.byte_len(source)
     let b = string.as_bytes(source)
     let mut out = helper.mem(string.with_capacity(n + n / 2))?
@@ -21,9 +20,6 @@ fn render(source: String, vars: Map[String, String], regex: bool) -> Result[Stri
             let mut j = i + 2
             while j + 1 < n {
                 if b[j] == b'}' && b[j + 1] == b'}' {
-                    break
-                }
-                if regex && b[j] == b'\n' {
                     break
                 }
                 j += 1
@@ -42,6 +38,43 @@ fn render(source: String, vars: Map[String, String], regex: bool) -> Result[Stri
         i += 1
     }
     Ok(take out)
+}
+
+fn render_regex(source: String, vars: Map[String, String], re: std.regex.Regex, mut cache: std.regex.Cache, mut groups: std.regex.Groups) -> Result[String, helper.Error] {
+    let n = string.byte_len(source)
+    let mut out = helper.mem(string.with_capacity(n + n / 2))?
+    let mut cursor = std.regex.cursor(0)
+    let mut start: u64 = 0
+    while std.regex.next_captures(re, mut cache, source, mut cursor, mut groups) {
+        let whole = option.unwrap(std.regex.group(groups, 0))
+        let capture = option.unwrap(std.regex.group(groups, 1))
+        helper.mem(string.push(mut out, string.slice(source, start, whole.start)))?
+        let key = string.trim_ascii(string.slice(source, capture.start, capture.end))
+        if let Some(value) = map.get(vars, key) {
+            helper.mem(string.push(mut out, value))?
+        }
+        start = whole.end
+    }
+    helper.mem(string.push(mut out, string.slice(source, start, n)))?
+    Ok(take out)
+}
+
+fn run_regex(source: String, vars: Map[String, String], runs: u64) -> Result[u32, helper.Error] {
+    let created = std.regex.new("\\{\\{(.*?)\\}\\}")
+    let re = match take created {
+        Ok(take re) => take re,
+        Error(Capacity(c)) => return Error(Capacity(c)),
+        Error(_) => return Error(Config),
+    }
+    let mut cache = helper.mem(std.regex.cache(re, 16384))?
+    let mut groups = helper.mem(std.regex.groups(re))?
+    let mut rendered = string.new()
+    let mut checksum: u32 = 0
+    for _ in 0 .. runs {
+        rendered = render_regex(source, vars, re, mut cache, mut groups)?
+        checksum = int.wrapping_add(checksum, int.narrow(string.byte_len(rendered)))
+    }
+    Ok(int.wrapping_add(checksum, helper.checksum_str(rendered)))
 }
 
 pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
@@ -77,10 +110,17 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
         bind(mut vars, numbered("CITY", i)?, cities[i % 6])?
     }
     helper.mem(string.push(mut source, "</table></body></html>"))?
+    let runs = warmup + iterations
+    if runs == 0 {
+        return Ok(helper.checksum_str(""))
+    }
+    if name == "Template::Regex" {
+        return run_regex(source, vars, runs)
+    }
     let mut rendered = string.new()
     let mut checksum: u32 = 0
-    for _ in 0 .. warmup + iterations {
-        rendered = render(source, vars, name == "Template::Regex")?
+    for _ in 0 .. runs {
+        rendered = render_parse(source, vars)?
         checksum = int.wrapping_add(checksum, int.narrow(string.byte_len(rendered)))
     }
     Ok(int.wrapping_add(checksum, helper.checksum_str(rendered)))

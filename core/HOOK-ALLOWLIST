@@ -341,6 +341,12 @@ core@1/string/slice
 core@1/string/to_bytes
 core@1/string/truncate
 core@1/string/view_string
+# DECISIONS.md 2026-11-19 (main-reds-1350 gated_libraries; dedup-1357 ruling 4,
+# 603fae9f): the shared UTF-8 validator's error type.
+core@1/string/Utf8Error
+# DECISIONS.md 2026-11-19 (main-reds-1350 gated_libraries): bbd839af moved it
+# from std into core; the same kind of entry as list/with_capacity.
+core@1/string/with_capacity
 core@1/task/cancel
 core@1/task/check_cancel
 core@1/task/join

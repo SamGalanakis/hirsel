@@ -1046,3 +1046,25 @@ fn truncate_literal() -> u64 {
         99
     }
 }
+
+// Source: Rust library/alloctests/tests/str.rs, from_utf8_error and
+// test_str_from_utf8, a7c37f9f0ee5e93396106e9de20f4a86b4154e63, MIT.
+// The bool validator exposes admission only. Rust's error-length distinctions
+// give independent single-, double- and triple-byte malformed prefixes.
+// expect: run rust_utf8_admission() = true
+fn rust_utf8_admission() -> bool {
+    let invalid: Inline[Bytes, 19] =[result.unwrap(b"A\xC3\xA9 \xFF "), result.unwrap(b"A\xC3\xA9 \x80 "), result.unwrap(b"A\xC3\xA9 \xC1 "), result.unwrap(b"A\xC3\xA9 \xC1"), result.unwrap(b"A\xC3\xA9 \xC2"), result.unwrap(b"A\xC3\xA9 \xC2 "), result.unwrap(b"A\xC3\xA9 \xC2\xC0"), result.unwrap(b"A\xC3\xA9 \xE0"), result.unwrap(b"A\xC3\xA9 \xE0\x9F"), result.unwrap(b"A\xC3\xA9 \xE0\xA0"), result.unwrap(b"A\xC3\xA9 \xE0\xA0\xC0"), result.unwrap(b"A\xC3\xA9 \xE0\xA0 "), result.unwrap(b"A\xC3\xA9 \xED\xA0\x80 "), result.unwrap(b"A\xC3\xA9 \xF1"), result.unwrap(b"A\xC3\xA9 \xF1\x80"), result.unwrap(b"A\xC3\xA9 \xF1\x80\x80"), result.unwrap(b"A\xC3\xA9 \xF1 "), result.unwrap(b"A\xC3\xA9 \xF1\x80 "), result.unwrap(b"A\xC3\xA9 \xF1\x80\x80 "),]
+    for input in invalid {
+        match string.from_utf8(result.unwrap(clone(input))) {
+            Error(original) => if original != input {
+                return false
+            },
+            Ok(_) => return false,
+        }
+    }
+    let utf8_input = result.unwrap(b"\xE0\xB8\xA8\xE0\xB9\x84\xE0\xB8\x97\xE0\xB8\xA2\xE4\xB8\xAD\xE5\x8D\x8EVi\xE1\xBB\x87t Nam")
+    match string.from_utf8(take utf8_input) {
+        Ok(s) => s == "ศไทย中华Việt Nam",
+        Error(_) => false,
+    }
+}

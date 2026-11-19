@@ -226,7 +226,6 @@ core@1/int/wrapping_neg
 core@1/int/wrapping_shl
 core@1/int/wrapping_sub
 core@1/list/Hole
-core@1/list/MergeState
 core@1/list/Slots
 core@1/list/append
 core@1/list/capacity
@@ -246,14 +245,12 @@ core@1/list/slots_empty
 core@1/list/slots_finish_list
 core@1/list/slots_forget_ring
 core@1/list/slots_free
-core@1/list/slots_from_list
 core@1/list/slots_list_view
 core@1/list/slots_move
 core@1/list/slots_new
 core@1/list/slots_put
 core@1/list/slots_shift
 core@1/list/slots_take
-core@1/list/slots_to_list
 core@1/list/slots_view
 core@1/list/sort_stable
 core@1/list/sum

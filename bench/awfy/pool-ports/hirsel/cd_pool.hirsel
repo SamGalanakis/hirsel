@@ -308,7 +308,7 @@ fn simulate(size: u64, time: f64) -> Result[List[Aircraft], Capacity] {
     let mut frame: List[Aircraft] = list.new()
     let mut i = 0u64
     while i < size {
-        let (sine, cosine) = option.unwrap(trig.sin_cos(time))
+        let (sine, cosine) = float.sin_cos(time)
         let lane: f64 = float.from_int(i * 3)
         result.capacity_only(list.push(mut frame, Aircraft(callsign: i, position: V3(x: time, y: cosine * 2.0 + lane, z: 10.0))))?
         result.capacity_only(list.push(mut frame, Aircraft(callsign: i + 1, position: V3(x: time, y: sine * 2.0 + lane, z: 10.0))))?

@@ -760,6 +760,8 @@ fn emit_module(
                 "core@1/list/median3_rec" => Inline::Default,
                 "std@1/float/shortest64" | "std@1/float/push_fixed64" => Inline::Always,
                 "std@1/float/shortest_decimal64" | "std@1/float/push_fixed_decimal64" => Inline::Never,
+                // Share the argument reducers across the three trigonometric entries.
+                "std@1/float/trig_reduce" | "std@1/float/trig_reduce_large" => Inline::Never,
                 // Share regex construction across call sites. The parser and
                 // translator each have a fixed workspace and independent error paths.
                 "std@1/regex/read"

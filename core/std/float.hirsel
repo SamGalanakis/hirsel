@@ -2123,3 +2123,409 @@ pub fn exp(x: f64) -> f64 {
         float.from_bits64(int.wrapping_add(float.to_bits64(y), shift)) * float.from_bits64(0x0170000000000000)
     }
 }
+
+// Ported from Rust libm 0.2.16, math/{sin,cos,sincos,k_sin,k_cos,rem_pio2,rem_pio2_large}.rs.
+// Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+// Developed at SunPro, a Sun Microsystems, Inc. business.
+// Permission to use, copy, modify, and distribute this software is freely
+// granted, provided that this notice is preserved.
+const SIN_S1: f64 = -1.66666666666666324348e-01
+
+const SIN_S2: f64 = 8.33333333332248946124e-03
+
+const SIN_S3: f64 = -1.98412698298579493134e-04
+
+const SIN_S4: f64 = 2.75573137070700676789e-06
+
+const SIN_S5: f64 = -2.50507602534068634195e-08
+
+const SIN_S6: f64 = 1.58969099521155010221e-10
+
+const COS_C1: f64 = 4.16666666666666019037e-02
+
+const COS_C2: f64 = -1.38888888888741095749e-03
+
+const COS_C3: f64 = 2.48015872894767294178e-05
+
+const COS_C4: f64 = -2.75573143513906633035e-07
+
+const COS_C5: f64 = 2.08757232129817482790e-09
+
+const COS_C6: f64 = -1.13596475577881948265e-11
+
+const INV_PIO2: f64 = 6.36619772367581382433e-01
+
+const PIO2_1: f64 = 1.57079632673412561417e+00
+
+const PIO2_1T: f64 = 6.07710050650619224932e-11
+
+const PIO2_2: f64 = 6.07710050630396597660e-11
+
+const PIO2_2T: f64 = 2.02226624879595063154e-21
+
+const PIO2_3: f64 = 2.02226624871116645580e-21
+
+const PIO2_3T: f64 = 8.47842766036889956997e-32
+
+const TWO_OVER_PI: Inline[i32, 66] =[0xA2F983, 0x6E4E44, 0x1529FC, 0x2757D1, 0xF534DD, 0xC0DB62, 0x95993C, 0x439041, 0xFE5163, 0xABDEBB, 0xC561B7, 0x246E3A, 0x424DD2, 0xE00649, 0x2EEA09, 0xD1921C, 0xFE1DEB, 0x1CB129, 0xA73EE8, 0x8235F5, 0x2EBB44, 0x84E99C, 0x7026B4, 0x5F7E41, 0x3991D6, 0x398353, 0x39F49C, 0x845F8B, 0xBDF928, 0x3B1FF8, 0x97FFDE, 0x05980F, 0xEF2F11, 0x8B5A0A, 0x6D1F6D, 0x367ECF, 0x27CB09, 0xB74F46, 0x3F669E, 0x5FEA2D, 0x7527BA, 0xC7EBE5, 0xF17B3D, 0x0739F7, 0x8A5292, 0xEA6BFB, 0x5FB11F, 0x8D5D08, 0x560330, 0x46FC7B, 0x6BABF0, 0xCFBC20, 0x9AF436, 0x1DA9E3, 0x91615E, 0xE61B08, 0x659985, 0x5F14A0, 0x68408D, 0xFFD880, 0x4D7327, 0x310606, 0x1556CA, 0x73A8C9, 0x60E27B, 0xC08C6B,]
+
+const PIO2_CHUNKS: Inline[f64, 8] =[1.57079625129699707031e+00, /* 0x3FF921FB, 0x40000000 */ 7.54978941586159635335e-08, /* 0x3E74442D, 0x00000000 */ 5.39030252995776476554e-15, /* 0x3CF84698, 0x80000000 */ 3.28200341580791294123e-22, /* 0x3B78CC51, 0x60000000 */ 1.27065575308067607349e-29, /* 0x39F01B83, 0x80000000 */ 1.22933308981111328932e-36, /* 0x387A2520, 0x40000000 */ 2.73370053816464559624e-44, /* 0x36E38222, 0x80000000 */ 2.16741683877804819444e-51, /* 0x3569F31D, 0x00000000 */ ]
+
+fn trig_high(x: f64) -> u32 {
+    let hi: u32 = int.truncate(float.to_bits64(x) >> 32)
+    hi & 0x7fffffff
+}
+
+fn trig_trunc(x: f64) -> i32 {
+    let converted: Result[i32, FloatError] = float.to_int(x)
+    result.unwrap(converted)
+}
+
+fn kernel_sin(x: f64, y: f64, reduced: bool) -> f64 {
+    let z = x * x
+    let w = z * z
+    let r = SIN_S2 + z * (SIN_S3 + z * SIN_S4) + z * w * (SIN_S5 + z * SIN_S6)
+    let v = z * x
+    if reduced {
+        x - ((z * (0.5 * y - v * r) - y) - v * SIN_S1)
+    } else {
+        x + v * (SIN_S1 + z * r)
+    }
+}
+
+fn kernel_cos(x: f64, y: f64) -> f64 {
+    let z = x * x
+    let w = z * z
+    let r = z * (COS_C1 + z * (COS_C2 + z * COS_C3)) + w * w * (COS_C4 + z * (COS_C5 + z * COS_C6))
+    let half = 0.5 * z
+    let y0 = 1.0 - half
+    y0 + (((1.0 - y0) - half) + (z * r - x * y))
+}
+
+fn trig_medium(x: f64, ix: u32) -> (i32, f64, f64) {
+    let to_int = 6755399441055744.0f64
+    let rounded = x * INV_PIO2 + to_int
+    let multiple = rounded - to_int
+    let quadrant = trig_trunc(multiple)
+    let mut r = x - multiple * PIO2_1
+    let mut w = multiple * PIO2_1T
+    let mut y0 = r - w
+    let ex: i32 = int.narrow(ix >> 20)
+    let ey: i32 = int.narrow((float.to_bits64(y0) >> 52) & 0x7ff)
+    if ex - ey > 16 {
+        let saved = r
+        w = multiple * PIO2_2
+        r = saved - w
+        w = multiple * PIO2_2T - ((saved - r) - w)
+        y0 = r - w
+        let ey2: i32 = int.narrow((float.to_bits64(y0) >> 52) & 0x7ff)
+        if ex - ey2 > 49 {
+            let saved2 = r
+            w = multiple * PIO2_3
+            r = saved2 - w
+            w = multiple * PIO2_3T - ((saved2 - r) - w)
+            y0 = r - w
+        }
+    }
+    (quadrant, y0, (r - y0) - w)
+}
+
+fn trig_near(x: f64, negative: bool, magnitude: i32) -> (i32, f64, f64) {
+    let n = if negative {
+        -magnitude
+    } else {
+        magnitude
+    }
+    let multiple: f64 = float.from_int(n)
+    let r = x - multiple * PIO2_1
+    let tail = multiple * PIO2_1T
+    let y0 = r - tail
+    (n, y0, (r - y0) - tail)
+}
+
+fn trig_reduce(x: f64) -> (i32, f64, f64) {
+    let bits = float.to_bits64(x)
+    let negative = bits >> 63 != 0
+    let ix = trig_high(x)
+    if ix <= 0x400f6a7a {
+        if ix & 0xfffff == 0x921fb {
+            return trig_medium(x, ix)
+        }
+        if ix <= 0x4002d97c {
+            return trig_near(x, negative, 1)
+        }
+        return trig_near(x, negative, 2)
+    }
+    if ix <= 0x401c463b {
+        if ix <= 0x4015fdbc {
+            if ix == 0x4012d97c {
+                return trig_medium(x, ix)
+            }
+            return trig_near(x, negative, 3)
+        }
+        if ix == 0x401921fb {
+            return trig_medium(x, ix)
+        }
+        return trig_near(x, negative, 4)
+    }
+    if ix < 0x413921fb {
+        return trig_medium(x, ix)
+    }
+    let mut z = float.from_bits64((bits & 0x000fffffffffffff) | (1046u64 << 52))
+    let mut input: Inline[f64, 3] =[0.0; 3]
+    for i in 0u64 .. 2u64 {
+        input[i] = float.from_int(trig_trunc(z))
+        z = (z - input[i]) * 16777216.0
+    }
+    input[2] = z
+    let mut last: u64 = 2
+    while last != 0 && float.eq(input[last], 0.0) {
+        last -= 1
+    }
+    let exponent: i32 = int.narrow(ix >> 20)
+    let (n, y0, y1) = trig_reduce_large(input, last, exponent - 1046)
+    if negative {
+        (-n, -y0, -y1)
+    } else {
+        (n, y0, y1)
+    }
+}
+
+// The exponent adjustments in binary64 reduction are within the normal
+// range for the scaling power. This is libm's scalbn normal-power path.
+fn trig_scale(x: f64, shift_exponent: i32) -> f64 {
+    let field: u64 = int.narrow(shift_exponent + 1023)
+    x * float.from_bits64(field << 52)
+}
+
+// libm's binary64 precision branch. Form the needed 24-bit chunks of
+// x * (2/pi), discarding multiples of eight before multiplying by pi/2.
+fn trig_reduce_large(input: Inline[f64, 3], input_last: u64, exponent: i32) -> (i32, f64, f64) {
+    let chunk = 16777216.0f64
+    let inverse_chunk = float.from_bits64(0x3e70000000000000)
+    let terms: u64 = 4
+    let start: i32 = order.max(0, (exponent - 3) / 24)
+    let mut scale = exponent - 24 * (start + 1)
+    let table_start: u64 = int.narrow(start)
+    let input_last_i: i32 = int.narrow(input_last)
+    let mut offset = start - input_last_i
+    let mut factors: Inline[f64, 20] =[0.0; 20]
+    let mut products: Inline[f64, 20] =[0.0; 20]
+    let mut remainder: Inline[f64, 20] =[0.0; 20]
+    let mut words: Inline[i32, 20] =[0; 20]
+    for i in 0u64 .. input_last + terms + 1 {
+        if offset >= 0 {
+            let k: u64 = int.narrow(offset)
+            factors[i] = float.from_int(TWO_OVER_PI[k])
+        }
+        offset += 1
+    }
+    for i in 0u64 .. terms + 1 {
+        let mut sum: f64 = 0.0
+        for j in 0u64 .. input_last + 1 {
+            sum += input[j] * factors[input_last + i - j]
+        }
+        products[i] = sum
+    }
+    let mut last = terms
+    let mut z: f64 = 0.0
+    let mut n: i32 = 0
+    let mut half: i32 = 0
+    loop {
+        let mut i: u64 = 0
+        z = products[last]
+        let mut j = last
+        while j > 0 {
+            let carry: f64 = float.from_int(trig_trunc(inverse_chunk * z))
+            words[i] = trig_trunc(z - chunk * carry)
+            z = products[j - 1] + carry
+            i += 1
+            j -= 1
+        }
+        z = trig_scale(z, scale)
+        z -= 8.0 * float.floor(z * 0.125)
+        n = trig_trunc(z)
+        let whole: f64 = float.from_int(n)
+        z -= whole
+        half = 0
+        if scale > 0 {
+            let hi = words[last - 1] >> (24 - scale)
+            n += hi
+            words[last - 1] -= hi << (24 - scale)
+            half = words[last - 1] >> (23 - scale)
+        } else if scale == 0 {
+            half = words[last - 1] >> 23
+        } else if float.ge(z, 0.5) {
+            half = 2
+        }
+        if half > 0 {
+            n += 1
+            let mut carry = false
+            for k in 0u64 .. last {
+                let word = words[k]
+                if carry {
+                    words[k] = 0xffffff - word
+                } else if word != 0 {
+                    carry = true
+                    words[k] = 0x1000000 - word
+                }
+            }
+            if scale == 1 {
+                words[last - 1] = words[last - 1] & 0x7fffff
+            } else if scale == 2 {
+                words[last - 1] = words[last - 1] & 0x3fffff
+            }
+            if half == 2 {
+                z = 1.0 - z
+                if carry {
+                    z -= trig_scale(1.0, scale)
+                }
+            }
+        }
+        if float.eq(z, 0.0) {
+            let mut remaining: i32 = 0
+            for k in terms .. last {
+                remaining = remaining | words[k]
+            }
+            if remaining == 0 {
+                let mut more: u64 = 1
+                while words[terms - more] == 0 {
+                    more += 1
+                }
+                for k in last + 1 .. last + more + 1 {
+                    factors[input_last + k] = float.from_int(TWO_OVER_PI[table_start + k])
+                    let mut sum: f64 = 0.0
+                    for piece in 0u64 .. input_last + 1 {
+                        sum += input[piece] * factors[input_last + k - piece]
+                    }
+                    products[k] = sum
+                }
+                last += more
+                continue
+            }
+        }
+        break
+    }
+    if float.eq(z, 0.0) {
+        last -= 1
+        scale -= 24
+        while words[last] == 0 {
+            last -= 1
+            scale -= 24
+        }
+    } else {
+        z = trig_scale(z, -scale)
+        if float.ge(z, chunk) {
+            let carry: f64 = float.from_int(trig_trunc(inverse_chunk * z))
+            words[last] = trig_trunc(z - chunk * carry)
+            last += 1
+            scale += 24
+            words[last] = trig_trunc(carry)
+        } else {
+            words[last] = trig_trunc(z)
+        }
+    }
+    let mut factor = trig_scale(1.0, scale)
+    let mut i = last + 1
+    while i > 0 {
+        i -= 1
+        let word: f64 = float.from_int(words[i])
+        products[i] = factor * word
+        factor *= inverse_chunk
+    }
+    i = last + 1
+    while i > 0 {
+        i -= 1
+        let mut sum: f64 = 0.0
+        let mut k: u64 = 0
+        while k <= terms && k <= last - i {
+            sum += PIO2_CHUNKS[k] * products[i + k]
+            k += 1
+        }
+        remainder[last - i] = sum
+    }
+    let mut sum: f64 = 0.0
+    i = last + 1
+    while i > 0 {
+        i -= 1
+        sum += remainder[i]
+    }
+    let y0 = sum
+    sum = remainder[0] - sum
+    for k in 1u64 .. last + 1 {
+        sum += remainder[k]
+    }
+    if half == 0 {
+        (n & 7, y0, sum)
+    } else {
+        (n & 7, -y0, -sum)
+    }
+}
+
+/// Sine of x in radians. Finite inputs use the libm binary64 kernel.
+/// Infinities and NaN return canonical NaN. Alloc: nothing.
+pub fn sin(x: f64) -> f64 {
+    let hi = trig_high(x)
+    if hi <= 0x3fe921fb {
+        if hi < 0x3e500000 {
+            return x
+        }
+        return kernel_sin(x, 0.0, false)
+    }
+    if hi >= 0x7ff00000 {
+        return x - x
+    }
+    let (n, y0, y1) = trig_reduce(x)
+    match n & 3 {
+        0 => kernel_sin(y0, y1, true),
+        1 => kernel_cos(y0, y1),
+        2 => -kernel_sin(y0, y1, true),
+        _ => -kernel_cos(y0, y1),
+    }
+}
+
+/// Cosine of x in radians. The nonfinite and allocation contracts are as sin.
+pub fn cos(x: f64) -> f64 {
+    let hi = trig_high(x)
+    if hi <= 0x3fe921fb {
+        if hi < 0x3e46a09e {
+            return 1.0
+        }
+        return kernel_cos(x, 0.0)
+    }
+    if hi >= 0x7ff00000 {
+        return x - x
+    }
+    let (n, y0, y1) = trig_reduce(x)
+    match n & 3 {
+        0 => kernel_cos(y0, y1),
+        1 => -kernel_sin(y0, y1, true),
+        2 => -kernel_cos(y0, y1),
+        _ => kernel_sin(y0, y1, true),
+    }
+}
+
+/// Returns the sine and cosine of x in radians with one argument reduction.
+/// Infinities and NaN return two canonical NaNs. Alloc: nothing.
+pub fn sin_cos(x: f64) -> (f64, f64) {
+    let hi = trig_high(x)
+    if hi <= 0x3fe921fb {
+        if hi < 0x3e46a09e {
+            return (x, 1.0)
+        }
+        return (kernel_sin(x, 0.0, false), kernel_cos(x, 0.0))
+    }
+    if hi >= 0x7ff00000 {
+        let nan = x - x
+        return (nan, nan)
+    }
+    let (n, y0, y1) = trig_reduce(x)
+    let s = kernel_sin(y0, y1, true)
+    let c = kernel_cos(y0, y1)
+    match n & 3 {
+        0 => (s, c),
+        1 => (c, -s),
+        2 => (-s, -c),
+        _ => (-c, s),
+    }
+}

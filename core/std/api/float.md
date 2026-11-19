@@ -17,3 +17,9 @@ profile.
 It spells them as serde_json does, with a fractional zero for finite
 integers in decimal form, signed exponents in scientific form, and `null`
 for nonfinite values. `std.json.write_f64` uses this formatter.
+
+`sin`, `cos`, and `sin_cos` take radians and use Rust libm's binary64
+kernels and argument reduction. `sin_cos` returns the sine first and shares
+one reduction. All finite inputs, including signed zero and the largest
+finite magnitudes, follow the same implementation on the evaluator,
+Cranelift, and LLVM. Infinities and NaN return canonical NaN.

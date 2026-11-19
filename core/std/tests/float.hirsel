@@ -493,3 +493,20 @@ fn ryu_shortest64() -> bool {
     }
     true
 }
+
+// Binary64 results from Rust libm 0.2.16. The inputs exercise signed zero,
+// subnormals, cancellation near quadrants, large reduction and nonfinite values.
+const TRIG_CASES: Inline[(u64, u64, u64, u64, u64), 16] =[(0x0000000000000000, 0x0000000000000000, 0x3ff0000000000000, 0x0000000000000000, 0x3ff0000000000000), (0x8000000000000000, 0x8000000000000000, 0x3ff0000000000000, 0x8000000000000000, 0x3ff0000000000000), (0x0000000000000001, 0x0000000000000001, 0x3ff0000000000000, 0x0000000000000001, 0x3ff0000000000000), (0x3e47000000000000, 0x3e47000000000000, 0x3fefffffffffffff, 0x3e47000000000000, 0x3fefffffffffffff), (0x400921fb000fd5dd, 0x3ea50d15ced1a4a2, 0xbfeffffffffff913, 0x3ea50d15ced1a4a2, 0xbfeffffffffff913), (0x413921fb00000000, 0xbfd4b02e5be91e9e, 0x3fee4831257a62da, 0xbfd4b02e5be91e9e, 0x3fee4831257a62da), (0x5fe123456789abcd, 0xbfb2f494fd40206e, 0x3fefe9832f3da6ff, 0xbfb2f494fd40206e, 0x3fefe9832f3da6ff), (0x7fefffffffffffff, 0x3f7452fc98b34e97, 0xbfefffe62ecfab75, 0x3f7452fc98b34e97, 0xbfefffe62ecfab75), (0xffefffffffffffff, 0xbf7452fc98b34e97, 0xbfefffe62ecfab75, 0xbf7452fc98b34e97, 0xbfefffe62ecfab75), (0x7ff0000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), (0xfff0000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), (0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), (0xb87fcfc4114cc3af, 0xb87fcfc4114cc3af, 0x3ff0000000000000, 0xb87fcfc4114cc3af, 0x3ff0000000000000), (0x7cc7b935f9787110, 0xbfe9f127718fd9f8, 0x3fe2bc3dee4e575f, 0xbfe9f127718fd9f8, 0x3fe2bc3dee4e575f), (0x63330c9e7dd6fcaa, 0xbfb553aa39230037, 0x3fefe38600045430, 0xbfb553aa39230037, 0x3fefe38600045430), (0xdfd08564f85c148f, 0xbfe458decf466e69, 0xbfe8b2b32ad3521a, 0xbfe458decf466e69, 0xbfe8b2b32ad3521a),]
+
+// expect: run trig_libm_bits() = 0
+fn trig_libm_bits() -> u64 {
+    for i in 0u64 .. 16u64 {
+        let (input, sin_bits, cos_bits, pair_sin_bits, pair_cos_bits) = TRIG_CASES[i]
+        let x = float.from_bits64(input)
+        let (s, c) = float.sin_cos(x)
+        if float.to_bits64(float.sin(x)) != sin_bits || float.to_bits64(float.cos(x)) != cos_bits || float.to_bits64(s) != pair_sin_bits || float.to_bits64(c) != pair_cos_bits {
+            return i + 1
+        }
+    }
+    0
+}

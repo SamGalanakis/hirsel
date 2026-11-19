@@ -342,7 +342,7 @@ fn unknown(j: u64, n: u64) -> u64 {
             .iter()
             .map(|anchor| {
                 anchor.map_or(0, |a| {
-                    ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                    hirsel_core_ir::source::module_site_word(a.item.index(), a.start)
                 })
             })
             .collect();

@@ -6,6 +6,7 @@
 #endif
 
 #include "counted_exit.h"
+#include "implied_check.h"
 #include "pass_cost.h"
 
 #include <llvm-c/TargetMachine.h>
@@ -219,6 +220,10 @@ public:
 void registerReleasePasses(PassBuilder &builder) {
     builder.registerPipelineParsingCallback(
         [](StringRef name, FunctionPassManager &passes, ArrayRef<PassBuilder::PipelineElement>) {
+            if (name == "implied-check-hoist") {
+                passes.addPass(hirsel_llvm::ImpliedCheckHoistPass());
+                return true;
+            }
             if (name == "counted-exit-split") {
                 passes.addPass(hirsel_llvm::CountedExitSplitPass());
                 return true;
@@ -322,7 +327,7 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
         "function<eager-inv;no-rerun>("
             "sroa<modify-cfg>,early-cse<memssa>,jump-threading,correlated-propagation,"
             "jump-table-to-switch,simplifycfg<switch-range-to-icmp>,instcombine<no-verify-fixpoint>,"
-            "aggressive-instcombine,libcalls-shrinkwrap,tailcallelim,"
+            "aggressive-instcombine,libcalls-shrinkwrap,tailcallelim,implied-check-hoist,"
             "simplifycfg<switch-range-to-icmp>,reassociate,constraint-elimination,invariant-arm-sink,"
             "loop-mssa(loop-instsimplify,loop-simplifycfg,licm<no-allowspeculation>,"
                       "loop-rotate,licm<allowspeculation>,simple-loop-unswitch<nontrivial;trivial>),"

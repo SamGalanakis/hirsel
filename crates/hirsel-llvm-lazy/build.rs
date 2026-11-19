@@ -24,6 +24,7 @@ fn main() {
     for source in [
         &shared.join("counted_exit.h"),
         &shared.join("forward_reads.h"),
+        &shared.join("implied_check.h"),
         &shared.join("loop_version.h"),
         &shared.join("pass_cost.h"),
         &shared.join("step_tree.h"),

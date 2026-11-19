@@ -73,18 +73,7 @@ pub fn parse_decimal_span(b: Bytes, start: u64, end: u64, limit: u64) -> Result[
 fn digits(b: Bytes, start: u64, end: u64, base: u32, limit: u64) -> Result[u64, ParseError] {
     let mut v: u64 = 0
     for i in start .. end {
-        let x = b[i]
-        let d: u8 = if x >= b'0' && x <= b'9' {
-            x - b'0'
-        } else if x >= b'a' && x <= b'z' {
-            x - b'a' + 10
-        } else if x >= b'A' && x <= b'Z' {
-            x - b'A' + 10
-        } else {
-            return Error(Invalid(i))
-        }
-        let digit: u32 = int.widen(d)
-        if digit >= base {
+        let Some(d) = int.ascii_digit(b[i], base) else {
             return Error(Invalid(i))
         }
         let Some(next) = int.accumulate_digit(v, base, d, limit) else {

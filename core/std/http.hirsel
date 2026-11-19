@@ -310,17 +310,6 @@ fn part(b: Bytes, span: http1.Span) -> View[Bytes] in b {
     list.slice(b, span.start, span.end)
 }
 
-fn hex_digit(x: u8) -> Option[u8] {
-    let c = int.to_ascii_lower(x)
-    if int.is_ascii_digit(c) {
-        Some(c - b'0')
-    } else if c >= b'a' && c <= b'f' {
-        Some(c - b'a' + 10)
-    } else {
-        None
-    }
-}
-
 fn unreserved(x: u8) -> bool {
     int.is_ascii_alpha(x) || int.is_ascii_digit(x) || x == b'-' || x == b'.' || x == b'_' || x == b'~'
 }
@@ -338,7 +327,7 @@ fn ip_literal(b: Bytes) -> bool {
     }
     if int.to_ascii_lower(b[0]) == b'v' {
         let mut at: u64 = 1
-        while at < n && hex_digit(b[at]) != None {
+        while at < n && int.ascii_digit(b[at], 16) != None {
             at += 1
         }
         if at == 1 || at + 1 >= n || b[at] != b'.' {
@@ -388,7 +377,7 @@ fn authority(b: Bytes) -> bool {
         while at < n && b[at] != b':' {
             let c = b[at]
             if c == b'%' {
-                if n - at < 3 || hex_digit(b[at + 1]) == None || hex_digit(b[at + 2]) == None {
+                if n - at < 3 || int.ascii_digit(b[at + 1], 16) == None || int.ascii_digit(b[at + 2], 16) == None {
                     return false
                 }
                 at += 3
@@ -610,11 +599,11 @@ fn segment(b: Bytes) -> Result[String, TargetError] {
             if end - at < 3 {
                 return Error(BadTarget)
             }
-            let hi = match hex_digit(b[at + 1]) {
+            let hi = match int.ascii_digit(b[at + 1], 16) {
                 Some(x) => x,
                 None => return Error(BadTarget),
             }
-            let lo = match hex_digit(b[at + 2]) {
+            let lo = match int.ascii_digit(b[at + 2], 16) {
                 Some(x) => x,
                 None => return Error(BadTarget),
             }
@@ -2672,19 +2661,6 @@ fn field_value(c: u8) -> bool {
     c == 9 || c >= 32 && c != 127
 }
 
-fn hex(c: u8) -> Option[u64] {
-    if c >= b'0' && c <= b'9' {
-        let digit: u64 = int.widen(c - b'0')
-        return Some(digit)
-    }
-    let lower = int.to_ascii_lower(c)
-    if lower >= b'a' && lower <= b'f' {
-        let digit: u64 = int.widen(lower - b'a')
-        return Some(digit + 10)
-    }
-    None
-}
-
 fn extension_end(c: u8, mut d: Decoder) {
     if c == b';' {
         d.state = ExtStart
@@ -2710,8 +2686,9 @@ fn extension_name_end(c: u8, mut d: Decoder) {
 fn chunk_line(c: u8, mut d: Decoder) {
     match d.state {
         Size => {
-            match hex(c) {
-                Some(digit) => {
+            match int.ascii_digit(c, 16) {
+                Some(nibble) => {
+                    let digit: u64 = int.widen(nibble)
                     if d.digits == 16 || d.size > (18446744073709551615u64 - digit) / 16 {
                         fail(mut d, 400)
                     } else {

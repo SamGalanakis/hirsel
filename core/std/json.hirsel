@@ -952,16 +952,10 @@ fn unicode(s: String, mut i: u64) -> Result[char, Error] {
 fn hex4(s: String, p: u64) -> Result[u32, Error] {
     let mut v: u32 = 0
     for k in p .. p + 4 {
-        let x = at(s, k)
-        let d: u32 = if is_digit(x) {
-            int.widen(x - b'0')
-        } else if x >= b'a' && x <= b'f' {
-            int.widen(x - b'a' + 10)
-        } else if x >= b'A' && x <= b'F' {
-            int.widen(x - b'A' + 10)
-        } else {
+        let Some(digit) = int.ascii_digit(at(s, k), 16) else {
             return Error(Syntax(k))
         }
+        let d: u32 = int.widen(digit)
         v = v * 16 + d
     }
     Ok(v)

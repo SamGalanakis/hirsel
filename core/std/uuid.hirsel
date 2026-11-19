@@ -14,18 +14,6 @@ fn hyphen_at(i: u64) -> bool {
     i == 8 || i == 13 || i == 18 || i == 23
 }
 
-fn hex_digit(b: u8) -> Option[u64] {
-    if b >= b'0' && b <= b'9' {
-        Some(int.widen(b - b'0'))
-    } else if b >= b'a' && b <= b'f' {
-        Some(int.widen(b - b'a' + 10))
-    } else if b >= b'A' && b <= b'F' {
-        Some(int.widen(b - b'A' + 10))
-    } else {
-        None
-    }
-}
-
 /// Accepts exactly the RFC 9562 section 4 form, 8-4-4-4-12, in either case.
 /// Fails: Invalid at the first wrong byte, the end of a short matching prefix,
 /// or byte 36 if a complete UUID is followed by extra bytes.
@@ -42,13 +30,14 @@ pub fn parse(s: String) -> Result[Uuid, Error] {
                 return Error(Invalid(i))
             }
         } else {
-            let Some(digit) = hex_digit(b[i]) else {
+            let Some(digit) = int.ascii_digit(b[i], 16) else {
                 return Error(Invalid(i))
             }
+            let nibble: u64 = int.widen(digit)
             if i < 18 {
-                hi = (hi << 4) | digit
+                hi = (hi << 4) | nibble
             } else {
-                lo = (lo << 4) | digit
+                lo = (lo << 4) | nibble
             }
         }
         i += 1

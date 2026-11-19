@@ -41,6 +41,24 @@ pub fn try_narrow[T: integer, U: integer](x: T) -> Option[U]
 
 pub fn truncate[T: integer, U: integer](x: T) -> U
 
+/// Returns the ASCII digit value below radix. Letters A through Z and a
+/// through z stand for 10 through 35. Other bytes return None. Radix bounds
+/// are the caller's grammar. Alloc: nothing. Cost: O(1).
+pub fn ascii_digit(b: u8, radix: u32) -> Option[u8] {
+    let digit = if b > b'9' && radix > 10 {
+        // The mask folds both ASCII letter cases after subtracting 'A'.
+        (int.wrapping_sub(b, b'A') & 0xDF) + 10
+    } else {
+        int.wrapping_sub(b, b'0')
+    }
+    let value: u32 = int.widen(digit)
+    if value < radix && digit < 36 {
+        Some(digit)
+    } else {
+        None
+    }
+}
+
 /// Accumulates one numeric digit as value times radix plus digit. Returns None
 /// when the result exceeds limit, including arithmetic overflow. The caller
 /// checks that the digit and radix belong to its grammar. Alloc: nothing.
@@ -85,12 +103,11 @@ pub fn parse[T: integer](s: String) -> Result[T, ParseError] {
     let mut mag: u64 = 0
     let mut big = false
     for i in start .. n {
-        let x = b[i]
-        if x < b'0' || x > b'9' {
+        let Some(digit) = ascii_digit(b[i], 10) else {
             return Error(Invalid(i))
         }
         if !big {
-            match accumulate_digit(mag, 10, x - b'0', 18446744073709551615) {
+            match accumulate_digit(mag, 10, digit, 18446744073709551615) {
                 Some(v) => {
                     mag = v
                 },

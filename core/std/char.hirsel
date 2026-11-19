@@ -61,19 +61,12 @@ pub fn digit(c: char, base: u32) -> Option[u32] {
     if base < 2 || base > 36 {
         fail("char.digit: base outside 2..=36")
     }
-    let v = char.to_u32(c)
-    let d: u32 = if v >= 0x30 && v <= 0x39 {
-        v - 0x30
-    } else if v >= 0x61 && v <= 0x7a {
-        v - 0x61 + 10
-    } else if v >= 0x41 && v <= 0x5a {
-        v - 0x41 + 10
-    } else {
+    let byte: Option[u8] = int.try_narrow(char.to_u32(c))
+    let Some(b) = byte else {
         return None
     }
-    if d < base {
-        Some(d)
-    } else {
-        None
+    match int.ascii_digit(b, base) {
+        Some(d) => Some(int.widen(d)),
+        None => None,
     }
 }

@@ -618,20 +618,6 @@ fn escape(s: String, mut p: Parser, start: u64) -> Result[Node, Error] {
     }
 }
 
-fn hex(c: u8) -> u64 {
-    if b'0' <= c && c <= b'9' {
-        int.widen(c - b'0')
-    } else {
-        let lo = c | 32
-        if b'a' <= lo && lo <= b'f' {
-            let n: u64 = int.widen(lo - b'a')
-            n + 10
-        } else {
-            16
-        }
-    }
-}
-
 fn hexadecimal(s: String, mut p: Parser, escape_at: u64, prefix: u64) -> Result[Node, Error] {
     skip(s, mut p)
     if p.at == p.width {
@@ -669,12 +655,11 @@ fn hexadecimal(s: String, mut p: Parser, escape_at: u64, prefix: u64) -> Result[
         if braced && c == b'}' {
             break
         }
-        let digit = hex(c)
-        if digit == 16 {
+        let Some(digit) = int.ascii_digit(c, 16) else {
             return Error(syntax(p.at, EscapeHexInvalidDigit))
         }
         if value <= 0x10FFFF {
-            value = value * 16 + digit
+            value = value * 16 + int.widen(digit)
         }
         seen += 1
         p.at += 1

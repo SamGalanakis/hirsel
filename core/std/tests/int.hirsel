@@ -274,6 +274,36 @@ fn rust_integer_radix_cases() -> bool {
     unsigned_error(int.parse_uint("-9", 10)) == 100
 }
 
+// ASCII defines exactly three digit ranges. Compare all bytes, including
+// the punctuation around each range, against those ranges at four radices.
+// expect: run ascii_digit_values() = true
+fn ascii_digit_values() -> bool {
+    let bases: Inline[u32, 4] =[2, 10, 16, 36]
+    for n in 0u32 .. 256u32 {
+        let b: u8 = int.narrow(n)
+        let value: u32 = if n >= 48 && n <= 57 {
+            n - 48
+        } else if n >= 65 && n <= 90 {
+            n - 55
+        } else if n >= 97 && n <= 122 {
+            n - 87
+        } else {
+            36
+        }
+        for base in bases {
+            let expected: Option[u8] = if value < base {
+                Some(int.narrow(value))
+            } else {
+                None
+            }
+            if int.ascii_digit(b, base) != expected {
+                return false
+            }
+        }
+    }
+    true
+}
+
 // 1295 = 35 * 36 + 35. The bytes left of the result keep their sentinel.
 // The maximum u64 uses the whole buffer in base two.
 // expect: run radix_digits_buffer() = true

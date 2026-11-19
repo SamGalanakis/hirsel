@@ -32,18 +32,6 @@ fn digit(b: u8) -> bool {
     b >= b'0' && b <= b'9'
 }
 
-fn hex(b: u8) -> Option[u8] {
-    if digit(b) {
-        Some(b - b'0')
-    } else if b >= b'A' && b <= b'F' {
-        Some(b - b'A' + 10)
-    } else if b >= b'a' && b <= b'f' {
-        Some(b - b'a' + 10)
-    } else {
-        None
-    }
-}
-
 fn unreserved(b: u8) -> bool {
     alpha(b) || digit(b) || b == b'-' || b == b'.' || b == b'_' || b == b'~'
 }
@@ -70,10 +58,10 @@ fn escaped(data: Bytes, i: u64, end: u64) -> Result[u8, Error] {
     if end - i < 3 {
         return Error(Invalid(i))
     }
-    let Some(hi) = hex(data[i + 1]) else {
+    let Some(hi) = int.ascii_digit(data[i + 1], 16) else {
         return Error(Invalid(i))
     }
-    let Some(lo) = hex(data[i + 2]) else {
+    let Some(lo) = int.ascii_digit(data[i + 2], 16) else {
         return Error(Invalid(i))
     }
     Ok((hi << 4) | lo)

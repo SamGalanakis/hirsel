@@ -89,14 +89,13 @@ pub fn parse_ip(b: Bytes) -> Result[Ip, ParseIpError] {
         let start = at
         let mut word: u16 = 0
         while at < n {
-            let c = option.unwrap(char.from_u32(int.widen(b[at])))
-            let Some(digit) = char.digit(c, 16) else {
+            let Some(digit) = int.ascii_digit(b[at], 16) else {
                 break
             }
             if at - start == 4 {
                 return Error(Invalid(at))
             }
-            word = (word << 4) | int.narrow(digit)
+            word = (word << 4) | int.widen(digit)
             at += 1
         }
         if at == start {

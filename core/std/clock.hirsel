@@ -1,4 +1,4 @@
-// Module `clock`: waiting on a Clock's monotonic time (core.md, "Host"). Clock is a core
+// Module `clock`: monotonic deadlines and waits (core.md, "Host"). Clock is a core
 // capability type; a run's Clock comes from `main`'s granted parameters (CAP-4). Core has
 // one waiting clock operation, `host.sleep_until`, on an absolute deadline in
 // `host.mono_ns` nanoseconds; a relative wait is library code over it, here. Field
@@ -12,4 +12,11 @@
 /// Ex: `std.clock.sleep_ns(c, 5_000_000)`
 pub fn sleep_ns(c: Clock, ns: u64) waits {
     host.sleep_until(c, host.mono_ns(c) + ns)
+}
+
+/// The deadline at plus ms milliseconds, in monotonic nanoseconds. Saturates at
+/// u64's maximum when the conversion or addition overflows. Cost: O(1).
+/// Ex: `clock.deadline_after_ms(2_000_000, 5)` is 7_000_000.
+pub fn deadline_after_ms(at: u64, ms: u64) -> u64 {
+    int.saturating_add(at, int.saturating_mul(ms, 1000000u64))
 }

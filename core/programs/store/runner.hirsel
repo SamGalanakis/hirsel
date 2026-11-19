@@ -150,13 +150,11 @@ fn status_watch(take watch: Option[Sender[Receiver[Phase]]]) -> Result[Option[Se
     }
 }
 
-fn deadline_after(at: u64, millis: u64) -> u64 { int.saturating_add(at, int.saturating_mul(millis, 1000000u64)) }
-
 fn serve_inbox_capacity(limit: u64) -> u64 { int.saturating_add(int.saturating_mul(limit, 2u64), 22u64) }
 
 fn start_drain(stop: Stop, started: u64, clock: Clock, tasks: Tasks, events: Sender[LifeEvent], root: Latest[Option[DrainWindow]]) -> Result[Task[()], StartError] {
-    let deadline = deadline_after(started, stop.grace_ms)
-    let admission = deadline_after(started, if stop.lag_ms < stop.grace_ms { stop.lag_ms } else { stop.grace_ms })
+    let deadline = std.clock.deadline_after_ms(started, stop.grace_ms)
+    let admission = std.clock.deadline_after_ms(started, if stop.lag_ms < stop.grace_ms { stop.lag_ms } else { stop.grace_ms })
     let window = DrainWindow(admission: admission, deadline: deadline)
     let wanted: Option[DrainWindow] = Some(window)
     let shared = match arc.new(take wanted) { Ok(take value) => take value, Error((cap, _)) => return Error(Full(cap)) }
@@ -3618,7 +3616,7 @@ fn wire_read[C: send](take x: WireRead[C]) -> () waits {
     loop {
         if let Error(_) = channel.receive(credits) { return }
         let next = loop {
-            let end = deadline_after(host.mono_ns(clock), config.idle_ms)
+            let end = std.clock.deadline_after_ms(host.mono_ns(clock), config.idle_ms)
             let packet = loop {
                 match channel.try_send(pool, Decode(take r, host.mono_ns(clock), channel.sender(reply))) {
                     Ok(()) => {},
@@ -3670,7 +3668,7 @@ fn wire_write(take x: WireWrite) -> () waits {
         }
         let is_close = list.len(frame) != 0u64 && frame[0u64] & 15u8 == 8u8
         let now = host.mono_ns(clock)
-        let mut end = if is_close { deadline_after(now, config.close_ms) } else { int.saturating_add(now, std.wsock.MESSAGE_NS) }
+        let mut end = if is_close { std.clock.deadline_after_ms(now, config.close_ms) } else { int.saturating_add(now, std.wsock.MESSAGE_NS) }
         let mut can_close = !is_close
         let _ = std.wsock.stage(mut writer, take frame)
         loop {
@@ -3684,7 +3682,7 @@ fn wire_write(take x: WireWrite) -> () waits {
                     if !can_close { let _ = channel.send(to, wire_event(Ended(1001u16))); return }
                     // The Close frame cannot overtake a partial frame. Give the
                     // sole writer the same close deadline as the owner.
-                    end = deadline_after(end, config.close_ms)
+                    end = std.clock.deadline_after_ms(end, config.close_ms)
                     can_close = false
                     if let Error(_) = channel.send(to, wire_event(WriteTimedOut(end))) { return }
                 },
@@ -4115,7 +4113,7 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]], mu
         if closing && unarmed {
             let own_close = match close_at {
                 Some(end) => end,
-                None => deadline_after(host.mono_ns(clock), c.socket.close_ms),
+                None => std.clock.deadline_after_ms(host.mono_ns(clock), c.socket.close_ms),
             }
             let deadline = match work.deadline { Some(cut) => if cut < own_close { cut } else { own_close }, None => own_close }
             close_at = Some(deadline)
@@ -4389,7 +4387,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
 fn start_socket_refusal(tasks: Tasks, take socket: Socket, clock: Clock, at: u64, config: WireConfig, to: Sender[ServeInput], id: u64, mut refusing: Map[u64, Task[()]]) {
     if map.len(refusing) >= 16u64 { return }
     if let Ok(take completion) = OwnerCompletion(to: channel.sender(to), id: id, abandoned: 0u64) {
-        let job = ManagedRefusal(socket: take socket, clock: clock, until: deadline_after(at, config.socket.upgrade_ms), completion: take completion)
+        let job = ManagedRefusal(socket: take socket, clock: clock, until: std.clock.deadline_after_ms(at, config.socket.upgrade_ms), completion: take completion)
         if let Ok(take handle) = task.spawn(tasks, bytes 16384u64, take job, refuse_managed_socket) { let _ = map.insert(mut refusing, id, take handle) }
     }
 }
@@ -4468,7 +4466,7 @@ pub fn prepare[G: send, H: send](r: Registry[G, H], a: Admitted, take want: Call
     if size > a.arg_max { return Error(Budget(Room(requested: size, available: a.arg_max))) }
     if size > a.budget { return Error(Budget(Room(requested: size, available: a.budget))) }
     let relative: u64 = int.widen(want.deadline_ms)
-    let end = int.saturating_add(a.arrived, relative * 1000000u64)
+    let end = std.clock.deadline_after_ms(a.arrived, relative)
     if want.deadline_ms == 0u32 || end <= a.now { return Error(Deadline) }
     if let Some(check) = map.get(r.checks, want.key) {
         if let Some(take why) = check(want.arg) { return Error(take why) }

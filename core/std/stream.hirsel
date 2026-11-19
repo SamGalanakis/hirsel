@@ -185,10 +185,6 @@ type Alarm: send {
     inbox: Sender[Delivery]
 }
 
-fn after_ms(at: u64, ms: u64) -> u64 {
-    int.saturating_add(at, int.saturating_mul(ms, 1000000u64))
-}
-
 fn monitor(take job: Monitor) -> ReadHalf waits {
     let Monitor(half: take half, remaining: limit, inbox: take inbox) = take job
     let mut reader = take half
@@ -211,18 +207,18 @@ fn monitor(take job: Monitor) -> ReadHalf waits {
 }
 
 fn alarm(take job: Alarm) waits {
-    let Alarm(clock: clock, from: start, interval: period, pre_head: pre_head, inbox: take inbox) = take job
-    let mut next = after_ms(start, period)
+    let Alarm(clock: c, from: start, interval: period, pre_head: pre_head, inbox: take inbox) = take job
+    let mut next = clock.deadline_after_ms(start, period)
     let mut pending = pre_head
     loop {
         let at = order.min(next, pending)
-        host.sleep_until(clock, at)
+        host.sleep_until(c, at)
         let _ = channel.try_send(inbox, Tick)
         if at == 18446744073709551615 {
             return
         }
         if next == at {
-            next = after_ms(at, period)
+            next = clock.deadline_after_ms(at, period)
         }
         if pending == at {
             pending = 18446744073709551615
@@ -259,7 +255,7 @@ fn write_head(mut socket: WriteHalf, head: Bytes, c: Clock, deadline: u64, ms: u
         http.write_promotion_refusal(mut socket, c, at, ms, signal)?
         return Ok(EndSent)
     }
-    let stop = after_ms(at, ms)
+    let stop = clock.deadline_after_ms(at, ms)
     let sent = match host.send_pair(mut socket, head, string.as_bytes(""), At(c, http.clamp_deadline(signal, order.min(stop, deadline)))) {
         Ok(0) => return Error(Reset),
         Ok(n) => n,
@@ -291,14 +287,14 @@ fn writer(take job: Writer) -> WriteHalf waits {
         let wrote: Result[SentUnit, NetError] = match take unit {
             Head => write_head(mut socket, scratch, c, pre_head, ms, inbox, signal),
             Data(take data, cap) => {
-                let deadline = order.min(cap, after_ms(host.mono_ns(c), ms))
+                let deadline = order.min(cap, clock.deadline_after_ms(host.mono_ns(c), ms))
                 match send_data(mut socket, mut scratch, data, chunked, c, deadline, signal) {
                     Ok(()) => Ok(ItemSent),
                     Error(e) => Error(e),
                 }
             },
             Heartbeat => {
-                let deadline = after_ms(host.mono_ns(c), ms)
+                let deadline = clock.deadline_after_ms(host.mono_ns(c), ms)
                 match send_data(mut socket, mut scratch, string.as_bytes(":\n\n"), chunked, c, deadline, signal) {
                     Ok(()) => Ok(ControlSent),
                     Error(e) => Error(e),
@@ -358,7 +354,7 @@ fn stop_producer(mut running: Option[Task[()]]) {
 
 pub fn drive(take job: Work) waits {
     let Work(transport: take transport, tasks: tasks, control: take control) = take job
-    let Transfer(reader: take input, writer: take output, offer: take offer, buffered: buffered, clock: clock, out_cap: capacity, pipeline_max: allowance, write_ms: ms, linger_ms: linger, heartbeat_ms: period, lease_ms: lease) = take transport
+    let Transfer(reader: take input, writer: take output, offer: take offer, buffered: buffered, clock: c, out_cap: capacity, pipeline_max: allowance, write_ms: ms, linger_ms: linger, heartbeat_ms: period, lease_ms: lease) = take transport
     if buffered > allowance {
         return
     }
@@ -378,9 +374,9 @@ pub fn drive(take job: Work) waits {
     let _ = channel.try_send(give, ())
     let _ = channel.try_send(give, ())
     let mut queue: List[Bytes] = result.unwrap(list.with_capacity(2))
-    let writing = Writer(half: take output, block: take block, size: head_len, out_cap: capacity, chunked: chunked, suppressed: suppress, clock: clock, pre_head: pre_head, write_ms: ms, stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes)
+    let writing = Writer(half: take output, block: take block, size: head_len, out_cap: capacity, chunked: chunked, suppressed: suppress, clock: c, pre_head: pre_head, write_ms: ms, stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes)
     let watching = Monitor(half: take input, remaining: allowance - buffered, inbox: channel.sender(tx))
-    let waking = Alarm(clock: clock, from: at, interval: period, pre_head: pre_head, inbox: channel.sender(tx))
+    let waking = Alarm(clock: c, from: at, interval: period, pre_head: pre_head, inbox: channel.sender(tx))
     let mut write_task = result.unwrap(task.spawn(tasks, bytes ((capacity + 7) / 8 * 8), take writing, writer))
     let mut read_task = result.unwrap(task.spawn(tasks, bytes 64, take watching, monitor))
     let mut alarm_task = result.unwrap(task.spawn(tasks, bytes 4096, take waking, alarm))
@@ -392,7 +388,7 @@ pub fn drive(take job: Work) waits {
     let mut end: Option[u64] = None
     let mut draining = false
     while let Ok(take message) = channel.receive(rx) {
-        let now = host.mono_ns(clock)
+        let now = host.mono_ns(c)
         let mut heartbeat_ready = false
         if !draining {
             if let Some(d) = http.stop_deadline(signal) {
@@ -402,7 +398,7 @@ pub fn drive(take job: Work) waits {
                 draining = true
                 let stop = match end {
                     Some(until) => until,
-                    None => after_ms(now, ms),
+                    None => clock.deadline_after_ms(now, ms),
                 }
                 end = Some(order.min(d, stop))
                 list.clear(mut queue)
@@ -411,7 +407,7 @@ pub fn drive(take job: Work) waits {
         }
         if let Some(expires) = lease_end {
             if now >= expires && end == None {
-                end = Some(after_ms(now, ms))
+                end = Some(clock.deadline_after_ms(now, ms))
                 list.clear(mut queue)
                 stop_producer(mut producer)
             }
@@ -439,7 +435,7 @@ pub fn drive(take job: Work) waits {
                 }
             },
             Committed => {
-                lease_end = Some(after_ms(host.mono_ns(clock), lease))
+                lease_end = Some(clock.deadline_after_ms(host.mono_ns(c), lease))
             },
             Item(take item) => {
                 if end == None {
@@ -449,7 +445,7 @@ pub fn drive(take job: Work) waits {
             Sent(HeadSent) => {
                 busy = false
                 if suppress {
-                    end = Some(after_ms(now, ms))
+                    end = Some(clock.deadline_after_ms(now, ms))
                 }
             },
             Sent(ItemSent) => {
@@ -467,13 +463,13 @@ pub fn drive(take job: Work) waits {
                     break
                 }
                 if end == None {
-                    end = Some(after_ms(now, ms))
+                    end = Some(clock.deadline_after_ms(now, ms))
                 }
                 list.clear(mut queue)
             },
             SourceEnded => {
                 if end == None {
-                    end = Some(after_ms(now, ms))
+                    end = Some(clock.deadline_after_ms(now, ms))
                     stop_producer(mut producer)
                 }
             },
@@ -522,6 +518,6 @@ pub fn drive(take job: Work) waits {
     let read_result = task.join(take read_task)
     let _ = task.join(take alarm_task)
     if let (Ok(take write_half), Ok(take read_half)) = (take write_result, take read_result) {
-        let _ = net.finish(take write_half, take read_half, clock, after_ms(host.mono_ns(clock), linger))
+        let _ = net.finish(take write_half, take read_half, c, clock.deadline_after_ms(host.mono_ns(c), linger))
     }
 }

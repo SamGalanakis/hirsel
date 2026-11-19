@@ -1,0 +1,2 @@
+csvs/*.csv -text
+json/*.json -text

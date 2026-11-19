@@ -1,3 +1,4 @@
+// test-vectors
 fn dialect(delimiter: u8, crlf: bool) -> csv.Dialect {
     csv.Dialect(delimiter: delimiter, crlf: crlf)
 }
@@ -252,9 +253,6 @@ fn writer_round_trip() -> bool {
 // expect: run python_reader() = true
 fn python_reader() -> bool {
     let d = dialect(44, false)
-    if !read_is(result.unwrap(b""), d, fixture_rows("")) {
-        return false
-    }
     if !read_is(result.unwrap(b"\n"), d, fixture_rows("␞")) {
         return false
     }
@@ -754,4 +752,31 @@ fn writer_end_refusal_retries() -> bool {
     }
     result.unwrap(csv.end(mut w, mut out))
     out == "abcde\r\n\"\"\r\n"
+}
+
+// Source and Rust reader differences are in vectors/csv/README.md.
+// expect: run csv_spectrum() = true
+fn csv_spectrum() -> bool {
+    for row in csv_spectrum_data() {
+        let (name, input, expected) = row
+        if !read_is(string.as_bytes(input), dialect(44, false), fixture_rows(expected)) {
+            fail(result.unwrap(string.from(name)))
+        }
+    }
+    let (input, offset) = csv_spectrum_bare_quote()
+    invalid_at(string.as_bytes(input), offset)
+}
+
+// Source: rust-csv src/reader.rs and csv-core/src/reader.rs,
+// 05612e87e6e92910d40d7214b70952b8434fef9b, MIT.
+// expect: run rust_csv_reader() = true
+fn rust_csv_reader() -> bool {
+    let cases: Inline[(String, String), 7] =[("foo,\"b,ar\",baz\nabc,mno,xyz", "foo␟b,ar␟baz␟␞abc␟mno␟xyz␟␞"), ("foo\nbar,baz", "foo␟␞bar␟baz␟␞"), ("\u{feff}a", "\u{feff}a␟␞"), ("a\u{feff}", "a\u{feff}␟␞"), ("a,\u{feff}b", "a␟\u{feff}b␟␞"), ("\n\r\na,b\r\n\n\r\nx,y\r\n\n\r\nm,n\r\n", "␞␞a␟b␟␞␞␞x␟y␟␞␞␞m␟n␟␞"), ("", ""),]
+    for row in cases {
+        let (input, expected) = row
+        if !read_is(string.as_bytes(input), dialect(44, false), fixture_rows(expected)) {
+            return false
+        }
+    }
+    invalid_at(string.as_bytes("  \"a\"  "), 2)
 }

@@ -626,16 +626,6 @@ fn emit_module(
         } else {
             format!("{name}.infallible")
         };
-        let destination = sig.dest.filter(|_| sig.results.is_empty()).and_then(|t| {
-            use hirsel_core_layout::{Layout, Repr};
-            match (module.types[t.index()].repr, &recipes[t.index()].layout) {
-                (Repr::Resource | Repr::Region, _) | (_, Layout::Fixed(_)) => {
-                    let (bytes, _) = e.place_layout(PlaceTy::Declared(t));
-                    matches!(bytes, 1..=16).then_some(bytes)
-                }
-                _ => None,
-            }
-        });
         let attrs = FnAttrs {
             linkage: if has_status {
                 Linkage::WeakOdr
@@ -671,7 +661,6 @@ fn emit_module(
                 }
                 _ => Inline::Default,
             },
-            destination_size: destination.filter(|_| e.abi.record.is_none()),
             carriers: carriers(module, &recipes, role_facts, FuncId(i as u32), sig, &locals),
             subprogram: function_debug.map(|d| d.scope),
             ..FnAttrs::default()

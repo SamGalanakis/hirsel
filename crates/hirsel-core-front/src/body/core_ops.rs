@@ -256,11 +256,34 @@ operations! {
     ("list", "slots_finish_list", Lane::Value, "A", "core-collections-918", true),
     ("list", "sort_stable", Lane::PendingCode, "C", "core-collections-918", false),
     ("list", "precedes", Lane::PendingCode, "C", "core-collections-918", true),
-    ("list", "sorted_run_end", Lane::PendingCode, "C", "core-collections-918", true),
-    ("list", "merge_top", Lane::PendingCode, "C", "core-collections-918", true),
-    ("list", "move_run", Lane::PendingCode, "C", "core-collections-918", true),
-    ("list", "merge_runs", Lane::PendingCode, "C", "core-collections-918", true),
-    ("list", "empty_merge", Lane::PendingCode, "C", "core-collections-918", true),
+    ("list", "bidirectional_merge", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "choose_pivot", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "create_run", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "drift", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "existing_run", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "gallop_left", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "gallop_right", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "idle", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "insert_tail", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "insertion_len", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "insertion_sort_hole", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "logical_merge", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "median3", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "median3_rec", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "merge", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "merge_both", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "merge_down", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "merge_up", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "partition_hole", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "partition_one", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "partition_scan", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "quicksort", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "reverse_run", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "small_len", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "small_sort", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "sort4_stable", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "sqrt_approx", Lane::PendingCode, "C", "runtime-sort-1336", true),
+    ("list", "stable_quicksort", Lane::PendingCode, "C", "runtime-sort-1336", true),
     ("list", "slots_list_view", Lane::Value, "A", "core-collections-918", true),
     ("list", "slots_list_move", Lane::Value, "A", "core-collections-918", true),
     ("list", "slots_forget_ring", Lane::Value, "A", "core-collections-918", true),
@@ -1606,11 +1629,34 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                                 "Hole"
                                     | "grow"
                                     | "precedes"
-                                    | "sorted_run_end"
-                                    | "merge_top"
-                                    | "move_run"
-                                    | "merge_runs"
-                                    | "empty_merge"
+                                    | "bidirectional_merge"
+                                    | "choose_pivot"
+                                    | "create_run"
+                                    | "drift"
+                                    | "existing_run"
+                                    | "gallop_left"
+                                    | "gallop_right"
+                                    | "idle"
+                                    | "insert_tail"
+                                    | "insertion_len"
+                                    | "insertion_sort_hole"
+                                    | "logical_merge"
+                                    | "median3"
+                                    | "median3_rec"
+                                    | "merge"
+                                    | "merge_both"
+                                    | "merge_down"
+                                    | "merge_up"
+                                    | "partition_hole"
+                                    | "partition_one"
+                                    | "partition_scan"
+                                    | "quicksort"
+                                    | "reverse_run"
+                                    | "small_len"
+                                    | "small_sort"
+                                    | "sort4_stable"
+                                    | "sqrt_approx"
+                                    | "stable_quicksort"
                             ))
                     || matches!(entry.module, "deque" | "heap" | "tape")
             );

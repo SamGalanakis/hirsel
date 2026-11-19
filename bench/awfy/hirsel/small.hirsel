@@ -11,36 +11,28 @@ type Ball {
     vy: i32
 }
 
-fn reflect(v: i32) -> i32 {
-    if v < 0 {
-        -v
-    } else {
-        v
-    }
-}
-
 fn step(mut ball: Ball) -> bool {
     let mut bounced = false
     ball.x += ball.vx
     ball.y += ball.vy
     if ball.x > 500 {
         ball.x = 500
-        ball.vx = -reflect(ball.vx)
+        ball.vx = 0 - int.abs(ball.vx)
         bounced = true
     }
     if ball.x < 0 {
         ball.x = 0
-        ball.vx = reflect(ball.vx)
+        ball.vx = int.abs(ball.vx)
         bounced = true
     }
     if ball.y > 500 {
         ball.y = 500
-        ball.vy = -reflect(ball.vy)
+        ball.vy = 0 - int.abs(ball.vy)
         bounced = true
     }
     if ball.y < 0 {
         ball.y = 0
-        ball.vy = reflect(ball.vy)
+        ball.vy = int.abs(ball.vy)
         bounced = true
     }
     bounced

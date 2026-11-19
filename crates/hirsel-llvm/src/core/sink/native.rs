@@ -29,6 +29,13 @@ const PROF: u32 = 3;
 const RANGE: u32 = 4;
 const TBAA: u32 = 5;
 
+#[derive(Clone, Copy)]
+enum TempSlot {
+    Empty,
+    Pending(Raw),
+    Defined(Raw),
+}
+
 pub(crate) struct NativeSink {
     context: Rc<llvm::Context>,
     api: &'static Api,
@@ -36,6 +43,8 @@ pub(crate) struct NativeSink {
     types: HashMap<Type, Raw>,
     locals: HashMap<Local, Raw>,
     pending: HashMap<Local, Raw>,
+    temps: Vec<TempSlot>,
+    pending_temps: usize,
     bound: HashMap<Local, Local>,
     blocks: HashMap<Label, Raw>,
     name: String,
@@ -57,6 +66,8 @@ impl NativeSink {
             types: HashMap::new(),
             locals: HashMap::new(),
             pending: HashMap::new(),
+            temps: Vec::new(),
+            pending_temps: 0,
             bound: HashMap::new(),
             blocks: HashMap::new(),
             name: String::new(),
@@ -119,7 +130,25 @@ impl NativeSink {
         // SAFETY: the name is borrowed through the synchronous lookup.
         unsafe { (self.api.global_ref)(self.unit, name.as_ptr().cast(), name.len()) }
     }
+    fn temp_slot(&mut self, index: usize) -> &mut TempSlot {
+        if index >= self.temps.len() {
+            self.temps.resize(index + 1, TempSlot::Empty);
+        }
+        &mut self.temps[index]
+    }
+
     fn local(&mut self, local: Local, ty: &Type) -> Raw {
+        if let Local::Temp(index) = local {
+            match *self.temp_slot(index) {
+                TempSlot::Pending(value) | TempSlot::Defined(value) => return value,
+                TempSlot::Empty => {}
+            }
+            let kind = self.ty(ty);
+            let value = unsafe { (self.api.placeholder)(kind) };
+            self.temps[index] = TempSlot::Pending(value);
+            self.pending_temps += 1;
+            return value;
+        }
         if let Some(&value) = self.bound.get(&local) {
             return self.local(value, ty);
         }
@@ -141,6 +170,17 @@ impl NativeSink {
         // SAFETY: naming and replacing values of this unit's current function.
         unsafe {
             (self.api.set_name)(value, self.name.as_ptr().cast(), self.name.len());
+            if let Local::Temp(index) = local {
+                match std::mem::replace(self.temp_slot(index), TempSlot::Defined(value)) {
+                    TempSlot::Pending(pending) => {
+                        (self.api.replace)(pending, value);
+                        self.pending_temps -= 1;
+                    }
+                    TempSlot::Defined(_) => debug_assert!(false, "{local} is defined twice"),
+                    TempSlot::Empty => {}
+                }
+                return;
+            }
             if let Some(pending) = self.pending.remove(&local) {
                 (self.api.replace)(pending, value);
             }
@@ -457,6 +497,7 @@ impl Sink for NativeSink {
     fn begin_function(&mut self, name: &str, sig: &FnSig, params: &[Local], attrs: &FnAttrs) {
         let f = self.function(name, sig, attrs);
         self.locals.clear();
+        self.temps.clear();
         self.bound.clear();
         self.blocks.clear();
         // SAFETY: the new function's body and arguments.
@@ -468,9 +509,10 @@ impl Sink for NativeSink {
     }
     fn end_function(&mut self) {
         assert!(
-            self.pending.is_empty(),
-            "undefined locals {:?}",
-            self.pending.keys().collect::<Vec<_>>()
+            self.pending.is_empty() && self.pending_temps == 0,
+            "undefined locals {:?}, {} temporaries",
+            self.pending.keys().collect::<Vec<_>>(),
+            self.pending_temps
         );
         for (label, &block) in &self.blocks {
             // SAFETY: a block of this unit.

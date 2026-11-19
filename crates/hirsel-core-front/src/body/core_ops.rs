@@ -1,5 +1,6 @@
 //! Binding of canonical core declarations to their call-site kernels.
 //! Identity is resolved once when the program's declarations are published.
+//! The operation table lists core functions declared without a body.
 use super::*;
 use hirsel_core_ir::{Counted, HostOp, RtOp};
 use hirsel_core_layout::flow::Op as FlowOp;
@@ -90,7 +91,6 @@ operations! {
     ("flow", "end", Lane::Runtime(Kernel::Flow(FlowOp::End)), "B", "mc-f1-1180", false),
     ("flow", "next", Lane::Runtime(Kernel::Flow(FlowOp::Next)), "B", "mc-f1-1180", false),
     ("flow", "finish", Lane::Runtime(Kernel::Flow(FlowOp::Finish)), "B", "mc-f1-1180", false),
-    ("int", "parse", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("core", "isolate", Lane::PendingCode, "A", "core-check-callables-913", false),
     ("latest", "new", Lane::Runtime(Kernel::LatestNew), "A", "core-ops-914", false),
     ("latest", "handle", Lane::Runtime(Kernel::LatestHandle), "A", "core-ops-914", false),
@@ -108,29 +108,7 @@ operations! {
     ("host", "sync", Lane::Runtime(Kernel::Host(HostOp::Sync)), "B", "core-ops-914", false),
     ("host", "sync_dir", Lane::Runtime(Kernel::Host(HostOp::SyncDir)), "B", "core-ops-914", false),
     ("host", "random", Lane::Runtime(Kernel::Host(HostOp::Random)), "B", "core-ops-914", false),
-    ("list", "sum", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("list", "fill", Lane::PendingCode, "A", "core-check-calls-910", false),
-    ("string", "from", Lane::PendingCode, "C", "std-seed-api-889", false),
-    ("string", "from_utf8", Lane::PendingCode, "C", "std-seed-api-889", false),
-    ("string", "is_utf8", Lane::PendingCode, "C", "std-seed-api-889", false),
-    ("string", "encode_base64", Lane::PendingCode, "C", "std-base64-1d2503c0", false),
-    ("string", "append_base64_bytes", Lane::PendingCode, "C", "std-base64-1d2503c0", false),
-    ("string", "append_base64_blocks", Lane::PendingCode, "C", "std-base64-1d2503c0", true),
-    ("string", "base64_symbol", Lane::PendingCode, "C", "std-base64-1d2503c0", true),
-    ("string", "into_bytes", Lane::PendingCode, "C", "std-seed-api-889", false),
-    ("string", "next_scalar", Lane::PendingCode, "C", "std-seed-api-889", false),
-    ("string", "push_scalar", Lane::PendingCode, "C", "std-seed-api-889", true),
-    ("string", "push_char", Lane::PendingCode, "C", "std-seed-api-889", false),
-    ("string", "push_u64", Lane::PendingCode, "C", "std-seed-api-889", false),
-    ("string", "truncate", Lane::PendingCode, "C", "std-seed-api-889", false),
-    ("string", "make_ascii_upper", Lane::PendingCode, "C", "std-seed-api-889", false),
-    ("string", "make_ascii_lower", Lane::PendingCode, "C", "std-seed-api-889", false),
-    ("string", "with_capacity", Lane::PendingCode, "C", "std-utf8-bbd839af", false),
-    ("string", "validate_utf8", Lane::PendingCode, "C", "std-utf8-603fae9f", false),
-    ("string", "utf8_head", Lane::PendingCode, "C", "std-utf8-603fae9f", false),
-    ("string", "utf8_tail", Lane::PendingCode, "C", "std-utf8-603fae9f", false),
-    ("string", "utf8_complete_prefix", Lane::PendingCode, "C", "std-utf8-603fae9f", true),
-    ("string", "utf8_block_prefix", Lane::PendingCode, "C", "std-utf8-58a13cbf", true),
     ("arc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Arc))), "A", "core-ops-914", false),
     ("arc", "share", Lane::Runtime(Kernel::Share(Counted::Arc)), "A", "core-ops-914", false),
     ("arc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Arc)), "A", "core-ops-914", false),
@@ -184,8 +162,6 @@ operations! {
     ("host", "remove_tree", Lane::Runtime(Kernel::Host(HostOp::RemoveTree)), "B", "core-ops-914", false),
     ("host", "wall_ms", Lane::Runtime(Kernel::Host(HostOp::WallMs)), "B", "core-ops-914", false),
     ("host", "mono_ns", Lane::Runtime(Kernel::Host(HostOp::MonoNs)), "B", "core-ops-914", false),
-    ("tape", "open", Lane::PendingCode, "C", "tape-build-1037", false),
-    ("tape", "end", Lane::PendingCode, "C", "tape-build-1037", false),
     ("tape", "open_raw", Lane::Runtime(Kernel::TapeOpen), "B", "tape-build-1037", true),
     ("tape", "end_returned", Lane::Runtime(Kernel::TapeEnd(true)), "B", "tape-build-1037", true),
     ("tape", "end_causes", Lane::Runtime(Kernel::TapeEnd(false)), "B", "tape-build-1037", true),
@@ -196,9 +172,6 @@ operations! {
     ("tape", "tasks", Lane::Runtime(Kernel::TapeGrant(9)), "B", "tape-s2-1074", false),
     ("tape", "args", Lane::Runtime(Kernel::TapeGrant(10)), "B", "tape-build-1037", false),
     ("tape", "across", Lane::Runtime(Kernel::TapeAcross), "B", "tape-build-1037", false),
-    ("tape", "io_error", Lane::PendingCode, "C", "tape-build-1037", true),
-    ("tape", "open_error", Lane::PendingCode, "C", "tape-build-1037", true),
-    ("tape", "ending", Lane::PendingCode, "C", "tape-build-1037", true),
     ("indexed", "get", Lane::Language, "A", "core-check-895", false),
     ("int", "wrapping_add", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "wrapping_sub", Lane::Numeric, "A", "core-check-index-912", false),
@@ -239,39 +212,19 @@ operations! {
     ("int", "narrow", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "try_narrow", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "truncate", Lane::Numeric, "A", "core-check-index-912", false),
-    ("deque", "Deque", Lane::PendingCode, "C", "core-collections-918", false),
-    ("deque", "Deque.$clone", Lane::PendingCode, "C", "core-collections-918", true),
-    ("heap", "new", Lane::PendingCode, "C", "core-collections-918", false),
-    ("heap", "len", Lane::PendingCode, "C", "core-collections-918", false),
-    ("heap", "push", Lane::PendingCode, "C", "core-collections-918", false),
-    ("heap", "peek", Lane::PendingCode, "C", "core-collections-918", false),
-    ("heap", "pop", Lane::PendingCode, "C", "core-collections-918", false),
-    ("heap", "grow", Lane::PendingCode, "C", "core-collections-918", true),
     ("heap", "slots_new", Lane::Value, "A", "core-collections-918", true),
     ("heap", "slots_move", Lane::Value, "A", "core-collections-918", true),
     ("heap", "slots_free", Lane::Value, "A", "core-collections-918", true),
-    ("heap", "prepare_push", Lane::PendingCode, "C", "mem-b-1172", true),
-    ("heap", "finish_prepared_push", Lane::PendingCode, "C", "mem-b-1172", true),
     ("heap", "slots_unmark_spare", Lane::Value, "A", "mem-b-1172", true),
     ("heap", "slots_publish_spare", Lane::Value, "A", "mem-b-1172", true),
     ("heap", "slots_put", Lane::Value, "A", "core-collections-918", true),
     ("heap", "slots_take", Lane::Value, "A", "core-collections-918", true),
     ("heap", "slots_view", Lane::Value, "A", "core-collections-918", true),
     ("heap", "slots_shift", Lane::Value, "A", "core-collections-918", true),
-    ("deque", "new", Lane::PendingCode, "C", "core-collections-918", false),
-    ("deque", "len", Lane::PendingCode, "C", "core-collections-918", false),
-    ("deque", "push_back", Lane::PendingCode, "C", "core-collections-918", false),
-    ("deque", "push_front", Lane::PendingCode, "C", "core-collections-918", false),
-    ("deque", "pop_front", Lane::PendingCode, "C", "core-collections-918", false),
-    ("deque", "pop_back", Lane::PendingCode, "C", "core-collections-918", false),
-    ("deque", "grow", Lane::PendingCode, "C", "core-collections-918", true),
-    ("deque", "reverse", Lane::PendingCode, "C", "core-collections-918", true),
     ("deque", "slots_needs_drop", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_forget_ring", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_empty", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_new", Lane::Value, "A", "core-collections-918", true),
-    ("deque", "prepare_push", Lane::PendingCode, "C", "mem-b-1172", true),
-    ("deque", "finish_prepared_push", Lane::PendingCode, "C", "mem-b-1172", true),
     ("deque", "slots_unmark_spare", Lane::Value, "A", "mem-b-1172", true),
     ("deque", "slots_publish_spare", Lane::Value, "A", "mem-b-1172", true),
     ("deque", "slots_put", Lane::Value, "A", "core-collections-918", true),
@@ -280,38 +233,7 @@ operations! {
     ("deque", "slots_shift", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_view", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_free", Lane::Value, "A", "core-collections-918", true),
-    ("list", "Hole", Lane::PendingCode, "C", "core-collections-918", true),
     ("list", "slots_finish_list", Lane::Value, "A", "core-collections-918", true),
-    ("list", "sort_stable", Lane::PendingCode, "C", "core-collections-918", false),
-    ("list", "precedes", Lane::PendingCode, "C", "core-collections-918", true),
-    ("list", "bidirectional_merge", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "choose_pivot", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "create_run", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "drift", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "existing_run", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "gallop_left", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "gallop_right", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "idle", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "insert_tail", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "insertion_len", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "insertion_sort_hole", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "logical_merge", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "median3", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "median3_rec", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "merge", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "merge_both", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "merge_down", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "merge_up", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "partition_hole", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "partition_one", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "partition_scan", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "quicksort", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "reverse_run", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "small_len", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "small_sort", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "sort4_stable", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "sqrt_approx", Lane::PendingCode, "C", "runtime-sort-1336", true),
-    ("list", "stable_quicksort", Lane::PendingCode, "C", "runtime-sort-1336", true),
     ("list", "slots_list_view", Lane::Value, "A", "core-collections-918", true),
     ("list", "slots_list_move", Lane::Value, "A", "core-collections-918", true),
     ("list", "slots_forget_ring", Lane::Value, "A", "core-collections-918", true),
@@ -331,7 +253,6 @@ operations! {
     ("list", "get", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "slice", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "push", Lane::Value, "A", "core-check-calls-910", false),
-    ("list", "grow", Lane::PendingCode, "A", "core-check-calls-910", true),
     ("list", "pop", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "set", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "swap", Lane::Value, "A", "core-collections-918", false),
@@ -341,16 +262,10 @@ operations! {
     ("inline", "copy_from_slice", Lane::Value, "A", "port-fidelity-1360", false),
     ("inline", "word_le", Lane::Value, "A", "dedup-1357", false),
     ("inline", "word_be", Lane::Value, "A", "dedup-1357", false),
-    ("map", "probe_insert", Lane::PendingCode, "C", "mem-b-1172", true),
     ("map", "push_entry", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "pop_entry", Lane::Value, "A", "core-check-callables-913", true),
-    ("map", "undo_clone", Lane::Value, "C", "core-check-callables-913", true),
-    ("map", "Map.$clone", Lane::Value, "C", "core-check-callables-913", true),
     ("map", "regrow", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "compact", Lane::Value, "A", "core-check-callables-913", true),
-    ("map", "make_room", Lane::Value, "C", "core-check-callables-913", true),
-    ("map", "reindex", Lane::Value, "C", "std-seed-api-889", true),
-    ("map", "install_index", Lane::PendingCode, "C", "core-check-callables-913", true),
     ("map", "swap_value", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "kill", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "take_entry", Lane::Value, "A", "core-collections-918", true),
@@ -365,15 +280,8 @@ operations! {
     ("map", "index_len", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "index_get", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "index_set", Lane::Value, "A", "core-check-callables-913", true),
-    ("map", "find", Lane::PendingCode, "C", "core-check-callables-913", true),
     ("map", "new", Lane::Value, "A", "core-check-callables-913", false),
     ("map", "len", Lane::Value, "A", "core-check-callables-913", false),
-    ("map", "get", Lane::Value, "C", "core-check-callables-913", false),
-    ("map", "insert", Lane::Value, "C", "core-check-callables-913", false),
-    ("map", "remove", Lane::Value, "C", "core-check-callables-913", false),
-    ("map", "update", Lane::Value, "C", "core-collections-918", false),
-    ("map", "update_or_insert", Lane::PendingCode, "C", "port-fidelity-1360", false),
-    ("map", "reserve", Lane::Value, "C", "std-seed-api-889", false),
     ("float", "sqrt", Lane::Numeric, "A", "core-check-895", false),
     ("float", "abs", Lane::Numeric, "A", "core-check-895", false),
     ("float", "floor", Lane::Numeric, "A", "core-check-895", false),
@@ -410,7 +318,6 @@ operations! {
     ("net", "split", Lane::Runtime(Kernel::Net(HostOp::NetSplit)), "B", "wire-w1a-1063", false),
     ("string", "new", Lane::Runtime(Kernel::StringList("new")), "A", "core-ops-914", false),
     ("string", "as_bytes", Lane::Runtime(Kernel::CarrierView), "A", "core-ops-914", false),
-    ("string", "slice", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "byte_len", Lane::Runtime(Kernel::StringList("len")), "A", "core-ops-914", false),
     ("string", "push", Lane::Runtime(Kernel::StringList("append")), "A", "core-ops-914", false),
     ("string", "reserve", Lane::Runtime(Kernel::StringList("reserve")), "A", "core-ops-914", false),
@@ -432,11 +339,6 @@ operations! {
     ("writer", "close", Lane::Language, "A", "core-check-895", false),
     ("writer", "completed", Lane::Language, "A", "core-check-895", false),
     ("writer", "last_completed", Lane::Language, "A", "core-check-895", false),
-    ("int", "radix_digits", Lane::PendingCode, "C", "dedup-1357", false),
-    ("int", "decimal_four", Lane::PendingCode, "C", "dedup-1357", true),
-    ("int", "decimal_digits", Lane::PendingCode, "C", "dedup-1357", true),
-    ("int", "accumulate_digit", Lane::PendingCode, "C", "dedup-1357", false),
-    ("int", "ascii_digit", Lane::PendingCode, "C", "dedup-1357", false),
 }
 
 pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
@@ -1659,7 +1561,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
     let actual: BTreeSet<_> = p
         .fns
         .iter()
-        .filter(|f| f.path.package_is("core", "1"))
+        .filter(|f| f.path.package_is("core", "1") && f.body.is_none())
         .map(|f| (f.path.0.modules[0].as_str(), f.path.0.name.as_str()))
         .collect();
     for entry in OPERATIONS {
@@ -1669,55 +1571,10 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                 entry.module == "string"
                     && matches!(
                         entry.name,
-                        "of_bytes"
-                            | "to_bytes"
-                            | "view_string"
-                            | "shorten"
-                            | "push_scalar"
-                            | "append_base64_blocks"
-                            | "utf8_complete_prefix"
-                            | "utf8_block_prefix"
-                            | "base64_symbol"
+                        "of_bytes" | "to_bytes" | "view_string" | "shorten"
                     )
-                    || entry.module == "int"
-                        && matches!(entry.name, "decimal_four" | "decimal_digits")
                     || entry.module == "map"
-                    || entry.module == "list"
-                        && (entry.name.starts_with("slots_")
-                            || matches!(
-                                entry.name,
-                                "Hole"
-                                    | "grow"
-                                    | "precedes"
-                                    | "bidirectional_merge"
-                                    | "choose_pivot"
-                                    | "create_run"
-                                    | "drift"
-                                    | "existing_run"
-                                    | "gallop_left"
-                                    | "gallop_right"
-                                    | "idle"
-                                    | "insert_tail"
-                                    | "insertion_len"
-                                    | "insertion_sort_hole"
-                                    | "logical_merge"
-                                    | "median3"
-                                    | "median3_rec"
-                                    | "merge"
-                                    | "merge_both"
-                                    | "merge_down"
-                                    | "merge_up"
-                                    | "partition_hole"
-                                    | "partition_one"
-                                    | "partition_scan"
-                                    | "quicksort"
-                                    | "reverse_run"
-                                    | "small_len"
-                                    | "small_sort"
-                                    | "sort4_stable"
-                                    | "sqrt_approx"
-                                    | "stable_quicksort"
-                            ))
+                    || entry.module == "list" && entry.name.starts_with("slots_")
                     || matches!(entry.module, "deque" | "heap" | "tape")
             );
         }
@@ -1730,7 +1587,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
     );
     assert_eq!(
         actual, recorded,
-        "assign each core declaration, bodied function or private kernel to its owning lane"
+        "assign each bodiless core function to its owning lane"
     );
 }
 

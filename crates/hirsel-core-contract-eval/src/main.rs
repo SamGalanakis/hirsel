@@ -99,11 +99,10 @@ fn run(
     // A capability parameter gets handle 0 of a fresh model world. A Result's
     // leading destination is supplied separately by its caller, never a wrapper.
     let handles = vec![0; signature.params.len()];
-    let (report, checked) = eval::run_nans_into_network(
+    let (report, checked) = eval::run_entry(
         module,
         function,
         &handles,
-        u64::MAX,
         eval::Nans::Scrambled,
         destination.as_deref_mut(),
         setting.instructions,

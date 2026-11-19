@@ -1,10 +1,10 @@
 [
-  {"name": "drop", "value": 1, "used": 32},
-  {"name": "read", "value": 1, "used": 32},
-  {"name": "twice", "value": 2, "used": 32},
-  {"name": "fail_then_ok", "value": 20, "used": 32},
-  {"name": "unwrap_stops", "value": 2005, "used": 32},
-  {"name": "gives_up", "value": 1000, "used": 32},
+  {"name": "drop", "value": 1, "used": 0},
+  {"name": "read", "value": 1, "used": 0},
+  {"name": "twice", "value": 2, "used": 0},
+  {"name": "fail_then_ok", "value": 20, "used": 0},
+  {"name": "unwrap_stops", "value": 2005, "used": 0},
+  {"name": "gives_up", "value": 1000, "used": 0},
   {"name": "child_drop", "value": 1, "used": 0},
   {"name": "child_kept", "value": 1, "used": 0}
 ]

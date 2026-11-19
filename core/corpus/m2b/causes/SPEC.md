@@ -11,13 +11,10 @@ Values, by hand:
 - unwrap_stops (start 5): Unwrap is not retryable, giving `Stopped(5)` = 2005.
 - gives_up (start 0, limit 1): n=0 is Fail and 0 - 0 + 1 >= 1, giving `GaveUp(0)` = 1000.
 
-Used, by FAIL-16 and MEM-24 (the isolate cell is 32):
-- The first caught failure fails into the root's primary cell, which is outside the limit. The catch installs the
-  reserved cell (32, admitted) as the primary, and dropping the Causes frees the message String (refunded) and
-  the root's cell (nothing to refund), so 32 stays.
-- A later caught failure uses that primary, so its own reserved cell takes its place. The dropped Causes then
-  refunds the earlier cell, so 32 stays; an isolate that returns refunds its own reservation.
-- So every case returns with 32 used.
+Used, by FAIL-10, FAIL-16 and MEM-24. Each catch installs its 32-byte reservation as the
+task's primary. Dropping the caught Causes refunds the previous 32-byte primary and
+any owned message. An isolate whose body returns refunds its own reservation. Each
+case returns with zero net bytes admitted relative to entry.
 
 In a child task (`spawn` with `bytes 4096`, then `join`), by FAIL-16, FAIL-10, MEM-20 and MEM-23:
 - child_drop: the child runs `drop`, so 1. The catch installs the child's reserved cell (32, admitted from the

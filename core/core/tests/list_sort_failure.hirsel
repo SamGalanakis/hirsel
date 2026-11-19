@@ -729,9 +729,8 @@ type SweepItem {
     key: u64
 }
 
-// Writes only when the list is not the original keys in some order.
+// A changed permutation adds a failure to the comparator's cause chain.
 resource type SweepAudit {
-    out: Stdout,
     values: List[SweepItem],
     count: u64
 } drop(t) {
@@ -769,16 +768,16 @@ resource type SweepAudit {
         (1u64 << t.count) - 1
     }
     if !valid || low != want_low || high != want_high {
-        let _ = stdout.write(t.out, "bad")
+        fail("sort changed its input permutation")
     }
 }
 
-fn sweep_fail_at(out: Stdout, count: u64, failure: u64) -> bool {
+fn sweep_fail_at(count: u64, failure: u64) -> bool {
     let mut xs: List[SweepItem] = list.new()
     for i in 0u64 .. count {
         result.unwrap(list.push(mut xs, SweepItem(id: i, key: merge_key(count, i))))
     }
-    let mut audit = result.unwrap(SweepAudit(out: out, values: take xs, count: count))
+    let mut audit = result.unwrap(SweepAudit(values: take xs, count: count))
     let mut calls: u64 = 0
     result.unwrap(list.sort_stable(mut audit.values, fn(a: SweepItem, b: SweepItem) -> Order {
         calls += 1
@@ -806,9 +805,9 @@ fn sweep_fail_at(out: Stdout, count: u64, failure: u64) -> bool {
 }
 
 // Fails the comparator at call 1, 2, ... until a sort completes; each failure's
-// audit checks the list. Returns the calls of the complete sort; 0 if it is
-// unsorted or no sort completes in 1000 calls.
-fn sweep(out: Stdout, count: u64) -> u64 {
+// audit checks the list. A caught chain must contain only the injected Unwrap.
+// Returns the completed sort's call count, or 0 on a failed check.
+fn sweep(count: u64) -> u64 {
     let mut failed: u64 = 0
     loop {
         if failed == 1000 {
@@ -816,7 +815,7 @@ fn sweep(out: Stdout, count: u64) -> u64 {
         }
         let f = failed + 1
         match result.unwrap(isolate(fn() -> bool {
-            sweep_fail_at(out, count, f)
+            sweep_fail_at(count, f)
         })) {
             Ok(sorted) => {
                 return if sorted {
@@ -825,31 +824,46 @@ fn sweep(out: Stdout, count: u64) -> u64 {
                     0
                 }
             }
-            Error(_) => {
+            Error(take causes) => {
+                let mut seen = false
+                for cause in causes {
+                    if seen {
+                        return 0
+                    }
+                    match cause.kind {
+                        Unwrap => {
+                            seen = true
+                        },
+                        _ => return 0,
+                    }
+                }
+                if !seen {
+                    return 0
+                }
                 failed += 1
             }
         }
     }
 }
 
-// expect: run sweep_37(out) = 128
-fn sweep_37(out: Stdout) -> u64 {
-    sweep(out, 37)
+// expect: run sweep_37() = 128
+fn sweep_37() -> u64 {
+    sweep(37)
 }
 
-// expect: run sweep_44(out) = 251
-fn sweep_44(out: Stdout) -> u64 {
-    sweep(out, 44)
+// expect: run sweep_44() = 251
+fn sweep_44() -> u64 {
+    sweep(44)
 }
 
-// expect: run sweep_88(out) = 282
-fn sweep_88(out: Stdout) -> u64 {
-    sweep(out, 88)
+// expect: run sweep_88() = 282
+fn sweep_88() -> u64 {
+    sweep(88)
 }
 
-// expect: run sweep_104(out) = 583
-fn sweep_104(out: Stdout) -> u64 {
-    sweep(out, 104)
+// expect: run sweep_104() = 583
+fn sweep_104() -> u64 {
+    sweep(104)
 }
 
 // Host-free per-call twins: the evaluator checks scratch and source live slots

@@ -17,18 +17,19 @@ value from four parts, written as decimal digits from left to right:
   and returns account 2's new balance (24 after the commit, 19 elsewhere), else 0.
   This shows the task goes on after the outcome.
 
-`used` is the bytes still admitted when the case returns. A caught failure used the
-task's primary cell, so `isolate` leaves its reserved 32-byte cell in its place (FAIL-16,
-MEM-24): 32 after each case with one caught failure, and 0 for every other case.
+`used` is the net bytes still admitted when the case returns. For a caught failure,
+`isolate` installs its reserved 32-byte cell as the task's primary (FAIL-16, MEM-24).
+Dropping the caught Causes refunds the previous primary (FAIL-10), so every case
+returns with zero net bytes admitted.
 
 | case | body | value | used |
 |---|---|---|---|
 | commit | transfer 5 from 1 to 2: reads 1, 2; writes 1 = 5, 2 = 25 | 1 12 1 1 = 11211 | 0 |
 | insufficient | transfer 50 from 1 to 2: reads 1, 2; 10 < 50 | 2 12 1 1 = 21211 | 0 |
-| overflow | transfer 5 from 1 to 3: reads 1, 3; writes 1 = 5; `i64 max + 5` fails | 3 13 1 1 = 31311 | 32 |
-| bounds | reads 1, then indexes an empty list at 0 | 3 1 1 1 = 3111 | 32 |
-| unwrap | reads 1 and 9, then `option.unwrap` of the absent 9 | 3 19 1 1 = 31911 | 32 |
-| explicit_fail | reads 1, writes 1 = 17, then `fail` | 3 1 1 1 = 3111 | 32 |
+| overflow | transfer 5 from 1 to 3: reads 1, 3; writes 1 = 5; `i64 max + 5` fails | 3 13 1 1 = 31311 | 0 |
+| bounds | reads 1, then indexes an empty list at 0 | 3 1 1 1 = 3111 | 0 |
+| unwrap | reads 1 and 9, then `option.unwrap` of the absent 9 | 3 19 1 1 = 31911 | 0 |
+| explicit_fail | reads 1, writes 1 = 17, then `fail` | 3 1 1 1 = 3111 | 0 |
 | refused_alloc | reads 1, then `list.with_capacity(8)` inside `bound bytes 0` | 6 1 1 1 = 6111 | 0 |
 
 These catch:

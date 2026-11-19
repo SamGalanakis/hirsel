@@ -1,4 +1,4 @@
 [
-  {"name": "fails", "value": 11123, "used": 32},
-  {"name": "cause_changed", "value": 400, "used": 32}
+  {"name": "fails", "value": 11123, "used": 0},
+  {"name": "cause_changed", "value": 400, "used": 0}
 ]

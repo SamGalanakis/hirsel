@@ -143,23 +143,18 @@ impl Context {
                 .unwrap_or_else(|| process::stop(b"HostHandles"))
         }
     }
-    /// Changes the fixture allowance while retaining startup reservations and
-    /// the payer domain registered with the scheduler's refund notification.
+    /// Sets a fixture's program allowance, excluding its original primary
+    /// cell, while preserving the scheduler's payer domain.
     #[cfg(feature = "testing")]
     pub fn set_test_available(&mut self, bytes: u64) {
+        if self.task_record.is_some()
+            && let Some(primary) = &mut self.primary
+        {
+            primary.exclude_startup_from_test_limit();
+        }
         self.current.set_test_available(bytes);
     }
 
-    pub(crate) fn mark_startup_primary(&mut self) {
-        // Child task contexts carry a prepaid primary from their spawn payer;
-        // only the root task owns the process-startup primary outside the run
-        // allowance.  Child teardown must refund its primary on cancellation.
-        if self.task_record.is_some()
-            && let Some(primary) = self.primary.as_mut().filter(|cell| !cell.reserved)
-        {
-            primary.startup = true;
-        }
-    }
     #[cfg(feature = "testing")]
     pub fn inject_admission(&mut self, n: usize, later: bool) {
         self.current.inject(n, later);
@@ -167,16 +162,6 @@ impl Context {
     #[cfg(feature = "testing")]
     pub fn admission_attempts(&self) -> usize {
         self.current.attempts()
-    }
-    /// A process fixture excludes startup from its allowance; a consumed root
-    /// primary refunds these startup bytes when the observed cause chain drops.
-    #[cfg(feature = "testing")]
-    pub fn test_primary_refund(&self) -> u64 {
-        if self.primary.is_none() {
-            hirsel_core_layout::charge::CAUSE_CELL
-        } else {
-            0
-        }
     }
     /// Native emitter pointer to the frozen current-limit prefix. Dereferencing
     /// requires the task-exclusive discipline of the C ABI.

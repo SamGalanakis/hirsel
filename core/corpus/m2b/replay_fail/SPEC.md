@@ -7,8 +7,9 @@ journal's bound. A failure is recorded as tag 2 and its primary cause's kind, re
 Bounds 2, Division 3, Unwrap 4, Fail 5 (then its text), Cancelled 6, Capacity 7. Values are
 derived by hand; none was pasted from a run.
 
-`used` is 32 for both cases: after `isolate` catches a failure, the task's 32-byte reserved
-cell replaces its primary cell and stays admitted (FAIL-16), and a second catch reuses it.
+`used` is 0 for both cases. After each catch the 32-byte reservation replaces the task's
+primary cell (FAIL-16). Dropping the caught Causes refunds the previous cell (FAIL-10)
+through the journal bound's hand-over (MEM-20) when it was funded there.
 
 ## fails = 11123
 `divide` on the empty argument fails with Division. Recorded: the outcome is a failure (1),

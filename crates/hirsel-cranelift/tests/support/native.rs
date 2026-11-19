@@ -247,7 +247,7 @@ fn execute_cases_with_bindings(
     source.push_str(include_str!(
         "../../../hirsel-core-rt/include/hirsel_core_rt.h"
     ));
-    source.push_str("\nextern HirselCoreContext *hirsel_core_test_context_new(uint64_t);\nextern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nextern size_t hirsel_core_test_attempts(const HirselCoreContext *);\nextern uint64_t hirsel_core_test_primary_refund(const HirselCoreContext *);\nstatic uint64_t trace[1000000]; static size_t traces;\nvoid hirsel_core_test_drop_trace(uint64_t n) { if(traces >= 1000000) __builtin_abort(); trace[traces++]=n; }\n");
+    source.push_str("\nextern HirselCoreContext *hirsel_core_test_context_new(uint64_t);\nextern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nextern size_t hirsel_core_test_attempts(const HirselCoreContext *);\nstatic uint64_t trace[1000000]; static size_t traces;\nvoid hirsel_core_test_drop_trace(uint64_t n) { if(traces >= 1000000) __builtin_abort(); trace[traces++]=n; }\n");
     if observing {
         source.push_str("extern void *hirsel_core_test_observe_begin(const HirselCoreContext *); extern uint64_t hirsel_core_test_observe_end(void *);\n");
     }
@@ -305,7 +305,7 @@ fn execute_cases_with_bindings(
     if host_files {
         source.push_str(r#"
 extern void hirsel_core_test_reset_limit(HirselCoreContext *,uint64_t);
-extern uint64_t hirsel_core_test_primary_refund(const HirselCoreContext *);
+
 static HirselCoreHostOutcome file_legacy_issue(void *state,HirselCoreHostRequest *r) {
  if(r->operation==0) return (HirselCoreHostOutcome){.value=r->handle};
  if(r->operation!=3) __builtin_abort();
@@ -600,8 +600,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         expected.push(report.trace.len() as u64);
         expected.extend(&report.trace);
         expected.push(report.admissions as u64);
-        let primary_refund = "hirsel_core_test_primary_refund(ctx)";
-        writeln!(source,"uint64_t startup_refund={primary_refund}; uint64_t available=hirsel_core_test_available(ctx); uint64_t used = available > UINT64_C({limit}) ? 0 : UINT64_C({limit}) - available; fwrite(&used,8,1,stdout); uint64_t nt=traces; fwrite(&nt,8,1,stdout); fwrite(trace,8,traces,stdout); uint64_t na=hirsel_core_test_attempts(ctx) - initial_attempts; fwrite(&na,8,1,stdout); hirsel_core_causes_drop(causes); uint64_t after_drop=hirsel_core_test_available(ctx); if(status && after_drop != UINT64_C({limit}) + startup_refund) return 9; hirsel_core_context_free(ctx);").unwrap();
+        writeln!(source,"uint64_t available=hirsel_core_test_available(ctx); uint64_t used = available > UINT64_C({limit}) ? 0 : UINT64_C({limit}) - available; fwrite(&used,8,1,stdout); uint64_t nt=traces; fwrite(&nt,8,1,stdout); fwrite(trace,8,traces,stdout); uint64_t na=hirsel_core_test_attempts(ctx) - initial_attempts; fwrite(&na,8,1,stdout); hirsel_core_causes_drop(causes); uint64_t after_drop=hirsel_core_test_available(ctx); if(status && after_drop != UINT64_C({limit})) return 9; hirsel_core_context_free(ctx);").unwrap();
         if host_files {
             // Context/run ownership belongs to hirsel_core_run in this path.
             let end = source.rfind("hirsel_core_context_free(ctx);").unwrap();

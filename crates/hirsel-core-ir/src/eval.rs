@@ -30,7 +30,8 @@ pub enum Outcome {
 
 pub struct Report {
     pub outcome: Outcome,
-    /// The root limit's `used` after the run (MEM-19).
+    /// The root limit's `used` at the observation boundary (MEM-19).
+    /// A host call observes the live task. An entry run retires the root task.
     pub used: u64,
     /// Root peak reservation (MEM-19), including bound/task/grant reservations.
     pub peak_reserved: u64,
@@ -870,28 +871,28 @@ pub fn run_nans_into(
     instructions: u64,
     revisions: &Revisions,
 ) -> (Report, Checked) {
-    run_nans_into_network(
+    run_world(
         m,
         f,
         args,
         limit,
-        nans,
-        destination,
-        instructions,
-        revisions,
-        None,
-        false,
+        WorldInput {
+            nans,
+            destination,
+            instructions,
+            revisions: Some(revisions),
+            ..WorldInput::default()
+        },
     )
 }
 
-/// Like [run_nans_into], with an explicitly supplied deterministic network, recording
-/// the CONC-10 events in its report when `events` is set.
+/// Run an entry with the root task's startup charge and teardown, as the native
+/// process entry does. May supply a deterministic network and record CONC-10 events.
 #[allow(clippy::too_many_arguments)]
-pub fn run_nans_into_network(
+pub fn run_entry(
     m: &Module,
     f: FuncId,
     args: &[u64],
-    limit: u64,
     nans: Nans,
     destination: Option<&mut [u8]>,
     instructions: u64,
@@ -903,7 +904,7 @@ pub fn run_nans_into_network(
         m,
         f,
         args,
-        limit,
+        u64::MAX,
         WorldInput {
             nans,
             destination,
@@ -911,6 +912,7 @@ pub fn run_nans_into_network(
             revisions: Some(revisions),
             network,
             events,
+            process_entry: true,
             ..WorldInput::default()
         },
     )
@@ -1032,6 +1034,7 @@ struct WorldInput<'a> {
     instructions: u64,
     copy_size: Option<u64>,
     events: bool,
+    process_entry: bool,
 }
 impl Default for WorldInput<'_> {
     fn default() -> Self {
@@ -1047,6 +1050,7 @@ impl Default for WorldInput<'_> {
             instructions: u64::MAX,
             copy_size: None,
             events: false,
+            process_entry: false,
         }
     }
 }
@@ -1158,16 +1162,24 @@ fn run_world(
             collect_arrays(&f.ty, &mut mach.arrays);
         }
     }
-    // The root's primary cell is admitted with the run, outside its limit.
+    let root = mach.root().clone();
+    let primary_charge = if input.process_entry {
+        mach.admit(&root, charge::TASK_RECORD + charge::CAUSE_CELL)
+            .expect("the entry has an unbounded root limit");
+        charge::CAUSE_CELL
+    } else {
+        // A host call borrows a task with a primary cell outside its allowance.
+        0
+    };
     let task = Task {
         step_bounds: Vec::new(),
         slice_steps: 0,
-        limits: vec![mach.root().clone()],
+        limits: vec![root.clone()],
         chain: Vec::new(),
         cells: Vec::new(),
         obligations: vec![Some(Cell {
-            limit: mach.root().clone(),
-            amount: 0,
+            limit: root,
+            amount: primary_charge,
             resource: false,
         })],
         reserved: Vec::new(),
@@ -1207,7 +1219,7 @@ fn run_world(
         refunds: Vec::new(),
     });
     mach.sched.ready.push_back(0);
-    let (mut mach, outcome, chain) = drive(mach);
+    let (mut mach, outcome, chain) = drive(mach, input.process_entry);
     if let Some(bytes) = input.destination.as_mut() {
         bytes.copy_from_slice(&mach.mem[split(destination.unwrap()).0].bytes);
     }
@@ -1249,7 +1261,7 @@ fn run_world(
 /// Run the root and every task it spawns to the root's end, by the native default
 /// scheduler's turns: pop the head of the ready queue (the poll queue when it is
 /// empty) and run that task until it waits, polls past its turn, or ends.
-fn drive(mach: Machine<'_>) -> (Box<Machine<'_>>, Outcome, Vec<Cause>) {
+fn drive(mach: Machine<'_>, process_entry: bool) -> (Box<Machine<'_>>, Outcome, Vec<Cause>) {
     std::thread::scope(|scope| {
         let (reply_tx, reply_rx) = mpsc::channel();
         let mut resumes: Vec<Option<mpsc::Sender<Resume<'_>>>> = Vec::new();
@@ -1313,7 +1325,9 @@ fn drive(mach: Machine<'_>) -> (Box<Machine<'_>>, Outcome, Vec<Cause>) {
                 };
                 std::thread::Builder::new()
                     .stack_size(stack)
-                    .spawn_scoped(scope, move || task_thread(task, f, args, link, stack))
+                    .spawn_scoped(scope, move || {
+                        task_thread(task, f, args, link, stack, process_entry)
+                    })
                     .expect("a task thread");
             }
             let resume = resumes[k].as_ref().expect("a started task");
@@ -1359,7 +1373,14 @@ fn drive(mach: Machine<'_>) -> (Box<Machine<'_>>, Outcome, Vec<Cause>) {
 
 /// A task thread: wait for the baton, run the task's body, hand the baton back.
 /// The thread's link sits in the baton while the task runs (`Machine::park`).
-fn task_thread<'m>(mut t: Task, f: FuncId, args: Vec<u64>, link: Link<'m>, stack: usize) {
+fn task_thread<'m>(
+    mut t: Task,
+    f: FuncId,
+    args: Vec<u64>,
+    link: Link<'m>,
+    stack: usize,
+    process_entry: bool,
+) {
     let origin = 0u8;
     TASK_STACK_ROOM.with(|room| {
         room.set((
@@ -1381,6 +1402,9 @@ fn task_thread<'m>(mut t: Task, f: FuncId, args: Vec<u64>, link: Link<'m>, stack
             let r = mach.call(&mut t, f, &args);
             // The root ends as every task does (native `start`): END, failed or not.
             mach.event(END, 0, u64::from(r.is_err()));
+            if process_entry {
+                mach.retire_root(&mut t);
+            }
             Some((r, std::mem::take(&mut t.chain)))
         } else {
             mach.child_main(&mut t, f, &args);
@@ -1671,6 +1695,22 @@ impl Machine<'_> {
         self.sched.tasks[t.k].state = State::Ended;
         self.wake(Condition::Join(i));
     }
+
+    fn retire_root(&mut self, t: &mut Task) {
+        // FAIL-10: refund the unused obligation and the cells in any failure
+        // diagnosed at the process boundary. Keep the cause kinds and sites.
+        if let Some(primary) = t.obligations[0].take() {
+            self.refund(primary.limit, primary.amount);
+        }
+        for (cause, (payer, amount)) in t.chain.iter().zip(t.cells.drain(..)) {
+            if cause.kind == "Fail" && cause.message[2] != 0 {
+                self.free(cause.message[0]);
+            }
+            self.refund(payer, amount);
+        }
+        self.refund(t.limits[0].clone(), charge::TASK_RECORD);
+    }
+
     /// The child task a handle names.
     fn child(&self, handle: u64) -> usize {
         handle.checked_sub(TASK_BASE).unwrap_or_else(|| {

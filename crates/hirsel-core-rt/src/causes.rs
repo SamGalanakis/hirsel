@@ -91,9 +91,8 @@ pub struct Cell {
     pub(crate) next: *mut Cell,
     funding: Payer,
     pub(crate) reserved: bool,
-    /// The root task's startup cell is outside the program limit. Its charge
-    /// remains held by the task record until context teardown.
-    pub(crate) startup: bool,
+    /// The cell has no charge against its funding record.
+    startup: bool,
 }
 impl Cell {
     pub(crate) fn prepaid(funding: Payer) -> Box<Self> {
@@ -139,6 +138,14 @@ impl Cell {
             cause: Cause::default(),
             next: ptr::null_mut(),
         })
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn exclude_startup_from_test_limit(&mut self) {
+        if !self.reserved && !self.startup {
+            self.funding.refund(charge::CAUSE_CELL);
+            self.startup = true;
+        }
     }
 }
 impl Drop for Cell {

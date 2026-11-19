@@ -463,7 +463,7 @@ fn product_start_double_isolate_catch_refunds_the_first_cause_cell() {
             );
             let second = crate::isolate::hirsel_core_isolate_catch(context);
             drop(crate::causes::Causes::from_raw(second.causes));
-            assert_eq!((*context).available(), before - 32);
+            assert_eq!((*context).available(), before);
         }
         0
     }

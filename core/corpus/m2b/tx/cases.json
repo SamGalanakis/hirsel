@@ -1,10 +1,10 @@
 [
   {"name": "commit", "value": 11211, "used": 0},
   {"name": "insufficient", "value": 21211, "used": 0},
-  {"name": "overflow", "value": 31311, "used": 32},
-  {"name": "bounds", "value": 3111, "used": 32},
-  {"name": "unwrap", "value": 31911, "used": 32},
-  {"name": "explicit_fail", "value": 3111, "used": 32},
+  {"name": "overflow", "value": 31311, "used": 0},
+  {"name": "bounds", "value": 3111, "used": 0},
+  {"name": "unwrap", "value": 31911, "used": 0},
+  {"name": "explicit_fail", "value": 3111, "used": 0},
   {"name": "refused_alloc", "value": 6111, "used": 0},
   {"name": "full", "value": 411512072, "used": 0},
   {"name": "generic_relay", "value": 2, "used": 0}

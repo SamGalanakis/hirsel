@@ -71,8 +71,8 @@ impl<T: TyRead> Shapes<'_, T> {
         let (maker, args) = self.codecs.maker(&*self.types, d, args)?;
         if !self.module
             || has_param(&*self.types, ty)
-            || crate::decls::has_bounds(self.decls, &*self.types, ty, &[]) & crate::decls::CODEC
-                == 0
+            || crate::decls::missing_bounds(self.decls, &*self.types, ty, &[], crate::decls::CODEC)
+                != 0
         {
             return None;
         }

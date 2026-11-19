@@ -1097,11 +1097,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
             let g = &p.fns[f].generics[i];
-            let missing = if g.bounds == 0 {
-                0
-            } else {
-                g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params)
-            };
+            let missing =
+                crate::decls::missing_bounds(&p.decls, &self.t, t, &self.params, g.bounds);
             let path = &p.fns[f].path;
             if missing == 0
                 && path.is_core("bytebuf.append_inline")

@@ -2809,6 +2809,33 @@ fn missing_codec_declarations(
 
 /// The bounds a type has (OWN-4, SEM-7).
 pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> u16 {
+    bounds_inner::<true>(decls, t, ty, params)
+}
+
+pub(crate) fn missing_bounds(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+    params: &[u16],
+    required: u16,
+) -> u16 {
+    if required == 0 {
+        return 0;
+    }
+    let available = if required & ENCODED == 0 {
+        bounds_inner::<false>(decls, t, ty, params)
+    } else {
+        has_bounds(decls, t, ty, params)
+    };
+    required & !available
+}
+
+fn bounds_inner<const ENCODING: bool>(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+    params: &[u16],
+) -> u16 {
     let row = t.kind(ty);
     let all = PLAIN | SHAREABLE | SEND | KEY | ORDERED;
     let plain_extra = if kind_row(decls, t, row, params) == Kind::Plain {
@@ -2817,8 +2844,16 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
         0
     };
     let meet = |xs: &[TyId]| {
-        xs.iter()
-            .fold(all | CODEC, |b, &x| b & has_bounds(decls, t, x, params))
+        xs.iter().fold(all | CODEC, |b, &x| {
+            b & bounds_inner::<ENCODING>(decls, t, x, params)
+        })
+    };
+    let encoded = || {
+        if ENCODING {
+            encoding_bounds(decls, t, ty, params) & ENCODED
+        } else {
+            0
+        }
     };
     plain_extra
         | match row {
@@ -2838,20 +2873,20 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                 Callable::OwnSend => SEND,
                 Callable::Own | Callable::Scoped | Callable::ScopedView => 0,
             },
-            TyKind::Tuple(xs) => meet(xs) | (encoding_bounds(decls, t, ty, params) & ENCODED),
+            TyKind::Tuple(xs) => meet(xs) | encoded(),
             TyKind::Region(_) => 0,
-            TyKind::Anchored(x, _) => has_bounds(decls, t, *x, params),
-            TyKind::Array(x, _) => has_bounds(decls, t, *x, params) & all,
+            TyKind::Anchored(x, _) => bounds_inner::<ENCODING>(decls, t, *x, params),
+            TyKind::Array(x, _) => bounds_inner::<ENCODING>(decls, t, *x, params) & all,
             TyKind::Vector(_) => PLAIN | SHAREABLE | SEND,
-            TyKind::View(x) => has_bounds(decls, t, *x, params) & (KEY | ORDERED),
+            TyKind::View(x) => bounds_inner::<ENCODING>(decls, t, *x, params) & (KEY | ORDERED),
             TyKind::Param(i) => params.get(*i as usize).copied().unwrap_or(0),
             TyKind::Adt(d, args) => {
                 let decl = &decls[d.index()];
                 nominal_bounds(
                     decl,
                     || meet(args),
-                    |i| has_bounds(decls, t, args[i], params),
-                ) | encoding_bounds(decls, t, ty, params) & ENCODED
+                    |i| bounds_inner::<ENCODING>(decls, t, args[i], params),
+                ) | encoded()
             }
         }
 }

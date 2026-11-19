@@ -426,7 +426,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse_compared("OWN-19", at, a, "not scoped", message);
                 return ERROR;
             }
-            let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
+            let missing =
+                crate::decls::missing_bounds(&p.decls, &self.t, t, &self.params, g.bounds);
             if missing != 0 {
                 // LANG-12: a written type argument lacking its parameter's bound
                 // (`Rc[HostFile]`) is refused at that argument.

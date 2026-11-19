@@ -304,12 +304,23 @@ pub(crate) fn scalar_kind(ty: TyId) -> Option<Scalar> {
 pub const BOOL: TyId = TyId(3);
 pub const HOLE: TyId = TyId(3 + Scalar::ALL.len() as u32);
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CallSubstitution {
+    pub partial: Option<TyId>,
+    // A failed readiness check must not intern a partial type.
+    pub known: Option<Option<TyId>>,
+}
+
 /// The program's types plus the types one body makes.
 pub struct Local<'a> {
     pub base: &'a Types,
     kinds: Vec<TypeEntry>,
     map: hashbrown::HashTable<TyId>,
     layout_names: Option<LayoutNames<'a>>,
+    // Single-binding roots are the common repeated substitution. The memo
+    // follows the arena when a nested body borrows it.
+    substitution: Option<(TyId, TyId, TyId)>,
+    pub(crate) call_substitution: Option<((TyId, Option<TyId>), CallSubstitution)>,
 }
 struct LayoutNames<'a> {
     base: &'a Types,
@@ -324,6 +335,8 @@ impl<'a> Local<'a> {
             kinds: vec![],
             map: hashbrown::HashTable::new(),
             layout_names: None,
+            substitution: None,
+            call_substitution: None,
         }
     }
     pub(crate) fn with_decls(
@@ -384,6 +397,12 @@ impl<'a> Local<'a> {
 pub trait TyRead {
     fn kind(&self, t: TyId) -> &TyKind;
     fn mk(&mut self, k: TyKind) -> TyId;
+    fn substitute(&mut self, ty: TyId, args: &[TyId]) -> TyId
+    where
+        Self: Sized,
+    {
+        subst_at(self, ty, args, 0)
+    }
     fn flags(&self, ty: TyId) -> TypeFlags
     where
         Self: Sized,
@@ -446,6 +465,27 @@ impl TyRead for Local<'_> {
     fn layout_name(&self, decls: &crate::Rows<crate::decls::TypeDecl>, ty: TyId) -> String {
         self.with_layout_name(decls, ty, |name| name.into_owned())
     }
+    fn substitute(&mut self, ty: TyId, args: &[TyId]) -> TyId {
+        if !has_param(self, ty) {
+            return ty;
+        }
+        if let TyKind::Param(i) | TyKind::Region(Root::Generic(i)) = self.kind(ty) {
+            return args.get(*i as usize).copied().unwrap_or(ERROR);
+        }
+        let [arg] = args else {
+            return subst_open(self, ty, args, 0);
+        };
+        if let Some((input, value, result)) = self.substitution
+            && (input, value) == (ty, *arg)
+        {
+            return result;
+        }
+        // Only roots are memoized. The walk still shifts bound roots at the
+        // depth where it replaces a parameter.
+        let result = subst_open(self, ty, args, 0);
+        self.substitution = Some((ty, *arg, result));
+        result
+    }
     fn with_layout_name<R>(
         &self,
         decls: &crate::Rows<crate::decls::TypeDecl>,
@@ -481,13 +521,17 @@ pub fn subst(t: &mut impl TyRead, ty: TyId, args: &[TyId]) -> TyId {
     if ty <= HOLE || args.is_empty() {
         return ty;
     }
-    subst_at(t, ty, args, 0)
+    t.substitute(ty, args)
 }
 
 fn subst_at(t: &mut impl TyRead, ty: TyId, args: &[TyId], depth: u32) -> TyId {
     if !has_param(t, ty) {
         return ty;
     }
+    subst_open(t, ty, args, depth)
+}
+
+fn subst_open(t: &mut impl TyRead, ty: TyId, args: &[TyId], depth: u32) -> TyId {
     match t.kind(ty).clone() {
         TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => {
             let value = args.get(i as usize).copied().unwrap_or(ERROR);

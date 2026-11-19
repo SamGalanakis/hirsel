@@ -13,6 +13,59 @@ pub(super) struct CallScratch {
     pub(super) ir_args: Vec<Arg>,
 }
 
+fn fill_call_type(
+    t: &mut impl TyRead,
+    ty: TyId,
+    found: &[Option<TyId>],
+    roots: &[Option<TyId>],
+) -> TyId {
+    if roots.is_empty() && !has_param(t, ty) {
+        return ty;
+    }
+    match t.kind(ty).clone() {
+        TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => found[i as usize].unwrap_or(HOLE),
+        TyKind::Region(Root::Parameter(i)) => {
+            roots.get(i as usize).copied().flatten().unwrap_or(ty)
+        }
+        TyKind::Anchored(x, root) => {
+            let x = fill_call_type(t, x, found, roots);
+            let root = fill_call_type(t, root, found, roots);
+            t.mk(TyKind::Anchored(x, root))
+        }
+        TyKind::Array(x, n) => {
+            let x = fill_call_type(t, x, found, roots);
+            t.mk(TyKind::Array(x, n))
+        }
+        TyKind::Tuple(xs) => {
+            let xs = xs
+                .into_iter()
+                .map(|x| fill_call_type(t, x, found, roots))
+                .collect();
+            t.mk(TyKind::Tuple(xs))
+        }
+        TyKind::Adt(d, xs) => {
+            let xs = xs
+                .into_iter()
+                .map(|x| fill_call_type(t, x, found, roots))
+                .collect();
+            t.mk(TyKind::Adt(d, xs))
+        }
+        TyKind::View(x) => {
+            let x = fill_call_type(t, x, found, roots);
+            t.mk(TyKind::View(x))
+        }
+        TyKind::Fn(ps, r, w, k) => {
+            let ps = ps
+                .into_iter()
+                .map(|(m, p)| (m, fill_call_type(t, p, found, roots)))
+                .collect();
+            let r = fill_call_type(t, r, found, roots);
+            t.mk(TyKind::Fn(ps, r, w, k))
+        }
+        _ => ty,
+    }
+}
+
 fn slot_push_kind(path: &DefPath) -> Option<slots::SlotPush> {
     if path.is_core("deque.push_back") {
         Some(slots::SlotPush::Back)
@@ -959,6 +1012,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
+    fn call_substitution(
+        &self,
+        ty: TyId,
+        found: &[Option<TyId>],
+        roots: &[Option<TyId>],
+    ) -> (Option<(TyId, Option<TyId>)>, CallSubstitution) {
+        let ([arg], []) = (found, roots) else {
+            return (None, CallSubstitution::default());
+        };
+        let key = (ty, *arg);
+        let result = self
+            .t
+            .call_substitution
+            .filter(|(old, _)| *old == key)
+            .map(|(_, result)| result)
+            .unwrap_or_default();
+        (Some(key), result)
+    }
+
     /// `pt` with the type arguments found so far, a hole for each one still open.
     pub(super) fn partial(&mut self, pt: TyId, s: &[Option<TyId>]) -> TyId {
         self.partial_rooted(pt, s, &[])
@@ -971,58 +1043,28 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         s: &[Option<TyId>],
         roots: &[Option<TyId>],
     ) -> TyId {
-        fn fill(
-            t: &mut impl TyRead,
-            ty: TyId,
-            found: &[Option<TyId>],
-            roots: &[Option<TyId>],
-        ) -> TyId {
-            if roots.is_empty() && !has_param(t, ty) {
-                return ty;
-            }
-            match t.kind(ty).clone() {
-                TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => {
-                    found[i as usize].unwrap_or(HOLE)
-                }
-                TyKind::Region(Root::Parameter(i)) => {
-                    roots.get(i as usize).copied().flatten().unwrap_or(ty)
-                }
-                TyKind::Anchored(x, root) => {
-                    let x = fill(t, x, found, roots);
-                    let root = fill(t, root, found, roots);
-                    t.mk(TyKind::Anchored(x, root))
-                }
-                TyKind::Array(x, n) => {
-                    let x = fill(t, x, found, roots);
-                    t.mk(TyKind::Array(x, n))
-                }
-                TyKind::Tuple(xs) => {
-                    let xs = xs.into_iter().map(|x| fill(t, x, found, roots)).collect();
-                    t.mk(TyKind::Tuple(xs))
-                }
-                TyKind::Adt(d, xs) => {
-                    let xs = xs.into_iter().map(|x| fill(t, x, found, roots)).collect();
-                    t.mk(TyKind::Adt(d, xs))
-                }
-                TyKind::View(x) => {
-                    let x = fill(t, x, found, roots);
-                    t.mk(TyKind::View(x))
-                }
-                TyKind::Fn(ps, r, w, k) => {
-                    let ps = ps
-                        .into_iter()
-                        .map(|(m, p)| (m, fill(t, p, found, roots)))
-                        .collect();
-                    let r = fill(t, r, found, roots);
-                    t.mk(TyKind::Fn(ps, r, w, k))
-                }
-                _ => ty,
-            }
-        }
-        if pt <= HOLE {
+        if pt <= HOLE || (roots.is_empty() && !has_param(&self.t, pt)) {
             return pt;
         }
-        fill(&mut self.t, pt, s, roots)
+        match self.t.kind(pt) {
+            TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => {
+                return s[*i as usize].unwrap_or(HOLE);
+            }
+            TyKind::Region(Root::Parameter(i)) => {
+                return roots.get(*i as usize).copied().flatten().unwrap_or(pt);
+            }
+            _ => {}
+        }
+        let (key, mut memo) = self.call_substitution(pt, s, roots);
+        if let Some(result) = memo.partial {
+            return result;
+        }
+        let result = fill_call_type(&mut self.t, pt, s, roots);
+        memo.partial = Some(result);
+        if let Some(key) = key {
+            self.t.call_substitution = Some((key, memo));
+        }
+        result
     }
     /// `pt` with the type arguments found so far, when they determine it.
     pub(super) fn known(&mut self, pt: TyId, s: &[Option<TyId>]) -> Option<TyId> {
@@ -1036,6 +1078,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<TyId> {
         if pt <= HOLE || (roots.is_empty() && !has_param(&self.t, pt)) {
             return Some(pt);
+        }
+        match self.t.kind(pt) {
+            TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => return s[*i as usize],
+            TyKind::Region(Root::Parameter(i)) => {
+                return Some(roots.get(*i as usize).copied().flatten().unwrap_or(pt));
+            }
+            _ => {}
         }
         fn ready(t: &impl TyRead, ty: TyId, found: &[Option<TyId>]) -> bool {
             if !has_param(t, ty) {
@@ -1053,7 +1102,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => true,
             }
         }
-        ready(&self.t, pt, s).then(|| self.partial_rooted(pt, s, roots))
+        let (key, mut memo) = self.call_substitution(pt, s, roots);
+        if let Some(known) = memo.known {
+            return known;
+        }
+        // A fully bound call environment already proves readiness. The fill
+        // still substitutes the same parameters and lexical roots.
+        let known = (s.iter().all(Option::is_some) || ready(&self.t, pt, s)).then(|| {
+            *memo
+                .partial
+                .get_or_insert_with(|| fill_call_type(&mut self.t, pt, s, roots))
+        });
+        memo.known = Some(known);
+        if let Some(key) = key {
+            self.t.call_substitution = Some((key, memo));
+        }
+        known
     }
 
     /// Find type arguments from one argument type; false when one is found twice

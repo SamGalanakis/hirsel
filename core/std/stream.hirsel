@@ -232,19 +232,10 @@ fn alarm(take job: Alarm) waits {
 
 fn chunk_prefix(mut out: Bytes, length: u64) {
     list.clear(mut out)
-    let hexes = string.as_bytes("0123456789abcdef")
-    let mut shift: u64 = 0
-    let mut left = length
-    while left >= 16 {
-        left >>= 4
-        shift += 4
-    }
-    loop {
-        let _ = list.push(mut out, hexes[(length >> shift) & 15])
-        if shift == 0 {
-            break
-        }
-        shift -= 4
+    let mut digits: Inline[u8, 64] =[0; 64]
+    let start = int.radix_digits(length, 16, mut digits)
+    for i in start .. 64 {
+        let _ = list.push(mut out, digits[i])
     }
     let _ = list.append(mut out, string.as_bytes("\r\n"))
 }

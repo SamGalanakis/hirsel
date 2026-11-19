@@ -1782,20 +1782,15 @@ fn exact(m: u64, e: i64) -> Decimal {
 
 /// The decimal digits of v > 0 into t, most significant first; returns their count.
 fn digits_of(v: u64, mut t: Inline[u8, 20]) -> u64 {
-    let mut len: u64 = 0
-    let mut w = v
-    while w > 0 {
-        w = w / 10
-        len += 1
+    if v == 0 {
+        return 0
     }
-    let mut i = len
-    w = v
-    while i > 0 {
-        i -= 1
-        t[i] = int.truncate(w % 10)
-        w = w / 10
+    let mut digits: Inline[u8, 64] =[0; 64]
+    let start = int.radix_digits(v, 10, mut digits)
+    for i in start .. 64 {
+        t[i - start] = digits[i] - b'0'
     }
-    len
+    64 - start
 }
 
 /// d's digits from 10^(point - 1) down to 10^p as an integer (at most 19 of them), and

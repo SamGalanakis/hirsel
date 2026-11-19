@@ -487,13 +487,15 @@ fn push_quoted(mut s: String, value: String) -> Result[(), Capacity] {
                 string.push(mut s, "\\r")?
             } else {
                 // Commit the whole six-byte escape in one append.
-                let hex = "0123456789abcdef"
-                let hi: u64 = int.widen(c / 16)
-                let lo: u64 = int.widen(c % 16)
                 string.reserve(mut s, 6)?
+                let mut hex: Inline[u8, 64] =[b'0'; 64]
+                let control: u64 = int.widen(c)
+                let _ = int.radix_digits(control, 16, mut hex)
                 string.push(mut s, "\\u00")?
-                string.push(mut s, string.slice(hex, hi, hi + 1))?
-                string.push(mut s, string.slice(hex, lo, lo + 1))?
+                for j in 62u64 .. 64 {
+                    let code: u32 = int.widen(hex[j])
+                    string.push_char(mut s, option.unwrap(char.from_u32(code)))?
+                }
             }
             start = i + 1
         }

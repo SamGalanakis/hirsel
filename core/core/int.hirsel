@@ -118,3 +118,83 @@ pub fn parse[T: integer](s: String) -> Result[T, ParseError] {
         None => Error(OutOfRange),
     }
 }
+
+/// Writes n's unpadded ASCII digits into the suffix of digits and returns its
+/// start offset. Radix is 2 through 36 with lowercase letters. Zero writes one
+/// digit. Fails: Fail for an invalid radix, before changing digits.
+/// Alloc: nothing. Cost: O(number of digits).
+pub fn radix_digits(n: u64, radix: u32, mut digits: Inline[u8, 64]) -> u64 {
+    if radix < 2 || radix > 36 {
+        fail("int.radix_digits: radix outside 2..=36")
+    }
+    if radix == 10 {
+        return decimal_digits(n, mut digits)
+    }
+    let base: u64 = int.widen(radix)
+    let mut start: u64 = 64
+    let mut value = n
+    loop {
+        let digit: u8 = int.narrow(value % base)
+        start -= 1
+        digits[start] = if digit < 10 {
+            b'0' + digit
+        } else {
+            b'a' + (digit - 10)
+        }
+        value /= base
+        if value == 0 {
+            return start
+        }
+    }
+}
+
+fn decimal_four(n: u64, mut digits: Inline[u8, 64], at: u64) {
+    // Two lanes of two digits. Multiplying by 103 and shifting by 10
+    // divides each pair by ten exactly.
+    let pairs = n / 100 | (n % 100) << 16
+    let tens = (int.wrapping_mul(pairs, 103) >> 10) & 0x000F000F
+    let word = (tens | int.wrapping_sub(pairs, int.wrapping_mul(tens, 10)) << 8) | 0x30303030
+    digits[at] = int.truncate(word)
+    digits[at + 1] = int.truncate(word >> 8)
+    digits[at + 2] = int.truncate(word >> 16)
+    digits[at + 3] = int.truncate(word >> 24)
+}
+
+fn decimal_digits(n: u64, mut digits: Inline[u8, 64]) -> u64 {
+    let mut start: u64 = 64
+    let mut value = n
+    // Split eight digits into two groups of four and then four pairs.
+    // Each pair occupies 16 bits, so its decimal arithmetic stays in its lane.
+    while value >= 100000000 {
+        let chunk = value % 100000000
+        value /= 100000000
+        start -= 8
+        let halves = chunk / 10000 | (chunk % 10000) << 32
+        let upper = (int.wrapping_mul(halves, 10486) >> 20) & 0x0000007F0000007F
+        let pairs = upper | int.wrapping_sub(halves, int.wrapping_mul(upper, 100)) << 16
+        let tens = (int.wrapping_mul(pairs, 103) >> 10) & 0x000F000F000F000F
+        let word = (tens | int.wrapping_sub(pairs, int.wrapping_mul(tens, 10)) << 8) | 0x3030303030303030
+        for i in 0u64 .. 8 {
+            digits[start + i] = int.truncate(word >> (i * 8))
+        }
+    }
+    if value >= 10000 {
+        start -= 4
+        decimal_four(value % 10000, mut digits, start)
+        value /= 10000
+    }
+    if value >= 1000 {
+        start -= 4
+        decimal_four(value, mut digits, start)
+        return start
+    }
+    loop {
+        let digit: u8 = int.truncate(value % 10)
+        start -= 1
+        digits[start] = b'0' + digit
+        value /= 10
+        if value == 0 {
+            return start
+        }
+    }
+}

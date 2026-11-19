@@ -261,3 +261,31 @@ fn rust_integer_radix_cases() -> bool {
     }
     unsigned_error(int.parse_uint("-9", 10)) == 100
 }
+
+// 1295 = 35 * 36 + 35. The bytes left of the result keep their sentinel.
+// The maximum u64 uses the whole buffer in base two.
+// expect: run radix_digits_buffer() = true
+fn radix_digits_buffer() -> bool {
+    let mut digits: Inline[u8, 64] =[0xa5; 64]
+    let suffix = int.radix_digits(1295, 36, mut digits)
+    if suffix != 62 || digits[61] != 0xa5 || digits[62] != b'z' || digits[63] != b'z' {
+        return false
+    }
+    let zero = int.radix_digits(0, 16, mut digits)
+    if zero != 63 || digits[62] != b'z' || digits[63] != b'0' {
+        return false
+    }
+    let start = int.radix_digits(18446744073709551615, 2, mut digits)
+    for byte in digits {
+        if byte != b'1' {
+            return false
+        }
+    }
+    start == 0
+}
+
+// expect: run radix_digits_invalid() = fail Fail
+fn radix_digits_invalid() -> u64 {
+    let mut digits: Inline[u8, 64] =[0; 64]
+    int.radix_digits(1, 37, mut digits)
+}

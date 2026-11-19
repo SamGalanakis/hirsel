@@ -584,23 +584,27 @@ pub fn encode(mut out: String, raw: Bytes, set: Set) -> Result[(), Capacity] {
         }
     }
     string.reserve(mut out, size)?
+    let mut digits: Inline[u8, 64] =[0; 64]
     for b in raw {
         if allowed(b, set) {
             let _ = string.push_char(mut out, ascii(b))
         } else {
+            digits[62] = b'0'
+            let value: u64 = int.widen(b)
+            let _ = int.radix_digits(value, 16, mut digits)
             let _ = string.push(mut out, "%")
-            let _ = string.push_char(mut out, hex_upper(b >> 4))
-            let _ = string.push_char(mut out, hex_upper(b & 15))
+            let _ = string.push_char(mut out, upper_hex(digits[62]))
+            let _ = string.push_char(mut out, upper_hex(digits[63]))
         }
     }
     Ok(())
 }
 
-fn hex_upper(n: u8) -> char {
-    ascii(if n < 10 {
-        b'0' + n
+fn upper_hex(byte: u8) -> char {
+    ascii(if byte >= b'a' {
+        byte - 32
     } else {
-        b'A' + (n - 10)
+        byte
     })
 }
 

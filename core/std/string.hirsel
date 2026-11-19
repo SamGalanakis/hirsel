@@ -47,32 +47,15 @@ pub fn push_uint(mut s: String, n: u64, base: u32, width: u64, pad: char) -> Res
     if base < 2 || base > 36 {
         fail("string.push_uint: base outside 2..=36")
     }
-    let radix: u64 = int.widen(base)
-    // Digits least significant first; 64 is enough for base 2.
     let mut digits: Inline[u8, 64] =[0; 64]
-    let mut count: u64 = 0
-    let mut v = n
-    loop {
-        let d: u8 = int.narrow(v % radix)
-        digits[count] = if d < 10 {
-            b'0' + d
-        } else {
-            b'a' + (d - 10)
-        }
-        count += 1
-        v = v / radix
-        if v == 0 {
-            break
-        }
-    }
-    let mut padded = count
+    let start = int.radix_digits(n, base, mut digits)
+    let mut padded = 64 - start
     while padded < width {
         string.push_char(mut s, pad)?
         padded += 1
     }
-    while count > 0 {
-        count -= 1
-        let code: u32 = int.widen(digits[count])
+    for i in start .. 64 {
+        let code: u32 = int.widen(digits[i])
         string.push_char(mut s, option.unwrap(char.from_u32(code)))?
     }
     Ok(())

@@ -64,20 +64,24 @@ pub fn parse(s: String) -> Result[Uuid, Error] {
 /// Alloc: growth of out. Cost: O(36). Ex: `std.uuid.push(mut line, id)?`.
 pub fn push(mut out: String, u: Uuid) -> Result[(), Capacity] {
     string.reserve(mut out, 36)?
-    let hex = "0123456789abcdef"
-    let mut digits: u64 = 0
+    let mut hi: Inline[u8, 64] =[b'0'; 64]
+    let mut lo: Inline[u8, 64] =[b'0'; 64]
+    let _ = int.radix_digits(u.hi, 16, mut hi)
+    let _ = int.radix_digits(u.lo, 16, mut lo)
+    let mut digit: u64 = 0
     for i in 0u64 .. 36u64 {
         if hyphen_at(i) {
             let _ = string.push(mut out, "-")
         } else {
-            let word = if digits < 16 {
-                u.hi
+            let at = 48 + digit % 16
+            let byte = if digit < 16 {
+                hi[at]
             } else {
-                u.lo
+                lo[at]
             }
-            let digit = (word >> ((15 - digits % 16) * 4)) & 15
-            let _ = string.push(mut out, string.slice(hex, digit, digit + 1))
-            digits += 1
+            let code: u32 = int.widen(byte)
+            let _ = string.push_char(mut out, option.unwrap(char.from_u32(code)))
+            digit += 1
         }
     }
     Ok(())

@@ -143,18 +143,13 @@ fn head_text(mut out: Bytes, s: String) -> Result[(), ResponseError] {
 }
 
 fn decimal(mut out: Bytes, n: u64, width: u64) -> Result[(), ResponseError] {
-    let mut digits: Inline[u8, 20] =[0; 20]
-    let mut start: u64 = 20
-    let mut rest = n
-    loop {
+    let mut digits: Inline[u8, 64] =[0; 64]
+    let mut start = int.radix_digits(n, 10, mut digits)
+    while 64 - start < width {
         start -= 1
-        digits[start] = b'0' + int.narrow(rest % 10)
-        rest /= 10
-        if rest == 0 && 20 - start >= width {
-            break
-        }
+        digits[start] = b'0'
     }
-    if bytebuf.append_inline(mut out, digits, start, 20) {
+    if bytebuf.append_inline(mut out, digits, start, 64) {
         Ok(())
     } else {
         Error(HeadTooLarge)

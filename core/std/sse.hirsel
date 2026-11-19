@@ -123,21 +123,13 @@ pub fn comment(mut out: EventBuf, text: String) -> Result[(), SseError] {
 }
 
 pub fn retry(mut out: EventBuf, milliseconds: u64) -> Result[(), SseError] {
-    let mut width: u64 = 1
-    let mut divisor: u64 = 1
-    while milliseconds / divisor >= 10 {
-        divisor *= 10
-        width += 1
-    }
-    if 9 + width > spare(out) {
+    let mut digits: Inline[u8, 64] =[0; 64]
+    let start = int.radix_digits(milliseconds, 10, mut digits)
+    if 9 + (64 - start) > spare(out) {
         return Error(TooLarge)
     }
     let _ = list.append(mut out.data, string.as_bytes("retry: "))
-    while divisor != 0 {
-        let digit: u8 = int.narrow(milliseconds / divisor % 10)
-        let _ = list.push(mut out.data, b'0' + digit)
-        divisor /= 10
-    }
+    let _ = bytebuf.append_inline(mut out.data, digits, start, 64)
     let _ = list.append(mut out.data, string.as_bytes("\n\n"))
     Ok(())
 }

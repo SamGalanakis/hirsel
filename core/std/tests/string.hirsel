@@ -830,6 +830,20 @@ fn push_u64_digits() -> bool {
     decimal(0) == "0" && decimal(9) == "9" && decimal(10) == "10" && decimal(18446744073709551615) == "18446744073709551615"
 }
 
+// Appending the 20 digits of u64::MAX to a one-byte literal needs 21
+// bytes of storage, charged as 24. Refusal leaves the literal intact.
+// expect: run push_u64_refusal_keeps_literal() = true
+fn push_u64_refusal_keeps_literal() -> bool {
+    let mut s = "x"
+    let outcome = bound bytes 7 {
+        string.push_u64(mut s, 18446744073709551615)?
+    }
+    match outcome {
+        Error(c) => c.requested == 24 && c.available == 7 && s == "x",
+        Ok(()) => false,
+    }
+}
+
 // Onto a literal: the static storage is copied out, never written.
 // expect: run push_u64_onto_literal() = true
 fn push_u64_onto_literal() -> bool {

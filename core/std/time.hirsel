@@ -701,37 +701,45 @@ fn prepend(mut text: DurationText, c: char) {
     text.chars[text.start] = c
 }
 
-fn prepend_digit(mut text: DurationText, digit: u64) {
-    let code: u32 = int.narrow(digit + 48)
+fn prepend_ascii(mut text: DurationText, digit: u8) {
+    let code: u32 = int.widen(digit)
     prepend(mut text, option.unwrap(char.from_u32(code)))
 }
 
-// Go's fmtFrac: walk the fraction from the right, skipping zeros until a digit
-// has been written. Leave the integer part for fmtInt.
 fn duration_fraction(mut text: DurationText, value: u64, precision: u8) -> u64 {
-    let end = text.start
-    let mut n = value
+    let mut scale: u64 = 1
     for _ in 0u8 .. precision {
-        let digit = n % 10
-        if digit != 0 || end != text.start {
-            prepend_digit(mut text, digit)
-        }
-        n = n / 10
+        scale *= 10
     }
-    if end != text.start {
-        prepend(mut text, '.')
+    let whole = value / scale
+    let fraction = value % scale
+    if fraction == 0 {
+        return whole
     }
-    n
+    // Unwritten leading positions are the zeros before the first fraction digit.
+    let mut digits: Inline[u8, 64] =[b'0'; 64]
+    let _ = int.radix_digits(fraction, 10, mut digits)
+    let width: u64 = int.widen(precision)
+    let start = 64 - width
+    let mut end: u64 = 64
+    while digits[end - 1] == b'0' {
+        end -= 1
+    }
+    while end > start {
+        end -= 1
+        prepend_ascii(mut text, digits[end])
+    }
+    prepend(mut text, '.')
+    whole
 }
 
 fn duration_integer(mut text: DurationText, value: u64) {
-    let mut n = value
-    loop {
-        prepend_digit(mut text, n % 10)
-        n = n / 10
-        if n == 0 {
-            break
-        }
+    let mut digits: Inline[u8, 64] =[0; 64]
+    let start = int.radix_digits(value, 10, mut digits)
+    let mut end: u64 = 64
+    while end > start {
+        end -= 1
+        prepend_ascii(mut text, digits[end])
     }
 }
 

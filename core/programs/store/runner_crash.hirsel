@@ -446,12 +446,15 @@ fn decode_fixture_token(text: View[String]) -> Option[Bytes] {
 }
 
 fn remember(out: Stdout, principal: Bytes) waits {
-    let digits = string.as_bytes("0123456789abcdef")
+    let mut digits: Inline[u8, 64] = [0; 64]
     let mut b: Bytes = list.new()
     result.unwrap(list.append(mut b, string.as_bytes("TOKEN ")))
     for byte in principal {
-        result.unwrap(list.push(mut b, digits[int.widen(byte / 16u8)]))
-        result.unwrap(list.push(mut b, digits[int.widen(byte % 16u8)]))
+        digits[62] = b'0'
+        let value: u64 = int.widen(byte)
+        let _ = int.radix_digits(value, 16, mut digits)
+        result.unwrap(list.push(mut b, digits[62]))
+        result.unwrap(list.push(mut b, digits[63]))
     }
     result.unwrap(stdout.write(out, result.unwrap(string.from_utf8(take b))))
 }

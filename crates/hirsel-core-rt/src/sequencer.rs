@@ -6,7 +6,10 @@
 use std::{
     cell::Cell,
     ptr,
-    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering},
+    },
 };
 
 /// Commits granted inside one cohort while another cohort waits.
@@ -29,6 +32,7 @@ pub(crate) struct Sequencer {
     global: Mcs,
     cohorts: [Cohort; COHORTS],
     lobby: Lobby,
+    home: OnceLock<Option<Home>>,
 }
 
 /// Requesters beyond this many queue in the lobby, parked, instead of
@@ -364,43 +368,80 @@ const AFFINITY_WINDOW: u32 = 64;
 /// A worker off the home L3 moves once this fraction of its window crossed.
 const AFFINITY_SHARE: u32 = 8;
 
-/// The home cohort, the one with most of the process's allowed CPUs (the
-/// lowest on a tie), and those CPUs. None when the process runs in one L3.
-fn home() -> Option<&'static (usize, libc::cpu_set_t)> {
-    static HOME: std::sync::OnceLock<Option<(usize, libc::cpu_set_t)>> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| {
+/// The L3 with the most allowed CPUs (lowest on a tie), when the worker
+/// pool's inherited mask spans multiple L3s.
+struct Home {
+    cohort: usize,
+    cpus: libc::cpu_set_t,
+    allowed: libc::cpu_set_t,
+    capacity: usize,
+    moved: AtomicUsize,
+}
+
+impl Home {
+    fn detect() -> Option<Self> {
         // SAFETY: an all-zero cpu_set_t is the empty set.
         let mut allowed: libc::cpu_set_t = unsafe { std::mem::zeroed() };
         // SAFETY: the set is writable and sized; pid 0 is the calling thread,
-        // which runs with the process's mask until it first moves itself.
+        // which still runs with the pool's inherited mask.
         if unsafe { libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut allowed) } != 0 {
             return None;
         }
-        let map = cohort_map();
+        Self::from_allowed(allowed, cohort_map())
+    }
+
+    fn from_allowed(allowed: libc::cpu_set_t, map: &[u8]) -> Option<Self> {
         let mut counts = [0usize; COHORTS];
-        // SAFETY: CPU_ISSET reads the initialized set within its size.
-        let allowed_cpus: Vec<usize> = (0..map.len())
-            .filter(|&cpu| unsafe { libc::CPU_ISSET(cpu, &allowed) })
-            .collect();
-        for &cpu in &allowed_cpus {
-            counts[usize::from(map[cpu])] += 1;
+        for (cpu, &cohort) in map.iter().take(libc::CPU_SETSIZE as usize).enumerate() {
+            // SAFETY: CPU_ISSET reads the initialized set within its size.
+            if unsafe { libc::CPU_ISSET(cpu, &allowed) } {
+                counts[usize::from(cohort)] += 1;
+            }
         }
         if counts.iter().filter(|&&n| n > 0).count() < 2 {
             return None;
         }
         let home = (0..COHORTS).max_by_key(|&c| (counts[c], std::cmp::Reverse(c)))?;
-        // SAFETY: as above.
+        // SAFETY: an all-zero cpu_set_t is the empty set.
         let mut cpus: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-        for &cpu in allowed_cpus
-            .iter()
-            .filter(|&&cpu| usize::from(map[cpu]) == home)
-        {
-            // SAFETY: CPU_SET writes within the set's size.
-            unsafe { libc::CPU_SET(cpu, &mut cpus) };
+        for (cpu, &cohort) in map.iter().take(libc::CPU_SETSIZE as usize).enumerate() {
+            // SAFETY: CPU_ISSET reads the initialized set within its size.
+            if usize::from(cohort) == home && unsafe { libc::CPU_ISSET(cpu, &allowed) } {
+                // SAFETY: CPU_SET writes within the set's size.
+                unsafe { libc::CPU_SET(cpu, &mut cpus) };
+            }
         }
-        Some((home, cpus))
-    })
-    .as_ref()
+        Some(Self {
+            cohort: home,
+            cpus,
+            allowed,
+            capacity: counts[home],
+            moved: AtomicUsize::new(0),
+        })
+    }
+
+    /// A successful move uses a slot for the lifetime of the pool.
+    fn try_move(&self, apply: impl FnOnce(&libc::cpu_set_t) -> bool) -> bool {
+        if self
+            .moved
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |moved| {
+                (moved < self.capacity).then_some(moved + 1)
+            })
+            .is_err()
+        {
+            return false;
+        }
+        if apply(&self.cpus) {
+            return true;
+        }
+        self.moved.fetch_sub(1, Ordering::Relaxed);
+        false
+    }
+}
+
+fn set_affinity(cpus: &libc::cpu_set_t) -> bool {
+    // SAFETY: the set is a valid cpu_set_t; 0 names the calling thread.
+    unsafe { libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), cpus) == 0 }
 }
 
 /// Outermost acquisitions between re-reads of the worker's CPU. A worker
@@ -487,6 +528,7 @@ pub(crate) struct Owner {
     /// Queued grants in the current affinity window, and those from another L3.
     grants: Cell<u32>,
     crossed: Cell<u32>,
+    narrowed: Cell<bool>,
     /// The outermost commit may be kept for the next one.
     keepable: Cell<bool>,
     /// Commits kept without a release since the last hand-off.
@@ -514,6 +556,7 @@ impl Owner {
             recheck: Cell::new(0),
             grants: Cell::new(0),
             crossed: Cell::new(0),
+            narrowed: Cell::new(false),
             keepable: Cell::new(false),
             kept: Cell::new(0),
             receive_run: Cell::new(0),
@@ -575,12 +618,12 @@ impl Owner {
         true
     }
 
-    /// Hand-off affinity: a worker whose queued grants mostly come from
-    /// another L3 moves its thread, with the fibers pinned to it, onto the
-    /// home L3, so a domain's commit traffic converges on one L3 (as Linux's
-    /// NUMA balancing moves a task toward the node its faults come from).
-    /// Moving the thread keeps every TLS address a suspended fiber holds.
+    /// An off-home worker can follow frequent remote grants onto the home
+    /// L3, up to one narrowed worker per allowed CPU there.
     fn count_grant(&self, cross: bool) {
+        if self.narrowed.get() {
+            return;
+        }
         let seen = self.grants.get() + 1;
         let crossed = self.crossed.get() + u32::from(cross);
         if seen < AFFINITY_WINDOW {
@@ -590,18 +633,15 @@ impl Owner {
         }
         self.grants.set(0);
         self.crossed.set(0);
-        // A share, not a majority: workers off the home L3 that trade the
-        // token among themselves see few crossings each, yet every cohort
-        // switch still pays a cross-L3 transfer. Once one of them moves, the
-        // rest see more crossings and follow.
+        // SAFETY: the sequencer outlives its owners.
+        let home = unsafe { &(*self.sequencer).home };
         if crossed >= AFFINITY_WINDOW / AFFINITY_SHARE
-            && let Some((home, cpus)) = home()
-            && self.cohort.get() != *home
+            && let Some(home) = home.get_or_init(Home::detect)
+            && self.cohort.get() != home.cohort
+            && home.try_move(set_affinity)
         {
-            // SAFETY: the set is a valid cpu_set_t; 0 names the calling thread.
-            if unsafe { libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), cpus) } == 0 {
-                self.recheck.set(0);
-            }
+            self.narrowed.set(true);
+            self.recheck.set(0);
         }
     }
 
@@ -688,6 +728,18 @@ impl Owner {
                 PARKS.each_ref().map(|n| n.load(Ordering::Relaxed)),
                 sample.receives.get(),
             );
+        }
+    }
+}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        if self.narrowed.get() {
+            // SAFETY: the sequencer outlives this owner on the worker's stack.
+            let home = unsafe { &(*self.sequencer).home };
+            if let Some(Some(home)) = home.get() {
+                set_affinity(&home.allowed);
+            }
         }
     }
 }
@@ -889,4 +941,42 @@ pub(crate) unsafe fn enter_or_delegate(request: *mut Request) -> Entry {
     }
     owner.depth.set(1);
     Entry::Held(Guard(at))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn narrowed_workers_fit_the_home_cohort() {
+        // Two allowed CPUs per L3. The lower L3 wins the tie, so at most
+        // two workers may lose CPUs 2 and 3 from their original mask.
+        // SAFETY: these four CPU indices fit a zeroed cpu_set_t.
+        let mut allowed: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        for cpu in 0..4 {
+            // SAFETY: the set is initialized and the index fits.
+            unsafe { libc::CPU_SET(cpu, &mut allowed) };
+        }
+        let home = Home::from_allowed(allowed, &[0, 0, 1, 1]).unwrap();
+        let mut masks = [allowed; 4];
+        for mask in &mut masks {
+            home.try_move(|cpus| {
+                *mask = *cpus;
+                true
+            });
+        }
+        for mask in masks.iter().take(2) {
+            // SAFETY: all indices fit and the set is initialized.
+            assert!(unsafe {
+                libc::CPU_ISSET(0, mask)
+                    && libc::CPU_ISSET(1, mask)
+                    && !libc::CPU_ISSET(2, mask)
+                    && !libc::CPU_ISSET(3, mask)
+            });
+        }
+        for mask in masks.iter().skip(2) {
+            // SAFETY: the initialized set includes both CPUs on the other L3.
+            assert!(unsafe { libc::CPU_ISSET(2, mask) && libc::CPU_ISSET(3, mask) });
+        }
+    }
 }

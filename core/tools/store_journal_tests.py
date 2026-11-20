@@ -18,7 +18,13 @@ INSTRUCTION_ALLOWANCES = {'frame_size_boundary': 1_892_798_149}  # measured 1_51
 
 LAWS = ('end', 'payload', 'segment', 'apply', 'recovery', 'bootstrap', 'worker',
         'db', 'end_storage', 'recorded', 'options', 'call_vector', 'recorded_barrier', 'rotation', 'changes_checkpoint', 'frame_size_boundary', 'frame_oversize', 'drop', 'ack_channel', 'recorded_fork', 'streams', 'step_stop', 'place', 'place_idle')
-TESTS = {'store@1/store/journal_test_' + name for name in LAWS if name not in ('frame_size_boundary', 'frame_oversize')}
+TRIGGER_LAWS = ('trigger_revision',)
+LAW_GROUPS = {'store': LAWS, 'triggers': TRIGGER_LAWS}
+NATIVE_GROUPS = {
+    module: {f'store@1/{module}/journal_test_{name}' for name in group
+             if name not in ('frame_size_boundary', 'frame_oversize')}
+    for module, group in LAW_GROUPS.items()
+}
 SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-place', 'journal-place-split', 'journal-place-idle')
 FAILURES = ('poison-segment', 'poison-end', 'poison-pack', 'poison-write', 'poison-cut',
             'orphan-end-recovery-sync')
@@ -88,16 +94,17 @@ def main():
             if engine == 'evaluator':
                 if args.evaluator is None:
                     parser.error('evaluator backend requires --evaluator')
-                for name in LAWS:
-                    result = evaluator.evaluate(manifest, 'store@1/store/journal_law_' + name,
-                                                instructions=INSTRUCTION_ALLOWANCES.get(name))
-                    try:
-                        report = json.loads(result.stdout)
-                    except ValueError:
-                        report = dict(stdout=result.stdout.decode(errors='replace'), stderr=result.stderr.decode(errors='replace'))
-                    good = result.returncode == 0 and report.get('outcome') == dict(kind='returned', values=[1])
-                    rows.append(dict(engine=engine, law=name, passed=good, result=report))
-                    print(f'{engine} {name}: {"PASS" if good else "FAIL"}', flush=True)
+                for module, group in LAW_GROUPS.items():
+                    for name in group:
+                        result = evaluator.evaluate(manifest, f'store@1/{module}/journal_law_{name}',
+                                                    instructions=INSTRUCTION_ALLOWANCES.get(name))
+                        try:
+                            report = json.loads(result.stdout)
+                        except ValueError:
+                            report = dict(stdout=result.stdout.decode(errors='replace'), stderr=result.stderr.decode(errors='replace'))
+                        good = result.returncode == 0 and report.get('outcome') == dict(kind='returned', values=[1])
+                        rows.append(dict(engine=engine, law=name, passed=good, result=report))
+                        print(f'{engine} {name}: {"PASS" if good else "FAIL"}', flush=True)
                 continue
             if args.compiler is None or args.runtime is None or args.bridge is None:
                 parser.error('native backends require compiler, runtime and bridge')
@@ -113,16 +120,21 @@ def main():
                 command.append('--release')
             if args.cc:
                 command += ['--cc', str(args.cc.resolve())]
-            result = run_case('store@1/store/journal_test_', engine, command, capture_output=True, text=True, env=env)
-            try:
-                report = json.loads(result.stdout)
-            except ValueError:
-                report = dict(stdout=result.stdout, stderr=result.stderr)
-            tests = report.get('tests', [])
-            good = (result.returncode == 0 and len(tests) == len(TESTS)
-                    and {test['definition'] for test in tests} == TESTS and all(test.get('passed') for test in tests))
-            rows.append(dict(engine=engine, passed=good, result=report))
-            print(f'{engine}: {sum(bool(t.get("passed")) for t in tests)}/{len(TESTS)} passed', flush=True)
+            for module, expected in NATIVE_GROUPS.items():
+                prefix = f'store@1/{module}/journal_test_'
+                selected = list(command)
+                selected[selected.index('--filter') + 1] = prefix
+                result = run_case(prefix, engine, selected, capture_output=True, text=True, env=env)
+                try:
+                    report = json.loads(result.stdout)
+                except ValueError:
+                    report = dict(stdout=result.stdout, stderr=result.stderr)
+                tests = report.get('tests', [])
+                good = (result.returncode == 0 and len(tests) == len(expected)
+                        and {test['definition'] for test in tests} == expected
+                        and all(test.get('passed') for test in tests))
+                rows.append(dict(engine=engine, module=module, passed=good, result=report))
+                print(f'{engine} {module}: {sum(bool(t.get("passed")) for t in tests)}/{len(expected)} passed', flush=True)
             large = list(command)
             large[large.index('--filter') + 1] = 'store@1/store/journal_frame_'
             # L29 simultaneously retains sixteen MiB of rows and the maximum

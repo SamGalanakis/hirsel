@@ -1,0 +1,402 @@
+// A place's triggers are ordinary typed table rows. Store frames and recovery
+// treat these tables the same as the place's other tables.
+pub type Due: send = AfterCommit | At(u64)
+
+pub type Id: codec + key + send {
+    store_hi: u64,
+    store_lo: u64,
+    branch: u32,
+    version: u64,
+    index: u64
+}
+
+pub type Hold: codec + send = Request(u64, u64, Bytes, Bytes) | Revision(Bytes, Bytes)
+
+pub type Terminal: codec + send = Returned(Bytes) | Raised(u32) | OutOfTime(u64) | OutOfBytes(u64, u64) | Gone | Cancelled
+
+pub type Error: send = Store(store.Error) | StaleAttempt | MissingEntry | AlreadyTriggerable | AttemptLimit | IndexLimit | NotHeld
+
+type State: codec + send = Waiting | Running | Parked(Hold)
+
+type Row: codec + send {
+    path: Bytes,
+    schema: Bytes,
+    arg: Bytes,
+    due: u64,
+    granted: bool,
+    attempt: u64,
+    revision: Bytes,
+    state: State,
+    cancel: bool
+}
+
+pub opaque type Tables: send {
+    rows: store.Table[Id, Row],
+    due: store.Index[u64, Id, Row],
+    outcomes: store.Table[Id, Terminal]
+}
+
+pub opaque type Entry[A] {
+    ref: EntryRef,
+    codec: std.codec.Codec[A]
+}
+
+type EntryRef: send { path: Bytes, schema: Bytes, granted: bool }
+
+pub opaque type Entries: send { listed: List[EntryRef] }
+
+pub opaque type Pending: send {
+    id: Id,
+    row: Row
+}
+
+pub opaque type Attempt: send { id: Id, number: u64 }
+
+pub type Started: send = Body(Attempt) | Held | Cancel(Attempt)
+
+fn rows_name() -> String { "store.triggers.pending" }
+fn outcomes_name() -> String { "store.triggers.outcomes" }
+
+
+fn put_id(id: Id, mut out: Bytes) -> Result[(), Capacity] {
+    std.codec.put_key_u64(id.store_hi, mut out)?
+    std.codec.put_key_u64(id.store_lo, mut out)?
+    std.codec.put_key_u32(id.branch, mut out)?
+    std.codec.put_key_u64(id.version, mut out)?
+    std.codec.put_key_u64(id.index, mut out)
+}
+
+fn take_id(raw: Bytes, mut at: u64) -> Result[Id, std.codec.Stop] {
+    let hi = std.codec.take_key_u64(raw, mut at)?
+    let lo = std.codec.take_key_u64(raw, mut at)?
+    let branch = std.codec.take_key_u32(raw, mut at)?
+    let version = std.codec.take_key_u64(raw, mut at)?
+    let index = std.codec.take_key_u64(raw, mut at)?
+    Ok(Id(store_hi: hi, store_lo: lo, branch: branch, version: version, index: index))
+}
+
+fn id_schema(mut s: std.codec.Schema) -> Result[(), Capacity] {
+    std.codec.schema_tuple(mut s, 5u64)?
+    std.codec.schema_u64(mut s)?
+    std.codec.schema_u64(mut s)?
+    std.codec.schema_u32(mut s)?
+    std.codec.schema_u64(mut s)?
+    std.codec.schema_u64(mut s)
+}
+
+fn id_key() -> std.codec.Key[Id] {
+    std.codec.key_make(put_id, take_id, id_schema)
+}
+
+fn row_due(row: Row) -> Result[u64, Capacity] { Ok(row.due) }
+
+fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
+    match take r {
+        Error(Exists(_)) => Ok(()),
+        other => take other,
+    }
+}
+
+pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+    let value: std.codec.Codec[Row] = std.codec.of()
+    let terminal: std.codec.Codec[Terminal] = std.codec.of()
+    let mut spec = store.spec(rows_name(), id_key(), value)
+    store.with_index(mut spec, "due", code.describe(row_due), std.codec.key_u64())?
+    created(store.migration_create_table(mut phase, take spec))?
+    created(store.migration_create_table(mut phase, store.spec(outcomes_name(), id_key(), terminal)))
+}
+
+pub fn tables(source: store.Schema) -> Result[Tables, store.Error] {
+    let value: std.codec.Codec[Row] = std.codec.of()
+    let terminal: std.codec.Codec[Terminal] = std.codec.of()
+    let mut rows = store.schema_table(source, rows_name(), id_key(), value)?
+    let due = store.schema_index(source, mut rows, "due", code.describe(row_due), std.codec.key_u64())?
+    let outcomes = store.schema_table(source, outcomes_name(), id_key(), terminal)?
+    Ok(Tables(rows: take rows, due: take due, outcomes: take outcomes))
+}
+
+fn stored[T](take r: Result[T, store.Error]) -> Result[T, Error] {
+    match take r {
+        Ok(take x) => Ok(take x),
+        Error(take e) => Error(Store(take e)),
+    }
+}
+
+fn room[T](take r: Result[T, Capacity]) -> Result[T, Error] {
+    match take r {
+        Ok(take x) => Ok(take x),
+        Error(c) => Error(Store(Full(c))),
+    }
+}
+
+fn copy_bytes(b: Bytes) -> Result[Bytes, Error] {
+    let copied: Result[Bytes, Capacity] = clone(b)
+    room(take copied)
+}
+
+fn path[F](f: StaticFn[F]) -> Result[Bytes, Capacity] {
+    // PROG-9 encodes a definition path between the version byte and the
+    // opening parenthesis. Only checked StaticFn descriptors reach here.
+    let id = code.identity(f)
+    let mut end = 1u64
+    while id[end] != 40u8 { end += 1u64 }
+    clone(list.slice(id, 1u64, end))
+}
+
+fn entry[F, A: codec](f: StaticFn[F], carries_grants: bool) -> Result[Entry[A], Capacity] {
+    let codec: std.codec.Codec[A] = std.codec.of()
+    Ok(Entry(ref: EntryRef(path: path(f)?, schema: std.codec.schema(codec)?, granted: carries_grants), codec: codec))
+}
+
+pub fn transact[H, A: codec, R, E](f: StaticFn[fn(mut store.Tx, H, store.Caller, take A) -> Result[R, E]]) -> Result[Entry[A], Capacity] {
+    entry(f, false)
+}
+
+pub fn granted[G, A: codec, R](f: StaticFn[fn(G, take A) -> Result[R, Capacity] waits]) -> Result[Entry[A], Capacity] {
+    entry(f, true)
+}
+
+pub fn empty_entries() -> Entries { Entries(listed: list.new()) }
+
+pub fn allow[A](mut entries: Entries, target: Entry[A]) -> Result[(), Error] {
+    for ref in entries.listed {
+        if ref.path == target.ref.path { return Error(AlreadyTriggerable) }
+    }
+    let copied: Result[EntryRef, Capacity] = clone(target.ref)
+    let ref = room(take copied)?
+    room(result.capacity_only(list.push(mut entries.listed, take ref)))
+}
+
+fn listed(entries: Entries, target: EntryRef) -> bool {
+    for ref in entries.listed {
+        if ref.path == target.path {
+            return ref.schema == target.schema && ref.granted == target.granted
+        }
+    }
+    false
+}
+
+pub fn write[A](mut tx: store.Tx, t: Tables, entries: Entries, target: Entry[A], arg: A, when: Due) -> Result[Id, Error] {
+    if !listed(entries, target.ref) { return Error(MissingEntry) }
+    let info = store.info(mut tx)
+    let mut id = Id(store_hi: info.id.store.hi, store_lo: info.id.store.lo, branch: info.id.branch, version: info.id.version, index: 0u64)
+    let shape = store.shape(t.rows)
+    while let Some(_) = stored(store.fetch(tx, shape, id))? {
+        let Some(next) = int.checked_add(id.index, 1u64) else { return Error(IndexLimit) }
+        id.index = next
+    }
+    let due = match when { AfterCommit => info.at, At(at) => at }
+    let mut encoded: Bytes = list.new()
+    room(std.codec.encode(target.codec, arg, mut encoded))?
+    let row = Row(path: copy_bytes(target.ref.path)?, schema: copy_bytes(target.ref.schema)?, arg: take encoded, due: due,
+        granted: target.ref.granted, attempt: 0u64, revision: list.new(), state: Waiting, cancel: false)
+    stored(store.put(mut tx, t.rows, id, row))?
+    Ok(id)
+}
+
+// The place supplies its durable main snapshot. The index sorts by due time,
+// with the primary key as the tie breaker (store index order).
+pub fn next_pending(s: store.Snapshot, t: Tables, active: scoped[view] fn(Id) -> bool) -> Result[Option[Pending], store.Error] {
+    let mut rows = store.find(s, t.due, Unbounded, Unbounded)?
+    while let Some((id, take row)) = store.next(mut rows)? {
+        // An inherited trigger in a fork is inert.
+        if id.branch == 0u32 && !active(id) && (!parked(row.state) || row.cancel) {
+            return Ok(Some(Pending(id: id, row: take row)))
+        }
+    }
+    Ok(None)
+}
+
+pub fn due_time(p: Pending) -> u64 { p.row.due }
+pub fn pending_id(p: Pending) -> Id { p.id }
+pub fn run_id(a: Attempt) -> Id { a.id }
+pub fn number(a: Attempt) -> u64 { a.number }
+pub fn is_granted(p: Pending) -> bool { p.row.granted }
+pub fn argument(p: Pending) -> View[Bytes] in p { view p.row.arg }
+
+pub fn resolves[A](p: Pending, target: Entry[A]) -> bool {
+    p.row.path == target.ref.path && p.row.granted == target.ref.granted && p.row.schema == target.ref.schema
+}
+
+fn read(tx: store.Tx, t: Tables, id: Id) -> Result[Row, Error] {
+    match stored(store.fetch(tx, store.shape(t.rows), id))? {
+        Some(take row) => Ok(take row),
+        None => Error(StaleAttempt),
+    }
+}
+
+fn parked(state: State) -> bool {
+    match state { Parked(_) => true, _ => false }
+}
+
+fn running(state: State) -> bool {
+    match state { Running => true, _ => false }
+}
+
+fn current(tx: store.Tx, t: Tables, a: Attempt) -> Result[Row, Error] {
+    let row = read(tx, t, a.id)?
+    if row.attempt != a.number || !running(row.state) { return Error(StaleAttempt) }
+    Ok(take row)
+}
+
+pub fn fence(tx: store.Tx, t: Tables, a: Attempt) -> Result[bool, Error] {
+    let row = current(tx, t, a)?
+    Ok(row.cancel)
+}
+
+pub fn start(mut tx: store.Tx, t: Tables, p: Pending, revision: Bytes) -> Result[Started, Error] {
+    let mut row = read(tx, t, p.id)?
+    if row.cancel {
+        // The cancellation settlement uses the current attempt without
+        // launching a body, including when the row is held.
+        return Ok(Cancel(Attempt(id: p.id, number: row.attempt)))
+    }
+    if parked(row.state) { return Error(StaleAttempt) }
+    if row.attempt != 0u64 && row.revision != revision {
+        row.state = Parked(Revision(copy_bytes(row.revision)?, copy_bytes(revision)?))
+        stored(store.put(mut tx, t.rows, p.id, row))?
+        return Ok(Held)
+    }
+    if row.attempt == 0u64 { row.revision = copy_bytes(revision)? }
+    let Some(n) = int.checked_add(row.attempt, 1u64) else { return Error(AttemptLimit) }
+    row.attempt = n
+    row.state = Running
+    stored(store.put(mut tx, t.rows, p.id, row))?
+    Ok(Body(Attempt(id: p.id, number: n)))
+}
+
+pub fn hold(mut tx: store.Tx, t: Tables, a: Attempt, step: u64, expected: Bytes, actual: Bytes) -> Result[(), Error] {
+    let mut row = current(tx, t, a)?
+    row.state = Parked(Request(a.number, step, copy_bytes(expected)?, copy_bytes(actual)?))
+    stored(store.put(mut tx, t.rows, a.id, row))
+}
+
+pub fn release(mut tx: store.Tx, t: Tables, id: Id, revision: Option[Bytes]) -> Result[(), Error] {
+    let mut row = read(tx, t, id)?
+    match row.state {
+        Parked(mark) => match revision {
+            Some(selected) => { row.revision = copy_bytes(selected)? },
+            None => if let Revision(_, _) = mark { return Error(NotHeld) },
+        },
+        _ => return Error(NotHeld),
+    }
+    row.state = Waiting
+    stored(store.put(mut tx, t.rows, id, row))
+}
+
+pub fn request_cancel(mut tx: store.Tx, t: Tables, id: Id) -> Result[(), Error] {
+    let mut row = read(tx, t, id)?
+    row.cancel = true
+    stored(store.put(mut tx, t.rows, id, row))
+}
+
+fn consume(mut tx: store.Tx, t: Tables, id: Id, terminal: Terminal) -> Result[(), Error] {
+    stored(store.put(mut tx, t.outcomes, id, terminal))?
+    let _ = stored(store.delete(mut tx, t.rows, id))?
+    Ok(())
+}
+
+pub fn finish(mut tx: store.Tx, t: Tables, a: Attempt, terminal: Terminal) -> Result[(), Error] {
+    let row = read(tx, t, a.id)?
+    if row.attempt != a.number { return Error(StaleAttempt) }
+    if row.cancel { return consume(mut tx, t, a.id, Cancelled) }
+    if !running(row.state) { return Error(StaleAttempt) }
+    consume(mut tx, t, a.id, terminal)
+}
+
+pub fn finish_transact(mut tx: store.Tx, t: Tables, p: Pending, terminal: Terminal) -> Result[(), Error] {
+    let row = read(tx, t, p.id)?
+    if row.granted { return Error(StaleAttempt) }
+    consume(mut tx, t, p.id, terminal)
+}
+
+pub fn outcome(s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Terminal], store.Error] {
+    store.get(s, store.shape(t.outcomes), id)
+}
+
+
+
+fn sample_granted(g: Clock, take arg: u64) -> Result[u64, Capacity] waits {
+    host.sleep_until(g, host.mono_ns(g))
+    Ok(arg)
+}
+
+fn done[R](take result: Result[store.Outcome[R, Error], store.Error]) -> store.Done[R] {
+    match take result {
+        Ok(Committed(take v)) => take v,
+        _ => fail("trigger law: expected a commit"),
+    }
+}
+
+fn first(db: store.Db, t: Tables) -> Option[Pending] {
+    result.unwrap(next_pending(store.snapshot(db), t, fn(id: Id) -> bool { false }))
+}
+
+// ENDSTATE steps law 9 and trigger Start. The existing attempt remains fenced
+// while held. Starting on r2 without release, or releasing without restamping,
+// makes this trace fail.
+pub fn journal_law_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut before = result.unwrap(store.open(tasks, d, c, r, store.defaults()))
+    result.unwrap(store.run_migration(mut before, tasks, code.describe(migrate)))
+    let original = result.unwrap(store.with_schema(before, code.describe(tables)))
+    let target: Entry[u64] = result.unwrap(granted(code.describe(sample_granted)))
+    let mut allowed = empty_entries()
+    result.unwrap(allow(mut allowed, target))
+    let r1 = result.unwrap(copy_bytes(string.as_bytes("r1")))
+    let r2 = result.unwrap(copy_bytes(string.as_bytes("r2")))
+    let queued_run = store.run(mut before, None, scoped fn(mut tx: store.Tx) -> Result[Id, Error] {
+        write(mut tx, original, allowed, target, 42u64, AfterCommit)
+    })
+    let queued = done(take queued_run)
+    result.unwrap(store.durable(mut before, queued.ticket))
+    let scheduled = option.unwrap(first(before, original))
+    let started_run = store.run(mut before, None, scoped fn(mut tx: store.Tx) -> Result[Started, Error] {
+        start(mut tx, original, scheduled, r1)
+    })
+    let started = done(take started_run)
+    result.unwrap(store.durable(mut before, started.ticket))
+    let Body(a1) = started.value else { return false }
+    if number(a1) != 1u64 { return false }
+    result.unwrap(store.close(take before))
+
+    let mut db = result.unwrap(store.open(tasks, d, c, r, store.defaults()))
+    let t = result.unwrap(store.with_schema(db, code.describe(tables)))
+    let p = option.unwrap(first(db, t))
+    let decision_run = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[Started, Error] {
+        start(mut tx, t, p, r2)
+    })
+    let decision = done(take decision_run)
+    result.unwrap(store.durable(mut db, decision.ticket))
+    if let Held = decision.value { } else { return false }
+    if let Some(_) = first(db, t) { return false }
+    let refused = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), Error] {
+        let _ = fence(tx, t, a1)?
+        Ok(())
+    })
+    match refused { Ok(Aborted(store.Undone(value: StaleAttempt, ticket: None))) => (), _ => return false }
+
+    let released_run = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), Error] {
+        release(mut tx, t, queued.value, Some(copy_bytes(r2)?))
+    })
+    let released = done(take released_run)
+    result.unwrap(store.durable(mut db, released.ticket))
+    let ready = option.unwrap(first(db, t))
+    let restarted_run = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[Started, Error] {
+        start(mut tx, t, ready, r2)
+    })
+    let restarted = done(take restarted_run)
+    result.unwrap(store.durable(mut db, restarted.ticket))
+    let Body(a2) = restarted.value else { return false }
+    let same = run_id(a2) == queued.value
+    let old = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), Error] {
+        finish(mut tx, t, a1, Returned(list.new()))
+    })
+    match old { Ok(Aborted(store.Undone(value: StaleAttempt, ticket: None))) => (), _ => return false }
+    result.unwrap(store.close(take db))
+    same && number(a2) == 2u64
+}
+
+@test
+fn journal_test_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_trigger_revision(d, c, r, tasks) { Ok(()) } else { Error(()) }
+}

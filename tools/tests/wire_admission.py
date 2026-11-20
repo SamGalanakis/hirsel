@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """W3c laws over real sockets, with independent codec and store-version oracles."""
 import argparse
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,7 +14,7 @@ import time
 import traceback
 
 from wire_process import stop_process
-from wire_wsock import REQUEST, connect, frame, head, read_frame, wait_ready
+from wire_wsock import GUID, REQUEST, connect, frame, head, read_frame, wait_ready
 
 
 def u32(n):
@@ -49,6 +51,8 @@ ENTRIES = {
 }
 TOKEN = b'anon:' + bytes(16)
 TRACE = []
+# The compiler, runtime and linker for the hirsel call laws, set by main.
+CLI = {}
 
 
 def hello(names=(), token=TOKEN):
@@ -388,9 +392,72 @@ def faulted_owner_releases_slot():
 
 
 
+def hirsel_call(url, *call):
+    command = [CLI['compiler'], 'call', CLI['server'], '--url', url, '--runtime', CLI['runtime']]
+    command += ['--cc', CLI['cc']] if CLI.get('cc') else []
+    return subprocess.Popen(command + ['--', *call], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def cli_call_exact_value():
+    # Bug: a result decoder that goes through f64, or loses a tag or option level.
+    # Oracle by hand from admission.hirsel: shape(n) returns Shape(sum: Large(n,
+    # Some(n + 2)), nested: Some(None), total: n + 2). For n = 2^53 + 1 an f64
+    # decoder prints 9007199254740992 and 9007199254740996 instead.
+    n = 2**53 + 1
+    process = hirsel_call('ws://127.0.0.1:18094/hirsel', 'shape', '--arg', str(n))
+    try:
+        out, err = process.communicate(timeout=120)
+    finally:
+        stop_process(process)
+    assert process.returncode == 0, err
+    assert json.loads(out) == {'tag': 'Returned', 'value': {
+        'sum': {'tag': 'Large', 'values': [n, {'tag': 'Some', 'value': n + 2}]},
+        'nested': {'tag': 'Some', 'value': {'tag': 'None'}}, 'total': n + 2}}, out
+
+
+def cli_call_fingerprint_mismatch():
+    # Bug: hirsel call sending its Call after the server declined the entry. The
+    # runner answers Placed(Gone) to a want whose identity and fingerprints it does
+    # not serve (slot_out_of_range's 'unknown'); this loopback stand-in answers
+    # exactly that to the CLI's Hello and records every frame the CLI sends after.
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        listener.settimeout(120)
+        process = hirsel_call(f'ws://127.0.0.1:{listener.getsockname()[1]}/hirsel', 'shape', '--arg', '1')
+        try:
+            s, _ = listener.accept()
+            with s:
+                s.settimeout(30)
+                key = next(line.split(b':', 1)[1].strip() for line in head(s).split(b'\r\n')
+                           if line.lower().startswith(b'sec-websocket-key:'))
+                accept = base64.b64encode(hashlib.sha1(key + GUID).digest())
+                s.sendall(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+                          b'Sec-WebSocket-Accept: ' + accept + b'\r\nSec-WebSocket-Protocol: hirsel.1\r\n\r\n')
+                op, hello_bytes = read_frame(s, masked=True)
+                # Hello, no token (a fresh anonymous principal), exactly one want.
+                assert op == 2 and Decode(hello_bytes).word() == 0, hello_bytes
+                assert hello_bytes[4:12] == u32(0) + u32(1), hello_bytes
+                welcome = u32(4) + blob(TOKEN) + u32(4) + u64(1048576) + blob(b'') + blob(b'') + u64(0)
+                s.sendall(frame(2, welcome, masked=False) + frame(2, u32(5) + u32(2), masked=False))
+                after = []
+                while not after or after[-1][0] != 8:
+                    try:
+                        after.append(read_frame(s, masked=True))
+                    except AssertionError:
+                        break
+            out, err = process.communicate(timeout=60)
+        finally:
+            if process.poll() is None:
+                stop_process(process)
+    assert process.returncode == 2 and 'Placed Gone; the call was not sent' in err, (process.returncode, err)
+    assert all(op != 2 for op, _ in after), after
+
+
 CASES = {f.__name__: f for f in (hello_order, slot_out_of_range, gone_slot_v5, second_hello_closes,
          session_limit_503, principal_limit_1013, call_rate_overloaded, request_mismatch_wire, resend_same_p, held_request_mismatch, hello_deadline, resume_unknown,
-         history_below_latest, reply_over_done_max, faulted_owner_releases_slot, welcome_with_small_budget)}
+         history_below_latest, reply_over_done_max, faulted_owner_releases_slot, welcome_with_small_budget,
+         cli_call_exact_value, cli_call_fingerprint_mismatch)}
 
 
 def main():
@@ -398,7 +465,11 @@ def main():
     p.add_argument('--server', required=True, type=Path)
     p.add_argument('--case', action='append', choices=CASES)
     p.add_argument('--report', type=Path)
+    p.add_argument('--compiler', type=Path, help='hirsel, for the hirsel call laws')
+    p.add_argument('--runtime', type=Path)
+    p.add_argument('--cc', type=Path)
     args = p.parse_args()
+    CLI.update({k: str(v.resolve()) for k, v in (('compiler', args.compiler), ('runtime', args.runtime), ('cc', args.cc), ('server', args.server)) if v})
     rows = []
     selected = args.case or CASES
     for name in selected:

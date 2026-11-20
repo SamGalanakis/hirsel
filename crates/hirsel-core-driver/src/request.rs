@@ -44,6 +44,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         crate::cli::Action::Invoke(invocation) => invocation,
     };
     let command = invocation.command.name;
+    if command == "call" {
+        std::process::exit(crate::call::run(crate::call::Options::read(invocation)?)?);
+    }
     if command == "sdk" {
         crate::sdk_command::run(crate::sdk_command::Options::read(invocation)?)?;
         std::process::exit(0);
@@ -253,7 +256,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::ListRules
             | Opt::SdkOut
             | Opt::PlaceTimeout
-            | Opt::NPlace => {
+            | Opt::NPlace
+            | Opt::Url
+            | Opt::CallTimeout => {
                 unreachable!("CLI early command option")
             }
         }

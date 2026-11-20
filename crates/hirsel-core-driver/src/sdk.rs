@@ -69,9 +69,9 @@ impl<'a> Reader<'a> {
 }
 
 pub struct Schema {
-    root: Value,
-    definitions: Vec<Value>,
-    key: bool,
+    pub(crate) root: Value,
+    pub(crate) definitions: Vec<Value>,
+    pub(crate) key: bool,
 }
 impl Schema {
     pub fn read(bytes: &[u8]) -> Result<Self, Error> {
@@ -287,7 +287,7 @@ pub fn place_error(bytes: &[u8]) -> Result<String, Error> {
     Ok(message)
 }
 
-fn stub_name(identity: &[u8]) -> Result<String, Error> {
+pub(crate) fn stub_name(identity: &[u8]) -> Result<String, Error> {
     // PROG-9: version 01 followed by UTF-8 D S, with S beginning at '('.
     if identity.first() != Some(&1) {
         return Err("Malformed: entry identity version".into());

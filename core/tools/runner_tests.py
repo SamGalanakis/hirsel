@@ -652,7 +652,8 @@ def admission_laws(args, root, work, engines, row):
 def socket_laws(args, root, work, engines, row):
     names = {'hello_order', 'slot_out_of_range', 'gone_slot_v5', 'second_hello_closes',
              'session_limit_503', 'principal_limit_1013', 'call_rate_overloaded',
-             'request_mismatch_wire', 'resend_same_p', 'held_request_mismatch', 'hello_deadline', 'resume_unknown', 'history_below_latest', 'reply_over_done_max', 'faulted_owner_releases_slot', 'welcome_with_small_budget'}
+             'request_mismatch_wire', 'resend_same_p', 'held_request_mismatch', 'hello_deadline', 'resume_unknown', 'history_below_latest', 'reply_over_done_max', 'faulted_owner_releases_slot', 'welcome_with_small_budget',
+             'cli_call_exact_value', 'cli_call_fingerprint_mismatch'}
     for engine in (e for e in engines if e != 'evaluator'):
         output = work / ('socket-' + engine)
         command = [sys.executable, str(root / 'tools/tests/wire_build.py'),
@@ -665,8 +666,9 @@ def socket_laws(args, root, work, engines, row):
             row(engine=engine, law='wire_socket_build', passed=False, result=(built.stdout + built.stderr)[-4000:])
             continue
         report = output / 'laws.json'
-        run = run_case('wire_socket_selection', engine, [sys.executable, str(root / 'tools/tests/wire_admission.py'),
-                              '--server', str(output / ('admission-' + engine)), '--report', str(report)],
+        laws = [sys.executable, str(root / 'tools/tests/wire_admission.py'), '--server', str(output / ('admission-' + engine)),
+                '--report', str(report), '--compiler', str(args.compiler.resolve()), '--runtime', str(args.runtime.resolve())]
+        run = run_case('wire_socket_selection', engine, laws + (['--cc', str(args.cc.resolve())] if args.cc else []),
                              cwd=root, capture_output=True, text=True)
         cases = json.loads(report.read_text()) if report.is_file() else []
         for case in cases:

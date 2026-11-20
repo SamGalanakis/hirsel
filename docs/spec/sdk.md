@@ -79,3 +79,99 @@ while RequestMismatch also fences the generation. Incompatible closes remain
 terminal until an explicit reconnect or bindings reload. Reconnection waits for
 all Placed frames, recovers pending calls, and restores subscriptions using new
 ids. Cache replacement waits for Batch.complete.
+
+## Calling an entry from the terminal
+
+`hirsel call SERVER --url ws://HOST:PORT/PATH [-- ENTRY [--FLAG VALUE...]]`
+lists a running place's entries, or calls one of them, for debugging. SERVER is
+the built executable the place runs. Without ENTRY, or with `-- --help`, the
+command prints every entry with its kind, flags and result type. `-- ENTRY
+--help` also prints the entry's named types.
+
+**Transport.** The call is an ordinary client session on the server's ingress,
+as the TypeScript client's is. It sends Hello with no token, so ingress mints a
+fresh anonymous principal; the CLI has no other identity and no privilege. It
+sends one Call on stream 0 at position 0, then reads Batch and Reset frames until
+the Done for that position arrives. There is no debug entry point or second call
+path: a place that admits the TypeScript client admits the CLI the same way, and
+nothing else. The upgrade offers `hirsel.1` and checks
+`Sec-WebSocket-Accept` and the selected subprotocol. `--timeout` bounds the
+connection and is the Call's `deadline_ms`; default 10 seconds. A session that
+ends after the Call was sent reports that the outcome is unknown, and the call
+is never resent. `wss://` is refused as unsupported.
+
+**Schemas.** Entry identities, fingerprints and argument and result schemas come
+from SERVER's describe launch mode, as in `hirsel sdk ts`. `--n-place` and
+`--place-timeout` mean what they mean there. They must match the running place,
+so the types match what is running. The Frame codec is the same one the SDK
+generates: `std.codec.schema(of[runner.Frame]())` from the compiler's bundled
+runner. The native options `--runtime` and `--cc` select the toolchain for that
+probe. Before sending a Call, the CLI checks two things:
+
+- If Welcome names a launch digest, the digest, target and `n_place` must equal
+  the Describe's. Otherwise the CLI refuses and sends nothing more.
+- The Hello want carries the Describe's identity and fingerprints, and the
+  server answers Placed per want. Gone means the server does not serve that
+  identity with those fingerprints, and the CLI refuses without sending the
+  Call. So does Resolve, which the CLI does not support.
+
+Query entries are listed, but calling one is refused as unsupported, because a
+query streams rows rather than returning one outcome.
+
+**Arguments.** Every flag is typed against the argument schema before the Frame
+probe or any connection runs:
+
+- If the argument type is a record, each field is one `--NAME VALUE` flag, and
+  every field except a unit field is required.
+- Otherwise the whole argument is `--arg VALUE`.
+- A unit argument takes no flags.
+
+Unknown, repeated and missing flags are refused, and so is a value that does not
+fit its type. A refusal names the flag and the expected type.
+
+Primitive values are plain text:
+
+- bool is `true` or `false`.
+- Integers are decimal, with `-` only for signed types, and must fit their width
+  exactly.
+- f32 and f64 are a finite decimal, `NaN`, `inf` or `-inf`.
+- char is one Unicode scalar.
+- String is the raw text.
+- Bytes is hex with an even number of digits.
+
+A `via` type takes its representation's form. Every other value is JSON in the
+one mapping below. The same mapping prints outcomes.
+
+**The JSON mapping.** Each `std.codec` value type has exactly one JSON form:
+
+- unit is `null`.
+- bool is a JSON boolean.
+- Every integer type is an exact JSON integer, including u64 and i64 values
+  beyond 2^53. A fraction, an exponent or an out-of-range value is refused.
+- f32 and f64 are JSON numbers, or the strings `"NaN"`, `"inf"` and `"-inf"`.
+- char and String are JSON strings.
+- Bytes (List[u8]) is a hex string.
+- Other lists are arrays.
+- Map[K, V] is an array of `[key, value]` pairs; duplicate keys are refused.
+- Tuples are arrays of their exact arity.
+- Records are objects with exactly their live field names. Key order carries no
+  meaning, and output keys are sorted.
+- Variants, Option and Result use the tagged form of section 4: `{"tag": N}`,
+  `{"tag": N, "value": V}` or `{"tag": N, "values": [V0, V1, ...]}`.
+
+**Output.** The CLI prints the Outcome as one JSON line on stdout, in the same
+mapping. For Returned, the payload is decoded with the entry's result schema,
+for example `{"tag":"Returned","value":{"tag":"Ok","value":4}}`. Other outcomes
+print as the Frame codec decodes them, for example
+`{"tag":"Failed","value":{"tag":"Raised","value":1}}`. The exit status is 0 for
+Returned and 1 for any other outcome. Refusals before sending, and transport
+errors, exit 2 with a message on stderr.
+
+Design notes:
+
+- Integers must be exact JSON integers, not strings or a second syntax, so there
+  is one form for every type and nothing silently rounds through f64.
+- Primitive flags take plain text because it is unambiguous for those types.
+- Composite values are JSON rather than Hirsel literal syntax: the driver
+  already parses JSON, and section 4 already defines the tagged shapes.
+- The command is `call`, beside `sdk`, because both read a server's Describe.

@@ -43,6 +43,8 @@ pub enum OptionId {
     SdkOut,
     PlaceTimeout,
     NPlace,
+    Url,
+    CallTimeout,
 }
 struct OptionSpec {
     id: OptionId,
@@ -78,6 +80,7 @@ commands! {
     "fmt", "fmt [--check] <package-dir>", "Format all new source files; refuse malformed input without partial edits.";
     "explain", "explain RULE|debug-lines | explain --list [--json]", "Explain current specification rules or the debug-lines build option.";
     "sdk", "sdk ts <program> --out DIR [options]", "Generate browser and Node ES modules and TypeScript declarations.";
+    "call", "call SERVER --url ws://HOST:PORT/PATH [options] [-- ENTRY [--FLAG VALUE...]]", "List a running place's entries, or call one, typed from the server's Describe.";
 }
 macro_rules! option {
     ($id:ident, [$($name:literal),+], $value:expr, [$($command:literal),*], $description:literal) => {
@@ -96,15 +99,29 @@ static OPTIONS: &[OptionSpec] = &[
         PlaceTimeout,
         ["--place-timeout"],
         Some("SECONDS"),
-        ["sdk"],
+        ["sdk", "call"],
         "Describe wall-clock deadline; default 10 seconds."
     ),
     option!(
         NPlace,
         ["--n-place"],
         Some("BYTES"),
-        ["sdk"],
+        ["sdk", "call"],
         "Place registration allowance; default 16777216 bytes."
+    ),
+    option!(
+        Url,
+        ["--url"],
+        Some("URL"),
+        ["call"],
+        "The running server's ws:// address."
+    ),
+    option!(
+        CallTimeout,
+        ["--timeout"],
+        Some("SECONDS"),
+        ["call"],
+        "Connection and call deadline; default 10 seconds."
     ),
     option!(
         Record,
@@ -270,7 +287,8 @@ static OPTIONS: &[OptionSpec] = &[
             "env",
             "core-product",
             "std-product",
-            "sdk"
+            "sdk",
+            "call"
         ],
         "Select the core runtime archive."
     ),
@@ -292,7 +310,8 @@ static OPTIONS: &[OptionSpec] = &[
             "test",
             "core-product",
             "std-product",
-            "sdk"
+            "sdk",
+            "call"
         ],
         "Select the C linker driver; an install records it for its requests."
     ),
@@ -519,7 +538,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         arguments: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
-        if argument == "--" && name == "run" {
+        if argument == "--" && matches!(name.as_str(), "run" | "call") {
             invocation.arguments.extend(arguments);
             break;
         }

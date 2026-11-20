@@ -37,6 +37,16 @@ fn big(take count: u32) -> Result[Bytes, Capacity] {
     Ok(take b)
 }
 
+// The hirsel call law decodes this hand-derived value: a tagged union, a nested
+// option and integers above 2^53 (docs/spec/sdk.md, "Calling an entry").
+type Sum: codec + send = Small(u32) | Large(u64, Option[u64]) | Empty
+type Shape: codec + send { sum: Sum, nested: Option[Option[u64]], total: u64 }
+
+fn shape(take n: u64) -> Result[Shape, Capacity] {
+    let m = n + 2u64
+    Ok(Shape(sum: Large(n, Some(m)), nested: Some(None), total: m))
+}
+
 fn read(tx: store.store.Tx, h: H, take _arg: u32) -> Result[store.runner.Cover, Capacity] {
     store.runner.cover(store.store.shape(h.table), Included(0u64), Included(0u64))
 }
@@ -54,6 +64,7 @@ fn place(mut r: Reg) -> Result[(), store.runner.RegisterError] {
     store.runner.transact(mut r, code.describe(large), 65536u64, store.runner.DEFAULT_STEPS)?
     store.runner.compute(mut r, code.describe(big), 65536u64, store.runner.DEFAULT_STEPS)?
     store.runner.query(mut r, code.describe(read), 65536u64, store.runner.DEFAULT_STEPS)?
+    store.runner.compute(mut r, code.describe(shape), 65536u64, store.runner.DEFAULT_STEPS)?
     store.runner.retain_gone(mut r, retired())
 }
 
@@ -108,7 +119,13 @@ fn fault_listener(n: Net, c: Clock, tasks: Tasks, reject: bool) -> Result[(), Ex
     }
 }
 
+// launch_server answers --hirsel-describe before any grant is used, so hirsel call
+// can read this place's entries from the executable.
 pub fn main(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
+    store.runner.launch_server(a, code.describe(place), scoped fn() -> Result[(), Exit] waits { serve_place(n, c, random, tasks, a) })
+}
+
+fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
     if let Some(mode) = args.get(a, 0u64) {
         if mode == "faulted_owner_releases_slot" { return fault_listener(n, c, tasks, false) }
         if mode == "wire_control_budget_too_small" { return fault_listener(n, c, tasks, true) }

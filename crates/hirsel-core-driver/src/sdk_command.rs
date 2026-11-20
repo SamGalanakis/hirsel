@@ -78,7 +78,11 @@ pub fn run(options: Options) -> Result<(), Error> {
     run_with(options, describe)
 }
 
-fn describe(executable: &Path, n_place: u64, timeout: Duration) -> Result<Vec<u8>, Error> {
+pub(crate) fn describe(
+    executable: &Path,
+    n_place: u64,
+    timeout: Duration,
+) -> Result<Vec<u8>, Error> {
     match crate::describe::describe_child(executable, n_place, timeout) {
         Ok(bytes) => Ok(bytes),
         Err(crate::describe::DescribeError::PlaceError(bytes)) => {

@@ -326,9 +326,11 @@ network provider (W8a) lands.
 
 A place enables the trigger library by calling `triggers.migrate` from its
 schema migration and setting `PlaceConfig.triggers` before calling
-`runner.operate`. The `TriggerConfig` supplies the entry list, the Caller for
-triggered transactions, and a grant factory for each granted attempt. Use
-`None` or an empty entry list to run without triggers.
+`runner.operate`. The `TriggerConfig[G, S]` supplies the entry list, the
+Caller for triggered transactions, and the seed grants of type `S`. Its plain
+callback `fn(S, take TriggerContext) -> Result[G, Capacity] waits` makes the
+entry's grants for each attempt in a task with the configured `grant_bytes`.
+Use `None` or an empty entry list to run without triggers.
 
 A transaction uses `triggers.write(mut tx, tables, entries, target, arg, when)`
 with a typed entry reference from `triggers.transact` or `triggers.granted`.
@@ -336,7 +338,7 @@ The configured list and the registry control which paths the head can dispatch.
 Use `AfterCommit` or `At(T)`, where T is in the units of `store.CallInfo.at`.
 Use `triggers.outcome` to read the terminal result by trigger identity.
 
-A grant factory receives a `TriggerContext`. The run uses `trigger_call` to
+A grant callback receives the attempt’s `TriggerContext`. The run uses `trigger_call` to
 invoke a fenced transaction and `trigger_boundary` to check its attempt and
 any committed cancel request before an outside step. `trigger_hold` commits a
 request fingerprint hold. An operator or activation entry uses

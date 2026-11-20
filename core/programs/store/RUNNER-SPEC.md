@@ -1121,24 +1121,28 @@ pub type Phase: send = Starting(Step) | Ready | Draining
 pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, addr: Option[Addr] }
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 pub type Backing: send = Memory | Disk(Dir, store.Options) | Temp(Dir)
-pub type PlaceConfig[G: send, H: send]: send {
+pub type TriggerConfig[G: send, S: send]: send {
+    entries: triggers.Entries, author: Caller, grants: S,
+    grant: fn(S, take TriggerContext) -> Result[G, Capacity] waits, grant_bytes: u64,
+}
+pub type PlaceConfig[G: send, H: send, S: send]: send {
     backing: Backing, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
     handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H],
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], policy: ingress.Ingress, n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
-    triggers: Option[TriggerConfig[G]],
+    triggers: Option[TriggerConfig[G, S]],
 }
 pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Full(Capacity)   // OpenError is place_head's: Store | Place
 pub type Ended: codec + send = Stopped | Forced(u64)
 
 pub fn status_root() -> Result[Latest[Status], Capacity]
-pub fn operate[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[()], status: Latest[Status], take watch: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits
+pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watch: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits
 pub fn release_digest(exported: List[Exported]) -> Result[Bytes, Capacity]
 ```
 
 - `operate` refuses `grace_ms = 0` with `Missing("grace_ms")` before it opens anything. A zero bound is a bound that was not given, as in STORE-SPEC W1. Admission closes at min(t₀ + `lag_ms`, D), so a lag that reaches the grace needs no refusal.
 - `Temp(d)` uses `std.dir.create_temp` for a fresh subdirectory of `d`. The head removes a named directory after it closes or drops the store. Cancellation at directory creation's delivery point can leave a directory whose name was never received (the `host.mkdtemp` cancellation prefix). `Disk` takes the store directory itself, already narrowed by the caller (for launch, the `--dir` grant), and removes nothing.
-- Managed wire calls retain W3's behavior: `Granted` is refused as `NotAllowed`. `PlaceConfig.triggers` grants authority only to triggered attempts. An absent configuration or an empty entry list disables trigger dispatch.
+- Managed wire calls retain W3's behavior: `Granted` is refused as `NotAllowed`. `PlaceConfig.triggers` grants authority only to triggered attempts. An absent configuration or an empty entry list disables trigger dispatch. After a durable start, the place invokes the plain grant callback with its seed and the new attempt context in the grant task, then passes the result to the granted entry.
 
 **Status.** `digest`, `target` and `n_place` are the launch identity (launch.md). `release` is `release_digest(exported)`, which is SHA-256 over `u8 17 ‖ "hirsel.release.v1" ‖` the value codec's bytes of this registry's `List[Exported]` in registration order. It is empty until activation has committed. The preview child computes `release` with the same function for the manifest (§12.2). `addr` is the bound address, present from `Listening` on. `Step` and `Phase` are send-only: status and watch stay in-process, and the status route writes its own JSON.
 
@@ -1283,7 +1287,7 @@ pub opaque type Fixture: send
 pub opaque type Caller: send
 pub opaque type Callee[A, R]: shareable + send
 
-pub fn start[G: send, H: send](take p: PlaceConfig[G, H], within_ms: u64) -> Result[Fixture, FixtureError] waits
+pub fn start[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], within_ms: u64) -> Result[Fixture, FixtureError] waits
 pub fn compute_entry[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]]) -> Callee[A, R]
 pub fn transact_entry[H, A, R, E](f: StaticFn[fn(mut store.Tx, H, take A) -> Result[R, E]]) -> Callee[A, Result[R, E]]
 pub fn query_entry[H, A](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]]) -> Callee[A, Cover]

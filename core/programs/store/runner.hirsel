@@ -59,19 +59,21 @@ pub type Phase: send = Starting(Step) | Ready | Draining
 pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, addr: Option[Addr] }
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 pub type Backing: send = Memory | Disk(Dir, store.Options) | Temp(Dir)
-pub type PlaceConfig[G: send, H: send]: send {
+pub type PlaceConfig[G: send, H: send, S: send]: send {
     backing: Backing, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], policy: ingress.Ingress, n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
-    triggers: Option[TriggerConfig[G]],
+    triggers: Option[TriggerConfig[G, S]],
 }
 // Grants are made per attempt. The context routes place calls back to the
 // same head and carries the attempt fence.
-pub type TriggerConfig[G: send]: send {
+pub type TriggerConfig[G: send, S: send]: send {
     entries: triggers.Entries,
     author: Caller,
-    grant: own[send] fn(take TriggerContext) -> Result[G, Capacity]
+    grants: S,
+    grant: fn(S, take TriggerContext) -> Result[G, Capacity] waits,
+    grant_bytes: u64,
 }
 
 pub opaque type TriggerContext: send {
@@ -185,7 +187,7 @@ fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
     int.saturating_add(total, 2097152u64)
 }
 
-pub fn operate[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
+pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
     if p.stop.grace_ms == 0u64 { return Error(Missing("grace_ms")) }
     if p.max_sessions == 0u64 || !wire_configuration(p.session) { return Error(Missing("session")) }
     let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_place: n_place, n_publisher: n_publisher,
@@ -218,17 +220,18 @@ pub fn operate[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[
         },
         _ => { let _ = channel.try_send(to, StopRequested); None },
     }
-    let allowance = head_bytes(backing, n_place, n_publisher)
-    let triggering: Option[(TriggerConfig[G], Sender[HeadInput])] = match take trigger_config {
+    let triggering: Option[(TriggerConfig[G, S], Sender[HeadInput])] = match take trigger_config {
         Some(take config) => {
             if triggers.is_empty(config.entries) { None } else { Some((take config, channel.sender(head_to))) }
         },
         None => None,
     }
+    let grant_bytes = match triggering { Some((config, _)) => config.grant_bytes, None => 0u64 }
+    let allowance = int.saturating_add(head_bytes(backing, n_place, n_publisher), grant_bytes)
     let head_job = ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain),
         triggering: take triggering)
-    let head_run: fn(take ManagedHead[G, H]) -> () waits = head_ended
+    let head_run: fn(take ManagedHead[G, H, S]) -> () waits = head_ended
     let mut heading: Option[Task[()]] = match task.spawn(tasks, bytes allowance, take head_job, head_run) {
         Ok(take handle) => Some(take handle), Error((cap, _)) => return Error(Full(cap)),
     }
@@ -365,7 +368,7 @@ pub fn operate[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[
 // starts a task under `bytes n` that holds the grant. A transact slot has two: the
 // session's check (rule 5: decode the argument, keep nothing) and the head's run, with the
 // entry's step bound and its code.revision, which each call record carries (R5, §7).
-type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes, take Option[TriggerReport]) -> Result[Task[Outcome], Capacity]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Caller, Bytes) -> Ran) | Query(u64, u64, own[send] fn(store.Snapshot, H, Bytes, store.Snapshot, Option[View[Cover]], u32, Log[Row]) -> Queried)
+type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take JobGrant[G], take Bytes, take Option[TriggerReport]) -> Result[Task[Outcome], Capacity]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Caller, Bytes) -> Ran) | Query(u64, u64, own[send] fn(store.Snapshot, H, Bytes, store.Snapshot, Option[View[Cover]], u32, Log[Row]) -> Queried)
 
 pub opaque type Registry[G: send, H: send]: send {
     slots: Map[Bytes, Slot[G, H]],
@@ -458,11 +461,13 @@ fn adapt_compute[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.c
     }
 }
 
+type JobGrant[G: send]: send = Direct(G) | FromPlace(Sender[GrantRequest[G]], TriggerContext)
+
 type Job[G: send, A, R]: send {
     f: StaticFn[fn(G, take A) -> Result[R, Capacity] waits],
     ca: std.codec.Codec[A],
     cr: std.codec.Codec[R],
-    grant: G,
+    grant: JobGrant[G],
     arg: Bytes,
     steps: u64
 }
@@ -471,11 +476,18 @@ type Job[G: send, A, R]: send {
 fn adapt_granted[G: send, A, R](take j: Job[G, A, R]) -> Outcome waits {
     let allowance = j.steps
     let ran = bound steps allowance {
-        let job = take j
-        let body = code.callable(job.f)
-        match std.codec.decode(job.ca, job.arg) {
-            Ok(Ok(take a)) => match body(job.grant, take a) {
-                Ok(take r) => encoded(job.cr, r),
+        let Job(f: f, ca: ca, cr: cr, grant: take source, arg: take arg, steps: _) = take j
+        let grants = match take source {
+            Direct(take value) => take value,
+            FromPlace(to, take ctx) => match attempt_grants(to, take ctx) {
+                Ok(take value) => take value,
+                Error(take outcome) => return take outcome,
+            },
+        }
+        let body = code.callable(f)
+        match std.codec.decode(ca, arg) {
+            Ok(Ok(take a)) => match body(grants, take a) {
+                Ok(take r) => encoded(cr, r),
                 Error(c) => Failed(OutOfBytes(room(c))),
             },
             Ok(Error(e)) => Refused(Malformed(bad(e))),
@@ -547,7 +559,7 @@ pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: S
         Error(c) => return Error(Full(c)),
     }
     register_check(mut r, key, ca, n, s)?
-    let made = fn(tasks: Tasks, take g: G, take arg: Bytes, take notice: Option[TriggerReport]) -> Result[Task[Outcome], Capacity] {
+    let made = fn(tasks: Tasks, take g: JobGrant[G], take arg: Bytes, take notice: Option[TriggerReport]) -> Result[Task[Outcome], Capacity] {
         let j = Job(f: f, ca: ca, cr: cr, grant: take g, arg: take arg, steps: s)
         if let Some(take report) = take notice {
             let watched = WatchedJob(job: take j, report: take report, tasks: tasks, allowance: n)
@@ -748,7 +760,7 @@ pub fn call[G: send, H: send](r: Registry[G, H], key: Bytes, arg: Bytes) -> Outc
 // granted entry is NoEntry; a task the place cannot grant is Budget.
 pub fn start[G: send, H: send](r: Registry[G, H], tasks: Tasks, take g: G, key: Bytes, take arg: Bytes) -> Result[Task[Outcome], Refusal] {
     match map.get(r.slots, key) {
-        Some(Granted(go)) => match go(tasks, take g, take arg, None) {
+        Some(Granted(go)) => match go(tasks, Direct(take g), take arg, None) {
             Ok(take t) => Ok(take t),
             Error(c) => Error(Budget(room(c))),
         },
@@ -1975,13 +1987,13 @@ pub type HeadInput: send = RunRequest(Req) | HeadContinue | HeadClose | HeadFini
 pub type HeadRequests = DirectRequests(Receiver[Req]) | ManagedRequests(Receiver[HeadInput])
 type HeadDrain { finish: Receiver[()], events: Sender[LifeEvent], window: Latest[Option[DrainWindow]], clock: Clock }
 
-type ManagedHead[G: send, H: send]: send {
+type ManagedHead[G: send, H: send, S: send]: send {
     backing: Backing, selection: Selection, tasks: Tasks, clock: Clock, random: Random,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     n_place: u64, n_publisher: u64, inbox: Receiver[HeadInput], finish_from: Receiver[()],
     to: Sender[LifeEvent], drain: Latest[Option[DrainWindow]],
-    triggering: Option[(TriggerConfig[G], Sender[HeadInput])],
+    triggering: Option[(TriggerConfig[G, S], Sender[HeadInput])],
 }
 
 fn head_advance(to: Sender[LifeEvent], inbox: Receiver[HeadInput], take progress: LifeEvent) -> bool waits {
@@ -1989,13 +2001,13 @@ fn head_advance(to: Sender[LifeEvent], inbox: Receiver[HeadInput], take progress
     match channel.receive(inbox) { Ok(HeadContinue) => true, _ => false }
 }
 
-fn head_ended[G: send, H: send](take job: ManagedHead[G, H]) -> () waits {
+fn head_ended[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> () waits {
     let to = channel.sender(job.to)
     let ended = managed_head(take job)
     let _ = channel.send(to, HeadEnded(take ended))
 }
 
-fn managed_head[G: send, H: send](take job: ManagedHead[G, H]) -> Result[(), StartError] waits {
+fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Result[(), StartError] waits {
     let ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain,
         triggering: take triggering) = take job
@@ -2712,6 +2724,38 @@ pub fn trigger_hold(ctx: TriggerContext, step_index: u64, take expected: Bytes, 
     })
 }
 
+type GrantRequest[G: send]: send { ctx: TriggerContext, reply: Sender[Result[G, Capacity]] }
+type GrantWorker[G: send, S: send]: send {
+    grants: S,
+    grant: fn(S, take TriggerContext) -> Result[G, Capacity] waits,
+    inbox: Receiver[GrantRequest[G]],
+}
+
+fn supply_grants[G: send, S: send](take supply: GrantWorker[G, S]) -> () waits {
+    // A grant callback may wait. Keep it off the head that serves its context.
+    while let Ok(take request) = channel.receive(supply.inbox) {
+        let GrantRequest(ctx: take ctx, reply: take reply) = take request
+        let given = (supply.grant)(supply.grants, take ctx)
+        let _ = channel.send(reply, take given)
+    }
+}
+
+fn attempt_grants[G: send](to: Sender[GrantRequest[G]], take ctx: TriggerContext) -> Result[G, Outcome] waits {
+    let pair: Result[(Sender[Result[G, Capacity]], Receiver[Result[G, Capacity]]), Capacity] = channel.new(1u64)
+    let (reply, inbox) = match take pair {
+        Ok(take value) => take value,
+        Error(cap) => return Error(Failed(OutOfBytes(room(cap)))),
+    }
+    if let Error(_) = channel.send(to, GrantRequest(ctx: take ctx, reply: take reply)) {
+        return Error(Failed(Gone))
+    }
+    match channel.receive(inbox) {
+        Ok(Ok(take given)) => Ok(take given),
+        Ok(Error(cap)) => Error(Failed(OutOfBytes(room(cap)))),
+        Error(_) => Error(Failed(Gone)),
+    }
+}
+
 type TriggerTimer: send { clock: Clock, deadline: u64, at: u64, to: Sender[HeadInput] }
 
 type ArmedTimer { at: u64, task_handle: Task[()] }
@@ -2722,17 +2766,28 @@ type TriggerDrive[G: send] {
     clock: Clock,
     tasks: Tasks,
     to: Sender[HeadInput],
-    config: TriggerConfig[G],
+    entries: triggers.Entries,
+    author: Caller,
+    grants: Sender[GrantRequest[G]],
+    granting: Task[()],
     active: Map[triggers.Id, Task[Outcome]],
     timer: Option[ArmedTimer]
 }
 
-fn make_trigger_drive[G: send](db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig[G]) -> Result[Box[TriggerDrive[G]], store.Error] {
+fn make_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig[G, S]) -> Result[Box[TriggerDrive[G]], store.Error] {
     let tables = store.with_schema(db, code.describe(triggers.tables))?
     let image = match launch_digest() { Ok(take digest) => take digest, Error(cap) => return Error(Full(cap)) }
     let stamp = if list.len(image) == 0u64 { copy_bytes(revision)? } else { take image }
-    let drive = TriggerDrive(tables: take tables, revision: take stamp, clock: clock, tasks: tasks,
-        to: take to, config: take config, active: map.new(), timer: None)
+    let TriggerConfig(entries: take entries, author: take author, grants: take seed, grant: grant, grant_bytes: allowance) = take config
+    let pair: Result[(Sender[GrantRequest[G]], Receiver[GrantRequest[G]]), Capacity] = channel.new(1u64)
+    let (grants, inbox) = match take pair { Ok(take value) => take value, Error(cap) => return Error(Full(cap)) }
+    let supply = GrantWorker(grants: take seed, grant: grant, inbox: take inbox)
+    let granting = match task.spawn(tasks, bytes allowance, take supply, supply_grants) {
+        Ok(take running) => take running,
+        Error((cap, _)) => return Error(Full(cap)),
+    }
+    let drive = TriggerDrive(tables: take tables, revision: take stamp, clock: clock, tasks: tasks, to: take to,
+        entries: take entries, author: take author, grants: take grants, granting: take granting, active: map.new(), timer: None)
     match box.new(take drive) {
         Ok(take scheduled) => Ok(take scheduled),
         Error((cap, _)) => Error(Full(cap)),
@@ -2780,13 +2835,16 @@ fn clear_trigger_timer[G: send, H: send](mut hd: Head[G, H], at: u64) -> () wait
 }
 
 fn stop_triggers[G: send](take drive: Box[TriggerDrive[G]]) -> () waits {
-    let TriggerDrive(active: take active, timer: take timer, ..) = box.unbox(take drive)
+    let TriggerDrive(active: take active, timer: take timer, granting: take granting, ..) = box.unbox(take drive)
     if let Some(take armed) = take timer { stop_timer(take armed) }
     for take (_, take watcher) in take active {
         let mut stopping = take watcher
         task.cancel(mut stopping)
         let _ = task.join(take stopping)
     }
+    let mut supply = take granting
+    task.cancel(mut supply)
+    let _ = task.join(take supply)
 }
 
 fn trigger_key[G: send, H: send](r: Registry[G, H], p: triggers.Pending, choices: triggers.Entries) -> Result[Option[Bytes], store.Error] {
@@ -2869,7 +2927,7 @@ fn invoke_trigger_transaction[G: send, H: send](mut db: store.Db, r: Registry[G,
             // The wall can move backwards between the scheduler's sample
             // and this transaction. The body sees this CallInfo, so use it.
             if store.info(mut tx).at < triggers.due_time(p) { return Error(NotDue) }
-            let body = bound bytes n { go(mut tx, h, drive.config.author, triggers.argument(p)) }
+            let body = bound bytes n { go(mut tx, h, drive.author, triggers.argument(p)) }
             let terminal: triggers.Terminal = match take body {
                 Ok(Commit(take payload)) => Returned(take payload),
                 Ok(Abort(take payload)) => return Error(Terminal(Returned(take payload))),
@@ -2920,14 +2978,14 @@ fn launch_trigger[G: send, H: send](r: Registry[G, H], mut drive: Box[TriggerDri
     let Some(Granted(go)) = map.get(r.slots, key) else { return Error(NoEntry) }
     match map.reserve(mut drive.active, 1u64) { Ok(()) => (), Error(cap) => return Error(Budget(room(cap))) }
     let context = TriggerContext(attempt: a, to: channel.sender(drive.to))
-    let grants = match (drive.config.grant)(take context) { Ok(take g) => take g, Error(cap) => return Error(Budget(room(cap))) }
+    let source = FromPlace(channel.sender(drive.grants), take context)
     let raw: Bytes = match copy_bytes(triggers.argument(p)) {
         Ok(take payload) => take payload,
         Error(Full(cap)) => return Error(Budget(room(cap))),
         Error(_) => return Error(NoEntry),
     }
     let notice = TriggerReport(attempt: a, to: channel.sender(drive.to))
-    match go(drive.tasks, take grants, take raw, Some(take notice)) {
+    match go(drive.tasks, take source, take raw, Some(take notice)) {
         Ok(take watcher) => {
             result.unwrap(map.insert(mut drive.active, triggers.run_id(a), take watcher))
             Ok(())
@@ -2968,7 +3026,7 @@ fn advance_trigger[G: send, H: send](mut hd: Head[G, H], mut drive: Box[TriggerD
         publish_trigger(mut hd, committed.ticket)?
         return Ok(true)
     }
-    let key = trigger_key(hd.r, p, drive.config.entries)?
+    let key = trigger_key(hd.r, p, drive.entries)?
     if !triggers.is_granted(p) {
         return run_trigger_transaction(mut hd, mut drive, p, take key)
     }
@@ -3107,7 +3165,7 @@ fn invoke_fenced_trigger[G: send, H: send](mut db: store.Db, registered: Registr
             Error(_) => return Error(Refusal(StaleAttempt)),
         }
         if let Some(Transact(n, _, _, _, go)) = slot {
-            let ran = bound bytes n { go(mut tx, h, drive.config.author, arg) }
+            let ran = bound bytes n { go(mut tx, h, drive.author, arg) }
             match take ran {
                 Ok(Commit(take payload)) => Ok(Returned(take payload)),
                 Ok(Abort(take payload)) => Error(BodyOutcome(Returned(take payload))),
@@ -3146,11 +3204,11 @@ fn trigger_law_body(mut tx: store.Tx, h: TriggerLawTables, author: Caller, take 
     Ok(next)
 }
 
-fn trigger_law_grants(take ctx: TriggerContext) -> Result[TriggerContext, Capacity] { Ok(take ctx) }
+fn trigger_law_grants(seed: (), take ctx: TriggerContext) -> Result[TriggerContext, Capacity] { Ok(take ctx) }
 
-fn trigger_law_config(take entries: triggers.Entries) -> TriggerConfig[TriggerContext] {
-    let grant: own[send] fn(take TriggerContext) -> Result[TriggerContext, Capacity] = trigger_law_grants
-    TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()), grant: take grant)
+fn trigger_law_config(take entries: triggers.Entries) -> TriggerConfig[TriggerContext, ()] {
+    TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
+        grants: (), grant: trigger_law_grants, grant_bytes: 65536u64)
 }
 
 fn trigger_law_places(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {

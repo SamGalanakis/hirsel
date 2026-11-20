@@ -1084,7 +1084,7 @@ fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
 }
 
 type ManagedRun: send {
-    settings: runner.PlaceConfig[(), Hd], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
+    settings: runner.PlaceConfig[(), Hd, ()], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
 }
 
 fn run_managed(take job: ManagedRun) -> Result[runner.Ended, runner.StartError] waits {
@@ -1094,7 +1094,7 @@ fn run_managed(take job: ManagedRun) -> Result[runner.Ended, runner.StartError] 
 
 fn managed_address(status: runner.Status) -> Addr { option.unwrap(status.addr) }
 
-fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, policy: ingress.Ingress, listen: Addr, stop: runner.Stop) -> runner.PlaceConfig[(), Hd] {
+fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, policy: ingress.Ingress, listen: Addr, stop: runner.Stop) -> runner.PlaceConfig[(), Hd, ()] {
     let mut wire = runner.wire_defaults(65536u64, N_PLACE)
     wire.n_pool = 4194304u64
     runner.PlaceConfig(backing: Disk(dir, disk_options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
@@ -1103,7 +1103,7 @@ fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: N
         net: net, tasks: tasks, clock: clock, random: random, stop: stop, triggers: None)
 }
 
-fn start_managed(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
+fn start_managed(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd, ()], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
     let (stop_to, stop_from): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     if stop_pending { result.unwrap(channel.send(stop_to, ())) }
     let (handoff, phase_rx): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
@@ -1113,7 +1113,7 @@ fn start_managed(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd], stop_p
     (take running, take stop_to, result.unwrap(channel.receive(phase_rx)), take status)
 }
 
-fn no_trigger_grant(take unused: runner.TriggerContext) -> Result[(), Capacity] {
+fn no_trigger_grant(seed: (), take unused: runner.TriggerContext) -> Result[(), Capacity] {
     fail("an empty trigger list cannot start a trigger")
 }
 
@@ -1124,8 +1124,8 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     let ephemeral = Addr(ip: V4(0x7f000001u32), port: 0u16)
     let bounds = runner.Stop(lag_ms: 0u64, grace_ms: 1000u64)
     let mut settings = managed_settings(dir, clock, random, tasks, net, policy, ephemeral, bounds)
-    let grant: own[send] fn(take runner.TriggerContext) -> Result[(), Capacity] = no_trigger_grant
-    settings.triggers = Some(runner.TriggerConfig(entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grant: take grant))
+    settings.triggers = Some(runner.TriggerConfig(entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()),
+        grants: (), grant: no_trigger_grant, grant_bytes: 0u64))
     let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
     if let Ok(Starting(Recovering)) = channel.receive(phases) {} else { fail("expected Recovering") }
     if let Ok(Starting(Activating)) = channel.receive(phases) {} else { fail("expected Activating") }

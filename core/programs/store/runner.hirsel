@@ -56,7 +56,7 @@ pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(s
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Draining
-pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, addr: Option[Addr] }
+pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, activation: u64, addr: Option[Addr] }
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 pub type Backing: send = Memory | Disk(Dir, store.Options) | Temp(Dir)
 pub type PlaceConfig[G: send, H: send, S: send]: send {
@@ -113,7 +113,7 @@ fn launch_owned_target() -> Result[String, Capacity] {
 }
 
 pub fn status_root() -> Result[Latest[Status], Capacity] {
-    let initial = Status(phase: Starting(Recovering), digest: launch_digest()?, target: launch_owned_target()?, n_place: launch_word(0u64, 0u64), release: list.new(), addr: None)
+    let initial = Status(phase: Starting(Recovering), digest: launch_digest()?, target: launch_owned_target()?, n_place: launch_word(0u64, 0u64), release: list.new(), activation: 0u64, addr: None)
     let shared = result.capacity_only(arc.new(take initial))?
     result.capacity_only(latest.new(take shared))
 }
@@ -185,6 +185,17 @@ fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
         total = int.saturating_add(total, if journal > 16777296u64 { journal } else { 16777296u64 })
     }
     int.saturating_add(total, 2097152u64)
+}
+
+// What `operate` spends of its task's bytes (RUNNER-SPEC §13.4): the head's allowance,
+// the serve side's reserve and its inbox, and operate's own inboxes, timers and status copies.
+const OPERATE_OWN_BYTES: u64 = 262144u64
+
+pub fn operate_bytes[G: send, H: send, S: send](p: PlaceConfig[G, H, S]) -> Result[u64, Capacity] {
+    let serving = serving_bytes(p.session, p.max_sessions)?
+    let grant = match p.triggers { Some(config) => config.grant_bytes, None => 0u64 }
+    let head = int.saturating_add(head_bytes(p.backing, p.n_place, p.n_publisher), grant)
+    Ok(int.saturating_add(int.saturating_add(head, serving), OPERATE_OWN_BYTES))
 }
 
 pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
@@ -304,9 +315,13 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
                 publish_phase(status, watch, mut current, Starting(Activating))?
                 let _ = channel.try_send(head_to, HeadContinue)
             },
-            Activated(take release) => {
+            Activated(take release, version) => {
                 current.release = take release
-                if stopped { let _ = channel.try_send(head_to, HeadClose) } else {
+                current.activation = version
+                if stopped {
+                    publish_phase(status, None, mut current, Draining)?
+                    let _ = channel.try_send(head_to, HeadClose)
+                } else {
                     publish_phase(status, watch, mut current, Starting(Publishing))?
                     let _ = channel.try_send(head_to, HeadContinue)
                 }
@@ -2061,7 +2076,7 @@ fn start_publisher[G: send, H: send](owned: store.Db, place: StaticFn[fn(mut Reg
 
 type DrainWindow: shareable + send { admission: u64, deadline: u64 }
 
-type LifeEvent: send = StopRequested | Recovered | Activated(Bytes) | Published(Sender[PubIn]) | ServePrepared | Settled | HeadEnded(Result[(), StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
+type LifeEvent: send = StopRequested | Recovered | Activated(Bytes, u64) | Published(Sender[PubIn]) | ServePrepared | Settled | HeadEnded(Result[(), StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
 
 pub type HeadInput: send = RunRequest(Req) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome])
 
@@ -2119,7 +2134,11 @@ fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Re
         },
         None => None,
     }
-    if !head_advance(to, inbox, Activated(take release)) { return head_closed(take db) }
+    // A place directory reopens a disk store at this version (RUNNER-SPEC §13.3).
+    let version = if persistent {
+        match activation_version(db) { Ok(found) => found, Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) } }
+    } else { 0u64 }
+    if !head_advance(to, inbox, Activated(take release, version)) { return head_closed(take db) }
     let mail = match mailbox(4u64) {
         Ok(take mail) => take mail,
         Error(cap) => { let _ = close_store(take db); return Error(Full(cap)) },

@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.20: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.21: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,22 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.21 (a directory of prelinked places by name, §13; lane place-dir-1454)
+
+The Lash harness needs to create, find, load and unload places by name inside one process (harness-prereq-1437 REPORT §5, build order item 3). `runner.operate` runs one place; nothing ran several. v2.21 adds the module `places` (package `store`), a directory over `operate`, and one runner field. Text and build together; the four laws are in runner_calls. No language, store-format or core change.
+
+| # | Point | Decision | What v2.21 says | Basis |
+|---|---|---|---|---|
+| 1 | The API | **NEW: an allowlist of `name → factory`, `open` returns a lease** | §13.1. The caller lists each name with a `Factory`, a `Backing` and a `Selection`. A factory is made only by `place_factory(make)`, whose `make` is a plain fn that builds a `PlaceConfig`, so only prelinked code can be listed (loading code by digest stays out, harness-prereq §6). `open(name)` returns a `Lease` on a Ready instance, starting one if needed. `close(name)` and the idle sweep unload. | brief; harness-prereq §5 |
+| 2 | One head per name | **NEW: one directory task owns every name's state** | §13.2. Each name is `Absent`, `Starting`, `Running` or `Closing`. Opens that find `Starting` queue on that start. A failed start answers every queued open with `Start(e)` and the name goes back to `Absent`. | workerd one container per id; Akka buffers during start |
+| 3 | Leases, idle and close | **NEW: a lease pins its instance; unload waits for operate to return** | §13.2. A lease holds a share of the instance's pin. The directory unloads a place only when it holds the only share, after seeing that for `idle_ms` (idle) or at once (`close`). Unloading sends `()` on operate's `stop`, so it is operate's drain (§12.1). The name stays `Closing` until the place task's last message, which it sends after `operate` has returned. An open during `Closing` waits and then starts a fresh instance. | workerd strong-ref check; Orleans and Akka buffer during deactivation |
+| 4 | Backing | **RULED: volatile backings never idle out** | §13.3. `Memory` and `Temp` places are unloaded only by `close` or directory stop, never by the idle sweep, because an idle timer must not be what loses data. Disk places reopen the same `Dir`, the same options and the activation the last instance ran. | brief |
+| 5 | Activation on reopen | **CHANGED: `Status.activation`** | §12.1 and §13.3. `Status` gains `activation: u64`, the activation version the head selected or installed (0 for a memory store). The directory lists the next start of a disk place at `Current(activation)`. | `head_prepare` refuses a different `Current` |
+| 6 | Directory stop | **NEW** | §13.4. `stop` sends every live place its own stop at once and returns when each has ended, so it takes as long as the slowest place's §12.1 drain. Opens and closes after it are refused `Stopping`. | brief |
+| 7 | Bounds | **NEW: a count and a byte budget, reserved up front; typed refusal** | §13.4. `max_places` caps live instances (Starting, Running and Closing). `place_bytes` is reserved when the directory starts. A start is refused `Full(Count(n))` or `Full(Reserve(room))` when it does not fit; nothing is evicted. `runner.operate_bytes(config)` is what operate spends. | Orleans memory-pressure collection and Akka limit passivation evict; we refuse instead |
+| 8 | Release check and triggers across unload | **ARGUED** | §13.5. Every session of an instance ends in its drain, before its publisher halts; the next instance has a new publisher at its own durable base. Due triggers run at the next open (ENDSTATE `storage-triggers`); the directory does not wake an unloaded place. | ENDSTATE.md "after a long outage" |
+| 9 | Laws | **NEW: PD1–PD4** | §8 and §13.6: `dir_one_head`, `dir_open_during_close`, `dir_idle_unload`, `dir_reopen_keeps`. | brief |
 
 ## CHANGES-v2.20 (a full owner inbox is repaired, not ended; Sam's ruling C on overload-advice-1449/ADVICE.md; lane auth-remove-1423)
 
@@ -927,6 +943,10 @@ Each law sits in the runner's law suite, beside STORE-SPEC §5's. Each runs agai
 | O33 (v2.15, `fixture_releases`): after `end`, and after a drop without `end`, the port can be bound again, the `Temp` subdirectory no longer exists, the test's live task count and retained bytes equal their values before `start`; a `start` past its bound returns `Deadline` and releases the same way | `end_leaks_listener` (the accept loop is not joined, so the port stays bound); `drop_leaves_store` (a drop without `end` keeps the directory's LOCK); `start_deadline_leaks`; `call_waits_past_deadline` (`call` waits for a reply instead of the Outcome row that V1 sends by `deadline_ms`, for an entry that outlasts it) | `host.listen` on the same port; the clock's time of `call`'s return against `deadline_ms`; the directory listing; the runtime's retained-bytes counter (L4's) | — | **PLANNED** (slice O5) |
 | O34 (v2.15, `lag_window`): between the stop and t₀ + `lag_ms`, the phase is `Draining`, and a new connection and a new send are served as in `Ready`. From min(t₀ + `lag_ms`, D) on, the listener refuses and new sends are `Overloaded` | `close_at_stop` (admission closes at t₀, so a proxy that has not polled yet sends to a refusing place); `lag_after_deadline` (admission closes at t₀ + `lag_ms` even when that is after D); **HTTP half (slice O3):** `keepalive_survives_stop` (a keep-alive connection takes a new request after admission closes) | a call answered during the lag and an accept-permit trace. A connection attempt after D must not replenish the permit, even if an already-bound socket temporarily admits it to the kernel backlog | — | WebSocket **RUN** on both native engines; two controls CAUGHT on Cranelift; HTTP remains O3 |
 | O35 (v2.15, `manifest_exact`): a manifest's `grants` and `root_limit` equal those of the build that wrote it, for a build with each grant kind, two `--dir`s and two Net rules, and its `release` equals the running place's status `release` | `grants_from_defaults` (the manifest lists the CLI's default grants instead of the build's); `net_rules_dropped` (Net appears without its rules); `release_recomputed` (the driver hashes its own re-encoding of the entry list, which differs from the registry's bytes once an entry's schema bytes are not canonical) | the build command line, canonicalized by hand; the status route of a fixture of the same executable | — | **PLANNED** (slice O4) |
+| PD1 (v2.21, `dir_one_head`): two concurrent first opens of one name lease one instance | a start per open: two heads, the second refused `Held` | §13.2 | — | RUN (cranelift) |
+| PD2 (v2.21, `dir_open_during_close`): an open during a close gets a fresh Ready instance after the close | the open gets the closing instance | §13.2 | — | RUN (cranelift) |
+| PD3 (v2.21, `dir_idle_unload`): an idle unload drains through operate, and a reopen during it starts only after the `Db` is closed | the name is freed when stop is sent, and the reopen is refused `Held` | §13.2 | — | RUN (cranelift) |
+| PD4 (v2.21, `dir_reopen_keeps`): a disk place reopened after an unload keeps a committed write and runs a trigger that came due while unloaded | a fresh store, or the listed selection instead of the pinned activation | §13.3, §13.5 | — | RUN (cranelift) |
 
 ### 8.1 `calls25_model.py` (RUN; `models/evidence/calls25.txt`)
 
@@ -1146,7 +1166,7 @@ Keyset pages are a store read. They are specified in STORE-SPEC v2.25 §1.5 and 
 ```hirsel
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Draining
-pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, addr: Option[Addr] }
+pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, activation: u64, addr: Option[Addr] }   // v2.21: activation (§13.3)
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 pub type Backing: send = Memory | Disk(Dir, store.Options) | Temp(Dir)
 pub type TriggerConfig[G: send, S: send]: send {
@@ -1360,3 +1380,96 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 - **Readiness through the route** is decided here, for the reasons above. Reversible: the route is one raw handler over `status`.
 - **`Overloaded` for drain refusals** is decided here. A `Draining` refusal would append tag 8 and change frame-vectors.json, and it would ask the client for the same action. Reversible until a client needs to tell the two apart.
 - **The manifest from the build** is decided here, and extends D1. Reversible: the manifest is one file that one command writes.
+
+## 13. Place directory (new in v2.21)
+
+A directory runs several places in one process and finds them by name. It is the module `places` in package `store` (core/programs/store/places.hirsel), built over `runner.operate`. It is not a second lifecycle: every start of a place is one `operate` call, and every stop is a send on that call's `stop` (§12.1). The directory only decides when to start and when to stop, and it waits for `operate` to return before it reuses a name.
+
+### 13.1 API
+
+```hirsel
+pub type Supplied: send { tasks: Tasks, clock: Clock, random: Random, net: Net, policy: ingress.Ingress }
+pub opaque type Factory: send
+pub type Listed: send { name: String, factory: Factory, backing: runner.Backing, selection: runner.Selection }
+pub type DirectoryConfig: send {
+    idle_ms: u64, max_places: u64, place_bytes: u64,
+    tasks: Tasks, clock: Clock, random: Random, net: Net, policy: ingress.Ingress,
+    watch: Option[Sender[Change]],
+}
+pub type Unloaded: send { name: String, ended: Result[runner.Ended, runner.StartError] }
+pub type Change: send = Up(String) | Down(Unloaded)
+pub type Limit: send = Count(u64) | Reserve(runner.Room)
+pub type Refused: send = Unknown | Full(Limit) | Start(runner.StartError) | Stopping
+pub type CloseRefused: send = Unknown | NotLoaded | Leased | Stopping
+pub type DirectoryError: send = Missing(String) | Duplicate(String) | Full(Capacity)
+pub opaque type Directory          // holds task handles, so it is not send
+pub opaque type Opener: send
+pub opaque type Lease: send
+
+pub fn place_factory[G: send, H: send, S: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Result[Factory, Capacity]
+pub fn directory(take places: List[Listed], take config: DirectoryConfig) -> Result[Directory, DirectoryError]
+pub fn opener(d: Directory) -> Opener
+pub fn open(o: Opener, name: String) -> Result[Lease, Refused] waits
+pub fn status(l: Lease) -> Latest[runner.Status]
+pub fn close(o: Opener, name: String) -> Result[Unloaded, CloseRefused] waits
+pub fn stop(take d: Directory) -> List[Unloaded] waits
+```
+
+- **The allowlist.** `directory` takes every name it will ever run. A name not listed is `Unknown`. A `Factory` is made only by `place_factory`, from a plain fn that captures nothing, so only code linked into the program can be listed. Loading a place's code by digest is out of scope (harness-prereq-1437 §6). Two listings with one name are refused `Duplicate(name)`.
+- **The factory.** At each start, `make` gets the directory's capabilities and a share of its ingress policy and returns a `PlaceConfig`. The directory then replaces the config's `backing` and `selection` with the listed ones, so `make` cannot point a reopen at another store. The factory erases the place's type parameters, so places with different `G`, `H` and `S` share one directory.
+- **Leases.** `open` returns a `Lease` on an instance whose phase was `Ready` when the lease was made. `status(l)` returns a handle on that instance's `Status`, which holds its address. A lease is the only in-flight accounting: while any lease on an instance lives, the directory does not unload it. A connection made without a lease is not counted; when its place unloads it is drained like any other (§12.1: answered, or refused `Overloaded`).
+- **Zero bounds.** `idle_ms`, `max_places` or `place_bytes` of 0 is refused `Missing(field)`, as in STORE-SPEC W1: a zero bound is a bound that was not given.
+- **Watch.** When `watch` is given, the directory `try_send`s `Up(name)` when an instance becomes Ready, before it answers any waiting open, and `Down(unloaded)` when its `operate` has returned, before it starts the name again. So a holder of a lease has always been preceded by its `Up` on the watch. A full watch drops the change.
+
+### 13.2 One instance per name
+
+One task, the directory, owns the state of every name and is the only task that changes it. Each name is in exactly one state:
+
+| State | Meaning | `open` | `close` | Leaves the state when |
+|---|---|---|---|---|
+| `Absent` | no instance | starts one (→ `Starting`), queued | `NotLoaded` | an open starts it |
+| `Starting` | an instance is in `Starting(_)` | queued on this start | `Leased` | Ready: every queued open gets a lease (→ `Running`). Ended before Ready: every queued open gets `Start(e)` for an error, or `Stopping`, and the name is `Absent` |
+| `Running` | the instance is Ready | gets a lease at once | if unleased: sends `stop` (→ `Closing`); else `Leased` | idle, `close`, directory stop, or the place ends by itself |
+| `Closing` | the instance drains | queued for a **fresh** instance | waits with the close | the place task's last message: closes get `Unloaded`; queued opens start a fresh instance |
+
+- **Coalesced first opens.** The directory reads one message at a time, so the first open moves the name to `Starting` before a second open is read. Every later open joins that start. A name never has two instances, so two heads never open one store.
+- **A failed start leaves nothing.** Every open queued on it gets the same error, and the name is `Absent` again with its bytes and its count returned. A later open tries again from scratch.
+- **Unload is operate's stop.** Idle, `close` and directory stop all send `()` on the instance's `stop`, which is operate's drain (§12.1: admission closes at min(t₀ + `lag_ms`, D), sessions are answered, the head closes the `Db`). The place task sends `Down` only after `operate` has returned, so after the `Db` is closed (or dropped on the forced path). Until then the name stays `Closing`.
+- **An open during a close never gets the closing instance.** It waits for `Down` and is then served by a fresh start. Handing it the closing instance would give it a place that is refusing new work and is about to vanish.
+- **Idle.** A sweep runs every `idle_ms / 2` (at least 1 ms). A `Running` instance whose pin the directory holds alone is idle from the first sweep that sees it so; any open clears that. Once a sweep finds it idle for `idle_ms`, the directory stops it. So an unleased place stops between `idle_ms` and about `2 × idle_ms` after its last lease ends. The check is exact, not a race: only the directory makes leases, and it reads the pin in the same task.
+
+### 13.3 Backing and reopen
+
+- **Disk.** A listed `Disk(dir, options)` reopens the same directory with the same options every time. When an instance reports its activation (below), the directory lists the name's next start at `Current(activation)`, so a reopen selects the activation the last instance ran (§6) and never installs a new one by accident. Before that, the listed selection is used.
+- **`Status.activation`** (extends §12.1). `Status` gains `activation: u64`: the version of the activation the head selected or installed, published from `Starting(Publishing)` on. It is 0 for a memory store, before activation, and in `status_root()`.
+- **Memory and Temp never idle out.** Ruling: both are volatile (a `Temp` store is a fresh directory, removed at close), so unloading them drops their state. An idle timer must not be what loses data, so the idle sweep skips them. An explicit `close` or the directory stop still unloads them, and then the state is gone, which is the caller's choice. Everything else (one instance per name, leases, the close wait, bounds) treats every backing alike. The alternative, unloading memory places on idle as well, would give one rule for all backings, but a harness that let a test sit idle would see its place's rows disappear.
+
+### 13.4 Bounds and directory stop
+
+- **Count.** `max_places` caps the live instances: `Starting`, `Running` and `Closing` all count, because a closing place still holds its store and its bytes. A start that would exceed it is refused `Full(Count(max_places))`.
+- **Bytes.** `directory` spawns its task with `place_bytes` plus its own room (1 MiB and 8 KiB per listed name), so the budget is reserved once, up front, from the caller. Each start reserves `runner.operate_bytes(config)` + 64 KiB (the place task's own bytes) out of `place_bytes`. `operate_bytes` is the head's allowance (`head_bytes` plus the trigger `grant_bytes`), the serve side's `serving_bytes` and 256 KiB for operate's own inboxes, timers and status copies. With store defaults that is about 2.5 GB (stop-hang-1452: head 1.42 GB, serve 1.13 GB). A start that does not fit is refused `Full(Reserve(Room(requested, available)))` before anything is spawned. The bytes return at `Down`.
+- **No eviction.** A full directory refuses; it does not unload another place to make room. Unloading a leased or busy place to admit a newcomer would break the lease rule, and choosing a victim is the caller's policy.
+- **Directory stop.** `stop` refuses every later open and close with `Stopping`, answers every queued open with `Stopping`, and sends `stop` to every `Starting` and `Running` instance at once. It returns when every instance has sent `Down`, with one `Unloaded` per instance stopped. Each place takes at most its own §12.1 drain (D = t₀ + `grace_ms`, plus the forced path's cancel and join); places drain in parallel, so the directory's stop takes as long as the slowest. A place still in `Starting` takes the stop between steps (§12.1). Dropping a `Directory` without `stop` cancels its task and so every place (CONC-8), which is the forced path: stores are left for recovery.
+
+### 13.5 The release check and triggers across unload
+
+- **Release check (v2.19.x).** It holds within one instance, and no session crosses instances. An instance unloads only through its drain: every session ends before the head halts the publisher, so no frame of the old instance can be sent after it. The next instance has a new publisher whose base is the store's durable version at its open, and new sessions with new fences. Its clients reconnect and subscribe from scratch, so every row they get passes the new publisher's check.
+- **Committed writes.** A drain answers only what was admitted, and the head closes the `Db` after the last commit is durable (§12.1). The reopen opens the same store, so every acknowledged commit is there.
+- **Triggers.** The directory does not wake an unloaded place for a scheduled trigger (unlike a Durable Object alarm). A trigger that comes due while its place is unloaded runs once at the next open, in (due time, identity) order (ENDSTATE `storage-triggers`, /workspace/code/hirsel-briefs/ENDSTATE.md:1117). The head already does this: it arms from the first pending trigger at open, and one that is past due runs at once. An owner that needs a trigger on time keeps a lease on its place.
+
+### 13.6 Laws
+
+Each law runs in runner_calls (`core-runner-r1`, native only) over one disk-backed name, "a". A second live instance of "a" cannot open its store: it is refused `Held`.
+
+| Law | Wrong implementation it catches | Oracle |
+|---|---|---|
+| PD1 `dir_one_head`: two concurrent first opens both get leases on one instance (same port), and the watch shows one `Up` | each open that finds no Ready instance starts one, so two heads run and the second open is refused | §13.2 coalesced first opens |
+| PD2 `dir_open_during_close`: an open sent while a `close` drains gets an instance whose phase is `Ready`; the close returns `Stopped`; the watch shows `Up`, `Down`, `Up` | the open is answered with the closing instance (phase `Draining`) | §13.2 never the closing instance |
+| PD3 `dir_idle_unload`: after the idle unload begins (`Draining`), an open gets a `Ready` instance, and the first instance's `Down` is `Ok(Stopped)` | the directory forgets the instance once it asks it to stop, so the reopen's store open is refused `Held` | §13.2 unload waits for operate |
+| PD4 `dir_reopen_keeps`: a write and a trigger due 1 s later are committed; the place is closed before the due time and reopened after it; the write reads back and the trigger's outcome appears | the reopen starts on a fresh store (mutant: `Temp` for `Disk`), or at the listed selection rather than the pinned activation (refused `NotCurrent`) | §13.3, §13.5 |
+
+### 13.7 Prior art (each source opened)
+
+- **Cloudflare Durable Objects** (workerd 7c4518fa, src/workerd/server/server/actor.rs). One container per id in one map (`actors`, :118). An idle object is evicted after `IDLE_SHUTDOWN_DELAY` = 10 s (:80, idle timer :1544–1563). Eviction is refused while a strong reference remains, because it "could leave two instances" (:1570–1590); a client handle's drop updates the access time (:2342–2357). A get during retirement waits for it and then starts fresh (:1357–1392). Alarms keep the object's name and wake it after eviction (src/workerd/server/server/factory/worker-factory-actor.c++:691). **Taken:** one instance per id, a lease as the strong reference, wait-then-fresh. **Not taken:** alarm wake-up; our triggers run at the next open (§13.5).
+- **Orleans** (af30f59f). Idle activations are collected after `CollectionAge` (15 min), scanned every `CollectionQuantum` (1 min) (src/Orleans.Runtime/Configuration/Options/GrainCollectionOptions.cs:14–24; Catalog/ActivationCollector.cs ScanStale :243–282). Requests that arrive while an activation deactivates are held and forwarded after it completes, not given the old activation (src/Orleans.Runtime/Catalog/ActivationData.cs:1295–1316, :2335–2360). Under memory pressure it collects regardless of keep-alive (Catalog/ActivationCollector.cs:447). **Taken:** hold opens during deactivation, sweep on a period. **Not taken:** memory-pressure eviction; we refuse when full.
+- **Akka cluster sharding** (49e479e8). Idle passivation with a 120 s default timeout, checked every half the timeout (akka-cluster-sharding/src/main/resources/reference.conf:55, :92; akka-cluster-sharding/src/main/scala/akka/cluster/sharding/internal/EntityPassivationStrategy.scala:147–167). Messages for a passivating entity are buffered and the entity restarts when passivation completes if any arrived (akka-cluster-sharding/src/main/scala/akka/cluster/sharding/Shard.scala:457–459, :820–823, :1044–1060); passivation is ignored while messages are buffered (:976–1000). **Taken:** sweep at half the idle time, buffer and restart. **Not taken:** limit-based passivation (evicting least-recently-used entities); see §13.4.

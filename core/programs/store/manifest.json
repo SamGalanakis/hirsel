@@ -14,6 +14,7 @@
         {"file": "core/programs/store/steps.hirsel", "modules": ["steps"], "signatures": false},
         {"file": "core/programs/store/signup.hirsel", "modules": ["signup"], "signatures": false},
         {"file": "core/programs/store/runner.hirsel", "modules": ["runner"], "signatures": false},
+        {"file": "core/programs/store/places.hirsel", "modules": ["places"], "signatures": false},
         {"file": "core/programs/store/runner_laws.hirsel", "modules": ["runner_laws"], "signatures": false},
         {"file": "core/programs/store/runner_calls.hirsel", "modules": ["runner_calls"], "signatures": false},
         {"file": "core/programs/store/wire_client.hirsel", "modules": ["wire_client"], "signatures": false}

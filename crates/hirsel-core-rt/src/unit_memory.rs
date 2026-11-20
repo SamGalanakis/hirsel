@@ -7,7 +7,7 @@ use crate::{
 use std::{
     collections::VecDeque,
     ptr::NonNull,
-    sync::{Condvar, Mutex, mpsc},
+    sync::{Condvar, Mutex, OnceLock, mpsc},
     thread::{self, JoinHandle},
 };
 
@@ -156,6 +156,7 @@ struct Work {
 }
 
 pub(crate) struct Memory {
+    launch: OnceLock<hirsel_core_ids::launch::Metadata>,
     unit_stacks: Cache<UnitStack>,
     task_stacks: Cache<Stack>,
     slabs: Cache<Slab>,
@@ -168,6 +169,7 @@ pub(crate) struct Memory {
 impl Memory {
     pub(super) fn new() -> Self {
         Self {
+            launch: OnceLock::new(),
             unit_stacks: Cache::new(64 * MIB, UNIT_STACK_BYTES),
             task_stacks: Cache::new(64 * MIB, crate::fiber::COMMIT),
             slabs: Cache::new(128 * MIB, crate::task_heap::SLAB),
@@ -203,6 +205,27 @@ impl Memory {
         }));
         self.ready.notify_one();
         receive.recv().unwrap()
+    }
+
+    pub(crate) fn native_metadata(
+        &self,
+        target: &str,
+        n_place: u64,
+        describe: bool,
+    ) -> hirsel_core_ids::launch::Metadata {
+        // All units have the same target and leading launch options. Resolve
+        // the lazy digest here so its file mapping is also released here.
+        self.launch
+            .get_or_init(|| {
+                let target = target.to_owned();
+                self.map(move || {
+                    let launch =
+                        hirsel_core_ids::launch::Metadata::native(&target, n_place, describe);
+                    let _ = launch.digest();
+                    launch
+                })
+            })
+            .clone()
     }
 
     fn release(&self, bytes: usize, release: Reclaim) {

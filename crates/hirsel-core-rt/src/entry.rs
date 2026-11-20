@@ -585,7 +585,15 @@ pub unsafe extern "C" fn hirsel_core_os_run_with_sources(
     entry: crate::process::Entry,
 ) -> u8 {
     // SAFETY: all configuration and source storage is pinned by the caller.
-    unsafe { run_os_with_sources(input, parameter_names, sources, entry, Metadata::native) }
+    unsafe { run_os_with_sources(input, parameter_names, sources, entry, native_metadata) }
+}
+
+pub(crate) fn native_metadata(target: &str, n_place: u64, describe: bool) -> Metadata {
+    if let Some(memory) = crate::units::memory() {
+        memory.native_metadata(target, n_place, describe)
+    } else {
+        Metadata::native(target, n_place, describe)
+    }
 }
 
 /// OS entry for a closed executable without any launch-digest reader.

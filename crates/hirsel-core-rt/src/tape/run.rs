@@ -536,7 +536,7 @@ unsafe fn run_taped_one(
             match entry::OsProcess::new(
                 &input.with_default_operations(),
                 crate::os::OsProvider::probe_directory,
-                Metadata::native,
+                entry::native_metadata,
             ) {
                 Ok(process) => Some(process),
                 Err(error) => {

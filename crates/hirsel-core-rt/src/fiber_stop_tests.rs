@@ -83,14 +83,25 @@ fn host_stops_have_exact_names_and_skip_cleanup() {
     }
 }
 
-/// A touch deep in a stack's reservation commits it; recycling a stack that grew
-/// drops those pages (the reused stack reads zero there) and lets it grow again.
-/// Without commit-on-touch the first write is an unrelated fault; a trim that
-/// unmaps but keeps the low-water word makes the second touch one.
+/// Law: recycling never unmaps, and a recycled stack comes back as the same
+/// guarded reservation with only its first `COMMIT` writable, whether the
+/// retention allowance kept it or it waits as surplus; releasing the surplus
+/// leaves the allowance holding exactly the kept stacks.
+///
+/// A touch deep in a stack's reservation commits it, so recycling a stack that
+/// grew must drop those pages (the reused stack reads zero there) and let it
+/// grow again. Without commit-on-touch the first write is an unrelated fault; a
+/// trim that unmaps but keeps the low-water word makes the second touch one; a
+/// recycle that trims only the stacks it keeps hands a grown surplus stack, with
+/// the last task's data, to the next spawn; a surplus stack that keeps or leaks
+/// a retention share leaves the allowance unbalanced.
 #[test]
-fn grown_stack_trims_on_recycle_and_grows_again() {
+fn recycled_stacks_come_back_trimmed_whether_kept_or_surplus() {
     super::arm();
-    let mut stock = super::Stock::default();
+    let page = super::page();
+    let one = page + super::COMMIT;
+    let budget: &'static _ = Box::leak(Box::new(crate::retention::Budget::with_headroom(one)));
+    let mut stock = super::Stock::with_budget(budget);
     let touch = |stack: &super::Stack, value: Option<u64>| {
         super::guard(stack.bounds());
         // SAFETY: half way down the current stack's reservation, above its guard page.
@@ -104,13 +115,58 @@ fn grown_stack_trims_on_recycle_and_grows_again() {
             seen
         };
         super::guard((0, 0));
-        (deep.addr(), seen)
+        seen
     };
+    let shape = |stack: &super::Stack| {
+        let (base, guard_end) = stack.bounds();
+        // SAFETY: an idle stack's top word is always writable.
+        let low = unsafe { *super::low_word(stack.top()) };
+        (stack.len, guard_end - base, stack.top() - low)
+    };
+    let fresh = (page + super::RESERVE, page, super::COMMIT);
+    let mut mapped: Vec<usize> = Vec::new();
+    for round in 0..2 {
+        let stacks: Vec<_> = (0..3).map(|_| stock.take()).collect();
+        assert_eq!(
+            budget.used(),
+            0,
+            "round {round}: taking releases each share"
+        );
+        let mut bases: Vec<usize> = stacks.iter().map(|stack| stack.bounds().0).collect();
+        bases.sort_unstable();
+        if round == 0 {
+            mapped = bases;
+        } else {
+            assert_eq!(
+                bases, mapped,
+                "the kept and surplus stacks are reused, none mapped"
+            );
+        }
+        for stack in &stacks {
+            assert_eq!(shape(stack), fresh, "round {round}: size, guard and commit");
+            assert_eq!(
+                touch(stack, Some(7)),
+                0,
+                "round {round}: no earlier task's data"
+            );
+        }
+        for stack in stacks {
+            stock.recycle(stack);
+        }
+        assert_eq!((stock.kept.len(), stock.surplus.len()), (1, 2));
+        assert_eq!(budget.used(), one, "only the kept stack holds a share");
+    }
+    stock.release();
+    assert_eq!((stock.kept.len(), stock.surplus.len()), (1, 0));
+    assert_eq!(
+        budget.used(),
+        one,
+        "releasing the surplus keeps the kept share"
+    );
     let stack = stock.take();
-    let (first, _) = touch(&stack, Some(7));
-    stock.recycle(stack);
-    let stack = stock.take();
-    let (again, seen) = touch(&stack, None);
-    assert_eq!(again, first, "the recycled stack is reused");
-    assert_eq!(seen, 0, "the trim dropped the grown page");
+    assert!(mapped.contains(&stack.bounds().0));
+    assert_eq!(touch(&stack, None), 0, "the kept stack was trimmed too");
+    drop(stack);
+    drop(stock);
+    assert_eq!(budget.used(), 0);
 }

@@ -1022,6 +1022,20 @@ unsafe fn switch_to_idle(task: *mut Task) {
     }
 }
 
+/// Return what ended tasks left resident: retained task-heap pages, this
+/// thread's surplus stacks and, on a pool worker, the pool's spare surplus.
+fn release_idle(run: *mut Scheduler) {
+    crate::task_heap::purge();
+    let worker = WORKER.get();
+    // SAFETY: as `worker_stock`; the pool outlives its registered workers.
+    unsafe {
+        (*worker_stock(run)).release();
+        if !worker.is_null() {
+            (*(*worker).pool).spare.release();
+        }
+    }
+}
+
 fn worker_stock(run: *mut Scheduler) -> *mut Stock {
     let worker = WORKER.get();
     // SAFETY: both alternatives are pinned and only this OS thread uses
@@ -1764,7 +1778,7 @@ impl Scheduler {
                     self.poll_net(timeout);
                     release
                 } else {
-                    crate::task_heap::purge();
+                    release_idle(self);
                     std::thread::park_timeout(Duration::from_nanos(
                         deadline.saturating_sub(crate::os::monotonic_ns()),
                     ));
@@ -1780,14 +1794,14 @@ impl Scheduler {
                     self.poll_net(timeout);
                     release
                 } else {
-                    crate::task_heap::purge();
+                    release_idle(self);
                     std::thread::park();
                     false
                 }
             }
         };
         if release && !self.readies.pending.load(Ordering::Acquire) {
-            crate::task_heap::purge();
+            release_idle(self);
         }
     }
 
@@ -3811,7 +3825,7 @@ impl RunPtr {
                     let task = run.pop();
                     if task.is_null() {
                         if release {
-                            crate::task_heap::purge();
+                            release_idle(run);
                         }
                         if !wait_for_net {
                             let flow_pending =
@@ -4038,7 +4052,7 @@ impl RunPtr {
         let (timeout, release) = match poller {
             Some(_) => crate::task_heap::idle_wait(poll_timeout(deadline)),
             None => {
-                crate::task_heap::purge();
+                release_idle(self.0);
                 (poll_timeout(deadline), false)
             }
         };
@@ -4064,7 +4078,7 @@ impl RunPtr {
                 })
             };
             if release && readied == 0 {
-                crate::task_heap::purge();
+                release_idle(self.0);
             }
         } else if let Some(deadline) = deadline {
             std::thread::park_timeout(Duration::from_nanos(

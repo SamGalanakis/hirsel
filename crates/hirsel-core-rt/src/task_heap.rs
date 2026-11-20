@@ -48,9 +48,12 @@ static RETAINING: Mutex<Vec<Arc<Heap>>> = Mutex::new(Vec::new());
 static RETAINING_HEAPS: AtomicUsize = AtomicUsize::new(0);
 
 /// The poll timeout for a worker about to wait `timeout` ms (-1: no limit),
-/// and whether it should release retained pages if that wait finds nothing.
+/// and whether it should release retained pages and surplus stacks if that
+/// wait finds nothing.
 pub(crate) fn idle_wait(timeout: i32) -> (i32, bool) {
-    let retaining = slabs::retaining() || RETAINING_HEAPS.load(Ordering::Relaxed) != 0;
+    let retaining = slabs::retaining()
+        || RETAINING_HEAPS.load(Ordering::Relaxed) != 0
+        || crate::fiber::surplus();
     if !retaining || (0..=RELEASE_DELAY_MS).contains(&timeout) {
         (timeout, false)
     } else {

@@ -1,9 +1,11 @@
 //! Shards claim aligned task-heap slabs from bitmap-managed ranges.
 //!
 //! A dropped slab stays claimed and resident in its shard's `retained` stack,
-//! up to `RETAINED_SLABS`, and the next claim takes it first. Its native pages
-//! go back to the host when the stack is full or when an idle worker calls
-//! `super::purge`, which releases retained dedicated pages too.
+//! and the next claim takes it first. Its native pages go back to the host
+//! when an idle worker calls `super::purge`, which releases retained dedicated
+//! pages too. Dropping a slab makes no system call, so a burst of task ends
+//! does not wait on the host; since a claim reuses before it maps, a shard
+//! never holds more slabs than it had claimed at once.
 use super::{Mapping, SLAB};
 use std::ptr::NonNull;
 use std::sync::Mutex;
@@ -13,8 +15,6 @@ const SHARD_COUNT: usize = 16;
 // Use one bitmap word per range. Mimalloc's arenas also claim fixed-size
 // slices from a bitmap; each Hirsel range has 64 independently owned slabs.
 const RANGE_BYTES: usize = SLAB * u64::BITS as usize;
-// Dropped slabs each shard keeps resident until a worker idles.
-const RETAINED_SLABS: usize = 128;
 
 static SHARDS: [Mutex<Shard>; SHARD_COUNT] = [const {
     Mutex::new(Shard {
@@ -95,12 +95,8 @@ impl Slab {
 impl Drop for Slab {
     fn drop(&mut self) {
         let mut shard = SHARDS[self.shard].lock().unwrap();
-        if shard.retained.len() < RETAINED_SLABS {
-            shard.retained.push((self.range, self.index));
-            RETAINED.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        shard.release(self.range, self.index);
+        shard.retained.push((self.range, self.index));
+        RETAINED.fetch_add(1, Ordering::Relaxed);
     }
 }
 

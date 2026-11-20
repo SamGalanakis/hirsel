@@ -9,8 +9,15 @@
 //! a shallow task costs what a 64 KiB stack did in RSS, the data limit and
 //! retained stock. Recycling returns a stack that grew to its first `COMMIT`.
 //! The word at the stack's top records its lowest writable address.
-use crate::retention::{RETENTION, Retained};
-use std::{cell::Cell, ptr::NonNull, sync::OnceLock};
+use crate::retention::{Budget, RETENTION, Retained};
+use std::{
+    cell::Cell,
+    ptr::NonNull,
+    sync::{
+        OnceLock,
+        atomic::{AtomicUsize, Ordering::Relaxed},
+    },
+};
 const RESERVE: usize = 8 << 20;
 const COMMIT: usize = 64 << 10;
 const GROW: usize = 256 << 10;
@@ -197,53 +204,116 @@ impl Drop for Stack {
         }
     }
 }
-#[derive(Default)]
+/// Idle stacks a worker's or run's spawns reuse. A recycled stack is trimmed,
+/// then kept, holding its share of the process retention allowance, or, once
+/// that is spent, held as surplus. Recycling never unmaps: the surplus goes back
+/// to the host when its thread has waited `RELEASE_DELAY_MS` with nothing to run
+/// (`release`), the task heap's rule for emptied slabs. Spawns reuse surplus
+/// first, so the stacks mapped never exceed the most that were live at once,
+/// plus each worker's private batch.
 pub(crate) struct Stock {
-    idle: Vec<(Stack, Retained<'static>)>,
+    budget: &'static Budget,
+    kept: Vec<(Stack, Retained<'static>)>,
+    surplus: Vec<Stack>,
 }
 
-/// Worker stock moves this many idle stacks to or from the pool's spare list.
+impl Default for Stock {
+    fn default() -> Self {
+        Self::with_budget(&RETENTION)
+    }
+}
+
+/// Surplus stacks held by every stock, so an idle worker with none skips the release.
+static SURPLUS: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether some stock holds surplus stacks for an idle worker to release.
+pub(crate) fn surplus() -> bool {
+    SURPLUS.load(Relaxed) != 0
+}
+
+/// Worker stock moves this many idle stacks to or from the pool's spare stock.
 const SPARE_BATCH: usize = 16;
 
 /// Idle stacks shared by a pool's workers. A fiber that ends on a thief
 /// returns its stack here, so the spawning worker refills instead of mapping.
 #[derive(Default)]
-pub(crate) struct Spare(std::sync::Mutex<Vec<(Stack, Retained<'static>)>>);
+pub(crate) struct Spare(std::sync::Mutex<Stock>);
+
+impl Spare {
+    pub(crate) fn release(&self) {
+        self.0.lock().unwrap().release();
+    }
+}
 
 // SAFETY: an idle stack holds no live frame or thread-local address; only its
 // mapping moves between workers.
 unsafe impl Send for Stack {}
 
 impl Stock {
+    fn with_budget(budget: &'static Budget) -> Self {
+        Self {
+            budget,
+            kept: Vec::new(),
+            surplus: Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.kept.len() + self.surplus.len()
+    }
+
     pub(crate) fn take(&mut self) -> Stack {
-        self.idle.pop().map_or_else(Stack::new, |(stack, _)| stack)
+        if let Some(stack) = self.surplus.pop() {
+            SURPLUS.fetch_sub(1, Relaxed);
+            return stack;
+        }
+        self.kept.pop().map_or_else(Stack::new, |(stack, _)| stack)
     }
 
     pub(crate) fn recycle(&mut self, stack: Stack) {
         stack.trim();
-        if let Some(held) = RETENTION.retain(stack.retained()) {
-            self.idle.push((stack, held));
+        match self.budget.retain(stack.retained()) {
+            Some(held) => self.kept.push((stack, held)),
+            None => {
+                SURPLUS.fetch_add(1, Relaxed);
+                self.surplus.push(stack);
+            }
         }
     }
 
+    /// Unmap the surplus; kept stacks stay for the next spawns.
+    pub(crate) fn release(&mut self) {
+        SURPLUS.fetch_sub(self.surplus.len(), Relaxed);
+        self.surplus.clear();
+    }
+
+    /// Move up to `count` idle stacks, surplus first, to `to`.
+    fn hand(&mut self, to: &mut Self, count: usize) {
+        let surplus = count.min(self.surplus.len());
+        to.surplus
+            .extend(self.surplus.drain(self.surplus.len() - surplus..));
+        let kept = (count - surplus).min(self.kept.len());
+        to.kept.extend(self.kept.drain(self.kept.len() - kept..));
+    }
+
     pub(crate) fn take_shared(&mut self, spare: &Spare) -> Stack {
-        if self.idle.is_empty() {
-            let mut shared = spare.0.lock().unwrap();
-            let start = shared.len().saturating_sub(SPARE_BATCH);
-            self.idle.extend(shared.drain(start..));
+        if self.len() == 0 {
+            spare.0.lock().unwrap().hand(self, SPARE_BATCH);
         }
         self.take()
     }
 
     pub(crate) fn recycle_shared(&mut self, stack: Stack, spare: &Spare) {
         self.recycle(stack);
-        if self.idle.len() > 2 * SPARE_BATCH {
-            spare
-                .0
-                .lock()
-                .unwrap()
-                .extend(self.idle.drain(..SPARE_BATCH));
+        if self.len() > 2 * SPARE_BATCH {
+            self.hand(&mut spare.0.lock().unwrap(), SPARE_BATCH);
         }
+    }
+}
+
+impl Drop for Stock {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 

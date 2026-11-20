@@ -1,6 +1,8 @@
-//! Reclaimable runtime stock shares one process allowance. Live storage has
-//! its own owners and is outside this counter. The native allocator returns
-//! blocks to its backend directly, so it has no runtime-owned stock.
+//! Reclaimable runtime stock shares one process allowance, which it keeps
+//! while workers idle. Live storage has its own owners and is outside this
+//! counter. Stacks recycled beyond it are surplus until their worker idles
+//! (`fiber::Stock`). The native allocator returns blocks to its backend
+//! directly, so it has no runtime-owned stock.
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 const HEADROOM: usize = 48 << 20;
@@ -8,19 +10,31 @@ pub(crate) static RETENTION: Budget = Budget::new();
 
 pub(crate) struct Budget {
     used: AtomicUsize,
+    headroom: usize,
 }
 
 impl Budget {
     const fn new() -> Self {
+        Self::with_headroom(HEADROOM)
+    }
+
+    pub(crate) const fn with_headroom(headroom: usize) -> Self {
         Self {
             used: AtomicUsize::new(0),
+            headroom,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn used(&self) -> usize {
+        self.used.load(Relaxed)
     }
 
     pub(crate) fn retain(&self, bytes: usize) -> Option<Retained<'_>> {
         self.used
             .fetch_update(Relaxed, Relaxed, |used| {
-                used.checked_add(bytes).filter(|&next| next <= HEADROOM)
+                used.checked_add(bytes)
+                    .filter(|&next| next <= self.headroom)
             })
             .ok()?;
         Some(Retained {

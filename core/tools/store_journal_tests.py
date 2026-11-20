@@ -19,7 +19,7 @@ INSTRUCTION_ALLOWANCES = {'frame_size_boundary': 1_892_798_149}  # measured 1_51
 LAWS = ('end', 'payload', 'segment', 'apply', 'recovery', 'bootstrap', 'worker',
         'db', 'end_storage', 'recorded', 'options', 'call_vector', 'recorded_barrier', 'rotation', 'changes_checkpoint', 'frame_size_boundary', 'frame_oversize', 'drop', 'ack_channel', 'recorded_fork', 'streams', 'step_stop', 'place', 'place_idle')
 TRIGGER_LAWS = ('trigger_revision',)
-LAW_GROUPS = {'store': LAWS, 'triggers': TRIGGER_LAWS}
+LAW_GROUPS = {'store': LAWS, 'triggers': TRIGGER_LAWS, 'runner': ('trigger_transact', 'trigger_granted')}
 NATIVE_GROUPS = {
     module: {f'store@1/{module}/journal_test_{name}' for name in group
              if name not in ('frame_size_boundary', 'frame_oversize')}

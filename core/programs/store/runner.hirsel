@@ -65,6 +65,19 @@ pub type PlaceConfig[G: send, H: send]: send {
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], policy: ingress.Ingress, n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
 }
+// Grants are made per attempt. The context routes place calls back to the
+// same head and carries the attempt fence.
+pub type TriggerConfig[G: send]: send {
+    entries: triggers.Entries,
+    author: Caller,
+    grant: own[send] fn(take TriggerContext) -> Result[G, Capacity]
+}
+
+pub opaque type TriggerContext: send {
+    attempt: triggers.Attempt,
+    to: Sender[HeadInput]
+}
+
 pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Full(Capacity)
 pub type Ended: codec + send = Stopped | Forced(u64)
 
@@ -125,7 +138,13 @@ resource type TemporaryBacking { dir: Dir, name: String } drop(temporary) {
 pub fn operate[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[()], status: Latest[Status], take watch: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
     if p.stop.grace_ms == 0u64 { return Error(Missing("grace_ms")) }
     if p.max_sessions == 0u64 || !wire_configuration(p.session) { return Error(Missing("session")) }
-    operate_place(take p, take stop, status, take watch)
+    operate_place(take p, take stop, status, take watch, None)
+}
+
+pub fn operate_with_triggers[G: send, H: send](take p: PlaceConfig[G, H], take triggers_config: TriggerConfig[G], take stop: Receiver[()], status: Latest[Status], take watch: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
+    if p.stop.grace_ms == 0u64 { return Error(Missing("grace_ms")) }
+    if p.max_sessions == 0u64 || !wire_configuration(p.session) { return Error(Missing("session")) }
+    operate_place(take p, take stop, status, take watch, Some(take triggers_config))
 }
 
 fn publish_phase(status: Latest[Status], watch: Option[Sender[Phase]], mut current: Status, phase: Phase) -> Result[(), StartError] {
@@ -177,7 +196,7 @@ fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
     int.saturating_add(total, 2097152u64)
 }
 
-fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
+fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], take triggers_config: Option[TriggerConfig[G]]) -> Result[Ended, StartError] waits {
     let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_place: n_place, n_publisher: n_publisher,
         session: session_config, max_sessions: limit, proxies: take proxies, policy: take access_gate,
         listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config) = take p
@@ -210,7 +229,8 @@ fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receive
     }
     let allowance = head_bytes(backing, n_place, n_publisher)
     let head_job = ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
-        n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain))
+        n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain),
+        triggers_config: take triggers_config, trigger_to: channel.sender(head_to))
     let head_run: fn(take ManagedHead[G, H]) -> () waits = head_ended
     let mut heading: Option[Task[()]] = match task.spawn(tasks, bytes allowance, take head_job, head_run) {
         Ok(take handle) => Some(take handle), Error((cap, _)) => return Error(Full(cap)),
@@ -348,7 +368,7 @@ fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receive
 // starts a task under `bytes n` that holds the grant. A transact slot has two: the
 // session's check (rule 5: decode the argument, keep nothing) and the head's run, with the
 // entry's step bound and its code.revision, which each call record carries (R5, §7).
-type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes) -> Result[Task[Outcome], Capacity]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Caller, Bytes) -> Ran) | Query(u64, u64, own[send] fn(store.Snapshot, H, Bytes, store.Snapshot, Option[View[Cover]], u32, Log[Row]) -> Queried)
+type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes, take Option[TriggerReport]) -> Result[Task[Outcome], Capacity]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Caller, Bytes) -> Ran) | Query(u64, u64, own[send] fn(store.Snapshot, H, Bytes, store.Snapshot, Option[View[Cover]], u32, Log[Row]) -> Queried)
 
 pub opaque type Registry[G: send, H: send]: send {
     slots: Map[Bytes, Slot[G, H]],
@@ -530,8 +550,15 @@ pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: S
         Error(c) => return Error(Full(c)),
     }
     register_check(mut r, key, ca, n, s)?
-    let made = fn(tasks: Tasks, take g: G, take arg: Bytes) -> Result[Task[Outcome], Capacity] {
+    let made = fn(tasks: Tasks, take g: G, take arg: Bytes, take notice: Option[TriggerReport]) -> Result[Task[Outcome], Capacity] {
         let j = Job(f: f, ca: ca, cr: cr, grant: take g, arg: take arg, steps: s)
+        if let Some(take report) = take notice {
+            let watched = WatchedJob(job: take j, report: take report, tasks: tasks, allowance: n)
+            return match task.spawn(tasks, bytes int.saturating_add(n, 4096u64), take watched, watch_trigger) {
+                Ok(take t) => Ok(take t),
+                Error((c, _)) => Error(c),
+            }
+        }
         match task.spawn(tasks, bytes n, take j, adapt_granted) {
             Ok(take t) => Ok(take t),
             Error((c, _)) => Error(c),
@@ -724,7 +751,7 @@ pub fn call[G: send, H: send](r: Registry[G, H], key: Bytes, arg: Bytes) -> Outc
 // granted entry is NoEntry; a task the place cannot grant is Budget.
 pub fn start[G: send, H: send](r: Registry[G, H], tasks: Tasks, take g: G, key: Bytes, take arg: Bytes) -> Result[Task[Outcome], Refusal] {
     match map.get(r.slots, key) {
-        Some(Granted(go)) => match go(tasks, take g, take arg) {
+        Some(Granted(go)) => match go(tasks, take g, take arg, None) {
             Ok(take t) => Ok(take t),
             Error(c) => Error(Budget(room(c))),
         },
@@ -1816,7 +1843,8 @@ type Head[G: send, H: send] {
     minted: u64,
     // The publisher refused a Release: it has stopped, and R = u64::MAX is published. The
     // head commits nothing more and the place ends with OpenError.PublisherStopped.
-    cut: bool
+    cut: bool,
+    trigger_drive: Option[Box[TriggerDrive[G]]]
 }
 
 type Publish[G: send, H: send]: send {
@@ -1862,12 +1890,12 @@ pub fn place_head_selected[G: send, H: send](take db: store.Db, selection: Selec
         Ok(take ready) => take ready,
         Error(take problem) => { let _ = close_store(take owned); return Error(take problem) },
     }
-    run_head(take owned, take r, take replay_identity, take h, take h2, place, n_place, take inbox, take mail, tasks, n_publisher, None)
+    run_head(take owned, take r, take replay_identity, take h, take h2, place, n_place, take inbox, take mail, tasks, n_publisher, None, None)
 }
 
 fn run_head[G: send, H: send](take db: store.Db, take r: Registry[G, H], take replay_identity: Bytes, take h: H, take h2: H,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take inbox: HeadRequests,
-    take mail: Mailbox, tasks: Tasks, n_publisher: u64, take drain: Option[HeadDrain]) -> Result[(), OpenError] waits {
+    take mail: Mailbox, tasks: Tasks, n_publisher: u64, take drain: Option[HeadDrain], take trigger_drive: Option[Box[TriggerDrive[G]]]) -> Result[(), OpenError] waits {
     let mut owned = take db
     let publishing = start_publisher(owned, place, n_place, take h2, take mail, tasks, n_publisher)
     let (out, publisher_task) = match take publishing {
@@ -1884,13 +1912,14 @@ fn run_head[G: send, H: send](take db: store.Db, take r: Registry[G, H], take re
             }
         }
     }
-    let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64, cut: false)
+    let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64, cut: false, trigger_drive: take trigger_drive)
     let served = serve_head(mut hd, take inbox, take drain)
     finish_head(take hd, take publisher_task, take served)
 }
 
 fn finish_head[G: send, H: send](take head: Head[G, H], take publishing: Task[()], take served: Result[(), store.Error]) -> Result[(), OpenError] waits {
-    let Head(db: take kept, out: take last_word, cut: cut, ..) = take head
+    let Head(db: take kept, out: take last_word, cut: cut, trigger_drive: take drive, ..) = take head
+    if let Some(take scheduled) = take drive { stop_triggers(take scheduled) }
     let _ = channel.send(last_word, PubIn(e: Halt))
     let stopped = match task.join(take publishing) { Ok(()) => cut, Error(_) => true }
     match take served { Ok(()) => (), Error(take problem) => return Error(Store(take problem)) }
@@ -1944,7 +1973,7 @@ type DrainWindow: shareable + send { admission: u64, deadline: u64 }
 
 type LifeEvent: send = StopRequested | Recovered | Activated(Bytes) | Published(Sender[PubIn]) | ServePrepared | Settled | HeadEnded(Result[(), StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
 
-pub type HeadInput: send = RunRequest(Req) | HeadContinue | HeadClose | HeadFinish
+pub type HeadInput: send = RunRequest(Req) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome])
 
 pub type HeadRequests = DirectRequests(Receiver[Req]) | ManagedRequests(Receiver[HeadInput])
 type HeadDrain { finish: Receiver[()], events: Sender[LifeEvent], window: Latest[Option[DrainWindow]], clock: Clock }
@@ -1955,6 +1984,7 @@ type ManagedHead[G: send, H: send]: send {
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     n_place: u64, n_publisher: u64, inbox: Receiver[HeadInput], finish_from: Receiver[()],
     to: Sender[LifeEvent], drain: Latest[Option[DrainWindow]],
+    triggers_config: Option[TriggerConfig[G]], trigger_to: Sender[HeadInput],
 }
 
 fn head_advance(to: Sender[LifeEvent], inbox: Receiver[HeadInput], take progress: LifeEvent) -> bool waits {
@@ -1970,7 +2000,8 @@ fn head_ended[G: send, H: send](take job: ManagedHead[G, H]) -> () waits {
 
 fn managed_head[G: send, H: send](take job: ManagedHead[G, H]) -> Result[(), StartError] waits {
     let ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
-        n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain) = take job
+        n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain,
+        triggers_config: take triggers_config, trigger_to: take trigger_to) = take job
     let persistent = match backing { Disk(_, _) => true, _ => false }
     let mut temporary: Option[TemporaryBacking] = None
     let opened: Result[store.Db, store.Error] = match backing {
@@ -1991,13 +2022,20 @@ fn managed_head[G: send, H: send](take job: ManagedHead[G, H]) -> Result[(), Sta
         Ok(take values) => take values,
         Error(take problem) => { let _ = close_store(take db); return Error(Open(take problem)) },
     }
+    let trigger_drive = match take triggers_config {
+        Some(take config) => match make_trigger_drive(db, clock, tasks, take trigger_to, release, take config) {
+            Ok(take drive) => Some(take drive),
+            Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) },
+        },
+        None => None,
+    }
     if !head_advance(to, inbox, Activated(take release)) { return head_closed(take db) }
     let mail = match mailbox(4u64) {
         Ok(take mail) => take mail,
         Error(cap) => { let _ = close_store(take db); return Error(Full(cap)) },
     }
     let closing = HeadDrain(finish: take finish_from, events: take to, window: take drain, clock: clock)
-    let ended = run_head(take db, take reg, take replay_identity, take local, take publisher_handles, place, n_place, ManagedRequests(take inbox), take mail, tasks, n_publisher, Some(take closing))
+    let ended = run_head(take db, take reg, take replay_identity, take local, take publisher_handles, place, n_place, ManagedRequests(take inbox), take mail, tasks, n_publisher, Some(take closing), take trigger_drive)
     let _ = take temporary
     match take ended {
         Ok(()) => Ok(()),
@@ -2304,6 +2342,7 @@ fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, 
                 settled = true
             }
         }
+        if !closed && advance_triggers(mut head)? { continue }
         let next = match replace(mut input, None) {
             Some(take next) => Some(take next),
             None => head_next(inbox, false),
@@ -2312,6 +2351,9 @@ fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, 
             Some(RunRequest(take req)) => { head_arrival(mut head, take req, closed)?; continue },
             Some(HeadClose) => { if !closed { closed = true; close_head_admission(mut head)? }; continue },
             Some(HeadFinish) => return Ok(()),
+            Some(TriggerWake(at)) => { clear_trigger_timer(mut head, at); continue },
+            Some(TriggerMessage(take message)) => { trigger_message(mut head, take message, closed)?; continue },
+            Some(TriggerDone(a, take outcome)) => { trigger_done(mut head, a, take outcome, closed)?; continue },
             Some(_) => continue,
             None => (),
         }
@@ -2616,6 +2658,593 @@ fn gate[G: send, H: send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
     if let Error(_) = channel.send(hd.out, PubIn(e: Released(Release(version: d, snapshot: Some(store.snapshot(hd.db)), answers: take answers)))) { hd.cut = true }
     refresh_waiting(mut hd, true)
     Ok(())
+}
+
+// These messages travel on the existing head inbox, so a run can only write
+// through the same writer that starts and finishes attempts.
+pub type TriggerCallError: send = Closed | Capacity(Capacity) | Store(store.Error) | StaleAttempt | Cancelled
+
+type FencedRefusal: send = Refusal(TriggerCallError) | BodyOutcome(Outcome)
+
+pub opaque type TriggerInput: send {
+    attempt: triggers.Attempt,
+    key: Bytes,
+    arg: Bytes,
+    answer: Sender[Result[Outcome, TriggerCallError]]
+}
+
+pub fn trigger_attempt(ctx: TriggerContext) -> triggers.Attempt { ctx.attempt }
+
+pub fn trigger_call(ctx: TriggerContext, take key: Bytes, take arg: Bytes) -> Result[Outcome, TriggerCallError] waits {
+    let made: Result[(Sender[Result[Outcome, TriggerCallError]], Receiver[Result[Outcome, TriggerCallError]]), Capacity] = channel.new(1u64)
+    let (to, from) = match take made {
+        Ok(take pair) => take pair,
+        Error(cap) => return Error(Capacity(cap)),
+    }
+    let request = TriggerInput(attempt: ctx.attempt, key: take key, arg: take arg, answer: take to)
+    let msg = match box.new(take request) {
+        Ok(take item) => take item,
+        Error((cap, _)) => return Error(Capacity(cap)),
+    }
+    if let Error(_) = channel.send(ctx.to, TriggerMessage(take msg)) { return Error(Closed) }
+    match channel.receive(from) { Ok(take answer) => take answer, Error(_) => Error(Closed) }
+}
+
+type TriggerTimer: send { clock: Clock, deadline: u64, at: u64, to: Sender[HeadInput] }
+
+type ArmedTimer { at: u64, task_handle: Task[()] }
+
+type TriggerDrive[G: send] {
+    tables: triggers.Tables,
+    revision: Bytes,
+    clock: Clock,
+    tasks: Tasks,
+    to: Sender[HeadInput],
+    config: TriggerConfig[G],
+    active: Map[triggers.Id, Task[Outcome]],
+    timer: Option[ArmedTimer]
+}
+
+fn make_trigger_drive[G: send](db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig[G]) -> Result[Box[TriggerDrive[G]], store.Error] {
+    let tables = store.with_schema(db, code.describe(triggers.tables))?
+    let revision_copy = copy_bytes(revision)?
+    let drive = TriggerDrive(tables: take tables, revision: take revision_copy, clock: clock, tasks: tasks,
+        to: take to, config: take config, active: map.new(), timer: None)
+    match box.new(take drive) {
+        Ok(take scheduled) => Ok(take scheduled),
+        Error((cap, _)) => Error(Full(cap)),
+    }
+}
+
+fn fire_trigger_timer(take timer: TriggerTimer) -> () waits {
+    host.sleep_until(timer.clock, timer.deadline)
+    let _ = channel.send(timer.to, TriggerWake(timer.at))
+}
+
+fn stop_timer(take armed: ArmedTimer) -> () waits {
+    let ArmedTimer(at: _, task_handle: take timer) = take armed
+    let mut waiting = take timer
+    task.cancel(mut waiting)
+    let _ = task.join(take waiting)
+}
+
+fn arm_trigger_timer[G: send](mut drive: Box[TriggerDrive[G]], at: u64) -> Result[(), store.Error] waits {
+    if let Some(armed) = drive.timer {
+        if armed.at == at { return Ok(()) }
+    }
+    if let Some(take prior) = replace(mut drive.timer, None) { stop_timer(take prior) }
+    // The clock's wait runs on monotonic time. Sample wall time again after
+    // waking so a wall-clock correction cannot start a trigger early.
+    let delay = int.saturating_sub(at, host.wall_ms(drive.clock))
+    let deadline = int.saturating_add(host.mono_ns(drive.clock), int.saturating_mul(delay, 1000000u64))
+    let timer = TriggerTimer(clock: drive.clock, deadline: deadline, at: at, to: channel.sender(drive.to))
+    match task.spawn(drive.tasks, bytes 4096u64, take timer, fire_trigger_timer) {
+        Ok(take waiting) => { drive.timer = Some(ArmedTimer(at: at, task_handle: take waiting)); Ok(()) },
+        Error((cap, _)) => Error(Full(cap)),
+    }
+}
+
+fn clear_trigger_timer[G: send, H: send](mut hd: Head[G, H], at: u64) -> () waits {
+    let Some(take drive) = replace(mut hd.trigger_drive, None) else { return () }
+    let mut owned = take drive
+    let clear = match owned.timer { Some(armed) => armed.at == at, None => false }
+    if clear {
+        if let Some(take elapsed) = replace(mut owned.timer, None) { stop_timer(take elapsed) }
+    }
+    hd.trigger_drive = Some(take owned)
+}
+
+fn stop_triggers[G: send](take drive: Box[TriggerDrive[G]]) -> () waits {
+    let TriggerDrive(active: take active, timer: take timer, ..) = box.unbox(take drive)
+    if let Some(take armed) = take timer { stop_timer(take armed) }
+    for take (_, take watcher) in take active {
+        let mut stopping = take watcher
+        task.cancel(mut stopping)
+        let _ = task.join(take stopping)
+    }
+}
+
+fn trigger_key[G: send, H: send](r: Registry[G, H], p: triggers.Pending, choices: triggers.Entries) -> Result[Option[Bytes], store.Error] {
+    if !triggers.is_allowed(p, choices) { return Ok(None) }
+    for entry in r.exported {
+        let matches_kind = match entry.described.kind {
+            Granted => triggers.is_granted(p),
+            Transact => !triggers.is_granted(p),
+            _ => false,
+        }
+        if matches_kind && triggers.matches(p, entry.described.identity, entry.described.args) {
+            let mut key = copy_bytes(entry.described.identity)?
+            match std.codec.put_u64(entry.args_fp, mut key) { Ok(()) => (), Error(cap) => return Error(Full(cap)) }
+            match std.codec.put_u64(entry.result_fp, mut key) { Ok(()) => (), Error(cap) => return Error(Full(cap)) }
+            return Ok(Some(take key))
+        }
+    }
+    Ok(None)
+}
+
+fn trigger_store_error(take problem: triggers.Error) -> store.Error {
+    match take problem {
+        Store(take underlying) => take underlying,
+        AttemptLimit => Limit(Transaction),
+        _ => Missing("trigger"),
+    }
+}
+
+fn trigger_commit[R](take ran: Result[store.Outcome[R, triggers.Error], store.Error]) -> Result[store.Done[R], store.Error] {
+    match take ran {
+        Ok(Committed(take committed)) => Ok(take committed),
+        Ok(Aborted(store.Undone(value: take problem, ..))) => Error(trigger_store_error(take problem)),
+        Ok(Refused(cap)) => Error(Full(cap)),
+        Error(take problem) => Error(take problem),
+        _ => Error(Missing("trigger commit")),
+    }
+}
+
+fn publish_trigger[G: send, H: send](mut hd: Head[G, H], ticket: store.Ticket) -> Result[(), store.Error] waits {
+    hd.last = Some(ticket)
+    gate(mut hd)
+}
+
+type TriggerBodyError: send = Store(triggers.Error) | Terminal(triggers.Terminal)
+
+fn trigger_terminal(take outcome: Outcome) -> triggers.Terminal {
+    match take outcome {
+        Returned(take raw) => Returned(take raw),
+        Failed(Raised(reason)) => Raised(reason),
+        Failed(OutOfTime(steps)) => OutOfTime(steps),
+        Failed(OutOfBytes(cap)) => OutOfBytes(cap.requested, cap.available),
+        Refused(Budget(cap)) => OutOfBytes(cap.requested, cap.available),
+        _ => Gone,
+    }
+}
+
+fn run_trigger_transaction[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDrive[G]], p: triggers.Pending, take key: Option[Bytes]) -> Result[(), store.Error] waits {
+    let final: triggers.Terminal = if triggers.cancelling(p) { Cancelled } else {
+        let completed = invoke_trigger_transaction(mut hd.db, hd.r, hd.h, drive, p, key)?
+        match take completed {
+            TriggerApplied(ticket) => return publish_trigger(mut hd, ticket),
+            TriggerSettled(take outcome) => take outcome,
+        }
+    }
+    // The draft that returned an error or fault left no writes. Only this
+    // settlement commits, and it consumes the row with the outcome.
+    let collected = store.run(mut hd.db, None, scoped fn(mut tx: store.Tx) -> Result[(), triggers.Error] {
+        triggers.finish_transact(mut tx, drive.tables, p, final)
+    })
+    let committed = trigger_commit(take collected)?
+    publish_trigger(mut hd, committed.ticket)
+}
+
+type TriggerDraft = TriggerApplied(store.Ticket) | TriggerSettled(triggers.Terminal)
+
+fn invoke_trigger_transaction[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, drive: Box[TriggerDrive[G]], p: triggers.Pending, key: Option[Bytes]) -> Result[TriggerDraft, store.Error] waits {
+    let slot = match key { Some(wanted) => map.get(r.slots, wanted), None => None }
+    let terminal: triggers.Terminal = if let Some(Transact(n, steps, _, _, go)) = slot {
+        let ran = store.run(mut db, Some(steps), scoped fn(mut tx: store.Tx) -> Result[(), TriggerBodyError] {
+            let body = bound bytes n { go(mut tx, h, drive.config.author, triggers.argument(p)) }
+            let terminal: triggers.Terminal = match take body {
+                Ok(Commit(take payload)) => Returned(take payload),
+                Ok(Abort(take payload)) => return Error(Terminal(Returned(take payload))),
+                Ok(Exhausted(cap)) => return Error(Terminal(OutOfBytes(cap.requested, cap.available))),
+                Ok(Refuse(_)) => return Error(Terminal(Gone)),
+                Error(cap) => return Error(Terminal(OutOfBytes(cap.requested, cap.available))),
+            }
+            match triggers.finish_transact(mut tx, drive.tables, p, terminal) {
+                Ok(()) => Ok(()),
+                Error(take problem) => Error(Store(take problem)),
+            }
+        })
+        match take ran {
+            Ok(Committed(committed)) => return Ok(TriggerApplied(committed.ticket)),
+            Ok(Aborted(store.Undone(value: Terminal(take terminal), ..))) => take terminal,
+            Ok(Aborted(store.Undone(value: Store(take problem), ..))) => return Error(trigger_store_error(take problem)),
+            Ok(Failed(causes)) => Raised(raised(causes)),
+            Ok(Stopped(limit)) => OutOfTime(limit.steps),
+            Ok(Refused(cap)) => OutOfBytes(cap.requested, cap.available),
+            Error(take problem) => return Error(take problem),
+        }
+    } else { Gone }
+    Ok(TriggerSettled(take terminal))
+}
+
+type TriggerReport: send { attempt: triggers.Attempt, to: Sender[HeadInput] }
+
+type WatchedJob[G: send, A, R]: send {
+    job: Job[G, A, R], report: TriggerReport, tasks: Tasks, allowance: u64
+}
+
+fn watch_trigger[G: send, A, R](take watched: WatchedJob[G, A, R]) -> Outcome waits {
+    let WatchedJob(job: take work, report: take report, tasks: tasks, allowance: n) = take watched
+    let finished: Option[Outcome] = match task.spawn(tasks, bytes n, take work, adapt_granted) {
+        Ok(take running) => match task.join(take running) {
+            Ok(take outcome) => Some(take outcome),
+            Error(Failed(causes)) => Some(Failed(Raised(raised(causes)))),
+            Error(Cancelled(_)) => None,
+        },
+        Error((cap, _)) => Some(Failed(OutOfBytes(room(cap)))),
+    }
+    let _ = channel.send(report.to, TriggerDone(report.attempt, take finished))
+    Abandoned
+}
+
+fn launch_trigger[G: send, H: send](r: Registry[G, H], mut drive: Box[TriggerDrive[G]], p: triggers.Pending, a: triggers.Attempt, key: Bytes) -> Result[(), Refusal] {
+    let Some(Granted(go)) = map.get(r.slots, key) else { return Error(NoEntry) }
+    match map.reserve(mut drive.active, 1u64) { Ok(()) => (), Error(cap) => return Error(Budget(room(cap))) }
+    let context = TriggerContext(attempt: a, to: channel.sender(drive.to))
+    let grants = match (drive.config.grant)(take context) { Ok(take g) => take g, Error(cap) => return Error(Budget(room(cap))) }
+    let raw: Bytes = match copy_bytes(triggers.argument(p)) {
+        Ok(take payload) => take payload,
+        Error(Full(cap)) => return Error(Budget(room(cap))),
+        Error(_) => return Error(NoEntry),
+    }
+    let notice = TriggerReport(attempt: a, to: channel.sender(drive.to))
+    match go(drive.tasks, take grants, take raw, Some(take notice)) {
+        Ok(take watcher) => {
+            result.unwrap(map.insert(mut drive.active, triggers.run_id(a), take watcher))
+            Ok(())
+        },
+        Error(cap) => Error(Budget(room(cap))),
+    }
+}
+
+fn finish_trigger[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDrive[G]], a: triggers.Attempt, outcome: triggers.Terminal) -> Result[(), store.Error] waits {
+    let settled = store.run(mut hd.db, None, scoped fn(mut tx: store.Tx) -> Result[(), triggers.Error] {
+        triggers.finish(mut tx, drive.tables, a, outcome)
+    })
+    match take settled {
+        Ok(Aborted(store.Undone(value: StaleAttempt, ..))) => Ok(()),
+        other => {
+            let committed = trigger_commit(take other)?
+            publish_trigger(mut hd, committed.ticket)
+        },
+    }
+}
+
+fn advance_trigger[G: send, H: send](mut hd: Head[G, H], mut drive: Box[TriggerDrive[G]]) -> Result[bool, store.Error] waits {
+    let snapshot = store.snapshot(hd.db)
+    let next = triggers.next_pending(snapshot, drive.tables, scoped fn(id: triggers.Id) -> bool { map.contains(drive.active, id) })?
+    let Some(take p) = take next else { return Ok(false) }
+    let due = triggers.due_time(p)
+    if store.next_call_info(hd.db).at < due {
+        arm_trigger_timer(mut drive, due)?
+        return Ok(false)
+    }
+    if let Some(_) = hd.last { gate(mut hd)? }
+    if hd.cut { return Ok(false) }
+    let key = trigger_key(hd.r, p, drive.config.entries)?
+    if !triggers.is_granted(p) {
+        run_trigger_transaction(mut hd, drive, p, take key)?
+        return Ok(true)
+    }
+    let ran = store.run(mut hd.db, None, scoped fn(mut tx: store.Tx) -> Result[triggers.Started, triggers.Error] {
+        triggers.start(mut tx, drive.tables, p, drive.revision)
+    })
+    let committed = trigger_commit(take ran)?
+    publish_trigger(mut hd, committed.ticket)?
+    if hd.cut { return Ok(false) }
+    match committed.value {
+        Held => (),
+        Cancel(a) => finish_trigger(mut hd, drive, a, Cancelled)?,
+        Body(a) => {
+            if let Some(wanted) = key {
+                if let Error(take problem) = launch_trigger(hd.r, mut drive, p, a, wanted) {
+                    finish_trigger(mut hd, drive, a, trigger_terminal(Refused(take problem)))?
+                }
+            } else { finish_trigger(mut hd, drive, a, Gone)? }
+        },
+    }
+    Ok(true)
+}
+
+fn advance_triggers[G: send, H: send](mut hd: Head[G, H]) -> Result[bool, store.Error] waits {
+    let Some(take selected) = replace(mut hd.trigger_drive, None) else { return Ok(false) }
+    let mut drive = take selected
+    let advanced = advance_trigger(mut hd, mut drive)
+    hd.trigger_drive = Some(take drive)
+    take advanced
+}
+
+fn trigger_done[G: send, H: send](mut hd: Head[G, H], a: triggers.Attempt, take outcome: Option[Outcome], closed: bool) -> Result[(), store.Error] waits {
+    let Some(take selected) = replace(mut hd.trigger_drive, None) else { return Ok(()) }
+    let mut drive = take selected
+    let watched = map.remove(mut drive.active, triggers.run_id(a))
+    let completed = if let Some(take watcher) = take watched {
+        let _ = task.join(take watcher)
+        if let Some(take result) = take outcome {
+            if !closed { finish_trigger(mut hd, drive, a, trigger_terminal(take result)) } else { Ok(()) }
+        } else { Ok(()) }
+    } else { Ok(()) }
+    hd.trigger_drive = Some(take drive)
+    take completed
+}
+
+fn trigger_message[G: send, H: send](mut hd: Head[G, H], take pending: Box[TriggerInput], closed: bool) -> Result[(), store.Error] waits {
+    let TriggerInput(attempt: a, key: take key, arg: take arg, answer: take answer) = box.unbox(take pending)
+    let Some(take drive) = replace(mut hd.trigger_drive, None) else { return Ok(()) }
+    let answer_value: Result[Result[Outcome, TriggerCallError], store.Error] =
+        if closed { Ok(Error(Closed)) } else { trigger_effect(mut hd, drive, a, key, arg) }
+    hd.trigger_drive = Some(take drive)
+    let reply = (take answer_value)?
+    let _ = channel.send(answer, take reply)
+    Ok(())
+}
+
+fn trigger_effect[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDrive[G]], a: triggers.Attempt, key: Bytes, arg: Bytes) -> Result[Result[Outcome, TriggerCallError], store.Error] waits {
+    let invoked = invoke_fenced_trigger(mut hd.db, hd.r, hd.h, drive, a, key, arg)
+    match take invoked {
+        Ok(Committed(store.Done(value: take value, ticket: ticket, ..))) => {
+            publish_trigger(mut hd, ticket)?
+            Ok(Ok(take value))
+        },
+        Ok(Aborted(store.Undone(value: BodyOutcome(take outcome), ..))) => Ok(Ok(take outcome)),
+        Ok(Aborted(store.Undone(value: Refusal(take problem), ..))) => Ok(Error(take problem)),
+        Ok(Failed(causes)) => Ok(Ok(Failed(Raised(raised(causes))))),
+        Ok(Stopped(limit)) => Ok(Ok(Failed(OutOfTime(limit.steps)))),
+        Ok(Refused(cap)) => Ok(Error(Capacity(cap))),
+        Error(take problem) => Error(take problem),
+    }
+}
+
+fn invoke_fenced_trigger[G: send, H: send](mut db: store.Db, registered: Registry[G, H], h: H, drive: Box[TriggerDrive[G]], a: triggers.Attempt, key: Bytes, arg: Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits {
+    let slot = map.get(registered.slots, key)
+    let steps = match slot { Some(Transact(_, limit, _, _, _)) => Some(limit), _ => None }
+    store.run(mut db, steps, scoped fn(mut tx: store.Tx) -> Result[Outcome, FencedRefusal] {
+        match triggers.fence(tx, drive.tables, a) {
+            Ok(false) => (),
+            Ok(true) => return Error(Refusal(Cancelled)),
+            Error(StaleAttempt) => return Error(Refusal(StaleAttempt)),
+            Error(Store(take problem)) => return Error(Refusal(Store(take problem))),
+            Error(_) => return Error(Refusal(StaleAttempt)),
+        }
+        if let Some(Transact(n, _, _, _, go)) = slot {
+            let ran = bound bytes n { go(mut tx, h, drive.config.author, arg) }
+            match take ran {
+                Ok(Commit(take payload)) => Ok(Returned(take payload)),
+                Ok(Abort(take payload)) => Error(BodyOutcome(Returned(take payload))),
+                Ok(Refuse(take refusal)) => Error(BodyOutcome(Refused(take refusal))),
+                Ok(Exhausted(cap)) => Error(BodyOutcome(Failed(OutOfBytes(room(cap))))),
+                Error(cap) => Error(BodyOutcome(Failed(OutOfBytes(room(cap))))),
+            }
+        } else { Error(BodyOutcome(Refused(NoEntry))) }
+    })
+}
+
+type TriggerLawTables: send { effects: store.Table[u64, u64] }
+
+fn trigger_law_migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+    triggers.migrate(mut phase)?
+    let codec: std.codec.Codec[u64] = std.codec.of()
+    store.migration_create_table(mut phase, store.spec("trigger-law-effects", std.codec.key_u64(), codec))
+}
+
+fn trigger_law_handles(catalog: store.Schema) -> Result[TriggerLawTables, store.Error] {
+    let codec: std.codec.Codec[u64] = std.codec.of()
+    let effects = store.schema_table(catalog, "trigger-law-effects", std.codec.key_u64(), codec)?
+    Ok(TriggerLawTables(effects: take effects))
+}
+
+fn trigger_law_body(mut tx: store.Tx, h: TriggerLawTables, author: Caller, take digit: u64) -> Result[u64, u64] {
+    let old = match result.unwrap(store.fetch(tx, store.shape(h.effects), 0u64)) { Some(value) => value, None => 0u64 }
+    let next = old * 10u64 + digit
+    result.unwrap(store.put(mut tx, h.effects, 0u64, next))
+    if digit == 2u64 { return Error(22u64) }
+    if digit == 3u64 { fail("trigger law: abort on fault") }
+    Ok(next)
+}
+
+fn trigger_law_grants(take ctx: TriggerContext) -> Result[TriggerContext, Capacity] { Ok(take ctx) }
+
+fn trigger_law_config(take entries: triggers.Entries) -> TriggerConfig[TriggerContext] {
+    let grant: own[send] fn(take TriggerContext) -> Result[TriggerContext, Capacity] = trigger_law_grants
+    TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()), grant: take grant)
+}
+
+fn trigger_law_places(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
+    transact(mut reg, code.describe(trigger_law_body), 131072u64, DEFAULT_STEPS)?
+    granted(mut reg, code.describe(trigger_law_granted_body), 131072u64, DEFAULT_STEPS)
+}
+
+fn trigger_law_initial(take db: store.Db, c: Clock, tasks: Tasks, take to: Sender[HeadInput], take allowed: triggers.Entries) -> (Head[TriggerContext, TriggerLawTables], Receiver[PubIn]) {
+    let revision = result.unwrap(copy_bytes(string.as_bytes("trigger-law-r1")))
+    let config = trigger_law_config(take allowed)
+    let drive = result.unwrap(make_trigger_drive(db, c, tasks, take to, revision, take config))
+    let reg = result.unwrap(placed(code.describe(trigger_law_places), 1048576u64))
+    let h = result.unwrap(store.with_schema(db, code.describe(trigger_law_handles)))
+    let output: Result[(Sender[PubIn], Receiver[PubIn]), Capacity] = channel.new(32u64)
+    let (out, from) = result.unwrap(take output)
+    let head = Head(db: take db, r: take reg, replay_identity: list.new(), h: take h, out: take out,
+        busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64, cut: false,
+        trigger_drive: Some(take drive))
+    (take head, take from)
+}
+
+fn trigger_law_outcome[G: send, H: send](head: Head[G, H], id: triggers.Id) -> Option[triggers.Terminal] {
+    match head.trigger_drive {
+        Some(drive) => result.unwrap(triggers.outcome(store.snapshot(head.db), drive.tables, id)),
+        None => None,
+    }
+}
+
+fn trigger_law_value(head: Head[TriggerContext, TriggerLawTables]) -> Option[u64] {
+    result.unwrap(store.get(store.snapshot(head.db), store.shape(head.h.effects), 0u64))
+}
+
+fn trigger_law_invoked(outcome: Option[triggers.Terminal], expected: Result[u64, u64]) -> bool {
+    let Some(Returned(raw)) = view outcome else { return false }
+    let codec: std.codec.Codec[Result[u64, u64]] = std.codec.of()
+    match std.codec.decode(codec, raw) {
+        Ok(Ok(value)) => match value {
+            Ok(n) => match expected { Ok(want) => n == want, _ => false },
+            Error(n) => match expected { Error(want) => n == want, _ => false },
+        },
+        _ => false,
+    }
+}
+
+// ENDSTATE Triggers T1/T2 and Transact. A later-due row is written first,
+// followed by AfterCommit, a typed error and a fault. The clock crosses T
+// while the store is closed. The fault and error write a digit before failing,
+// so only a rollback followed by outcome-only consumption leaves 14.
+pub fn journal_law_trigger_transact(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut initial = result.unwrap(store.open(tasks, d, c, r, store.defaults()))
+    result.unwrap(store.run_migration(mut initial, tasks, code.describe(trigger_law_migrate)))
+    let tables = result.unwrap(store.with_schema(initial, code.describe(triggers.tables)))
+    let target: triggers.Entry[u64] = result.unwrap(triggers.transact(code.describe(trigger_law_body)))
+    let mut allowed = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut allowed, target))
+    let latest = store.next_call_info(initial).at + 10u64
+    let written = store.run(mut initial, None, scoped fn(mut tx: store.Tx) -> Result[(triggers.Id, triggers.Id, triggers.Id, triggers.Id), triggers.Error] {
+        let later = triggers.write(mut tx, tables, allowed, target, 4u64, At(latest))?
+        let early = triggers.write(mut tx, tables, allowed, target, 1u64, AfterCommit)?
+        let aborted = triggers.write(mut tx, tables, allowed, target, 2u64, At(latest))?
+        let faulted = triggers.write(mut tx, tables, allowed, target, 3u64, At(latest))?
+        Ok((early, later, aborted, faulted))
+    })
+    let committed = result.unwrap(trigger_commit(take written))
+    let (early, later, aborted, faulted) = committed.value
+    if later.index != 0u64 || early.index != 1u64 || aborted.index != 2u64 || faulted.index != 3u64 { return false }
+    if early.version != committed.info.id.version || early.branch != committed.info.id.branch { return false }
+    result.unwrap(store.durable(mut initial, committed.ticket))
+    result.unwrap(store.close(take initial))
+    while host.wall_ms(c) < latest {
+        host.sleep_until(c, host.mono_ns(c) + 10000000u64)
+    }
+
+    let reopened = result.unwrap(store.open(tasks, d, c, r, store.defaults()))
+    let inputs: Result[(Sender[HeadInput], Receiver[HeadInput]), Capacity] = channel.new(4u64)
+    let (wake, inbox) = result.unwrap(take inputs)
+    let (take built, take published) = trigger_law_initial(take reopened, c, tasks, take wake, take allowed)
+    let mut head = take built
+    if !result.unwrap(advance_triggers(mut head)) { return false }
+    if !trigger_law_invoked(trigger_law_outcome(head, early), Ok(1u64)) { return false }
+    if !result.unwrap(advance_triggers(mut head)) { return false }
+    if !trigger_law_invoked(trigger_law_outcome(head, later), Ok(14u64)) { return false }
+    if !result.unwrap(advance_triggers(mut head)) { return false }
+    if !trigger_law_invoked(trigger_law_outcome(head, aborted), Error(22u64)) { return false }
+    if !result.unwrap(advance_triggers(mut head)) { return false }
+    if let Some(Raised(5u32)) = trigger_law_outcome(head, faulted) { } else { return false }
+    if trigger_law_value(head) != Some(14u64) { return false }
+    if result.unwrap(advance_triggers(mut head)) { return false }
+    let Head(db: take kept, ..) = take head
+    result.unwrap(store.close(take kept))
+
+    let mut recovered = result.unwrap(store.open(tasks, d, c, r, store.defaults()))
+    let recovered_tables = result.unwrap(store.with_schema(recovered, code.describe(triggers.tables)))
+    let due = result.unwrap(triggers.next_pending(store.snapshot(recovered), recovered_tables, fn(id: triggers.Id) -> bool { false }))
+    if let Some(_) = due { return false }
+    if let Some(Raised(5u32)) = result.unwrap(triggers.outcome(store.snapshot(recovered), recovered_tables, faulted)) { } else { return false }
+    result.unwrap(store.close(take recovered))
+    true
+}
+
+@test
+fn journal_test_trigger_transact(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_trigger_transact(d, c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+fn trigger_law_entry_key() -> Result[Bytes, Capacity] {
+    let args: std.codec.Codec[u64] = std.codec.of()
+    let returned: std.codec.Codec[Result[u64, u64]] = std.codec.of()
+    let (take key, _) = described(code.identity(code.describe(trigger_law_body)), None, Transact, args, returned)?
+    Ok(take key)
+}
+
+fn trigger_law_argument(n: u64) -> Result[Bytes, Capacity] {
+    let mut raw: Bytes = list.new()
+    std.codec.put_u64(n, mut raw)?
+    Ok(take raw)
+}
+
+fn trigger_law_granted_body(ctx: TriggerContext, take digit: u64) -> Result[u64, Capacity] waits {
+    let key = trigger_law_entry_key()?
+    let arg = trigger_law_argument(digit)?
+    match trigger_call(ctx, take key, take arg) {
+        Ok(Returned(_)) => Ok(triggers.number(trigger_attempt(ctx))),
+        Error(Cancelled) => Ok(0u64),
+        _ => fail("trigger law: unexpected fenced call result"),
+    }
+}
+
+// ENDSTATE granted Start/End and steps law 7. After the start is durable,
+// close before a body can write. Reopen and run attempt 2, then try the old
+// attempt's write during attempt 2. The first attempt must have changed no row,
+// the late write must be refused, and exactly one terminal outcome must remain.
+pub fn journal_law_trigger_granted(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut initial = result.unwrap(store.open(tasks, d, c, r, store.defaults()))
+    result.unwrap(store.run_migration(mut initial, tasks, code.describe(trigger_law_migrate)))
+    let t = result.unwrap(store.with_schema(initial, code.describe(triggers.tables)))
+    let target: triggers.Entry[u64] = result.unwrap(triggers.granted(code.describe(trigger_law_granted_body)))
+    let mut allowed = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut allowed, target))
+    let armed = store.run(mut initial, None, scoped fn(mut tx: store.Tx) -> Result[triggers.Id, triggers.Error] {
+        triggers.write(mut tx, t, allowed, target, 7u64, AfterCommit)
+    })
+    let committed = result.unwrap(trigger_commit(take armed))
+    result.unwrap(store.durable(mut initial, committed.ticket))
+    let candidate = result.unwrap(triggers.next_pending(store.snapshot(initial), t, fn(id: triggers.Id) -> bool { false }))
+    let p = option.unwrap(take candidate)
+    let revision = result.unwrap(copy_bytes(string.as_bytes("trigger-law-r1")))
+    let began = store.run(mut initial, None, scoped fn(mut tx: store.Tx) -> Result[triggers.Started, triggers.Error] {
+        triggers.start(mut tx, t, p, revision)
+    })
+    let started = result.unwrap(trigger_commit(take began))
+    let Body(old) = started.value else { return false }
+    if triggers.number(old) != 1u64 { return false }
+    result.unwrap(store.durable(mut initial, started.ticket))
+    result.unwrap(store.close(take initial))
+
+    let reopened = result.unwrap(store.open(tasks, d, c, r, store.defaults()))
+    let inputs: Result[(Sender[HeadInput], Receiver[HeadInput]), Capacity] = channel.new(4u64)
+    let (to, inbox) = result.unwrap(take inputs)
+    let (take built, take published) = trigger_law_initial(take reopened, c, tasks, take to, take allowed)
+    let mut head = take built
+    if !result.unwrap(advance_triggers(mut head)) { return false }
+    let selected = replace(mut head.trigger_drive, None)
+    let drive = option.unwrap(take selected)
+    let wrong = result.unwrap(trigger_law_argument(9u64))
+    let key = result.unwrap(trigger_law_entry_key())
+    let stale = trigger_effect(mut head, drive, old, key, wrong)
+    head.trigger_drive = Some(take drive)
+    match stale { Ok(Error(StaleAttempt)) => (), _ => return false }
+    let inbound = result.unwrap(channel.receive(inbox))
+    let TriggerMessage(take request) = take inbound else { return false }
+    result.unwrap(trigger_message(mut head, take request, false))
+    let scope_end = result.unwrap(channel.receive(inbox))
+    let TriggerDone(a, take answer) = take scope_end else { return false }
+    if triggers.number(a) != 2u64 || triggers.run_id(a) != committed.value { return false }
+    result.unwrap(trigger_done(mut head, a, take answer, false))
+    if trigger_law_value(head) != Some(7u64) || result.unwrap(advance_triggers(mut head)) { return false }
+    let Some(Returned(take raw)) = trigger_law_outcome(head, committed.value) else { return false }
+    let mut offset = 0u64
+    if result.unwrap(std.codec.take_u64(raw, mut offset)) != 2u64 { return false }
+    let Head(db: take kept, ..) = take head
+    result.unwrap(store.close(take kept))
+    true
+}
+
+@test
+fn journal_test_trigger_granted(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_trigger_granted(d, c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
 // ---- The publisher, on its one inbox. A Release with a snapshot runs one G2 round to it

@@ -134,13 +134,15 @@ fn copy_bytes(b: Bytes) -> Result[Bytes, Error] {
     room(take copied)
 }
 
-fn path[F](f: StaticFn[F]) -> Result[Bytes, Capacity] {
-    // PROG-9 encodes a definition path between the version byte and the
-    // opening parenthesis. Only checked StaticFn descriptors reach here.
-    let id = code.identity(f)
+fn definition_path(identity: Bytes) -> View[Bytes] in identity {
+    // PROG-9 encodes a path between the version byte and the first '('.
     let mut end = 1u64
-    while id[end] != 40u8 { end += 1u64 }
-    clone(list.slice(id, 1u64, end))
+    while identity[end] != 40u8 { end += 1u64 }
+    list.slice(identity, 1u64, end)
+}
+
+fn path[F](f: StaticFn[F]) -> Result[Bytes, Capacity] {
+    clone(definition_path(code.identity(f)))
 }
 
 fn entry[F, A: codec](f: StaticFn[F], carries_grants: bool) -> Result[Entry[A], Capacity] {
@@ -217,6 +219,22 @@ pub fn argument(p: Pending) -> View[Bytes] in p { view p.row.arg }
 pub fn resolves[A](p: Pending, target: Entry[A]) -> bool {
     p.row.path == target.ref.path && p.row.granted == target.ref.granted && p.row.schema == target.ref.schema
 }
+
+
+pub fn is_allowed(p: Pending, choices: Entries) -> bool {
+    for target in choices.listed {
+        if p.row.path == target.path {
+            return p.row.granted == target.granted && p.row.schema == target.schema
+        }
+    }
+    false
+}
+
+pub fn matches(p: Pending, identity: Bytes, schema: Bytes) -> bool {
+    p.row.path == definition_path(identity) && p.row.schema == schema
+}
+
+pub fn cancelling(p: Pending) -> bool { p.row.cancel }
 
 fn read(tx: store.Tx, t: Tables, id: Id) -> Result[Row, Error] {
     match stored(store.fetch(tx, store.shape(t.rows), id))? {

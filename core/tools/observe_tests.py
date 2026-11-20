@@ -13,7 +13,12 @@ from runner_tests import CALLS, NATIVE_ONLY_CALLS, c_compiler, dir_for, evaluate
 from std_native import ROOT
 
 
-UNOBSERVED_CALLS = NATIVE_ONLY_CALLS | {'release_digest', 'ready_after_activation', 'drain_answers_once'}
+# OBSERVERS-SPEC §6 requires a client log. R1 also exercises startup,
+# reserves and direct head requests outside the traced client session.
+UNOBSERVED_CALLS = NATIVE_ONLY_CALLS | {
+    'atomic_migration', 'drain_answers_once', 'duplicate_own_reply',
+    'ready_after_activation', 'release_digest', 'serve_bounded_and_settled',
+}
 LIVE_CASES = (*(case for case in CALLS if case not in UNOBSERVED_CALLS), 'observe_early_then_late')
 CLAUSES = ('J1', 'J2', 'J3', 'J4', 'J5', 'J6')
 

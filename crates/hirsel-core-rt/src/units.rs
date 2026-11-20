@@ -1481,8 +1481,12 @@ fn add_timer(p: &Pool, at: u64, id: u32) {
     }
 }
 fn fire_timers(p: &Pool) {
+    let next = p.next_timer.load(Ordering::SeqCst);
+    if next == u64::MAX {
+        return;
+    }
     let t = now();
-    if p.next_timer.load(Ordering::SeqCst) > t {
+    if next > t {
         return;
     }
     let mut due = Vec::new();

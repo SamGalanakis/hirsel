@@ -12374,17 +12374,21 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(le(mut stream_value, 1, 8))
     result.unwrap(list.fill(mut stream_value, 32, 5u8))
     result.unwrap(le(mut stream_value, 2, 1))
-    result.unwrap(list.fill(mut stream_value, 32, 6u8))
     result.unwrap(list.append(mut stream_value, string.as_bytes("reply")))
     result.unwrap(blob(mut payload, stream_value))
     result.unwrap(le(mut payload, 2, 1))
     result.unwrap(blob(mut payload, string.as_bytes("entry")))
     result.unwrap(blob(mut payload, string.as_bytes("arguments")))
     result.unwrap(blob(mut payload, string.as_bytes("stream")))
+    // STORE v2.30 §2.4 (AN1/AN2): 21-byte COMMIT prefix, then the
+    // streams section (5 + 1 + 10 + 4 + 41 + 5), then the CALL tag
+    // and its first three blobs (1 + 9 + 13 + 10).
+    let revision_at = 120u64
     result.unwrap(blob(mut payload, revision_vector()))
     result.unwrap(blob(mut payload, code_vector()))
     result.unwrap(le(mut payload, 0, 1))
-    if list.len(payload) != 289 { return false }
+    // Revision (36), code (52) and settle (1) add 89 bytes.
+    if list.len(payload) != 209 { return false }
     let raw = result.unwrap(disk_seal(DiskContext(store: id, role: 2, seq: seq), 72, 0x0011, 1, payload))
     let path = result.unwrap(disk_path("j-", seq, ""))
     let mut file = result.unwrap(host.open(d, path, Append))
@@ -12392,7 +12396,8 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(host.sync(mut file))
     result.unwrap(host.close(take file))
     let end_path = result.unwrap(disk_path("j-", seq, ".end"))
-    result.unwrap(disk_write_synced(d, end_path, journal_end_bytes(id, seq, 377)))
+    // HEADER (72) + COMMIT frame overhead (16) + payload (209).
+    result.unwrap(disk_write_synced(d, end_path, journal_end_bytes(id, seq, 297)))
     let mut reopened = result.unwrap(open(tasks, d, c, r, options))
     let b = main_branch(reopened)
     match result.unwrap(recorded(reopened, b, 1)) {
@@ -12417,11 +12422,12 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(close(take bad))
     let mut one: Bytes = list.new()
     result.unwrap(list.fill(mut one, 1, 7u8))
-    let mut short = result.unwrap(copied(list.slice(payload, 0, 152)))
+    let mut short = result.unwrap(copied(list.slice(payload, 0, revision_at)))
     result.unwrap(blob(mut short, one))
     result.unwrap(blob(mut short, code_vector()))
     result.unwrap(le(mut short, 0, 1))
-    if list.len(short) != 210 { return false }
+    // The one-byte revision makes this payload 31 bytes shorter.
+    if list.len(short) != 178 { return false }
     let short_raw = result.unwrap(disk_seal(DiskContext(store: bad_id, role: 2, seq: bad_seq), 72, 0x0011, 1, short))
     let short_path = result.unwrap(disk_path("j-", bad_seq, ""))
     let mut short_file = result.unwrap(host.open(bad_dir, short_path, Append))
@@ -12429,7 +12435,7 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(host.sync(mut short_file))
     result.unwrap(host.close(take short_file))
     let short_end = result.unwrap(disk_path("j-", bad_seq, ".end"))
-    result.unwrap(disk_write_synced(bad_dir, short_end, journal_end_bytes(bad_id, bad_seq, 346)))
+    result.unwrap(disk_write_synced(bad_dir, short_end, journal_end_bytes(bad_id, bad_seq, 266)))
     match open(tasks, bad_dir, c, r, options) {
         Error(Corrupt(fault)) => match fault.why { Malformed => {}, _ => return false },
         _ => return false

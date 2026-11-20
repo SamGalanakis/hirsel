@@ -20,6 +20,7 @@ pub struct Client {
     pub board_slot: u32,
     /// `complete`s that replaced a live image: the publisher's repairs (RUNNER-SPEC §3 "Repair").
     pub repairs: usize,
+    resubscribes: usize,
     subscribed: bool,
     sub: u32,
     /// The current subscription's first `complete` has not arrived.
@@ -67,6 +68,7 @@ impl Client {
             toggle_slot: slots[0],
             board_slot: slots[1],
             repairs: 0,
+            resubscribes: 0,
             subscribed: false,
             sub: 0,
             pending: false,
@@ -124,6 +126,7 @@ impl Client {
                 self.image.fill(0);
                 if self.subscribed {
                     self.subscribe().await?;
+                    self.resubscribes += 1;
                 }
             }
             Frame::Ended(_, outcome) => return Err(format!("board ended: {outcome:?}").into()),
@@ -253,6 +256,7 @@ pub struct Converged {
     pub returned: usize,
     pub reconnects: usize,
     pub repairs: usize,
+    pub resubscribes: usize,
     pub version: u64,
     pub checksum: u64,
 }
@@ -295,8 +299,12 @@ pub async fn converge(
                 if j == reconnect {
                     // Deliberately lose a possible outcome and resend the same p on the same principal.
                     let token = client.token.clone();
+                    let repairs = client.repairs;
+                    let resubscribes = client.resubscribes;
                     drop(client);
                     client = Client::connect(&url, &wants, Some(token)).await?;
+                    client.repairs = repairs;
+                    client.resubscribes = resubscribes;
                     client.snapshot().await?;
                     client.start_call(0, p, bit).await?;
                 }
@@ -324,6 +332,7 @@ pub async fn converge(
     }
     let version = fresh.version;
     let mut repairs = fresh.repairs;
+    let mut resubscribes = fresh.resubscribes;
     for mut client in finished {
         // A sub due for repair gets its image only once its owner drains, with no commit
         // needed (RUNNER-SPEC §3 "Repair"), so the image is awaited, not only the version.
@@ -336,6 +345,7 @@ pub async fn converge(
             }
         }
         repairs += client.repairs;
+        resubscribes += client.resubscribes;
         client.socket.close(None).await?;
     }
     fresh.socket.close(None).await?;
@@ -344,6 +354,7 @@ pub async fn converge(
         returned: count,
         reconnects: n,
         repairs,
+        resubscribes,
         version,
         checksum: fresh.image.iter().map(|&byte| u64::from(byte)).sum(),
     })

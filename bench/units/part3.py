@@ -31,6 +31,7 @@ SESSIONS, PARTITIONS, SYNCS = 256, 8, 8
 TOOL_DELAY_US = 1000
 RUN = dict(dur=8, warm=1, burst_at=4, burst_len=1, burst_x=1.5)
 STEP = 1.25
+BLOCK_SIDES = 3
 
 
 def log(*a):
@@ -280,27 +281,41 @@ def main():
                 else:
                     cell_sides = sides[:]
                 random.shuffle(cell_sides)
-                for side in cell_sides:
-                    if side == "S1w16":
-                        cpus = cpuset("0-3,8-11,16-19,24-27")
-                    else:
-                        cpus = cpuset(SERVER) | cpuset(LOAD) | cpuset(TOOL)
-                    key = f"{side}|{json.dumps(cell, sort_keys=True)}"
-                    guess = best.get(key) or guesses.get(side, 2000)
-                    while True:
-                        with Block(cpus, log=log) as b:
-                            with Tool():
-                                lo, runs = search(side, cell, guess * 0.9, out, g)
+                # A timing block holds up to BLOCK_SIDES sides of one cell (a
+                # few minutes), in random order, so the lock is taken once per
+                # chunk rather than once per side. A block that saw cc1plus is
+                # discarded and its chunk rerun.
+                cpus = cpuset(SERVER) | cpuset(LOAD) | cpuset(TOOL)
+                if "S1w16" in cell_sides:
+                    cpus |= cpuset("16-19,24-27")
+                for c0 in range(0, len(cell_sides), BLOCK_SIDES):
+                    run_chunk(cell_sides[c0:c0 + BLOCK_SIDES], cell, cpus, best, guesses, out, g)
+
+
+def run_chunk(cell_sides, cell, cpus, best, guesses, out, g):
+                while True:
+                    found = {}
+                    with Block(cpus, log=log) as b:
+                        with Tool():
+                            for side in cell_sides:
+                                key = f"{side}|{json.dumps(cell, sort_keys=True)}"
+                                guess = (best.get(key) or guesses.get(f"{side}|{cell['f']}")
+                                         or guesses.get(side, 2000))
+                                found[side] = search(side, cell, guess * 0.9, out, g)
+                    for side, (lo, runs) in found.items():
                         for r in runs:
                             r["discarded"] = not b.clean
                             out.write(json.dumps(r) + "\n")
-                        out.flush()
-                        if b.clean:
-                            break
-                    best[key] = lo or guess
-                    out.write(json.dumps(dict(summary=True, side=side, cell=cell, group=g, max_rate=lo)) + "\n")
                     out.flush()
+                    if b.clean:
+                        break
+                    random.shuffle(cell_sides)
+                for side, (lo, runs) in found.items():
+                    key = f"{side}|{json.dumps(cell, sort_keys=True)}"
+                    best[key] = lo or best.get(key)
+                    out.write(json.dumps(dict(summary=True, side=side, cell=cell, group=g, max_rate=lo)) + "\n")
                     log(f"group {g} {side} {cell}: max passing rate {lo}")
+                out.flush()
 
 
 if __name__ == "__main__":

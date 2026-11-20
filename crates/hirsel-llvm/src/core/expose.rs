@@ -627,6 +627,22 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
         let mut hot = (0..original.blocks.len()).collect::<BTreeSet<_>>();
         let mut body = original.clone();
         let mut budget = 2048;
+        // A recursive callee unrolls at most 8 copies deep along one chain of
+        // expansions (GCC's max-inline-recursive-depth-auto), as LLVM's loop
+        // helpers do after O3: unbounded, Havlak's loop nesting pass spent the
+        // budget on 15 nested copies, and SLP searched each loop's 15-wide
+        // PHI lists. Each expanded callee with the copy it was expanded into
+        // (None for the caller's own body), and each block's copy.
+        let mut copies: Vec<(usize, Option<usize>)> = Vec::new();
+        let mut chain: Vec<Option<usize>> = vec![None; body.blocks.len()];
+        let deep = |copies: &[(usize, Option<usize>)], mut copy: Option<usize>, f: usize| {
+            let mut n = 0;
+            while let Some(c) = copy {
+                n += usize::from(copies[c].0 == f);
+                copy = copies[c].1;
+            }
+            n >= 8
+        };
         loop {
             let selected = hot.iter().find_map(|&b| {
                 body.blocks[b]
@@ -650,8 +666,11 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
                         if module.functions[f.index()].versioned && !caller_versioned {
                             return None;
                         }
-                        (!call.cold && f.index() != i && price(callee).max(1) <= budget)
-                            .then_some((b, offset, callee))
+                        (!call.cold
+                            && f.index() != i
+                            && price(callee).max(1) <= budget
+                            && !deep(&copies, chain[b], f.index()))
+                        .then_some((b, offset, callee))
                     })
             });
             let Some((b, offset, callee)) = selected else {
@@ -668,7 +687,13 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
             let inherits = hirsel_core_ir::source::inherits_site(
                 &module.instances[module.functions[f.index()].instance.index()],
             );
-            hot.extend(expand(&mut body, b, offset, callee, module, inherits));
+            let added = expand(&mut body, b, offset, callee, module, inherits);
+            // The continuation stays in the caller's copy; the callee's blocks
+            // form the new one.
+            copies.push((f.index(), chain[b]));
+            chain.push(chain[b]);
+            chain.resize(body.blocks.len(), Some(copies.len() - 1));
+            hot.extend(added);
         }
         if budget != 2048 {
             merge_blocks(&mut body);

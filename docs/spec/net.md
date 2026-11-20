@@ -99,7 +99,7 @@ LISTEN, ACCEPT and CONNECT produce run-local socket designations on replay.
 The bound LISTEN address and ACCEPT peer address come from the tape.
 Splitting or releasing a replay socket performs its local ownership change.
 
-Tape format 3 stores a Run's root Net rules, in order and with duplicates,
+Tape format 4 stores a Run's root Net rules, in order and with duplicates,
 in the header's grant snapshot. Each address rule occupies 23 bytes.
 [TLS-6](tls.md#tls-6-tapes) defines the TLS rule record.
 Replay starts with no live Net grant. It computes narrowed rule lists and

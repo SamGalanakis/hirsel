@@ -30,6 +30,7 @@ pub const ENV: u8 = 7;
 pub const PROCESS: u8 = 8;
 pub const TASKS: u8 = 9;
 pub const ARGS: u8 = 10;
+pub const SECRET: u8 = 11;
 /// Host metadata. Its index + 1 is the numeric provider handle. Source code
 /// cannot construct or inspect this metadata; copying a handle copies designation.
 #[repr(C)]
@@ -154,9 +155,11 @@ pub struct OsConfig {
     pub process_ops: *const ProcessOperations,
     /// Installed by the native linker for a launch with a Net grant.
     pub socket_activation: *const SocketActivation,
+    pub secret_grants: *const [View; 3],
+    pub secret_grants_len: usize,
 }
 impl OsConfig {
-    fn with_default_operations(&self) -> Self {
+    pub(crate) fn with_default_operations(&self) -> Self {
         Self {
             directory_ops: &hirsel_core_os_directory_ops,
             process_ops: &hirsel_core_os_process_ops,
@@ -174,9 +177,10 @@ pub struct OsProcess {
     _carriers: Vec<Buffer>,
     _metadata: Box<[Grant]>,
     _net_rules: crate::net::RulesStorage,
+    secrets: Vec<crate::secret::Granted>,
     grants: Vec<u64>,
     diagnostic: Vec<u8>,
-    config: Config,
+    pub(crate) config: Config,
     _launch: Box<Metadata>,
     describe_out: Option<OwnedFd>,
 }
@@ -202,9 +206,10 @@ unsafe fn bytes<'a>(view: View) -> &'a [u8] {
         unsafe { std::slice::from_raw_parts(view.data, view.len) }
     }
 }
-enum StartupError {
+pub(crate) enum StartupError {
     Io(io::Error),
     MissingGrant(usize),
+    MissingSecret(usize),
     NetRules,
     UnsupportedHostOpenat2(io::Error),
 }
@@ -217,7 +222,9 @@ impl StartupError {
     fn into_io(self) -> io::Error {
         match self {
             Self::Io(error) | Self::UnsupportedHostOpenat2(error) => error,
-            Self::MissingGrant(_) | Self::NetRules => io::Error::from_raw_os_error(libc::EACCES),
+            Self::MissingGrant(_) | Self::MissingSecret(_) | Self::NetRules => {
+                io::Error::from_raw_os_error(libc::EACCES)
+            }
         }
     }
 }
@@ -225,7 +232,7 @@ impl OsProcess {
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     /// Matching socket activation metadata is consumed during process startup,
     /// before other threads can access the environment.
-    unsafe fn new(
+    pub(crate) unsafe fn new(
         input: &OsConfig,
         probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
         launch_metadata: fn(&str, u64, bool) -> Metadata,
@@ -349,6 +356,34 @@ impl OsProcess {
                 None
             };
             let mut metadata = Vec::new();
+            let mut secrets = Vec::new();
+            if !describe_mode {
+                for i in 0..input.parameters_len {
+                    let requirement = &*input.parameters.add(i);
+                    if requirement.kind == SECRET {
+                        let read = || {
+                            if requirement.index >= input.secret_grants_len {
+                                return None;
+                            }
+                            let [name, source, patterns] =
+                                *input.secret_grants.add(requirement.index);
+                            let text = |view| std::str::from_utf8(bytes(view)).ok();
+                            let record = hirsel_core_net::SecretGrant::new(
+                                text(name)?,
+                                text(source)?,
+                                text(patterns)?,
+                            )?;
+                            crate::secret::Granted::read(record, requirement.index as u64)
+                        };
+                        secrets.push(read().ok_or(StartupError::MissingSecret(i))?);
+                    }
+                }
+                metadata.extend(secrets.iter().map(|secret| Grant {
+                    kind: SECRET,
+                    provider: provider_pointer,
+                    handle: (secret as *const crate::secret::Granted) as u64,
+                }));
+            }
             if describe_mode {
                 // Main receives inert designations. The launch boundary denies
                 // every provider operation and spawn, so these grant no authority.
@@ -417,6 +452,7 @@ impl OsProcess {
                 _carriers: views,
                 _metadata: metadata,
                 _net_rules: net_rules,
+                secrets,
                 grants: Vec::with_capacity(input.parameters_len),
                 diagnostic: vec![],
                 config,
@@ -497,6 +533,7 @@ unsafe extern "C" fn close_grants(state: *mut u8) {
     // admits nothing, ignores OS close errors, and cannot add a language cause.
     unsafe {
         let process = &mut *state.cast::<OsProcess>();
+        process.secrets.clear();
         drop(process.os.take());
         drop(process.describe_out.take());
     }
@@ -623,35 +660,44 @@ unsafe fn run_with_sources_and_probe(
             unsafe { crate::process::hirsel_core_run(&process.config, entry) }
         }
         Err(error) => {
-            let mut line = b"not started: ".to_vec();
-            match error {
-                StartupError::NetRules => {
-                    line.extend_from_slice(b"Net requires --grant ");
-                    line.extend_from_slice(hirsel_core_net::RULE_SYNTAX.as_bytes());
-                    line.push(b'\n');
-                }
-                StartupError::MissingGrant(index) => {
-                    line.extend_from_slice(b"grant `");
-                    // SAFETY: emitter supplies one valid UTF-8 name per main parameter.
-                    line.extend_from_slice(unsafe { bytes(*names.add(index)) });
-                    line.extend_from_slice(b"` is not in the run's configuration\n");
-                }
-                StartupError::UnsupportedHostOpenat2(_) => {
-                    line.extend_from_slice(
-                        b"Dir requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
-                    );
-                }
-                StartupError::Io(error) => {
-                    line.extend_from_slice(
-                        format!("host grants could not be configured: {error}\n").as_bytes(),
-                    );
-                }
-            }
-            // SAFETY: the configured diagnostic fd and line live through this write.
-            unsafe { crate::os::diagnostic(input.stderr_fd, line.as_ptr(), line.len()) };
+            unsafe { report_startup(error, input.stderr_fd, names) };
             crate::process::NOT_STARTED
         }
     }
+}
+
+pub(crate) unsafe fn report_startup(error: StartupError, stderr: i32, names: *const View) {
+    let mut line = b"not started: ".to_vec();
+    match error {
+        StartupError::NetRules => {
+            line.extend_from_slice(b"Net requires --grant ");
+            line.extend_from_slice(hirsel_core_net::RULE_SYNTAX.as_bytes());
+            line.push(b'\n');
+        }
+        StartupError::MissingGrant(index) => {
+            line.extend_from_slice(b"grant `");
+            // SAFETY: emitter supplies one valid UTF-8 name per main parameter.
+            line.extend_from_slice(unsafe { bytes(*names.add(index)) });
+            line.extend_from_slice(b"` is not in the run's configuration\n");
+        }
+        StartupError::MissingSecret(index) => {
+            line.extend_from_slice(b"grant `");
+            line.extend_from_slice(unsafe { bytes(*names.add(index)) });
+            line.extend_from_slice(b"` [secret] has no readable nonempty source\n");
+        }
+        StartupError::UnsupportedHostOpenat2(_) => {
+            line.extend_from_slice(
+                b"Dir requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
+            );
+        }
+        StartupError::Io(error) => {
+            line.extend_from_slice(
+                format!("host grants could not be configured: {error}\n").as_bytes(),
+            );
+        }
+    }
+    // SAFETY: the configured diagnostic fd and line live through this write.
+    unsafe { crate::os::diagnostic(stderr, line.as_ptr(), line.len()) };
 }
 
 #[cfg(test)]

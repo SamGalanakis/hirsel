@@ -261,6 +261,9 @@ impl Function<'_, '_, '_> {
                     | HostOp::NetNarrow
                     | HostOp::NetNarrowTls
                     | HostOp::TlsConnect
+                    | HostOp::SendSecret
+                    | HostOp::SecretSeal
+                    | HostOp::SecretNarrow
                     | HostOp::NetSplit
                     | HostOp::Stopped => (null, no_mode),
                 };
@@ -275,6 +278,9 @@ impl Function<'_, '_, '_> {
                     | HostOp::NetNarrow
                     | HostOp::NetNarrowTls
                     | HostOp::TlsConnect
+                    | HostOp::SendSecret
+                    | HostOp::SecretSeal
+                    | HostOp::SecretNarrow
                     | HostOp::NetSplit => {
                         let signature = op_signature(op);
                         let count = signature.len();

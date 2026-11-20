@@ -76,6 +76,9 @@ impl FunctionEmitter<'_> {
             | HostOp::NetNarrow
             | HostOp::NetNarrowTls
             | HostOp::TlsConnect
+            | HostOp::SendSecret
+            | HostOp::SecretSeal
+            | HostOp::SecretNarrow
             | HostOp::NetSplit => {
                 let mut operands = vec![ptr(CONTEXT)];
                 for (p, value) in RtOp::Host(op).signature().params.iter().zip(args) {

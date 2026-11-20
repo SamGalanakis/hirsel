@@ -342,20 +342,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             ty
         };
-        let id = match self.rep(ty) {
-            Ok(Rep::Place(id)) => id,
-            Err(what) => return self.gap_ty(n, what),
-            _ => return (shown, None),
-        };
-        if !self.live() {
-            return (shown, None);
+        let v = self.static_string(&data, ty, n);
+        if !viewed {
+            self.temp(ty, v);
         }
+        (shown, v)
+    }
+
+    pub(super) fn static_string(&mut self, data: &[u8], ty: TyId, n: NodeId) -> Option<ValueId> {
+        if !self.live() {
+            return None;
+        }
+        let id = self.runtime_type(ty, n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let u64t = Ty::Scalar(Scalar::U64);
         let start = if data.is_empty() {
             self.konst(Ty::Ptr, 0, n)
         } else {
-            let d = self.e.static_bytes(&data);
+            let d = self.e.static_bytes(data);
             let v = self.value(Ty::Ptr);
             self.inst(Inst::ReadStatic { result: v, data: d }, n);
             Some(v)
@@ -365,14 +369,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.konst(u64t, data.len() as u64, n),
             self.konst(u64t, 0, n),
         ) else {
-            return (shown, None);
+            return None;
         };
         for (k, (value, t)) in [(start, Ty::Ptr), (length, u64t), (zero, u64t)]
             .into_iter()
             .enumerate()
         {
             let Some(offset) = self.konst(u64t, 8 * k as u64, n) else {
-                return (shown, None);
+                return None;
             };
             let at = self.address(
                 AddressBase::Address(to),
@@ -382,11 +386,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             self.inst(Inst::Store { address: at, value }, n);
         }
-        let v = self.pointer(to, n);
-        if !viewed {
-            self.temp(ty, Some(v));
-        }
-        (shown, Some(v))
+        Some(self.pointer(to, n))
     }
     pub(super) fn literal(
         &mut self,

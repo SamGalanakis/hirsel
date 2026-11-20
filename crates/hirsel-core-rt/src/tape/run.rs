@@ -20,6 +20,7 @@ type DescribeOutput = unsafe extern "C" fn(*mut u8, *const u8, usize) -> bool;
 struct Run {
     entry: Entry,
     requirements: *const entry::Requirement,
+    names: *const View,
     requirements_len: usize,
     path: Vec<u8>,
     identity: Vec<u8>,
@@ -246,6 +247,17 @@ unsafe extern "C" fn invoke(
                 }
             }
         }
+        let mut secret_grants = Vec::new();
+        if run.mode == 0 && !(*(*config).launch).is_describe() {
+            for i in 0..run.requirements_len {
+                let req = &*run.requirements.add(i);
+                if req.kind == entry::SECRET {
+                    let source = entry::hirsel_core_entry_grant(config, req.kind, req.index);
+                    let handle = entry::hirsel_core_capability_handle(context, source);
+                    secret_grants.push((*(handle as *const crate::secret::Granted)).record.clone());
+                }
+            }
+        }
         let header = Header {
             kind: KIND_RUN,
             mode: MODE_RECORD,
@@ -258,6 +270,7 @@ unsafe extern "C" fn invoke(
             chooser: crate::tasks::recorded_chooser(),
             arg,
             net_rules,
+            secret_grants,
         };
         let expect = Expect {
             identity: &run.identity,
@@ -317,6 +330,7 @@ unsafe extern "C" fn invoke(
         let replay_net_rules = (!startup.net_rules.is_empty())
             .then(|| crate::net::RulesStorage::new(startup.net_rules));
         let files = (*context).host_files;
+        let mut secret_grants = startup.secret_grants.into_iter();
         for i in 0..run.requirements_len {
             let req = &*run.requirements.add(i);
             let source = entry::hirsel_core_entry_grant(config, req.kind, req.index);
@@ -358,7 +372,38 @@ unsafe extern "C" fn invoke(
                             }
                             (*files).net_tape = Some(crate::net::SocketTape::new(p, h));
                         }
-                        (*files).registry.taped_grant(p, h, tape.group())
+                        if req.kind == entry::SECRET {
+                            let mut secret = if run.launch.is_describe() {
+                                crate::secret::Secret {
+                                    origin: crate::secret::Origin::Granted(0),
+                                    patterns: std::sync::Arc::from([]),
+                                    bytes: None,
+                                }
+                            } else if run.mode == 0 {
+                                (*(handle as *const crate::secret::Granted)).secret.clone()
+                            } else {
+                                let Some(record) = secret_grants.next() else {
+                                    return stopped(run, Fault::Corrupt);
+                                };
+                                let name = crate::tls::view_bytes(&*run.names.add(i));
+                                if record.parameter.as_bytes() != name {
+                                    return stopped(run, Fault::Corrupt);
+                                }
+                                crate::secret::Secret {
+                                    origin: crate::secret::Origin::Granted(0),
+                                    patterns: hirsel_core_net::Pattern::parse_list(
+                                        &record.patterns,
+                                    )
+                                    .unwrap()
+                                    .into(),
+                                    bytes: None,
+                                }
+                            };
+                            secret.origin = crate::secret::Origin::Granted(ordinal_of(h) as u64);
+                            (*files).secrets.lock().unwrap().register(secret)
+                        } else {
+                            (*files).registry.taped_grant(p, h, tape.group())
+                        }
                     }
                     Err(f) => {
                         refuse(f);
@@ -368,6 +413,9 @@ unsafe extern "C" fn invoke(
                 }
             };
             run.grants.push(value);
+        }
+        if secret_grants.next().is_some() {
+            return stopped(run, Fault::Corrupt);
         }
         let mut substituted = *config;
         substituted.grants = run.grants.as_ptr();
@@ -419,6 +467,7 @@ pub unsafe extern "C" fn hirsel_core_os_run_taped(
         let mut run = Run {
             entry,
             requirements: input.parameters,
+            names,
             requirements_len: input.parameters_len,
             path: CStr::from_ptr(path).to_bytes().to_vec(),
             identity: CStr::from_ptr(identity).to_bytes().to_vec(),
@@ -439,24 +488,24 @@ pub unsafe extern "C" fn hirsel_core_os_run_taped(
             describe_tape: (NO_HOST, 0),
         };
         let opened = if mode == 0 {
-            Some(entry::hirsel_core_os_process_new(input))
+            match entry::OsProcess::new(
+                &input.with_default_operations(),
+                crate::os::OsProvider::probe_directory,
+                Metadata::native,
+            ) {
+                Ok(process) => Some(process),
+                Err(error) => {
+                    entry::report_startup(error, run.stderr, names);
+                    return process::NOT_STARTED;
+                }
+            }
         } else {
             None
         };
         let no_host = NO_HOST;
         let mut metadata = Vec::new();
         let mut config = match &opened {
-            Some(opened) if opened.error == IoError::OK => {
-                *entry::hirsel_core_os_process_config(opened.process)
-            }
-            Some(opened) => {
-                let _ = names;
-                stopped(
-                    &mut run,
-                    format_args!("record grants could not be configured: {:?}", opened.error),
-                );
-                return process::NOT_STARTED;
-            }
+            Some(process) => process.config,
             None => {
                 for i in 0..input.parameters_len {
                     metadata.push(Grant {
@@ -492,9 +541,6 @@ pub unsafe extern "C" fn hirsel_core_os_run_taped(
         config.close_grants = None;
         config.describe_output = Some(emit_describe);
         let status = process::hirsel_core_run(&config, invoke);
-        if let Some(opened) = opened {
-            entry::hirsel_core_os_process_free(opened.process);
-        }
         run.stop.unwrap_or(status)
     }
 }
@@ -580,6 +626,8 @@ pub(super) fn check_launch_replay() {
             directory_ops: std::ptr::null(),
             process_ops: std::ptr::null(),
             socket_activation: std::ptr::null(),
+            secret_grants: core::ptr::null(),
+            secret_grants_len: 0,
             target: View {
                 data: target.as_ptr(),
                 len: target.len(),

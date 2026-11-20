@@ -62,6 +62,8 @@ impl Run {
             directory_ops: ptr::null(),
             process_ops: ptr::null(),
             socket_activation: ptr::null(),
+            secret_grants: core::ptr::null(),
+            secret_grants_len: 0,
             target: view(b"test-target"),
         };
         unsafe {

@@ -367,7 +367,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
     #[cfg(test)]
     ATTEMPTS.set(ATTEMPTS.get() + 1);
     unsafe {
-        let write = matches!(request.operation, CONNECT | SEND_PAIR);
+        let write = matches!(request.operation, CONNECT | SEND_PAIR | SEND_SECRET);
         let sockets = &mut *n.sockets;
         let key = n.connecting.unwrap_or(request.handle);
         if !first && request.operation != LISTEN {
@@ -503,6 +503,39 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                     Err(e) => Err(e),
                 }
             }
+            SEND_SECRET => {
+                let Some(stream) = n
+                    .tls
+                    .as_mut()
+                    .and_then(|tls| tls.sessions.get_mut(&(key & !3)))
+                else {
+                    return Some(crate::net::DENIED);
+                };
+                let send = request.path.cast_mut().cast::<crate::secret::SendRequest>();
+                let committed = &mut (*send).committed;
+                let fd = sockets.fd(key);
+                let mut skip = *committed;
+                for part in [&request.buffer, &(*send).secret, &*n.send_tail] {
+                    let part = crate::tls::bytes(part);
+                    if skip >= part.len() {
+                        skip -= part.len();
+                        continue;
+                    }
+                    let part = &part[skip..];
+                    let len = part.len();
+                    let answer = stream.send(fd, part, &[])?;
+                    if answer.error != IoError::OK {
+                        return Some(answer);
+                    }
+                    *committed += answer.value as usize;
+                    if answer.value < len as u64 {
+                        return None;
+                    }
+                    skip = 0;
+                }
+                // Success requires flushing the final committed record too.
+                return stream.send(fd, &[], &[]);
+            }
             RECV_BOUNDED | SEND_PAIR => {
                 let b = &mut request.buffer;
                 let receiving = request.operation == RECV_BOUNDED;
@@ -592,13 +625,18 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
         })
     }
 }
-unsafe fn finish(request: &Request, n: &mut NetworkRequest, outcome: Outcome) -> Step {
+unsafe fn finish(request: &Request, n: &mut NetworkRequest, mut outcome: Outcome) -> Step {
     unsafe {
         if request.operation == CONNECT && outcome.error.tag != 0 {
             if let Some(key) = n.connecting.take() {
                 (*n.sockets).release(key);
             }
         }
+    }
+    if request.operation == SEND_SECRET && outcome.error != IoError::OK {
+        // SAFETY: this operation pins its distinct progress field through delivery.
+        outcome.written =
+            unsafe { (*request.path.cast::<crate::secret::SendRequest>()).committed as u64 };
     }
     Step {
         outcome,
@@ -670,7 +708,7 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
             deadline
         };
         let key = n.connecting.unwrap_or(request.handle);
-        let write = matches!(request.operation, CONNECT | SEND_PAIR);
+        let write = matches!(request.operation, CONNECT | SEND_PAIR | SEND_SECRET);
         if let Err(e) = (*n.sockets).arm(key, write, token) {
             return finish(request, n, error(e.raw_os_error().unwrap_or(libc::EIO)));
         }
@@ -695,7 +733,10 @@ pub(crate) unsafe fn abort(request: *mut Request, token: u64, reason: u8) -> Out
         let r = &*request;
         let n = &mut *r.path.cast_mut().cast::<NetworkRequest>();
         let key = n.connecting.unwrap_or(r.handle);
-        (*n.sockets).disarm(key, matches!(r.operation, CONNECT | SEND_PAIR));
+        (*n.sockets).disarm(
+            key,
+            matches!(r.operation, CONNECT | SEND_PAIR | SEND_SECRET),
+        );
         finish(r, n, signal(if reason == ABORT_CANCEL { 7 } else { 6 })).outcome
     }
 }

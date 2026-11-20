@@ -96,6 +96,7 @@ pub struct NativeOptions {
     /// Explicit host authority, using the runtime's grant-kind bit positions.
     pub grant_mask: u64,
     pub net_rules: Vec<hirsel_core_net::GrantRule>,
+    pub secret_grants: Vec<hirsel_core_net::SecretGrant>,
     /// Diagnostic build: exact root reservation peak, unsuitable for timing samples.
     pub logical_charge_report: Option<PathBuf>,
     /// The toolchain this request already observed for its request record's
@@ -137,6 +138,7 @@ impl NativeOptions {
             directories: vec![],
             grant_mask: 0,
             net_rules: vec![],
+            secret_grants: vec![],
             logical_charge_report: None,
             observed: None,
         }
@@ -1278,7 +1280,7 @@ fn entry_abi(
 pub fn grant_kind(name: &str) -> Option<u8> {
     [
         "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process", "Tasks",
-        "Args",
+        "Args", "Secret",
     ]
     .iter()
     .position(|kind| *kind == name)
@@ -1797,6 +1799,7 @@ mod tests {
             directories: vec![],
             grant_mask: 0,
             net_rules: vec![],
+            secret_grants: vec![],
             logical_charge_report: None,
             observed: None,
         }

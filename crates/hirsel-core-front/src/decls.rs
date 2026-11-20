@@ -228,7 +228,7 @@ impl Role {
             "Into" | "Port" | "Sink" => Role::FlowEndpoint,
 
             "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin" | "Env"
-            | "Process" | "Tasks" => Role::Capability,
+            | "Process" | "Tasks" | "Secret" => Role::Capability,
             _ => return None,
         })
     }

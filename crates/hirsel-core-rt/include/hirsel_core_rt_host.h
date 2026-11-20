@@ -175,6 +175,8 @@ typedef struct {
     const HirselCoreProcessOperations *process_ops;
     /* Set to &hirsel_core_os_socket_activation for a sourced launch with Net. */
     const HirselCoreSocketActivation *socket_activation;
+    const HirselCoreView (*secret_grants)[3]; /* parameter, source label, patterns */
+    size_t secret_grants_len;
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;
@@ -234,6 +236,18 @@ typedef struct {
     void *runtime_state;
 } HirselCoreTlsRequest;
 HirselCoreHostOutcome hirsel_core_host_tls_connect(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreView *, uint8_t, const HirselCoreBuffer *, const HirselCoreView *, HirselCoreBuffer *, uint8_t *, uint8_t, uint64_t, uint64_t, uint64_t);
+/* SEND_SECRET (23): buffer is before, the network prefix's first word points
+   to after, and secret borrows the run-owned bytes. The operation returns zero
+   on success and reports the committed prefix in written on failure. */
+#define HIRSEL_CORE_SEND_SECRET 23
+#define HIRSEL_CORE_GRANT_SECRET 11
+typedef struct {
+    uint64_t network[21];
+    HirselCoreBuffer secret;
+} HirselCoreSendSecretRequest;
+HirselCoreHostOutcome hirsel_core_host_send_secret(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t, const HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_seal(HirselCoreContext *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_narrow(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow_tls(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint16_t, uint16_t, uint8_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, uint8_t, uint16_t, uint16_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_split(HirselCoreContext *, uint64_t, uint64_t);

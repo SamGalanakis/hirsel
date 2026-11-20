@@ -38,6 +38,7 @@ pub mod region;
 mod retention;
 #[cfg(any(test, feature = "testing"))]
 pub mod schedule_script;
+pub mod secret;
 mod sequencer;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;

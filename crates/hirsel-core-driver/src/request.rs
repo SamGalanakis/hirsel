@@ -152,6 +152,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut directories = Vec::new();
     let mut grant_mask = 0;
     let mut net_rules = Vec::new();
+    let mut secret_grants = Vec::new();
     let mut json = false;
     use crate::cli::OptionId as Opt;
     for (option, value) in invocation.options {
@@ -183,6 +184,18 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::CoreProduct => core_product = Some(PathBuf::from(value)),
             Opt::Dir => directories.push(value),
             Opt::Grant => {
+                if value == "Secret" || value.starts_with("Secret:") {
+                    let grant = hirsel_core_net::SecretGrant::parse(&value)
+                        .ok_or(hirsel_core_net::SecretGrant::SYNTAX)?;
+                    if secret_grants
+                        .iter()
+                        .any(|old: &hirsel_core_net::SecretGrant| old.parameter == grant.parameter)
+                    {
+                        return Err("a Secret parameter can be granted only once".into());
+                    }
+                    secret_grants.push(grant);
+                    continue;
+                }
                 if value == "Net" {
                     return Err(
                         format!("Net requires --grant {}", hirsel_core_net::RULE_SYNTAX).into(),
@@ -522,6 +535,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             options.directories = directories;
             options.grant_mask = grant_mask;
             options.net_rules = net_rules;
+            options.secret_grants = secret_grants;
             options.logical_charge_report = logical_charge_report;
             options.tape = run_tape;
             Ok(options)

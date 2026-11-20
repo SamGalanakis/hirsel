@@ -342,6 +342,36 @@ impl Model {
         self.attempt_with(Waiter::Network(op), token, |s| s.attempt(op, input, spare))
     }
 
+    pub fn attempt_secret(
+        &self,
+        key: u64,
+        input: [&[u8]; 3],
+        committed: &mut usize,
+        token: u64,
+    ) -> Option<Reply> {
+        let op = Operation::Send(key);
+        self.attempt_with(Waiter::Network(op), token, |state| {
+            let mut skip = *committed;
+            for part in input {
+                if skip >= part.len() {
+                    skip -= part.len();
+                    continue;
+                }
+                let remaining = &part[skip..];
+                let reply = state.attempt(op, [remaining, &[]], 0)?;
+                if reply.error != 0 {
+                    return Some(reply);
+                }
+                *committed += reply.value as usize;
+                if reply.value < remaining.len() as u64 {
+                    return None;
+                }
+                skip = 0;
+            }
+            state.attempt(op, [&[], &[]], 0)
+        })
+    }
+
     pub fn attempt_tls(&self, key: u64, offered: &[impl AsRef<[u8]>], token: u64) -> Option<Reply> {
         self.attempt_with(Waiter::Handshake(key), token, |s| s.handshake(key, offered))
     }

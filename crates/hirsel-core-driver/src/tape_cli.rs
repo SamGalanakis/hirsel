@@ -64,6 +64,9 @@ pub(crate) fn show(path: &Path) -> io::Result<()> {
         h.arg.len()
     );
     println!("arg {:?}  grants {:?}", h.arg, h.net_rules);
+    for grant in &h.secret_grants {
+        println!("grant `{}` [secret] to {}", grant.parameter, grant.patterns);
+    }
     let mut decoder = Decoder::default();
     let mut at = 0;
     while let Some((flags, payload)) = blocks

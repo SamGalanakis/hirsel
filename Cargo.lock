@@ -483,6 +483,7 @@ dependencies = [
  "hirsel-core-net",
  "hirsel-guard",
  "serde",
+ "zeroize",
 ]
 
 [[package]]
@@ -571,6 +572,7 @@ dependencies = [
  "ring",
  "rustls",
  "rustls-native-certs",
+ "zeroize",
 ]
 
 [[package]]

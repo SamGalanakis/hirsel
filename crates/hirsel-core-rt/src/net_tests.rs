@@ -68,6 +68,8 @@ fn net_laws_child() {
         directory_ops: std::ptr::null(),
         process_ops: std::ptr::null(),
         socket_activation: std::ptr::null(),
+        secret_grants: core::ptr::null(),
+        secret_grants_len: 0,
         target: crate::process::View {
             data: b"test-target".as_ptr(),
             len: 11,

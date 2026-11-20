@@ -92,6 +92,8 @@ pub(crate) struct Files {
     pub(crate) tls: crate::os_tls::Streams,
     pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
     pub(crate) net_tape: Option<crate::net::SocketTape>,
+    pub(crate) secrets: Mutex<crate::secret::Secrets>,
+    pub(crate) tls_writes: BTreeMap<u64, crate::secret::TlsWrite>,
     // Children inherit these entries without borrowing the scheduler's sockets.
     pub(crate) registry: Registry,
 }
@@ -232,6 +234,7 @@ impl Files {
         self.tls.sessions.clear();
         self.connected.clear();
         self.net_grants.get_mut().unwrap().clear();
+        *self.secrets.get_mut().unwrap() = crate::secret::Secrets::default();
         if let Some(files) = &mut self.registry.0.get_mut().unwrap().live {
             // SAFETY: the run's Context and providers remain pinned.
             unsafe { files.close(context) };

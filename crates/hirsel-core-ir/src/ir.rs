@@ -997,6 +997,9 @@ pub enum HostOp {
     Stopped = 28,
     TlsConnect = 22,
     NetNarrowTls = 29,
+    SendSecret = 23,
+    SecretSeal = 30,
+    SecretNarrow = 31,
 }
 
 impl HostOp {
@@ -1033,6 +1036,9 @@ impl HostOp {
         HostOp::Listen,
         HostOp::Accept,
         HostOp::TlsConnect,
+        HostOp::SendSecret,
+        HostOp::SecretSeal,
+        HostOp::SecretNarrow,
         HostOp::RecvBounded,
         HostOp::SendPair,
         HostOp::NetNarrow,
@@ -1074,6 +1080,9 @@ impl HostOp {
             HostOp::NetNarrow => "net_narrow",
             HostOp::NetNarrowTls => "net_narrow_tls",
             HostOp::TlsConnect => "tls_connect",
+            HostOp::SendSecret => "send_secret",
+            HostOp::SecretSeal => "secret_seal",
+            HostOp::SecretNarrow => "secret_narrow",
             HostOp::NetSplit => "net_split",
             HostOp::Stopped => "host_stopped",
         }
@@ -1089,6 +1098,9 @@ impl HostOp {
             Self::NetNarrow => "hirsel_core_net_narrow",
             Self::NetNarrowTls => "hirsel_core_net_narrow_tls",
             Self::TlsConnect => "hirsel_core_tls_connect",
+            Self::SendSecret => "hirsel_core_host_send_secret",
+            Self::SecretSeal => "hirsel_core_secret_seal",
+            Self::SecretNarrow => "hirsel_core_secret_narrow",
             Self::NetSplit => "hirsel_core_net_split",
             _ => unreachable!(),
         }
@@ -1102,6 +1114,8 @@ impl HostOp {
                 | HostOp::Random
                 | HostOp::NetNarrow
                 | HostOp::NetNarrowTls
+                | HostOp::SecretSeal
+                | HostOp::SecretNarrow
                 | HostOp::NetSplit
         )
     }
@@ -1327,6 +1341,12 @@ impl RtOp {
                             u64_,
                         ],
                     ),
+                    HostOp::SendSecret => (
+                        vec![V(u64_), V(p), V(u64_), V(p), V(u8_), V(u64_), V(u64_)],
+                        outcome,
+                    ),
+                    HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
+                    HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
                     HostOp::NetNarrowTls => (
                         vec![
                             V(u64_),

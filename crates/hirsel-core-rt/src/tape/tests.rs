@@ -410,6 +410,7 @@ pub(super) fn header(build: [u8; 32]) -> Header {
         chooser: CHOOSER_FIFO,
         arg: b"arg".to_vec(),
         net_rules: vec![],
+        secret_grants: vec![],
     }
 }
 pub(super) fn expect() -> Expect<'static> {
@@ -544,6 +545,7 @@ fn the_encoder_writes_the_format_3_model_tape_byte_for_byte() {
         chooser: CHOOSER_FIFO,
         arg: b"arg-7".to_vec(),
         net_rules: vec![],
+        secret_grants: vec![],
     };
     let mono = |v: u64| Frame::Op {
         task: 0,

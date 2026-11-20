@@ -18,8 +18,10 @@ use hirsel_core_layout::{
     Body as Shaped, Cleanup, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, cleanup_class,
     compute, field_size, map_entry,
 };
+use hirsel_core_net::{Name, Pattern, SecretGrant};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, mpsc};
+use zeroize::Zeroizing;
 
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
@@ -106,7 +108,15 @@ struct World {
     random: u8,
     network: Network,
     net_charges: Vec<(Limit, u64)>,
+    secrets: Vec<EvalSecret>,
+    tls_writes: BTreeMap<u64, (Name, bool)>,
 }
+#[derive(Clone)]
+struct EvalSecret {
+    patterns: Box<[Pattern]>,
+    bytes: Arc<Zeroizing<Vec<u8>>>,
+}
+
 enum Node {
     File(Vec<u8>),
     Dir,
@@ -1962,6 +1972,8 @@ impl Machine<'_> {
             ]);
         }
         self.world.network.sockets.split(key);
+        let name = hirsel_core_net::tls::verification_name(self.carrier_bytes(a[2])).unwrap();
+        self.world.tls_writes.insert(key & !3, (name, false));
         let protocol = if reply.bytes.is_empty() {
             0
         } else {
@@ -2001,11 +2013,105 @@ impl Machine<'_> {
         vec![key, 0, 0, 0]
     }
 
+    fn secret_policy(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
+        let Some(patterns) = std::str::from_utf8(self.carrier_bytes(a[1]))
+            .ok()
+            .and_then(Pattern::parse_list)
+        else {
+            return vec![0, 1, 0, 0];
+        };
+        let (patterns, len) = if op == HostOp::SecretSeal {
+            (patterns, self.load(a[0] + 8, 8))
+        } else {
+            let Some(parent) = self.world.secrets.get(a[0] as usize) else {
+                return vec![0, 1, 0, 0];
+            };
+            let intersection = Pattern::intersection(&parent.patterns, &patterns);
+            if intersection.is_empty() {
+                return vec![0, 1, 0, 0];
+            }
+            (intersection, 0)
+        };
+        let size = SecretGrant::logical_size(&patterns, len);
+        let charge = size.unwrap_or(u64::MAX);
+        let payer = t.limits.last().unwrap();
+        if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
+            return vec![charge, 2, 0, available];
+        }
+        let bytes = if op == HostOp::SecretSeal {
+            let data = self.load(a[0], 8);
+            let bytes = Zeroizing::new(self.carrier_bytes(a[0]).to_vec());
+            if !bytes.is_empty() && self.load(a[0] + 16, 8) != 0 {
+                let (block, offset) = split(data);
+                use zeroize::Zeroize;
+                self.mem[block].bytes[offset..offset + bytes.len()].zeroize();
+            }
+            Arc::new(bytes)
+        } else {
+            self.world.secrets[a[0] as usize].bytes.clone()
+        };
+        let key = self.world.secrets.len() as u64;
+        self.world.secrets.push(EvalSecret { patterns, bytes });
+        self.world.net_charges.push((payer.clone(), charge));
+        vec![key, 0, 0, 0]
+    }
+
+    fn send_secret(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
+        let key = a[0];
+        let Some((name, spent)) = self.world.tls_writes.get(&(key & !3)) else {
+            return Ok(vec![0, 1, 0, 0]);
+        };
+        if *spent {
+            return Ok(vec![0, 5, 0, 0]);
+        }
+        let Some(secret) = self.world.secrets.get(a[2] as usize) else {
+            return Ok(vec![0, 1, 0, 0]);
+        };
+        if !secret.patterns.iter().any(|pattern| pattern.covers(name)) {
+            return Ok(vec![0, 1, 0, 0]);
+        }
+        let bytes = secret.bytes.clone();
+        let before = self.carrier_bytes(a[1]).to_vec();
+        let after = self.carrier_bytes(a[3]).to_vec();
+        self.check_cancel(t)?;
+        let model = self.world.network.sockets.model().unwrap().clone();
+        model.advance_to(self.world.clock);
+        let deadline = (a[4] != 0).then_some(a[6]);
+        let mut committed = 0;
+        let reply = self.network_attempt(t, &model, deadline, |token| {
+            model.attempt_secret(
+                key,
+                [&before, bytes.as_slice(), &after],
+                &mut committed,
+                token,
+            )
+        });
+        if reply.error != 0 && committed != 0 {
+            self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
+        }
+        Ok(vec![0, reply.error.into(), reply.code.into(), 0])
+    }
+
     /// A provider row against [`World`]: an outcome `value, error, code, written`.
     fn host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
+        if op == HostOp::SecretSeal {
+            return Ok(self.secret_policy(t, op, a));
+        }
         self.deny_describe_capability();
-        if op == HostOp::TlsConnect {
-            return self.tls_connect(t, a);
+        match op {
+            HostOp::TlsConnect => return self.tls_connect(t, a),
+            HostOp::SendSecret => return self.send_secret(t, a),
+            HostOp::SecretNarrow => return Ok(self.secret_policy(t, op, a)),
+            HostOp::SendPair
+                if self
+                    .world
+                    .tls_writes
+                    .get(&(a[0] & !3))
+                    .is_some_and(|record| record.1) =>
+            {
+                return Ok(vec![0, 5, 0, 0]);
+            }
+            _ => {}
         }
         const NOT_FOUND: u64 = 1;
         const DENIED: u64 = 2;
@@ -2033,7 +2139,9 @@ impl Machine<'_> {
             | HostOp::SendPair => {
                 return self.network_host(t, op, a);
             }
-            HostOp::TlsConnect => unreachable!(),
+            HostOp::TlsConnect | HostOp::SendSecret | HostOp::SecretSeal | HostOp::SecretNarrow => {
+                unreachable!()
+            }
             HostOp::NetNarrowTls => {
                 use hirsel_core_net::{GrantRule, TlsRule, TlsTrust};
                 let trust = match a[4] {
@@ -2703,6 +2811,9 @@ impl Machine<'_> {
             FieldTy::Handle(Handle::Flow) => panic!("flow execution uses the native reference"),
             FieldTy::Handle(Handle::Socket) => {
                 let h = self.load(at, 8);
+                if h & 3 == 2 {
+                    self.world.tls_writes.remove(&(h & !3));
+                }
                 self.world.network.sockets.release(h);
                 false
             }

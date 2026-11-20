@@ -2287,6 +2287,9 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             HostOp::NetNarrow => &["u64", "u8", "u8", "u64", "u64", "u8", "u16", "u16"],
             HostOp::TlsConnect => &["u64", "u64", "ptr", "u8", "ptr", "ptr", "u8", "u64", "u64"],
             HostOp::NetNarrowTls => &["u64", "ptr", "u16", "u16", "u8", "ptr"],
+            HostOp::SendSecret => &["u64", "ptr", "u64", "ptr", "u8", "u64", "u64"],
+            HostOp::SecretSeal => &["ptr", "ptr"],
+            HostOp::SecretNarrow => &["u64", "ptr"],
             HostOp::NetSplit | HostOp::Stopped => &["u64"],
             HostOp::Open => &["u64", "ptr", "u8"],
             HostOp::Close | HostOp::TryLock | HostOp::Unlock | HostOp::WallMs | HostOp::MonoNs => {

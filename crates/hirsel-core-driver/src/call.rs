@@ -509,7 +509,7 @@ pub fn arguments(schema: &Schema, flags: &[String]) -> Result<Vec<u8>, Error> {
 // ---------------------------------------------------------------------------
 // The std.codec value form and its JSON mapping (docs/spec/sdk.md)
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -1308,7 +1308,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     out
 }
 
-fn base64(data: &[u8]) -> String {
+pub(crate) fn base64(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {

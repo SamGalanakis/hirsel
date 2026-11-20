@@ -139,6 +139,8 @@ fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
         directory_ops: std::ptr::null(),
         process_ops: std::ptr::null(),
         socket_activation: std::ptr::null(),
+        secret_grants: core::ptr::null(),
+        secret_grants_len: 0,
         target: View {
             data: target.as_ptr(),
             len: target.len(),
@@ -222,6 +224,8 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
         directory_ops: std::ptr::null(),
         process_ops: std::ptr::null(),
         socket_activation: std::ptr::null(),
+        secret_grants: core::ptr::null(),
+        secret_grants_len: 0,
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,
@@ -339,6 +343,8 @@ fn c_constructor_refuses_missing_grants_bad_descriptors_and_invalid_argv_before_
         directory_ops: std::ptr::null(),
         process_ops: std::ptr::null(),
         socket_activation: std::ptr::null(),
+        secret_grants: core::ptr::null(),
+        secret_grants_len: 0,
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,
@@ -429,6 +435,8 @@ fn c_u64_capability_operands_feed_host_requests_and_ok_is_initialized() {
         directory_ops: std::ptr::null(),
         process_ops: std::ptr::null(),
         socket_activation: std::ptr::null(),
+        secret_grants: core::ptr::null(),
+        secret_grants_len: 0,
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,
@@ -614,6 +622,8 @@ fn broken_pipe_child() {
             directory_ops: std::ptr::null(),
             process_ops: std::ptr::null(),
             socket_activation: std::ptr::null(),
+            secret_grants: core::ptr::null(),
+            secret_grants_len: 0,
             target: crate::process::View {
                 data: std::ptr::null(),
                 len: 0,

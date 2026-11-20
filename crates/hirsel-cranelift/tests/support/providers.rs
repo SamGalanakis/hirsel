@@ -295,6 +295,9 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::NetNarrow
                     | HostOp::NetNarrowTls
                     | HostOp::TlsConnect
+                    | HostOp::SendSecret
+                    | HostOp::SecretSeal
+                    | HostOp::SecretNarrow
                     | HostOp::NetSplit
             )
         })
@@ -383,6 +386,9 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::NetNarrow
                     | HostOp::NetNarrowTls
                     | HostOp::TlsConnect
+                    | HostOp::SendSecret
+                    | HostOp::SecretSeal
+                    | HostOp::SecretNarrow
                     | HostOp::NetSplit
             )
         })

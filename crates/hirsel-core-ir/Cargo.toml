@@ -9,7 +9,7 @@ rust-version.workspace = true
 # The structural well-formedness function, for tests of this crate and of its producers.
 wf = []
 # The FORM v0 test evaluator, for producers' behaviour cases.
-eval = ["dep:hirsel-core-net"]
+eval = ["dep:hirsel-core-net", "dep:zeroize"]
 
 [dependencies]
 hirsel-core-net = { path = "../hirsel-core-net", optional = true }
@@ -17,6 +17,9 @@ serde = { version = "1", features = ["derive"] }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 
+zeroize = { version = "=1.9.2", optional = true }
+
 [dev-dependencies]
+zeroize = "=1.9.2"
 hirsel-core-net = { path = "../hirsel-core-net" }
 hirsel-guard = { path = "../hirsel-guard" }

@@ -10,7 +10,7 @@ use hirsel_core_net::{GrantRule, Rule, TlsRule, TlsTrust};
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 3;
+pub const FORMAT: u16 = 4;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// Block flags: closed for a durable barrier; the tape's last block.
 pub const BARRIER: u8 = 1;
@@ -224,12 +224,14 @@ pub struct Header {
     pub arg: Vec<u8>,
     /// Inert snapshot of the Run's configured Net rules. Empty for a Call.
     pub net_rules: Vec<GrantRule>,
+    pub secret_grants: Vec<hirsel_core_net::SecretGrant>,
 }
 /// The complete encoded header does not fit in block zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeaderTooLarge;
 
 const NET_KIND: u8 = 1;
+const SECRET_KIND: u8 = 11;
 const NET_RULE_LEN: usize = 23;
 
 fn read_net_rule(bytes: &[u8]) -> Rule {
@@ -268,20 +270,14 @@ fn read_tls_rule(c: &mut Cursor<'_>) -> Result<TlsRule, Corrupt> {
     TlsRule::new(&patterns, first, last, trust).ok_or(Corrupt)
 }
 
-fn read_net_rules(bytes: &[u8]) -> Result<Vec<GrantRule>, Corrupt> {
-    if bytes.is_empty() {
-        return Ok(vec![]);
-    }
-    let mut c = Cursor::new(bytes);
-    if c.u8()? != NET_KIND {
-        return Err(Corrupt);
-    }
+fn read_net_rules(c: &mut Cursor<'_>) -> Result<Vec<GrantRule>, Corrupt> {
+    c.u8()?;
     let count = usize::try_from(c.varint()?).map_err(|_| Corrupt)?;
     let mut rules = Vec::new();
     for _ in 0..count {
         if c.bytes.get(c.at) == Some(&2) {
             c.u8()?;
-            rules.push(GrantRule::Tls(read_tls_rule(&mut c)?));
+            rules.push(GrantRule::Tls(read_tls_rule(c)?));
         } else {
             let rule = read_net_rule(c.take(NET_RULE_LEN)?);
             if !rule.valid() {
@@ -290,7 +286,7 @@ fn read_net_rules(bytes: &[u8]) -> Result<Vec<GrantRule>, Corrupt> {
             rules.push(GrantRule::Address(rule));
         }
     }
-    if count == 0 || !c.done() {
+    if count == 0 {
         return Err(Corrupt);
     }
     Ok(rules)
@@ -344,6 +340,26 @@ fn write_net_rules(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
     Ok(out)
 }
 
+fn read_secret_grants(c: &mut Cursor<'_>) -> Result<Vec<hirsel_core_net::SecretGrant>, Corrupt> {
+    let mut grants = Vec::new();
+    while !c.done() {
+        if c.u8()? != SECRET_KIND {
+            return Err(Corrupt);
+        }
+        let mut field = || std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt);
+        let grant =
+            hirsel_core_net::SecretGrant::new(field()?, field()?, field()?).ok_or(Corrupt)?;
+        if grants
+            .iter()
+            .any(|old: &hirsel_core_net::SecretGrant| old.parameter == grant.parameter)
+        {
+            return Err(Corrupt);
+        }
+        grants.push(grant);
+    }
+    Ok(grants)
+}
+
 fn varint_len(value: usize) -> usize {
     (usize::BITS - value.leading_zeros()).div_ceil(7).max(1) as usize
 }
@@ -368,7 +384,16 @@ impl Header {
     }
 
     pub fn encode(&self, revision: [u8; 32]) -> Result<Vec<u8>, HeaderTooLarge> {
-        let grants = write_net_rules(&self.net_rules)?;
+        let mut grants = write_net_rules(&self.net_rules)?;
+        for grant in &self.secret_grants {
+            grants.push(SECRET_KIND);
+            for field in [&grant.parameter, &grant.source, &grant.patterns] {
+                if grants.len().saturating_add(field.len()) > MAX_LEN {
+                    return Err(HeaderTooLarge);
+                }
+                put_bytes(&mut grants, field.as_bytes());
+            }
+        }
         let len = Self::encoded_len(self.identity.len(), self.arg.len(), grants.len())?;
         let mut out = Vec::with_capacity(len);
         out.extend_from_slice(&FORMAT.to_le_bytes());
@@ -413,7 +438,13 @@ impl Header {
         if (kind == KIND_CALL && !grants.is_empty()) || !c.done() {
             return Err(Corrupt);
         }
-        let net_rules = read_net_rules(grants)?;
+        let mut grants = Cursor::new(grants);
+        let net_rules = if grants.bytes.first() == Some(&NET_KIND) {
+            read_net_rules(&mut grants)?
+        } else {
+            vec![]
+        };
+        let secret_grants = read_secret_grants(&mut grants)?;
         Ok(Self {
             kind,
             mode,
@@ -426,6 +457,7 @@ impl Header {
             chooser,
             arg: arg.to_vec(),
             net_rules,
+            secret_grants,
         })
     }
 }
@@ -680,7 +712,7 @@ impl Out {
             out.push(self.error.0);
             put_varint(out, self.error.1);
         }
-        if writes(op) {
+        if writes(op) || (op == op::SEND_SECRET && self.status != OK) {
             put_varint(out, self.written);
         }
         if carries_payload(op) {
@@ -704,7 +736,11 @@ impl Out {
         } else {
             (0, 0)
         };
-        let written = if writes(op) { c.varint()? } else { 0 };
+        let written = if writes(op) || (op == op::SEND_SECRET && status != OK) {
+            c.varint()?
+        } else {
+            0
+        };
         let payload = if carries_payload(op) {
             let b = c.bytes()?;
             if b.len() > PAYLOAD_CHUNK {
@@ -1029,7 +1065,7 @@ impl Decoder {
                 F_GRANT => {
                     let gap = c.varint()?;
                     let kind = c.u8()?;
-                    if kind > ARGS_KIND {
+                    if kind > SECRET_KIND {
                         return Err(Corrupt);
                     }
                     let args = (kind == ARGS_KIND).then(|| c.bytes().map(<[u8]>::to_vec));
@@ -1130,6 +1166,7 @@ pub mod op {
     pub const LISTEN: u8 = 20;
     pub const ACCEPT: u8 = 21;
     pub const TLS_CONNECT: u8 = 22;
+    pub const SEND_SECRET: u8 = 23;
     pub const RECV_BOUNDED: u8 = 27;
     pub const SEND_PAIR: u8 = 26;
     pub const STOPPED: u8 = 28;

@@ -684,6 +684,17 @@ fn tape_http_replays_both_native_engines() {
 /// inputs, with a counting provider in place of the CLI's refuse-all provider.
 #[test]
 fn cli_replays_tls_offline() {
+    cli_tls_replay(false);
+}
+
+/// TLS-5 and TLS-6, TL10–TL12. The permitted peer receives the exact
+/// synthetic grant bytes. Plain TCP and the wrong verified name receive zero.
+#[test]
+fn cli_replays_tls_without_secret_sources() {
+    cli_tls_replay(true);
+}
+
+fn cli_tls_replay(with_secret: bool) {
     use rustls::{
         ServerConfig, ServerConnection, StreamOwned,
         pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
@@ -698,30 +709,63 @@ fn cli_replays_tls_offline() {
     const CA: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/ca.pem");
     const LEAF: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/alpha.pem");
     const KEY: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/alpha.key.pem");
+    const BETA: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/beta.pem");
+    const BETA_KEY: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/beta.key.pem");
     const PEER: &str = include_str!("../../hirsel-core-rt/testdata/tls/alpha.sha256");
     const REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: alpha.test\r\n\r\n";
     const RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
-    let mut server =
-        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![CertificateDer::from_pem_slice(LEAF).unwrap()],
-                PrivateKeyDer::from_pem_slice(KEY).unwrap(),
-            )
-            .unwrap();
-    server.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let server = |leaf, key, alpn| {
+        let mut config =
+            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![CertificateDer::from_pem_slice(leaf).unwrap()],
+                    PrivateKeyDer::from_pem_slice(key).unwrap(),
+                )
+                .unwrap();
+        if alpn {
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        }
+        Arc::new(config)
+    };
+    let mut raw = [0; 32];
+    let mut file_bytes = [0; 32];
+    if with_secret {
+        let mut random = std::fs::File::open("/dev/urandom").unwrap();
+        random.read_exact(&mut raw).unwrap();
+        random.read_exact(&mut file_bytes).unwrap();
+    }
+    let token = crate::call::hex(&raw);
+    let expected_request = if with_secret {
+        [b"before:", token.as_bytes(), b":after\n", &file_bytes, b":after\nsealed:after\n"].concat()
+    } else {
+        REQUEST.to_vec()
+    };
+    let response = if with_secret { "accepted\n" } else { RESPONSE };
     let peer = std::thread::spawn(move || {
+        if with_secret {
+            let (mut plain, _) = listener.accept().unwrap();
+            let mut refused = Vec::new();
+            plain.read_to_end(&mut refused).unwrap();
+            assert!(refused.is_empty(), "plaintext reached plain TCP");
+            let (socket, _) = listener.accept().unwrap();
+            let mut beta = StreamOwned::new(
+                ServerConnection::new(server(BETA, BETA_KEY, false)).unwrap(), socket);
+            beta.read_to_end(&mut refused).unwrap();
+            assert!(refused.is_empty(), "plaintext reached beta.test");
+        }
         let (socket, _) = listener.accept().unwrap();
-        let mut stream = StreamOwned::new(ServerConnection::new(Arc::new(server)).unwrap(), socket);
-        let mut request = [0; REQUEST.len()];
+        let mut stream = StreamOwned::new(
+            ServerConnection::new(server(LEAF, KEY, !with_secret)).unwrap(), socket);
+        let mut request = vec![0; expected_request.len()];
         stream.read_exact(&mut request).unwrap();
-        assert_eq!(request, REQUEST);
-        stream.write_all(RESPONSE.as_bytes()).unwrap();
+        assert!(request == expected_request, "wrong plaintext reached the permitted peer");
+        stream.write_all(response.as_bytes()).unwrap();
         stream.conn.send_close_notify();
         stream.flush().unwrap();
     });
@@ -733,7 +777,11 @@ fn cli_replays_tls_offline() {
     let dir = tempfile::tempdir().unwrap();
     let app = dir.path().join("app");
     std::fs::create_dir(&app).unwrap();
-    let fixture = include_str!("../../../core/front/tape/tls.hirsel");
+    let fixture = if with_secret {
+        include_str!("../../../core/front/tape/tls-secret.hirsel")
+    } else {
+        include_str!("../../../core/front/tape/tls.hirsel")
+    };
     std::fs::write(
         app.join("main.hirsel"),
         fixture.replace("12345", &port.to_string()),
@@ -791,10 +839,15 @@ fn cli_replays_tls_offline() {
         "Net=Connect 127.0.0.1/32 {port}-{port};Tls *.test {port}-{port} System;Tls alpha.test {port}-{port} Roots=sha256:{:x}",
         <sha2::Sha256 as sha2::Digest>::digest(CA)
     );
-    let record = invoke(
-        "run",
-        &["--grant", &net, "--grant", "Stdout", "--record", tape_path],
-    )
+    let mut grants = vec!["--grant", &net, "--grant", "Stdout", "--record", tape_path];
+    let file = dir.path().join("local-credential");
+    let from_file = format!("Secret:local=file:{} to alpha.test", file.display());
+    if with_secret {
+        std::fs::write(&file, file_bytes).unwrap();
+        grants.extend(["--grant", "Secret:token=env:HIRSEL_TL10_TOKEN to alpha.test", "--grant", &from_file]);
+    }
+    let record = invoke("run", &grants)
+    .env("HIRSEL_TL10_TOKEN", &token)
     .env("SSL_CERT_FILE", &roots)
     .env_remove("SSL_CERT_DIR")
     .env_remove("HIRSEL_TL9_REPLAY")
@@ -821,7 +874,11 @@ fn cli_replays_tls_offline() {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    let expected = format!("{RESPONSE}1 {digest_words}\n");
+    let expected = if with_secret {
+        format!("[secret][secret]{response}")
+    } else {
+        format!("{RESPONSE}1 {digest_words}\n")
+    };
     assert_eq!(recorded, expected);
     assert_eq!(record_log, expected);
     assert_eq!(
@@ -832,10 +889,14 @@ fn cli_replays_tls_offline() {
     assert!(!sealed.windows(CA.len()).any(|bytes| bytes == CA));
     assert!(!sealed.windows(LEAF.len()).any(|bytes| bytes == LEAF));
 
+    if with_secret {
+        std::fs::remove_file(&file).unwrap();
+    }
     std::fs::remove_file(&roots).unwrap();
     let replay = invoke("replay", &["--tape", tape_path])
         .env("SSL_CERT_FILE", &roots)
         .env_remove("SSL_CERT_DIR")
+        .env_remove("HIRSEL_TL10_TOKEN")
         .env("HIRSEL_TL9_REPLAY", "1")
         .output()
         .unwrap();
@@ -857,6 +918,26 @@ fn cli_replays_tls_offline() {
     );
     assert_eq!(code, Some(0), "{error}");
     assert!(export.contains("op=22"), "{export}");
+    if with_secret {
+        assert!(export.contains("op=23"));
+        assert!(export.contains("grant `token` [secret] to alpha.test"));
+        assert!(export.contains("grant `local` [secret] to alpha.test"));
+        for bytes in [raw.as_slice(), token.as_bytes(), file_bytes.as_slice()] {
+            for form in [
+                bytes,
+                crate::call::hex(bytes).as_bytes(),
+                crate::call::base64(bytes).as_bytes(),
+            ] {
+                for output in [
+                    sealed.as_slice(), &record.stdout, &record.stderr, &replay.stdout, &replay.stderr,
+                    export.as_bytes(),
+                ] {
+                    assert!(!output.windows(form.len()).any(|word| word == form),
+                        "a Secret representation escaped");
+                }
+            }
+        }
+    }
 }
 
 /// An ISA cap changes the machine body called by the entry, and has no tape

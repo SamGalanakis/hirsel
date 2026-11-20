@@ -94,8 +94,9 @@ running the program. `--diagnose` allows a different revision, labels it, and
 reports the first divergent request at its source position. It always replays
 and never continues with live effects.
 
-Tape format 3 records socket addresses and received bytes, and verifies the
-bytes a program offers to send.
+Tape format 4 records socket addresses and received bytes, and verifies the
+bytes a program offers to send. For `tls.send_secret`, it records the
+Secret designation and verifies the surrounding bytes.
 
 `tape show --include-credentials` writes the header and stored frames to standard
 output. Source positions appear in diagnose replay.

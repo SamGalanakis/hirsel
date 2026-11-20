@@ -90,6 +90,7 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | `HostFile` | resource, mechanical | `send` | 8 | resource |
 | `Socket`, `ReadHalf`, `WriteHalf`, `Listener` | resource, mechanical | `send` | 8 | resource |
 | `Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Env`, `Process`, `Tasks` | plain | `shareable`, `send` | 8 | capability |
+| `Secret` | plain | `shareable`, `send` | 8 | capability |
 | `Args` | plain | `shareable`, `send` | 8 | nothing |
 | `Site` | plain | `shareable`, `send`, `key` | 8 | nothing |
 | `Causes` | own | `send` | 8 | opaque owner |

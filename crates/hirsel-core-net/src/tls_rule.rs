@@ -49,6 +49,10 @@ pub enum Pattern {
 }
 
 impl Pattern {
+    pub fn parse_list(patterns: &str) -> Option<Box<[Self]>> {
+        patterns.split(',').map(Self::parse).collect()
+    }
+
     pub fn parse(pattern: &str) -> Option<Self> {
         if let Some(suffix) = pattern.strip_prefix("*.") {
             let Name::Dns(suffix) = Name::parse(suffix)? else {
@@ -58,6 +62,52 @@ impl Pattern {
         } else {
             Name::parse(pattern).map(Self::Exact)
         }
+    }
+
+    pub fn intersection(left: &[Self], right: &[Self]) -> Box<[Self]> {
+        // A nonempty pairwise intersection always equals one of its inputs.
+        // Visit each input pattern once so overlaps do not multiply storage.
+        let covered = |pattern: &Pattern, rules: &[Pattern]| {
+            rules.iter().any(|rule| pattern.is_subset_of(rule))
+        };
+        left.iter()
+            .filter(|pattern| covered(pattern, right))
+            .chain(
+                right
+                    .iter()
+                    .filter(|pattern| covered(pattern, left) && !left.contains(pattern)),
+            )
+            .cloned()
+            .collect()
+    }
+
+    pub fn list_text(patterns: &[Self]) -> String {
+        use std::fmt::Write as _;
+        let mut text = String::new();
+        for pattern in patterns {
+            if !text.is_empty() {
+                text.push(',');
+            }
+            match pattern {
+                Pattern::Exact(Name::Ip(ip)) => write!(text, "{ip}").unwrap(),
+                Pattern::Exact(Name::Dns(name)) => text.push_str(name),
+                Pattern::Wildcard(suffix) => {
+                    text.push_str("*.");
+                    text.push_str(suffix);
+                }
+            }
+        }
+        text
+    }
+
+    pub fn list_bytes(patterns: &[Self]) -> u64 {
+        patterns
+            .iter()
+            .map(|pattern| match pattern {
+                Pattern::Exact(Name::Dns(name)) | Pattern::Wildcard(name) => name.len() as u64 + 32,
+                Pattern::Exact(Name::Ip(_)) => 32,
+            })
+            .sum()
     }
 
     fn includes_suffix(name: &str, suffix: &str) -> bool {
@@ -119,10 +169,7 @@ impl TlsRule {
             return None;
         }
         Some(Self {
-            patterns: patterns
-                .split(',')
-                .map(Pattern::parse)
-                .collect::<Option<_>>()?,
+            patterns: Pattern::parse_list(patterns)?,
             first,
             last,
             trust,
@@ -160,20 +207,7 @@ impl TlsRule {
         if self.trust != other.trust || first > last {
             return None;
         }
-        // A nonempty pairwise intersection always equals one of its inputs.
-        // Visit each input pattern once so overlaps do not multiply storage.
-        let covered = |pattern: &Pattern, rules: &[Pattern]| {
-            rules.iter().any(|rule| pattern.is_subset_of(rule))
-        };
-        let patterns: Box<[_]> = self
-            .patterns
-            .iter()
-            .filter(|pattern| covered(pattern, &other.patterns))
-            .chain(other.patterns.iter().filter(|pattern| {
-                covered(pattern, &self.patterns) && !self.patterns.contains(pattern)
-            }))
-            .cloned()
-            .collect();
+        let patterns = Pattern::intersection(&self.patterns, &other.patterns);
         (!patterns.is_empty()).then_some(Self {
             patterns,
             first,
@@ -193,32 +227,11 @@ impl TlsRule {
     }
 
     pub fn pattern_text(&self) -> String {
-        use std::fmt::Write as _;
-        let mut text = String::new();
-        for pattern in &self.patterns {
-            if !text.is_empty() {
-                text.push(',');
-            }
-            match pattern {
-                Pattern::Exact(Name::Ip(ip)) => write!(text, "{ip}").unwrap(),
-                Pattern::Exact(Name::Dns(name)) => text.push_str(name),
-                Pattern::Wildcard(suffix) => {
-                    text.push_str("*.");
-                    text.push_str(suffix);
-                }
-            }
-        }
-        text
+        Pattern::list_text(&self.patterns)
     }
 
     /// Accommodate the retained names as well as the fixed rule charge.
     pub fn pattern_bytes(&self) -> u64 {
-        self.patterns
-            .iter()
-            .map(|pattern| match pattern {
-                Pattern::Exact(Name::Dns(name)) | Pattern::Wildcard(name) => name.len() as u64 + 32,
-                Pattern::Exact(Name::Ip(_)) => 32,
-            })
-            .sum()
+        Pattern::list_bytes(&self.patterns)
     }
 }

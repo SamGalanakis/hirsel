@@ -16,6 +16,8 @@ pub(crate) enum Kernel {
     Unique,
     Host(HostOp),
     Net(HostOp),
+    SecretSeal,
+    SecretRender,
     ArgsLen,
     ArgsGet,
     NewOwner(Option<Counted>),
@@ -317,6 +319,10 @@ operations! {
     ("host", "send_pair", Lane::Runtime(Kernel::Net(HostOp::SendPair)), "B", "wire-w1a-1063", false),
     ("net", "narrow", Lane::Runtime(Kernel::Net(HostOp::NetNarrow)), "B", "wire-w1a-1063", false),
     ("tls", "connect", Lane::Runtime(Kernel::Net(HostOp::TlsConnect)), "B", "tls-t1-1442", false),
+    ("tls", "send_secret", Lane::Runtime(Kernel::Net(HostOp::SendSecret)), "B", "tls-t4-1447", false),
+    ("secret", "seal", Lane::Runtime(Kernel::SecretSeal), "A", "tls-t4-1447", false),
+    ("secret", "narrow", Lane::Runtime(Kernel::Net(HostOp::SecretNarrow)), "B", "tls-t4-1447", false),
+    ("secret", "render", Lane::Runtime(Kernel::SecretRender), "A", "tls-t4-1447", false),
     ("net", "split", Lane::Runtime(Kernel::Net(HostOp::NetSplit)), "B", "wire-w1a-1063", false),
     ("string", "new", Lane::Runtime(Kernel::StringList("new")), "A", "core-ops-914", false),
     ("string", "as_bytes", Lane::Runtime(Kernel::CarrierView), "A", "core-ops-914", false),
@@ -697,6 +703,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::Stream(op) => self.runtime_stream(op, vals, result, n),
             Kernel::Host(op) => self.runtime_host(op, f, vals, result, n),
             Kernel::Net(op) => self.runtime_net(op, f, vals, result, n),
+            Kernel::SecretSeal => self.runtime_net(HostOp::SecretSeal, f, vals, result, n),
+            Kernel::SecretRender => self.static_string(b"[secret]", self.bare(result), n),
             Kernel::Spawn => self.runtime_spawn(
                 types[0], types[1], vals[0]?, vals[1]?, vals[2], vals[3]?, result, n,
             ),
@@ -1495,6 +1503,8 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::TapeAcross => true,
             Kernel::CarrierMove
             | Kernel::CarrierView
+            | Kernel::SecretSeal
+            | Kernel::SecretRender
             | Kernel::StringShorten
             | Kernel::StringList(_)
             | Kernel::Unique
@@ -3078,7 +3088,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let u = Ty::Scalar(Scalar::U64);
         let key = if matches!(
             op,
-            HostOp::Accept | HostOp::RecvBounded | HostOp::SendPair | HostOp::NetSplit
+            HostOp::Accept
+                | HostOp::RecvBounded
+                | HostOp::SendPair
+                | HostOp::SendSecret
+                | HostOp::NetSplit
         ) {
             self.runtime_key(vals[0]?, n)
         } else {
@@ -3117,6 +3131,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     operands.extend([vals[1]?, vals[2]?]);
                     operands.extend(self.net_until(self.p.fns[f].params[3].ty, vals[3]?, n)?);
                 }
+                HostOp::SendSecret => {
+                    operands.extend([vals[1]?, vals[2]?, vals[3]?]);
+                    operands.extend(self.net_until(self.p.fns[f].params[4].ty, vals[4]?, n)?);
+                }
+                HostOp::SecretSeal | HostOp::SecretNarrow => operands.push(vals[1]?),
                 HostOp::NetSplit => {}
                 _ => unreachable!(),
             }
@@ -3127,6 +3146,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let args: Vec<_> = operands.into_iter().map(Arg::Value).collect();
             self.runtime_outputs::<8>(RtOp::Host(op), &args, n)?
         };
+        if op == HostOp::SecretSeal {
+            self.consume(vals[0], n);
+            self.drop_field(vals[0], self.p.fns[f].params[0].ty, n);
+        }
         let (value, error, code, written) = (values[0], values[1], values[2], values[3]);
         if op == HostOp::NetSplit {
             self.consume(vals[0], n);
@@ -3136,13 +3159,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.runtime_store(to, &[Step::Field(1)], u, written, n);
             return Some(self.pointer(to, n));
         }
+        let policy_result = matches!(
+            op,
+            HostOp::NetNarrow | HostOp::SecretSeal | HostOp::SecretNarrow
+        );
         let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
         self.runtime_result(
             result,
             ok,
             n,
             |cx, to, ty| {
-                if op == HostOp::NetNarrow || matches!(op, HostOp::RecvBounded | HostOp::SendPair) {
+                if policy_result || matches!(op, HostOp::RecvBounded | HostOp::SendPair) {
                     cx.runtime_case_payload(to, 0, ty, Some(value), n);
                 } else if op == HostOp::Connect {
                     if let Some(at) =
@@ -3167,7 +3194,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if let Some(at) =
                     cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
                 {
-                    if op == HostOp::NetNarrow {
+                    if policy_result {
                         let invalid = cx
                             .runtime_compare(Ty::Scalar(Scalar::U8), error, 1, n)
                             .unwrap();
@@ -3202,8 +3229,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         if let Some(cap) =
                             cx.runtime_field(at, &[Step::CaseField { case: 1, field: 0 }], cap, n)
                         {
-                            cx.runtime_store(cap, &[Step::Field(0)], u, value, n);
-                            cx.runtime_store(cap, &[Step::Field(1)], u, written, n);
+                            cx.runtime_capacity(cap, value, written, n);
                         }
                         cx.jump(join, &[], n);
                         cx.start(join);

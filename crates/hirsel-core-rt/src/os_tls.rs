@@ -24,7 +24,6 @@ pub(crate) struct Streams {
 }
 
 pub(crate) struct Stream {
-    _verified_name: Name,
     connection: ClientConnection,
     read_error: Option<Outcome>,
     write_error: Option<Outcome>,
@@ -53,7 +52,6 @@ impl Stream {
         let connection =
             ClientConnection::new(Arc::new(config), server_name).map_err(protocol_error)?;
         Ok(Self {
-            _verified_name: name,
             connection,
             read_error: None,
             write_error: None,

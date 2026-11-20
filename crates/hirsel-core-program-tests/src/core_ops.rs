@@ -750,3 +750,85 @@ fn exit(n: Net, c: Clock, kind: u64) -> u64 waits {
         );
     }
 }
+
+/// TL13. A deadline at the current model time permits one send attempt.
+/// The one-record queue commits "A" then blocks. The peer acknowledges only
+/// that prefix, and both send operations subsequently observe Reset.
+#[test]
+fn scripted_secret_send_spends_the_write_half() {
+    use hirsel_core_net::{
+        GrantRule, Sockets,
+        model::{Address, Config, Model, TlsHandshake, TlsIdentity, TlsScript, TlsStep},
+    };
+
+    let source = r#"
+fn f(n: Net, c: Clock) -> u64 waits {
+    let peer = Addr(ip: V4(2130706433u32), port: 443)
+    let socket = result.unwrap(host.connect(n, peer, Never))
+    let empty: List[String] = list.new()
+    let (reader, writer, _) = result.unwrap(tls.connect(n, take socket, "alpha.test", System, empty, Never))
+    let mut r = take reader
+    let mut w = take writer
+    let b = result.unwrap(string.into_bytes("BCD"))
+    let s = result.unwrap(secret.seal(take b, "*.test"))
+    let narrowed = result.unwrap(secret.narrow(s, "ALPHA.TEST."))
+    let before = result.unwrap(string.into_bytes("A"))
+    let after = result.unwrap(string.into_bytes("E"))
+    match tls.send_secret(mut w, before, narrowed, after, At(c, host.mono_ns(c))) {
+        Error(TimedOut) => {},
+        _ => return 1,
+    }
+    match host.send_pair(mut w, after, before, Never) {
+        Error(Reset) => {},
+        _ => return 2,
+    }
+    match tls.send_secret(mut w, after, s, before, Never) {
+        Error(Reset) => {},
+        _ => return 3,
+    }
+    let mut reply: Bytes = result.unwrap(list.with_capacity(1))
+    if result.unwrap(host.recv_bounded(mut r, mut reply, 1, Never)) == 1 && reply[0] == 33u8 {
+        0u64
+    } else {
+        4u64
+    }
+}
+"#;
+    let (program, functions) = crate::SourceProgram::lower(source, None);
+    let model = Model::new(Config {
+        queue_bytes: 1,
+        max_prefix: 1,
+        latency_ns: 3,
+        ..Config::default()
+    });
+    model.script_tls_peer(
+        Address {
+            family: 0,
+            hi: 0,
+            lo: 0x7f000001,
+            port: 443,
+        },
+        TlsScript {
+            handshake: TlsHandshake::After {
+                delay_ns: 3,
+                result: Ok(TlsIdentity {
+                    protocol: None,
+                    peer: [7; 32],
+                }),
+            },
+            steps: vec![TlsStep::Expect(b"A".to_vec()), TlsStep::Send(b"!".to_vec())],
+        },
+    );
+    let rules = vec![
+        GrantRule::parse("Connect 127.0.0.1/32 443-443").unwrap(),
+        GrantRule::parse("Tls *.test 443-443 System").unwrap(),
+    ];
+    let network = eval::Network {
+        grants: [(1, rules)].into(),
+        sockets: Sockets::with_model(model.clone()),
+    };
+    let report = eval::run_network(&program, functions["f"], &[1, 2], 4 << 20, network);
+    assert_eq!(report.outcome, eval::Outcome::Returned(vec![0]));
+    assert_eq!(report.used, 0);
+    assert_eq!((model.live_handles(), model.pending()), (0, 0));
+}

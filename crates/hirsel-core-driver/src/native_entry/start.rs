@@ -121,6 +121,11 @@ pub(super) fn emit(
         (abi::OS_CONFIG_DIRECTORY_OPS, directory_ops),
         (abi::OS_CONFIG_PROCESS_OPS, process_ops),
         (abi::OS_CONFIG_SOCKET_ACTIVATION, socket_activation),
+        (abi::OS_CONFIG_SECRET_GRANTS, f.address(data.secret_grants)),
+        (
+            abi::OS_CONFIG_SECRET_GRANTS_LEN,
+            f.constant(plan.secret_grants.len() as u64),
+        ),
     ] {
         f.store(value, config, offset);
     }

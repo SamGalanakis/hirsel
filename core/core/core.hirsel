@@ -114,6 +114,10 @@ pub opaque type Process
 
 pub opaque type Tasks
 
+pub opaque type Secret
+
+pub type SecretError = Invalid | Capacity(Capacity)
+
 pub opaque resource type Socket
 
 pub opaque resource type ReadHalf

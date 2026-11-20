@@ -301,6 +301,7 @@ pub struct Tape {
 struct Startup {
     arg: Vec<u8>,
     net_rules: Vec<hirsel_core_net::GrantRule>,
+    secret_grants: Vec<hirsel_core_net::SecretGrant>,
 }
 
 fn handle(generation: u32, ordinal: usize) -> u64 {
@@ -516,7 +517,7 @@ impl Replayer {
 fn socket_op(op: u8) -> bool {
     matches!(
         op,
-        CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR | TLS_CONNECT
+        CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR | TLS_CONNECT | SEND_SECRET
     )
 }
 
@@ -589,7 +590,19 @@ unsafe fn socket_args(request: &Request) -> Args {
         } else {
             args.push(0);
         }
-        if request.operation == SEND_PAIR {
+        if matches!(request.operation, SEND_PAIR | SEND_SECRET) {
+            if request.operation == SEND_SECRET {
+                let send = &*request.path.cast::<crate::secret::SendRequest>();
+                let (kind, ordinal) = match send.origin {
+                    crate::secret::Origin::Granted(ordinal) => (0, ordinal),
+                    crate::secret::Origin::Sealed(ordinal) => (1, ordinal),
+                };
+                args.push(kind);
+                put_varint(&mut args, ordinal);
+                let patterns = hirsel_core_net::Pattern::list_text(&send.patterns);
+                put_varint(&mut args, patterns.len() as u64);
+                args.extend_from_slice(patterns.as_bytes());
+            }
             let tail = &*n.send_tail;
             let mut tail_len = Vec::new();
             put_varint(&mut args, request.buffer.len as u64);
@@ -731,6 +744,7 @@ impl Tape {
                     Startup {
                         arg: header.arg.clone(),
                         net_rules: vec![],
+                        secret_grants: vec![],
                     },
                 )
             }
@@ -790,6 +804,7 @@ impl Tape {
                     Startup {
                         arg: stored.arg,
                         net_rules: stored.net_rules,
+                        secret_grants: stored.secret_grants,
                     },
                 )
             }
@@ -1043,7 +1058,7 @@ fn ordinal_of(h: u64) -> usize {
 }
 
 unsafe fn source_handle(request: &Request, inner: Inner) -> u64 {
-    let direction = if matches!(request.operation, RECV_BOUNDED | SEND_PAIR) {
+    let direction = if matches!(request.operation, RECV_BOUNDED | SEND_PAIR | SEND_SECRET) {
         // SAFETY: owned network operations pin this operand through delivery.
         unsafe { (*request.path.cast::<crate::net::NetworkRequest>()).direction }
     } else {
@@ -1479,6 +1494,10 @@ unsafe fn replay_out(
                 );
             }
             r.buffer.len += out.payload.len();
+        }
+    } else if op == SEND_SECRET {
+        if out.value != 0 || (ok && out.written != 0) {
+            return Err(Fault::Corrupt);
         }
     } else if op == SEND_PAIR && ok {
         // SAFETY: the send adapter pins the tail carrier through delivery.

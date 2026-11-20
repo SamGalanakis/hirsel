@@ -169,7 +169,8 @@ unsafe fn connect(
             // stack, outside the scheduler's socket callback and registry lock.
             state.roots = Some(cache.get_or_init(crate::os_tls::system_roots).clone());
         }
-        let canonical = match state.name.as_ref().unwrap() {
+        let verified = state.name.as_ref().unwrap().clone();
+        let canonical = match &verified {
             Name::Dns(name) => name.to_string(),
             Name::Ip(ip) => ip.to_string(),
         };
@@ -209,11 +210,21 @@ unsafe fn connect(
         };
         let mut outcome = hirsel_core_host(context, &provider, &mut request);
         if outcome.status == 0 && outcome.error == IoError::OK {
+            let _commit = crate::sequencer::enter();
             if let Some(tape) = tape {
-                let _commit = crate::sequencer::enter();
-                (*files).connected.remove(&key);
                 outcome = tape.carrier(outcome);
             }
+            (*files).connected.remove(&key);
+            (*files)
+                .connected
+                .insert(outcome.value, (address, provider));
+            (*files).tls_writes.insert(
+                outcome.value,
+                crate::secret::TlsWrite {
+                    name: verified,
+                    spent: false,
+                },
+            );
         } else if state.consumed {
             let _commit = crate::sequencer::enter();
             (*files).connected.remove(&key);

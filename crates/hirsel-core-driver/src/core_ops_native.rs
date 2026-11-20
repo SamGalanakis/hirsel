@@ -118,6 +118,7 @@ fn core_operations(backend: Backend) {
             grant_mask: 1 << 9,
             logical_charge_report: None,
             net_rules: vec![],
+            secret_grants: vec![],
             observed: None,
         };
         let built = match product.build(&entry, &options) {
@@ -203,6 +204,7 @@ fn counted_operations(backend: Backend) {
             grant_mask: 0,
             logical_charge_report: None,
             net_rules: vec![],
+            secret_grants: vec![],
             observed: None,
         };
         let built = match product.build(&entry, &options) {
@@ -276,6 +278,7 @@ fn args_operations(backend: Backend, len_only: bool) {
             grant_mask: 0,
             logical_charge_report: None,
             net_rules: vec![],
+            secret_grants: vec![],
             observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -357,6 +360,7 @@ fn stream_operations(backend: Backend) {
             grant_mask: (1 << 4) | (1 << 5) | (1 << 9),
             logical_charge_report: None,
             net_rules: vec![],
+            secret_grants: vec![],
             observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -433,6 +437,7 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
             }),
         logical_charge_report: None,
         net_rules: vec![],
+        secret_grants: vec![],
         observed: None,
     };
     let built = product.build(&entry, &options).unwrap();
@@ -523,6 +528,7 @@ fn host_operations(backend: Backend) {
             grant_mask: (1 << 2) | (1 << 4) | (1 << 9),
             logical_charge_report: None,
             net_rules: vec![],
+            secret_grants: vec![],
             observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -630,6 +636,7 @@ pub fn proof_clone_run() -> u64 {
         grant_mask: 0,
         logical_charge_report: None,
         net_rules: vec![],
+        secret_grants: vec![],
         observed: None,
     };
     let built = product.build(&entry, &options).unwrap();

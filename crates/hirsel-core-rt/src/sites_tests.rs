@@ -66,6 +66,8 @@ fn run(sources: *const SourceTable, entry: Entry, explicit_owner: bool) -> (u8, 
         directory_ops: std::ptr::null(),
         process_ops: std::ptr::null(),
         socket_activation: std::ptr::null(),
+        secret_grants: core::ptr::null(),
+        secret_grants_len: 0,
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,

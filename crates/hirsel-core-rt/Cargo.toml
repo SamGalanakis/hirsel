@@ -29,6 +29,7 @@ libmimalloc-sys = { version = "=0.1.49", optional = true }
 ring = "=0.17.14"
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "=0.8.5"
+zeroize = "=1.9.2"
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 hirsel-tape-format = { path = "../hirsel-tape-format" }
 

@@ -49,6 +49,7 @@ fn modeled(op: u8) -> bool {
             | RECV_BOUNDED
             | SEND_PAIR
             | TLS_CONNECT
+            | SEND_SECRET
             | MONO_NS
             | WALL_MS
             | SLEEP_UNTIL
@@ -111,6 +112,9 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
         }
         if r.operation == TLS_CONNECT {
             return tls_step(&p.model, r, token);
+        }
+        if r.operation == SEND_SECRET {
+            return secret_step(&p.model, r, token);
         }
         let n = &mut *r.path.cast_mut().cast::<NetworkRequest>();
         let address = hirsel_core_net::model::Address {
@@ -185,6 +189,33 @@ fn pending(deadline: Option<u64>) -> Step {
         kind: STEP_PENDING,
         deadline_ns: deadline.unwrap_or(0),
         ..Step::default()
+    }
+}
+
+unsafe fn secret_step(model: &Model, request: &Request, token: u64) -> Step {
+    // SAFETY: SEND_SECRET pins the three operands and progress through delivery.
+    unsafe {
+        let send = &mut *request.path.cast_mut().cast::<crate::secret::SendRequest>();
+        let parts = [&request.buffer, &send.secret, &*send.network.send_tail]
+            .map(|part| crate::tls::bytes(part));
+        let deadline = send.network.until.map(|(_, _, at)| at);
+        let reply = if let Some(reply) =
+            model.attempt_secret(request.handle, parts, &mut send.committed, token)
+        {
+            reply
+        } else if deadline.is_some_and(|at| at <= model.now()) {
+            model.abort(token, false)
+        } else {
+            return pending(deadline);
+        };
+        let mut out = outcome(&reply);
+        if reply.error != 0 {
+            out.written = send.committed as u64;
+        }
+        Step {
+            outcome: out,
+            ..Step::default()
+        }
     }
 }
 
@@ -266,7 +297,11 @@ unsafe extern "C" fn abort(
         if r.operation == TLS_CONNECT {
             tls_release(&mut *r.path.cast_mut().cast::<TlsRequest>(), r.handle);
         }
-        outcome(&reply)
+        let mut out = outcome(&reply);
+        if r.operation == SEND_SECRET {
+            out.written = (*r.path.cast::<crate::secret::SendRequest>()).committed as u64;
+        }
+        out
     }
 }
 /// # Safety

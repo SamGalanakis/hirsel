@@ -361,6 +361,9 @@ unsafe fn owned_op(
     unsafe {
         let files = (*context).host_files;
         let tape = (*files).net_tape;
+        if op == SEND_PAIR && write_spent(files, key) {
+            return AddressOutcome::new(RESET, Address::default());
+        }
         let mut network = NetworkRequest {
             send_tail,
             address: Address::default(),
@@ -401,14 +404,7 @@ unsafe fn owned_op(
                 outcome
             }
         } else {
-            let provider = {
-                let _commit = crate::sequencer::enter();
-                (*files)
-                    .connected
-                    .get(&(key & !3))
-                    .map(|record| record.1)
-                    .unwrap_or(*(*(*context).run).provider)
-            };
+            let provider = socket_provider(context, key);
             hirsel_core_host(context, &provider, &mut request)
         };
         if op == RECV_BOUNDED {
@@ -508,6 +504,125 @@ pub unsafe extern "C" fn hirsel_core_host_send_pair(
         .outcome()
     }
 }
+const RESET: Outcome = Outcome {
+    error: IoError { tag: 5, code: 0 },
+    value: 0,
+    written: 0,
+    status: 0,
+};
+
+unsafe fn write_spent(files: *mut crate::host_file::Files, key: u64) -> bool {
+    let _commit = crate::sequencer::enter();
+    unsafe {
+        (*files)
+            .tls_writes
+            .get(&(key & !3))
+            .is_some_and(|write| write.spent)
+    }
+}
+
+unsafe fn socket_provider(context: *mut Context, key: u64) -> Provider {
+    let _commit = crate::sequencer::enter();
+    unsafe {
+        (*(*context).host_files)
+            .connected
+            .get(&(key & !3))
+            .map(|record| record.1)
+            .unwrap_or(*(*(*context).run).provider)
+    }
+}
+
+/// # Safety
+/// The write half is exclusively borrowed. The two language carriers and
+/// their initialized prefixes are pinned through delivery.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_send_secret(
+    context: *mut Context,
+    key: u64,
+    before: *const Buffer,
+    s: u64,
+    after: *const Buffer,
+    until_kind: u8,
+    clock: u64,
+    deadline_ns: u64,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        crate::process::deny_describe_capability(context);
+        let files = (*context).host_files;
+        let secret = crate::secret::resolve(context, s);
+        {
+            let _commit = crate::sequencer::enter();
+            let Some(write) = (*files).tls_writes.get(&(key & !3)) else {
+                return DENIED;
+            };
+            if key & 3 != 2 {
+                return DENIED;
+            }
+            if write.spent {
+                return RESET;
+            }
+            if !secret
+                .patterns
+                .iter()
+                .any(|pattern| pattern.covers(&write.name))
+            {
+                return DENIED;
+            }
+        }
+        let bytes = secret
+            .bytes
+            .as_ref()
+            .map_or(&[][..], |bytes| bytes.as_slice());
+        let mut send = crate::secret::SendRequest {
+            network: NetworkRequest {
+                send_tail: after,
+                address: Address::default(),
+                sockets: &raw mut (*files).sockets,
+                until: deadline(context, until_kind, clock, deadline_ns),
+                backlog: 0,
+                connecting: None,
+                denied: false,
+                direction: 2,
+                os: &crate::os_net::OPERATIONS,
+                tls: &raw mut (*files).tls,
+                pending_write: false,
+            },
+            secret: Buffer {
+                data: bytes.as_ptr().cast_mut(),
+                len: bytes.len(),
+                capacity: 0,
+            },
+            origin: secret.origin,
+            patterns: secret.patterns,
+            committed: 0,
+        };
+        let tape = (*files).net_tape;
+        let (provider, handle) = tape.map_or_else(
+            || (socket_provider(context, key), key),
+            |tape| (tape.provider, tape.handle(key)),
+        );
+        let mut request = Request {
+            operation: SEND_SECRET,
+            mode: 0,
+            handle,
+            path: (&raw mut send).cast(),
+            path_len: size_of::<crate::secret::SendRequest>(),
+            buffer: *before,
+            site,
+        };
+        let outcome = hirsel_core_host(context, &provider, &mut request);
+        if (outcome.status != 0 || outcome.error != IoError::OK)
+            && (outcome.written != 0 || send.committed != 0)
+        {
+            let _commit = crate::sequencer::enter();
+            (*files).tls_writes.get_mut(&(key & !3)).unwrap().spent = true;
+        }
+        outcome
+    }
+}
+
 /// # Safety
 /// Consumes the sole Socket carrier. No allocation, admission or replay point.
 #[unsafe(no_mangle)]
@@ -541,6 +656,9 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
     let _commit = crate::sequencer::enter();
     unsafe {
         let files = (*context).host_files;
+        if key & 3 == 2 {
+            (*files).tls_writes.remove(&(key & !3));
+        }
         let source = match (*files).net_tape {
             Some(tape) => tape.source(key),
             None => Some(key),

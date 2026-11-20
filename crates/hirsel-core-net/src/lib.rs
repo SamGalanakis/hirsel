@@ -122,6 +122,8 @@ pub mod model;
 pub mod tls;
 mod tls_rule;
 pub use tls_rule::{Name, Pattern, TlsRule, TlsTrust};
+mod secret_grant;
+pub use secret_grant::{SecretGrant, SecretSource};
 
 #[cfg(test)]
 mod tests {

@@ -47,6 +47,7 @@ pub(crate) struct Plan<'a> {
     root_limit: u64,
     grant_mask: u64,
     net_rules: &'a [hirsel_core_net::GrantRule],
+    secret_grants: Vec<Option<&'a hirsel_core_net::SecretGrant>>,
     directories: &'a [String],
     charge_report: Option<Vec<u8>>,
     tape: Option<&'a crate::native::RunTape>,
@@ -65,6 +66,7 @@ pub(crate) fn policy(
     u64,
     u64,
     &[hirsel_core_net::GrantRule],
+    &[hirsel_core_net::SecretGrant],
     &[String],
     Option<&[u8]>,
     Option<&crate::native::RunTape>,
@@ -73,6 +75,7 @@ pub(crate) fn policy(
         options.root_limit,
         options.grant_mask,
         &options.net_rules,
+        &options.secret_grants,
         &options.directories,
         options
             .logical_charge_report
@@ -93,7 +96,7 @@ impl<'a> Plan<'a> {
         let Layout::Fixed(layout) = &binding.recipe.layout else {
             return Err(NativeStop::Entry("Result needs fixed layout".into()));
         };
-        let mut ordinals = [0u64; 11];
+        let mut ordinals = [0u64; 12];
         let parameters = binding
             .parameters
             .iter()
@@ -112,7 +115,18 @@ impl<'a> Plan<'a> {
                     name: &p.name,
                 })
             })
-            .collect::<std::result::Result<_, NativeStop>>()?;
+            .collect::<std::result::Result<Vec<_>, NativeStop>>()?;
+        let secret_kind = grant_kind("Secret").unwrap();
+        let secret_grants: Vec<_> = parameters
+            .iter()
+            .filter(|p| p.kind == secret_kind)
+            .map(|p| options.secret_grants.iter().find(|g| g.parameter == p.name))
+            .collect();
+        if secret_grants.iter().flatten().count() != options.secret_grants.len() {
+            return Err(NativeStop::Entry(
+                "Secret grants must name distinct Secret parameters".into(),
+            ));
+        }
         Ok(Self {
             symbol,
             identity,
@@ -125,6 +139,7 @@ impl<'a> Plan<'a> {
             root_limit: options.root_limit,
             grant_mask: options.grant_mask,
             net_rules: &options.net_rules,
+            secret_grants,
             directories: &options.directories,
             tape: options.tape.as_ref(),
             charge_report: options

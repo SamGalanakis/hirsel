@@ -182,8 +182,10 @@ arguments and dictionaries after `D`; version 1 has none.
 `code.revision(s)` returns `Option[View[Bytes]] in s`: the function's **revision**, 32 bytes
 that name the code a call through `s` runs. It is derived from the function's **code
 address** (PROG-10), which covers the checked core IR of every instance (PROG-5) the function
-reaches, std's and core's included, taken by the IR's own edges: calls and function values,
-among them the functions the checker selects from types, such as a codec maker. The revision
+reaches, std's and core's included, taken through each instance's slots (PROG-10): the calls,
+function values and descriptors its retained code makes, the core functions the compiler
+implements that it uses, and the finalizers its values need, among them the functions the
+checker selects from types, such as a codec maker the code calls. The revision
 is `H("hirsel.code-revision.v2", address)`, where the address is that of the function's
 revision root: the function itself, the adapted function for a `$callable` adapter, and the
 builtin address (PROG-10) for a core function the compiler implements, such as `float.widen`.
@@ -239,49 +241,111 @@ keys, client matching and link symbols never use it, so an edit to a body never 
 public name. Write `H(d, x)` for SHA-256 over the length-framed domain text `d` followed by the
 length-framed bytes `x`.
 
+**Instance identities.** An instance's identity is its definition, the canonical text of the
+implementation chosen for each of its constraints, in order, and the closure hash of each of
+its type arguments, in order. A type's **closure hash** is `H("hirsel.core-closure.v1", c)`,
+where `c` is the closure wire encoding of the rows the type reaches, in first-visit order from
+the type, over fields, then held parts, then hook type arguments, then hook signatures. That
+encoding is frozen as it stands at this version of the section: a change to it, including one
+that comes from reordering the compiler's own declarations, takes a new domain. Identities are
+ordered by comparing, in turn, the package name, the package's major version, the module path
+component by component, the item name, the dictionary texts one by one, and the closure hashes
+one by one. Texts and hashes compare bytewise, and a list that is a prefix of another comes
+first. The **identity encoding** of an instance is, in order: its definition identity `D`
+(PROG-9) as a text, the dictionary count and each dictionary text, then the closure-hash count
+and each 32-byte hash. A text is its byte length as unsigned LEB128 followed by its UTF-8
+bytes. Bodies, groups and builtin addresses use this encoding, never a hash of it and never the
+header-bearing bytes of PROG-9.
+
+A function that the compiler generates beside a source item, such as a closure, a task-entry
+wrapper or a flow transform, is named by its owner item, its kind and its ordinal among the
+owner's generated functions of that kind, in the order the checker emits them. No syntax-node
+number enters the name, so wrapping an earlier expression in parentheses never renames a later
+closure. A generated adapter that several owners share keeps its one shared identity.
+
 **Body.** An instance's **body** is the normal form of its checked IR: its own function, the
 functions generated beside it, the shapes, signatures, statics and instance rows they use, and
-one slot for each function it calls but does not define. It holds:
+its **slots**, the functions it uses but does not define. It holds:
 
 - every operation and terminator, in its order within its block, so parse decisions,
   type-selected calls, failure order and the order of charges are kept;
+- every instruction's failure target, at the instruction;
 - each shape's canonical name, representation, carried and held parts, field order, cases,
-  grants, `send`, and hook references; signatures and loans; statics, with each byte static's
-  alignment; symbolic layout queries; compact roots, as a set; and which functions take
-  vector-width variants;
-- the instance's own identity (definition, dictionaries and the closure hashes of its type
-  arguments), so `ident[u64]` and `ident[u32]` have different bodies, and each slot's
-  identity.
+  grants, `send`, and its hooks as metadata (each hook's identity and signature); signatures
+  and loans; statics, with each byte static's alignment and each aggregate's field order;
+  layout operands as the checker wrote them: symbolic layout queries, explicit byte steps,
+  allocation alignment, the charge, overflow and refund operands, and case indices; compact
+  roots, as a set; and which functions take vector-width variants (SEM-11);
+- the instance's own identity, so `ident[u64]` and `ident[u32]` have different bodies, and
+  each slot's identity and signature.
+
+The slots are exactly the functions the retained code can run: the target of each call, each
+function value and each descriptor (`code.describe`) in a block the body keeps, each core
+function the compiler implements that such a block uses (below), and the finalizer of every
+type that a value in that code can hold, through fields and cases included. A hook that only
+describes a type, such as a codec maker no retained code calls, is metadata in its shape and
+never a slot. One inventory serves every consumer: the slots a body lists are the ones its
+group binds, the ones its program links, and the only places a revision root of a described
+function is looked for.
 
 It holds no source position, no `cold` hint, no optimisation-only parameter facts, no
-generated code variants, no byte size or offset, and no number a producer chose: functions,
-blocks, values, rows and pool entries are numbered in one fixed traversal. That traversal
-starts at the instance's function, then takes the finalizers of its type rows by their
-closure hashes. It walks blocks depth-first from the entry block, taking successors in operand
-order. It numbers each value at its definition, and each row at its first reference. Blocks
-the entry does not reach are left out. Every enumeration is written with a tag from a fixed,
-append-only table, and every count and index as unsigned LEB128. The body starts with its
-normal-form version, which is 1. Decoding and re-encoding a body gives the same bytes. Its
-**body hash** is `H("hirsel.code-body.v1", body)`. Positions and hints go to the body's
-**annex** instead, in the same order. The annex is hashed under `hirsel.code-annex.v1` and
-never enters an address.
+generated code variants, no physical byte size or offset that native layout resolves later,
+and no number a producer chose: functions, blocks, values, addresses, calls, edges, switch arms,
+rows and pool entries are numbered in one fixed traversal. That traversal starts at the
+instance's function. It walks each function's blocks depth-first from the entry block, taking
+a block's successors in the IR's own order: each instruction's failure target, in instruction
+order, then the terminator's targets in operand order. It numbers each value at its definition,
+and each row and function at its first reference. When a walk ends, the finalizers the walked
+code needs and that are not yet numbered take the next numbers in ascending order of their
+types' closure hashes, and those with bodies are walked in that order, until none is left.
+The types of compact roots not yet numbered then take the next numbers in ascending order of
+closure hash, and the roots are written sorted by type number and width, without repeats.
+Blocks the entry does not reach are left out, with every call and reference in them. A body's
+slots are its bodiless functions in number order.
 
-**Groups.** The instances a program reaches are partitioned into the strongly connected
-components of their call graph, one **group** per component, so a function and the functions it
-calls back form one group. A function that calls nothing back is a group of one. A group lists
-its members in ascending order of their identities, which never tie, so the order does not
-depend on how they were found. For each member it gives the body hash and, for each of the
-member's slots in order, a **binding**: `Internal(k)`, the group's member k;
+Every enumeration is written with a tag from a fixed, append-only table, and every count and
+index as unsigned LEB128. The body starts with its normal-form version, which is 1. Each value
+has exactly one encoding: a reader refuses bytes that are not that encoding, such as a LEB128
+number with a redundant byte, an unknown tag, a list out of its required order or with a
+repeat, or bytes left over at the end. Decoding and re-encoding a body gives the same bytes. Its
+**body hash** is `H("hirsel.code-body.v1", body)`. Positions and hints go to the body's
+**annex** instead, in the body's order: each entry names a position of that body, and an annex
+whose entries do not match its body's instructions, terminators and calls in number and kind is
+malformed. The annex is hashed under `hirsel.code-annex.v1` and never enters an address.
+
+**Groups.** Addresses are computed for each build from the whole reach of its program, after
+the reach walk, from each instance's body hash and the ordered identities of its slots. They are
+never stored with one instance's compiled form, since a callee's edit changes them without
+changing that instance. The instances the program reaches are partitioned into the strongly
+connected components of their slot graph, one **group** per component, so a function and the
+functions it calls back form one group. A function that calls nothing back is a group of one.
+Groups are hashed dependency-first: a group's hash is computed after the hash of every group it
+binds. A group lists its members in ascending identity order, which never ties, so the order
+does not depend on how they were found. For each member it gives the body hash and, for each of
+the member's slots in order, a **binding**: `Internal(k)`, the group's member k;
 `External(address)`; or `Builtin(n)`. The **group hash** is `H("hirsel.code-group.v1", group)`,
 and member k's address is `H("hirsel.code-address.v1", group hash ‖ k)`, with `k` a 32-bit
 little-endian number. An edit to a callee therefore changes its callers' addresses, through
 their groups, but not their bodies.
 
+**One address per instance.** In one program, every instance identity has exactly one address.
+Every slot that names an identity is bound to that one address, every group in the program
+agrees on it, and the program links the identity's one symbol to the code at that address. A
+slot's signature equals the signature of the function it is bound to. A generated function that
+two owners both define is one instance: both definitions have equal bodies and equal bindings,
+and a producer that would give them different ones refuses the program. A set of groups in which
+one identity has two addresses, or a slot's signature differs from its target's, is not a
+program, and is refused before anything is assembled from it.
+
 **Builtins.** A core function the compiler implements has no checked IR. Its address is
-`H("hirsel.code-builtin.v1", identity ‖ n)`. Here `n` is that builtin's semantics number, a
-32-bit little-endian number that starts at 1 and rises whenever the compiler changes what the
-builtin does. Engine operations inside a body are written as tags. A change in the meaning of
-one gets a new tag.
+`H("hirsel.code-builtin.v1", e ‖ n)`, where `e` is its identity encoding and `n` its semantics
+number, a 32-bit little-endian number that starts at 1 and rises whenever the compiler changes
+what the builtin does. Every reachable use of such a function is a slot bound `Builtin(n)`:
+a call the compiler lowers inline, as for `float.widen`, a function value of it, and a
+descriptor of it alike. The lowered operations stay in the body as well. An engine implements
+each builtin at the numbers it lists and refuses a program that binds any other; it never runs
+a builtin under a number other than the one bound. Engine operations inside a body are written
+as tags, and a change in the meaning of one gets a new tag, under the same rule.
 
 So equal addresses mean the same checked code everywhere it reaches, on every engine and
 build. The driver's reuse keys (pre-check keys, record and instance keys, image roots) decide
@@ -289,13 +353,27 @@ only whether stored work can be reused. They never enter a body, a group, an add
 revision or a release recipe ([launch](launch.md#release-recipe-and-host-assembly)), so a
 build from source and a build from an image give equal addresses. An address says nothing
 about inputs: two runs of equal code with different arguments, or with different arrival
-orders between units ([CONC-10](tasks.md#conc-10-event-order)), may differ. A cache keyed by an address keys
-those as well.
+orders between units ([CONC-10](tasks.md#conc-10-event-order)), may differ. A cache keyed by
+an address keys those as well. A cache whose outcomes depend on source sites, such as a
+failure's reported site or a `Cause.site` value a program compares, also keys the site maps of
+every annex the outcome can read and the site context of its caller, or does not cache those
+outcomes. A cache of one function's results keys each function argument by its target's address
+and its captured values, since two function values with equal identity bytes can run different
+code.
 
 The domains `hirsel.code-body.v1`, `hirsel.code-annex.v1`, `hirsel.code-group.v1`,
 `hirsel.code-address.v1`, `hirsel.code-builtin.v1` and `hirsel.code-revision.v2` are added by
 the 2026-11-21 version of this section. A change to the normal form or to a group's encoding
 takes a new version and a new domain. It never reuses an old one.
+
+Version note (2026-11-21, code-address attacks): the traversal now follows every instruction's
+failure target; slots are the functions retained code can run, and type hooks are metadata;
+every use of a builtin, lowered inline or not, is a `Builtin(n)` slot over the identity
+encoding; addresses are computed per build after the reach walk; compact-root types are ordered
+by closure hash; the identity order, the identity encoding and the closure encoding are fixed;
+generated functions are named by ordinal; and a program has one address per identity. Earlier
+text took slots from every bodiless row, wrote lowered builtins as instructions only, and stored
+an address at materialisation. No address had been published, so nothing migrates.
 
 ### PROG-6: One meaning
 

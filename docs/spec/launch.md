@@ -160,8 +160,10 @@ ordinary value codec. Its type, `Release`, is declared with `Describe` above.
 - `grants` is every grant baked into the executable, one canonical string each,
   sorted bytewise: a kind name as `--grant` takes it (`Clock`, `Random`, …),
   `Net=` followed by the rule text `--grant` takes, and `Dir=` followed by the
-  path `--dir` took. A directory path stays as given. It is resolved against the
-  working directory at startup, which the manifest does not know.
+  path `--dir` took. The strings are a display of the recipe's grant bindings
+  (below), which say which parameter receives each one. A directory path stays as
+  given. It is resolved against the launch's working directory at startup, which
+  the manifest does not know.
 - `root_limit` is the executable's root limit.
 - `recipe` is the 32-byte root R of the release recipe the executable was assembled
   from (below). `release` says what the public interface runs, R says what code was
@@ -185,53 +187,165 @@ DIR.
 bodies, groups and annexes (PROG-10), and recipes. A **recipe** has a version, the normal-form
 version and these parts:
 
-- the entry, the program's `main`, as its identity bytes and its address;
-- every group hash in the entry's closure, in ascending order;
-- every body hash in that closure with its annex hash, in ascending order of body hash;
-- the launch inputs: the backend (Cranelift or LLVM release), the target, the grants in the
-  manifest's canonical form, the root limit and `n_place`.
+- the entry, the program's `main`, as its identity encoding (PROG-10) and its address;
+- every group in the entry's closure, as its hash and byte length, in strictly ascending order
+  of hash;
+- every body in that closure, as its hash and byte length with its annex's hash and byte
+  length, in strictly ascending order of body hash;
+- the launch inputs: the backend (Cranelift or LLVM release), the target, the root limit,
+  `n_place`, and the **grant bindings**.
+
+The grant bindings follow `main`'s capability parameters in declaration order. Each binding
+gives the parameter's ordinal, its kind, and the values that parameter receives, in order and
+with their count: each directory path a `Dir` parameter takes, or each rule text a `Net`
+parameter takes. So exchanging the paths given to two `Dir` parameters changes R. The
+manifest's sorted `grants` strings are derived from the bindings for display and comparison;
+nothing is assembled or launched from them.
 
 Its root is `R = H("hirsel.release-recipe.v1", recipe)`. A place's `place`, `migrate`, handle
 and launch code is reached from `main`, so the closure covers it. The annexes hold the site
 maps failures report, so a comment that moves lines changes R but no address. R does not
-cover the host's toolchain: one R can assemble to different bytes under another compiler.
+cover the host's toolchain: one R can assemble to different bytes under another toolchain, and
+the assembly record (below) says which.
 
-**Admission.** A host takes a recipe only when an authorised deploy request names its R (the
-host's control boundary). A hash proves only that bytes are intact. It never proves that they
-were checked. Code from outside that boundary arrives as source, and the host publishes it
-itself with the normal checker. Before the host uses anything a request sends, it checks, in
-order, and refuses with the first failure:
+**Working directory.** A directory path in a recipe stays as given. A relative path is resolved
+when the executable starts, against the launch's working directory, which is an input of the
+launch and never of the recipe. `hirsel run` and `hirsel build --manifest` launch in the
+caller's working directory. `hirsel host` launches every child of a place (preview, prepare,
+serving and install) in that place's working directory, set by `--workdir DIR` when the place
+is added to the host. A recipe that moves to another host therefore resolves its relative paths
+against that host's place directory, and the deploy preview prints each `Dir` binding with the
+absolute path it resolves to there.
 
-1. sizes, counts, formats and versions are within the host's bounds and are ones its
-   toolchain supports (`Unsupported`);
-2. the recipe hashes to R, and every object hashes to the hash the recipe lists for it
-   (`Hash`);
-3. the closure walked from the entry through the groups' `External` bindings equals the
-   listed objects exactly (`Missing`, `Extra`);
-4. every slot's identity equals the bound member's or builtin's identity, every `Internal`
-   index is in range, every builtin's semantics number is known, each group's members are in
-   ascending identity order and form one strongly connected component, and the entry's
-   identity matches (`Binding`);
-5. every body and annex decodes within bounds and re-encodes to its own bytes (`Malformed`).
+**Authority.** A host takes a recipe only when an authorised deploy request names its R. In
+`hirsel host` that is a request on the control socket, whose filesystem permission is the
+boundary. A request that names a raw R is the caller's explicit statement that a checker it
+trusts produced this whole R, its bindings and annexes included; a hash proves only that bytes
+are intact, and never that they were checked. A caller with narrower authority, such as a
+deployment service that only schedules deploys for others, never forwards a raw R. It either
+selects a publication the host has recorded, by its R, or submits source, which the host
+publishes itself with the normal checker, using the host's own compiler caches and package
+images and the bounds below. The operator still approves the grant bindings each deploy would
+give, as the preview shows them. One local principal that both publishes and deploys needs no
+signature. A request from another machine would add publisher authentication at this point: a
+signature over R by a key the host is configured to trust establishes who vouched for R, and
+the operator still decides whether to deploy it.
 
-Admission does not check types or ownership again. Admitted objects stay under the attempt's
-pending pin. The client sends R and the recipe. The host answers with the hashes it lacks, in
-one round, and the client sends exactly those.
+**Admission.** Before the host keeps or uses anything a request sends, it checks the request in
+this order and refuses with the first failure. Steps 1-3 come before the host answers with the
+objects it lacks.
 
-**Hot deploy.** `hirsel deploy R --code-store DIR` admits R and fetches what is missing. The
-host then assembles the executable with its installed toolchain for the recipe's backend and
-target, records its digest beside R, and copies it into the image store. All of this happens
-before the preview and before the old place exports, outside the write pause. A refusal or
-assembly failure stops the deploy before anything is touched. A retry after drift reuses the
-assembled executable. The deploy reports the fetch time, the assembly time and the write pause
-as three separate figures. An executable that is retained (current, previous, pending, or named
-by a live release interval or a tape) keeps its own bytes, its recipe and its recipe's closure.
-A recorded digest is recovered from those bytes and never by assembling again.
+1. The request comes through the control socket and names R. The recipe's bytes are within
+   `--max-recipe-bytes`, they hash to R, and they decode completely and canonically (PROG-10's
+   rule for one encoding per value): every list in strictly ascending order with no repeat, no
+   bytes left over, and a version and normal-form version the host supports. Counts are within
+   `--max-closure` objects. A failure is `Unsupported`, `Hash` or `Malformed`.
+2. The host takes the collection lock and reserves every object the recipe lists that the code
+   store already holds, so collection cannot remove it, and only then computes what it lacks.
+3. It reserves staging space for the lacking objects' listed lengths against its host-wide
+   `--staging-bytes`, within the attempt's limits on total bytes, on memory for decoded
+   objects, on members, slots and nesting, on outstanding objects and on elapsed time
+   (`--admit-timeout`). A request over a limit, or one the host cannot reserve now, is
+   `Limit(which)`.
+4. The host answers with the hashes it lacks, in one round. Each received object is charged
+   against its listed length and the attempt's limits while its bytes stream in, partial frames
+   included. An object the host did not ask for, or one already received, is
+   `Unsolicited(h)` and is not kept. An object whose bytes do not hash to its listed hash is
+   `Hash(h)`.
+5. Every group, body and annex of the closure decodes within the limits under PROG-10's
+   encoding rules, each annex against its own body, before any of it is put into a map
+   (`Malformed`).
+6. The closure walked from the entry through the groups' `External` bindings, compared as typed
+   sets of groups, bodies and the annex paired with each body, equals the listed objects
+   exactly (`Missing`, `Extra`).
+7. Every slot's identity equals the bound member's or builtin's identity, every `Internal`
+   index is in range, each group's members form one strongly connected component, the entry's
+   identity matches, and the closure has one address per identity with every slot's signature
+   equal to its target's (PROG-10) (`Binding`, `Conflict(identity)`).
+8. Every `Builtin(n)` and every engine-operation tag is one the recipe's backend implements at
+   exactly that number (`Unsupported`).
 
-Laws: `assemble_is_build`, where `hirsel build` and `publish` followed by `build --recipe` give
-byte-identical executables on one toolchain; `admit_refuses` covers each refusal above, and
-nothing is assembled until all checks pass; `site_only_change`, where a moved comment keeps
-every address, changes R, and the failure sites reported move with it.
+Admission does not check types or ownership again. A refusal, a disconnect or a host restart
+releases the attempt's reservations and discards its staging. Publication of outside source and
+assembly run under the same kind of limits on time, memory and output.
+
+**Assembly records.** An **assembly record** is an immutable host record naming one realised
+combination: R, the toolchain fingerprint, and the image digest that assembly produced. Its name
+is the hash of those three. The **toolchain fingerprint** is a hash of the effective environment
+of the assembly: the resolved target features, the compiler and backend, the runtime ABI and
+runtime archive, the linker, every link input and the effective settings. A host's toolchain is
+an immutable installation, so every file it loads is covered. Image bytes are kept once per
+digest, and any number of records may name one digest: two recipes that differ only in
+`n_place` give two records and one image, and one recipe assembled under two toolchains gives
+two records and two images. Native objects keep their own key (body, annex and emission
+environment) and the final link keeps its own (R and the toolchain fingerprint). The host
+reuses a cached mapping from such a key to bytes only when it produced that mapping itself under
+that exact key. Objects from any code store are verified content, never a cached mapping.
+
+**Durable publication.** The host's code store, its image store and its records are written
+with the barriers the store uses (`host.sync` and `host.sync_dir`), in this order, so that after
+any crash every record the host has synced names only complete, synced objects. The driver's
+build cache, where a power cut may turn a write into a miss, is never used for them.
+
+1. Received objects go into the attempt's private staging directory, which no reader and no
+   collection sees.
+2. After admission, each new object is synced, renamed into the code store and the code store's
+   directories are synced. An object already present is kept, never rewritten.
+3. Assembly writes the executable in staging. The host syncs it, renames it into the image store
+   by digest and syncs that directory, then writes, syncs and renames the assembly record and
+   syncs its directory.
+4. The host writes, syncs and renames the attempt's **pending record**, naming the attempt and
+   its assembly record, and syncs its directory. The reservations become the pending record's
+   roots. Nothing after this point, preview included, runs before this sync.
+
+Pin acquisition, reservation and deletion take one collection lock, so no object or image is
+removed between a presence check and the pin that keeps it. Collection removes only what no
+root reaches. The roots are the union of: the assembly record of each retained activation
+(current, previous, and each live `releases` interval), each pending record, each tape pin, and
+each live reservation. An assembly record keeps its image, its recipe and the recipe's closure.
+The host keeps a per-store index from activation version to the assembly record that serves it,
+so the store's `releases` rows keep their format, and a tape pin names the assembly record of
+the run it records and is synced before `Pinned` is answered. A retained digest whose image is
+missing gives `Unknown(ImageGone)`.
+
+When the host starts, before any collection, it reconciles every attempt. Staging with no
+pending record is removed. For each pending record it probes the place as hot deploy's recovery
+does: if the recovered activation is the attempt's (a cut after install but before its
+acknowledgement), it writes and syncs the index entry for that activation, then removes the
+pending record; otherwise the attempt was abandoned and its pending record is removed once the
+recovered activation's own roots are durable. Old and new roots are both kept until then.
+
+**Hot deploy.** `hirsel deploy R --code-store DIR` admits R, fetches what is missing, assembles
+with the host's installed toolchain for the recipe's backend and target, and publishes the
+assembly record and the pending record, in that order. All of this happens before the preview
+and before the old place exports, outside the write pause. A refusal or assembly failure stops
+the deploy before anything is touched. The preview, the prepare child and the cutover all use
+the attempt's one assembly record: the preview runs that record's image with the recipe's
+`n_place` and grant bindings; the prepare child is given that image's digest; and before the
+host accepts the import it checks that the prepared target's `Describe` and release record are
+the ones the preview reported for that record. A retry after drift keeps the record and takes a
+fresh attempt and export. The write pause keeps hot deploy's own checks (attempt and prepared
+digest, store identity, version and activation, capacity, and the deadline), and no fetch,
+assembly or closure walk runs inside it. The deploy reports the fetch time, the assembly time
+and the write pause as three separate figures. A recorded digest is recovered from its retained
+bytes and never by assembling again.
+
+Laws: `grant_binding_order`, where a launch that reports which directory each `Dir` parameter
+received gives the given paths, and exchanging them exchanges the reports; `assemble_is_build`,
+where `hirsel build` and `publish` followed by `build --recipe` give byte-identical executables
+on one toolchain, as agreement only; `assembly_environment`, where a change of runtime archive
+or of a builtin's semantics number under one R gives another fingerprint and never a cached
+image; `admit_refuses` covers each refusal above, and nothing is assembled until all checks
+pass; `shared_digest`, where two recipes sharing one digest and one recipe with two digests
+each keep their own record, bytes and allowance through a host restart and a collection;
+`site_only_change`, where a moved comment keeps every address, changes R, and the failure sites
+reported move with it.
+
+Version note (2026-11-21, deploy trust): the recipe lists grant bindings by parameter instead of
+sorted grant strings, and object lengths; admission is bounded before the host asks for
+objects; a raw R is the caller's attestation; assembly records replace one record per digest;
+and host stores follow the publication order above. Pre-1.0, no recipe had been published, so
+nothing migrates.
 
 ## Preview launch
 

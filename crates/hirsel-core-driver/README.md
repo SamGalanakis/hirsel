@@ -269,7 +269,17 @@ gap to be closed later.
 - **The store is never synced.** Writers rename a locked temporary from
   `<store>/tmp` into place; opening a store removes each temporary no writer
   holds. After a power loss a torn, short, zero-filled or missing record fails
-  its check or is absent, so it is a miss and is rebuilt.
+  its check or is absent, so it is a miss and is rebuilt. This contract covers the
+  driver's build cache only. A host's code store, image store and assembly records
+  back retained releases, are synced in the order
+  [launch.md](../../docs/spec/launch.md#release-recipe-and-host-assembly) gives, and
+  never live in this cache.
+- **Cached mappings come only from their producer.** A cache entry that maps a
+  key (a native object's body, annex and emission environment, or a final link's
+  recipe and toolchain fingerprint) to bytes is used only where this driver or
+  host wrote it under that exact key. Objects read from another code store are
+  checked against their hashes and used as content, never as a mapping from a
+  key to a result.
 - **Tool inputs are trusted by the two-sighting stat rule.** The link driver or
   installed recipe, link
   editor, runtime archive and every file the link recipe names are hashed when

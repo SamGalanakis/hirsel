@@ -930,20 +930,32 @@ static void lowerX86IndexStrides(Function &F) {
 // paths, sharing one finite expansion budget across introduced helper calls.
 // The whole expansion budget prices each helper too: a separate small-callee
 // cutoff would still reject the hot body of a metered structured helper.
+// A recursive helper unrolls at most 8 copies deep along one inlining chain
+// (GCC's max-inline-recursive-depth-auto): unbounded, Havlak's loop nesting
+// pass spent its whole budget on 41 copies of one helper.
 static void inlineLoopHelpers(Module &M) {
   for (Function &F : M) {
     if (F.isDeclaration()) continue;
     DominatorTree DT(F);
     LoopInfo LI(DT);
-    SmallVector<CallBase *, 16> Pending;
+    // Each inlined callee with the History index of the copy it was inlined
+    // into (-1 for F); each pending call with the copy it lies in.
+    SmallVector<std::pair<Function *, int>, 16> History;
+    auto Deep = [&](Function *Target, int Entry) {
+      unsigned Copies = 0;
+      for (; Entry >= 0; Entry = History[Entry].second)
+        Copies += History[Entry].first == Target;
+      return Copies >= 8;
+    };
+    SmallVector<std::pair<CallBase *, int>, 16> Pending;
     for (BasicBlock &BB : F) if (LI.getLoopFor(&BB))
       for (Instruction &I : BB) if (auto *C = dyn_cast<CallInst>(&I))
-        if (C->getCalledFunction()) Pending.push_back(C);
+        if (C->getCalledFunction()) Pending.push_back({C, -1});
     unsigned Budget = 2048;
     while (!Pending.empty()) {
-      CallBase *Call = Pending.pop_back_val();
+      auto [Call, Entry] = Pending.pop_back_val();
       Function *Target = Call->getCalledFunction();
-      if (!Target || Target->isDeclaration() || Target == &F ||
+      if (!Target || Target->isDeclaration() || Target == &F || Deep(Target, Entry) ||
           Target->hasFnAttribute(Attribute::NoInline) ||
           Call->hasFnAttr(Attribute::NoInline) ||
           expansionCost(*Target) > Budget) continue;
@@ -951,7 +963,9 @@ static void inlineLoopHelpers(Module &M) {
       InlineFunctionInfo Info;
       if (InlineFunction(*Call, Info, true).isSuccess()) {
         Budget -= Cost;
-        Pending.append(Info.InlinedCallSites.begin(), Info.InlinedCallSites.end());
+        History.push_back({Target, Entry});
+        for (CallBase *Site : Info.InlinedCallSites)
+          Pending.push_back({Site, int(History.size()) - 1});
       }
     }
   }

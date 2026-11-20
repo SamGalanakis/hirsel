@@ -1948,13 +1948,15 @@ fn launch_untied(
                 .unwrap();
         }
     });
+    // Every recording block is in its file before the run reports.
+    crate::tape::writer::flush();
     if let Some(waits) = &p.queue_waits {
         waits.report();
     }
     if std::env::var_os("HIRSEL_XSTATS").is_some() {
         let g = |i: usize| USTATS[i].load(Ordering::Relaxed);
         eprintln!(
-            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} xnotify={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} msgs={} bytes={} full_waits={} unit_epoll_waits={} lifo={} tape_writes={} tape_bytes={} tape_payload={} tape_skipped={}",
+            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} xnotify={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} msgs={} bytes={} full_waits={} unit_epoll_waits={} lifo={} tape_writes={} tape_bytes={} tape_payload={} tape_skipped={} tape_worker_ns={} tape_truncated={} tape_writer_ns={} tape_writer_calls={} tape_write_failed={}",
             w,
             g(S_CREATED),
             g(S_RESUMES),
@@ -1980,6 +1982,11 @@ fn launch_untied(
             crate::tape::TAPE_COUNTS[1].load(Ordering::Relaxed),
             crate::tape::TAPE_COUNTS[2].load(Ordering::Relaxed),
             crate::tape::TAPE_COUNTS[3].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[4].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[5].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[6].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[7].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[8].load(Ordering::Relaxed),
         );
     }
     if crate::sequencer::ACQUIRES.load(Ordering::Relaxed) != 0 {

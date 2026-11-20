@@ -460,6 +460,10 @@ pub unsafe extern "C" fn hirsel_core_os_run_taped(
     identity: *const libc::c_char,
     revision: *const [u8; 32],
 ) -> u8 {
+    if mode == 0 {
+        // On the host stack, before any recording task needs it.
+        super::writer::start();
+    }
     // mc-units-proto: under HIRSEL_UNITS a recording launch runs one taped
     // run per unit, each recording to its own tape, `<path>.u<unit>`.
     if mode == 0
@@ -479,7 +483,9 @@ pub unsafe extern "C" fn hirsel_core_os_run_taped(
         });
     }
     // SAFETY: forwarded unchanged.
-    unsafe { run_taped_one(input, names, sources, entry, path, mode, identity, revision) }
+    let status = unsafe { run_taped_one(input, names, sources, entry, path, mode, identity, revision) };
+    super::writer::flush();
+    status
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -14,6 +14,10 @@ pub const FORMAT: u16 = 4;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;
+/// Block flag: the recording was cut here (its writer could not keep up).
+/// The block has an empty payload and ends the recording; a reader stops
+/// with `Stop::Truncated`.
+pub const TRUNCATED: u8 = 4;
 /// The most payload a reader buffers before delivering (section 5.2).
 pub const MAX_LEN: usize = 1 << 20;
 /// A writer closes its block once this much payload is buffered.
@@ -489,12 +493,32 @@ pub fn block(tape_id: &[u8; 16], flags: u8, seq: u64, payload: &[u8]) -> Vec<u8>
     out
 }
 
+/// Append the DATA frame continuing a payload with `chunk`.
+pub fn put_data(out: &mut Vec<u8>, chunk: &[u8]) {
+    out.push(F_DATA);
+    put_bytes(out, chunk);
+}
+
+/// Seal a block filled in place: `bytes` holds `BLOCK_HEAD` reserved bytes
+/// and then the payload. Writes the head and appends the check, giving the
+/// same bytes as `block`.
+pub fn seal(tape_id: &[u8; 16], flags: u8, seq: u64, bytes: &mut Vec<u8>) {
+    let len = bytes.len() - BLOCK_HEAD;
+    assert!(len <= MAX_LEN);
+    bytes[0] = flags;
+    bytes[1..4].copy_from_slice(&MAGIC);
+    bytes[4..12].copy_from_slice(&seq.to_le_bytes());
+    bytes[12..16].copy_from_slice(&(len as u32).to_le_bytes());
+    let check = xxh3(&[tape_id, bytes]);
+    bytes.extend_from_slice(&check.to_le_bytes());
+}
+
 /// Why reading stopped before the tape's END block (section 5.2's table).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stop {
     /// End of file exactly at a block boundary, with no END block read.
     Missing,
-    /// A trailing partial block.
+    /// A trailing partial block, or a TRUNCATED block.
     Truncated,
     /// A complete block failing a check, or anything after an END block.
     Damaged(u64),
@@ -590,6 +614,9 @@ impl Blocks {
         check_digest(&self.bytes, &self.tape_id, self.seq)?;
         self.seq += 1;
         let flags = self.bytes[0];
+        if flags & TRUNCATED != 0 {
+            return Err(Stop::Truncated.into());
+        }
         self.ended = flags & END != 0;
         Ok(Some((
             flags,
@@ -641,7 +668,7 @@ fn read_block<E>(
 
 fn check_head(bytes: &[u8], seq: u64) -> Result<(), Stop> {
     if bytes[1..4] != MAGIC
-        || bytes[0] & !END != 0
+        || bytes[0] & !(END | TRUNCATED) != 0
         || u64::from_le_bytes(bytes[4..12].try_into().unwrap()) != seq
     {
         return Err(Stop::Damaged(seq));
@@ -728,8 +755,8 @@ pub struct Out {
     pub payload: Vec<u8>,
 }
 impl Out {
-    /// The frame bytes, then the DATA frames continuing the payload.
-    fn encode(&self, op: u8, out: &mut Vec<u8>, rest: &mut Vec<Vec<u8>>) {
+    /// The frame bytes, then the payload chunks its DATA frames continue with.
+    fn encode<'a>(&'a self, op: u8, out: &mut Vec<u8>, rest: &mut Vec<&'a [u8]>) {
         out.push(self.status);
         put_varint(out, self.value);
         if self.status == ERROR {
@@ -742,11 +769,7 @@ impl Out {
         if carries_payload(op) {
             let first = self.payload.len().min(PAYLOAD_CHUNK);
             put_bytes(out, &self.payload[..first]);
-            for chunk in self.payload[first..].chunks(PAYLOAD_CHUNK) {
-                let mut d = vec![F_DATA];
-                put_bytes(&mut d, chunk);
-                rest.push(d);
-            }
+            rest.extend(self.payload[first..].chunks(PAYLOAD_CHUNK));
         }
     }
     fn decode(op: u8, c: &mut Cursor) -> Result<Self, Corrupt> {
@@ -897,11 +920,27 @@ impl Encoder {
     pub fn frame(&mut self, f: &Frame) -> (Vec<u8>, Vec<Vec<u8>>) {
         let mut out = Vec::new();
         let mut rest = Vec::new();
+        self.frame_into(f, &mut out, &mut rest);
+        let data = rest
+            .into_iter()
+            .map(|chunk| {
+                let mut d = Vec::new();
+                put_data(&mut d, chunk);
+                d
+            })
+            .collect();
+        (out, data)
+    }
+    /// `frame`, appending the frame's bytes to `out` (a block being filled)
+    /// and pushing the payload chunks of its DATA frames to `rest`, borrowed
+    /// from the frame; `put_data` writes each where it falls.
+    pub fn frame_into<'f>(&mut self, f: &'f Frame, out: &mut Vec<u8>, rest: &mut Vec<&'f [u8]>) {
+        let start = out.len();
         match f {
             Frame::Wait { gap, task } => {
                 out.push(F_WAIT);
-                put_varint(&mut out, *gap);
-                self.task(&mut out, 0, *task);
+                put_varint(out, *gap);
+                self.task(out, start, *task);
             }
             Frame::Issue {
                 task,
@@ -910,21 +949,21 @@ impl Encoder {
                 args,
             } => {
                 out.push(F_ISSUE);
-                self.task(&mut out, 0, *task);
+                self.task(out, start, *task);
                 out.push(*op);
-                put_varint(&mut out, *object);
-                args.encode(&mut out);
+                put_varint(out, *object);
+                args.encode(out);
                 self.issued.insert(*task, *op);
             }
             Frame::Done { gap, task, out: o } => {
                 out.push(F_DONE);
-                put_varint(&mut out, *gap);
-                self.task(&mut out, 0, *task);
+                put_varint(out, *gap);
+                self.task(out, start, *task);
                 let op = self
                     .issued
                     .remove(task)
                     .expect("DONE follows its task's ISSUE");
-                o.encode(op, &mut out, &mut rest);
+                o.encode(op, out, rest);
             }
             Frame::Op {
                 task,
@@ -934,11 +973,11 @@ impl Encoder {
                 out: o,
             } => {
                 out.push(F_OP);
-                self.task(&mut out, 0, *task);
+                self.task(out, start, *task);
                 out.push(*op);
-                put_varint(&mut out, *object);
-                args.encode(&mut out);
-                o.encode(*op, &mut out, &mut rest);
+                put_varint(out, *object);
+                args.encode(out);
+                o.encode(*op, out, rest);
             }
             Frame::Wake { gap, task } | Frame::Cancel { gap, task } => {
                 out.push(if matches!(f, Frame::Wake { .. }) {
@@ -946,31 +985,30 @@ impl Encoder {
                 } else {
                     F_CANCEL
                 });
-                put_varint(&mut out, *gap);
-                self.task(&mut out, 0, *task);
+                put_varint(out, *gap);
+                self.task(out, start, *task);
             }
-            Frame::Choose { gap, index } => put_choose(&mut out, *gap, *index),
+            Frame::Choose { gap, index } => put_choose(out, *gap, *index),
             Frame::Grant { gap, kind, args } => {
                 out.push(F_GRANT);
-                put_varint(&mut out, *gap);
+                put_varint(out, *gap);
                 out.push(*kind);
                 if *kind == ARGS_KIND {
                     put_bytes(
-                        &mut out,
+                        out,
                         args.as_deref().expect("an Args grant carries its vector"),
                     );
                 }
             }
-            Frame::Repeat { count } => put_repeat(&mut out, *count),
+            Frame::Repeat { count } => put_repeat(out, *count),
             Frame::End { gap, ending: e } => {
                 out.push(F_END);
-                put_varint(&mut out, *gap);
+                put_varint(out, *gap);
                 out.push(END_COMPLETE);
                 out.push(e.kind);
-                e.outcome.encode(&mut out);
+                e.outcome.encode(out);
             }
         }
-        (out, rest)
     }
 }
 

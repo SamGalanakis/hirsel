@@ -468,6 +468,24 @@ unsafe fn sleep_wait(state: *mut u8, request: &Request) -> Wait {
 }
 /// `issue` as a provider callback, for recognising the OS provider's own.
 pub(crate) const ISSUE: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step = issue;
+/// A duplicate of the descriptor behind file `handle` of `provider`, when
+/// `provider` is the OS provider: the recording writer appends through it
+/// off the workers (`tape::writer`). None for any other provider.
+/// # Safety
+/// `provider` is installed in the calling run, and `handle` is a file it
+/// opened and has not closed.
+pub(crate) unsafe fn duplicate_file(provider: &Provider, handle: u64) -> Option<OwnedFd> {
+    if provider.issue as usize != ISSUE as usize {
+        return None;
+    }
+    // SAFETY: the OS provider's state is its OsProvider.
+    let os = unsafe { &*provider.state.cast::<OsProvider>() };
+    let fd = os.files.get(&handle)?.as_raw_fd();
+    // SAFETY: a live descriptor; the duplicate is owned by the result.
+    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    // SAFETY: a fresh descriptor nothing else owns.
+    (dup >= 0).then(|| unsafe { OwnedFd::from_raw_fd(dup) })
+}
 /// Clocks and files finish immediately, except SYNC and SYNC_DIR, which park while
 /// the sync helper runs them; sockets may park after a not-ready attempt.
 /// Never inlined, so `ISSUE` has one address (`provider::deliver`).

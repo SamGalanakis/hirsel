@@ -3,8 +3,21 @@ use hirsel_wire_bench::{
     codec, reference,
 };
 
-#[tokio::main(worker_threads = 2)]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Keep the existing default and let the multicore benchmark select the width.
+    let workers = match std::env::var("TOKIO_WORKER_THREADS") {
+        Ok(value) => value.parse()?,
+        Err(std::env::VarError::NotPresent) => 2,
+        Err(error) => return Err(error.into()),
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()?
+        .block_on(serve())
+}
+
+async fn serve() -> Result<()> {
     let mut listen = "127.0.0.1:7700".to_owned();
     let mut wal = "checkbox.wal".to_owned();
     let mut wants = codec::checkbox_wants();

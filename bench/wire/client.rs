@@ -264,6 +264,7 @@ pub struct Converged {
     pub returned: usize,
     pub reconnects: usize,
     pub version: u64,
+    pub checksum: u64,
 }
 
 /// Identical driver for both servers. The oracle depends only on Returned calls.
@@ -350,5 +351,6 @@ pub async fn converge(
         returned: count,
         reconnects: n,
         version,
+        checksum: fresh.image.iter().map(|&byte| u64::from(byte)).sum(),
     })
 }

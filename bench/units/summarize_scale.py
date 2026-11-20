@@ -151,22 +151,22 @@ def verdicts(rows, n):
         ratios.append(ratio)
         fraction = REC_CELLS[cell]["f"]
         if ratio is not None:
-            details.append(f"f={fraction}, {ratio:.2f}× the best recorded control")
+            details.append(f"At f={fraction}, untied reached {ratio:.2f}× the best recorded control.")
         elif finished(rows, cell, REC_SIDES[:4]):
             if candidate is None:
-                details.append(f"f={fraction}, untied had no passing rate")
+                details.append(f"At f={fraction}, every untied trial missed the pass rule.")
             if control is None:
-                details.append(f"f={fraction}, no control passed")
+                details.append(f"At f={fraction}, all three recorded controls missed the pass rule.")
         sparse |= count == 1 or control_count == 1
     if any(ratio is not None and ratio < 1.25 for ratio in ratios):
         state = "Threshold missed."
     elif all(ratios):
         state = "Supported."
     elif all(finished(rows, cell, REC_SIDES[:4]) for cell in REC_CELLS):
-        state = "Ratio unavailable in at least one cell."
+        state = "The 1.25× rule remains unverified across both cells."
     else:
         state = "Pending complete searches in both cells."
-    measurement = f" {' and '.join(details)}." if details else ""
+    measurement = f" {' '.join(details)}" if details else ""
     repeat = " At least one rate rests on a single passing search." if sparse and details else ""
     print(f"- **Recorded fan-out.** {state}{measurement}{repeat}")
 

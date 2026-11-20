@@ -17,6 +17,7 @@ mkdir -p "$scratch"/{bin,build,store,tapes}
 tools/capped rustup run 1.99.0 cargo build -j2 --manifest-path bench/units/rust/Cargo.toml \
     --target-dir "$scratch/build/cargo" --locked --release --bin loadgen --bin toolsrv --bin twin
 cp "$scratch/build/cargo/release/"{loadgen,toolsrv,twin} "$scratch/bin/"
+cp "$scratch/bin/loadgen" "$scratch/bin/loadgen_drain"
 
 export UNITS_DIR="$scratch/store"
 build_side() {

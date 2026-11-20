@@ -62,6 +62,9 @@ class Contract:
     schedule: tuple[int, int | None] | None = None
     root_limit: int = 64 << 20
     evaluator_instructions: int = 1_000_000_000
+    # File-level `// test-env: NAME=VALUE`: each native law of the file runs once
+    # more with NAME=VALUE set, e.g. to select a portable runtime path.
+    run_env: tuple[tuple[str, str], ...] = ()
 
     @property
     def name(self):
@@ -143,6 +146,7 @@ def discover(root, filters):
         if backend and not reason:
             raise ValueError(f'{file}: evaluator-only law needs // test-reason:')
         evaluator_only = reason[1] if backend else None
+        run_env = tuple(tuple(pair) for pair in re.findall(r'^// test-env: ([A-Z0-9_]+)=(\S+)$', source, re.M))
         stdout = stderr = b""
         first_write = None
         host_op = 0
@@ -194,7 +198,7 @@ def discover(root, filters):
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
             package = 'store' if file.parent == root / 'core/programs/store/tests' else file.relative_to(root).parts[1]
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule, root_limit, evaluator_instructions)
+            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule, root_limit, evaluator_instructions, run_env)
             schedule = None
             root_limit = 64 << 20
             evaluator_instructions = 1_000_000_000
@@ -768,6 +772,12 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     row['ran'], row['cause'] = https_observation(case, result, tape, raw, token, peer)
                 else:
                     row['ran'], row['cause'] = test_observation(case, result, entry)
+                    for name, value in case.run_env if row['cause'] is None else ():
+                        again = progress.run(command, cwd=host, capture_output=True, env={**os.environ, name: value})
+                        _, cause = test_observation(case, again, entry)
+                        if cause:
+                            row['cause'] = f'with {name}={value}: {cause}'
+                            break
                 row['passed'] = row['cause'] is None
                 if row['cause']:
                     row['owner'] = owner(row['cause'], owners)

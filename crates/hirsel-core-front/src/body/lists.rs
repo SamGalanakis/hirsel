@@ -1225,6 +1225,63 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(())
     }
 
+    /// `sha256.blocks`: Bounds unless `at + 64 × count ≤ len`, checked before
+    /// the state changes; no data address is formed for zero blocks.
+    pub(super) fn sha256_blocks(
+        &mut self,
+        state: ValueId,
+        header: ValueId,
+        at: ValueId,
+        count: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64_ = Ty::Scalar(Scalar::U64);
+        let len = self.read_sequence_word(header, 8, u64_, n);
+        let block = self.konst(u64_, 64, n)?;
+        let (bytes, overflow) = self.list_arith(ArithOp::Mul, ArithMode::Checked, count, block, n);
+        let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
+        let within = self.list_compare(CompareOp::Le, at, len, n);
+        let (room, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, len, at, n);
+        let fits = self.list_compare(CompareOp::Le, bytes, room, n);
+        let valid = self.list_bool(BinaryOp::BitAnd, within, fits, n);
+        let valid = self.list_bool(BinaryOp::BitAnd, no_overflow, valid, n);
+        self.list_require_element(valid, n);
+        let zero = self.konst(u64_, 0, n)?;
+        let compressing = self.list_compare(CompareOp::Ne, count, zero, n);
+        let compress = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.list_branch(compressing, compress, done, n);
+        self.start(compress);
+        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let byte = PlaceTy::Value(Ty::Scalar(Scalar::U8));
+        let from = self.address(AddressBase::Value(data), &[Step::Byte(at)], byte, n);
+        let from = self.pointer(from, n);
+        self.runtime_row(
+            hirsel_core_ir::RtOp::Sha256Blocks,
+            &[Arg::Value(state), Arg::Value(from), Arg::Value(count)],
+            n,
+        )?;
+        self.jump(done, &[], n);
+        self.start(done);
+        None
+    }
+
+    /// `sha256.block`: one block from an Inline array; nothing to check.
+    pub(super) fn sha256_block(
+        &mut self,
+        state: ValueId,
+        data: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
+        self.runtime_row(
+            hirsel_core_ir::RtOp::Sha256Blocks,
+            &[Arg::Value(state), Arg::Value(data), Arg::Value(one)],
+            n,
+        )?;
+        None
+    }
+
     fn require_copy_range(&mut self, at: ValueId, count: ValueId, len: ValueId, n: NodeId) {
         let within = self.list_compare(CompareOp::Le, at, len, n);
         let (room, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, len, at, n);

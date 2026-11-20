@@ -22,6 +22,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `option`, `result` | [option](../../core/core/option.hirsel), [result](../../core/core/result.hirsel) | FAIL-2 |
 | `int`, `float`, `char` | [int](../../core/core/int.hirsel), [float](../../core/core/float.hirsel), [char](../../core/core/char.hirsel) | SEM-1 to SEM-3 |
 | `simd` | [simd](../../core/core/simd.hirsel) | SEM-11 |
+| `sha256` | [sha256](../../core/core/sha256.hirsel) | SEM-8, MEM-30 |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
 | `bytebuf` | [bytebuf](../../core/core/bytebuf.hirsel) | MEM-21, MEM-28 |
@@ -199,6 +200,15 @@ operations it names; nothing else about them may be inferred from an implementat
   The word operations and [SEM-11](semantics.md#sem-11-vectors) lane operations are the
   multi-byte loads and stores. Library scans use them and the [SEM-1](semantics.md#sem-1-integers)
   integer operations.
+- **SHA-256 blocks.** `sha256.blocks(mut h, b, at, count)` applies the FIPS 180-4
+  SHA-256 compression function to each of the `count` 64-byte blocks of `b` from `at`,
+  in order, updating the eight state words `h`. A range outside `b`, including an end
+  past `u64`, raises `Bounds` before `h` changes. `sha256.block(mut h, b)` compresses
+  the one block of an `Inline[u8, 64]`. Each call admits no bytes and takes one Step
+  whatever `count` is ([MEM-30](budgets.md#mem-30-step-bounds)), as a bulk copy does. An
+  engine may use the CPU's SHA-256 instructions; the state words are the same on every
+  CPU, so by [SEM-8](semantics.md#sem-8-determinism) a replay elsewhere reproduces the run.
+  `std.sha256` extends this module with the streaming hash.
 - **Lists.** `list.set` returns the old element and `list.get` returns `None` out of range,
   where `xs[i]` and `list.set` fail with `Bounds`. An element is mutated in place through
   its index place (`xs[i] = x`, or `mut xs[i]` as an argument), including nested places

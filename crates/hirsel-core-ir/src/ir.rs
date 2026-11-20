@@ -917,6 +917,8 @@ pub enum RtOp {
     CompareBytes,
     /// The fixed byte hash a `Map` key's text components fold (crate docs, "Maps").
     HashBytes,
+    /// The SHA-256 compression of whole blocks into an eight-word state (crate docs, "SHA-256").
+    Sha256Blocks,
     /// The next cell of a `Causes` chain, or null (crate docs, "Causes").
     CauseNext,
     /// A cause cell's `Cause`, in core's layout (crate docs, "Causes").
@@ -1152,6 +1154,7 @@ impl RtOp {
     /// | `dest_id` | | `u64`: a destination identity no other call of the run returns (MEM-4) |
     /// | `compare_bytes` | `a: ptr`, `a_len: u64`, `b: ptr`, `b_len: u64` | `i8`: -1, 0 or 1 as `a` orders before, equal to or after `b` |
     /// | `hash_bytes` | `data: ptr`, `len: u64` | `u64`: the fixed byte hash (crate docs, "Maps") |
+    /// | `sha256_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-256") |
     /// | `cause_next` | cell `ptr` | `ptr`: the next cell, null after the last |
     /// | `cause_value` | cell `ptr` | `ptr`: the cell's `Cause` |
     /// | `args_len` | `Args: u64` | `u64` |
@@ -1229,6 +1232,7 @@ impl RtOp {
                 vec![Ty::Scalar(Scalar::I8)],
             ),
             RtOp::HashBytes => (vec![V(p), V(u64_)], vec![u64_]),
+            RtOp::Sha256Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::CauseNext | RtOp::CauseValue => (vec![V(p)], vec![p]),
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
@@ -1419,6 +1423,7 @@ impl RtOp {
             | RtOp::DestId
             | RtOp::CompareBytes
             | RtOp::HashBytes
+            | RtOp::Sha256Blocks
             | RtOp::CauseNext
             | RtOp::CauseValue
             | RtOp::ArgsLen

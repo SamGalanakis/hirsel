@@ -442,6 +442,19 @@
 //! (SEM-5), so no hash is observable. Engines map `rt.hash_bytes` to `uint64_t
 //! hirsel_core_hash_bytes(const uint8_t *, uint64_t)`, with no context or status.
 //!
+//! # SHA-256
+//!
+//! `rt.sha256_blocks(state, data, blocks)` applies the FIPS 180-4 SHA-256
+//! compression to each of `blocks` 64-byte blocks at `data`, in order, updating
+//! the eight `u32` state words at `state` in place. The front end checks the
+//! range first and calls it only with at least one block, so the row never fails.
+//! `sha256.blocks` and `sha256.block` are each one core call and one step whatever
+//! the block count (MEM-30). The run time chooses the CPU's
+//! SHA-256 instructions when present and its portable code otherwise; the result
+//! is the same bytes, so nothing observable names the choice (SEM-8). Engines map
+//! it to `void hirsel_core_sha256_blocks(uint32_t *, const uint8_t *, uint64_t)`,
+//! with no context or status.
+//!
 //! # Identities
 //!
 //! `rt.dest_id` is the run's one counter of fresh `u64` identities: a

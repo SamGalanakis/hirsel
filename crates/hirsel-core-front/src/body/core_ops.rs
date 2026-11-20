@@ -265,6 +265,8 @@ operations! {
     ("inline", "copy_from_slice", Lane::Value, "A", "port-fidelity-1360", false),
     ("inline", "word_le", Lane::Value, "A", "dedup-1357", false),
     ("inline", "word_be", Lane::Value, "A", "dedup-1357", false),
+    ("sha256", "blocks", Lane::Value, "A", "sha256-hardware", false),
+    ("sha256", "block", Lane::Value, "A", "sha256-hardware", false),
     ("map", "push_entry", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "pop_entry", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "regrow", Lane::Value, "A", "core-check-callables-913", true),

@@ -275,6 +275,11 @@ impl FunctionEmitter<'_> {
             RtOp::HashBytes => {
                 vec![self.hash_bytes(&args[0], &args[1])]
             }
+            RtOp::Sha256Blocks => self.native_call(
+                "hirsel_core_sha256_blocks",
+                &[],
+                &[p(&args[0]), p(&args[1]), u(&args[2])],
+            ),
             RtOp::CompareBytes => {
                 vec![self.compare_bytes(&args[..4])]
             }

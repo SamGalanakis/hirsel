@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Build the portable Rust SHA-256 partner and check its committed law vectors.
+"""Build the Rust SHA-256 partner and check its committed law vectors.
+
+The partner is RustCrypto sha2 0.10.9 with its default backends: SHA-NI
+when the CPU has it (selected at run time by cpufeatures), its portable
+code otherwise.
 
 Run after tools/buck2/prepare.py. Output and build intermediates belong outside
 this checkout, e.g. --out /tmp/sha256-reference. No Cargo feature graph changes.
@@ -11,17 +15,30 @@ import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-DEPS = ('block-buffer', 'cfg-if', 'crypto-common', 'digest', 'generic-array', 'typenum')
+# The sha2 variant with default features (no force-soft) on x86-64.
+SHA2 = 'sha2-0.10-features-1ff189b9204c'
+
+
+def closure(buck):
+    """The third-party libraries the named sha2 target depends on, by target name."""
+    rows = {}
+    for line in buck.splitlines():
+        if line.startswith('third_party_rust_library('):
+            rows[re.search(r"name='([^']+)'", line[line.rindex(", name='"):])[1]] = line
+    pending, seen = [SHA2], []
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.append(name)
+        line = rows[name]
+        x86 = line[line.index("'linux-x86_64'"):line.index("'linux-arm64'")]
+        pending += re.findall(r"'//third-party:([^']+)'", line[:line.index('platform=')] + x86)
+    return seen[1:]
 
 
 def build(out):
-    names = re.findall(r"third_party_rust_library\(name='([^']+)'", (ROOT / 'third-party/BUCK').read_text())
-    targets = []
-    for dependency in DEPS:
-        matches = [n for n in names if n.startswith(dependency + '-')]
-        if len(matches) != 1:
-            raise ValueError(f'expected one {dependency} target, found {matches}')
-        targets.append(f'//third-party:{matches[0]}[static]')
+    targets = [f'//third-party:{name}[static]' for name in closure((ROOT / 'third-party/BUCK').read_text())]
     command = [str(ROOT / '.buck2/bin/buck2'), 'build', '--target-platforms',
                '//tools/buck2:release', *targets, '//third-party:sha2[sources]', '--show-json-output']
     outputs = json.loads(subprocess.check_output(command, cwd=ROOT, text=True))
@@ -31,12 +48,11 @@ def build(out):
     rustc = ROOT / 'tools/buck2/toolchains/rust-files/bin/rustc'
     search = [arg for library in libraries for arg in ('-L', 'dependency=' + str(library.parent))]
     externs = []
-    for name in ('cfg_if', 'digest'):
+    for name in ('cfg_if', 'cpufeatures', 'digest'):
         library, = [p for p in libraries if p.name.startswith('lib' + name + '-')]
         externs += ['--extern', name + '=' + str(library)]
     subprocess.run([str(rustc), '--edition=2018', '--crate-name=sha2', '--crate-type=rlib',
-                    '-Copt-level=3', '-Ccodegen-units=16', '--cfg', 'feature="std"',
-                    '--cfg', 'feature="force-soft"', str(crate), *externs, *search,
+                    '-Copt-level=3', '-Ccodegen-units=16', '--cfg', 'feature="std"', str(crate), *externs, *search,
                     '-o', str(out / 'libsha2.rlib')], cwd=ROOT, check=True)
     binary = out / 'rust-sha256'
     # Buck's static rlibs contain absolute relocations. This executable does not

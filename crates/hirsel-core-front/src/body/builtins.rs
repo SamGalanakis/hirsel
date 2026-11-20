@@ -63,6 +63,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.inline_copy_from_slice(types[0], vals[0], vals[1]?, vals[2], vals[3]?, n)?;
             return Some(None);
         }
+        if module == ["sha256"] {
+            return match name {
+                "blocks" => Some(self.sha256_blocks(vals[0]?, vals[1]?, vals[2]?, vals[3]?, n)),
+                "block" => Some(self.sha256_block(vals[0]?, vals[1]?, n)),
+                _ => None,
+            };
+        }
         if module == ["list"] {
             return self.list_value(name, types[0], vals, result, n);
         }

@@ -5,14 +5,18 @@ Example: std_native.py --compiler PATH --runtime PATH --filter file --backend bo
 Confined filesystem cases run on the host, which needs openat2 (Linux >= 5.6).
 """
 import argparse
+import base64
 import contextlib
 import dataclasses
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
 import re
 import shlex
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -206,6 +210,8 @@ def discover(root, filters):
 
 
 def host_parameter(case):
+    if '(https)' in case.call:
+        return 'native_net:Net,native_clock:Clock,token:Secret,native_out:Stdout,native_err:Stderr', ''
     if model_network(case):
         return 'native_net:Net,native_clock:Clock,native_tasks:Tasks', ''
     for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr'), ('clock', 'Clock'), ('tasks', 'Tasks')]:
@@ -213,6 +219,75 @@ def host_parameter(case):
             name = 'native_' + argument
             return name + ':' + kind, name
     return '', ''
+
+
+@contextlib.contextmanager
+def https_fixture(root):
+    """TLS-2 and TL10 use one real peer and literal HTTP/1.1 wire oracles."""
+    certs = root / 'crates/hirsel-core-rt/testdata/tls'
+    config = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    config.load_cert_chain(certs / 'alpha.pem', certs / 'alpha.key.pem')
+    config.set_alpn_protocols(['http/1.1'])
+    raw = os.urandom(32)
+    token = raw.hex().encode()
+
+    def exchange(stream, request, response):
+        remaining = memoryview(request)
+        while remaining:
+            data = stream.recv(len(remaining))
+            if not data or data != remaining[:len(data)]:
+                raise ValueError('HTTPS request differs from the wire oracle')
+            remaining = remaining[len(data):]
+        stream.sendall(response)
+
+    def serve(listener):
+        connection, _ = listener.accept()
+        with connection, config.wrap_socket(connection, server_side=True) as stream:
+            if stream.selected_alpn_protocol() != 'http/1.1':
+                raise ValueError('HTTPS client did not negotiate HTTP/1.1')
+            exchange(stream, b'POST /upload HTTP/1.1\r\nHost: alpha.test\r\nContent-Length: 5\r\n\r\nhello',
+                     b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nworld\r\n0\r\n\r\n')
+            exchange(stream, b'GET /reject HTTP/1.1\r\nHost: alpha.test\r\nAuthorization: Bearer ' + token
+                     + b'\r\nX-Trace: enabled\r\nX-Second: ' + token + b'\r\nContent-Length: 0\r\n\r\n',
+                     b'HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n')
+            with contextlib.suppress(OSError):
+                stream.unwrap().close()
+
+    with socket.socket() as listener, ThreadPoolExecutor(max_workers=1) as executor:
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        peer = executor.submit(serve, listener)
+        try:
+            yield listener.getsockname()[1], (certs / 'ca.pem').resolve(), raw, token, peer
+        finally:
+            listener.shutdown(socket.SHUT_RDWR)
+
+
+def https_observation(case, result, tape, raw, token, peer):
+    sealed = tape.read_bytes() if tape.is_file() else b''
+    for value in (raw, token):
+        for form in (value, base64.b64encode(value)):
+            if any(form in output for output in (result.stdout, result.stderr, sealed)):
+                return bool(sealed), 'a Secret representation escaped'
+    diagnostics, _, stdout = result.stdout.partition(b'\n')
+    try:
+        product = json.loads(diagnostics)
+    except ValueError:
+        return False, f'HTTPS run did not report diagnostics: {result.stdout!r} {result.stderr!r}'
+    if not product.get('native'):
+        return False, first_stop(product) or f'HTTPS run did not build: {result.stderr!r}'
+    if product['diagnostics']:
+        return False, f'HTTPS run reported diagnostics: {product["diagnostics"]!r}'
+    cause = observation(case, subprocess.CompletedProcess([], result.returncode, stdout, result.stderr))
+    if cause:
+        return bool(sealed), cause
+    if not sealed:
+        return False, 'HTTPS run did not record a tape'
+    try:
+        peer.result()
+    except (OSError, ValueError) as error:
+        return True, str(error)
+    return True, None
 
 
 class Evaluator:
@@ -282,12 +357,16 @@ class Evaluator:
         self.errors.close()
 
 
-def wrapper(case):
+def wrapper(case, port=None):
     # The adapter lives in the original module, so private helpers remain private.
     call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)').replace('(tasks)', '(native_tasks)')
     call = call.replace('(network)', '(native_net,native_clock,native_tasks)')
     parameters, _ = host_parameter(case)
     effect = ' waits' if case.waits else ''
+    if port is not None:
+        address = f'Addr(ip: V4(2130706433u32), port: {port}u16)'
+        call = call.replace('(https)', f'(native_net,native_clock,{address},token,native_out,native_err)')
+        return f'\npub fn native_contract({parameters})->Result[(),Exit]{effect} {{\nif {call} == {case.expected} {{Ok(())}} else {{Error(Exit(status: 1))}}\n}}\n'
     if case.expected.startswith(('fail ', 'fault ')):
         body = f'let _ = {call}\nOk(())'
     else:
@@ -556,13 +635,26 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                                 lambda m: m[1] + json.dumps(values['hex']) + m[2], source)
                         if count != 1:
                             raise ValueError('TypeScript differential must supply exactly one corpus')
-                adapted.write_text(source + wrapper(case))
+                https = '(https)' in case.call
+                if https:
+                    port, roots, raw, token, peer = active.enter_context(https_fixture(root))
+                adapted.write_text(source + wrapper(case, port if https else None))
                 inputs = scratch / 'inputs.json'
                 inputs.write_text(json.dumps(manifest(root, case, adapted)))
                 entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
-                command = [str(compiler), 'test', '--inputs', str(inputs), '--backend', engine,
+                command = [str(compiler), 'run' if https else 'test', '--inputs', str(inputs), '--backend', engine,
                            '--runtime', str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit),
-                           '--test-timeout', str(timeout), '--dir', str(host), '-o', str(scratch / 'programs')]
+                           '-o', str(scratch / 'programs')]
+                if https:
+                    tape = scratch / 'https.tape'
+                    net = f'Net=Connect 127.0.0.1/32 {port}-{port};Tls alpha.test {port}-{port} System'
+                    command.extend(['--entry', entry, '--record', str(tape), '--grant', net, '--grant', 'Clock',
+                                    '--grant', 'Stdout', '--grant', 'Stderr',
+                                    '--grant', 'Secret:token=env:HIRSEL_TL10_TOKEN to alpha.test'])
+                    environment = {**os.environ, 'SSL_CERT_FILE': str(roots), 'HIRSEL_TL10_TOKEN': token.decode()}
+                    environment.pop('SSL_CERT_DIR', None)
+                else:
+                    command.extend(['--test-timeout', str(timeout), '--dir', str(host)])
                 if evaluating:
                     law_started = time.monotonic()
                     result = resident.evaluate(inputs, entry, network=model_network(case),
@@ -671,8 +763,11 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     linker.chmod(0o755)
                 if linker:
                     command.extend(['--cc', str(linker)])
-                result = progress.run(command, cwd=host, capture_output=True)
-                row['ran'], row['cause'] = test_observation(case, result, entry)
+                result = progress.run(command, cwd=host, capture_output=True, env=environment if https else None)
+                if https:
+                    row['ran'], row['cause'] = https_observation(case, result, tape, raw, token, peer)
+                else:
+                    row['ran'], row['cause'] = test_observation(case, result, entry)
                 row['passed'] = row['cause'] is None
                 if row['cause']:
                     row['owner'] = owner(row['cause'], owners)

@@ -1291,3 +1291,42 @@ fn http_client_round_trip(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let _ = task.join(take server_task)
     passed
 }
+
+// TLS-2 and TL10. The loopback fixture checks both HTTP heads and the
+// upload bytes. It returns a chunked "world", then conflicting body framing.
+// expect: stdout "GET /reject\nAuthorization: Bearer [secret]\nX-Trace: enabled\nX-Second: [secret]\n"
+// expect: stderr "BodyFraming\nGET /reject\nAuthorization: Bearer [secret]\nX-Trace: enabled\nX-Second: [secret]\n"
+// expect: run http_client_https_round_trip(https) = true
+fn http_client_https_round_trip(n: Net, c: Clock, address: Addr, token: Secret, out: Stdout, err: Stderr) -> bool waits {
+    let end = 18446744073709551615u64
+    let upload = http_client.Request(method: "POST", target: "/upload", headers: list.new(), body: Fixed(5))
+    let mut client = result.unwrap(http_client.https(n, address, "alpha.test", "alpha.test", System, c, upload, end))
+    result.unwrap(http_client.write(mut client, string.as_bytes("hello")))
+    if !post_echo(mut client, "world") {
+        return false
+    }
+    let mut fields: List[http_client.Header] = list.new()
+    let bearer = result.unwrap(string.into_bytes("Bearer "))
+    let enabled = result.unwrap(string.into_bytes("enabled"))
+    result.unwrap(list.push(mut fields, http_client.Header(name: "Authorization", value: Protected(take bearer, token))))
+    result.unwrap(list.push(mut fields, http_client.Header(name: "X-Trace", value: Public(take enabled))))
+    result.unwrap(list.push(mut fields, http_client.Header(name: "X-Second", value: Protected(list.new(), token))))
+    let request = http_client.Request(method: "GET", target: "/reject", headers: take fields, body: Fixed(0))
+    result.unwrap(http_client.start(mut client, request, end))
+    let mut description: Bytes = result.unwrap(list.with_capacity(256))
+    result.unwrap(http_client.render_request(mut description, request))
+    result.unwrap(stdout.write(out, result.unwrap(string.from_utf8(take description))))
+    let failure: http_client.Error = match http_client.finish_request(mut client, 128) {
+        Error(BodyFraming) => BodyFraming,
+        _ => return false,
+    }
+    let mut rendered: Bytes = result.unwrap(list.with_capacity(256))
+    result.unwrap(http_client.render_error(mut rendered, failure, request))
+    let message = result.unwrap(string.from_utf8(take rendered))
+    let events: Log[String] = result.unwrap(log.new())
+    result.unwrap(log.append(events, take message))
+    let entries = log.finish(take events)
+    result.unwrap(stderr.write(err, entries[0]))
+    http_client.close(take client)
+    list.len(entries) == 1
+}

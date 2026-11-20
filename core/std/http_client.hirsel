@@ -1,6 +1,8 @@
+pub type HeaderValue: send = Public(Bytes) | Protected(Bytes, Secret)
+
 pub type Header: send {
     name: String,
-    value: Bytes
+    value: HeaderValue
 }
 
 pub type RequestBody: key = Fixed(u64) | Chunked
@@ -30,14 +32,13 @@ fn reserved(name: Bytes) -> bool {
     http1.equal_ascii(name, string.as_bytes("host")) || http1.equal_ascii(name, string.as_bytes("content-length")) || http1.equal_ascii(name, string.as_bytes("transfer-encoding")) || http1.equal_ascii(name, string.as_bytes("trailer")) || http1.equal_ascii(name, string.as_bytes("expect")) || http1.equal_ascii(name, string.as_bytes("upgrade"))
 }
 
-fn field(mut out: Bytes, name: Bytes, value: Bytes) -> Result[(), Error] {
+fn field_prefix(mut out: Bytes, name: Bytes, value: Bytes) -> Result[(), Error] {
     if !http1.valid_field(name, value) {
         return Error(InvalidRequest)
     }
     append(mut out, name)?
     text(mut out, ": ")?
-    append(mut out, value)?
-    text(mut out, "\r\n")
+    append(mut out, value)
 }
 
 fn number(mut out: Bytes, n: u64, radix: u32) -> Result[(), Error] {
@@ -50,9 +51,13 @@ fn number(mut out: Bytes, n: u64, radix: u32) -> Result[(), Error] {
     Ok(())
 }
 
-/// Writes an HTTP/1.1 request head into caller-owned fixed storage.
-/// Returns whether a request Connection field asks the peer to close.
-pub fn encode_request(mut out: Bytes, authority: String, req: Request) -> Result[bool, Error] {
+type EncodedHead {
+    close: bool,
+    count: u64,
+    offsets: Inline[u64, 62]
+}
+
+fn encode_head(mut out: Bytes, authority: String, req: Request) -> Result[EncodedHead, Error] {
     list.clear(mut out)
     if req.method == "" || req.method == "CONNECT" {
         return Error(InvalidRequest)
@@ -79,16 +84,28 @@ pub fn encode_request(mut out: Bytes, authority: String, req: Request) -> Result
     if list.len(req.headers) > 62 {
         return Error(TooLarge)
     }
-    let mut wants_close = false
+    let mut encoded = EncodedHead(close: false, count: 0, offsets:[0; 62])
     for f in req.headers {
         let name = string.as_bytes(f.name)
         if reserved(name) {
             return Error(InvalidRequest)
         }
-        field(mut out, name, f.value)?
-        if http1.equal_ascii(name, string.as_bytes("connection")) {
-            wants_close = wants_close || http1.contains(f.value, string.as_bytes("close"))
+        let connection = http1.equal_ascii(name, string.as_bytes("connection"))
+        match f.value {
+            Public(value) => {
+                field_prefix(mut out, name, value)?
+                if connection {
+                    encoded.close = encoded.close || http1.contains(value, string.as_bytes("close"))
+                }
+            },
+            Protected(prefix, _) => {
+                encoded.close = encoded.close || connection
+                field_prefix(mut out, name, prefix)?
+                encoded.offsets[encoded.count] = list.len(out)
+                encoded.count += 1
+            },
         }
+        text(mut out, "\r\n")?
     }
     match req.body {
         Fixed(n) => {
@@ -99,7 +116,67 @@ pub fn encode_request(mut out: Bytes, authority: String, req: Request) -> Result
         Chunked => text(mut out, "Transfer-Encoding: chunked\r\n")?,
     }
     text(mut out, "\r\n")?
-    Ok(wants_close)
+    Ok(encoded)
+}
+
+/// Writes an HTTP/1.1 request head into caller-owned fixed storage.
+/// Returns whether Connection asks the peer to close. Protected fields need a TLS stream.
+pub fn encode_request(mut out: Bytes, authority: String, req: Request) -> Result[bool, Error] {
+    let encoded = encode_head(mut out, authority, req)?
+    if encoded.count != 0 {
+        list.clear(mut out)
+        return Error(Write(Denied))
+    }
+    Ok(encoded.close)
+}
+
+fn render_request_into(mut out: Bytes, req: Request) -> Result[(), Error] {
+    text(mut out, req.method)?
+    text(mut out, " ")?
+    text(mut out, req.target)?
+    text(mut out, "\n")?
+    for f in req.headers {
+        text(mut out, f.name)?
+        text(mut out, ": ")?
+        match f.value {
+            Public(value) => append(mut out, value)?,
+            Protected(prefix, credential) => {
+                append(mut out, prefix)?
+                text(mut out, secret.render(credential))?
+            },
+        }
+        text(mut out, "\n")?
+    }
+    Ok(())
+}
+
+/// Renders a request's method, target and fields into bounded caller-owned storage.
+pub fn render_request(mut out: Bytes, req: Request) -> Result[(), Error] {
+    list.clear(mut out)
+    render_request_into(mut out, req)
+}
+
+/// Renders the HTTP error category and the redacted request that caused it.
+pub fn render_error(mut out: Bytes, error: Error, req: Request) -> Result[(), Error] {
+    list.clear(mut out)
+    let label = match error {
+        InvalidRequest => "InvalidRequest",
+        State => "State",
+        NoSpace => "NoSpace",
+        Allocation(_) => "Allocation",
+        Connect(_) => "Connect",
+        Write(_) => "Write",
+        Receive(_) => "Receive",
+        MalformedHead => "MalformedHead",
+        UnsupportedSwitch => "UnsupportedSwitch",
+        BodyFraming => "BodyFraming",
+        TooLarge => "TooLarge",
+        Deadline => "Deadline",
+        Cancelled => "Cancelled",
+    }
+    text(mut out, label)?
+    text(mut out, "\n")?
+    render_request_into(mut out, req)
 }
 
 /// Writes the size line for one nonempty chunk into fixed storage.
@@ -329,13 +406,44 @@ fn connect_error(e: NetError) -> Error {
     }
 }
 
-fn send(mut output: WriteHalf, prefix: Bytes, body: Bytes, clock: Clock, deadline: u64) -> Result[(), Error] waits {
-    match http.write_wire(mut output, prefix, body, clock, deadline) {
+fn write_result(result: Result[(), NetError]) -> Result[(), Error] {
+    match result {
         Ok(()) => Ok(()),
         Error(TimedOut) => Error(Deadline),
         Error(Aborted) => Error(Cancelled),
         Error(e) => Error(Write(e)),
     }
+}
+
+fn send(mut output: WriteHalf, prefix: Bytes, body: Bytes, clock: Clock, deadline: u64) -> Result[(), Error] waits {
+    write_result(http.write_wire(mut output, prefix, body, clock, deadline))
+}
+
+fn send_head(mut c: Connection, req: Request, encoded: EncodedHead) -> Result[(), Error] waits {
+    let empty = string.as_bytes("")
+    if encoded.count == 0 {
+        return send(mut c.output, c.encoding, empty, c.clock, c.deadline)
+    }
+    let mut index = 0u64
+    for f in req.headers {
+        if let Protected(_, credential) = f.value {
+            let at = encoded.offsets[index]
+            let before = list.slice(c.encoding, if index == 0 {
+                0
+            } else {
+                at
+            }, at)
+            index += 1
+            let end = if index < encoded.count {
+                encoded.offsets[index]
+            } else {
+                list.len(c.encoding)
+            }
+            let after = list.slice(c.encoding, at, end)
+            write_result(tls.send_secret(mut c.output, before, credential, after, At(c.clock, c.deadline)))?
+        }
+    }
+    Ok(())
 }
 
 fn check_deadline(mut c: Connection) -> Result[(), Error] {
@@ -347,20 +455,47 @@ fn check_deadline(mut c: Connection) -> Result[(), Error] {
     }
 }
 
-/// Dials a numeric address and writes the first request head under this deadline.
-pub fn dial(n: Net, address: Addr, authority: String, clock: Clock, req: Request, deadline_ns: u64) -> Result[Connection, Error] waits {
+fn connect(n: Net, address: Addr, clock: Clock, deadline_ns: u64) -> Result[Socket, Error] waits {
     if host.mono_ns(clock) >= deadline_ns {
         return Error(Deadline)
     }
-    let socket = match host.connect(n, address, At(clock, deadline_ns)) {
+    match host.connect(n, address, At(clock, deadline_ns)) {
+        Ok(take s) => Ok(take s),
+        Error(e) => Error(connect_error(e)),
+    }
+}
+
+/// Dials a numeric address and writes the first request head under this deadline.
+pub fn dial(n: Net, address: Addr, authority: String, clock: Clock, req: Request, deadline_ns: u64) -> Result[Connection, Error] waits {
+    let socket = connect(n, address, clock, deadline_ns)?
+    attach(take socket, authority, clock, req, deadline_ns)
+}
+
+/// Performs a verified TLS handshake offering HTTP/1.1 and writes the first request head.
+pub fn https(n: Net, address: Addr, authority: String, name: String, trust: Trust, clock: Clock, req: Request, deadline_ns: u64) -> Result[Connection, Error] waits {
+    let socket = connect(n, address, clock, deadline_ns)?
+    let mut alpn: List[String] = list.new()
+    let protocol = match string.from("http/1.1") {
         Ok(take s) => take s,
+        Error(e) => return Error(Allocation(e)),
+    }
+    if let Error((e, _)) = list.push(mut alpn, take protocol) {
+        return Error(Allocation(e))
+    }
+    let (take input, take output, _) = match tls.connect(n, take socket, name, trust, alpn, At(clock, deadline_ns)) {
+        Ok(take stream) => take stream,
         Error(e) => return Error(connect_error(e)),
     }
-    attach(take socket, authority, clock, req, deadline_ns)
+    attach_halves(take input, take output, authority, clock, req, deadline_ns)
 }
 
 /// Takes ownership of a connected stream and writes the first request head.
 pub fn attach(take socket: Socket, authority: String, clock: Clock, req: Request, deadline_ns: u64) -> Result[Connection, Error] waits {
+    let (take input, take output) = net.split(take socket)
+    attach_halves(take input, take output, authority, clock, req, deadline_ns)
+}
+
+fn attach_halves(take input: ReadHalf, take output: WriteHalf, authority: String, clock: Clock, req: Request, deadline_ns: u64) -> Result[Connection, Error] waits {
     if string.byte_len(authority) > 8192 {
         return Error(TooLarge)
     }
@@ -368,7 +503,6 @@ pub fn attach(take socket: Socket, authority: String, clock: Clock, req: Request
         Ok(take s) => take s,
         Error(e) => return Error(Allocation(e)),
     }
-    let (take input, take output) = net.split(take socket)
     let wire = reader()?
     let encoding = storage(8192)?
     let mut c = Connection(input: take input, output: take output, wire: take wire, encoding: take encoding, authority: take stored, clock: clock, deadline: deadline_ns, phase: Idle, upload: Fixed(0), head_request: false, close_after: false)
@@ -383,9 +517,10 @@ pub fn start(mut c: Connection, req: Request, deadline_ns: u64) -> Result[(), Er
     }
     c.deadline = deadline_ns
     check_deadline(mut c)?
-    c.close_after = encode_request(mut c.encoding, c.authority, req)?
+    let encoded = encode_head(mut c.encoding, c.authority, req)?
+    c.close_after = encoded.close
     c.phase = Closed
-    send(mut c.output, c.encoding, string.as_bytes(""), c.clock, c.deadline)?
+    send_head(mut c, req, encoded)?
     check_deadline(mut c)?
     c.upload = req.body
     c.head_request = req.method == "HEAD"

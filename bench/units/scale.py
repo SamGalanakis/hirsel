@@ -64,6 +64,10 @@ class Deadline(Exception):
     pass
 
 
+class PortBusy(RuntimeError):
+    pass
+
+
 def stop_at_deadline(*_):
     raise Deadline
 
@@ -163,7 +167,7 @@ def assert_ports_free(ports):
     result = subprocess.run(["ss", "-H", "-ltn"], capture_output=True, text=True, check=True)
     listening = {int(row.split()[3].rsplit(":", 1)[1]) for row in result.stdout.splitlines()}
     if busy := listening.intersection(ports):
-        raise RuntimeError(f"unexpected listener on {sorted(busy)}")
+        raise PortBusy(f"unexpected listener on {sorted(busy)}")
 
 
 class Runner:
@@ -324,11 +328,14 @@ class Runner:
             result = None
 
         ustats = None
+        memory = None
         queue = []
         ordinary_err = []
         for line in server_err:
             if line.startswith("untied-stats "):
                 ustats = {key: int(value) for key, value in (kv.split("=", 1) for kv in line.split()[1:])}
+            elif line.startswith("pool-memory "):
+                memory = {key: int(value) for key, value in (kv.split("=", 1) for kv in line.split()[1:])}
             elif line.startswith("queue-wait "):
                 queue.append(list(map(int, line.split()[1:])))
             else:
@@ -338,6 +345,8 @@ class Runner:
             result["failures"] == result["timeouts"] == result["late"] == 0 and
             result["completed"] == result["issued"] and result["p99_ns"] <= LIMIT_NS
         )
+        if memory is not None:
+            r["pool_memory"] = memory
         cpu = usage.ru_utime + usage.ru_stime if usage else None
         cpu_warm = cpu_at(samples, result["warm_ns"]) if result else None
         cpu_end = cpu_at(samples, result["end_ns"]) if result else None
@@ -389,9 +398,11 @@ class Runner:
                             for side, rate, seed in items:
                                 tag = f"{phase}-{cell_name}-{os.getpid()}-{self.hold}-{side.replace(' ', '_')}"
                                 records.append(self.trial(tag, side, cell, rate, seed, tool, profile))
+            except PortBusy as error:
+                receipt["port_conflict"] = str(error)
             finally:
                 clean = bool(receipt.get("board_window_open") and receipt.get("cc1plus_start") == []
-                             and receipt.get("cc1plus_end") == [])
+                             and receipt.get("cc1plus_end") == [] and "port_conflict" not in receipt)
                 for r in records:
                     out.write(json.dumps(r | receipt | {"discarded": not clean}) + "\n")
                 out.write(json.dumps(receipt | {"hold_summary": True, "discarded": not clean}) + "\n")

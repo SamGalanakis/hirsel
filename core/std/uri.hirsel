@@ -251,7 +251,7 @@ fn authority(text: String, u: Uri, mut out: String) -> Result[(Option[http1.Span
         userinfo = Some(piece(text, s, mut out)?)
         string.push(mut out, "@")?
     }
-    let written = match host {
+    let written: Host = match host {
         Name(s) => Name(piece(text, s, mut out)?),
         Ip6(s) => {
             string.push(mut out, "[")?

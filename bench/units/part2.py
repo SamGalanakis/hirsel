@@ -122,9 +122,15 @@ def run_one(c):
 def main():
     random.seed(int(time.time()))
     plain, board = configs(), board_configs()
+    only = os.environ.get("PART2_ONLY")
+    if only:
+        pick = lambda cs: [c for c in cs if re.search(only, c["name"] + "/" + c["shape"])]
+        plain, board = pick(plain), pick(board)
     with open(OUT, "a") as out:
         for g in range(GROUPS):
             for kind, cs in (("plain", plain), ("board", board)):
+                if not cs:
+                    continue
                 order = cs[:]
                 random.shuffle(order)
                 cpus = set().union(*(cpuset(c["cpus"]) for c in order))

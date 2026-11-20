@@ -1026,7 +1026,9 @@ resource type SubscriptionLease: send { refund: Sender[u64], charge: u64 } drop(
 // A live sub has its Cover. An ended entry (§3 "Ended entries") has none: it no longer runs,
 // but its read set stays indexed, and its input stays charged to the session, until its first
 // read-set hit, its owner's removal or the session's end.
-type Sub { generation: u64, input: SubscriptionInput, cover: Option[Cover], routes: List[RouteKey] }
+// `due` (§3 "Repair"): a full owner inbox bounced content of this live sub. Its hits still
+// fence, its diffs stop, and on its owner's progress one full `complete` replaces it.
+type Sub { generation: u64, input: SubscriptionInput, cover: Option[Cover], routes: List[RouteKey], due: bool }
 
 type SubId { who: u64, sub: u32, serial: u64 }
 
@@ -1285,6 +1287,7 @@ fn end_entry(mut subs: Subscriptions, who: u64, sub: u32) {
     let dropped = map.update(mut subs.by_session, who, scoped fn(mut group: Map[u32, Sub]) -> Option[RouteKey] {
         match map.update(mut group, sub, scoped fn(mut entry: Sub) -> Option[RouteKey] {
             entry.cover = None
+            entry.due = false
             if list.len(entry.routes) > 0u64 && entry.routes[0].slot == 0u64 { Some(list.remove(mut entry.routes, 0u64)) } else { None }
         }) {
             Some(take key) => take key,
@@ -1313,6 +1316,41 @@ fn ended_entry(subs: Subscriptions, id: SubId) -> bool {
         Some(entry) => match entry.cover { Some(_) => false, None => true },
         None => false,
     }
+}
+
+fn due_entry(subs: Subscriptions, id: SubId) -> bool {
+    match sub_at(subs, id.who, id.sub) {
+        Some(entry) => entry.due,
+        None => false,
+    }
+}
+
+// Marks a live sub for repair (§3 "Repair"); an ended entry or a removed sub is not marked.
+fn mark_due(mut subs: Subscriptions, who: u64, sub: u32) -> bool {
+    match map.update(mut subs.by_session, who, scoped fn(mut group: Map[u32, Sub]) -> bool {
+        match map.update(mut group, sub, scoped fn(mut entry: Sub) -> bool {
+            match entry.cover {
+                Some(_) => { entry.due = true; true },
+                None => false,
+            }
+        }) {
+            Some(marked) => marked,
+            None => false,
+        }
+    }) {
+        Some(marked) => marked,
+        None => false,
+    }
+}
+
+fn due_subs(subs: Subscriptions, who: u64) -> List[u32] {
+    let mut due: List[u32] = list.new()
+    if let Some(group) = map.get(subs.by_session, who) {
+        for (sub, entry) in group {
+            if entry.due { result.unwrap(list.push(mut due, sub)) }
+        }
+    }
+    take due
 }
 
 // What one step owes one session: at `version`, the subs whose whole initial result it
@@ -1435,7 +1473,7 @@ fn add_subscription(mut subs: Subscriptions, who: u64, sub: u32, generation: u64
     subs.serial += 1u64
     let id = SubId(who: who, sub: sub, serial: subs.serial)
     let (take nodes, take keys) = stage_routes(id, cover_view(c), take reads)?
-    put_sub(mut subs, id, Sub(generation: generation, input: take input, cover: take c, routes: take keys))?
+    put_sub(mut subs, id, Sub(generation: generation, input: take input, cover: take c, routes: take keys, due: false))?
     install_routes(mut subs.root, take nodes)
     Ok(())
 }
@@ -1647,6 +1685,9 @@ fn round[G: send, H: send](mut b: Board[G, H], mut fenced: Fenced) -> List[Owe] 
             let _ = remove_sub(mut b.subs, id.who, id.sub)
             continue
         }
+        // A due sub's hit is fenced above and its diff is not computed: the repair's full
+        // image replaces whatever this round changed (§3 "Repair").
+        if due_entry(b.subs, id) { continue }
         let Some((generation, take advanced)) = advance_sub(b, newest, d, id, read) else { continue }
         let k = owe(mut owes, id.who, version)
         match take advanced {
@@ -1729,7 +1770,9 @@ type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, Bytes
 // retirement mark, a channel it keeps the only Sender of and never sends on.
 // v2.19: a session's fence root holds a handle the publisher publishes on (§3 "The release
 // check"), and the publisher answers with the session's id and a handle to the round register.
-type Join: send { to: Sender[WireEvent], told: Sender[Admit], mark: Option[Receiver[()]], closed: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[Latest[Fence]] }
+// v2.20: `progress` is the owner's drain token (§3 "Repair"), a capacity-1 channel the owner
+// sends on before each `Drained`; with none, a due session repairs on every pass.
+type Join: send { to: Sender[WireEvent], told: Sender[Admit], mark: Option[Receiver[()]], closed: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[Latest[Fence]], progress: Option[Receiver[()]] }
 
 type Admit: send { who: u64, round: Latest[RoundAt] }
 
@@ -3558,13 +3601,14 @@ fn journal_test_trigger_cancel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
 // answers at the base (V3). A Subscribe runs at the base (G3), in its place among Releases.
 //
 // The publisher never blocks on a session (L23): every send to an owner is a try_send. A
-// closed inbox drops that session's subs. A full one ends each sub whose content did not fit
-// with Ended(sub, Refused(Overloaded)); the client resubscribes (WIRE-SPEC D3). That Ended
-// (or a Reset) and bounced answers wait until the inbox takes them. The publisher retries
-// them at its current base, together with any new content or answers for that owner.
+// closed inbox drops that session's subs. A full one marks each live sub whose content did
+// not fit due for repair (§3 "Repair"), with no Ended and no Reset: `due` says some sub of
+// the session is due. On the owner's progress the publisher reruns each due sub at its base
+// and sends its whole image as a `complete`. A bounced Ended (or Reset) and bounced answers
+// wait until the inbox takes them, retried at the current base with any new content.
 // `ended_at` is the oldest computation version among `ended` (u64::MAX when empty): a waiting
 // Ended keeps the version it was computed at when it is folded into later content.
-type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[(u32, u64, Outcome)], ended_at: u64, reset: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet] }
+type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[(u32, u64, Outcome)], ended_at: u64, reset: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet], due: bool, progress: Option[Receiver[()]] }
 
 // One try_send to an owner: taken, bounced back by a full inbox, or shut.
 type Offered = Took | Bounced(Notice) | Shut
@@ -3612,7 +3656,7 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 keep_answers(mut waiting, take answers)
             },
             Joined(take j) => {
-                let Join(to: take to, told: take told, mark: take mark, closed: take closed, identity: take id, fence: take fence) = take j
+                let Join(to: take to, told: take told, mark: take mark, closed: take closed, identity: take id, fence: take fence, progress: take progress) = take j
                 let wake: Option[Sender[WireEvent]] = match closed { Some(_) => Some(channel.sender(to)), _ => None }
                 // A fenced session's Arcs are reserved here (§3 "Admission"); a refusal answers id 0.
                 let reserved: Result[Option[FenceSet], Capacity] = match take fence {
@@ -3622,7 +3666,7 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 match take reserved {
                     Ok(take fences) => {
                         minted += 1u64
-                        result.unwrap(list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: take mark, identity: take id, fence: take fences)))
+                        result.unwrap(list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: take mark, identity: take id, fence: take fences, due: false, progress: take progress)))
                         let _ = channel.try_send(told, Admit(who: minted, round: latest.handle(rounds.round)))
                     },
                     Error(_) => { let _ = channel.try_send(told, Admit(who: 0u64, round: latest.handle(rounds.round))) },
@@ -3640,6 +3684,7 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
             Drained => (),
         }
         sweep(mut b.subs, mut joined)
+        repair(mut b, mut joined, mut owes)
         settle(mut b.subs, mut joined, mut waiting, take owes, at)
     }
 }
@@ -3748,6 +3793,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             let _ = replace(mut next.ended, list.new())
             next.reset = true
             end_session(mut subs, who)
+            joined[i].due = false
         } else if list.len(old) > 0u64 {
             // A unit is checked at its oldest component (§3).
             if old_at < next.version { next.version = old_at }
@@ -3796,33 +3842,65 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
     }
 }
 
-// A full inbox bounced this content: each sub it named (complete or a row) ends Overloaded,
-// its Ended subs wait, and a Reset waits and covers them all.
+// A full inbox bounced this content: a Reset waits and covers it all; otherwise each live sub
+// it named (complete or a row) is due for repair (§3 "Repair") and its Ended subs wait.
 fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
-    let Owe(session: who, version: computed, generations: take generations, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
-    let mut cut: List[u32] = take complete
-    for r in rows {
-        if !list.contains(cut, r.sub) {
-            result.unwrap(list.push(mut cut, r.sub))
-        }
-    }
-    for sub in cut {
-        end_entry(mut subs, who, sub)
-    }
+    let Owe(session: who, version: computed, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
     if reset || j.reset {
         j.reset = true
         j.ended = list.new()
         j.ended_at = ROUND_HALTED
         return
     }
+    for sub in complete {
+        if mark_due(mut subs, who, sub) { j.due = true }
+    }
+    for r in rows {
+        if mark_due(mut subs, who, r.sub) { j.due = true }
+    }
+    if list.len(ended) == 0u64 { return }
     if computed < j.ended_at { j.ended_at = computed }
     for take x in ended {
         result.unwrap(list.push(mut j.ended, take x))
     }
-    for sub in cut {
-        let generation = match sub_generation(generations, sub) { Some(g) => g, None => 0u64 }
-        result.unwrap(list.push(mut j.ended, (sub, generation, Refused(Overloaded))))
+}
+
+// §3 "Repair", before the offers of each pass: every owner's drain token is taken, so a token
+// sent before a bounce never counts after it. A due session that progressed (or has no token
+// channel) reruns each due sub at the base, with its generation and input, into its owe as a
+// complete. Removing the sub drops its old read set: any commit since that read set's run
+// that hit it has fenced the session, and if none did the rerun reads the same keys.
+fn repair[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe]) {
+    let at = store.version(b.base)
+    let mut i = 0u64
+    while i < list.len(joined) {
+        let progressed = match joined[i].progress {
+            Some(from) => match channel.try_receive(from) { Ok(()) => true, _ => false },
+            None => true,
+        }
+        if joined[i].due && progressed && !joined[i].reset {
+            joined[i].due = false
+            let who = joined[i].who
+            for sub in due_subs(b.subs, who) {
+                let Some(take old) = remove_sub(mut b.subs, who, sub) else { continue }
+                let Sub(generation: generation, input: take input, cover: _, routes: _, due: _) = take old
+                let fresh = at_base_generation(mut b, who, sub, generation, take input)
+                let k = owe(mut owes, who, at)
+                merge_owe(mut owes[k], take fresh)
+            }
+        }
+        i += 1u64
     }
+}
+
+fn merge_owe(mut into: Owe, take from: Owe) {
+    let Owe(session: _, version: v, generations: take generations, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take from
+    if v < into.version { into.version = v }
+    if reset { into.reset = true }
+    for g in generations { result.unwrap(list.push(mut into.generations, g)) }
+    for sub in complete { result.unwrap(list.push(mut into.complete, sub)) }
+    for take r in rows { result.unwrap(list.push(mut into.rows, take r)) }
+    for take e in ended { result.unwrap(list.push(mut into.ended, take e)) }
 }
 
 fn joiner(joined: List[Joiner], who: u64) -> Option[u64] {
@@ -4429,7 +4507,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let (ev_to, ev_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(8u64))
     let (told_to, told_from): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
     let mut queue: List[ToPub] = list.new()
-    result.unwrap(list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to, mark: None, closed: None, identity: None, fence: None))))
+    result.unwrap(list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to, mark: None, closed: None, identity: None, fence: None, progress: None))))
     result.unwrap(list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new()))))
     result.unwrap(list.push(mut queue, Subscribed(1u64, 1u32, query_key(code.describe(q1)), no_arg())))
     result.unwrap(list.push(mut queue, Released(Release(version: v2, snapshot: Some(take c2), answers: list.new()))))
@@ -4480,8 +4558,12 @@ pub fn law_retired_without_waiting(c: Clock, r: Random, tasks: Tasks) -> bool wa
 // A session joins the publisher and is told its id (0 if it could not): a sync point that is
 // not a Released, since the publisher has taken every message sent before it.
 fn join_as(to: Sender[PubIn], take ev: Sender[WireEvent], take mark: Option[Receiver[()]]) -> u64 waits {
+    join_with(to, take ev, take mark, None)
+}
+
+fn join_with(to: Sender[PubIn], take ev: Sender[WireEvent], take mark: Option[Receiver[()]], take progress: Option[Receiver[()]]) -> u64 waits {
     let (told, hear): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
-    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take ev, told: take told, mark: take mark, closed: None, identity: None, fence: None)))) {
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take ev, told: take told, mark: take mark, closed: None, identity: None, fence: None, progress: take progress)))) {
         return 0u64
     }
     match channel.receive(hear) {
@@ -4654,8 +4736,8 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
     let mut ended: List[(u32, u64, Outcome)] = list.new()
     result.unwrap(list.push(mut ended, (1u32, 0u64, Refused(Overloaded))))
     let mut joined: List[Joiner] = list.new()
-    result.unwrap(list.push(mut joined, Joiner(who: 1u64, to: take l_to, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: Some(take l_mark), identity: None, fence: None)))
-    result.unwrap(list.push(mut joined, Joiner(who: 2u64, to: take m_to, closed: None, ended: take ended, ended_at: ROUND_HALTED, reset: false, mark: Some(take m_mark), identity: None, fence: None)))
+    result.unwrap(list.push(mut joined, Joiner(who: 1u64, to: take l_to, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: Some(take l_mark), identity: None, fence: None, due: false, progress: None)))
+    result.unwrap(list.push(mut joined, Joiner(who: 2u64, to: take m_to, closed: None, ended: take ended, ended_at: ROUND_HALTED, reset: false, mark: Some(take m_mark), identity: None, fence: None, due: false, progress: None)))
     let mut outcomes: List[KeyedDone] = list.new()
     result.unwrap(list.push(mut outcomes, KeyedDone(stream: no_arg(), p: 0u64, outcome: Refused(Overloaded))))
     let mut waiting: List[Replies] = list.new()
@@ -4769,7 +4851,7 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
     let PubIn(e: take first) = take joining
     let (ses, held) = match take first {
         Joined(take j) => {
-            let Join(to: take delivery, told: take told, mark: take given, closed: _, identity: _, fence: _) = take j
+            let Join(to: take delivery, told: take told, mark: take given, closed: _, identity: _, fence: _, progress: _) = take j
             let ses_to = take delivery
             let _ = channel.try_send(told, Admit(who: 7u64, round: latest.handle(rounds.round)))
             let _ = channel.send(ses_to, wire_event(JoinReady))
@@ -4909,10 +4991,12 @@ pub fn law_stale_never_released(c: Clock, r: Random, tasks: Tasks) -> bool waits
 // fence of their own: session 1's q1 by a Cover-only conversion that faults (Ended), session
 // 2's q1 by one that loses (a publisher-made Reset), and session 3's q_late by a re-run that
 // faults after reading perm, which its last good run never read. Session 4's q1 gets round
-// c's rows, which bounce at its full owner inbox after c's R is published (B1d), so it ends
-// Overloaded with no fence. Commit b then writes only perm, which no live sub reads: all four
-// sessions are fenced at b and nothing is owed. A second write to perm fences none, since
-// each entry left at its first hit.
+// c's rows, which bounce at its full owner inbox after c's R is published (B1d), so it is due
+// for repair (§3 "Repair"): no Ended, no fence. Commit b then writes only perm: all four
+// sessions are fenced at b, and nothing is owed, since session 4's sub is due and is not re-run.
+// A second write to perm fences only session 4, whose due sub keeps its read set; each ended
+// entry left at its first hit. Repair waits for session 4's drain token, then owes q1's whole
+// image at the base: perm is set, so rows 1 and 2, in one `complete`.
 fn ended_trace(c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, store.defaults())
     let cv: std.codec.Codec[u64] = std.codec.of()
@@ -4957,18 +5041,21 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     let mut at_c = Fenced(sessions: list.new(), all: false)
     let mut owes_c = round(mut b, mut at_c)
     let (full_to, _full_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(1u64))
-    let mut full = Joiner(who: 4u64, to: take full_to, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: None, identity: None, fence: None)
+    let (progressed, progress): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let mut joined: List[Joiner] = list.new()
+    result.unwrap(list.push(mut joined, Joiner(who: 4u64, to: take full_to, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress))))
     let mut bounced = 0u64
     let mut i = 0u64
     while i < list.len(owes_c) {
         if owes_c[i].session == 4u64 {
             let o = list.remove(mut owes_c, i)
             if list.len(o.rows) > 0u64 { bounced += 1u64 }
-            overloaded(mut b.subs, mut full, take o)
+            overloaded(mut b.subs, mut joined[0], take o)
         } else {
             i += 1u64
         }
     }
+    let marked = joined[0].due && list.len(joined[0].ended) == 0u64
     let mut ended = 0u64
     for o in owes_c {
         if o.session == 2u64 && o.reset { ended += 1u64 }
@@ -4988,8 +5075,17 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     b.newest = Some(store.snapshot(db))
     let mut again = Fenced(sessions: list.new(), all: false)
     let owes_again = round(mut b, mut again)
-    bounced == 1u64 && list.len(full.ended) == 1u64 && ended == 3u64 && c_fences && b_fences && list.len(owes_b) == 0u64
-        && list.len(again.sessions) == 0u64 && list.len(owes_again) == 0u64
+    let kept = !again.all && list.len(again.sessions) == 1u64 && list.contains(again.sessions, 4u64) && list.len(owes_again) == 0u64
+    let mut idle: List[Owe] = list.new()
+    repair(mut b, mut joined, mut idle)
+    let _ = channel.try_send(progressed, ())
+    let mut fixed: List[Owe] = list.new()
+    repair(mut b, mut joined, mut fixed)
+    let image = list.len(fixed) == 1u64 && fixed[0].session == 4u64 && fixed[0].version == store.version(b.base)
+        && list.len(fixed[0].complete) == 1u64 && fixed[0].complete[0] == 1u32 && list.len(fixed[0].ended) == 0u64 && !fixed[0].reset
+        && list.len(fixed[0].rows) == 2u64 && fixed[0].rows[0].sub == 1u32 && fixed[0].rows[1].sub == 1u32 && !joined[0].due
+    bounced == 1u64 && marked && ended == 3u64 && c_fences && b_fences && list.len(owes_b) == 0u64
+        && kept && list.len(idle) == 0u64 && image
 }
 
 // publisher_trap_open: a publisher that traps publishes R = u64::MAX before it goes, so the
@@ -5021,7 +5117,7 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     }
     let (s_to, s_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(1u64))
     let (told, hear): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
-    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: channel.sender(s_to), told: take told, mark: None, closed: None, identity: None, fence: None)))) {
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: channel.sender(s_to), told: take told, mark: None, closed: None, identity: None, fence: None, progress: None)))) {
         return false
     }
     let Admit(who: s, round: take register) = match channel.receive(hear) {
@@ -5080,7 +5176,7 @@ fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let root = result.unwrap(latest.new(take first))
     let (s_to, s_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(16u64))
     let (told, hear): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
-    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take s_to, told: take told, mark: None, closed: None, identity: None, fence: Some(latest.handle(root)))))) {
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take s_to, told: take told, mark: None, closed: None, identity: None, fence: Some(latest.handle(root)), progress: None)))) {
         return false
     }
     let Admit(who: s, round: take register) = match channel.receive(hear) {
@@ -6695,7 +6791,9 @@ pub opaque type WireSession[G: send, H: send]: send {
     asking: bool, pending: Option[WirePending],
     held: Map[Bytes, WireHeld], refusals: u64, last: u64, generation: u64,
     joined: Option[u64], joining: Option[Receiver[Admit]], join_lease: Option[WireJoinLease], marked: bool, mark: Option[Sender[()]], subscription: Option[(u32, SubscriptionInput)], subscription_room: Option[SubscriptionRoom], sub_generation: u64, subs: List[(u32, u64)], pub_subs: List[u32], reset_seen: bool,
-    holding: bool, leaving: List[WireJoinLease], resubs: List[WireResub]
+    holding: bool, leaving: List[WireJoinLease], resubs: List[WireResub],
+    // §3 "Repair": the drain token's sender, made at each join; the publisher holds the receiver.
+    progress: Option[Sender[()]]
 }
 
 // v2.19.2 (§3 "The owner asks for removal"): a replacing Subscribed held while the writer
@@ -6715,7 +6813,7 @@ fn wire_service_with_head[G: send, H: send](take reg: Registry[G, H], access_gat
         source: V4(0u32), me: None, publisher: None, caller: None, welcome_token: None, phase: 0u8, wants: list.new(), entries: list.new(), placing: 0u64,
         asking: false, pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64,
         joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false,
-        holding: false, leaving: list.new(), resubs: list.new())
+        holding: false, leaving: list.new(), resubs: list.new(), progress: None)
     Service(context: take context, step: wire_step, ready: wire_can_read, allocate: wire_service_allocate, finish: wire_finish, check: wire_check_live)
 }
 
@@ -7271,6 +7369,8 @@ fn wire_apply_subscribe[G: send, H: send](mut s: WireSession[G, H], mut work: Wi
     let fence = match take fence_root { Ok(take root) => take root, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
     let close_channel: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
     let (closing, closed) = match take close_channel { Ok(take pair) => take pair, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
+    let progress_channel: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
+    let (token, progress) = match take progress_channel { Ok(take pair) => take pair, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
     if let None = work.head {
         match head_lease(copy_wire_head(s.head)) {
             Ok(take h) => { work.head = Some(take h) },
@@ -7280,15 +7380,16 @@ fn wire_apply_subscribe[G: send, H: send](mut s: WireSession[G, H], mut work: Wi
     let identity = match work.head { Some(h) => latest.handle(h.identity), None => fail("runner: missing head lease") }
     let join = if s.marked {
         s.mark = Some(take closing)
-        Join(to: wire_me(s), told: take told, mark: Some(take closed), closed: None, identity: Some(take identity), fence: Some(latest.handle(fence)))
+        Join(to: wire_me(s), told: take told, mark: Some(take closed), closed: None, identity: Some(take identity), fence: Some(latest.handle(fence)), progress: Some(take progress))
     } else {
         if let Error(_) = list.reserve(mut s.leaving, 1u64) { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) }
         let lease = match WireJoinLease(closing: take closing, publisher: wire_publisher(s)) { Ok(take l) => take l, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
         s.join_lease = Some(take lease)
-        Join(to: wire_me(s), told: take told, mark: None, closed: Some(take closed), identity: Some(take identity), fence: Some(latest.handle(fence)))
+        Join(to: wire_me(s), told: take told, mark: None, closed: Some(take closed), identity: Some(take identity), fence: Some(latest.handle(fence)), progress: Some(take progress))
     }
     if let Error(_) = channel.try_send(wire_publisher(s), PubIn(e: Joined(take join))) { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) }
     work.fence = Some(take fence)
+    s.progress = Some(take token)
     // A fresh join can wait for its id while an old terminal frame is queued.
     wire_prune_output(mut s, mut work.output, Some(sub))
     s.joining = Some(take hear)
@@ -7524,6 +7625,8 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
         WSent => { wire_sent(mut s, mut work); wire_flush(mut s, mut work); return Ok(None) },
         WDropped => { wire_dropped(mut s, mut work)?; wire_flush(mut s, mut work); return Ok(None) },
         WDrained => {
+            // The token goes first, so the wake it rides on finds it (§3 "Repair").
+            if let Some(to) = s.progress { let _ = channel.try_send(to, ()) }
             if let Some(_) = work.head { let _ = channel.try_send(wire_publisher(s), PubIn(e: Drained)) }
         },
         WClose(deadline) => { work.deadline = Some(deadline) },
@@ -7709,13 +7812,14 @@ fn wire_check_live[G: send, H: send](s: WireSession[G, H], f: Frame) -> Option[u
 
 // Publisher harness: a joined inbox whose consumer the law can hold still.
 // This fixture does not create a session or a second call transport.
-pub type FixtureOwner { inbox: Receiver[WireEvent], out: Sender[Down], from: Receiver[Down], post: Sender[PubIn], who: u64 }
+pub type FixtureOwner { inbox: Receiver[WireEvent], out: Sender[Down], from: Receiver[Down], post: Sender[PubIn], who: u64, progress: Sender[()] }
 
 pub fn fixture_owner(pub_in: Sender[PubIn]) -> FixtureOwner waits {
     let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(64u64))
-    let who = join_as(pub_in, take to, None)
+    let (progressed, progress): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let who = join_with(pub_in, take to, None, Some(take progress))
     let (out, from): (Sender[Down], Receiver[Down]) = result.unwrap(channel.new(64u64))
-    FixtureOwner(inbox: take inbox, out: take out, from: take from, post: channel.sender(pub_in), who: who)
+    FixtureOwner(inbox: take inbox, out: take out, from: take from, post: channel.sender(pub_in), who: who, progress: take progressed)
 }
 
 pub fn fixture_subscribe(owner: FixtureOwner, sub: u32, take key: Bytes, take arg: Bytes) -> () waits {
@@ -7732,6 +7836,7 @@ fn fixture_content(owner: FixtureOwner, take event: WireEvent) -> () waits {
     if let Updated(Update(version: _, content: Some(take o), outcomes: take outcomes)) = take e {
         hand(owner.out, take o, mut dropped, take outcomes)
     }
+    let _ = channel.try_send(owner.progress, ())
     let _ = channel.try_send(owner.post, PubIn(e: Drained))
 }
 

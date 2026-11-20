@@ -830,32 +830,108 @@ fn drive_subs_wired(take d: Drive) -> () waits {
     hang(take s0)
 }
 
-// Enough writes to fill A's client channel (64), the Batch its owner holds while blocked,
-// and its inbox (64), with room to spare.
+// Enough writes to fill A's owner inbox (64), with room to spare.
 const STALL_WRITES: u64 = 150u64
 
-// B's writes from `from` while A reads nothing: each reaches B in its own round.
-fn stall(b: Conn, clock: Clock, from: u64) -> () waits {
-    for i in from .. from + STALL_WRITES {
-        ask(b, clock, 0u64, i, k_write(), u64_arg(i), LATER)
-        let v = 3u64 + 2u64 * i
-        want(match down(b) {
-            Batched(x) => x.version == v && list.len(x.rows) == 1u64 && list.len(x.outcomes) == 1u64
-                && x.outcomes[0].p == i && ok_value(x.outcomes[0].outcome) == Some(v),
-            _ => false,
-        }, "never_blocks: B's row and outcome arrive while A is full")
+// write(k)'s row: "data"'s table id 1 as 4 bytes big-endian, then k big-endian (L16).
+fn row_key(k: u64) -> Bytes {
+    let mut out: Bytes = list.new()
+    for x in [0u8, 0u8, 0u8, 1u8] {
+        result.unwrap(list.push(mut out, x))
+    }
+    result.unwrap(std.codec.put_key_u64(k, mut out))
+    out
+}
+
+// write(k)'s value: the u64 codec's 8 bytes, little-endian.
+fn row_value(k: u64) -> Bytes {
+    let mut out: Bytes = list.new()
+    result.unwrap(std.codec.put_u64(k, mut out))
+    out
+}
+
+// A's cache of sub 1 as a client keeps it (WIRE §3): every `complete` replaces it from empty,
+// and a row sets or removes its key. `at` is the version the cache is current at; a diff is
+// applied only at `at` + 2 (each of B's writes is one round, two versions apart), so a
+// diff past a hole fails. `repairs` counts the `complete`s after the first.
+type Cache { rows: Map[Bytes, Bytes], at: u64, completes: u64 }
+
+fn cache() -> Cache {
+    Cache(rows: map.new(), at: 0u64, completes: 0u64)
+}
+
+fn apply(mut c: Cache, take d: runner.Down) {
+    match take d {
+        Batched(take x) => {
+            let runner.KeyedBatch(version: version, complete: complete, rows: take rows, outcomes: _) = take x
+            want(version != NEVER, "repair: A's channel closed")
+            let replaces = list.len(complete) == 1u64 && complete[0] == 1u32
+            want(replaces || list.len(complete) == 0u64, "repair: A's complete names only sub 1")
+            if replaces {
+                c.rows = map.new()
+                c.completes += 1u64
+            } else {
+                want(version == c.at + 2u64, "repair: a diff crosses a hole in A's cache")
+            }
+            for take row in rows {
+                want(row.sub == 1u32, "repair: A's rows are sub 1's")
+                let runner.Row(sub: _, key: take key, value: take value) = take row
+                match take value {
+                    Some(take v) => result.unwrap(result.capacity_only(map.insert(mut c.rows, take key, take v))),
+                    None => { let _ = map.remove(mut c.rows, key) },
+                }
+            }
+            c.at = version
+        },
+        Ended(_, _) => fail("repair: A's sub ended"),
+        _ => fail("repair: A got a Reset"),
     }
 }
 
-// A resubscribes sub 1 after its Ended: one Batch naming it, with all n rows written.
-fn resubscribed(a: Conn, n: u64) -> () waits {
-    subscribe(a, 1u32, k_everything())
-    want(match down(a) {
-        Batched(x) => x.version == 3u64 + 2u64 * (n - 1u64) && list.len(x.complete) == 1u64 && x.complete[0] == 1u32 && list.len(x.rows) == n,
-        _ => false,
-    }, "never_blocks: A's resubscribe is one Batch with every row")
+// The exact image after writes 0 .. n: every key once, with its value, at write n - 1's version.
+fn exact(c: Cache, n: u64) -> bool {
+    if c.at != 3u64 + 2u64 * (n - 1u64) || map.len(c.rows) != n { return false }
+    for k in 0u64 .. n {
+        match map.get(c.rows, row_key(k)) {
+            Some(v) => if v != row_value(k) { return false },
+            None => return false,
+        }
+    }
+    true
 }
 
+// B's write i, answered in its own round with its row and outcome.
+fn wrote(b: Conn, clock: Clock, i: u64) -> () waits {
+    ask(b, clock, 0u64, i, k_write(), u64_arg(i), LATER)
+    let v = 3u64 + 2u64 * i
+    want(match down(b) {
+        Batched(x) => x.version == v && list.len(x.rows) == 1u64 && list.len(x.outcomes) == 1u64
+            && x.outcomes[0].p == i && ok_value(x.outcomes[0].outcome) == Some(v),
+        _ => false,
+    }, "never_blocks: B's row and outcome arrive in their round while A is full")
+}
+
+// B's writes from `from` while A reads nothing: A's inbox fills and a round bounces.
+fn stall(b: Conn, clock: Clock, from: u64) -> () waits {
+    for i in from .. from + STALL_WRITES {
+        wrote(b, clock, i)
+    }
+}
+
+// A reads in a quiet place until its cache is current: only the owner's wake can carry the
+// repair (L24).
+fn quiet_repair(a: Conn, mut c: Cache, n: u64) -> () waits {
+    let before = c.completes
+    while c.at != 3u64 + 2u64 * (n - 1u64) || c.completes == before {
+        apply(mut c, down(a))
+    }
+    want(exact(c, n), "repair: A's image after a quiet drain is exact")
+}
+
+// L23 (RUNNER-SPEC v2.20, publisher_never_blocks): A subscribes sub 1 and stops reading; B's
+// writes each reach B in their round while A's inbox is full. A then drains while B keeps
+// writing: A's sub is never ended or reset, no diff crosses the hole the bounce made, and
+// one replacing `complete` brings A's cache to the exact rows.
 fn drive_publisher_never_blocks(take d: Drive) -> () waits {
     let a: Conn = Held(runner.fixture_owner(d.post))
     let b = conn(d, 1u64)
@@ -863,79 +939,69 @@ fn drive_publisher_never_blocks(take d: Drive) -> () waits {
     subscribe(b, 1u32, k_everything())
     want(content(down(b), 1u64, Some(1u32), 1u32, list.new()), "never_blocks: B's empty initial Batch at 1")
     stall(b, d.clock, 0u64)
-    // A drains: its Batches until its Ended(1, Refused(Overloaded)); anything for sub 1 after
-    // it would come before the resubscribe's Batch below. Here B keeps writing while A drains
-    // (L24 below drains in a quiet place).
-    let mut ended = false
-    let mut extra = 0u64
-    while !ended {
+    let mut c = cache()
+    let mut n = STALL_WRITES
+    while c.completes < 2u64 {
         match try_down(a) {
-            Ok(Batched(_)) => (),
-            Ok(Ended(sub, o)) => {
-                want(sub == 1u32 && is(o, Refused(Overloaded)), "never_blocks: A's sub ends Overloaded")
-                ended = true
-            },
-            Ok(_) => fail("never_blocks: A got a Reset"),
+            Ok(take x) => apply(mut c, take x),
             Error(_) => {
-                want(extra < 16u64, "never_blocks: A's Ended never came")
-                let i = STALL_WRITES + extra
-                ask(b, d.clock, 0u64, i, k_write(), u64_arg(i), LATER)
-                want(match down(b) {
-                    Batched(x) => x.version == 3u64 + 2u64 * i && list.len(x.rows) == 1u64
-                        && list.len(x.outcomes) == 1u64 && x.outcomes[0].p == i
-                        && ok_value(x.outcomes[0].outcome) == Some(x.version),
-                    _ => false,
-                }, "never_blocks: B's write answered after A drains")
-                extra += 1u64
+                want(n < STALL_WRITES + 16u64, "never_blocks: A's repair never came")
+                wrote(b, d.clock, n)
+                n += 1u64
             },
         }
     }
-    resubscribed(a, STALL_WRITES + extra)
+    while c.at != 3u64 + 2u64 * (n - 1u64) {
+        apply(mut c, down(a))
+    }
+    want(exact(c, n), "never_blocks: A's image is exact after its repair")
     hang(take a)
     hang(take b)
 }
 
-// A reads in a quiet place until its Ended: only the owner's wake can carry it (L24).
-fn quiet_drain(a: Conn) -> () waits {
-    loop {
-        match down(a) {
-            Batched(x) => want(x.version != NEVER, "owed_ended: A's Ended never came in a quiet place"),
-            Ended(sub, o) => {
-                want(sub == 1u32 && is(o, Refused(Overloaded)), "owed_ended: A's sub ends Overloaded")
-                return
-            },
-            _ => fail("owed_ended: A got a Reset"),
-        }
-    }
-}
-
-// L24 (RUNNER-SPEC v2.13, owed_ended_delivered): L23's stall, then B stops and the place is
-// quiet; A still gets its Ended, after the rounds that fit and before its resubscribe's
-// Batch. Twice, so a wake spent on the first bounce cannot carry the second.
-fn drive_owed_ended_delivered(take d: Drive) -> () waits {
+// L24 (RUNNER-SPEC v2.20, repair_delivered): L23's stall, then B stops and the place is quiet;
+// A's repair still comes, after the rounds that fit, with the exact rows. Then again, with a
+// replacing Subscribe of sub 1 while it is due, so a wake spent on the first bounce cannot
+// carry the second. Then a third stall, with an Unsubscribe while sub 1 is due: A drains the
+// rounds that fit and nothing names sub 1 after them.
+fn drive_repair_delivered(take d: Drive) -> () waits {
     let a: Conn = Held(runner.fixture_owner(d.post))
     let b = conn(d, 1u64)
     subscribe(a, 1u32, k_everything())
     subscribe(b, 1u32, k_everything())
-    want(content(down(b), 1u64, Some(1u32), 1u32, list.new()), "owed_ended: B's empty initial Batch at 1")
+    want(content(down(b), 1u64, Some(1u32), 1u32, list.new()), "repair: B's empty initial Batch at 1")
+    let mut c = cache()
     stall(b, d.clock, 0u64)
-    quiet_drain(a)
-    resubscribed(a, STALL_WRITES)
+    quiet_repair(a, mut c, STALL_WRITES)
     stall(b, d.clock, STALL_WRITES)
-    quiet_drain(a)
-    resubscribed(a, 2u64 * STALL_WRITES)
+    subscribe(a, 1u32, k_everything())
+    quiet_repair(a, mut c, 2u64 * STALL_WRITES)
+    stall(b, d.clock, 2u64 * STALL_WRITES)
+    unsubscribe(a, 1u32)
+    let completes = c.completes
+    // B's write after the Unsubscribe is ordered after it on PubIn, so once B has its answer
+    // the publisher holds no sub 1 of A.
+    wrote(b, d.clock, 3u64 * STALL_WRITES)
+    while let Ok(take x) = try_down(a) {
+        apply(mut c, take x)
+    }
+    wrote(b, d.clock, 3u64 * STALL_WRITES + 1u64)
+    while let Ok(take x) = try_down(a) {
+        apply(mut c, take x)
+    }
+    want(c.completes == completes, "repair: nothing names sub 1 after its Unsubscribe")
     hang(take a)
     hang(take b)
 }
 
-pub fn law_owed_ended_delivered(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+pub fn law_repair_delivered(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     if !runner.law_owner_take_wakes() { return false }
-    served(c, r, tasks, n, drive_owed_ended_delivered)
+    served(c, r, tasks, n, drive_repair_delivered)
 }
 
 @test
-fn test_owed_ended_delivered(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
-    if law_owed_ended_delivered(c, r, tasks, n) { Ok(()) } else { Error(()) }
+fn test_repair_delivered(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_repair_delivered(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 pub fn law_publisher_never_blocks(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {

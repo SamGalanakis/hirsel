@@ -893,14 +893,14 @@ The relay hands every Outcome by `try_send` into the send's fresh 1-slot reply c
 So a present row whose value is itself `null` (a V of `()`, `Option[T]`, or a nullable `via` type) is distinct from a removal. Keys and values are written in B-4's forms, from the Cover's table schemas in describe.
 
 - `outcomes` is always empty: an SSE stream carries no sends, so it can owe no Outcome. The member is kept so that one decoder reads WebSocket and SSE envelopes.
-- The completing initial Batch, an empty one included, is the event whose `complete` lists the subscription.
+- The completing initial Batch, an empty one included, is the event whose `complete` lists the subscription. A later event whose `complete` lists it is a repair (RUNNER-SPEC v2.20): the client replaces the subscription's image from empty, as for the first.
 
 **Encoding.** The writer encodes each event in pieces from the frame, through `out_cap`. JSON escapes CR and LF, so the data is one line, and the event's blank line is written last, so a cut event is discarded (HTTP-13). The event's length is bounded by B-5's analysis over the frame schema, `a·n + b` for a frame of n bytes, n ≤ `max_frame`; its memory is the frame, already on the `budget` ledger.
 
 **Control is independent of data.** Batches wait for the writer. An `Ended` or a `Reset` takes the control slot (§2), and is written as soon as the writer finishes its current unit, under its own unit deadline. If that deadline passes, the stream closes without it, and the client sees no partial event (HTTP-13).
 
 **Slow readers.**
-- A slow reader stalls the writer, and the publisher fills the group's `budget` and resets under W-D3, unchanged.
+- A slow reader stalls the writer. When the group's owner inbox is full, the publisher ends nothing: it marks the subscription for repair and, once the owner has made progress, sends one whole replacement as a `batch` event on the open stream (RUNNER-SPEC v2.20). Rows over the group's `budget` still reset under W-D3, unchanged.
 - On a Reset the owner writes `event: reset` as above if the writer can deliver it in time, and the stream ends either way. The client re-requests and gets a fresh subscription with its full state.
 
 **Resume.** There is no version-only resume.

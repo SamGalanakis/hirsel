@@ -79,11 +79,11 @@ async fn main() -> Result<()> {
         "converge" => {
             let result = client::converge(&url, &wants, config.clients, toggles, pace).await?;
             println!(
-                "Rust converge smoke PASS clients={} Returned={} reconnects={} resubscribes={} version={} checksum={} required_server_overrides: per_ip_sessions=20000 per_ip_new_principals=20000/min; shared W4/W6 acceptance pending",
+                "Rust converge smoke PASS clients={} Returned={} reconnects={} repairs={} version={} checksum={} required_server_overrides: per_ip_sessions=20000 per_ip_new_principals=20000/min; shared W4/W6 acceptance pending",
                 result.clients,
                 result.returned,
                 result.reconnects,
-                result.resubscribes,
+                result.repairs,
                 result.version,
                 result.checksum
             );

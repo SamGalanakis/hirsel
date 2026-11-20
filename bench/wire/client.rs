@@ -1,4 +1,4 @@
-use crate::codec::{self, Done, Entry, Frame, Outcome, Refusal, Want};
+use crate::codec::{self, Done, Entry, Frame, Outcome, Want};
 use crate::{BITS, IMAGE_BYTES, Result, flip};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
@@ -18,10 +18,12 @@ pub struct Client {
     pub version: u64,
     pub toggle_slot: u32,
     pub board_slot: u32,
-    pub resubscribes: usize,
+    /// `complete`s that replaced a live image: the publisher's repairs (RUNNER-SPEC §3 "Repair").
+    pub repairs: usize,
     subscribed: bool,
     sub: u32,
-    pending: Option<Vec<u8>>,
+    /// The current subscription's first `complete` has not arrived.
+    pending: bool,
 }
 impl Client {
     pub async fn connect(url: &str, wants: &[Want], token: Option<Vec<u8>>) -> Result<Self> {
@@ -64,10 +66,10 @@ impl Client {
             version: 0,
             toggle_slot: slots[0],
             board_slot: slots[1],
-            resubscribes: 0,
+            repairs: 0,
             subscribed: false,
             sub: 0,
-            pending: None,
+            pending: false,
         })
     }
     pub async fn send(&mut self, frame: Frame) -> Result<()> {
@@ -84,7 +86,7 @@ impl Client {
             .sub
             .checked_add(1)
             .ok_or("subscription ids exhausted")?;
-        self.pending = Some(vec![0; IMAGE_BYTES]);
+        self.pending = true;
         self.subscribed = true;
         self.send(Frame::Subscribe(self.sub, self.board_slot, vec![], None))
             .await
@@ -110,7 +112,9 @@ impl Client {
                     return Err("session version decreased".into());
                 }
                 self.version = *version;
-                apply_batch(&mut self.image, &mut self.pending, self.sub, complete, rows)?;
+                if apply_batch(&mut self.image, &mut self.pending, self.sub, complete, rows)? {
+                    self.repairs += 1;
+                }
             }
             Frame::Reset(version, _) => {
                 if *version < self.version {
@@ -121,14 +125,6 @@ impl Client {
                 if self.subscribed {
                     self.subscribe().await?;
                 }
-            }
-            // RUNNER-SPEC L23: a full owner inbox ends the subscription Overloaded and the
-            // client resubscribes. The image stays until the new subscription completes.
-            Frame::Ended(sub, Outcome::Refused(Refusal::Overloaded))
-                if self.subscribed && *sub == self.sub =>
-            {
-                self.resubscribes += 1;
-                self.subscribe().await?;
             }
             Frame::Ended(_, outcome) => return Err(format!("board ended: {outcome:?}").into()),
             _ => return Err("unexpected server frame after Placed".into()),
@@ -165,69 +161,52 @@ impl Client {
     }
 }
 
+/// WIRE §3: every `complete` naming the subscription replaces its image from empty, the
+/// first one and each repair alike, so a key absent from it is gone. Other rows apply to the
+/// image. Returns whether a `complete` replaced an image the subscription had already completed.
 fn apply_batch(
     image: &mut Vec<u8>,
-    pending: &mut Option<Vec<u8>>,
+    pending: &mut bool,
     sub: u32,
     complete: &[u32],
     rows: &[codec::Row],
-) -> Result<()> {
-    if pending.is_some() && !complete.contains(&sub) && rows.iter().any(|r| r.sub == sub) {
+) -> Result<bool> {
+    let ours = rows.iter().filter(|row| row.sub == sub);
+    if complete.contains(&sub) {
+        let mut whole = vec![0; IMAGE_BYTES];
+        for row in ours {
+            codec::apply_row(&mut whole, row)?;
+        }
+        *image = whole;
+        let repaired = !*pending;
+        *pending = false;
+        return Ok(repaired);
+    }
+    if *pending && rows.iter().any(|row| row.sub == sub) {
         return Err("live subscription row arrived before its complete marker".into());
     }
-    for row in rows {
-        if row.sub == sub {
-            codec::apply_row(pending.as_mut().unwrap_or(image), row)?;
-        }
+    for row in ours {
+        codec::apply_row(image, row)?;
     }
-    if complete.contains(&sub)
-        && let Some(whole) = pending.take()
-    {
-        *image = whole;
-    }
-    Ok(())
+    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // A repair's `complete` without a chunk the image holds clears that chunk: merging it into
+    // the image would leave the chunk painted forever (overload-advice-1449).
     #[test]
-    fn only_completion_replaces_the_named_cache_and_retired_rows_are_ignored() -> Result<()> {
+    fn every_complete_replaces_the_image_from_empty() -> Result<()> {
         let mut image = vec![0; IMAGE_BYTES];
-        image[0] = 1;
-        let mut pending = Some(vec![0; IMAGE_BYTES]);
-        apply_batch(&mut image, &mut pending, 2, &[], &[])?;
-        assert_eq!(image[0], 1);
-        assert!(pending.is_some());
+        let mut pending = true;
         let mut bits = vec![0; IMAGE_BYTES];
         bits[0] = 2;
-        apply_batch(
-            &mut image,
-            &mut pending,
-            2,
-            &[1],
-            &[codec::chunk_row(1, 0, &bits)],
-        )?;
-        assert_eq!(image[0], 1);
-        assert!(
-            apply_batch(
-                &mut image,
-                &mut pending,
-                2,
-                &[],
-                &[codec::chunk_row(2, 0, &bits)]
-            )
-            .is_err()
-        );
-        apply_batch(
-            &mut image,
-            &mut pending,
-            2,
-            &[2],
-            &[codec::chunk_row(2, 0, &bits)],
-        )?;
+        assert!(apply_batch(&mut image, &mut pending, 2, &[], &[codec::chunk_row(2, 0, &bits)]).is_err());
+        assert!(!apply_batch(&mut image, &mut pending, 2, &[2], &[codec::chunk_row(2, 0, &bits)])?);
         assert_eq!(image[0], 2);
-        assert!(pending.is_none());
+        assert!(apply_batch(&mut image, &mut pending, 2, &[2], &[])?);
+        assert_eq!(image[0], 0);
         Ok(())
     }
 }
@@ -273,7 +252,7 @@ pub struct Converged {
     pub clients: usize,
     pub returned: usize,
     pub reconnects: usize,
-    pub resubscribes: usize,
+    pub repairs: usize,
     pub version: u64,
     pub checksum: u64,
 }
@@ -344,18 +323,19 @@ pub async fn converge(
         return Err("fresh server table differs from XOR of Returned toggles".into());
     }
     let version = fresh.version;
-    let mut resubscribes = fresh.resubscribes;
+    let mut repairs = fresh.repairs;
     for mut client in finished {
-        while client.version < version || client.pending.is_some() {
-            let frame = client.receive().await?;
+        // A sub due for repair gets its image only once its owner drains, with no commit
+        // needed (RUNNER-SPEC §3 "Repair"), so the image is awaited, not only the version.
+        while client.version < version || client.pending || client.image != oracle {
+            let frame = tokio::time::timeout(Duration::from_secs(30), client.receive())
+                .await
+                .map_err(|_| "subscriber image differs from XOR of Returned toggles")??;
             if !outcomes(frame).is_empty() {
                 return Err("duplicate final outcome after last call".into());
             }
         }
-        if client.image != oracle {
-            return Err("subscriber image differs from XOR of Returned toggles".into());
-        }
-        resubscribes += client.resubscribes;
+        repairs += client.repairs;
         client.socket.close(None).await?;
     }
     fresh.socket.close(None).await?;
@@ -363,7 +343,7 @@ pub async fn converge(
         clients: n,
         returned: count,
         reconnects: n,
-        resubscribes,
+        repairs,
         version,
         checksum: fresh.image.iter().map(|&byte| u64::from(byte)).sum(),
     })

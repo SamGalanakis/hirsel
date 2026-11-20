@@ -227,6 +227,12 @@ enum Output {
     Close(u16),
     Flush,
 }
+/// One connection's outbox. Equal contract with Hirsel's publisher (RUNNER-SPEC v2.20): a
+/// scheduling pause never ends a subscription, and the client converges to the exact current
+/// image. The mechanisms differ. This reference merges one pending frame per peer by
+/// `(sub, key)`, and only a merged frame over the row allowance becomes a `Reset`. Hirsel
+/// keeps no bounced rows: it marks the subscription due and, once the owner drains, sends one
+/// whole `complete` at its base, which the client applies by replacing the image from empty.
 struct Peer {
     principal: Principal,
     slots: Vec<Option<usize>>,

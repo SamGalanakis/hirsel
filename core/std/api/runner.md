@@ -115,14 +115,21 @@ and an Unsubscribe is applied at the owner, which drops that sub's rows and Ende
 completes its resubscription; the publisher keeps the sub until then or until the session ends.
 The publisher never blocks on a session (L23): every send to a
 session is a `try_send`. A closed inbox drops that session's subscriptions. A full one ends
-each subscription whose content did not fit with `Ended(sub, Refused(Overloaded))`, and the
-client resubscribes. That Ended, and any answer that did not fit, waits in the publisher until
-the inbox takes it. After each message the publisher retries pending outcomes and the
+nothing (v2.20): each live subscription whose content did not fit is marked due for repair.
+A due subscription keeps its read set, so a commit that hits it still fences the session, but
+it is not re-run and sends no diff. Once its owner has made progress (below), the publisher
+re-runs it at its base and sends its whole result in a Batch whose `complete` names it, which
+the client applies by replacing that subscription's image from empty. A replacing Subscribe, an
+Unsubscribe or the session's end clears the mark. Ended entries, a pending Reset and any
+answer that did not fit wait in the publisher until the inbox takes them. After each message the publisher retries pending outcomes and the
 ledger together at its current base. The publisher keeps no subscription content for a
 full inbox. An owner with a head lease wakes the publisher (v2.13, L24): it counts the events it takes since it last found its
 inbox empty, and at the inbox's capacity it offers the publisher a `Drained` by `try_send`
-(dropped if the publisher's inbox is full), so a waiting Ended reaches its client in a
-quiet place too. An owner that keeps up never offers one. A marked session (v2.14: an HTTP
+(dropped if the publisher's inbox is full). Just before it, the owner `try_send`s `()` on its
+progress channel, a capacity-1 channel whose receiver it handed over at its join; the
+publisher takes that token before each delivery pass, and a taken token makes the session's
+due subscriptions eligible for repair. So a waiting ledger reaches its client, and a bounced
+subscription is repaired, in a quiet place too. An owner that keeps up never offers one. A marked session (v2.14: an HTTP
 group or a one-shot read) ends without waiting on the publisher (L25). At its join it sends the
 Receiver of a retirement mark, a channel whose only Sender it keeps and never sends on. To end,
 it drops its inbox and the mark, then offers one `Drained` by `try_send`; its joiner calls

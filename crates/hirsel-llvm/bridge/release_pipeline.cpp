@@ -12,6 +12,7 @@
 #include "pass_cost.h"
 
 #include <llvm-c/TargetMachine.h>
+#include <llvm/ADT/MapVector.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -114,7 +115,8 @@ LLVMErrorRef runPasses(LLVMModuleRef module, LLVMTargetMachineRef machine,
 class GrowthArmsBackPass : public OptionalPassInfoMixin<GrowthArmsBackPass> {
 public:
     PreservedAnalyses run(Module &module, ModuleAnalysisManager &) {
-        SmallVector<CallBase *> back;
+        // Each arm's header parameter, arms in module order.
+        MapVector<Function *, unsigned> arms;
         for (Function &f : module) {
             if (f.isDeclaration() || !f.getName().contains(".cold.")) continue;
             bool growth = false;
@@ -133,12 +135,25 @@ public:
             for (Argument &arg : f.args())
                 if (loaded.contains(&arg) && stored.contains(&arg)) header = arg.getArgNo();
             if (header < 0) continue;
-            for (User *user : f.users())
-                if (auto *call = dyn_cast<CallBase>(user))
-                    if (call->getCalledFunction() == &f &&
-                        !isa<AllocaInst>(getUnderlyingObject(call->getArgOperand(header))))
-                        back.push_back(call);
+            arms[&f] = header;
         }
+        // Each arm's calls in module order, not its use list's: a body restored
+        // from the release tail cache lists its uses in another order than one
+        // optimized in place, and the order the arms go back in is the order
+        // the caller's context lists its new uses, which a part's key records.
+        MapVector<Function *, SmallVector<CallBase *, 4>> calls;
+        for (auto &[arm, header] : arms) calls[arm];
+        for (Function &f : module)
+            for (BasicBlock &block : f)
+                for (Instruction &i : block)
+                    if (auto *call = dyn_cast<CallBase>(&i)) {
+                        auto arm = arms.find(call->getCalledFunction());
+                        if (arm != arms.end() &&
+                            !isa<AllocaInst>(getUnderlyingObject(call->getArgOperand(arm->second))))
+                            calls[arm->first].push_back(call);
+                    }
+        SmallVector<CallBase *> back;
+        for (auto &[arm, sites] : calls) back.append(sites.begin(), sites.end());
         for (CallBase *call : back) {
             InlineFunctionInfo info;
             InlineFunction(*call, info, /*MergeAttributes=*/false, /*CalleeAAR=*/nullptr,

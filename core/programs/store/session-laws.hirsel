@@ -28,7 +28,7 @@ type PoolCallPeer: send {
 
 fn pool_call_peer(take peer: PoolCallPeer) -> () waits {
     let PoolCallPeer(net: net, address: address, clock: clock, random: random, socket: config, payload: take payload) = take peer
-    let end = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
+    let end: Until = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
     let socket = result.unwrap(host.connect(net, address, end))
     let mut name: Bytes = list.new()
     result.unwrap(list.append(mut name, string.as_bytes("127.0.0.1")))
@@ -90,7 +90,7 @@ fn pool_call_queued(tasks: Tasks, clock: Clock, random: Random, net: Net, config
     let mut listener = take listening
     let peer = PoolCallPeer(net: net, address: address, clock: clock, random: random, socket: config.socket, payload: take payload)
     let sending = result.unwrap(task.spawn(tasks, bytes 65536u64, take peer, pool_call_peer))
-    let deadline = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
+    let deadline: Until = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
     let (take socket, addr) = result.unwrap(host.accept(mut listener, deadline))
     let upgraded = result.unwrap(std.wsock.server(take socket, take slot, addr.ip, list.new(), config.socket, clock, host.mono_ns(clock)))
     let (ready, heard): (Sender[bool], Receiver[bool]) = result.unwrap(channel.new(1u64))
@@ -173,7 +173,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let (release_to, releases): (Sender[PubIn], Receiver[PubIn]) = result.unwrap(channel.new(1u64))
     let mut head = Head(db: take db, r: take entries, replay_identity: list.new(),
         h: table, out: take release_to, busy: map.new(), waiting: list.new(),
-        group: list.new(), last: None, minted: 0u64, cut: false)
+        group: list.new(), last: None, minted: 0u64, cut: false, trigger_drive: None)
 
     // The retained writer block costs 32 bytes. An Ended frame with a 30-byte
     // payload encodes in place in capacity 44, charged 48: the remaining 48,
@@ -295,8 +295,9 @@ fn wire_owner_park(take rx: Receiver[()]) -> Result[(), std.wsock.Error] waits {
 pub fn law_session_records(tasks: Tasks) -> bool waits {
     // charge-v1: five WireEvents of 450 plus 64, one WireUnit of 56 plus 64,
     // a credit channel of zero-sized units plus 64; three test gates of 64;
-    // two unit-returning task records of 288 and the owner record of 320.
-    let checked = bound bytes 3586u64 {
+    // two unit-returning task records of 288 and the owner record of 328 (it holds a
+    // Result[(), std.wsock.Error], widened by NetError's Tls(TlsFailure) arm).
+    let checked = bound bytes 3594u64 {
         let (events, hear): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
         let (writes, read_writes): (Sender[WireUnit], Receiver[WireUnit]) = result.unwrap(channel.new(1u64))
         let (credit, read_credit): (Sender[()], Receiver[()]) = result.unwrap(channel.new(5u64))

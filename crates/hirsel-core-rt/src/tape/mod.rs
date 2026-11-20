@@ -500,6 +500,8 @@ impl Recorder {
             }
         }
         self.encoder.new_block();
+        TAPE_COUNTS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        TAPE_COUNTS[1].fetch_add(b.len() as u64, std::sync::atomic::Ordering::Relaxed);
         self.sink.write(&b)
     }
 }
@@ -1398,11 +1400,16 @@ unsafe fn record_out(
                 .extend_from_slice(buffer_bytes(&*tls.protocol_out));
             out.payload.extend_from_slice(&*tls.peer_out);
         }
+    } else if ok && carries_payload(r.operation) && r.buffer.len.saturating_sub(before) > 256 && order_only() {
+        // mc-units-untied order-only variant (not replayable): a payload over
+        // 256 bytes is recorded as its length only (`value`), no bytes, no digest.
+        TAPE_COUNTS[3].fetch_add((r.buffer.len - before) as u64, std::sync::atomic::Ordering::Relaxed);
     } else if ok && carries_payload(r.operation) && r.buffer.len > before {
         // SAFETY: source initialized these bytes in the request's spare carrier.
         out.payload =
             unsafe { std::slice::from_raw_parts(r.buffer.data.add(before), r.buffer.len - before) }
                 .to_vec();
+        TAPE_COUNTS[2].fetch_add(out.payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
     }
     (
         out,
@@ -1751,3 +1758,14 @@ unsafe extern "C" fn deliver(state: *mut u8, r: *mut Request, outcome: Outcome) 
         o
     }
 }
+
+/// mc-units-untied: `HIRSEL_TAPE_ORDER_ONLY` records large payloads as their
+/// length only (a cost bound; such a tape cannot replay).
+fn order_only() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HIRSEL_TAPE_ORDER_ONLY").is_some())
+}
+
+/// mc-units-untied counters: block writes, block bytes, payload bytes
+/// recorded, payload bytes skipped by the order-only variant.
+pub(crate) static TAPE_COUNTS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];

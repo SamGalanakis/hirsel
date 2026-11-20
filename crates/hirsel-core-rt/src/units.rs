@@ -1771,7 +1771,7 @@ fn launch_untied(
     if std::env::var_os("HIRSEL_XSTATS").is_some() {
         let g = |i: usize| USTATS[i].load(Ordering::Relaxed);
         eprintln!(
-            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} xnotify={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} msgs={} bytes={} full_waits={} unit_epoll_waits={} lifo={}",
+            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} xnotify={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} msgs={} bytes={} full_waits={} unit_epoll_waits={} lifo={} tape_writes={} tape_bytes={} tape_payload={} tape_skipped={}",
             w,
             g(S_CREATED),
             g(S_RESUMES),
@@ -1793,6 +1793,10 @@ fn launch_untied(
             STATS[3].load(Ordering::Relaxed),
             hirsel_core_net::EPOLL_WAITS.load(Ordering::Relaxed),
             g(S_LIFO),
+            crate::tape::TAPE_COUNTS[0].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[1].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[2].load(Ordering::Relaxed),
+            crate::tape::TAPE_COUNTS[3].load(Ordering::Relaxed),
         );
     }
     if crate::sequencer::ACQUIRES.load(Ordering::Relaxed) != 0 {

@@ -4,7 +4,7 @@
 Copied from part3.py with the load, LIMIT_NS, the pass rule and the search
 unchanged. Sides: untied (W=8 workers, one unit per session, children in par
 cells), S3k7 (old thread-per-unit, floating) and tokiow8. A block holds one
-cell and one search per side; the first side rotates from block to block.
+cell and one rate step per side (see run_chunk); the first side rotates.
 Usage: part3u.py PLAN OUT.jsonl GROUPS   (PLAN: base | par | rec | all | pilot)
 
 Original header:
@@ -30,7 +30,7 @@ UBIN, UBIN_REC = "/tmp/mcut/progs/session_u", "/tmp/mcut/progs_rec/session_u"
 STORE = "/tmp/mcu/store"
 STORES = ["/tmp/mcu/store", "/tmp/mcut/store"]
 TAPES = "/tmp/mcu/tapes"
-TAPE_DIRS = {"untied": "/tmp/mcut/tapes"}
+TAPE_DIRS = {"untied": "/tmp/mcut/tapes", "untied-oo": "/tmp/mcut/tapes"}
 WORK = "/tmp/mcut/p3"
 SERVER = "0-3,8-11"
 SERVER_LIST = [0, 1, 2, 3, 8, 9, 10, 11]
@@ -70,6 +70,11 @@ def side_cmd(side, par, rec, k=None):
             pins = SERVER_LIST[:k] + ([SERVER_LIST[k]] if k < len(SERVER_LIST) else [])
             env["HIRSEL_UNIT_CPUS"] = ",".join(map(str, pins))
         return [exe] + base + ["1"], env, SERVER, k
+    if side == "untied-oo":
+        # Order-only recording (not replayable): payloads over 256 bytes are
+        # recorded as their length only. Recorded cells only.
+        argv, env, cpus, nports = side_cmd("untied", par, rec)
+        return argv, env | {"HIRSEL_TAPE_ORDER_ONLY": "1"}, cpus, nports
     if side == "untied":
         env |= {"HIRSEL_UNTIED": os.environ.get("P3_UW", "8"), "HIRSEL_UNITS": str(PARTITIONS + 1),
                 "HIRSEL_FRONT": str(PORT), "HIRSEL_XSTATS": "1"}
@@ -172,6 +177,22 @@ def one_run(side, cell, rate, seed):
     t0, tool0 = time.time(), cpu_ticks(tool_pid)
     lgp = subprocess.Popen(lg, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     seen_masks = {}
+    perf = os.environ.get("P3_PERF")
+    if perf:
+        # Attribution runs only: perf on CPUs 6-7 against the server for 3 s,
+        # starting 3 s into the load. P3_PERF is "record" (CPU, call graphs),
+        # "sched" (off-CPU: sched_switch with call graphs) or "stat".
+        time.sleep(3.5)
+        tag = f"{WORK}/perf-{side}-{cell['variant']}-{cell['f']}-{int(rec)}-{rate:.0f}-{perf}"
+        base_cmd = ["taskset", "-c", "6-7", "perf"]
+        if perf == "record":
+            pcmd = base_cmd + ["record", "-N", "-F", "1999", "-g", "-o", tag + ".data", "-p", str(srv.pid), "--", "sleep", "3"]
+        elif perf == "sched":
+            pcmd = base_cmd + ["record", "-N", "-e", "sched:sched_switch", "-g", "-o", tag + ".data", "-p", str(srv.pid), "--", "sleep", "3"]
+        else:
+            pcmd = base_cmd + ["stat", "-e", "task-clock,context-switches,cpu-migrations,syscalls:sys_enter_write,syscalls:sys_enter_epoll_wait,syscalls:sys_enter_futex",
+                               "-o", tag + ".txt", "-p", str(srv.pid), "--", "sleep", "3"]
+        subprocess.run(pcmd, capture_output=True)
     if side.startswith("S1"):
         time.sleep(RUN["dur"] / 2 + 1.5)
         seen_masks = masks(srv.pid)
@@ -213,47 +234,48 @@ def one_run(side, cell, rate, seed):
     return rec_
 
 
-def search(side, cell, guess, out, group):
-    """Highest passing rate, to within STEP**0.25."""
-    seed = random.randrange(1, 1 << 30)
-    runs = []
-
-    def go(rate):
-        r = one_run(side, cell, rate, seed)
-        for _ in range(2):
-            L0 = r["load"]
-            # A server that failed although every turn completed correctly and
-            # in time failed for a reason outside the load: on this host, an
-            # HTTP probe from another process connecting to the listening port
-            # (seen as a "GET / HT" hello). Not a verdict on this rate: rerun.
-            stray = bool(L0 and r["rc"] != 0 and L0["failures"] == 0 and L0["timeouts"] == 0
-                         and L0["completed"] == L0["issued"] and L0["late"] == 0 and L0["p99_ns"] <= LIMIT_NS)
-            if r["load"] is not None and not stray:
-                break
-            # The load generator produced no result (the server never came
-            # up): an infrastructure fault, not a verdict on this rate. Keep
-            # the record, then rerun the rate.
-            r["group"] = group
-            r["infra_retry"] = "server-failed-load-clean" if r["load"] is not None else "no-load-result"
-            runs.append(r)
-            log(f"  {side} rate={rate:.0f} no load result; rerunning: {r.get('load_err', '')[-160:]!r}")
-            r = one_run(side, cell, rate, seed)
+def run_rate(side, cell, rate, seed, group):
+    """One trial at one rate (plus infra reruns); returns (pass, records)."""
+    recs = []
+    r = one_run(side, cell, rate, seed)
+    for _ in range(2):
+        L0 = r["load"]
+        # A server that failed although every turn completed correctly and
+        # in time failed for a reason outside the load: on this host, an
+        # HTTP probe from another process connecting to the listening port
+        # (seen as a "GET / HT" hello). Not a verdict on this rate: rerun.
+        stray = bool(L0 and r["rc"] != 0 and L0["failures"] == 0 and L0["timeouts"] == 0
+                     and L0["completed"] == L0["issued"] and L0["late"] == 0 and L0["p99_ns"] <= LIMIT_NS)
+        if r["load"] is not None and not stray:
+            break
+        # The load generator produced no result (the server never came
+        # up): an infrastructure fault, not a verdict on this rate. Keep
+        # the record, then rerun the rate.
         r["group"] = group
-        runs.append(r)
-        L = r["load"] or {}
-        log(f"  {side} {cell} rate={rate:.0f} pass={r['pass']} p99={L.get('p99_ns', 0) / 1e6:.2f}ms e2e99={L.get('e2e_p99_ns', 0) / 1e6:.2f}ms late={L.get('late')} cpu={r.get('server_cpu_s')} "
-            f"done={L.get('completed')}/{L.get('issued')} fail={L.get('failures')} to={L.get('timeouts')} tool={r['tool_cpu_s']}")
-        return r["pass"]
+        r["infra_retry"] = "server-failed-load-clean" if r["load"] is not None else "no-load-result"
+        recs.append(r)
+        log(f"  {side} rate={rate:.0f} no load result; rerunning: {r.get('load_err', '')[-160:]!r}")
+        r = one_run(side, cell, rate, seed)
+    r["group"] = group
+    recs.append(r)
+    L = r["load"] or {}
+    log(f"  {side} {cell} rate={rate:.0f} pass={r['pass']} p99={L.get('p99_ns', 0) / 1e6:.2f}ms e2e99={L.get('e2e_p99_ns', 0) / 1e6:.2f}ms late={L.get('late')} cpu={r.get('server_cpu_s')} "
+        f"done={L.get('completed')}/{L.get('issued')} fail={L.get('failures')} to={L.get('timeouts')} tool={r['tool_cpu_s']}")
+    return r["pass"], recs
 
+
+def search_steps(guess):
+    """The unchanged search as a generator: yields a rate, is sent its pass,
+    returns the highest passing rate (to within STEP**0.25)."""
     lo, hi = None, None
     rate = guess
-    if go(rate):
+    if (yield rate):
         lo = rate
         while hi is None:
             rate *= STEP
             if rate > 400000:
                 break
-            if go(rate):
+            if (yield rate):
                 lo = rate
             else:
                 hi = rate
@@ -263,18 +285,18 @@ def search(side, cell, guess, out, group):
             rate /= STEP
             if rate < 20:
                 break
-            if go(rate):
+            if (yield rate):
                 lo = rate
             else:
                 hi = rate
     if lo is not None and hi is not None:
         for _ in range(2):
             mid = (lo * hi) ** 0.5
-            if go(mid):
+            if (yield mid):
                 lo = mid
             else:
                 hi = mid
-    return lo, runs
+    return lo
 
 
 CELLS = [dict(f=0.0, variant="base", rec=False), dict(f=1.0, variant="base", rec=False),
@@ -301,7 +323,7 @@ def main():
     best = {}
     rot = int(os.environ.get("P3_ROT", "0"))
     with open(outp, "a") as out:
-        for g in range(groups):
+        for g in range(int(os.environ.get("P3_G0", "0")), int(os.environ.get("P3_G0", "0")) + groups):
             for cell in cells:
                 cell_sides = [s for s in sides if not (cell["rec"] and s.startswith("tokio"))]
                 k = rot % len(cell_sides)
@@ -311,30 +333,61 @@ def main():
                 run_chunk(cell_sides, cell, cpus, best, guesses, out, g)
 
 
+HOLD_GAP_S = 15
+
+
 def run_chunk(cell_sides, cell, cpus, best, guesses, out, g):
-                while True:
-                    found = {}
-                    with Block(cpus, log=log) as b:
-                        with Tool():
-                            for side in cell_sides:
-                                key = f"{side}|{json.dumps(cell, sort_keys=True)}"
-                                guess = (best.get(key) or guesses.get(f"{side}|{cell['variant']}|{cell['f']}|{int(cell['rec'])}")
-                                         or guesses.get(f"{side}|{cell['variant']}") or guesses.get(side, 2000))
-                                found[side] = search(side, cell, guess * 0.9, out, g)
-                    for side, (lo, runs) in found.items():
-                        for r in runs:
-                            r["discarded"] = not b.clean
-                            out.write(json.dumps(r) + "\n")
-                    out.flush()
-                    if b.clean:
-                        break
-                    log("block discarded (cc1plus); rerunning")
-                for side, (lo, runs) in found.items():
-                    key = f"{side}|{json.dumps(cell, sort_keys=True)}"
-                    best[key] = lo or best.get(key)
-                    out.write(json.dumps(dict(summary=True, side=side, cell=cell, group=g, max_rate=lo, order=cell_sides)) + "\n")
-                    log(f"group {g} {side} {cell}: max passing rate {lo}")
-                out.flush()
+    """All sides' searches of one cell advance in lock step. One lock hold
+    (regimes, then board; cc1plus checked at both ends) covers one
+    interleaved set: one trial per side still searching, at that side's next
+    rate step, first side rotating from set to set. Both locks are released
+    after the set and the runner waits HOLD_GAP_S before queuing again with a
+    blocking flock, so other lanes get their turn (lock sharing, 2026-11-20)."""
+    gens, pending, done, seeds = {}, {}, {}, {}
+    for side in cell_sides:
+        key = f"{side}|{json.dumps(cell, sort_keys=True)}"
+        guess = (best.get(key) or guesses.get(f"{side}|{cell['variant']}|{cell['f']}|{int(cell['rec'])}")
+                 or guesses.get(f"{side}|{cell['variant']}") or guesses.get(side, 2000))
+        gens[side] = search_steps(guess * 0.9)
+        pending[side] = next(gens[side])
+        seeds[side] = random.randrange(1, 1 << 30)
+    k = 0
+    while pending:
+        live = [s for s in cell_sides if s in pending]
+        live = live[k % len(live):] + live[:k % len(live)]
+        k += 1
+        while True:
+            results = {}
+            t0 = time.time()
+            with Block(cpus, log=log) as b:
+                with Tool():
+                    for side in live:
+                        results[side] = run_rate(side, cell, pending[side], seeds[side], g)
+            held = time.time() - t0
+            for side, (ok, recs) in results.items():
+                for r in recs:
+                    r["discarded"] = not b.clean
+                    r["set_order"] = live
+                    out.write(json.dumps(r) + "\n")
+            out.flush()
+            log(f"  set {live} held {held:.0f}s clean={b.clean}")
+            time.sleep(HOLD_GAP_S)
+            if b.clean:
+                break
+            log("set discarded (cc1plus); rerunning")
+        for side, (ok, recs) in results.items():
+            try:
+                pending[side] = gens[side].send(ok)
+            except StopIteration as e:
+                done[side] = e.value
+                del pending[side]
+    for side in cell_sides:
+        lo = done[side]
+        key = f"{side}|{json.dumps(cell, sort_keys=True)}"
+        best[key] = lo or best.get(key)
+        out.write(json.dumps(dict(summary=True, side=side, cell=cell, group=g, max_rate=lo, order=cell_sides)) + "\n")
+        log(f"group {g} {side} {cell}: max passing rate {lo}")
+    out.flush()
 
 
 if __name__ == "__main__":

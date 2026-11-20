@@ -1126,6 +1126,7 @@ pub type PlaceConfig[G: send, H: send]: send {
     handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H],
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], policy: ingress.Ingress, n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
+    triggers: Option[TriggerConfig[G]],
 }
 pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Full(Capacity)   // OpenError is place_head's: Store | Place
 pub type Ended: codec + send = Stopped | Forced(u64)
@@ -1137,7 +1138,7 @@ pub fn release_digest(exported: List[Exported]) -> Result[Bytes, Capacity]
 
 - `operate` refuses `grace_ms = 0` with `Missing("grace_ms")` before it opens anything. A zero bound is a bound that was not given, as in STORE-SPEC W1. Admission closes at min(t₀ + `lag_ms`, D), so a lag that reaches the grace needs no refusal.
 - `Temp(d)` uses `std.dir.create_temp` for a fresh subdirectory of `d`. The head removes a named directory after it closes or drops the store. Cancellation at directory creation's delivery point can leave a directory whose name was never received (the `host.mkdtemp` cancellation prefix). `Disk` takes the store directory itself, already narrowed by the caller (for launch, the `--dir` grant), and removes nothing.
-- Managed wire calls retain W3's behavior: `Granted` is refused as `NotAllowed`. `PlaceConfig` carries no grant for these calls.
+- Managed wire calls retain W3's behavior: `Granted` is refused as `NotAllowed`. `PlaceConfig.triggers` grants authority only to triggered attempts. An absent configuration or an empty entry list disables trigger dispatch.
 
 **Status.** `digest`, `target` and `n_place` are the launch identity (launch.md). `release` is `release_digest(exported)`, which is SHA-256 over `u8 17 ‖ "hirsel.release.v1" ‖` the value codec's bytes of this registry's `List[Exported]` in registration order. It is empty until activation has committed. The preview child computes `release` with the same function for the manifest (§12.2). `addr` is the bound address, present from `Listening` on. `Step` and `Phase` are send-only: status and watch stay in-process, and the status route writes its own JSON.
 

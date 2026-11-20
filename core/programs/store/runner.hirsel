@@ -64,6 +64,7 @@ pub type PlaceConfig[G: send, H: send]: send {
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], policy: ingress.Ingress, n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
+    triggers: Option[TriggerConfig[G]],
 }
 // Grants are made per attempt. The context routes place calls back to the
 // same head and carries the attempt fence.
@@ -135,14 +136,6 @@ resource type TemporaryBacking { dir: Dir, name: String } drop(temporary) {
     if list.len(string.as_bytes(temporary.name)) != 0u64 { let _ = std.dir.remove_all(temporary.dir, temporary.name) }
 }
 
-pub fn operate[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[()], status: Latest[Status], take watch: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
-    operate_place(take p, take stop, status, take watch, None)
-}
-
-pub fn operate_with_triggers[G: send, H: send](take p: PlaceConfig[G, H], take triggers_config: TriggerConfig[G], take stop: Receiver[()], status: Latest[Status], take watch: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
-    operate_place(take p, take stop, status, take watch, Some(take triggers_config))
-}
-
 fn publish_phase(status: Latest[Status], watch: Option[Sender[Phase]], mut current: Status, phase: Phase) -> Result[(), StartError] {
     current.phase = phase
     let copied: Result[Status, Capacity] = clone(current)
@@ -192,12 +185,12 @@ fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
     int.saturating_add(total, 2097152u64)
 }
 
-fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], take triggers_config: Option[TriggerConfig[G]]) -> Result[Ended, StartError] waits {
+pub fn operate[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
     if p.stop.grace_ms == 0u64 { return Error(Missing("grace_ms")) }
     if p.max_sessions == 0u64 || !wire_configuration(p.session) { return Error(Missing("session")) }
     let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_place: n_place, n_publisher: n_publisher,
         session: session_config, max_sessions: limit, proxies: take proxies, policy: take access_gate,
-        listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config) = take p
+        listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, triggers: take trigger_config) = take p
     if limit == 0u64 || limit > WIRE_OWNER_LIMIT || !wire_configuration(session_config) { return Error(Missing("socket")) }
     let watch = status_watch(take watching)?
     let mut current = match copy_status(latest.read(status)) { Ok(take held) => take held, Error(cap) => return Error(Full(cap)) }
@@ -226,8 +219,10 @@ fn operate_place[G: send, H: send](take p: PlaceConfig[G, H], take stop: Receive
         _ => { let _ = channel.try_send(to, StopRequested); None },
     }
     let allowance = head_bytes(backing, n_place, n_publisher)
-    let triggering = match take triggers_config {
-        Some(take config) => Some((take config, channel.sender(head_to))),
+    let triggering: Option[(TriggerConfig[G], Sender[HeadInput])] = match take trigger_config {
+        Some(take config) => {
+            if triggers.is_empty(config.entries) { None } else { Some((take config, channel.sender(head_to))) }
+        },
         None => None,
     }
     let head_job = ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,

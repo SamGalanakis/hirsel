@@ -160,6 +160,8 @@ pub fn granted[G, A: codec, R](f: StaticFn[fn(G, take A) -> Result[R, Capacity] 
 
 pub fn empty_entries() -> Entries { Entries(listed: list.new()) }
 
+pub fn is_empty(entries: Entries) -> bool { list.len(entries.listed) == 0u64 }
+
 pub fn allow[A](mut entries: Entries, target: Entry[A]) -> Result[(), Error] {
     for ref in entries.listed {
         if ref.path == target.ref.path { return Error(AlreadyTriggerable) }

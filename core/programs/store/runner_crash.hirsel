@@ -597,7 +597,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     let settings = runner.PlaceConfig(backing: Disk(d, existing), selection: chosen, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
-        stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
+        stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), triggers: None)
     let seed = DeadlinePlace(config: take settings, stop: take stopping, status: result.unwrap(runner.status_root()), watch: take watch)
     let running = result.unwrap(task.spawn(tasks, bytes 50331648u64, take seed, deadline_place))
     let phases = result.unwrap(channel.receive(watcher))
@@ -670,7 +670,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     let config = runner.PlaceConfig(backing: Disk(d, options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
-        stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64))
+        stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64), triggers: None)
     let seed = DeadlinePlace(config: take config, stop: take stopping, status: latest.handle(status), watch: take watch)
     let running = result.unwrap(task.spawn(tasks, bytes 50331648u64, take seed, deadline_place))
     let phases = result.unwrap(channel.receive(watcher))
@@ -745,7 +745,7 @@ pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Std
                 migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
                 proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
                 listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
-                stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
+                stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), triggers: None)
             if let Ok(Stopped) = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) {} else {
                 fail("runner-stop-early: place did not stop")
             }

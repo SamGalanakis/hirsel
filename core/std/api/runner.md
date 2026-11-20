@@ -325,9 +325,10 @@ network provider (W8a) lands.
 ### Store triggers
 
 A place enables the trigger library by calling `triggers.migrate` from its
-schema migration and opening with `runner.operate_with_triggers`. Its
-`TriggerConfig` supplies the explicit entry list, the Caller for triggered
-transactions, and a grant factory for each granted attempt.
+schema migration and setting `PlaceConfig.triggers` before calling
+`runner.operate`. The `TriggerConfig` supplies the entry list, the Caller for
+triggered transactions, and a grant factory for each granted attempt. Use
+`None` or an empty entry list to run without triggers.
 
 A transaction uses `triggers.write(mut tx, tables, entries, target, arg, when)`
 with a typed entry reference from `triggers.transact` or `triggers.granted`.

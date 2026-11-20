@@ -1100,7 +1100,7 @@ fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: N
     runner.PlaceConfig(backing: Disk(dir, disk_options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
         migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), policy: ingress.share(policy), n_publisher: 1048576u64, listen: listen,
-        net: net, tasks: tasks, clock: clock, random: random, stop: stop)
+        net: net, tasks: tasks, clock: clock, random: random, stop: stop, triggers: None)
 }
 
 fn start_managed(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
@@ -1113,13 +1113,20 @@ fn start_managed(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd], stop_p
     (take running, take stop_to, result.unwrap(channel.receive(phase_rx)), take status)
 }
 
+fn no_trigger_grant(take unused: runner.TriggerContext) -> Result[(), Capacity] {
+    fail("an empty trigger list cannot start a trigger")
+}
+
 pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> u64 waits {
     let mut name = result.unwrap(string.with_capacity(32u64))
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let (policy, policy_task) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
     let ephemeral = Addr(ip: V4(0x7f000001u32), port: 0u16)
     let bounds = runner.Stop(lag_ms: 0u64, grace_ms: 1000u64)
-    let (running, stop_to, phases, status) = start_managed(tasks, managed_settings(dir, clock, random, tasks, net, policy, ephemeral, bounds), false)
+    let mut settings = managed_settings(dir, clock, random, tasks, net, policy, ephemeral, bounds)
+    let grant: own[send] fn(take runner.TriggerContext) -> Result[(), Capacity] = no_trigger_grant
+    settings.triggers = Some(runner.TriggerConfig(entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grant: take grant))
+    let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
     if let Ok(Starting(Recovering)) = channel.receive(phases) {} else { fail("expected Recovering") }
     if let Ok(Starting(Activating)) = channel.receive(phases) {} else { fail("expected Activating") }
     if let Ok(Starting(Publishing)) = channel.receive(phases) {} else { fail("expected Publishing") }

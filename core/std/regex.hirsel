@@ -4565,8 +4565,9 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
         if !reverse && (!skip_enabled || d.start_bit != 0) {
             let columns: u32 = int.narrow(d.columns)
             let begin = pos
-            // Follow only ordinary cached ASCII transitions. The outer loop
-            // handles the first special transition and the end of input.
+            // Follow cached ASCII transitions, recording matches as the outer
+            // loop would. The outer loop handles dead, start and uncached
+            // transitions and the end of input.
             while pos < query.limit {
                 let ch = data[pos]
                 if ch >= 128 {
@@ -4577,9 +4578,16 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
                 let offset: u64 = int.widen(int.wrapping_add(int.wrapping_sub(state, columns), col))
                 let transition = work[d.transitions + offset]
                 if transition == DFA_DEAD || (transition & tags) != 0 {
-                    break
+                    // Only a match into a live, non-start state stays here.
+                    let untagged = transition ^ DFA_MATCH
+                    if untagged == DFA_DEAD || (transition & DFA_MATCH) == 0 || (untagged & d.start_bit) != 0 || transition == DFA_UNKNOWN {
+                        break
+                    }
+                    matched = Some(pos)
+                    state = untagged
+                } else {
+                    state = transition
                 }
-                state = transition
                 pos += 1
             }
             scanned += pos - begin

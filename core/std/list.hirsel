@@ -230,16 +230,30 @@ pub fn reverse[T](mut xs: List[T]) {
 }
 
 /// Sorts in place; `before(a, b)` returns Less when a goes first. Not stable.
-/// Introsort: quicksort with a median-of-three pivot, insertion sort below 17 elements and
-/// heapsort past 2 log2(len) partition levels (Rust's sort_unstable is pdqsort, which adds
-/// pattern detection on top of the same three parts).
+/// Introsort detects ordered runs and partitions out equal keys. It uses a median-of-three
+/// pivot, insertion sort below 17 elements and heapsort past 2 log2(len) partition levels.
 /// `before` is a `scoped fn` (OWN-21): it may view the caller's locals and does not wait;
 /// it does not escape the call. If it is not a total order, xs still holds each element exactly once, in an unspecified
 /// order. A failure inside `before` propagates with the same guarantee.
-/// Alloc: nothing. Cost: O(len log len) worst case.
+/// Alloc: nothing. Cost: O(len) on ordered inputs, O(len log len) worst case.
 /// Ex: `list.sort(mut xs, fn(a: u64, b: u64) -> Order { std.order.compare(a, b) })`
 pub fn sort[T](mut xs: List[T], before: scoped fn(T, T) -> Order) {
     let n = list.len(xs)
+    if n <= 16 {
+        insertion_sort(mut xs, 0, n, before)
+        return
+    }
+    let descending = less(xs, 1, 0, before)
+    let mut run: u64 = 2
+    while run < n && less(xs, run, run - 1, before) == descending {
+        run += 1
+    }
+    if run == n {
+        if descending {
+            reverse(mut xs)
+        }
+        return
+    }
     let mut limit: u64 = 0
     let mut m = n
     while m > 1 {
@@ -318,7 +332,11 @@ fn sort_range[T](mut xs: List[T], start: u64, end: u64, limit: u64, before: scop
             return
         }
         depth -= 1
-        let p = partition(mut xs, a, b, before)
+        let (p, grouped_equals) = partition(mut xs, a, b, before)
+        if grouped_equals {
+            a = p + 1
+            continue
+        }
         if p - a < b - p {
             sort_range(mut xs, a, p, depth, before)
             a = p + 1
@@ -330,9 +348,9 @@ fn sort_range[T](mut xs: List[T], start: u64, end: u64, limit: u64, before: scop
     insertion_sort(mut xs, a, b, before)
 }
 
-/// Lomuto partition of xs[a..b] (b - a >= 3) around the median of its first, middle and
-/// last elements; returns the pivot's final index.
-fn partition[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) -> Order) -> u64 {
+// Median-of-three Lomuto partition. Returns the pivot's final index and
+// whether the elements to its left are already done.
+fn partition[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) -> Order) -> (u64, bool) {
     let mid = a + (b - a) / 2
     let hi = b - 1
     if less(xs, mid, a, before) {
@@ -344,9 +362,35 @@ fn partition[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) -> Orde
     if less(xs, mid, hi, before) {
         list.swap(mut xs, mid, hi)
     }
+    // As in ipnsort, the preceding partition leaves xs[a - 1] as a
+    // lower bound for this range. If the pivot equals it, finish all
+    // equal keys in one pass.
+    if a > 0 && equal_at(xs, a - 1, hi, before) {
+        return (partition_equal(mut xs, a, hi, before), true)
+    }
     let mut store = a
     for i in a .. hi {
         if less(xs, i, hi, before) {
+            list.swap(mut xs, i, store)
+            store += 1
+        }
+    }
+    list.swap(mut xs, store, hi)
+    (store, false)
+}
+
+fn equal_at[T](xs: List[T], i: u64, j: u64, before: scoped fn(T, T) -> Order) -> bool {
+    match before(xs[i], xs[j]) {
+        Equal => true,
+        _ => false,
+    }
+}
+
+// The pivot is a lower bound for the range. Move its equals to the front.
+fn partition_equal[T](mut xs: List[T], a: u64, hi: u64, before: scoped fn(T, T) -> Order) -> u64 {
+    let mut store = a
+    for i in a .. hi {
+        if equal_at(xs, i, hi, before) {
             list.swap(mut xs, i, store)
             store += 1
         }

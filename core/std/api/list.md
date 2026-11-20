@@ -18,3 +18,8 @@ and propagate only Capacity. Plain elements may be passed as `x` without `take`.
 `list.find_byte2`, `list.find_byte3` and `list.find_byte4` accept several byte values.
 `list.starts_with` compares the list with a prefix of the same element type.
 Both allocate nothing.
+
+`list.sort` sorts in place without preserving the order of equal keys. It runs
+in O(len) on nondecreasing or strictly descending input and O(len log len) in
+the worst case. A failing comparator or one that does not give a total order
+leaves every original element in the list.

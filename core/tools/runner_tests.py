@@ -51,7 +51,12 @@ PERSISTENT_PLACE_CALLS = {'atomic_migration', 'ready_after_activation', 'calls_r
 # compute body. RUNNER-SPEC.md §8, L6+L7 orders the compute before the hung
 # call's stop, observed at its first publisher offer. MEM-30 makes the slice
 # a scheduling point. The three answers to s0 go to one inbox.
-HUNG_BODY_SENDS = (65536 - 165 + 1) // 2
+# The body's prelude inside its 65,536-step bound is 158 steps: the 165 counted at
+# 3a3ccdc8, less the seven calls STORE v2.30 AN1 deleted from that path
+# (current_authority, share_authority, arc.share and full_scope's call and
+# list.new in draft_body's Tx; clone of the granted scope in stage_reply; and
+# check_key in put).
+HUNG_BODY_SENDS = (65536 - 158 + 1) // 2
 HUNG_TOLDS = 3
 COUNTS = {'calls_runs_once': (7, 6), 'calls_deadline_hung': (7, HUNG_BODY_SENDS + HUNG_TOLDS + 2)}
 PLACEMENT_OBSERVERS = {'ready_after_activation': 'READY_BEFORE_ACCEPT', 'lag_window': 'LAG_ADMISSION'}

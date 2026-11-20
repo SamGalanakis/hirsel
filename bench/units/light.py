@@ -20,6 +20,8 @@ import scale
 import scale2
 
 CTL = {6, 7}
+# Ports apart from the other pool lanes, which use 28190 and 28200-28206.
+scale.PORT, scale.TOOL_PORT = 28400, 28390
 CELLS = {
     "A1-256": scale.SCALE_CELLS["A1-256"],
     "A1-8192": scale.SCALE_CELLS["A1-8192"],
@@ -30,6 +32,14 @@ GUESS = {"A1-256": (20000, 23000), "A1-8192": (14000, 18000), "F1-256": (18000, 
 
 
 class Runner(scale2.Runner):
+    def server_cmd(self, side, cell):
+        # A side directory may add `env.json`: runtime settings for that side.
+        argv, env, ports = super().server_cmd(side, cell)
+        extra = self.scratch / side / "env.json"
+        if side != "tokiow8" and extra.is_file():
+            env |= json.loads(extra.read_text())
+        return argv, env, ports
+
     def collect_load(self, load, load_pidfile, server_pid, profile):
         # scale.Runner.collect_load with perf on CPUs 6-7 (the host rule here).
         real = subprocess.Popen

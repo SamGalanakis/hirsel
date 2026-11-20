@@ -1126,9 +1126,13 @@ struct Pool {
     retirements: Mutex<VecDeque<UP>>,
     retirement_ready: AtomicBool,
     retirement_owner: Mutex<()>,
+    /// Units in the local queues and the injector. The LIFO slots are not
+    /// counted: only their own worker takes them.
     queued: AtomicUsize,
     searching: AtomicUsize,
     sleepers: Mutex<usize>,
+    /// Mirrors `sleepers` so a wake need not take the lock when none sleeps.
+    nsleep: AtomicUsize,
     cv: Condvar,
     poll: Mutex<()>,
     poller_blocked: AtomicBool,
@@ -1146,6 +1150,7 @@ struct Pool {
     spin_ns: u64,
     slice_ns: u64,
     poll_every_ns: u64,
+    spin_poll_ns: u64,
     queue_waits: Option<QueueWaits>,
 }
 static POOL: OnceLock<Pool> = OnceLock::new();
@@ -1358,7 +1363,7 @@ pub(crate) fn unit_id(u: &Unit) -> u32 {
 #[inline]
 pub(crate) fn maybe_yield() {
     let p = pool();
-    if p.queued.load(Ordering::Relaxed) == 0 {
+    if p.queued.load(Ordering::Relaxed) == 0 && p.lifo[worker_ix()].load(Ordering::Relaxed).is_null() {
         return;
     }
     // SAFETY: called on the unit's own stack while it runs.
@@ -1429,10 +1434,10 @@ fn enqueue(p: &Pool, u: &Unit) {
     let ix = worker_ix();
     if ix < p.w && p.lifo_on && !cur().is_null() {
         // Woken by the unit running on this worker: it runs here next.
-        p.queued.fetch_add(1, Ordering::SeqCst);
         let prev = p.lifo[ix].swap((u as *const Unit).cast_mut(), Ordering::AcqRel);
         if !prev.is_null() {
             p.locals[ix].lock().unwrap().push_back(UP(prev));
+            p.queued.fetch_add(1, Ordering::SeqCst);
             notify_worker(p);
         }
         return;
@@ -1451,7 +1456,7 @@ fn notify_worker(p: &Pool) {
     if p.searching.load(Ordering::SeqCst) > 0 {
         return;
     }
-    {
+    if p.nsleep.load(Ordering::SeqCst) > 0 {
         let s = p.sleepers.lock().unwrap();
         if *s > 0 {
             p.cv.notify_one();
@@ -1570,39 +1575,59 @@ fn accept_front(p: &Pool) {
     }
 }
 
+/// The next unit for worker `ix`, taken off the queues and the count.
 fn find(p: &Pool, ix: usize) -> Option<UP> {
+    if !p.lifo[ix].load(Ordering::Relaxed).is_null() {
+        let l = p.lifo[ix].swap(std::ptr::null_mut(), Ordering::AcqRel);
+        if !l.is_null() {
+            if p.lifo_runs[ix].load(Ordering::Relaxed) < LIFO_RUNS {
+                p.lifo_runs[ix].fetch_add(1, Ordering::Relaxed);
+                bump(S_LIFO);
+                return Some(UP(l));
+            }
+            p.locals[ix].lock().unwrap().push_back(UP(l));
+            p.queued.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    p.lifo_runs[ix].store(0, Ordering::Relaxed);
     if p.queued.load(Ordering::SeqCst) == 0 {
         fire_timers(p);
         if p.queued.load(Ordering::SeqCst) == 0 {
             return None;
         }
     }
-    let l = p.lifo[ix].swap(std::ptr::null_mut(), Ordering::AcqRel);
-    if !l.is_null() {
-        if p.lifo_runs[ix].load(Ordering::Relaxed) < LIFO_RUNS {
-            p.lifo_runs[ix].fetch_add(1, Ordering::Relaxed);
-            bump(S_LIFO);
-            return Some(UP(l));
-        }
-        p.locals[ix].lock().unwrap().push_back(UP(l));
-    }
-    p.lifo_runs[ix].store(0, Ordering::Relaxed);
+    let taken = |u: UP| {
+        p.queued.fetch_sub(1, Ordering::SeqCst);
+        Some(u)
+    };
     if let Some(u) = p.locals[ix].lock().unwrap().pop_front() {
-        return Some(u);
+        return taken(u);
     }
     if let Some(u) = p.injector.lock().unwrap().pop_front() {
-        return Some(u);
+        return taken(u);
     }
     for j in 1..p.w {
         let v = (ix + j) % p.w;
         if let Ok(mut q) = p.locals[v].try_lock()
             && let Some(u) = q.pop_back()
         {
+            drop(q);
             bump(S_STEALS);
-            return Some(u);
+            return taken(u);
         }
     }
     None
+}
+
+/// Poll the shared poller without blocking if no worker is blocked in it
+/// and the pool has not polled for `every` nanoseconds.
+fn poll_due(p: &Pool, t: u64, every: u64) {
+    if !p.poller_blocked.load(Ordering::Relaxed)
+        && t.saturating_sub(p.last_poll.load(Ordering::Relaxed)) > every
+        && let Ok(_g) = p.poll.try_lock()
+    {
+        poll_global(p, 0);
+    }
 }
 
 /// Run one queued unit until it parks, yields or ends.
@@ -1678,12 +1703,10 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
             }
             After::Run => crate::process::stop(b"UnitLeftWithoutReason"),
         }
-        // Busy workers still poll the shared poller now and then.
-        let t = now();
-        if t.saturating_sub(p.last_poll.load(Ordering::Relaxed)) > p.poll_every_ns
-            && let Ok(_g) = p.poll.try_lock()
-        {
-            poll_global(p, 0);
+        // Busy workers poll now and then when no idle worker is blocked in
+        // the poller.
+        if !p.poller_blocked.load(Ordering::Relaxed) {
+            poll_due(p, now(), p.poll_every_ns);
         }
     }
 }
@@ -1714,7 +1737,6 @@ fn worker_main(p: &'static Pool, ix: usize) {
             continue;
         }
         if let Some(u) = find(p, ix) {
-            p.queued.fetch_sub(1, Ordering::SeqCst);
             // SAFETY: a dequeued unit.
             unsafe { run_unit(p, ix, u, &mut host) };
             continue;
@@ -1722,32 +1744,37 @@ fn worker_main(p: &'static Pool, ix: usize) {
         if p.stop.load(Ordering::SeqCst) && p.queued.load(Ordering::SeqCst) == 0 {
             break;
         }
-        p.searching.fetch_add(1, Ordering::SeqCst);
-        let t0 = now();
+        // Search: at most half the workers at once. A searcher watches the
+        // queued count without taking queue locks, and polls only when no
+        // worker is blocked in the poller.
         let mut got = None;
-        let mut i = 0u32;
-        loop {
-            if let Some(u) = find(p, ix) {
-                got = Some(u);
-                break;
-            }
-            i = i.wrapping_add(1);
-            if i % 32 == 0 {
-                if let Ok(_g) = p.poll.try_lock() {
-                    poll_global(p, 0);
-                }
-                if now() - t0 > p.spin_ns || p.stop.load(Ordering::Relaxed) {
+        if 2 * p.searching.fetch_add(1, Ordering::SeqCst) < p.w {
+            let t0 = now();
+            let mut i = 0u32;
+            loop {
+                if p.queued.load(Ordering::SeqCst) > 0
+                    && let Some(u) = find(p, ix)
+                {
+                    got = Some(u);
                     break;
                 }
+                i = i.wrapping_add(1);
+                if i % 64 == 0 {
+                    let t = now();
+                    if t - t0 > p.spin_ns || p.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    poll_due(p, t, p.spin_poll_ns);
+                }
+                std::hint::spin_loop();
             }
-            std::hint::spin_loop();
         }
         p.searching.fetch_sub(1, Ordering::SeqCst);
         if let Some(u) = got {
+            // The last searcher to find work wakes another if work remains.
             if p.queued.load(Ordering::SeqCst) > 0 {
                 notify_worker(p);
             }
-            p.queued.fetch_sub(1, Ordering::SeqCst);
             // SAFETY: a dequeued unit.
             unsafe { run_unit(p, ix, u, &mut host) };
             continue;
@@ -1772,11 +1799,13 @@ fn worker_main(p: &'static Pool, ix: usize) {
             }
             Err(_) => {
                 let mut s = p.sleepers.lock().unwrap();
+                p.nsleep.fetch_add(1, Ordering::SeqCst);
                 if p.queued.load(Ordering::SeqCst) == 0 && !p.stop.load(Ordering::SeqCst) {
                     *s += 1;
                     s = p.cv.wait(s).unwrap();
                     *s -= 1;
                 }
+                p.nsleep.fetch_sub(1, Ordering::SeqCst);
             }
         }
     }
@@ -1826,6 +1855,7 @@ fn launch_untied(
         queued: AtomicUsize::new(0),
         searching: AtomicUsize::new(0),
         sleepers: Mutex::new(0),
+        nsleep: AtomicUsize::new(0),
         cv: Condvar::new(),
         poll: Mutex::new(()),
         poller_blocked: AtomicBool::new(false),
@@ -1840,7 +1870,8 @@ fn launch_untied(
         front,
         next_session: AtomicU32::new(k as u32),
         last_poll: AtomicU64::new(0),
-        spin_ns: env_u64("HIRSEL_UNTIED_SPIN_US", 30) * 1000,
+        spin_ns: env_u64("HIRSEL_UNTIED_SPIN_US", 5) * 1000,
+        spin_poll_ns: env_u64("HIRSEL_UNTIED_SPIN_POLL_US", 20) * 1000,
         slice_ns: env_u64("HIRSEL_UNTIED_SLICE_US", 500) * 1000,
         poll_every_ns: env_u64("HIRSEL_UNTIED_POLL_US", 100) * 1000,
         queue_waits: (env_u64("HIRSEL_UNTIED_QUEUE_WAIT", 0) != 0).then(|| QueueWaits::new(w)),

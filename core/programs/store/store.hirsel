@@ -1735,9 +1735,11 @@ pub type Admission = Admitted(Completion) | Duplicate(Stored) | Rejected(u64) | 
 
 // An Admitted(p) this open committed on main: a later admit of p while it is
 // still unreplied answers Abandoned with this commit_ticket and commits nothing.
+// `ticket` is None while the entry is only reserved (admit_commit), and a None
+// entry answers nothing.
 type OpenAdmit: shareable + send {
     p: u64,
-    ticket: Ticket
+    ticket: Option[Ticket]
 }
 
 pub fn admit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest) -> Result[Admission, Error] waits {
@@ -1773,7 +1775,7 @@ pub fn admit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest) -> Result[Admi
         return Ok(Duplicate(take r))
     }
     let mine = match std.omap.get(db.admits, stream) {
-        Some(a) => if a.p == p { Some(a.ticket) } else { None },
+        Some(a) => if a.p == p { a.ticket } else { None },
         None => None
     }
     if let Some(t) = mine {
@@ -1786,6 +1788,16 @@ pub fn admit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest) -> Result[Admi
 fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: bool) -> Result[Admission, Error] waits {
     let held_stream = copied(stream)?
     let key = copied(stream)?
+    // §1.8: a later admit of p in this open commits nothing, so the entry that
+    // remembers this one is reserved before the commit. Without room the admit
+    // is Full and commits nothing; the map is kept as it was.
+    let reserved = match std.omap.insert(mut db.admit_ids, db.admits, copied(stream)?, OpenAdmit(p: p, ticket: None)) {
+        Ok((take admits, _)) => take admits,
+        Error((c, _)) => return Error(Full(c))
+    }
+    // Dropping the old version leaves every node of the map unshared, so the
+    // edit below replaces the reserved entry in place and allocates nothing.
+    db.admits = take reserved
     let b = main_branch(db)
     let outcome = run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
         let value = stream_bytes(p, d, false, list.new())?
@@ -1800,10 +1812,12 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
         Failed(_) => return Error(Missing("admit")),
         Stopped(_) => return Error(Missing("admit"))
     }
-    // Without room to remember it, a later admit of p commits Admitted(p)
-    // again and answers Abandoned with that commit_ticket, which is also correct.
-    if let Ok((take admits, _)) = std.omap.insert(mut db.admit_ids, db.admits, take key, OpenAdmit(p: p, ticket: admitted)) {
-        db.admits = take admits
+    let filled = std.omap.insert_owned(mut db.admit_ids, replace(mut db.admits, std.omap.new()), take key, OpenAdmit(p: p, ticket: Some(admitted)))
+    db.admits = match take filled {
+        Ok((take admits, _)) => take admits,
+        // The reserved key sits on unshared nodes, so insert_owned edits it in
+        // place and cannot fail here.
+        Error(_) => fail("admit: reserved entry was shared")
     }
     let completion = Completion(admitted: admitted, stream: take held_stream, p: p, request: d)
     Ok(if abandoned { Abandoned(take completion) } else { Admitted(take completion) })
@@ -13046,6 +13060,15 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     let quiet = db.frame_seq
     match result.unwrap(admit(mut db, s, 0, theirs)) { RequestMismatch => {}, _ => return false }
     if db.frame_seq != quiet || db.heads[0].head != head { return false }
+    // §1.8 with a refused re-commit: admit reserves its open entry before it
+    // commits, so a Full re-commit leaves a reserved entry behind, and that
+    // entry answers nothing: the next admit of 0 re-commits under this open.
+    // Wrong implementation caught: a reserved entry that answers Abandoned.
+    let limit = db.ceiling
+    db.ceiling = 1
+    match admit(mut db, s, 0, ours) { Error(Full(_)) => {}, _ => return false }
+    db.ceiling = limit
+    if db.heads[0].head != head { return false }
     let again = match result.unwrap(admit(mut db, s, 0, ours)) { Abandoned(t) => ticket(t), _ => return false }
     if again.open != open_number(db) || again.open == first.open || db.heads[0].head != head + 1 { return false }
     match result.unwrap(admit(mut db, s, 0, ours)) { Abandoned(complete) => if ticket(complete).open != again.open || journal_mark(ticket(complete)) != journal_mark(again) { return false }, _ => return false }

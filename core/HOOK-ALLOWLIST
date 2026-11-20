@@ -197,6 +197,9 @@ core@1/host/rename
 # DECISIONS.md 2026-11-16 (CAP-5 / CAP-8, S5c)
 core@1/host/random
 core@1/host/sleep_until
+# DECISIONS.md 2026-11-18 (service-ops host stop source): the store runner
+# waits for the recorded stop through its Process grant (RUNNER-SPEC §12.4).
+core@1/host/stopped
 core@1/host/sync
 core@1/host/sync_dir
 core@1/host/try_lock

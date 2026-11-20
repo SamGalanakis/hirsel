@@ -98,27 +98,53 @@ pub fn parse[T: integer](s: String) -> Result[T, ParseError] {
     if start == n {
         return Error(Invalid(0))
     }
-    // The magnitude in u64 holds every T's magnitude. The grammar is still
-    // read to the end before reporting a range error.
+    // The largest all-nines values that fit the eight integer types.
+    let digits19: Option[T] = int.try_narrow(9999999999999999999u64)
+    let digits18: Option[T] = int.try_narrow(999999999999999999u64)
+    let digits9: Option[T] = int.try_narrow(999999999u64)
+    let digits4: Option[T] = int.try_narrow(9999u64)
+    let fast_digits: u64 = if let Some(_) = digits19 {
+        19
+    } else if let Some(_) = digits18 {
+        18
+    } else if let Some(_) = digits9 {
+        9
+    } else if let Some(_) = digits4 {
+        4
+    } else {
+        2
+    }
     let mut mag: u64 = 0
-    let mut big = false
-    for i in start .. n {
-        let Some(digit) = ascii_digit(b[i], 10) else {
-            return Error(Invalid(i))
+    if n - start <= fast_digits {
+        // Every number with this many digits fits T, including each prefix.
+        for i in start .. n {
+            let Some(digit) = ascii_digit(b[i], 10) else {
+                return Error(Invalid(i))
+            }
+            mag = int.wrapping_add(int.wrapping_mul(mag, 10), int.widen(digit))
         }
-        if !big {
-            match accumulate_digit(mag, 10, digit, 18446744073709551615) {
-                Some(v) => {
-                    mag = v
-                },
-                None => {
-                    big = true
-                },
+    } else {
+        // u64 holds every T's magnitude. Read the grammar to the end even
+        // after overflow, so an invalid byte still wins over OutOfRange.
+        let mut big = false
+        for i in start .. n {
+            let Some(digit) = ascii_digit(b[i], 10) else {
+                return Error(Invalid(i))
+            }
+            if !big {
+                match accumulate_digit(mag, 10, digit, 18446744073709551615) {
+                    Some(v) => {
+                        mag = v
+                    },
+                    None => {
+                        big = true
+                    },
+                }
             }
         }
-    }
-    if big {
-        return Error(OutOfRange)
+        if big {
+            return Error(OutOfRange)
+        }
     }
     if !negative || mag == 0 {
         let fit: Option[T] = int.try_narrow(mag)

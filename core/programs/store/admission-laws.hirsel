@@ -23,7 +23,7 @@ fn w3c_key[A, R](f: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R])
 }
 
 fn transport_receive[G: send, H: send](mut s: WireSession[G, H], mut w: WireWork) -> Option[Frame] {
-    let frame = wire_take_output(s, mut w)
+    let frame = result.unwrap(wire_take_output(s, mut w))
     wire_sent(mut s, mut w)
     take frame
 }
@@ -196,7 +196,7 @@ pub fn law_join_cleanup() -> bool {
     let (closing, closed): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let lease = result.unwrap(WireJoinLease(closing: take closing, publisher: channel.sender(pub_to)))
     let mut joined: List[Joiner] = list.new()
-    result.unwrap(list.push(mut joined, Joiner(who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), reset: false, mark: None, identity: None)))
+    result.unwrap(list.push(mut joined, Joiner(who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: None, identity: None, fence: None)))
     let _ = take lease
     let mut subs = subscriptions()
     let mut waiting: List[Replies] = list.new()
@@ -435,10 +435,10 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     set(mut db, t, 1u64, 0u64)
     set(mut db, t, 2u64, 0u64)
     let base = store.snapshot(db)
-    let Mailbox(to: take to, from: take from) = result.unwrap(mailbox(8u64))
+    let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = result.unwrap(channel.new(1u64))
     let pub_job = Publish(place: code.describe(subs_place), n_place: 1048576u64,
-        h: result.unwrap(subs_handles(mut db)), base: take base, from: take from, ready: take ready_to)
+        h: result.unwrap(subs_handles(mut db)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = result.unwrap(task.spawn(tasks, bytes 8388608u64, take pub_job, publish))
     if let Ok(None) = channel.receive(ready_from) {} else { return false }
     let (access_gate, take policy_task) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
@@ -450,10 +450,10 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let mut owner = take initial
     let mut work = wire_work()
     let (events, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
-    let (told, who): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
+    let (told, who): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
     let (closing, closed): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
-    result.unwrap(channel.send(to, PubIn(e: Joined(Join(to: take events, told: take told, mark: None, closed: Some(take closed), identity: None)))))
-    owner.joined = Some(result.unwrap(channel.receive(who)))
+    result.unwrap(channel.send(to, PubIn(e: Joined(Join(to: take events, told: take told, mark: None, closed: Some(take closed), identity: None, fence: None)))))
+    owner.joined = Some(result.unwrap(channel.receive(who)).who)
     owner.publisher = Some(channel.sender(to))
     if let Ok(WireEvent(e: JoinReady)) = channel.receive(inbox) {} else { return false }
 
@@ -556,4 +556,49 @@ pub fn law_settled_callinfo(d: Dir, clock: Clock, random: Random, tasks: Tasks) 
 @test
 fn test_settled_callinfo(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_settled_callinfo(d, clock, random, tasks) { Ok(()) } else { Error(()) }
+}
+
+// L28 (v2.19, outcome_dropped): a unit the writer drops loses its content and keeps its
+// Outcome rows, which ride in the owner's next Reset; a Dropped never counts toward the
+// protocol-error close, so a second one sends a second Reset rather than closing 1008.
+pub fn law_dropped_keeps_outcomes(tasks: Tasks, c: Clock, r: Random) -> bool waits {
+    let (access_gate, take policy_task) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
+    let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    let service = wire_service_seed(take reg, access_gate, head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
+    let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
+    let mut owner = take initial
+    let mut work = wire_work()
+    let mut ok = true
+    for p in 5u64 .. 7u64 {
+        let mut complete: List[u32] = list.new()
+        result.unwrap(list.push(mut complete, 1u32))
+        let mut done: List[Done] = list.new()
+        result.unwrap(list.push(mut done, Done(stream: 3u32, p: p, outcome: Refused(NoEntry))))
+        wire_queue_checked(mut work.output, Batch(4u64, take complete, list.new(), take done), list.new(), list.new(), Some(4u64))
+        let taken = match result.unwrap(wire_take_output(owner, mut work)) {
+            Some(Batch(_, _, _, _)) => true,
+            _ => false,
+        }
+        let dropped = match wire_step(mut owner, mut work, WDropped) {
+            Ok(_) => true,
+            Error(_) => false,
+        }
+        let reset = match result.unwrap(wire_take_output(owner, mut work)) {
+            Some(Reset(_, ds)) => list.len(ds) == 1u64 && ds[0].stream == 3u32 && ds[0].p == p,
+            _ => false,
+        }
+        wire_sent(mut owner, mut work)
+        ok = ok && taken && dropped && reset && !owner.reset_seen && list.len(work.output) == 0u64
+    }
+    let mut policy_handle = take policy_task
+    task.cancel(mut policy_handle)
+    let _ = task.join(take policy_handle)
+    let _ = take requests
+    ok
+}
+
+@test
+fn test_dropped_keeps_outcomes(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+    if law_dropped_keeps_outcomes(tasks, clock, random) { Ok(()) } else { Error(()) }
 }

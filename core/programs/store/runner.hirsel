@@ -1463,13 +1463,16 @@ fn advance_sub[G: send, H: send](b: Board[G, H], newest: store.Snapshot, d: List
 }
 
 // G2: one round from the base to the newest snapshot released.
-fn round[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
+// `fenced` gets every session with a read-set hit, found before any sub is advanced or ended;
+// a lost diff fences them all.
+fn round[G: send, H: send](mut b: Board[G, H], mut fenced: Fenced) -> List[Owe] {
     let mut owes: List[Owe] = list.new()
     let Some(take newest) = replace(mut b.newest, None) else { return take owes }
     let version = store.version(newest)
     let d = match store.changes(b.base, newest) {
         Ok(take x) => take x,
         Error(_) => {
+            fenced.all = true
             reset_subscriptions(mut b.subs, mut owes, version)
             b.base = take newest
             return take owes
@@ -1478,10 +1481,16 @@ fn round[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
     let hits = match affected_subscriptions(b.subs, d) {
         Ok(take x) => take x,
         Error(_) => {
+            fenced.all = true
             reset_subscriptions(mut b.subs, mut owes, version)
             b.base = take newest
             return take owes
         },
+    }
+    for (id, read) in hits {
+        if read && !list.contains(fenced.sessions, id.who) {
+            if let Error(_) = list.push(mut fenced.sessions, id.who) { fenced.all = true }
+        }
     }
     for (id, read) in hits {
         let Some((generation, take advanced)) = advance_sub(b, newest, d, id, read) else { continue }
@@ -1560,15 +1569,55 @@ type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, Bytes
 // publisher answers with the id it mints for the session.
 // v2.14: a marked session (an HTTP group or one-shot read) sends the Receiver of its
 // retirement mark, a channel it keeps the only Sender of and never sends on.
-type Join: send { to: Sender[WireEvent], told: Sender[u64], mark: Option[Receiver[()]], closed: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]] }
+// v2.19: a session's fence root holds a handle the publisher publishes on (§3 "The release
+// check"), and the publisher answers with the session's id and a handle to the round register.
+type Join: send { to: Sender[WireEvent], told: Sender[Admit], mark: Option[Receiver[()]], closed: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[Latest[Fence]] }
 
-// The publisher's inbox, both ends. `post` gives each session a sender; place_head then
-// takes the mailbox whole, its head sending Releases on the same channel.
-pub opaque type Mailbox: send { to: Sender[PubIn], from: Receiver[PubIn] }
+type Admit: send { who: u64, round: Latest[RoundAt] }
+
+// v2.19 (§3 "The release check"): `latest` is the newest commit that hit a read set of the
+// session, and `prior` the value `latest` had before it.
+pub type Fence: shareable + send { prior: u64, latest: u64 }
+
+// The round register's value R: the newest version whose fences are all published.
+// u64::MAX is the deploy halt's, and drops every content unit.
+type RoundAt: shareable + send { at: u64 }
+
+const ROUND_HALTED: u64 = 18446744073709551615u64
+
+// The publisher's inbox, both ends, and the place's round register with its u64::MAX Arc.
+// `post` gives each session a sender; place_head then takes the mailbox whole, its head
+// sending Releases on the same channel.
+pub opaque type Mailbox: send { to: Sender[PubIn], from: Receiver[PubIn], rounds: RoundRegister }
+
+type RoundRegister: send { round: Latest[RoundAt], halted: Arc[RoundAt] }
 
 pub fn mailbox(n: u64) -> Result[Mailbox, Capacity] {
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(n)?
-    Ok(Mailbox(to: take to, from: take from))
+    let first = result.capacity_only(arc.new(RoundAt(at: 0u64)))?
+    let register = result.capacity_only(latest.new(take first))?
+    let halted = result.capacity_only(arc.new(RoundAt(at: ROUND_HALTED)))?
+    Ok(Mailbox(to: take to, from: take from, rounds: RoundRegister(round: take register, halted: take halted)))
+}
+
+// The release check's decision (§3), one function for every transport: R = u64::MAX drops
+// every content unit; otherwise the fence acts at `latest` once R has reached it, and at
+// `prior` before, and a unit passes if that fence is at most its version.
+pub fn release_passes(r: u64, f: Fence, version: u64) -> bool {
+    if r == ROUND_HALTED { return false }
+    let effective = if f.latest <= r { f.latest } else { f.prior }
+    effective <= version
+}
+
+// The writer's check: R first, then the fence, each copied and its share released before
+// the decision.
+fn release_load(register: Latest[RoundAt], fence: Latest[Fence], version: u64) -> bool {
+    let r = latest.read(register).at
+    let f = {
+        let held = latest.read(fence)
+        Fence(prior: held.prior, latest: held.latest)
+    }
+    release_passes(r, f, version)
 }
 
 pub fn post(m: Mailbox) -> Sender[PubIn] {
@@ -1599,12 +1648,13 @@ type Publish[G: send, H: send]: send {
     h: H,
     base: store.Snapshot,
     from: Receiver[PubIn],
+    rounds: RoundRegister,
     ready: Sender[Option[RegisterError]]
 }
 
 // The publisher task runs `place` itself and tells the head whether it could.
 fn publish[G: send, H: send](take p: Publish[G, H]) -> () waits {
-    let Publish(place: place, n_place: n_place, h: take h, base: take base, from: take from, ready: take ready) = take p
+    let Publish(place: place, n_place: n_place, h: take h, base: take base, from: take from, rounds: take rounds, ready: take ready) = take p
     let r = match placed(place, n_place) {
         Ok(take x) => take x,
         Error(take e) => {
@@ -1615,7 +1665,7 @@ fn publish[G: send, H: send](take p: Publish[G, H]) -> () waits {
     if let Error(_) = channel.send(ready, None) {
         return
     }
-    publisher(take r, take h, take base, take from)
+    publisher(take r, take h, take base, take from, take rounds)
 }
 
 // The head selects the release under the store's LOCK before opening handles.
@@ -1682,13 +1732,13 @@ fn open_handles[H: send](db: store.Db, handles: StaticFn[fn(store.Schema) -> Res
 }
 
 fn start_publisher[G: send, H: send](owned: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take h2: H, take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(Sender[PubIn], Task[()]), OpenError] waits {
-    let Mailbox(to: take out, from: take from) = take mail
+    let Mailbox(to: take out, from: take from, rounds: take rounds) = take mail
     let told: Result[(Sender[Option[RegisterError]], Receiver[Option[RegisterError]]), Capacity] = channel.new(1u64)
     let (ready, readied) = match take told {
         Ok(take pair) => take pair,
         Error(c) => return Error(Store(Full(c))),
     }
-    let p = Publish(place: place, n_place: n_place, h: take h2, base: store.snapshot(owned), from: take from, ready: take ready)
+    let p = Publish(place: place, n_place: n_place, h: take h2, base: store.snapshot(owned), from: take from, rounds: take rounds, ready: take ready)
     let publishing = match task.spawn(tasks, bytes n_publisher, take p, publish) {
         Ok(take t) => take t,
         Error((c, _)) => return Error(Store(Full(c))),
@@ -2396,7 +2446,9 @@ fn gate[G: send, H: send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
 // with Ended(sub, Refused(Overloaded)); the client resubscribes (WIRE-SPEC D3). That Ended
 // (or a Reset) and bounced answers wait until the inbox takes them. The publisher retries
 // them at its current base, together with any new content or answers for that owner.
-type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[(u32, u64, Outcome)], reset: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]] }
+// `ended_at` is the oldest computation version among `ended` (u64::MAX when empty): a waiting
+// Ended keeps the version it was computed at when it is folded into later content.
+type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[(u32, u64, Outcome)], ended_at: u64, reset: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[Latest[Fence]] }
 
 // One try_send to an owner: taken, bounced back by a full inbox, or shut.
 type Offered = Took | Bounced(Notice) | Shut
@@ -2409,12 +2461,13 @@ fn offer(to: Sender[WireEvent], take e: Notice) -> Offered {
     }
 }
 
-fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: store.Snapshot, take from: Receiver[PubIn]) -> () waits {
+fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: store.Snapshot, take from: Receiver[PubIn], take rounds: RoundRegister) -> () waits {
     let mut at = store.version(base)
     let mut b = Board(r: take r, h: take h, base: take base, newest: None, subs: subscriptions())
     let mut joined: List[Joiner] = list.new()
     let mut waiting: List[Replies] = list.new()
     let mut minted = 0u64
+    if !fence_round(joined, Fenced(sessions: list.new(), all: false), at, rounds) { return }
     loop {
         let got = match channel.receive(from) {
             Ok(take x) => take x,
@@ -2429,16 +2482,19 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 if let Some(take s) = take snap {
                     at = v
                     b.newest = Some(take s)
-                    owes = round(mut b)
+                    let mut fenced = Fenced(sessions: list.new(), all: false)
+                    owes = round(mut b, mut fenced)
+                    // G2 step 3: every fence of the round, then R, before anything is offered.
+                    if !fence_round(joined, take fenced, v, rounds) { return }
                 }
                 keep_answers(mut waiting, take answers)
             },
             Joined(take j) => {
-                let Join(to: take to, told: take told, mark: take mark, closed: take closed, identity: take id) = take j
+                let Join(to: take to, told: take told, mark: take mark, closed: take closed, identity: take id, fence: take fence) = take j
                 minted += 1u64
                 let wake: Option[Sender[WireEvent]] = match closed { Some(_) => Some(channel.sender(to)), _ => None }
-                result.unwrap(list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), reset: false, mark: take mark, identity: take id)))
-                let _ = channel.try_send(told, minted)
+                result.unwrap(list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: take mark, identity: take id, fence: take fence)))
+                let _ = channel.try_send(told, Admit(who: minted, round: latest.handle(rounds.round)))
                 if let Some(sender) = wake { let _ = channel.try_send(sender, wire_event(JoinReady)) }
             },
             Subscribed(who, sub, take key, take arg) =>
@@ -2454,6 +2510,39 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
         sweep(mut b.subs, mut joined)
         settle(mut b.subs, mut joined, mut waiting, take owes, at)
     }
+}
+
+// The sessions a round's read-set hits fence: each named session, or every joined session
+// when the round could not tell which (a lost diff resets them all).
+type Fenced { sessions: List[u64], all: bool }
+
+// G2 step 3 (§3 "The release check"): allocate every fence of round b and R = b, then publish
+// the fences, then R. A fence already at b is left as it is. The prior is read from the root,
+// whose only publisher is this task. If an allocation fails, R = u64::MAX is published from
+// its reserved Arc, so every writer drops all content, and the publisher stops (false).
+fn fence_round(joined: List[Joiner], take fenced: Fenced, b: u64, rounds: RoundRegister) -> bool {
+    let Fenced(sessions: take sessions, all: all) = take fenced
+    let mut fresh: List[(u64, Arc[Fence])] = list.new()
+    let mut i = 0u64
+    while i < list.len(joined) {
+        if let Some(root) = joined[i].fence {
+            if all || list.contains(sessions, joined[i].who) {
+                let current = latest.read(root).latest
+                if current < b {
+                    let made = match arc.new(Fence(prior: current, latest: b)) { Ok(take a) => take a, Error(_) => { latest.publish(rounds.round, arc.share(rounds.halted)); return false } }
+                    if let Error(_) = list.push(mut fresh, (i, take made)) { latest.publish(rounds.round, arc.share(rounds.halted)); return false }
+                }
+            }
+        }
+        i += 1u64
+    }
+    let next = match arc.new(RoundAt(at: b)) { Ok(take a) => take a, Error(_) => { latest.publish(rounds.round, arc.share(rounds.halted)); return false } }
+    for take entry in fresh {
+        let (index, take made) = take entry
+        if let Some(root) = joined[index].fence { latest.publish(root, take made) }
+    }
+    latest.publish(rounds.round, take next)
+    true
 }
 
 fn publish_subscription[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe], who: u64, sub: u32, generation: u64, take key: Bytes, take arg: Bytes) {
@@ -2527,6 +2616,8 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             j += 1u64
         }
         let old = replace(mut joined[i].ended, list.new())
+        let old_at = joined[i].ended_at
+        joined[i].ended_at = ROUND_HALTED
         if joined[i].reset || next.reset {
             let _ = replace(mut next.generations, list.new())
             let _ = replace(mut next.complete, list.new())
@@ -2535,6 +2626,8 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             next.reset = true
             forget_subs(mut subs, who)
         } else if list.len(old) > 0u64 {
+            // A unit is checked at its oldest component (§3).
+            if old_at < next.version { next.version = old_at }
             let now = replace(mut next.ended, take old)
             for take ended in now {
                 result.unwrap(list.push(mut next.ended, take ended))
@@ -2583,7 +2676,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
 // A full inbox bounced this content: each sub it named (complete or a row) ends Overloaded,
 // its Ended subs wait, and a Reset waits and covers them all.
 fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
-    let Owe(session: who, version: _, generations: take generations, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
+    let Owe(session: who, version: computed, generations: take generations, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
     let mut cut: List[u32] = take complete
     for r in rows {
         if !list.contains(cut, r.sub) {
@@ -2596,8 +2689,10 @@ fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
     if reset || j.reset {
         j.reset = true
         j.ended = list.new()
+        j.ended_at = ROUND_HALTED
         return
     }
+    if computed < j.ended_at { j.ended_at = computed }
     for take x in ended {
         result.unwrap(list.push(mut j.ended, take x))
     }
@@ -3019,9 +3114,15 @@ fn holds(c: Client, keys: List[Bytes], who: u64, sub: u32, row0: Option[u8], row
     map.len(rows) == n
 }
 
+fn step_held[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
+    let mut fenced = Fenced(sessions: list.new(), all: false)
+    round(mut b, mut fenced)
+}
+
 fn step[G: send, H: send](mut b: Board[G, H], db: store.Db) -> List[Owe] {
     b.newest = Some(store.snapshot(db))
-    round(mut b)
+    let mut fenced = Fenced(sessions: list.new(), all: false)
+    round(mut b, mut fenced)
 }
 
 pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
@@ -3058,7 +3159,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     if first.version != 4u64 || list.len(first.complete) != 1u64 || !apply(mut cl, take first) || !holds(cl, keys, 0u64, 1u32, Some(0u8), Some(0u8)) {
         return false
     }
-    if !apply_all(mut cl, round(mut b)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(0u8)) {
+    if !apply_all(mut cl, step_held(mut b)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(0u8)) {
         return false
     }
     // shared_cache: session 1 subscribes Q1 with the same sub id; session 0 subscribes Qf.
@@ -3185,11 +3286,11 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let outside = store.snapshot(db)
     let v1 = store.version(c1)
     let v2 = store.version(c2)
-    let Mailbox(to: take to, from: take from) = result.unwrap(mailbox(8u64))
+    let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ev_to, ev_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(8u64))
-    let (told_to, told_from): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
+    let (told_to, told_from): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
     let mut queue: List[ToPub] = list.new()
-    result.unwrap(list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to, mark: None, closed: None, identity: None))))
+    result.unwrap(list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to, mark: None, closed: None, identity: None, fence: None))))
     result.unwrap(list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new()))))
     result.unwrap(list.push(mut queue, Subscribed(1u64, 1u32, query_key(code.describe(q1)), no_arg())))
     result.unwrap(list.push(mut queue, Released(Release(version: v2, snapshot: Some(take c2), answers: list.new()))))
@@ -3200,9 +3301,9 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
             return false
         }
     }
-    publisher(take reg, take h, take base, take from)
+    publisher(take reg, take h, take base, take from, take rounds)
     match channel.try_receive(told_from) {
-        Ok(1u64) => (),
+        Ok(a) => if a.who != 1u64 { return false },
         _ => return false,
     }
     let mut cl = Client(caches: list.new(), last: list.new())
@@ -3240,12 +3341,12 @@ pub fn law_retired_without_waiting(c: Clock, r: Random, tasks: Tasks) -> bool wa
 // A session joins the publisher and is told its id (0 if it could not): a sync point that is
 // not a Released, since the publisher has taken every message sent before it.
 fn join_as(to: Sender[PubIn], take ev: Sender[WireEvent], take mark: Option[Receiver[()]]) -> u64 waits {
-    let (told, hear): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
-    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take ev, told: take told, mark: take mark, closed: None, identity: None)))) {
+    let (told, hear): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take ev, told: take told, mark: take mark, closed: None, identity: None, fence: None)))) {
         return 0u64
     }
     match channel.receive(hear) {
-        Ok(n) => n,
+        Ok(a) => a.who,
         Error(_) => 0u64,
     }
 }
@@ -3299,9 +3400,9 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
     let c2 = store.snapshot(db)
     let v1 = store.version(c1)
     let v2 = store.version(c2)
-    let Mailbox(to: take to, from: take from) = result.unwrap(mailbox(8u64))
+    let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = result.unwrap(channel.new(1u64))
-    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, h: take h, base: take base, from: take from, ready: take ready_to)
+    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, h: take h, base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = match task.spawn(tasks, bytes 8388608u64, take p, publish) {
         Ok(take x) => take x,
         Error(_) => return false,
@@ -3414,8 +3515,8 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
     let mut ended: List[(u32, u64, Outcome)] = list.new()
     result.unwrap(list.push(mut ended, (1u32, 0u64, Refused(Overloaded))))
     let mut joined: List[Joiner] = list.new()
-    result.unwrap(list.push(mut joined, Joiner(who: 1u64, to: take l_to, closed: None, ended: list.new(), reset: false, mark: Some(take l_mark), identity: None)))
-    result.unwrap(list.push(mut joined, Joiner(who: 2u64, to: take m_to, closed: None, ended: take ended, reset: false, mark: Some(take m_mark), identity: None)))
+    result.unwrap(list.push(mut joined, Joiner(who: 1u64, to: take l_to, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: Some(take l_mark), identity: None, fence: None)))
+    result.unwrap(list.push(mut joined, Joiner(who: 2u64, to: take m_to, closed: None, ended: take ended, ended_at: ROUND_HALTED, reset: false, mark: Some(take m_mark), identity: None, fence: None)))
     let mut outcomes: List[KeyedDone] = list.new()
     result.unwrap(list.push(mut outcomes, KeyedDone(stream: no_arg(), p: 0u64, outcome: Refused(Overloaded))))
     let mut waiting: List[Replies] = list.new()
@@ -3506,7 +3607,7 @@ fn retired_owner(take seed: RetiredOwner) -> Result[(), ()] waits {
 }
 
 fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
-    let Mailbox(to: take to, from: take from) = result.unwrap(mailbox(2u64))
+    let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(2u64))
     let (head, heads): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
     let (down_to, down): (Sender[Down], Receiver[Down]) = result.unwrap(channel.new(16u64))
     let (inbox, events): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(16u64))
@@ -3529,9 +3630,9 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
     let PubIn(e: take first) = take joining
     let (ses, held) = match take first {
         Joined(take j) => {
-            let Join(to: take delivery, told: take told, mark: take given, closed: _, identity: _) = take j
+            let Join(to: take delivery, told: take told, mark: take given, closed: _, identity: _, fence: _) = take j
             let ses_to = take delivery
-            let _ = channel.try_send(told, 7u64)
+            let _ = channel.try_send(told, Admit(who: 7u64, round: latest.handle(rounds.round)))
             let _ = channel.send(ses_to, wire_event(JoinReady))
             (take ses_to, take given)
         },
@@ -3645,6 +3746,103 @@ fn test_retired_without_waiting(c: Clock, r: Random, tasks: Tasks) -> Result[(),
     } else {
         Error(())
     }
+}
+
+// L28 (RUNNER-SPEC v2.19.2, stale_never_released): once commit b's round register value is
+// published, no writer accepts a content unit below b for a session whose read set b hit.
+// The decision rows are hand-derived from §3: R = u64::MAX drops; the fence acts at `latest`
+// once R has reached it and at `prior` before. The trace runs the publisher as a task: one
+// session joins with its fence root and subscribes q1 at v0 (q1 reads perm, covers rows 0
+// and 1). Commit c writes only a covered row, so the fence stays at 0 and R = c; commit b
+// clears perm, a read hit, so the fence becomes {0, b} and R = b, and the writer's check
+// then refuses a unit at c and accepts one at b.
+pub fn law_stale_never_released(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let table = !release_passes(ROUND_HALTED, Fence(prior: 0u64, latest: 0u64), 5u64)
+        && !release_passes(7u64, Fence(prior: 3u64, latest: 7u64), 5u64)
+        && release_passes(5u64, Fence(prior: 3u64, latest: 9u64), 4u64)
+        && !release_passes(5u64, Fence(prior: 3u64, latest: 9u64), 2u64)
+        && release_passes(9u64, Fence(prior: 3u64, latest: 9u64), 9u64)
+    table && stale_trace(c, r, tasks)
+}
+
+fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 0u64, 1u64)
+    set(mut db, t, 1u64, 0u64)
+    set(mut db, t, 2u64, 0u64)
+    let base = store.snapshot(db)
+    let v0 = store.version(base)
+    let h = match subs_handles(mut db) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    set(mut db, t, 1u64, 5u64)
+    let cs = store.snapshot(db)
+    set(mut db, t, 0u64, 0u64)
+    let bs = store.snapshot(db)
+    let vc = store.version(cs)
+    let vb = store.version(bs)
+    let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
+    let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = result.unwrap(channel.new(1u64))
+    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, h: take h, base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let publishing = match task.spawn(tasks, bytes 8388608u64, take p, publish) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    match channel.receive(ready_from) {
+        Ok(None) => (),
+        _ => return false,
+    }
+    let first = result.unwrap(arc.new(Fence(prior: 0u64, latest: 0u64)))
+    let root = result.unwrap(latest.new(take first))
+    let (s_to, s_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(16u64))
+    let (told, hear): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take s_to, told: take told, mark: None, closed: None, identity: None, fence: Some(latest.handle(root)))))) {
+        return false
+    }
+    let Admit(who: s, round: take register) = match channel.receive(hear) {
+        Ok(take a) => take a,
+        Error(_) => return false,
+    }
+    let mut queue: List[ToPub] = list.new()
+    result.unwrap(list.push(mut queue, Subscribed(s, 1u32, query_key(code.describe(q1)), no_arg())))
+    result.unwrap(list.push(mut queue, Released(Release(version: vc, snapshot: Some(take cs), answers: list.new()))))
+    for take e in queue {
+        if let Error(_) = channel.send(to, PubIn(e: take e)) {
+            return false
+        }
+    }
+    let (x_to, x_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(1u64))
+    let x = join_as(to, take x_to, None)
+    // Round c named only q1's cover: no fence moved.
+    let at_c = latest.read(register).at == vc && latest.read(root).latest == 0u64
+        && release_load(register, root, v0) && release_load(register, root, vc)
+    if let Error(_) = channel.send(to, PubIn(e: Released(Release(version: vb, snapshot: Some(take bs), answers: list.new())))) {
+        return false
+    }
+    let (y_to, y_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(1u64))
+    let y = join_as(to, take y_to, None)
+    let at_b = {
+        let f = latest.read(root)
+        f.prior == 0u64 && f.latest == vb
+    } && latest.read(register).at == vb && !release_load(register, root, vc) && release_load(register, root, vb)
+    if let Error(_) = channel.send(to, PubIn(e: Halt)) {
+        return false
+    }
+    let stopped = match task.join(take publishing) {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+    let _ = (s_from, x_from, y_from)
+    stopped && s != 0u64 && x != 0u64 && y != 0u64 && at_c && at_b
+}
+
+@test
+fn test_stale_never_released(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_stale_never_released(c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
 @test
@@ -3932,7 +4130,7 @@ const MAX_RETURNED_BYTES: u64 = DONE_MAX - 20u64
 
 // WIRE W3b. The service owns principal binding, admission, dedup and outcomes.
 // Each owner holds the one publisher sender. Another transport calls the same dispatch.
-pub type ServiceInput: send = WAttach(Ip, Sender[WireEvent], Sender[PubIn]) | WClient(Frame, u64) | WRunner(Notice) | WPrepared(Box[ServicePlan]) | WDrained | WSent | WPoll(bool) | WClose(u64) | WForce
+pub type ServiceInput: send = WAttach(Ip, Sender[WireEvent], Sender[PubIn]) | WClient(Frame, u64) | WRunner(Notice) | WPrepared(Box[ServicePlan]) | WDrained | WSent | WDropped | WPoll(bool) | WClose(u64) | WForce
 
 pub type Service[C: send]: send {
     context: C,
@@ -3969,7 +4167,7 @@ pub opaque type WireEvent: send { e: WireInput }
 
 fn wire_event(take e: WireInput) -> WireEvent { WireEvent(e: take e) }
 
-type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | Authenticated(Option[ingress.Principal]) | Rate(bool) | JoinReady | HelloExpired | Published(Frame) | Control(u8, std.websocket.Control) | Sent | WriteTimedOut(u64) | ReadClosed(std.websocket.Control, std.wsock.Reader) | WriteClosed(std.wsock.Writer) | Ended(u16) | DrainWake
+type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | Authenticated(Option[ingress.Principal]) | Rate(bool) | JoinReady | HelloExpired | Published(Frame) | Control(u8, std.websocket.Control) | Sent | Dropped | WriteTimedOut(u64) | ReadClosed(std.websocket.Control, std.wsock.Reader) | WriteClosed(std.wsock.Writer) | Ended(u16) | DrainWake
 
 type WirePacket: send = Fragment | Decoded(Frame, u64) | Pinged(std.websocket.Control) | Ponged | PeerClosed(std.websocket.Control)
 type WireParsed: send { reader: std.wsock.Reader, packet: Result[Option[WirePacket], std.wsock.Error] }
@@ -4080,7 +4278,29 @@ fn wire_allocate[C: send](pool: Sender[WireAllocation[C]], to: Sender[Option[All
 
 // Read credits cover the inbox and a reader blocked on handing off a packet.
 type WireRead[C: send]: send { reader: std.wsock.Reader, to: Sender[WireEvent], credits: Receiver[()], clock: Clock, config: std.wsock.Config, pool: Sender[WireAllocation[C]] }
-type WireWrite: send { writer: std.wsock.Writer, from: Receiver[Bytes], to: Sender[WireEvent], out: std.wsock.Outbound, clock: Clock, config: std.wsock.Config }
+type WireWrite: send { writer: std.wsock.Writer, from: Receiver[WireUnit], to: Sender[WireEvent], out: std.wsock.Outbound, clock: Clock, config: std.wsock.Config }
+
+// One encoded frame for the writer. A content unit carries its version and handles to the
+// round register and its session's fence root; the writer applies the release check after
+// it takes the unit and before its first byte (§3).
+type WireUnit: send { frame: Bytes, check: Option[WireCheck] }
+type WireCheck: send { version: u64, round: Latest[RoundAt], fence: Latest[Fence] }
+
+// A content unit is built only with both handles; the owner has them from the join that let
+// the content in, so a missing one is a broken invariant and ends the session, unwritten.
+fn wire_unit(work: WireWork, take frame: Bytes, check: Option[u64]) -> WireUnit {
+    let checked = match check {
+        Some(version) => match work.round {
+            Some(register) => match work.fence {
+                Some(fence) => Some(WireCheck(version: version, round: latest.handle(register), fence: latest.handle(fence))),
+                None => fail("runner: a content unit without its fence"),
+            },
+            None => fail("runner: a content unit without the round register"),
+        },
+        None => None,
+    }
+    WireUnit(frame: take frame, check: take checked)
+}
 
 fn wire_return_reader(to: Sender[WireEvent], control: std.websocket.Control, take input: std.wsock.Reader) -> () waits {
     let mut reader = take input
@@ -4143,9 +4363,16 @@ fn wire_write(take x: WireWrite) -> () waits {
     let mut writer = take initial
     let mut out = take initial_out
     loop {
-        let frame = match channel.receive(from) {
+        let unit = match channel.receive(from) {
             Ok(take b) => take b,
             Error(_) => return,
+        }
+        let WireUnit(frame: take frame, check: take check) = take unit
+        if let Some(c) = check {
+            if !release_load(c.round, c.fence, c.version) {
+                if let Error(_) = channel.send(to, wire_event(Dropped)) { return }
+                continue
+            }
         }
         let is_close = list.len(frame) != 0u64 && frame[0u64] & 15u8 == 8u8
         let now = host.mono_ns(clock)
@@ -4182,8 +4409,8 @@ fn wire_write(take x: WireWrite) -> () waits {
 // until Sent, so a writer stalled in send cannot retain a queued second frame.
 fn wire_ready(busy: bool) -> bool { !busy }
 
-fn wire_offer(to: Sender[Bytes], mut busy: bool, take b: Bytes) -> Result[(), Bytes] {
-    match channel.try_send(to, take b) {
+fn wire_offer(to: Sender[WireUnit], mut busy: bool, take u: WireUnit) -> Result[(), WireUnit] {
+    match channel.try_send(to, take u) {
         Ok(()) => { busy = true; Ok(()) },
         Error(Full(take full)) => Error(take full),
         Error(Closed(take closed)) => Error(take closed),
@@ -4296,7 +4523,7 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]], mu
         Ok(take p) => take p, Error(cap) => return Error(Allocation(cap)),
     }
     for _ in 0u64 .. 1u64 + c.q { let _ = channel.try_send(credit, ()) }
-    let new_writes: Result[(Sender[Bytes], Receiver[Bytes]), Capacity] = channel.new(1u64)
+    let new_writes: Result[(Sender[WireUnit], Receiver[WireUnit]), Capacity] = channel.new(1u64)
     let (write, writes) = match take new_writes {
         Ok(take p) => take p, Error(cap) => return Error(Allocation(cap)),
     }
@@ -4494,6 +4721,14 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]], mu
                 let _ = apply_input(mut service.context, mut work, WSent)
                 None
             },
+            Dropped => {
+                busy = false
+                if let Error(code) = apply_input(mut service.context, mut work, WDropped) {
+                    control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(code))))
+                    closing = true
+                }
+                None
+            },
             WriteTimedOut(end) => {
                 if !closing {
                     close_at = Some(end)
@@ -4537,14 +4772,17 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]], mu
         let mut outgoing: Option[Frame] = None
         if !closing {
             if let Some(take f) = take frame {
-                if let Error(e) = wire_queue_external(mut work, c, take f) { break Error(e) }
+                if let Error(e) = wire_queue_external(mut work, c, take f, None) { break Error(e) }
             }
             let writable = wire_ready(busy) && !write_closed && none(control)
                 && (list.len(work.output) == 0u64 || !work.output[0u64].external)
             match apply_input(mut service.context, mut work, WPoll(writable)) {
                 Ok(Some(take f)) => {
                     if writable { outgoing = Some(take f) }
-                    else if let Error(e) = wire_queue_external(mut work, c, take f) { break Error(e) }
+                    else {
+                        let held_check = replace(mut work.check, None)
+                        if let Error(e) = wire_queue_external(mut work, c, take f, held_check) { break Error(e) }
+                    }
                 },
                 Ok(None) => {},
                 Error(code) => { control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(code)))); closing = true },
@@ -4560,19 +4798,21 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]], mu
                 }
             }
         }
-        let mut data_frame: Option[(Bytes, bool)] = None
+        let mut data_frame: Option[(Bytes, bool, Option[u64])] = None
         if wire_ready(busy) && !write_closed && !closing && none(control) {
             let next = match take outgoing {
                 Some(take f) => Some(take f),
                 None => if list.len(work.output) != 0u64 && work.output[0u64].external {
-                    let WireOutput(frame: take f, marks: _, generations: _, external: _) = list.remove(mut work.output, 0u64)
+                    let WireOutput(frame: take f, marks: _, generations: _, external: _, check: held_check) = list.remove(mut work.output, 0u64)
+                    work.check = held_check
                     Some(take f)
                 } else { None },
             }
             if let Some(take f) = take next {
                 let welcome = match f { Welcome(_, _, _, _, _, _) => true, _ => false }
+                let check = replace(mut work.check, None)
                 match wire_pack(pool, encoded_to, encoded_from, take f) {
-                    Ok(take b) => { data_frame = Some((take b, welcome)) },
+                    Ok(take b) => { data_frame = Some((take b, welcome, check)) },
                     Error(Protocol(1013u16)) => {
                         match std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(1013u16)) {
                             Ok(take refused) => { control = Some(take refused) },
@@ -4606,11 +4846,13 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]], mu
         }
         if wire_ready(busy) && !write_closed {
             if let Some(take b) = replace(mut control, None) {
-                if let Error(_) = wire_offer(write, mut busy, take b) { break Ok(()) }
+                if let Error(_) = wire_offer(write, mut busy, WireUnit(frame: take b, check: None)) { break Ok(()) }
                 continue
             }
-            if let Some((take packed, welcome)) = take data_frame {
-                if let Error(_) = wire_offer(write, mut busy, take packed) { break Ok(()) }
+            if let Some((take packed, welcome, check)) = take data_frame {
+                // The check version travels with the unit; WSent or WDropped clears the copy.
+                work.check = check
+                if let Error(_) = wire_offer(write, mut busy, wire_unit(work, take packed, check)) { break Ok(()) }
                 if welcome {
                     if let Some(take accepted) = replace(mut lease, None) { std.wsock.hello_accepted(take accepted) }
                 }
@@ -4961,9 +5203,12 @@ pub fn prepare[G: send, H: send](r: Registry[G, H], a: Admitted, take want: Call
 // The wire owner owns this state. Policy tasks answer only through its inbox.
 type WireOwed: send { generation: u64, reply: Bytes }
 
-pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], timers: Map[u64, Task[()]], output: List[WireOutput], sending: List[WireMark], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64 }
+// v2.19: `fence` is the session's fence root, made at join, and `round` the place's round
+// register, from the join's answer. `check` and `sending_done` are the unit handed out last:
+// its version, and a copy of its Outcome rows, which a Dropped Reset carries (§3).
+pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], timers: Map[u64, Task[()]], output: List[WireOutput], sending: List[WireMark], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64, fence: Option[Latest[Fence]], round: Option[Latest[RoundAt]], check: Option[u64], sending_done: List[Done] }
 
-fn wire_work() -> WireWork { WireWork(head: None, asking: None, timers: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64) }
+fn wire_work() -> WireWork { WireWork(head: None, asking: None, timers: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64, fence: None, round: None, check: None, sending_done: list.new()) }
 
 fn wire_cut(work: WireWork, clock: Clock) -> bool {
     wire_cut_at(work.drain, clock)
@@ -4984,7 +5229,9 @@ type WireMark: send = Unit(Bytes) | V1
 
 // The service and public transport callbacks share this owner-local queue. An
 // external item has no outcome units or subscription generations to retire.
-type WireOutput: send { frame: Frame, marks: List[WireMark], generations: List[(u32, u64)], external: bool }
+// `check` is a content unit's version, the oldest of its content components' (§3 "The release
+// check"); None for a unit that carries no content and passes unchecked.
+type WireOutput: send { frame: Frame, marks: List[WireMark], generations: List[(u32, u64)], external: bool, check: Option[u64] }
 type WirePending: send { stream: u32, p: u64, slot: u32, deadline: u32, arg: Bytes, at: u64, grows: bool }
 type WireAsk: send = Bind(Option[Bytes]) | CheckRate(Caller)
 type WirePolicy: send { policy: ingress.Ingress, source: Ip, request: WireAsk, to: Sender[WireEvent] }
@@ -5065,7 +5312,7 @@ pub opaque type WireSession[G: send, H: send]: send {
     phase: u8, wants: List[Want], entries: List[Bytes], placing: u64,
     asking: bool, pending: Option[WirePending],
     held: Map[Bytes, WireHeld], refusals: u64, last: u64, generation: u64,
-    joined: Option[u64], joining: Option[Receiver[u64]], join_lease: Option[WireJoinLease], marked: bool, mark: Option[Sender[()]], subscription: Option[(u32, SubscriptionInput)], subscription_room: Option[SubscriptionRoom], sub_generation: u64, subs: List[(u32, u64)], pub_subs: List[u32], reset_seen: bool
+    joined: Option[u64], joining: Option[Receiver[Admit]], join_lease: Option[WireJoinLease], marked: bool, mark: Option[Sender[()]], subscription: Option[(u32, SubscriptionInput)], subscription_room: Option[SubscriptionRoom], sub_generation: u64, subs: List[(u32, u64)], pub_subs: List[u32], reset_seen: bool
 }
 
 pub fn wire_service[G: send, H: send](take reg: Registry[G, H], access_gate: ingress.Ingress, head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H]] {
@@ -5207,10 +5454,10 @@ fn wire_queued_bytes(output: List[WireOutput]) -> u64 {
     size
 }
 
-fn wire_queue_external(mut work: WireWork, c: WireConfig, take frame: Frame) -> Result[(), std.wsock.Error] {
+fn wire_queue_external(mut work: WireWork, c: WireConfig, take frame: Frame, check: Option[u64]) -> Result[(), std.wsock.Error] {
     if wire_output_size(frame) > c.socket.max_frame { return Error(Protocol(1009u16)) }
     if list.len(work.output) >= 1u64 + c.q || wire_queued_bytes(work.output) + wire_output_charge(frame, false) > c.budget { return Error(Busy) }
-    let item = WireOutput(frame: take frame, marks: list.new(), generations: list.new(), external: true)
+    let item = WireOutput(frame: take frame, marks: list.new(), generations: list.new(), external: true, check: check)
     match list.push(mut work.output, take item) {
         Ok(()) => Ok(()),
         Error((cap, _)) => Error(Allocation(cap)),
@@ -5218,7 +5465,11 @@ fn wire_queue_external(mut work: WireWork, c: WireConfig, take frame: Frame) -> 
 }
 
 fn wire_queue(mut output: List[WireOutput], take frame: Frame, take marks: List[WireMark], take generations: List[(u32, u64)]) {
-    result.unwrap(list.push(mut output, WireOutput(frame: take frame, marks: take marks, generations: take generations, external: false)))
+    wire_queue_checked(mut output, take frame, take marks, take generations, None)
+}
+
+fn wire_queue_checked(mut output: List[WireOutput], take frame: Frame, take marks: List[WireMark], take generations: List[(u32, u64)], check: Option[u64]) {
+    result.unwrap(list.push(mut output, WireOutput(frame: take frame, marks: take marks, generations: take generations, external: false, check: check)))
 }
 
 fn wire_refused[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, stream: u32, p: u64, take why: Refusal) -> Result[(), u16] {
@@ -5256,7 +5507,7 @@ fn wire_reset_rows[G: send, H: send](mut s: WireSession[G, H], mut output: List[
             result.unwrap(list.push(mut output, take o))
             continue
         }
-        let WireOutput(frame: take f, marks: take held, generations: _, external: _) = take o
+        let WireOutput(frame: take f, marks: take held, generations: _, external: _, check: _) = take o
         for take m in take held { result.unwrap(list.push(mut marks, take m)) }
         match take f {
             Batch(_, _, _, take ds) => for take d in take ds { result.unwrap(list.push(mut done, take d)) },
@@ -5292,7 +5543,7 @@ fn wire_drop_stale(mut generations: List[(u32, u64)], active: List[(u32, u64)]) 
 
 fn wire_current_output(active: List[(u32, u64)], take output: WireOutput) -> Option[WireOutput] {
     if output.external { return Some(take output) }
-    let WireOutput(frame: take f, marks: take marks, generations: take stamps, external: external) = take output
+    let WireOutput(frame: take f, marks: take marks, generations: take stamps, external: external, check: check) = take output
     let mut generations = take stamps
     if let Ended(sub, _) = f {
         // A terminal frame has no active subscription unless the id was reused.
@@ -5321,18 +5572,20 @@ fn wire_current_output(active: List[(u32, u64)], take output: WireOutput) -> Opt
                 }
                 while list.len(live_rows) > kept { let _ = list.pop(mut live_rows) }
                 if list.len(live_complete) == 0u64 && list.len(live_rows) == 0u64 && list.len(done) == 0u64 { return None }
-                return Some(WireOutput(frame: Batch(version, take live_complete, take live_rows, take done), marks: take marks, generations: take generations, external: external))
+                // Content left out of a unit is gone from it; what stays keeps the unit's version.
+                let kept_check: Option[u64] = if list.len(live_complete) == 0u64 && list.len(live_rows) == 0u64 { None } else { check }
+                return Some(WireOutput(frame: Batch(version, take live_complete, take live_rows, take done), marks: take marks, generations: take generations, external: external, check: kept_check))
             }
             return None
         }
     }
-    Some(WireOutput(frame: take f, marks: take marks, generations: take generations, external: external))
+    Some(WireOutput(frame: take f, marks: take marks, generations: take generations, external: external, check: check))
 }
 
 fn wire_prune_output[G: send, H: send](mut s: WireSession[G, H], mut output: List[WireOutput], retired: Option[u32]) {
     let mut kept = 0u64
     for index in 0u64 .. list.len(output) {
-        let empty = WireOutput(frame: Reset(0u64, list.new()), marks: list.new(), generations: list.new(), external: false)
+        let empty = WireOutput(frame: Reset(0u64, list.new()), marks: list.new(), generations: list.new(), external: false, check: None)
         let queued = list.set(mut output, index, take empty)
         if !queued.external { if let Ended(sub, _) = queued.frame { if retired == Some(sub) { continue } } }
         if let Some(take current) = wire_current_output(s.subs, take queued) {
@@ -5343,18 +5596,44 @@ fn wire_prune_output[G: send, H: send](mut s: WireSession[G, H], mut output: Lis
     while list.len(output) > kept { let _ = list.pop(mut output) }
 }
 
-fn wire_take_output[G: send, H: send](s: WireSession[G, H], mut work: WireWork) -> Option[Frame] {
+// A content unit's Outcome rows are copied before it is handed out, so a Dropped Reset can
+// carry them (§3); a copy that cannot be made closes the session (1013) rather than send the
+// unit unchecked or lose the rows.
+fn wire_take_output[G: send, H: send](s: WireSession[G, H], mut work: WireWork) -> Result[Option[Frame], u16] {
     let selected = loop {
-        if list.len(work.output) == 0u64 { return None }
+        if list.len(work.output) == 0u64 { return Ok(None) }
         let next = list.remove(mut work.output, 0u64)
         if let Some(take current) = wire_current_output(s.subs, take next) { break take current }
     }
-    let WireOutput(frame: take f, marks: take marks, generations: _, external: _) = take selected
+    let WireOutput(frame: take f, marks: take marks, generations: _, external: _, check: check) = take selected
     work.sending = take marks
-    Some(take f)
+    work.check = check
+    work.sending_done = list.new()
+    if let Some(_) = check {
+        if let Batch(_, _, _, done) = f {
+            if list.len(done) != 0u64 {
+                let copied: Result[List[Done], Capacity] = clone(done)
+                match take copied { Ok(take rows) => { work.sending_done = take rows }, Error(_) => return Error(1013u16) }
+            }
+        }
+    }
+    Ok(Some(take f))
+}
+
+// v2.19 (§3): the writer dropped the content unit it was handed. Every content component
+// the owner holds goes; every Outcome row, the dropped unit's included, rides in one Reset
+// that never counts toward the protocol-error close.
+fn wire_dropped[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork) -> Result[(), u16] {
+    let marks = replace(mut work.sending, list.new())
+    let done = replace(mut work.sending_done, list.new())
+    work.check = None
+    let version = s.last
+    wire_reset_rows(mut s, mut work.output, version, take done, take marks)
 }
 
 fn wire_sent[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork) {
+    work.check = None
+    work.sending_done = list.new()
     let marks = replace(mut work.sending, list.new())
     for take mark in take marks {
         match take mark {
@@ -5496,11 +5775,16 @@ fn wire_apply_plan[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
     Ok(())
 }
 
+// An Ended the owner makes itself passes unchecked; a publisher-made one is content (§3).
 fn wire_end[G: send, H: send](mut s: WireSession[G, H], mut output: List[WireOutput], sub: u32, take outcome: Outcome) {
+    wire_end_checked(mut s, mut output, sub, take outcome, None)
+}
+
+fn wire_end_checked[G: send, H: send](mut s: WireSession[G, H], mut output: List[WireOutput], sub: u32, take outcome: Outcome, check: Option[u64]) {
     let mut generations: List[(u32, u64)] = list.new()
     if let Some(generation) = sub_generation(s.subs, sub) { stamp_rows(mut generations, sub, generation) }
     wire_stop_sub(mut s, mut output, sub)
-    wire_queue(mut output, Ended(sub, take outcome), list.new(), take generations)
+    wire_queue_checked(mut output, Ended(sub, take outcome), list.new(), take generations, check)
 }
 
 fn wire_subscribed[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, sub: u32, take input: SubscriptionInput) {
@@ -5573,8 +5857,14 @@ fn wire_apply_subscribe[G: send, H: send](mut s: WireSession[G, H], mut work: Wi
         return Ok(())
     }
     if let Some(_) = s.joined { wire_subscribed(mut s, mut work, sub, take input); return Ok(()) }
-    let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
+    let made: Result[(Sender[Admit], Receiver[Admit]), Capacity] = channel.new(1u64)
     let (told, hear) = match take made { Ok(take pair) => take pair, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
+    // v2.19: the session's fence root, at {0, 0}; the publisher gets a handle in the Join.
+    let fence_root: Result[Latest[Fence], Capacity] = match arc.new(Fence(prior: 0u64, latest: 0u64)) {
+        Ok(take first) => result.capacity_only(latest.new(take first)),
+        Error((cap, _)) => Error(cap),
+    }
+    let fence = match take fence_root { Ok(take root) => take root, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
     let close_channel: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
     let (closing, closed) = match take close_channel { Ok(take pair) => take pair, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
     if let None = work.head {
@@ -5586,13 +5876,14 @@ fn wire_apply_subscribe[G: send, H: send](mut s: WireSession[G, H], mut work: Wi
     let identity = match work.head { Some(h) => latest.handle(h.identity), None => fail("runner: missing head lease") }
     let join = if s.marked {
         s.mark = Some(take closing)
-        Join(to: wire_me(s), told: take told, mark: Some(take closed), closed: None, identity: Some(take identity))
+        Join(to: wire_me(s), told: take told, mark: Some(take closed), closed: None, identity: Some(take identity), fence: Some(latest.handle(fence)))
     } else {
         let lease = match WireJoinLease(closing: take closing, publisher: wire_publisher(s)) { Ok(take l) => take l, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
         s.join_lease = Some(take lease)
-        Join(to: wire_me(s), told: take told, mark: None, closed: Some(take closed), identity: Some(take identity))
+        Join(to: wire_me(s), told: take told, mark: None, closed: Some(take closed), identity: Some(take identity), fence: Some(latest.handle(fence)))
     }
     if let Error(_) = channel.try_send(wire_publisher(s), PubIn(e: Joined(take join))) { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) }
+    work.fence = Some(take fence)
     // A fresh join can wait for its id while an old terminal frame is queued.
     wire_prune_output(mut s, mut work.output, Some(sub))
     s.joining = Some(take hear)
@@ -5625,8 +5916,10 @@ fn wire_stage_update[G: send, H: send](mut s: WireSession[G, H], mut output: Lis
     let mut live_complete: List[u32] = list.new()
     let mut ended: List[(u32, u64, Outcome)] = list.new()
     let mut generations: List[(u32, u64)] = list.new()
+    let mut computed = 0u64
     if current {
-        let Owe(session: _, version: _, generations: take stamps, complete: take complete, rows: take rows, ended: take stopped, reset: reset) = option.unwrap(take content)
+        let Owe(session: _, version: content_version, generations: take stamps, complete: take complete, rows: take rows, ended: take stopped, reset: reset) = option.unwrap(take content)
+        computed = content_version
         if reset {
             if s.reset_seen { return Error(1008u16) }
             s.reset_seen = true
@@ -5667,14 +5960,15 @@ fn wire_stage_update[G: send, H: send](mut s: WireSession[G, H], mut output: Lis
                 return wire_reset_rows(mut s, mut output, version, take done, take marks)
             }
         }
+        let check = if list.len(live_rows) != 0u64 || list.len(live_complete) != 0u64 { Some(computed) } else { None }
         let frame: Frame = Batch(version, take live_complete, take live_rows, take done)
-        wire_queue(mut output, take frame, take marks, take generations)
+        wire_queue_checked(mut output, take frame, take marks, take generations, check)
     }
     for take e in ended {
         let (sub, generation, take why) = take e
         if sub_generation(s.subs, sub) == Some(generation) {
             wire_forget_sub(mut s, sub)
-            wire_end(mut s, mut output, sub, take why)
+            wire_end_checked(mut s, mut output, sub, take why, Some(computed))
         }
     }
     Ok(())
@@ -5822,6 +6116,7 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
             }
         },
         WSent => { wire_sent(mut s, mut work); return Ok(None) },
+        WDropped => { wire_dropped(mut s, mut work)?; return Ok(None) },
         WDrained => {
             if let Some(_) = work.head { let _ = channel.try_send(wire_publisher(s), PubIn(e: Drained)) }
         },
@@ -5832,10 +6127,12 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
             return Ok(None)
         },
         WPoll(writable) => {
-            let received: Option[u64] = match s.joining { Some(hear) => match channel.try_receive(hear) { Ok(who) => Some(who), _ => None }, _ => None }
-            if let Some(who) = received {
+            let received: Option[Admit] = match s.joining { Some(hear) => match channel.try_receive(hear) { Ok(take a) => Some(take a), _ => None }, _ => None }
+            if let Some(take admit) = received {
+                let Admit(who: who, round: take register) = take admit
                 let _ = replace(mut s.joining, None)
                 s.joined = Some(who)
+                work.round = Some(take register)
                 if let Some((sub, take ready_sub)) = replace(mut s.subscription, None) { wire_subscribed(mut s, mut work, sub, take ready_sub) }
             }
             if !writable { return Ok(None) }
@@ -5855,7 +6152,7 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
                 if index + 1u64 == list.len(s.entries) { s.phase = 4u8 }
                 return Ok(Some(Placed(take answer)))
             }
-            return Ok(wire_take_output(s, mut work))
+            return wire_take_output(s, mut work)
         },
     }
     let version = s.last

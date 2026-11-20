@@ -238,19 +238,20 @@ fn test_wire_session(tasks: Tasks, clock: Clock) -> Result[(), ()] waits {
 }
 
 pub fn law_writer_one_frame() -> bool {
-    // Two caller-owned candidate frames and one Bytes handoff record. A third
-    // charged byte cannot fit; the writer cannot reserve or retain another frame.
-    let checked = bound bytes (2u64 * 262160u64 + 88u64) {
-        let (tx, rx): (Sender[Bytes], Receiver[Bytes]) = result.unwrap(channel.new(1u64))
+    // Two caller-owned candidate frames and one WireUnit handoff record (Bytes 24, an
+    // Option of a u64 and two Latest handles 32, plus 64). A third charged byte cannot
+    // fit; the writer cannot reserve or retain another frame.
+    let checked = bound bytes (2u64 * 262160u64 + 120u64) {
+        let (tx, rx): (Sender[WireUnit], Receiver[WireUnit]) = result.unwrap(channel.new(1u64))
         let first: Bytes = result.unwrap(list.with_capacity(262158u64))
         let second: Bytes = result.unwrap(list.with_capacity(262158u64))
         let mut busy = false
         let handed = if wire_ready(busy) {
-            match wire_offer(tx, mut busy, take first) { Ok(()) => true, _ => false }
+            match wire_offer(tx, mut busy, WireUnit(frame: take first, check: None)) { Ok(()) => true, _ => false }
         } else { false }
         let pending = result.unwrap(channel.try_receive(rx))
         let rejected = if wire_ready(busy) {
-            let _ = wire_offer(tx, mut busy, take second)
+            let _ = wire_offer(tx, mut busy, WireUnit(frame: take second, check: None))
             false
         } else {
             let extra: Result[Bytes, Capacity] = list.with_capacity(1u64)
@@ -258,7 +259,7 @@ pub fn law_writer_one_frame() -> bool {
             charged && list.capacity(second) == 262158u64
         }
         let empty = match channel.try_receive(rx) { Error(Empty) => true, _ => false }
-        handed && busy && rejected && empty && list.capacity(pending) == 262158u64
+        handed && busy && rejected && empty && list.capacity(pending.frame) == 262158u64
     }
     match checked { Ok(ok) => ok, Error(_) => false }
 }
@@ -282,12 +283,12 @@ fn wire_owner_park(take rx: Receiver[()]) -> Result[(), std.wsock.Error] waits {
 }
 
 pub fn law_session_records(tasks: Tasks) -> bool waits {
-    // charge-v1: five WireEvents of 450 plus 64, one Bytes plus 64,
+    // charge-v1: five WireEvents of 450 plus 64, one WireUnit of 56 plus 64,
     // a credit channel of zero-sized units plus 64; three test gates of 64;
     // two unit-returning task records of 288 and the owner record of 320.
-    let checked = bound bytes 3554u64 {
+    let checked = bound bytes 3586u64 {
         let (events, hear): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
-        let (writes, read_writes): (Sender[Bytes], Receiver[Bytes]) = result.unwrap(channel.new(1u64))
+        let (writes, read_writes): (Sender[WireUnit], Receiver[WireUnit]) = result.unwrap(channel.new(1u64))
         let (credit, read_credit): (Sender[()], Receiver[()]) = result.unwrap(channel.new(5u64))
         let (a, ar): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
         let (b, br): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
@@ -302,7 +303,7 @@ pub fn law_session_records(tasks: Tasks) -> bool waits {
         let _ = task.join(take owner)
         let owner_closed = match channel.try_send(end, ()) { Error(Closed(_)) => true, _ => false }
         let _ = channel.try_send(events, wire_event(Sent))
-        let _ = channel.try_send(writes, list.new())
+        let _ = channel.try_send(writes, WireUnit(frame: list.new(), check: None))
         let _ = channel.try_send(credit, ())
         let live = match (channel.try_receive(hear), channel.try_receive(read_writes), channel.try_receive(read_credit)) {
             (Ok(WireEvent(e: Sent)), Ok(_), Ok(())) => true,

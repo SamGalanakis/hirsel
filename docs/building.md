@@ -78,7 +78,9 @@ AArch64 runtime libraries.
 provider operations and task scheduling in a new, owner-only tape. The tape may
 contain bearer tokens and other credentials from provider calls. Choose a path
 that does not exist yet. A stopped run records the delivery of `host.stopped`
-through its Process grant.
+through its Process grant. A tape is a recording for diagnosis and testing: it
+is not synced and cannot resume a run after a crash. Durable state belongs to
+the store ([CAP-9](spec/capabilities.md#cap-9-tapes)).
 
 ```sh
 hirsel run app --record session.tape --dir inputs --grant Stdout -- input.json

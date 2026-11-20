@@ -179,7 +179,7 @@ Once issued, an operation delivers exactly one result
 ([CONC-7](tasks.md#conc-7-cancellation-points)). Given the same values, the run behaves
 identically
 ([SEM-8](semantics.md#sem-8-determinism)). The format of a recording is not part of the
-language.
+language. Passing the replay point makes nothing durable ([CAP-9](#cap-9-tapes)).
 
 ### CAP-9: Tapes
 
@@ -218,3 +218,13 @@ substitutes that carries bytes and nothing else: `port.call(p, request, mut repl
 provider operation recorded like any other, and the holder of the `PortEnd` takes each call
 with `tape.serve` and replies with `tape.answer`. The format of a tape is not part of the
 language.
+
+A tape is for diagnosis and testing and makes no durability promise: no tape write is
+synced, nothing resumes from a tape, and a crash ends the recording where it falls. The
+store is the one durability contract: a commit to a disk store survives any crash once
+`store.durable` has returned for it ([store](../../core/std/api/store.md)), and nothing
+else promises that work survives a crash. `host.sync` and `host.sync_dir` are the host
+barriers beneath it ([core](core.md#contracts-the-signatures-do-not-state)). A process
+that performs outside effects over several steps is durable only through its own commits,
+which the store's step wrapper makes for it
+([runner](../../core/std/api/runner.md#store-triggers)).

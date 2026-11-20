@@ -364,7 +364,9 @@ A callback receives the grant at its own index.
 
 Use `steps.step` for an outside operation. The wrapper makes the started row
 durable before calling and the result row durable before returning a value or
-`Callback(E)`. A replay returns the recorded result. When a step returns
+`Callback(E)`. After a crash the run's next attempt runs the body from the top:
+each finished step returns its recorded result without calling again, and a step
+that started and has no result returns `InDoubt(id)` instead of calling again. When a step returns
 `InDoubt(id)`, `steps.resolve` can record a lookup under `steps.outside_key(id)`.
 Use `steps.resend` only when the program decides to send again. Both calls
 check the same step identity and request fingerprint. A fingerprint mismatch

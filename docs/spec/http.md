@@ -1213,7 +1213,7 @@ A removed keyed op must still answer its live claims' retries, with the original
 - Not available to compute, query or granted entries.
 ## 5. Replay
 
-The provider tape stays authoritative (CAP-8, CAP-9).
+The provider tape is the record a replay follows (CAP-8, CAP-9). It makes nothing durable: keyed state survives a crash only through the store's commits ([CAP-9](capabilities.md#cap-9-tapes)).
 
 **Tapes hold credentials (RUNNER-SPEC v2.16 M5).** The Net and Random tapes are byte-exact, so they hold minted anonymous tokens and `Authorization` headers. They are **credential-bearing**: their files are readable only by their owner, and an export needs an explicit credentials flag. A tape is never redacted in place, because that would break replay. Routine logs and diagnostics name a session by its Caller, and never include Hello or Welcome bodies, token headers or Random deliveries. The keyed record's Caller is decoded by K-4's claim grammar, and K-8's ownerless recovery runs the policy with it.
 

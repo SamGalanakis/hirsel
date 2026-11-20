@@ -30,7 +30,8 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `seq`, `indexed`, `writer` | [seq](../../core/core/seq.hirsel), [indexed](../../core/core/indexed.hirsel), [writer](../../core/core/writer.hirsel) | MEM-4, MEM-12 |
 | `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11 |
 | `latest` | [latest](../../core/core/latest.hirsel) | CONC-13 |
-| `tape`, `port` | not yet in the core source | CAP-9 |
+| `tape` | [tape](../../core/core/tape.hirsel) | CAP-9 |
+| `port` | not yet in the core source | CAP-9 |
 | `log` | [log](../../core/core/log.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `flow` | [flow](../../core/core/flow.hirsel) | CONC-14 |

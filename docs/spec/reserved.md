@@ -206,7 +206,10 @@ and external readiness are explicit provider outcomes." *v1:* CAP-5, CAP-8; `Wri
 states the committed prefix of a write; cancellation reaches an operation only at issue;
 `host.sync` and `host.sync_dir` are the sync barriers, and a failed one is an unknown
 outcome ([core](core.md#contracts-the-signatures-do-not-state)). Fencing and conditional
-update are later.
+update are later. v1 has no durable provider: the store's step wrapper commits a started
+row before an outside effect and its result before the result is used
+([runner](../../core/std/api/runner.md#store-triggers)), and a tape is never the durable
+record ([CAP-9](capabilities.md#cap-9-tapes)).
 
 **R24.** Static pool brands may later let a pool skip its identity check. *v1:* a pool is
 library code whose handles are plain data checked at run time (MEM-18); no rule, keyword or

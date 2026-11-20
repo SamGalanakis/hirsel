@@ -108,7 +108,7 @@ pub fn clear(mut s: String) {
 /// The first byte position at or after `start` where pat occurs, or None. An empty pat is
 /// found at `start`. Fails: Bounds (failure) when start > byte_len (`list.slice`).
 /// Alloc: nothing.
-/// Cost: O(len x len(pat)) worst case (naive search, as Go for short patterns).
+/// Cost: O(byte_len(s) - start + byte_len(pat)) worst case.
 /// Ex: `let Some(colon) = string.find(line, 0, ":") else { return Error(Malformed) }`
 pub fn find(s: String, start: u64, pat: String) -> Option[u64] {
     let n = string.byte_len(s)
@@ -123,22 +123,113 @@ pub fn find(s: String, start: u64, pat: String) -> Option[u64] {
         return Some(start)
     }
     let first = needle[0]
-    let limit = rest - m + 1
+    let last = m - 1
+    let last_byte = needle[last]
     let mut from: u64 = 0
-    while from < limit {
-        let Some(i) = list.find_byte(hay, from, limit, first) else {
+    let mut misses: u64 = 0
+    while from <= rest - m {
+        let Some(end) = list.find_byte(hay, from + last, rest, last_byte) else {
             return None
         }
-        let mut k: u64 = 1
-        while k < m && hay[i + k] == needle[k] {
-            k += 1
+        let at = end - last
+        from = at + 1
+        if hay[at] == first {
+            if m <= 2 || list.starts_with_at(hay, at, needle) {
+                return Some(start + at)
+            }
+            // Go's cutover on false hits, scaled by the cost of a full check.
+            // Short needles have constant check cost. For longer ones, limit
+            // failed checks to two upfront plus one per needle length scanned.
+            if m > 8 {
+                misses += 1
+                if misses > 2 + at / m {
+                    let Some(found) = find_two_way(hay, from, needle, m, rest - m) else {
+                        return None
+                    }
+                    return Some(start + found)
+                }
+            }
         }
-        if k == m {
-            return Some(start + i)
-        }
-        from = i + 1
     }
     None
+}
+
+// Crochemore-Perrin Two-Way search, using memchr's critical factorization.
+fn find_two_way(hay: Bytes, from: u64, needle: Bytes, m: u64, last: u64) -> Option[u64] {
+    let (min_cut, min_period) = extreme_suffix(needle, m, false)
+    let (max_cut, max_period) = extreme_suffix(needle, m, true)
+    let (cut, period) = if min_cut > max_cut {
+        (min_cut, min_period)
+    } else {
+        (max_cut, max_period)
+    }
+    // The suffix period applies to the entire needle if it also repeats the
+    // shorter left half. Only then can a shift retain a known matching prefix.
+    let (shift, overlap) = if cut < m - cut && list.slice(needle, 0, cut) == list.slice(needle, period, period + cut) {
+        (period, m - period)
+    } else {
+        (if cut > m - cut {
+            cut
+        } else {
+            m - cut
+        }, 0u64)
+    }
+    let mut known: u64 = 0
+    let mut at = from
+    while at <= last {
+        let mut right = if cut > known {
+            cut
+        } else {
+            known
+        }
+        while right < m && hay[at + right] == needle[right] {
+            right += 1
+        }
+        if right < m {
+            at += right - cut + 1
+            known = 0
+        } else {
+            let mut left = cut
+            while left > known && hay[at + left - 1] == needle[left - 1] {
+                left -= 1
+            }
+            if left <= known {
+                return Some(at)
+            }
+            at += shift
+            known = overlap
+        }
+    }
+    None
+}
+
+// Start and period of the lexicographically extreme suffix in either byte order.
+fn extreme_suffix(needle: Bytes, m: u64, largest: bool) -> (u64, u64) {
+    let mut suffix: u64 = 0
+    let mut period: u64 = 1
+    let mut candidate: u64 = 1
+    let mut offset: u64 = 0
+    while offset < m - candidate {
+        let a = needle[suffix + offset]
+        let b = needle[candidate + offset]
+        if a == b {
+            offset += 1
+            if offset == period {
+                candidate += period
+                offset = 0
+            }
+        } else if (b > a) == largest {
+            suffix = candidate
+            period = 1
+            candidate += 1
+            offset = 0
+        } else {
+            candidate += offset + 1
+            period = candidate - suffix
+            offset = 0
+        }
+    }
+    (suffix, period)
 }
 
 /// Whether s begins with p. Cost: O(len(p)). Ex: `string.starts_with(line, "GET ")`

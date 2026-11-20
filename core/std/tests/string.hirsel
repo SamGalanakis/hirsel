@@ -300,6 +300,98 @@ fn find_start_past_end() -> u64 {
     found(string.find("abc", 4, "a"))
 }
 
+// The first complete bytewise match, checked in order at every possible offset.
+fn find_oracle(s: String, start: u64, pat: String) -> Option[u64] {
+    let hay = string.as_bytes(s)
+    let needle = string.as_bytes(pat)
+    let n = list.len(hay)
+    let m = list.len(needle)
+    if m > n - start {
+        return None
+    }
+    for at in start .. n - m + 1 {
+        let mut matched: u64 = 0
+        while matched < m && hay[at + matched] == needle[matched] {
+            matched += 1
+        }
+        if matched == m {
+            return Some(at)
+        }
+    }
+    None
+}
+
+fn find_binary_text(n: u64, seed: u64) -> String {
+    let mut out = result.unwrap(string.with_capacity(n))
+    let mut x = seed
+    for _ in 0u64 .. n {
+        x = int.wrapping_add(int.wrapping_mul(x, 6364136223846793005), 1)
+        result.unwrap(string.push(mut out, if (x >> 63) == 0 {
+            "a"
+        } else {
+            "b"
+        }))
+    }
+    take out
+}
+
+// Generated two-letter inputs include independent text and a match planted at
+// either end. All-a prefixes also induce repeated false endpoint hits before
+// periodic (aba...) and nonperiodic (aaa...ba) patterns.
+// expect: run find_binary_differential() = true
+fn find_binary_differential() -> bool {
+    for m in 0u64 .. 41 {
+        let pat = find_binary_text(m, m + 1)
+        let s = find_binary_text(67, 2 * m + 3)
+        let mut prefix = result.unwrap(string.from(pat))
+        result.unwrap(string.push(mut prefix, s))
+        let mut suffix = result.unwrap(string.from(s))
+        result.unwrap(string.push(mut suffix, pat))
+        if string.find(prefix, 0, pat) != Some(0) || string.find(suffix, 67, pat) != Some(67) {
+            return false
+        }
+        for start in 0u64 .. 5 {
+            if string.find(s, start, pat) != find_oracle(s, start, pat) || string.find(suffix, start, pat) != find_oracle(suffix, start, pat) {
+                return false
+            }
+        }
+        if string.find("", 0, pat) != find_oracle("", 0, pat) {
+            return false
+        }
+        if m >= 3 {
+            for shape in 0u64 .. 2 {
+                let mut needle = result.unwrap(string.with_capacity(m))
+                for i in 0u64 .. m {
+                    let is_b = if shape == 0 {
+                        i % 3 == 1 && i + 1 < m
+                    } else {
+                        i == m - 2
+                    }
+                    result.unwrap(string.push(mut needle, if is_b {
+                        "b"
+                    } else {
+                        "a"
+                    }))
+                }
+                let mut hay = result.unwrap(string.repeat("a", 67))
+                if string.find(hay, 0, needle) != None {
+                    return false
+                }
+                result.unwrap(string.push(mut hay, needle))
+                if string.find(hay, 0, needle) != find_oracle(hay, 0, needle) {
+                    return false
+                }
+            }
+        }
+    }
+    // The right half matches at 60, while its left half first matches at 63.
+    let periodic = "abaabaabaabaaba"
+    let mut hay = result.unwrap(string.repeat("a", 62))
+    result.unwrap(string.push(mut hay, string.slice(periodic, 2, 15)))
+    result.unwrap(string.push(mut hay, "aba"))
+    string.find(hay, 0, periodic) == find_oracle(hay, 0, periodic)
+}
+
 // expect: run starts_with_prefix() = true
 fn starts_with_prefix() -> bool {
     let data = string.as_bytes("xabcdefgh")

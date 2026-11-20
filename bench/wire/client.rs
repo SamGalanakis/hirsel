@@ -1,4 +1,4 @@
-use crate::codec::{self, Done, Entry, Frame, Outcome, Want};
+use crate::codec::{self, Done, Entry, Frame, Outcome, Refusal, Want};
 use crate::{BITS, IMAGE_BYTES, Result, flip};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
@@ -18,6 +18,7 @@ pub struct Client {
     pub version: u64,
     pub toggle_slot: u32,
     pub board_slot: u32,
+    pub resubscribes: usize,
     subscribed: bool,
     sub: u32,
     pending: Option<Vec<u8>>,
@@ -63,6 +64,7 @@ impl Client {
             version: 0,
             toggle_slot: slots[0],
             board_slot: slots[1],
+            resubscribes: 0,
             subscribed: false,
             sub: 0,
             pending: None,
@@ -119,6 +121,14 @@ impl Client {
                 if self.subscribed {
                     self.subscribe().await?;
                 }
+            }
+            // RUNNER-SPEC L23: a full owner inbox ends the subscription Overloaded and the
+            // client resubscribes. The image stays until the new subscription completes.
+            Frame::Ended(sub, Outcome::Refused(Refusal::Overloaded))
+                if self.subscribed && *sub == self.sub =>
+            {
+                self.resubscribes += 1;
+                self.subscribe().await?;
             }
             Frame::Ended(_, outcome) => return Err(format!("board ended: {outcome:?}").into()),
             _ => return Err("unexpected server frame after Placed".into()),
@@ -263,6 +273,7 @@ pub struct Converged {
     pub clients: usize,
     pub returned: usize,
     pub reconnects: usize,
+    pub resubscribes: usize,
     pub version: u64,
     pub checksum: u64,
 }
@@ -333,8 +344,9 @@ pub async fn converge(
         return Err("fresh server table differs from XOR of Returned toggles".into());
     }
     let version = fresh.version;
+    let mut resubscribes = fresh.resubscribes;
     for mut client in finished {
-        while client.version < version {
+        while client.version < version || client.pending.is_some() {
             let frame = client.receive().await?;
             if !outcomes(frame).is_empty() {
                 return Err("duplicate final outcome after last call".into());
@@ -343,6 +355,7 @@ pub async fn converge(
         if client.image != oracle {
             return Err("subscriber image differs from XOR of Returned toggles".into());
         }
+        resubscribes += client.resubscribes;
         client.socket.close(None).await?;
     }
     fresh.socket.close(None).await?;
@@ -350,6 +363,7 @@ pub async fn converge(
         clients: n,
         returned: count,
         reconnects: n,
+        resubscribes,
         version,
         checksum: fresh.image.iter().map(|&byte| u64::from(byte)).sum(),
     })

@@ -68,7 +68,7 @@ pub enum Fault {
     Truncated(u64),
     Damaged(u64),
     Corrupt,
-    /// The sink's write failed (S1 has no barriers; S3 poisons instead).
+    /// The sink's write failed.
     Io(IoError),
     /// The tape was ended or dropped (section 8).
     Ended,
@@ -184,6 +184,10 @@ struct Recorder {
     buffer: Vec<u8>,
     retained_buffer: Option<Retained<'static>>,
     seq: u64,
+    /// The two most recent consecutive, literal CHOOSE frames, newest last.
+    chooses: [Option<(u64, u64)>; 2],
+    repeat: u64,
+    frames: usize,
 }
 
 struct Replayer {
@@ -432,27 +436,60 @@ impl Drop for ProviderFile {
 }
 
 impl Recorder {
-    /// Append one frame and its DATA continuations, closing the block at
-    /// 64 KiB between frames, never inside one.
+    /// Keep period-two CHOOSE runs in a REPEAT. Seals fall between frames,
+    /// including between a frame and its DATA continuations.
     fn frame(&mut self, f: &Frame) -> Result<(), IoError> {
-        let (head, rest) = self.encoder.frame(f);
-        self.retained_buffer = None;
-        self.buffer.extend_from_slice(&head);
-        for d in rest {
-            if self.buffer.len() >= CLOSE_AT {
-                self.close(0)?;
+        if let Frame::Choose { gap, index } = *f {
+            let choose = Some((gap, index));
+            if self.chooses[(self.repeat % 2) as usize] == choose {
+                self.repeat += 1;
+            } else {
+                self.flush_repeat();
+                self.retained_buffer = None;
+                put_choose(&mut self.buffer, gap, index);
+                self.chooses = [self.chooses[1], choose];
             }
+        } else {
+            self.flush_repeat();
+            self.chooses = [None, None];
+            let (head, rest) = self.encoder.frame(f);
             self.retained_buffer = None;
-            self.buffer.extend_from_slice(&d);
+            self.buffer.extend_from_slice(&head);
+            for data in rest {
+                self.frames += 1;
+                if self.full() {
+                    self.close(0)?;
+                }
+                self.retained_buffer = None;
+                self.buffer.extend_from_slice(&data);
+            }
         }
+        self.frames += 1;
         if matches!(f, Frame::End { .. }) {
             self.close(format::END)?;
-        } else if self.buffer.len() >= CLOSE_AT {
+        } else if self.full() {
             self.close(0)?;
         }
         Ok(())
     }
+
+    fn full(&self) -> bool {
+        self.buffer.len() >= CLOSE_AT || self.frames >= CLOSE_FRAMES
+    }
+
+    fn flush_repeat(&mut self) {
+        if self.repeat != 0 {
+            self.retained_buffer = None;
+            put_repeat(&mut self.buffer, self.repeat);
+            self.repeat = 0;
+            self.chooses = [None, None];
+        }
+    }
+
     fn close(&mut self, flags: u8) -> Result<(), IoError> {
+        self.flush_repeat();
+        self.chooses = [None, None];
+        self.frames = 0;
         let b = block(&self.tape_id, flags, self.seq, &self.buffer);
         self.seq += 1;
         self.buffer.clear();
@@ -732,6 +769,9 @@ impl Tape {
                     buffer,
                     retained_buffer: None,
                     seq: 0,
+                    chooses: [None, None],
+                    repeat: 0,
+                    frames: 0,
                 };
                 recorder.close(0).map_err(OpenError::Io)?;
                 let live = Live {

@@ -1,4 +1,4 @@
-//! The tape format, byte by byte (REPLAY-SPEC v2 section 5): little-endian
+//! The tape format, byte by byte (REPLAY-SPEC section 5): little-endian
 //! fixed-width integers, canonical LEB128 varints, checked blocks, the header
 //! (block 0's payload) and the frames of every later block.
 //!
@@ -12,13 +12,16 @@ use twox_hash::XxHash3_64;
 
 pub const FORMAT: u16 = 4;
 pub const MAGIC: [u8; 3] = *b"HTB";
-/// Block flags: closed for a durable barrier; the tape's last block.
-pub const BARRIER: u8 = 1;
+/// The tape's last block.
 pub const END: u8 = 2;
 /// The most payload a reader buffers before delivering (section 5.2).
 pub const MAX_LEN: usize = 1 << 20;
 /// A writer closes its block once this much payload is buffered.
 pub const CLOSE_AT: usize = 64 * 1024;
+/// A REPEAT cannot make a writer keep more frames than 64 KiB of CHOOSE.
+pub const CLOSE_FRAMES: usize = CLOSE_AT / 3;
+/// The most frames a reader accepts in one block, after expanding REPEAT.
+pub const MAX_FRAMES: usize = MAX_LEN;
 /// flags, magic, seq, len.
 pub const BLOCK_HEAD: usize = 1 + 3 + 8 + 4;
 pub const BLOCK_CHECK: usize = 8;
@@ -29,8 +32,6 @@ pub const ARGS_LITERAL: usize = 16;
 
 pub const KIND_RUN: u8 = 1;
 pub const KIND_CALL: u8 = 2;
-pub const MODE_RECORD: u8 = 1;
-pub const MODE_DURABLE: u8 = 2;
 pub const CHOOSER_FIFO: u8 = 0;
 pub const CHOOSER_COMMIT: u8 = 2;
 
@@ -41,10 +42,11 @@ pub const F_WAKE: u8 = 4;
 pub const F_CANCEL: u8 = 5;
 pub const F_CHOOSE: u8 = 6;
 pub const F_GRANT: u8 = 7;
-pub const F_INCARNATION: u8 = 8;
 pub const F_DATA: u8 = 9;
 pub const F_END: u8 = 10;
 pub const F_WAIT: u8 = 11;
+/// A positive count of CHOOSE frames, each equal to the one two frames back.
+pub const F_REPEAT: u8 = 12;
 /// The head bit saying a task varint follows.
 pub const T: u8 = 0x10;
 
@@ -126,6 +128,18 @@ pub fn xxh3(parts: &[&[u8]]) -> u64 {
         h.write(p);
     }
     h.finish()
+}
+
+/// A CHOOSE carries no task, so it needs no encoder state.
+pub fn put_choose(out: &mut Vec<u8>, gap: u64, index: u64) {
+    out.push(F_CHOOSE);
+    put_varint(out, gap);
+    put_varint(out, index);
+}
+
+pub fn put_repeat(out: &mut Vec<u8>, count: u64) {
+    out.push(F_REPEAT);
+    put_varint(out, count);
 }
 
 pub fn put_varint(out: &mut Vec<u8>, mut v: u64) {
@@ -210,7 +224,6 @@ impl<'a> Cursor<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Header {
     pub kind: u8,
-    pub mode: u8,
     pub tape_id: [u8; 16],
     pub identity: Vec<u8>,
     /// The code's revision: the entry's code revision for a Run tape, the
@@ -370,7 +383,7 @@ impl Header {
         arg: usize,
         grants: usize,
     ) -> Result<usize, HeaderTooLarge> {
-        let mut len = 2 + 1 + 1 + 16 + 32 + 4 + 8 + 8 + 1;
+        let mut len = 2 + 1 + 16 + 32 + 4 + 8 + 8 + 1;
         for field in [identity, arg, grants] {
             if field > MAX_LEN {
                 return Err(HeaderTooLarge);
@@ -398,7 +411,6 @@ impl Header {
         let mut out = Vec::with_capacity(len);
         out.extend_from_slice(&FORMAT.to_le_bytes());
         out.push(self.kind);
-        out.push(self.mode);
         out.extend_from_slice(&self.tape_id);
         put_bytes(&mut out, &self.identity);
         out.extend_from_slice(&revision);
@@ -419,8 +431,7 @@ impl Header {
             return Err(Corrupt);
         }
         let kind = c.u8()?;
-        let mode = c.u8()?;
-        if !matches!(kind, KIND_RUN | KIND_CALL) || !matches!(mode, MODE_RECORD | MODE_DURABLE) {
+        if !matches!(kind, KIND_RUN | KIND_CALL) {
             return Err(Corrupt);
         }
         let tape_id = c.fixed()?;
@@ -447,7 +458,6 @@ impl Header {
         let secret_grants = read_secret_grants(&mut grants)?;
         Ok(Self {
             kind,
-            mode,
             tape_id,
             identity: identity.to_vec(),
             revision,
@@ -461,8 +471,8 @@ impl Header {
         })
     }
 }
-/// Where block 0's payload keeps the tape id: after format, kind and mode.
-pub const TAPE_ID_AT: usize = 4;
+/// Where block 0's payload keeps the tape id: after format and kind.
+pub const TAPE_ID_AT: usize = 3;
 
 /// One block's bytes: head, payload, then the check over the tape id and
 /// everything before the check.
@@ -526,14 +536,21 @@ impl Blocks {
         let mut bytes = Vec::new();
         read_block(&mut bytes, 0, &mut read)?;
         let payload = &bytes[BLOCK_HEAD..bytes.len() - BLOCK_CHECK];
+        check_head(&bytes, 0)?;
+        if bytes[0] != 0 {
+            return Err(Stop::Damaged(0).into());
+        }
+        // The format is needed to locate the tape id for the checksum.
+        if let Some(version) = payload.get(..2)
+            && version != FORMAT.to_le_bytes()
+        {
+            return Err(Stop::Corrupt.into());
+        }
         let Some(id) = payload.get(TAPE_ID_AT..TAPE_ID_AT + 16) else {
             return Err(Stop::Damaged(0).into());
         };
         let tape_id = id.try_into().unwrap();
-        check(&bytes, &tape_id, 0)?;
-        if bytes[0] != 0 {
-            return Err(Stop::Damaged(0).into());
-        }
+        check_digest(&bytes, &tape_id, 0)?;
         let header = Header::decode(payload).map_err(Stop::from)?;
         Ok((
             Self {
@@ -569,7 +586,8 @@ impl Blocks {
             };
         }
         read_block(&mut self.bytes, self.seq, &mut read)?;
-        check(&self.bytes, &self.tape_id, self.seq)?;
+        check_head(&self.bytes, self.seq)?;
+        check_digest(&self.bytes, &self.tape_id, self.seq)?;
         self.seq += 1;
         let flags = self.bytes[0];
         self.ended = flags & END != 0;
@@ -621,13 +639,19 @@ fn read_block<E>(
     Ok(())
 }
 
-fn check(bytes: &[u8], id: &[u8; 16], seq: u64) -> Result<(), Stop> {
-    let (body, stored) = bytes.split_at(bytes.len() - BLOCK_CHECK);
-    if body[1..4] != MAGIC
-        || body[0] & !(BARRIER | END) != 0
-        || u64::from_le_bytes(body[4..12].try_into().unwrap()) != seq
-        || xxh3(&[id, body]) != u64::from_le_bytes(stored.try_into().unwrap())
+fn check_head(bytes: &[u8], seq: u64) -> Result<(), Stop> {
+    if bytes[1..4] != MAGIC
+        || bytes[0] & !END != 0
+        || u64::from_le_bytes(bytes[4..12].try_into().unwrap()) != seq
     {
+        return Err(Stop::Damaged(seq));
+    }
+    Ok(())
+}
+
+fn check_digest(bytes: &[u8], id: &[u8; 16], seq: u64) -> Result<(), Stop> {
+    let (body, stored) = bytes.split_at(bytes.len() - BLOCK_CHECK);
+    if xxh3(&[id, body]) != u64::from_le_bytes(stored.try_into().unwrap()) {
         return Err(Stop::Damaged(seq));
     }
     Ok(())
@@ -837,7 +861,10 @@ pub enum Frame {
         kind: u8,
         args: Option<Vec<u8>>,
     },
-    Incarnation(u64),
+    /// Physical output only. Replay sees the CHOOSE frames it represents.
+    Repeat {
+        count: u64,
+    },
     End {
         gap: u64,
         ending: Ending,
@@ -922,11 +949,7 @@ impl Encoder {
                 put_varint(&mut out, *gap);
                 self.task(&mut out, 0, *task);
             }
-            Frame::Choose { gap, index } => {
-                out.push(F_CHOOSE);
-                put_varint(&mut out, *gap);
-                put_varint(&mut out, *index);
-            }
+            Frame::Choose { gap, index } => put_choose(&mut out, *gap, *index),
             Frame::Grant { gap, kind, args } => {
                 out.push(F_GRANT);
                 put_varint(&mut out, *gap);
@@ -938,10 +961,7 @@ impl Encoder {
                     );
                 }
             }
-            Frame::Incarnation(n) => {
-                out.push(F_INCARNATION);
-                put_varint(&mut out, *n);
-            }
+            Frame::Repeat { count } => put_repeat(&mut out, *count),
             Frame::End { gap, ending: e } => {
                 out.push(F_END);
                 put_varint(&mut out, *gap);
@@ -962,6 +982,8 @@ pub struct Decoder {
     issued: std::collections::BTreeMap<u64, u8>,
     /// A frame whose payload still waits for DATA frames: (frame, bytes needed).
     open: Option<(Frame, usize)>,
+    /// Return REPEAT frames as stored. By default they expand to CHOOSE.
+    pub physical: bool,
 }
 impl Decoder {
     fn task(&mut self, head: u8, c: &mut Cursor) -> Result<u64, Corrupt> {
@@ -980,6 +1002,8 @@ impl Decoder {
         let mut frames = Vec::new();
         // A block's first task-carrying frame names its task (Encoder::new_block).
         self.task = None;
+        let mut chooses = [None, None];
+        let mut count = 0;
         while !c.done() {
             let head = c.u8()?;
             let kind = head & 0x0f;
@@ -992,6 +1016,34 @@ impl Decoder {
             }
             if self.open.is_some() && kind != F_DATA {
                 return Err(Corrupt);
+            }
+            if kind == F_REPEAT {
+                let n = c.varint()?;
+                let [Some(two_back), Some(one_back)] = chooses else {
+                    return Err(Corrupt);
+                };
+                if n == 0 || n > (MAX_FRAMES - count) as u64 {
+                    return Err(Corrupt);
+                }
+                count += n as usize;
+                if self.physical {
+                    frames.push(Frame::Repeat { count: n });
+                } else {
+                    let pair = [two_back, one_back];
+                    for i in 0..n {
+                        let (gap, index) = pair[(i % 2) as usize];
+                        frames.push(Frame::Choose { gap, index });
+                    }
+                }
+                chooses = [None, None];
+                continue;
+            }
+            count += 1;
+            if count > MAX_FRAMES {
+                return Err(Corrupt);
+            }
+            if kind != F_CHOOSE {
+                chooses = [None, None];
             }
             let frame = match kind {
                 F_WAIT => Frame::Wait {
@@ -1058,10 +1110,11 @@ impl Decoder {
                         task: self.task(head, &mut c)?,
                     }
                 }
-                F_CHOOSE => Frame::Choose {
-                    gap: c.varint()?,
-                    index: c.varint()?,
-                },
+                F_CHOOSE => {
+                    let (gap, index) = (c.varint()?, c.varint()?);
+                    chooses = [chooses[1], Some((gap, index))];
+                    Frame::Choose { gap, index }
+                }
                 F_GRANT => {
                     let gap = c.varint()?;
                     let kind = c.u8()?;
@@ -1075,7 +1128,6 @@ impl Decoder {
                         args: args.transpose()?,
                     }
                 }
-                F_INCARNATION => Frame::Incarnation(c.varint()?),
                 F_DATA => {
                     let chunk = c.bytes()?;
                     let Some((mut f, needs)) = self.open.take() else {

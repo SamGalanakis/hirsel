@@ -351,7 +351,7 @@ fn tape_cli_replays() {
     ];
     let (code, out, err) = process::tape_request(&shown, dir.path());
     assert_eq!(code, Some(0), "show: {err}");
-    assert!(out.contains("format 3") && out.contains("GRANT") && out.contains("END"));
+    assert!(out.contains("format 4") && out.contains("GRANT") && out.contains("END"));
     assert!(!out.contains("site"));
     // Random already exists in the provider ABI. Its payload must also replay,
     // including DATA continuation, rather than leave the carrier empty.

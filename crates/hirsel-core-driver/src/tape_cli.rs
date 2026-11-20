@@ -34,12 +34,7 @@ pub(crate) fn header(path: &Path) -> io::Result<Header> {
 pub(crate) fn show(path: &Path) -> io::Result<()> {
     let mut file = File::open(path)?;
     let (mut blocks, h) = Blocks::open(|buf| read(&mut file, buf)).map_err(block_error)?;
-    println!(
-        "format {}  kind {}  mode {}",
-        format::FORMAT,
-        h.kind,
-        h.mode
-    );
+    println!("format {}  kind {}", format::FORMAT, h.kind);
     println!("identity {}", String::from_utf8_lossy(&h.identity));
     println!(
         "revision {}",
@@ -68,6 +63,8 @@ pub(crate) fn show(path: &Path) -> io::Result<()> {
         println!("grant `{}` [secret] to {}", grant.parameter, grant.patterns);
     }
     let mut decoder = Decoder::default();
+    decoder.physical = true;
+    // Count REPEAT positions as replay does, so the line starts at its first CHOOSE.
     let mut at = 0;
     while let Some((flags, payload)) = blocks
         .next(|buf| read(&mut file, buf))
@@ -107,7 +104,10 @@ pub(crate) fn show(path: &Path) -> io::Result<()> {
                     "OP task={task} op={op} object={object} args={args:?} status={} value={} error={:?} written={} payload={:?}",
                     out.status, out.value, out.error, out.written, out.payload
                 ),
-                Frame::Incarnation(n) => println!("INCARNATION n={n}"),
+                Frame::Repeat { count } => {
+                    println!("REPEAT count={count}");
+                    at += count - 1;
+                }
                 Frame::End { gap, ending } => println!(
                     "END gap={gap} kind={} outcome={:?}",
                     ending.kind, ending.outcome

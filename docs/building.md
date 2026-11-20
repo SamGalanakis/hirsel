@@ -99,7 +99,8 @@ bytes a program offers to send. For `tls.send_secret`, it records the
 Secret designation and verifies the surrounding bytes.
 
 `tape show --include-credentials` writes the header and stored frames to standard
-output. Source positions appear in diagnose replay.
+output. It shows REPEAT once, at the position of the first CHOOSE it represents.
+Source positions appear in diagnose replay.
 
 ## Symbolize a runtime panic
 

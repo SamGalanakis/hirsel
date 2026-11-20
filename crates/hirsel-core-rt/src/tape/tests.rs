@@ -16,7 +16,7 @@ pub(super) const REVISION: [u8; 32] = {
     b
 };
 const HAND: &[u8] = include_bytes!("testdata/hand-tape.bin");
-const MODEL: &[u8] = include_bytes!("testdata/model-f3-tape.bin");
+const MODEL: &[u8] = include_bytes!("testdata/model-f4-tape.bin");
 const XXH3: &[u8] = include_bytes!("testdata/xxh3.bin");
 
 // ---------- providers ----------
@@ -424,7 +424,6 @@ fn handle_like(like: u64, ordinal: u64) -> u64 {
 pub(super) fn header(build: [u8; 32]) -> Header {
     Header {
         kind: KIND_CALL,
-        mode: MODE_RECORD,
         tape_id: std::array::from_fn(|i| 0x10 + i as u8),
         identity: b"app@1/main/run".to_vec(),
         revision: build,
@@ -553,13 +552,12 @@ fn xxh3_is_libxxhash_whole_and_in_two_parts() {
 
 /// Wrong implementation caught: any byte of the encoder off the spec (field
 /// order, varint, zig-zag delta, T at a block's first frame, check input).
-/// The oracle is 1004's model (libxxhash), not this code. Its header is a
-/// Call tape's, with `revision[32]`.
+/// The oracle is vectors.py's format-4 derivation from REPLAY-SPEC §5,
+/// checked with libxxhash. Its Call header has a 32-byte revision.
 #[test]
-fn the_encoder_writes_the_format_3_model_tape_byte_for_byte() {
+fn the_encoder_writes_the_format_4_model_tape_byte_for_byte() {
     let h = Header {
         kind: KIND_CALL,
-        mode: MODE_DURABLE,
         tape_id: std::array::from_fn(|i| i as u8),
         identity: b"pkg/charge#0001".to_vec(),
         revision: std::array::from_fn(|i| i as u8),
@@ -972,9 +970,9 @@ fn record_closes_the_file_when_the_header_write_fails() {
 #[test]
 fn record_refuses_a_header_that_overflows_block_zero_before_creating_the_file() {
     let mut h = header(REVISION);
-    // 73 fixed bytes, 14 identity bytes + 1 length byte, the argument's
-    // 3-byte length and a 1-byte empty grants count.
-    h.arg = vec![0; MAX_LEN - 92];
+    // Format 4 has 72 fixed bytes, 14 identity bytes + 1 length byte,
+    // a 3-byte argument length and a 1-byte empty grants length.
+    h.arg = vec![0; MAX_LEN - 91];
     let mut store = Box::<Store>::default();
     let (tape, _) =
         unsafe { Tape::open(REVISION, store.dir(), b"t", Mode::Record, &h, &expect()) }.unwrap();
@@ -1050,13 +1048,14 @@ fn a_cut_at_every_byte_is_truncated_or_missing() {
 /// Wrong implementation caught: a check that skips any byte of a block (the
 /// head, the payload, the check itself) or the tape id.
 #[test]
-fn every_one_byte_change_is_damaged_or_truncated() {
+fn every_one_byte_change_is_refused() {
     let (store, _) = record(100);
     let t = store.file().to_vec();
     let at = boundaries(&t);
     for i in 0..t.len() {
         let k = at.iter().rposition(|&b| b <= i).unwrap();
         let in_len = (at[k] + 12..at[k] + 16).contains(&i);
+        let in_format = (BLOCK_HEAD..BLOCK_HEAD + 2).contains(&i);
         for x in [0x01u8, 0x80, 0xff] {
             let mut m = t.clone();
             m[i] ^= x;
@@ -1066,7 +1065,11 @@ fn every_one_byte_change_is_damaged_or_truncated() {
                 Err(e) => panic!("byte {i}: {e:?}"),
                 Ok((_, _, verdict)) => verdict.unwrap_err(),
             };
-            let ok = r == Fault::Damaged(k as u64) || (in_len && matches!(r, Fault::Truncated(_)));
+            let ok = if in_format {
+                r == Fault::Corrupt
+            } else {
+                r == Fault::Damaged(k as u64) || (in_len && matches!(r, Fault::Truncated(_)))
+            };
             assert!(ok, "byte {i} ^ {x:#x}: {r:?}");
         }
     }
@@ -1835,4 +1838,50 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
 
     drop(os);
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A REPEAT needs two consecutive CHOOSE frames in its block and a positive
+/// count. It cannot expand the block past MAX_FRAMES (REPLAY-SPEC §5.4).
+#[test]
+fn a_repeat_the_format_forbids_is_corrupt() {
+    let choose = |gap, index| {
+        let mut out = Vec::new();
+        put_choose(&mut out, gap, index);
+        out
+    };
+    let repeat = |count| {
+        let mut out = Vec::new();
+        put_repeat(&mut out, count);
+        out
+    };
+    let (a, b) = (choose(1, 0), choose(1, 1));
+    let grant = vec![F_GRANT, 0, crate::entry::CLOCK];
+    for (why, payload) in [
+        ("no CHOOSE", repeat(1)),
+        ("one CHOOSE", [a.clone(), repeat(1)].concat()),
+        (
+            "another frame between",
+            [a.clone(), b.clone(), grant, repeat(1)].concat(),
+        ),
+        ("count zero", [a.clone(), b.clone(), repeat(0)].concat()),
+        (
+            "after a REPEAT",
+            [a.clone(), b.clone(), repeat(1), repeat(1)].concat(),
+        ),
+        (
+            "only one CHOOSE after a REPEAT",
+            [a.clone(), b.clone(), repeat(1), b.clone(), repeat(1)].concat(),
+        ),
+        (
+            "past the bound",
+            [a.clone(), b.clone(), repeat(MAX_FRAMES as u64 - 1)].concat(),
+        ),
+        ("2^63 frames", [a, b, repeat(1 << 63)].concat()),
+    ] {
+        for physical in [false, true] {
+            let mut decoder = Decoder::default();
+            decoder.physical = physical;
+            assert_eq!(decoder.block(&payload, false), Err(Corrupt), "{why}");
+        }
+    }
 }

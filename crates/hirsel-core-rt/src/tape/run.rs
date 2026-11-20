@@ -260,7 +260,6 @@ unsafe extern "C" fn invoke(
         }
         let header = Header {
             kind: KIND_RUN,
-            mode: MODE_RECORD,
             tape_id,
             identity: run.identity.clone(),
             revision: run.revision,

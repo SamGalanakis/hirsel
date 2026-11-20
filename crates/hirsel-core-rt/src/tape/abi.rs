@@ -112,7 +112,6 @@ pub unsafe extern "C" fn hirsel_core_tape_open(
         }
         let header = Header {
             kind: 1,
-            mode: 1,
             tape_id,
             identity: if record {
                 identity.to_vec()

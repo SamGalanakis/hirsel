@@ -102,7 +102,6 @@ unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> 
         let tape = if run.record {
             let header = Header {
                 kind: KIND_RUN,
-                mode: MODE_RECORD,
                 tape_id: [1; 16],
                 identity: b"cost".to_vec(),
                 revision: [2; 32],

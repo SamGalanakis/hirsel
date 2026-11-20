@@ -103,9 +103,11 @@ static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t 
     return (HirselCoreWait){0};
 }
 static uint64_t scratch_dirs;
+static uint64_t park_wall_ms;
 static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token) {
     (void)token;
     if(r->operation==15) return (HirselCoreStep){0};
+    if(park_wall_ms && r->operation==10) return (HirselCoreStep){.outcome.value=park_wall_ms};
     const uint64_t scratch_handle=UINT64_C(1)<<48;
     if(r->operation==7) {
         char name[32];
@@ -195,6 +197,8 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         uint64_t phase=reopen?reopen_order[run]:run;
         store_crash_phase(state,phase);
         cancellation.phase=phase;
+        /* Law 8 opens at midnight, noon and the following midnight. */
+        park_wall_ms=!strcmp(scenario,"steps-park")?1000+phase*UINT64_C(43200000):0;
         hold.enabled=phase==1 && !strcmp(scenario,"journal-ack");
         const char *expected=store_crash_acked(state)?"new":"prefix";
         char floor[32];

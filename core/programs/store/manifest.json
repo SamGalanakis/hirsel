@@ -11,6 +11,7 @@
         {"file": "core/programs/store/main.hirsel", "modules": ["main"], "signatures": false},
         {"file": "core/programs/store/ingress.hirsel", "modules": ["ingress"], "signatures": false},
         {"file": "core/programs/store/triggers.hirsel", "modules": ["triggers"], "signatures": false},
+        {"file": "core/programs/store/steps.hirsel", "modules": ["steps"], "signatures": false},
         {"file": "core/programs/store/signup.hirsel", "modules": ["signup"], "signatures": false},
         {"file": "core/programs/store/runner.hirsel", "modules": ["runner"], "signatures": false},
         {"file": "core/programs/store/runner_laws.hirsel", "modules": ["runner_laws"], "signatures": false},

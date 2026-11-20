@@ -12,7 +12,7 @@ pub type Id: codec + key + send {
 
 pub type Hold: codec + send = Request(u64, u64, Bytes, Bytes) | Revision(Bytes, Bytes)
 
-pub type Terminal: codec + send = Returned(Bytes) | Raised(u32) | OutOfTime(u64) | OutOfBytes(u64, u64) | Gone | Cancelled
+pub type Terminal: codec + send = Returned(Bytes) | Raised(u32) | OutOfTime(u64) | OutOfBytes(u64, u64) | Gone | Cancelled | Cap
 
 pub type Error: send = Store(store.Error) | StaleAttempt | MissingEntry | AlreadyTriggerable | AttemptLimit | IndexLimit | NotHeld | CancelRequested | NotDue
 
@@ -256,6 +256,13 @@ fn current(tx: store.Tx, t: Tables, a: Attempt) -> Result[Row, Error] {
 pub fn fence(tx: store.Tx, t: Tables, a: Attempt) -> Result[bool, Error] {
     let row = current(tx, t, a)?
     Ok(row.cancel)
+}
+
+pub fn hold_mark(s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Hold], store.Error] {
+    match store.get(s, store.shape(t.rows), id)? {
+        Some(Row(state: Parked(take mark), ..)) => Ok(Some(take mark)),
+        _ => Ok(None),
+    }
 }
 
 pub fn boundary(s: store.Snapshot, t: Tables, a: Attempt) -> Result[bool, Error] {

@@ -831,6 +831,25 @@ pub fn info(mut tx: Tx) -> CallInfo {
     tx.info
 }
 
+// A step records the body's typed error in the outer transaction. Keep the
+// issued-id log and read set, and roll back the body's table writes.
+pub fn rollback_writes_on_error[R, E](mut tx: Tx, body: scoped[view] fn(mut Tx) -> Result[R, E]) -> Result[R, E] {
+    let roots = share_roots(tx.roots)
+    let ops = std.omap.snapshot(tx.ops)
+    let resident = tx.resident
+    let frame_bytes = tx.frame_bytes
+    let wrote = tx.wrote
+    let result = body(mut tx)
+    if let Error(_) = result {
+        tx.roots = take roots
+        tx.ops = take ops
+        tx.resident = resident
+        tx.frame_bytes = frame_bytes
+        tx.wrote = wrote
+    }
+    take result
+}
+
 pub fn run[R, A](mut db: Db, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let b = main_branch(db)
     run_on(mut db, b, steps, body)
@@ -3296,6 +3315,10 @@ fn application_name(name: String) -> Result[(), Error] {
 pub fn with_schema[H](db: Db, make: StaticFn[fn(Schema) -> Result[H, Error]]) -> Result[H, Error] {
     healthy(db)?
     (code.callable(make))(Schema(store: db.store, catalog: std.omap.snapshot(db.heads[0].roots.catalog)))
+}
+
+pub fn tx_schema(tx: Tx) -> Schema {
+    Schema(store: tx.store, catalog: std.omap.snapshot(tx.roots.catalog))
 }
 
 type MigrationJob: send {

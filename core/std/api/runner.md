@@ -346,3 +346,26 @@ request fingerprint hold. An operator or activation entry uses
 `triggers.request_cancel` or `triggers.release` in a transaction. Passing a
 revision to release changes the stamp and clears the hold together. The next
 start keeps the trigger identity and increments the attempt.
+
+The store step library gives a granted trigger a confined process body.
+Include `steps.migrate` in the place migration and `steps.register` in the
+place registry. Schedule a run with `steps.schedule`, which writes its step
+cap in the same transaction as the trigger. The granted entry calls
+`steps.run` with the attempt context, a map of grants keyed by step index,
+codec input, and a plain body. The body receives the opaque context and input.
+A callback receives the grant at its own index.
+
+Use `steps.step` for an outside operation. The wrapper makes the started row
+durable before calling and the result row durable before returning a value or
+`Callback(E)`. A replay returns the recorded result. When a step returns
+`InDoubt(id)`, `steps.resolve` can record a lookup under `steps.outside_key(id)`.
+Use `steps.resend` only when the program decides to send again. Both calls
+check the same step identity and request fingerprint. A fingerprint mismatch
+places a hold on the run.
+
+Use `steps.register_transaction` to register a plain transaction callback as
+an attempt entry. `steps.transaction` commits its result, writes and any
+triggers together. If the callback returns a typed error, the transaction
+keeps the error result and rolls back the callback's writes. A park uses this
+form to commit its state and a fresh `At(T)` trigger, then returns from the
+process.

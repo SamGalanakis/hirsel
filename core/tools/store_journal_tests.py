@@ -19,7 +19,17 @@ INSTRUCTION_ALLOWANCES = {'frame_size_boundary': 1_892_798_149}  # measured 1_51
 LAWS = ('end', 'payload', 'segment', 'apply', 'recovery', 'bootstrap', 'worker',
         'db', 'end_storage', 'recorded', 'options', 'call_vector', 'recorded_barrier', 'rotation', 'changes_checkpoint', 'frame_size_boundary', 'frame_oversize', 'drop', 'ack_channel', 'recorded_fork', 'streams', 'step_stop', 'place', 'place_idle')
 TRIGGER_LAWS = ('trigger_revision',)
-LAW_GROUPS = {'store': LAWS, 'triggers': TRIGGER_LAWS, 'runner': ('trigger_transact', 'trigger_granted', 'trigger_cancel')}
+STEP_LAWS = (
+    'steps_reexecution', 'steps_own_rows', 'steps_typed_error', 'steps_fingerprint',
+    'steps_in_doubt', 'steps_sealed', 'steps_fence', 'steps_revision',
+    'steps_transaction_pair', 'steps_transaction_child',
+)
+LAW_GROUPS = {
+    'store': LAWS,
+    'triggers': TRIGGER_LAWS,
+    'runner': ('trigger_transact', 'trigger_granted', 'trigger_cancel'),
+    'steps': STEP_LAWS,
+}
 NATIVE_GROUPS = {
     module: {f'store@1/{module}/journal_test_{name}' for name in group
              if name not in ('frame_size_boundary', 'frame_oversize')}
@@ -160,6 +170,12 @@ def main():
                 rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 checks = provider_checks(work / (engine + '-crash') / 'store', engine, env)
                 rows.append(dict(engine=engine, passed=True, providers=checks))
+                step_work = work / 'steps'
+                step_work.mkdir(exist_ok=True)
+                step_cuts = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc,
+                                       manifest, step_work, engine, entry='store@1/steps/journal_steps_main',
+                                       scenarios=(), environment=env, count_only=('poison-segment', 'steps-park'))
+                rows.append(dict(engine=engine, passed=True, step_cuts=step_cuts))
             except RuntimeError as error:
                 rows.append(dict(engine=engine, passed=False, provider_failure=str(error)))
         if args.report:

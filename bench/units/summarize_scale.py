@@ -163,12 +163,12 @@ def scale_tables(rows):
         for first, second in combinations(SCALE_SIDES, 2):
             a, b = best(rows, cell_name, first)[0], best(rows, cell_name, second)[0]
             if a and b:
-                ratio = max(a, b) / min(a, b)
-                if ratio < 1.25:
+                gap = 1 - min(a, b) / max(a, b)
+                if gap < 0.25:
                     print(f"- {first} and {second} tie under the 25% rule.")
                 else:
                     faster, slower = (first, second) if a > b else (second, first)
-                    print(f"- {faster} leads {slower} by {(ratio - 1) * 100:.1f}%.")
+                    print(f"- {slower} is {gap * 100:.1f}% below {faster}.")
 
 
 def fairness_table(rows, n):

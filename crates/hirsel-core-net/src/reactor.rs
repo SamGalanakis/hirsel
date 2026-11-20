@@ -118,6 +118,10 @@ impl Poller {
     pub fn raw_fd(&self) -> i32 {
         self.epoll.as_raw_fd()
     }
+    /// mc-units-light: the wake eventfd, registered under tag `u64::MAX`.
+    pub fn wake_fd(&self) -> i32 {
+        self.wake.as_raw_fd()
+    }
 
     fn wake_epoll(&self) {
         let one = 1u64;
@@ -143,6 +147,32 @@ impl Poller {
 }
 fn tag(index: usize, generation: u32) -> u64 {
     index as u64 | (u64::from(generation) << 32)
+}
+
+/// mc-units-light: one poller for a whole pool of units. A unit's registry
+/// adds its descriptors to it, tagged with the owning unit, and never polls
+/// it: the pool polls and hands each edge to its unit, which dispatches it
+/// as one of its own events. A shared tag is the unit in the top 16 bits,
+/// the low 16 bits of the slot generation, then the slot index.
+struct SharedPoller {
+    poller: Arc<Poller>,
+    unit: fn() -> Option<u32>,
+}
+static SHARED: std::sync::OnceLock<SharedPoller> = std::sync::OnceLock::new();
+/// Bits of a shared tag below the unit.
+pub const SHARED_UNIT_SHIFT: u32 = 48;
+/// Make the process's shared poller. `unit` names the calling unit, or None
+/// outside one (such a registry keeps a private poller).
+pub fn share_poller(unit: fn() -> Option<u32>) -> io::Result<Arc<Poller>> {
+    let poller = Poller::new()?;
+    let _ = SHARED.set(SharedPoller {
+        poller: poller.clone(),
+        unit,
+    });
+    Ok(poller)
+}
+fn shared_tag(unit: u32, index: usize, generation: u32) -> u64 {
+    (u64::from(unit) << SHARED_UNIT_SHIFT) | (u64::from(generation & 0xffff) << 32) | index as u64
 }
 
 struct Record {
@@ -228,6 +258,8 @@ pub struct Sockets {
     pub crossings: std::collections::HashMap<u32, Arc<dyn Crossing>>,
     /// mc-units-proto: this registry's unit, set by its first crossing.
     pub unit: Option<u32>,
+    /// mc-units-light: registered in the pool's shared poller as this unit.
+    shared: Option<u32>,
 }
 impl Sockets {
     pub fn model(&self) -> Option<&Model> {
@@ -243,6 +275,7 @@ impl Sockets {
             model: Some(Box::new(ModeledSockets::new(model))),
             crossings: Default::default(),
             unit: None,
+            shared: None,
         }
     }
     /// mc-units-proto: the crossing attached to a live key, if any.
@@ -263,7 +296,14 @@ impl Sockets {
     /// Lazily created once per run, at its first real socket operation.
     pub fn poller(&mut self) -> io::Result<Arc<Poller>> {
         if self.poller.is_none() {
-            self.poller = Some(Poller::new()?);
+            if let Some(shared) = SHARED.get()
+                && let Some(unit) = (shared.unit)()
+            {
+                self.shared = Some(unit);
+                self.poller = Some(shared.poller.clone());
+            } else {
+                self.poller = Some(Poller::new()?);
+            }
         }
         Ok(self.poller.as_ref().unwrap().clone())
     }
@@ -347,11 +387,15 @@ impl Sockets {
             self.poller()?;
             let slot = &mut self.slots[index];
             let r = slot.record.as_mut().unwrap();
+            let token = match self.shared {
+                Some(unit) => shared_tag(unit, index, slot.generation),
+                None => tag(index, slot.generation),
+            };
             self.poller.as_ref().unwrap().ctl(
                 libc::EPOLL_CTL_ADD,
                 r.fd.as_raw_fd(),
                 (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP | libc::EPOLLET) as u32,
-                tag(index, slot.generation),
+                token,
             )?;
             r.registered = true;
         }
@@ -387,7 +431,9 @@ impl Sockets {
         let Some(slot) = slots.get_mut(index) else {
             return;
         };
-        if slot.generation != (identity >> 32) as u32 {
+        // A shared tag keeps 16 generation bits. A stale edge that matches
+        // only readies a waiter that retries its syscall.
+        if slot.generation & 0xffff != (identity >> 32) as u32 & 0xffff {
             return;
         }
         let Some(r) = slot.record.as_mut() else {
@@ -413,7 +459,7 @@ impl Sockets {
     /// Poll only returned registrations while holding the driver token
     /// and exclusive access to the socket registry.
     pub fn poll(&mut self, timeout_ms: i32, ready: impl FnMut(u64)) -> io::Result<usize> {
-        if timeout_ms == 0 && self.waiting == 0 {
+        if (timeout_ms == 0 && self.waiting == 0) || self.shared.is_some() {
             return Ok(0);
         }
         let Some(poller) = self.poller.as_ref() else {

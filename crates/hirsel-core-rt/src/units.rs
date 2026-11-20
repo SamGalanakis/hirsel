@@ -943,7 +943,7 @@ pub(crate) fn launch(k: usize, input: &crate::entry::OsConfig, run: impl Fn(&cra
 use std::cell::{RefCell as URefCell, UnsafeCell};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize};
 use std::sync::Condvar;
 
 /// mc-units-untied: a thread-local Cell whose every access computes the slot
@@ -1054,12 +1054,14 @@ pub(crate) struct Unit {
     state: AtomicU8,
     inside: AtomicBool,
     after: Cell<After>,
-    epfd: AtomicI32,
     next_local: Cell<u32>,
     deliveries: Arc<AtomicU64>,
     unobserved: URefCell<Vec<(usize, Unobserved)>>,
     children: Cell<u32>,
-    xready: Mutex<Vec<u64>>,
+    /// Readiness for this unit's keys, as (reactor identity, epoll flags):
+    /// crossing events and the shared poller's socket edges. The unit's
+    /// scheduler takes them at its next turn, in this order.
+    xready: Mutex<Vec<(u64, u32)>>,
     status: AtomicU8,
     stop_fd: Cell<i32>,
     slice_start: Cell<u64>,
@@ -1133,6 +1135,7 @@ struct Pool {
     poll_until: AtomicU64,
     gep: i32,
     gwake: i32,
+    _shared: Arc<hirsel_core_net::Poller>,
     timers: Mutex<BinaryHeap<Reverse<(u64, u32)>>>,
     next_timer: AtomicU64,
     live: AtomicUsize,
@@ -1243,7 +1246,6 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
         state: AtomicU8::new(QUEUED),
         inside: AtomicBool::new(false),
         after: Cell::new(After::Run),
-        epfd: AtomicI32::new(-1),
         next_local: Cell::new(0),
         deliveries: Arc::new(AtomicU64::new(0)),
         unobserved: URefCell::new(Vec::new()),
@@ -1395,35 +1397,30 @@ fn xnotify(unit: u32, id: u64) {
         return;
     }
     let Some(u) = unit_ref(unit) else { return };
-    u.xready.lock().unwrap().push(id);
+    u.xready.lock().unwrap().push((id, (libc::EPOLLIN | libc::EPOLLOUT) as u32));
     bump(S_XNOTIFY);
     wake(u);
 }
-/// Crossing events queued for the running unit, as reactor identities.
-pub(crate) fn take_xready(mut each: impl FnMut(u64)) {
+/// Readiness queued for the running unit, as (reactor identity, flags).
+pub(crate) fn take_xready(mut each: impl FnMut(u64, u32)) {
     // SAFETY: called by the running unit's scheduler.
     let u = unsafe { &*cur() };
-    let ids = std::mem::take(&mut *u.xready.lock().unwrap());
-    for id in ids {
-        each(id);
+    let mut q = u.xready.lock().unwrap();
+    if q.is_empty() {
+        return;
+    }
+    let ids = std::mem::take(&mut *q);
+    drop(q);
+    for (id, flags) in ids {
+        each(id, flags);
     }
 }
 
-/// Register the running unit's own epoll fd in the shared poller, once.
-pub(crate) fn attach_epoll(fd: i32) {
+/// The running unit's id, for the shared poller's tags.
+fn shared_unit() -> Option<u32> {
     let u = cur();
-    if u.is_null() {
-        return;
-    }
-    // SAFETY: the running unit's record.
-    let u = unsafe { &*u };
-    if u.epfd.load(Ordering::Relaxed) == fd {
-        return;
-    }
-    u.epfd.store(fd, Ordering::Relaxed);
-    let mut ev = libc::epoll_event { events: (libc::EPOLLIN | libc::EPOLLET) as u32, u64: u64::from(u.id) };
-    // SAFETY: both descriptors are live.
-    unsafe { libc::epoll_ctl(pool().gep, libc::EPOLL_CTL_ADD, fd, &mut ev) };
+    // SAFETY: a live unit record.
+    (!u.is_null()).then(|| unsafe { (*u).id })
 }
 
 const LIFO_RUNS: u32 = 3;
@@ -1527,7 +1524,12 @@ fn poll_global(p: &Pool, timeout: i32) {
             accept_front(p);
         } else {
             USTATS[S_GPOLL_EVENTS].fetch_add(1, Ordering::Relaxed);
-            wake_id(tag as u32);
+            let unit = (tag >> hirsel_core_net::SHARED_UNIT_SHIFT) as u32;
+            if let Some(u) = unit_ref(unit) {
+                let ident = tag & ((1 << hirsel_core_net::SHARED_UNIT_SHIFT) - 1);
+                u.xready.lock().unwrap().push((ident, e.events));
+                wake(u);
+            }
         }
     }
     fire_timers(p);
@@ -1786,14 +1788,9 @@ fn launch_untied(
     input: &crate::entry::OsConfig,
     run: &(dyn Fn(&crate::entry::OsConfig) -> u8 + Sync),
 ) -> u8 {
-    // SAFETY: plain descriptor creation.
-    let (gep, gwake) = unsafe {
-        let gep = libc::epoll_create1(libc::EPOLL_CLOEXEC);
-        let gwake = libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK);
-        let mut ev = libc::epoll_event { events: libc::EPOLLIN as u32, u64: WAKE_TAG };
-        libc::epoll_ctl(gep, libc::EPOLL_CTL_ADD, gwake, &mut ev);
-        (gep, gwake)
-    };
+    // One poller for every unit's descriptors; its wake eventfd is WAKE_TAG.
+    let shared = hirsel_core_net::share_poller(shared_unit).unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+    let (gep, gwake) = (shared.raw_fd(), shared.wake_fd());
     let front = match std::env::var("HIRSEL_FRONT").ok().and_then(|v| v.parse::<u16>().ok()) {
         // SAFETY: a fresh nonblocking listener on 127.0.0.1:port.
         Some(port) => unsafe {
@@ -1835,6 +1832,7 @@ fn launch_untied(
         poll_until: AtomicU64::new(u64::MAX),
         gep,
         gwake,
+        _shared: shared,
         timers: Mutex::new(BinaryHeap::new()),
         next_timer: AtomicU64::new(u64::MAX),
         live: AtomicUsize::new(0),

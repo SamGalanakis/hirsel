@@ -1571,8 +1571,8 @@ impl Scheduler {
             let readies = &self.readies;
             let net = self.net;
             // SAFETY: the run pins its registry; no task runs during polling.
-            crate::units::take_xready(|id| unsafe {
-                (*net).dispatch(id, (libc::EPOLLIN | libc::EPOLLOUT) as u32, |token| readies.enqueue(token))
+            crate::units::take_xready(|id, flags| unsafe {
+                (*net).dispatch(id, flags, |token| readies.enqueue(token))
             });
         }
         if !self.net.is_null() {
@@ -2489,12 +2489,8 @@ unsafe fn alone(
                         sockets
                             .poll(0, |token| readies.push(token))
                             .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
-                        crate::units::take_xready(|id| {
-                            sockets.dispatch(
-                                id,
-                                (libc::EPOLLIN | libc::EPOLLOUT) as u32,
-                                |token| readies.push(token),
-                            )
+                        crate::units::take_xready(|id, flags| {
+                            sockets.dispatch(id, flags, |token| readies.push(token))
                         });
                     }
                 }
@@ -3075,9 +3071,6 @@ pub(crate) fn attach_net(
             run.readies.clone()
         }
     };
-    if crate::units::untied() {
-        crate::units::attach_epoll(poller.raw_fd());
-    }
     *readies.net.lock().unwrap_or_else(|e| e.into_inner()) = Some(poller);
 }
 fn poll_timeout(deadline: Option<u64>) -> i32 {

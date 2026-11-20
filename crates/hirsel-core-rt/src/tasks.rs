@@ -436,7 +436,6 @@ struct Delivery {
     deferred: bool,
 }
 
-#[derive(Default)]
 struct Domain {
     sequencer: crate::sequencer::Sequencer,
     ready: AtomicUsize,
@@ -531,7 +530,14 @@ impl Pool {
     ) -> Self {
         Self {
             registry: Mutex::default(),
-            domains: BTreeMap::from([(RESIDUAL_DOMAIN, Arc::new(Domain::default()))]),
+            domains: BTreeMap::from([(
+                RESIDUAL_DOMAIN,
+                Arc::new(Domain {
+                    sequencer: crate::sequencer::Sequencer::new(workers),
+                    ready: AtomicUsize::new(0),
+                    handoffs: AtomicUsize::new(0),
+                }),
+            )]),
             queues: (0..workers)
                 .map(|_| Mutex::new(WorkerQueue::new()))
                 .collect(),

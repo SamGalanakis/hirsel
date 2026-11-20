@@ -860,12 +860,12 @@ fn f{entry} = n{instance} g{g} {{
                 (88, 130),
                 (96, 2),  // live count differs from the three occupied slots
                 (104, 8), // cached index length, independent of capacity=3
-                (112, 2),
+                (112, 0xe1e0cd537ed145ba),
                 (120, 0),
-                (128, 1),
+                (128, 0x49ec259204a234c1),
                 (136, 0),
                 (144, 0),
-                (152, 3),
+                (152, 0xaddb2134e9f8658b),
                 (160, 0),
                 (168, 0),
             ]

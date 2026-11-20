@@ -25,7 +25,8 @@ SERVER = "0-3,8-11"
 SERVER_LIST = [0, 1, 2, 3, 8, 9, 10, 11]
 LOAD = "16-19"
 TOOL = "24-27"
-PORT, TOOL_PORT = 47700, 47690
+# Below the ephemeral range (32768-60999), so no outgoing connection can hold them.
+PORT, TOOL_PORT = 29700, 29690
 SESSIONS, PARTITIONS, SYNCS = 256, 8, 8
 TOOL_DELAY_US = 1000
 RUN = dict(dur=8, warm=1, burst_at=4, burst_len=1, burst_x=1.5)
@@ -190,6 +191,17 @@ def search(side, cell, guess, out, group):
 
     def go(rate):
         r = one_run(side, cell, rate, seed)
+        for _ in range(2):
+            if r["load"] is not None:
+                break
+            # The load generator produced no result (the server never came
+            # up): an infrastructure fault, not a verdict on this rate. Keep
+            # the record, then rerun the rate.
+            r["group"] = group
+            r["infra_retry"] = True
+            runs.append(r)
+            log(f"  {side} rate={rate:.0f} no load result; rerunning: {r.get('load_err', '')[-160:]!r}")
+            r = one_run(side, cell, rate, seed)
         r["group"] = group
         runs.append(r)
         L = r["load"] or {}

@@ -4319,7 +4319,7 @@ fn wire_read[C: send](take x: WireRead[C]) -> () waits {
     let mut probing = false
     loop {
         if let Error(_) = channel.receive(credits) { return }
-        let next = loop {
+        let next: WireInput = loop {
             let end = std.clock.deadline_after_ms(host.mono_ns(clock), config.idle_ms)
             let packet = loop {
                 match channel.try_send(pool, Decode(take r, host.mono_ns(clock), channel.sender(reply))) {

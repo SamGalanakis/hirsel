@@ -3666,10 +3666,15 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
     // owner channel or the inbox closes.
     let mut rounds = take register
     fence_round(mut joined, Fenced(sessions: list.new(), all: false), at, mut rounds)
+    // A message taken while coalescing Releases, handled next in inbox order.
+    let mut held: Option[PubIn] = None
     loop {
-        let got = match channel.receive(from) {
-            Ok(take x) => take x,
-            Error(_) => return,
+        let got = match replace(mut held, None) {
+            Some(take x) => take x,
+            None => match channel.receive(from) {
+                Ok(take x) => take x,
+                Error(_) => return,
+            },
         }
         let PubIn(e: take e) = take got
         let mut owes: List[Owe] = list.new()
@@ -3680,15 +3685,36 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
             },
             Released(take rel) => {
                 let Release(version: v, snapshot: take snap, answers: take answers) = take rel
-                if let Some(take s) = take snap {
-                    at = v
+                keep_answers(mut waiting, take answers)
+                let mut newest = take snap
+                let mut newest_at = v
+                // G1: drain the Releases queued behind this one, in order, and run one round at
+                // the newest snapshot, so a slow publisher coalesces. Every Release's answers are
+                // kept. A Drained carries nothing but the pass below, so it joins the run; any
+                // other message ends it and is handled next.
+                loop {
+                    match channel.try_receive(from) {
+                        Ok(PubIn(e: Released(take more))) => {
+                            let Release(version: mv, snapshot: take ms, answers: take ma) = take more
+                            keep_answers(mut waiting, take ma)
+                            if let Some(take s) = take ms {
+                                newest = Some(take s)
+                                newest_at = mv
+                            }
+                        },
+                        Ok(PubIn(e: Drained)) => (),
+                        Ok(take other) => { held = Some(take other); break },
+                        Error(_) => break,
+                    }
+                }
+                if let Some(take s) = take newest {
+                    at = newest_at
                     b.newest = Some(take s)
                     let mut fenced = Fenced(sessions: list.new(), all: false)
                     owes = round(mut b, mut fenced)
                     // G2 step 3: every fence of the round, then R, before anything is offered.
-                    fence_round(mut joined, take fenced, v, mut rounds)
+                    fence_round(mut joined, take fenced, newest_at, mut rounds)
                 }
-                keep_answers(mut waiting, take answers)
             },
             Joined(take j) => {
                 let Join(to: take to, told: take told, mark: take mark, closed: take closed, identity: take id, fence: take fence, progress: take progress, taken: take taken, first: take first) = take j
@@ -4526,10 +4552,12 @@ fn test_subs_reset_keeps_diff(c: Clock, r: Random) -> Result[(), ()] waits {
 }
 
 // L22 (RUNNER-SPEC v2.12, subscribe_order): a Subscribe runs at the version of the last
-// Released taken before it in PubIn's order, and each later Release reaches it as a round.
+// Released taken before it in PubIn's order, and each later Release reaches it in a round.
 // The publisher's own loop drains one inbox filled in that order: Joined, c1's Release, the
-// Subscribe, c2's Release, Halt. Sub 1's initial result holds c1 (row 1 = 1) at c1's version,
-// and c2 (row 2 = 7) follows as a round at c2's version.
+// Subscribe, c2's Release, a Release outside the sub's reads, Halt. Sub 1's initial result
+// holds c1 (row 1 = 1, row 2 = 0) at c1's version. The two later Releases are queued
+// together, so G1 coalesces them (v2.23): c2 (row 2 = 7) follows in one round at the newest
+// version.
 pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, store.defaults())
     let cv: std.codec.Codec[u64] = std.codec.of()
@@ -4560,6 +4588,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let outside = store.snapshot(db)
     let v1 = store.version(c1)
     let v2 = store.version(c2)
+    let v3 = store.version(outside)
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ev_to, ev_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(8u64))
     let (told_to, told_from): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
@@ -4591,7 +4620,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
         let ok = if n == 0u64 {
             o.version == v1 && list.len(o.complete) == 1u64 && apply(mut cl, take o) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(0u8))
         } else {
-            o.version == v2 && list.len(o.complete) == 0u64 && apply(mut cl, take o) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(7u8))
+            o.version == v3 && list.len(o.complete) == 0u64 && apply(mut cl, take o) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(7u8))
         }
         if !ok {
             return false
@@ -6019,6 +6048,7 @@ fn wire_owner_run[C: send](take initial: WireLoop[C], take initial_service: Box[
     // either child's Ended. Cancellation uses CONC-8 on the two owned handles.
     let result: Result[(), std.wsock.Error] = loop {
         wire_owner_join(mut st, mut service)
+        if !wire_post(mut st.work) { wire_owner_refuse(mut st, 1011u16) }
         let received = match wire_owner_next(mut st, mut service) {
             Some(take e) => take e,
             None => break Ok(()),
@@ -6098,6 +6128,23 @@ fn wire_owner_run[C: send](take initial: WireLoop[C], take initial_service: Box[
 // next poll refuses its first Subscribe.
 fn wire_join_send(mut work: WireWork, to: Sender[PubIn]) waits {
     if let Some(take join) = replace(mut work.join, None) { let _ = channel.send(to, take join) }
+}
+
+// v2.23: the requests a full head inbox did not take go in with a waiting send, in order. The
+// head never waits on an owner (it answers through the publisher, which never waits on one
+// either), so the wait ends when the head takes its next message. False when the head is gone.
+fn wire_post(mut work: WireWork) -> bool waits {
+    if list.len(work.posts) == 0u64 { return true }
+    let head = match work.head { Some(lease) => copy_wire_head(lease.head), None => fail("runner: missing head lease") }
+    while list.len(work.posts) != 0u64 {
+        let req = list.remove(mut work.posts, 0u64)
+        let sent = match head {
+            LegacyHead(to) => match channel.send(to, take req) { Ok(()) => true, Error(_) => false },
+            LifecycleHead(to) => match channel.send(to, RunRequest(take req)) { Ok(()) => true, Error(_) => false },
+        }
+        if !sent { work.posts = list.new(); return false }
+    }
+    true
 }
 
 fn wire_owner_join[C: send](mut st: WireLoop[C], mut service: Box[Service[C]]) waits {
@@ -6752,9 +6799,9 @@ type WireOwed: send { generation: u64, reply: Bytes }
 // v2.19: `fence` is the session's fence root, made at join, and `round` the place's round
 // register, from the join's answer. `check` and `sending_done` are the unit handed out last:
 // its version, and a copy of its Outcome rows, which a Dropped Reset carries (§3).
-pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], timers: Map[u64, Task[()]], output: List[WireOutput], sending: List[WireMark], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64, fence: Option[Latest[Fence]], round: Option[Latest[RoundAt]], check: Option[u64], sending_done: List[Done], join: Option[PubIn], sending_complete: bool }
+pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], timers: Map[u64, Task[()]], output: List[WireOutput], sending: List[WireMark], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64, fence: Option[Latest[Fence]], round: Option[Latest[RoundAt]], check: Option[u64], sending_done: List[Done], join: Option[PubIn], sending_complete: bool, posts: List[Req] }
 
-fn wire_work() -> WireWork { WireWork(head: None, asking: None, timers: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64, fence: None, round: None, check: None, sending_done: list.new(), join: None, sending_complete: false) }
+fn wire_work() -> WireWork { WireWork(head: None, asking: None, timers: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64, fence: None, round: None, check: None, sending_done: list.new(), join: None, sending_complete: false, posts: list.new()) }
 
 fn wire_cut(work: WireWork, clock: Clock) -> bool {
     wire_cut_at(work.drain, clock)
@@ -6800,7 +6847,7 @@ fn wire_deadline(take t: WireDeadline) -> () waits {
 }
 
 type WireHead: send = LegacyHead(Sender[Req]) | LifecycleHead(Sender[HeadInput])
-type HeadOffer = Posted | InboxFull | InboxClosed
+type HeadOffer = Posted | InboxFull(Req) | InboxClosed
 
 fn copy_wire_head(head: WireHead) -> WireHead {
     match head {
@@ -6813,12 +6860,13 @@ fn try_head(head: WireHead, take req: Req) -> HeadOffer {
     match head {
         LegacyHead(to) => match channel.try_send(to, take req) {
             Ok(()) => Posted,
-            Error(Full(_)) => InboxFull,
+            Error(Full(take back)) => InboxFull(take back),
             Error(Closed(_)) => InboxClosed,
         },
         LifecycleHead(to) => match channel.try_send(to, RunRequest(take req)) {
             Ok(()) => Posted,
-            Error(Full(_)) => InboxFull,
+            Error(Full(RunRequest(take back))) => InboxFull(take back),
+            Error(Full(_)) => fail("runner: the head inbox returned another input"),
             Error(Closed(_)) => InboxClosed,
         },
     }
@@ -7384,10 +7432,18 @@ fn wire_apply_plan[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
         let request = Request(caller: take principal, stream: take named, p: position, key: take entry, arg: take argument, digest: digest, reply_to: wire_me(s), live: take live, identity: take identity, seed: take seed)
         let mut sends: List[WireOwed] = list.new()
         if let Error(_) = list.push(mut sends, take owed) { return wire_refused(mut s, mut work, stream, p, Overloaded) }
-        match try_head(s.head, Req(e: Requested(take request))) {
-            Posted => (),
-            InboxFull => return wire_refused(mut s, mut work, stream, p, Overloaded),
-            InboxClosed => return Error(1011u16),
+        // v2.23: a full head inbox does not refuse. The request waits in `posts`, in order, and
+        // the owner loop posts it with a waiting send (wire_post). The slot table still bounds a
+        // session to 1 + q requests at the head.
+        let req = Req(e: Requested(take request))
+        if list.len(work.posts) != 0u64 {
+            if let Error(_) = list.push(mut work.posts, take req) { return wire_refused(mut s, mut work, stream, p, Overloaded) }
+        } else {
+            match try_head(s.head, take req) {
+                Posted => (),
+                InboxFull(take back) => if let Error(_) = list.push(mut work.posts, take back) { return wire_refused(mut s, mut work, stream, p, Overloaded) },
+                InboxClosed => return Error(1011u16),
+            }
         }
         result.unwrap(map.insert(mut s.held, take k, WireHeld(stream: stream, p: p, digest: digest, forwarded: true, queued: queued, owed: take sends)))
     }

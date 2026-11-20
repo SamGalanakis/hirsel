@@ -185,7 +185,7 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool w
 
 @test
 fn test_wire_admission(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
-    if law_join_cleanup() && law_unread_client(tasks, clock, random) && law_hello_and_slots(tasks, clock, random) && law_refused_send_releases_timer(tasks, clock, random) { Ok(()) } else { Error(()) }
+    if law_join_cleanup() && law_unread_client(tasks, clock, random) && law_hello_and_slots(tasks, clock, random) && law_full_head_waits(tasks, clock, random) { Ok(()) } else { Error(()) }
 }
 
 
@@ -331,10 +331,11 @@ fn w3c_close(take rig: W3cRig) -> () waits {
     result.unwrap(store.close(take db))
 }
 
-// RUNNER-SPEC L9: only admitted sends retain deadline tasks.
-pub fn law_refused_send_releases_timer(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+// RUNNER-SPEC v2.23 (§3 queue table): a full head inbox does not refuse. Other sessions fill
+// the shared head; this owner's sends are still admitted, each keeping its deadline task, and
+// reach the head in send order once it has room.
+pub fn law_full_head_waits(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
     let mut rig = w3c_rig(tasks, clock, random)
-    // Other sessions can fill the shared head while this owner owes no sends.
     let filling = result.unwrap(head_lease(copy_wire_head(rig.owner.head)))
     for p in 0u64 .. 5u64 {
         let key = w3c_retired()
@@ -345,12 +346,22 @@ pub fn law_refused_send_releases_timer(tasks: Tasks, clock: Clock, random: Rando
             identity: latest.handle(filling.identity), seed: result.unwrap(owner_seed(filling)))
         if let Posted = try_head(rig.owner.head, Req(e: Requested(take request))) {} else { return false }
     }
-    for stream in 0u32 .. 7u32 {
+    for stream in 0u32 .. 5u32 {
         let at = host.mono_ns(clock)
         let pending = WirePending(stream: stream, p: 0u64, slot: 0u32, deadline: 10000u32, arg: w3c_arg(7u32), at: at, grows: true)
         result.unwrap(wire_call_ready(mut rig.owner, mut rig.work, take pending, true))
-        let output = option.unwrap(transport_receive(mut rig.owner, mut rig.work))
-        if !w3c_answer(output, 0u64, stream, 0u64, Refused(Overloaded)) || map.len(rig.work.timers) != 0u64 { return false }
+        if let Some(_) = transport_receive(mut rig.owner, mut rig.work) { return false }
+    }
+    if map.len(rig.work.timers) != 5u64 { return false }
+    for _ in 0u64 .. 5u64 { let _ = result.unwrap(channel.try_receive(rig.requests)) }
+    if !wire_post(mut rig.work) { return false }
+    for stream in 0u32 .. 5u32 {
+        let Req(e: take got) = result.unwrap(channel.try_receive(rig.requests))
+        let named = match rig.owner.caller { Some(c) => wire_stream(c, stream), None => return false }
+        match take got {
+            Requested(take q) => if q.stream != named { return false },
+            _ => return false,
+        }
     }
     w3c_close(take rig)
     true

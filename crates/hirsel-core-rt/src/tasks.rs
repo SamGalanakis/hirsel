@@ -173,7 +173,10 @@ pub struct Task {
     /// Host CLOCK_MONOTONIC nanoseconds.
     timer_deadline: Option<u64>,
     operation: *mut Operation,
+    /// The scheduler's creation list, newest first, linked both ways so a
+    /// retire unlinks in O(1) however many tasks are live.
     all: *mut Task,
+    all_previous: *mut Task,
     state: State,
     id: u64,
     group: Option<crate::tape::schedule::Group>,
@@ -3455,6 +3458,7 @@ pub unsafe fn run_root(
         timer_deadline: None,
         operation: ptr::null_mut(),
         all: ptr::null_mut(),
+        all_previous: ptr::null_mut(),
         state: State::Ready,
         id: 0,
         group: None,
@@ -4008,6 +4012,7 @@ unsafe fn spawn_in(
             timer_deadline: None,
             operation: ptr::null_mut(),
             all: (*run).all,
+            all_previous: ptr::null_mut(),
             state: State::Ready,
             id,
             group: group.map(|group| group.child()),
@@ -4047,6 +4052,9 @@ unsafe fn spawn_in(
             .as_ref()
             .unwrap()
             .prepare(start, task.cast(), ptr::null_mut());
+        if !(*task).all.is_null() {
+            (*(*task).all).all_previous = task;
+        }
         (*run).all = task;
         #[cfg(feature = "testing")]
         if (*run).measure {
@@ -4175,11 +4183,16 @@ unsafe fn retire(task: *mut Task) {
     unsafe {
         let run = (*task).run;
         (*run).outside_cancels.retain(|&t| t != task);
-        let mut link = &raw mut (*run).all;
-        while *link != task {
-            link = &raw mut (**link).all;
+        let (previous, next) = ((*task).all_previous, (*task).all);
+        if previous.is_null() {
+            debug_assert!((*run).all == task);
+            (*run).all = next;
+        } else {
+            (*previous).all = next;
         }
-        *link = (*task).all;
+        if !next.is_null() {
+            (*next).all_previous = previous;
+        }
         let mut owner = Box::from_raw(task);
         // Ended context returns unused primary before record/result refunds.
         drop(owner.owned_context.take());
@@ -4511,6 +4524,7 @@ mod ready_routing_laws {
                         timer_deadline: None,
                         operation: &mut operations[i],
                         all: ptr::null_mut(),
+                        all_previous: ptr::null_mut(),
                         state: State::Provider,
                         id: i as u64,
                         group: None,

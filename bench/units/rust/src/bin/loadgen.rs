@@ -11,13 +11,14 @@
 //! Usage: loadgen key=value... ; prints one JSON line.
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::io::{BufWriter, Write};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Barrier, mpsc};
 use units_bench::*;
 
 // `ready`: when this turn could first be sent, the later of its intended
 // arrival and the reply to the session's previous turn.
-struct Rec { intended: u64, ready: u64, done: u64, held: u64, ok: bool }
+struct Rec { id: u64, intended: u64, ready: u64, sent: u64, done: u64, held: u64, ok: bool }
 
 fn main() {
     let kv: HashMap<String, String> = std::env::args().skip(1)
@@ -30,6 +31,7 @@ fn main() {
     let reserved_hot: u64 = get("reserved_hot", "0").parse().unwrap();
     let hot = get("hot", "0") == "1";
     let close_after_drain = get("close_after_drain", "0") == "1";
+    let detail = kv.contains_key("slow_turns");
     let rate: f64 = get("rate", "1000").parse().unwrap();
     let dur: f64 = get("dur", "10").parse().unwrap();
     let warm: f64 = get("warm", "1").parse().unwrap();
@@ -117,7 +119,8 @@ fn main() {
                     next
                 };
                 if dead { timeouts += 1; continue; }
-                let left = deadline.saturating_sub(now_ns());
+                let sent = now_ns();
+                let left = deadline.saturating_sub(sent);
                 let io = async {
                     st.write_all(&turn.encode()).await?;
                     st.read_exact(&mut reply).await?;
@@ -130,7 +133,7 @@ fn main() {
                         let acc = u64::from_le_bytes(reply[8..16].try_into().unwrap());
                         let held = u64::from_le_bytes(reply[16..24].try_into().unwrap());
                         let ok = id == turn.id && acc == turn.expected(&table);
-                        recs.push(Rec { intended, ready: intended.max(prev_done), done, held, ok });
+                        recs.push(Rec { id: turn.id, intended, ready: intended.max(prev_done), sent, done, held, ok });
                         prev_done = done;
                     }
                     _ => { timeouts += 1; dead = true; }
@@ -140,7 +143,7 @@ fn main() {
                 drain.wait().await;
             }
             drop(st);
-            (recs, timeouts, hot_issued)
+            (recs, timeouts, hot_issued, if detail { now_ns() } else { 0 })
         }));
     }
     // Dispatcher: a plain thread with fine sleeps, so timer granularity does
@@ -184,9 +187,15 @@ fn main() {
     let mut lat: Vec<u64> = Vec::new();
     let mut e2e: Vec<u64> = Vec::new();
     let mut max_added_turn: Option<(u64, &Rec)> = None;
+    // Write diagnostics only after all replies and connection closes.
+    let mut slow = kv.get("slow_turns").map(|path| {
+        let mut out = BufWriter::new(std::fs::File::create(path).unwrap());
+        writeln!(out, "client\tintended_ns\tready_ns\tsent_ns\tdone_ns\theld_ns\tadded_ns\tarrival_from_end_ns\tturn").unwrap();
+        out
+    });
     let (mut completed, mut failures, mut timeouts, mut late) = (0u64, 0u64, 0u64, 0u64);
     let (mut hot_issued, mut hot_completed, mut in_window) = (0u64, 0u64, 0u64);
-    for (recs, t, hot_count) in &results {
+    for (client, (recs, t, hot_count, _closed)) in results.iter().enumerate() {
         timeouts += t;
         hot_issued += hot_count;
         for r in recs {
@@ -196,10 +205,15 @@ fn main() {
             if r.done >= warm_ns && r.done < end {
                 in_window += 1;
             }
+            let added = (r.done - r.ready).saturating_sub(r.held);
+            if added > 20_000_000 && let Some(out) = &mut slow {
+                let arrival_from_end = r.intended as i64 - end as i64;
+                writeln!(out, "{client}\t{}\t{}\t{}\t{}\t{}\t{added}\t{arrival_from_end}\t{}",
+                         r.intended, r.ready, r.sent, r.done, r.held, r.id).unwrap();
+            }
             if *hot_count != 0 {
                 if r.ok && r.done < end { hot_completed += 1; }
             } else if r.intended >= warm_ns {
-                let added = (r.done - r.ready).saturating_sub(r.held);
                 lat.push(added);
                 if max_added_turn.is_none_or(|(max, _)| added > max) {
                     max_added_turn = Some((added, r));
@@ -208,6 +222,7 @@ fn main() {
             }
         }
     }
+    if let Some(mut out) = slow { out.flush().unwrap(); }
     lat.sort_unstable();
     e2e.sort_unstable();
     let q = |p: f64| if lat.is_empty() { 0 } else { lat[((lat.len() as f64 * p) as usize).min(lat.len() - 1)] };
@@ -215,13 +230,14 @@ fn main() {
     let issued = open_issued + hot_issued;
     let hot_turns_per_s = hot_completed as f64 / dur;
     let (max_ready, max_done) = max_added_turn.map_or((0, 0), |(_, r)| (r.ready, r.done));
+    let first_close = results.iter().map(|r| r.3).min().unwrap_or(0);
     println!(concat!(
         "{{\"issued\":{},\"completed\":{},\"failures\":{},\"timeouts\":{},\"late\":{},\"rate\":{},",
         "\"measured\":{},\"p50_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"max_ns\":{},\"e2e_p50_ns\":{},\"e2e_p99_ns\":{},",
         "\"hot_issued\":{},\"hot_completed_in_run\":{},\"hot_turns_per_s\":{},",
         "\"start_ns\":{},\"warm_ns\":{},\"end_ns\":{},\"completed_after_warm_in_run\":{},",
-        "\"max_added_ready_ns\":{},\"max_added_done_ns\":{}}}"
+        "\"max_added_ready_ns\":{},\"max_added_done_ns\":{},\"first_close_ns\":{}}}"
     ), issued, completed, failures, timeouts, late, rate,
         lat.len(), q(0.5), q(0.99), q(0.999), lat.last().copied().unwrap_or(0), qe(0.5), qe(0.99),
-        hot_issued, hot_completed, hot_turns_per_s, start, warm_ns, end, in_window, max_ready, max_done);
+        hot_issued, hot_completed, hot_turns_per_s, start, warm_ns, end, in_window, max_ready, max_done, first_close);
 }

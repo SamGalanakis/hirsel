@@ -29,7 +29,7 @@ NOFILE = 524288
 CPU_HZ = os.sysconf("SC_CLK_TCK")
 HOLDS_GAP_S = 15
 QUEUE_BUCKET_NS = 10_000_000
-LOAD_NAMES = {"loadgen", "loadgen_drain"}
+LOAD_NAMES = {"loadgen", "loadgen_drain", "loadgen_detail"}
 
 SCALE_SIDES = ("untied", "S3k7", "tokiow8")
 REC_SIDES = ("untied", "S3k7", "S1w2", "S1w8", "untied (1 GiB)")
@@ -283,7 +283,10 @@ class Runner:
         server_pidfile = self.scratch / "server.pid"
         load_pidfile = self.scratch / "load.pid"
         server_argv, env, nports = self.server_cmd(side, cell)
-        load_name = "loadgen_drain" if profile_mode or "close_after_drain" in cell else "loadgen"
+        if cell.get("slow_turns"):
+            load_name = "loadgen_detail"
+        else:
+            load_name = "loadgen_drain" if profile_mode or "close_after_drain" in cell else "loadgen"
         lg_argv = [
             self.bin / load_name, f"port={PORT}", f"nports={nports}", f"sessions={cell['sessions']}",
             f"rate={rate:.0f}", f"f={int(cell['f'] * 1000)}", f"par={int(cell['par'])}",
@@ -292,6 +295,8 @@ class Runner:
             f"close_after_drain={int(cell.get('close_after_drain', False))}",
             f"phase_file={marker}", *(f"{k}={v}" for k, v in RUN.items()),
         ]
+        if cell.get("slow_turns"):
+            lg_argv.append(f"slow_turns={self.data / (trial_id + '.tsv')}")
         profile = None
         if profile_mode:
             profile = {"mode": profile_mode, "path": self.data / f"{trial_id}.perf.data"}

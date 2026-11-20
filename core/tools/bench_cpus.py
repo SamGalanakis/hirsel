@@ -38,7 +38,7 @@ def add_cpu_sets(parser, *, required=True):
     parser.add_argument("--measure-cpus", type=cpu_list, required=required, help="CPU list for measured processes")
 
 
-def sibling_cpus(measure_cpus, build_cpus=()):
+def sibling_cpus(measure_cpus, build_cpus=(), *, allow_smt=False):
     measure_cpus, build_cpus = set(measure_cpus), set(build_cpus)
     collisions = measure_cpus & build_cpus
     if collisions:
@@ -49,13 +49,13 @@ def sibling_cpus(measure_cpus, build_cpus=()):
         peers = set(cpu_list(topology.read_text().strip())) - {cpu}
         if shared := peers & build_cpus:
             raise ValueError(f"CPU {cpu} has SMT siblings in the build set: {sorted(shared)}")
-        if shared := peers & measure_cpus:
+        if (shared := peers & measure_cpus) and not allow_smt:
             raise ValueError(f"CPU {cpu} has SMT siblings in the measurement set: {sorted(shared)}")
-        siblings.update(peers)
+        siblings.update(peers - measure_cpus)
     return sorted(siblings)
 
 
-def validate_cpu_sets(parser, args, *, width=1, sequential=False):
+def validate_cpu_sets(parser, args, *, width=1, sequential=False, allow_smt=False):
     if args.build_cpus is None or args.measure_cpus is None:
         parser.error("--build-cpus and --measure-cpus are required to measure")
     if len(args.measure_cpus) < width:
@@ -64,7 +64,7 @@ def validate_cpu_sets(parser, args, *, width=1, sequential=False):
     if outside:
         parser.error(f"CPUs outside the caller's affinity: {sorted(outside)}")
     try:
-        return sibling_cpus(args.measure_cpus, () if sequential else args.build_cpus)
+        return sibling_cpus(args.measure_cpus, () if sequential else args.build_cpus, allow_smt=allow_smt)
     except (ValueError, OSError) as error:
         parser.error(str(error))
 

@@ -207,12 +207,13 @@ def sample_env(width, language, test_pool):
     return env
 
 
-def measured_command(directory, cpus, command, profile=False):
+def measured_command(directory, cpus, command, profile=False, cycles=False):
     if profile:
-        perf = ["perf", "record", "-N", "-e", "cycles:u", "-F", "3997",
+        perf = ["perf", "record", "-N", "--sample-cpu", "-e", "cycles:u", "-F", "3997",
                 "--call-graph", "dwarf,8192", "-o", directory / "perf.data"]
     else:
-        perf = ["perf", "stat", "-x", ";", "-e", "instructions:u,duration_time",
+        events = "instructions:u,duration_time" + (",cycles:u" if cycles else "")
+        perf = ["perf", "stat", "-x", ";", "-e", events,
                 "-o", directory / "perf.csv"]
     return ["taskset", "-c", ",".join(map(str, cpus)), str(ROOT / "tools/capped"),
             *map(str, perf), "--", "/usr/bin/time", "-f", "%M", "-o", str(directory / "rss.txt"),
@@ -220,15 +221,15 @@ def measured_command(directory, cpus, command, profile=False):
 
 
 def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0=False,
-            test_pool=False, *, command=None, profile=False):
+            test_pool=False, *, command=None, profile=False, allow_smt=False, cycles=False):
     width = len(cpus)
-    siblings = sibling_cpus(cpus)
+    siblings = sibling_cpus(cpus, allow_smt=allow_smt)
     command = command or sample_command(bins, case, language, width, size, s0)
     if not command[0].is_file():
         return {"status": "missing-binary"}
     directory = out / f"{case}-{language.lower()}-{width}"
     directory.mkdir()
-    launch = measured_command(directory, cpus, command, profile)
+    launch = measured_command(directory, cpus, command, profile, cycles)
     stdin = sample_stdin(bins, case, language)
     if lock_path:
         wait_load()
@@ -297,6 +298,8 @@ def validate_sample(directory, case, wanted, cpus, kernel=False):
             row["status"] = "missing-or-invalid-kernel-time"
             return row
         row["kernel_seconds"] = int(durations[0]) / 1e9
+    if "cycles:u" in counters:
+        row["cycles"] = counters["cycles:u"]
     return row | {
         "instructions": counters["instructions:u"],
         "seconds": counters["duration_time"] / 1e9,
@@ -432,7 +435,8 @@ def listening(process, directory, port):
     raise RuntimeError(f"server exited before listen ({process.returncode})")
 
 
-def observe_service(bins, directory, case, language, cpus, load_cpus, size, rounds, wanted, profile=False):
+def observe_service(bins, directory, case, language, cpus, load_cpus, size, rounds, wanted, *,
+                    profile=False, allow_smt=False, cycles=False):
     width = len(cpus)
     checkbox = case == "checkbox"
     work = regimes.WORKLOADS[case]
@@ -464,10 +468,10 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
     (directory / "command").write_text(shlex.join(map(str, server)) + "\n")
     launch = measured_command(directory, cpus, [
         "sh", "-c", 'printf "%s\\n" "$$" > "$1"; shift; exec "$@"', "server", pidfile, *server,
-    ], profile)
+    ], profile, cycles)
     cpus_text = ",".join(map(str, cpus))
     data = {"cpus": cpus_text, "load_cpus": ",".join(map(str, load_cpus))}
-    with (smt_activity(sibling_cpus(cpus), f"{case}/{language}/{width}") as busy,
+    with (smt_activity(sibling_cpus(cpus, allow_smt=allow_smt), f"{case}/{language}/{width}") as busy,
           (directory / "stdout").open("wb") as output, (directory / "stderr").open("wb") as err,
           subprocess.Popen(launch, cwd=ROOT, env=server_env, stdout=output, stderr=err) as process):
         try:
@@ -555,7 +559,8 @@ def host_snapshot(process):
 
 def run_regime_block(args, parser, bins, out, workers):
     # Keep the process checks and every pair inside the same lane lock.
-    with measurement_lock(args.lock):
+    with (measurement_lock(args.lock),
+          measurement_lock(args.also_lock) if args.also_lock else nullcontext()):
         before = host_snapshot(args.block_process_check)
         after = None
         result = None
@@ -583,10 +588,13 @@ def run_regimes(args, parser, bins, out, workers):
     if args.rounds is None:
         parser.error("--rounds is required with --regimes (use 0 or trial rounds for calibration)")
     if any(case == "checkbox" or regimes.WORKLOADS[case].connections for case in cases):
-        if not args.load_cpus or set(args.load_cpus).intersection(args.measure_cpus):
-            parser.error("socket and checkbox cases require disjoint --load-cpus")
-        if set(args.load_cpus).intersection(sibling_cpus(args.measure_cpus)):
-            parser.error("load CPUs must also be on separate physical cores")
+        if not args.load_cpus:
+            parser.error("socket and checkbox cases require --load-cpus")
+        if not args.allow_smt:
+            if set(args.load_cpus).intersection(args.measure_cpus):
+                parser.error("socket and checkbox cases require disjoint --load-cpus")
+            if set(args.load_cpus).intersection(sibling_cpus(args.measure_cpus)):
+                parser.error("load CPUs must also be on separate physical cores")
     if args.mode == "recorded":
         if args.case and any(not regimes.WORKLOADS[case].recorded for case in cases):
             parser.error("a selected case has no recording and replay path")
@@ -622,18 +630,22 @@ def run_regimes(args, parser, bins, out, workers):
                             tape = f"{out.name}-{tape}"
                             if work.connections or case == "checkbox":
                                 row = observe_service(bins, path, case, lang, cpus, args.load_cpus,
-                                                      size, rounds, wanted, args.profile)
+                                                      size, rounds, wanted, profile=args.profile,
+                                                      allow_smt=args.allow_smt, cycles=args.cycles)
                             else:
                                 extra = ("record", tape) if recorded else ()
                                 command = regimes.command(bins, case, lang, width, size, rounds, *extra)
                                 row = observe(bins, point, case, lang, cpus, size, wanted, False,
-                                              None, test_pool=True, command=command, profile=args.profile)
+                                              None, test_pool=True, command=command, profile=args.profile,
+                                              allow_smt=args.allow_smt, cycles=args.cycles)
                                 if path.exists():
                                     (path / "command").write_text(shlex.join(map(str, command)) + "\n")
                                     row["metrics"] = stderr_metrics(path)
                             row |= {"case": case, "language": lang, "width": width, "size": size,
                                     "rounds": rounds, "grain_ns": grain, "repeat": repeat,
                                     "mode": args.mode, "path": str(path.relative_to(out))}
+                            if args.allow_smt and args.load_cpus and set(cpus).intersection(args.load_cpus):
+                                row["placement"] = "SMT-bound, load shares the server CPUs"
                             if lang == "Hirsel" and path.exists():
                                 row["pool"] = pool_counters(path, case, size)
                             if recorded:
@@ -669,17 +681,23 @@ def main():
     parser.add_argument("--size", type=int, help="override the scheduler workload size")
     parser.add_argument("--mode", choices=("untaped", "recorded"), default="untaped")
     parser.add_argument("--load-cpus", type=cpu_list)
+    parser.add_argument("--allow-smt", action="store_true",
+                        help="allow benchmark and load CPU assignments to share cores or CPUs")
+    parser.add_argument("--cycles", action="store_true", help="also count user cycles in grain samples")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--repeat-workers", nargs="+", type=int, default=(1, 4, 8))
     parser.add_argument("--crossover-width", type=int, default=8, help="width to compare to 1 when rendering grain results")
     parser.add_argument("--profile", action="store_true", help="collect perf stacks instead of stat counters")
     add_cpu_sets(parser, required=False)
     parser.add_argument("--lock", type=Path, default=LOCK)
+    parser.add_argument("--also-lock", type=Path, help="acquire a second lock for the whole grain block")
     parser.add_argument("--block-process-check", metavar="NAME",
                         help="hold the lock for a grain block and reject it if NAME appears at either boundary")
     args = parser.parse_args()
     if args.block_process_check and (not args.regimes or args.read):
         parser.error("--block-process-check requires a grain measurement")
+    if args.also_lock and (not args.block_process_check or args.also_lock.resolve() == args.lock.resolve()):
+        parser.error("--also-lock requires a guarded block and a distinct lock path")
     if args.read:
         rows = [row for file in args.read for row in json.loads(file.read_text())]
         if args.regimes:
@@ -701,7 +719,7 @@ def main():
                 parser.error("supply one nonnegative --rounds value for each --grain-ns value")
             if (args.size is not None and args.size < 1) or args.repeats < 1:
                 parser.error("--size and --repeats must be positive")
-            validate_cpu_sets(parser, args, width=max(workers), sequential=True)
+            validate_cpu_sets(parser, args, width=max(workers), sequential=True, allow_smt=args.allow_smt)
             if args.load_cpus and not set(args.load_cpus).issubset(os.sched_getaffinity(0)):
                 parser.error("load CPUs outside the caller's affinity")
             os.sched_setaffinity(0, args.build_cpus)

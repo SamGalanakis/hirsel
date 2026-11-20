@@ -309,3 +309,11 @@ whole invocation and uses `pgrep -x` at both boundaries. It saves process
 IDs, load averages and timestamps to `block.json`. Exit 75 means the block
 must be repeated in a new output directory. A busy opening check starts no
 samples. The lock closes when the invocation ends.
+
+Use `--also-lock "$second_lock"` when the assigned CPUs require a second
+lock. Both locks cover the process checks and the samples. Use
+`--allow-smt` only when the assigned layout deliberately puts measured
+threads on both SMT siblings or puts the load generator on a server
+sibling or CPU. Keep both ports on the same layout and label results that
+share the server CPUs. `--cycles` adds user cycles to the process-tree
+counters.

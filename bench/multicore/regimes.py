@@ -171,6 +171,9 @@ def render(rows, crossover_width):
         key = (row["case"], row["mode"], row["grain_ns"], row["language"], row["width"])
         cells[key].append(row)
     widths = sorted({row["width"] for row in rows})
+    placements = {row["width"]: row["placement"] for row in rows if "placement" in row}
+    width_headers = [f"{width} ({placements[width]})" if width in placements else str(width)
+                     for width in widths]
     grains = sorted({row["grain_ns"] for row in rows})
     peers = ("Hirsel", "Tokio", "Go")
     good = {key: {r["repeat"]: rate(r) for r in records if r["status"] == "ok"}
@@ -183,7 +186,7 @@ def render(rows, crossover_width):
             if not points or case == "calibrate":
                 continue
             print(f"\n### {case}, {mode}\n")
-            print("| Grain target (ns) | Port | " + " | ".join(map(str, widths)) + " |")
+            print("| Grain target (ns) | Port | " + " | ".join(width_headers) + " |")
             print("| ---: | --- |" + " ---: |" * len(widths))
             for grain in grains:
                 for lang in peers:

@@ -617,8 +617,9 @@ def ingress_laws(args, root, work, engines, row):
 
 
 SETTLEMENT_LAWS = ('after_publication', 'settled_callinfo')
-# L28's owner half: a dropped unit's Outcome rows ride in a Reset that never closes 1008.
-RELEASE_LAWS = ('dropped_keeps_outcomes',)
+# L28's owner half: a dropped unit's Outcome rows ride in a Reset that never closes 1008,
+# and an owner removal reaches the publisher only while the writer holds no content unit.
+RELEASE_LAWS = ('dropped_keeps_outcomes', 'removal_waits_for_writer')
 
 
 def admission_laws(args, root, work, engines, row):

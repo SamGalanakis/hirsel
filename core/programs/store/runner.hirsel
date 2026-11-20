@@ -5760,8 +5760,13 @@ pub opaque type WireSession[G: send, H: send]: send {
     phase: u8, wants: List[Want], entries: List[Bytes], placing: u64,
     asking: bool, pending: Option[WirePending],
     held: Map[Bytes, WireHeld], refusals: u64, last: u64, generation: u64,
-    joined: Option[u64], joining: Option[Receiver[Admit]], join_lease: Option[WireJoinLease], marked: bool, mark: Option[Sender[()]], subscription: Option[(u32, SubscriptionInput)], subscription_room: Option[SubscriptionRoom], sub_generation: u64, subs: List[(u32, u64)], pub_subs: List[u32], reset_seen: bool
+    joined: Option[u64], joining: Option[Receiver[Admit]], join_lease: Option[WireJoinLease], marked: bool, mark: Option[Sender[()]], subscription: Option[(u32, SubscriptionInput)], subscription_room: Option[SubscriptionRoom], sub_generation: u64, subs: List[(u32, u64)], pub_subs: List[u32], reset_seen: bool,
+    holding: bool, leaving: List[WireJoinLease], resubs: List[WireResub]
 }
+
+// v2.19.2 (§3 "The owner asks for removal"): a replacing Subscribed held while the writer
+// holds a content unit. The owner already counts the new instance as live.
+type WireResub: send { sub: u32, generation: u64, input: SubscriptionInput }
 
 pub fn wire_service[G: send, H: send](take reg: Registry[G, H], access_gate: ingress.Ingress, head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H]] {
     wire_service_with_head(take reg, access_gate, LegacyHead(channel.sender(head)), clock, tasks, config, result.unwrap(launch_target(a)))
@@ -5775,7 +5780,8 @@ fn wire_service_with_head[G: send, H: send](take reg: Registry[G, H], access_gat
     let context = WireSession(registry: take reg, place: None, policy: ingress.share(access_gate), head: take head, clock: clock, tasks: tasks, config: config, target: take target,
         source: V4(0u32), me: None, publisher: None, caller: None, welcome_token: None, phase: 0u8, wants: list.new(), entries: list.new(), placing: 0u64,
         asking: false, pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64,
-        joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false)
+        joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false,
+        holding: false, leaving: list.new(), resubs: list.new())
     Service(context: take context, step: wire_step, ready: wire_can_read, allocate: wire_service_allocate, finish: wire_finish, check: wire_check_live)
 }
 
@@ -5967,7 +5973,7 @@ fn wire_reset_rows[G: send, H: send](mut s: WireSession[G, H], mut output: List[
     for take m in latest_marks { result.unwrap(list.push(mut marks, take m)) }
     let _ = replace(mut s.subs, list.new())
     let _ = replace(mut s.pub_subs, list.new())
-    let _ = replace(mut s.join_lease, None)
+    wire_leave(mut s)
     s.joined = None
     let _ = replace(mut s.joining, None)
     let _ = replace(mut s.subscription, None)
@@ -6255,8 +6261,24 @@ fn wire_subscribed[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
             return
         }
     }
-    let sent = channel.try_send(to_pub, PubIn(e: WireSubscribed(who, sub, generation, take input)))
-    if let Error(_) = take sent { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return }
+    if registered && s.holding {
+        // v2.19.2: this Subscribed removes the publisher's live instance, so it waits for the writer.
+        let mut at = 0u64
+        while at < list.len(s.resubs) && s.resubs[at].sub != sub { at += 1u64 }
+        let held = WireResub(sub: sub, generation: generation, input: take input)
+        if at == list.len(s.resubs) {
+            if let Error(_) = list.reserve(mut s.resubs, 1u64) {
+                wire_end(mut s, mut work.output, sub, Refused(Overloaded))
+                return
+            }
+            result.unwrap(list.push(mut s.resubs, take held))
+        } else {
+            let _ = list.set(mut s.resubs, at, take held)
+        }
+    } else {
+        let sent = channel.try_send(to_pub, PubIn(e: WireSubscribed(who, sub, generation, take input)))
+        if let Error(_) = take sent { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return }
+    }
     if index == list.len(s.subs) {
         result.unwrap(list.push(mut s.subs, (sub, generation)))
     } else {
@@ -6326,6 +6348,7 @@ fn wire_apply_subscribe[G: send, H: send](mut s: WireSession[G, H], mut work: Wi
         s.mark = Some(take closing)
         Join(to: wire_me(s), told: take told, mark: Some(take closed), closed: None, identity: Some(take identity), fence: Some(latest.handle(fence)))
     } else {
+        if let Error(_) = list.reserve(mut s.leaving, 1u64) { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) }
         let lease = match WireJoinLease(closing: take closing, publisher: wire_publisher(s)) { Ok(take l) => take l, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
         s.join_lease = Some(take lease)
         Join(to: wire_me(s), told: take told, mark: None, closed: Some(take closed), identity: Some(take identity), fence: Some(latest.handle(fence)))
@@ -6516,6 +6539,7 @@ fn wire_authenticate[G: send, H: send](mut s: WireSession[G, H], take principal:
 }
 
 fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, take input: ServiceInput) -> Result[Option[Frame], u16] {
+    s.holding = match work.check { Some(_) => true, None => false }
     match take input {
         WAttach(source, take me, take pub_to) => {
             s.source = source; s.me = Some(take me); s.publisher = Some(take pub_to)
@@ -6563,8 +6587,8 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
                 _ => {},
             }
         },
-        WSent => { wire_sent(mut s, mut work); return Ok(None) },
-        WDropped => { wire_dropped(mut s, mut work)?; return Ok(None) },
+        WSent => { wire_sent(mut s, mut work); wire_flush(mut s, mut work); return Ok(None) },
+        WDropped => { wire_dropped(mut s, mut work)?; wire_flush(mut s, mut work); return Ok(None) },
         WDrained => {
             if let Some(_) = work.head { let _ = channel.try_send(wire_publisher(s), PubIn(e: Drained)) }
         },
@@ -6672,20 +6696,61 @@ fn wire_forget_sub[G: send, H: send](mut s: WireSession[G, H], sub: u32) {
 
 fn wire_stop_sub[G: send, H: send](mut s: WireSession[G, H], mut output: List[WireOutput], sub: u32) {
     wire_remove_sub(mut s, mut output, sub)
+    let mut at = 0u64
+    while at < list.len(s.resubs) {
+        if s.resubs[at].sub == sub { let _ = list.remove(mut s.resubs, at) } else { at += 1u64 }
+    }
     if list.len(s.subs) == 0u64 {
-        let _ = replace(mut s.join_lease, None)
+        wire_leave(mut s)
         let _ = replace(mut s.joining, None)
         let _ = replace(mut s.subscription, None)
         s.joined = None
         let _ = replace(mut s.pub_subs, list.new())
         return
     }
+    if !s.holding { wire_unsubscribe(mut s, sub) }
+}
+
+fn wire_unsubscribe[G: send, H: send](mut s: WireSession[G, H], sub: u32) {
     let mut registered = false
     for id in s.pub_subs { if id == sub { registered = true } }
     if registered {
         if let Some(who) = s.joined {
             if let Ok(()) = channel.try_send(wire_publisher(s), PubIn(e: Unsubscribed(who, sub))) { wire_forget_sub(mut s, sub) }
         }
+    }
+}
+
+// v2.19.2 (§3 "The owner asks for removal"): the session leaves by dropping its join lease,
+// which tells the publisher to forget it. While the writer holds a content unit the lease
+// is parked, so the publisher keeps fencing the read sets that unit was computed from. The
+// join that made the lease reserved its parking slot, so parking allocates nothing.
+fn wire_leave[G: send, H: send](mut s: WireSession[G, H]) {
+    while let Some(_) = list.pop(mut s.resubs) {}
+    if let Some(take lease) = replace(mut s.join_lease, None) {
+        if s.holding { result.unwrap(list.push(mut s.leaving, take lease)) }
+    }
+}
+
+// The writer holds no content unit: the removals held for it go now, in the order the
+// publisher must apply them. A replacing Subscribed goes before the Unsubscribeds, and a
+// sub the owner no longer has but the publisher may (pub_subs) owes an Unsubscribed.
+fn wire_flush[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork) {
+    s.holding = false
+    while let Some(_) = list.pop(mut s.leaving) {}
+    while list.len(s.resubs) != 0u64 {
+        let WireResub(sub: sub, generation: generation, input: take input) = list.remove(mut s.resubs, 0u64)
+        let who = option.unwrap(s.joined)
+        if let Error(_) = channel.try_send(wire_publisher(s), PubIn(e: WireSubscribed(who, sub, generation, take input))) {
+            wire_end(mut s, mut work.output, sub, Refused(Overloaded))
+        }
+    }
+    let mut at = 0u64
+    while at < list.len(s.pub_subs) {
+        let sub = s.pub_subs[at]
+        let before = list.len(s.pub_subs)
+        if let None = sub_generation(s.subs, sub) { wire_unsubscribe(mut s, sub) }
+        if list.len(s.pub_subs) == before { at += 1u64 }
     }
 }
 

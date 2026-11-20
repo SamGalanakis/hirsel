@@ -602,3 +602,66 @@ pub fn law_dropped_keeps_outcomes(tasks: Tasks, c: Clock, r: Random) -> bool wai
 fn test_dropped_keeps_outcomes(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
     if law_dropped_keeps_outcomes(tasks, clock, random) { Ok(()) } else { Error(()) }
 }
+
+fn held_quiet(from: Receiver[PubIn]) -> bool {
+    match channel.try_receive(from) { Error(_) => true, _ => false }
+}
+
+// L28 (v2.19.2, remove_while_held): an owner removal (an Unsubscribed, a Subscribed that
+// replaces a live sub, or the leave a Reset makes) reaches the publisher only while the
+// writer holds no content unit. Otherwise the publisher forgets the read set the held unit
+// was computed from, a later hit no longer fences it, and the writer releases it stale.
+// Red on v2.19.1, which sent each removal at once.
+pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool waits {
+    let (access_gate, take policy_task) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
+    let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    let service = wire_service_seed(take reg, access_gate, head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
+    let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
+    let mut owner = take initial
+    let mut work = wire_work()
+    let (to, from): (Sender[PubIn], Receiver[PubIn]) = result.unwrap(channel.new(8u64))
+    let (closing, closed): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    owner.publisher = Some(channel.sender(to))
+    owner.joined = Some(1u64)
+    owner.phase = 3u8
+    result.unwrap(list.reserve(mut owner.leaving, 1u64))
+    owner.join_lease = Some(result.unwrap(WireJoinLease(closing: take closing, publisher: channel.sender(to))))
+    wire_subscribed(mut owner, mut work, 8u32, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg()))
+    wire_subscribed(mut owner, mut work, 9u32, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg()))
+    let idle_sent = match (channel.try_receive(from), channel.try_receive(from)) {
+        (Ok(PubIn(e: WireSubscribed(1u64, 8u32, _, _))), Ok(PubIn(e: WireSubscribed(1u64, 9u32, _, _)))) => true,
+        _ => false,
+    }
+
+    // The writer holds a content unit: a replacement of 9 and an Unsubscribe of 8 wait.
+    work.check = Some(4u64)
+    let replace_9: ServicePlan = PlannedSubscribe(9u32, SubscriptionInput(room: None, key: query_key(code.describe(qf)), arg: no_arg()))
+    let replaced = match wire_step(mut owner, mut work, WPrepared(result.unwrap(box.new(take replace_9)))) { Ok(_) => true, Error(_) => false }
+    let unsubscribed = match wire_step(mut owner, mut work, WClient(Unsubscribe(8u32), 0u64)) { Ok(_) => true, Error(_) => false }
+    let held = replaced && unsubscribed && held_quiet(from)
+    let sent = match wire_step(mut owner, mut work, WSent) { Ok(_) => true, Error(_) => false }
+    let flushed = sent && match (channel.try_receive(from), channel.try_receive(from)) {
+        (Ok(PubIn(e: WireSubscribed(1u64, 9u32, _, _))), Ok(PubIn(e: Unsubscribed(1u64, 8u32)))) => true,
+        _ => false,
+    } && held_quiet(from)
+
+    // A Reset made while the writer holds a unit keeps the session joined until it is sent.
+    work.check = Some(5u64)
+    let reset: ServicePlan = ResumeReset
+    let reset_made = match wire_step(mut owner, mut work, WPrepared(result.unwrap(box.new(take reset)))) { Ok(_) => true, Error(_) => false }
+    let lease_kept = reset_made && match channel.try_receive(closed) { Error(Empty) => true, _ => false } && held_quiet(from)
+    let _ = wire_step(mut owner, mut work, WSent)
+    let left = match channel.try_receive(closed) { Ok(()) => true, _ => false }
+
+    let mut policy_handle = take policy_task
+    task.cancel(mut policy_handle)
+    let _ = task.join(take policy_handle)
+    let _ = take requests
+    idle_sent && held && flushed && lease_kept && left
+}
+
+@test
+fn test_removal_waits_for_writer(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+    if law_removal_waits_for_writer(tasks, clock, random) { Ok(()) } else { Error(()) }
+}

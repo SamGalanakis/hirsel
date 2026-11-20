@@ -1,0 +1,522 @@
+const LANES: u64 = 16
+const TASK_BYTES: u64 = 65536
+const ROOT_BYTES: u64 = 268435456
+
+// Use the same xorshift recurrence in each port.
+fn kernel(seed: u64, rounds: u64) -> u64 {
+    let mut x = seed
+    for _ in 0 .. rounds {
+        x = x ^ (x << 13)
+        x = x ^ (x >> 7)
+        x = x ^ (x << 17)
+    }
+    x
+}
+
+type Work: send {
+    start: u64,
+    count: u64,
+    grain: u64,
+}
+
+fn compute(take job: Work) -> u64 {
+    let mut sum = 0u64
+    for i in 0 .. job.count {
+        sum = int.wrapping_add(sum, kernel(job.start + i, job.grain))
+    }
+    sum
+}
+
+fn independent(tasks: Tasks, lanes: u64, waves: u64, grain: u64) -> u64 waits {
+    let mut sum = 0u64
+    for wave in 0 .. waves {
+        let mut jobs: List[Task[u64]] = result.unwrap(list.with_capacity(lanes))
+        for lane in 0 .. lanes {
+            let job = Work(start: 1 + wave * lanes + lane, count: 1, grain: grain)
+            result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, job, compute))))
+        }
+        while let Some(take h) = list.pop(mut jobs) {
+            sum = int.wrapping_add(sum, result.unwrap(task.join(take h)))
+        }
+    }
+    sum
+}
+
+type Pair: send {
+    tasks: Tasks,
+    work: Work,
+}
+
+type Stage: send {
+    input: Receiver[u64],
+    output: Sender[u64],
+    count: u64,
+    grain: u64,
+}
+
+fn stage(take job: Stage) -> () waits {
+    for _ in 0 .. job.count {
+        let value = result.unwrap(channel.receive(job.input))
+        result.unwrap(channel.send(job.output, kernel(value, job.grain)))
+    }
+}
+
+fn pair(take job: Pair) -> u64 waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (out, reply): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let child = Stage(input: take rx, output: take out, count: job.work.count, grain: job.work.grain)
+    let h = result.unwrap(task.spawn(job.tasks, bytes TASK_BYTES, take child, stage))
+    let mut sum = 0u64
+    for i in 0 .. job.work.count {
+        result.unwrap(channel.send(tx, job.work.start + i))
+        sum = int.wrapping_add(sum, result.unwrap(channel.receive(reply)))
+    }
+    result.unwrap(task.join(take h))
+    sum
+}
+
+fn chain(take job: Pair) -> u64 waits {
+    let mut sum = 0u64
+    for i in 0 .. job.work.count {
+        let leaf = Work(start: job.work.start + i, count: 1, grain: job.work.grain)
+        let h = result.unwrap(task.spawn(job.tasks, bytes TASK_BYTES, leaf, compute))
+        sum = int.wrapping_add(sum, result.unwrap(task.join(take h)))
+    }
+    sum
+}
+
+fn parallel_pairs(tasks: Tasks, count: u64, grain: u64, f: fn(take Pair) -> u64 waits) -> u64 waits {
+    let mut jobs: List[Task[u64]] = list.new()
+    for lane in 0 .. LANES {
+        let job = Pair(tasks: tasks, work: Work(start: lane * count + 1, count: count, grain: grain))
+        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes 131072, job, f))))
+    }
+    let mut sum = 0u64
+    while let Some(take h) = list.pop(mut jobs) {
+        sum = int.wrapping_add(sum, result.unwrap(task.join(take h)))
+    }
+    sum
+}
+
+type Producer: send {
+    output: Sender[u64],
+    work: Work,
+}
+
+fn produce(take job: Producer) -> () waits {
+    for i in 0 .. job.work.count {
+        result.unwrap(channel.send(job.output, kernel(job.work.start + i, job.work.grain)))
+    }
+}
+
+fn collect(input: Receiver[u64], count: u64) -> u64 waits {
+    let mut sum = 0u64
+    for _ in 0 .. count {
+        sum = int.wrapping_add(sum, result.unwrap(channel.receive(input)))
+    }
+    sum
+}
+
+fn join_all(take pending: List[Task[()]]) waits {
+    let mut jobs = take pending
+    while let Some(take h) = list.pop(mut jobs) {
+        result.unwrap(task.join(take h))
+    }
+}
+
+fn fan_in(tasks: Tasks, count: u64, grain: u64) -> u64 waits {
+    let (out, input): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+    let mut jobs: List[Task[()]] = list.new()
+    for lane in 0 .. LANES {
+        let job = Producer(output: channel.sender(out), work: Work(start: lane * count + 1, count: count, grain: grain))
+        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, produce))))
+    }
+    let sum = collect(input, LANES * count)
+    join_all(take jobs)
+    sum
+}
+
+type Dispatch: send {
+    outputs: List[Sender[u64]],
+    count: u64,
+}
+
+fn dispatch(take job: Dispatch) -> () waits {
+    for i in 0 .. job.count {
+        for lane in 0 .. LANES {
+            result.unwrap(channel.send(job.outputs[lane], i * LANES + lane + 1))
+        }
+    }
+}
+
+fn fan_out(tasks: Tasks, count: u64, grain: u64) -> u64 waits {
+    let (out, input): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+    let mut jobs: List[Task[()]] = list.new()
+    let mut outputs: List[Sender[u64]] = list.new()
+    for _ in 0 .. LANES {
+        let (send, receive): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+        result.unwrap(list.push(mut outputs, take send))
+        let job = Stage(input: take receive, output: channel.sender(out), count: count, grain: grain)
+        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, stage))))
+    }
+    let job = Dispatch(outputs: take outputs, count: count)
+    result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, dispatch))))
+    let sum = collect(input, LANES * count)
+    join_all(take jobs)
+    sum
+}
+
+fn pipeline(tasks: Tasks, count: u64, grain: u64) -> u64 waits {
+    let (sender, receiver): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+    let mut input = take receiver
+    let mut jobs: List[Task[()]] = list.new()
+    for _ in 0 .. 8u64 {
+        let (out, next): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+        let job = Stage(input: take input, output: take out, count: count, grain: grain)
+        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, stage))))
+        input = take next
+    }
+    let source = Producer(output: take sender, work: Work(start: 1, count: count, grain: 0))
+    result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take source, produce))))
+    let sum = collect(input, count)
+    join_all(take jobs)
+    sum
+}
+
+type Branch: send {
+    tasks: Tasks,
+    start: u64,
+    leaves: u64,
+    grain: u64,
+}
+
+fn tree(take job: Branch) -> u64 waits {
+    if job.leaves == 1 { return kernel(job.start, job.grain) }
+    let half = job.leaves / 2
+    let left = Branch(tasks: job.tasks, start: job.start, leaves: half, grain: job.grain)
+    let right = Branch(tasks: job.tasks, start: job.start + half, leaves: half, grain: job.grain)
+    let allowance = (2 * half - 1) * TASK_BYTES
+    let a = result.unwrap(task.spawn(job.tasks, bytes allowance, left, tree))
+    let b = result.unwrap(task.spawn(job.tasks, bytes allowance, right, tree))
+    int.wrapping_add(result.unwrap(task.join(take a)), result.unwrap(task.join(take b)))
+}
+
+fn forest(tasks: Tasks, waves: u64, grain: u64) -> u64 waits {
+    let mut sum = 0u64
+    for wave in 0 .. waves {
+        sum = int.wrapping_add(sum, tree(Branch(tasks: tasks, start: wave * 64 + 1, leaves: 64, grain: grain)))
+    }
+    sum
+}
+
+type Hub: send {
+    request: Receiver[u64],
+    release: Receiver[()],
+    replies: List[Sender[()]],
+    count: u64,
+}
+
+fn broker(take job: Hub) -> () waits {
+    for _ in 0 .. job.count {
+        let lane = result.unwrap(channel.receive(job.request))
+        result.unwrap(channel.send(job.replies[lane], ()))
+        result.unwrap(channel.receive(job.release))
+    }
+}
+
+type Client: send {
+    request: Sender[u64],
+    release: Sender[()],
+    grant: Receiver[()],
+    lane: u64,
+    work: Work,
+}
+
+fn touch(take job: Client) -> u64 waits {
+    let mut sum = 0u64
+    for i in 0 .. job.work.count {
+        let value = kernel(job.work.start + i, job.work.grain)
+        result.unwrap(channel.send(job.request, job.lane))
+        result.unwrap(channel.receive(job.grant))
+        sum = int.wrapping_add(sum, value)
+        result.unwrap(channel.send(job.release, ()))
+    }
+    sum
+}
+
+fn hub(tasks: Tasks, count: u64, grain: u64) -> u64 waits {
+    let (request, requests): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (release, releases): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
+    let mut replies: List[Sender[()]] = list.new()
+    let mut clients: List[Task[u64]] = list.new()
+    for lane in 0 .. LANES {
+        let (grant, permit): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
+        result.unwrap(list.push(mut replies, take grant))
+        let job = Client(request: channel.sender(request), release: channel.sender(release), grant: take permit,
+                         lane: lane, work: Work(start: lane * count + 1, count: count, grain: grain))
+        result.unwrap(list.push(mut clients, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, touch))))
+    }
+    let job = Hub(request: take requests, release: take releases, replies: take replies, count: LANES * count)
+    let owner = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, broker))
+    let mut sum = 0u64
+    while let Some(take h) = list.pop(mut clients) {
+        sum = int.wrapping_add(sum, result.unwrap(task.join(take h)))
+    }
+    result.unwrap(task.join(take owner))
+    sum
+}
+
+type Shared: shareable + send {
+    value: u64,
+}
+
+type ArcJob: send {
+    shared: Arc[Shared],
+    work: Work,
+}
+
+fn arc_worker(take job: ArcJob) -> u64 {
+    let mut sum = 0u64
+    for i in 0 .. job.work.count {
+        let value = kernel(job.work.start + i, job.work.grain)
+        let shared = arc.share(job.shared)
+        sum = int.wrapping_add(sum, int.wrapping_add(value, shared.value))
+    }
+    sum
+}
+
+fn arc_hub(tasks: Tasks, count: u64, grain: u64) -> u64 waits {
+    let shared = result.unwrap(arc.new(Shared(value: 1)))
+    let mut jobs: List[Task[u64]] = list.new()
+    for lane in 0 .. LANES {
+        let job = ArcJob(shared: arc.share(shared), work: Work(start: lane * count + 1, count: count, grain: grain))
+        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, arc_worker))))
+    }
+    let mut sum = 0u64
+    while let Some(take h) = list.pop(mut jobs) {
+        sum = int.wrapping_add(sum, result.unwrap(task.join(take h)))
+    }
+    sum
+}
+
+type Sleeper: send {
+    clock: Clock,
+    id: u64,
+    grain: u64,
+    delay: u64,
+}
+
+fn sleeper(take job: Sleeper) -> (u64, u64) waits {
+    let deadline = host.mono_ns(job.clock) + job.delay
+    host.sleep_until(job.clock, deadline)
+    let lag = int.saturating_sub(host.mono_ns(job.clock), deadline)
+    (kernel(job.id, job.grain), lag)
+}
+
+type Hot: send {
+    pair: Pair,
+    clock: Clock,
+}
+
+fn hot_pair(take job: Hot) -> (u64, u64) waits {
+    let started = host.mono_ns(job.clock)
+    let sum = pair(job.pair)
+    (sum, host.mono_ns(job.clock) - started)
+}
+
+fn append(mut line: String, name: String, value: u64) {
+    result.unwrap(string.push(mut line, name))
+    result.unwrap(string.push_u64(mut line, value))
+    result.unwrap(string.push(mut line, "\n"))
+}
+
+fn timers(tasks: Tasks, clock: Clock, err: Stderr, count: u64, grain: u64, hot: u64) -> u64 waits {
+    let mut jobs: List[Task[(u64, u64)]] = result.unwrap(list.with_capacity(count))
+    let mut hot_tasks: List[Task[(u64, u64)]] = list.new()
+    if hot != 0 {
+        let work = Work(start: count + 1, count: hot, grain: grain)
+        let job = Hot(pair: Pair(tasks: tasks, work: work), clock: clock)
+        result.unwrap(list.push(mut hot_tasks, result.unwrap(task.spawn(tasks, bytes 131072, job, hot_pair))))
+    }
+    for i in 0 .. count {
+        let job = Sleeper(clock: clock, id: i + 1, grain: if hot == 0 { grain } else { 0 },
+                          delay: 2000000 + i * 1000)
+        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes 8192, job, sleeper))))
+    }
+    let mut sum = 0u64
+    let mut lag = 0u64
+    let mut worst = 0u64
+    while let Some(take h) = list.pop(mut jobs) {
+        let (value, ns) = result.unwrap(task.join(take h))
+        sum = int.wrapping_add(sum, value)
+        lag += ns
+        if ns > worst { worst = ns }
+    }
+    let mut line = string.new()
+    if let Some(take h) = list.pop(mut hot_tasks) {
+        let (value, elapsed) = result.unwrap(task.join(take h))
+        sum = int.wrapping_add(sum, value)
+        append(mut line, "hot-ns=", elapsed)
+    }
+    append(mut line, "wake-mean-ns=", lag / count)
+    append(mut line, "wake-max-ns=", worst)
+    result.unwrap(stderr.write(err, line))
+    sum
+}
+
+fn run(tasks: Tasks, clock: Clock, err: Stderr, name: String, count: u64, grain: u64) -> (u64, u64) waits {
+    let first = Work(start: 1, count: count, grain: grain)
+    let job = Pair(tasks: tasks, work: first)
+    if name == "independent16" {
+        (count * 16, independent(tasks, 16, count, grain))
+    } else if name == "independent256" {
+        (count * 256, independent(tasks, 256, count, grain))
+    } else if name == "pairs" {
+        (count * LANES, parallel_pairs(tasks, count, grain, pair))
+    } else if name == "single_pair" {
+        (count, pair(job))
+    } else if name == "fanin" {
+        (count * LANES, fan_in(tasks, count, grain))
+    } else if name == "fanout" {
+        (count * LANES, fan_out(tasks, count, grain))
+    } else if name == "pipeline" {
+        (count, pipeline(tasks, count, grain))
+    } else if name == "grain_spawn_join" {
+        (count, chain(job))
+    } else if name == "grain_spawn_chain" {
+        (count * LANES, parallel_pairs(tasks, count, grain, chain))
+    } else if name == "spawn_tree" {
+        (count * 64, forest(tasks, count, grain))
+    } else if name == "channel_hub" {
+        (count * LANES, hub(tasks, count, grain))
+    } else if name == "arc_hub" {
+        (count * LANES, arc_hub(tasks, count, grain))
+    } else if name == "skew" {
+        (count + 1000, timers(tasks, clock, err, 1000, grain, count))
+    } else if name == "timers" {
+        (count, timers(tasks, clock, err, count, grain, 0))
+    } else if name == "calibrate" {
+        let started = host.mono_ns(clock)
+        let sum = compute(first)
+        let mut line = string.new()
+        append(mut line, "kernel-ns=", host.mono_ns(clock) - started)
+        result.unwrap(stderr.write(err, line))
+        (count, sum)
+    } else {
+        fail("unknown grain workload")
+    }
+}
+
+type Connection: send {
+    socket: Socket,
+    count: u64,
+    grain: u64,
+}
+
+fn serve(take job: Connection) -> u64 waits {
+    let Connection(socket: take socket, count: count, grain: grain) = take job
+    let (reader, writer) = net.split(take socket)
+    let mut input = take reader
+    let mut output = take writer
+    let mut buffer: Bytes = result.unwrap(list.with_capacity(8))
+    let mut sum = 0u64
+    for _ in 0 .. count {
+        list.clear(mut buffer)
+        while list.len(buffer) < 8 {
+            let received = result.unwrap(host.recv_bounded(mut input, mut buffer, 8, Never))
+            if received == 0 { fail("socket closed during request") }
+        }
+        let mut value = 0u64
+        for i in 0 .. 8u64 {
+            value |= int.wrapping_shl(int.widen(buffer[i]), int.narrow(i * 8))
+        }
+        let mixed = kernel(value, grain)
+        sum = int.wrapping_add(sum, mixed)
+        list.clear(mut buffer)
+        for i in 0 .. 8u64 {
+            result.unwrap(list.push(mut buffer, int.truncate(mixed >> (8 * i))))
+        }
+        let mut sent = 0u64
+        while sent < 8 {
+            let written = result.unwrap(host.send_pair(mut output, list.slice(buffer, sent, 8), string.as_bytes(""), Never))
+            if written == 0 { fail("socket closed during reply") }
+            sent += written
+        }
+    }
+    sum
+}
+
+fn sockets(tasks: Tasks, net: Net, err: Stderr, port: u16, connections: u64, count: u64, grain: u64) -> u64 waits {
+    let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001), port: port), 128))
+    let mut line = string.new()
+    append(mut line, "listening=", int.widen(address.port))
+    result.unwrap(stderr.write(err, line))
+    let mut input = take listener
+    let mut jobs: List[Task[u64]] = list.new()
+    for _ in 0 .. connections {
+        let (take socket, _) = result.unwrap(host.accept(mut input, Never))
+        let job = Connection(socket: take socket, count: count, grain: grain)
+        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, serve))))
+    }
+    let mut sum = 0u64
+    while let Some(take h) = list.pop(mut jobs) {
+        sum = int.wrapping_add(sum, result.unwrap(task.join(take h)))
+    }
+    sum
+}
+
+fn receipt(completed: u64, sum: u64) -> String {
+    let mut line = string.new()
+    result.unwrap(string.push_u64(mut line, completed))
+    result.unwrap(string.push(mut line, " "))
+    result.unwrap(string.push_u64(mut line, sum))
+    result.unwrap(string.push(mut line, "\n"))
+    line
+}
+
+pub fn main(tasks: Tasks, net: Net, clock: Clock, dir: Dir, out: Stdout, err: Stderr, argv: Args) -> Result[(), Exit] waits {
+    let Some(name) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
+    let Some(size) = args.get(argv, 1) else { return Error(Exit(status: 2)) }
+    let Some(rounds) = args.get(argv, 2) else { return Error(Exit(status: 2)) }
+    let count: u64 = result.unwrap(int.parse(size))
+    let grain: u64 = result.unwrap(int.parse(rounds))
+    if name == "socket_server" {
+        let Some(port) = args.get(argv, 3) else { return Error(Exit(status: 2)) }
+        let Some(clients) = args.get(argv, 4) else { return Error(Exit(status: 2)) }
+        let connections: u64 = result.unwrap(int.parse(clients))
+        let sum = sockets(tasks, net, err, result.unwrap(int.parse(port)), connections, count, grain)
+        result.unwrap(stdout.write(out, receipt(connections * count, sum)))
+        return Ok(())
+    }
+    if let Some(mode) = args.get(argv, 3) {
+        let Some(path) = args.get(argv, 4) else { return Error(Exit(status: 2)) }
+        let operation: tape.Mode = if mode == "record" {
+            Record
+        } else if mode == "replay" {
+            Replay
+        } else {
+            return Error(Exit(status: 2))
+        }
+        // The workload arguments are checked by the checksum on both runs.
+        let header = tape.Header(id: (1, 1), identity: "multicore-regimes", arg: list.new(), limit: ROOT_BYTES)
+        let mut recording = match tape.open(dir, path, operation, header) {
+            Ok(take value) => take value,
+            Error(_) => return Error(Exit(status: 3)),
+        }
+        let recorded_tasks = tape.tasks(mut recording, tasks)
+        let (completed, sum) = run(recorded_tasks, clock, err, name, count, grain)
+        let line = receipt(completed, sum)
+        let mut outcome: Bytes = list.new()
+        for i in 0 .. 8u64 {
+            result.unwrap(list.push(mut outcome, int.truncate(sum >> (8 * i))))
+        }
+        match tape.end(take recording, Ok(take outcome)) {
+            Sealed => result.unwrap(stdout.write(out, line)),
+            Faulted(_) => return Error(Exit(status: 4)),
+        }
+    } else {
+        let (completed, sum) = run(tasks, clock, err, name, count, grain)
+        result.unwrap(stdout.write(out, receipt(completed, sum)))
+    }
+    Ok(())
+}

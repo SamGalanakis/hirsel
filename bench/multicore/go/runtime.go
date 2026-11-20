@@ -101,6 +101,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	if len(os.Args) == 5 {
+		completed, checksum := runGrain(os.Args[1], rounds, os.Args[4])
+		fmt.Println(completed, checksum)
+		return
+	}
 	var sum uint64
 	switch os.Args[1] {
 	case "spawn_join":

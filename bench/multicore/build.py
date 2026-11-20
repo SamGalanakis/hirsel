@@ -2,11 +2,13 @@
 """Build the multicore benchmark programs outside the repository."""
 import argparse
 from html import unescape
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 
 BENCH = Path(__file__).resolve().parent
@@ -110,18 +112,20 @@ def time_rust_kernel(text, case):
 ''' + after)
 
 
-def build_rust(out, game, standard, s0=False, s8u=False):
+def build_rust(out, game, standard, s0=False, s8u=False, regimes=False):
     path = out / "rust"
     path.mkdir(exist_ok=True)
     crate = BENCH / "rust"
-    if s8u:
+    if regimes:
+        binaries = ["--bin", "regimes"]
+    elif s8u:
         binaries = ["--bin", "s8u"]
     elif s0:
         binaries = ["--bin", "runtime", "--bin", "s0"]
     else:
         binaries = ["--bin", "runtime"]
     cargo = subprocess.check_output(
-        [str(ROOT / "tools/capped"), "cargo", "build", "--release", "--locked",
+        [str(ROOT / "tools/capped"), "cargo", "build", "--release", "--locked", "-j2",
          "--manifest-path", str(crate / "Cargo.toml"), "--target-dir", str(out / "cargo"),
          *binaries, "--message-format=json"],
         cwd=crate, env=os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "2"},
@@ -137,9 +141,9 @@ def build_rust(out, game, standard, s0=False, s8u=False):
                     externs[target] = file
             if target == "runtime" and artifact["executable"]:
                 shutil.copy2(artifact["executable"], out / "tokio")
-            if target in {"s0", "s8u"} and artifact["executable"]:
+            if target in {"s0", "s8u", "regimes"} and artifact["executable"]:
                 shutil.copy2(artifact["executable"], path / target)
-    if s0 or s8u:
+    if s0 or s8u or regimes:
         return
     rustc = subprocess.check_output(
         ["rustup", "which", "--toolchain", "1.99.0", "rustc"], text=True
@@ -168,6 +172,10 @@ def build_go(out, game, go):
     path = out / "go"
     path.mkdir(exist_ok=True)
     env = os.environ | {"GOAMD64": "v2", "GOMAXPROCS": "2", "GOTOOLCHAIN": "local"}
+    run([go, "build", "-p", "2", "-o", path / "runtime",
+         BENCH / "go/runtime.go", BENCH / "go/regimes.go"], env=env)
+    if game is None:
+        return
     for case, (_, version) in GAME_ROWS.items():
         src = out / f"{case}.go"
         src.write_text(go_source(game, case, version))
@@ -175,7 +183,6 @@ def build_go(out, game, go):
     src = out / "fasta.go"
     src.write_text(source(game, "fasta", "go", 1))
     run([go, "build", "-o", path / "fasta", src], env=env)
-    run([go, "build", "-o", path / "runtime", BENCH / "go/runtime.go"], env=env)
     with (out / "input.fasta").open("wb") as file:
         run([path / "fasta", "120000"], stdout=file, env=env)
 
@@ -203,7 +210,7 @@ def hirsel_inputs(src):
     ]}
 
 
-def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False):
+def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=False):
     path = out / "hirsel"
     path.mkdir(exist_ok=True)
     llvm = ROOT / "tools/buck2/toolchains/llvm-files"
@@ -214,6 +221,8 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False):
     succeeded = True
     for src in sorted((BENCH / "hirsel").glob("*.hirsel")):
         case = src.stem
+        if (case == "regimes") != regimes:
+            continue
         if case.startswith("s8u_") != s8u:
             continue
         if s0 and case not in {"runtime", "matmul_t16"}:
@@ -235,6 +244,9 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False):
             command += ["--grant", "Clock", "--grant", "Stderr"]
         if s8u:
             command += ["--grant", "Clock"]
+        if regimes:
+            command += ["--grant", "Clock", "--grant", "Stderr", "--debug-lines", "on",
+                        "--grant", "Net=Listen 127.0.0.1/32 0-65535"]
         if engine == "llvm":
             command.append("--release")
         with log.open("wb") as file:
@@ -244,6 +256,42 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False):
             (path / case).unlink(missing_ok=True)
             print(f"Hirsel {case}: exit {result.returncode}; see {log}", flush=True)
     return succeeded
+
+
+def build_checkbox(out, compiler, runtime):
+    wire_target = out / "wire"
+    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "2"}
+    run([ROOT / "tools/capped", "cargo", "build", "-j2", "--release", "--locked", "--bins",
+         "--manifest-path", ROOT / "bench/wire/Cargo.toml", "--target-dir", wire_target], env=env)
+    spec = importlib.util.spec_from_file_location(
+        "checkbox_run", ROOT / "core/programs/checkbox/run.py")
+    checkbox = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checkbox)
+    work = out / "checkbox"
+    web = work / "web"
+    web.mkdir(parents=True, exist_ok=True)
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    listen = f"127.0.0.1:{port}"
+    clang = ROOT / "tools/buck2/toolchains/llvm-files/bin/clang"
+    with (work / "build.log").open("wb") as log:
+        binary = checkbox.build(
+            compiler, work, web, listen, prefix=(ROOT / "tools/capped",),
+            flags=("--backend", "llvm", "--release", "--runtime", runtime, "--cc", clang, "--json"),
+            stdout=log, env=env,
+        )
+    run([ROOT / "tools/capped", compiler, "sdk", "ts", binary, "--out", web,
+         "--n-place", checkbox.N_PLACE, "--runtime", runtime, "--cc", clang], env=env)
+    run(["node", "--input-type=module", "-e", """
+import { writeFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+const base = pathToFileURL(process.argv[1] + '/');
+const { Frame } = await import(new URL('frame.js', base));
+const { want } = await import(new URL('entries.js', base));
+await writeFile(process.argv[2], Frame.encode({tag: 'Hello', values: [{tag: 'None'}, want]}));
+""", web, work / "wants.bin"])
+    (work / "port").write_text(str(port) + "\n")
 
 
 def build_goose(out, compiler):
@@ -263,15 +311,18 @@ def main():
     parser.add_argument("--go", default="go")
     parser.add_argument("--goose", type=Path, help="Goose compiler built from d5ae5bbd")
     parser.add_argument("--hirsel", type=Path, help="release Hirsel driver")
-    parser.add_argument("--runtime", type=Path, help="shipping native runtime archive")
+    parser.add_argument("--runtime", type=Path, help="native runtime archive (testing for --regimes)")
     parser.add_argument("--engine", choices=["llvm", "cranelift"], default="llvm")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--languages", nargs="+", choices=["rust", "go", "hirsel", "goose"])
+    selection.add_argument("--regimes", action="store_true", help="build the scheduler grain fixtures")
     selection.add_argument("--s8u", action="store_true", help="build only the S8u search fixtures")
     selection.add_argument("--s0", action="store_true", help="build only the S0 Hirsel, Tokio and Rust fixtures")
     selection.add_argument("--standard-rust", action="store_true", help="build published Rust data inputs and phase timings")
     options = parser.parse_args()
-    if options.s8u:
+    if options.regimes:
+        languages = ["rust", "go", "hirsel"]
+    elif options.s8u:
         languages = ["rust", "hirsel"]
     elif options.s0:
         languages = ["rust", "hirsel"]
@@ -281,7 +332,7 @@ def main():
     if out.is_relative_to(ROOT):
         parser.error("--out must be outside the repository")
     for needed, for_languages in [
-        ("game", set() if options.s0 or options.s8u else {"rust", "go"}), ("goose", {"goose"}),
+        ("game", set() if options.s0 or options.s8u or options.regimes else {"rust", "go"}), ("goose", {"goose"}),
         ("hirsel", {"hirsel"}), ("runtime", {"hirsel"}),
     ]:
         if for_languages.intersection(languages) and getattr(options, needed) is None:
@@ -290,13 +341,15 @@ def main():
     succeeded = True
     for language in dict.fromkeys(languages):
         if language == "rust":
-            build_rust(out, options.game, options.standard_rust, options.s0, options.s8u)
+            build_rust(out, options.game, options.standard_rust, options.s0, options.s8u, options.regimes)
         elif language == "go":
-            build_go(out, options.game.resolve(), options.go)
+            build_go(out, options.game.resolve() if options.game else None, options.go)
         elif language == "hirsel":
-            succeeded = build_hirsel(out, options.hirsel.resolve(), options.runtime.resolve(), options.engine, options.s0, options.s8u)
+            succeeded = build_hirsel(out, options.hirsel.resolve(), options.runtime.resolve(), options.engine, options.s0, options.s8u, options.regimes)
         elif language == "goose":
             build_goose(out, options.goose.resolve())
+    if options.regimes:
+        build_checkbox(out, options.hirsel.resolve(), options.runtime.resolve())
     return 0 if succeeded else 1
 
 

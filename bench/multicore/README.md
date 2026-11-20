@@ -302,3 +302,10 @@ publication-to-acquisition time for queued hand-offs. The hand-off interval
 excludes any wait before publication. Acquisitions per explicit workload
 operation use the source-level operation count, since the testing archive
 has no total for implicit charge, refund, dispatch and cleanup events.
+
+For a guarded block, select its cases with `--case` and pass
+`--block-process-check cc1plus`. The runner holds the named lock across the
+whole invocation and uses `pgrep -x` at both boundaries. It saves process
+IDs, load averages and timestamps to `block.json`. Exit 75 means the block
+must be repeated in a new output directory. A busy opening check starts no
+samples. The lock closes when the invocation ends.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Measure one process-tree sample per workload, language, and worker count."""
 import argparse
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from datetime import datetime
 from collections import Counter
 import fcntl
 import hashlib
@@ -534,6 +535,46 @@ def replay_sample(bins, path, row, tape, cpu, wanted):
         shutil.move(bins / tape, path / "run.tape")
 
 
+@contextmanager
+def measurement_lock(path):
+    with path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def host_snapshot(process):
+    result = subprocess.run(["pgrep", "-x", "--", re.escape(process)], capture_output=True, text=True)
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"pgrep exit {result.returncode}: {result.stderr.strip()}")
+    return {
+        "time": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "load_average": os.getloadavg(),
+        "pids": [int(pid) for pid in result.stdout.split()],
+    }
+
+
+def run_regime_block(args, parser, bins, out, workers):
+    # Keep the process checks and every pair inside the same lane lock.
+    with measurement_lock(args.lock):
+        before = host_snapshot(args.block_process_check)
+        after = None
+        result = None
+        try:
+            if not before["pids"]:
+                result = run_regimes(args, parser, bins, out, workers)
+        finally:
+            if not before["pids"]:
+                after = host_snapshot(args.block_process_check)
+            clean = after is not None and not after["pids"]
+            block = {"process": args.block_process_check, "before": before, "after": after,
+                     "clean": clean, "sample_exit": result}
+            (out / "block.json").write_text(json.dumps(block, indent=2) + "\n")
+        if not clean:
+            print(f"block overlaps {args.block_process_check}: {out / 'block.json'}", file=sys.stderr)
+            return 75
+        return result
+
+
 def run_regimes(args, parser, bins, out, workers):
     cases = tuple(dict.fromkeys(args.case or (case for case in regimes.WORKLOADS if case != "calibrate")))
     if not set(cases).issubset(regimes.WORKLOADS):
@@ -567,8 +608,7 @@ def run_regimes(args, parser, bins, out, workers):
                 for repeat in range(1, repeats + 1):
                     point = out / f"{case}-{grain}ns-{rounds}r-w{width}-r{repeat}"
                     point.mkdir()
-                    with args.lock.open("a") as lock:
-                        fcntl.flock(lock, fcntl.LOCK_EX)
+                    with nullcontext() if args.block_process_check else measurement_lock(args.lock):
                         group = []
                         for lang in ("Hirsel", "Tokio", "Go"):
                             if (args.languages and lang not in args.languages
@@ -635,7 +675,11 @@ def main():
     parser.add_argument("--profile", action="store_true", help="collect perf stacks instead of stat counters")
     add_cpu_sets(parser, required=False)
     parser.add_argument("--lock", type=Path, default=LOCK)
+    parser.add_argument("--block-process-check", metavar="NAME",
+                        help="hold the lock for a grain block and reject it if NAME appears at either boundary")
     args = parser.parse_args()
+    if args.block_process_check and (not args.regimes or args.read):
+        parser.error("--block-process-check requires a grain measurement")
     if args.read:
         rows = [row for file in args.read for row in json.loads(file.read_text())]
         if args.regimes:
@@ -662,6 +706,8 @@ def main():
                 parser.error("load CPUs outside the caller's affinity")
             os.sched_setaffinity(0, args.build_cpus)
             out.mkdir(parents=True)
+            if args.block_process_check:
+                return run_regime_block(args, parser, bins, out, workers)
             return run_regimes(args, parser, bins, out, workers)
         if args.s0 and args.standard_rust:
             parser.error("--s0 and --standard-rust select different workloads")

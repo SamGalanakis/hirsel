@@ -53,9 +53,9 @@ def build(compiler, work, web, listen, source=PROGRAM / "main.hirsel", store_sou
     subprocess.run([
         *prefix, compiler, "build", *flags, "--source-core", "--inputs", inputs(work, source, store_sources),
         "--store", work / "compiler-store", "--entry", ENTRY + "/main",
-        "--dir", data, "--dir", web, "--grant", "Tasks", "--grant", "Clock",
+        "--dir", data, "--dir", web, "--grant", "Tasks", "--grant", "Clock", "--grant", "Process",
         "--grant", "Random", "--grant", f"Net=Listen {listen.rsplit(':', 1)[0]}/32 {port}-{port}",
-        "--limit", str(2 << 30), "-o", executable,
+        "--limit", str(3 << 30), "-o", executable,
     ], check=True, cwd=ROOT, env=env, stdout=stdout)
     return executable
 

@@ -169,62 +169,33 @@ fn settings(a: Args) -> Result[Settings, Exit] {
     Ok(Settings(listen: listen, proxies: take proxies, policy: policy))
 }
 
-type Server: send {
-    listener: Listener,
-    clock: Clock,
-    tasks: Tasks,
-    args: Args,
-    head: Sender[store.runner.Req],
-    post: Sender[store.runner.PubIn],
-    policy: store.ingress.Ingress,
-    proxies: List[std.wsock.Prefix],
-    config: store.runner.WireConfig,
-}
+// A stop admits for no extra time, then gives admitted work and open sessions this long.
+const STOP_GRACE_MS: u64 = 5000u64
 
-fn serve(take server: Server) -> Result[(), std.wsock.Error] waits {
-    let Server(listener: take listener, clock: c, tasks: tasks, args: a, head: take head, post: take post, policy: take policy, proxies: take proxies, config: config) = take server
-    let service: scoped[view] fn() -> store.runner.Service[store.runner.WireSession[(), Handles]] = fn() -> store.runner.Service[store.runner.WireSession[(), Handles]] {
-        store.runner.wire_place_service(code.describe(place), policy, head, c, tasks, config, a)
-    }
-    store.runner.serve_admitted(take listener, tasks, c, post, config, store.runner.WIRE_OWNER_LIMIT, take proxies, policy, service)
-}
-
-fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
+// runner.operate owns the place from store open to store close; a SIGINT or SIGTERM closes
+// `stop` (runner.main), which drains and closes the store.
+fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, take stop: Receiver[()]) -> Result[(), Exit] waits {
     let selection = store.runner.launch_selection(a)?
     let Settings(listen: listen, proxies: take proxies, policy: options) = settings(a)?
-    let failed = Exit(status: 1u8)
-    let db = match store.store.open(tasks, directory, c, random, store.store.defaults()) {
-        Ok(take value) => take value,
-        Error(_) => return Error(failed),
-    }
     let (policy, take admission_task) = result.unwrap(store.ingress.start(tasks, c, random, options, 8388608u64))
-    let (head, inbox): (Sender[store.runner.Req], Receiver[store.runner.Req]) = result.unwrap(channel.new(256u64))
-    let mail = result.unwrap(store.runner.mailbox(256u64))
-    let (take listener, _) = match host.listen(n, listen, 128u16) {
-        Ok(take pair) => take pair,
-        Error(_) => return Error(failed),
-    }
-    let mut config = store.runner.wire_defaults(65536u64, N_PLACE)
-    config.site = Some(std.wsock.Site(dir: web, find: asset))
-    let server = Server(listener: take listener, clock: c, tasks: tasks, args: a, head: take head, post: store.runner.post(mail), policy: take policy, proxies: take proxies, config: config)
-    let mut serving = match task.spawn(tasks, bytes 1153433600u64, take server, serve) {
-        Ok(take job) => take job,
-        Error(_) => return Error(failed),
-    }
-    let ended = store.runner.place_head_selected(take db, selection, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), DirectRequests(take inbox), take mail, tasks, 67108864u64)
-    task.cancel(mut serving)
-    let _ = task.join(take serving)
+    let mut session = store.runner.wire_defaults(65536u64, N_PLACE)
+    session.site = Some(std.wsock.Site(dir: web, find: asset))
+    let config: store.runner.PlaceConfig[(), Handles, ()] = store.runner.PlaceConfig(backing: Disk(directory, store.store.defaults()),
+        selection: selection, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
+        session: session, max_sessions: store.runner.WIRE_OWNER_LIMIT, proxies: take proxies, policy: take policy, n_publisher: 67108864u64,
+        listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), triggers: None)
+    let ended = store.runner.operate(take config, take stop, result.unwrap(store.runner.status_root()), None)
     let mut admission = take admission_task
     task.cancel(mut admission)
     let _ = task.join(take admission)
-    if let Error(_) = ended {
-        return Error(failed)
+    match ended {
+        Ok(_) => Ok(()),
+        Error(_) => Error(Exit(status: 1u8)),
     }
-    Ok(())
 }
 
-pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
-    store.runner.launch_server(a, code.describe(place), scoped fn() -> Result[(), Exit] waits {
+pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process) -> Result[(), Exit] waits {
+    store.runner.main(a, process, tasks, code.describe(place), scoped fn(take stop: Receiver[()]) -> Result[(), Exit] waits {
         if let Some(take candidate) = store.runner.launch_prepare_args(a)? {
             let store.runner.PrepareArgs(attempt: take attempt, digest: take digest) = take candidate
             let setup = store.runner.PrepareConfig(scratch: directory, options: store.store.defaults(),
@@ -232,7 +203,7 @@ pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: T
                 place: code.describe(place), migrate: code.describe(migrate), handles: code.describe(handles))
             return match store.runner.prepare_deploy(setup) { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 1u8)) }
         }
-        start(n, directory, web, c, random, tasks, a)
+        start(n, directory, web, c, random, tasks, a, take stop)
     })
 }
 

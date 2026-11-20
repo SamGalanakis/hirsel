@@ -34,8 +34,8 @@ SERVER_EDITS = {
                              "        let _ = list.remove(mut live_rows, 0u64)\n"
                              "    }\n"
                              "    let requested = wire_rows_size(live_rows)"),
-    "old_owner_limit": ("main", "config, store.runner.WIRE_OWNER_LIMIT, take proxies",
-                        "config, 1024u64, take proxies"),
+    "old_owner_limit": ("main", "max_sessions: store.runner.WIRE_OWNER_LIMIT,",
+                        "max_sessions: 1024u64,"),
     "no_ip_session_limit": ("ingress", "if s.free == 0u64 { RejectedPolicy } else {",
                             "if false { RejectedPolicy } else {"),
     "no_principal_rate": ("ingress", "if s.mint_count >= c.mint_burst { false } else {", "if false { false } else {"),

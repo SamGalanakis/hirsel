@@ -187,6 +187,7 @@ fn main() {
     let mut lat: Vec<u64> = Vec::new();
     let mut e2e: Vec<u64> = Vec::new();
     let mut max_added_turn: Option<(u64, &Rec)> = None;
+    let mut last_reply = 0;
     // Write diagnostics only after all replies and connection closes.
     let mut slow = kv.get("slow_turns").map(|path| {
         let mut out = BufWriter::new(std::fs::File::create(path).unwrap());
@@ -200,6 +201,7 @@ fn main() {
         hot_issued += hot_count;
         for r in recs {
             completed += 1;
+            last_reply = last_reply.max(r.done);
             if !r.ok { failures += 1; }
             if r.done > end + 1_000_000_000 { late += 1; }
             if r.done >= warm_ns && r.done < end {
@@ -236,8 +238,9 @@ fn main() {
         "\"measured\":{},\"p50_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"max_ns\":{},\"e2e_p50_ns\":{},\"e2e_p99_ns\":{},",
         "\"hot_issued\":{},\"hot_completed_in_run\":{},\"hot_turns_per_s\":{},",
         "\"start_ns\":{},\"warm_ns\":{},\"end_ns\":{},\"completed_after_warm_in_run\":{},",
-        "\"max_added_ready_ns\":{},\"max_added_done_ns\":{},\"first_close_ns\":{}}}"
+        "\"max_added_ready_ns\":{},\"max_added_done_ns\":{},\"first_close_ns\":{},\"last_reply_ns\":{}}}"
     ), issued, completed, failures, timeouts, late, rate,
         lat.len(), q(0.5), q(0.99), q(0.999), lat.last().copied().unwrap_or(0), qe(0.5), qe(0.99),
-        hot_issued, hot_completed, hot_turns_per_s, start, warm_ns, end, in_window, max_ready, max_done, first_close);
+        hot_issued, hot_completed, hot_turns_per_s, start, warm_ns, end, in_window, max_ready, max_done,
+        first_close, last_reply);
 }

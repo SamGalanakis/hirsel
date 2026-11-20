@@ -352,7 +352,9 @@ fn main() {
         .enable_all()
         .build()
         .unwrap();
-    let (completed, sum) = runtime.block_on(async {
+    // The driver runs on a runtime worker like the Hirsel and Go drivers;
+    // main only waits, so no round crosses the injector to the main thread.
+    let driver = runtime.spawn(async move {
         match args[1].as_str() {
             "socket_server" => {
                 socket_server(
@@ -369,5 +371,6 @@ fn main() {
             name => run(name, count, grain).await,
         }
     });
+    let (completed, sum) = runtime.block_on(driver).unwrap();
     println!("{completed} {sum}");
 }

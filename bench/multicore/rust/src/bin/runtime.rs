@@ -110,8 +110,11 @@ fn main() {
         .worker_threads(workers)
         .build()
         .unwrap();
-    let (sum, completed) = runtime.block_on(async {
-        match args[1].as_str() {
+    // The driver runs on a runtime worker like the Hirsel and Go drivers;
+    // main only waits, so no round crosses the injector to the main thread.
+    let case = args[1].clone();
+    let driver = runtime.spawn(async move {
+        match case.as_str() {
             "spawn_join" => spawn_join(rounds).await,
             "spawn_chain" => (spawn_chain(rounds).await, 0),
             "ping_pong" => ping_pong(rounds, 1).await,
@@ -122,6 +125,7 @@ fn main() {
             case => panic!("unknown workload: {case}"),
         }
     });
+    let (sum, completed) = runtime.block_on(driver).unwrap();
     if args.get(4).is_some_and(|mode| mode == "work-receipt") {
         println!("{completed} {sum}");
     } else {

@@ -382,9 +382,10 @@ impl VacantSlots {
 
 thread_local! {
     static THREAD: u8 = const { 0 };
-    static BOUND: Cell<Option<Binding>> = const { Cell::new(None) };
     static VACANT: RefCell<Option<VacantSlots>> = const { RefCell::new(None) };
 }
+
+crate::units::moved_tls! { static BOUND: Option<Binding> = None; }
 
 pub(crate) fn preserve_binding<R>(run: impl FnOnce() -> R) -> R {
     struct Restore(Option<Binding>);
@@ -400,7 +401,17 @@ pub(crate) fn preserve_binding<R>(run: impl FnOnce() -> R) -> R {
 }
 #[inline(always)]
 fn thread() -> usize {
+    // mc-units-untied: a unit is the owner, whichever worker runs it.
+    if crate::units::untied() {
+        return crate::units::identity();
+    }
     THREAD.with(|v| v as *const u8 as usize)
+}
+#[inline(never)]
+pub(crate) fn check_unbound() {
+    if BOUND.get().is_some() || VACANT.with_borrow(Option::is_some) {
+        crate::process::stop(b"UntiedParkBound");
+    }
 }
 /// One pointer to a stable task-table slot. The slot's outstanding bytes keep
 /// both it and its table alive. No per-block reference count or allocation.

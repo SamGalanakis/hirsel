@@ -569,6 +569,7 @@ impl Owner {
 
     /// False only when the holder served this node's request instead.
     fn acquire(&self) -> bool {
+        ACQUIRES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let cohort = match self.recheck.get() {
             0 => {
                 self.recheck.set(COHORT_RECHECK);
@@ -759,8 +760,14 @@ struct Sample {
     receives: Cell<[u64; RECEIVE_RUN_LIMIT as usize]>,
 }
 
-thread_local! {
-    static OWNER: Cell<*mut Owner> = const { Cell::new(ptr::null_mut()) };
+crate::units::moved_tls! { static OWNER: *mut Owner = ptr::null_mut(); }
+/// mc-units-untied (law 4): times the cross-worker ordering token was taken.
+pub(crate) static ACQUIRES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[inline(never)]
+pub(crate) fn check_no_owner() {
+    if !OWNER.get().is_null() {
+        crate::process::stop(b"UntiedParkWithOwner");
+    }
 }
 
 /// # Safety

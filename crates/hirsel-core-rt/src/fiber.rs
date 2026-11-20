@@ -17,10 +17,10 @@ const GROW: usize = 256 << 10;
 /// Bytes kept at the top for the low-water word; a multiple of 16.
 const HEADER: usize = 16;
 thread_local! {
-    static GUARD: Cell<(usize,usize)> = const { Cell::new((0,0)) };
-    static STOP_FD: Cell<i32> = const { Cell::new(2) };
     static ALTERNATE: Alternate = Alternate::new();
 }
+crate::units::moved_tls! { static GUARD: (usize, usize) = (0, 0); }
+crate::units::moved_tls! { static STOP_FD: i32 = 2; }
 static PREVIOUS: OnceLock<libc::sigaction> = OnceLock::new();
 #[cfg(test)]
 #[path = "fiber_stop_tests.rs"]

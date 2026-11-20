@@ -89,6 +89,7 @@ impl Poller {
             return Ok(None);
         };
         events.clear();
+        crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // SAFETY: epoll owns its descriptor and events has POLL_BATCH spare slots.
         let count = unsafe {
             libc::epoll_wait(
@@ -112,6 +113,10 @@ impl Poller {
 
     pub fn wake(&self) {
         (self.operations.wake)(self);
+    }
+    /// mc-units-untied: the epoll fd, for the shared poller.
+    pub fn raw_fd(&self) -> i32 {
+        self.epoll.as_raw_fd()
     }
 
     fn wake_epoll(&self) {

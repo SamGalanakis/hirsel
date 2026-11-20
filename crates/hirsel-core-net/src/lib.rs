@@ -118,6 +118,8 @@ mod grant;
 pub use grant::{GrantRule, RuleView};
 mod reactor;
 pub use reactor::{Crossing, Poller, Sockets};
+/// mc-units-untied: epoll_wait calls made by run reactors.
+pub static EPOLL_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub mod model;
 pub mod tls;
 mod tls_rule;

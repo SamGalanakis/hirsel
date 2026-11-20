@@ -117,8 +117,8 @@ impl Default for SchedulerProvider {
         }
     }
 }
-thread_local! { static CALLBACK_TASK: Local<*mut Task> = const { Local::new(ptr::null_mut()) }; }
-thread_local! { static CURRENT: Local<*mut Task> = const { Local::new(ptr::null_mut()) }; }
+crate::units::moved_tls! { static CALLBACK_TASK: *mut Task = ptr::null_mut(); }
+crate::units::moved_tls! { static CURRENT: *mut Task = ptr::null_mut(); }
 
 pub(crate) fn private_flow_step<R>(run: impl FnOnce() -> R) -> R {
     struct Restore(*mut Task);
@@ -943,9 +943,7 @@ struct Worker {
     script: Option<Arc<crate::schedule_script::ScheduleScript>>,
 }
 
-thread_local! {
-    static WORKER: Local<*mut Worker> = const { Local::new(ptr::null_mut()) };
-}
+crate::units::moved_tls! { static WORKER: *mut Worker = ptr::null_mut(); }
 
 fn publish_deliveries() {
     // SAFETY: a worker pins its pool and only it mutates the outbox. The
@@ -1569,6 +1567,14 @@ impl Scheduler {
             }
             return;
         }
+        if !self.net.is_null() && crate::units::untied() {
+            let readies = &self.readies;
+            let net = self.net;
+            // SAFETY: the run pins its registry; no task runs during polling.
+            crate::units::take_xready(|id| unsafe {
+                (*net).dispatch(id, (libc::EPOLLIN | libc::EPOLLOUT) as u32, |token| readies.enqueue(token))
+            });
+        }
         if !self.net.is_null() {
             let readies = &self.readies;
             let notify = self.pool.is_some();
@@ -1593,6 +1599,16 @@ impl Scheduler {
         }
         // SAFETY: no task is running while the idle scheduler waits.
         let deadline = unsafe { self.timers.as_ref().and_then(|task| task.timer_deadline) };
+        if crate::units::untied() && self.model.is_none() {
+            if deadline.is_none() && !self.has_outside_wait() && !flow_pending {
+                self.stop_quiescent();
+            }
+            crate::units::park(deadline);
+            if !self.net.is_null() {
+                self.poll_net(0);
+            }
+            return;
+        }
         if self.model.is_some() {
             let now = self.now();
             self.poll_net(-1);
@@ -1856,7 +1872,7 @@ fn cancel_takes_effect(context: &Context, requested: &AtomicBool) -> bool {
 }
 
 /// Readiness tokens from `hirsel_core_ready`, which may run on any thread.
-struct Readies {
+pub(crate) struct Readies {
     tokens: Mutex<Vec<u64>>,
     pending: AtomicBool,
     worker: std::thread::Thread,
@@ -1867,9 +1883,14 @@ struct Readies {
     /// queued or running sync). It drops only after that ready is pushed, so
     /// a waiter that reads zero and then no pending ready is quiescent.
     outside: AtomicUsize,
+    /// mc-units-untied: the unit this waiter belongs to, or units::NONE.
+    unit: u32,
 }
 impl Readies {
     fn new() -> Arc<Self> {
+        Self::for_unit(crate::units::current())
+    }
+    pub(crate) fn for_unit(unit: u32) -> Arc<Self> {
         Arc::new(Self {
             tokens: Mutex::new(Vec::new()),
             pending: AtomicBool::new(false),
@@ -1878,6 +1899,7 @@ impl Readies {
             net: Mutex::new(None),
             model: Mutex::new(None),
             outside: AtomicUsize::new(0),
+            unit,
         })
     }
     fn outside(&self) -> bool {
@@ -1892,6 +1914,10 @@ impl Readies {
     }
     fn push(&self, token: u64) {
         self.enqueue(token);
+        if self.unit != crate::units::NONE && crate::units::untied() {
+            crate::units::wake_id(self.unit);
+            return;
+        }
         self.worker.unpark();
         for peer in self.peers.lock().unwrap().iter() {
             peer.unpark();
@@ -1929,12 +1955,23 @@ static TOKENS: AtomicU64 = AtomicU64::new(1);
 thread_local! {
     /// This thread's scheduler-less waiter, in WAITERS only while an
     /// operation alone waits (`alone`; depth counts nested callers).
-    static ALONE: (Arc<Readies>, std::cell::Cell<usize>) = (Readies::new(), std::cell::Cell::new(0));
+    static ALONE: (Arc<Readies>, std::cell::Cell<usize>) = (Readies::for_unit(crate::units::NONE), std::cell::Cell::new(0));
 }
 /// The scheduler-less waiter's registration for one `alone` operation.
 struct AloneWait(Arc<Readies>);
 impl AloneWait {
     fn enter() -> Self {
+        if let Some(u) = crate::units::running() {
+            let readies = alone_waiter();
+            if u.alone_depth.get() == 0 {
+                WAITERS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(readies.clone());
+            }
+            u.alone_depth.set(u.alone_depth.get() + 1);
+            return Self(readies);
+        }
         let readies = ALONE.with(|(readies, depth)| {
             if depth.get() == 0 {
                 WAITERS
@@ -1950,6 +1987,16 @@ impl AloneWait {
 }
 impl Drop for AloneWait {
     fn drop(&mut self) {
+        if let Some(u) = crate::units::running() {
+            u.alone_depth.set(u.alone_depth.get() - 1);
+            if u.alone_depth.get() == 0 {
+                WAITERS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .retain(|r| !Arc::ptr_eq(r, &self.0));
+            }
+            return;
+        }
         ALONE.with(|(readies, depth)| {
             depth.set(depth.get() - 1);
             if depth.get() == 0 {
@@ -1960,6 +2007,18 @@ impl Drop for AloneWait {
             }
         });
     }
+}
+
+/// mc-units-untied: the scheduler-less waiter is the running unit's, else
+/// this thread's.
+fn alone_waiter() -> Arc<Readies> {
+    if let Some(u) = crate::units::running() {
+        return u
+            .alone
+            .get_or_init(|| Readies::for_unit(crate::units::unit_id(u)))
+            .clone();
+    }
+    ALONE.with(|(r, _)| r.clone())
 }
 
 /// Host work whose ready its issuer's waiter still awaits: the running task's
@@ -1974,7 +2033,7 @@ impl Outside {
             task = CALLBACK_TASK.get();
         }
         let readies = if task.is_null() {
-            ALONE.with(|(r, _)| r.clone())
+            alone_waiter()
         } else {
             // SAFETY: the issuing task pins its run for this call.
             unsafe { (*(*task).run).readies.clone() }
@@ -2005,6 +2064,28 @@ pub extern "C" fn hirsel_core_ready(token: u64) {
     for waiter in WAITERS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         waiter.push(token);
     }
+}
+/// mc-units-untied: a ready for an operation issued by `unit` reaches only
+/// that unit's waiters (and scheduler-less ones), not every unit.
+pub(crate) fn ready_unit(token: u64, unit: u32) {
+    if unit == crate::units::NONE || !crate::units::untied() {
+        return hirsel_core_ready(token);
+    }
+    for waiter in WAITERS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        if waiter.unit == unit || waiter.unit == crate::units::NONE {
+            waiter.push(token);
+        }
+    }
+}
+/// mc-units-untied: at a park, this worker's thread-locals hold the idle
+/// values every unit sees at its park point, so none is carried across.
+#[inline(never)]
+pub(crate) fn check_idle_tls() {
+    if !CURRENT.get().is_null() || !CALLBACK_TASK.get().is_null() || !WORKER.get().is_null() {
+        crate::process::stop(b"UntiedParkWithTask");
+    }
+    crate::limit::check_unbound();
+    crate::sequencer::check_no_owner();
 }
 
 /// W and I of one operation (REPLAY-SPEC section 3, driver steps 2 to 6). Runs
@@ -2348,6 +2429,14 @@ unsafe fn alone(
     token: u64,
 ) -> Option<crate::provider::Outcome> {
     let p = provider;
+    if crate::units::untied() && std::env::var_os("HIRSEL_UNTIED_TRACE").is_some() {
+        eprintln!(
+            "untied: alone wait unit={} op={}\n{}",
+            crate::units::current(),
+            unsafe { (*request).operation },
+            std::backtrace::Backtrace::force_capture()
+        );
+    }
     // Before WAITERS, which a fork may have copied while held.
     crate::os_sync::check_fork();
     // This thread's waiter is registered before the first callback, so a ready
@@ -2397,6 +2486,33 @@ unsafe fn alone(
                     continue;
                 }
                 crate::process::stop(b"Deadlock");
+            }
+            if crate::units::running().is_some() {
+                // mc-units-untied: the unit parks; its worker runs other units.
+                if !unsafe { (*context).host_files }.is_null() {
+                    // SAFETY: the unit's own registry, pinned through this wait.
+                    unsafe {
+                        let sockets = &mut (*(*context).host_files).sockets;
+                        sockets
+                            .poll(0, |token| readies.push(token))
+                            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+                        crate::units::take_xready(|id| {
+                            sockets.dispatch(
+                                id,
+                                (libc::EPOLLIN | libc::EPOLLOUT) as u32,
+                                |token| readies.push(token),
+                            )
+                        });
+                    }
+                }
+                if readies.pending.load(Ordering::Acquire) && readies.take(token) {
+                    return true;
+                }
+                if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
+                    return false;
+                }
+                crate::units::park(deadline);
+                continue;
             }
             if !unsafe { (*context).host_files }.is_null() {
                 // SAFETY: direct ABI caller pins its registry through this wait.
@@ -2925,7 +3041,7 @@ pub(crate) fn attach_model(model: Arc<dyn ModelClock>) {
         CURRENT.get()
     };
     if task.is_null() {
-        ALONE.with(|(r, _)| *r.model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model));
+        *alone_waiter().model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model);
     } else {
         // SAFETY: the provider callback's task pins its run on this worker.
         unsafe {
@@ -2942,7 +3058,7 @@ pub(crate) fn attach_net(
         task = CALLBACK_TASK.get();
     }
     let readies = if task.is_null() {
-        ALONE.with(|(r, _)| r.clone())
+        alone_waiter()
     } else {
         // SAFETY: the callback/task pins the run and its shared registry.
         unsafe {
@@ -2966,6 +3082,9 @@ pub(crate) fn attach_net(
             run.readies.clone()
         }
     };
+    if crate::units::untied() {
+        crate::units::attach_epoll(poller.raw_fd());
+    }
     *readies.net.lock().unwrap_or_else(|e| e.into_inner()) = Some(poller);
 }
 fn poll_timeout(deadline: Option<u64>) -> i32 {
@@ -3663,7 +3782,13 @@ impl RunPtr {
                         && run.cancels.is_empty()
                         && !run.readies.pending.load(Ordering::Acquire)
                         && run.has_outside_wait();
-                    let (timeout, release) = if wait_for_net {
+                    let untied = crate::units::untied();
+                    let (timeout, release) = if wait_for_net && untied {
+                        (
+                            poll_timeout(run.timers.as_ref().and_then(|task| task.timer_deadline)),
+                            false,
+                        )
+                    } else if wait_for_net {
                         crate::task_heap::idle_wait(poll_timeout(
                             run.timers.as_ref().and_then(|task| task.timer_deadline),
                         ))
@@ -3672,7 +3797,16 @@ impl RunPtr {
                     };
                     // mc-units-proto: HIRSEL_XSPIN busy-polls instead of sleeping.
                     let timeout = if crate::units::spin() { 0 } else { timeout };
-                    run.take_wakes(timeout);
+                    if untied && timeout != 0 {
+                        // mc-units-untied: the unit parks; any worker resumes it.
+                        crate::units::park(run.timers.as_ref().and_then(|task| task.timer_deadline));
+                        run.take_wakes(0);
+                    } else {
+                        if untied {
+                            crate::units::maybe_yield();
+                        }
+                        run.take_wakes(timeout);
+                    }
                     let task = run.pop();
                     if task.is_null() {
                         if release {

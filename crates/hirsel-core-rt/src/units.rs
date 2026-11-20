@@ -1062,6 +1062,7 @@ pub(crate) struct Unit {
     status: AtomicU8,
     stop_fd: Cell<i32>,
     slice_start: Cell<u64>,
+    queued_ns: AtomicU64,
     created_ns: u64,
     first_park: AtomicBool,
     /// The unit's scheduler-less waiter (replaces the thread's ALONE).
@@ -1138,6 +1139,7 @@ struct Pool {
     spin_ns: u64,
     slice_ns: u64,
     poll_every_ns: u64,
+    queue_waits: Option<QueueWaits>,
 }
 static POOL: OnceLock<Pool> = OnceLock::new();
 fn pool() -> &'static Pool {
@@ -1154,6 +1156,47 @@ static WORST: AtomicU8 = AtomicU8::new(0);
 
 fn now() -> u64 {
     crate::os::monotonic_ns()
+}
+
+// Optional timing for the fairness experiment. Maxima are kept per worker
+// and 10 ms bucket so setup and teardown can be excluded after the run.
+const QUEUE_BUCKET_NS: u64 = 10_000_000;
+struct QueueWaits {
+    origin_ns: u64,
+    workers: Vec<Vec<AtomicU64>>,
+}
+
+impl QueueWaits {
+    fn new(w: usize) -> Self {
+        Self {
+            origin_ns: now(),
+            workers: (0..w)
+                .map(|_| (0..6000).map(|_| AtomicU64::new(0)).collect())
+                .collect(),
+        }
+    }
+
+    fn record(&self, ix: usize, queued: u64, started: u64) {
+        let bucket = (started - self.origin_ns) / QUEUE_BUCKET_NS;
+        if queued != 0 && let Some(max) = self.workers[ix].get(bucket as usize) {
+            max.fetch_max(started - queued, Ordering::Relaxed);
+        }
+    }
+
+    fn report(&self) {
+        for (i, _) in self.workers[0].iter().enumerate() {
+            let max = self.workers.iter().map(|w| w[i].load(Ordering::Relaxed)).max().unwrap();
+            if max != 0 {
+                eprintln!("queue-wait {} {max}", self.origin_ns + i as u64 * QUEUE_BUCKET_NS);
+            }
+        }
+    }
+}
+
+fn mark_queued(p: &Pool, u: &Unit) {
+    if p.queue_waits.is_some() && (p.k..0x8000).contains(&u.id) {
+        u.queued_ns.store(now(), Ordering::Relaxed);
+    }
 }
 
 /// Make unit `id` and queue it. The record and its stack are made here; its
@@ -1205,6 +1248,7 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
         status: AtomicU8::new(0),
         stop_fd: Cell::new(2),
         slice_start: Cell::new(0),
+        queued_ns: AtomicU64::new(0),
         created_ns: t0,
         first_park: AtomicBool::new(false),
         alone: std::sync::OnceLock::new(),
@@ -1378,6 +1422,7 @@ pub(crate) fn attach_epoll(fd: i32) {
 
 const LIFO_RUNS: u32 = 3;
 fn enqueue(p: &Pool, u: &Unit) {
+    mark_queued(p, u);
     let ix = worker_ix();
     if ix < p.w && p.lifo_on && !cur().is_null() {
         // Woken by the unit running on this worker: it runs here next.
@@ -1564,7 +1609,11 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
         CUR.set(up.0.cast_mut());
         let prev_fd = crate::fiber::set_stop_fd(u.stop_fd.get());
         *u.host.get() = host as *mut *mut u8;
-        u.slice_start.set(now());
+        let started = now();
+        if let Some(waits) = &p.queue_waits {
+            waits.record(ix, u.queued_ns.load(Ordering::Relaxed), started);
+        }
+        u.slice_start.set(started);
         hirsel_stack::switch(host as *mut *mut u8, *u.sp.get());
         u.stop_fd.set(crate::fiber::set_stop_fd(prev_fd));
         CUR.set(std::ptr::null_mut());
@@ -1583,6 +1632,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
             }
             After::Yield => {
                 u.state.store(QUEUED, Ordering::SeqCst);
+                mark_queued(p, u);
                 p.injector.lock().unwrap().push_back(up);
                 p.queued.fetch_add(1, Ordering::SeqCst);
                 notify_worker(p);
@@ -1599,6 +1649,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                     // Woken while it ran: run it again.
                     bump(S_NOTIFIED_REQUEUE);
                     u.state.store(QUEUED, Ordering::SeqCst);
+                    mark_queued(p, u);
                     p.locals[ix].lock().unwrap().push_back(up);
                     p.queued.fetch_add(1, Ordering::SeqCst);
                 }
@@ -1749,6 +1800,7 @@ fn launch_untied(
         spin_ns: env_u64("HIRSEL_UNTIED_SPIN_US", 30) * 1000,
         slice_ns: env_u64("HIRSEL_UNTIED_SLICE_US", 500) * 1000,
         poll_every_ns: env_u64("HIRSEL_UNTIED_POLL_US", 100) * 1000,
+        queue_waits: (env_u64("HIRSEL_UNTIED_QUEUE_WAIT", 0) != 0).then(|| QueueWaits::new(w)),
     });
     // SAFETY: the launch joins every worker before `run` goes out of scope.
     let run: &'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync) = unsafe { std::mem::transmute(run) };
@@ -1768,6 +1820,9 @@ fn launch_untied(
                 .unwrap();
         }
     });
+    if let Some(waits) = &p.queue_waits {
+        waits.report();
+    }
     if std::env::var_os("HIRSEL_XSTATS").is_some() {
         let g = |i: usize| USTATS[i].load(Ordering::Relaxed);
         eprintln!(

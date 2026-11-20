@@ -69,7 +69,7 @@ def result(rows, cell, side, group):
     rate = number(summary, "max_rate")
     if rate is not None:
         trial = next(r for r in trials if r["search_rate"] == rate and r["passed"])
-        return trial, rate, "Pass"
+        return trial, trial["rate"], "Pass"
     lowest = min(trials, key=lambda r: r["rate"])
     if summary is None or summary.get("incomplete"):
         passed = max((r for r in trials if r["passed"]), key=lambda r: r["rate"], default=None)
@@ -197,7 +197,7 @@ def scale_tables(rows):
 def fairness_table(rows, n):
     print(f"\n## Hot sessions at {n:,} sessions\n")
     table(("Side", "Hot", "Open turns/s", "Non-hot p50 (ms)", "Non-hot p99 (ms)",
-           "Non-hot max (ms)", "Max ready wait during load (ms)", "After load (ms)", "Hot turns/s", "Complete",
+           "Non-hot max (ms)", "Max ready wait during load (ms)", "Max ready wait during drain (ms)", "Hot turns/s", "Complete",
            "Peak RSS (MiB)", "Peak sampled threads", "CPU µs/turn after warmup (est.)",
            "CPU µs/turn incl. setup", "Steals/s incl. setup", "Units"))
     for side in SCALE_SIDES:

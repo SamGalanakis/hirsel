@@ -373,6 +373,9 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
         if !first && request.operation != LISTEN {
             sockets.disarm(key, write);
         }
+        if let Some(crossing) = crate::units::attempt(request, n, key) {
+            return crossing;
+        }
         let result = match request.operation {
             LISTEN => {
                 let key = match socket(n, true) {

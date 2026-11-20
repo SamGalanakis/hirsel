@@ -117,7 +117,7 @@ impl Rule {
 mod grant;
 pub use grant::{GrantRule, RuleView};
 mod reactor;
-pub use reactor::{Poller, Sockets};
+pub use reactor::{Crossing, Poller, Sockets};
 pub mod model;
 pub mod tls;
 mod tls_rule;

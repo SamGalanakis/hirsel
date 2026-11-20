@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Build one mc-units-proto hirsel program (throwaway prototype)."""
+import json, os, subprocess, sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]
+sys.path.insert(0, str(ROOT / "bench/multicore"))
+import build as mc  # noqa: E402
+
+def main():
+    src, out, compiler, runtime = map(Path, sys.argv[1:5])
+    grants = sys.argv[5:]
+    out.mkdir(parents=True, exist_ok=True)
+    case = src.stem
+    inputs = out / f"{case}.json"
+    data = mc.hirsel_inputs(src)
+    inputs.write_text(json.dumps(data))
+    llvm = ROOT / "tools/buck2/toolchains/llvm-files"
+    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "1",
+                        "LD_LIBRARY_PATH": str(llvm / "lib")}
+    net = ("Net=Listen 127.77.0.0/16 0-65535;Connect 127.77.0.0/16 0-65535;"
+           "Listen 127.0.0.1/32 0-65535;Connect 127.0.0.1/32 0-65535")
+    cmd = [ROOT / "tools/capped", compiler, "build", "--inputs", inputs,
+           "--entry", f"multicore@1/{case}/main", "--backend", "llvm", "--release",
+           "--runtime", runtime, "--cc", llvm / "bin/clang", "--store", out / "store",
+           "--dir", out, "--grant", "Stdout", "--grant", "Tasks", "--grant", "Clock",
+           "--grant", "Stderr", "--grant", net, "--limit", "1073741824",
+           "--debug-lines", "on", "--json", "-o", out / case]
+    for g in grants:
+        cmd += ["--grant", g]
+    r = subprocess.run(list(map(str, cmd)), env=env, capture_output=True, text=True)
+    print(r.stdout[-6000:]); print(r.stderr[-6000:])
+    sys.exit(r.returncode)
+
+main()

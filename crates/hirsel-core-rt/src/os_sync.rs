@@ -84,11 +84,22 @@ fn start() -> Result<(), i32> {
     if STARTED.load(Ordering::Acquire) {
         return Ok(());
     }
-    std::thread::Builder::new()
-        .name("hirsel-sync".into())
-        .stack_size(STACK)
-        .spawn(run)
-        .map_err(|e| e.raw_os_error().unwrap_or(libc::EAGAIN))?;
+    // mc-units-proto: HIRSEL_SYNC_HELPERS runs that many helpers on one queue.
+    let helpers = std::env::var("HIRSEL_SYNC_HELPERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n: &usize| n >= 1)
+        .unwrap_or(1);
+    for _ in 0..helpers {
+        std::thread::Builder::new()
+            .name("hirsel-sync".into())
+            .stack_size(STACK)
+            .spawn(|| {
+                crate::units::restore_mask();
+                run()
+            })
+            .map_err(|e| e.raw_os_error().unwrap_or(libc::EAGAIN))?;
+    }
     STARTED.store(true, Ordering::Release);
     Ok(())
 }

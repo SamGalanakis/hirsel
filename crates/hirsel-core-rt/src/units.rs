@@ -754,6 +754,19 @@ pub(crate) unsafe fn attempt(
     let request_id = request as *mut crate::provider::Request as usize;
     unsafe {
         let sockets = &mut *n.sockets;
+        // mc-units-untied (law 2's scripted input): with HIRSEL_XGATE a crossing
+        // receive or accept never completes at issue; its arrival always enters
+        // the unit's order through the event path (one self-notify), so where
+        // an arrival lands does not depend on when the peer ran.
+        if in_task
+            && matches!(request.operation, RECV_BOUNDED | ACCEPT)
+            && untied()
+            && xgate()
+            && sockets.crossing(key).is_some()
+        {
+            xnotify(current(), ident(key));
+            return Some(None);
+        }
         match request.operation {
             LISTEN => {
                 let unit = magic(&n.address)?;
@@ -798,6 +811,11 @@ pub(crate) unsafe fn attempt(
 /// The calling unit's id (0 outside units).
 pub(crate) fn unit() -> u32 {
     current()
+}
+
+fn xgate() -> bool {
+    static GATE: OnceLock<bool> = OnceLock::new();
+    *GATE.get_or_init(|| std::env::var_os("HIRSEL_XGATE").is_some())
 }
 
 pub(crate) fn spin() -> bool {

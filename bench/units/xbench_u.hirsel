@@ -346,6 +346,40 @@ fn x_client(nw: Net, clock: Clock, unit: u64, n: u64) waits {
     }
 }
 
+// ---- law 2/3: a closed lock-step ring. Unit u listens on port 2 and sends
+// to unit (u+1)%K; unit 0 injects each round. No clock reads, so a unit's
+// recording is a function of the program and its peers' bytes only.
+fn x_ring(nw: Net, clock: Clock, err: Stderr, unit: u64, units: u64, n: u64, size: u64) waits {
+    let (take l, _) = result.unwrap(host.listen(nw, unit_addr(unit, 2), 16))
+    let mut listener = take l
+    let out = connect_retry(nw, clock, unit_addr((unit + 1) % units, 2))
+    let (take inc, _) = result.unwrap(host.accept(mut listener, Never))
+    let (orh, owh) = net.split(take out)
+    let (irh, iwh) = net.split(take inc)
+    let mut r = take irh
+    let mut w = take owh
+    let mut buf = payload(size, unit)
+    let mut check = 0u64
+    for i in 0 .. n {
+        if unit == 0 {
+            let _ = list.set(mut buf, 0, int.truncate(i))
+            send_all(mut w, buf)
+            if !recv_exact(mut r, mut buf, size) { fail("ring: closed") }
+        } else {
+            if !recv_exact(mut r, mut buf, size) { fail("ring: closed") }
+            let first: u8 = buf[0]
+            let wide: u64 = int.widen(first)
+            let _ = list.set(mut buf, 1, int.truncate(kernel(wide + unit, 50)))
+            send_all(mut w, buf)
+        }
+        let second: u8 = buf[1]
+        let second_wide: u64 = int.widen(second)
+        check = int.wrapping_add(check, second_wide)
+    }
+    if unit == 0 { report(err, "x_ring", n, 0, check) }
+    let _keep = (take orh, take iwh)
+}
+
 pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, argv: Args) -> Result[(), Exit] waits {
     let Some(mode) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
     let n = arg(argv, 1)
@@ -367,6 +401,8 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, argv: Args) -> Res
     let units = arg(argv, count - 2)
     if mode == "x_pingpong" {
         if unit == 1 { x_echo(nw, n, size) } else { x_ask(nw, clock, err, n, size) }
+    } else if mode == "x_ring" {
+        x_ring(nw, clock, err, unit, units, n, size)
     } else if mode == "x_pipe" {
         if unit == 1 { x_echo(nw, n, size) } else { x_pipe(tasks, nw, clock, err, n, size) }
     } else if mode == "x_svc" {

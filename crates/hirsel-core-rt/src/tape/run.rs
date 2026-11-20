@@ -223,6 +223,13 @@ unsafe extern "C" fn invoke(
             if n != tape_id.len() as isize {
                 return stopped(run, std::io::Error::last_os_error());
             }
+            // mc-units-untied (law 2 only): a fixed tape id, so two runs' tapes
+            // can be compared byte for byte.
+            if let Some(v) = std::env::var_os("HIRSEL_TAPE_ID_FIXED") {
+                tape_id = [0; 16];
+                tape_id[..8].copy_from_slice(&(v.len() as u64 + 0x5eed).to_le_bytes());
+                tape_id[8..12].copy_from_slice(&crate::units::unit().to_le_bytes());
+            }
         }
         let mut arg = Vec::new();
         put_varint(&mut arg, (*config).args_len as u64);

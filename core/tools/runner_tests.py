@@ -624,7 +624,7 @@ SETTLEMENT_LAWS = ('after_publication', 'settled_callinfo')
 RELEASE_LAWS = ('dropped_keeps_outcomes', 'removal_waits_for_writer')
 # L24's owner half: repairs queued behind a busy writer coalesce, so the newest board arrives
 # with no Reset.
-REPAIR_LAWS = ('repair_coalesced',)
+REPAIR_LAWS = ('repair_coalesced', 'repair_one_unsent', 'join_waits')
 
 
 def admission_laws(args, root, work, engines, row):

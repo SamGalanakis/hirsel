@@ -1787,7 +1787,17 @@ type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, Bytes
 // check"), and the publisher answers with the session's id and a handle to the round register.
 // v2.20: `progress` is the owner's drain token (§3 "Repair"), a capacity-1 channel the owner
 // sends on before each `Drained`; with none, a due session repairs on every pass.
-type Join: send { to: Sender[WireEvent], told: Sender[Admit], mark: Option[Receiver[()]], closed: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[Latest[Fence]], progress: Option[Receiver[()]] }
+// v2.22: `taken` is the session's taken register (§3 "Repair"): the count of `complete`s the
+// owner has taken and no longer holds unsent. `first` is the Subscribe that made the owner
+// join, registered as the publisher takes the Join, so a join needs one PubIn message.
+type Join: send { to: Sender[WireEvent], told: Sender[Admit], mark: Option[Receiver[()]], closed: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[Latest[Fence]], progress: Option[Receiver[()]], taken: Option[Latest[Taken]], first: Option[JoinSubscribe] }
+
+// v2.22: the owner's first Subscribe, with its instance, carried in its Join.
+type JoinSubscribe: send { sub: u32, generation: u64, input: SubscriptionInput }
+
+// v2.22: how many `complete`s the owner has taken from its inbox, published only while it
+// holds none of them unsent (§3 "Repair").
+type Taken: shareable + send { n: u64 }
 
 type Admit: send { who: u64, round: Latest[RoundAt] }
 
@@ -3631,7 +3641,9 @@ fn journal_test_trigger_cancel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
 // wait until the inbox takes them, retried at the current base with any new content.
 // `ended_at` is the oldest computation version among `ended` (u64::MAX when empty): a waiting
 // Ended keeps the version it was computed at when it is folded into later content.
-type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[(u32, u64, Outcome)], ended_at: u64, reset: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet], due: bool, progress: Option[Receiver[()]] }
+// v2.22: `handed` counts the `complete`s the owner's inbox took, and `taken` is the owner's
+// count of those it no longer holds unsent; a due session is repaired only when they agree.
+type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[(u32, u64, Outcome)], ended_at: u64, reset: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet], due: bool, progress: Option[Receiver[()]], progressed: bool, taken: Option[Latest[Taken]], handed: u64 }
 
 // One try_send to an owner: taken, bounced back by a full inbox, or shut.
 type Offered = Took | Bounced(Notice) | Shut
@@ -3679,7 +3691,7 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 keep_answers(mut waiting, take answers)
             },
             Joined(take j) => {
-                let Join(to: take to, told: take told, mark: take mark, closed: take closed, identity: take id, fence: take fence, progress: take progress) = take j
+                let Join(to: take to, told: take told, mark: take mark, closed: take closed, identity: take id, fence: take fence, progress: take progress, taken: take taken, first: take first) = take j
                 let wake: Option[Sender[WireEvent]] = match closed { Some(_) => Some(channel.sender(to)), _ => None }
                 // A fenced session's Arcs are reserved here (§3 "Admission"); a refusal answers id 0.
                 let reserved: Result[Option[FenceSet], Capacity] = match take fence {
@@ -3689,8 +3701,13 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 match take reserved {
                     Ok(take fences) => {
                         minted += 1u64
-                        result.unwrap(list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: take mark, identity: take id, fence: take fences, due: false, progress: take progress)))
+                        result.unwrap(list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: take mark, identity: take id, fence: take fences, due: false, progress: take progress, progressed: false, taken: take taken, handed: 0u64)))
                         let _ = channel.try_send(told, Admit(who: minted, round: latest.handle(rounds.round)))
+                        // v2.22: the Subscribe that made the owner join, at this base (G3).
+                        if let Some(take f) = take first {
+                            let JoinSubscribe(sub: sub, generation: generation, input: take input) = take f
+                            publish_wire_subscription(mut b, mut joined, mut owes, minted, sub, generation, take input)
+                        }
                     },
                     Error(_) => { let _ = channel.try_send(told, Admit(who: 0u64, round: latest.handle(rounds.round))) },
                 }
@@ -3838,8 +3855,10 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             i += 1u64
             continue
         }
+        let handing = list.len(next.complete)
         let content = if has_content { Some(take next) } else { None }
         match offer(joined[i].to, update(at, take content, take rows)) {
+            Took => { joined[i].handed += handing },
             Shut => {
                 forget(mut subs, mut joined, who)
                 continue
@@ -3869,6 +3888,8 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
 // it named (complete or a row) is due for repair (§3 "Repair") and its Ended subs wait.
 fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
     let Owe(session: who, version: computed, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
+    // A token taken before this bounce never counts after it (§3 "Repair").
+    j.progressed = false
     if reset || j.reset {
         j.reset = true
         j.ended = list.new()
@@ -3897,12 +3918,14 @@ fn repair[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], mut ow
     let at = store.version(b.base)
     let mut i = 0u64
     while i < list.len(joined) {
-        let progressed = match joined[i].progress {
+        let took = match joined[i].progress {
             Some(from) => match channel.try_receive(from) { Ok(()) => true, _ => false },
             None => true,
         }
-        if joined[i].due && progressed && !joined[i].reset {
+        if took { joined[i].progressed = true }
+        if joined[i].due && joined[i].progressed && !joined[i].reset && caught_up(joined[i]) {
             joined[i].due = false
+            joined[i].progressed = false
             let who = joined[i].who
             for sub in due_subs(b.subs, who) {
                 let Some(take old) = remove_sub(mut b.subs, who, sub) else { continue }
@@ -3914,6 +3937,12 @@ fn repair[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], mut ow
         }
         i += 1u64
     }
+}
+
+// v2.22 (§3 "Repair"): the owner holds no `complete` it took and has not sent. A session with
+// no taken register (the HTTP and one-shot sessions) is always caught up.
+fn caught_up(j: Joiner) -> bool {
+    match j.taken { Some(t) => latest.read(t).n >= j.handed, None => true }
 }
 
 fn merge_owe(mut into: Owe, take from: Owe) {
@@ -4530,7 +4559,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let (ev_to, ev_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(8u64))
     let (told_to, told_from): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
     let mut queue: List[ToPub] = list.new()
-    result.unwrap(list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to, mark: None, closed: None, identity: None, fence: None, progress: None))))
+    result.unwrap(list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to, mark: None, closed: None, identity: None, fence: None, progress: None, taken: None, first: None))))
     result.unwrap(list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new()))))
     result.unwrap(list.push(mut queue, Subscribed(1u64, 1u32, query_key(code.describe(q1)), no_arg())))
     result.unwrap(list.push(mut queue, Released(Release(version: v2, snapshot: Some(take c2), answers: list.new()))))
@@ -4586,7 +4615,7 @@ fn join_as(to: Sender[PubIn], take ev: Sender[WireEvent], take mark: Option[Rece
 
 fn join_with(to: Sender[PubIn], take ev: Sender[WireEvent], take mark: Option[Receiver[()]], take progress: Option[Receiver[()]]) -> u64 waits {
     let (told, hear): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
-    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take ev, told: take told, mark: take mark, closed: None, identity: None, fence: None, progress: take progress)))) {
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take ev, told: take told, mark: take mark, closed: None, identity: None, fence: None, progress: take progress, taken: None, first: None)))) {
         return 0u64
     }
     match channel.receive(hear) {
@@ -4759,8 +4788,8 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
     let mut ended: List[(u32, u64, Outcome)] = list.new()
     result.unwrap(list.push(mut ended, (1u32, 0u64, Refused(Overloaded))))
     let mut joined: List[Joiner] = list.new()
-    result.unwrap(list.push(mut joined, Joiner(who: 1u64, to: take l_to, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: Some(take l_mark), identity: None, fence: None, due: false, progress: None)))
-    result.unwrap(list.push(mut joined, Joiner(who: 2u64, to: take m_to, closed: None, ended: take ended, ended_at: ROUND_HALTED, reset: false, mark: Some(take m_mark), identity: None, fence: None, due: false, progress: None)))
+    result.unwrap(list.push(mut joined, Joiner(who: 1u64, to: take l_to, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: Some(take l_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64)))
+    result.unwrap(list.push(mut joined, Joiner(who: 2u64, to: take m_to, closed: None, ended: take ended, ended_at: ROUND_HALTED, reset: false, mark: Some(take m_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64)))
     let mut outcomes: List[KeyedDone] = list.new()
     result.unwrap(list.push(mut outcomes, KeyedDone(stream: no_arg(), p: 0u64, outcome: Refused(Overloaded))))
     let mut waiting: List[Replies] = list.new()
@@ -4825,6 +4854,7 @@ fn retired_owner(take seed: RetiredOwner) -> Result[(), ()] waits {
     let mut service = take initial
     let mut work = wire_work()
     loop {
+        wire_join_send(mut work, pub_to)
         let event = match channel.receive(from) { Ok(take x) => take x, _ => break }
         let WireEvent(e: take input_event) = take event
         let input = match take input_event {
@@ -4872,28 +4902,21 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
         Error(_) => return false,
     }
     let PubIn(e: take first) = take joining
-    let (ses, held) = match take first {
+    // v2.22: the Subscribe that made the owner join rides in its Join.
+    let (ses, held, subscribed) = match take first {
         Joined(take j) => {
-            let Join(to: take delivery, told: take told, mark: take given, closed: _, identity: _, fence: _, progress: _) = take j
+            let Join(to: take delivery, told: take told, mark: take given, closed: _, identity: _, fence: _, progress: _, taken: _, first: take carried) = take j
             let ses_to = take delivery
             let _ = channel.try_send(told, Admit(who: 7u64, round: latest.handle(rounds.round)))
             let _ = channel.send(ses_to, wire_event(JoinReady))
-            (take ses_to, take given)
+            let one = match carried { Some(f) => f.sub == 1u32, None => false }
+            (take ses_to, take given, one)
         },
         _ => return false,
     }
     let m = match take held {
         Some(take x) => take x,
         None => return false,
-    }
-    let subscribing = match channel.receive(from) {
-        Ok(take x) => take x,
-        Error(_) => return false,
-    }
-    let PubIn(e: take second) = take subscribing
-    let subscribed = match take second {
-        WireSubscribed(who, sub, _, _) => who == 7u64 && sub == 1u32,
-        _ => false,
     }
     let live = match channel.try_receive(m) {
         Error(Empty) => true,
@@ -5066,7 +5089,7 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     let (full_to, _full_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(1u64))
     let (progressed, progress): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let mut joined: List[Joiner] = list.new()
-    result.unwrap(list.push(mut joined, Joiner(who: 4u64, to: take full_to, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress))))
+    result.unwrap(list.push(mut joined, Joiner(who: 4u64, to: take full_to, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: None, handed: 0u64)))
     let mut bounced = 0u64
     let mut i = 0u64
     while i < list.len(owes_c) {
@@ -5140,7 +5163,7 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     }
     let (s_to, s_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(1u64))
     let (told, hear): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
-    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: channel.sender(s_to), told: take told, mark: None, closed: None, identity: None, fence: None, progress: None)))) {
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: channel.sender(s_to), told: take told, mark: None, closed: None, identity: None, fence: None, progress: None, taken: None, first: None)))) {
         return false
     }
     let Admit(who: s, round: take register) = match channel.receive(hear) {
@@ -5199,7 +5222,7 @@ fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let root = result.unwrap(latest.new(take first))
     let (s_to, s_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(16u64))
     let (told, hear): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
-    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take s_to, told: take told, mark: None, closed: None, identity: None, fence: Some(latest.handle(root)), progress: None)))) {
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take s_to, told: take told, mark: None, closed: None, identity: None, fence: Some(latest.handle(root)), progress: None, taken: None, first: None)))) {
         return false
     }
     let Admit(who: s, round: take register) = match channel.receive(hear) {
@@ -5990,6 +6013,7 @@ fn wire_owner_run[C: send](take initial: WireLoop[C], take initial_service: Box[
     // Every normal exit goes through wire_join, including service refusal and
     // either child's Ended. Cancellation uses CONC-8 on the two owned handles.
     let result: Result[(), std.wsock.Error] = loop {
+        wire_owner_join(mut st, mut service)
         let received = match wire_owner_next(mut st, mut service) {
             Some(take e) => take e,
             None => break Ok(()),
@@ -6061,6 +6085,20 @@ fn wire_owner_run[C: send](take initial: WireLoop[C], take initial_service: Box[
     }
     if st.expired { abandoned = st.work.abandoned }
     wire_owner_end(take st, mut service, take result)
+}
+
+// v2.22 (§3): the owner's Join goes into PubIn with a waiting send, like connect's. The
+// publisher never waits on an owner, so the wait is at most one drain; the owner holds no sub
+// and no content of this join until it is admitted. A closed inbox drops the Join, and the
+// next poll refuses its first Subscribe.
+fn wire_join_send(mut work: WireWork, to: Sender[PubIn]) waits {
+    if let Some(take join) = replace(mut work.join, None) { let _ = channel.send(to, take join) }
+}
+
+fn wire_owner_join[C: send](mut st: WireLoop[C], mut service: Box[Service[C]]) waits {
+    if let None = st.work.join { return }
+    wire_join_send(mut st.work, st.pub_to)
+    let _ = (st.apply_input)(mut service.context, mut st.work, WPoll(false))
 }
 
 // The next event, or None when the loop ends: the inbox closed, or the work's
@@ -6156,6 +6194,8 @@ fn wire_owner_input[C: send](mut st: WireLoop[C], take held: Box[Service[C]], po
 fn wire_owner_runner[C: send](mut st: WireLoop[C], take held: Box[Service[C]], pool: Sender[WireAllocation[C]], take e: Notice) -> Option[(Box[Service[C]], Option[Frame])] waits {
     let mut service = take held
     let applied = if let Notice(e: Updated(take published)) = e {
+        // Content of a fresh join can come before the owner has seen its Admit.
+        let _ = (st.apply_input)(mut service.context, mut st.work, WPoll(false))
         let drain: Option[Latest[Option[DrainWindow]]] = match st.work.drain { Some(root) => Some(latest.handle(root)), None => None }
         let output = replace(mut st.work.output, list.new())
         let job = DeliveryJob(update: take published, output: take output, drain: take drain)
@@ -6707,9 +6747,9 @@ type WireOwed: send { generation: u64, reply: Bytes }
 // v2.19: `fence` is the session's fence root, made at join, and `round` the place's round
 // register, from the join's answer. `check` and `sending_done` are the unit handed out last:
 // its version, and a copy of its Outcome rows, which a Dropped Reset carries (§3).
-pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], timers: Map[u64, Task[()]], output: List[WireOutput], sending: List[WireMark], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64, fence: Option[Latest[Fence]], round: Option[Latest[RoundAt]], check: Option[u64], sending_done: List[Done] }
+pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], timers: Map[u64, Task[()]], output: List[WireOutput], sending: List[WireMark], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64, fence: Option[Latest[Fence]], round: Option[Latest[RoundAt]], check: Option[u64], sending_done: List[Done], join: Option[PubIn], sending_complete: bool }
 
-fn wire_work() -> WireWork { WireWork(head: None, asking: None, timers: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64, fence: None, round: None, check: None, sending_done: list.new()) }
+fn wire_work() -> WireWork { WireWork(head: None, asking: None, timers: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64, fence: None, round: None, check: None, sending_done: list.new(), join: None, sending_complete: false) }
 
 fn wire_cut(work: WireWork, clock: Clock) -> bool {
     wire_cut_at(work.drain, clock)
@@ -6813,10 +6853,13 @@ pub opaque type WireSession[G: send, H: send]: send {
     phase: u8, wants: List[Want], entries: List[Bytes], placing: u64,
     asking: bool, pending: Option[WirePending],
     held: Map[Bytes, WireHeld], refusals: u64, last: u64, generation: u64,
-    joined: Option[u64], joining: Option[Receiver[Admit]], join_lease: Option[WireJoinLease], marked: bool, mark: Option[Sender[()]], subscription: Option[(u32, SubscriptionInput)], subscription_room: Option[SubscriptionRoom], sub_generation: u64, subs: List[(u32, u64)], pub_subs: List[u32], reset_seen: bool,
+    joined: Option[u64], joining: Option[Receiver[Admit]], join_lease: Option[WireJoinLease], marked: bool, mark: Option[Sender[()]], subscription: Option[(u32, u64)], subscription_room: Option[SubscriptionRoom], sub_generation: u64, subs: List[(u32, u64)], pub_subs: List[u32], reset_seen: bool,
     holding: bool, leaving: List[WireJoinLease], resubs: List[WireResub],
     // §3 "Repair": the drain token's sender, made at each join; the publisher holds the receiver.
-    progress: Option[Sender[()]]
+    progress: Option[Sender[()]],
+    // v2.22 (§3 "Repair"): this join's taken register, the `complete`s taken for this join, and
+    // the count last published in the register.
+    taken: Option[Latest[Taken]], completes: u64, told_taken: u64
 }
 
 // v2.19.2 (§3 "The owner asks for removal"): a replacing Subscribed held while the writer
@@ -6836,7 +6879,7 @@ fn wire_service_with_head[G: send, H: send](take reg: Registry[G, H], access_gat
         source: V4(0u32), me: None, publisher: None, caller: None, welcome_token: None, phase: 0u8, wants: list.new(), entries: list.new(), placing: 0u64,
         asking: false, pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64,
         joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false,
-        holding: false, leaving: list.new(), resubs: list.new(), progress: None)
+        holding: false, leaving: list.new(), resubs: list.new(), progress: None, taken: None, completes: 0u64, told_taken: 0u64)
     Service(context: take context, step: wire_step, ready: wire_can_read, allocate: wire_service_allocate, finish: wire_finish, check: wire_check_live)
 }
 
@@ -7178,6 +7221,7 @@ fn wire_take_output[G: send, H: send](s: WireSession[G, H], mut work: WireWork) 
     work.sending = take marks
     work.check = check
     work.sending_done = list.new()
+    work.sending_complete = wire_carries_complete(f)
     if let Some(_) = check {
         if let Batch(_, _, _, done) = f {
             if list.len(done) != 0u64 {
@@ -7196,12 +7240,14 @@ fn wire_dropped[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork) 
     let marks = replace(mut work.sending, list.new())
     let done = replace(mut work.sending_done, list.new())
     work.check = None
+    work.sending_complete = false
     let version = s.last
     wire_reset_rows(mut s, mut work.output, version, take done, take marks)
 }
 
 fn wire_sent[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork) {
     work.check = None
+    work.sending_complete = false
     work.sending_done = list.new()
     let marks = replace(mut work.sending, list.new())
     for take mark in take marks {
@@ -7461,22 +7507,37 @@ fn wire_apply_subscribe[G: send, H: send](mut s: WireSession[G, H], mut work: Wi
         }
     }
     let identity = match work.head { Some(h) => latest.handle(h.identity), None => fail("runner: missing head lease") }
+    // v2.22: the first Subscribe rides in the Join, so its room is reserved now.
+    if let Error(_) = list.reserve(mut s.subs, 1u64) { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) }
+    if let Error(_) = list.reserve(mut s.pub_subs, 1u64) { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) }
+    let taken_root: Result[Latest[Taken], Capacity] = match arc.new(Taken(n: 0u64)) {
+        Ok(take zero) => result.capacity_only(latest.new(take zero)),
+        Error((cap, _)) => Error(cap),
+    }
+    let taken = match take taken_root { Ok(take root) => take root, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
+    s.sub_generation += 1u64
+    let generation = s.sub_generation
+    let first = Some(JoinSubscribe(sub: sub, generation: generation, input: take input))
     let join = if s.marked {
         s.mark = Some(take closing)
-        Join(to: wire_me(s), told: take told, mark: Some(take closed), closed: None, identity: Some(take identity), fence: Some(latest.handle(fence)), progress: Some(take progress))
+        Join(to: wire_me(s), told: take told, mark: Some(take closed), closed: None, identity: Some(take identity), fence: Some(latest.handle(fence)), progress: Some(take progress), taken: Some(latest.handle(taken)), first: take first)
     } else {
         if let Error(_) = list.reserve(mut s.leaving, 1u64) { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) }
         let lease = match WireJoinLease(closing: take closing, publisher: wire_publisher(s)) { Ok(take l) => take l, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
         s.join_lease = Some(take lease)
-        Join(to: wire_me(s), told: take told, mark: None, closed: Some(take closed), identity: Some(take identity), fence: Some(latest.handle(fence)), progress: Some(take progress))
+        Join(to: wire_me(s), told: take told, mark: None, closed: Some(take closed), identity: Some(take identity), fence: Some(latest.handle(fence)), progress: Some(take progress), taken: Some(latest.handle(taken)), first: take first)
     }
-    if let Error(_) = channel.try_send(wire_publisher(s), PubIn(e: Joined(take join))) { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) }
+    // v2.22: the owner's loop sends the Join with a waiting send (§3); it holds no sub yet.
+    work.join = Some(PubIn(e: Joined(take join)))
     work.fence = Some(take fence)
     s.progress = Some(take token)
+    s.taken = Some(take taken)
+    s.completes = 0u64
+    s.told_taken = 0u64
     // A fresh join can wait for its id while an old terminal frame is queued.
     wire_prune_output(mut s, mut work.output, Some(sub))
     s.joining = Some(take hear)
-    s.subscription = Some((sub, take input))
+    s.subscription = Some((sub, generation))
     Ok(())
 }
 
@@ -7509,6 +7570,7 @@ fn wire_stage_update[G: send, H: send](mut s: WireSession[G, H], mut output: Lis
     if current {
         let Owe(session: _, version: content_version, generations: take stamps, complete: take complete, rows: take rows, ended: take stopped, reset: reset) = option.unwrap(take content)
         computed = content_version
+        s.completes += list.len(complete)
         if reset {
             if s.reset_seen { return Error(1008u16) }
             s.reset_seen = true
@@ -7663,7 +7725,60 @@ fn wire_authenticate[G: send, H: send](mut s: WireSession[G, H], take principal:
     Ok(())
 }
 
+// The publisher's answer to this session's Join. Id 0 (it could not reserve the session's fence
+// Arcs) or a Join the publisher never took (its inbox closed) refuses the first Subscribe;
+// otherwise that Subscribe, carried in the Join (v2.22), is live at the generation it was sent with.
+fn wire_poll_admit[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork) {
+    if let Some(_) = work.join { return }
+    let received: Option[Option[Admit]] = match s.joining {
+        Some(hear) => match channel.try_receive(hear) { Ok(take a) => Some(Some(take a)), Error(Empty) => None, _ => Some(None) },
+        _ => None,
+    }
+    let Some(take answer) = take received else { return }
+    let _ = replace(mut s.joining, None)
+    match take answer {
+        Some(Admit(who: who, round: take register)) if who != 0u64 => {
+            s.joined = Some(who)
+            work.round = Some(take register)
+            if let Some((sub, generation)) = replace(mut s.subscription, None) {
+                result.unwrap(list.push(mut s.subs, (sub, generation)))
+                result.unwrap(list.push(mut s.pub_subs, sub))
+            }
+        },
+        _ => {
+            let _ = replace(mut s.join_lease, None)
+            let _ = replace(mut s.mark, None)
+            let _ = replace(mut s.taken, None)
+            work.fence = None
+            if let Some((sub, _)) = replace(mut s.subscription, None) { wire_end(mut s, mut work.output, sub, Refused(Overloaded)) }
+        },
+    }
+}
+
+// v2.22 (§3 "Repair"): once the owner holds no `complete` it took and has not sent, it publishes
+// how many it has taken for this join and wakes the publisher, so a due sub held back for an
+// unsent repair is repaired without waiting for another drain.
+fn wire_offer_taken[G: send, H: send](mut s: WireSession[G, H], work: WireWork) {
+    if s.completes == s.told_taken || work.sending_complete { return }
+    for o in work.output { if wire_carries_complete(o.frame) { return } }
+    let made = arc.new(Taken(n: s.completes))
+    let next = match take made { Ok(take a) => take a, Error(_) => return }
+    match s.taken { Some(root) => latest.publish(root, take next), None => return }
+    s.told_taken = s.completes
+    let _ = channel.try_send(wire_publisher(s), PubIn(e: Drained))
+}
+
+fn wire_carries_complete(f: Frame) -> bool {
+    match f { Batch(_, complete, _, _) => list.len(complete) != 0u64, _ => false }
+}
+
 fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, take input: ServiceInput) -> Result[Option[Frame], u16] {
+    let stepped = wire_step_input(mut s, mut work, take input)
+    wire_offer_taken(mut s, work)
+    stepped
+}
+
+fn wire_step_input[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, take input: ServiceInput) -> Result[Option[Frame], u16] {
     s.holding = match work.check { Some(_) => true, None => false }
     match take input {
         WAttach(source, take me, take pub_to) => {
@@ -7726,22 +7841,7 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
             return Ok(None)
         },
         WPoll(writable) => {
-            let received: Option[Admit] = match s.joining { Some(hear) => match channel.try_receive(hear) { Ok(take a) => Some(take a), _ => None }, _ => None }
-            if let Some(take admit) = received {
-                let Admit(who: who, round: take register) = take admit
-                let _ = replace(mut s.joining, None)
-                if who == 0u64 {
-                    // The publisher could not reserve this session's fence Arcs.
-                    let _ = replace(mut s.join_lease, None)
-                    let _ = replace(mut s.mark, None)
-                    work.fence = None
-                    if let Some((sub, _)) = replace(mut s.subscription, None) { wire_end(mut s, mut work.output, sub, Refused(Overloaded)) }
-                } else {
-                    s.joined = Some(who)
-                    work.round = Some(take register)
-                    if let Some((sub, take ready_sub)) = replace(mut s.subscription, None) { wire_subscribed(mut s, mut work, sub, take ready_sub) }
-                }
-            }
+            wire_poll_admit(mut s, mut work)
             if !writable { return Ok(None) }
             if s.phase == 4u8 { s.phase = 3u8 }
             if s.phase == 2u8 {

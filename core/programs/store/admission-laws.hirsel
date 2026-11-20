@@ -196,7 +196,7 @@ pub fn law_join_cleanup() -> bool {
     let (closing, closed): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let lease = result.unwrap(WireJoinLease(closing: take closing, publisher: channel.sender(pub_to)))
     let mut joined: List[Joiner] = list.new()
-    result.unwrap(list.push(mut joined, Joiner(who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: None, identity: None, fence: None, due: false, progress: None)))
+    result.unwrap(list.push(mut joined, Joiner(who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64)))
     let _ = take lease
     let mut subs = subscriptions()
     let mut waiting: List[Replies] = list.new()
@@ -452,7 +452,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let (events, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
     let (told, who): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
     let (closing, closed): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
-    result.unwrap(channel.send(to, PubIn(e: Joined(Join(to: take events, told: take told, mark: None, closed: Some(take closed), identity: None, fence: None, progress: None)))))
+    result.unwrap(channel.send(to, PubIn(e: Joined(Join(to: take events, told: take told, mark: None, closed: Some(take closed), identity: None, fence: None, progress: None, taken: None, first: None)))))
     owner.joined = Some(result.unwrap(channel.receive(who)).who)
     owner.publisher = Some(channel.sender(to))
     if let Ok(WireEvent(e: JoinReady)) = channel.receive(inbox) {} else { return false }
@@ -743,4 +743,179 @@ pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool w
 @test
 fn test_removal_waits_for_writer(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
     if law_removal_waits_for_writer(tasks, clock, random) { Ok(()) } else { Error(()) }
+}
+
+fn repair_offer(mut b: Board[(), Qh], mut joined: List[Joiner]) -> u64 {
+    let mut owes: List[Owe] = list.new()
+    repair(mut b, mut joined, mut owes)
+    let mut offered = 0u64
+    for o in owes { offered += list.len(o.complete) }
+    let mut waiting: List[Replies] = list.new()
+    let at = store.version(b.base)
+    settle(mut b.subs, mut joined, mut waiting, take owes, at)
+    offered
+}
+
+fn owner_takes(mut owner: WireSession[(), Qh], mut work: WireWork, inbox: Receiver[WireEvent]) -> bool {
+    match channel.try_receive(inbox) {
+        Ok(WireEvent(e: FromRunner(take notice))) => match wire_step(mut owner, mut work, WRunner(take notice)) { Ok(_) => true, Error(_) => false },
+        _ => false,
+    }
+}
+
+// L24 (v2.22, repair_one_unsent): a repair is sent only when the session holds no other repair
+// `complete` the owner has not sent; until then the sub stays due. Session 7's sub 1 is due and
+// its owner has drained, so the publisher hands it one repair. The owner takes it, but its
+// writer has not sent it when the sub bounces again and the owner drains again: the publisher
+// owes nothing, and the sub stays due. Once the writer sends the first repair, the owner wakes
+// the publisher, and the next pass owes exactly one `complete` of sub 1. Red when the publisher
+// repairs on the drain token alone (v2.20), which queues a second whole repair behind the first.
+pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 0u64, 1u64)
+    set(mut db, t, 1u64, 0u64)
+    let h = result.unwrap(subs_handles(mut db))
+    let board_reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    let mut b = Board(r: take board_reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
+    let _ = at_base_generation(mut b, 7u64, 1u32, 1u64, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg()))
+
+    let (access_gate, take policy_task) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
+    let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    let service = wire_service_seed(take reg, access_gate, head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
+    let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
+    let mut owner = take initial
+    let mut work = wire_work()
+    let (to_owner, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(8u64))
+    let (to_pub, from_pub): (Sender[PubIn], Receiver[PubIn]) = result.unwrap(channel.new(8u64))
+    owner.me = Some(channel.sender(to_owner))
+    owner.publisher = Some(take to_pub)
+    owner.phase = 3u8
+    owner.joined = Some(7u64)
+    result.unwrap(list.push(mut owner.subs, (1u32, 1u64)))
+    result.unwrap(list.push(mut owner.pub_subs, 1u32))
+    let zero = match arc.new(Taken(n: 0u64)) { Ok(take a) => take a, Error(_) => return false }
+    let root = result.unwrap(result.capacity_only(latest.new(take zero)))
+    let register = latest.handle(root)
+    owner.taken = Some(take root)
+    let (token, progress): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let mut joined: List[Joiner] = list.new()
+    result.unwrap(list.push(mut joined, Joiner(who: 7u64, to: take to_owner, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: Some(take register), handed: 0u64)))
+
+    // The first repair: due, and the owner drained.
+    let _ = mark_due(mut b.subs, 7u64, 1u32)
+    joined[0].due = true
+    let _ = channel.try_send(token, ())
+    let first = repair_offer(mut b, mut joined)
+    let took = owner_takes(mut owner, mut work, inbox)
+
+    // The sub bounces again and the owner drains again, while the first repair is unsent.
+    let _ = mark_due(mut b.subs, 7u64, 1u32)
+    joined[0].due = true
+    let _ = channel.try_send(token, ())
+    let held = repair_offer(mut b, mut joined) == 0u64 && joined[0].due
+
+    // The writer sends the first repair; the owner wakes the publisher.
+    let sent_complete = match wire_step(mut owner, mut work, WPoll(true)) {
+        Ok(Some(Batch(_, complete, _, _))) => list.len(complete) == 1u64 && complete[0] == 1u32,
+        _ => false,
+    }
+    let sent = sent_complete && match wire_step(mut owner, mut work, WSent) { Ok(_) => true, Error(_) => false }
+    let woke = match channel.try_receive(from_pub) { Ok(PubIn(e: Drained)) => true, _ => false }
+    let second = repair_offer(mut b, mut joined)
+
+    let mut policy_handle = take policy_task
+    task.cancel(mut policy_handle)
+    let _ = task.join(take policy_handle)
+    let _ = take requests
+    first == 1u64 && took && held && sent && woke && second == 1u64 && !joined[0].due
+}
+
+@test
+fn test_repair_one_unsent(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+    if law_repair_one_unsent(tasks, clock, random) { Ok(()) } else { Error(()) }
+}
+
+type BurstDrain: send { from: Receiver[PubIn], back: Sender[Receiver[PubIn]] }
+
+// The publisher's side of a full PubIn: it takes the message that filled the inbox, then hands
+// the inbox back to the law.
+fn burst_drain(take d: BurstDrain) -> Result[(), ()] waits {
+    let BurstDrain(from: take from, back: take back) = take d
+    let _ = channel.receive(from)
+    let _ = channel.send(back, take from)
+    Ok(())
+}
+
+// L23 (v2.22, join_waits): a Subscribe that makes its owner join is not refused because PubIn
+// is full while the place is not overloaded. Its Join waits in PubIn like `connect`'s, and it
+// carries that first Subscribe, so a PubIn that fills again before the Admit arrives refuses
+// nothing either. The owner answers `Refused(Overloaded)` to neither, and sub 1 is live at the
+// generation its Join named. Red when the owner `try_send`s its Join (v2.12 item 3), and when
+// it sends the first Subscribe as its own `WireSubscribed` after the Admit.
+pub fn law_join_waits(tasks: Tasks, c: Clock, r: Random) -> bool waits {
+    let (access_gate, take policy_task) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
+    let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    let service = wire_service_seed(take reg, access_gate, head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
+    let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
+    let mut owner = take initial
+    let mut work = wire_work()
+    let (to_owner, _inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(8u64))
+    let (to_pub, from_pub): (Sender[PubIn], Receiver[PubIn]) = result.unwrap(channel.new(1u64))
+    let (back_to, back): (Sender[Receiver[PubIn]], Receiver[Receiver[PubIn]]) = result.unwrap(channel.new(1u64))
+    owner.me = Some(take to_owner)
+    owner.publisher = Some(channel.sender(to_pub))
+    owner.phase = 3u8
+    // Another session's message fills PubIn.
+    result.unwrap(channel.try_send(to_pub, PubIn(e: Drained)))
+    let subscribe: ServicePlan = PlannedSubscribe(1u32, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg()))
+    let applied = match wire_step(mut owner, mut work, WPrepared(result.unwrap(box.new(take subscribe)))) { Ok(_) => true, Error(_) => false }
+    let not_refused_full = wire_no_end(work.output)
+    let draining = match task.spawn(tasks, bytes 1048576u64, BurstDrain(from: take from_pub, back: take back_to), burst_drain) { Ok(take t) => take t, Error(_) => return false }
+    wire_join_send(mut work, to_pub)
+    let inbox = match channel.receive(back) { Ok(take i) => take i, Error(_) => return false }
+    let _ = task.join(take draining)
+    let first: Option[JoinSubscribe] = None
+    let mut carried = take first
+    let mut told: Option[Sender[Admit]] = None
+    if let Ok(PubIn(e: Joined(take j))) = channel.try_receive(inbox) {
+        let Join(to: _, told: take answer, mark: _, closed: _, identity: _, fence: _, progress: _, taken: _, first: take sub) = take j
+        told = Some(take answer)
+        carried = take sub
+    }
+
+    // PubIn fills again before the owner sees its Admit.
+    result.unwrap(channel.try_send(to_pub, PubIn(e: Drained)))
+    let round_at = match arc.new(RoundAt(at: 0u64)) { Ok(take a) => take a, Error(_) => return false }
+    let rounds = result.unwrap(result.capacity_only(latest.new(take round_at)))
+    let mut admit_sent = false
+    if let Some(take to) = take told {
+        let admit = Admit(who: 7u64, round: latest.handle(rounds))
+        admit_sent = match channel.try_send(to, take admit) { Ok(_) => true, _ => false }
+    }
+    let polled = match wire_step(mut owner, mut work, WPoll(false)) { Ok(_) => true, Error(_) => false }
+    let not_refused = wire_no_end(work.output)
+    let generation = match take carried { Some(take f) => if f.sub == 1u32 { f.generation } else { 0u64 }, None => 0u64 }
+    let live = generation != 0u64 && match sub_generation(owner.subs, 1u32) { Some(g) => g == generation, None => false }
+    let joined_seven = match owner.joined { Some(who) => who == 7u64, None => false }
+
+    let mut policy_handle = take policy_task
+    task.cancel(mut policy_handle)
+    let _ = task.join(take policy_handle)
+    let _ = take requests
+    applied && not_refused_full && admit_sent && polled && not_refused && live && joined_seven
+}
+
+fn wire_no_end(output: List[WireOutput]) -> bool {
+    for o in output { if let Ended(_, _) = o.frame { return false } }
+    true
+}
+
+@test
+fn test_join_waits(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+    if law_join_waits(tasks, clock, random) { Ok(()) } else { Error(()) }
 }

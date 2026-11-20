@@ -169,9 +169,7 @@ pub struct Task {
     waiting_on: *mut Waiters,
     wait_previous: *mut Task,
     wait_next: *mut Task,
-    timer_next: *mut Task,
-    /// Host CLOCK_MONOTONIC nanoseconds.
-    timer_deadline: Option<u64>,
+    timer: Timer,
     operation: *mut Operation,
     /// The scheduler's creation list, newest first, linked both ways so a
     /// retire unlinks in O(1) however many tasks are live.
@@ -1037,6 +1035,178 @@ fn worker_stock(run: *mut Scheduler) -> *mut Stock {
     }
 }
 
+#[derive(Default)]
+struct Timer {
+    parent: *mut Task,
+    children: [*mut Task; 2],
+    /// Host CLOCK_MONOTONIC nanoseconds.
+    deadline: u64,
+    /// Zero for a detached timer.
+    arm: u64,
+}
+
+/// Complete binary min-heap over the tasks' prepaid links. The arm sequence
+/// preserves FIFO expiry at equal deadlines, including after a re-arm.
+#[derive(Default)]
+struct TimerHeap {
+    root: *mut Task,
+    len: usize,
+    arm_sequence: u64,
+}
+
+impl TimerHeap {
+    fn deadline(&self) -> Option<u64> {
+        // SAFETY: only pinned operations belong to this heap.
+        NonNull::new(self.root).map(|task| unsafe { (*task.as_ptr()).timer.deadline })
+    }
+
+    unsafe fn precedes(a: *mut Task, b: *mut Task) -> bool {
+        // SAFETY: both pointers name live tasks owned by the scheduler turn.
+        unsafe { ((*a).timer.deadline, (*a).timer.arm) < ((*b).timer.deadline, (*b).timer.arm) }
+    }
+
+    /// Follow a one-based heap index's bits below the leading 1.
+    unsafe fn at(&self, index: usize) -> *mut Task {
+        debug_assert!((1..=self.len).contains(&index));
+        // SAFETY: the complete tree has a node at every index through len.
+        unsafe {
+            let mut bit = (1 << index.ilog2()) >> 1;
+            let mut task = self.root;
+            while bit != 0 {
+                task = (*task).timer.children[usize::from(index & bit != 0)];
+                bit >>= 1;
+            }
+            task
+        }
+    }
+
+    unsafe fn replace(&mut self, old: *mut Task, new: *mut Task) {
+        // SAFETY: old is linked in the heap. A non-null new task is being
+        // moved to its position by the exclusive scheduler turn.
+        unsafe {
+            let parent = (*old).timer.parent;
+            if parent.is_null() {
+                self.root = new;
+            } else {
+                let side = usize::from((*parent).timer.children[1] == old);
+                (*parent).timer.children[side] = new;
+            }
+            if !new.is_null() {
+                (*new).timer.parent = parent;
+            }
+        }
+    }
+
+    unsafe fn set_children(task: *mut Task, children: [*mut Task; 2]) {
+        // SAFETY: all non-null pointers are live tasks in this turn's heap.
+        unsafe {
+            (*task).timer.children = children;
+            for child in children {
+                if !child.is_null() {
+                    (*child).timer.parent = task;
+                }
+            }
+        }
+    }
+
+    /// Exchange two adjacent positions without changing the tree's shape.
+    unsafe fn exchange_with_parent(&mut self, task: *mut Task, parent: *mut Task) {
+        // SAFETY: both tasks are live, and parent is task's current parent.
+        unsafe {
+            let mut children = (*parent).timer.children;
+            let side = usize::from(children[1] == task);
+            children[side] = parent;
+            self.replace(parent, task);
+            Self::set_children(parent, (*task).timer.children);
+            Self::set_children(task, children);
+        }
+    }
+
+    unsafe fn sift_up(&mut self, task: *mut Task) {
+        // SAFETY: task is a live heap node and only its order may be wrong.
+        unsafe {
+            let mut parent = (*task).timer.parent;
+            while !parent.is_null() && Self::precedes(task, parent) {
+                self.exchange_with_parent(task, parent);
+                parent = (*task).timer.parent;
+            }
+        }
+    }
+
+    unsafe fn sift_down(&mut self, task: *mut Task) {
+        // SAFETY: task and its descendants are live nodes in this turn's heap.
+        unsafe {
+            loop {
+                let [left, right] = (*task).timer.children;
+                if left.is_null() {
+                    return;
+                }
+                let child = if !right.is_null() && Self::precedes(right, left) {
+                    right
+                } else {
+                    left
+                };
+                if !Self::precedes(child, task) {
+                    return;
+                }
+                self.exchange_with_parent(child, task);
+            }
+        }
+    }
+
+    unsafe fn insert(&mut self, task: *mut Task, deadline: u64) {
+        // SAFETY: this turn owns the parked task, which is not armed.
+        unsafe {
+            debug_assert_eq!((*task).timer.arm, 0);
+            self.arm_sequence = self
+                .arm_sequence
+                .checked_add(1)
+                .unwrap_or_else(|| crate::process::stop(b"TimerArms"));
+            let index = self.len + 1;
+            let parent = if self.len == 0 {
+                self.root = task;
+                ptr::null_mut()
+            } else {
+                let parent = self.at(index / 2);
+                (*parent).timer.children[index % 2] = task;
+                parent
+            };
+            self.len = index;
+            (*task).timer = Timer {
+                parent,
+                children: [ptr::null_mut(); 2],
+                deadline,
+                arm: self.arm_sequence,
+            };
+            self.sift_up(task);
+        }
+    }
+
+    unsafe fn remove(&mut self, task: *mut Task) {
+        // SAFETY: only this turn mutates the live task's timer. Its links
+        // locate it directly when armed.
+        unsafe {
+            if (*task).timer.arm == 0 {
+                return;
+            }
+            let last = self.at(self.len);
+            self.replace(last, ptr::null_mut());
+            self.len -= 1;
+            if last != task {
+                self.replace(task, last);
+                Self::set_children(last, (*task).timer.children);
+                let parent = (*last).timer.parent;
+                if !parent.is_null() && Self::precedes(last, parent) {
+                    self.sift_up(last);
+                } else {
+                    self.sift_down(last);
+                }
+            }
+            (*task).timer = Timer::default();
+        }
+    }
+}
+
 struct Scheduler {
     pool: Option<NonNull<Pool>>,
     deferred: *mut Task,
@@ -1045,7 +1215,7 @@ struct Scheduler {
     idle: *mut u8,
     head: *mut Task,
     tail: *mut Task,
-    timers: *mut Task,
+    timers: TimerHeap,
     all: *mut Task,
     next: u64,
     provider: SchedulerProvider,
@@ -1315,37 +1485,6 @@ impl Scheduler {
         }
     }
 
-    unsafe fn insert_timer(&mut self, task: *mut Task, deadline: u64) {
-        // SAFETY: the task is exclusively parked and is not in the timer list.
-        unsafe {
-            (*task).timer_deadline = Some(deadline);
-            let mut link = &raw mut self.timers;
-            while !(*link).is_null() && (*(*link)).timer_deadline.is_some_and(|at| at <= deadline) {
-                link = &raw mut (**link).timer_next;
-            }
-            (*task).timer_next = *link;
-            *link = task;
-        }
-    }
-
-    unsafe fn remove_timer(&mut self, task: *mut Task) {
-        // SAFETY: only the idle scheduler mutates timer links.
-        unsafe {
-            if (*task).timer_deadline.is_none() {
-                return;
-            }
-            let mut link = &raw mut self.timers;
-            while !(*link).is_null() && *link != task {
-                link = &raw mut (**link).timer_next;
-            }
-            if *link == task {
-                *link = (*task).timer_next;
-            }
-            (*task).timer_next = ptr::null_mut();
-            (*task).timer_deadline = None;
-        }
-    }
-
     /// One scheduler turn's wakes, before any pop: cancellation requests, then
     /// readiness, then expired timers.
     ///
@@ -1394,32 +1533,31 @@ impl Scheduler {
     }
 
     unsafe fn take_timers(&mut self) {
-        // SAFETY: this turn owns the timer list and pinned operation frames.
+        // SAFETY: this turn owns the timer heap and pinned operation frames.
         unsafe {
-            if self.timers.is_null() {
+            if self.timers.root.is_null() {
                 return;
             }
             let now = self.now();
             // Detach every expired timer first: a wait that answers Until(now)
             // again re-arms for the next turn, so the other tasks still run.
+            // Detached timers lend their unused parent link to this wake batch.
             let mut expired = ptr::null_mut::<Task>();
             let mut tail = &raw mut expired;
-            while !self.timers.is_null()
-                && (*self.timers)
-                    .timer_deadline
-                    .is_some_and(|deadline| deadline <= now)
+            while self
+                .timers
+                .deadline()
+                .is_some_and(|deadline| deadline <= now)
             {
-                let task = self.timers;
-                self.timers = (*task).timer_next;
-                (*task).timer_next = ptr::null_mut();
-                (*task).timer_deadline = None;
+                let task = self.timers.root;
+                self.timers.remove(task);
                 *tail = task;
-                tail = &raw mut (*task).timer_next;
+                tail = &raw mut (*task).timer.parent;
             }
             while !expired.is_null() {
                 let task = expired;
-                expired = (*task).timer_next;
-                (*task).timer_next = ptr::null_mut();
+                expired = (*task).timer.parent;
+                (*task).timer.parent = ptr::null_mut();
                 self.wake_operation(task, Wake::Timer);
             }
         }
@@ -1566,7 +1704,7 @@ impl Scheduler {
     fn poll_net(&mut self, timeout: i32) {
         if let Some(model) = &self.model {
             // Readiness is taken before timers by take_wakes, including ties.
-            let deadline = unsafe { self.timers.as_ref().and_then(|t| t.timer_deadline) };
+            let deadline = self.timers.deadline();
             for token in model.poll(deadline, timeout != 0) {
                 self.readies.push(token);
             }
@@ -1595,7 +1733,7 @@ impl Scheduler {
             return;
         }
         // SAFETY: no task is running while the idle scheduler waits.
-        let deadline = unsafe { self.timers.as_ref().and_then(|task| task.timer_deadline) };
+        let deadline = self.timers.deadline();
         if self.model.is_some() {
             let now = self.now();
             self.poll_net(-1);
@@ -1657,7 +1795,7 @@ impl Scheduler {
         // SAFETY: the task is parked; its operation frame is pinned.
         unsafe {
             self.parked.remove((*(*task).operation).token);
-            self.remove_timer(task);
+            self.timers.remove(task);
             (*(*task).operation).state = state;
             self.ready(task);
         }
@@ -1722,10 +1860,10 @@ impl Scheduler {
                             return false;
                         }
                         WAIT_UNTIL => {
-                            self.remove_timer(task);
-                            self.insert_timer(task, w.deadline_ns);
+                            self.timers.remove(task);
+                            self.timers.insert(task, w.deadline_ns);
                         }
-                        WAIT_PARK => self.remove_timer(task),
+                        WAIT_PARK => self.timers.remove(task),
                         _ => crate::process::stop(b"Provider"),
                     }
                     self.parked.insert(token, task);
@@ -1768,12 +1906,12 @@ impl Scheduler {
                 }
                 STEP_PENDING => {
                     self.parked.insert((*(*task).operation).token, task);
-                    self.remove_timer(task);
+                    self.timers.remove(task);
                     (*(*task).operation).state = OperationState::Issued {
                         deadline: step.deadline_ns,
                     };
                     if step.deadline_ns != 0 {
-                        self.insert_timer(task, step.deadline_ns);
+                        self.timers.insert(task, step.deadline_ns);
                     }
                 }
                 _ => crate::process::stop(b"Provider"),
@@ -1792,9 +1930,9 @@ impl Scheduler {
             }
             if let OperationState::Issued { deadline } = (*op).state
                 && deadline != 0
-                && (*task).timer_deadline.is_none()
+                && (*task).timer.arm == 0
             {
-                self.insert_timer(task, deadline);
+                self.timers.insert(task, deadline);
             }
         }
     }
@@ -3389,7 +3527,7 @@ pub unsafe fn run_root(
         idle: ptr::null_mut(),
         head: ptr::null_mut(),
         tail: ptr::null_mut(),
-        timers: ptr::null_mut(),
+        timers: TimerHeap::default(),
         all: ptr::null_mut(),
         next: 1,
         provider,
@@ -3454,8 +3592,7 @@ pub unsafe fn run_root(
         waiting_on: ptr::null_mut(),
         wait_previous: ptr::null_mut(),
         wait_next: ptr::null_mut(),
-        timer_next: ptr::null_mut(),
-        timer_deadline: None,
+        timer: Timer::default(),
         operation: ptr::null_mut(),
         all: ptr::null_mut(),
         all_previous: ptr::null_mut(),
@@ -3666,9 +3803,7 @@ impl RunPtr {
                         && !run.readies.pending.load(Ordering::Acquire)
                         && run.has_outside_wait();
                     let (timeout, release) = if wait_for_net {
-                        crate::task_heap::idle_wait(poll_timeout(
-                            run.timers.as_ref().and_then(|task| task.timer_deadline),
-                        ))
+                        crate::task_heap::idle_wait(poll_timeout(run.timers.deadline()))
                     } else {
                         (0, false)
                     };
@@ -3880,7 +4015,7 @@ impl RunPtr {
                 pool.wake(index);
                 return;
             }
-            let deadline = run.timers.as_ref().and_then(|task| task.timer_deadline);
+            let deadline = run.timers.deadline();
             if run.readies.pending.load(Ordering::Acquire) {
                 pool.wake(index);
                 return;
@@ -4008,8 +4143,7 @@ unsafe fn spawn_in(
             waiting_on: ptr::null_mut(),
             wait_previous: ptr::null_mut(),
             wait_next: ptr::null_mut(),
-            timer_next: ptr::null_mut(),
-            timer_deadline: None,
+            timer: Timer::default(),
             operation: ptr::null_mut(),
             all: (*run).all,
             all_previous: ptr::null_mut(),
@@ -4463,7 +4597,7 @@ mod ready_routing_laws {
                 idle: ptr::null_mut(),
                 head: ptr::null_mut(),
                 tail: ptr::null_mut(),
-                timers: ptr::null_mut(),
+                timers: TimerHeap::default(),
                 all: ptr::null_mut(),
                 next: 1,
                 provider: SchedulerProvider::default(),
@@ -4520,8 +4654,7 @@ mod ready_routing_laws {
                         waiting_on: ptr::null_mut(),
                         wait_previous: ptr::null_mut(),
                         wait_next: ptr::null_mut(),
-                        timer_next: ptr::null_mut(),
-                        timer_deadline: None,
+                        timer: Timer::default(),
                         operation: &mut operations[i],
                         all: ptr::null_mut(),
                         all_previous: ptr::null_mut(),

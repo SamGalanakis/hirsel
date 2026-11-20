@@ -64,6 +64,8 @@ impl FunctionEmitter<'_> {
         let mut results = vec![U, K, Ty::Scalar(Scalar::U32), U, K];
         if matches!(op, HostOp::Listen | HostOp::Accept) {
             results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
+        } else if op == HostOp::TlsConnect {
+            results.extend([U; 4]);
         }
         let mut values = match op {
             HostOp::Connect
@@ -72,6 +74,8 @@ impl FunctionEmitter<'_> {
             | HostOp::RecvBounded
             | HostOp::SendPair
             | HostOp::NetNarrow
+            | HostOp::NetNarrowTls
+            | HostOp::TlsConnect
             | HostOp::NetSplit => {
                 let mut operands = vec![ptr(CONTEXT)];
                 for (p, value) in RtOp::Host(op).signature().params.iter().zip(args) {

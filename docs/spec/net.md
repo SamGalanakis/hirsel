@@ -45,7 +45,9 @@ listener closes it once. No finalizer waits or enables positive linger.
 rule with `r`, dropping empty intersections. Address rules have `dir: NetDirection`,
 `prefix: Ip`, `bits: u8`, `ports: (u16, u16)`, where
 `NetDirection = Connect | Listen`. A `Tls` rule has name patterns, ports and a pinned trust
-instead ([TLS-3](tls.md#tls-3-authority)). It permits only a client handshake on a socket
+instead ([TLS-3](tls.md#tls-3-authority)). In Hirsel, use
+`Tls(names: String, ports: (u16, u16), trust: TlsPin)` with `SystemPin` or
+`Sha256(Bytes)`. The latter holds the 32 raw digest bytes. It permits only a client handshake on a socket
 that a `Connect` rule already allowed. An invalid prefix length, nonzero prefix host
 bits, reversed ports or IPv4-mapped IPv6 prefix returns `Invalid` without changing
 anything. Rule storage is admitted, so `RuleError` also includes

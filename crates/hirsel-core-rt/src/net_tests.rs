@@ -50,7 +50,8 @@ fn net_laws_child() {
         hirsel_core_net::Rule::parse(listen).unwrap(),
         hirsel_core_net::Rule::parse("Connect ::1/128 1-65535").unwrap(),
         hirsel_core_net::Rule::parse("Listen ::1/128 0-65535").unwrap(),
-    ];
+    ]
+    .map(hirsel_core_net::RuleView::address);
     let config = OsConfig {
         root_limit: 1 << 20,
         args: ptr::null(),
@@ -148,7 +149,9 @@ fn net_laws_child() {
 }
 #[test]
 fn net_narrow_retains_charge_until_run_end_and_refuses_invalid_or_capacity() {
-    let rule = hirsel_core_net::Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap();
+    let rule = hirsel_core_net::RuleView::address(
+        hirsel_core_net::Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
+    );
     let mut os = crate::os::OsProvider::new(
         File::create("/dev/null").unwrap().into(),
         File::create("/dev/null").unwrap().into(),
@@ -766,6 +769,8 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                         denied: false,
                         direction: 0,
                         os: &crate::os_net::OPERATIONS,
+                        tls: ptr::null_mut(),
+                        pending_write: false,
                     };
                     let mut r = Request {
                         operation: CONNECT,

@@ -136,8 +136,19 @@ uint64_t hirsel_core_entry_grant(const HirselCoreProcessConfig *, uint8_t kind, 
 bool hirsel_core_entry_grants_present(const HirselCoreProcessConfig *, const HirselCoreEntryRequirement *, size_t);
 const HirselCoreProvider *hirsel_core_capability_provider(const HirselCoreContext *, uint64_t);
 uint64_t hirsel_core_capability_handle(const HirselCoreContext *, uint64_t);
-/* NET-6 configuration. dir: 0 Connect, 1 Listen; family: 0 V4, 1 V6. */
-typedef struct { uint8_t dir, family; uint64_t hi, lo; uint8_t bits; uint16_t first, last; } HirselCoreNetRule;
+/* NET-6 configuration. dir: 0 Connect, 1 Listen, 2 Tls. Address rules use
+   family (0 V4, 1 V6), hi, lo and bits. TLS rules use comma-separated patterns
+   and trust (0 System, 1 Roots); roots holds the SHA-256 pin for Roots. */
+typedef struct {
+    uint8_t dir, family;
+    uint64_t hi, lo;
+    uint8_t bits;
+    uint16_t first, last;
+    const uint8_t *patterns;
+    size_t patterns_len;
+    uint8_t trust;
+    uint8_t roots[32];
+} HirselCoreNetRule;
 typedef struct { const HirselCoreNetRule *data; size_t len; } HirselCoreNetRules;
 typedef struct HirselCoreDirectoryOperations HirselCoreDirectoryOperations;
 extern const HirselCoreDirectoryOperations hirsel_core_os_directory_ops;
@@ -205,6 +216,25 @@ HirselCoreHostOutcome hirsel_core_host_recv_bounded(HirselCoreContext *, uint64_
    is a const HirselCoreBuffer * borrowing the second prefix. Both remain
    pinned through deliver. Outcome.value counts their concatenated prefix. */
 HirselCoreHostOutcome hirsel_core_host_send_pair(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
+/* TLS_CONNECT (22). Only the TLS fields in this extension are public.
+   ALPN is a sequence of one-byte lengths followed by the protocol bytes.
+   protocol_out points to a 255-byte buffer with length initially zero.
+   peer_out points to 32 writable bytes. Success returns the stream key.
+   NetError tag 9 carries the TLS case in the low byte and detail in the second.
+   The input Socket is consumed on all returns. */
+#define HIRSEL_CORE_TLS_CONNECT 22
+typedef struct {
+    uint64_t network[21];
+    HirselCoreView name;
+    uint8_t trust;
+    HirselCoreBuffer roots;
+    HirselCoreView alpn;
+    HirselCoreBuffer *protocol_out;
+    uint8_t *peer_out;
+    void *runtime_state;
+} HirselCoreTlsRequest;
+HirselCoreHostOutcome hirsel_core_host_tls_connect(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreView *, uint8_t, const HirselCoreBuffer *, const HirselCoreView *, HirselCoreBuffer *, uint8_t *, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_net_narrow_tls(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint16_t, uint16_t, uint8_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, uint8_t, uint16_t, uint16_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_split(HirselCoreContext *, uint64_t, uint64_t);
 void hirsel_core_socket_drop(HirselCoreContext *, uint64_t);

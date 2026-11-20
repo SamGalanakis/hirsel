@@ -4,6 +4,7 @@ use crate::{
     entry::SocketActivation,
     net::{Address, NetworkRequest},
     provider::*,
+    tls::{HandshakeState, TlsRequest},
 };
 use std::{
     env, io,
@@ -25,6 +26,12 @@ pub(crate) struct Operations {
 pub(crate) static OPERATIONS: Operations = Operations {
     step,
     abort,
+    adopt_listener,
+};
+
+pub(crate) static TLS_OPERATIONS: Operations = Operations {
+    step: tls_step,
+    abort: tls_abort,
     adopt_listener,
 };
 
@@ -87,7 +94,7 @@ fn errno() -> i32 {
         .raw_os_error()
         .unwrap_or(libc::EIO)
 }
-fn retry(mut call: impl FnMut() -> isize) -> Result<isize, i32> {
+pub(crate) fn retry(mut call: impl FnMut() -> isize) -> Result<isize, i32> {
     loop {
         let rc = call();
         if rc >= 0 {
@@ -99,7 +106,7 @@ fn retry(mut call: impl FnMut() -> isize) -> Result<isize, i32> {
         }
     }
 }
-fn error(code: i32) -> Outcome {
+pub(crate) fn error(code: i32) -> Outcome {
     let tag = match code {
         libc::EACCES => 1,
         libc::ECONNREFUSED => 2,
@@ -114,7 +121,7 @@ fn error(code: i32) -> Outcome {
         ..Outcome::default()
     }
 }
-fn signal(tag: u8) -> Outcome {
+pub(crate) fn signal(tag: u8) -> Outcome {
     Outcome {
         error: IoError { tag, code: 0 },
         ..Outcome::default()
@@ -500,6 +507,26 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 let b = &mut request.buffer;
                 let receiving = request.operation == RECV_BOUNDED;
                 let tail = (!receiving).then(|| &*n.send_tail);
+                if let Some(stream) = n
+                    .tls
+                    .as_mut()
+                    .and_then(|tls| tls.sessions.get_mut(&(key & !3)))
+                {
+                    let fd = sockets.fd(key);
+                    if let Some(tail) = tail {
+                        return stream.send(fd, crate::tls::bytes(b), crate::tls::bytes(tail));
+                    }
+                    let spare = if b.capacity <= b.len {
+                        &mut [][..]
+                    } else {
+                        std::slice::from_raw_parts_mut(b.data.add(b.len), b.capacity - b.len)
+                    };
+                    let result = stream.receive(fd, spare);
+                    if let Some(outcome) = result {
+                        b.len += outcome.value as usize;
+                    }
+                    return result;
+                }
                 if (receiving && b.len >= b.capacity)
                     || tail.is_some_and(|tail| b.len == 0 && tail.len == 0)
                 {
@@ -620,7 +647,10 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
         let drained = first
             && request.operation == RECV_BOUNDED
             && request.buffer.len < request.buffer.capacity
-            && (*n.sockets).read_drained(request.handle);
+            && (*n.sockets).read_drained(request.handle)
+            && n.tls
+                .as_ref()
+                .is_none_or(|tls| !tls.sessions.contains_key(&(request.handle & !3)));
         let deadline = if drained {
             let deadline = pending_deadline(n);
             // Even a drained reader gets one try at an already-expired deadline.
@@ -667,5 +697,98 @@ pub(crate) unsafe fn abort(request: *mut Request, token: u64, reason: u8) -> Out
         let key = n.connecting.unwrap_or(r.handle);
         (*n.sockets).disarm(key, matches!(r.operation, CONNECT | SEND_PAIR));
         finish(r, n, signal(if reason == ABORT_CANCEL { 7 } else { 6 })).outcome
+    }
+}
+
+unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
+    unsafe {
+        let request = &*request;
+        let tls = &mut *request.path.cast_mut().cast::<TlsRequest>();
+        let key = request.handle;
+        let n = &mut tls.network;
+        let streams = &mut *n.tls;
+        let sockets = &mut *n.sockets;
+        let s = &mut *tls.state.cast::<HandshakeState>();
+        if first {
+            let roots = s.roots.take().unwrap_or_else(|| {
+                streams
+                    .system
+                    .get_or_init(crate::os_tls::system_roots)
+                    .clone()
+            });
+            match crate::os_tls::Stream::new(
+                s.name.take().unwrap(),
+                roots,
+                std::mem::take(&mut s.alpn),
+            ) {
+                Ok(stream) => s.stream = Some(stream),
+                Err(outcome) => return tls_finish(tls, key, outcome),
+            }
+        } else {
+            sockets.disarm(key, n.pending_write);
+        }
+        let stream = s.stream.as_mut().unwrap();
+        match stream.handshake(sockets.fd(key)) {
+            Ok(Ok(())) => {
+                let protocol = &mut *tls.protocol_out;
+                let out = std::slice::from_raw_parts_mut(protocol.data, protocol.capacity);
+                protocol.len = stream.handshake_result(out, &mut *tls.peer_out);
+                streams
+                    .sessions
+                    .insert(key, Box::new(s.stream.take().unwrap()));
+                sockets.split(key);
+                Step {
+                    outcome: Outcome {
+                        value: key,
+                        ..Outcome::default()
+                    },
+                    ..Step::default()
+                }
+            }
+            Ok(Err(write)) => {
+                let deadline = pending_deadline(n);
+                if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
+                    return tls_finish(tls, key, signal(6));
+                }
+                n.pending_write = write;
+                if let Err(e) = sockets.arm(key, write, token) {
+                    return tls_finish(tls, key, error(e.raw_os_error().unwrap_or(libc::EIO)));
+                }
+                crate::tasks::attach_net(n.sockets, sockets.poller().unwrap());
+                Step {
+                    kind: STEP_PENDING,
+                    deadline_ns: deadline.unwrap_or(0),
+                    ..Step::default()
+                }
+            }
+            Err(outcome) => tls_finish(tls, key, outcome),
+        }
+    }
+}
+
+unsafe fn tls_finish(tls: &mut TlsRequest, key: u64, outcome: Outcome) -> Step {
+    unsafe {
+        let n = &mut tls.network;
+        let state = &mut *tls.state.cast::<HandshakeState>();
+        drop(state.stream.take());
+        (*n.sockets).release(key);
+        state.consumed = true;
+    }
+    Step {
+        outcome,
+        ..Step::default()
+    }
+}
+
+unsafe fn tls_abort(request: *mut Request, _: u64, reason: u8) -> Outcome {
+    unsafe {
+        let r = &*request;
+        let tls = &mut *r.path.cast_mut().cast::<TlsRequest>();
+        tls_finish(
+            tls,
+            r.handle,
+            signal(if reason == ABORT_CANCEL { 7 } else { 6 }),
+        )
+        .outcome
     }
 }

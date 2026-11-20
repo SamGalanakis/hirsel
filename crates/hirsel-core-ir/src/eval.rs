@@ -1882,7 +1882,11 @@ impl Machine<'_> {
         // (native provider `drive`, `cancellation_point`).
         if !matches!(
             op,
-            HostOp::WallMs | HostOp::MonoNs | HostOp::NetNarrow | HostOp::NetSplit
+            HostOp::WallMs
+                | HostOp::MonoNs
+                | HostOp::NetNarrow
+                | HostOp::NetNarrowTls
+                | HostOp::NetSplit
         ) {
             self.check_cancel(t)?;
         }
@@ -1893,6 +1897,50 @@ impl Machine<'_> {
             | HostOp::RecvBounded
             | HostOp::SendPair => {
                 return self.network_host(t, op, a);
+            }
+            HostOp::TlsConnect => {
+                self.world.network.sockets.release(a[1]);
+                vec![0, 9, 4, 0, 0, 0, 0, 0]
+            }
+            HostOp::NetNarrowTls => {
+                // T3 installs TLS rules in the evaluator's provider grants.
+                let names = self.carrier(a[1]).0;
+                let trust = match a[4] {
+                    0 => Some(hirsel_core_net::TlsTrust::System),
+                    1 => self
+                        .carrier(a[5])
+                        .0
+                        .try_into()
+                        .ok()
+                        .map(hirsel_core_net::TlsTrust::Roots),
+                    _ => None,
+                };
+                if trust
+                    .and_then(|trust| {
+                        hirsel_core_net::TlsRule::new(
+                            std::str::from_utf8(&names).ok()?,
+                            a[2] as u16,
+                            a[3] as u16,
+                            trust,
+                        )
+                    })
+                    .is_none()
+                {
+                    vec![0, 1, 0, 0]
+                } else {
+                    let key = self
+                        .world
+                        .network
+                        .grants
+                        .keys()
+                        .copied()
+                        .max()
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .expect("run-local handle counter");
+                    self.world.network.grants.insert(key, Vec::new());
+                    ok(key, 0)
+                }
             }
             HostOp::NetSplit => {
                 let (read, write) = self.world.network.sockets.split(a[0]);

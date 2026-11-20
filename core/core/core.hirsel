@@ -131,16 +131,24 @@ pub type Addr {
 
 pub type Until = Never | At(Clock, u64)
 
-pub type NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32)
+pub type NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure)
+
+pub type Trust = System | Roots(Bytes)
+
+pub type Handshake {
+    protocol: Option[u64],
+    peer: (u64, u64, u64, u64)
+}
+
+pub type TlsFailure = Certificate(CertFailure) | Name | Alpn | Roots | Protocol(u8) | Closed | Truncated
+
+pub type CertFailure = UnknownIssuer | NameMismatch | Expired | NotYetValid | Invalid
 
 pub type NetDirection = Connect | Listen
 
-pub type Rule {
-    dir: NetDirection,
-    prefix: Ip,
-    bits: u8,
-    ports: (u16, u16)
-}
+pub type TlsPin = SystemPin | Sha256(Bytes)
+
+pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16)) | Tls(names: String, ports: (u16, u16), trust: TlsPin)
 
 pub type RuleError = Invalid | Capacity(Capacity)
 

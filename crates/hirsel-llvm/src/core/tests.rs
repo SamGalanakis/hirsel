@@ -2285,6 +2285,8 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             HostOp::RecvBounded => &["u64", "ptr", "u64", "u8", "u64", "u64"],
             HostOp::SendPair => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
             HostOp::NetNarrow => &["u64", "u8", "u8", "u64", "u64", "u8", "u16", "u16"],
+            HostOp::TlsConnect => &["u64", "u64", "ptr", "u8", "ptr", "ptr", "u8", "u64", "u64"],
+            HostOp::NetNarrowTls => &["u64", "ptr", "u16", "u16", "u8", "ptr"],
             HostOp::NetSplit | HostOp::Stopped => &["u64"],
             HostOp::Open => &["u64", "ptr", "u8"],
             HostOp::Close | HostOp::TryLock | HostOp::Unlock | HostOp::WallMs | HostOp::MonoNs => {
@@ -2299,6 +2301,8 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             &[]
         } else if matches!(op, HostOp::Listen | HostOp::Accept) {
             &["u64", "u8", "u32", "u64", "u8", "u64", "u64", "u16"]
+        } else if op == HostOp::TlsConnect {
+            &["u64", "u8", "u32", "u64", "u64", "u64", "u64", "u64"]
         } else if !matches!(op, HostOp::WallMs | HostOp::MonoNs) {
             &["u64", "u8", "u32", "u64"]
         } else {
@@ -2355,6 +2359,8 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             .unwrap();
         let storage = if matches!(op, HostOp::Listen | HostOp::Accept) {
             "sret([56 x i8])"
+        } else if op == HostOp::TlsConnect {
+            "sret([64 x i8])"
         } else {
             "sret([32 x i8])"
         };

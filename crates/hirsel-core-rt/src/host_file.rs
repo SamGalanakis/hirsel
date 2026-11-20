@@ -88,6 +88,8 @@ pub(crate) struct Registry(Mutex<Entries>);
 #[derive(Default)]
 pub(crate) struct Files {
     pub(crate) sockets: hirsel_core_net::Sockets,
+    pub(crate) connected: std::collections::BTreeMap<u64, (crate::net::Address, Provider)>,
+    pub(crate) tls: crate::os_tls::Streams,
     pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
     pub(crate) net_tape: Option<crate::net::SocketTape>,
     // Children inherit these entries without borrowing the scheduler's sockets.
@@ -227,6 +229,8 @@ impl Files {
             unsafe { tapes.close(context) };
         }
         self.sockets = hirsel_core_net::Sockets::default();
+        self.tls.sessions.clear();
+        self.connected.clear();
         self.net_grants.get_mut().unwrap().clear();
         if let Some(files) = &mut self.registry.0.get_mut().unwrap().live {
             // SAFETY: the run's Context and providers remain pinned.

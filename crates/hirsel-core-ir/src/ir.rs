@@ -995,6 +995,8 @@ pub enum HostOp {
     NetNarrow = 24,
     NetSplit = 25,
     Stopped = 28,
+    TlsConnect = 22,
+    NetNarrowTls = 29,
 }
 
 impl HostOp {
@@ -1030,9 +1032,11 @@ impl HostOp {
         HostOp::Connect,
         HostOp::Listen,
         HostOp::Accept,
+        HostOp::TlsConnect,
         HostOp::RecvBounded,
         HostOp::SendPair,
         HostOp::NetNarrow,
+        HostOp::NetNarrowTls,
         HostOp::NetSplit,
         HostOp::Stopped,
     ];
@@ -1068,6 +1072,8 @@ impl HostOp {
             HostOp::RecvBounded => "host_recv_bounded",
             HostOp::SendPair => "host_send_pair",
             HostOp::NetNarrow => "net_narrow",
+            HostOp::NetNarrowTls => "net_narrow_tls",
+            HostOp::TlsConnect => "tls_connect",
             HostOp::NetSplit => "net_split",
             HostOp::Stopped => "host_stopped",
         }
@@ -1081,6 +1087,8 @@ impl HostOp {
             Self::RecvBounded => "hirsel_core_host_recv_bounded",
             Self::SendPair => "hirsel_core_host_send_pair",
             Self::NetNarrow => "hirsel_core_net_narrow",
+            Self::NetNarrowTls => "hirsel_core_net_narrow_tls",
+            Self::TlsConnect => "hirsel_core_tls_connect",
             Self::NetSplit => "hirsel_core_net_split",
             _ => unreachable!(),
         }
@@ -1089,7 +1097,12 @@ impl HostOp {
     pub const fn waits(self) -> bool {
         !matches!(
             self,
-            HostOp::WallMs | HostOp::MonoNs | HostOp::Random | HostOp::NetNarrow | HostOp::NetSplit
+            HostOp::WallMs
+                | HostOp::MonoNs
+                | HostOp::Random
+                | HostOp::NetNarrow
+                | HostOp::NetNarrowTls
+                | HostOp::NetSplit
         )
     }
 }
@@ -1288,6 +1301,40 @@ impl RtOp {
                             V(u8_),
                             V(Ty::Scalar(Scalar::U16)),
                             V(Ty::Scalar(Scalar::U16)),
+                        ],
+                        outcome,
+                    ),
+                    HostOp::TlsConnect => (
+                        vec![
+                            V(u64_),
+                            V(u64_),
+                            V(p),
+                            V(u8_),
+                            V(p),
+                            V(p),
+                            V(u8_),
+                            V(u64_),
+                            V(u64_),
+                        ],
+                        vec![
+                            u64_,
+                            u8_,
+                            Ty::Scalar(Scalar::U32),
+                            u64_,
+                            u64_,
+                            u64_,
+                            u64_,
+                            u64_,
+                        ],
+                    ),
+                    HostOp::NetNarrowTls => (
+                        vec![
+                            V(u64_),
+                            V(p),
+                            V(Ty::Scalar(Scalar::U16)),
+                            V(Ty::Scalar(Scalar::U16)),
+                            V(u8_),
+                            V(p),
                         ],
                         outcome,
                     ),

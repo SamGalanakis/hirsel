@@ -29,6 +29,7 @@ pub mod model_net;
 pub mod net;
 pub mod os;
 mod os_net;
+mod os_tls;
 #[cfg(any(test, feature = "charge-observation"))]
 pub mod peak;
 pub mod process;
@@ -47,6 +48,7 @@ mod task_heap;
 pub mod tasks;
 #[cfg(feature = "testing")]
 pub mod test_provider;
+pub mod tls;
 
 mod frame_list;
 

@@ -1,6 +1,7 @@
 //! Static views and source bindings use the same ELF writer as generated code.
 use super::*;
 use hirsel_core_layout::source_positions;
+use std::mem::offset_of;
 
 pub(super) struct Tables {
     pub parameters: DataId,
@@ -86,19 +87,38 @@ pub(super) fn write(
     let parameters = bytes(object, None, requirements, 8)?;
     let names = views(object, plan.parameters.iter().map(|p| p.name))?;
     let directories = views(object, plan.directories.iter().map(String::as_str))?;
+    use hirsel_core_net::{GrantRule, RuleView};
     let mut rules = Vec::new();
-    for r in plan.net_rules {
-        let mut row = vec![0; 32];
-        row[0] = r.dir;
-        row[1] = r.family;
-        row[8..16].copy_from_slice(&r.hi.to_le_bytes());
-        row[16..24].copy_from_slice(&r.lo.to_le_bytes());
-        row[24] = r.bits;
-        row[26..28].copy_from_slice(&r.first.to_le_bytes());
-        row[28..30].copy_from_slice(&r.last.to_le_bytes());
+    let mut pointers = Vec::new();
+    for rule in plan.net_rules {
+        let mut row = [0; size_of::<RuleView>()];
+        let view = match rule {
+            GrantRule::Address(address) => RuleView::address(*address),
+            GrantRule::Tls(rule) => {
+                let patterns = rule.pattern_text();
+                let view = RuleView::tls(rule, &patterns);
+                let offset = rules.len() + offset_of!(RuleView, patterns);
+                let data = bytes(object, None, patterns.into_bytes(), 1)?;
+                pointers.push((u32::try_from(offset).map_err(error)?, data));
+                view
+            }
+        };
+        let address = view.address;
+        row[0] = address.dir;
+        row[1] = address.family;
+        row[8..16].copy_from_slice(&address.hi.to_le_bytes());
+        row[16..24].copy_from_slice(&address.lo.to_le_bytes());
+        row[24] = address.bits;
+        row[26..28].copy_from_slice(&address.first.to_le_bytes());
+        row[28..30].copy_from_slice(&address.last.to_le_bytes());
+        let len = offset_of!(RuleView, patterns_len);
+        row[len..len + 8].copy_from_slice(&(view.patterns_len as u64).to_le_bytes());
+        row[offset_of!(RuleView, trust)] = view.trust;
+        let roots = offset_of!(RuleView, roots);
+        row[roots..roots + 32].copy_from_slice(&view.roots);
         rules.extend(row);
     }
-    let net_rules = bytes(object, None, rules, 8)?;
+    let net_rules = define(object, None, rules, 8, &pointers)?;
     let files = bytes(object, None, source_files(sources)?, 8)?;
     // The versioned symbol binds the source layout to the supplied runtime.
     let decoder = object

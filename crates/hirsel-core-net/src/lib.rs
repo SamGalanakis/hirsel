@@ -5,7 +5,7 @@ hirsel_guard::install!();
 use std::net::IpAddr;
 
 /// The public grant spelling, also used in configuration diagnostics.
-pub const RULE_SYNTAX: &str = "Net=<Connect|Listen> <prefix>/<len> <lo>-<hi>[;<rule>]";
+pub const RULE_SYNTAX: &str = "Net=<Connect|Listen> <prefix>/<len> <lo>-<hi>[;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>>";
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -114,9 +114,13 @@ impl Rule {
     }
 }
 
+mod grant;
+pub use grant::{GrantRule, RuleView};
 mod reactor;
 pub use reactor::{Poller, Sockets};
 pub mod model;
+mod tls_rule;
+pub use tls_rule::{Name, Pattern, TlsRule, TlsTrust};
 
 #[cfg(test)]
 mod tests {
@@ -155,6 +159,62 @@ mod tests {
                 .permits(1, 0, 0, 0, 80)
         );
     }
+    // TL4. The truth table follows TLS-3's label-suffix rule.
+    #[test]
+    fn tls_rule_intersections_match_the_name_and_port_sets() {
+        let names = ["a.test", "x.a.test", "y.x.a.test", "X.A.TEST.", "xa.test"]
+            .map(|text| Name::parse(text).unwrap());
+        let rules = [
+            (
+                "Tls *.a.test 440-450 System",
+                [false, true, true, true, false],
+                440..=450,
+            ),
+            (
+                "Tls x.a.test 443-455 System",
+                [false, true, false, true, false],
+                443..=455,
+            ),
+            (
+                "Tls *.x.a.test 440-450 System",
+                [false, false, true, false, false],
+                440..=450,
+            ),
+        ]
+        .map(|(text, verdicts, ports)| (TlsRule::parse(text).unwrap(), verdicts, ports));
+        let root = TlsRule::parse("Tls a.test,*.test 0-65535 System").unwrap();
+        for (a, a_names, a_ports) in &rules {
+            for (b, b_names, b_ports) in &rules {
+                for (first, second) in [(a, b), (b, a)] {
+                    let result = root.intersect(first).and_then(|r| r.intersect(second));
+                    for (i, name) in names.iter().enumerate() {
+                        for port in 439..=456 {
+                            let expected = a_names[i]
+                                && b_names[i]
+                                && a_ports.contains(&port)
+                                && b_ports.contains(&port);
+                            assert_eq!(
+                                result
+                                    .as_ref()
+                                    .is_some_and(|r| { r.permits(name, port, TlsTrust::System) }),
+                                expected,
+                                "{first:?} then {second:?}, {name:?}:{port}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let roots = TlsRule::parse(&format!(
+            "Tls *.a.test 440-450 Roots=sha256:{}",
+            "00".repeat(32)
+        ))
+        .unwrap();
+        assert!(root.intersect(&roots).is_none());
+        let outside = TlsRule::parse("Tls *.a.test 1-1 System").unwrap();
+        assert!(rules[0].0.intersect(&outside).is_none());
+    }
+
     #[test]
     fn write_half_shutdown_does_not_close_read_owner() {
         use std::{io::Read, os::unix::net::UnixStream};

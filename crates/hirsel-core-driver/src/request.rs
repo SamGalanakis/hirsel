@@ -190,7 +190,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 }
                 if let Some(rules) = value.strip_prefix("Net=") {
                     for rule in rules.split(';') {
-                        net_rules.push(hirsel_core_net::Rule::parse(rule)?);
+                        net_rules.push(hirsel_core_net::GrantRule::parse(rule)?);
                     }
                     grant_mask |= 1 << 1;
                     continue;

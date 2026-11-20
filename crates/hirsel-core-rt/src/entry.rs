@@ -144,7 +144,7 @@ pub struct OsConfig {
     /// Main's declaration order. Constructor refuses a missing requirement.
     pub parameters: *const Requirement,
     pub parameters_len: usize,
-    pub net_rules: *const hirsel_core_net::Rule,
+    pub net_rules: *const hirsel_core_net::RuleView,
     pub net_rules_len: usize,
     /// Executable target, emitted by the linker for either native backend.
     pub target: View,
@@ -173,8 +173,7 @@ pub struct OsProcess {
     _args: Vec<Vec<u8>>,
     _carriers: Vec<Buffer>,
     _metadata: Box<[Grant]>,
-    _net_storage: Box<[hirsel_core_net::Rule]>,
-    _net_rules: Box<crate::net::Rules>,
+    _net_rules: crate::net::RulesStorage,
     grants: Vec<u64>,
     diagnostic: Vec<u8>,
     config: Config,
@@ -315,23 +314,24 @@ impl OsProcess {
                     capacity: 0,
                 })
                 .collect::<Vec<_>>();
-            let net_storage: Box<[hirsel_core_net::Rule]> =
-                if prepare_path.is_some() || input.net_rules_len == 0 {
-                    Box::default()
-                } else {
-                    std::slice::from_raw_parts(input.net_rules, input.net_rules_len).into()
-                };
+            let net_storage = if describe_mode || prepare_path.is_some() || input.net_rules_len == 0
+            {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(input.net_rules, input.net_rules_len)
+                    .iter()
+                    .map(|rule| rule.decode())
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(StartupError::NetRules)?
+            };
             if !describe_mode
                 && prepare_path.is_none()
                 && input.grant_mask & (1 << NET) != 0
-                && (net_storage.is_empty() || net_storage.iter().any(|r| !r.valid()))
+                && net_storage.is_empty()
             {
                 return Err(StartupError::NetRules);
             }
-            let net_rules = Box::new(crate::net::Rules {
-                data: net_storage.as_ptr(),
-                len: net_storage.len(),
-            });
+            let net_rules = crate::net::RulesStorage::new(net_storage);
             let provider = Box::new(os.provider_with(directory_ops.map(|ops| ops.issue)));
             let provider_pointer = &*provider as *const Provider;
             let requirements = if input.parameters_len == 0 {
@@ -379,11 +379,7 @@ impl OsProcess {
                             } else {
                                 provider_pointer
                             },
-                            handle: if kind == NET {
-                                (&*net_rules as *const crate::net::Rules) as u64
-                            } else {
-                                0
-                            },
+                            handle: if kind == NET { net_rules.handle() } else { 0 },
                         });
                     }
                 }
@@ -420,7 +416,6 @@ impl OsProcess {
                 _args: args,
                 _carriers: views,
                 _metadata: metadata,
-                _net_storage: net_storage,
                 _net_rules: net_rules,
                 grants: Vec::with_capacity(input.parameters_len),
                 diagnostic: vec![],

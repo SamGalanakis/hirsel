@@ -1054,6 +1054,7 @@ pub mod op {
     pub const CONNECT: u8 = 19;
     pub const LISTEN: u8 = 20;
     pub const ACCEPT: u8 = 21;
+    pub const TLS_CONNECT: u8 = 22;
     pub const RECV_BOUNDED: u8 = 27;
     pub const SEND_PAIR: u8 = 26;
     pub const STOPPED: u8 = 28;

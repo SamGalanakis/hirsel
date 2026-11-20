@@ -11,16 +11,16 @@ A `Secret` is a credential that program code cannot read. Its bytes are held by 
 outside program memory. The one operation that sends them, `tls.send_secret`, writes them
 on a TLS stream whose verified name the secret permits.
 
-The fences on this page are `hirsel unbuilt` until slices T1 to T5 land.
+The declarations for later slices use `hirsel unbuilt` fences.
 
 ## Types
 
 Module `tls` declares `connect` and `send_secret`. Module `secret` declares `seal`,
 `narrow` and `render`.
 
-```hirsel unbuilt
+```hirsel
 pub type Trust = System | Roots(Bytes)
-pub type Handshake { protocol: Option[String], peer: Bytes }
+pub type Handshake { protocol: Option[u64], peer: (u64, u64, u64, u64) }
 pub type TlsFailure = Certificate(CertFailure) | Name | Alpn | Roots | Protocol(u8) | Closed | Truncated
 pub type CertFailure = UnknownIssuer | NameMismatch | Expired | NotYetValid | Invalid
 ```
@@ -39,7 +39,7 @@ declares `codec` ([OWN-4](ownership.md#own-4-bounds)).
 
 ### TLS-1: Client handshake
 
-```hirsel unbuilt
+```hirsel core
 pub fn connect(n: Net, take s: Socket, name: String, trust: Trust, alpn: List[String], until: Until) -> Result[(ReadHalf, WriteHalf, Handshake), NetError] waits
 ```
 
@@ -57,10 +57,10 @@ pub fn connect(n: Net, take s: Socket, name: String, trust: Trust, alpn: List[St
   clock. It cannot be turned off. Revocation is not checked.
 - **ALPN.** `alpn` lists the protocols to offer, in order of preference. An empty list
   offers none. Each entry is 1 to 255 bytes, no entry appears twice, and there are at
-  most 16 entries. The negotiated protocol is in `Handshake.protocol`. It is always one
-  of the offered entries, or `None`.
+  most 16 entries. If the server chose a protocol, `Handshake.protocol` is its zero-based
+  index in `alpn`. Otherwise it is `None`.
 - **Peer.** `Handshake.peer` is the SHA-256 of the DER encoding of the peer's leaf
-  certificate (32 bytes). The chain itself is never returned.
+  certificate, split into four big-endian `u64` words. The chain itself is never returned.
 - **No resumption.** There are no session tickets, no resumption and no early data, so a
   handshake does not depend on earlier runs or earlier connections.
 
@@ -81,7 +81,8 @@ When the provider is asked to perform the handshake, these failures are possible
 | leaf not valid for `name` | `Tls(Certificate(NameMismatch))` |
 | leaf or chain outside its validity at the provider's time | `Tls(Certificate(Expired))` or `Tls(Certificate(NotYetValid))` |
 | a malformed or unacceptable certificate, including a bad signature or a disallowed key usage | `Tls(Certificate(Invalid))` |
-| the peer sent an alert, or the client detected a protocol violation and sent one | `Tls(Protocol(d))`, where `d` is the alert's description code (RFC 8446 §6). Example: 120 is `no_application_protocol`. 0 means the failure had no alert. |
+| the peer sent a fatal alert | `Tls(Protocol(d))`, where `d` is the alert's description code (RFC 8446 §6). Example: 120 is `no_application_protocol`.
+| the client detected a protocol violation | `Tls(Protocol(0))`. 0 means no alert code was reported. Hirsel does not report the alert rustls sends in this case. |
 | the transport ended before the handshake finished | `Tls(Closed)` |
 | a transport error | `Reset`, `Unreachable` or `Other(errno)`, as for a plain receive |
 | `until` passed | `TimedOut` |
@@ -107,12 +108,12 @@ The halves from `tls.connect` are ordinary halves. The rules of
 - **Send.** `net.send_pair` returns the number of plaintext bytes the TLS stream
   committed. A byte is committed when the session has taken it into a record. The
   session sends the ciphertext of committed bytes before the ciphertext of any later
-  send, and before `close_notify`. So when a send ends with `TimedOut` or `Aborted`, its
-  `written` count is a committed prefix. The caller continues from there, as on a plain
-  socket ([CAP-5](capabilities.md#cap-5-provider-operations)), and each byte reaches the
-  peer exactly once. The session takes at most one record (16 KiB of plaintext) ahead of
-  the ciphertext the socket has accepted. A send returns `Ok` only after the ciphertext
-  of every byte it committed has been accepted by the socket.
+  send, and before `close_notify`. `Ok(n)` means `n` bytes are committed. If the deadline
+  passes or cancellation arrives after some bytes were committed, the send returns
+  `Ok(n)`. If it committed zero bytes, it returns `TimedOut` or `Aborted`. The session
+  holds at most one record (16 KiB of plaintext) of committed ciphertext beyond what
+  the socket has accepted. The next send or drop flushes it first. Each byte reaches
+  the peer exactly once when the caller continues from the returned count.
 - **Both directions.** One TLS session serves both halves. The provider serialises the
   two halves' use of it, but only inside a callback and never across a wait. So a
   receive in one task and a send in another proceed together, as they do on a plain
@@ -122,7 +123,8 @@ The halves from `tls.connect` are ordinary halves. The rules of
   attempt to send it with any committed ciphertext, then performs `SHUT_WR`. Like the
   plain drop, it ignores the result, cannot wait, and passes no replay point. Dropping
   the read half releases its ownership. The last owner closes the descriptor once and
-  frees the session, and rustls zeroes the session's keys.
+  frees the session. Hirsel makes no promise that the crypto library wipes key-schedule
+  memory.
 
 A program that must know the peer received everything waits for the peer's reply, as
 on a plain socket. A send that returned `Ok` does not mean the peer has read it.
@@ -389,14 +391,14 @@ computes.
 
 | law | bug | oracle and setup |
 |---|---|---|
-| **TL1** wrong name | verification skipped, or SNI matched in place of the certificate | A loopback server presents `alpha.test`. `tls.connect` with name `beta.test` and roots holding the test CA gives `Tls(Certificate(NameMismatch))`. With name `alpha.test` it succeeds, and `Handshake.peer` equals the `openssl` digest of the alpha leaf. |
+| **TL1** wrong name | verification skipped, or SNI matched in place of the certificate | A loopback server presents `alpha.test`. `tls.connect` with name `beta.test` and roots holding the test CA gives `Tls(Certificate(NameMismatch))`. With name `alpha.test` it succeeds, and `Handshake.peer` equals the `openssl` digest of the alpha leaf split into four big-endian words. |
 | **TL2** trust is exact | `Roots` falling back to the host store, or accepting any chain | The same server with `Roots` set to an unrelated CA, and with `System`: both give `Tls(Certificate(UnknownIssuer))`. Malformed or empty PEM gives `Tls(Roots)`, and the provider records no call. The oracle is the fixture's issuer. |
 | **TL3** authority before effect | the handshake reaching the host without a covering rule | Using a counting provider, check that each of these gives `Denied` with zero provider calls past the socket: a name outside the rule's patterns, a peer port outside the range, trust `System` under a `Roots=` rule, a roots bundle whose digest differs from the pin, and an accepted socket. The expected verdicts are worked out by hand for a corpus of names against `*.a.test` and `x.a.test` (`a.test`, `x.a.test`, `y.x.a.test`, `X.A.TEST.`, `xa.test`). |
 | **TL4** narrowing never widens | intersection returning the wider pattern | Over the TL3 name corpus, a pair of rules, and every order of two `narrow` calls: the set of names the result covers equals the intersection of the hand-computed sets. Put the cases in the existing NET-6 rule tests. |
 | **TL5** committed prefix | counting plaintext as committed that the session later drops or sends twice | The peer reads slowly over a small socket buffer. Sends of a 1 MiB pattern with deadlines that expire part way through. The caller continues from `written` each time. The peer's received plaintext equals the pattern byte for byte, so nothing is lost or repeated. |
 | **TL6** truncation | an unauthenticated EOF read as a clean end | The peer closes TCP after half of a body without `close_notify`, and the next receive gives `Tls(Truncated)`. With `close_notify`, the next receive gives `Ok(0)`. The oracle is RFC 8446 §6.1. |
 | **TL7** release on every exit | an fd or session leaked on abort or failure | Check four cases: cancel during a handshake parked on a peer that never answers (`Aborted`), a deadline expiry (`TimedOut`), TL1's failure, and a refusal from TL3. After each one, the process's open descriptor count, read from `/proc/self/fd`, is back to its value before `connect`. |
-| **TL8** ALPN | the wrong protocol reported, or a server choice outside the offer accepted | Offer `[h2, http/1.1]` to a server that lists `[http/1.1]`: the result is `Some("http/1.1")`. Against a server that lists only `[x]`: `Tls(Protocol(120))`. An entry of 0 bytes, an entry of 256 bytes, or a repeated entry: `Tls(Alpn)` before issue. The oracle is RFC 7301 §3.2. |
+| **TL8** ALPN | the wrong protocol reported, or a server choice outside the offer accepted | Offer `[h2, http/1.1]` to a server that lists `[http/1.1]`: the result is `Some(1)`. Against a server that lists only `[x]`: `Tls(Protocol(120))`. An entry of 0 bytes, an entry of 256 bytes, or a repeated entry: `Tls(Alpn)` before issue. The oracle is RFC 7301 §3.2. |
 | **TL9** replay is offline | Replay reaching the host or needing keys | Record an HTTPS GET against the loopback server. Replay it with a refuse-all inner provider, the server stopped, and the roots file removed. The response bytes, the protocol and the peer digest are equal to the recorded run's, and the inner provider records zero calls. |
 | **TL10** a secret never renders | the bytes reaching a render, log line, diagnostic or tape | The grant `env:` source is 32 random bytes encoded as hex. The program makes an HTTPS request with it as `Authorization: Bearer`, renders the request, triggers and renders an HTTP error, and writes a `Log`. The run is recorded. Search stdout, stderr, the run's diagnostics and the tape file for the value, its base64 and its raw bytes: there are no hits. The loopback server's received header equals the environment value. |
 | **TL11** a secret reaches only its names | exfiltration to a host the grant did not name | Two cases: `send_secret` on a stream verified as `beta.test` with a secret `to alpha.test`, and `send_secret` on a plain-TCP half. Both give `Denied`, and the server receives zero bytes after the handshake. |

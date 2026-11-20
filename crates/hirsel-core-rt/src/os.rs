@@ -473,7 +473,7 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
     if unsafe {
         matches!(
             (*request).operation,
-            CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR
+            CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR | TLS_CONNECT
         )
     } {
         // SAFETY: socket adapters pin the request, and state is this run's

@@ -55,7 +55,7 @@ impl Function<'_, '_, '_> {
         Ok(storage)
     }
     pub fn runtime_call(&mut self, op: RtOp, call: &CallSite, fused_receive: bool) -> Result<()> {
-        let mut args = [Value::from_u32(0); 8];
+        let mut args = [Value::from_u32(0); 9];
         for (i, arg) in call
             .args
             .get(&self.body.pools.args)
@@ -259,6 +259,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::RecvBounded
                     | HostOp::SendPair
                     | HostOp::NetNarrow
+                    | HostOp::NetNarrowTls
+                    | HostOp::TlsConnect
                     | HostOp::NetSplit
                     | HostOp::Stopped => (null, no_mode),
                 };
@@ -271,6 +273,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::RecvBounded
                     | HostOp::SendPair
                     | HostOp::NetNarrow
+                    | HostOp::NetNarrowTls
+                    | HostOp::TlsConnect
                     | HostOp::NetSplit => {
                         let signature = op_signature(op);
                         let count = signature.len();
@@ -283,6 +287,8 @@ impl Function<'_, '_, '_> {
                         let mut results = vec![U, K, Ty::Scalar(Scalar::U32), U, K];
                         if matches!(op, HostOp::Listen | HostOp::Accept) {
                             results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
+                        } else if op == HostOp::TlsConnect {
+                            results.extend([U; 4]);
                         }
                         self.c_call(op.net_symbol(), &params, &results, &operands)?
                     }
@@ -317,7 +323,7 @@ impl Function<'_, '_, '_> {
                 for i in 0..n {
                     outputs[i] = values[i];
                 }
-                if matches!(op, HostOp::Listen | HostOp::Accept) {
+                if matches!(op, HostOp::Listen | HostOp::Accept | HostOp::TlsConnect) {
                     for i in 4..8 {
                         outputs[i] = values[i + 1];
                     }

@@ -2226,7 +2226,8 @@ fn clone_stable_llvm() {
 fn wire_net_source(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();
-    let mut request = source_request(r#"
+    let mut request = source_request(
+        r#"
 pub fn main(n: Net) -> Result[(), Exit] waits {
     match host.connect(n, Addr(ip: V4(134744072u32), port: 80), Never) { Error(Denied) => {}, _ => return Error(Exit(status: 1)) }
     let (listener0, local) = match host.listen(n, Addr(ip: V4(2130706433u32), port: 0), 16) {
@@ -2244,25 +2245,50 @@ pub fn main(n: Net) -> Result[(), Exit] waits {
     match host.connect(child, Addr(ip: V4(2130706433u32), port: 81), Never) { Error(Denied) => {}, _ => return Error(Exit(status: 5)) }
     Ok(())
 }
-"#, dir.path());
-    request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
-    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
-    assert!(product.accepted(), "{}", serde_json::to_string(&product.machine_diagnostics().unwrap()).unwrap());
+"#,
+        dir.path(),
+    );
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{}",
+        serde_json::to_string(&product.machine_diagnostics().unwrap()).unwrap()
+    );
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let mut options = native_options(backend, dir.path());
     options.grant_mask = 1 << 1;
     let bare = product.build(&entry, &options).unwrap();
-    assert_not_started(&Command::new(bare.executable).output().unwrap(), &format!("not started: Net requires --grant {}\n", hirsel_core_net::RULE_SYNTAX));
-    options.net_rules = ["Connect 127.0.0.0/8 1-65535", "Listen 127.0.0.0/8 0-65535"].map(|r| hirsel_core_net::Rule::parse(r).unwrap()).to_vec();
+    assert_not_started(
+        &Command::new(bare.executable).output().unwrap(),
+        &format!(
+            "not started: Net requires --grant {}\n",
+            hirsel_core_net::RULE_SYNTAX
+        ),
+    );
+    options.net_rules = ["Connect 127.0.0.0/8 1-65535", "Listen 127.0.0.0/8 0-65535"]
+        .map(|r| hirsel_core_net::GrantRule::parse(r).unwrap())
+        .to_vec();
     let granted = product.build(&entry, &options).unwrap();
-    assert!(granted.linked, "the executable key includes explicit Net rules");
+    assert!(
+        granted.linked,
+        "the executable key includes explicit Net rules"
+    );
     run_clean(&granted.executable, 0);
-    options.net_rules = vec![hirsel_core_net::Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap()];
+    options.net_rules =
+        vec![hirsel_core_net::GrantRule::parse("Connect 127.0.0.0/8 1-65535").unwrap()];
     let changed = product.build(&entry, &options).unwrap();
     assert!(changed.linked);
     run_clean(&changed.executable, 3);
 }
 #[test]
-fn wire_net_source_cranelift() { wire_net_source(Backend::Cranelift); }
+fn wire_net_source_cranelift() {
+    wire_net_source(Backend::Cranelift);
+}
 #[test]
-fn wire_net_source_llvm() { wire_net_source(Backend::Llvm); }
+fn wire_net_source_llvm() {
+    wire_net_source(Backend::Llvm);
+}

@@ -206,7 +206,8 @@ fn model_native_provider_uses_virtual_timers_with_and_without_scheduler() {
         let rules = [
             Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
             Rule::parse("Listen 127.0.0.0/8 0-65535").unwrap(),
-        ];
+        ]
+        .map(hirsel_core_net::RuleView::address);
         let view = Rules {
             data: rules.as_ptr(),
             len: rules.len(),

@@ -730,6 +730,8 @@ fn socket_deadline_final_receive_records_its_success() {
                 denied: false,
                 direction: 1,
                 os: &crate::os_net::OPERATIONS,
+                tls: ptr::null_mut(),
+                pending_write: false,
             };
             let mut bytes = [b'a', 0];
             let mut request = Request {

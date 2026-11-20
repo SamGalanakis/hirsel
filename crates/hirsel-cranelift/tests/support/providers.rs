@@ -293,6 +293,8 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::RecvBounded
                     | HostOp::SendPair
                     | HostOp::NetNarrow
+                    | HostOp::NetNarrowTls
+                    | HostOp::TlsConnect
                     | HostOp::NetSplit
             )
         })
@@ -379,6 +381,8 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::RecvBounded
                     | HostOp::SendPair
                     | HostOp::NetNarrow
+                    | HostOp::NetNarrowTls
+                    | HostOp::TlsConnect
                     | HostOp::NetSplit
             )
         })

@@ -32,6 +32,8 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | bumpalo-3.20.3 | MIT OR Apache-2.0 | `hirsel` | `72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649` |
 | cc-1.7.0 | MIT OR Apache-2.0 | none | `50a649af8a827553c29fb0cb4bd4a6f1a0dd695bd3232b9bc98bd9c8a3ffbb8b` |
 | cfg-if-1.0.5 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600` |
+| core-foundation-0.10.1 | MIT OR Apache-2.0 | none | `b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6` |
+| core-foundation-sys-0.8.7 | MIT OR Apache-2.0 | none | `773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b` |
 | cpufeatures-0.2.17 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280` |
 | cranelift-assembler-x64-0.136.3 | Apache-2.0 WITH LLVM-exception | `hirsel` | `f6d504c8c7ba3f3accaf8e98b7096beb98e1a271404357744c7e9e730c6865ff` |
 | cranelift-assembler-x64-meta-0.136.3 | Apache-2.0 WITH LLVM-exception | none | `c065757905596bc06e82969ebd7b92d691b7fd710a7e9e8181ae0c30dab588d0` |
@@ -57,6 +59,7 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | fnv-1.0.7 | Apache-2.0 / MIT | `hirsel` | `3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1` |
 | foldhash-0.2.0 | Zlib | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb` |
 | generic-array-0.14.7 | MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a` |
+| getrandom-0.2.17 | MIT OR Apache-2.0 | `runtime/*/*/libhirsel_core_rt.a` | `ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0` |
 | getrandom-0.4.3 | MIT OR Apache-2.0 | `hirsel` | `300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099` |
 | gimli-0.33.0 | MIT OR Apache-2.0 | `hirsel` | `0bf7f043f89559805f8c7cacc432749b2fa0d0a0a9ee46ce47164ed5ba7f126c` |
 | hashbrown-0.16.1 | MIT OR Apache-2.0 | `hirsel` | `841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100` |
@@ -72,13 +75,22 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | memchr-2.8.3 | Unlicense OR MIT | `hirsel` | `cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98` |
 | mimalloc-0.1.52 | MIT | `hirsel` | `2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862` |
 | object-0.40.0 | Apache-2.0 OR MIT | `hirsel` | `dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c` |
-| once_cell-1.21.4 | MIT OR Apache-2.0 | `hirsel` | `9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50` |
+| once_cell-1.21.4 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50` |
+| openssl-probe-0.2.2 | MIT OR Apache-2.0 | `runtime/*/*/libhirsel_core_rt.a` | `7e036b411754132fd6b74e94b74e9a13c5cf606fa93d1885c35860d3060820b1` |
 | proc-macro2-1.0.107 | MIT OR Apache-2.0 | none | `985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9` |
 | quote-1.0.47 | MIT OR Apache-2.0 | none | `1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001` |
 | r-efi-6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | none | `f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf` |
 | regalloc2-0.15.2 | Apache-2.0 WITH LLVM-exception | `hirsel` | `757712e8e61590d6d4f5d563483755538b5aa13467837a3b41cd9832509a7f85` |
+| ring-0.17.14 | Apache-2.0 AND ISC | `runtime/*/*/libhirsel_core_rt.a` | `a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7` |
 | rustc-hash-2.1.3 | Apache-2.0 OR MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d` |
 | rustix-1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | `hirsel` | `891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d` |
+| rustls-0.23.46 | Apache-2.0 OR ISC OR MIT | `runtime/*/*/libhirsel_core_rt.a` | `48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf` |
+| rustls-native-certs-0.8.5 | Apache-2.0 OR ISC OR MIT | `runtime/*/*/libhirsel_core_rt.a` | `4a073f5dc7469f984c52ad2752b63b0807745133b6de880b7b64c1ac4c48aec4` |
+| rustls-pki-types-1.16.0 | MIT OR Apache-2.0 | `runtime/*/*/libhirsel_core_rt.a` | `102f35f7de7b06d8c61f1cff6592f5253e0dea431c74867aad5dfd70f44663fb` |
+| rustls-webpki-0.103.17 | ISC | `runtime/*/*/libhirsel_core_rt.a` | `e3a0760a887c14823fca5a1c970b01d47c328c696c0c64829d1df50e8f853fd5` |
+| schannel-0.1.30 | MIT | none | `9cb23c424d8ee841bb4d813677ca237e2a610067d594fec130f87d6093495ab5` |
+| security-framework-3.7.0 | MIT OR Apache-2.0 | none | `b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d` |
+| security-framework-sys-2.17.0 | MIT OR Apache-2.0 | none | `6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3` |
 | serde-1.0.229 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba` |
 | serde_core-1.0.229 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48` |
 | serde_derive-1.0.229 | MIT OR Apache-2.0 | none | `e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348` |
@@ -87,6 +99,7 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | shlex-2.0.1 | MIT OR Apache-2.0 | none | `f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba` |
 | smallvec-1.16.3 | MIT OR Apache-2.0 | `hirsel` | `5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b` |
 | stable_deref_trait-1.2.1 | MIT OR Apache-2.0 | none | `6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596` |
+| subtle-2.6.1 | BSD-3-Clause | `runtime/*/*/libhirsel_core_rt.a` | `13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292` |
 | syn-2.0.119 | MIT OR Apache-2.0 | none | `872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297` |
 | syn-3.0.6 | MIT OR Apache-2.0 | none | `8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee` |
 | target-lexicon-0.13.5 | Apache-2.0 WITH LLVM-exception | `hirsel` | `adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca` |
@@ -94,10 +107,23 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | twox-hash-2.1.5 | MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2` |
 | typenum-1.20.1 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20` |
 | unicode-ident-1.0.26 | (MIT OR Apache-2.0) AND Unicode-3.0 | none | `d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954` |
+| untrusted-0.9.0 | ISC | `runtime/*/*/libhirsel_core_rt.a` | `8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1` |
 | version_check-0.9.5 | MIT/Apache-2.0 | none | `0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a` |
+| wasi-0.11.1+wasi-snapshot-preview1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | none | `ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b` |
 | wasmtime-internal-core-49.0.3 | Apache-2.0 WITH LLVM-exception | `hirsel` | `ba00c5db77adb0749ee059068e5a417bfac3d8969f5a3479d9bd1ca8c1ba248d` |
 | windows-link-0.2.1 | MIT OR Apache-2.0 | none | `f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5` |
+| windows-sys-0.52.0 | MIT OR Apache-2.0 | none | `282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d` |
 | windows-sys-0.61.2 | MIT OR Apache-2.0 | none | `ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc` |
+| windows-targets-0.52.6 | MIT OR Apache-2.0 | none | `9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973` |
+| windows_aarch64_gnullvm-0.52.6 | MIT OR Apache-2.0 | none | `32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3` |
+| windows_aarch64_msvc-0.52.6 | MIT OR Apache-2.0 | none | `09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469` |
+| windows_i686_gnu-0.52.6 | MIT OR Apache-2.0 | none | `8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b` |
+| windows_i686_gnullvm-0.52.6 | MIT OR Apache-2.0 | none | `0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66` |
+| windows_i686_msvc-0.52.6 | MIT OR Apache-2.0 | none | `240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66` |
+| windows_x86_64_gnu-0.52.6 | MIT OR Apache-2.0 | none | `147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78` |
+| windows_x86_64_gnullvm-0.52.6 | MIT OR Apache-2.0 | none | `24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d` |
+| windows_x86_64_msvc-0.52.6 | MIT OR Apache-2.0 | none | `589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec` |
+| zeroize-1.9.2 | Apache-2.0 OR MIT | `runtime/*/*/libhirsel_core_rt.a` | `85ccff8a4805aba1eaa4cd4afcd49f7557dd2cf5fd79ffc37f8959466effc5aa` |
 | zmij-1.0.23 | MIT | `hirsel` | `29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b` |
 
 ## Native components
@@ -271,6 +297,18 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
     "hirsel",
     "runtime/*/*/libhirsel_core_rt.a"
    ]
+  },
+  {
+   "checksum": "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6",
+   "crate": "core-foundation-0.10.1",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
+   "checksum": "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b",
+   "crate": "core-foundation-sys-0.8.7",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
   },
   {
    "checksum": "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280",
@@ -466,6 +504,14 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    ]
   },
   {
+   "checksum": "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0",
+   "crate": "getrandom-0.2.17",
+   "license": "MIT OR Apache-2.0",
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
    "checksum": "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099",
    "crate": "getrandom-0.4.3",
    "license": "MIT OR Apache-2.0",
@@ -589,7 +635,16 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "crate": "once_cell-1.21.4",
    "license": "MIT OR Apache-2.0",
    "linked": [
-    "hirsel"
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
+   "checksum": "7e036b411754132fd6b74e94b74e9a13c5cf606fa93d1885c35860d3060820b1",
+   "crate": "openssl-probe-0.2.2",
+   "license": "MIT OR Apache-2.0",
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
    ]
   },
   {
@@ -619,6 +674,14 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    ]
   },
   {
+   "checksum": "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7",
+   "crate": "ring-0.17.14",
+   "license": "Apache-2.0 AND ISC",
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
    "checksum": "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d",
    "crate": "rustc-hash-2.1.3",
    "license": "Apache-2.0 OR MIT",
@@ -634,6 +697,56 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "linked": [
     "hirsel"
    ]
+  },
+  {
+   "checksum": "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf",
+   "crate": "rustls-0.23.46",
+   "license": "Apache-2.0 OR ISC OR MIT",
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
+   "checksum": "4a073f5dc7469f984c52ad2752b63b0807745133b6de880b7b64c1ac4c48aec4",
+   "crate": "rustls-native-certs-0.8.5",
+   "license": "Apache-2.0 OR ISC OR MIT",
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
+   "checksum": "102f35f7de7b06d8c61f1cff6592f5253e0dea431c74867aad5dfd70f44663fb",
+   "crate": "rustls-pki-types-1.16.0",
+   "license": "MIT OR Apache-2.0",
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
+   "checksum": "e3a0760a887c14823fca5a1c970b01d47c328c696c0c64829d1df50e8f853fd5",
+   "crate": "rustls-webpki-0.103.17",
+   "license": "ISC",
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
+   "checksum": "9cb23c424d8ee841bb4d813677ca237e2a610067d594fec130f87d6093495ab5",
+   "crate": "schannel-0.1.30",
+   "license": "MIT",
+   "linked": []
+  },
+  {
+   "checksum": "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d",
+   "crate": "security-framework-3.7.0",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
+   "checksum": "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3",
+   "crate": "security-framework-sys-2.17.0",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
   },
   {
    "checksum": "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba",
@@ -697,6 +810,14 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "linked": []
   },
   {
+   "checksum": "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292",
+   "crate": "subtle-2.6.1",
+   "license": "BSD-3-Clause",
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
    "checksum": "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297",
    "crate": "syn-2.0.119",
    "license": "MIT OR Apache-2.0",
@@ -749,9 +870,23 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "linked": []
   },
   {
+   "checksum": "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1",
+   "crate": "untrusted-0.9.0",
+   "license": "ISC",
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
    "checksum": "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a",
    "crate": "version_check-0.9.5",
    "license": "MIT/Apache-2.0",
+   "linked": []
+  },
+  {
+   "checksum": "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b",
+   "crate": "wasi-0.11.1+wasi-snapshot-preview1",
+   "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
    "linked": []
   },
   {
@@ -769,10 +904,78 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "linked": []
   },
   {
+   "checksum": "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d",
+   "crate": "windows-sys-0.52.0",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
    "checksum": "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc",
    "crate": "windows-sys-0.61.2",
    "license": "MIT OR Apache-2.0",
    "linked": []
+  },
+  {
+   "checksum": "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973",
+   "crate": "windows-targets-0.52.6",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
+   "checksum": "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3",
+   "crate": "windows_aarch64_gnullvm-0.52.6",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
+   "checksum": "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469",
+   "crate": "windows_aarch64_msvc-0.52.6",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
+   "checksum": "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b",
+   "crate": "windows_i686_gnu-0.52.6",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
+   "checksum": "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66",
+   "crate": "windows_i686_gnullvm-0.52.6",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
+   "checksum": "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66",
+   "crate": "windows_i686_msvc-0.52.6",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
+   "checksum": "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78",
+   "crate": "windows_x86_64_gnu-0.52.6",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
+   "checksum": "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d",
+   "crate": "windows_x86_64_gnullvm-0.52.6",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
+   "checksum": "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec",
+   "crate": "windows_x86_64_msvc-0.52.6",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
+   "checksum": "85ccff8a4805aba1eaa4cd4afcd49f7557dd2cf5fd79ffc37f8959466effc5aa",
+   "crate": "zeroize-1.9.2",
+   "license": "Apache-2.0 OR MIT",
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
   },
   {
    "checksum": "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b",

@@ -316,6 +316,7 @@ operations! {
     ("host", "recv_bounded", Lane::Runtime(Kernel::Net(HostOp::RecvBounded)), "B", "wire-w1a-1063", false),
     ("host", "send_pair", Lane::Runtime(Kernel::Net(HostOp::SendPair)), "B", "wire-w1a-1063", false),
     ("net", "narrow", Lane::Runtime(Kernel::Net(HostOp::NetNarrow)), "B", "wire-w1a-1063", false),
+    ("tls", "connect", Lane::Runtime(Kernel::Net(HostOp::TlsConnect)), "B", "tls-t1-1442", false),
     ("net", "split", Lane::Runtime(Kernel::Net(HostOp::NetSplit)), "B", "wire-w1a-1063", false),
     ("string", "new", Lane::Runtime(Kernel::StringList("new")), "A", "core-ops-914", false),
     ("string", "as_bytes", Lane::Runtime(Kernel::CarrierView), "A", "core-ops-914", false),
@@ -2776,6 +2777,130 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let field = self.runtime_field(at, &[Step::Field(i as u32)], child, n)?;
         Some((child, field))
     }
+    fn net_case_field(
+        &mut self,
+        ty: TyId,
+        at: AddressId,
+        case: u32,
+        field: u32,
+        n: NodeId,
+    ) -> Option<(TyId, AddressId)> {
+        let TyKind::Adt(d, _) = self.t.kind(ty) else {
+            return None;
+        };
+        let DeclBody::Variant(cases) = &self.p.decls[d.index()].body else {
+            return None;
+        };
+        let child = cases[case as usize].fields[field as usize].ty;
+        let address = self.runtime_field(at, &[Step::CaseField { case, field }], child, n)?;
+        Some((child, address))
+    }
+
+    fn net_read_case(
+        &mut self,
+        ty: TyId,
+        at: AddressId,
+        case: u32,
+        field: u32,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let (child, addr) = self.net_case_field(ty, at, case, field, n)?;
+        match self.rep(child).ok()? {
+            Rep::Scalar(t) => Some(self.read_bits(addr, t, n)),
+            Rep::Place(_) => Some(self.pointer(addr, n)),
+            Rep::None => None,
+        }
+    }
+
+    fn tls_trust(&mut self, ty: TyId, at: AddressId, n: NodeId) -> Option<[ValueId; 2]> {
+        let k = Ty::Scalar(Scalar::U8);
+        let tag = self.net_case(at, n);
+        let system = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 0, n)?;
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[k, Ty::Ptr]);
+        self.runtime_branch(system, yes, no, n);
+        self.start(yes);
+        let zero = self.konst(k, 0, n)?;
+        // The adapter ignores the roots carrier for System.
+        let unused = self.pointer(at, n);
+        self.jump(join, &[zero, unused], n);
+        self.start(no);
+        let one = self.konst(k, 1, n)?;
+        let roots = self.net_read_case(ty, at, 1, 0, n)?;
+        self.jump(join, &[one, roots], n);
+        self.start(join);
+        let values = self.block_params(join);
+        Some([values[0], values[1]])
+    }
+
+    fn runtime_narrow(
+        &mut self,
+        net: ValueId,
+        ty: TyId,
+        rule: ValueId,
+        n: NodeId,
+    ) -> Option<[ValueId; 8]> {
+        let (_, at) = self.runtime_place(ty, Some(rule), n)?;
+        let tag = self.net_case(at, n);
+        let address = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 0, n)?;
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let signature = RtOp::Host(HostOp::NetNarrow).signature();
+        let join = self.new_block(&signature.results);
+        self.runtime_branch(address, yes, no, n);
+        self.start(yes);
+        let (_, dir) = self.net_case_field(ty, at, 0, 0, n)?;
+        let dir = self.net_case(dir, n);
+        let d8 = self.value(Ty::Scalar(Scalar::U8));
+        self.inst(
+            Inst::Convert {
+                result: d8,
+                flag: None,
+                operand: dir,
+                mode: ConvertMode::Truncate,
+            },
+            n,
+        );
+        let (_, ip) = self.net_case_field(ty, at, 0, 1, n)?;
+        let [family, hi, lo] = self.net_ip(ip, n)?;
+        let bits = self.net_read_case(ty, at, 0, 2, n)?;
+        let (pair, ports) = self.net_case_field(ty, at, 0, 3, n)?;
+        let first = self.net_read_field(pair, ports, 0, n)?;
+        let last = self.net_read_field(pair, ports, 1, n)?;
+        let [value, error, code, written] = self.runtime_row(
+            RtOp::Host(HostOp::NetNarrow),
+            &[net, d8, family, hi, lo, bits, first, last].map(Arg::Value),
+            n,
+        )?;
+        self.jump(join, &[value, error, code, written], n);
+        self.start(no);
+        let names = self.net_read_case(ty, at, 1, 0, n)?;
+        let (pair, ports) = self.net_case_field(ty, at, 1, 1, n)?;
+        let first = self.net_read_field(pair, ports, 0, n)?;
+        let last = self.net_read_field(pair, ports, 1, n)?;
+        let (pin, trust) = self.net_case_field(ty, at, 1, 2, n)?;
+        let [trust, digest] = self.tls_trust(pin, trust, n)?;
+        let [value, error, code, written] = self.runtime_row(
+            RtOp::Host(HostOp::NetNarrowTls),
+            &[net, names, first, last, trust, digest].map(Arg::Value),
+            n,
+        )?;
+        self.jump(join, &[value, error, code, written], n);
+        self.start(join);
+        let v = self.block_params(join);
+        Some([
+            v[0],
+            v[1],
+            v[2],
+            v[3],
+            ValueId(0),
+            ValueId(0),
+            ValueId(0),
+            ValueId(0),
+        ])
+    }
+
     fn net_read_field(&mut self, ty: TyId, at: AddressId, i: usize, n: NodeId) -> Option<ValueId> {
         let (child, field) = self.net_field(ty, at, i, n)?;
         match self.rep(child).ok()? {
@@ -2960,34 +3085,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             vals[0]?
         };
         let mut operands = vec![key];
-        match op {
-            HostOp::Connect | HostOp::Listen | HostOp::NetNarrow => {
-                let ty = self.p.fns[f].params[1].ty;
-                let (_, at) = self.runtime_place(ty, vals[1], n)?;
-                let ip_index = usize::from(op == HostOp::NetNarrow);
-                if op == HostOp::NetNarrow {
-                    let (_, dir) = self.net_field(ty, at, 0, n)?;
-                    let d = self.net_case(dir, n);
-                    let d8 = self.value(Ty::Scalar(Scalar::U8));
-                    self.inst(
-                        Inst::Convert {
-                            result: d8,
-                            flag: None,
-                            operand: d,
-                            mode: ConvertMode::Truncate,
-                        },
-                        n,
-                    );
-                    operands.push(d8);
-                }
-                let (_, ip) = self.net_field(ty, at, ip_index, n)?;
-                operands.extend(self.net_ip(ip, n)?);
-                if op == HostOp::NetNarrow {
-                    operands.push(self.net_read_field(ty, at, 2, n)?);
-                    let (pair, ports) = self.net_field(ty, at, 3, n)?;
-                    operands.push(self.net_read_field(pair, ports, 0, n)?);
-                    operands.push(self.net_read_field(pair, ports, 1, n)?);
-                } else {
+        if op != HostOp::NetNarrow {
+            match op {
+                HostOp::Connect | HostOp::Listen => {
+                    let ty = self.p.fns[f].params[1].ty;
+                    let (_, at) = self.runtime_place(ty, vals[1], n)?;
+                    let (_, ip) = self.net_field(ty, at, 0, n)?;
+                    operands.extend(self.net_ip(ip, n)?);
                     operands.push(self.net_read_field(ty, at, 1, n)?);
                     if op == HostOp::Connect {
                         operands.extend(self.net_until(self.p.fns[f].params[2].ty, vals[2]?, n)?);
@@ -2995,19 +3099,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         operands.push(vals[2]?);
                     }
                 }
+                HostOp::TlsConnect => {
+                    operands.extend([self.runtime_key(vals[1]?, n), vals[2]?]);
+                    let ty = self.p.fns[f].params[3].ty;
+                    let (_, at) = self.runtime_place(ty, vals[3], n)?;
+                    operands.extend(self.tls_trust(ty, at, n)?);
+                    operands.push(vals[4]?);
+                    operands.extend(self.net_until(self.p.fns[f].params[5].ty, vals[5]?, n)?);
+                    // The adapter consumes the socket before any outcome, even on
+                    // the operation's failure edge.
+                    self.consume(vals[1], n);
+                }
+                HostOp::Accept => {
+                    operands.extend(self.net_until(self.p.fns[f].params[1].ty, vals[1]?, n)?)
+                }
+                HostOp::RecvBounded | HostOp::SendPair => {
+                    operands.extend([vals[1]?, vals[2]?]);
+                    operands.extend(self.net_until(self.p.fns[f].params[3].ty, vals[3]?, n)?);
+                }
+                HostOp::NetSplit => {}
+                _ => unreachable!(),
             }
-            HostOp::Accept => {
-                operands.extend(self.net_until(self.p.fns[f].params[1].ty, vals[1]?, n)?)
-            }
-            HostOp::RecvBounded | HostOp::SendPair => {
-                operands.extend([vals[1]?, vals[2]?]);
-                operands.extend(self.net_until(self.p.fns[f].params[3].ty, vals[3]?, n)?);
-            }
-            HostOp::NetSplit => {}
-            _ => unreachable!(),
         }
-        let args: Vec<_> = operands.into_iter().map(Arg::Value).collect();
-        let values = self.runtime_outputs::<8>(RtOp::Host(op), &args, n)?;
+        let values = if op == HostOp::NetNarrow {
+            self.runtime_narrow(key, self.p.fns[f].params[1].ty, vals[1]?, n)?
+        } else {
+            let args: Vec<_> = operands.into_iter().map(Arg::Value).collect();
+            self.runtime_outputs::<8>(RtOp::Host(op), &args, n)?
+        };
         let (value, error, code, written) = (values[0], values[1], values[2], values[3]);
         if op == HostOp::NetSplit {
             self.consume(vals[0], n);
@@ -3031,6 +3150,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     {
                         cx.runtime_store(at, &[], u, value, n);
                     }
+                } else if op == HostOp::TlsConnect {
+                    cx.runtime_tls_result(to, ty, value, written, &values[4..], n);
                 } else if matches!(op, HostOp::Listen | HostOp::Accept) {
                     if let Some(pair) =
                         cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
@@ -3087,13 +3208,102 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         cx.jump(join, &[], n);
                         cx.start(join);
                     } else {
-                        cx.runtime_net_error(at, error, code, n);
+                        cx.runtime_net_error(at, ty, error, code, n);
                     }
                 }
             },
         )
     }
-    fn runtime_net_error(&mut self, to: AddressId, error: ValueId, code: ValueId, n: NodeId) {
+    fn runtime_tls_result(
+        &mut self,
+        to: AddressId,
+        ty: TyId,
+        key: ValueId,
+        protocol: ValueId,
+        words: &[ValueId],
+        n: NodeId,
+    ) {
+        let u = Ty::Scalar(Scalar::U64);
+        let Some(pair) = self.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+        else {
+            return;
+        };
+        for direction in 1..=2 {
+            let bit = self.konst(u, direction, n).unwrap();
+            let half = self.value(u);
+            self.inst(
+                Inst::Binary {
+                    result: half,
+                    op: BinaryOp::BitOr,
+                    left: key,
+                    right: bit,
+                    fail: None,
+                },
+                n,
+            );
+            self.runtime_store(pair, &[Step::Field(direction as u32 - 1)], u, half, n);
+        }
+        let Some((ty, handshake)) = self.net_field(ty, pair, 2, n) else {
+            return;
+        };
+        let (_, selected) = self.net_field(ty, handshake, 0, n).unwrap();
+        let (_, peer) = self.net_field(ty, handshake, 1, n).unwrap();
+        for (i, word) in words.iter().enumerate() {
+            self.runtime_store(peer, &[Step::Field(i as u32)], u, *word, n);
+        }
+        let none = self.runtime_compare(u, protocol, 0, n).unwrap();
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[]);
+        self.runtime_branch(none, yes, no, n);
+        self.start(yes);
+        self.inst(
+            Inst::SetCase {
+                address: selected,
+                case: 0,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(no);
+        let one = self.konst(u, 1, n).unwrap();
+        let index = self.value(u);
+        self.inst(
+            Inst::IntArith {
+                result: index,
+                flag: None,
+                op: ArithOp::Sub,
+                mode: ArithMode::Wrapping,
+                left: protocol,
+                right: one,
+            },
+            n,
+        );
+        self.inst(
+            Inst::SetCase {
+                address: selected,
+                case: 1,
+            },
+            n,
+        );
+        self.runtime_store(
+            selected,
+            &[Step::CaseField { case: 1, field: 0 }],
+            u,
+            index,
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+    }
+    fn runtime_net_error(
+        &mut self,
+        to: AddressId,
+        ty: TyId,
+        error: ValueId,
+        code: ValueId,
+        n: NodeId,
+    ) {
         let join = self.new_block(&[]);
         for case in 0..7 {
             let Some(on) =
@@ -3109,6 +3319,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.jump(join, &[], n);
             self.start(no);
         }
+        let tls = self
+            .runtime_compare(Ty::Scalar(Scalar::U8), error, 9, n)
+            .unwrap();
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        self.runtime_branch(tls, yes, no, n);
+        self.start(yes);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 8,
+            },
+            n,
+        );
+        if let Some((ty, field)) = self.net_case_field(ty, to, 8, 0, n) {
+            self.runtime_tls_error(ty, field, code, n);
+        }
+        self.jump(join, &[], n);
+        self.start(no);
         self.inst(
             Inst::SetCase {
                 address: to,
@@ -3121,6 +3350,98 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             &[Step::CaseField { case: 7, field: 0 }],
             Ty::Scalar(Scalar::U32),
             code,
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+    }
+    fn runtime_tls_error(&mut self, ty: TyId, to: AddressId, code: ValueId, n: NodeId) {
+        let k = Ty::Scalar(Scalar::U8);
+        let word = Ty::Scalar(Scalar::U32);
+        let case = self.value(k);
+        self.inst(
+            Inst::Convert {
+                result: case,
+                flag: None,
+                operand: code,
+                mode: ConvertMode::Truncate,
+            },
+            n,
+        );
+        let divisor = self.konst(word, 256, n).unwrap();
+        let shifted = self.value(word);
+        let flag = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::IntArith {
+                result: shifted,
+                flag: Some(flag),
+                op: ArithOp::Div,
+                mode: ArithMode::Checked,
+                left: code,
+                right: divisor,
+            },
+            n,
+        );
+        let detail = self.value(k);
+        self.inst(
+            Inst::Convert {
+                result: detail,
+                flag: None,
+                operand: shifted,
+                mode: ConvertMode::Truncate,
+            },
+            n,
+        );
+        let join = self.new_block(&[]);
+        for i in 0..6 {
+            let on = self.runtime_compare(k, case, u64::from(i), n).unwrap();
+            let yes = self.new_block(&[]);
+            let no = self.new_block(&[]);
+            self.runtime_branch(on, yes, no, n);
+            self.start(yes);
+            self.inst(
+                Inst::SetCase {
+                    address: to,
+                    case: i,
+                },
+                n,
+            );
+            if i == 0 {
+                let (_, certificate) = self.net_case_field(ty, to, 0, 0, n).unwrap();
+                for case in 0..4 {
+                    let on = self.runtime_compare(k, detail, u64::from(case), n).unwrap();
+                    let yes = self.new_block(&[]);
+                    let no = self.new_block(&[]);
+                    self.runtime_branch(on, yes, no, n);
+                    self.start(yes);
+                    self.inst(
+                        Inst::SetCase {
+                            address: certificate,
+                            case,
+                        },
+                        n,
+                    );
+                    self.jump(join, &[], n);
+                    self.start(no);
+                }
+                self.inst(
+                    Inst::SetCase {
+                        address: certificate,
+                        case: 4,
+                    },
+                    n,
+                );
+            } else if i == 4 {
+                self.runtime_store(to, &[Step::CaseField { case: 4, field: 0 }], k, detail, n);
+            }
+            self.jump(join, &[], n);
+            self.start(no);
+        }
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 6,
+            },
             n,
         );
         self.jump(join, &[], n);

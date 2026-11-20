@@ -95,7 +95,7 @@ pub struct NativeOptions {
     pub directories: Vec<String>,
     /// Explicit host authority, using the runtime's grant-kind bit positions.
     pub grant_mask: u64,
-    pub net_rules: Vec<hirsel_core_net::Rule>,
+    pub net_rules: Vec<hirsel_core_net::GrantRule>,
     /// Diagnostic build: exact root reservation peak, unsuitable for timing samples.
     pub logical_charge_report: Option<PathBuf>,
     /// The toolchain this request already observed for its request record's
@@ -1939,7 +1939,7 @@ mod tests {
             .unwrap();
         options.grant_mask = (1 << 10) - 2;
         options.net_rules =
-            vec![hirsel_core_net::Rule::parse("Connect 0.0.0.0/0 0-65535").unwrap()];
+            vec![hirsel_core_net::GrantRule::parse("Connect 0.0.0.0/0 0-65535").unwrap()];
         let escaped = dir.path().join("directory \"é");
         std::fs::create_dir(&escaped).unwrap();
         options.directories = vec![
@@ -2046,8 +2046,9 @@ mod tests {
             _ => {
                 options.grant_mask = 1 << expected_kind;
                 if expected_kind == 1 {
-                    options.net_rules =
-                        vec![hirsel_core_net::Rule::parse("Connect 0.0.0.0/0 0-65535").unwrap()];
+                    options.net_rules = vec![
+                        hirsel_core_net::GrantRule::parse("Connect 0.0.0.0/0 0-65535").unwrap(),
+                    ];
                 }
             }
         }

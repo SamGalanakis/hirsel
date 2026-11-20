@@ -46,7 +46,7 @@ pub(crate) struct Plan<'a> {
     release_sites: &'a [hirsel_core_ir::source::ReleaseSite],
     root_limit: u64,
     grant_mask: u64,
-    net_rules: &'a [hirsel_core_net::Rule],
+    net_rules: &'a [hirsel_core_net::GrantRule],
     directories: &'a [String],
     charge_report: Option<Vec<u8>>,
     tape: Option<&'a crate::native::RunTape>,
@@ -64,7 +64,7 @@ pub(crate) fn policy(
 ) -> (
     u64,
     u64,
-    &[hirsel_core_net::Rule],
+    &[hirsel_core_net::GrantRule],
     &[String],
     Option<&[u8]>,
     Option<&crate::native::RunTape>,

@@ -238,7 +238,12 @@ unsafe extern "C" fn invoke(
             let net = entry::hirsel_core_entry_grant(config, entry::NET, 0);
             if net != 0 {
                 let handle = entry::hirsel_core_capability_handle(context, net);
-                net_rules = (*(handle as *const crate::net::Rules)).as_slice().to_vec();
+                for rule in (*(handle as *const crate::net::Rules)).as_slice() {
+                    if rule.address.dir == 2 {
+                        return stopped(run, "Tls Net rules require TLS tape support");
+                    }
+                    net_rules.push(rule.address);
+                }
             }
         }
         let header = Header {
@@ -309,8 +314,14 @@ unsafe extern "C" fn invoke(
             let label = b"replay: revision differs\n";
             crate::os::diagnostic(run.stderr, label.as_ptr(), label.len());
         }
-        let replay_net_rules = (!startup.net_rules.is_empty())
-            .then(|| crate::net::RulesStorage::new(startup.net_rules.into_boxed_slice()));
+        let replay_net_rules = (!startup.net_rules.is_empty()).then(|| {
+            crate::net::RulesStorage::new(
+                startup
+                    .net_rules
+                    .into_iter()
+                    .map(hirsel_core_net::GrantRule::Address),
+            )
+        });
         let files = (*context).host_files;
         for i in 0..run.requirements_len {
             let req = &*run.requirements.add(i);

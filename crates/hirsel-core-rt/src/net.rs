@@ -4,18 +4,18 @@ use crate::{
     entry::{hirsel_core_capability_handle, hirsel_core_capability_provider},
     provider::*,
 };
-use hirsel_core_net::Rule;
+use hirsel_core_net::{GrantRule, Rule, RuleView, TlsRule, TlsTrust};
 use std::ptr;
 
 #[repr(C)]
 pub struct Rules {
-    pub data: *const Rule,
+    pub data: *const RuleView,
     pub len: usize,
 }
 impl Rules {
     /// # Safety
     /// The run pins the configured or narrowed immutable rule list.
-    pub unsafe fn as_slice(&self) -> &[Rule] {
+    pub unsafe fn as_slice(&self) -> &[RuleView] {
         if self.len == 0 {
             &[]
         } else {
@@ -24,18 +24,31 @@ impl Rules {
     }
 }
 pub(crate) struct RulesStorage {
-    _storage: Box<[Rule]>,
+    _rows: Box<[RuleView]>,
+    _patterns: Vec<String>,
     view: Box<Rules>,
 }
 
 impl RulesStorage {
-    pub(crate) fn new(storage: Box<[Rule]>) -> Self {
+    pub(crate) fn new(storage: impl IntoIterator<Item = GrantRule>) -> Self {
+        let mut patterns = Vec::new();
+        let rows: Box<[_]> = storage
+            .into_iter()
+            .map(|rule| match rule {
+                GrantRule::Address(address) => RuleView::address(address),
+                GrantRule::Tls(rule) => {
+                    patterns.push(rule.pattern_text());
+                    RuleView::tls(&rule, patterns.last().unwrap())
+                }
+            })
+            .collect();
         let view = Box::new(Rules {
-            data: storage.as_ptr(),
-            len: storage.len(),
+            data: rows.as_ptr(),
+            len: rows.len(),
         });
         Self {
-            _storage: storage,
+            _rows: rows,
+            _patterns: patterns,
             view,
         }
     }
@@ -97,6 +110,14 @@ impl AddressOutcome {
         }
     }
 }
+/// Only a ready TLS session enters the socket registry. Keep ordinary Net
+/// callbacks independent of a concrete TLS backend.
+pub(crate) trait SecureStream: Send {
+    fn receive(&mut self, fd: i32, plaintext: &mut [u8]) -> Option<Outcome>;
+    fn send(&mut self, fd: i32, prefix: &[u8], tail: &[u8]) -> Option<Outcome>;
+    fn shutdown(&mut self, fd: i32);
+}
+
 /// Borrowed through delivery. Only the leading send-tail pointer is visible
 /// to external providers, and only for SEND_PAIR.
 #[repr(C)]
@@ -110,6 +131,8 @@ pub(crate) struct NetworkRequest {
     pub denied: bool,
     pub direction: u8,
     pub os: &'static crate::os_net::Operations,
+    pub tls: *mut crate::os_tls::Streams,
+    pub pending_write: bool,
 }
 /// A CLI run substitutes all Net grants on one tape. A socket carrier
 /// keeps the tape's object ordinal and the usual two direction bits.
@@ -143,7 +166,7 @@ impl SocketTape {
     }
 }
 
-unsafe fn deadline(
+pub(crate) unsafe fn deadline(
     context: *mut Context,
     kind: u8,
     clock: u64,
@@ -195,10 +218,10 @@ unsafe fn permitted(request: &Request, handle: u64) -> bool {
 pub(crate) unsafe fn permits_address(handle: u64, address: &Address, dir: u8) -> bool {
     unsafe {
         let rules = &*(handle as *const Rules);
-        rules
-            .as_slice()
-            .iter()
-            .any(|r| r.permits(dir, address.family, address.hi, address.lo, address.port))
+        rules.as_slice().iter().any(|r| {
+            r.address
+                .permits(dir, address.family, address.hi, address.lo, address.port)
+        })
     }
 }
 
@@ -285,16 +308,19 @@ unsafe fn address_op(
             lo,
             port,
         };
+        let files = (*context).host_files;
         let mut network = NetworkRequest {
             send_tail: ptr::null(),
             address,
-            sockets: &raw mut (*(*context).host_files).sockets,
+            sockets: &raw mut (*files).sockets,
             until: deadline(context, until_kind, clock, deadline_ns),
             backlog,
             connecting: None,
             denied: false,
             direction: 0,
             os: &crate::os_net::OPERATIONS,
+            tls: &raw mut (*files).tls,
+            pending_write: false,
         };
         let mut request = Request {
             operation: op,
@@ -307,8 +333,13 @@ unsafe fn address_op(
         };
         let provider = hirsel_core_capability_provider(context, n);
         let mut outcome = hirsel_core_host(context, provider, &mut request);
-        if let Some(tape) = (*(*context).host_files).net_tape {
+        let _commit = crate::sequencer::enter();
+        if let Some(tape) = (*files).net_tape {
             outcome = tape.carrier(outcome);
+        } else if op == CONNECT && outcome.status == 0 && outcome.error == IoError::OK {
+            (*files)
+                .connected
+                .insert(outcome.value, (address, *provider));
         }
         AddressOutcome::new(outcome, network.address)
     }
@@ -339,6 +370,8 @@ unsafe fn owned_op(
             denied: false,
             direction: (key & 3) as u8,
             os: &crate::os_net::OPERATIONS,
+            tls: &raw mut (*files).tls,
+            pending_write: false,
         };
         let mut buffer = if operand.is_null() {
             empty_buffer()
@@ -367,7 +400,15 @@ unsafe fn owned_op(
                 outcome
             }
         } else {
-            hirsel_core_host(context, (*(*context).run).provider, &mut request)
+            let provider = {
+                let _commit = crate::sequencer::enter();
+                (*files)
+                    .connected
+                    .get(&(key & !3))
+                    .map(|record| record.1)
+                    .unwrap_or(*(*(*context).run).provider)
+            };
+            hirsel_core_host(context, &provider, &mut request)
         };
         if op == RECV_BOUNDED {
             (*operand).len = request.buffer.len;
@@ -504,7 +545,15 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             None => Some(key),
         };
         if let Some(source) = source {
-            (*files).sockets.release(source);
+            if source & 3 == 2
+                && let Some(stream) = (*files).tls.sessions.get_mut(&(source & !3))
+            {
+                stream.shutdown((*files).sockets.fd(source));
+            }
+            if (*files).sockets.release(source) {
+                (*files).connected.remove(&(source & !3));
+                (*files).tls.sessions.remove(&(source & !3));
+            }
         }
     }
 }
@@ -534,11 +583,44 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
         last,
     };
     if !rule.valid() {
-        return Outcome {
-            error: IoError { tag: 1, code: 0 },
-            ..Outcome::default()
-        };
+        return DENIED;
     }
+    unsafe { narrow(context, n, GrantRule::Address(rule)) }
+}
+
+/// # Safety
+/// Live run, typed Net grant and pinned pattern and digest carriers.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_net_narrow_tls(
+    context: *mut Context,
+    n: u64,
+    patterns: *const Buffer,
+    first: u16,
+    last: u16,
+    trust: u8,
+    digest: *const Buffer,
+    _site: u64,
+) -> Outcome {
+    unsafe {
+        let trust = match trust {
+            0 => TlsTrust::System,
+            1 => match crate::tls::bytes(&*digest).try_into() {
+                Ok(digest) => TlsTrust::Roots(digest),
+                Err(_) => return DENIED,
+            },
+            _ => return DENIED,
+        };
+        let Ok(patterns) = std::str::from_utf8(crate::tls::bytes(&*patterns)) else {
+            return DENIED;
+        };
+        match TlsRule::new(patterns, first, last, trust) {
+            Some(rule) => narrow(context, n, GrantRule::Tls(rule)),
+            None => DENIED,
+        }
+    }
+}
+unsafe fn narrow(context: *mut Context, n: u64, rule: GrantRule) -> Outcome {
     unsafe {
         crate::process::deny_describe_capability(context);
         let provider = *hirsel_core_capability_provider(context, n);
@@ -550,9 +632,13 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
             parent
         };
         let rules = (*(rules_handle as *const Rules)).as_slice();
-        let count = rules.iter().filter_map(|r| r.intersect(rule)).count();
-        let charge = (count as u64)
-            .checked_mul(37)
+        let intersections: Vec<_> = rules
+            .iter()
+            .filter_map(|r| r.decode()?.intersect(&rule))
+            .collect();
+        let charge = intersections
+            .iter()
+            .try_fold(0u64, |total, r| total.checked_add(r.logical_size()))
             .and_then(|n| n.checked_add(7))
             .map(|n| n & !7);
         let payer = (*context).payer();
@@ -564,7 +650,7 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
                 status: 0,
             };
         }
-        let rules = RulesStorage::new(rules.iter().filter_map(|r| r.intersect(rule)).collect());
+        let rules = RulesStorage::new(intersections);
         let handle = rules.handle();
         let files = (*context).host_files;
         (*files).net_grants.lock().unwrap().push(Grant {
@@ -582,5 +668,15 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
             value,
             ..Outcome::default()
         }
+    }
+}
+
+pub(crate) fn tls_failure(case: u8, detail: u8) -> Outcome {
+    Outcome {
+        error: IoError {
+            tag: 9,
+            code: u32::from(case) | (u32::from(detail) << 8),
+        },
+        ..Outcome::default()
     }
 }

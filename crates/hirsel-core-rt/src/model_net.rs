@@ -83,6 +83,12 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
     unsafe {
         let p = &*state.cast::<ModelProvider>();
         let r = &mut *request;
+        if r.operation == TLS_CONNECT {
+            return Step {
+                outcome: crate::net::tls_failure(4, 0),
+                ..Step::default()
+            };
+        }
         if !modeled(r.operation) {
             return (p.fallback.issue)(p.fallback.state, request, token);
         }

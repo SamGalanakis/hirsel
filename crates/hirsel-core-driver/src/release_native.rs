@@ -326,6 +326,8 @@ fn step_elision_compatible(op: RtOp) -> bool {
             | HostOp::RecvBounded
             | HostOp::SendPair
             | HostOp::NetNarrow
+            | HostOp::NetNarrowTls
+            | HostOp::TlsConnect
             | HostOp::NetSplit
             | HostOp::Stopped,
         ) => true,

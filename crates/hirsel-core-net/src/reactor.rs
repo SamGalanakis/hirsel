@@ -420,10 +420,10 @@ impl Sockets {
         events.0.len()
     }
 
-    pub fn release(&mut self, key: u64) {
+    pub fn release(&mut self, key: u64) -> bool {
         if Model::owns(key) {
             self.model.as_mut().unwrap().release(key);
-            return;
+            return !self.model().unwrap().contains(key);
         }
         let r = self.record_mut(key);
         let direction = key & 3;
@@ -434,7 +434,8 @@ impl Sockets {
             }
         }
         r.owners &= !(1 << direction);
-        if r.owners == 0 {
+        let last = r.owners == 0;
+        if last {
             let fd = r.fd.as_raw_fd();
             let waiting = r.waiters.iter().flatten().count();
             self.waiting -= waiting;
@@ -456,6 +457,7 @@ impl Sockets {
                 self.free.push(index as u32);
             }
         }
+        last
     }
     pub fn len(&self) -> usize {
         self.live + self.model.as_ref().map_or(0, |resources| resources.len())

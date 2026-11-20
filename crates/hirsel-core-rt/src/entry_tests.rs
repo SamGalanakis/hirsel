@@ -215,7 +215,9 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
             index: 0,
         },
     ];
-    let net_rule = hirsel_core_net::Rule::parse("Connect 0.0.0.0/0 0-65535").unwrap();
+    let net_rule = hirsel_core_net::RuleView::address(
+        hirsel_core_net::Rule::parse("Connect 0.0.0.0/0 0-65535").unwrap(),
+    );
     let config = OsConfig {
         directory_ops: std::ptr::null(),
         process_ops: std::ptr::null(),
@@ -265,7 +267,12 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
             if kind == NET {
                 let rules = &*(hirsel_core_capability_handle(&context, operand)
                     as *const crate::net::Rules);
-                assert_eq!(rules.as_slice(), &[net_rule]);
+                let decoded = rules
+                    .as_slice()
+                    .iter()
+                    .map(|rule| rule.address)
+                    .collect::<Vec<_>>();
+                assert_eq!(decoded, [net_rule.address]);
             } else {
                 assert_eq!(hirsel_core_capability_handle(&context, operand), 0);
             }

@@ -568,3 +568,61 @@ fn a_refund_after_handover_and_before_end_goes_to_the_next_owner_event() {
         .collect();
     assert_eq!(refunds, [(c, 0), (s, 8)]);
 }
+
+/// Routing law: a queued slot is always on the inbox of its root's owner. A
+/// reassignment moves exactly the moved root's slots, including slots of
+/// records joined under it before or after they were queued; a hand-over
+/// moves the child's slots to the destination root. Red on a reassignment
+/// that leaves the root's slots on the old owner (or moves only the root's own
+/// slot), on one that moves every slot of the old inbox, and on a union or
+/// hand-over that leaves the joined record's slots behind.
+#[test]
+fn reassignment_and_handover_move_exactly_the_moved_roots_queued_slots() {
+    let root = Funding::root(96);
+    let routed = || root.payer.get().domain().remote.lock().unwrap().routed();
+    let a = root.reserve(32).unwrap();
+    a.task_owner(1);
+    let b = root.reserve(32).unwrap();
+    b.task_owner(1);
+    let mut ca = Context::with_funding(a);
+    let mut cb = Context::with_funding(b);
+    let id = |f: &Funding| f.payer.get().slot().id;
+    let (r0, ra, rb) = (id(&root), id(&ca.current), id(&cb.current));
+    // c is queued before it joins a; d joins a before it is queued.
+    ca.limit_enter(16).unwrap();
+    let rc = id(&ca.current);
+    drop(Block::new(&ca, Some(8), 8, 8).unwrap());
+    let kept = Block::new(&ca, Some(8), 8, 8).unwrap();
+    assert_eq!(routed(), [(1, vec![(rc, vec![rc])])]);
+    ca.limit_exit();
+    ca.limit_enter(16).unwrap();
+    let rd = id(&ca.current);
+    let late = Block::new(&ca, Some(8), 8, 8).unwrap();
+    ca.limit_exit();
+    drop((kept, late));
+    drop(Block::new(&ca, Some(8), 8, 8).unwrap());
+    drop(Block::new(&cb, Some(8), 8, 8).unwrap());
+    let mut a_slots = vec![ra, rc, rd];
+    a_slots.sort();
+    assert_eq!(routed(), [(1, vec![(ra, a_slots.clone()), (rb, vec![rb])])]);
+    ca.current.task_owner(2);
+    assert_eq!(
+        routed(),
+        [(1, vec![(rb, vec![rb])]), (2, vec![(ra, a_slots.clone())])]
+    );
+    cb.current.handover(1);
+    assert_eq!(
+        routed(),
+        [(0, vec![(r0, vec![rb])]), (2, vec![(ra, a_slots.clone())])]
+    );
+    ca.current.task_owner(0);
+    let mut both = vec![(r0, vec![rb]), (ra, a_slots)];
+    both.sort();
+    assert_eq!(routed(), [(0, both)]);
+    root.drain();
+    assert_eq!(routed(), []);
+    // No refund was lost or doubled: every byte is back at its limit.
+    assert_eq!((root.available(), ca.available()), (64, 32));
+    ca.current.end();
+    assert_eq!(root.available(), 96);
+}

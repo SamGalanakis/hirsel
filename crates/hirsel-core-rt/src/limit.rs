@@ -7,7 +7,7 @@
 use crate::Capacity;
 #[path = "limit_refunds.rs"]
 mod refunds;
-use refunds::{Inbox, Remote};
+use refunds::{Inbox, Queue, Remote};
 use std::{
     cell::{Cell, RefCell, UnsafeCell},
     ptr::NonNull,
@@ -61,6 +61,8 @@ pub(crate) struct Slot {
     pending: AtomicU64,
     pending_zeros: AtomicUsize,
     next_pending: UnsafeCell<Option<NonNull<Slot>>>,
+    /// The dirty slots this record leads, while it is a union-find root.
+    queue: UnsafeCell<Queue>,
     handover: Cell<Option<u64>>,
     id: usize,
 }
@@ -112,6 +114,8 @@ impl Forest {
                 return;
             }
             let parent = r.parent.or_else(|| r.live.parent.map(|p| p.slot().id));
+            // SAFETY: a queued slot pins its root through its charge or edge.
+            debug_assert!(unsafe { (*slot.as_ref().queue.get()).is_empty() });
             // The free list takes over the final slot pin until its next use.
             r.refs = 1;
             r.parent = None;
@@ -152,6 +156,7 @@ impl Forest {
                 pending: AtomicU64::new(0),
                 pending_zeros: AtomicUsize::new(0),
                 next_pending: UnsafeCell::new(None),
+                queue: UnsafeCell::new(Queue::EMPTY),
                 handover: Cell::new(None),
                 domain,
                 id: id + i,
@@ -253,7 +258,9 @@ impl Forest {
         }
         root
     }
-    fn merge(&mut self, child: usize, original_parent: usize, unused: u64) -> usize {
+    /// Join the records and return (winner, loser). The caller gives the
+    /// winner the loser's queued slots (`Remote::unite`).
+    fn merge(&mut self, child: usize, original_parent: usize, unused: u64) -> (usize, usize) {
         let parent = self.find(original_parent);
         // SAFETY: the recipient owns both the original parent and the merged
         // record through this fold.
@@ -282,7 +289,7 @@ impl Forest {
         self.retain(winner);
         self.record_mut(loser).parent = Some(winner);
         self.release(original_parent);
-        winner
+        (winner, loser)
     }
 
     fn refund(&mut self, id: usize, bytes: u64) {
@@ -526,22 +533,17 @@ impl Payer {
             .is_some_and(|binding| binding.domain == self.slot().domain)
             || (!crate::tasks::parallel() && d.owner == Some(thread()));
         if local && d.handles.get() != 0 {
-            let root = self.root();
+            let mut root = self.root();
             // SAFETY: scheduler execution serializes reads of live routing.
             let mut live = unsafe { (*root.links()).live };
             if bytes != 0 && live.owner != crate::tasks::current_id() {
                 let _commit = crate::tasks::before_commit();
-                let root = self.root();
+                root = self.root();
                 // SAFETY: an outstanding charge pins the current route.
                 live = unsafe { (*root.links()).live };
             }
             if live.owner != crate::tasks::current_id() {
-                let publish = || {
-                    d.remote
-                        .lock()
-                        .unwrap()
-                        .enqueue(self, bytes, Some(live.inbox))
-                };
+                let publish = || d.remote.lock().unwrap().enqueue(self, bytes, Some(root));
                 if bytes == 0 {
                     publish();
                 } else {
@@ -815,7 +817,8 @@ impl Funding {
             let slot = unsafe { slot.as_ref() };
             if let Some(unused) = slot.handover.take() {
                 let original_parent = f.record_mut(slot.id).parent.take().unwrap();
-                f.merge(slot.id, original_parent, unused);
+                let (winner, loser) = f.merge(slot.id, original_parent, unused);
+                remote.unite(NonNull::from(f.slot(winner)), NonNull::from(f.slot(loser)));
                 f.release(slot.id);
             }
             let bytes = slot.pending.swap(0, Ordering::Relaxed);
@@ -894,7 +897,7 @@ impl Funding {
             live.inbox = inbox;
             // SAFETY: the map retains the previous inbox until the next reap.
             unsafe { old.inbox.as_ref().release(domain) };
-            remote.reroute(old.inbox);
+            remote.relink(payer.0, old.inbox);
         }
     }
 
@@ -958,22 +961,25 @@ impl Funding {
             let f = child.forest();
             let id = child.slot().id;
             let live = f.record(id).live;
-            let target = f.record(parent.slot().id).live.inbox;
+            debug_assert!(f.record(id).parent.is_none());
             f.retain(id);
             f.record_mut(id).parent = Some(live.parent.unwrap().slot().id);
-            remote.enqueue_handover(child, unused, target);
-            if live.inbox != target {
-                remote.reroute(live.inbox);
-            }
+            // The child's queued slots now lead to the destination root.
+            remote.unite(parent.0, child.0);
+            remote.enqueue_handover(child, unused, parent);
         });
     }
 
     fn end_id(&self) -> usize {
-        let f = self.payer.get().forest();
-        let child = f.find(self.payer.get().slot().id);
+        let payer = self.payer.get();
+        let f = payer.forest();
+        let child = f.find(payer.slot().id);
         let original_parent = f.record(child).live.parent.unwrap().slot().id;
         let unused = unsafe { (*f.balance(child)).available };
-        f.merge(child, original_parent, unused)
+        let (winner, loser) = f.merge(child, original_parent, unused);
+        let mut remote = payer.domain().remote.lock().unwrap();
+        remote.unite(NonNull::from(f.slot(winner)), NonNull::from(f.slot(loser)));
+        winner
     }
 
     /// Move a retained forwarding handle to its canonical record at a context switch.
@@ -1134,6 +1140,12 @@ impl Funding {
         f.record_mut(child_id).parent = Some(parent_id);
         f.record_mut(child_id).refs = 0;
         f.record_mut(parent_id).refs += 1;
+        child
+            .domain()
+            .remote
+            .lock()
+            .unwrap()
+            .unite(parent.0, child.0);
         self.payer.set(parent);
         true
     }

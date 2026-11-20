@@ -18,6 +18,13 @@
           "signatures": true
         },
         {
+          "file": "core/std/base64.hirsel",
+          "modules": [
+            "base64"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/std/char.hirsel",
           "modules": [
             "char"
@@ -28,6 +35,13 @@
           "file": "core/std/clock.hirsel",
           "modules": [
             "clock"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/codec.hirsel",
+          "modules": [
+            "codec"
           ],
           "signatures": true
         },
@@ -126,6 +140,13 @@
           "file": "core/std/string.hirsel",
           "modules": [
             "string"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/utf8.hirsel",
+          "modules": [
+            "utf8"
           ],
           "signatures": true
         }

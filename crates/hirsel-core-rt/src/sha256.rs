@@ -174,14 +174,15 @@ mod x86 {
             let at = block.as_ptr().cast::<__m128i>();
             // SAFETY: each block is 64 readable bytes; the loads are unaligned.
             let load = |i| _mm_shuffle_epi8(unsafe { _mm_loadu_si128(at.add(i)) }, mask);
-            let mut w = [load(0), load(1), load(2), load(3)];
-            for i in 0..4 {
-                rounds4(&mut abef, &mut cdgh, w[i], i);
+            // The last four scheduled words rotate through locals, not an
+            // indexed array, so they stay in registers.
+            let (mut w0, mut w1, mut w2, mut w3) = (load(0), load(1), load(2), load(3));
+            for (i, w) in [w0, w1, w2, w3].into_iter().enumerate() {
+                rounds4(&mut abef, &mut cdgh, w, i);
             }
             for i in 4..16 {
-                let next = schedule(w[i % 4], w[(i + 1) % 4], w[(i + 2) % 4], w[(i + 3) % 4]);
-                w[i % 4] = next;
-                rounds4(&mut abef, &mut cdgh, next, i);
+                (w0, w1, w2, w3) = (w1, w2, w3, schedule(w0, w1, w2, w3));
+                rounds4(&mut abef, &mut cdgh, w3, i);
             }
             abef = _mm_add_epi32(abef, abef_save);
             cdgh = _mm_add_epi32(cdgh, cdgh_save);
@@ -220,17 +221,22 @@ mod aarch64 {
                 let load = |i: usize| {
                     vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block.as_ptr().add(16 * i))))
                 };
-                let mut s = [load(0), load(1), load(2), load(3)];
+                // The last four scheduled words rotate through locals, not an
+                // indexed array, so they stay in registers.
+                let (mut s0, mut s1, mut s2, mut s3) = (load(0), load(1), load(2), load(3));
                 for i in 0..16 {
-                    if i >= 4 {
-                        let j = i % 4;
-                        s[j] = vsha256su1q_u32(
-                            vsha256su0q_u32(s[j], s[(j + 1) % 4]),
-                            s[(j + 2) % 4],
-                            s[(j + 3) % 4],
-                        );
-                    }
-                    let wk = vaddq_u32(s[i % 4], vld1q_u32(K.as_ptr().add(4 * i)));
+                    let w = match i {
+                        0 => s0,
+                        1 => s1,
+                        2 => s2,
+                        3 => s3,
+                        _ => {
+                            let next = vsha256su1q_u32(vsha256su0q_u32(s0, s1), s2, s3);
+                            (s0, s1, s2, s3) = (s1, s2, s3, next);
+                            next
+                        }
+                    };
+                    let wk = vaddq_u32(w, vld1q_u32(K.as_ptr().add(4 * i)));
                     let abcd_prev = abcd;
                     abcd = vsha256hq_u32(abcd_prev, efgh, wk);
                     efgh = vsha256h2q_u32(efgh, abcd_prev, wk);

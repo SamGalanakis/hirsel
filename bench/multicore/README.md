@@ -196,3 +196,109 @@ final incumbent to the last search stopping. Hirsel stage clocks are
 unavailable, so its owner timestamps bound the lag. The output receipt
 records elapsed nanoseconds, work, quality, witness, lower and upper lag
 bounds in nanoseconds, and rounds in that order.
+
+## Scheduler grain sweep
+
+For each regime, compare throughput at width 8 against that program's own
+width-1 throughput at the same grain. Use the median of at least three
+samples per deciding cell and report their spread.
+
+- **collapses** if Hirsel has less than half its width-1 throughput and Tokio
+  retains at least half its own width-1 throughput.
+- **scales** if Tokio speeds up at least 2× and Hirsel reaches at least 0.6
+  times Tokio's speedup.
+- **flat** otherwise.
+
+The crossover grain is the smallest sampled grain where a program at width 8
+beats itself at width 1. Report the result for Hirsel, Tokio and Go where
+available, including an absent or unmeasured crossover. Report the cell
+verdicts and use the worst cell for the topology summary.
+
+Apply these three conditions only with cost attributed to the ordering token
+through waits, transfers or parks. Exclude defects and bounded local hot spots.
+
+1. **(a)** The socket or checkbox service is slower at width 8 than width 1.
+2. **(b)** At grain 10 µs or more a regime fails to scale where Tokio speeds
+   up at least 4×.
+3. **(c)** Hirsel's crossover exceeds ten times Tokio's in at least three
+   topologies.
+
+The kernel is xorshift64 with shifts 13, 7 and 17. The entire suite uses
+the same iteration counts on each port and retains each port's observed grain.
+Calibrate by timing 4,000 evaluations on one CPU, subtracting the zero-round
+time and dividing by 4,000. The counts 0, 64, 640, 6,400 and 64,000 are the
+calibrated inputs for approximately 0, 100 ns, 1 µs, 10 µs and 100 µs on the
+Ryzen 9 5950X. Recalibrate once on a different host before the sweep. Calibration
+uses seed values 1 through 4,000. Each benchmark prints the number of completed
+units and the sum modulo 2^64 of the transformed inputs. The oracle computes
+powers of the linear map over GF(2) and sums those powers applied to the
+workload's seed interval. A wrong receipt fails the sample.
+
+| Case | Unit and topology |
+| --- | --- |
+| `independent16`, `independent256` | One result per compute-only task. Join each wave before starting another. A wave has 16 or 256 tasks. |
+| `pairs`, `single_pair` | One round trip. Each of 16 pairs, or the single pair, uses two capacity-one channels. The responder computes between receive and reply. |
+| `fanin` | One item. Sixteen producers compute before sending to a capacity-64 queue with one collector. |
+| `fanout` | One item. One dispatcher sends round-robin to 16 capacity-64 queues. Each worker computes and sends to a capacity-64 result queue. Hirsel receivers have a single owner, so every port uses the same dispatch. |
+| `pipeline` | One item after eight capacity-64 stages. Each stage applies the kernel once. |
+| `grain_spawn_join`, `grain_spawn_chain` | One joined child. One or 16 chains spawn then join each computing child before starting the next. |
+| `spawn_tree` | One leaf. A depth-six binary tree spawns two children at each branch and joins both. |
+| `channel_hub` | One exclusive permit. Sixteen clients compute, enter one capacity-one request queue, and receive the permit on a private channel. The broker waits for release before granting another permit. The broker owns the receivers. |
+| `arc_hub` | One share and release on the same Arc. Sixteen tasks compute before each share and add the shared payload of 1 to the result. Go has no Arc twin. |
+| `skew` | One hot round trip or idle wake. A single pair runs beside 1,000 one-shot timers. Grain applies to the pair. Report round trips/s during the hot pair's lifetime and the mean and maximum time from the idle deadline to resume. |
+| `timers` | One wake from 10,000 one-shot timers staggered by task index. Each task takes its own clock reading, sleeps until that reading plus 2 ms and 1 µs per index, then computes. |
+| `sockets64`, `sockets1024` | One TCP request. Each connection sends a little-endian seed and gets the transformed u64 back. A disjoint Tokio generator connects all sockets before releasing the closed-loop request stream. Report request-phase throughput and nearest-rank p50/p99 round trip latency. The server and generator verify the same receipt. |
+| `checkbox` | One Returned toggle under `wire-load converge` with 64 clients, 200 toggles per client and pace 1,000. Grain stays native to the checkbox application. The checksum is the sum of bytes of the final board. The loader checks each subscriber and the fresh snapshot against the XOR oracle and the runner checks the receipt against the prescribed input bits. |
+
+Use the release compiler and testing archive from the build below. The same
+archive runs untaped at all widths and reports pool counters when width exceeds
+one. Recorded pairs, fan-in, pipeline and spawn cases use the public
+`tape.open` and `tape.tasks` path. With the testing archive, width 1 writes
+chooser 0 and widths above 1 write chooser 2. The runner uses the same
+executable and checks the same receipt on replay at width 1. The Tokio
+comparison remains untaped. The checkout's checkbox entry has no graceful
+completion for sealing a recording, so the service row runs untaped.
+
+```sh
+taskset -c "$build_cpus" python3 tools/buck2/prepare.py
+taskset -c "$build_cpus" .buck2/bin/buck2 build -j2 \
+  --target-platforms //tools/buck2:release --show-full-output \
+  //:hirsel-core-driver-bin-hirsel //:hirsel-core-rt-test-pool-archives
+taskset -c "$build_cpus" ./bench/multicore/build.py --regimes \
+  --out "$benchmark_bins" --hirsel "$release_driver" --runtime "$test_pool_archive" --go "$go"
+
+# Use the lane's assigned values. Build and measurement run sequentially.
+rounds=(0 64 640 6400 64000)
+taskset -c "$measure_cpus" ./bench/multicore/run.py --regimes \
+  --case calibrate --workers 1 --size 4000 --repeats 1 --rounds "${rounds[@]}" \
+  --bins "$benchmark_bins" --out "$calibration_dir" --lock "$lane_lock" \
+  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus"
+
+for mode in untaped recorded; do
+  taskset -c "$assigned_cpus" ./bench/multicore/run.py --regimes --mode "$mode" \
+    --workers "${workers[@]}" --rounds "${rounds[@]}" --bins "$benchmark_bins" \
+    --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" --load-cpus "$load_cpus" \
+    --lock "$lane_lock" --out "$evidence_dir/$mode"
+done
+./bench/multicore/run.py --regimes --read "$evidence_dir"/{untaped,recorded}/samples.json \
+  --crossover-width 8
+
+# Select the three measured cases with the lowest width-8 speedup.
+taskset -c "$assigned_cpus" ./bench/multicore/run.py --regimes --profile --languages Hirsel \
+  --case "$case" --grain-ns "$grain" --rounds "$round_count" --workers 8 --repeats 1 \
+  --bins "$benchmark_bins" --out "$profile_dir" --lock "$lane_lock" \
+  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" --load-cpus "$load_cpus"
+```
+
+Each repetition runs Hirsel followed by Tokio and then Go where available,
+under one lock. The default repeats widths 1, 4 and 8 three times and other
+widths once. Report measured SMT activity. Use assigned physical cores for
+both server and loader. For the socket rows throughput excludes connection
+setup. For checkbox it spans the convergence driver's lifetime. Process-tree
+wall time, user instructions and RSS are retained independently. For live
+services these count the server process tree and therefore exclude the load
+generator. The sequencer counters report service time under the token and
+publication-to-acquisition time for queued hand-offs. The hand-off interval
+excludes any wait before publication. Acquisitions per explicit workload
+operation use the source-level operation count, since the testing archive
+has no total for implicit charge, refund, dispatch and cleanup events.

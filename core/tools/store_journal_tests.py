@@ -55,6 +55,17 @@ def provider_checks(executable, engine, env):
         checked([str(executable), 'journal-cancel', str(cut)], env, engine=engine)
     rows.append(dict(cancellation_wait_entries=waits, passed=True))
     print(f'{engine}: {waits}/{waits} cancellation wait entries passed', flush=True)
+    # The journal worker is cancelled while its issued sync is in flight; the
+    # head must end the place as Broken, never unwrap the closed ack channel.
+    count = checked([str(executable), 'journal-worker-cancel', 'count'], env, engine=engine)
+    match = re.fullmatch(r'cuts ([0-9]+)\n', count.stdout)
+    if match is None or int(match[1]) == 0:
+        raise RuntimeError('journal worker issued no sync to cancel across')
+    issued = int(match[1])
+    for cut in range(issued):
+        checked([str(executable), 'journal-worker-cancel', str(cut)], env, engine=engine)
+    rows.append(dict(scenario='journal-worker-cancel', issued_syncs=issued, passed=True))
+    print(f'{engine}: {issued}/{issued} journal worker cancels across an issued sync passed', flush=True)
     # L24 (iv)(a): syncs held for one writer turn; every schedule must finish.
     checked([str(executable), 'journal-ack', 'count'], env, engine=engine)
     for seed in range(1, 33):

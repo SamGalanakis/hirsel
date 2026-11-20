@@ -12,6 +12,9 @@ use std::{
 pub(crate) const TEMP_ATTEMPTS: usize = 128;
 
 pub(crate) type IssueFile = unsafe extern "C" fn(*mut u8, *mut Request) -> Outcome;
+/// Queue a SYNC or SYNC_DIR on the sync helper; None for a handle this
+/// provider does not own.
+pub(crate) type SyncFile = unsafe fn(*mut u8, *mut Request, u64) -> Option<Step>;
 
 /// Operations required by an OS directory grant. The generated launcher
 /// names this table only when it supplies directory paths.
@@ -19,6 +22,7 @@ pub struct DirectoryOperations {
     pub(crate) grant: fn(&mut OsProvider, &Path) -> io::Result<u64>,
     pub(crate) probe: fn(&OsProvider, u64) -> io::Result<()>,
     pub(crate) issue: IssueFile,
+    pub(crate) sync: SyncFile,
 }
 
 #[unsafe(no_mangle)]
@@ -26,10 +30,12 @@ pub static hirsel_core_os_directory_ops: DirectoryOperations = DirectoryOperatio
     grant: OsProvider::grant,
     probe: OsProvider::probe_directory,
     issue: issue_file,
+    sync: sync_file,
 };
 
 pub struct OsProvider {
     issue_file: Option<IssueFile>,
+    sync_file: Option<SyncFile>,
     /// Host CLOCK_MONOTONIC at construction: mono_ns and sleep deadlines count from it.
     epoch: u64,
     directories: BTreeMap<u64, OwnedFd>,
@@ -45,10 +51,17 @@ impl OsProvider {
     pub(crate) fn file_descriptor(&self, handle: u64) -> i32 {
         self.files[&handle].as_raw_fd()
     }
+    #[cfg(test)]
+    pub(crate) fn adopt_file(&mut self, fd: OwnedFd) -> u64 {
+        let id = self.id();
+        self.files.insert(id, fd);
+        id
+    }
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub fn new(stdout: OwnedFd, stderr: OwnedFd) -> Self {
         Self {
             issue_file: None,
+            sync_file: None,
             epoch: monotonic_ns(),
             directories: BTreeMap::new(),
             files: BTreeMap::new(),
@@ -89,12 +102,13 @@ impl OsProvider {
         id
     }
     pub fn provider(&mut self) -> Provider {
-        self.provider_with(Some(issue_file))
+        self.provider_with(Some(&hirsel_core_os_directory_ops))
     }
 
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
-    pub(crate) fn provider_with(&mut self, issue_file: Option<IssueFile>) -> Provider {
-        self.issue_file = issue_file;
+    pub(crate) fn provider_with(&mut self, directory: Option<&DirectoryOperations>) -> Provider {
+        self.issue_file = directory.map(|ops| ops.issue);
+        self.sync_file = directory.map(|ops| ops.sync);
         Provider {
             state: (self as *mut Self).cast(),
             wait,
@@ -454,7 +468,8 @@ unsafe fn sleep_wait(state: *mut u8, request: &Request) -> Wait {
 }
 /// `issue` as a provider callback, for recognising the OS provider's own.
 pub(crate) const ISSUE: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step = issue;
-/// Files and clocks finish immediately; sockets may park after a not-ready attempt.
+/// Clocks and files finish immediately, except SYNC and SYNC_DIR, which park while
+/// the sync helper runs them; sockets may park after a not-ready attempt.
 /// Never inlined, so `ISSUE` has one address (`provider::deliver`).
 /// # Safety
 /// As `wait`.
@@ -496,6 +511,13 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
         };
         #[cfg(test)]
         probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
+        return step;
+    }
+    if unsafe { matches!((*request).operation, SYNC | SYNC_DIR) }
+        && let Some(sync) = unsafe { (*state.cast::<OsProvider>()).sync_file }
+        // SAFETY: the directory provider owns the request's handle.
+        && let Some(step) = unsafe { sync(state, request, token) }
+    {
         return step;
     }
     let outcome = unsafe { crate::tasks::host_operation(state, request, issue_on_stack) };
@@ -552,9 +574,15 @@ unsafe fn socket_operations(request: *const Request) -> &'static crate::os_net::
 }
 /// Only socket operations enter I under the OS provider.
 unsafe extern "C" fn resume(_: *mut u8, request: *mut Request, token: u64) -> Step {
+    if unsafe { matches!((*request).operation, SYNC | SYNC_DIR) } {
+        return crate::os_sync::resume(token);
+    }
     unsafe { (socket_operations(request).step)(request, token, false) }
 }
 unsafe extern "C" fn abort(_: *mut u8, request: *mut Request, token: u64, reason: u8) -> Outcome {
+    if unsafe { matches!((*request).operation, SYNC | SYNC_DIR) } {
+        return crate::os_sync::abort();
+    }
     unsafe { (socket_operations(request).abort)(request, token, reason) }
 }
 unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
@@ -573,6 +601,50 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
             unsafe { issue_file(state, request) }
         }
     }
+}
+
+thread_local! {
+    /// The token `submit_on_stack` queues for, and the step it answers.
+    static SUBMIT: std::cell::Cell<(u64, Step)> = std::cell::Cell::new((0, Step::default()));
+}
+
+/// SYNC and SYNC_DIR park while the helper syncs a duplicate of the handle's
+/// descriptor (`os_sync`). Submission runs on the host stack, because the
+/// first one starts the helper thread.
+unsafe fn sync_file(state: *mut u8, request: *mut Request, token: u64) -> Option<Step> {
+    // SAFETY: forwarded caller contract.
+    let (os, operation, handle) = unsafe {
+        let request = &*request;
+        (
+            &*state.cast::<OsProvider>(),
+            request.operation,
+            request.handle,
+        )
+    };
+    if operation == SYNC_DIR {
+        os.directories.get(&handle)
+    } else {
+        os.files.get(&handle)
+    }?;
+    SUBMIT.set((token, Step::default()));
+    // SAFETY: as `issue`; submit never suspends.
+    unsafe { crate::tasks::host_operation(state, request, submit_on_stack) };
+    Some(SUBMIT.get().1)
+}
+
+unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
+    // SAFETY: forwarded caller contract; `sync_file` checked the handle.
+    let (os, request) = unsafe { (&*state.cast::<OsProvider>(), &*request) };
+    let directory = request.operation == SYNC_DIR;
+    let fd = if directory {
+        &os.directories[&request.handle]
+    } else {
+        &os.files[&request.handle]
+    }
+    .as_raw_fd();
+    let token = SUBMIT.get().0;
+    SUBMIT.set((token, crate::os_sync::submit(fd, directory, token)));
+    Outcome::default()
 }
 
 unsafe extern "C" fn issue_file(state: *mut u8, request: *mut Request) -> Outcome {

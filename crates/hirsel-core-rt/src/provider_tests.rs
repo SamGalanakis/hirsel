@@ -121,6 +121,30 @@ fn files_deliver_committed_prefixes_and_all_open_modes() {
         assert_eq!(std::fs::read(f.root.join(name)).unwrap(), b"abcdef");
     }
 }
+/// A sync parks while the helper runs it and delivers the syscall's own
+/// failure, never success: fdatasync(2) refuses a pipe with EINVAL.
+#[test]
+fn a_parked_sync_delivers_the_syscalls_failure() {
+    let mut f = Fixture::new();
+    let mut fds = [0; 2];
+    // SAFETY: pipe2 writes two new descriptors into the array.
+    assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+    // SAFETY: both descriptors are new and owned here.
+    let (read, write) = unsafe {
+        use std::os::fd::FromRawFd;
+        (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))
+    };
+    drop(read);
+    let h = f.os.adopt_file(write);
+    let failed = f.simple(SYNC, h, b"", 0);
+    assert_eq!(
+        failed.error,
+        IoError {
+            tag: 5,
+            code: libc::EINVAL as u32
+        }
+    );
+}
 #[test]
 fn locks_are_exclusive_idempotent_and_end_at_close() {
     crate::openat2_required::require();

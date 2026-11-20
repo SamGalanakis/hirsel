@@ -58,6 +58,19 @@ impl Counted {
                 },
             }
         }
+        // Only a host that parked is resumed or aborted.
+        unsafe extern "C" fn resume(s: *mut u8, r: *mut Request, t: u64) -> Step {
+            let c = unsafe { &*s.cast::<Counted>() };
+            c.calls.set(c.calls.get() + 1);
+            let p = c.inner.unwrap();
+            unsafe { (p.resume)(p.state, r, t) }
+        }
+        unsafe extern "C" fn abort(s: *mut u8, r: *mut Request, t: u64, why: u8) -> Outcome {
+            let c = unsafe { &*s.cast::<Counted>() };
+            c.calls.set(c.calls.get() + 1);
+            let p = c.inner.unwrap();
+            unsafe { (p.abort)(p.state, r, t, why) }
+        }
         unsafe extern "C" fn deliver(s: *mut u8, r: *mut Request, o: Outcome) -> Outcome {
             let c = unsafe { &*s.cast::<Counted>() };
             c.calls.set(c.calls.get() + 1);
@@ -70,8 +83,8 @@ impl Counted {
             state: (self as *const Self).cast_mut().cast(),
             wait,
             issue,
-            resume: crate::provider::immediate::resume,
-            abort: crate::provider::immediate::abort,
+            resume,
+            abort,
             deliver,
         }
     }
@@ -291,12 +304,18 @@ fn call(
         site: 0,
     };
     let p = sub.0;
-    // SAFETY: the request and its carrier are pinned for the operation.
+    let context = TASK.get();
+    // SAFETY: the request and its carrier are pinned for the operation; a
+    // task's context is its own while it runs.
     let o = unsafe {
-        let _ = (p.wait)(p.state, &mut r, 0);
-        let step = (p.issue)(p.state, &mut r, 0);
-        assert_eq!(step.kind, STEP_DONE);
-        (p.deliver)(p.state, &mut r, step.outcome)
+        if context.is_null() {
+            let _ = (p.wait)(p.state, &mut r, 0);
+            let step = (p.issue)(p.state, &mut r, 0);
+            assert_eq!(step.kind, STEP_DONE);
+            (p.deliver)(p.state, &mut r, step.outcome)
+        } else {
+            crate::provider::hirsel_core_host(context, &p, &mut r)
+        }
     };
     if !input {
         // SAFETY: the provider initialised the carrier up to the request's len.
@@ -315,6 +334,11 @@ fn call(
         status: o.status,
         bytes: carrier.clone(),
     }
+}
+thread_local! {
+    /// The running task's context: `call` then issues through the scheduler
+    /// (`hirsel_core_host`), else it calls the provider directly.
+    static TASK: Shared<*mut crate::Context> = const { Shared::new(ptr::null_mut()) };
 }
 fn input(sub: (Provider, u64), op: u8, bytes: &[u8]) -> Ob {
     call(sub, op, 0, &[], &mut bytes.to_vec(), true)
@@ -1442,9 +1466,143 @@ fn a_dropped_tape_keeps_its_frames_and_has_no_end() {
     assert_eq!(verdict, Err(Fault::Diverged(at)));
 }
 
-/// The bypass law on the real host, every S1 operation kind. Wrong
-/// implementation caught: one op kind whose Replay reaches the host, or whose
-/// recorded answer (value, error, written, carrier bytes) is lost.
+/// Runs `body` as the root task of a scheduler run; Record under the
+/// recording schedule script, as the S2 cases do.
+fn in_task(record: bool, body: &mut dyn FnMut(*mut crate::Context)) {
+    type Body<'a> = &'a mut dyn FnMut(*mut crate::Context);
+    unsafe extern "C" fn root(context: *mut crate::Context, _: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: `in_task` pins the body until the run returns.
+        unsafe { (**input.cast::<*mut Body<'_>>())(context) };
+        0
+    }
+    let mut context = crate::Context::new(1 << 20);
+    let mut files = crate::host_file::Files::default();
+    context.host_files = &mut files;
+    crate::causes::task_start(&mut context).unwrap();
+    let mut body: Body<'_> = body;
+    let mut input: *mut Body<'_> = &mut body;
+    // SAFETY: the body and its borrows are pinned for the cooperative run.
+    let mut execute = || unsafe {
+        crate::tasks::run_root(
+            &mut context,
+            root,
+            (&mut input as *mut *mut Body<'_>).cast(),
+            ptr::null_mut(),
+            size_of::<*mut Body<'_>>(),
+            0,
+            crate::tasks::SchedulerProvider::default(),
+        )
+    };
+    let status = if record {
+        std::sync::Arc::new(crate::schedule_script::ScheduleScript::last()).install(execute)
+    } else {
+        execute()
+    };
+    assert_eq!(status, 0);
+}
+
+/// A task that takes one tape frame of its own: a clock read.
+#[derive(Clone, Copy)]
+struct Other {
+    clock: (Provider, u64),
+    seen: *mut Option<Ob>,
+}
+unsafe extern "C" fn other(context: *mut crate::Context, _: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: the spawner pins `seen` until it joins this task.
+    unsafe {
+        let job = input.cast::<Other>().read();
+        // This task does not suspend between taking the context and giving
+        // the spawner's back.
+        let spawner = TASK.replace(context);
+        *job.seen = Some(plain(job.clock, WALL_MS, 0, &[]));
+        crate::os_sync::hold(false);
+        TASK.set(spawner);
+    }
+    0
+}
+
+/// How the host answers SYNC and SYNC_DIR.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Syncs {
+    /// The OS: parked while the helper syncs.
+    Parked,
+    /// The OS, finished inside issue: the tape records OP, as every tape
+    /// before the sync helper did.
+    Blocking,
+    /// The file's SYNC parks and fails with EIO; no syscall.
+    Failing,
+}
+struct SyncHost(Provider, Syncs);
+impl SyncHost {
+    fn provider(&self) -> Provider {
+        unsafe extern "C" fn wait(s: *mut u8, r: *mut Request, t: u64) -> Wait {
+            let p = unsafe { (*s.cast::<SyncHost>()).0 };
+            unsafe { (p.wait)(p.state, r, t) }
+        }
+        unsafe extern "C" fn issue(s: *mut u8, r: *mut Request, t: u64) -> Step {
+            let SyncHost(p, syncs) = unsafe { &*s.cast::<SyncHost>() };
+            if *syncs == Syncs::Failing && unsafe { (*r).operation } == SYNC {
+                crate::tasks::hirsel_core_ready(t);
+                return Step {
+                    kind: STEP_PENDING,
+                    ..Step::default()
+                };
+            }
+            let mut step = unsafe { (p.issue)(p.state, r, t) };
+            while *syncs == Syncs::Blocking && step.kind == STEP_PENDING {
+                std::thread::sleep(std::time::Duration::from_micros(100));
+                step = unsafe { (p.resume)(p.state, r, t) };
+            }
+            step
+        }
+        unsafe extern "C" fn resume(s: *mut u8, r: *mut Request, t: u64) -> Step {
+            let SyncHost(p, syncs) = unsafe { &*s.cast::<SyncHost>() };
+            if *syncs == Syncs::Failing && unsafe { (*r).operation } == SYNC {
+                return Step {
+                    kind: STEP_DONE,
+                    outcome: Outcome {
+                        error: IoError::from_errno(libc::EIO),
+                        ..Outcome::default()
+                    },
+                    deadline_ns: 0,
+                };
+            }
+            unsafe { (p.resume)(p.state, r, t) }
+        }
+        unsafe extern "C" fn abort(_: *mut u8, _: *mut Request, _: u64, _: u8) -> Outcome {
+            unreachable!("an issued sync is never aborted")
+        }
+        unsafe extern "C" fn deliver(s: *mut u8, r: *mut Request, o: Outcome) -> Outcome {
+            let p = unsafe { (*s.cast::<SyncHost>()).0 };
+            unsafe { (p.deliver)(p.state, r, o) }
+        }
+        Provider {
+            state: (self as *const Self).cast_mut().cast(),
+            wait,
+            issue,
+            resume,
+            abort,
+            deliver,
+        }
+    }
+}
+
+fn tape_frames(mut bytes: &[u8]) -> Vec<Frame> {
+    let (mut blocks, _) = Blocks::open(|buf| bytes.read(buf)).unwrap();
+    let mut decoder = Decoder::default();
+    let mut frames = Vec::new();
+    while let Some((flags, payload)) = blocks.next(|buf| bytes.read(buf)).unwrap() {
+        frames.extend(decoder.block(payload, flags & format::END != 0).unwrap());
+    }
+    frames
+}
+
+/// The bypass law on the real host, every S1 operation kind, each issued by
+/// a task through the scheduler. Wrong implementation caught: one op kind
+/// whose Replay reaches the host, or whose recorded answer (value, error,
+/// written, carrier bytes) is lost; a parked SYNC whose ISSUE and DONE do not
+/// replay around another task's frame; a tape recorded with SYNC as one OP
+/// (before the sync helper) that no longer replays.
 #[test]
 fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     super::run::check_launch_replay();
@@ -1456,9 +1614,11 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     let stderr = std::fs::File::create(root.join("stderr")).unwrap();
     let mut os = Box::new(OsProvider::new(stdout.into(), stderr.into()));
     let (wd, sd) = (os.grant(&world_dir).unwrap(), os.grant(&store_dir).unwrap());
-    let host = Counted::new(Some(os.provider()));
+    let mut h = header(REVISION);
+    h.kind = KIND_RUN;
+    let (store, real) = (os.provider(), os.provider());
 
-    let run = |tape: &Tape, h: Provider, wd: u64| -> Vec<Ob> {
+    let ops = |context: *mut crate::Context, tape: &Tape, h: Provider, wd: u64| {
         let dir = tape.on_tape(crate::entry::DIR, (h, wd)).unwrap();
         let clock = tape.on_tape(crate::entry::CLOCK, (h, 0)).unwrap();
         let out = tape.on_tape(crate::entry::STDOUT, (h, 0)).unwrap();
@@ -1470,7 +1630,42 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
         obs.push(f);
         let big: Vec<u8> = (0..100_000u32).map(|i| (i * 13) as u8).collect();
         obs.push(input(file, WRITE, &big));
+        // Another task, runnable while this one's SYNC is parked.
+        let mut seen = None;
+        let mut job = Other {
+            clock,
+            seen: &mut seen,
+        };
+        // SAFETY: the job and `seen` outlive the join below.
+        let task = unsafe {
+            crate::tasks::hirsel_core_spawn(
+                context,
+                0,
+                1 << 16,
+                (&mut job as *mut Other).cast(),
+                other,
+                crate::tasks::TaskLayout {
+                    input: crate::tasks::ValueLayout {
+                        bytes: size_of::<Other>(),
+                        align: align_of::<Other>(),
+                        logical: 0,
+                        clean: None,
+                    },
+                    result: crate::tasks::ValueLayout {
+                        bytes: 0,
+                        align: 1,
+                        logical: 0,
+                        clean: None,
+                    },
+                },
+                0,
+            )
+        }
+        .task;
+        assert!(!task.is_null(), "spawn failed: {:?}", last_fault());
         obs.push(plain(file, SYNC, 0, &[]));
+        // SAFETY: the task is this one's child.
+        unsafe { crate::tasks::hirsel_core_join(context, task, ptr::null_mut(), 0) };
         obs.push(plain(file, TRY_LOCK, 0, &[]));
         obs.push(plain(file, UNLOCK, 0, &[]));
         obs.push(plain(file, CLOSE, 0, &[]));
@@ -1497,53 +1692,147 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
         obs.push(input(clock, SLEEP_UNTIL, &deadline.to_le_bytes()));
         obs.push(input(out, STDOUT, b"out"));
         obs.push(input(err, STDERR, b"err"));
+        obs.push(seen.expect("the other task ran"));
         obs
     };
-    let (tape, _) = unsafe {
-        Tape::open(
-            REVISION,
-            (os.provider(), sd),
-            b"t",
-            Mode::Record,
-            &header(REVISION),
-            &expect(),
-        )
-    }
-    .unwrap();
-    let recorded = run(&tape, host.provider(), wd);
-    tape.end(&ending()).unwrap();
-    let kinds: std::collections::BTreeSet<u8> = recorded.iter().map(|o| o.op).collect();
-    assert_eq!(kinds, (OPEN..=SYNC_DIR).collect(), "every S1 op kind");
-    assert_eq!(
-        recorded[11].error.tag, 1,
-        "the absent open recorded its error"
-    );
-    assert!(recorded.iter().all(|o| o.status == 0));
-    let failed: Vec<usize> = (0..recorded.len())
-        .filter(|&i| recorded[i].error != IoError::OK)
-        .collect();
-    assert_eq!(failed, [11]);
+    let taped = |mode: Mode, host: Provider, wd: u64| -> Vec<Ob> {
+        let mut obs = Vec::new();
+        in_task(mode == Mode::Record, &mut |context| {
+            TASK.set(context);
+            // SAFETY: the tape's store is the OS provider's store grant.
+            let (tape, _) =
+                unsafe { Tape::open(REVISION, (store, sd), b"t", mode, &h, &expect()) }.unwrap();
+            obs = ops(context, &tape, host, wd);
+            tape.end(&ending()).unwrap();
+            TASK.set(ptr::null_mut());
+        });
+        obs
+    };
 
-    let refuse = Counted::new(None);
-    let (tape, _) = unsafe {
-        Tape::open(
-            REVISION,
-            (os.provider(), sd),
-            b"t",
-            Mode::Replay,
-            &header(REVISION),
-            &expect(),
-        )
+    for syncs in [Syncs::Parked, Syncs::Blocking, Syncs::Failing] {
+        let host = Counted::new(Some(real));
+        let answers = SyncHost(host.provider(), syncs);
+        // The helper holds a parked SYNC until the other task has taken its
+        // frame, so that frame falls between the SYNC's ISSUE and DONE.
+        let _ = std::fs::remove_file(store_dir.join("t"));
+        crate::os_sync::hold(syncs == Syncs::Parked);
+        let recorded = taped(Mode::Record, answers.provider(), wd);
+        crate::os_sync::hold(false);
+        let kinds: std::collections::BTreeSet<u8> = recorded.iter().map(|o| o.op).collect();
+        assert_eq!(kinds, (OPEN..=SYNC_DIR).collect(), "every S1 op kind");
+        assert_eq!(
+            recorded[11].error.tag, 1,
+            "the absent open recorded its error"
+        );
+        assert!(recorded.iter().all(|o| o.status == 0));
+        let failed: Vec<usize> = (0..recorded.len())
+            .filter(|&i| recorded[i].error != IoError::OK)
+            .collect();
+        if syncs == Syncs::Failing {
+            assert_eq!(failed, [3, 11], "the SYNC recorded its EIO");
+            assert_eq!(recorded[3].error, IoError::from_errno(libc::EIO));
+        } else {
+            assert_eq!(failed, [11]);
+        }
+        let frames = tape_frames(&std::fs::read(store_dir.join("t")).unwrap());
+        let syncs_at: Vec<usize> = (0..frames.len())
+            .filter(|&i| {
+                matches!(
+                    frames[i],
+                    Frame::Issue {
+                        op: SYNC | SYNC_DIR,
+                        ..
+                    } | Frame::Op {
+                        op: SYNC | SYNC_DIR,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(syncs_at.len(), 3);
+        if syncs == Syncs::Blocking {
+            assert!(
+                syncs_at
+                    .iter()
+                    .all(|&i| matches!(frames[i], Frame::Op { .. }))
+            );
+        } else {
+            let Frame::Issue { task, .. } = frames[syncs_at[0]] else {
+                panic!("the parked SYNC records an ISSUE");
+            };
+            let done = (syncs_at[0]..frames.len())
+                .find(|&i| matches!(frames[i], Frame::Done { task: t, .. } if t == task))
+                .expect("the SYNC's DONE");
+            assert!(
+                syncs == Syncs::Failing
+                    || frames[syncs_at[0] + 1..done]
+                        .iter()
+                        .any(|f| matches!(f, Frame::Op { task: t, .. } if *t != task)),
+                "another task's frame falls inside the parked SYNC"
+            );
+        }
+
+        let refuse = Counted::new(None);
+        let replayed = taped(Mode::Replay, refuse.provider(), 0);
+        assert_eq!(
+            refuse.calls.get(),
+            0,
+            "an operation reached the host under Replay"
+        );
+        assert_eq!(replayed, recorded);
     }
-    .unwrap();
-    let replayed = run(&tape, refuse.provider(), 0);
-    tape.end(&ending()).unwrap();
-    assert_eq!(
-        refuse.calls.get(),
-        0,
-        "an operation reached the host under Replay"
+
+    // With no task (no scheduler) nothing but the tape can ready a replayed
+    // parked SYNC: Replay must still finish, from the tape alone.
+    let bare = |mode: Mode, host: Provider, wd: u64| -> Vec<Ob> {
+        let mut context = crate::Context::new(1 << 20);
+        let mut files = crate::host_file::Files::default();
+        context.host_files = &mut files;
+        crate::causes::task_start(&mut context).unwrap();
+        TASK.set(&mut context);
+        // SAFETY: the tape's store is the OS provider's store grant.
+        let (tape, _) =
+            unsafe { Tape::open(REVISION, (store, sd), b"t", mode, &h, &expect()) }.unwrap();
+        let dir = tape.on_tape(crate::entry::DIR, (host, wd)).unwrap();
+        let f = plain(dir, OPEN, 3, b"bare");
+        let file = (dir.0, handle_like(dir.1, f.value));
+        let obs = vec![
+            f,
+            input(file, WRITE, b"x"),
+            plain(file, SYNC, 0, &[]),
+            plain(file, CLOSE, 0, &[]),
+            plain(dir, SYNC_DIR, 0, &[]),
+            plain(dir, REMOVE, 0, b"bare"),
+        ];
+        tape.end(&ending()).unwrap();
+        TASK.set(ptr::null_mut());
+        obs
+    };
+    let _ = std::fs::remove_file(store_dir.join("t"));
+    let recorded = bare(Mode::Record, real, wd);
+    assert!(
+        recorded
+            .iter()
+            .all(|o| o.status == 0 && o.error == IoError::OK)
     );
-    assert_eq!(replayed, recorded);
+    let frames = tape_frames(&std::fs::read(store_dir.join("t")).unwrap());
+    let issued = frames
+        .iter()
+        .filter(|f| {
+            matches!(
+                f,
+                Frame::Issue {
+                    op: SYNC | SYNC_DIR,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(issued, 2, "both syncs parked on the helper");
+    let refuse = Counted::new(None);
+    assert_eq!(bare(Mode::Replay, refuse.provider(), 0), recorded);
+    assert_eq!(refuse.calls.get(), 0);
+
     drop(os);
     std::fs::remove_dir_all(&root).unwrap();
 }

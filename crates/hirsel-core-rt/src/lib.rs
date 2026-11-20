@@ -29,6 +29,7 @@ pub mod model_net;
 pub mod net;
 pub mod os;
 mod os_net;
+mod os_sync;
 mod os_tls;
 #[cfg(any(test, feature = "charge-observation"))]
 pub mod peak;

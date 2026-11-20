@@ -1365,10 +1365,12 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
     let writer = replace(mut owned.journal_task, None)
     if let Some(_) = owned.poison { let _ = replace(mut owned.acks, None) }
     if let Some(take worker) = writer {
-        match result.unwrap(task.join(take worker)) {
-            Error(Io(e)) => if let None = owned.poison { owned.poison = Some(e) },
-            Error(take e) => if let None = failure { failure = Some(take e) },
-            Ok(()) => {}
+        match task.join(take worker) {
+            Ok(Error(Io(e))) => if let None = owned.poison { owned.poison = Some(e) },
+            Ok(Error(take e)) => if let None = failure { failure = Some(take e) },
+            Ok(Ok(())) => {},
+            // A writer cancelled before its last ack is terminal, as in journal_receive.
+            Error(_) => if let None = owned.poison { owned.poison = Some(Closed) }
         }
     }
     while let Some(ack) = close_ack(owned) {
@@ -12209,9 +12211,14 @@ fn journal_test_worker(d: Dir, tasks: Tasks) -> Result[(), ()] waits {
     if journal_law_worker(d, tasks) { Ok(()) } else { Error(()) }
 }
 
+// A writer that ended without its ack (cancelled before it could send
+// Broken) is a terminal failure: the place stops, unacked sequences unanswered.
 fn journal_receive(db: Db) -> Ack waits {
     match db.acks {
-        Some(receiver) => result.unwrap(channel.receive(receiver)),
+        Some(receiver) => match channel.receive(receiver) {
+            Ok(ack) => ack,
+            Error(_) => Broken(Closed)
+        },
         None => fail("journal receiver")
     }
 }

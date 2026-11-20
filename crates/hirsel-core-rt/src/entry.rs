@@ -339,7 +339,7 @@ impl OsProcess {
                 return Err(StartupError::NetRules);
             }
             let net_rules = crate::net::RulesStorage::new(net_storage);
-            let provider = Box::new(os.provider_with(directory_ops.map(|ops| ops.issue)));
+            let provider = Box::new(os.provider_with(directory_ops));
             let provider_pointer = &*provider as *const Provider;
             let requirements = if input.parameters_len == 0 {
                 &[][..]

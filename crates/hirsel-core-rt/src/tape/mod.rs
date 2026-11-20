@@ -226,6 +226,9 @@ struct Delivery {
     inner: Inner,
     outcome: Outcome,
     created: Option<u64>,
+    /// The wrapper refused the call: the inner provider still gets its own
+    /// outcome once, and the caller gets the refusal.
+    refused: bool,
 }
 
 struct State {
@@ -234,6 +237,10 @@ struct State {
     /// Record's HostFiles still open when their tape ended, by substitute
     /// handle: their cleanup closes the inner file with no frame.
     orphans: BTreeMap<u64, Inner>,
+    /// Record's SYNC and SYNC_DIR the inner provider accepted, by request
+    /// address. An issued sync cannot be aborted, so its result is consumed
+    /// even after a fault or the tape's end; only then does it refuse.
+    accepted: BTreeMap<usize, Inner>,
     /// By request address: a request is pinned through its delivery.
     delivering: BTreeMap<usize, Delivery>,
 }
@@ -266,6 +273,7 @@ fn cell() -> &'static Cell {
             generation: 0,
             live: None,
             orphans: BTreeMap::new(),
+            accepted: BTreeMap::new(),
             delivering: BTreeMap::new(),
         }),
         provider: Provider {
@@ -1206,7 +1214,7 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     live.schedule.last = position;
     if live.mode == Mode::Replay {
         // SAFETY: output is written only into the request's spare carrier.
-        return match unsafe { replay(live, generation, ordinal, r, &args) } {
+        return match unsafe { replay(live, generation, ordinal, r, &args, token) } {
             Ok(step) => step,
             Err(f) => {
                 live.fault = Some(refuse(f));
@@ -1237,10 +1245,19 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
         args,
     };
     if step.kind == STEP_PENDING {
-        if let Err(e) = live.recorder.as_mut().unwrap().frame(&own) {
-            live.fault = Some(refuse(Fault::Io(e)));
+        let written = live.recorder.as_mut().unwrap().frame(&own);
+        if let Err(e) = &written {
+            live.fault = Some(refuse(Fault::Io(*e)));
+        }
+        if matches!(r.operation, SYNC | SYNC_DIR) {
+            s.accepted.insert(key, inner);
+            if written.is_err() {
+                return step;
+            }
+        } else if written.is_err() {
             return done(REFUSED);
         }
+        let live = s.live.as_mut().unwrap();
         live.pending.insert(
             key,
             Pending {
@@ -1354,6 +1371,7 @@ unsafe fn record_out(
             inner,
             outcome: o,
             created,
+            refused: false,
         },
     )
 }
@@ -1365,6 +1383,7 @@ unsafe fn replay(
     ordinal: usize,
     r: &mut Request,
     args: &Args,
+    token: u64,
 ) -> Result<Step, Fault> {
     let task = schedule::task_from_live();
     let rep = live.replayer.as_mut().unwrap();
@@ -1398,6 +1417,18 @@ unsafe fn replay(
         return Err(rep.diverged(Mismatch::Arg));
     }
     let Some(out) = out else {
+        // Without a scheduler nothing else readies a replayed sync, and
+        // nothing else runs before its completion. Ready it only when its
+        // recorded Done comes next, as `complete` will accept; any other
+        // frame is the divergence `complete` would report.
+        if matches!(op, SYNC | SYNC_DIR) && !crate::tasks::has_provider_task() {
+            if !matches!(rep.peek()?, Frame::Done { gap, task: t, .. }
+                if *t == task && live.schedule.last.checked_add(*gap) == Some(live.schedule.events))
+            {
+                return Err(rep.diverged(Mismatch::Schedule));
+            }
+            crate::tasks::hirsel_core_ready(token);
+        }
         return Ok(pending());
     };
     live.schedule.events += 1;
@@ -1522,7 +1553,49 @@ unsafe fn complete(state: *mut u8, r: *mut Request, token: u64, why: Option<u8>)
     let key = r as usize;
     let mut s = cell.state.lock().unwrap();
     // SAFETY: the scheduler pins the request throughout the callback.
-    if s.generation != generation_of(unsafe { (*r).handle }) {
+    let current = s.generation == generation_of(unsafe { (*r).handle });
+    if let Some(&inner) = s.accepted.get(&key)
+        && !(current && s.live.as_ref().is_some_and(|live| live.fault.is_none()))
+    {
+        // A sync the inner provider accepted before the fault or the end:
+        // wait for its result, deliver it to the inner provider, and refuse.
+        let fault = s
+            .live
+            .as_ref()
+            .filter(|_| current)
+            .and_then(|live| live.fault)
+            .unwrap_or(Fault::Ended);
+        drop(s);
+        debug_assert!(why.is_none(), "an issued sync is never aborted");
+        // SAFETY: forward with the pinned inner provider's own handle.
+        let step = unsafe {
+            let h = (*r).handle;
+            (*r).handle = source_handle(&*r, inner);
+            let step = (inner.provider.resume)(inner.provider.state, r, token);
+            (*r).handle = h;
+            step
+        };
+        if step.kind == STEP_PENDING {
+            return step;
+        }
+        let mut s = cell.state.lock().unwrap();
+        s.accepted.remove(&key);
+        if let Some(live) = s.live.as_mut().filter(|_| current) {
+            live.pending.remove(&key);
+        }
+        s.delivering.insert(
+            key,
+            Delivery {
+                inner,
+                outcome: step.outcome,
+                created: None,
+                refused: true,
+            },
+        );
+        refuse(fault);
+        return done(REFUSED);
+    }
+    if !current {
         refuse(Fault::Ended);
         return done(REFUSED);
     }
@@ -1583,6 +1656,7 @@ unsafe fn complete(state: *mut u8, r: *mut Request, token: u64, why: Option<u8>)
         return step;
     }
     let mut s = cell.state.lock().unwrap();
+    s.accepted.remove(&key);
     let live = s.live.as_mut().unwrap();
     let pending = live.pending.remove(&key).unwrap();
     // SAFETY: completed request is still pinned by the scheduler.
@@ -1628,6 +1702,9 @@ unsafe extern "C" fn deliver(state: *mut u8, r: *mut Request, outcome: Outcome) 
         (*r).handle = source_handle(&*r, d.inner);
         let mut o = (d.inner.provider.deliver)(d.inner.provider.state, r, d.outcome);
         (*r).handle = h;
+        if d.refused {
+            return outcome;
+        }
         if let Some(created) = d.created {
             o.value = created;
         }

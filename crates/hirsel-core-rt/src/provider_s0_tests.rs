@@ -472,6 +472,39 @@ fn s0_c_pending_then_cancel_aborts_and_the_request_stays() {
     assert_eq!(rec.count(1, Cb::Resume), 0);
     assert_eq!(rec.count(1, Cb::Deliver), 1);
 }
+/// (c) for a sync: an issued SYNC is not cancellable. The request waits for
+/// the sync's own result (never abort, never Aborted), and stays pending for
+/// the next check_cancel.
+#[test]
+fn s0_c_an_issued_sync_delivers_its_result_through_a_cancel() {
+    unsafe fn body(context: *mut Context, rec: *mut Rec) {
+        unsafe {
+            let task = spawn(context, rec, 1, crate::provider::SYNC);
+            yield_turn(context);
+            let issued = (*rec)
+                .calls
+                .iter()
+                .find(|c| c.site == 1 && c.cb == Cb::Issue);
+            let token = issued.expect("the job parked in I").token;
+            // The cancel is taken before the ready, at the same turn.
+            hirsel_core_cancel(context, task);
+            hirsel_core_ready(token);
+            assert!(join(context, task));
+        }
+    }
+    let mut rec = Rec::new(ready, pending_forever, done0);
+    run(&mut rec, false, body);
+    let (outcome, check) = rec.result(1);
+    assert_eq!(
+        (outcome.status, outcome.value),
+        (0, 1),
+        "the sync's own result"
+    );
+    assert_ne!(check, 0, "the next check_cancel observes the request");
+    assert_eq!(rec.count(1, Cb::Abort(ABORT_CANCEL)), 0);
+    assert_eq!(rec.count(1, Cb::Resume), 1);
+    assert_eq!(rec.count(1, Cb::Deliver), 1);
+}
 /// End a sibling while the issued operation is parked, then request the
 /// provider task's end. Only its abort followed by END can release its stack.
 #[test]

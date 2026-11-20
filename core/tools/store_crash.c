@@ -43,10 +43,23 @@ static void cancel_wait(HirselCoreContext *ctx) {
         hirsel_core_cancel(ctx,cancellation.owner);
     }
 }
+/* journal-worker-cancel: every Sync and SyncDir parks after issue and readies
+ * itself. Each issue while the write phase's journal worker lives is one cut;
+ * that cut cancels the worker alone, so a sync it issued is in flight and the
+ * store's head survives to see the worker end. Resume answers the outcome
+ * computed at issue. The worker is the spawn of reserve + 65536 bytes. */
+enum { JOURNAL_WORKER_BYTES=16777296+65536 };
+static struct {
+    int enabled, fired;
+    uint64_t phase, target, issued, token[64];
+    HirselCoreTask *worker;
+    HirselCoreHostOutcome out[64];
+} parked;
 extern HirselCoreSpawn __real_hirsel_core_spawn(HirselCoreContext*,uint64_t,uint64_t,void*,HirselCoreTaskBody,HirselCoreTaskLayout,uint64_t);
 HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx,uint64_t tasks,uint64_t bytes,void *input,HirselCoreTaskBody body,HirselCoreTaskLayout layout,uint64_t site) {
     HirselCoreSpawn result=__real_hirsel_core_spawn(ctx,tasks,bytes,input,body,layout,site);
     if(cancellation.enabled && cancellation.phase==1 && ctx==cancellation.root && !cancellation.owner) cancellation.owner=result.task;
+    if(parked.enabled && parked.phase==1 && bytes==JOURNAL_WORKER_BYTES) parked.worker=result.task;
     return result;
 }
 extern HirselCoreHostOutcome __real_hirsel_core_host_op(HirselCoreContext*,uint8_t,uint64_t,HirselCoreBuffer*,uint8_t,uint64_t);
@@ -133,10 +146,23 @@ static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token)
         if(r->operation==1) r->buffer.len+=(size_t)out.value;
         if(r->operation==18) r->buffer.len+=(size_t)out.written;
     }
+    if(parked.enabled && (r->operation==16 || r->operation==17)) {
+        if(parked.token[token%64]) abort();
+        parked.token[token%64]=token; parked.out[token%64]=out;
+        if(parked.phase==1 && parked.worker && parked.issued++==parked.target && !parked.fired) {
+            parked.fired=1;
+            hirsel_core_cancel(0,parked.worker);
+        }
+        hirsel_core_ready(token);
+        return (HirselCoreStep){.kind=1};
+    }
     return (HirselCoreStep){.outcome=out};
 }
 static HirselCoreStep resume(void *state,HirselCoreHostRequest *r,uint64_t token) {
-    (void)state; (void)r; (void)token; abort();
+    (void)state; (void)r;
+    if(!parked.enabled || parked.token[token%64]!=token) abort();
+    parked.token[token%64]=0;
+    return (HirselCoreStep){.outcome=parked.out[token%64]};
 }
 static HirselCoreHostOutcome cancel(void *state,HirselCoreHostRequest *r,uint64_t token,uint8_t why) {
     (void)state; (void)r; (void)token; (void)why; abort();
@@ -168,6 +194,8 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     schedule_hash=14695981039346656037u;
     cancellation.enabled=!strcmp(scenario,"journal-cancel");
     cancellation.target=cut; cancellation.entry=entry;
+    parked.enabled=!strcmp(scenario,"journal-worker-cancel");
+    parked.target=cut;
     int uncut=!strcmp(raw_cut,"count");
     enum { ORPHAN_END_SYNC_FAILURE=6, OPEN_MANIFEST_SYNC_FAILURE=8 };
     int recovery_failure=!strcmp(scenario,"orphan-end-recovery-sync");
@@ -178,7 +206,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         !strcmp(scenario,"poison-write")?4:!strcmp(scenario,"journal-place-split")?5:
         recovery_failure?ORPHAN_END_SYNC_FAILURE:open_sync_failure?OPEN_MANIFEST_SYNC_FAILURE:0;
     int orphan_end=recovery_failure || !strcmp(scenario,"orphan-end");
-    if((failure && failure!=5) || cancellation.enabled || orphan_end) cut=UINT64_MAX;
+    if((failure && failure!=5) || cancellation.enabled || parked.enabled || orphan_end) cut=UINT64_MAX;
     void *state=store_crash_new(cut);
     store_crash_sync_failure(state,failure);
     if(orphan_end) store_crash_orphan_end(state);
@@ -199,6 +227,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         cancellation.phase=phase;
         /* Law 8 opens at midnight, noon and the following midnight. */
         park_wall_ms=!strcmp(scenario,"steps-park")?1000+phase*UINT64_C(43200000):0;
+        parked.phase=phase; parked.worker=0;
         hold.enabled=phase==1 && !strcmp(scenario,"journal-ack");
         const char *expected=store_crash_acked(state)?"new":"prefix";
         char floor[32];
@@ -226,6 +255,9 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
             (store_crash_floor(state)!=2 || !store_crash_acked(state))) {
             fprintf(stderr,"byte split did not settle A as durable and B as failed\n");status=120;break;
         }
+        if(phase==1 && parked.enabled && !uncut && !parked.fired) {
+            fprintf(stderr,"journal worker sync %llu was not issued\n",(unsigned long long)parked.target);status=120;break;
+        }
         if(phase==1 && cancellation.enabled && !uncut && !cancellation.fired) {
             fprintf(stderr,"cancellation wait was not reached\n");status=120;break;
         }
@@ -242,7 +274,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
             fprintf(stderr,"uncut store run did not acknowledge its checkpoint\n");status=120;break;
         }
     }
-    if(!status) printf("cuts %llu\n",(unsigned long long)(cancellation.enabled?cancellation.events:store_crash_events(state)));
+    if(!status) printf("cuts %llu\n",(unsigned long long)(cancellation.enabled?cancellation.events:parked.enabled?parked.issued:store_crash_events(state)));
     if(!status && seed) printf("events %llu\n",(unsigned long long)schedule_hash);
     store_crash_free(state);
     return status;

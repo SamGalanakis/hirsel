@@ -1520,8 +1520,10 @@ impl Scheduler {
     }
 
     fn has_outside_wait(&self) -> bool {
-        // SAFETY: each entry points to its pinned provider operation.
-        self.parked.live.values().any(|arm| unsafe {
+        // A queued or running sync's ready is still to come.
+        self.readies.outside()
+            // SAFETY: each entry points to its pinned provider operation.
+            || self.parked.live.values().any(|arm| unsafe {
             let task = arm.task;
             !(*task)
                 .group
@@ -1594,11 +1596,19 @@ impl Scheduler {
         if self.model.is_some() {
             let now = self.now();
             self.poll_net(-1);
+            // Read before the ready flag: a sync's ready is pushed before its
+            // count drops, so zero here and no ready below is quiescence.
+            let syncing = self.readies.outside();
             if !self.readies.pending.load(Ordering::Acquire)
                 && self.now() == now
                 && deadline.is_none_or(|at| at > now)
                 && !flow_pending
             {
+                if syncing {
+                    // Simulated time does not run a host sync: wait for its ready.
+                    std::thread::park();
+                    return;
+                }
                 self.stop_quiescent();
             }
             return;
@@ -1818,7 +1828,8 @@ enum Wake {
     Timer,
 }
 use crate::provider::{
-    ABORT_CANCEL, ABORT_DEADLINE, STEP_DONE, STEP_PENDING, Step, WAIT_PARK, WAIT_READY, WAIT_UNTIL,
+    ABORT_CANCEL, ABORT_DEADLINE, STEP_DONE, STEP_PENDING, SYNC, SYNC_DIR, Step, WAIT_PARK,
+    WAIT_READY, WAIT_UNTIL,
 };
 /// # Safety
 /// A live task pins this flag. For a parallel task it lives outside the
@@ -1852,6 +1863,10 @@ struct Readies {
     peers: Mutex<Vec<std::thread::Thread>>,
     net: Mutex<Option<Arc<hirsel_core_net::Poller>>>,
     model: Mutex<Option<Arc<dyn ModelClock>>>,
+    /// Host work this waiter depends on whose ready is still to come (a
+    /// queued or running sync). It drops only after that ready is pushed, so
+    /// a waiter that reads zero and then no pending ready is quiescent.
+    outside: AtomicUsize,
 }
 impl Readies {
     fn new() -> Arc<Self> {
@@ -1862,7 +1877,11 @@ impl Readies {
             peers: Mutex::default(),
             net: Mutex::new(None),
             model: Mutex::new(None),
+            outside: AtomicUsize::new(0),
         })
+    }
+    fn outside(&self) -> bool {
+        self.outside.load(Ordering::SeqCst) != 0
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<u64>> {
         self.tokens.lock().unwrap_or_else(|e| e.into_inner())
@@ -1898,16 +1917,6 @@ impl Readies {
 /// waiter and only the one holding that operation acts on it.
 static WAITERS: Mutex<Vec<Arc<Readies>>> = Mutex::new(Vec::new());
 struct Registered(Arc<Readies>);
-impl Registered {
-    fn new() -> Self {
-        let readies = Readies::new();
-        WAITERS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(readies.clone());
-        Self(readies)
-    }
-}
 impl Drop for Registered {
     fn drop(&mut self) {
         WAITERS
@@ -1917,7 +1926,71 @@ impl Drop for Registered {
     }
 }
 static TOKENS: AtomicU64 = AtomicU64::new(1);
-thread_local! { static ALONE: Registered = Registered::new(); }
+thread_local! {
+    /// This thread's scheduler-less waiter, in WAITERS only while an
+    /// operation alone waits (`alone`; depth counts nested callers).
+    static ALONE: (Arc<Readies>, std::cell::Cell<usize>) = (Readies::new(), std::cell::Cell::new(0));
+}
+/// The scheduler-less waiter's registration for one `alone` operation.
+struct AloneWait(Arc<Readies>);
+impl AloneWait {
+    fn enter() -> Self {
+        let readies = ALONE.with(|(readies, depth)| {
+            if depth.get() == 0 {
+                WAITERS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(readies.clone());
+            }
+            depth.set(depth.get() + 1);
+            readies.clone()
+        });
+        Self(readies)
+    }
+}
+impl Drop for AloneWait {
+    fn drop(&mut self) {
+        ALONE.with(|(readies, depth)| {
+            depth.set(depth.get() - 1);
+            if depth.get() == 0 {
+                WAITERS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .retain(|r| !Arc::ptr_eq(r, readies));
+            }
+        });
+    }
+}
+
+/// Host work whose ready its issuer's waiter still awaits: the running task's
+/// run, or this thread's scheduler-less waiter. While one is held that waiter
+/// does not declare quiescence; drop it only after the ready is pushed. Each
+/// run counts only its own, so one run's sync never holds another's verdict.
+pub(crate) struct Outside(Arc<Readies>);
+impl Outside {
+    pub(crate) fn begin() -> Self {
+        let mut task = CURRENT.get();
+        if task.is_null() {
+            task = CALLBACK_TASK.get();
+        }
+        let readies = if task.is_null() {
+            ALONE.with(|(r, _)| r.clone())
+        } else {
+            // SAFETY: the issuing task pins its run for this call.
+            unsafe { (*(*task).run).readies.clone() }
+        };
+        let outside = readies.outside.fetch_add(1, Ordering::SeqCst) + 1;
+        // Room for each outstanding ready, so the helper's push to this
+        // waiter does not allocate on its thread.
+        readies.lock().reserve(outside);
+        Self(readies)
+    }
+}
+impl Drop for Outside {
+    fn drop(&mut self) {
+        self.0.outside.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// A provider readies the Park or Pending operation `token`. It may be called on
 /// any thread, from inside a callback or a task: it only records the token, and
@@ -2215,6 +2288,12 @@ unsafe fn parked(
             match step.kind {
                 STEP_DONE => break Some(step.outcome),
                 STEP_PENDING => {
+                    // An issued sync is not cancellable: its task waits for the
+                    // real result, and a cancel takes effect at the next
+                    // cancellation point.
+                    if matches!((*request).operation, SYNC | SYNC_DIR) {
+                        op.observes_cancel = false;
+                    }
                     op.state = OperationState::Issued {
                         deadline: step.deadline_ns,
                     };
@@ -2267,10 +2346,13 @@ unsafe fn alone(
     token: u64,
 ) -> Option<crate::provider::Outcome> {
     let p = provider;
+    // Before WAITERS, which a fork may have copied while held.
+    crate::os_sync::check_fork();
     // This thread's waiter is registered before the first callback, so a ready
     // from inside `wait` or `issue` is not lost. The token is fresh, so the
     // stale tokens cleared here are other operations'.
-    let readies = ALONE.with(|r| r.0.clone());
+    let registration = AloneWait::enter();
+    let readies = registration.0.clone();
     struct AloneNet(Arc<Readies>);
     impl Drop for AloneNet {
         fn drop(&mut self) {
@@ -2293,6 +2375,8 @@ unsafe fn alone(
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             if let Some(model) = model {
+                // Read before the ready flag, as the scheduler's model idle.
+                let syncing = readies.outside();
                 let before = model.now();
                 for token in model.poll(deadline, true) {
                     readies.push(token);
@@ -2304,6 +2388,10 @@ unsafe fn alone(
                     return false;
                 }
                 if model.now() != before {
+                    continue;
+                }
+                if syncing {
+                    std::thread::park();
                     continue;
                 }
                 crate::process::stop(b"Deadlock");
@@ -2835,7 +2923,7 @@ pub(crate) fn attach_model(model: Arc<dyn ModelClock>) {
         CURRENT.get()
     };
     if task.is_null() {
-        ALONE.with(|r| *r.0.model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model));
+        ALONE.with(|(r, _)| *r.model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model));
     } else {
         // SAFETY: the provider callback's task pins its run on this worker.
         unsafe {
@@ -2852,7 +2940,7 @@ pub(crate) fn attach_net(
         task = CALLBACK_TASK.get();
     }
     let readies = if task.is_null() {
-        ALONE.with(|r| r.0.clone())
+        ALONE.with(|(r, _)| r.clone())
     } else {
         // SAFETY: the callback/task pins the run and its shared registry.
         unsafe {
@@ -3287,6 +3375,7 @@ pub unsafe fn run_root(
     result_bytes: usize,
     provider: SchedulerProvider,
 ) -> u8 {
+    crate::os_sync::check_fork();
     let workers = worker_count();
     crate::fiber::arm();
     let mut run = Scheduler {

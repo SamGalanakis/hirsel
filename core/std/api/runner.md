@@ -336,7 +336,8 @@ A transaction uses `triggers.write(mut tx, tables, entries, target, arg, when)`
 with a typed entry reference from `triggers.transact` or `triggers.granted`.
 The configured list and the registry control which paths the head can dispatch.
 Use `AfterCommit` or `At(T)`, where T is in the units of `store.CallInfo.at`.
-Use `triggers.outcome` to read the terminal result by trigger identity.
+Read the terminal result by trigger identity with `triggers.outcome` on a
+snapshot or `triggers.fetch_outcome` in a transaction.
 
 A grant callback receives the attempt’s `TriggerContext`. The run uses `trigger_call` to
 invoke a fenced transaction and `trigger_boundary` to check its attempt and

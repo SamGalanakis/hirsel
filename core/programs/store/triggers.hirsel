@@ -339,6 +339,10 @@ pub fn outcome(s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Terminal],
     store.get(s, store.shape(t.outcomes), id)
 }
 
+pub fn fetch_outcome(tx: store.Tx, t: Tables, id: Id) -> Result[Option[Terminal], store.Error] {
+    store.fetch(tx, store.shape(t.outcomes), id)
+}
+
 
 
 // The journal law harness provides one host directory and a 64 MiB task.

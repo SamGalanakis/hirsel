@@ -1,0 +1,394 @@
+// A sign-up process written directly over the place's trigger and attempt APIs.
+type Signup: codec + send { id: u64, email: String, card: String }
+type Account: codec + send { email: String, active: bool }
+type StepRow: codec + send = Started(Bytes) | Finished(Bytes, u64)
+type StepWrite: codec + send { key: Bytes, fingerprint: Bytes }
+type FinishedStep: codec + send { step: StepWrite, receipt: u64 }
+type Activation: codec + send { id: u64, step: StepWrite }
+type StatusRequest: codec + send { id: u64, run: triggers.Id }
+type SeenStep: codec + send = Fresh | InDoubt | Recorded(u64) | Changed(Bytes)
+type WriteError: codec + send = Denied | Exists | Missing | Rejected
+type RunResult: codec + send = Active | Held | Cancelled | MailInDoubt | ChargeInDoubt
+type RunError = End(RunResult) | Full(Capacity)
+
+type Tables: send {
+    accounts: store.Table[u64, Account],
+    progress: store.Table[Bytes, StepRow],
+    triggers: triggers.Tables,
+}
+
+fn accounts_name() -> String { "signup.accounts" }
+fn progress_name() -> String { "signup.progress" }
+const ENTRY_BYTES: u64 = 131072u64
+const PLACE_BYTES: u64 = 1048576u64
+
+fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+    triggers.migrate(mut phase)?
+    let account: std.codec.Codec[Account] = std.codec.of()
+    store.migration_create_table(mut phase, store.spec(accounts_name(), std.codec.key_u64(), account))?
+    let step_row: std.codec.Codec[StepRow] = std.codec.of()
+    store.migration_create_table(mut phase, store.spec(progress_name(), std.codec.key_bytes(), step_row))
+}
+
+fn handles(schema: store.Schema) -> Result[Tables, store.Error] {
+    let account: std.codec.Codec[Account] = std.codec.of()
+    let step_row: std.codec.Codec[StepRow] = std.codec.of()
+    let accounts = store.schema_table(schema, accounts_name(), std.codec.key_u64(), account)?
+    let progress = store.schema_table(schema, progress_name(), std.codec.key_bytes(), step_row)?
+    Ok(Tables(accounts: take accounts, progress: take progress, triggers: triggers.tables(schema)?))
+}
+
+fn stored[R](take x: Result[R, store.Error]) -> Result[R, WriteError] {
+    match take x { Ok(take a) => Ok(take a), Error(_) => Error(Rejected) }
+}
+
+fn trigger_entries(target: triggers.Entry[Signup]) -> Result[triggers.Entries, triggers.Error] {
+    let mut entries = triggers.empty_entries()
+    triggers.allow(mut entries, target)?
+    Ok(take entries)
+}
+
+fn signup(mut tx: store.Tx, h: Tables, caller: store.Caller, take arg: Signup) -> Result[triggers.Id, WriteError] {
+    if let Some(_) = stored(store.fetch(tx, store.shape(h.accounts), arg.id))? { return Error(Exists) }
+    let made: Result[triggers.Entry[Signup], Capacity] = triggers.granted(code.describe(run))
+    let target = match take made { Ok(take value) => take value, Error(_) => return Error(Rejected) }
+    let entries = match trigger_entries(target) { Ok(take value) => take value, Error(_) => return Error(Rejected) }
+    let copied: Result[String, Capacity] = clone(arg.email)
+    let email = match take copied { Ok(take value) => take value, Error(_) => return Error(Rejected) }
+    stored(store.put(mut tx, h.accounts, arg.id, Account(email: take email, active: false)))?
+    match triggers.write(mut tx, h.triggers, entries, target, arg, AfterCommit) {
+        Ok(id) => Ok(id),
+        Error(_) => Error(Rejected),
+    }
+}
+
+// The runner sends issuer 0 only on its fenced trigger calls. The wire
+// admission path supplies issuer 1, so wire callers cannot write progress.
+fn record_started(mut tx: store.Tx, h: Tables, caller: store.Caller, take step: StepWrite) -> Result[SeenStep, WriteError] {
+    if caller.issuer != 0u8 { return Error(Denied) }
+    match stored(store.fetch(tx, store.shape(h.progress), step.key))? {
+        Some(Started(take remembered)) => {
+            if remembered == step.fingerprint { Ok(InDoubt) } else { Ok(Changed(take remembered)) }
+        },
+        Some(Finished(take remembered, receipt)) => {
+            if remembered == step.fingerprint { Ok(Recorded(receipt)) } else { Ok(Changed(take remembered)) }
+        },
+        None => {
+            let StepWrite(key: take key, fingerprint: take fingerprint) = take step
+            stored(store.put(mut tx, h.progress, key, Started(take fingerprint)))?
+            Ok(Fresh)
+        },
+    }
+}
+
+fn record_result(mut tx: store.Tx, h: Tables, caller: store.Caller, take data: FinishedStep) -> Result[(), WriteError] {
+    if caller.issuer != 0u8 { return Error(Denied) }
+    let Some(Started(fingerprint)) = stored(store.fetch(tx, store.shape(h.progress), data.step.key))? else { return Error(Missing) }
+    if fingerprint != data.step.fingerprint { return Error(Rejected) }
+    stored(store.put(mut tx, h.progress, data.step.key, Finished(take fingerprint, data.receipt)))
+}
+
+fn activate(mut tx: store.Tx, h: Tables, caller: store.Caller, take data: Activation) -> Result[SeenStep, WriteError] {
+    if caller.issuer != 0u8 { return Error(Denied) }
+    match stored(store.fetch(tx, store.shape(h.progress), data.step.key))? {
+        Some(Finished(take remembered, receipt)) => {
+            if remembered == data.step.fingerprint { return Ok(Recorded(receipt)) }
+            return Ok(Changed(take remembered))
+        },
+        Some(Started(take remembered)) => return Ok(Changed(take remembered)),
+        None => (),
+    }
+    let Some(take found) = stored(store.fetch(tx, store.shape(h.accounts), data.id))? else { return Error(Missing) }
+    let mut account = take found
+    account.active = true
+    stored(store.put(mut tx, h.accounts, data.id, account))?
+    let Activation(id: _, step: take step) = take data
+    let StepWrite(key: take key, fingerprint: take fingerprint) = take step
+    stored(store.put(mut tx, h.progress, key, Finished(take fingerprint, 0u64)))?
+    Ok(Recorded(0u64))
+}
+
+fn signup_status(mut tx: store.Tx, h: Tables, caller: store.Caller, take request: StatusRequest) -> Result[Option[bool], WriteError] {
+    if let None = stored(triggers.fetch_outcome(tx, h.triggers, request.run))? { return Ok(None) }
+    let row = stored(store.fetch(tx, store.shape(h.accounts), request.id))?
+    Ok(Some(match row { Some(account) => account.active, None => false }))
+}
+
+type Mail: send { email: String, reply: Sender[u64] }
+type Payment: send = Charge(Bytes, String, Sender[u64]) | Lookup(Bytes, Sender[Option[u64]])
+type Services: send { mail: Sender[Mail], payment: Sender[Payment] }
+type Grants: send { context: runner.TriggerContext, services: Services }
+
+fn make_grants(services: Services, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
+    Ok(Grants(context: take ctx, services: Services(mail: channel.sender(services.mail), payment: channel.sender(services.payment))))
+}
+
+fn mail_service(take inbox: Receiver[Mail]) -> () waits {
+    let mut sent = 0u64
+    while let Ok(take request) = channel.receive(inbox) {
+        sent += 1u64
+        let _ = channel.send(request.reply, sent)
+    }
+}
+
+fn payment_service(take inbox: Receiver[Payment]) -> () waits {
+    let mut charges: Map[Bytes, u64] = map.new()
+    let mut charged = 0u64
+    while let Ok(take request) = channel.receive(inbox) {
+        match take request {
+            Charge(take key, _, take reply) => {
+                // This service charges for every request, even a repeated key.
+                charged += 1u64
+                let _ = result.unwrap(map.insert(mut charges, take key, charged))
+                let _ = channel.send(reply, charged)
+            },
+            Lookup(key, reply) => {
+                let found: Option[u64] = match map.get(charges, key) { Some(receipt) => Some(receipt), None => None }
+                let _ = channel.send(reply, found)
+            },
+        }
+    }
+}
+
+fn room[R](take x: Result[R, Capacity]) -> Result[R, RunError] {
+    match take x { Ok(take a) => Ok(take a), Error(c) => Error(Full(c)) }
+}
+
+fn fenced[R](take x: Result[R, runner.TriggerCallError]) -> Result[R, RunError] {
+    match take x {
+        Ok(take value) => Ok(take value),
+        Error(Cancelled) => Error(End(Cancelled)),
+        Error(Capacity(c)) => Error(Full(c)),
+        _ => fail("sign-up: fenced call refused"),
+    }
+}
+
+fn encode[A: codec](a: A) -> Result[Bytes, Capacity] {
+    let mut raw: Bytes = list.new()
+    let codec: std.codec.Codec[A] = std.codec.of()
+    std.codec.encode(codec, a, mut raw)?
+    Ok(take raw)
+}
+
+fn step_identity(ctx: runner.TriggerContext, index: u64) -> Result[Bytes, Capacity] {
+    // The attempt number and the CallInfo of a step commit can both change.
+    encode((triggers.run_id(runner.trigger_attempt(ctx)), index))
+}
+
+fn request_fingerprint[A: codec](kind: u8, value: A) -> Result[Bytes, Capacity] {
+    let codec: std.codec.Codec[A] = std.codec.of()
+    let mut request: Bytes = list.new()
+    std.codec.put_u8(kind, mut request)?
+    std.codec.encode(codec, value, mut request)?
+    let digest = std.sha256.hash(request)
+    let mut raw: Bytes = list.with_capacity(32u64)?
+    for i in 0u64 .. 32u64 { let _ = list.push(mut raw, digest[i]) }
+    Ok(take raw)
+}
+
+fn entry_key[A: codec, R: codec](f: StaticFn[fn(mut store.Tx, Tables, store.Caller, take A) -> Result[R, WriteError]]) -> Result[Bytes, Capacity] {
+    let input: std.codec.Codec[A] = std.codec.of()
+    let reply: std.codec.Codec[Result[R, WriteError]] = std.codec.of()
+    let identity = code.identity(f)
+    let mut raw: Bytes = list.with_capacity(list.len(identity) + 16u64)?
+    list.append(mut raw, identity)?
+    std.codec.put_u64(std.codec.fingerprint(input)?, mut raw)?
+    std.codec.put_u64(std.codec.fingerprint(reply)?, mut raw)?
+    Ok(take raw)
+}
+
+fn decode_reply[R: codec](outcome: runner.Outcome) -> Result[R, Capacity] {
+    let Returned(raw) = view outcome else { fail("sign-up: transact did not return") }
+    let codec: std.codec.Codec[Result[R, WriteError]] = std.codec.of()
+    match std.codec.decode(codec, raw)? {
+        Ok(Ok(take value)) => Ok(take value),
+        _ => fail("sign-up: transact rejected"),
+    }
+}
+
+fn call[A: codec, R: codec](ctx: runner.TriggerContext, f: StaticFn[fn(mut store.Tx, Tables, store.Caller, take A) -> Result[R, WriteError]], a: A) -> Result[R, RunError] waits {
+    let entry = room(entry_key(f))?
+    let payload = room(encode(a))?
+    let answered = fenced(runner.trigger_call(ctx, take entry, take payload))?
+    room(decode_reply(answered))
+}
+
+fn process(g: Grants, arg: Signup) -> Result[RunResult, RunError] waits {
+    let ctx = view g.context
+    fenced(runner.trigger_boundary(ctx))?
+    let email: String = room(clone(arg.email))?
+    let welcome = StepWrite(key: room(step_identity(ctx, 1u64))?, fingerprint: room(request_fingerprint(1u8, email))?)
+    // trigger_call waits for the started row to be durable before sending mail.
+    match call(ctx, code.describe(record_started), welcome)? {
+        Fresh => {
+            let pair: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
+            let (to, from) = room(take pair)?
+            result.unwrap(channel.send(g.services.mail, Mail(email: take email, reply: take to)))
+            let receipt = result.unwrap(channel.receive(from))
+            call(ctx, code.describe(record_result), FinishedStep(step: take welcome, receipt: receipt))?
+        },
+        InDoubt => return Ok(MailInDoubt),
+        Recorded(_) => (),
+        Changed(take expected) => {
+            let StepWrite(key: _, fingerprint: take actual) = take welcome
+            fenced(runner.trigger_hold(ctx, 1u64, take expected, take actual))?
+            return Ok(Held)
+        },
+    }
+
+    fenced(runner.trigger_boundary(ctx))?
+    let payment = StepWrite(key: room(step_identity(ctx, 2u64))?, fingerprint: room(request_fingerprint(2u8, arg.card))?)
+    match call(ctx, code.describe(record_started), payment)? {
+        Fresh => {
+            let pair: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
+            let (to, from) = room(take pair)?
+            let copy_key: Bytes = room(clone(payment.key))?
+            let card: String = room(clone(arg.card))?
+            result.unwrap(channel.send(g.services.payment, Charge(take copy_key, take card, take to)))
+            let receipt = result.unwrap(channel.receive(from))
+            call(ctx, code.describe(record_result), FinishedStep(step: take payment, receipt: receipt))?
+        },
+        InDoubt => {
+            let pair: Result[(Sender[Option[u64]], Receiver[Option[u64]]), Capacity] = channel.new(1u64)
+            let (to, from) = room(take pair)?
+            let copy_key: Bytes = room(clone(payment.key))?
+            result.unwrap(channel.send(g.services.payment, Lookup(take copy_key, take to)))
+            let Some(receipt) = result.unwrap(channel.receive(from)) else { return Ok(ChargeInDoubt) }
+            call(ctx, code.describe(record_result), FinishedStep(step: take payment, receipt: receipt))?
+        },
+        Recorded(_) => (),
+        Changed(take expected) => {
+            let StepWrite(key: _, fingerprint: take actual) = take payment
+            fenced(runner.trigger_hold(ctx, 2u64, take expected, take actual))?
+            return Ok(Held)
+        },
+    }
+
+    fenced(runner.trigger_boundary(ctx))?
+    let activation = Activation(id: arg.id, step: StepWrite(key: room(step_identity(ctx, 3u64))?, fingerprint: room(request_fingerprint(3u8, arg.id))?))
+    match call(ctx, code.describe(activate), activation)? {
+        Recorded(_) => Ok(Active),
+        Changed(take expected) => {
+            let Activation(id: _, step: take step) = take activation
+            let StepWrite(key: _, fingerprint: take actual) = take step
+            fenced(runner.trigger_hold(ctx, 3u64, take expected, take actual))?
+            Ok(Held)
+        },
+        _ => fail("sign-up: activation did not commit a result"),
+    }
+}
+
+fn run(g: Grants, take arg: Signup) -> Result[RunResult, Capacity] waits {
+    match process(g, arg) {
+        Ok(value) => Ok(value),
+        Error(End(value)) => Ok(value),
+        Error(Full(cap)) => Error(cap),
+    }
+}
+
+fn place(mut registry: runner.Registry[Grants, Tables]) -> Result[(), runner.RegisterError] {
+    runner.transact(mut registry, code.describe(signup), ENTRY_BYTES, runner.DEFAULT_STEPS)?
+    runner.transact(mut registry, code.describe(record_started), ENTRY_BYTES, runner.DEFAULT_STEPS)?
+    runner.transact(mut registry, code.describe(record_result), ENTRY_BYTES, runner.DEFAULT_STEPS)?
+    runner.transact(mut registry, code.describe(activate), ENTRY_BYTES, runner.DEFAULT_STEPS)?
+    runner.transact(mut registry, code.describe(signup_status), ENTRY_BYTES, runner.DEFAULT_STEPS)?
+    runner.granted(mut registry, code.describe(run), ENTRY_BYTES, runner.DEFAULT_STEPS)
+}
+
+type Demo: send { config: runner.PlaceConfig[Grants, Tables, Services], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]] }
+
+fn operate(take demo: Demo) -> Result[runner.Ended, runner.StartError] waits {
+    let Demo(config: take config, stop: take stop, status: take status, watch: take watch) = take demo
+    runner.operate(take config, take stop, status, Some(take watch))
+}
+
+fn client_call[R: codec](conn: wire_client.Conn, slot: u32, take arg: Bytes, position: u64) -> R waits {
+    wire_client.send_frame(conn, Call(0u32, position, slot, 1000u32, take arg))
+    loop {
+        match wire_client.next(conn) {
+            Ok(Batch(_, _, _, done)) => {
+                for item in done {
+                    if item.p == position { return result.unwrap(decode_reply(item.outcome)) }
+                }
+            },
+            Ok(_) => (),
+            Error(_) => fail("sign-up: wire call lost"),
+        }
+    }
+}
+
+// Run with a scratch Dir, then inspect the account and its stored step rows.
+pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, out: Stdout) -> Result[(), Exit] waits {
+    let mut name = result.unwrap(string.with_capacity(64u64))
+    result.unwrap(string.push(mut name, "signup-"))
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let (mail, mail_in): (Sender[Mail], Receiver[Mail]) = result.unwrap(channel.new(1u64))
+    let (payment, payment_in): (Sender[Payment], Receiver[Payment]) = result.unwrap(channel.new(1u64))
+    let mailing = result.unwrap(task.spawn(tasks, bytes 65536u64, take mail_in, mail_service))
+    let payments = result.unwrap(task.spawn(tasks, bytes 65536u64, take payment_in, payment_service))
+    let services = Services(mail: take mail, payment: take payment)
+    let target: triggers.Entry[Signup] = result.unwrap(triggers.granted(code.describe(run)))
+    let entries = result.unwrap(trigger_entries(target))
+    let trigger_config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
+        grants: take services, grant: make_grants, grant_bytes: 65536u64)
+    let (policy, policy_task) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), PLACE_BYTES))
+    let mut wire = runner.wire_defaults(65536u64, PLACE_BYTES)
+    wire.n_pool = 4194304u64
+    let options = triggers.law_options()
+    let settings = runner.PlaceConfig(backing: Disk(dir, options), selection: Current(0u64), place: code.describe(place), n_place: PLACE_BYTES,
+        migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
+        proxies: list.new(), policy: take policy, n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
+        net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), triggers: Some(take trigger_config))
+    let (keep_running, stopping): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let (watch, watching): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
+    let status = result.unwrap(runner.status_root())
+    let demo = Demo(config: take settings, stop: take stopping, status: latest.handle(status), watch: take watch)
+    let mut running = result.unwrap(task.spawn(tasks, bytes 50331648u64, take demo, operate))
+    let phases = result.unwrap(channel.receive(watching))
+    loop {
+        match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("sign-up: place did not start") }
+    }
+    let address = option.unwrap(latest.read(status).addr)
+    let mut keys: List[Bytes] = list.new()
+    let signup_key = result.unwrap(entry_key(code.describe(signup)))
+    let status_key = result.unwrap(entry_key(code.describe(signup_status)))
+    result.unwrap(list.push(mut keys, result.unwrap(clone(signup_key))))
+    result.unwrap(list.push(mut keys, result.unwrap(clone(status_key))))
+    let conn = result.unwrap(wire_client.connect(tasks, net, address, clock, random, keys, None, wire.socket))
+    let arg = Signup(id: 1u64, email: "ada@example.test", card: "scripted-card")
+    let created = result.unwrap(encode(arg))
+    let run_id: triggers.Id = client_call(conn, wire_client.slot(keys, signup_key), take created, 0u64)
+    let mut position = 1u64
+    let requested = StatusRequest(id: 1u64, run: run_id)
+    loop {
+        let observed: Option[bool] = client_call(conn, wire_client.slot(keys, status_key), result.unwrap(encode(requested)), position)
+        match observed {
+            Some(true) => break,
+            Some(false) => fail("sign-up: run ended without activating the account"),
+            None => (),
+        }
+        position += 1u64
+        host.sleep_until(clock, int.saturating_add(host.mono_ns(clock), 50000000u64))
+    }
+    // Cut the task after observing the terminal commit, then reopen its store.
+    let _ = take conn
+    task.cancel(mut running)
+    let _ = task.join(take running)
+    let _ = take keep_running
+    let db = result.unwrap(store.open(tasks, dir, clock, random, options))
+    let snapshot = store.snapshot(db)
+    let h = result.unwrap(store.with_schema(db, code.describe(handles)))
+    let Some(Returned(take outcome)) = result.unwrap(triggers.outcome(snapshot, h.triggers, run_id)) else { fail("sign-up: missing terminal outcome") }
+    let result_codec: std.codec.Codec[RunResult] = std.codec.of()
+    if let Ok(Active) = result.unwrap(std.codec.decode(result_codec, outcome)) {} else { fail("sign-up: expected an active outcome") }
+    let welcome = result.unwrap(encode((run_id, 1u64)))
+    let paid = result.unwrap(encode((run_id, 2u64)))
+    if let Some(Finished(_, 1u64)) = result.unwrap(store.get(snapshot, store.shape(h.progress), welcome)) {} else { fail("sign-up: missing welcome receipt") }
+    if let Some(Finished(_, 1u64)) = result.unwrap(store.get(snapshot, store.shape(h.progress), paid)) {} else { fail("sign-up: missing payment receipt") }
+    result.unwrap(store.close(take db))
+    let _ = take mailing
+    let _ = take payments
+    let _ = take policy_task
+    result.unwrap(stdout.write(out, "sign-up active; one welcome and one charge\n"))
+    Ok(())
+}

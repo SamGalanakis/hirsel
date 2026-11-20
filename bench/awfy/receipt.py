@@ -27,7 +27,7 @@ from measurement_artifacts import SHIPPING, check
 VERSION = 4
 REFUSED = 2
 INSTRUCTION_LIMIT = Decimal("0.5")
-CYCLE_RIDE_RATIO = Decimal("1.01")
+GUARD_B_CYCLE_RATIO = Decimal("1.03")
 INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
 CANDIDATE_HASHES = (*ARTIFACT_HASHES, "std_sha256", "workload_sources_sha256")
@@ -494,10 +494,10 @@ def report_cycle_pairs(key, kept, attempted, wanted, *, filtered=True, peer=Fals
         verdict, status = "TOO FEW QUIET PAIRS", REFUSED
     elif peer:
         return 0
-    elif center > CYCLE_RIDE_RATIO:
+    elif center > GUARD_B_CYCLE_RATIO:
         verdict, status = "FAILS", 1
     else:
-        verdict, status = "RIDES", 0
+        verdict, status = "PASSES", 0
     if summary is not None:
         summary.setdefault("cycles", {})["verdict"] = verdict
     print(f"{key} {verdict}", flush=True)

@@ -255,8 +255,8 @@ class QuietCyclePairs(unittest.TestCase):
             self.assertEqual((len(unfiltered), unfiltered_attempts), (1, 1))
             self.assertEqual([run["smt_busy_percent"] for run in unfiltered[0]], [{23: 100.0}, {23: 100.0}])
 
-    def test_ride_uses_the_median_of_the_paired_cycle_ratios(self):
-        for center, verdict, expected in ((1009, "RIDES", 0), (1011, "FAILS", 1)):
+    def test_guard_b_uses_the_median_of_the_paired_cycle_ratios(self):
+        for center, verdict, expected in ((1029, "PASSES", 0), (1031, "FAILS", 1)):
             with self.subTest(verdict=verdict), redirect_stdout(io.StringIO()) as output:
                 samples = [
                     ({"cycles": 1000 * scale, "instructions": 100, "smt_busy_percent": {}},

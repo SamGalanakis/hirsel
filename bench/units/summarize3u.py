@@ -5,7 +5,7 @@ import collections, json, statistics, sys
 
 CELL_ORDER = [("base", 0.0, False), ("base", 1.0, False), ("par", 0.5, False), ("par", 0.1, False),
               ("base", 0.0, True), ("par", 0.5, True)]
-SIDES = ["untied", "untied-oo", "untied-rh", "untied-oo-rh", "S3k7", "tokiow8"]
+SIDES = ["untied", "untied-ns", "untied-oo", "untied-rh", "untied-oo-rh", "S3k7", "tokiow8"]
 
 
 def key(c):

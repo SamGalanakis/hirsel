@@ -70,6 +70,10 @@ def side_cmd(side, par, rec, k=None):
             pins = SERVER_LIST[:k] + ([SERVER_LIST[k]] if k < len(SERVER_LIST) else [])
             env["HIRSEL_UNIT_CPUS"] = ",".join(map(str, pins))
         return [exe] + base + ["1"], env, SERVER, k
+    if side.endswith("-ns"):
+        # Attribution variant (marked): no idle spin (HIRSEL_UNTIED_SPIN_US=0).
+        argv, env, cpus, nports = side_cmd(side.removesuffix("-ns"), par, rec)
+        return argv, env | {"HIRSEL_UNTIED_SPIN_US": "0"}, cpus, nports
     if side.endswith("-rh"):
         # Attribution variant (marked): process retention headroom raised from
         # 48 MiB to 1 GiB, so per-unit tape buffers no longer crowd out the

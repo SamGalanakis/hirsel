@@ -1,33 +1,45 @@
 #!/usr/bin/env python3
-"""Split recorded tape bytes by kind: payload bytes of network reads (op 1,
-READ: client and tool sockets), of crossing receives (op 27, RECV_BOUNDED),
-of other operations, and the rest of the file (frames, issues, grants).
+"""Split recorded tape payload bytes by (op, object): a DONE counts for the
+operation its task last issued. The rest of each file is framing (headers,
+issues, grants, digests, block headers).
 
-Usage: tape_kinds.py HIRSEL TAPE...   (prints one JSON object per tape and a total)
+Usage: tape_kinds.py HIRSEL TAPE...   (one JSON object per tape and a total)
 """
 import collections, json, os, re, subprocess, sys
 
-KIND = {1: "network_in", 27: "crossing_in"}
-REC = re.compile(r"^[<>] \d+ (OP|DONE|ISSUE|GRANT)\b.*?\bop=(\d+)")
+REC = re.compile(r"^\s*\d+ (OP|DONE|ISSUE|GRANT)\b")
+FIELD = re.compile(r"\b(task|op|object)=(\d+)")
 
 
 def split(hirsel, tape):
     p = subprocess.Popen([hirsel, "tape", "show", tape, "--include-credentials"], stdout=subprocess.PIPE, text=True)
     c = collections.Counter()
+    issued = {}
     for line in p.stdout:
         m = REC.match(line)
         if not m:
             continue
-        c["records"] += 1
+        head = line.split(" payload=")[0]
+        f = dict(FIELD.findall(head))
+        if m[1] == "ISSUE":
+            issued[f.get("task")] = (f.get("op"), f.get("object"))
+            continue
+        if m[1] == "OP":
+            key = (f.get("op"), f.get("object"))
+        elif m[1] == "DONE":
+            key = issued.pop(f.get("task"), ("?", "?"))
+        else:
+            continue
         i = line.find("payload=[")
         if i < 0:
             continue
         body = line[i + 9:line.rfind("]")]
         n = body.count(",") + 1 if body.strip() else 0
-        c[KIND.get(int(m[2]), "other") + "_payload"] += n
+        if n:
+            c[f"op{key[0]}/obj{key[1]}"] += n
     p.wait()
     c["file_bytes"] = os.path.getsize(tape)
-    c["framing"] = c["file_bytes"] - sum(v for k, v in c.items() if k.endswith("_payload"))
+    c["framing"] = c["file_bytes"] - sum(v for k, v in c.items() if k.startswith("op"))
     return c
 
 

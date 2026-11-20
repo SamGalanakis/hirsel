@@ -468,21 +468,25 @@ impl WorkerQueue {
         }
     }
 
-    fn pop(&mut self) -> Option<TaskPtr> {
+    /// The next task, and whether it came from this worker's LIFO slot.
+    fn pop(&mut self) -> Option<(TaskPtr, bool)> {
         if let Some(task) = self.pinned.pop_front() {
-            return Some(task);
+            return Some((task, false));
         }
         if self.lifo_turns < LIFO_TURNS
             && let Some(task) = self.lifo.take()
         {
             self.lifo_turns += 1;
-            return Some(task);
+            return Some((task, true));
         }
         self.lifo_turns = 0;
-        self.local
-            .pop_front()
-            .or_else(|| self.lifo.take())
-            .or_else(|| self.deferred.pop_front())
+        if let Some(task) = self.local.pop_front() {
+            return Some((task, false));
+        }
+        if let Some(task) = self.lifo.take() {
+            return Some((task, true));
+        }
+        self.deferred.pop_front().map(|task| (task, false))
     }
 }
 
@@ -499,6 +503,9 @@ struct Pool {
     cohorts: Vec<AtomicUsize>,
     /// Set by every unpark of the worker, so its idle spin sees the wake.
     nudged: Vec<AtomicBool>,
+    /// Live tasks whose fiber is pinned to each worker. A fiber stays on the
+    /// worker of its first run, so first runs are placed to keep these level.
+    homes: Vec<AtomicUsize>,
 
     spare: crate::fiber::Spare,
     readies: Arc<Readies>,
@@ -534,6 +541,7 @@ impl Pool {
             sleeping: AtomicUsize::new(0),
             cohorts: (0..workers).map(|_| AtomicUsize::new(0)).collect(),
             nudged: (0..workers).map(|_| AtomicBool::new(false)).collect(),
+            homes: (0..workers).map(|_| AtomicUsize::new(0)).collect(),
 
             spare: crate::fiber::Spare::default(),
             readies,
@@ -630,6 +638,24 @@ impl Pool {
         }
     }
 
+    /// The worker a fresh task's first run belongs on: `index`, unless
+    /// another worker is home to at least two fewer live tasks. Fibers are
+    /// pinned after their first run (thread-local addresses in runtime
+    /// frames), and a fresh task that blocks at once is first run in
+    /// microseconds, so without this one worker can pin a whole stolen batch
+    /// of channel tasks and keep all their later work while its peers park.
+    fn first_home(&self, index: usize) -> usize {
+        let own = self.homes[index].load(Ordering::Relaxed);
+        let (least, count) = self
+            .homes
+            .iter()
+            .enumerate()
+            .map(|(i, homes)| (i, homes.load(Ordering::Relaxed)))
+            .min_by_key(|&(_, count)| count)
+            .unwrap();
+        if own > count + 1 { least } else { index }
+    }
+
     fn has_work(&self, index: usize) -> bool {
         let own = self.queues[index].lock().unwrap();
         if !own.pinned.is_empty()
@@ -706,12 +732,13 @@ impl Pool {
     }
 
     /// `batch` is the thief's reusable steal storage; it is empty between calls.
-    fn pop(&self, index: usize, batch: &mut Vec<TaskPtr>) -> Option<TaskPtr> {
-        if let Some(task) = self.queues[index].lock().unwrap().pop() {
-            return Some(task);
+    /// The flag is set for a task from this worker's own LIFO slot.
+    fn pop(&self, index: usize, batch: &mut Vec<TaskPtr>) -> Option<(TaskPtr, bool)> {
+        if let Some(popped) = self.queues[index].lock().unwrap().pop() {
+            return Some(popped);
         }
         if let Some(task) = self.injector.lock().unwrap().pop_front() {
-            return Some(task);
+            return Some((task, false));
         }
         let cohort = crate::sequencer::cohort();
         self.cohorts[index].store(cohort, Ordering::Relaxed);
@@ -745,7 +772,7 @@ impl Pool {
                     .unwrap()
                     .local
                     .extend(batch.drain(..));
-                return Some(first);
+                return Some((first, false));
             }
             // A LIFO task usually runs next on its own worker, which keeps
             // a spawn-and-join child local. It becomes stealable once a thief
@@ -757,7 +784,7 @@ impl Pool {
                         self.sample.stolen.fetch_add(1, Ordering::Relaxed);
                     }
                     victim.lifo_seen = false;
-                    return victim.lifo.take();
+                    return victim.lifo.take().map(|task| (task, false));
                 }
                 victim.lifo_seen = true;
             }
@@ -3376,6 +3403,7 @@ pub unsafe fn run_root(
         if let Some(pool) = pool.as_deref().filter(|pool| !pool.serial_replay) {
             root.arc_runtime = run.arc_observed();
             root.worker = Some(0);
+            pool.homes[0].store(1, Ordering::Relaxed);
             root.state = State::Ready;
             let domain = &pool.domains[&root.domain];
             domain.ready.store(1, Ordering::Relaxed);
@@ -3643,7 +3671,8 @@ impl RunPtr {
                     if (*root.0).state == State::Ended {
                         return;
                     }
-                    let Some(task) = pool.pop((*worker).index, &mut (*worker).stolen) else {
+                    let Some((task, own_lifo)) = pool.pop((*worker).index, &mut (*worker).stolen)
+                    else {
                         drop(commit);
                         self.park_worker(pool, root, (*worker).index);
                         continue;
@@ -3651,13 +3680,31 @@ impl RunPtr {
                     let domain = &pool.domains[&(*task.0).domain];
                     domain.ready.fetch_sub(1, Ordering::Relaxed);
                     domain.handoffs.fetch_sub(1, Ordering::Relaxed);
+                    // A spawn-and-wait child in this worker's LIFO slot stays
+                    // local; other fresh tasks start where the fewest live.
+                    if (*task.0).worker.is_none() && !own_lifo {
+                        let home = pool.first_home((*worker).index);
+                        pool.homes[home].fetch_add(1, Ordering::Relaxed);
+                        (*task.0).worker = Some(home);
+                        if home != (*worker).index {
+                            // Not yet run: its stack holds no thread-local
+                            // address, so it may start on the other worker.
+                            (*run).publish(task.0, false);
+                            drop(commit);
+                            pool.units.fetch_sub(1, Ordering::Release);
+                            continue;
+                        }
+                    }
                     task.0
                 } else {
                     std::mem::replace(&mut direct, ptr::null_mut())
                 };
                 #[cfg(feature = "testing")]
                 (*worker).dispatch_sample.take(task);
-                (*task).worker.get_or_insert((*worker).index);
+                if (*task).worker.is_none() {
+                    pool.homes[(*worker).index].fetch_add(1, Ordering::Relaxed);
+                    (*task).worker = Some((*worker).index);
+                }
                 (*task).state = State::Running;
                 CURRENT.set(task);
                 abi::task_resume((*task).context);
@@ -3673,6 +3720,7 @@ impl RunPtr {
                 match (*task).state {
                     State::Ended => {
                         ended = (*task).stack.take();
+                        pool.homes[(*worker).index].fetch_sub(1, Ordering::Relaxed);
                         if task == root.0 {
                             pool.wake_workers();
                         }

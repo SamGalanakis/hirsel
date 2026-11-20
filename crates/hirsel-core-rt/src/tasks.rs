@@ -2304,6 +2304,8 @@ unsafe fn parked(
             }
         };
         (*task).operation = ptr::null_mut();
+        // mc-units-proto: a crossing delivery a retry consumed is observed now.
+        crate::units::observed(request as usize);
         produced
     }
 }
@@ -3668,6 +3670,8 @@ impl RunPtr {
                     } else {
                         (0, false)
                     };
+                    // mc-units-proto: HIRSEL_XSPIN busy-polls instead of sleeping.
+                    let timeout = if crate::units::spin() { 0 } else { timeout };
                     run.take_wakes(timeout);
                     let task = run.pop();
                     if task.is_null() {

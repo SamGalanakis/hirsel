@@ -2,6 +2,16 @@
 // HIRSEL_UNITS=K; the launcher appends the unit id and K to the arguments.
 const TASK_BYTES: u64 = 65536
 
+fn kernel(seed: u64, rounds: u64) -> u64 {
+    let mut x = seed
+    for _ in 0 .. rounds {
+        x = x ^ (x << 13)
+        x = x ^ (x >> 7)
+        x = x ^ (x << 17)
+    }
+    x
+}
+
 fn arg(argv: Args, i: u64) -> u64 {
     let Some(v) = args.get(argv, i) else { fail("missing argument") }
     result.unwrap(int.parse(v))
@@ -135,22 +145,23 @@ type Drain: send {
     r: ReadHalf,
     n: u64,
     size: u64,
+    grain: u64,
 }
 
 fn drain(take job: Drain) -> u64 waits {
-    let Drain(r: take rh, n: n, size: size) = take job
+    let Drain(r: take rh, n: n, size: size, grain: grain) = take job
     let mut r = take rh
     let mut buf: Bytes = result.unwrap(list.with_capacity(size))
     let mut sum = 0u64
     for _ in 0 .. n {
         if !recv_exact(mut r, mut buf, size) { fail("drain: closed") }
         let b: u8 = buf[0]
-        sum = int.wrapping_add(sum, int.widen(b))
+        sum = int.wrapping_add(sum, kernel(int.widen(b), grain) & 0xff)
     }
     sum
 }
 
-fn x_sink(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, n: u64, size: u64, producers: u64) waits {
+fn x_sink(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, n: u64, size: u64, producers: u64, grain: u64) waits {
     let (take l, _) = result.unwrap(host.listen(nw, unit_addr(0, 2), 128))
     let mut listener = take l
     let mut jobs: List[Task[u64]] = list.new()
@@ -161,7 +172,7 @@ fn x_sink(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, n: u64, size: u64, p
         if p == 0 { started = host.mono_ns(clock) }
         let (rh, wh) = net.split(take s)
         result.unwrap(list.push(mut writers, take wh))
-        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, Drain(r: take rh, n: n, size: size), drain))))
+        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, Drain(r: take rh, n: n, size: size, grain: grain), drain))))
     }
     let mut check = 0u64
     while let Some(take h) = list.pop(mut jobs) {
@@ -240,8 +251,10 @@ fn c_pipe(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64, depth: u64
     let (tx, rx): (Sender[Bytes], Receiver[Bytes]) = result.unwrap(channel.new(depth))
     let (out, back): (Sender[Bytes], Receiver[Bytes]) = result.unwrap(channel.new(depth))
     let started = host.mono_ns(clock)
-    let e = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, Echo(input: take rx, output: take out, n: n), c_echo))
-    let f = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, Feed(output: take tx, n: n, size: size), feed))
+    // In-flight messages are charged to the tasks that allocated them.
+    let budget = TASK_BYTES + 4 * depth * (size + 64)
+    let e = result.unwrap(task.spawn(tasks, bytes budget, Echo(input: take rx, output: take out, n: n), c_echo))
+    let f = result.unwrap(task.spawn(tasks, bytes budget, Feed(output: take tx, n: n, size: size), feed))
     let mut check = 0u64
     for i in 0 .. n {
         let b = result.unwrap(channel.receive(back))
@@ -254,7 +267,7 @@ fn c_pipe(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64, depth: u64
     report(err, "c_pipe", n, host.mono_ns(clock) - started, check)
 }
 
-fn c_fanin(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64, producers: u64) waits {
+fn c_fanin(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64, producers: u64, grain: u64) waits {
     let (tx, rx): (Sender[Bytes], Receiver[Bytes]) = result.unwrap(channel.new(64))
     let started = host.mono_ns(clock)
     let mut jobs: List[Task[()]] = list.new()
@@ -265,12 +278,71 @@ fn c_fanin(tasks: Tasks, clock: Clock, err: Stderr, n: u64, size: u64, producers
     for _ in 0 .. n * producers {
         let b = result.unwrap(channel.receive(rx))
         let got: u8 = b[0]
-        check = int.wrapping_add(check, int.widen(got))
+        check = int.wrapping_add(check, kernel(int.widen(got), grain) & 0xff)
     }
     while let Some(take h) = list.pop(mut jobs) {
         result.unwrap(task.join(take h))
     }
     report(err, "c_fanin", n * producers, host.mono_ns(clock) - started, check)
+}
+
+// ---- replay demo: unit 0 folds messages from two ports in arrival order.
+type Forward: send {
+    r: ReadHalf,
+    out: Sender[u64],
+    n: u64,
+}
+
+fn forward(take job: Forward) -> () waits {
+    let Forward(r: take rh, out: out, n: n) = take job
+    let mut r = take rh
+    let mut buf: Bytes = result.unwrap(list.with_capacity(8))
+    for _ in 0 .. n {
+        if !recv_exact(mut r, mut buf, 8) { fail("svc: closed") }
+        result.unwrap(channel.send(out, list.word_le(buf, 0)))
+    }
+}
+
+fn x_svc(tasks: Tasks, nw: Net, err: Stderr, n: u64) waits {
+    let (take l, _) = result.unwrap(host.listen(nw, unit_addr(0, 3), 16))
+    let mut listener = take l
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(4096))
+    let mut jobs: List[Task[()]] = list.new()
+    for _ in 0 .. 2u64 {
+        let (take s, _) = result.unwrap(host.accept(mut listener, Never))
+        let (rh, _) = net.split(take s)
+        result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes TASK_BYTES, Forward(r: take rh, out: channel.sender(tx), n: n), forward))))
+    }
+    let mut state = 1u64
+    let mut order = 0u64
+    for i in 0 .. 2 * n {
+        let v = result.unwrap(channel.receive(rx))
+        state = kernel(state ^ v, 3)
+        // Count how often the source port changes: an arrival-order witness.
+        if i > 0 && (v >> 32) != order { state = int.wrapping_add(state, 1) }
+        order = v >> 32
+    }
+    join_units(take jobs)
+    report(err, "x_svc", 2 * n, 0, state)
+}
+
+fn join_units(take pending: List[Task[()]]) waits {
+    let mut jobs = take pending
+    while let Some(take h) = list.pop(mut jobs) {
+        result.unwrap(task.join(take h))
+    }
+}
+
+fn x_client(nw: Net, clock: Clock, unit: u64, n: u64) waits {
+    let s = connect_retry(nw, clock, unit_addr(0, 3))
+    let (_, wh) = net.split(take s)
+    let mut w = take wh
+    let mut b: Bytes = result.unwrap(list.with_capacity(8))
+    for i in 0 .. n {
+        list.clear(mut b)
+        result.unwrap(list.put_word_le(mut b, (unit << 32) | i))
+        send_all(mut w, b)
+    }
 }
 
 pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, argv: Args) -> Result[(), Exit] waits {
@@ -286,7 +358,7 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, argv: Args) -> Res
         return Ok(())
     }
     if mode == "c_fanin" {
-        c_fanin(tasks, clock, err, n, size, arg(argv, 3))
+        c_fanin(tasks, clock, err, n, size, arg(argv, 3), arg(argv, 4))
         return Ok(())
     }
     let count = args.len(argv)
@@ -296,8 +368,10 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, argv: Args) -> Res
         if unit == 1 { x_echo(nw, n, size) } else { x_ask(nw, clock, err, n, size) }
     } else if mode == "x_pipe" {
         if unit == 1 { x_echo(nw, n, size) } else { x_pipe(tasks, nw, clock, err, n, size) }
+    } else if mode == "x_svc" {
+        if unit == 0 { x_svc(tasks, nw, err, n) } else { x_client(nw, clock, unit, n) }
     } else if mode == "x_fanin" {
-        if unit == 0 { x_sink(tasks, nw, clock, err, n, size, units - 1) } else { x_source(nw, clock, n, size) }
+        if unit == 0 { x_sink(tasks, nw, clock, err, n, size, units - 1, arg(argv, 3)) } else { x_source(nw, clock, n, size) }
     } else {
         return Error(Exit(status: 2))
     }

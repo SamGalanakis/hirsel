@@ -467,7 +467,51 @@ fn send(e: &Endpoint, prefix: &[u8], tail: &[u8]) -> Option<crate::provider::Out
 }
 
 /// RECV_BOUNDED: at most the rest of the front message, 0 at end, None to wait.
-fn recv(e: &Endpoint, b: &mut Buffer) -> Option<crate::provider::Outcome> {
+/// A delivery consumed by a scheduler retry, stamped when its task resumes.
+enum Unobserved {
+    Record { log: Arc<Log>, deliveries: Arc<AtomicU64>, head: [u8; 29], bytes: Vec<u8> },
+    Replay { next: u64 },
+}
+thread_local! {
+    static UNOBSERVED: std::cell::RefCell<Vec<(usize, Unobserved)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn stamp(log: &Log, deliveries: &AtomicU64, mut head: [u8; 29], bytes: &[u8]) {
+    let delivery = deliveries.fetch_add(1, Ordering::Relaxed);
+    head[17..25].copy_from_slice(&delivery.to_le_bytes());
+    let mut w = log.0.lock().unwrap();
+    let _ = w.write_all(&head);
+    let _ = w.write_all(bytes);
+}
+
+fn replay_advance(next: u64) {
+    let r = replay().unwrap();
+    r.next_delivery.store(next + 1, Ordering::Relaxed);
+    let queues = r.queues.lock().unwrap();
+    let waiters = r.waiters.lock().unwrap();
+    for (local, q) in queues.iter() {
+        if q.front().is_some_and(|m| m.delivery == next + 1)
+            && let Some(fd) = waiters.get(local)
+        {
+            notify(fd);
+        }
+    }
+}
+
+/// The task that issued `request` resumed: it observes its delivery now.
+pub(crate) fn observed(request: usize) {
+    let found = UNOBSERVED.with_borrow_mut(|u| {
+        let i = u.iter().position(|(r, _)| *r == request)?;
+        Some(u.swap_remove(i).1)
+    });
+    match found {
+        Some(Unobserved::Record { log, deliveries, head, bytes }) => stamp(&log, &deliveries, head, &bytes),
+        Some(Unobserved::Replay { next }) => replay_advance(next),
+        None => {}
+    }
+}
+
+fn recv(e: &Endpoint, b: &mut Buffer, request: usize, in_task: bool) -> Option<crate::provider::Outcome> {
     let spare = b.capacity.saturating_sub(b.len);
     if spare == 0 {
         return Some(ok(0));
@@ -482,8 +526,11 @@ fn recv(e: &Endpoint, b: &mut Buffer) -> Option<crate::provider::Outcome> {
             return Some(ok(0));
         };
         let next = r.next_delivery.load(Ordering::Relaxed);
-        if front.delivery > next {
+        if front.delivery != u64::MAX && front.delivery > next {
             return None; // another endpoint's delivery comes first
+        }
+        if front.delivery != u64::MAX && front.delivery < next {
+            return None; // an earlier delivery is consumed but not yet observed
         }
         let n = spare.min(front.bytes.len());
         // SAFETY: the buffer has `spare` writable bytes after len.
@@ -492,22 +539,19 @@ fn recv(e: &Endpoint, b: &mut Buffer) -> Option<crate::provider::Outcome> {
         front.bytes.drain(..n);
         let advanced = front.delivery == next;
         if advanced {
-            // The delivery counts at its first byte, as in recording.
-            r.next_delivery.store(next + 1, Ordering::Relaxed);
-            front.delivery = 0;
+            // Started: later chunks of this message need no turn.
+            front.delivery = u64::MAX;
         }
         if front.bytes.is_empty() {
             q.pop_front();
         }
+        drop(queues);
         if advanced {
-            // Wake whichever endpoint holds the next delivery.
-            let waiters = r.waiters.lock().unwrap();
-            for (local, q) in queues.iter() {
-                if q.front().is_some_and(|m| m.delivery == next + 1)
-                    && let Some(fd) = waiters.get(local)
-                {
-                    notify(fd);
-                }
+            // The turn passes when the task observes this delivery.
+            if in_task {
+                replay_advance(next);
+            } else {
+                UNOBSERVED.with_borrow_mut(|u| u.push((request, Unobserved::Replay { next })));
             }
         }
         return Some(ok(n as u64));
@@ -528,20 +572,23 @@ fn recv(e: &Endpoint, b: &mut Buffer) -> Option<crate::provider::Outcome> {
     front.left -= n as u32;
     let done = front.left == 0;
     if first && let Some(log) = &e.log {
-        let delivery = e.deliveries.fetch_add(1, Ordering::Relaxed);
-        let mut w = log.0.lock().unwrap();
-        let mut rec = [0u8; 29];
-        rec[0] = REC_MSG;
-        rec[1..5].copy_from_slice(&e.local.to_le_bytes());
-        rec[5..9].copy_from_slice(&link.units[from].to_le_bytes());
-        rec[9..17].copy_from_slice(&seq.to_le_bytes());
-        rec[17..25].copy_from_slice(&delivery.to_le_bytes());
-        rec[25..29].copy_from_slice(&(len as u32).to_le_bytes());
-        let _ = w.write_all(&rec);
+        let mut head = [0u8; 29];
+        head[0] = REC_MSG;
+        head[1..5].copy_from_slice(&e.local.to_le_bytes());
+        head[5..9].copy_from_slice(&link.units[from].to_le_bytes());
+        head[9..17].copy_from_slice(&seq.to_le_bytes());
+        head[25..29].copy_from_slice(&(len as u32).to_le_bytes());
         let (a, bb) = ring.bytes.as_slices();
         let take_a = a.len().min(len);
-        let _ = w.write_all(&a[..take_a]);
-        let _ = w.write_all(&bb[..len - take_a]);
+        let mut bytes = Vec::with_capacity(len);
+        bytes.extend_from_slice(&a[..take_a]);
+        bytes.extend_from_slice(&bb[..len - take_a]);
+        if in_task {
+            stamp(log, &e.deliveries, head, &bytes);
+        } else {
+            let pending = Unobserved::Record { log: log.clone(), deliveries: e.deliveries.clone(), head, bytes };
+            UNOBSERVED.with_borrow_mut(|u| u.push((request, pending)));
+        }
     } else if first {
         e.deliveries.fetch_add(1, Ordering::Relaxed);
     }
@@ -579,8 +626,10 @@ pub(crate) unsafe fn attempt(
     request: &mut crate::provider::Request,
     n: &mut crate::net::NetworkRequest,
     key: u64,
+    in_task: bool,
 ) -> Option<Option<crate::provider::Outcome>> {
     use crate::provider::{ACCEPT, CONNECT, LISTEN, RECV_BOUNDED, SEND_PAIR};
+    let request_id = request as *mut crate::provider::Request as usize;
     unsafe {
         let sockets = &mut *n.sockets;
         match request.operation {
@@ -604,7 +653,7 @@ pub(crate) unsafe fn attempt(
                 let c = sockets.crossing(key)?.clone();
                 let e = c.as_any().downcast_ref::<Endpoint>()?;
                 if request.operation == RECV_BOUNDED {
-                    Some(recv(e, &mut request.buffer))
+                    Some(recv(e, &mut request.buffer, request_id, in_task))
                 } else {
                     let b = &request.buffer;
                     let t = &*n.send_tail;
@@ -623,6 +672,11 @@ pub(crate) unsafe fn attempt(
 }
 
 // ------------------------------------------------------------------ launch
+
+pub(crate) fn spin() -> bool {
+    static SPIN: OnceLock<bool> = OnceLock::new();
+    *SPIN.get_or_init(|| std::env::var_os("HIRSEL_XSPIN").is_some())
+}
 
 pub(crate) fn count() -> Option<usize> {
     std::env::var("HIRSEL_UNITS")

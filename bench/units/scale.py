@@ -227,10 +227,16 @@ class Runner:
         env = {k: v for k, v in os.environ.items() if not k.startswith("HIRSEL_")} | env
         return pinned(SERVER, argv), env, nports
 
+    def profile_setup(self, mode):
+        event = ["-F", "999"] if mode == "cpu" else ["-e", "sched:sched_switch"]
+        return 2_000_000_000, ["-g", *event], "3"
+
     def collect_load(self, load, load_pidfile, server_pid, profile):
         samples, masks_seen = [], {}
         profile_proc = None
         profile_pidfile = self.scratch / "perf.pid"
+        if profile:
+            offset, events, duration = self.profile_setup(profile["mode"])
         started = time.monotonic()
         # The load generator writes the scheduled start after setup.
         # Profile only during the timed phase, never during 8K connection setup.
@@ -244,12 +250,13 @@ class Runner:
                 if not masks_seen and phase_ns is not None and time.monotonic_ns() >= phase_ns + 1_000_000_000:
                     masks_seen = masks(server_pid)
                 if profile and profile_proc is None and phase_ns is not None:
-                    if time.monotonic_ns() >= phase_ns + 2_000_000_000:
-                        event = ["-F", "999"] if profile["mode"] == "cpu" else ["-e", "sched:sched_switch"]
-                        cmd = ["taskset", "-c", "6-7", "perf", "record", "-N", "-g", *event,
-                               "-o", str(profile["path"]), "-p", str(server_pid), "--", "sleep", "3"]
+                    if time.monotonic_ns() >= phase_ns + offset:
+                        cmd = ["taskset", "-c", "4-5", "perf", "record", "-N", "--clockid", "mono",
+                               *events, "-o", str(profile["path"]), "-p", str(server_pid), "--", "sleep", duration]
+                        profile["launch_ns"] = time.monotonic_ns()
                         with profile["path"].with_suffix(".log").open("w") as err:
                             profile_proc = launch(cmd, profile_pidfile, stdout=err, stderr=err)
+                        profile["pid"] = profile_proc.pid
                 try:
                     out, err = load.communicate(timeout=0.075)
                     sample = proc_sample(server_pid)
@@ -263,8 +270,7 @@ class Runner:
             return out, err, samples, masks_seen, True
         finally:
             if profile_proc is not None:
-                # The timed workload is longer than the three-second profile.
-                # If collection aborted, let the perf child and its sleep exit.
+                # Wait even if the diagnostic outlasts the server.
                 profile["rc"] = profile_proc.wait(timeout=5)
 
     def trial(self, trial_id, side, cell, rate, seed, tool_pid, profile_mode):
@@ -334,6 +340,7 @@ class Runner:
         tape_bytes = sum(p.stat().st_size for p in tape_files)
         r.update(
             load=result, load_rc=load.returncode, load_err=load_err[-12000:], load_timeout=load_timeout,
+            server_pid=server.pid, load_pid=load.pid, tool_pid=tool_pid,
             server_rc=server.returncode, server_err=ordinary_err[-40:], masks=seen_masks, ustats=ustats,
             wall_s=elapsed, server_cpu_s=cpu, peak_rss_kib=usage.ru_maxrss if usage else None,
             peak_threads_sampled=max((sample[2] for sample in samples), default=None),

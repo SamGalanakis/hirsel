@@ -572,6 +572,20 @@ impl State {
         &mut self.heads[usize::from(class.kind)][usize::from(class.bin)]
     }
 
+    /// Unlink the class's head if the inline path filled it. Only the head may
+    /// be full while linked, so a list that moves on leaves no full page behind.
+    fn drop_full_head(&mut self, class: Class) {
+        // SAFETY: this heap owns the head and its page's slots.
+        unsafe {
+            if let Some(page) = *self.head(class) {
+                let slots = &*page.as_ref().slots.get();
+                if slots.live == slots.limit {
+                    self.unlink(page, class);
+                }
+            }
+        }
+    }
+
     /// The head's empty page, if the class keeps one.
     fn spare(&mut self, class: Class) -> Option<PagePointer> {
         // SAFETY: this heap owns the head and its page's slots.
@@ -580,6 +594,7 @@ impl State {
     }
 
     fn available(&mut self, payer: Payer, key: Key) -> Option<PagePointer> {
+        self.drop_full_head(key.class);
         let wanted = partial_key(key);
         // SAFETY: this heap owns the lists. A linked page keeps its key while
         // it has a live slot, and the empty head keeps the key of the pages
@@ -649,6 +664,7 @@ impl State {
     /// # Safety
     /// The heap is exclusively held, and the class has no spare.
     unsafe fn file_current(&mut self, class: Class) {
+        self.drop_full_head(class);
         // SAFETY: as the caller states; the current list's pages are partial
         // and its key is never filed while it is current.
         unsafe {
@@ -666,6 +682,7 @@ impl State {
     /// of another key never comes here: it becomes the spare after the
     /// current list is filed, or joins the empty cache.
     unsafe fn link(&mut self, page: PagePointer, class: Class) {
+        self.drop_full_head(class);
         // SAFETY: exclusively held heap; a linked page's key is fixed.
         unsafe {
             let key = partial_key(Page::key(page));
@@ -920,13 +937,14 @@ impl Heap {
             return Self::allocate_locking(heap, payer, bytes, align, kind, growable);
         };
         // SAFETY: this heap owns its queues. The head page of a matching payer
-        // and alignment has a free slot and stays partial after this one.
+        // and alignment with a free slot gives it out; a head it fills stays
+        // linked until the class's list next moves.
         // Direct classes are below a native page, so they always fit a slab.
         unsafe {
             if let Some(page) = *state.head(class)
                 && (*page.as_ref().key.get()).payer == payer.record_pointer().addr()
                 && (*page.as_ref().key.get()).class.align == class.align
-                && (*page.as_ref().slots.get()).live + 1 < (*page.as_ref().slots.get()).limit
+                && (*page.as_ref().slots.get()).live < (*page.as_ref().slots.get()).limit
             {
                 if (*page.as_ref().slots.get()).free.is_null() {
                     return Self::extend_take(state, page, bytes);
@@ -1301,10 +1319,10 @@ pub(crate) unsafe fn release_page(page: PagePointer, payload: NonNull<u8>) {
         #[cfg(feature = "memcheck")]
         allocation_check::freed(payload, (*page.as_ref().key.get()).class.kind);
         let slots = &mut *page.as_ref().slots.get();
-        // A partial page keeps its queue position, and an emptied head stays
+        // A partial page or the head keeps its queue position, and an emptied head stays
         // as the spare unless it is spread. A closed heap destroys the page at
         // its last slot.
-        if slots.live != slots.limit
+        if (slots.live != slots.limit || slots.head)
             && (slots.live > slots.watch
                 || (slots.live == 1
                     && slots.head
@@ -1535,7 +1553,8 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
             }
             return;
         }
-        let was_full = slots.live == slots.limit;
+        // A full page is in no list, unless it is the head the inline path filled.
+        let was_out = slots.live == slots.limit && !slots.head;
         slots.live -= 1;
         if state.closed {
             if slots.live == 0 {
@@ -1571,20 +1590,20 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
             }
         }
         if slots.live != 0 {
-            if was_full {
+            if was_out {
                 state.link(page, class);
             }
-        } else if !was_full && slots.head {
+        } else if !was_out && slots.head {
             // Already the queue head: it stays as the spare.
         } else if state.spare(class).is_none() {
             // The emptied page becomes the spare, its key the current list's.
-            if !was_full {
+            if !was_out {
                 state.unlink(page, class);
             }
             state.file_current(class);
             state.link(page, class);
         } else {
-            if !was_full {
+            if !was_out {
                 state.unlink(page, class);
             }
             state.empty_slabs.push_back(page);
@@ -1779,6 +1798,7 @@ fn host_memory<T>() -> T {
 mod tests {
     use super::*;
     use crate::{Context, block};
+    use std::collections::HashSet;
 
     /// A worker's free of a transferred block contends with the owner's
     /// allocation. A failed attempt must leave the holder's lock held, or
@@ -1793,6 +1813,98 @@ mod tests {
             "a failed attempt released the lock"
         );
         drop(held);
+    }
+
+    /// The inline path takes a head page's last slot and leaves the full page
+    /// linked. Only the head may be full while linked: before another page
+    /// goes first, or the class's list is filed, the full head leaves the
+    /// lists. A full page left behind the head is relinked by its next free
+    /// while still listed, which cycles the list or hands a slot out twice.
+    #[test]
+    fn a_full_head_leaves_the_lists_before_another_page_goes_first() {
+        const LIMIT: u64 = 1 << 24;
+        const BYTES: usize = 40;
+        let context = Context::new(LIMIT);
+        let heap = context.heap.get_or_init(Arc::default);
+        let payer = context.payer();
+        let allocate = || {
+            block::admit_storage(payer, Some(BYTES as u64)).unwrap();
+            Heap::allocate(heap, payer, BYTES, 8, block::PLAIN, false)
+        };
+        // SAFETY: each block is live and freed once with its full charge.
+        let free = |pointer: NonNull<u8>| unsafe { block::free(pointer, BYTES as u64) };
+        // A slab page's (full, head) state; nursery pages have no stride.
+        let state = |pointer: NonNull<u8>| {
+            // SAFETY: the block is live, so its page is; this thread is the
+            // heap's only user and holds no borrow of the slots.
+            unsafe {
+                let page = page_of(pointer);
+                let slots = &*page.as_ref().slots.get();
+                (Page::key(page).class.stride != 0)
+                    .then_some((slots.live == slots.limit, slots.head))
+            }
+        };
+        // Every listed page is listed once with matching back links, and
+        // only a current list's first page may be full.
+        let check = || {
+            let state = heap.lock();
+            let mut seen = HashSet::new();
+            let firsts = state
+                .heads
+                .iter()
+                .flatten()
+                .flatten()
+                .map(|&page| (page, true));
+            let filed = state.partial.values().map(|&page| (page, false));
+            for (first, current) in firsts.chain(filed) {
+                let mut previous = None;
+                let mut at = Some(first);
+                while let Some(page) = at {
+                    assert!(seen.insert(page), "a page is listed twice");
+                    // SAFETY: the heap lock owns every listed page's slots.
+                    let slots = unsafe { &*page.as_ref().slots.get() };
+                    assert_eq!(slots.previous, previous, "a broken back link");
+                    let leads = current && previous.is_none();
+                    assert_eq!(slots.head, leads, "a stale head mark");
+                    assert!(
+                        slots.live < slots.limit || leads,
+                        "a full page behind the head"
+                    );
+                    previous = at;
+                    at = slots.next;
+                }
+            }
+        };
+        let mut live = Vec::new();
+        // Fill pages until a full head is linked while an earlier full page is out.
+        let (out, head) = loop {
+            let pointer = allocate();
+            live.push(pointer);
+            if state(pointer) == Some((true, true))
+                && let Some(&out) = live.iter().find(|&&q| state(q) == Some((true, false)))
+            {
+                break (out, pointer);
+            }
+        };
+        check();
+        // The out page's free links it first, ahead of the full head.
+        free(out);
+        live.retain(|&pointer| pointer != out);
+        check();
+        // The head's free finds it out of the lists, or relinks a listed page.
+        free(head);
+        live.retain(|&pointer| pointer != head);
+        check();
+        for _ in 0..4096 {
+            live.push(allocate());
+        }
+        check();
+        let mut addresses: Vec<_> = live.iter().map(|pointer| pointer.addr().get()).collect();
+        addresses.sort_unstable();
+        addresses.dedup();
+        assert_eq!(addresses.len(), live.len(), "a slot was handed out twice");
+        live.into_iter().for_each(free);
+        assert_eq!(context.available(), LIMIT);
     }
 
     fn resident_pages(base: NonNull<u8>, len: usize) -> usize {

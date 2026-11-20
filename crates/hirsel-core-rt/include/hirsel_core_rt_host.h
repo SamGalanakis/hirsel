@@ -141,6 +141,8 @@ typedef struct { uint8_t dir, family; uint64_t hi, lo; uint8_t bits; uint16_t fi
 typedef struct { const HirselCoreNetRule *data; size_t len; } HirselCoreNetRules;
 typedef struct HirselCoreDirectoryOperations HirselCoreDirectoryOperations;
 extern const HirselCoreDirectoryOperations hirsel_core_os_directory_ops;
+typedef struct HirselCoreProcessOperations HirselCoreProcessOperations;
+extern const HirselCoreProcessOperations hirsel_core_os_process_ops;
 typedef struct {
     uint64_t root_limit;
     const HirselCoreView *args;
@@ -156,6 +158,8 @@ typedef struct {
     HirselCoreView target;
     /* Set to &hirsel_core_os_directory_ops for a sourced launch with directories. */
     const HirselCoreDirectoryOperations *directory_ops;
+    /* Set to &hirsel_core_os_process_ops for a sourced launch with Process. */
+    const HirselCoreProcessOperations *process_ops;
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;

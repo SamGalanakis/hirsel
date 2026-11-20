@@ -73,6 +73,22 @@ pub(super) fn emit(
             .map_err(error)?;
         f.address(operations)
     };
+    let process_kind = grant_kind("Process").unwrap();
+    let process_ops = if plan.tape.is_none()
+        && plan.grant_mask & (1 << process_kind) != 0
+        && plan
+            .parameters
+            .iter()
+            .any(|requirement| requirement.kind == process_kind)
+    {
+        let operations = f
+            .object
+            .declare_data("hirsel_core_os_process_ops", Linkage::Import, false, false)
+            .map_err(error)?;
+        f.address(operations)
+    } else {
+        f.constant(0)
+    };
     for (offset, value) in [
         (abi::OS_CONFIG_ROOT_LIMIT, limit),
         (abi::OS_CONFIG_ARGS, args),
@@ -88,6 +104,7 @@ pub(super) fn emit(
         (abi::OS_CONFIG_TARGET, target),
         (abi::OS_CONFIG_TARGET_LEN, target_len),
         (abi::OS_CONFIG_DIRECTORY_OPS, directory_ops),
+        (abi::OS_CONFIG_PROCESS_OPS, process_ops),
     ] {
         f.store(value, config, offset);
     }

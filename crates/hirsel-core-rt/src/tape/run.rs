@@ -573,6 +573,7 @@ pub(super) fn check_launch_replay() {
             net_rules: ptr::null(),
             net_rules_len: 0,
             directory_ops: std::ptr::null(),
+            process_ops: std::ptr::null(),
             target: View {
                 data: target.as_ptr(),
                 len: target.len(),

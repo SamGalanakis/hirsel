@@ -64,6 +64,7 @@ fn run(sources: *const SourceTable, entry: Entry, explicit_owner: bool) -> (u8, 
     let (mut reader, writer) = UnixStream::pair().unwrap();
     let config = OsConfig {
         directory_ops: std::ptr::null(),
+        process_ops: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,

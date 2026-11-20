@@ -6,6 +6,7 @@ use crate::{
     os::{DirectoryOperations, OsProvider, hirsel_core_os_directory_ops},
     process::{Config, View},
     provider::{Buffer, IoError, Provider},
+    stop_signals::{StopSignals, hirsel_core_os_process_ops},
 };
 use hirsel_core_ids::launch::Metadata;
 use std::{
@@ -116,7 +117,14 @@ pub unsafe extern "C" fn hirsel_core_capability_handle(
         }
     }
 }
+/// Operations required by a live Process grant. The generated launcher names
+/// this table only when main can receive Process.
+pub struct ProcessOperations {
+    pub(crate) install: fn() -> io::Result<StopSignals>,
+}
+
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct OsConfig {
     pub root_limit: u64,
     pub args: *const View,
@@ -136,12 +144,23 @@ pub struct OsConfig {
     pub target: View,
     /// Installed by the native linker for a launch with directory grants.
     pub directory_ops: *const DirectoryOperations,
+    /// Installed by the native linker for a launch with a live Process grant.
+    pub process_ops: *const ProcessOperations,
+}
+impl OsConfig {
+    fn with_default_operations(&self) -> Self {
+        Self {
+            directory_ops: &hirsel_core_os_directory_ops,
+            process_ops: &hirsel_core_os_process_ops,
+            ..*self
+        }
+    }
 }
 pub struct OsProcess {
     pub(crate) sources: *const crate::abi_sites::SourceTable,
     os: Option<Box<OsProvider>>,
     _provider: Box<Provider>,
-    _stop: Option<Box<crate::stop_signals::StopSignals>>,
+    _stop: Option<Box<StopSignals>>,
     _args: Vec<Vec<u8>>,
     _carriers: Vec<Buffer>,
     _metadata: Box<[Grant]>,
@@ -201,7 +220,6 @@ impl OsProcess {
     unsafe fn new(
         input: &OsConfig,
         probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
-        directory_ops: Option<&DirectoryOperations>,
         launch_metadata: fn(&str, u64, bool) -> Metadata,
     ) -> Result<Box<Self>, StartupError> {
         // SAFETY: copy launcher input before acquiring any program grant.
@@ -265,6 +283,7 @@ impl OsProcess {
             } else {
                 None
             };
+            let directory_ops = input.directory_ops.as_ref();
             let mut dirs = Vec::new();
             if let Some(scratch) = prepare_path {
                 let operations =
@@ -309,12 +328,15 @@ impl OsProcess {
             } else {
                 std::slice::from_raw_parts(input.parameters, input.parameters_len)
             };
-            let stop = (!describe_mode
+            let stop = if let Some(operations) = input.process_ops.as_ref()
+                && !describe_mode
                 && input.grant_mask & (1 << PROCESS) != 0
-                && requirements.iter().any(|req| req.kind == PROCESS))
-            .then(crate::stop_signals::StopSignals::install)
-            .transpose()?
-            .map(Box::new);
+                && requirements.iter().any(|req| req.kind == PROCESS)
+            {
+                Some(Box::new((operations.install)()?))
+            } else {
+                None
+            };
             let mut metadata = Vec::new();
             if describe_mode {
                 // Main receives inert designations. The launch boundary denies
@@ -430,9 +452,8 @@ pub unsafe extern "C" fn hirsel_core_os_process_new(config: *const OsConfig) -> 
     // SAFETY: constructor copies/pins all configuration before returning its owner.
     match unsafe {
         OsProcess::new(
-            &*config,
+            &(*config).with_default_operations(),
             OsProvider::probe_directory,
-            Some(&hirsel_core_os_directory_ops),
             Metadata::native,
         )
     } {
@@ -512,7 +533,7 @@ pub unsafe extern "C" fn hirsel_core_os_run(
 /// # Safety
 /// Input/name/entry contracts are os_run's; sources follows
 /// abi_sites::hirsel_core_os_process_set_sources through reporting. The native
-/// linker supplies a live `directory_ops` table when configuring directory grants.
+/// linker supplies the operations tables for directory and Process grants.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_run_with_sources(
     input: *const OsConfig,
@@ -555,7 +576,6 @@ unsafe fn run_os_with_sources(
             sources,
             entry,
             |os, handle| (operations.unwrap().probe)(os, handle),
-            operations,
             launch_metadata,
         )
     }
@@ -570,12 +590,11 @@ unsafe fn run_with_probe(
     // SAFETY: original entry supplies no source table.
     unsafe {
         run_with_sources_and_probe(
-            input,
+            &input.with_default_operations(),
             names,
             std::ptr::null(),
             entry,
             probe,
-            Some(&hirsel_core_os_directory_ops),
             Metadata::native,
         )
     }
@@ -587,11 +606,10 @@ unsafe fn run_with_sources_and_probe(
     sources: *const crate::abi_sites::SourceTable,
     entry: crate::process::Entry,
     probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
-    directory_ops: Option<&DirectoryOperations>,
     launch_metadata: fn(&str, u64, bool) -> Metadata,
 ) -> u8 {
     // SAFETY: input tables are borrowed from the OS entry's configuration.
-    match unsafe { OsProcess::new(input, probe, directory_ops, launch_metadata) } {
+    match unsafe { OsProcess::new(input, probe, launch_metadata) } {
         Ok(mut process) => {
             // SAFETY: table is borrowed until this call completes reporting.
             unsafe { crate::abi_sites::hirsel_core_os_process_set_sources(&mut *process, sources) };

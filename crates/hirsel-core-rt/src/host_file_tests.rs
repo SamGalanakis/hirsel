@@ -179,6 +179,7 @@ fn native_host_file_child() {
     let sink = File::options().write(true).open("/dev/null").unwrap();
     let setup = OsConfig {
         directory_ops: std::ptr::null(),
+        process_ops: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,

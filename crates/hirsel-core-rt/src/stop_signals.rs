@@ -1,6 +1,10 @@
 //! The live Process provider. A self-pipe relay takes Unix signal delivery into
 //! the scheduler's ordinary provider readiness path.
-use crate::provider::{CANCELLED, Outcome, Provider, Request, STEP_PENDING, Step, Wait, deliver};
+use crate::{
+    entry::ProcessOperations,
+    provider::{CANCELLED, Outcome, Provider, Request, STEP_PENDING, Step, Wait, deliver},
+};
+
 use std::{
     collections::BTreeSet,
     io,
@@ -10,6 +14,11 @@ use std::{
         atomic::{AtomicI32, Ordering},
     },
     thread::{self, JoinHandle},
+};
+
+#[unsafe(no_mangle)]
+pub static hirsel_core_os_process_ops: ProcessOperations = ProcessOperations {
+    install: StopSignals::install,
 };
 
 const SIGNALS: [i32; 2] = [libc::SIGTERM, libc::SIGINT];
@@ -29,9 +38,10 @@ struct State {
 
 pub(crate) struct StopSignals {
     provider: Provider,
+    release: fn(),
 }
 impl StopSignals {
-    pub(crate) fn install() -> io::Result<Self> {
+    fn install() -> io::Result<Self> {
         let mut active = ACTIVE.lock().unwrap();
         if active.is_none() {
             *active = Some(Relay::install()?);
@@ -47,6 +57,7 @@ impl StopSignals {
                 abort,
                 deliver,
             },
+            release,
         })
     }
 
@@ -56,12 +67,16 @@ impl StopSignals {
 }
 impl Drop for StopSignals {
     fn drop(&mut self) {
-        let mut active = ACTIVE.lock().unwrap();
-        let relay = active.as_mut().unwrap();
-        relay.users -= 1;
-        if relay.users == 0 {
-            drop(active.take());
-        }
+        (self.release)();
+    }
+}
+
+fn release() {
+    let mut active = ACTIVE.lock().unwrap();
+    let relay = active.as_mut().unwrap();
+    relay.users -= 1;
+    if relay.users == 0 {
+        drop(active.take());
     }
 }
 

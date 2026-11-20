@@ -29,6 +29,7 @@ NOFILE = 524288
 CPU_HZ = os.sysconf("SC_CLK_TCK")
 HOLDS_GAP_S = 15
 QUEUE_BUCKET_NS = 10_000_000
+LOAD_NAMES = {"loadgen", "loadgen_drain"}
 
 SCALE_SIDES = ("untied", "S3k7", "tokiow8")
 REC_SIDES = ("untied", "S3k7", "S1w2", "S1w8", "untied (1 GiB)")
@@ -257,7 +258,7 @@ class Runner:
                     return out, err, samples, masks_seen, False
                 except subprocess.TimeoutExpired:
                     continue
-            stop_owned(load, load_pidfile, {"loadgen"})
+            stop_owned(load, load_pidfile, LOAD_NAMES)
             out, err = load.communicate()
             return out, err, samples, masks_seen, True
         finally:
@@ -276,11 +277,13 @@ class Runner:
         server_pidfile = self.scratch / "server.pid"
         load_pidfile = self.scratch / "load.pid"
         server_argv, env, nports = self.server_cmd(side, cell)
+        load_name = "loadgen_drain" if profile_mode or "close_after_drain" in cell else "loadgen"
         lg_argv = [
-            self.bin / "loadgen", f"port={PORT}", f"nports={nports}", f"sessions={cell['sessions']}",
+            self.bin / load_name, f"port={PORT}", f"nports={nports}", f"sessions={cell['sessions']}",
             f"rate={rate:.0f}", f"f={int(cell['f'] * 1000)}", f"par={int(cell['par'])}",
             f"seed={seed}", "threads=4", "grace=5", f"ready_ack={int(cell['ready_ack'])}",
             f"reserved_hot={8 if 'hot' in cell else 0}", f"hot={int(cell.get('hot', False))}",
+            f"close_after_drain={int(cell.get('close_after_drain', False))}",
             f"phase_file={marker}", *(f"{k}={v}" for k, v in RUN.items()),
         ]
         profile = None
@@ -296,7 +299,7 @@ class Runner:
                 try:
                     out, load_err, samples, seen_masks, load_timeout = self.collect_load(load, load_pidfile, server.pid, profile)
                 finally:
-                    stop_owned(load, load_pidfile, {"loadgen"})
+                    stop_owned(load, load_pidfile, LOAD_NAMES)
                 usage = poll_server(server, 3)
             finally:
                 stop_owned(server, server_pidfile, {"session", "session_rec", "session_u", "session_u_rec", "twin"})
@@ -438,11 +441,14 @@ def main():
     fairness = commands.add_parser("fairness")
     fairness.add_argument("sessions", type=int)
     fairness.add_argument("rates", help="JSON mapping of side to best passing A1 rate")
+    drain = commands.add_parser("drain")
+    drain.add_argument("rate", type=float, help="open-loop rate from the untied hot-session run")
     attrib = commands.add_parser("profile")
     attrib.add_argument("cell", choices=SCALE_CELLS | REC_CELLS)
     attrib.add_argument("mode", choices=["cpu", "sched"])
     attrib.add_argument("rates", help="JSON mapping of side to fixed offered rate")
     attrib.add_argument("--hot", type=int, choices=(0, 1), help="use the paired fairness workload")
+    attrib.add_argument("--ready-ack", action="store_true", help="wait for session setup before offering load")
     args = parser.parse_args()
     if os.sched_getaffinity(0) != {4, 5}:
         parser.error("pin this controller with taskset -c 4-5")
@@ -469,11 +475,17 @@ def main():
                     cell = SCALE_CELLS[f"A1-{args.sessions}"] | {"hot": hot}
                     sides = SCALE_SIDES if not hot else SCALE_SIDES[1:] + SCALE_SIDES[:1]
                     runner.run_set(out, "fairness", f"A2-{int(hot)}", cell, 1, [(s, rate[s] / 2, 732242) for s in sides if s in rate])
+            elif args.command == "drain":
+                for defer in (False, True):
+                    cell = SCALE_CELLS["A1-8192"] | {"hot": True, "close_after_drain": defer}
+                    runner.run_set(out, "drain", f"A2-{int(defer)}", cell, 1, [("untied", args.rate, 732242)])
             else:
                 rates = json.loads(args.rates)
                 cell = configs[args.cell]
                 if args.hot is not None:
                     cell |= {"hot": bool(args.hot)}
+                if args.ready_ack:
+                    cell |= {"ready_ack": True}
                 runner.run_set(out, "profile", args.cell, cell, 0, [(s, rate, 12345) for s, rate in rates.items()], args.mode)
     except Deadline:
         log("measurement deadline reached")

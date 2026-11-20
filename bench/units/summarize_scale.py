@@ -82,6 +82,14 @@ def best(rows, cell, side):
     return max((r for r in rates if r is not None), default=None), sum(r is not None for r in rates)
 
 
+def finished(rows, cell, sides):
+    summaries = {
+        (r["side"], r["group"])
+        for r in rows if r.get("summary") and r["cell_name"] == cell and not r.get("incomplete")
+    }
+    return all((s, g) in summaries for s in sides for g in (1, 2))
+
+
 def fairness_trial(rows, side, hot):
     return next((r for r in rows if r.get("phase") == "fairness" and r.get("side") == side
                  and "trial" in r and r["cell"]["hot"] == hot), None)
@@ -133,19 +141,34 @@ def verdicts(rows, n):
         print(f"- **Fairness.** {'Holds' if untied else 'Threshold missed'} for untied.{controls} One pair per side.")
 
     ratios = []
+    details = []
     sparse = False
     for cell in REC_CELLS:
         candidate, count = best(rows, cell, "untied")
         control, control_count = max((best(rows, cell, side) for side in REC_SIDES[1:4]),
                                      key=lambda item: item[0] or 0)
-        ratios.append(candidate / control if candidate and control else None)
+        ratio = candidate / control if candidate and control else None
+        ratios.append(ratio)
+        fraction = REC_CELLS[cell]["f"]
+        if ratio is not None:
+            details.append(f"f={fraction}, {ratio:.2f}× the best recorded control")
+        elif finished(rows, cell, REC_SIDES[:4]):
+            if candidate is None:
+                details.append(f"f={fraction}, untied had no passing rate")
+            if control is None:
+                details.append(f"f={fraction}, no control passed")
         sparse |= count == 1 or control_count == 1
-    if all(ratios):
-        state = "Supported." if min(ratios) >= 1.25 else "Threshold missed."
-        repeat = " At least one rate rests on a single passing search." if sparse else ""
-        print(f"- **Recorded fan-out.** {state} Untied reached {ratios[0]:.2f}× the best recorded control at f=0.5 and {ratios[1]:.2f}× at f=0.1.{repeat}")
+    if any(ratio is not None and ratio < 1.25 for ratio in ratios):
+        state = "Threshold missed."
+    elif all(ratios):
+        state = "Supported."
+    elif all(finished(rows, cell, REC_SIDES[:4]) for cell in REC_CELLS):
+        state = "Ratio unavailable in at least one cell."
     else:
-        print("- **Recorded fan-out.** Pending comparable passing rates in both cells.")
+        state = "Pending complete searches in both cells."
+    measurement = f" {' and '.join(details)}." if details else ""
+    repeat = " At least one rate rests on a single passing search." if sparse and details else ""
+    print(f"- **Recorded fan-out.** {state}{measurement}{repeat}")
 
 
 def scale_tables(rows):
@@ -174,7 +197,7 @@ def scale_tables(rows):
 def fairness_table(rows, n):
     print(f"\n## Hot sessions at {n:,} sessions\n")
     table(("Side", "Hot", "Open turns/s", "Non-hot p50 (ms)", "Non-hot p99 (ms)",
-           "Non-hot max (ms)", "Max ready wait (ms)", "Hot turns/s", "Complete",
+           "Non-hot max (ms)", "Max ready wait during load (ms)", "After load (ms)", "Hot turns/s", "Complete",
            "Peak RSS (MiB)", "Peak sampled threads", "CPU µs/turn after warmup (est.)",
            "CPU µs/turn incl. setup", "Steals/s incl. setup", "Units"))
     for side in SCALE_SIDES:
@@ -185,9 +208,11 @@ def fairness_table(rows, n):
             wait_text = ms(wait)
             if upper is not None and upper != wait:
                 wait_text += " to " + ms(upper)
+            end = load_number(trial, "end_ns")
+            after = max((delay for t, delay in number(trial, "queue_wait_buckets") or [] if t >= end), default=None)
             row(side, "Yes" if hot else "No", fmt(number(trial, "rate")),
                 *(ms(load_number(trial, col)) for col in ("p50_ns", "p99_ns", "max_ns")),
-                wait_text, fmt(load_number(trial, "hot_turns_per_s"), 1),
+                wait_text, ms(after), fmt(load_number(trial, "hot_turns_per_s"), 1),
                 "Yes" if complete(trial) else "No" if trial else "—", *resources(trial))
 
 

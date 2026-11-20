@@ -41,6 +41,7 @@ tempfile = "3"
 twox-hash = { version = "=2.1.5", default-features = false, features = ["std", "xxhash3_64"] }
 
 [dev-dependencies]
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 hirsel-core-front = { path = "../hirsel-core-front", features = ["cost-profile"] }
 tempfile = "3"
 hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval", "wf"] }

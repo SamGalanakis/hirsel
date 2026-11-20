@@ -1,0 +1,33 @@
+pub fn main(n: Net, out: Stdout) -> Result[(), Exit] waits {
+    let peer = Addr(ip: V4(2130706433u32), port: 12345u16)
+    let child = result.unwrap(net.narrow(n, Tls(names: "alpha.test", ports: (peer.port, peer.port), trust: SystemPin)))
+    let socket = result.unwrap(host.connect(n, peer, Never))
+    let mut alpn: List[String] = list.new()
+    result.unwrap(list.push(mut alpn, "h2"))
+    result.unwrap(list.push(mut alpn, "http/1.1"))
+    let (reader, writer, handshake) = result.unwrap(tls.connect(child, take socket, "ALPHA.TEST.", System, alpn, Never))
+    let mut read = take reader
+    let mut write = take writer
+    let prefix = result.unwrap(string.into_bytes("GET / HTTP/1.1\r\n"))
+    let tail = result.unwrap(string.into_bytes("Host: alpha.test\r\n\r\n"))
+    let sent = result.unwrap(host.send_pair(mut write, prefix, tail, Never))
+    if sent != list.len(prefix) + list.len(tail) {
+        return Error(Exit(status: 2))
+    }
+    let mut response: Bytes = list.new()
+    result.unwrap(list.reserve(mut response, 256))
+    while result.unwrap(host.recv_bounded(mut read, mut response, 11, Never)) != 0 {}
+    let mut text = result.unwrap(string.from_utf8(take response))
+    match handshake.protocol {
+        Some(index) => result.unwrap(string.push_u64(mut text, index)),
+        None => return Error(Exit(status: 3)),
+    }
+    let (a, b, c, d) = handshake.peer
+    for word in [a, b, c, d] {
+        result.unwrap(string.push_char(mut text, ' '))
+        result.unwrap(string.push_u64(mut text, word))
+    }
+    result.unwrap(string.push_char(mut text, '\n'))
+    result.unwrap(stdout.write(out, text))
+    Ok(())
+}

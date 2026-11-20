@@ -150,11 +150,11 @@ impl SocketTape {
         }
     }
 
-    fn handle(self, key: u64) -> u64 {
+    pub(crate) fn handle(self, key: u64) -> u64 {
         self.generation | (key >> 2)
     }
 
-    fn carrier(self, mut outcome: Outcome) -> Outcome {
+    pub(crate) fn carrier(self, mut outcome: Outcome) -> Outcome {
         if outcome.status == 0 && outcome.error == IoError::OK {
             outcome.value = u64::from(outcome.value as u32) << 2;
         }
@@ -336,7 +336,8 @@ unsafe fn address_op(
         let _commit = crate::sequencer::enter();
         if let Some(tape) = (*files).net_tape {
             outcome = tape.carrier(outcome);
-        } else if op == CONNECT && outcome.status == 0 && outcome.error == IoError::OK {
+        }
+        if op == CONNECT && outcome.status == 0 && outcome.error == IoError::OK {
             (*files)
                 .connected
                 .insert(outcome.value, (address, *provider));
@@ -551,9 +552,11 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
                 stream.shutdown((*files).sockets.fd(source));
             }
             if (*files).sockets.release(source) {
-                (*files).connected.remove(&(source & !3));
+                (*files).connected.remove(&(key & !3));
                 (*files).tls.sessions.remove(&(source & !3));
             }
+        } else {
+            (*files).connected.remove(&(key & !3));
         }
     }
 }

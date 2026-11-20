@@ -679,6 +679,186 @@ fn tape_http_replays_both_native_engines() {
     }
 }
 
+/// TL9 checks the server's HTTP bytes, RFC 7301's selected index and the
+/// OpenSSL digest of the fixture leaf. Replay runs after removing both live
+/// inputs, with a counting provider in place of the CLI's refuse-all provider.
+#[test]
+fn cli_replays_tls_offline() {
+    use rustls::{
+        ServerConfig, ServerConnection, StreamOwned,
+        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    };
+    use std::{
+        io::{Read, Write},
+        net::{Ipv4Addr, TcpListener},
+        os::unix::fs::PermissionsExt,
+        sync::Arc,
+    };
+
+    const CA: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/ca.pem");
+    const LEAF: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/alpha.pem");
+    const KEY: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/alpha.key.pem");
+    const PEER: &str = include_str!("../../hirsel-core-rt/testdata/tls/alpha.sha256");
+    const REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: alpha.test\r\n\r\n";
+    const RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut server =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from_pem_slice(LEAF).unwrap()],
+                PrivateKeyDer::from_pem_slice(KEY).unwrap(),
+            )
+            .unwrap();
+    server.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let peer = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let mut stream = StreamOwned::new(ServerConnection::new(Arc::new(server)).unwrap(), socket);
+        let mut request = [0; REQUEST.len()];
+        stream.read_exact(&mut request).unwrap();
+        assert_eq!(request, REQUEST);
+        stream.write_all(RESPONSE.as_bytes()).unwrap();
+        stream.conn.send_close_notify();
+        stream.flush().unwrap();
+    });
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    let fixture = include_str!("../../../core/front/tape/tls.hirsel");
+    std::fs::write(
+        app.join("main.hirsel"),
+        fixture.replace("12345", &port.to_string()),
+    )
+    .unwrap();
+    let roots = dir.path().join("roots.pem");
+    std::fs::write(&roots, CA).unwrap();
+    let tape = dir.path().join("tls.tape");
+
+    let native = native_options(Backend::Cranelift, dir.path());
+    let observer_src = dir.path().join("tls-observe.c");
+    let observer_obj = dir.path().join("tls-observe.o");
+    std::fs::write(&observer_src, include_str!("tape_tls_observe.c")).unwrap();
+    command(
+        Command::new(native.link.driver())
+            .arg("-c")
+            .arg(observer_src)
+            .arg("-I")
+            .arg(root.join("crates/hirsel-core-rt/include"))
+            .arg("-o")
+            .arg(&observer_obj),
+    )
+    .unwrap();
+    let linker = appending_driver(
+        dir.path(),
+        "clang-observe-tls",
+        &format!(
+            "'{}' -Wl,--wrap=hirsel_core_run,--wrap=hirsel_core_host_io",
+            observer_obj.display().to_string().replace('\'', "'\\''")
+        ),
+    );
+    let common = [
+        app.display().to_string(),
+        "--backend".into(),
+        "cranelift".into(),
+        "--runtime".into(),
+        native.runtime.canonicalize().unwrap().display().to_string(),
+        "--cc".into(),
+        linker.display().to_string(),
+        "--libraries".into(),
+        root.join("core").display().to_string(),
+        "--source-core".into(),
+        "--source-std".into(),
+        "--store".into(),
+        dir.path().join("cache").display().to_string(),
+    ];
+    let tape_path = tape.to_str().unwrap();
+    let invoke = |command: &str, args: &[&str]| {
+        let mut call = vec![command.to_owned()];
+        call.extend(common.iter().cloned());
+        call.extend(args.iter().map(|&arg| arg.to_owned()));
+        process::tape_request_command(&call, dir.path())
+    };
+    let net = format!(
+        "Net=Connect 127.0.0.1/32 {port}-{port};Tls *.test {port}-{port} System;Tls alpha.test {port}-{port} Roots=sha256:{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(CA)
+    );
+    let record = invoke(
+        "run",
+        &["--grant", &net, "--grant", "Stdout", "--record", tape_path],
+    )
+    .env("SSL_CERT_FILE", &roots)
+    .env_remove("SSL_CERT_DIR")
+    .env_remove("HIRSEL_TL9_REPLAY")
+    .output()
+    .unwrap();
+    let after = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes)
+            .split_once(process::CHILD_MARK)
+            .expect("request child started")
+            .1
+            .to_owned()
+    };
+    let recorded = after(&record.stdout);
+    let record_log = after(&record.stderr);
+    assert_eq!(record.status.code(), Some(0), "{record_log}");
+    peer.join().unwrap();
+
+    let digest_words = (0..64)
+        .step_by(16)
+        .map(|start| {
+            u64::from_str_radix(&PEER[start..start + 16], 16)
+                .unwrap()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let expected = format!("{RESPONSE}1 {digest_words}\n");
+    assert_eq!(recorded, expected);
+    assert_eq!(record_log, expected);
+    assert_eq!(
+        std::fs::metadata(&tape).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let sealed = std::fs::read(&tape).unwrap();
+    assert!(!sealed.windows(CA.len()).any(|bytes| bytes == CA));
+    assert!(!sealed.windows(LEAF.len()).any(|bytes| bytes == LEAF));
+
+    std::fs::remove_file(&roots).unwrap();
+    let replay = invoke("replay", &["--tape", tape_path])
+        .env("SSL_CERT_FILE", &roots)
+        .env_remove("SSL_CERT_DIR")
+        .env("HIRSEL_TL9_REPLAY", "1")
+        .output()
+        .unwrap();
+    let replay_log = after(&replay.stderr);
+    assert_eq!(replay.status.code(), Some(0), "{replay_log}");
+    assert!(after(&replay.stdout).is_empty());
+    assert_eq!(replay_log, format!("{recorded}inner calls: 0\n"));
+    assert_eq!(std::fs::read(&tape).unwrap(), sealed);
+
+    let show = ["tape".into(), "show".into(), tape_path.into()];
+    let (code, export, error) = process::tape_request(&show, dir.path());
+    assert_ne!(code, Some(0));
+    assert!(export.is_empty());
+    assert!(error.contains("--include-credentials"), "{error}");
+    let [command, subcommand, path] = show;
+    let (code, export, error) = process::tape_request(
+        &[command, subcommand, path, "--include-credentials".into()],
+        dir.path(),
+    );
+    assert_eq!(code, Some(0), "{error}");
+    assert!(export.contains("op=22"), "{export}");
+}
+
 /// An ISA cap changes the machine body called by the entry, and has no tape
 /// or descriptor identity. The independently computed swizzle checksum is
 /// the same at both caps. The low-cap replay consumes the high-cap record.

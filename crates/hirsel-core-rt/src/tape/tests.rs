@@ -622,7 +622,10 @@ fn network_outcomes_decode_with_exact_payloads() {
     let (mut blocks, header) = Blocks::open(|buf| bytes.read(buf)).unwrap();
     let listen = hirsel_core_net::Rule::parse("Listen 127.0.0.1/32 0-65535").unwrap();
     let connect = hirsel_core_net::Rule::parse("Connect ::1/128 1-65535").unwrap();
-    assert_eq!(header.net_rules, [listen, connect, listen]);
+    assert_eq!(
+        header.net_rules,
+        [listen, connect, listen].map(hirsel_core_net::GrantRule::Address)
+    );
 
     let mut encoded_header = header.encode(header.revision).unwrap();
     let last = encoded_header.len() - 1;

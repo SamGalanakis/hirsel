@@ -300,7 +300,7 @@ pub struct Tape {
 
 struct Startup {
     arg: Vec<u8>,
-    net_rules: Vec<hirsel_core_net::Rule>,
+    net_rules: Vec<hirsel_core_net::GrantRule>,
 }
 
 fn handle(generation: u32, ordinal: usize) -> u64 {
@@ -514,7 +514,14 @@ impl Replayer {
 }
 
 fn socket_op(op: u8) -> bool {
-    matches!(op, CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR)
+    matches!(
+        op,
+        CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR | TLS_CONNECT
+    )
+}
+
+fn creates_object(op: u8) -> bool {
+    matches!(op, OPEN | MKDTEMP | LISTEN | CONNECT | ACCEPT | TLS_CONNECT)
 }
 
 fn net_status(error: u8) -> u8 {
@@ -559,6 +566,22 @@ unsafe fn socket_args(request: &Request) -> Args {
         if request.operation == RECV_BOUNDED {
             let spare = request.buffer.capacity.saturating_sub(request.buffer.len) as u64;
             args.extend_from_slice(&spare.to_le_bytes());
+        }
+        if request.operation == TLS_CONNECT {
+            let tls = &*request.path.cast::<crate::tls::TlsRequest>();
+            let name = crate::tls::view_bytes(&tls.name);
+            put_varint(&mut args, name.len() as u64);
+            args.extend_from_slice(name);
+            match tls.pin() {
+                hirsel_core_net::TlsTrust::System => args.push(0),
+                hirsel_core_net::TlsTrust::Roots(digest) => {
+                    args.push(1);
+                    args.extend_from_slice(&digest);
+                }
+            }
+            let alpn = crate::tls::view_bytes(&tls.alpn);
+            put_varint(&mut args, alpn.len() as u64);
+            args.extend_from_slice(alpn);
         }
         if let Some((_, clock, at)) = n.until {
             put_varint(&mut args, ordinal_of(clock) as u64);
@@ -1269,7 +1292,7 @@ unsafe fn record_out(
     };
     let mut answer = o;
     let mut created = None;
-    if ok && matches!(r.operation, OPEN | MKDTEMP | LISTEN | CONNECT | ACCEPT) {
+    if ok && creates_object(r.operation) {
         live.objects.push(Object {
             inner: Some(Inner {
                 provider: inner.provider,
@@ -1295,6 +1318,14 @@ unsafe fn record_out(
         // SAFETY: the source wrote the address into the pinned network operand.
         let network = unsafe { &*r.path.cast::<crate::net::NetworkRequest>() };
         out.payload = address_bytes(network.address).to_vec();
+    } else if ok && r.operation == TLS_CONNECT {
+        // SAFETY: the handshake pins both outputs through delivery.
+        unsafe {
+            let tls = &*r.path.cast::<crate::tls::TlsRequest>();
+            out.payload
+                .extend_from_slice(buffer_bytes(&*tls.protocol_out));
+            out.payload.extend_from_slice(&*tls.peer_out);
+        }
     } else if ok && carries_payload(r.operation) && r.buffer.len > before {
         // SAFETY: source initialized these bytes in the request's spare carrier.
         out.payload =
@@ -1392,7 +1423,7 @@ unsafe fn replay_out(
         o.value = prev.wrapping_add(unzz(out.value) as u64);
         live.clocks.insert((op, object), o.value);
     }
-    if ok && matches!(op, OPEN | MKDTEMP | LISTEN | CONNECT | ACCEPT) {
+    if ok && creates_object(op) {
         if out.value != live.objects.len() as u64 + 1 {
             return Err(Fault::Corrupt);
         }
@@ -1413,6 +1444,25 @@ unsafe fn replay_out(
                 lo: u64::from_le_bytes(bytes.fixed()?),
                 port: u16::from_le_bytes(bytes.fixed()?),
             };
+        }
+    } else if op == TLS_CONNECT {
+        if ok {
+            let (protocol, digest) = out.payload.split_last_chunk::<32>().ok_or(Fault::Corrupt)?;
+            // SAFETY: TLS_CONNECT pins the offer and both output buffers.
+            unsafe {
+                let tls = &*r.path.cast::<crate::tls::TlsRequest>();
+                let buffer = &mut *tls.protocol_out;
+                if protocol.len() > buffer.capacity
+                    || (!protocol.is_empty() && !tls.offers(protocol))
+                {
+                    return Err(Fault::Corrupt);
+                }
+                if !protocol.is_empty() {
+                    ptr::copy_nonoverlapping(protocol.as_ptr(), buffer.data, protocol.len());
+                }
+                buffer.len = protocol.len();
+                *tls.peer_out = *digest;
+            }
         }
     } else if carries_payload(op) {
         let spare = r.buffer.capacity.saturating_sub(r.buffer.len);

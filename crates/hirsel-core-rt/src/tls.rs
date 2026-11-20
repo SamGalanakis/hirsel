@@ -24,6 +24,7 @@ pub struct TlsRequest {
 const _: () = assert!(size_of::<NetworkRequest>() == 168);
 
 pub(crate) struct HandshakeState {
+    pin: TlsTrust,
     pub name: Option<Name>,
     pub roots: Option<rustls::RootCertStore>,
     pub alpn: Vec<Vec<u8>>,
@@ -39,11 +40,29 @@ pub(crate) unsafe fn bytes(buffer: &Buffer) -> &[u8] {
     }
 }
 
-unsafe fn view_bytes(view: &View) -> &[u8] {
+pub(crate) unsafe fn view_bytes(view: &View) -> &[u8] {
     if view.len == 0 {
         &[]
     } else {
         unsafe { std::slice::from_raw_parts(view.data, view.len) }
+    }
+}
+
+impl TlsRequest {
+    pub(crate) unsafe fn pin(&self) -> TlsTrust {
+        unsafe { (*self.state.cast::<HandshakeState>()).pin }
+    }
+
+    pub(crate) unsafe fn offers(&self, protocol: &[u8]) -> bool {
+        let mut encoded = unsafe { view_bytes(&self.alpn) };
+        while let Some((&len, tail)) = encoded.split_first() {
+            let (entry, rest) = tail.split_at(usize::from(len));
+            if entry == protocol {
+                return true;
+            }
+            encoded = rest;
+        }
+        false
     }
 }
 
@@ -132,7 +151,12 @@ unsafe fn connect(
                 return error;
             }
         };
-        if state.roots.is_none() && crate::os::owns(&provider) {
+        let tape = (*files).net_tape;
+        let source = match tape {
+            Some(tape) => crate::tape::source(&provider, tape.handle(key)).map(|(p, _)| p),
+            None => Some(provider),
+        };
+        if state.roots.is_none() && source.as_ref().is_some_and(crate::os::owns) {
             if crate::tasks::check_cancel(context, site) != 0 {
                 net::hirsel_core_socket_drop(context, key);
                 return CANCELLED;
@@ -177,20 +201,24 @@ unsafe fn connect(
         let mut request = Request {
             operation: TLS_CONNECT,
             mode: 0,
-            handle: key,
+            handle: tape.map_or(key, |tape| tape.handle(key)),
             path: (&raw mut tls).cast(),
             path_len: size_of::<TlsRequest>(),
             buffer: net::empty_buffer(),
             site,
         };
-        let outcome = hirsel_core_host(context, &provider, &mut request);
-        if outcome.status != 0 || outcome.error != IoError::OK {
-            if state.consumed {
+        let mut outcome = hirsel_core_host(context, &provider, &mut request);
+        if outcome.status == 0 && outcome.error == IoError::OK {
+            if let Some(tape) = tape {
                 let _commit = crate::sequencer::enter();
                 (*files).connected.remove(&key);
-            } else {
-                net::hirsel_core_socket_drop(context, key);
+                outcome = tape.carrier(outcome);
             }
+        } else if state.consumed {
+            let _commit = crate::sequencer::enter();
+            (*files).connected.remove(&key);
+        } else {
+            net::hirsel_core_socket_drop(context, key);
         }
         outcome
     }
@@ -209,10 +237,6 @@ unsafe fn prepare(
     bad_alpn: bool,
 ) -> Result<(net::Address, Provider, HandshakeState), Outcome> {
     unsafe {
-        let grant_provider = &*hirsel_core_capability_provider(context, n);
-        if (*files).net_tape.is_some() || crate::tape::owns(grant_provider) {
-            return Err(tls_failure(4, 0));
-        }
         let (address, provider) = (*files).connected.get(&key).copied().ok_or(DENIED)?;
         let name = std::str::from_utf8(view_bytes(&name))
             .ok()
@@ -234,7 +258,14 @@ unsafe fn prepare(
             }
             _ => return Err(tls_failure(3, 0)),
         };
-        let rules = &*(hirsel_core_capability_handle(context, n) as *const Rules);
+        let grant = hirsel_core_capability_handle(context, n);
+        let grant_provider = &*hirsel_core_capability_provider(context, n);
+        let rules = if crate::tape::owns(grant_provider) {
+            crate::tape::net_rules(grant_provider, grant)
+        } else {
+            grant
+        };
+        let rules = &*(rules as *const Rules);
         if !rules.as_slice().iter().filter(|rule| rule.address.dir == 2).any(|rule| {
             matches!(rule.decode(), Some(GrantRule::Tls(rule)) if rule.permits(&name, address.port, pin))
         }) {
@@ -244,6 +275,7 @@ unsafe fn prepare(
             address,
             provider,
             HandshakeState {
+                pin,
                 name: Some(name),
                 roots: store,
                 alpn,

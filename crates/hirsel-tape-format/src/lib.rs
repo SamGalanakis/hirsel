@@ -6,7 +6,7 @@
 //! block's xxh3-64 check, which covers the tape id, the block's flags, magic,
 //! sequence number and length, so a block from another tape or another place
 //! fails. Discovery is sequential from offset 0 and never resynchronises.
-use hirsel_core_net::Rule;
+use hirsel_core_net::{GrantRule, Rule, TlsRule, TlsTrust};
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
@@ -223,7 +223,7 @@ pub struct Header {
     pub chooser: u8,
     pub arg: Vec<u8>,
     /// Inert snapshot of the Run's configured Net rules. Empty for a Call.
-    pub net_rules: Vec<Rule>,
+    pub net_rules: Vec<GrantRule>,
 }
 /// The complete encoded header does not fit in block zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -244,7 +244,31 @@ fn read_net_rule(bytes: &[u8]) -> Rule {
     }
 }
 
-fn read_net_rules(bytes: &[u8]) -> Result<Vec<Rule>, Corrupt> {
+fn read_tls_rule(c: &mut Cursor<'_>) -> Result<TlsRule, Corrupt> {
+    let trust = match c.u8()? {
+        0 => TlsTrust::System,
+        1 => TlsTrust::Roots(c.fixed()?),
+        _ => return Err(Corrupt),
+    };
+    let first = u16::from_le_bytes(c.fixed()?);
+    let last = u16::from_le_bytes(c.fixed()?);
+    let count = u16::from_le_bytes(c.fixed()?);
+    let mut patterns = String::new();
+    for i in 0..count {
+        let len = usize::from(c.u8()?);
+        let pattern = std::str::from_utf8(c.take(len)?).map_err(|_| Corrupt)?;
+        if pattern.is_empty() || pattern.contains(',') {
+            return Err(Corrupt);
+        }
+        if i != 0 {
+            patterns.push(',');
+        }
+        patterns.push_str(pattern);
+    }
+    TlsRule::new(&patterns, first, last, trust).ok_or(Corrupt)
+}
+
+fn read_net_rules(bytes: &[u8]) -> Result<Vec<GrantRule>, Corrupt> {
     if bytes.is_empty() {
         return Ok(vec![]);
     }
@@ -253,12 +277,71 @@ fn read_net_rules(bytes: &[u8]) -> Result<Vec<Rule>, Corrupt> {
         return Err(Corrupt);
     }
     let count = usize::try_from(c.varint()?).map_err(|_| Corrupt)?;
-    let len = count.checked_mul(NET_RULE_LEN).ok_or(Corrupt)?;
-    let rules = c.take(len)?.chunks_exact(NET_RULE_LEN).map(read_net_rule);
-    if count == 0 || !c.done() || !rules.clone().all(Rule::valid) {
+    let mut rules = Vec::new();
+    for _ in 0..count {
+        if c.bytes.get(c.at) == Some(&2) {
+            c.u8()?;
+            rules.push(GrantRule::Tls(read_tls_rule(&mut c)?));
+        } else {
+            let rule = read_net_rule(c.take(NET_RULE_LEN)?);
+            if !rule.valid() {
+                return Err(Corrupt);
+            }
+            rules.push(GrantRule::Address(rule));
+        }
+    }
+    if count == 0 || !c.done() {
         return Err(Corrupt);
     }
-    Ok(rules.collect())
+    Ok(rules)
+}
+
+fn write_net_rules(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
+    if rules.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut out = vec![NET_KIND];
+    put_varint(&mut out, rules.len() as u64);
+    for rule in rules {
+        match rule {
+            GrantRule::Address(rule) => {
+                out.extend_from_slice(&[rule.dir, rule.family]);
+                out.extend_from_slice(&rule.hi.to_le_bytes());
+                out.extend_from_slice(&rule.lo.to_le_bytes());
+                out.push(rule.bits);
+                out.extend_from_slice(&rule.first.to_le_bytes());
+                out.extend_from_slice(&rule.last.to_le_bytes());
+            }
+            GrantRule::Tls(rule) => {
+                out.push(2);
+                match rule.trust() {
+                    TlsTrust::System => out.push(0),
+                    TlsTrust::Roots(digest) => {
+                        out.push(1);
+                        out.extend_from_slice(&digest);
+                    }
+                }
+                let (first, last) = rule.ports();
+                out.extend_from_slice(&first.to_le_bytes());
+                out.extend_from_slice(&last.to_le_bytes());
+                let text = rule.pattern_text();
+                let patterns = text.split(',');
+                let count = u16::try_from(patterns.clone().count()).map_err(|_| HeaderTooLarge)?;
+                out.extend_from_slice(&count.to_le_bytes());
+                for pattern in patterns {
+                    out.push(u8::try_from(pattern.len()).map_err(|_| HeaderTooLarge)?);
+                    out.extend_from_slice(pattern.as_bytes());
+                    if out.len() > MAX_LEN {
+                        return Err(HeaderTooLarge);
+                    }
+                }
+            }
+        }
+        if out.len() > MAX_LEN {
+            return Err(HeaderTooLarge);
+        }
+    }
+    Ok(out)
 }
 
 fn varint_len(value: usize) -> usize {
@@ -285,16 +368,8 @@ impl Header {
     }
 
     pub fn encode(&self, revision: [u8; 32]) -> Result<Vec<u8>, HeaderTooLarge> {
-        let count = self.net_rules.len();
-        let grants_len = if count == 0 {
-            0
-        } else {
-            count
-                .checked_mul(NET_RULE_LEN)
-                .and_then(|len| len.checked_add(1 + varint_len(count)))
-                .ok_or(HeaderTooLarge)?
-        };
-        let len = Self::encoded_len(self.identity.len(), self.arg.len(), grants_len)?;
+        let grants = write_net_rules(&self.net_rules)?;
+        let len = Self::encoded_len(self.identity.len(), self.arg.len(), grants.len())?;
         let mut out = Vec::with_capacity(len);
         out.extend_from_slice(&FORMAT.to_le_bytes());
         out.push(self.kind);
@@ -307,19 +382,7 @@ impl Header {
         out.extend_from_slice(&self.bound.to_le_bytes());
         out.push(self.chooser);
         put_bytes(&mut out, &self.arg);
-        put_varint(&mut out, grants_len as u64);
-        if count != 0 {
-            out.push(NET_KIND);
-            put_varint(&mut out, count as u64);
-            for rule in &self.net_rules {
-                out.extend_from_slice(&[rule.dir, rule.family]);
-                out.extend_from_slice(&rule.hi.to_le_bytes());
-                out.extend_from_slice(&rule.lo.to_le_bytes());
-                out.push(rule.bits);
-                out.extend_from_slice(&rule.first.to_le_bytes());
-                out.extend_from_slice(&rule.last.to_le_bytes());
-            }
-        }
+        put_bytes(&mut out, &grants);
         Ok(out)
     }
     pub fn decode(payload: &[u8]) -> Result<Self, Corrupt> {
@@ -590,7 +653,10 @@ pub fn writes(op: u8) -> bool {
 }
 pub fn carries_payload(op: u8) -> bool {
     use crate::op::*;
-    matches!(op, READ | MKDTEMP | RANDOM | LISTEN | ACCEPT | RECV_BOUNDED)
+    matches!(
+        op,
+        READ | MKDTEMP | RANDOM | LISTEN | ACCEPT | RECV_BOUNDED | TLS_CONNECT
+    )
 }
 
 /// An outcome as the tape stores it. `value` is stored as given: the recorder
@@ -602,7 +668,7 @@ pub struct Out {
     /// Error tag and code, present exactly when `status` is ERROR.
     pub error: (u8, u64),
     pub written: u64,
-    /// Input bytes, a temporary-directory suffix, or a socket address.
+    /// Input bytes, a temporary-directory suffix, a socket address, or TLS handshake data.
     pub payload: Vec<u8>,
 }
 impl Out {
@@ -658,6 +724,15 @@ impl Out {
                 } else if !b.is_empty() {
                     return Err(Corrupt);
                 }
+            }
+            if op == op::TLS_CONNECT
+                && if status == OK {
+                    !(32..=32 + 255).contains(&b.len())
+                } else {
+                    !b.is_empty()
+                }
+            {
+                return Err(Corrupt);
             }
             b.to_vec()
         } else {

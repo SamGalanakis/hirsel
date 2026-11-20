@@ -436,6 +436,7 @@ dependencies = [
  "mimalloc",
  "object",
  "rustc-hash",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

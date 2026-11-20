@@ -239,10 +239,10 @@ unsafe extern "C" fn invoke(
             if net != 0 {
                 let handle = entry::hirsel_core_capability_handle(context, net);
                 for rule in (*(handle as *const crate::net::Rules)).as_slice() {
-                    if rule.address.dir == 2 {
-                        return stopped(run, "Tls Net rules require TLS tape support");
-                    }
-                    net_rules.push(rule.address);
+                    let Some(rule) = rule.decode() else {
+                        return stopped(run, Fault::Corrupt);
+                    };
+                    net_rules.push(rule);
                 }
             }
         }
@@ -314,14 +314,8 @@ unsafe extern "C" fn invoke(
             let label = b"replay: revision differs\n";
             crate::os::diagnostic(run.stderr, label.as_ptr(), label.len());
         }
-        let replay_net_rules = (!startup.net_rules.is_empty()).then(|| {
-            crate::net::RulesStorage::new(
-                startup
-                    .net_rules
-                    .into_iter()
-                    .map(hirsel_core_net::GrantRule::Address),
-            )
-        });
+        let replay_net_rules = (!startup.net_rules.is_empty())
+            .then(|| crate::net::RulesStorage::new(startup.net_rules));
         let files = (*context).host_files;
         for i in 0..run.requirements_len {
             let req = &*run.requirements.add(i);
@@ -351,7 +345,7 @@ unsafe extern "C" fn invoke(
                         entry::hirsel_core_capability_handle(context, source),
                     )
                 } else {
-                    (NO_HOST, 0)
+                    (*(*config).provider, 0)
                 };
                 match tape.on_tape(req.kind, (provider, handle)) {
                     Ok((p, h)) => {

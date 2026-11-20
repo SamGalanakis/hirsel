@@ -26,6 +26,10 @@
 use crate::net::Address;
 use crate::provider::Buffer;
 use hirsel_core_net::{Crossing, Sockets};
+#[path = "unit_memory.rs"]
+mod memory;
+pub(crate) use memory::Memory;
+use memory::UnitStack;
 use std::{
     cell::Cell,
     collections::{HashMap, VecDeque},
@@ -995,7 +999,6 @@ const HANDOFF_PORT: u16 = 7;
 const ROLE_INITIAL: u32 = 0;
 const ROLE_SESSION: u32 = 1;
 const ROLE_CHILD: u32 = 2;
-const USTACK: usize = 1 << 20;
 const WAKE_TAG: u64 = u64::MAX;
 const FRONT_TAG: u64 = u64::MAX - 1;
 
@@ -1046,7 +1049,6 @@ enum After {
     Run,
     Wait(Option<u64>),
     Yield,
-    Retire,
     Done,
 }
 
@@ -1055,7 +1057,7 @@ pub(crate) struct Unit {
     sp: UnsafeCell<*mut u8>,
     /// The running worker's host stack slot.
     host: UnsafeCell<*mut *mut u8>,
-    stack: (usize, usize),
+    stack: UnsafeCell<Option<UnitStack>>,
     state: AtomicU8,
     inside: AtomicBool,
     after: Cell<After>,
@@ -1133,9 +1135,7 @@ struct Pool {
     lifo_runs: Vec<AtomicU32>,
     lifo_on: bool,
     injector: Mutex<VecDeque<UP>>,
-    retirements: Mutex<VecDeque<UP>>,
-    retirement_ready: AtomicBool,
-    retirement_owner: Mutex<()>,
+    memory: Memory,
     /// Units in the local queues and the injector. The LIFO slots are not
     /// counted: only their own worker takes them.
     queued: AtomicUsize,
@@ -1168,6 +1168,13 @@ struct Pool {
 static POOL: OnceLock<Pool> = OnceLock::new();
 fn pool() -> &'static Pool {
     POOL.get().unwrap()
+}
+pub(crate) fn memory() -> Option<&'static Memory> {
+    if !untied() {
+        return None;
+    }
+    let p = pool();
+    (!p.stop.load(Ordering::Acquire)).then_some(&p.memory)
 }
 struct RunFn(&'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync));
 static RUN: OnceLock<RunFn> = OnceLock::new();
@@ -1237,29 +1244,13 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
         views.push(crate::process::View { data: e.as_ptr(), len: e.len() });
     }
     let config = crate::entry::OsConfig { args: views.as_ptr(), args_len: views.len(), ..*base };
-    // SAFETY: a fresh private mapping; its lowest page is the guard.
-    let (lo, len) = unsafe {
-        let page = 4096;
-        let len = USTACK + page;
-        let raw = libc::mmap(
-            std::ptr::null_mut(),
-            len,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
-            -1,
-            0,
-        );
-        if raw == libc::MAP_FAILED {
-            crate::process::stop(b"UnitStack");
-        }
-        libc::mprotect(raw, page, libc::PROT_NONE);
-        (raw.addr(), len)
-    };
+    let stack = p.memory.take_unit_stack();
+    let top = stack.top();
     let u: &'static Unit = Box::leak(Box::new(Unit {
         id,
         sp: UnsafeCell::new(std::ptr::null_mut()),
         host: UnsafeCell::new(std::ptr::null_mut()),
-        stack: (lo, len),
+        stack: UnsafeCell::new(Some(stack)),
         state: AtomicU8::new(QUEUED),
         inside: AtomicBool::new(false),
         after: Cell::new(After::Run),
@@ -1285,7 +1276,7 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
     // SAFETY: the frame is written at the top of the unit's own stack.
     unsafe {
         let words = hirsel_stack::initial_frame(unit_entry, (u as *const Unit).cast_mut().cast(), std::ptr::null_mut());
-        let start = (lo + len - 16 - size_of_val(&words)) as *mut u8;
+        let start = top.sub(16 + size_of_val(&words));
         std::ptr::copy_nonoverlapping(words.as_ptr().cast::<u8>(), start, size_of_val(&words));
         *u.sp.get() = start;
     }
@@ -1341,12 +1332,6 @@ fn leave(after: After) {
         u.after.set(after);
         hirsel_stack::switch(u.sp.get(), **u.host.get());
     }
-}
-
-/// The root task ended. Serialize the remaining stack and heap teardown
-/// while the other workers keep dispatching units.
-pub(crate) fn retire() {
-    leave(After::Retire);
 }
 
 /// The running unit has nothing runnable: park until a wake or `deadline`.
@@ -1691,9 +1676,11 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
         u.inside.store(false, Ordering::SeqCst);
         match after {
             After::Done => {
-                libc::munmap(u.stack.0 as *mut libc::c_void, u.stack.1);
                 WORST.fetch_max(u.status.load(Ordering::Relaxed), Ordering::Relaxed);
                 u.state.store(DONE, Ordering::SeqCst);
+                // The terminal switch returned to the host stack. DONE
+                // rejects further wakes, and nothing can resume this stack.
+                p.memory.put_unit_stack((*u.stack.get()).take().unwrap());
                 if p.live.fetch_sub(1, Ordering::SeqCst) == 1 {
                     p.stop.store(true, Ordering::SeqCst);
                     let parked = std::mem::take(&mut *p.idle.lock().unwrap());
@@ -1703,13 +1690,6 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                     }
                     write_wake(p);
                 }
-            }
-            After::Retire => {
-                u.state.swap(QUEUED, Ordering::SeqCst);
-                mark_queued(p, u);
-                let mut pending = p.retirements.lock().unwrap();
-                pending.push_back(up);
-                p.retirement_ready.store(true, Ordering::Release);
             }
             After::Yield => {
                 u.state.swap(QUEUED, Ordering::SeqCst);
@@ -1745,19 +1725,6 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
     }
 }
 
-/// A worker that publishes a retirement checks this queue again on its next
-/// iteration. If another worker owns teardown, that worker checks it on exit.
-/// The other workers neither wait for that owner nor count retirees as work
-/// they can steal.
-#[cold]
-fn take_retirement(p: &Pool) -> Option<(UP, std::sync::MutexGuard<'_, ()>)> {
-    let owner = p.retirement_owner.try_lock().ok()?;
-    let mut pending = p.retirements.lock().unwrap();
-    let next = pending.pop_front();
-    p.retirement_ready.store(!pending.is_empty(), Ordering::Release);
-    next.map(|up| (up, owner))
-}
-
 fn worker_main(p: &'static Pool, ix: usize) {
     crate::fiber::arm();
     WORKER_IX.set(ix);
@@ -1766,16 +1733,6 @@ fn worker_main(p: &'static Pool, ix: usize) {
     // A wake handed this worker the search role (already counted).
     let mut handed = false;
     loop {
-        if p.retirement_ready.load(Ordering::Acquire)
-            && let Some((u, _owner)) = take_retirement(p)
-        {
-            if std::mem::take(&mut handed) {
-                p.searching.fetch_sub(1, Ordering::SeqCst);
-            }
-            // SAFETY: the retirement queue delivered exclusive entry.
-            unsafe { run_unit(p, ix, u, &mut host) };
-            continue;
-        }
         if !handed && let Some(u) = find(p, ix) {
             // SAFETY: a dequeued unit.
             unsafe { run_unit(p, ix, u, &mut host) };
@@ -1902,9 +1859,7 @@ fn launch_untied(
         lifo_runs: (0..w).map(|_| AtomicU32::new(0)).collect(),
         lifo_on: env_u64("HIRSEL_UNTIED_LIFO", 1) != 0,
         injector: Mutex::new(VecDeque::new()),
-        retirements: Mutex::new(VecDeque::new()),
-        retirement_ready: AtomicBool::new(false),
-        retirement_owner: Mutex::new(()),
+        memory: Memory::new(),
         queued: AtomicUsize::new(0),
         searching: AtomicUsize::new(0),
         idle: Mutex::new(Vec::with_capacity(w)),
@@ -1936,6 +1891,7 @@ fn launch_untied(
     let _ = BASE.set(Base(*input));
     UNTIED_ON.store(true, Ordering::SeqCst);
     let p = pool();
+    let memory_thread = p.memory.start();
     for i in 0..k {
         create_unit(i as u32, ROLE_INITIAL);
     }
@@ -1948,12 +1904,14 @@ fn launch_untied(
                 .unwrap();
         }
     });
+    drop(memory_thread);
     // Every recording block is in its file before the run reports.
     crate::tape::writer::flush();
     if let Some(waits) = &p.queue_waits {
         waits.report();
     }
     if std::env::var_os("HIRSEL_XSTATS").is_some() {
+        p.memory.report();
         let g = |i: usize| USTATS[i].load(Ordering::Relaxed);
         eprintln!(
             "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} xnotify={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} msgs={} bytes={} full_waits={} unit_epoll_waits={} lifo={} tape_writes={} tape_bytes={} tape_payload={} tape_skipped={} tape_worker_ns={} tape_truncated={} tape_writer_ns={} tape_writer_calls={} tape_write_failed={}",

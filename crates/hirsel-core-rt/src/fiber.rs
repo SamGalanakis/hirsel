@@ -12,7 +12,7 @@
 use crate::retention::{RETENTION, Retained};
 use std::{cell::Cell, ptr::NonNull, sync::OnceLock};
 const RESERVE: usize = 8 << 20;
-const COMMIT: usize = 64 << 10;
+pub(crate) const COMMIT: usize = 64 << 10;
 const GROW: usize = 256 << 10;
 /// Bytes kept at the top for the low-water word; a multiple of 16.
 const HEADER: usize = 16;
@@ -149,6 +149,12 @@ impl Stack {
     fn retained(&self) -> usize {
         self.len - RESERVE + COMMIT
     }
+    /// Upper bound on resident bytes while this idle mapping is cached.
+    pub(crate) fn committed_bytes(&self) -> usize {
+        let top = self.top();
+        // SAFETY: this stack is idle and its low-water word is writable.
+        top - unsafe { *low_word(top) } + self.len - RESERVE
+    }
     /// Return a stack that grew to its first `COMMIT` bytes. A stack that never
     /// left them costs one load and compare, inlined into recycling.
     fn trim(&self) {
@@ -200,6 +206,9 @@ impl Drop for Stack {
 #[derive(Default)]
 pub(crate) struct Stock {
     idle: Vec<(Stack, Retained<'static>)>,
+    // Repeated calls from one live unit reuse its last stack without locking
+    // the pool. The unit gives it back with the rest of its task storage.
+    recent: Option<Stack>,
 }
 
 /// Worker stock moves this many idle stacks to or from the pool's spare list.
@@ -216,10 +225,19 @@ unsafe impl Send for Stack {}
 
 impl Stock {
     pub(crate) fn take(&mut self) -> Stack {
+        if let Some(memory) = crate::units::memory() {
+            return self.recent.take().unwrap_or_else(|| memory.take_task_stack());
+        }
         self.idle.pop().map_or_else(Stack::new, |(stack, _)| stack)
     }
 
     pub(crate) fn recycle(&mut self, stack: Stack) {
+        if let Some(memory) = crate::units::memory() {
+            if let Some(previous) = self.recent.replace(stack) {
+                memory.put_task_stack(previous);
+            }
+            return;
+        }
         stack.trim();
         if let Some(held) = RETENTION.retain(stack.retained()) {
             self.idle.push((stack, held));
@@ -247,13 +265,23 @@ impl Stock {
     }
 }
 
+impl Drop for Stock {
+    fn drop(&mut self) {
+        if let Some(stack) = self.recent.take()
+            && let Some(memory) = crate::units::memory()
+        {
+            memory.put_task_stack(stack);
+        }
+    }
+}
+
 struct Alternate {
     stack: Stack,
     previous: libc::stack_t,
 }
 impl Alternate {
     fn new() -> Self {
-        let stack = Stack::new();
+        let stack = crate::units::memory().map_or_else(Stack::new, |memory| memory.map(Stack::new));
         // SAFETY: install owned usable pages as the current thread's signal stack.
         unsafe {
             let mut previous = std::mem::zeroed();

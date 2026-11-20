@@ -3823,9 +3823,6 @@ impl RunPtr {
                 CURRENT.set(previous);
                 match (*task).state {
                     State::Ended => {
-                        if task == root.0 && worker.is_null() && crate::units::running().is_some() {
-                            crate::units::retire();
-                        }
                         (*worker_stock(self.0)).recycle((*task).stack.take().unwrap());
                     }
                     State::Provider if (*run).wake_operation(task, Wake::Parked) => direct = task,

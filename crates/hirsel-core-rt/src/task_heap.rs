@@ -22,7 +22,7 @@
 //! heap's retained dedicated payload never takes its dedicated footprint
 //! (live plus retained) above its peak live dedicated bytes, so a program
 //! that repeats the same work reuses the same resident pages.
-mod slabs;
+pub(crate) mod slabs;
 
 use crate::{abi_layout::own_prefix, limit::Payer};
 use std::cell::Cell;
@@ -31,7 +31,7 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-const SLAB: usize = 64 * 1024;
+pub(crate) const SLAB: usize = 64 * 1024;
 const MIN_PAGE_BYTES: usize = 4096;
 const GROWTH_RESERVE_FACTOR: usize = 8;
 const MIN_GROWTH_RESERVATION: usize = 256 * 1024;
@@ -242,7 +242,7 @@ struct Spread {
 }
 
 enum Backing {
-    Slab { _allocation: slabs::Slab },
+    Slab(slabs::Slab),
     Dedicated(Mapping),
 }
 
@@ -250,7 +250,7 @@ impl Backing {
     fn dedicated(&self) -> &Mapping {
         match self {
             Self::Dedicated(mapping) => mapping,
-            Self::Slab { .. } => unreachable!("dedicated page has a slab backing"),
+            Self::Slab(_) => unreachable!("dedicated page has a slab backing"),
         }
     }
 }
@@ -308,12 +308,7 @@ impl Page {
         let slab = class.fits_slab();
         let (backing, start) = if slab {
             let (allocation, start) = slabs::Slab::allocate(Arc::as_ptr(heap).addr());
-            (
-                Backing::Slab {
-                    _allocation: allocation,
-                },
-                start,
-            )
+            (Backing::Slab(allocation), start)
         } else {
             let headroom = if own_prefix(class.kind) == 0 {
                 0
@@ -374,9 +369,7 @@ impl Page {
         unsafe {
             page.as_ptr().write(Self {
                 heap: Arc::clone(heap),
-                backing: Backing::Slab {
-                    _allocation: allocation,
-                },
+                backing: Backing::Slab(allocation),
                 payer: payer.into(),
                 key: key.into(),
                 slots: Slots {
@@ -458,7 +451,14 @@ impl Page {
                 page.as_ptr().read()
             }
         };
-        drop(page.backing);
+        if let Some(memory) = crate::units::memory() {
+            match page.backing {
+                Backing::Slab(slab) => memory.put_slab(slab),
+                Backing::Dedicated(mapping) => memory.put_page(mapping),
+            }
+        } else {
+            drop(page.backing);
+        }
         drop(page.heap);
     }
 }
@@ -864,7 +864,7 @@ impl DedicatedCache {
         self.demand -= stride;
         self.retained_bytes += bytes;
         self.retained.push_back(page);
-        !std::mem::replace(&mut self.listed, true)
+        !crate::units::untied() && !std::mem::replace(&mut self.listed, true)
     }
 
     fn remove_retained(&mut self, index: usize) -> PagePointer {
@@ -1409,7 +1409,7 @@ unsafe fn extend(state: &mut Locked<'_>, page: PagePointer, class: Class) {
             push_free(slots, slots.first.add(index * stride));
         }
         slots.bump += count;
-        if class.fits_slab() {
+        if class.fits_slab() && !crate::units::untied() {
             let spread = &mut *page.as_ref().spread.get();
             let end = region + slots.bump * stride - header;
             if end > spread.touched {
@@ -1583,7 +1583,7 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
             return;
         }
         push_free(slots, payload);
-        if (*page.as_ref().spread.get()).spread && slots.live <= slots.watch {
+        if (*page.as_ref().spread.get()).spread && slots.live <= slots.watch && !crate::units::untied() {
             // The owner trims its listed pages when it parks. Another task's
             // release may come after that park, so it trims here.
             if ptr::eq(crate::tasks::current_heap(), state.0) {
@@ -1624,9 +1624,10 @@ unsafe fn release_slow(mut state: Locked<'_>, page: PagePointer, payload: NonNul
     }
 }
 
-struct Mapping {
+pub(crate) struct Mapping {
     base: NonNull<u8>,
     len: usize,
+    prefix: usize,
     // Dedicated payload bytes made writable. A live slot's sole owner or the
     // empty cache under the heap mutex can update this extent.
     writable: Cell<usize>,
@@ -1634,6 +1635,10 @@ struct Mapping {
     // any growth in place. Updated by the allocating heap under its mutex.
     born: Cell<usize>,
 }
+// SAFETY: an idle mapping is uniquely owned. Moving it preserves the address;
+// only the owner can unmap it or change its writable extent.
+unsafe impl Send for Mapping {}
+
 impl Mapping {
     const WRITABLE: libc::c_int = libc::PROT_READ | libc::PROT_WRITE;
 
@@ -1657,6 +1662,22 @@ impl Mapping {
         align: usize,
         headroom: usize,
     ) -> Option<(Self, NonNull<u8>)> {
+        let mapping = if let Some(memory) = crate::units::memory() {
+            let len = space.checked_add(headroom)?;
+            memory.take_page(|mapping| {
+                mapping.len == len && mapping.prefix == headroom && mapping.writable.get() >= bytes
+                    && (mapping.base.addr().get() + headroom) & (align - 1) == 0
+            }).or_else(|| memory.map(move || Self::map_aligned(bytes, space, align, headroom)))?
+        } else {
+            Self::map_aligned(bytes, space, align, headroom)?
+        };
+        // SAFETY: the complete mapping contains this requested prefix.
+        let payload = unsafe { mapping.base.add(headroom) };
+        mapping.born.set(0);
+        Some((mapping, payload))
+    }
+
+    fn map_aligned(bytes: usize, space: usize, align: usize, headroom: usize) -> Option<Self> {
         let len = space.checked_add(headroom)?;
         let extra = if align > page_bytes() { align } else { 0 };
         let total = len.checked_add(extra)?;
@@ -1703,6 +1724,7 @@ impl Mapping {
             let mapping = Self {
                 base,
                 len,
+                prefix: headroom,
                 writable: Cell::new(bytes),
                 born: Cell::new(0),
             };
@@ -1711,8 +1733,12 @@ impl Mapping {
             {
                 return None;
             }
-            Some((mapping, payload))
+            Some(mapping)
         }
+    }
+
+    pub(crate) fn committed_bytes(&self) -> usize {
+        self.prefix + self.writable.get()
     }
 
     fn headroom(&self, payload: NonNull<u8>) -> usize {

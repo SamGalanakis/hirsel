@@ -156,7 +156,15 @@ fn run() {
 /// errno of a duplicate or helper start that failed before any syscall.
 pub(crate) fn submit(fd: RawFd, directory: bool, token: u64) -> Step {
     check_fork();
-    if let Err(errno) = start() {
+    let started = if STARTED.load(Ordering::Acquire) {
+        Ok(())
+    } else if let Some(memory) = crate::units::memory() {
+        // Starting the helpers can map their OS thread stacks.
+        memory.map(start)
+    } else {
+        start()
+    };
+    if let Err(errno) = started {
         return done(errno);
     }
     // SAFETY: fd is the program's live descriptor for the request's handle.

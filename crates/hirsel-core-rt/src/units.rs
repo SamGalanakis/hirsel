@@ -1025,6 +1025,7 @@ const S_CREATE_NS: usize = 10;
 const S_READY_TO_PARK_NS: usize = 11;
 const S_GPOLL_EVENTS: usize = 12;
 const S_NOTIFIED_REQUEUE: usize = 13;
+const S_LIFO: usize = 14;
 fn bump(i: usize) {
     USTATS[i].fetch_add(1, Ordering::Relaxed);
 }
@@ -1111,6 +1112,12 @@ struct Pool {
     w: usize,
     k: u32,
     locals: Vec<Mutex<VecDeque<UP>>>,
+    /// Per worker: the unit a unit running there last woke. Not stealable;
+    /// run next by its worker, at most LIFO_RUNS times in a row (as Tokio's
+    /// LIFO slot), so a request and its reply stay on one core.
+    lifo: Vec<AtomicPtr<Unit>>,
+    lifo_runs: Vec<AtomicU32>,
+    lifo_on: bool,
     injector: Mutex<VecDeque<UP>>,
     queued: AtomicUsize,
     searching: AtomicUsize,
@@ -1369,8 +1376,19 @@ pub(crate) fn attach_epoll(fd: i32) {
     unsafe { libc::epoll_ctl(pool().gep, libc::EPOLL_CTL_ADD, fd, &mut ev) };
 }
 
+const LIFO_RUNS: u32 = 3;
 fn enqueue(p: &Pool, u: &Unit) {
     let ix = worker_ix();
+    if ix < p.w && p.lifo_on && !cur().is_null() {
+        // Woken by the unit running on this worker: it runs here next.
+        p.queued.fetch_add(1, Ordering::SeqCst);
+        let prev = p.lifo[ix].swap((u as *const Unit).cast_mut(), Ordering::AcqRel);
+        if !prev.is_null() {
+            p.locals[ix].lock().unwrap().push_back(UP(prev));
+            notify_worker(p);
+        }
+        return;
+    }
     if ix < p.w {
         p.locals[ix].lock().unwrap().push_back(UP(u));
     } else {
@@ -1492,6 +1510,16 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
             return None;
         }
     }
+    let l = p.lifo[ix].swap(std::ptr::null_mut(), Ordering::AcqRel);
+    if !l.is_null() {
+        if p.lifo_runs[ix].load(Ordering::Relaxed) < LIFO_RUNS {
+            p.lifo_runs[ix].fetch_add(1, Ordering::Relaxed);
+            bump(S_LIFO);
+            return Some(UP(l));
+        }
+        p.locals[ix].lock().unwrap().push_back(UP(l));
+    }
+    p.lifo_runs[ix].store(0, Ordering::Relaxed);
     if let Some(u) = p.locals[ix].lock().unwrap().pop_front() {
         return Some(u);
     }
@@ -1688,6 +1716,9 @@ fn launch_untied(
         w,
         k: k as u32,
         locals: (0..w).map(|_| Mutex::new(VecDeque::new())).collect(),
+        lifo: (0..w).map(|_| AtomicPtr::new(std::ptr::null_mut())).collect(),
+        lifo_runs: (0..w).map(|_| AtomicU32::new(0)).collect(),
+        lifo_on: env_u64("HIRSEL_UNTIED_LIFO", 1) != 0,
         injector: Mutex::new(VecDeque::new()),
         queued: AtomicUsize::new(0),
         searching: AtomicUsize::new(0),
@@ -1730,7 +1761,7 @@ fn launch_untied(
     if std::env::var_os("HIRSEL_XSTATS").is_some() {
         let g = |i: usize| USTATS[i].load(Ordering::Relaxed);
         eprintln!(
-            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} xnotify={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} msgs={} bytes={} full_waits={} unit_epoll_waits={}",
+            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} xnotify={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} msgs={} bytes={} full_waits={} unit_epoll_waits={} lifo={}",
             w,
             g(S_CREATED),
             g(S_RESUMES),
@@ -1751,6 +1782,7 @@ fn launch_untied(
             STATS[1].load(Ordering::Relaxed),
             STATS[3].load(Ordering::Relaxed),
             hirsel_core_net::EPOLL_WAITS.load(Ordering::Relaxed),
+            g(S_LIFO),
         );
     }
     if crate::sequencer::ACQUIRES.load(Ordering::Relaxed) != 0 {

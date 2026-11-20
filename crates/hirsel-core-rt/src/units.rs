@@ -673,6 +673,11 @@ pub(crate) unsafe fn attempt(
 
 // ------------------------------------------------------------------ launch
 
+/// The calling thread's unit id (0 outside units).
+pub(crate) fn unit() -> u32 {
+    UNIT.get()
+}
+
 pub(crate) fn spin() -> bool {
     static SPIN: OnceLock<bool> = OnceLock::new();
     *SPIN.get_or_init(|| std::env::var_os("HIRSEL_XSPIN").is_some())

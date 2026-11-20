@@ -453,6 +453,39 @@ pub unsafe extern "C" fn hirsel_core_os_run_taped(
     identity: *const libc::c_char,
     revision: *const [u8; 32],
 ) -> u8 {
+    // mc-units-proto: under HIRSEL_UNITS a recording launch runs one taped
+    // run per unit, each recording to its own tape, `<path>.u<unit>`.
+    if mode == 0
+        && let Some(k) = crate::units::count()
+    {
+        struct Shared(*const View, *const SourceTable, *const libc::c_char, *const libc::c_char, *const [u8; 32]);
+        // SAFETY: the caller pins every operand for the whole launch.
+        unsafe impl Sync for Shared {}
+        let shared = Shared(names, sources, path, identity, revision);
+        // SAFETY: each unit borrows the pinned operands until its run returns.
+        return crate::units::launch(k, unsafe { &*input }, |config| unsafe {
+            let shared = &shared;
+            let mut unit_path = CStr::from_ptr(shared.2).to_bytes().to_vec();
+            unit_path.extend_from_slice(format!(".u{}", crate::units::unit()).as_bytes());
+            unit_path.push(0);
+            run_taped_one(config, shared.0, shared.1, entry, unit_path.as_ptr().cast(), mode, shared.3, shared.4)
+        });
+    }
+    // SAFETY: forwarded unchanged.
+    unsafe { run_taped_one(input, names, sources, entry, path, mode, identity, revision) }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn run_taped_one(
+    input: *const OsConfig,
+    names: *const View,
+    sources: *const SourceTable,
+    entry: Entry,
+    path: *const libc::c_char,
+    mode: u64,
+    identity: *const libc::c_char,
+    revision: *const [u8; 32],
+) -> u8 {
     // SAFETY: every pointer is a borrowed generated startup operand.
     unsafe {
         let input = &*input;

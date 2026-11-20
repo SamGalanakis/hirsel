@@ -21,7 +21,8 @@ def main():
                         "LD_LIBRARY_PATH": str(llvm / "lib")}
     net = ("Net=Listen 127.77.0.0/16 0-65535;Connect 127.77.0.0/16 0-65535;"
            "Listen 127.0.0.1/32 0-65535;Connect 127.0.0.1/32 0-65535")
-    cmd = [ROOT / "tools/capped", compiler, "build", "--inputs", inputs,
+    record = os.environ.get("UNITS_RECORD")
+    cmd = [ROOT / "tools/capped", compiler, "run" if record else "build", "--inputs", inputs,
            "--entry", f"multicore@1/{case}/main", "--backend", "llvm", "--release",
            "--runtime", runtime, "--cc", llvm / "bin/clang", "--store", out / "store",
            "--dir", os.environ.get("UNITS_DIR", str(out)), "--grant", "Stdout", "--grant", "Tasks", "--grant", "Clock",
@@ -29,6 +30,11 @@ def main():
            "--debug-lines", "on", "--json", "-o", out / case]
     for g in grants:
         cmd += ["--grant", g]
+    if record:
+        # Build a recording executable (run --record), then let it run once
+        # with the given arguments; later runs reuse the executable from a
+        # fresh working directory with the relative tape path.
+        cmd += ["--record", record, "--"] + os.environ.get("UNITS_RECORD_ARGS", "").split()
     r = subprocess.run(list(map(str, cmd)), env=env, capture_output=True, text=True)
     print(r.stdout[-6000:]); print(r.stderr[-6000:])
     sys.exit(r.returncode)

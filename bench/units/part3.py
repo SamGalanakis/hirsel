@@ -48,11 +48,15 @@ def side_cmd(side, par, rec, k=None):
         cpus = SERVER if w <= 8 else "0-3,8-11,16-19,24-27"
         return [exe] + base + ["0"], env, cpus, 1
     if side.startswith("S3"):
-        k = int(side.split("k")[1])
+        # S3kK: K session units plus the service unit, each its own thread,
+        # free to move within the server CPUs. S3kKpin pins unit i to one CPU.
+        pinned = side.endswith("pin")
+        k = int(side.split("k")[1].removesuffix("pin"))
         units = k + 1
-        pins = SERVER_LIST[:k] + ([SERVER_LIST[k]] if k < len(SERVER_LIST) else [])
-        env |= {"HIRSEL_UNITS": str(units), "HIRSEL_UNIT_CPUS": ",".join(map(str, pins)),
-                "HIRSEL_XRING": "65536"}
+        env |= {"HIRSEL_UNITS": str(units), "HIRSEL_XRING": "65536"}
+        if pinned:
+            pins = SERVER_LIST[:k] + ([SERVER_LIST[k]] if k < len(SERVER_LIST) else [])
+            env["HIRSEL_UNIT_CPUS"] = ",".join(map(str, pins))
         return [exe] + base + ["1"], env, SERVER, k
     if side.startswith("tokio"):
         w = int(side.split("w")[1])
@@ -247,7 +251,7 @@ def plan(name):
         return [dict(f=0.0, variant="base", rec=False)], ["S1w8", "S3k7", "tokiow8"]
     if name == "sweep":
         cells = [dict(f=f, variant="base", rec=False) for f in (0.0, 1.0)]
-        return cells, ["S1w1", "S1w2", "S1w4", "S1w8", "S3k4", "S3k7", "S3k8", "tokiow8"]
+        return cells, ["S1w1", "S1w2", "S1w4", "S1w8", "S3k4", "S3k7", "S3k8", "S3k7pin", "tokiow8"]
     if name == "cells":
         cells = []
         for variant in ("base", "skew", "par"):

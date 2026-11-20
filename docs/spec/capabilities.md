@@ -187,8 +187,8 @@ A **tape** is a core resource, `Tape`, that records or replays the provider oper
 through the capabilities it substitutes. `tape.open(d, name, mode, header)` opens the tape
 file `name` in the directory `d`, to record, to replay, or to replay across: a replay that
 also accepts a recording made by another code revision, which `tape.across(t)` reports.
-`tape.clock`, `tape.dir`, `tape.stdout`, `tape.stderr`, `tape.tasks` and `tape.args` each take a tape and a capability and return
-a **substitute**: a capability of the same type whose every operation, and every operation
+`tape.clock`, `tape.dir`, `tape.stdout`, `tape.stderr`, `tape.tasks` and `tape.args` each
+take a tape and a capability and return a **substitute**: a capability of the same type whose every operation, and every operation
 on a handle made through it, reaches the tape at its issue and at its delivery (CAP-8). A
 substitute differs from its source only by the values its operations return (CAP-5), so
 code that takes the capability runs unchanged on either.

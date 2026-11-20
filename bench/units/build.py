@@ -24,8 +24,8 @@ def main():
     cmd = [ROOT / "tools/capped", compiler, "build", "--inputs", inputs,
            "--entry", f"multicore@1/{case}/main", "--backend", "llvm", "--release",
            "--runtime", runtime, "--cc", llvm / "bin/clang", "--store", out / "store",
-           "--dir", out, "--grant", "Stdout", "--grant", "Tasks", "--grant", "Clock",
-           "--grant", "Stderr", "--grant", net, "--limit", "1073741824",
+           "--dir", os.environ.get("UNITS_DIR", str(out)), "--grant", "Stdout", "--grant", "Tasks", "--grant", "Clock",
+           "--grant", "Stderr", "--grant", net, "--limit", os.environ.get("UNITS_LIMIT", "1073741824"),
            "--debug-lines", "on", "--json", "-o", out / case]
     for g in grants:
         cmd += ["--grant", g]

@@ -1,6 +1,7 @@
 # HTTP
 
 [API overview](../API.md). [Specification](../../../docs/spec/http.md).
+[Outbound HTTP/1.1](http_client.md).
 
 `serve(take listeners, clock, tasks, take config, take routes, take state)`
 serves HTTP/1.1 and HTTP/1.0 on listeners from `Net`. The supplied

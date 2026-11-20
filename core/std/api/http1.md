@@ -25,7 +25,8 @@ lines, token header names, opaque field values, trimmed surrounding optional
 whitespace, no folding, no leading header whitespace. Request targets must be
 UTF-8. Offsets preserve field spelling, order and duplicates. Body framing and
 URL checks in the old Go HTTP adapter are outside this head parser; the
-upgrade rejects body framing before interpreting its tail as frames.
+upgrade rejects body framing before interpreting its tail as frames. The HTTP client selects response framing
+after the status head parses. [HTTP client](http_client.md)
 
 `std.http.framing` interprets request framing after the head parser completes.
 It rejects a non-final `chunked` transfer coding with 400 and close

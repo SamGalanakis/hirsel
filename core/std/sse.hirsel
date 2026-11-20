@@ -133,3 +133,187 @@ pub fn retry(mut out: EventBuf, milliseconds: u64) -> Result[(), SseError] {
     let _ = list.append(mut out.data, string.as_bytes("\n\n"))
     Ok(())
 }
+
+pub opaque type Decoder: send {
+    max_bytes: u64,
+    line: Bytes,
+    data: Bytes,
+    name: Bytes,
+    pending_id: Bytes,
+    last_id: Bytes,
+    id_changed: bool,
+    retry: Option[u64],
+    first_line: bool,
+    skip_lf: bool,
+    stopped: bool
+}
+
+/// Allocates fixed storage for a line, event data, name and two ID buffers.
+pub fn decoder(max_bytes: u64) -> Result[Decoder, Capacity] {
+    let line_buffer: Bytes = list.with_capacity(max_bytes)?
+    let data: Bytes = list.with_capacity(max_bytes)?
+    let name: Bytes = list.with_capacity(max_bytes)?
+    let pending: Bytes = list.with_capacity(max_bytes)?
+    let last: Bytes = list.with_capacity(max_bytes)?
+    Ok(Decoder(max_bytes: max_bytes, line: take line_buffer, data: take data, name: take name, pending_id: take pending, last_id: take last, id_changed: false, retry: None, first_line: true, skip_lf: false, stopped: false))
+}
+
+pub fn last_event_id(d: Decoder) -> View[Bytes] in d {
+    view d.last_id
+}
+
+pub fn retry_ms(d: Decoder) -> Option[u64] {
+    d.retry
+}
+
+fn bounded_append(mut out: Bytes, raw: Bytes, max: u64) -> Result[(), SseError] {
+    if list.len(raw) > max - list.len(out) {
+        return Error(TooLarge)
+    }
+    let _ = list.append(mut out, raw)
+    Ok(())
+}
+
+// ASCII separators cannot be part of a UTF-8 continuation. Decode complete
+// field values, using one replacement per invalid UTF-8 unit.
+fn append_utf8(mut out: Bytes, raw: Bytes, max: u64) -> Result[(), SseError] {
+    let n = list.len(raw)
+    let mut start: u64 = 0
+    while start < n {
+        let rest = list.slice(raw, start, n)
+        match string.validate_utf8(rest) {
+            Ok(()) => return bounded_append(mut out, rest, max),
+            Error(e) => {
+                bounded_append(mut out, list.slice(rest, 0, e.valid_up_to), max)?
+                bounded_append(mut out, string.as_bytes("�"), max)?
+                match e.error_len {
+                    Some(width) => {
+                        start += e.valid_up_to + width
+                    },
+                    None => return Ok(()),
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
+fn retry_digits(value: Bytes) -> Result[Option[u64], SseError] {
+    if list.len(value) == 0 {
+        return Ok(None)
+    }
+    // A nondigit anywhere in the value makes even an overflowing prefix invalid.
+    for c in value {
+        if !int.is_ascii_digit(c) {
+            return Ok(None)
+        }
+    }
+    match int.parse_decimal_span(value, 0, list.len(value), 18446744073709551615) {
+        Ok(n) => Ok(Some(n)),
+        Error(_) => Error(TooLarge),
+    }
+}
+
+fn dispatch(mut d: Decoder, on_event: scoped fn(Bytes, Bytes, Bytes)) {
+    if d.id_changed {
+        let next = replace(mut d.pending_id, list.new())
+        d.pending_id = replace(mut d.last_id, take next)
+        list.clear(mut d.pending_id)
+        d.id_changed = false
+    }
+    if list.len(d.data) != 0 {
+        let name = if list.len(d.name) == 0 {
+            string.as_bytes("message")
+        } else {
+            view d.name
+        }
+        on_event(name, list.slice(d.data, 0, list.len(d.data) - 1), d.last_id)
+        list.clear(mut d.data)
+    }
+    list.clear(mut d.name)
+}
+
+// WHATWG HTML, "Interpreting an event stream". Field names are case-sensitive.
+fn decode_line(mut d: Decoder, on_event: scoped fn(Bytes, Bytes, Bytes)) -> Result[(), SseError] {
+    let end = list.len(d.line)
+    let mut start: u64 = 0
+    if d.first_line {
+        if end >= 3 && d.line[0] == 0xef && d.line[1] == 0xbb && d.line[2] == 0xbf {
+            start = 3
+        }
+        d.first_line = false
+    }
+    if start == end {
+        dispatch(mut d, on_event)
+        return Ok(())
+    }
+    let colon = match list.find_byte(d.line, start, end, b':') {
+        Some(at) => at,
+        None => end,
+    }
+    let mut at = colon
+    if at < end {
+        at += 1
+        if at < end && d.line[at] == b' ' {
+            at += 1
+        }
+    }
+    let name = list.slice(d.line, start, colon)
+    let value = list.slice(d.line, at, end)
+    if name == string.as_bytes("data") {
+        append_utf8(mut d.data, value, d.max_bytes)?
+        bounded_append(mut d.data, string.as_bytes("\n"), d.max_bytes)?
+    } else if name == string.as_bytes("event") {
+        list.clear(mut d.name)
+        append_utf8(mut d.name, value, d.max_bytes)?
+    } else if name == string.as_bytes("id") && list.find_byte(value, 0, list.len(value), 0) == None {
+        list.clear(mut d.pending_id)
+        append_utf8(mut d.pending_id, value, d.max_bytes)?
+        d.id_changed = true
+    } else if name == string.as_bytes("retry") {
+        if let Some(n) = retry_digits(value)? {
+            d.retry = Some(n)
+        }
+    }
+    Ok(())
+}
+
+/// Emits only complete events. The views passed to on_event live for the callback.
+pub fn feed(mut d: Decoder, input: Bytes, on_event: scoped fn(Bytes, Bytes, Bytes)) -> Result[(), SseError] {
+    if d.stopped {
+        return Error(TooLarge)
+    }
+    for c in input {
+        if d.skip_lf {
+            d.skip_lf = false
+            if c == b'\n' {
+                continue
+            }
+        }
+        if c == b'\r' || c == b'\n' {
+            if let Error(e) = decode_line(mut d, on_event) {
+                d.stopped = true
+                return Error(e)
+            }
+            d.skip_lf = c == b'\r'
+            list.clear(mut d.line)
+        } else {
+            if list.len(d.line) == d.max_bytes {
+                d.stopped = true
+                return Error(TooLarge)
+            }
+            let _ = list.push(mut d.line, c)
+        }
+    }
+    Ok(())
+}
+
+/// Discards an unfinished event at EOF. Committed reconnect state survives.
+pub fn finish(mut d: Decoder) {
+    list.clear(mut d.line)
+    list.clear(mut d.data)
+    list.clear(mut d.name)
+    list.clear(mut d.pending_id)
+    d.id_changed = false
+    d.stopped = true
+}

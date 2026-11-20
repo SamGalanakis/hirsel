@@ -387,6 +387,24 @@ pub fn token(c: u8) -> bool {
     int.is_ascii_alpha(c) || int.is_ascii_digit(c) || c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 || c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124 || c == 126
 }
 
+/// Checks a nonempty field name and an opaque HTTP field value.
+pub fn valid_field(name: Bytes, value: Bytes) -> bool {
+    if list.len(name) == 0 {
+        return false
+    }
+    for c in name {
+        if !token(c) {
+            return false
+        }
+    }
+    for c in value {
+        if c < 32 && c != 9 || c == 127 {
+            return false
+        }
+    }
+    true
+}
+
 fn version(b: Bytes, mut at: u64) -> Result[u8, Stop] {
     let prefix = string.as_bytes("HTTP/1.")
     for i in 0u64 .. 7u64 {
@@ -453,8 +471,8 @@ pub fn request(b: Bytes, mut h: Head) -> Progress {
     resume(b, mut h, mut cur)
 }
 
-/// Bounded status-head parser for WebSocket's client 101 check. Same offsets,
-/// limits and strict header rules as request. Ex: `http1.response(b, mut h)`.
+/// Bounded status-head parser for HTTP clients and the WebSocket 101 check.
+/// Same offsets, limits and strict header rules as request. Ex: `http1.response(b, mut h)`.
 pub fn response(b: Bytes, mut h: Head) -> Progress {
     h = head()
     let mut cur = cursor()

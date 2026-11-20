@@ -618,3 +618,21 @@ pub fn next_pair(text: String, query: http1.Span, at: u64) -> Option[(http1.Span
     }
     Some((span(start, key_end), span(value_start, end), next))
 }
+
+/// Checks RFC 9112 origin-form, including paths beginning with two slashes.
+/// Fails: Invalid(i). Alloc: nothing. Cost: O(len).
+pub fn http_origin_form(text: String) -> Result[(), Error] {
+    let data = string.as_bytes(text)
+    let end = list.len(data)
+    if end == 0 || data[0] != b'/' {
+        return Error(Invalid(0))
+    }
+    let mut next = scan_part(data, 1, end, Path, true)?
+    if next < end && data[next] == b'?' {
+        next = scan_part(data, next + 1, end, Query, false)?
+    }
+    if next != end {
+        return Error(Invalid(next))
+    }
+    Ok(())
+}

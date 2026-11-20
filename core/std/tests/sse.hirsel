@@ -22,3 +22,37 @@ fn wpt_eventsource_data() -> bool {
     }
     true
 }
+
+fn sse_split(wire: Bytes, split: u64, expected: String, last: String, retry: Option[u64]) -> bool {
+    let mut d = result.unwrap(sse.decoder(128))
+    let mut seen: Bytes = result.unwrap(list.with_capacity(256))
+    for (start, stop) in[(0u64, split), (split, list.len(wire))] {
+        result.unwrap(sse.feed(mut d, list.slice(wire, start, stop), fn(name: Bytes, data: Bytes, id: Bytes) {
+            result.unwrap(list.append(mut seen, name))
+            result.unwrap(list.append(mut seen, string.as_bytes("|")))
+            result.unwrap(list.append(mut seen, data))
+            result.unwrap(list.append(mut seen, string.as_bytes("|")))
+            result.unwrap(list.append(mut seen, id))
+            result.unwrap(list.append(mut seen, string.as_bytes(";")))
+        }))
+    }
+    sse.finish(mut d)
+    seen == string.as_bytes(expected) && sse.last_event_id(d) == string.as_bytes(last) && sse.retry_ms(d) == retry
+}
+
+// WHATWG HTML, "Interpreting an event stream", all four examples. Complete
+// blocks dispatch even when split between CR and LF. EOF discards a partial
+// block, including its uncommitted ID. The final row covers the field rules.
+// expect: run eventsource_fragments() = true
+fn eventsource_fragments() -> bool {
+    let rows: Inline[(String, String, String, Option[u64]), 5] =[("data: YHOO\ndata: +2\ndata: 10\n\n", "message|YHOO\n+2\n10|;", "", None), (": test stream\r\n\r\ndata: first event\r\nid: 1\r\rdata:second event\nid\n\ndata:  third event\n\n", "message|first event|1;message|second event|;message| third event|;", "", None), ("data\n\ndata\ndata\n\ndata:", "message||;message|\n|;", "", None), ("data:test\n\ndata: test\n\n", "message|test|;message|test|;", "", None), ("\u{feff}id: é\r\nretry: 0025\r\n\r\nevent: update\ndata: café\nid: no\0pe\nretry: +30\nretry: 99ms\n\nid: ignored\ndata: unfinished\n", "update|café|é;", "é", Some(25)),]
+    for (source, expected, last, retry) in rows {
+        let raw = string.as_bytes(source)
+        for i in 0u64 .. list.len(raw) + 1 {
+            if !sse_split(raw, i, expected, last, retry) {
+                return false
+            }
+        }
+    }
+    true
+}

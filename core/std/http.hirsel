@@ -1,7 +1,7 @@
 // HTTP-4: pure request framing over http1's parsed offsets. I/O belongs to
 // the connection. ADAPTED Go net/http/transfer.go and internal/chunked.go;
 // strict duplicate refusal and extension grammar follow docs/spec/http.md.
-pub type Framing: key = Empty | ContentLength(u64) | Chunked
+pub type Framing: key = Empty | ContentLength(u64) | Chunked | CloseDelimited
 
 pub type BodyError: key {
     status: u16,
@@ -64,18 +64,8 @@ fn reserved_field(name: Bytes) -> bool {
 }
 
 fn valid_field(name: Bytes, value: Bytes) -> bool {
-    if list.len(name) == 0 {
+    if !http1.valid_field(name, value) {
         return false
-    }
-    for c in name {
-        if !http1.token(c) {
-            return false
-        }
-    }
-    for c in value {
-        if c != 9 && c < 32 || c == 127 {
-            return false
-        }
     }
     let n = list.len(value)
     n == 0 || value[0] > 32 && value[n - 1] > 32
@@ -342,7 +332,8 @@ fn ip_literal(b: Bytes) -> bool {
     }
 }
 
-fn authority(b: Bytes) -> bool {
+/// Validates the HTTP Host field authority, including an optional numeric port.
+pub fn valid_authority(b: Bytes) -> bool {
     let n = list.len(b)
     if n == 0 {
         return false
@@ -497,7 +488,7 @@ fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[(RequestHead, Framing
         let kind = request_field(part(b, f.name))
         match kind {
             HostField => {
-                if host != None || !authority(part(b, f.value)) {
+                if host != None || !valid_authority(part(b, f.value)) {
                     return Error(400)
                 }
                 host = Some(f.value)
@@ -556,7 +547,7 @@ fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[(RequestHead, Framing
             None => end,
         }
         let absolute = http1.Span(start: host_start, end: start)
-        if host == None || !authority(part(b, absolute)) {
+        if host == None || !valid_authority(part(b, absolute)) {
             return Error(400)
         }
         host = Some(absolute)
@@ -2431,12 +2422,25 @@ fn serve_internal[S: shareable + send](take listeners: List[Listener], c: Clock,
 /// HTTP-4 refuses ambiguous framing before interpreting any body bytes.
 /// Ex: `http.framing(bytes, view h, 1048576)`.
 pub fn framing(b: Bytes, h: View[http1.Head], body_max: u64) -> Result[Framing, BodyError] {
+    frame_fields(b, h, collect_framing(b, h), body_max)
+}
+
+fn collect_framing(b: Bytes, h: View[http1.Head]) -> FramingFields {
     let mut fields = framing_fields()
     for i in 0u64 .. h.count {
         let f = h.fields[i]
         count_framing(mut fields, request_field(part(b, f.name)), f.value, i)
     }
-    frame_fields(b, h, fields, body_max)
+    fields
+}
+
+/// RFC 9112 §6.3 response framing. Bodiless responses pass hypothetical
+/// length metadata through untouched. Only chunked transfer coding is decoded.
+pub fn response_framing(b: Bytes, h: View[http1.Head], head_request: bool, body_max: u64) -> Result[Framing, BodyError] {
+    if head_request || h.status == 204 || h.status == 304 || h.status < 200 {
+        return Ok(Empty)
+    }
+    message_framing(b, h, collect_framing(b, h), body_max, CloseDelimited)
 }
 
 fn transfer_ows_end(b: Bytes, start: u64, end: u64) -> u64 {
@@ -2543,6 +2547,13 @@ fn transfer_framing(b: Bytes, h: View[http1.Head], fields: u64) -> Result[Framin
 
 // The connection checks policy first, then interprets the recorded framing spans.
 fn frame_fields(b: Bytes, h: View[http1.Head], fields: FramingFields, body_max: u64) -> Result[Framing, BodyError] {
+    if fields.length.end - fields.length.start > 19 && fields.lengths == 1 && fields.encoding_fields == 0 {
+        return Error(failure(400))
+    }
+    message_framing(b, h, fields, body_max, Empty)
+}
+
+fn message_framing(b: Bytes, h: View[http1.Head], fields: FramingFields, body_max: u64, absent: Framing) -> Result[Framing, BodyError] {
     let FramingFields(lengths: lengths, encoding_fields: encoding_fields, length: length) = fields
     if lengths > 0 && encoding_fields != 0 || lengths > 1 {
         return Error(failure(400))
@@ -2554,10 +2565,9 @@ fn frame_fields(b: Bytes, h: View[http1.Head], fields: FramingFields, body_max: 
         return transfer_framing(b, h, encoding_fields)
     }
     if lengths == 0 {
-        return Ok(Empty)
+        return Ok(absent)
     }
-    let n = length.end - length.start
-    if n == 0 || n > 19 {
+    if length.start == length.end {
         return Error(failure(400))
     }
     let Ok(size) = int.parse_decimal_span(b, length.start, length.end, 18446744073709551615) else {
@@ -2569,7 +2579,7 @@ fn frame_fields(b: Bytes, h: View[http1.Head], fields: FramingFields, body_max: 
     Ok(ContentLength(size))
 }
 
-type BodyState: key = Fixed | Size | SizeWs | ExtStart | ExtName | ExtNameWs | ExtValueStart | ExtToken | ExtQuote | ExtEscape | ExtAfter | ExtWs | ChunkLf | ChunkData | DataCr | DataLf | TrailerStart | TrailerName | TrailerValue | TrailerLf | TrailerEndLf | Finished | Broken
+type BodyState: key = Fixed | UntilEof | Size | SizeWs | ExtStart | ExtName | ExtNameWs | ExtValueStart | ExtToken | ExtQuote | ExtEscape | ExtAfter | ExtWs | ChunkLf | ChunkData | DataCr | DataLf | TrailerStart | TrailerName | TrailerValue | TrailerLf | TrailerEndLf | Finished | Broken
 
 pub type Decoder {
     state: BodyState,
@@ -2602,7 +2612,10 @@ pub fn decoder(frame: Framing, h: http1.Head, body_max: u64) -> Decoder {
         },
         Chunked => {
             d.state = Size
-        }
+        },
+        CloseDelimited => {
+            d.state = UntilEof
+        },
     }
     d
 }
@@ -2832,6 +2845,16 @@ pub fn decode(mut d: Decoder, b: Bytes) -> BodyProgress {
             }
             return More
         }
+        if d.state == UntilEof {
+            let n = order.min(d.body_max - d.decoded, list.len(b))
+            if n == 0 {
+                fail(mut d, 413)
+                continue
+            }
+            d.used = n
+            d.decoded += n
+            return Data(http1.Span(start: 0, end: n))
+        }
         if d.state == Fixed || d.state == ChunkData {
             let start = d.used
             let n = order.min(d.remaining, list.len(b) - start)
@@ -2879,11 +2902,12 @@ pub fn decode(mut d: Decoder, b: Bytes) -> BodyProgress {
     }
 }
 
-/// End of input is successful only after Done. Truncation permanently closes
-/// the connection, including a short Content-Length body or unfinished CRLF.
+/// End of input finishes a close-delimited body. A short Content-Length
+/// body or unfinished chunk framing permanently closes the connection.
 /// Ex: `http.body_eof(mut d)`.
 pub fn body_eof(mut d: Decoder) -> Result[(), BodyError] {
-    if d.state == Finished {
+    if d.state == Finished || d.state == UntilEof {
+        d.state = Finished
         return Ok(())
     }
     if d.state != Broken {

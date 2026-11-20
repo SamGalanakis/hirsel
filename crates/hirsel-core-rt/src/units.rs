@@ -1041,6 +1041,7 @@ enum After {
     Run,
     Wait(Option<u64>),
     Yield,
+    Retire,
     Done,
 }
 
@@ -1120,6 +1121,9 @@ struct Pool {
     lifo_runs: Vec<AtomicU32>,
     lifo_on: bool,
     injector: Mutex<VecDeque<UP>>,
+    retirements: Mutex<VecDeque<UP>>,
+    retirement_ready: AtomicBool,
+    retirement_owner: Mutex<()>,
     queued: AtomicUsize,
     searching: AtomicUsize,
     sleepers: Mutex<usize>,
@@ -1316,6 +1320,12 @@ fn leave(after: After) {
         u.after.set(after);
         hirsel_stack::switch(u.sp.get(), **u.host.get());
     }
+}
+
+/// The root task ended. Serialize the remaining stack and heap teardown
+/// while the other workers keep dispatching units.
+pub(crate) fn retire() {
+    leave(After::Retire);
 }
 
 /// The running unit has nothing runnable: park until a wake or `deadline`.
@@ -1594,7 +1604,6 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
     // SAFETY: the dequeued record is live; this worker alone dequeued it.
     unsafe {
         let u = &*up.0;
-        p.queued.fetch_sub(1, Ordering::SeqCst);
         // Acquire readiness published while this entry was already queued.
         u.state.swap(RUNNING, Ordering::SeqCst);
         // Law 1: never two workers inside one unit.
@@ -1622,10 +1631,20 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 WORST.fetch_max(u.status.load(Ordering::Relaxed), Ordering::Relaxed);
                 u.state.store(DONE, Ordering::SeqCst);
                 if p.live.fetch_sub(1, Ordering::SeqCst) == 1 {
-                    p.stop.store(true, Ordering::SeqCst);
-                    p.cv.notify_all();
+                    {
+                        let _sleepers = p.sleepers.lock().unwrap();
+                        p.stop.store(true, Ordering::SeqCst);
+                        p.cv.notify_all();
+                    }
                     write_wake(p);
                 }
+            }
+            After::Retire => {
+                u.state.swap(QUEUED, Ordering::SeqCst);
+                mark_queued(p, u);
+                let mut pending = p.retirements.lock().unwrap();
+                pending.push_back(up);
+                p.retirement_ready.store(true, Ordering::Release);
             }
             After::Yield => {
                 u.state.swap(QUEUED, Ordering::SeqCst);
@@ -1663,12 +1682,33 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
     }
 }
 
+/// A worker that publishes a retirement checks this queue again on its next
+/// iteration. If another worker owns teardown, that worker checks it on exit.
+/// The other workers neither wait for that owner nor count retirees as work
+/// they can steal.
+#[cold]
+fn take_retirement(p: &Pool) -> Option<(UP, std::sync::MutexGuard<'_, ()>)> {
+    let owner = p.retirement_owner.try_lock().ok()?;
+    let mut pending = p.retirements.lock().unwrap();
+    let next = pending.pop_front();
+    p.retirement_ready.store(!pending.is_empty(), Ordering::Release);
+    next.map(|up| (up, owner))
+}
+
 fn worker_main(p: &'static Pool, ix: usize) {
     crate::fiber::arm();
     WORKER_IX.set(ix);
     let mut host: *mut u8 = std::ptr::null_mut();
     loop {
+        if p.retirement_ready.load(Ordering::Acquire)
+            && let Some((u, _owner)) = take_retirement(p)
+        {
+            // SAFETY: the retirement queue delivered exclusive entry.
+            unsafe { run_unit(p, ix, u, &mut host) };
+            continue;
+        }
         if let Some(u) = find(p, ix) {
+            p.queued.fetch_sub(1, Ordering::SeqCst);
             // SAFETY: a dequeued unit.
             unsafe { run_unit(p, ix, u, &mut host) };
             continue;
@@ -1701,6 +1741,7 @@ fn worker_main(p: &'static Pool, ix: usize) {
             if p.queued.load(Ordering::SeqCst) > 0 {
                 notify_worker(p);
             }
+            p.queued.fetch_sub(1, Ordering::SeqCst);
             // SAFETY: a dequeued unit.
             unsafe { run_unit(p, ix, u, &mut host) };
             continue;
@@ -1778,6 +1819,9 @@ fn launch_untied(
         lifo_runs: (0..w).map(|_| AtomicU32::new(0)).collect(),
         lifo_on: env_u64("HIRSEL_UNTIED_LIFO", 1) != 0,
         injector: Mutex::new(VecDeque::new()),
+        retirements: Mutex::new(VecDeque::new()),
+        retirement_ready: AtomicBool::new(false),
+        retirement_owner: Mutex::new(()),
         queued: AtomicUsize::new(0),
         searching: AtomicUsize::new(0),
         sleepers: Mutex::new(0),

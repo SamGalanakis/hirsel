@@ -1358,23 +1358,19 @@ pub(crate) fn maybe_yield() {
     leave(After::Yield);
 }
 
-/// Make a unit runnable. Parked: queue it. Running: it re-polls before parking.
+/// Publish readiness to the next entry even when the unit already has a
+/// pending entry. Only the PARKED transition publishes a new queue item.
 pub(crate) fn wake(u: &Unit) {
-    loop {
-        match u.state.load(Ordering::Acquire) {
-            PARKED => {
-                if u.state.compare_exchange(PARKED, QUEUED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-                    enqueue(pool(), u);
-                    return;
-                }
-            }
-            RUNNING => {
-                if u.state.compare_exchange(RUNNING, NOTIFIED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-                    return;
-                }
-            }
-            _ => return,
+    let prior = u.state.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+        match state {
+            PARKED => Some(QUEUED),
+            RUNNING => Some(NOTIFIED),
+            QUEUED | NOTIFIED => Some(state),
+            _ => None,
         }
+    });
+    if prior == Ok(PARKED) {
+        enqueue(pool(), u);
     }
 }
 pub(crate) fn wake_id(id: u32) {
@@ -1599,7 +1595,8 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
     unsafe {
         let u = &*up.0;
         p.queued.fetch_sub(1, Ordering::SeqCst);
-        u.state.store(RUNNING, Ordering::SeqCst);
+        // Acquire readiness published while this entry was already queued.
+        u.state.swap(RUNNING, Ordering::SeqCst);
         // Law 1: never two workers inside one unit.
         if u.inside.swap(true, Ordering::SeqCst) {
             eprintln!("untied: law 1 violated: unit {} entered twice", u.id);
@@ -1631,7 +1628,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 }
             }
             After::Yield => {
-                u.state.store(QUEUED, Ordering::SeqCst);
+                u.state.swap(QUEUED, Ordering::SeqCst);
                 mark_queued(p, u);
                 p.injector.lock().unwrap().push_back(up);
                 p.queued.fetch_add(1, Ordering::SeqCst);
@@ -1648,7 +1645,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 {
                     // Woken while it ran: run it again.
                     bump(S_NOTIFIED_REQUEUE);
-                    u.state.store(QUEUED, Ordering::SeqCst);
+                    u.state.swap(QUEUED, Ordering::SeqCst);
                     mark_queued(p, u);
                     p.locals[ix].lock().unwrap().push_back(up);
                     p.queued.fetch_add(1, Ordering::SeqCst);

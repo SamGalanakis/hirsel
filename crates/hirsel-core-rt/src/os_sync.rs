@@ -29,8 +29,6 @@ const STACK: usize = 64 * 1024;
 
 struct Job {
     token: u64,
-    /// mc-units-untied: the issuing unit, whose waiter alone gets the ready.
-    unit: u32,
     directory: bool,
     fd: OwnedFd,
     /// Holds the issuer's waiter out of quiescence until the ready is pushed.
@@ -126,7 +124,6 @@ fn run() {
         }
         let Job {
             token,
-            unit,
             directory,
             fd,
             outside,
@@ -151,8 +148,7 @@ fn run() {
         if let Some(slot) = lock(&RESULTS).get_mut(&token) {
             *slot = errno;
         }
-        crate::tasks::ready_unit(token, unit);
-        drop(outside);
+        outside.complete(token);
     }
 }
 
@@ -178,7 +174,6 @@ pub(crate) fn submit(fd: RawFd, directory: bool, token: u64) -> Step {
     lock(&RESULTS).insert(token, RUNNING);
     lock(&QUEUE).push_back(Job {
         token,
-        unit: crate::units::current(),
         directory,
         fd,
         outside,

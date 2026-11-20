@@ -2044,6 +2044,11 @@ impl Outside {
         readies.lock().reserve(outside);
         Self(readies)
     }
+
+    /// Publish to the issuing waiter before releasing its outside work.
+    pub(crate) fn complete(self, token: u64) {
+        self.0.push(token);
+    }
 }
 impl Drop for Outside {
     fn drop(&mut self) {
@@ -2063,18 +2068,6 @@ impl Drop for Outside {
 pub extern "C" fn hirsel_core_ready(token: u64) {
     for waiter in WAITERS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         waiter.push(token);
-    }
-}
-/// mc-units-untied: a ready for an operation issued by `unit` reaches only
-/// that unit's waiters (and scheduler-less ones), not every unit.
-pub(crate) fn ready_unit(token: u64, unit: u32) {
-    if unit == crate::units::NONE || !crate::units::untied() {
-        return hirsel_core_ready(token);
-    }
-    for waiter in WAITERS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-        if waiter.unit == unit || waiter.unit == crate::units::NONE {
-            waiter.push(token);
-        }
     }
 }
 /// mc-units-untied: at a park, this worker's thread-locals hold the idle

@@ -1,3 +1,4 @@
+use super::places::MapSkip;
 use super::*;
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -880,13 +881,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let iteration_holds = self.freezes.len();
         self.depth += 1;
         let value = match (flow, sequence) {
-            (Some((_, advance, _, index, _, _, _)), Some((collection, Some(pointer)))) => {
+            (
+                Some((head, advance, _, index, _, index_ir, index_slot)),
+                Some((collection, Some(pointer))),
+            ) => {
                 if causes {
                     self.runtime_row(hirsel_core_ir::RtOp::CauseValue, &[Arg::Value(index)], n)
                         .map(|v| v[0])
                 } else if matches!(self.t.kind(collection), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Map))
                 {
-                    self.map_pair(pointer, collection, index, elem, advance, consuming, n)
+                    // A consuming loop steps its index in the body, so a dead
+                    // slot steps it here before returning to the head.
+                    let skip = if consuming {
+                        MapSkip::Step {
+                            head,
+                            index_slot,
+                            index_ir,
+                        }
+                    } else {
+                        MapSkip::Advance(advance)
+                    };
+                    self.map_pair(pointer, collection, index, elem, skip, n)
                 } else if matches!(self.t.kind(collection), TyKind::Adt(d, _) if matches!(self.p.decls[d.index()].role, Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan)))
                 {
                     packed_cursor

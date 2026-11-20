@@ -257,7 +257,7 @@ pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, o
         migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), policy: take policy, n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), triggers: Some(take trigger_config))
-    let (keep_running, stopping): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let (stop, stopping): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let (watch, watching): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
     let status = result.unwrap(runner.status_root())
     let demo = Demo(config: take settings, stop: take stopping, status: latest.handle(status), watch: take watch)
@@ -288,11 +288,10 @@ pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, o
         position += 1u64
         host.sleep_until(clock, int.saturating_add(host.mono_ns(clock), 50000000u64))
     }
-    // Cut the task after observing the terminal commit, then reopen its store.
-    let _ = take conn
-    task.cancel(mut running)
-    let _ = task.join(take running)
-    let _ = take keep_running
+    // Stop the place gracefully after observing the terminal commit, then reopen its store.
+    let _ = wire_client.close(take conn)
+    result.unwrap(channel.send(stop, ()))
+    if let Ok(Ok(Stopped)) = task.join(take running) {} else { fail("sign-up: place did not stop") }
     let db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let snapshot = store.snapshot(db)
     let h = result.unwrap(store.with_schema(db, code.describe(handles)))

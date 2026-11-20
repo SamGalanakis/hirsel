@@ -875,8 +875,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         collection: TyId,
         index: ValueId,
         pair: TyId,
-        advance: BlockId,
-        consuming: bool,
+        skip: MapSkip,
         n: NodeId,
     ) -> Option<ValueId> {
         let entry = self.map_entry_at(header, collection, index, n)?;
@@ -900,10 +899,46 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let live = self.new_block(&[]);
         let yes = self.edge(live, &[]);
-        let no = self.edge(advance, &[]);
-        self.end(Terminator::Branch { condition, yes, no }, Some(n));
+        match skip {
+            MapSkip::Advance(advance) => {
+                let no = self.edge(advance, &[]);
+                self.end(Terminator::Branch { condition, yes, no }, Some(n));
+            }
+            MapSkip::Step {
+                head,
+                index_slot,
+                index_ir,
+            } => {
+                let dead = self.new_block(&[]);
+                let no = self.edge(dead, &[]);
+                self.end(Terminator::Branch { condition, yes, no }, Some(n));
+                self.start(dead);
+                let step = self.konst(index_ir, 1, n)?;
+                let after = self.value(index_ir);
+                // The loop head proved index < limit, so the step fits.
+                self.inst(
+                    Inst::IntArith {
+                        result: after,
+                        flag: None,
+                        op: ArithOp::Add,
+                        mode: ArithMode::Wrapping,
+                        left: index,
+                        right: step,
+                    },
+                    n,
+                );
+                self.inst(
+                    Inst::Store {
+                        address: index_slot,
+                        value: after,
+                    },
+                    n,
+                );
+                self.jump(head, &[], n);
+            }
+        }
         self.start(live);
-        if consuming {
+        if matches!(skip, MapSkip::Step { .. }) {
             return self.map_take_entry(header, collection, index, pair, n);
         }
         let place = self.place_ty(pair, n)?;
@@ -1599,4 +1634,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             result,
         ))
     }
+}
+
+/// Where a Map loop goes from a dead insertion-order slot. A view loop steps
+/// its index at `advance`; a consuming loop steps it in the body, so its dead
+/// slot steps the index itself and returns to the head.
+#[derive(Clone, Copy)]
+pub(super) enum MapSkip {
+    Advance(BlockId),
+    Step {
+        head: BlockId,
+        index_slot: AddressId,
+        index_ir: Ty,
+    },
 }

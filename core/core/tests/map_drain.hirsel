@@ -52,6 +52,27 @@ fn drained_after_compact() -> u64 {
     count
 }
 
+// Removals without a compaction leave dead slots before and between live
+// entries. The loop steps past each dead slot and moves out the live entries
+// once each, in insertion order: 1 then 3.
+// expect: run drained_past_dead_slots() = 13
+fn drained_past_dead_slots() -> u64 {
+    let mut m: Map[u64, String] = map.new()
+    for i in 0u64 .. 4 {
+        result.unwrap(map.insert(mut m, i, word(i)))
+    }
+    let _ = map.remove(mut m, 0)
+    let _ = map.remove(mut m, 2)
+    let mut seen: u64 = 0
+    for take (k, v) in m {
+        if v != word(k) {
+            return 99
+        }
+        seen = seen * 10 + k
+    }
+    seen
+}
+
 // The current binding is cleaned before the unreached map tail.
 // expect: run early_break_cleans_tail() = 0
 fn early_break_cleans_tail() -> u64 {

@@ -72,7 +72,7 @@ type Kind: codec + send = Compute | Transact | Query | Granted
 type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }
 type Exported: codec + send { described: Described, args_fp: u64, result_fp: u64, revision: Bytes }
 type Describe: codec + send { digest: Bytes, target: String, n_place: u64, exported: List[Exported] }
-type Release: codec + send { describe: Describe, release: Bytes, grants: List[String], root_limit: u64 }
+type Release: codec + send { describe: Describe, release: Bytes, grants: List[String], root_limit: u64, recipe: Bytes }
 ```
 
 Entries are in registration order. `Described` has the fields `kind`, `identity`,
@@ -163,11 +163,75 @@ ordinary value codec. Its type, `Release`, is declared with `Describe` above.
   path `--dir` took. A directory path stays as given. It is resolved against the
   working directory at startup, which the manifest does not know.
 - `root_limit` is the executable's root limit.
+- `recipe` is the 32-byte root R of the release recipe the executable was assembled
+  from (below). `release` says what the public interface runs, R says what code was
+  assembled, and the digest says which bytes run. R does not enter `release`, and the
+  store's `releases` rows do not hold it.
 
 Grants and the root limit are part of the executable's build key, so a manifest
 describes exactly one executable. Limits the place sets in its own code (`q`,
 `n_session`, `budget` and the others) are covered by the digest.
 `hirsel manifest show PATH` prints a manifest as text.
+
+## Release recipe and host assembly
+
+`hirsel build` works in two steps. It checks the program and writes its code objects and its
+release recipe into a code store. Then it assembles the executable from that recipe. Both
+steps are the only build path. `hirsel publish` runs the first step alone and prints R.
+`hirsel build --recipe R --code-store DIR` runs the second step alone, from objects already in
+DIR.
+
+**Objects.** A code store holds immutable objects, each named by the hash of its own bytes:
+bodies, groups and annexes (PROG-10), and recipes. A **recipe** has a version, the normal-form
+version and these parts:
+
+- the entry, the program's `main`, as its identity bytes and its address;
+- every group hash in the entry's closure, in ascending order;
+- every body hash in that closure with its annex hash, in ascending order of body hash;
+- the launch inputs: the backend (Cranelift or LLVM release), the target, the grants in the
+  manifest's canonical form, the root limit and `n_place`.
+
+Its root is `R = H("hirsel.release-recipe.v1", recipe)`. A place's `place`, `migrate`, handle
+and launch code is reached from `main`, so the closure covers it. The annexes hold the site
+maps failures report, so a comment that moves lines changes R but no address. R does not
+cover the host's toolchain: one R can assemble to different bytes under another compiler.
+
+**Admission.** A host takes a recipe only when an authorised deploy request names its R (the
+host's control boundary). A hash proves only that bytes are intact. It never proves that they
+were checked. Code from outside that boundary arrives as source, and the host publishes it
+itself with the normal checker. Before the host uses anything a request sends, it checks, in
+order, and refuses with the first failure:
+
+1. sizes, counts, formats and versions are within the host's bounds and are ones its
+   toolchain supports (`Unsupported`);
+2. the recipe hashes to R, and every object hashes to the hash the recipe lists for it
+   (`Hash`);
+3. the closure walked from the entry through the groups' `External` bindings equals the
+   listed objects exactly (`Missing`, `Extra`);
+4. every slot's identity equals the bound member's or builtin's identity, every `Internal`
+   index is in range, every builtin's semantics number is known, each group's members are in
+   ascending identity order and form one strongly connected component, and the entry's
+   identity matches (`Binding`);
+5. every body and annex decodes within bounds and re-encodes to its own bytes (`Malformed`).
+
+Admission does not check types or ownership again. Admitted objects stay under the attempt's
+pending pin. The client sends R and the recipe. The host answers with the hashes it lacks, in
+one round, and the client sends exactly those.
+
+**Hot deploy.** `hirsel deploy R --code-store DIR` admits R and fetches what is missing. The
+host then assembles the executable with its installed toolchain for the recipe's backend and
+target, records its digest beside R, and copies it into the image store. All of this happens
+before the preview and before the old place exports, outside the write pause. A refusal or
+assembly failure stops the deploy before anything is touched. A retry after drift reuses the
+assembled executable. The deploy reports the fetch time, the assembly time and the write pause
+as three separate figures. An executable that is retained (current, previous, pending, or named
+by a live release interval or a tape) keeps its own bytes, its recipe and its recipe's closure.
+A recorded digest is recovered from those bytes and never by assembling again.
+
+Laws: `assemble_is_build`, where `hirsel build` and `publish` followed by `build --recipe` give
+byte-identical executables on one toolchain; `admit_refuses` covers each refusal above, and
+nothing is assembled until all checks pass; `site_only_change`, where a moved comment keeps
+every address, changes R, and the failure sites reported move with it.
 
 ## Preview launch
 

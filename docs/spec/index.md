@@ -54,7 +54,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Tasks](tasks.md) | CONC-1 to CONC-13 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-9 |
 | [Semantics](semantics.md) | SEM-1 to SEM-11 |
-| [Programs](programs.md) | PROG-1 to PROG-6, PROG-9 |
+| [Programs](programs.md) | PROG-1 to PROG-6, PROG-9, PROG-10 |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
 | [Core library](core.md) | |
 | [Reserved](reserved.md) | |

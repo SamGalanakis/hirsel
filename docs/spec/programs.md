@@ -122,7 +122,8 @@ it. A program reads the identity of a named function through `code` (PROG-9). No
 construct dispatches on a function's name or signature at run time, and nothing
 observable depends on a function's address or on the order of declarations
 ([SEM-8](semantics.md#sem-8-determinism)), so two bodies with the same checked meaning
-are interchangeable, except to `code.revision` (PROG-9), which names the checked IR.
+are interchangeable, except to `code.revision` (PROG-9) and the code address (PROG-10),
+which name the checked IR.
 
 ### PROG-9: Code descriptors
 
@@ -179,15 +180,17 @@ identity, and no alias connects the two. A later encoding may add an instance's 
 arguments and dictionaries after `D`; version 1 has none.
 
 `code.revision(s)` returns `Option[View[Bytes]] in s`: the function's **revision**, 32 bytes
-that name the code a call through `s` runs. It is a hash of the checked core IR of every
-instance (PROG-5) that the function reaches, std's and core's included, taken by the IR's own
-edges: calls and function values, among them the functions the checker selects from types,
-such as a codec maker. Each instance enters as its identity and its
-checked IR with the source positions and the optimisation-only facts removed; the reach is a
-set, so recursion and order do not matter. A core function the compiler implements itself,
-such as `float.widen`, has no checked IR: it reaches nothing and enters as its identity
-alone. Nothing else enters: not the backend, the runtime, the target, the optimisation
-level or the root limit. So:
+that name the code a call through `s` runs. It is derived from the function's **code
+address** (PROG-10), which covers the checked core IR of every instance (PROG-5) the function
+reaches, std's and core's included, taken by the IR's own edges: calls and function values,
+among them the functions the checker selects from types, such as a codec maker. The revision
+is `H("hirsel.code-revision.v2", address)`, where the address is that of the function's
+revision root: the function itself, the adapted function for a `$callable` adapter, and the
+builtin address (PROG-10) for a core function the compiler implements, such as `float.widen`.
+Equal revisions mean equal addresses, so Hirsel has one identity for code; the revision only
+keeps the bytes a program holds apart from the keys of a code store. Nothing else enters: not
+the backend, the runtime, the target, the optimisation level, the root limit, source
+positions or optimisation hints. So:
 
 - an edit to comments, layout, local or parameter names, item order, or an item the
   function does not reach leaves the revision equal;
@@ -202,6 +205,12 @@ revisions, which a program `hirsel build` links never is; a core function the co
 implements has its revision in any program. A store, registry or tape that keeps only
 identity bytes matches by identity alone, so a changed body under an unchanged identity is
 not detected; one that keeps the revision as well detects it.
+
+Version note (2026-11-21, code addresses): the revision was a hash over the reach's
+`(identity, IR)` rows under `hirsel.code-revision.v1`. It is now derived from the address,
+under `hirsel.code-revision.v2`. Every revision value, and so every release digest
+([launch](launch.md#release-manifest)), changes once; its size and every format that carries
+it do not. No migration is provided before 1.0.
 
 ```hirsel
 type Handler = fn(Bytes) -> Result[Bytes, Capacity]
@@ -220,6 +229,73 @@ fn d(f: fn(u64) -> u64) -> StaticFn[fn(u64) -> u64] { code.describe(f) }   // re
 fn same[T: key](a: T, b: T) -> bool { a == b }
 fn d() -> u64 { let _ = code.describe(same); 0 }                             // refused: PROG-9, same is generic
 ```
+
+### PROG-10: Code addresses
+
+Every instance (PROG-5) that a checked program reaches has a **code address**: 32 bytes,
+computed from its checked core IR and the addresses of the code it calls. The address names
+code only. Public names stay path-based: identity bytes (PROG-9), `StaticFn` equality, entry
+keys, client matching and link symbols never use it, so an edit to a body never makes a new
+public name. Write `H(d, x)` for SHA-256 over the length-framed domain text `d` followed by the
+length-framed bytes `x`.
+
+**Body.** An instance's **body** is the normal form of its checked IR: its own function, the
+functions generated beside it, the shapes, signatures, statics and instance rows they use, and
+one slot for each function it calls but does not define. It holds:
+
+- every operation and terminator, in its order within its block, so parse decisions,
+  type-selected calls, failure order and the order of charges are kept;
+- each shape's canonical name, representation, carried and held parts, field order, cases,
+  grants, `send`, and hook references; signatures and loans; statics, with each byte static's
+  alignment; symbolic layout queries; compact roots, as a set; and which functions take
+  vector-width variants;
+- the instance's own identity (definition, dictionaries and the closure hashes of its type
+  arguments), so `ident[u64]` and `ident[u32]` have different bodies, and each slot's
+  identity.
+
+It holds no source position, no `cold` hint, no optimisation-only parameter facts, no
+generated code variants, no byte size or offset, and no number a producer chose: functions,
+blocks, values, rows and pool entries are numbered in one fixed traversal. That traversal
+starts at the instance's function, then takes the finalizers of its type rows by their
+closure hashes. It walks blocks depth-first from the entry block, taking successors in operand
+order. It numbers each value at its definition, and each row at its first reference. Blocks
+the entry does not reach are left out. Every enumeration is written with a tag from a fixed,
+append-only table, and every count and index as unsigned LEB128. The body starts with its
+normal-form version, which is 1. Decoding and re-encoding a body gives the same bytes. Its
+**body hash** is `H("hirsel.code-body.v1", body)`. Positions and hints go to the body's
+**annex** instead, in the same order. The annex is hashed under `hirsel.code-annex.v1` and
+never enters an address.
+
+**Groups.** The instances a program reaches are partitioned into the strongly connected
+components of their call graph, one **group** per component, so a function and the functions it
+calls back form one group. A function that calls nothing back is a group of one. A group lists
+its members in ascending order of their identities, which never tie, so the order does not
+depend on how they were found. For each member it gives the body hash and, for each of the
+member's slots in order, a **binding**: `Internal(k)`, the group's member k;
+`External(address)`; or `Builtin(n)`. The **group hash** is `H("hirsel.code-group.v1", group)`,
+and member k's address is `H("hirsel.code-address.v1", group hash ‖ k)`, with `k` a 32-bit
+little-endian number. An edit to a callee therefore changes its callers' addresses, through
+their groups, but not their bodies.
+
+**Builtins.** A core function the compiler implements has no checked IR. Its address is
+`H("hirsel.code-builtin.v1", identity ‖ n)`. Here `n` is that builtin's semantics number, a
+32-bit little-endian number that starts at 1 and rises whenever the compiler changes what the
+builtin does. Engine operations inside a body are written as tags. A change in the meaning of
+one gets a new tag.
+
+So equal addresses mean the same checked code everywhere it reaches, on every engine and
+build. The driver's reuse keys (pre-check keys, record and instance keys, image roots) decide
+only whether stored work can be reused. They never enter a body, a group, an address, a
+revision or a release recipe ([launch](launch.md#release-recipe-and-host-assembly)), so a
+build from source and a build from an image give equal addresses. An address says nothing
+about inputs: two runs of equal code with different arguments, or with different arrival
+orders between units ([CONC-10](tasks.md#conc-10-event-order)), may differ. A cache keyed by an address keys
+those as well.
+
+The domains `hirsel.code-body.v1`, `hirsel.code-annex.v1`, `hirsel.code-group.v1`,
+`hirsel.code-address.v1`, `hirsel.code-builtin.v1` and `hirsel.code-revision.v2` are added by
+the 2026-11-21 version of this section. A change to the normal form or to a group's encoding
+takes a new version and a new domain. It never reuses an old one.
 
 ### PROG-6: One meaning
 

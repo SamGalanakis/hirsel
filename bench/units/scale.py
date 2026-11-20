@@ -251,7 +251,7 @@ class Runner:
                     masks_seen = masks(server_pid)
                 if profile and profile_proc is None and phase_ns is not None:
                     if time.monotonic_ns() >= phase_ns + offset:
-                        cmd = ["taskset", "-c", "4-5", "perf", "record", "-N", "--clockid", "mono",
+                        cmd = ["taskset", "-c", "6-7", "perf", "record", "-N", "--clockid", "mono",
                                *events, "-o", str(profile["path"]), "-p", str(server_pid), "--", "sleep", duration]
                         profile["launch_ns"] = time.monotonic_ns()
                         with profile["path"].with_suffix(".log").open("w") as err:

@@ -1452,7 +1452,8 @@ pub fn push_json_f64(mut s: String, x: f64) -> Result[(), Capacity] {
 // The text goes straight into s, as push_scaled writes it: the digits through push_u64
 // and the zeros, point and exponent as literal slices. Every layout is
 // whole [. zeros fraction] [zeros] [.0] [e+-exponent]: 0.000ddd and d.ddd/dd.ddd split c
-// at a point, ddd000 keeps c whole and pads p zeros.
+// at a point, ddd000 keeps c whole and pads p zeros. A zero whole part (0.000ddd only)
+// goes out with its point as one "0." literal.
 fn push_shortest(mut s: String, x: f64, json: bool) -> Result[(), Capacity] {
     let bits = float.to_bits64(x)
     if !is_finite(x) {
@@ -1496,9 +1497,15 @@ fn push_shortest(mut s: String, x: f64, json: bool) -> Result[(), Capacity] {
         whole = c / scale
         fraction = c % scale
     }
-    string.push_u64(mut s, whole)?
+    if whole != 0 {
+        string.push_u64(mut s, whole)?
+    }
     let zeros: u64 = if places != 0 {
-        string.push(mut s, ".")?
+        string.push(mut s, if whole == 0 {
+            "0."
+        } else {
+            "."
+        })?
         places - decimal_len(fraction)
     } else if scientific {
         0

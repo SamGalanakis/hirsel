@@ -276,6 +276,7 @@ fn step_elision_compatible(op: RtOp) -> bool {
         | RtOp::DestId
         | RtOp::CompareBytes
         | RtOp::HashBytes
+        | RtOp::Sha1Blocks
         | RtOp::Sha256Blocks
         | RtOp::CauseNext
         | RtOp::CauseValue

@@ -22,6 +22,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `option`, `result` | [option](../../core/core/option.hirsel), [result](../../core/core/result.hirsel) | FAIL-2 |
 | `int`, `float`, `char` | [int](../../core/core/int.hirsel), [float](../../core/core/float.hirsel), [char](../../core/core/char.hirsel) | SEM-1 to SEM-3 |
 | `simd` | [simd](../../core/core/simd.hirsel) | SEM-11 |
+| `sha1` | [sha1](../../core/core/sha1.hirsel) | SEM-8, MEM-30 |
 | `sha256` | [sha256](../../core/core/sha256.hirsel) | SEM-8, MEM-30 |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
@@ -200,6 +201,12 @@ operations it names; nothing else about them may be inferred from an implementat
   The word operations and [SEM-11](semantics.md#sem-11-vectors) lane operations are the
   multi-byte loads and stores. Library scans use them and the [SEM-1](semantics.md#sem-1-integers)
   integer operations.
+- **SHA-1 blocks.** `sha1.blocks(mut h, b)` applies RFC 3174 compression to the
+  64-byte blocks of `b` and its RFC 3174 padding, updating the five state words
+  `h`. This call takes one step and admits no bytes. The engine can use the CPU's
+  SHA-1 instructions with identical state words and accounting on every CPU
+  ([SEM-8](semantics.md#sem-8-determinism), [MEM-30](budgets.md#mem-30-step-bounds)).
+  `std.sha1.hash` supplies the RFC initial state and returns the twenty digest bytes.
 - **SHA-256 blocks.** `sha256.blocks(mut h, b, at, count)` applies the FIPS 180-4
   SHA-256 compression function to each of the `count` 64-byte blocks of `b` from `at`,
   in order, updating the eight state words `h`. A range outside `b`, including an end

@@ -63,6 +63,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.inline_copy_from_slice(types[0], vals[0], vals[1]?, vals[2], vals[3]?, n)?;
             return Some(None);
         }
+        if module == ["sha1"] && name == "blocks" {
+            return Some(self.sha1_blocks(vals[0]?, vals[1]?, n));
+        }
         if module == ["sha256"] {
             return match name {
                 "blocks" => Some(self.sha256_blocks(vals[0]?, vals[1]?, vals[2]?, vals[3]?, n)),

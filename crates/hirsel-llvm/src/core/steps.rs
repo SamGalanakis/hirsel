@@ -397,6 +397,7 @@ fn neutral_runtime(op: RtOp) -> bool {
         RtOp::DestId
             | RtOp::CompareBytes
             | RtOp::HashBytes
+            | RtOp::Sha1Blocks
             | RtOp::Sha256Blocks
             | RtOp::CauseNext
             | RtOp::CauseValue

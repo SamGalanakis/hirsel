@@ -351,6 +351,10 @@ impl Function<'_, '_, '_> {
                 outputs[0] = self.c_call("hirsel_core_hash_bytes", &[P, U], &[U], &args[..2])?[0];
                 1
             }
+            RtOp::Sha1Blocks => {
+                self.c_call("hirsel_core_sha1_blocks", &[P, P, U], &[], &args[..3])?;
+                0
+            }
             RtOp::Sha256Blocks => {
                 self.c_call("hirsel_core_sha256_blocks", &[P, P, U], &[], &args[..3])?;
                 0

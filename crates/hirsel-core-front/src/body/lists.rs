@@ -1225,6 +1225,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(())
     }
 
+    pub(super) fn sha1_blocks(
+        &mut self,
+        state: ValueId,
+        header: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        self.runtime_row(
+            hirsel_core_ir::RtOp::Sha1Blocks,
+            &[Arg::Value(state), Arg::Value(data), Arg::Value(len)],
+            n,
+        )?;
+        None
+    }
+
     /// `sha256.blocks`: Bounds unless `at + 64 × count ≤ len`, checked before
     /// the state changes; no data address is formed for zero blocks.
     pub(super) fn sha256_blocks(

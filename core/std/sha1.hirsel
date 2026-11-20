@@ -1,90 +1,9 @@
-// RFC 3174 section 6.1, with an inline schedule and state. RustCrypto sha1
-// compress/soft.rs uses the same schedule, grouped into four-word rounds.
-// SHA-1 is for RFC 6455 accept keys, never for integrity or authentication.
-fn rotl(x: u32, n: u32) -> u32 {
-    (x << n) | (x >> (32 - n))
-}
-
-fn block(b: Bytes, at: u64, mut h: Inline[u32, 5], tail: bool) {
-    let mut w: Inline[u32, 80] =[0; 80]
-    if tail {
-        let n = list.len(b)
-        let bits = n << 3
-        for i in 0u64 .. 64u64 {
-            let p = at + i
-            let x: u8 = if p < n {
-                b[p]
-            } else if p == n {
-                128
-            } else if i >= 56 && at + 64 - n >= 9 {
-                int.truncate(bits >> ((63 - i) * 8))
-            } else {
-                0
-            }
-            let x32: u32 = int.widen(x)
-            let shift: u32 = int.narrow(24 - (i % 4) * 8)
-            w[i / 4] = w[i / 4] | (x32 << shift)
-        }
-    } else {
-        for i in 0u64 .. 16 {
-            w[i] = list.word_be(b, at + i * 4)
-        }
-    }
-    for i in 16u64 .. 80u64 {
-        w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1)
-    }
-    let mut a = h[0]
-    let mut c = h[2]
-    let mut d = h[3]
-    let mut e = h[4]
-    let mut bb = h[1]
-    for i in 0u64 .. 80u64 {
-        let f = if i < 20 {
-            (bb & c) | ((~bb) & d)
-        } else if i < 40 {
-            bb ^ c ^ d
-        } else if i < 60 {
-            (bb & c) | (bb & d) | (c & d)
-        } else {
-            bb ^ c ^ d
-        }
-        let k: u32 = if i < 20 {
-            0x5a827999
-        } else if i < 40 {
-            0x6ed9eba1
-        } else if i < 60 {
-            0x8f1bbcdc
-        } else {
-            0xca62c1d6
-        }
-        let t = int.wrapping_add(int.wrapping_add(int.wrapping_add(int.wrapping_add(rotl(a, 5), f), e), k), w[i])
-        e = d
-        d = c
-        c = rotl(bb, 30)
-        bb = a
-        a = t
-    }
-    h[0] = int.wrapping_add(h[0], a)
-    h[1] = int.wrapping_add(h[1], bb)
-    h[2] = int.wrapping_add(h[2], c)
-    h[3] = int.wrapping_add(h[3], d)
-    h[4] = int.wrapping_add(h[4], e)
-}
-
-/// RFC 3174 SHA-1 digest, twenty bytes in network order. O(n), 340 bytes
-/// of inline working state; only the result allocates. Ex: `sha1.hash(string.as_bytes("abc"))`.
+// RFC 3174 SHA-1 for RFC 6455 accept keys.
+/// RFC 3174 SHA-1 digest, twenty bytes in network order. O(n), only the
+/// result allocates. Ex: `sha1.hash(string.as_bytes("abc"))`.
 pub fn hash(b: Bytes) -> Result[Bytes, Capacity] {
     let mut h: Inline[u32, 5] =[0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]
-    let n = list.len(b)
-    let mut at: u64 = 0
-    while n - at >= 64 {
-        block(b, at, mut h, false)
-        at += 64
-    }
-    block(b, at, mut h, true)
-    if n - at >= 56 {
-        block(b, at + 64, mut h, true)
-    }
+    sha1.blocks(mut h, b)
     let mut out: Bytes = list.with_capacity(20)?
     for word in h {
         list.put_word_be(mut out, word)?

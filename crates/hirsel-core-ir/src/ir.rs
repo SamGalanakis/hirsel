@@ -961,6 +961,8 @@ pub enum RtOp {
     DescribeEmit,
     /// Owner flow operation with pointers to its fixed operand and result words.
     Flow(hirsel_core_layout::flow::Op),
+    /// SHA-1 compression of a byte span and its RFC 3174 padding.
+    Sha1Blocks,
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1154,6 +1156,7 @@ impl RtOp {
     /// | `dest_id` | | `u64`: a destination identity no other call of the run returns (MEM-4) |
     /// | `compare_bytes` | `a: ptr`, `a_len: u64`, `b: ptr`, `b_len: u64` | `i8`: -1, 0 or 1 as `a` orders before, equal to or after `b` |
     /// | `hash_bytes` | `data: ptr`, `len: u64` | `u64`: the fixed byte hash (crate docs, "Maps") |
+    /// | `sha1_blocks` | state `ptr`, `data: ptr`, `len: u64` | (crate docs, "SHA-1") |
     /// | `sha256_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-256") |
     /// | `cause_next` | cell `ptr` | `ptr`: the next cell, null after the last |
     /// | `cause_value` | cell `ptr` | `ptr`: the cell's `Cause` |
@@ -1232,6 +1235,7 @@ impl RtOp {
                 vec![Ty::Scalar(Scalar::I8)],
             ),
             RtOp::HashBytes => (vec![V(p), V(u64_)], vec![u64_]),
+            RtOp::Sha1Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha256Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::CauseNext | RtOp::CauseValue => (vec![V(p)], vec![p]),
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
@@ -1423,6 +1427,7 @@ impl RtOp {
             | RtOp::DestId
             | RtOp::CompareBytes
             | RtOp::HashBytes
+            | RtOp::Sha1Blocks
             | RtOp::Sha256Blocks
             | RtOp::CauseNext
             | RtOp::CauseValue

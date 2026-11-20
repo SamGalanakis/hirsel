@@ -1,0 +1,4 @@
+// Module `sha1`: RFC 3174 SHA-1 block compression.
+/// Compress b's 64-byte blocks and its RFC 3174 padding into h. Takes one
+/// step and allocates nothing. h starts with the SHA-1 initial words for a digest.
+pub fn blocks(mut h: Inline[u32, 5], b: Bytes)

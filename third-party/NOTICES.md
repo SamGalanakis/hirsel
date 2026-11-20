@@ -27,6 +27,7 @@ upstream license texts under the bundle's `notices/` directory; see
 | Howard Hinnant | `days_from_civil` and `civil_from_days`, Chrono-Compatible Low-Level Date Algorithms | `core/std/time.hirsel` | [Published reference](https://howardhinnant.github.io/date_algorithms.html#days_from_civil) | Public domain |
 | Go standard library | `src/path/path_test.go:100-106,152-158,168-181,191-205` Split, Ext, Base and Dir vectors restricted to valid paths | `core/std/tests/path.hirsel` | golang/go `46b62495e1bf4d56e0313320772ae588d9119aed` | BSD-3-Clause (Go) |
 | Rust standard library | `library/std/src/path.rs:334-354,2880-2975` last-dot rule for valid names and stem, prefix and extension examples | `core/std/path.hirsel`, `core/std/tests/path.hirsel` | rust-lang/rust `5f4effd579500175af844241eb179e756190f1e7` | MIT (Rust) |
+| RustCrypto SHA-1 | SHA instruction round and schedule intrinsics in `sha1/src/compress/{x86_sha,aarch64_sha2}.rs` | `crates/hirsel-core-rt/src/sha1.rs` | RustCrypto/hashes, sha1 0.11.0, `2f00175af936de46b3ddefe65c4de93cb4e876e4` | MIT (RustCrypto) |
 | xxhash-rust | Scalar XXH3 recurrence and default secret in `src/const_xxh3.rs:40-254`, `src/xxh3_common.rs:13-28,34-38,56-59` | `core/std/check.hirsel`, `core/programs/store/xxh3_bench.hirsel` | DoumanAsh/xxhash-rust 0.8.15, `7026cd705195f502283f97aafc9ea41930099c68` | BSL-1.0 |
 | crc32c | Portable reflected CRC-32C byte recurrence in `src/sw.rs:35-40`; generated 256-entry table, with no slicing or hardware dispatch | `core/programs/store/crc_bench.hirsel` | zowens/crc32c 0.6.8, `254a861f7cc71bfe455e86f0e1d86e3c83c33390` | MIT; upstream also Apache-2.0 |
 | Cranelift | code generator dependency (`cranelift-codegen`, `-frontend`, `-module`, `-object`) | `crates/hirsel-cranelift/Cargo.toml` | bytecodealliance/wasmtime cranelift 0.136.3 crate releases | Apache-2.0 WITH LLVM-exception |
@@ -437,5 +438,38 @@ FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NON-INFRINGEMENT. IN NO EVENT
 SHALL THE COPYRIGHT HOLDERS OR ANYONE DISTRIBUTING THE SOFTWARE BE LIABLE
 FOR ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
 ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+## MIT (RustCrypto)
+
+```text
+Copyright (c) 2016-2026 The RustCrypto Project Developers
+Copyright (c) 2016 Artyom Pavlov
+Copyright (c) 2009-2013 Mozilla Foundation
+Copyright (c) 2006-2009 Graydon Hoare
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```

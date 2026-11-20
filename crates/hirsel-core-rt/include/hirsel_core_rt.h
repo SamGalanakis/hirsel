@@ -75,6 +75,9 @@ HirselCoreGrowth hirsel_core_grow_cold(const HirselCoreContext *, void *carrier,
 uint64_t hirsel_core_dest_id(void);
 /* rt.hash_bytes: the fixed Map byte hash (FORM "Maps"); no context or status. */
 uint64_t hirsel_core_hash_bytes(const uint8_t *data, uint64_t len);
+/* rt.sha1_blocks: RFC 3174 compression of the byte span and its padding. */
+void hirsel_core_sha1_blocks(uint32_t *state, const uint8_t *data, uint64_t len);
+
 /* rt.sha256_blocks: FIPS 180-4 compression of blocks 64-byte blocks into the
    eight state words, with the CPU's SHA-256 instructions when it has them; no
    context or status; zero blocks read nothing. */

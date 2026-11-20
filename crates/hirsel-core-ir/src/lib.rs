@@ -442,6 +442,15 @@
 //! (SEM-5), so no hash is observable. Engines map `rt.hash_bytes` to `uint64_t
 //! hirsel_core_hash_bytes(const uint8_t *, uint64_t)`, with no context or status.
 //!
+//! # SHA-1
+//!
+//! `rt.sha1_blocks(state, data, len)` applies RFC 3174 block compression in
+//! order to `len` readable bytes and their SHA-1 padding. It updates five
+//! `u32` state words in place. An empty span only compresses the padding.
+//! The call admits no bytes and costs one step (MEM-30). The portable and
+//! instruction kernels update the same state (SEM-8). Engines map the row to
+//! `void hirsel_core_sha1_blocks(uint32_t *, const uint8_t *, uint64_t)`.
+//!
 //! # SHA-256
 //!
 //! `rt.sha256_blocks(state, data, blocks)` applies the FIPS 180-4 SHA-256

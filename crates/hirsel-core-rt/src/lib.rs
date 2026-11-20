@@ -41,6 +41,7 @@ mod retention;
 pub mod schedule_script;
 pub mod secret;
 mod sequencer;
+mod sha1;
 mod sha256;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;

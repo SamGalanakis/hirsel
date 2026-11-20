@@ -1496,6 +1496,16 @@ fn accept_front(p: &Pool) {
         if id >= 0x8000 {
             crate::process::stop(b"UnitIdSpace");
         }
+        if std::env::var_os("HIRSEL_UNTIED_TRACE_FRONT").is_some() {
+            // SAFETY: getpeername into a local sockaddr.
+            let port = unsafe {
+                let mut a: libc::sockaddr_in = std::mem::zeroed();
+                let mut l = size_of::<libc::sockaddr_in>() as u32;
+                libc::getpeername(fd, (&mut a as *mut libc::sockaddr_in).cast(), &mut l);
+                u16::from_be(a.sin_port)
+            };
+            eprintln!("front id={id} fd={fd} peer={port}");
+        }
         // SAFETY: accept4 returned a descriptor nothing else owns.
         let owned = unsafe { OwnedFd::from_raw_fd(fd) };
         listener_for(id, HANDOFF_PORT).queue.lock().unwrap().push_back(Pend::Fd(owned));

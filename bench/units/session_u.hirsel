@@ -341,7 +341,32 @@ type Child: send {
 }
 
 // ---- one session unit.
-fn serve_session(nw: Net, clock: Clock, unit: u64, partitions: u64, par: u64, tool_port: u64) waits {
+fn note(err: Stderr, what: String, unit: u64, v: u64) waits {
+    let mut line = string.new()
+    result.unwrap(string.push(mut line, what))
+    result.unwrap(string.push(mut line, " unit="))
+    result.unwrap(string.push_u64(mut line, unit))
+    result.unwrap(string.push(mut line, " v="))
+    result.unwrap(string.push_u64(mut line, v))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(stderr.write(err, line))
+}
+
+// The hello, tolerating a connection the client dropped (a retried connect
+// the server had already accepted): false when it never arrives whole.
+fn read_hello(mut r: ReadHalf, mut buf: Bytes) -> bool waits {
+    list.clear(mut buf)
+    while list.len(buf) < 8 {
+        let want = 8 - list.len(buf)
+        match host.recv_bounded(mut r, mut buf, want, Never) {
+            Ok(got) => { if got == 0 { return false } },
+            Error(_) => return false,
+        }
+    }
+    true
+}
+
+fn serve_session(nw: Net, clock: Clock, err: Stderr, unit: u64, sessions: u64, partitions: u64, par: u64, tool_port: u64) waits {
     let (take hl, _) = result.unwrap(host.listen(nw, unit_addr(unit, HANDOFF_PORT), 4))
     let mut handoff = take hl
     let (take cs, _) = result.unwrap(host.accept(mut handoff, Never))
@@ -349,8 +374,15 @@ fn serve_session(nw: Net, clock: Clock, unit: u64, partitions: u64, par: u64, to
     let mut r = take rh
     let mut w = take wh
     let mut hello: Bytes = result.unwrap(list.with_capacity(8))
-    if !recv_exact(mut r, mut hello, 8) { fail("hello") }
+    if !read_hello(mut r, mut hello) {
+        note(err, "dropped-hello", unit, 0)
+        return
+    }
     let sid: u64 = list.word_le(hello, 0)
+    if sid >= sessions {
+        note(err, "bad-sid", unit, sid)
+        return
+    }
     // Crossings to this session's partition and to the shared service.
     let ps = connect_retry(nw, clock, unit_addr(sid % partitions, COMMIT_PORT))
     let (prh, pwh) = net.split(take ps)
@@ -397,7 +429,10 @@ fn serve_session(nw: Net, clock: Clock, unit: u64, partitions: u64, par: u64, to
             result.unwrap(list.push(mut tools, take tool))
         } else {
             for i in 0 .. ncalls {
-                let Some(take c) = list.pop(mut idle) else { fail("no child") }
+                let Some(take c) = list.pop(mut idle) else {
+                    note(err, "no-child", unit, sid)
+                    fail("no child")
+                }
                 let mut ch = take c
                 list.clear(mut job)
                 result.unwrap(list.put_word_le(mut job, size_of(req[24 + i])))
@@ -447,7 +482,7 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, d: Dir, argv: Args
     let unit = arg(argv, count - 3)
     let role = arg(argv, count - 1)
     if role == 1 {
-        serve_session(nw, clock, unit, partitions, par, tool_port)
+        serve_session(nw, clock, err, unit, sessions, partitions, par, tool_port)
     } else if role == 2 {
         serve_child(nw, clock, unit, tool_port)
     } else if unit < partitions {

@@ -221,13 +221,20 @@ def search(side, cell, guess, out, group):
     def go(rate):
         r = one_run(side, cell, rate, seed)
         for _ in range(2):
-            if r["load"] is not None:
+            L0 = r["load"]
+            # A server that failed although every turn completed correctly and
+            # in time failed for a reason outside the load: on this host, an
+            # HTTP probe from another process connecting to the listening port
+            # (seen as a "GET / HT" hello). Not a verdict on this rate: rerun.
+            stray = bool(L0 and r["rc"] != 0 and L0["failures"] == 0 and L0["timeouts"] == 0
+                         and L0["completed"] == L0["issued"] and L0["late"] == 0 and L0["p99_ns"] <= LIMIT_NS)
+            if r["load"] is not None and not stray:
                 break
             # The load generator produced no result (the server never came
             # up): an infrastructure fault, not a verdict on this rate. Keep
             # the record, then rerun the rate.
             r["group"] = group
-            r["infra_retry"] = True
+            r["infra_retry"] = "server-failed-load-clean" if r["load"] is not None else "no-load-result"
             runs.append(r)
             log(f"  {side} rate={rate:.0f} no load result; rerunning: {r.get('load_err', '')[-160:]!r}")
             r = one_run(side, cell, rate, seed)

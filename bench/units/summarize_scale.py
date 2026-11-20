@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""Render the measurements from scale.py as Markdown tables."""
+
+import argparse
+import json
+from pathlib import Path
+
+from scale import REC_CELLS, REC_SIDES, SCALE_CELLS, SCALE_SIDES
+
+
+def read_rows(data):
+    for path in sorted(data.glob("*.jsonl")):
+        with path.open() as source:
+            for line in source:
+                if line.endswith("\n"):
+                    yield json.loads(line)
+
+
+def fmt(x, places=0):
+    return "—" if x is None else f"{x:,.{places}f}"
+
+
+def ms(ns):
+    return fmt(ns / 1e6, 3) if ns is not None else "—"
+
+
+def table(header):
+    print("| " + " | ".join(header) + " |")
+    print("| " + " | ".join("---" for _ in header) + " |")
+
+
+def row(*cells):
+    print("| " + " | ".join(map(str, cells)) + " |")
+
+
+def number(record, name):
+    return (record or {}).get(name)
+
+
+def load_number(record, name):
+    return ((record or {}).get("load") or {}).get(name)
+
+
+def resources(trial):
+    rss = number(trial, "peak_rss_kib")
+    stats = number(trial, "ustats") or {}
+    return (
+        fmt(rss / 1024, 1) if rss is not None else "—",
+        fmt(number(trial, "peak_threads_sampled")),
+        fmt(number(trial, "server_measured_cpu_us_per_turn")),
+        fmt(number(trial, "server_cpu_us_per_turn")),
+        fmt(number(trial, "steals_per_s")),
+        fmt(stats.get("units")),
+    )
+
+
+def search_trials(rows, cell, side, group):
+    return [r for r in rows if r.get("cell_name") == cell and r.get("side") == side
+            and r.get("group") == group and r.get("phase") == "search" and "trial" in r]
+
+
+def result(rows, cell, side, group):
+    trials = search_trials(rows, cell, side, group)
+    summary = next((r for r in rows if r.get("summary") and r["cell_name"] == cell
+                    and r["side"] == side and r["group"] == group), None)
+    if not trials:
+        return None, None, "Pending" if summary is None else "Incomplete"
+    rate = number(summary, "max_rate")
+    if rate is not None:
+        trial = next(r for r in trials if r["search_rate"] == rate and r["passed"])
+        return trial, rate, "Pass"
+    lowest = min(trials, key=lambda r: r["rate"])
+    if summary is None or summary.get("incomplete"):
+        return lowest, None, "Incomplete"
+    return lowest, None, "No pass"
+
+
+def best(rows, cell, side):
+    rates = [result(rows, cell, side, group)[1] for group in (1, 2)]
+    return max((r for r in rates if r is not None), default=None), sum(r is not None for r in rates)
+
+
+def fairness_trial(rows, side, hot):
+    return next((r for r in rows if r.get("phase") == "fairness" and r.get("side") == side
+                 and "trial" in r and r["cell"]["hot"] == hot), None)
+
+
+def complete(trial):
+    load = (trial or {}).get("load")
+    return bool(load and trial["server_rc"] == trial["load_rc"] == 0
+                and load["completed"] == load["issued"]
+                and load["late"] == load["failures"] == load["timeouts"] == 0)
+
+
+def fair(rows, side):
+    cold, hot = (fairness_trial(rows, side, v) for v in (False, True))
+    if not cold or not hot:
+        return None
+    return complete(cold) and complete(hot) and hot["load"]["p99_ns"] <= min(5_000_000, 2 * cold["load"]["p99_ns"])
+
+
+def verdicts(rows, n):
+    high = f"A1-{n}"
+    u0, n0 = best(rows, "A1-256", "untied")
+    u, nu = best(rows, high, "untied")
+    t, nt = best(rows, high, "tokiow8")
+    s, ns = best(rows, high, "S3k7")
+    if all((u0, u, t, s)):
+        repeat = " At least one side had a single passing search." if min(n0, nu, nt, ns) == 1 else ""
+        rel = f"At {n:,} sessions untied reached {u / u0:.3f}× its 256-session rate and {u / t:.3f}× tokiow8. S3k7 reached {s / u:.3f}× untied."
+        exclusion = s >= 1.25 * u
+        if u < 0.9 * u0 or u < 0.75 * t:
+            state = "Threshold missed."
+        elif exclusion and fair(rows, "S3k7") is None:
+            state = "Rate thresholds met. S3k7 fairness is pending."
+        elif exclusion and fair(rows, "S3k7"):
+            state = "Pool not supported at scale under the S3k7 rule."
+        else:
+            state = "Holds."
+        print(f"- **Scale.** {state} {rel}{repeat}")
+    else:
+        print("- **Scale.** Pending comparable passing rates.")
+
+    untied = fair(rows, "untied")
+    if untied is None:
+        print("- **Fairness.** Pending paired runs.")
+    else:
+        by_side = ", ".join(f"{s} {'passed' if fair(rows, s) else 'failed'}"
+                            for s in SCALE_SIDES if fair(rows, s) is not None)
+        print(f"- **Fairness.** {'Holds' if untied else 'Threshold missed'} for untied. {by_side}. One pair per side.")
+
+    ratios = []
+    sparse = False
+    for cell in REC_CELLS:
+        candidate, count = best(rows, cell, "untied")
+        control, control_count = max((best(rows, cell, side) for side in REC_SIDES[1:4]),
+                                     key=lambda item: item[0] or 0)
+        ratios.append(candidate / control if candidate and control else None)
+        sparse |= count == 1 or control_count == 1
+    if all(ratios):
+        state = "Supported." if min(ratios) >= 1.25 else "Threshold missed."
+        repeat = " At least one rate rests on a single passing search." if sparse else ""
+        print(f"- **Recorded fan-out.** {state} Untied reached {ratios[0]:.2f}× the best recorded control at f=0.5 and {ratios[1]:.2f}× at f=0.1.{repeat}")
+    else:
+        print("- **Recorded fan-out.** Pending comparable passing rates in both cells.")
+
+
+def scale_tables(rows):
+    for cell_name, cell in SCALE_CELLS.items():
+        print(f"\n## Base load at {cell['sessions']:,} sessions, f=0\n")
+        table(("Side", "Search", "Result", "Best pass or lowest tried (turns/s)", "p99 (ms)",
+               "Peak RSS (MiB)", "Peak sampled threads", "CPU µs/turn after warmup (est.)",
+               "CPU µs/turn incl. setup", "Steals/s incl. setup", "Units"))
+        for side in SCALE_SIDES:
+            for group in (1, 2):
+                trial, rate, state = result(rows, cell_name, side, group)
+                row(side, group, state, fmt(rate if rate is not None else number(trial, "rate")),
+                    ms(load_number(trial, "p99_ns")), *resources(trial))
+        print()
+        pairs = [best(rows, cell_name, side)[0] for side in SCALE_SIDES]
+        if all(pairs):
+            for side, other in zip(SCALE_SIDES[1:], pairs[1:], strict=True):
+                ratio = max(pairs[0], other) / min(pairs[0], other)
+                if ratio < 1.25:
+                    print(f"- Untied and {side} tie under the 25% rule.")
+                else:
+                    faster = "untied" if pairs[0] > other else side
+                    print(f"- {faster} leads the untied/{side} comparison by {(ratio - 1) * 100:.1f}%.")
+
+
+def fairness_table(rows, n):
+    print(f"\n## Hot sessions at {n:,} sessions\n")
+    table(("Side", "Hot", "Open turns/s", "Non-hot p50 (ms)", "Non-hot p99 (ms)",
+           "Non-hot max (ms)", "Max ready wait (ms)", "Hot turns/s", "Complete",
+           "Peak RSS (MiB)", "Peak sampled threads", "CPU µs/turn after warmup (est.)",
+           "CPU µs/turn incl. setup", "Steals/s incl. setup", "Units"))
+    for side in SCALE_SIDES:
+        for hot in (False, True):
+            trial = fairness_trial(rows, side, hot)
+            wait = number(trial, "queue_wait_max_ns")
+            upper = number(trial, "queue_wait_overlap_max_ns")
+            wait_text = ms(wait)
+            if upper is not None and upper != wait:
+                wait_text += " to " + ms(upper)
+            row(side, "Yes" if hot else "No", fmt(number(trial, "rate")),
+                *(ms(load_number(trial, col)) for col in ("p50_ns", "p99_ns", "max_ns")),
+                wait_text, fmt(load_number(trial, "hot_turns_per_s"), 1),
+                "Yes" if complete(trial) else "No" if trial else "—", *resources(trial))
+
+
+def recorded_tables(rows):
+    for cell_name, cell in REC_CELLS.items():
+        print(f"\n## Full recording, 16 parallel tool calls per turn, f={cell['f']}\n")
+        table(("Side", "Search", "Result", "Best pass or lowest tried (turns/s)",
+               "p99 (ms)", "Recorded bytes/turn", "Source"))
+        for side in REC_SIDES:
+            for group in (1, 2):
+                trial, rate, state = result(rows, cell_name, side, group)
+                stats = number(trial, "ustats") or {}
+                written, source = stats.get("tape_bytes"), "Writer"
+                if written is None:
+                    written, source = number(trial, "tape_disk_bytes"), "File size"
+                completed = load_number(trial, "completed")
+                row(side, group, state, fmt(rate if rate is not None else number(trial, "rate")),
+                    ms(load_number(trial, "p99_ns")),
+                    fmt(written / completed if written is not None and completed else None),
+                    source if written is not None and completed else "—")
+
+
+def main():
+    args = argparse.ArgumentParser(description=__doc__)
+    args.add_argument("data", type=Path)
+    args.add_argument("--sessions", type=int, default=8192)
+    args.add_argument("--attribution", type=Path)
+    args.add_argument("--method", type=Path)
+    args.add_argument("--tip", required=True)
+    opt = args.parse_args()
+    rows = [r for r in read_rows(opt.data) if not r.get("discarded")]
+    print("# Session scaling and recorded fan-out\n")
+    verdicts(rows, opt.sessions)
+    print("\nThe tables use clean timing holds. Numbers come from the measured runs except where marked as estimates.")
+    scale_tables(rows)
+    fairness_table(rows, opt.sessions)
+    recorded_tables(rows)
+    if opt.attribution:
+        print("\n## Attribution\n")
+        print(opt.attribution.read_text().strip())
+    if opt.method:
+        print("\n" + opt.method.read_text().strip())
+    print(f"\nBranch `t3/mc-units-scale`, tip `{opt.tip}`.")
+
+
+if __name__ == "__main__":
+    main()

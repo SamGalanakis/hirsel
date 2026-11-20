@@ -185,8 +185,9 @@ language. Passing the replay point makes nothing durable ([CAP-9](#cap-9-tapes))
 
 A **tape** is a core resource, `Tape`, that records or replays the provider operations made
 through the capabilities it substitutes. `tape.open(d, name, mode, header)` opens the tape
-file `name` in the directory `d`, to record or to replay. `tape.clock`, `tape.dir`,
-`tape.stdout`, `tape.stderr` and `tape.args` each take a tape and a capability and return
+file `name` in the directory `d`, to record, to replay, or to replay across: a replay that
+also accepts a recording made by another code revision, which `tape.across(t)` reports.
+`tape.clock`, `tape.dir`, `tape.stdout`, `tape.stderr`, `tape.tasks` and `tape.args` each take a tape and a capability and return
 a **substitute**: a capability of the same type whose every operation, and every operation
 on a handle made through it, reaches the tape at its issue and at its delivery (CAP-8). A
 substitute differs from its source only by the values its operations return (CAP-5), so
@@ -200,7 +201,8 @@ code that takes the capability runs unchanged on either.
   object or its argument, is a divergence: it has no effect, and the tape refuses it.
 - `tape.open` refuses, before anything runs, a recording made by another build, whose build
   identity, which covers every byte of the code that runs, differs from the opener's, and
-  one whose argument or limit differs.
+  one whose argument or limit differs. Opened across, a replay accepts a recording whose
+  code revision differs and still refuses the others.
 - `tape.end(take t)` waits until every operation on the tape that is in progress has
   delivered, then seals the tape. After `end`, or once the tape is dropped, the tape refuses
   every operation on a substitute or on a handle made through it, which never reaches the
@@ -216,8 +218,9 @@ refuses every later one, so a replay that reaches the same point fails the same 
 `tape.port(mut t)` returns a `Port` and its `PortEnd`, a way out of code that holds only
 substitutes that carries bytes and nothing else: `port.call(p, request, mut reply)` is a
 provider operation recorded like any other, and the holder of the `PortEnd` takes each call
-with `tape.serve` and replies with `tape.answer`. The format of a tape is not part of the
-language.
+with `tape.serve` and replies with `tape.answer`. `tape.port`, `tape.serve` and
+`tape.answer` are not yet in the core source ([core](core.md)). The format of a tape is not
+part of the language.
 
 A tape is for diagnosis and testing and makes no durability promise: no tape write is
 synced, nothing resumes from a tape, and a crash ends the recording where it falls. The

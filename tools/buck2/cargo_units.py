@@ -273,6 +273,18 @@ class Resolution:
                 base = literal(call, 'name')
                 # Manually declared tools and harnesses have no Cargo unit.
                 if base not in self.preferred:
+                    package = ast.literal_eval(attrs['package_name']) if 'package_name' in attrs else None
+                    if call.func.id == 'hirsel_library' and package in self.preferred:
+                        # A feature variant of a member's library (the runtime
+                        # archives) links its package's own unit dependencies,
+                        # so it shares each third-party crate with the members
+                        # it depends on instead of linking a second copy.
+                        key = self.preferred[package]
+                        deps = self.values(key, lambda u: sorted(
+                            self.label(dep) for _, dep in u['edges'] if dep in self.names
+                            and self.units[dep]['target']['kind'] != ['custom-build']))
+                        result.append([replace(source, statement, dict(deps=deps), render)])
+                        continue
                     result.append(source.splitlines(keepends=True)[statement.lineno - 1:statement.end_lineno])
                     continue
                 for key, name in sorted(self.names.items(), key=lambda pair: pair[1]):

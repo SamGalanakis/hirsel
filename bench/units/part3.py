@@ -12,7 +12,7 @@ started are ever signalled, after checking their command name.
 
 Usage: part3.py PLAN OUT.jsonl GROUPS   (PLAN: sweep | cells | pilot)
 """
-import json, os, random, signal, subprocess, sys, time
+import json, os, random, signal, socket, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from blocks import Block, cpuset
 
@@ -92,6 +92,19 @@ def masks(pid):
     return out
 
 
+def wait_rusage(p, timeout):
+    """Reap the server ourselves to get its rusage (taskset execs, so the pid is the server)."""
+    end = None if timeout is None else time.time() + timeout
+    while True:
+        pid, status, ru = os.wait4(p.pid, os.WNOHANG)
+        if pid:
+            p.returncode = os.waitstatus_to_exitcode(status)
+            return ru
+        if end is not None and time.time() > end:
+            return None
+        time.sleep(0.05)
+
+
 class Tool:
     def __enter__(self):
         os.makedirs(WORK, exist_ok=True)
@@ -100,6 +113,10 @@ class Tool:
                                   stderr=self.err)
         open(f"{WORK}/tool.pid", "w").write(str(self.p.pid))
         time.sleep(0.5)
+        # The block's own tool server must be the one listening: a stray
+        # listener on the port would otherwise serve the calls unnoticed.
+        if self.p.poll() is not None or "toolsrv ready" not in open(f"{WORK}/tool.err").read():
+            raise SystemExit(f"tool server did not start: {open(f'{WORK}/tool.err').read()[-400:]}")
         return self
 
     def __exit__(self, *a):
@@ -116,6 +133,10 @@ def one_run(side, cell, rate, seed):
         os.makedirs(d, exist_ok=True)
         for n in os.listdir(d):
             os.unlink(os.path.join(d, n))
+    for p in range(PORT, PORT + 9):
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", p)) == 0:
+                raise SystemExit(f"port {p} already has a listener before the run")
     full_env = {k: v for k, v in os.environ.items() if not k.startswith("HIRSEL_")} | env
     err = open(f"{WORK}/server.err", "w")
     srv = subprocess.Popen(["taskset", "-c", cpus] + argv, env=full_env, stderr=err)
@@ -138,15 +159,15 @@ def one_run(side, cell, rate, seed):
         out, lerr = lgp.communicate()
     wall = time.time() - t0
     tool1 = cpu_ticks(tool_pid)
-    try:
-        srv.wait(timeout=30)
-    except subprocess.TimeoutExpired:
+    ru = wait_rusage(srv, 30)
+    if ru is None:
         kill_own(f"{WORK}/server.pid", {"session", "session_rec", "twin"})
-        srv.wait()
+        ru = wait_rusage(srv, None)
     err.close()
     server_err = open(f"{WORK}/server.err").read()[-2000:]
     rec_ = dict(side=side, cell=cell, rate=rate, seed=seed, wall=wall, rc=srv.returncode,
                 server=server_err.strip().splitlines()[-12:], masks=seen_masks,
+                server_cpu_s=round(ru.ru_utime + ru.ru_stime, 3), server_sys_s=round(ru.ru_stime, 3),
                 tool_cpu_s=(tool1 - tool0) / 100 if tool0 is not None and tool1 is not None else None)
     tapes = sum(os.path.getsize(os.path.join(TAPES, n)) for n in os.listdir(TAPES)) if rec else 0
     rec_["tape_bytes"] = tapes

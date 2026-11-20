@@ -622,6 +622,9 @@ SETTLEMENT_LAWS = ('after_publication', 'settled_callinfo')
 # L28's owner half: a dropped unit's Outcome rows ride in a Reset that never closes 1008,
 # and an owner removal reaches the publisher only while the writer holds no content unit.
 RELEASE_LAWS = ('dropped_keeps_outcomes', 'removal_waits_for_writer')
+# L24's owner half: repairs queued behind a busy writer coalesce, so the newest board arrives
+# with no Reset.
+REPAIR_LAWS = ('repair_coalesced',)
 
 
 def admission_laws(args, root, work, engines, row):
@@ -639,7 +642,7 @@ def admission_laws(args, root, work, engines, row):
     selected.write_text(json.dumps(selection))
     durable = ('gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max')
     state = ('unread_client', 'hello_and_slots', 'join_cleanup', 'refused_send_releases_timer')
-    names = args.admission_law or (*state, *durable, 'wire_replacement_generation', *SETTLEMENT_LAWS, *RELEASE_LAWS)
+    names = args.admission_law or (*state, *durable, 'wire_replacement_generation', *SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS)
     if 'evaluator' in engines:
         for name in names:
             value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/runner/law_' + name)
@@ -647,7 +650,7 @@ def admission_laws(args, root, work, engines, row):
     for engine in (e for e in engines if e != 'evaluator'):
         groups = [('wire_admission', state), ('durable_wire_admission', durable),
                   ('wire_replacement_generation', ('wire_replacement_generation',))]
-        groups.extend((name, (name,)) for name in (*SETTLEMENT_LAWS, *RELEASE_LAWS))
+        groups.extend((name, (name,)) for name in (*SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS))
         for group, members in groups:
             if not any(name in names for name in members):
                 continue
@@ -807,7 +810,7 @@ def main():
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     p.add_argument('--session-law', action='append', choices=SESSION_LAWS)
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
-                   'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max', *SETTLEMENT_LAWS, *RELEASE_LAWS])
+                   'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max', *SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS])
     p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1'])
     args = p.parse_args()
     if args.stop_case and args.part != 'deadline':

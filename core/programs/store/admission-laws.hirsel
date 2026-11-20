@@ -603,6 +603,85 @@ fn test_dropped_keeps_outcomes(tasks: Tasks, clock: Clock, random: Random) -> Re
     if law_dropped_keeps_outcomes(tasks, clock, random) { Ok(()) } else { Error(()) }
 }
 
+// A whole board of sub 1 as a repair's rows: REPAIR_KEYS keys, each holding `mark` bytes of
+// REPAIR_VALUE, so one repair is about a fifth of `budget` and fits a frame.
+const REPAIR_KEYS: u64 = 10u64
+const REPAIR_VALUE: u64 = 20000u64
+
+fn repair_board(mark: u8) -> List[Row] {
+    let mut rows: List[Row] = list.new()
+    for k in 0u64 .. REPAIR_KEYS {
+        let mut key: Bytes = list.new()
+        result.unwrap(std.codec.put_u64(k, mut key))
+        let mut value: Bytes = list.new()
+        for _ in 0u64 .. REPAIR_VALUE { result.unwrap(list.push(mut value, mark)) }
+        result.unwrap(list.push(mut rows, Row(sub: 1u32, key: take key, value: Some(take value))))
+    }
+    take rows
+}
+
+// L24 (v2.20, repair_delivered), the owner's half: a reader that is slow but responsive gets
+// one repair after another while its writer is still busy. Each `complete` replaces sub 1's
+// image from empty (v2.20 item 5), so the client reaches the newest board with no `Reset`
+// (item 6 counts only coalesced rows against `budget`). Red when the owner keeps every
+// superseded repair queued: the sixth whole board puts it over `budget`, and it resets.
+pub fn law_repair_coalesced(tasks: Tasks, c: Clock, r: Random) -> bool waits {
+    let (access_gate, take policy_task) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
+    let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    let service = wire_service_seed(take reg, access_gate, head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
+    let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
+    let mut owner = take initial
+    let mut work = wire_work()
+    owner.joined = Some(7u64)
+    result.unwrap(list.push(mut owner.subs, (1u32, 1u64)))
+    let repairs = 8u8
+    let mut delivered = true
+    for mark in 1u8 .. repairs + 1u8 {
+        let version: u64 = 10u64 + int.widen(mark)
+        let mut generations: List[(u32, u64)] = list.new()
+        result.unwrap(list.push(mut generations, (1u32, 1u64)))
+        let mut complete: List[u32] = list.new()
+        result.unwrap(list.push(mut complete, 1u32))
+        let owed = Owe(session: 7u64, version: version, generations: take generations, complete: take complete, rows: repair_board(mark), ended: list.new(), reset: false)
+        if let Error(_) = wire_update(mut owner, mut work, Update(version: version, content: Some(take owed), outcomes: list.new())) { delivered = false }
+    }
+    // The client's image: every `complete` naming sub 1 replaces it from empty.
+    let mut image: Map[Bytes, Bytes] = map.new()
+    let mut reset = false
+    while let Some(take frame) = transport_receive(mut owner, mut work) {
+        match take frame {
+            Batch(_, take complete, take rows, _) => {
+                if list.len(complete) == 1u64 && complete[0] == 1u32 { image = map.new() }
+                for take row in rows {
+                    let Row(sub: _, key: take key, value: take value) = take row
+                    if let Some(take v) = take value { result.unwrap(result.capacity_only(map.insert(mut image, take key, take v))) }
+                }
+            },
+            _ => { reset = true },
+        }
+    }
+    let mut exact = map.len(image) == REPAIR_KEYS
+    for k in 0u64 .. REPAIR_KEYS {
+        let mut key: Bytes = list.new()
+        result.unwrap(std.codec.put_u64(k, mut key))
+        exact = exact && match map.get(image, key) {
+            Some(v) => list.len(v) == REPAIR_VALUE && v[0] == repairs && v[REPAIR_VALUE - 1u64] == repairs,
+            None => false,
+        }
+    }
+    let mut policy_handle = take policy_task
+    task.cancel(mut policy_handle)
+    let _ = task.join(take policy_handle)
+    let _ = take requests
+    delivered && !reset && !owner.reset_seen && exact
+}
+
+@test
+fn test_repair_coalesced(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+    if law_repair_coalesced(tasks, clock, random) { Ok(()) } else { Error(()) }
+}
+
 fn held_quiet(from: Receiver[PubIn]) -> bool {
     match channel.try_receive(from) { Error(_) => true, _ => false }
 }

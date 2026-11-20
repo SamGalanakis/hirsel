@@ -1801,6 +1801,10 @@ type RoundAt: shareable + send { at: u64 }
 
 const ROUND_HALTED: u64 = 18446744073709551615u64
 
+// The publisher's `PubIn` capacity in an operated place (§3 queue table: 64 in the reference
+// server). A full `PubIn` ends an owner's Join or Subscribe with Refused(Overloaded).
+const PUBLISHER_INBOX: u64 = 64u64
+
 // The publisher's inbox, both ends, and the place's round register with its reserved Arcs.
 // `post` gives each session a sender; place_head then takes the mailbox whole, its head
 // sending Releases on the same channel.
@@ -2139,7 +2143,7 @@ fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Re
         match activation_version(db) { Ok(found) => found, Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) } }
     } else { 0u64 }
     if !head_advance(to, inbox, Activated(take release, version)) { return head_closed(take db) }
-    let mail = match mailbox(4u64) {
+    let mail = match mailbox(PUBLISHER_INBOX) {
         Ok(take mail) => take mail,
         Error(cap) => { let _ = close_store(take db); return Error(Full(cap)) },
     }
@@ -7087,6 +7091,66 @@ fn wire_current_output(active: List[(u32, u64)], take output: WireOutput) -> Opt
     Some(WireOutput(frame: take f, marks: take marks, generations: take generations, external: external, check: check))
 }
 
+// A `complete` replaces its sub's image from empty (v2.20 item 5), so whatever the owner still
+// holds of the same instance ahead of it, rows or an earlier `complete`, is superseded and goes
+// before `budget` is checked: the rows a Reset weighs are coalesced (§3). Outcomes, their marks
+// and other subs' content stay.
+fn wire_supersede(mut output: List[WireOutput], replacing: List[(u32, u64)]) {
+    let mut kept = 0u64
+    for index in 0u64 .. list.len(output) {
+        let empty = WireOutput(frame: Reset(0u64, list.new()), marks: list.new(), generations: list.new(), external: false, check: None)
+        let queued = list.set(mut output, index, take empty)
+        if let Some(take current) = wire_superseded(take queued, replacing) {
+            let _ = list.set(mut output, kept, take current)
+            kept += 1u64
+        }
+    }
+    while list.len(output) > kept { let _ = list.pop(mut output) }
+}
+
+fn wire_superseded(take output: WireOutput, replacing: List[(u32, u64)]) -> Option[WireOutput] {
+    if output.external { return Some(take output) }
+    let WireOutput(frame: take f, marks: take marks, generations: take stamps, external: external, check: check) = take output
+    let mut generations = take stamps
+    let mut gone: List[(u32, u64)] = list.new()
+    if let Batch(_, _, _, _) = f {
+        let mut index = list.len(generations)
+        while index != 0u64 {
+            index -= 1u64
+            let (sub, generation) = generations[index]
+            if sub_generation(replacing, sub) == Some(generation) {
+                let _ = list.remove(mut generations, index)
+                result.unwrap(list.push(mut gone, (sub, generation)))
+            }
+        }
+    }
+    if list.len(gone) == 0u64 { return Some(WireOutput(frame: take f, marks: take marks, generations: take generations, external: external, check: check)) }
+    if let Batch(version, take complete, take rows, take done) = take f {
+        let mut live_complete = take complete
+        let mut kept = 0u64
+        for index in 0u64 .. list.len(live_complete) {
+            if let None = sub_generation(gone, live_complete[index]) {
+                list.swap(mut live_complete, kept, index)
+                kept += 1u64
+            }
+        }
+        while list.len(live_complete) > kept { let _ = list.pop(mut live_complete) }
+        let mut live_rows = take rows
+        kept = 0u64
+        for index in 0u64 .. list.len(live_rows) {
+            if let None = sub_generation(gone, live_rows[index].sub) {
+                list.swap(mut live_rows, kept, index)
+                kept += 1u64
+            }
+        }
+        while list.len(live_rows) > kept { let _ = list.pop(mut live_rows) }
+        if list.len(live_complete) == 0u64 && list.len(live_rows) == 0u64 && list.len(done) == 0u64 { return None }
+        let kept_check: Option[u64] = if list.len(live_complete) == 0u64 && list.len(live_rows) == 0u64 { None } else { check }
+        return Some(WireOutput(frame: Batch(version, take live_complete, take live_rows, take done), marks: take marks, generations: take generations, external: external, check: kept_check))
+    }
+    None
+}
+
 fn wire_prune_output[G: send, H: send](mut s: WireSession[G, H], mut output: List[WireOutput], retired: Option[u32]) {
     let mut kept = 0u64
     for index in 0u64 .. list.len(output) {
@@ -7474,6 +7538,13 @@ fn wire_stage_update[G: send, H: send](mut s: WireSession[G, H], mut output: Lis
         live_complete = list.new()
         live_rows = list.new()
         generations = list.new()
+    }
+    if list.len(live_complete) != 0u64 {
+        let mut replacing: List[(u32, u64)] = list.new()
+        for sub in live_complete {
+            if let Some(generation) = sub_generation(generations, sub) { result.unwrap(list.push(mut replacing, (sub, generation))) }
+        }
+        wire_supersede(mut output, replacing)
     }
     if list.len(live_rows) != 0u64 || list.len(live_complete) != 0u64 || list.len(done) != 0u64 {
         let charge = wire_batch_charge(live_complete, live_rows, done, list.len(marks) != 0u64)

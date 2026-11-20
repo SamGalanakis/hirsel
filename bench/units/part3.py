@@ -31,7 +31,7 @@ SESSIONS, PARTITIONS, SYNCS = 256, 8, 8
 TOOL_DELAY_US = 1000
 RUN = dict(dur=8, warm=1, burst_at=4, burst_len=1, burst_x=1.5)
 STEP = 1.25
-BLOCK_SIDES = 3
+BLOCK_SIDES = 4
 
 
 def log(*a):

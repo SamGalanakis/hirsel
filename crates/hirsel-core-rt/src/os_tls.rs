@@ -6,9 +6,8 @@ use crate::{
 };
 use hirsel_core_net::Name;
 use rustls::{
-    CertificateError, ClientConfig, ClientConnection, RootCertStore,
-    client::Resumption,
-    pki_types::{CertificateDer, ServerName, pem::PemObject},
+    CertificateError, ClientConfig, ClientConnection, RootCertStore, client::Resumption,
+    pki_types::ServerName,
 };
 use std::{
     collections::BTreeMap,
@@ -176,16 +175,6 @@ impl SecureStream for Stream {
         self.connection.send_close_notify();
         let _ = self.connection.write_tls(&mut SocketIo(fd));
     }
-}
-
-pub(crate) fn explicit_roots(pem: &[u8]) -> Option<RootCertStore> {
-    // A Roots bundle contains certificates only. The PEM decoder walks each
-    // section and RootCertStore::add validates the decoded trust anchor.
-    let mut store = RootCertStore::empty();
-    for certificate in CertificateDer::pem_slice_iter(pem) {
-        store.add(certificate.ok()?).ok()?;
-    }
-    (!store.is_empty()).then_some(store)
 }
 
 pub(crate) fn system_roots() -> RootCertStore {

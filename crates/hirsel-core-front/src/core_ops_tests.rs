@@ -75,8 +75,8 @@ fn accepting(mut l: Listener) waits { let _ = host.accept(mut l, Never) }
             network.grants.insert(
                 1,
                 vec![
-                    hirsel_core_net::Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
-                    hirsel_core_net::Rule::parse("Listen 127.0.0.0/8 1-65535").unwrap(),
+                    hirsel_core_net::GrantRule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
+                    hirsel_core_net::GrantRule::parse("Listen 127.0.0.0/8 1-65535").unwrap(),
                 ],
             );
             let report = eval::run_network(

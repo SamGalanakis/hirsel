@@ -8,6 +8,8 @@ rust-version.workspace = true
 [dependencies]
 libc = { version = "0.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
+ring = "=0.17.14"
+rustls = { version = "=0.23.46", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 hirsel-guard = { path = "../hirsel-guard" }

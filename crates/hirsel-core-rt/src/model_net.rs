@@ -2,6 +2,7 @@
 use crate::{
     net::{Address, NetworkRequest},
     provider::*,
+    tls::{HandshakeState, TlsRequest},
 };
 use hirsel_core_net::model::{Model, Operation, Reply};
 use std::sync::Arc;
@@ -42,7 +43,15 @@ impl crate::tasks::ModelClock for Model {
 fn modeled(op: u8) -> bool {
     matches!(
         op,
-        CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR | MONO_NS | WALL_MS | SLEEP_UNTIL
+        CONNECT
+            | LISTEN
+            | ACCEPT
+            | RECV_BOUNDED
+            | SEND_PAIR
+            | TLS_CONNECT
+            | MONO_NS
+            | WALL_MS
+            | SLEEP_UNTIL
     )
 }
 /// # Safety
@@ -83,12 +92,6 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
     unsafe {
         let p = &*state.cast::<ModelProvider>();
         let r = &mut *request;
-        if r.operation == TLS_CONNECT {
-            return Step {
-                outcome: crate::net::tls_failure(4, 0),
-                ..Step::default()
-            };
-        }
         if !modeled(r.operation) {
             return (p.fallback.issue)(p.fallback.state, request, token);
         }
@@ -105,6 +108,9 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                 },
                 ..Step::default()
             };
+        }
+        if r.operation == TLS_CONNECT {
+            return tls_step(&p.model, r, token);
         }
         let n = &mut *r.path.cast_mut().cast::<NetworkRequest>();
         let address = hirsel_core_net::model::Address {
@@ -170,13 +176,62 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                 ..Step::default()
             };
         }
+        pending(deadline)
+    }
+}
+
+fn pending(deadline: Option<u64>) -> Step {
+    Step {
+        kind: STEP_PENDING,
+        deadline_ns: deadline.unwrap_or(0),
+        ..Step::default()
+    }
+}
+
+unsafe fn tls_step(model: &Model, request: &Request, token: u64) -> Step {
+    // SAFETY: both adapters keep the extension, offer and output buffers live.
+    unsafe {
+        let tls = &mut *request.path.cast_mut().cast::<TlsRequest>();
+        let state = &mut *tls.state.cast::<HandshakeState>();
+        let key = request.handle;
+        let deadline = tls.network.until.map(|(_, _, at)| at);
+        let reply = if let Some(reply) = model.attempt_tls(key, &state.alpn, token) {
+            reply
+        } else if deadline.is_some_and(|at| at <= model.now()) {
+            model.abort(token, false)
+        } else {
+            return pending(deadline);
+        };
+        if reply.error == 0 {
+            let protocol = &mut *tls.protocol_out;
+            if !reply.bytes.is_empty() {
+                std::ptr::copy_nonoverlapping(
+                    reply.bytes.as_ptr(),
+                    protocol.data,
+                    reply.bytes.len(),
+                );
+            }
+            protocol.len = reply.bytes.len();
+            *tls.peer_out = reply.peer;
+            (*tls.network.sockets).split(key);
+        } else {
+            tls_release(tls, key);
+        }
         Step {
-            kind: STEP_PENDING,
-            deadline_ns: deadline.unwrap_or(0),
+            outcome: outcome(&reply),
             ..Step::default()
         }
     }
 }
+
+unsafe fn tls_release(tls: &mut TlsRequest, key: u64) {
+    // SAFETY: the consuming request still owns the unsplit socket.
+    unsafe {
+        (*tls.network.sockets).release(key);
+        (*tls.state.cast::<HandshakeState>()).consumed = true;
+    }
+}
+
 unsafe extern "C" fn resume(state: *mut u8, request: *mut Request, token: u64) -> Step {
     unsafe {
         let p = &*state.cast::<ModelProvider>();
@@ -206,7 +261,12 @@ unsafe extern "C" fn abort(
                 return step.outcome;
             }
         }
-        outcome(&p.model.abort(token, reason == ABORT_CANCEL))
+        let reply = p.model.abort(token, reason == ABORT_CANCEL);
+        let r = &*request;
+        if r.operation == TLS_CONNECT {
+            tls_release(&mut *r.path.cast_mut().cast::<TlsRequest>(), r.handle);
+        }
+        outcome(&reply)
     }
 }
 /// # Safety

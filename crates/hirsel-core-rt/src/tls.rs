@@ -6,7 +6,7 @@ use crate::{
     process::View,
     provider::*,
 };
-use hirsel_core_net::{GrantRule, Name, TlsTrust};
+use hirsel_core_net::{GrantRule, Name, TlsTrust, tls};
 use std::ptr;
 
 #[repr(C)]
@@ -70,13 +70,13 @@ fn protocols(mut encoded: &[u8]) -> Option<Vec<Vec<u8>>> {
     let mut offered = Vec::new();
     while let Some((&len, tail)) = encoded.split_first() {
         let (protocol, rest) = tail.split_at_checked(usize::from(len))?;
-        if len == 0 || offered.len() == 16 || offered.iter().any(|p| p == protocol) {
+        if offered.len() == 16 {
             return None;
         }
         offered.push(protocol.to_vec());
         encoded = rest;
     }
-    Some(offered)
+    tls::valid_protocols(&offered).then_some(offered)
 }
 
 /// # Safety
@@ -238,26 +238,13 @@ unsafe fn prepare(
 ) -> Result<(net::Address, Provider, HandshakeState), Outcome> {
     unsafe {
         let (address, provider) = (*files).connected.get(&key).copied().ok_or(DENIED)?;
-        let name = std::str::from_utf8(view_bytes(&name))
-            .ok()
-            .and_then(Name::parse)
-            .ok_or_else(|| tls_failure(1, 0))?;
+        let name = tls::verification_name(view_bytes(&name)).ok_or_else(|| tls_failure(1, 0))?;
         if bad_alpn {
             return Err(tls_failure(2, 0));
         }
         let alpn = protocols(view_bytes(&alpn)).ok_or_else(|| tls_failure(2, 0))?;
-        let (pin, store) = match trust {
-            0 => (TlsTrust::System, None),
-            1 => {
-                let roots = bytes(roots);
-                let store =
-                    crate::os_tls::explicit_roots(roots).ok_or_else(|| tls_failure(3, 0))?;
-                let pin =
-                    TlsTrust::Roots(crate::os_tls::sha256(roots).as_ref().try_into().unwrap());
-                (pin, Some(store))
-            }
-            _ => return Err(tls_failure(3, 0)),
-        };
+        let pem = if trust == 1 { bytes(roots) } else { &[] };
+        let (pin, store) = tls::trust(trust, pem).ok_or_else(|| tls_failure(3, 0))?;
         let grant = hirsel_core_capability_handle(context, n);
         let grant_provider = &*hirsel_core_capability_provider(context, n);
         let rules = if crate::tape::owns(grant_provider) {
@@ -369,9 +356,7 @@ pub unsafe extern "C" fn hirsel_core_tls_connect(
         );
         let mut peer = [0; 4];
         if outcome.status == 0 && outcome.error == IoError::OK {
-            for (word, bytes) in peer.iter_mut().zip(digest.as_chunks::<8>().0) {
-                *word = u64::from_be_bytes(*bytes);
-            }
+            peer = tls::peer_words(digest);
             if protocol_out.len != 0 {
                 let chosen = &protocol[..protocol_out.len];
                 outcome.written =

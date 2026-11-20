@@ -980,7 +980,7 @@ pub fn run_injected(
 }
 /// Harness-owned socket descriptors and explicit rules. Never constructed by source code.
 pub struct Network {
-    pub grants: BTreeMap<u64, Vec<hirsel_core_net::Rule>>,
+    pub grants: BTreeMap<u64, Vec<hirsel_core_net::GrantRule>>,
     pub sockets: hirsel_core_net::Sockets,
 }
 impl Default for Network {
@@ -1751,6 +1751,14 @@ impl Machine<'_> {
         };
         (bytes, data, len, cap)
     }
+    fn carrier_bytes(&self, carrier: u64) -> &[u8] {
+        let len = self.load(carrier + 8, 8);
+        if len == 0 {
+            &[]
+        } else {
+            self.get(self.load(carrier, 8), len as usize)
+        }
+    }
     fn deny_describe_capability(&self) {
         if self
             .world
@@ -1776,12 +1784,15 @@ impl Machine<'_> {
                 let address = address();
                 let allowed = self.world.network.grants.get(&a[0]).is_some_and(|rules| {
                     rules.iter().any(|r| {
-                        r.permits(
-                            u8::from(op == HostOp::Listen),
-                            address.family,
-                            address.hi,
-                            address.lo,
-                            address.port,
+                        matches!(
+                            r,
+                            hirsel_core_net::GrantRule::Address(r) if r.permits(
+                                u8::from(op == HostOp::Listen),
+                                address.family,
+                                address.hi,
+                                address.lo,
+                                address.port,
+                            )
                         )
                     })
                 });
@@ -1825,27 +1836,16 @@ impl Machine<'_> {
         } else {
             0
         };
-        let token = t.k as u64 + 1;
-        let reply = loop {
-            if let Some(r) = model.attempt_parts(operation, [&input, &tail], spare, token) {
-                break r;
-            }
-            if deadline.is_some_and(|at| at <= model.now()) {
-                break model.abort(token, false);
-            }
-            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
-            self.park(Some(Wait::Network(deadline)));
-            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
-                break model.abort(token, true);
-            }
-        };
-        self.world.clock = model.now();
+        let reply = self.network_attempt(t, &model, deadline, |token| {
+            model.attempt_parts(operation, [&input, &tail], spare, token)
+        });
         let Reply {
             value,
             error,
             code,
             address,
             bytes,
+            ..
         } = reply;
         if error == 0 {
             if matches!(op, HostOp::Connect | HostOp::Listen | HostOp::Accept) {
@@ -1869,9 +1869,144 @@ impl Machine<'_> {
         }
         Ok(result)
     }
+    fn network_attempt(
+        &mut self,
+        t: &Task,
+        model: &hirsel_core_net::model::Model,
+        deadline: Option<u64>,
+        mut attempt: impl FnMut(u64) -> Option<hirsel_core_net::model::Reply>,
+    ) -> hirsel_core_net::model::Reply {
+        let token = t.k as u64 + 1;
+        let reply = loop {
+            if let Some(reply) = attempt(token) {
+                break reply;
+            }
+            if deadline.is_some_and(|at| at <= model.now()) {
+                break model.abort(token, false);
+            }
+            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+            self.park(Some(Wait::Network(deadline)));
+            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                break model.abort(token, true);
+            }
+        };
+        self.world.clock = model.now();
+        reply
+    }
+
+    fn tls_offer(&self, a: &[u64], port: u16) -> Result<Vec<Vec<u8>>, (u64, u64)> {
+        use hirsel_core_net::{GrantRule, tls};
+        let name = tls::verification_name(self.carrier_bytes(a[2])).ok_or((9, 1))?;
+        let len = self.load(a[5] + 8, 8);
+        if len > 16 {
+            return Err((9, 2));
+        }
+        let data = self.load(a[5], 8);
+        let protocols: Vec<_> = (0..len)
+            .map(|i| self.carrier_bytes(data + i * 24))
+            .collect();
+        if !tls::valid_protocols(&protocols) {
+            return Err((9, 2));
+        }
+        let pem = if a[3] == 1 {
+            self.carrier_bytes(a[4])
+        } else {
+            &[]
+        };
+        let (trust, _) = tls::trust(a[3] as u8, pem).ok_or((9, 3))?;
+        let allowed = self.world.network.grants.get(&a[0]).is_some_and(|rules| {
+            rules.iter().any(
+                |rule| matches!(rule, GrantRule::Tls(rule) if rule.permits(&name, port, trust)),
+            )
+        });
+        if !allowed {
+            return Err((1, 0));
+        }
+        Ok(protocols.into_iter().map(<[u8]>::to_vec).collect())
+    }
+
+    fn tls_connect(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
+        let key = a[1];
+        let model = self.world.network.sockets.model().unwrap().clone();
+        let offered = match model
+            .connected_peer(key)
+            .ok_or((1, 0))
+            .and_then(|peer| self.tls_offer(a, peer.port))
+        {
+            Ok(offered) => offered,
+            Err((tag, code)) => {
+                self.world.network.sockets.release(key);
+                return Ok(vec![0, tag, code, 0, 0, 0, 0, 0]);
+            }
+        };
+        if let Err(cancelled) = self.check_cancel(t) {
+            self.world.network.sockets.release(key);
+            return Err(cancelled);
+        }
+        model.advance_to(self.world.clock);
+        let deadline = (a[6] != 0).then_some(a[8]);
+        let reply = self.network_attempt(t, &model, deadline, |token| {
+            model.attempt_tls(key, &offered, token)
+        });
+        if reply.error != 0 {
+            self.world.network.sockets.release(key);
+            return Ok(vec![
+                0,
+                reply.error.into(),
+                reply.code.into(),
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]);
+        }
+        self.world.network.sockets.split(key);
+        let protocol = if reply.bytes.is_empty() {
+            0
+        } else {
+            offered.iter().position(|p| *p == reply.bytes).unwrap() as u64 + 1
+        };
+        let mut result = vec![reply.value, 0, 0, protocol];
+        result.extend(hirsel_core_net::tls::peer_words(reply.peer));
+        Ok(result)
+    }
+
+    fn narrow_net(&mut self, t: &Task, parent: u64, rule: hirsel_core_net::GrantRule) -> Vec<u64> {
+        let grants = &self.world.network.grants;
+        let intersections: Vec<_> = grants
+            .get(&parent)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.intersect(&rule))
+            .collect();
+        let charge = intersections
+            .iter()
+            .try_fold(0u64, |total, r| total.checked_add(r.logical_size()))
+            .and_then(|n| n.checked_add(7))
+            .map(|n| n & !7)
+            .expect("host-sized rule storage");
+        let payer = t.limits.last().unwrap();
+        if let Err(available) = self.admit(payer, charge) {
+            return vec![charge, 2, 0, available];
+        }
+        let grants = &mut self.world.network.grants;
+        let key = grants
+            .last_key_value()
+            .map_or(0, |(&key, _)| key)
+            .checked_add(1)
+            .expect("run-local handle counter");
+        grants.insert(key, intersections);
+        self.world.net_charges.push((payer.clone(), charge));
+        vec![key, 0, 0, 0]
+    }
+
     /// A provider row against [`World`]: an outcome `value, error, code, written`.
     fn host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
         self.deny_describe_capability();
+        if op == HostOp::TlsConnect {
+            return self.tls_connect(t, a);
+        }
         const NOT_FOUND: u64 = 1;
         const DENIED: u64 = 2;
         const EXISTS: u64 = 3;
@@ -1898,48 +2033,25 @@ impl Machine<'_> {
             | HostOp::SendPair => {
                 return self.network_host(t, op, a);
             }
-            HostOp::TlsConnect => {
-                self.world.network.sockets.release(a[1]);
-                vec![0, 9, 4, 0, 0, 0, 0, 0]
-            }
+            HostOp::TlsConnect => unreachable!(),
             HostOp::NetNarrowTls => {
-                // T3 installs TLS rules in the evaluator's provider grants.
-                let names = self.carrier(a[1]).0;
+                use hirsel_core_net::{GrantRule, TlsRule, TlsTrust};
                 let trust = match a[4] {
-                    0 => Some(hirsel_core_net::TlsTrust::System),
+                    0 => Some(TlsTrust::System),
                     1 => self
-                        .carrier(a[5])
-                        .0
+                        .carrier_bytes(a[5])
                         .try_into()
                         .ok()
-                        .map(hirsel_core_net::TlsTrust::Roots),
+                        .map(TlsTrust::Roots),
                     _ => None,
                 };
-                if trust
-                    .and_then(|trust| {
-                        hirsel_core_net::TlsRule::new(
-                            std::str::from_utf8(&names).ok()?,
-                            a[2] as u16,
-                            a[3] as u16,
-                            trust,
-                        )
-                    })
-                    .is_none()
-                {
-                    vec![0, 1, 0, 0]
-                } else {
-                    let key = self
-                        .world
-                        .network
-                        .grants
-                        .keys()
-                        .copied()
-                        .max()
-                        .unwrap_or(0)
-                        .checked_add(1)
-                        .expect("run-local handle counter");
-                    self.world.network.grants.insert(key, Vec::new());
-                    ok(key, 0)
+                let rule = trust.and_then(|trust| {
+                    let patterns = std::str::from_utf8(self.carrier_bytes(a[1])).ok()?;
+                    TlsRule::new(patterns, a[2] as u16, a[3] as u16, trust)
+                });
+                match rule {
+                    Some(rule) => self.narrow_net(t, a[0], GrantRule::Tls(rule)),
+                    None => error(1),
                 }
             }
             HostOp::NetSplit => {
@@ -1956,44 +2068,10 @@ impl Machine<'_> {
                     first: a[6] as u16,
                     last: a[7] as u16,
                 };
-                if !r.valid() {
-                    vec![0, 1, 0, 0]
+                if r.valid() {
+                    self.narrow_net(t, a[0], hirsel_core_net::GrantRule::Address(r))
                 } else {
-                    let rules = self
-                        .world
-                        .network
-                        .grants
-                        .get(&a[0])
-                        .cloned()
-                        .unwrap_or_default();
-                    let count = rules.iter().filter_map(|p| p.intersect(r)).count() as u64;
-                    let charge = count
-                        .checked_mul(37)
-                        .and_then(|n| n.checked_add(7))
-                        .map(|n| n & !7)
-                        .expect("host-sized rule storage");
-                    let payer = t.limits.last().unwrap();
-                    match self.admit(payer, charge) {
-                        Err(available) => vec![charge, 2, 0, available],
-                        Ok(()) => {
-                            let key = self
-                                .world
-                                .network
-                                .grants
-                                .keys()
-                                .copied()
-                                .max()
-                                .unwrap_or(0)
-                                .checked_add(1)
-                                .expect("run-local handle counter");
-                            self.world
-                                .network
-                                .grants
-                                .insert(key, rules.iter().filter_map(|p| p.intersect(r)).collect());
-                            self.world.net_charges.push((payer.clone(), charge));
-                            ok(key, 0)
-                        }
-                    }
+                    error(1)
                 }
             }
             HostOp::Stopped => {

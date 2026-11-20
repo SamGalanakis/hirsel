@@ -449,7 +449,7 @@ fn log_boxed_list_append_and_finish_in_evaluator() {
 #[test]
 fn wire_socket_model_carries_addresses_deadlines_and_bytes_on_evaluator() {
     use hirsel_core_net::{
-        Rule, Sockets,
+        GrantRule, Sockets,
         model::{Choice, Config, Model},
     };
     for latency in [0, 3] {
@@ -479,8 +479,8 @@ fn wire_socket_model_carries_addresses_deadlines_and_bytes_on_evaluator() {
         network.grants.insert(
             1,
             vec![
-                Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
-                Rule::parse("Listen 127.0.0.0/8 0-65535").unwrap(),
+                GrantRule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
+                GrantRule::parse("Listen 127.0.0.0/8 0-65535").unwrap(),
             ],
         );
         let report = eval::run_network(&program, names["wire"], &[1, 2], 1 << 20, network);
@@ -495,7 +495,7 @@ fn wire_socket_model_carries_addresses_deadlines_and_bytes_on_evaluator() {
 
 #[test]
 fn wire_model_cancellation_after_issue_returns_aborted_without_consuming_bytes() {
-    use hirsel_core_net::Rule;
+    use hirsel_core_net::GrantRule;
     let source = r#"
 type Input: send { r: ReadHalf }
 fn reader(take x: Input) -> (u64, ReadHalf) waits {
@@ -533,12 +533,220 @@ fn f(n: Net, c: Clock, tasks: Tasks) -> u64 waits {
     network.grants.insert(
         1,
         vec![
-            Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
-            Rule::parse("Listen 127.0.0.0/8 0-65535").unwrap(),
+            GrantRule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
+            GrantRule::parse("Listen 127.0.0.0/8 0-65535").unwrap(),
         ],
     );
     let report = eval::run_network(&program, names["f"], &[1, 2, 3], 1 << 20, network);
     assert_eq!(report.outcome, eval::Outcome::Returned(vec![7]));
     assert_eq!(report.used, 0);
     assert_eq!((model.live_handles(), model.pending()), (0, 0));
+}
+
+#[test]
+fn scripted_tls_laws_on_evaluator() {
+    use hirsel_core_net::{
+        GrantRule, Sockets,
+        model::{
+            Address, CertFailure, Config, Model, TlsFailure, TlsHandshake, TlsIdentity, TlsScript,
+            TlsStep,
+        },
+    };
+
+    let source = r#"
+fn close_writer(take w: WriteHalf) {}
+
+fn prefix(n: Net, c: Clock) -> u64 waits {
+    let peer = Addr(ip: V4(2130706433u32), port: 443)
+    let socket = result.unwrap(host.connect(n, peer, Never))
+    let child = result.unwrap(net.narrow(n, Tls(names: "alpha.test", ports: (443u16, 443u16), trust: SystemPin)))
+    let mut offer: List[String] = list.new()
+    result.unwrap(list.push(mut offer, "h2"))
+    result.unwrap(list.push(mut offer, "http/1.1"))
+    let (r0, w0, h) = result.unwrap(tls.connect(child, take socket, "ALPHA.TEST.", System, offer, Never))
+    let (a, b, c0, d) = h.peer
+    if h.protocol != Some(1u64) || a != 72623859790382856u64 || b != 1230066625199609624u64 || c0 != 2387509390608836392u64 || d != 3544952156018063160u64 {
+        return 1
+    }
+    let size = 1048576u64
+    let mut payload: Bytes = result.unwrap(list.with_capacity(size))
+    for i in 0u64 .. 256u64 {
+        result.unwrap(list.push(mut payload, int.narrow(i)))
+        result.unwrap(list.fill(mut payload, 4095, 97u8))
+    }
+    let mut w = w0
+    let mut sent = 0u64
+    let mut short = false
+    let mut timed_out = false
+    while sent < size {
+        let middle = sent + 1
+        let end = if size - sent < 16384 { size } else { sent + 16384 }
+        let first = list.slice(payload, sent, middle)
+        let rest = list.slice(payload, middle, end)
+        let deadline = host.mono_ns(c) + 1
+        let count = match host.send_pair(mut w, first, rest, At(c, deadline)) {
+            Ok(count) => {
+                short = short || count < end - sent
+                count
+            },
+            Error(TimedOut) => {
+                timed_out = true
+                result.unwrap(host.send_pair(mut w, first, rest, Never))
+            },
+            Error(_) => return 2
+        }
+        if count == 0 || count > end - sent { return 3 }
+        sent = sent + count
+    }
+    let empty: Bytes = list.new()
+    result.unwrap(host.send_pair(mut w, empty, empty, Never))
+    close_writer(take w)
+    let mut r = r0
+    let mut reply: Bytes = result.unwrap(list.with_capacity(1))
+    let count = result.unwrap(host.recv_bounded(mut r, mut reply, 1, Never))
+    if short && timed_out && count == 1 && reply[0] == 33u8 { 0u64 } else { 4u64 }
+}
+
+type HandshakeJob: send { n: Net, socket: Socket }
+fn handshake(take job: HandshakeJob) -> u64 waits {
+    let HandshakeJob(n: n, socket: socket) = take job
+    let empty: List[String] = list.new()
+    match tls.connect(n, take socket, "alpha.test", System, empty, Never) {
+        Error(Aborted) => 7u64,
+        _ => 0u64
+    }
+}
+
+fn cancel(n: Net, c: Clock, tasks: Tasks) -> u64 waits {
+    let peer = Addr(ip: V4(2130706433u32), port: 443)
+    let socket = result.unwrap(host.connect(n, peer, Never))
+    let mut h = result.unwrap(task.spawn(tasks, bytes 4096, HandshakeJob(n: n, socket: take socket), handshake))
+    host.sleep_until(c, 10)
+    task.cancel(mut h)
+    result.unwrap(task.join(take h))
+}
+
+fn exit(n: Net, c: Clock, kind: u64) -> u64 waits {
+    let peer = Addr(ip: V4(2130706433u32), port: 443)
+    let socket = result.unwrap(host.connect(n, peer, Never))
+    let empty: List[String] = list.new()
+    let until = if kind == 6 { At(c, 10) } else { Never }
+    match tls.connect(n, take socket, "alpha.test", System, empty, until) {
+        Error(TimedOut) => 6u64,
+        Error(Tls(Certificate(NameMismatch))) => 9u64,
+        Error(Denied) => 1u64,
+        _ => 0u64
+    }
+}
+"#;
+    let (program, functions) = crate::SourceProgram::lower(source, None);
+    let address = Address {
+        family: 0,
+        hi: 0,
+        lo: 0x7f000001,
+        port: 443,
+    };
+    let run = |name, args: &[u64], expected, allowed, script| {
+        let model = Model::new(Config {
+            queue_bytes: 4096,
+            max_prefix: 4096,
+            latency_ns: 3,
+            record_decisions: false,
+            ..Config::default()
+        });
+        model.script_tls_peer(address, script);
+        let mut rules = vec![GrantRule::parse("Connect 127.0.0.1/32 443-443").unwrap()];
+        if allowed {
+            rules.push(GrantRule::parse("Tls *.test 443-443 System").unwrap());
+        }
+        let network = eval::Network {
+            grants: [(1, rules)].into(),
+            sockets: Sockets::with_model(model.clone()),
+        };
+        let mut remaining = eval::Network::default();
+        let report = eval::run_network_into(
+            &program,
+            functions[name],
+            args,
+            4 << 20,
+            network,
+            &mut remaining,
+        );
+        assert_eq!(
+            report.outcome,
+            eval::Outcome::Returned(vec![expected]),
+            "{name}"
+        );
+        assert!(remaining.sockets.is_empty(), "{name}");
+        assert_eq!(
+            (
+                model.live_handles(),
+                model.live_tls_sessions(),
+                model.pending()
+            ),
+            (0, 0, 0),
+            "{name}"
+        );
+    };
+
+    // TL5. The peer answers only after it has matched every byte of the 1 MiB pattern.
+    let pattern = (0u8..=255)
+        .flat_map(|i| [i].into_iter().chain(std::iter::repeat_n(b'a', 4095)))
+        .collect();
+    let identity = TlsIdentity {
+        protocol: Some(b"http/1.1".to_vec()),
+        peer: [
+            1, 2, 3, 4, 5, 6, 7, 8, 17, 18, 19, 20, 21, 22, 23, 24, 33, 34, 35, 36, 37, 38, 39, 40,
+            49, 50, 51, 52, 53, 54, 55, 56,
+        ],
+    };
+    run(
+        "prefix",
+        &[1, 2],
+        0,
+        true,
+        TlsScript {
+            handshake: TlsHandshake::After {
+                delay_ns: 3,
+                result: Ok(identity),
+            },
+            steps: vec![TlsStep::Expect(pattern), TlsStep::Send(vec![b'!'])],
+        },
+    );
+
+    // TL7. Returning with a live socket, session or pending operation violates TLS-1.
+    for (name, expected, allowed, handshake) in [
+        ("cancel", 7, true, TlsHandshake::Silent),
+        ("exit", 6, true, TlsHandshake::Silent),
+        (
+            "exit",
+            9,
+            true,
+            TlsHandshake::After {
+                delay_ns: 3,
+                result: Err(TlsFailure::Certificate(CertFailure::NameMismatch)),
+            },
+        ),
+        (
+            "exit",
+            1,
+            false,
+            TlsHandshake::After {
+                delay_ns: 0,
+                result: Err(TlsFailure::Closed),
+            },
+        ),
+    ] {
+        let kind = if name == "cancel" { 3 } else { expected };
+        run(
+            name,
+            &[1, 2, kind],
+            expected,
+            allowed,
+            TlsScript {
+                handshake,
+                steps: vec![],
+            },
+        );
+    }
 }

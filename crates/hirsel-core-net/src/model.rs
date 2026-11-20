@@ -5,9 +5,13 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+mod tls;
+pub use tls::{CertFailure, TlsFailure, TlsHandshake, TlsIdentity, TlsScript, TlsStep};
+use tls::{RECORD_BYTES, ScriptedPeer};
+
 // Host registry generations start at one. Model identities use generation zero.
 const LAST_ID: u64 = u32::MAX as u64;
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Address {
     pub family: u8,
     pub hi: u64,
@@ -89,6 +93,11 @@ pub enum Operation {
     Recv(u64),
     Send(u64),
 }
+#[derive(Clone, Copy)]
+enum Waiter {
+    Network(Operation),
+    Handshake(u64),
+}
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Reply {
     pub value: u64,
@@ -96,7 +105,9 @@ pub struct Reply {
     pub error: u8,
     pub code: u32,
     pub address: Address,
+    /// Received plaintext or the selected ALPN protocol bytes.
     pub bytes: Vec<u8>,
+    pub peer: [u8; 32],
 }
 impl Reply {
     fn error(error: u8) -> Self {
@@ -127,10 +138,16 @@ struct Direction {
     partitioned: bool,
     fin: bool,
 }
+impl Direction {
+    fn is_drained(&self) -> bool {
+        self.accepted.is_empty() && self.transit.is_empty() && self.readable.is_empty()
+    }
+}
 struct Connection {
     directions: [Direction; 2],
     reset: bool,
     endpoints: [u64; 2],
+    script: Option<Box<ScriptedPeer>>,
 }
 enum Record {
     Listener {
@@ -156,7 +173,8 @@ struct State {
     liveness: bool,
     records: BTreeMap<u64, Record>,
     connections: BTreeMap<u64, Connection>,
-    waiters: BTreeMap<u64, Operation>,
+    waiters: BTreeMap<u64, Waiter>,
+    scripts: BTreeMap<Address, VecDeque<TlsScript>>,
     faults: Vec<(u64, Fault)>,
     delivery: Option<u64>,
 }
@@ -185,6 +203,7 @@ impl Model {
             records: BTreeMap::new(),
             connections: BTreeMap::new(),
             waiters: BTreeMap::new(),
+            scripts: BTreeMap::new(),
             faults: vec![],
             delivery: None,
         })))
@@ -242,6 +261,28 @@ impl Model {
         }
         s.enable_delivery();
     }
+    /// Queue a peer for the next connection to this address. Each script
+    /// belongs to one connection and is released with its last socket owner.
+    pub fn script_tls_peer(&self, address: Address, script: TlsScript) {
+        self.state()
+            .scripts
+            .entry(address)
+            .or_default()
+            .push_back(script);
+    }
+
+    pub fn connected_peer(&self, key: u64) -> Option<Address> {
+        match self.state().records.get(&key)? {
+            Record::Endpoint {
+                side: 0,
+                owners: 1,
+                peer,
+                ..
+            } => Some(*peer),
+            _ => None,
+        }
+    }
+
     pub fn split(&self, key: u64) -> (u64, u64) {
         let mut s = self.state();
         let Record::Endpoint { owners, .. } = s.records.get_mut(&(key & !3)).unwrap() else {
@@ -271,6 +312,13 @@ impl Model {
     pub fn contains(&self, key: u64) -> bool {
         self.state().records.contains_key(&(key & !3))
     }
+    pub fn live_tls_sessions(&self) -> usize {
+        self.state()
+            .connections
+            .values()
+            .filter(|c| c.script.is_some())
+            .count()
+    }
     pub fn pending(&self) -> usize {
         self.state().waiters.len()
     }
@@ -291,15 +339,29 @@ impl Model {
         spare: usize,
         token: u64,
     ) -> Option<Reply> {
+        self.attempt_with(Waiter::Network(op), token, |s| s.attempt(op, input, spare))
+    }
+
+    pub fn attempt_tls(&self, key: u64, offered: &[impl AsRef<[u8]>], token: u64) -> Option<Reply> {
+        self.attempt_with(Waiter::Handshake(key), token, |s| s.handshake(key, offered))
+    }
+
+    fn attempt_with(
+        &self,
+        waiter: Waiter,
+        token: u64,
+        attempt: impl FnOnce(&mut State) -> Option<Reply>,
+    ) -> Option<Reply> {
         let mut s = self.state();
         s.waiters.remove(&token);
         s.events();
-        let reply = s.attempt(op, input, spare);
+        let reply = attempt(&mut s);
         if reply.is_none() {
-            s.waiters.insert(token, op);
+            s.waiters.insert(token, waiter);
         }
         reply
     }
+
     pub fn abort(&self, token: u64, cancelled: bool) -> Reply {
         self.state().waiters.remove(&token);
         Reply::error(if cancelled { 7 } else { 6 })
@@ -310,11 +372,24 @@ impl Model {
     pub fn poll(&self, deadline: Option<u64>, idle: bool) -> Vec<u64> {
         let mut s = self.state();
         s.events();
-        if idle && !s.waiters.values().any(|&op| s.ready(op)) {
-            let next = [s.delivery, s.faults.first().map(|(at, _)| *at), deadline]
-                .into_iter()
-                .flatten()
+        if idle && !s.waiters.values().any(|&waiter| s.waiter_ready(waiter)) {
+            let handshake = s
+                .waiters
+                .values()
+                .filter_map(|op| match *op {
+                    Waiter::Handshake(key) => s.connections[&key].script.as_ref()?.ready_at(),
+                    _ => None,
+                })
                 .min();
+            let next = [
+                s.delivery,
+                s.faults.first().map(|(at, _)| *at),
+                deadline,
+                handshake,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             if let Some(next) = next {
                 s.now = s.now.max(next);
                 s.events();
@@ -323,7 +398,7 @@ impl Model {
         let ready: Vec<_> = s
             .waiters
             .iter()
-            .filter_map(|(&token, &op)| s.ready(op).then_some(token))
+            .filter_map(|(&token, &waiter)| s.waiter_ready(waiter).then_some(token))
             .collect();
         for token in &ready {
             s.waiters.remove(token);
@@ -429,17 +504,48 @@ impl State {
                 })
             }
             Operation::Connect(address) => {
-                let Some(listener) = self.matching_listener(address) else {
+                let scripted = self.scripts.contains_key(&address);
+                let listener = self.matching_listener(address);
+                if !scripted && listener.is_none() {
                     return Some(Reply::error(2));
-                };
+                }
                 if !self.ready(op) {
                     return None;
                 }
-                if self.records.len().saturating_add(2) > self.config.max_handles
-                    || self.next >= LAST_ID
+                let handles = if scripted { 1 } else { 2 };
+                if self.records.len().saturating_add(handles) > self.config.max_handles
+                    || self.next + handles as u64 - 1 > LAST_ID
                 {
                     return Some(Reply::handles());
                 }
+                if scripted {
+                    let scripts = self.scripts.get_mut(&address).unwrap();
+                    let script = scripts.pop_front().unwrap();
+                    if scripts.is_empty() {
+                        self.scripts.remove(&address);
+                    }
+                    let client = self.key();
+                    self.connections.insert(
+                        client,
+                        Connection {
+                            directions: Default::default(),
+                            reset: false,
+                            endpoints: [client, 0],
+                            script: Some(Box::new(ScriptedPeer::new(script))),
+                        },
+                    );
+                    self.records.insert(
+                        client,
+                        Record::Endpoint {
+                            connection: client,
+                            side: 0,
+                            owners: 1,
+                            peer: address,
+                        },
+                    );
+                    return Some(Reply::value(client));
+                }
+                let listener = listener.unwrap();
                 let mut peer = address;
                 if peer.family == 0 {
                     peer.hi = 0;
@@ -459,6 +565,7 @@ impl State {
                         directions: Default::default(),
                         reset: false,
                         endpoints: [client, server],
+                        script: None,
                     },
                 );
                 self.records.insert(
@@ -502,15 +609,27 @@ impl State {
             Operation::Send(key) => {
                 let [prefix, tail] = input;
                 let len = prefix.len() + tail.len();
-                if len == 0 {
-                    return Some(Reply::value(0));
-                }
                 let (id, side) = self.endpoint(key);
                 let c = &self.connections[&id];
+                let tls = c.script.as_ref().is_some_and(|p| p.established());
+                if len == 0 && !tls {
+                    return Some(Reply::value(0));
+                }
                 if c.reset {
                     return Some(Reply::error(5));
                 }
-                let available = self.config.queue_bytes - c.directions[side].accepted.len();
+                let queued = c.directions[side].accepted.len();
+                let available = if tls {
+                    if queued != 0 {
+                        return None;
+                    }
+                    if len == 0 {
+                        return Some(Reply::value(0));
+                    }
+                    self.config.queue_bytes.min(RECORD_BYTES)
+                } else {
+                    self.config.queue_bytes - queued
+                };
                 if available == 0 {
                     return None;
                 }
@@ -525,12 +644,20 @@ impl State {
                 Some(Reply::value(n as u64))
             }
             Operation::Recv(key) => {
+                let (id, side) = self.endpoint(key);
+                let c = self.connections.get_mut(&id).unwrap();
+                let d = &c.directions[1 - side];
+                let drained = d.is_drained();
+                if let Some(error) = c
+                    .script
+                    .as_mut()
+                    .and_then(|p| p.receive_error(drained, spare))
+                {
+                    return Some(error);
+                }
                 if spare == 0 {
                     return Some(Reply::value(0));
                 }
-                let (id, side) = self.endpoint(key);
-                let c = &self.connections[&id];
-                let d = &c.directions[1 - side];
                 if !d.readable.is_empty() {
                     let bound = spare.min(d.readable.len()).min(self.config.max_prefix);
                     let n = self.choose(Choice::Receive, bound) + 1;
@@ -547,24 +674,70 @@ impl State {
                 if c.reset {
                     return Some(Reply::error(5));
                 }
-                if d.fin && d.accepted.is_empty() && d.transit.is_empty() {
+                if d.fin && drained {
                     return Some(Reply::value(0));
                 }
                 None
             }
         }
     }
+    fn handshake(&mut self, key: u64, offered: &[impl AsRef<[u8]>]) -> Option<Reply> {
+        let c = self.connections.get_mut(&key).unwrap();
+        if c.reset {
+            return Some(Reply::error(5));
+        }
+        let Some(peer) = &mut c.script else {
+            return Some(tls::unsupported());
+        };
+        let reply = peer.establish(self.now, key, offered)?;
+        if reply.error == 0 {
+            peer.drive(&mut c.directions, self.config.queue_bytes);
+            self.enable_delivery();
+        }
+        Some(reply)
+    }
+
+    fn waiter_ready(&self, waiter: Waiter) -> bool {
+        match waiter {
+            Waiter::Network(op) => self.ready(op),
+            Waiter::Handshake(key) => {
+                let c = &self.connections[&key];
+                c.reset
+                    || c.script
+                        .as_ref()
+                        .and_then(|p| p.ready_at())
+                        .is_some_and(|at| at <= self.now)
+            }
+        }
+    }
     fn ready(&self, op: Operation) -> bool {
         match op {
             Operation::Listen(..) => true,
-            Operation::Connect(address) => self.matching_listener(address).is_none_or(|key| {
-                matches!(&self.records[&key], Record::Listener { pending, backlog, .. } if pending.len() < *backlog)
-            }),
+            Operation::Connect(address) => {
+                self.scripts.contains_key(&address)
+                    || self.matching_listener(address).is_none_or(|key| {
+                        matches!(&self.records[&key], Record::Listener { pending, backlog, .. } if pending.len() < *backlog)
+                    })
+            }
             Operation::Accept(key) => matches!(&self.records[&key], Record::Listener { pending, .. } if !pending.is_empty()),
-            Operation::Send(key) => { let (id, side) = self.endpoint(key); let c = &self.connections[&id];
-                c.reset || c.directions[side].accepted.len() < self.config.queue_bytes },
-            Operation::Recv(key) => { let (id, side) = self.endpoint(key); let c = &self.connections[&id]; let d = &c.directions[1-side];
-                c.reset || !d.readable.is_empty() || (d.fin && d.accepted.is_empty() && d.transit.is_empty()) },
+            Operation::Send(key) => {
+                let (id, side) = self.endpoint(key);
+                let c = &self.connections[&id];
+                let queued = c.directions[side].accepted.len();
+                c.reset || if c.script.as_ref().is_some_and(|p| p.established()) {
+                    queued == 0
+                } else {
+                    queued < self.config.queue_bytes
+                }
+            }
+            Operation::Recv(key) => {
+                let (id, side) = self.endpoint(key);
+                let c = &self.connections[&id];
+                let d = &c.directions[1 - side];
+                let drained = d.is_drained();
+                c.reset || !d.readable.is_empty() || (d.fin && drained)
+                    || c.script.as_ref().is_some_and(|p| p.read_terminal(drained).is_some())
+            }
         }
     }
     fn can_deliver(&self) -> bool {
@@ -618,6 +791,13 @@ impl State {
                     }
                 }
             }
+            for c in self.connections.values_mut() {
+                if !c.reset
+                    && let Some(peer) = &mut c.script
+                {
+                    peer.drive(&mut c.directions, self.config.queue_bytes);
+                }
+            }
             self.enable_delivery();
         }
     }
@@ -651,7 +831,26 @@ impl State {
         {
             let (connection, side) = (*connection, *side);
             if key & 3 == 0 || key & 3 == 2 {
-                self.connections.get_mut(&connection).unwrap().directions[side].fin = true;
+                let c = self.connections.get_mut(&connection).unwrap();
+                let direction = &mut c.directions[side];
+                direction.fin = true;
+                if let Some(peer) = &mut c.script
+                    && peer.established()
+                {
+                    // One nonblocking flush before shutdown. Only bytes
+                    // accepted by the transport survive a blocked drop.
+                    if !direction.partitioned && !c.reset {
+                        let n = direction
+                            .accepted
+                            .len()
+                            .min(self.config.queue_bytes - direction.transit.len());
+                        direction.transit.extend(direction.accepted.drain(..n));
+                    }
+                    direction.accepted.clear();
+                    if !c.reset {
+                        peer.drive(&mut c.directions, self.config.queue_bytes);
+                    }
+                }
             }
             *owners &= !(1 << (key & 3));
             if *owners != 0 {

@@ -183,7 +183,7 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
             let rules = rules
                 .iter()
                 .map(|rule| {
-                    hirsel_core_net::Rule::parse(rule.as_str().ok_or("expected a net rule")?)
+                    hirsel_core_net::GrantRule::parse(rule.as_str().ok_or("expected a net rule")?)
                         .map_err(|_| "invalid net rule")
                 })
                 .collect::<Result<Vec<_>, _>>()?;

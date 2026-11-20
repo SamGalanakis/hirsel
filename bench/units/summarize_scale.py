@@ -2,6 +2,7 @@
 """Render the measurements from scale.py as Markdown tables."""
 
 import argparse
+from itertools import combinations
 import json
 from pathlib import Path
 
@@ -71,7 +72,8 @@ def result(rows, cell, side, group):
         return trial, rate, "Pass"
     lowest = min(trials, key=lambda r: r["rate"])
     if summary is None or summary.get("incomplete"):
-        return lowest, None, "Incomplete"
+        passed = max((r for r in trials if r["passed"]), key=lambda r: r["rate"], default=None)
+        return passed or lowest, None, "Incomplete"
     return lowest, None, "No pass"
 
 
@@ -126,8 +128,9 @@ def verdicts(rows, n):
         print("- **Fairness.** Pending paired runs.")
     else:
         by_side = ", ".join(f"{s} {'passed' if fair(rows, s) else 'failed'}"
-                            for s in SCALE_SIDES if fair(rows, s) is not None)
-        print(f"- **Fairness.** {'Holds' if untied else 'Threshold missed'} for untied. {by_side}. One pair per side.")
+                            for s in SCALE_SIDES[1:] if fair(rows, s) is not None)
+        controls = f" {by_side}." if by_side else ""
+        print(f"- **Fairness.** {'Holds' if untied else 'Threshold missed'} for untied.{controls} One pair per side.")
 
     ratios = []
     sparse = False
@@ -157,15 +160,15 @@ def scale_tables(rows):
                 row(side, group, state, fmt(rate if rate is not None else number(trial, "rate")),
                     ms(load_number(trial, "p99_ns")), *resources(trial))
         print()
-        pairs = [best(rows, cell_name, side)[0] for side in SCALE_SIDES]
-        if all(pairs):
-            for side, other in zip(SCALE_SIDES[1:], pairs[1:], strict=True):
-                ratio = max(pairs[0], other) / min(pairs[0], other)
+        for first, second in combinations(SCALE_SIDES, 2):
+            a, b = best(rows, cell_name, first)[0], best(rows, cell_name, second)[0]
+            if a and b:
+                ratio = max(a, b) / min(a, b)
                 if ratio < 1.25:
-                    print(f"- Untied and {side} tie under the 25% rule.")
+                    print(f"- {first} and {second} tie under the 25% rule.")
                 else:
-                    faster = "untied" if pairs[0] > other else side
-                    print(f"- {faster} leads the untied/{side} comparison by {(ratio - 1) * 100:.1f}%.")
+                    faster, slower = (first, second) if a > b else (second, first)
+                    print(f"- {faster} leads {slower} by {(ratio - 1) * 100:.1f}%.")
 
 
 def fairness_table(rows, n):

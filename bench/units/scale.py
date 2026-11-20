@@ -251,6 +251,9 @@ class Runner:
                             profile_proc = launch(cmd, profile_pidfile, stdout=err, stderr=err)
                 try:
                     out, err = load.communicate(timeout=0.075)
+                    sample = proc_sample(server_pid)
+                    if sample:
+                        samples.append(sample)
                     return out, err, samples, masks_seen, False
                 except subprocess.TimeoutExpired:
                     continue
@@ -324,6 +327,8 @@ class Runner:
         cpu = usage.ru_utime + usage.ru_stime if usage else None
         cpu_warm = cpu_at(samples, result["warm_ns"]) if result else None
         cpu_end = cpu_at(samples, result["end_ns"]) if result else None
+        tape_files = list(self.tapes.iterdir()) if cell["rec"] else []
+        tape_bytes = sum(p.stat().st_size for p in tape_files)
         r.update(
             load=result, load_rc=load.returncode, load_err=load_err[-12000:], load_timeout=load_timeout,
             server_rc=server.returncode, server_err=ordinary_err[-40:], masks=seen_masks, ustats=ustats,
@@ -336,10 +341,13 @@ class Runner:
             ),
             tool_cpu_s=(tool1[1] - tool0[1]) / CPU_HZ if tool0 and tool1 else None,
             steals_per_s=ustats["steals"] / elapsed if ustats else None,
-            tape_disk_bytes=sum(p.stat().st_size for p in self.tapes.iterdir()) if cell["rec"] else None,
-            tape_files=sum(1 for _ in self.tapes.iterdir()) if cell["rec"] else None,
+            cpu_samples=samples,
+            tape_disk_bytes=tape_bytes if cell["rec"] else None,
+            tape_files=len(tape_files) if cell["rec"] else None,
             passed=full_pass,
         )
+        if cell["rec"] and full_pass and not tape_bytes:
+            raise RuntimeError(f"{side} completed a recorded trial without producing a tape")
         if queue and result:
             a, b = result["warm_ns"], result["end_ns"]
             r["queue_wait_buckets"] = queue

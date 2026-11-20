@@ -18,12 +18,15 @@ pub struct Poller {
 }
 
 struct PollOperations {
-    poll: for<'a> fn(&'a Poller, i32) -> io::Result<Option<PollEvents<'a>>>,
+    poll: for<'a> fn(&'a Poller, Turn<'a>, i32) -> io::Result<Option<PollEvents<'a>>>,
     wake: fn(&Poller),
 }
 
+/// The driver token: one worker at a time polls and dispatches.
+type Turn<'a> = MutexGuard<'a, Vec<libc::epoll_event>>;
+
 /// The initialized prefix of one kernel turn, held until registry dispatch.
-pub struct PollEvents<'a>(MutexGuard<'a, Vec<libc::epoll_event>>);
+pub struct PollEvents<'a>(Turn<'a>);
 fn checked(rc: i32) -> io::Result<i32> {
     if rc < 0 {
         Err(io::Error::last_os_error())
@@ -68,7 +71,7 @@ impl Poller {
         checked(unsafe { libc::epoll_ctl(self.epoll.as_raw_fd(), op, fd, &mut event) })?;
         Ok(())
     }
-    fn try_turn(&self) -> Option<MutexGuard<'_, Vec<libc::epoll_event>>> {
+    fn try_turn(&self) -> Option<Turn<'_>> {
         match self.events.try_lock() {
             Ok(events) => Some(events),
             Err(TryLockError::WouldBlock) => None,
@@ -79,15 +82,31 @@ impl Poller {
     /// Try the driver token. A busy token returns immediately while another
     /// worker polls or dispatches. A zero timeout is a nonblocking turn.
     pub fn poll(&self, timeout_ms: i32) -> io::Result<Option<PollEvents<'_>>> {
-        (self.operations.poll)(self, timeout_ms)
+        self.wait(timeout_ms, || false)
+    }
+
+    /// Poll with `woken` checked once the turn is held. A waker that sets its
+    /// flag before `wake` is seen here even when another worker's turn has
+    /// already drained the wake: that turn ended before this one began.
+    pub fn wait(
+        &self,
+        timeout_ms: i32,
+        woken: impl FnOnce() -> bool,
+    ) -> io::Result<Option<PollEvents<'_>>> {
+        let Some(events) = self.try_turn() else {
+            return Ok(None);
+        };
+        let timeout_ms = if woken() { 0 } else { timeout_ms };
+        (self.operations.poll)(self, events, timeout_ms)
     }
 
     // The optional operations are installed with the native poller, so a
     // scheduler that can never construct one does not link this syscall path.
-    fn poll_epoll(&self, timeout_ms: i32) -> io::Result<Option<PollEvents<'_>>> {
-        let Some(mut events) = self.try_turn() else {
-            return Ok(None);
-        };
+    fn poll_epoll<'a>(
+        &'a self,
+        mut events: Turn<'a>,
+        timeout_ms: i32,
+    ) -> io::Result<Option<PollEvents<'a>>> {
         events.clear();
         // SAFETY: epoll owns its descriptor and events has POLL_BATCH spare slots.
         let count = unsafe {

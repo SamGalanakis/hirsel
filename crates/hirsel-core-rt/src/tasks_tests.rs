@@ -167,6 +167,154 @@ fn two_worker_handoff_survives_terminal_recheck_during_publication_pause() {
     assert_eq!(handoffs.load(Ordering::Relaxed), 2);
 }
 
+/// A delivery to a task whose home worker is going to sleep is followed by
+/// that task running with no other event. Here the peer's poll turn takes
+/// the shared poller wake before the home worker takes its own turn.
+#[test]
+fn a_message_sent_while_its_receivers_worker_goes_to_wait_in_the_poller_is_received() {
+    use crate::schedule_script::{PausePoint, ScheduleScript};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    #[derive(Default)]
+    struct Gate {
+        /// The receiver's worker thread, once the receiver has run.
+        home: AtomicI32,
+        held: AtomicBool,
+        sent: AtomicBool,
+        peer_waits: AtomicUsize,
+        released: AtomicBool,
+        received: AtomicBool,
+        /// The home worker slept in the poller before the receiver ran.
+        lost: AtomicBool,
+    }
+    #[derive(Clone, Copy)]
+    struct Root {
+        gate: *const Gate,
+        sockets: *mut hirsel_core_net::Sockets,
+    }
+    struct Receiver {
+        gate: *const Gate,
+        rx: *mut Channel,
+    }
+
+    unsafe extern "C" fn receiver(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: the root pins the gate and moved the receiver to this task.
+        unsafe {
+            let input = input.cast::<Receiver>().read();
+            (*input.gate).home.store(libc::gettid(), Ordering::Release);
+            let mut unit = ();
+            let got = hirsel_core_receive(context, input.rx, (&raw mut unit).cast(), 2);
+            assert_eq!((got.transferred, got.status), (true, 0));
+            (*input.gate).received.store(true, Ordering::Release);
+            assert_eq!(hirsel_core_receiver_drop(context, input.rx), 0);
+        }
+        0
+    }
+
+    unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: the test pins the gate and sockets for the whole run.
+        unsafe {
+            let input = input.cast::<Root>().read();
+            attach_net(input.sockets, (*input.sockets).poller().unwrap());
+            let pair = hirsel_core_channel_new(context, 1, value::<()>(0), 1);
+            let mut child = Receiver {
+                gate: input.gate,
+                rx: pair.receiver,
+            };
+            let h = hirsel_core_spawn(
+                context,
+                0,
+                1024,
+                (&raw mut child).cast(),
+                receiver,
+                layout::<Receiver, ()>(0),
+                1,
+            );
+            assert!(!h.task.is_null());
+            // The root does not suspend, so the receiver starts on the other
+            // worker, parks in receive, and that worker reaches its idle wait.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !(*input.gate).held.load(Ordering::Acquire) {
+                assert!(Instant::now() < deadline, "receiver's worker never idled");
+                std::thread::yield_now();
+            }
+            let mut unit = ();
+            assert_eq!(hirsel_core_try_send(pair.sender, (&raw mut unit).cast()), 0);
+            (*input.gate).sent.store(true, Ordering::Release);
+            let joined = hirsel_core_join(context, h.task, ptr::null_mut(), 3);
+            assert_eq!((joined.kind, joined.status), (0, 0));
+            hirsel_core_sender_drop(pair.sender);
+        }
+        0
+    }
+
+    fn in_poll(tid: i32) -> bool {
+        std::fs::read_to_string(format!("/proc/self/task/{tid}/wchan"))
+            .is_ok_and(|wchan| wchan == "ep_poll")
+    }
+    fn wait_until(done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !done() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+    }
+
+    let gate = Arc::new(Gate::default());
+    let hook = gate.clone();
+    let script = Arc::new(ScheduleScript::new(0).with_pause_hook(move |point| {
+        let home = hook.home.load(Ordering::Acquire);
+        if point != PausePoint::IdleWait || home == 0 {
+            return;
+        }
+        // SAFETY: gettid has no preconditions.
+        if unsafe { libc::gettid() } == home {
+            // The receiver is parked: hold its worker after its last checks.
+            if !hook.held.swap(true, Ordering::AcqRel) {
+                wait_until(|| hook.released.load(Ordering::Acquire));
+            }
+        } else if hook.sent.load(Ordering::Acquire)
+            && hook.peer_waits.fetch_add(1, Ordering::AcqRel) == 1
+        {
+            // The peer's first wait after the send took the poll turn and
+            // the wake. Let the home worker take its turn first.
+            hook.released.store(true, Ordering::Release);
+            wait_until(|| {
+                let asleep = in_poll(home);
+                if hook.received.load(Ordering::Acquire) {
+                    return true;
+                }
+                hook.lost.fetch_or(asleep, Ordering::AcqRel);
+                asleep
+            });
+        }
+    }));
+
+    let (done, finished) = std::sync::mpsc::channel();
+    let run_gate = gate.clone();
+    std::thread::spawn(move || {
+        let mut sockets = hirsel_core_net::Sockets::default();
+        let input = Root {
+            gate: Arc::as_ptr(&run_gate),
+            sockets: &raw mut sockets,
+        };
+        script.install(|| with_workers(2, || run(root, input)));
+        done.send(()).unwrap();
+    });
+    let ended = finished.recv_timeout(Duration::from_secs(10)).is_ok();
+    assert!(
+        !gate.lost.load(Ordering::Acquire),
+        "the receiver's worker slept in the poller with its message queued"
+    );
+    assert!(ended, "the run never ended");
+    assert!(gate.received.load(Ordering::Acquire));
+}
+
 #[test]
 fn vacant_slot_hits_and_misses_preserve_charges_events_and_refusal_site() {
     unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {

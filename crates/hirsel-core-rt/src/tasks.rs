@@ -3903,9 +3903,16 @@ impl RunPtr {
                 (poll_timeout(deadline), false)
             }
         };
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(script) = &pool.script {
+            script.pause(crate::schedule_script::PausePoint::IdleWait);
+        }
         if let Some(poller) = poller
             && let Some(events) = poller
-                .poll(timeout)
+                .wait(timeout, || {
+                    pool.nudged[index].load(Ordering::Acquire)
+                        || pool.readies.pending.load(Ordering::Acquire)
+                })
                 .unwrap_or_else(|_| crate::process::stop(b"HostPoll"))
         {
             let _commit = crate::sequencer::enter();

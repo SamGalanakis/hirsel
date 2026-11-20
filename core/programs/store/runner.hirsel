@@ -3804,6 +3804,9 @@ fn unend(mut ended: List[(u32, u64, Outcome)], sub: u32) {
 // Fold the ledger and this round into the same attempt as the owner's pending outcomes.
 fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[Replies], take owes: List[Owe], at: u64) {
     let mut contents = take owes
+    // There is one entry per owner. The joined list walks increasing owner numbers.
+    list.sort(mut contents, scoped fn(a: Owe, b: Owe) -> Order { std.order.compare(a.session, b.session) })
+    let mut content_index = 0u64
     let mut bounced: List[Replies] = list.new()
     let mut i = 0u64
     while i < list.len(joined) {
@@ -3814,14 +3817,16 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             continue
         }
         let owner = match joined[i].identity { Some(id) => latest.read(id).number, None => 0u64 }
-        let mut next = Owe(session: who, version: at, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), reset: false)
-        let mut j = 0u64
-        while j < list.len(contents) {
-            if contents[j].session == who {
-                next = list.remove(mut contents, j)
-                break
-            }
-            j += 1u64
+        let empty = Owe(session: who, version: at, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), reset: false)
+        while content_index < list.len(contents) && contents[content_index].session < who {
+            content_index += 1u64
+        }
+        let mut next = if content_index < list.len(contents) && contents[content_index].session == who {
+            let found = list.set(mut contents, content_index, take empty)
+            content_index += 1u64
+            take found
+        } else {
+            take empty
         }
         let old = replace(mut joined[i].ended, list.new())
         let old_at = joined[i].ended_at

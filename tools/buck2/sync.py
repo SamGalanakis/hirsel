@@ -75,11 +75,11 @@ READS = generated.Reads(ROOT)
 
 # What each build script reads besides its own file, as repository paths.
 BUILD_SCRIPT_SOURCES = {
-    "hirsel-core-diag": ["crates/hirsel-core-diag/build.rs", "crates/hirsel-core-diag/src/catalogue_source.rs"],
+    "hirsel-core-diag": ["crates/hirsel-core-diag/build.rs", "crates/hirsel-core-diag/src/catalogue_source.rs", "core/front/support/cases.rs"],
 }
 
 BUILD_SCRIPT_INPUTS = {
-    "hirsel-core-diag": ["docs/spec/*.md"],
+    "hirsel-core-diag": ["docs/spec/*.md", "core/front/cases/**/*.hirsel"],
     "hirsel-core-driver": ["core/core/**", "core/std/*.hirsel"],
 }
 

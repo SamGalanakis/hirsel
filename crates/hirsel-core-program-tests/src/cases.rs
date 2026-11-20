@@ -9,6 +9,10 @@ use hirsel_core_resolve::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[path = "../../../core/front/support/cases.rs"]
+mod case_source;
+use case_source::DiagnosticExpectation;
+
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/front")
 }
@@ -422,12 +426,36 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
             "CoreIR with shared slots is not well formed: {e:?}"
         ));
     }
-    for line in source.lines() {
-        let Some(e) = line.trim().strip_prefix("// expect: ") else {
-            continue;
-        };
+    for e in case_source::expectations(&source) {
         expects += 1;
         let words: Vec<&str> = e.split_whitespace().collect();
+        if let Some(expectation) = DiagnosticExpectation::parse(e, &words) {
+            match expectation {
+                DiagnosticExpectation::Refuse { rule, at } => {
+                    want_refusals.push(format!("{rule} at {at}"));
+                }
+                DiagnosticExpectation::Cause { rule, at, from } => {
+                    want_causes.push(format!("{rule} at {at} from {from}"));
+                }
+                DiagnosticExpectation::Compared {
+                    head,
+                    declared,
+                    required,
+                } => {
+                    want_compared.push(format!("{head} | {declared} | {required}"));
+                }
+                DiagnosticExpectation::Message { rule, at, text } => {
+                    if !refusals.iter().any(|r| {
+                        r.rule == rule
+                            && line_col(&modules, &r.primary) == at
+                            && r.message.contains(&text)
+                    }) {
+                        failures.push(format!("missing message {rule} at {at}: {text}"));
+                    }
+                }
+            }
+            continue;
+        }
         match words.as_slice() {
             ["accept"] => {}
             ["cached"] => {
@@ -485,27 +513,6 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                     failures.push(
                         "cached diagnostic provenance differs from the source request".into(),
                     );
-                }
-            }
-            ["refuse", rule, "at", at] => want_refusals.push(format!("{rule} at {at}")),
-            ["cause", rule, "at", at, "from", from @ ..] => {
-                want_causes.push(format!("{rule} at {at} from {}", from.join(" ")))
-            }
-            ["compared", ..] => match e.split(" | ").collect::<Vec<_>>().as_slice() {
-                [head, declared, required] => want_compared.push(format!(
-                    "{} | {declared} | {required}",
-                    head.trim_start_matches("compared ")
-                )),
-                _ => failures.push(format!("unreadable expectation `{e}`")),
-            },
-            ["message", rule, "at", at, "|", text @ ..] => {
-                let text = text.join(" ");
-                if !refusals.iter().any(|r| {
-                    r.rule == *rule
-                        && line_col(&modules, &r.primary) == *at
-                        && r.message.contains(&text)
-                }) {
-                    failures.push(format!("missing message {rule} at {at}: {text}"));
                 }
             }
             ["gap-cause", "at", at, "from", from @ ..] => {
@@ -965,21 +972,6 @@ pub(super) fn run_expect(
     (got != expected).then(|| format!("run {call}: want {expected:?}, got {got:?}"))
 }
 
-fn cases(dir: &Path, out: &mut Vec<PathBuf>) {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .expect("cases dir")
-        .map(|e| e.expect("entry").path())
-        .collect();
-    entries.sort();
-    for e in entries {
-        if e.is_dir() {
-            cases(&e, out);
-        } else if e.extension().is_some_and(|x| x == "hirsel") {
-            out.push(e);
-        }
-    }
-}
-
 #[test]
 fn generic_allocation_layout() {
     let failures = run_case(&root().join("cases/body/generic-allocation-layout.hirsel"));
@@ -1359,8 +1351,7 @@ fn flow_transform_rejects() {
 
 #[test]
 fn corpus() {
-    let mut paths = vec![];
-    cases(&root().join("cases"), &mut paths);
+    let paths = case_source::files(&root().join("cases")).expect("cases dir");
     assert!(!paths.is_empty());
     let mut report = vec![];
     for path in &paths {

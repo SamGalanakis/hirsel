@@ -25,23 +25,28 @@ keeps one absolute deadline through readiness retries.
 
 An address argument outside the grant returns `Denied` before issue.
 `listen` has a backlog, with no `Until` parameter.
-`NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32)`.
+`NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure)`.
+[TLS-1](tls.md#tls-1-client-handshake) defines `Tls`. On a TLS stream, receive and send
+move plaintext ([TLS-2](tls.md#tls-2-plaintext-on-a-tls-stream)).
 
 ### NET-7: Owned connections
 
 `net.split(take s: Socket) -> (ReadHalf, WriteHalf)` consumes the socket and
 transfers its existing record to two directional owners. It allocates and admits
 nothing, cannot fail, and passes no replay point. Dropping a write half performs
-`SHUT_WR`, ignoring the result. Dropping a read half releases its ownership.
+`SHUT_WR`, ignoring the result. On a TLS stream it first queues `close_notify` and makes
+one nonblocking attempt to send it ([TLS-2](tls.md#tls-2-plaintext-on-a-tls-stream)). Dropping a read half releases its ownership.
 The last owner closes the descriptor once. Dropping an unsplit socket or a
 listener closes it once. No finalizer waits or enables positive linger.
 
 ### NET-6: Network rules
 
 `net.narrow(n: Net, r: Rule) -> Result[Net, RuleError]` intersects each parent
-rule with `r`, dropping empty intersections. Rules have `dir: NetDirection`,
+rule with `r`, dropping empty intersections. Address rules have `dir: NetDirection`,
 `prefix: Ip`, `bits: u8`, `ports: (u16, u16)`, where
-`NetDirection = Connect | Listen`. An invalid prefix length, nonzero prefix host
+`NetDirection = Connect | Listen`. A `Tls` rule has name patterns, ports and a pinned trust
+instead ([TLS-3](tls.md#tls-3-authority)). It permits only a client handshake on a socket
+that a `Connect` rule already allowed. An invalid prefix length, nonzero prefix host
 bits, reversed ports or IPv4-mapped IPv6 prefix returns `Invalid` without changing
 anything. Rule storage is admitted, so `RuleError` also includes
 `Capacity(Capacity)`. The immutable result storage remains charged to its payer
@@ -54,7 +59,10 @@ hirsel run app --grant 'Net=Connect 127.0.0.0/8 1-65535;Listen 127.0.0.1/32 8000
 ```
 
 The syntax is `--grant 'Net=<dir> <prefix>/<len> <lo>-<hi>[;<rule>]'`, where
-`dir` is `Connect` or `Listen` and the prefix is an IPv4 or IPv6 literal. Bare
+`dir` is `Connect` or `Listen` and the prefix is an IPv4 or IPv6 literal. A `Tls` rule is
+written `Tls <pattern>[,<pattern>] <lo>-<hi> <trust>`. Its trust is `System` or
+`Roots=sha256:<hex>`. An example:
+`--grant 'Net=Connect 203.0.113.7/32 443-443;Tls api.example.com 443-443 System'`. Bare
 `--grant Net` is refused with the required syntax. Full authority is explicit,
 for example `Connect 0.0.0.0/0 0-65535`; it is never implicit.
 
@@ -97,5 +105,6 @@ their Capacity charges from the snapshot and each parent's intersections.
 The tape checks socket arguments at issue. It stores the delivered receive
 bytes and appends them to the caller's buffer in the original fragment sizes.
 Each send checks both offered buffers and the absolute deadline. The delivery
-records how many bytes the source committed. A final readiness attempt at a
+records how many bytes the source committed. [TLS-6](tls.md#tls-6-tapes) says what a TLS
+session and a `Secret` add to a tape. It also says which tapes are credential-bearing. A final readiness attempt at a
 deadline can deliver a successful receive, including its bytes.

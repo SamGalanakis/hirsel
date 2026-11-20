@@ -3,7 +3,8 @@
 ### CAP-1: Authority is explicit
 
 Files, directories, network, processes, clocks, randomness, standard streams, environment
-variables and tasks are reached only through operations that take a capability argument.
+variables, tasks and credentials ([`Secret`](tls.md#tls-5-secrets)) are reached only
+through operations that take a capability argument.
 These capability values are the only way a program affects or observes the world outside
 its values. A function holds authority only through its parameters (CAP-3). Top-level `const` values cannot hold capabilities.
 
@@ -18,7 +19,10 @@ fn stamp() -> u64 { host.mono_ns() }                     // refused: CAP-1, no C
 
 A capability type is an opaque type ([PROG-2](programs.md#prog-2-visibility)) of the
 standard library. Its values are made only by its own module, from entry grants (CAP-4) or
-by attenuation (CAP-7), or by a tape as a substitute (CAP-9), so no program can forge one. A capability that holds state is a
+by attenuation (CAP-7), or by a tape as a substitute (CAP-9), so no program can forge one.
+A `Secret` can also be sealed from bytes the program already holds
+([TLS-5](tls.md#tls-5-secrets)). Sealing gives the program no authority it did not have
+before, because it already held those bytes. A capability that holds state is a
 resource ([OWN-3](ownership.md#own-3-kinds)); one that only designates authority is plain,
 and copying it copies the designation, never the thing designated. Each capability type
 declares whether it is `send` ([CONC-2](tasks.md#conc-2-the-send-bound)).
@@ -52,7 +56,9 @@ fn opener(d: Dir) -> Result[own fn(String) -> Result[HostFile, IoError] waits, (
 ### CAP-4: Entry grants
 
 The only capabilities a run starts with are the arguments of `main`
-([PROG-3](programs.md#prog-3-entry)). The run's configuration grants each parameter; a run
+([PROG-3](programs.md#prog-3-entry)). The run's configuration grants each parameter. A
+`Secret` parameter is granted from an environment variable or a file that the launcher
+reads before the run starts ([TLS-5](tls.md#tls-5-secrets)); a run
 whose configuration does not grant one of them, or whose provider cannot give one on this
 host (a `Dir`'s minimum host, [core](core.md#contracts-the-signatures-do-not-state)), does not start: it runs no
 program code and has no host effect, and reports as
@@ -153,7 +159,9 @@ replay point and no value depends on it ([SEM-5](semantics.md#sem-5-maps)).
 ### CAP-7: Attenuation
 
 A capability can be narrowed by its module's functions: a `Dir` to a subdirectory or to
-read-only access, a `Net` to a subset of its rules, a `Tasks` to a child limit. A narrowed
+read-only access, a `Net` to a subset of its rules (including its `Tls` rules,
+[TLS-3](tls.md#tls-3-authority)), a `Secret` to fewer destination names, a `Tasks` to a
+child limit. A narrowed
 capability never permits more than its source. No operation widens a capability or
 combines two into more than either.
 

@@ -271,15 +271,12 @@ class Resolution:
         for statement, call, attrs in calls(source):
             if call.func.id in FIRST_PARTY:
                 base = literal(call, 'name')
-                # Manually declared tools and harnesses have no Cargo unit.
+                # Only feature variants of the same library inherit its Cargo deps.
                 if base not in self.preferred:
                     package = ast.literal_eval(attrs['package_name']) if 'package_name' in attrs else None
-                    if call.func.id == 'hirsel_library' and package in self.preferred:
-                        # A feature variant of a member's library (the runtime
-                        # archives) links its package's own unit dependencies,
-                        # so it shares each third-party crate with the members
-                        # it depends on instead of linking a second copy.
-                        key = self.preferred[package]
+                    key = self.preferred.get(package)
+                    if (call.func.id == 'hirsel_library' and key is not None
+                            and self.root / literal(call, 'crate_root') == Path(self.units[key]['target']['src_path'])):
                         deps = self.values(key, lambda u: sorted(
                             self.label(dep) for _, dep in u['edges'] if dep in self.names
                             and self.units[dep]['target']['kind'] != ['custom-build']))

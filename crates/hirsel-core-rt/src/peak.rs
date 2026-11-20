@@ -1,6 +1,6 @@
 //! Optional MEM-19 balances and native backing observations. Shipping builds
-//! omit the module and all hooks. One cooperative worker owns a run's samples;
-//! a multi-worker scheduler must synchronize a run-owned observer first.
+//! omit the module and all hooks. The observer is worker-local and takes the
+//! sequencer only outside the task-heap lock.
 use crate::{Context, limit::Funding};
 use std::{
     cell::{Cell, RefCell},

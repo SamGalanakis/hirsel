@@ -480,6 +480,19 @@ unsafe impl Sync for Heap {}
 
 struct Locked<'a>(&'a Heap);
 
+impl Locked<'_> {
+    #[inline(always)]
+    fn finish_allocation(self, pointer: NonNull<u8>, class: Class) -> NonNull<u8> {
+        // Sampling may take the sequencer. The slot is still private to the caller.
+        drop(self);
+        #[cfg(any(test, feature = "charge-observation"))]
+        crate::peak::allocated(pointer.as_ptr(), class.stride);
+        #[cfg(not(any(test, feature = "charge-observation")))]
+        let _ = class;
+        pointer
+    }
+}
+
 impl std::ops::Deref for Locked<'_> {
     type Target = State;
     fn deref(&self) -> &State {
@@ -949,7 +962,8 @@ impl Heap {
                 if (*page.as_ref().slots.get()).free.is_null() {
                     return Self::extend_take(state, page, bytes);
                 }
-                return Self::take(page, class, bytes);
+                let pointer = Self::take(page, class, bytes);
+                return state.finish_allocation(pointer, class);
             }
             Self::allocate_slow(heap, state, payer, bytes, align, kind, growable)
         }
@@ -982,7 +996,8 @@ impl Heap {
         unsafe {
             let class = Page::key(page).class;
             extend(&mut state, page, class);
-            Self::take(page, class, bytes)
+            let pointer = Self::take(page, class, bytes);
+            state.finish_allocation(pointer, class)
         }
     }
 
@@ -1006,10 +1021,8 @@ impl Heap {
             }
             #[cfg(not(feature = "memcheck"))]
             let _ = bytes;
-            #[cfg(not(any(test, feature = "charge-observation", feature = "memcheck")))]
+            #[cfg(not(feature = "memcheck"))]
             let _ = class;
-            #[cfg(any(test, feature = "charge-observation"))]
-            crate::peak::allocated(pointer.as_ptr(), class.stride);
             pointer
         }
     }
@@ -1043,7 +1056,7 @@ impl Heap {
                 && !growable
                 && let Some(pointer) = Self::nurse(heap, &mut state, payer, class, bytes)
             {
-                return pointer;
+                return state.finish_allocation(pointer, class);
             }
             let (page, fresh) = if let Some(page) = ready {
                 (page, None)
@@ -1073,7 +1086,7 @@ impl Heap {
             } else if ready.is_none() {
                 state.link(page, class);
             }
-            pointer
+            state.finish_allocation(pointer, class)
         }
     }
 
@@ -1123,10 +1136,6 @@ impl Heap {
             allocation_check::allocated(pointer, bytes, class.kind);
             #[cfg(not(feature = "memcheck"))]
             let _ = bytes;
-            #[cfg(not(any(test, feature = "charge-observation", feature = "memcheck")))]
-            let _ = class;
-            #[cfg(any(test, feature = "charge-observation"))]
-            crate::peak::allocated(pointer.as_ptr(), class.stride);
             Some(pointer)
         }
     }

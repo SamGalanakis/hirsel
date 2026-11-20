@@ -10,7 +10,7 @@
 //
 // The text below is the original Part 3 header, kept for the request format.
 //
-// Arguments: port sessions partitions par tool_port units_mode [unit K].
+// Arguments: port sessions partitions par tool_port units_mode [ready_ack] unit K role.
 // S1 (units_mode 0): one run; every session, the P partition committers and
 // the shared service are tasks; a service call is a local channel round trip.
 // S3 (units_mode 1, HIRSEL_UNITS=K): units 0..K-2 serve sessions on TCP port
@@ -366,7 +366,7 @@ fn read_hello(mut r: ReadHalf, mut buf: Bytes) -> bool waits {
     true
 }
 
-fn serve_session(nw: Net, clock: Clock, err: Stderr, unit: u64, sessions: u64, partitions: u64, par: u64, tool_port: u64) waits {
+fn serve_session(nw: Net, clock: Clock, err: Stderr, unit: u64, sessions: u64, partitions: u64, par: u64, tool_port: u64, ready_ack: bool) waits {
     let (take hl, _) = result.unwrap(host.listen(nw, unit_addr(unit, HANDOFF_PORT), 4))
     let mut handoff = take hl
     let (take cs, _) = result.unwrap(host.accept(mut handoff, Never))
@@ -410,6 +410,10 @@ fn serve_session(nw: Net, clock: Clock, err: Stderr, unit: u64, sessions: u64, p
     let mut small: Bytes = result.unwrap(list.with_capacity(24))
     let mut job: Bytes = result.unwrap(list.with_capacity(16))
     let mut rec: Bytes = result.unwrap(list.with_capacity(64))
+    if ready_ack {
+        result.unwrap(list.put_word_le(mut small, sid))
+        send_all(mut w, small)
+    }
     while recv_exact(mut r, mut req, 48) {
         let turn: u64 = list.word_le(req, 0)
         let seed: u64 = list.word_le(req, 8)
@@ -475,14 +479,16 @@ fn serve_session(nw: Net, clock: Clock, err: Stderr, unit: u64, sessions: u64, p
 
 pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, d: Dir, argv: Args) -> Result[(), Exit] waits {
     let sessions = arg(argv, 1)
+    if sessions == 0 { return Ok(()) }
     let partitions = arg(argv, 2)
     let par = arg(argv, 3)
     let tool_port = arg(argv, 4)
     let count = args.len(argv)
+    let ready_ack = if count == 10 { arg(argv, 6) != 0 } else { false }
     let unit = arg(argv, count - 3)
     let role = arg(argv, count - 1)
     if role == 1 {
-        serve_session(nw, clock, err, unit, sessions, partitions, par, tool_port)
+        serve_session(nw, clock, err, unit, sessions, partitions, par, tool_port, ready_ack)
     } else if role == 2 {
         serve_child(nw, clock, unit, tool_port)
     } else if unit < partitions {

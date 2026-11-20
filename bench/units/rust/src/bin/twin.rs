@@ -3,7 +3,7 @@
 //! tasks; nothing runs on the main thread (it only waits). The partition
 //! write runs on the committer's worker; fdatasync runs on one of `syncs`
 //! dedicated threads, as HIRSEL_SYNC_HELPERS does for hirsel.
-//! Usage: twin PORT SESSIONS PARTITIONS PAR TOOL_PORT WORKERS SYNCS DIR
+//! Usage: twin PORT SESSIONS PARTITIONS PAR TOOL_PORT WORKERS SYNCS DIR [READY_ACK]
 //!        twin synccost DIR N SIZE   (cost of write+fdatasync alone)
 use std::io::Write;
 use std::os::fd::AsRawFd;
@@ -82,9 +82,12 @@ async fn open_tool(port: u16) -> Tool {
     Tool { s, buf: Vec::with_capacity(8 + 65536) }
 }
 
-async fn session(mut st: TcpStream, commit: mpsc::Sender<Commit>, svc: mpsc::Sender<SvcReq>, tool_port: u16, par: bool) -> u64 {
+async fn session(mut st: TcpStream, commit: mpsc::Sender<Commit>, svc: mpsc::Sender<SvcReq>, tool_port: u16, par: bool, ready_sid: Option<u64>) -> u64 {
     let mut tools = Vec::new();
     for _ in 0..if par { 16 } else { 1 } { tools.push(open_tool(tool_port).await); }
+    if let Some(sid) = ready_sid {
+        st.write_all(&sid.to_le_bytes()).await.unwrap();
+    }
     let mut req = [0u8; REQ];
     let mut turns = 0u64;
     while st.read_exact(&mut req).await.is_ok() {
@@ -163,6 +166,7 @@ fn main() {
     let workers: usize = a[6].parse().unwrap();
     let syncs: usize = a[7].parse().unwrap();
     let dir = std::path::PathBuf::from(&a[8]);
+    let ready_ack = a.get(9).is_some_and(|arg| arg == "1");
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(workers).enable_all().build().unwrap();
     let main = rt.spawn(async move {
         let sync = sync_pool(syncs);
@@ -178,14 +182,15 @@ fn main() {
         let svc = tokio::spawn(service(svc_rx));
         let l = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
         let mut jobs = Vec::new();
-        for _ in 0..sessions {
+        while jobs.len() < sessions as usize {
             let (mut st, _) = l.accept().await.unwrap();
             st.set_nodelay(true).unwrap();
             let mut hello = [0u8; 8];
-            st.read_exact(&mut hello).await.unwrap();
+            if st.read_exact(&mut hello).await.is_err() { continue; }
             let sid = u64::from_le_bytes(hello);
+            if sid >= sessions { continue; }
             let commit = commits[(sid % partitions as u64) as usize].clone();
-            jobs.push(tokio::spawn(session(st, commit, svc_tx.clone(), tool_port, par)));
+            jobs.push(tokio::spawn(session(st, commit, svc_tx.clone(), tool_port, par, ready_ack.then_some(sid))));
         }
         let mut turns = 0;
         for j in jobs { turns += j.await.unwrap(); }

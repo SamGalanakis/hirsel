@@ -1,6 +1,6 @@
 // mc-units-proto Part 3: the session server (throwaway prototype).
 //
-// Arguments: port sessions partitions par tool_port units_mode [unit K].
+// Arguments: port sessions partitions par tool_port units_mode [ready_ack] [unit K].
 // S1 (units_mode 0): one run; every session, the P partition committers and
 // the shared service are tasks; a service call is a local channel round trip.
 // S3 (units_mode 1, HIRSEL_UNITS=K): units 0..K-2 serve sessions on TCP port
@@ -66,6 +66,18 @@ fn recv_exact(mut r: ReadHalf, mut buf: Bytes, size: u64) -> bool waits {
         let want = size - list.len(buf)
         let got = result.unwrap(host.recv_bounded(mut r, mut buf, want, Never))
         if got == 0 { return false }
+    }
+    true
+}
+
+fn read_hello(mut r: ReadHalf, mut buf: Bytes) -> bool waits {
+    list.clear(mut buf)
+    while list.len(buf) < 8 {
+        let want = 8 - list.len(buf)
+        match host.recv_bounded(mut r, mut buf, want, Never) {
+            Ok(got) => { if got == 0 { return false } },
+            Error(_) => return false,
+        }
     }
     true
 }
@@ -224,10 +236,12 @@ type Session: send {
     svc_unit: u64,
     tool_port: u64,
     par: u64,
+    ready_ack: bool,
+    sid: u64,
 }
 
 fn session(take job: Session) -> u64 waits {
-    let Session(tasks: tasks, nw: nw, clock: clock, r: take rh, w: take wh, commit: commit, svc: svc, svc_unit: svc_unit, tool_port: tool_port, par: par) = take job
+    let Session(tasks: tasks, nw: nw, clock: clock, r: take rh, w: take wh, commit: commit, svc: svc, svc_unit: svc_unit, tool_port: tool_port, par: par, ready_ack: ready_ack, sid: sid) = take job
     let mut r = take rh
     let mut w = take wh
     let mut tools: List[Tool] = list.new()
@@ -248,6 +262,10 @@ fn session(take job: Session) -> u64 waits {
     let (ack_tx, ack_rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
     let mut req: Bytes = result.unwrap(list.with_capacity(48))
     let mut small: Bytes = result.unwrap(list.with_capacity(24))
+    if ready_ack {
+        result.unwrap(list.put_word_le(mut small, sid))
+        send_all(mut w, small)
+    }
     let mut turns = 0u64
     while recv_exact(mut r, mut req, 48) {
         let turn: u64 = list.word_le(req, 0)
@@ -360,15 +378,18 @@ fn serve_service(tasks: Tasks, nw: Net, err: Stderr, unit: u64, sessions: u64) w
 pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, d: Dir, argv: Args) -> Result[(), Exit] waits {
     let port = arg(argv, 0)
     let sessions = arg(argv, 1)
+    if sessions == 0 { return Ok(()) }
     let partitions = arg(argv, 2)
     let par = arg(argv, 3)
     let tool_port = arg(argv, 4)
     let units_mode = arg(argv, 5)
+    let count = args.len(argv)
+    let ready_arg_count = if units_mode == 0 { 7u64 } else { 9u64 }
+    let ready_ack = if count == ready_arg_count { arg(argv, 6) != 0 } else { false }
     let mut unit = 0u64
     let mut k = 1u64
     let mut svc_unit = 0u64
     if units_mode != 0 {
-        let count = args.len(argv)
         unit = arg(argv, count - 2)
         let total = arg(argv, count - 1)
         k = total - 1
@@ -403,14 +424,15 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, d: Dir, argv: Args
     let mut jobs: List[Task[u64]] = list.new()
     let budget = if par != 0 { PAR_SESSION_BYTES } else { SESSION_BYTES }
     let mut hello: Bytes = result.unwrap(list.with_capacity(8))
-    for _ in 0 .. mine {
+    while list.len(jobs) < mine {
         let (take s, _) = result.unwrap(host.accept(mut listener, Never))
         let (rh, wh) = net.split(take s)
         let mut r = take rh
-        if !recv_exact(mut r, mut hello, 8) { fail("hello") }
+        if !read_hello(mut r, mut hello) { continue }
         let sid: u64 = list.word_le(hello, 0)
+        if sid >= sessions || sid % k != unit { continue }
         let slot = (sid / k) % nowned
-        let job = Session(tasks: tasks, nw: nw, clock: clock, r: take r, w: take wh, commit: channel.sender(commits[slot]), svc: channel.sender(svc_tx), svc_unit: svc_unit, tool_port: tool_port, par: par)
+        let job = Session(tasks: tasks, nw: nw, clock: clock, r: take r, w: take wh, commit: channel.sender(commits[slot]), svc: channel.sender(svc_tx), svc_unit: svc_unit, tool_port: tool_port, par: par, ready_ack: ready_ack, sid: sid)
         result.unwrap(list.push(mut jobs, result.unwrap(task.spawn(tasks, bytes budget, take job, session))))
     }
     let mut turns = 0u64

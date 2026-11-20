@@ -573,3 +573,179 @@ fn json_nesting_129() -> bool {
     let closing = result.unwrap(string.repeat("]", 129))
     refuses_depth_before_admission(nested_json_input("[", 129, closing))
 }
+
+type ProfileSum: codec = Empty | Single(char) | Multiple(u8, bool)
+
+type ProfileRow: codec {
+    unit: (),
+    flag: bool,
+    scalar: char,
+    a8: u8,
+    a16: u16,
+    a32: u32,
+    a64: u64,
+    b8: i8,
+    b16: i16,
+    b32: i32,
+    b64: i64,
+    narrow: f32,
+    wide: f64,
+    label: String,
+    payload: Bytes,
+    series: List[u16],
+    lookup: Map[u64, String],
+    maybe: Option[String],
+    outcome: Result[(), bool],
+    choice: ProfileSum
+}
+
+fn typed_input(s: String) -> Bytes {
+    result.unwrap(string.into_bytes(result.unwrap(string.from(s))))
+}
+
+fn profile_encode[T](f: json.Format[T], v: T) -> String {
+    let mut scratch: Bytes = list.new()
+    let mut output: Bytes = list.new()
+    let mut declared: u64 = 0
+    let measured = result.unwrap(json.encode_typed(f, v, mut scratch, scoped fn(n: u64) -> Result[(), Capacity] {
+        declared = n
+        Ok(())
+    }, scoped fn(byte: u8) -> Result[(), Capacity] {
+        codec.put_u8(byte, mut output)
+    }))
+    if measured != declared || measured != list.len(output) {
+        fail("typed JSON length differs from bytes written")
+    }
+    result.unwrap(string.from_utf8(take output))
+}
+
+fn profile_law[T: codec](f: json.Format[T], v: T, alternative: String, canonical: String) -> bool {
+    let c: codec.Codec[T] = codec.of()
+    let mut expected: Bytes = list.new()
+    result.unwrap(codec.encode(c, v, mut expected))
+    let actual = profile_encode(f, v)
+    if actual != canonical {
+        return false
+    }
+    let round_trip = result.unwrap(json.decode_typed(f, typed_input(actual), 65536))
+    let mut round_trip_bytes: Bytes = list.new()
+    result.unwrap(codec.encode(c, round_trip, mut round_trip_bytes))
+    let parsed = result.unwrap(json.decode_typed(f, typed_input(alternative), 65536))
+    round_trip_bytes == expected && profile_encode(f, parsed) == canonical
+}
+
+// B-4's canonical spellings, including declaration order, padded Bytes,
+// insertion order, float width, explicit None, and the multi-field sum.
+// expect: run typed_json_profile_round_trips() = true
+fn typed_json_profile_round_trips() -> bool {
+    let mut lookup: Map[u64, String] = map.new()
+    result.unwrap(map.insert(mut lookup, 10u64, result.unwrap(string.from("ten"))))
+    result.unwrap(map.insert(mut lookup, 2u64, result.unwrap(string.from("two"))))
+    let mut payload: Bytes = list.new()
+    result.unwrap(codec.put_u8(77, mut payload))
+    let mut series: List[u16] = list.new()
+    result.unwrap(list.push(mut series, 2u16))
+    result.unwrap(list.push(mut series, 0u16))
+    let value = ProfileRow(unit: (), flag: true, scalar: '😀', a8: 255, a16: 65535, a32: 4294967295, a64: 18446744073709551615, b8: -128, b16: -32768, b32: -2147483648, b64: -9223372036854775808, narrow: 1.0000001, wide: float.from_bits64(0x8000000000000000), label: result.unwrap(string.from("é\n/\"\\\u{001f}")), payload: take payload, series: take series, lookup: take lookup, maybe: None, outcome: Ok(()), choice: Multiple(7, false))
+    let alternative = " { \"choice\": {\"Multiple\": [7,false]}, \"outcome\": {\"ok\":null}, \"lookup\":[[\"10\",\"ten\"],[\"2\",\"two\"]], \"series\":[2,0], \"payload\":\"TQ==\", \"label\":\"é\\n\\/\\\"\\\\\\u001f\", \"wide\":-0.0e4, \"narrow\":1.0000000596046448, \"b64\":\"-9223372036854775808\", \"b32\":-2147483648, \"b16\":-32768, \"b8\":-128, \"a64\":\"18446744073709551615\", \"a32\":4294967295, \"a16\":65535, \"a8\":255, \"scalar\":\"\\uD83D\\uDE00\", \"flag\":true, \"unit\":null } "
+    let canonical = "{\"unit\":null,\"flag\":true,\"scalar\":\"😀\",\"a8\":255,\"a16\":65535,\"a32\":4294967295,\"a64\":\"18446744073709551615\",\"b8\":-128,\"b16\":-32768,\"b32\":-2147483648,\"b64\":\"-9223372036854775808\",\"narrow\":1.0000001,\"wide\":-0,\"label\":\"é\\u000A/\\\"\\\\\\u001F\",\"payload\":\"TQ==\",\"series\":[2,0],\"lookup\":[[\"10\",\"ten\"],[\"2\",\"two\"]],\"maybe\":null,\"outcome\":{\"ok\":null},\"choice\":{\"Multiple\":[7,false]}}"
+    let f: json.Format[ProfileRow] = result.unwrap(json.typed())
+    profile_law(f, value, alternative, canonical)
+}
+
+type ProfileAlternates: codec {
+    empty: ProfileSum,
+    single: ProfileSum,
+    present: Option[u8],
+    failed: Result[bool, ()],
+    low: f64,
+    fixed: f64,
+    high: f64,
+    nan: f32,
+    inf: f64,
+    neg_inf: f32
+}
+
+// B-4's other variant/option forms and the Number::toString exponent edges.
+// expect: run typed_json_profile_variants_and_floats() = true
+fn typed_json_profile_variants_and_floats() -> bool {
+    let value = ProfileAlternates(empty: Empty, single: Single('x'), present: Some(9), failed: Error(()), low: 1e-7, fixed: 1e-6, high: 1e21, nan: float.from_bits32(0x7fc00000), inf: float.from_bits64(0x7ff0000000000000), neg_inf: float.from_bits32(0xff800000))
+    let alternative = "{\"empty\":\"\\u0045mpty\",\"single\":{\"Single\":\"\\u0078\"},\"present\":9,\"failed\":{\"error\":null},\"low\":0.0000001,\"fixed\":1E-06,\"high\":1000000000000000000000,\"nan\":\"NaN\",\"inf\":\"Infinity\",\"neg_inf\":\"-Infinity\"}"
+    let canonical = "{\"empty\":\"Empty\",\"single\":{\"Single\":\"x\"},\"present\":9,\"failed\":{\"error\":null},\"low\":1e-7,\"fixed\":0.000001,\"high\":1e+21,\"nan\":\"NaN\",\"inf\":\"Infinity\",\"neg_inf\":\"-Infinity\"}"
+    let f: json.Format[ProfileAlternates] = result.unwrap(json.typed())
+    profile_law(f, value, alternative, canonical)
+}
+
+type ProfileBad: codec {
+    wide: u64,
+    payload: Bytes,
+    label: String,
+    real: f64
+}
+
+type ProfileDepth: codec = Stop | Next(List[ProfileDepth])
+
+// B-4. Escaped duplicates, unfamiliar members and bad scalars must be
+// refused before a codec can consume their bytes. Offsets are UTF-8 bytes.
+// expect: run typed_json_profile_refusals() = true
+fn typed_json_profile_refusals() -> bool {
+    let f: json.Format[ProfileBad] = result.unwrap(json.typed())
+    let duplicate = match json.decode_typed(f, typed_input("{\"wide\":\"1\",\"\\u0077ide\":\"2\"}"), 65536) {
+        Error(Input(12, path, DuplicateMember)) => path == "/wide",
+        _ => false,
+    }
+    let unknown = match json.decode_typed(f, typed_input("{\"extra\":null}"), 65536) {
+        Error(Input(1, path, UnknownMember)) => path == "/extra",
+        _ => false,
+    }
+    let bare = match json.decode_typed(f, typed_input("{\"wide\":1}"), 65536) {
+        Error(Input(8, path, ExpectedValue)) => path == "/wide",
+        _ => false,
+    }
+    let padding = match json.decode_typed(f, typed_input("{\"payload\":\"TR==\"}"), 65536) {
+        Error(Input(11, path, InvalidBase64)) => path == "/payload",
+        _ => false,
+    }
+    let surrogate = match json.decode_typed(f, typed_input("{\"label\":\"\\uD800\"}"), 65536) {
+        Error(Input(_, path, ExpectedValue)) => path == "/label",
+        _ => false,
+    }
+    let overflow = match json.decode_typed(f, typed_input("{\"real\":1.7976931348623159e308}"), 65536) {
+        Error(Input(8, path, InvalidNumber)) => path == "/real",
+        _ => false,
+    }
+    let f_deep: json.Format[ProfileDepth] = result.unwrap(json.typed())
+    let mut deep = result.unwrap(string.repeat("{\"Next\":[", 33))
+    result.unwrap(string.push(mut deep, "\"Stop\""))
+    result.unwrap(string.push(mut deep, result.unwrap(string.repeat("]}", 33))))
+    let depth = match json.decode_typed(f_deep, typed_input(deep), 1048576) {
+        Error(Input(288, _, DepthLimit)) => true,
+        _ => false,
+    }
+    let c: codec.Codec[ProfileDepth] = codec.of()
+    let mut nested: ProfileDepth = Stop
+    for _ in 0u64 .. 32 {
+        let mut items: List[ProfileDepth] = list.new()
+        result.unwrap(list.push(mut items, take nested))
+        nested = Next(take items)
+    }
+    let mut wire_value: Bytes = list.new()
+    result.unwrap(codec.encode(c, nested, mut wire_value))
+    let good_depth = result.unwrap(json.typed_length(f_deep, wire_value)) == 358
+    let mut items: List[ProfileDepth] = list.new()
+    result.unwrap(list.push(mut items, take nested))
+    let mut starts: u64 = 0
+    let bad_depth = match json.encode_typed(f_deep, Next(take items), mut wire_value, scoped fn(n: u64) -> Result[(), Capacity] {
+        starts = n
+        Ok(())
+    }, scoped fn(byte: u8) -> Result[(), Capacity] {
+        if byte != 0 {
+            fail("over-depth JSON sent a byte")
+        }
+        Ok(())
+    }) {
+        Error(DepthLimit) => starts == 0,
+        _ => false,
+    }
+    duplicate && unknown && bare && padding && surrogate && overflow && depth && good_depth && bad_depth
+}

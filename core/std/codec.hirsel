@@ -1107,6 +1107,48 @@ pub fn schema[T](c: Codec[T]) -> Result[Bytes, Capacity] {
     finish(s)
 }
 
+/// Builds a codec description with its reader defaults. The schema views below
+/// borrow the description, which remains valid across value transcodes.
+pub fn describe[T](c: Codec[T]) -> Result[Schema, Capacity] {
+    built(c)
+}
+
+/// The root type expression of a completed description.
+pub fn schema_root(s: Schema) -> View[Bytes] in s {
+    view s.cur
+}
+
+/// The number of nominal definitions in a completed description.
+pub fn schema_definitions(s: Schema) -> u64 {
+    list.len(s.defs)
+}
+
+/// Definition bytes starting with the kind byte, after the nominal path and arguments.
+pub fn schema_definition(s: Schema, index: u64) -> View[Bytes] in s {
+    let d = s.defs[index]
+    list.slice(d, kind_at(d, 0), list.len(d))
+}
+
+/// Reads a u32 count, byte length or definition index from a description.
+pub fn schema_word(b: Bytes, offset: u64) -> u64 {
+    count_at(b, offset)
+}
+
+/// The end offset of the type expression at at in a completed description.
+pub fn schema_next(b: Bytes, at: u64) -> u64 {
+    skip(b, at)
+}
+
+/// A declared field's pre-encoded default, when the description has one.
+pub fn schema_default(s: Schema, def: u64, field_name: String) -> Option[View[Bytes]] in s {
+    for d in s.defaults {
+        if d.def == def && d.field == field_name {
+            return Some(view d.value)
+        }
+    }
+    None
+}
+
 /// The stable fingerprint of c's schema: CRC-64-AVRO (Rabin) of its bytes, so equal
 /// schemas, tombstones and variant order included, have equal fingerprints.
 pub fn fingerprint[T](c: Codec[T]) -> Result[u64, Capacity] {

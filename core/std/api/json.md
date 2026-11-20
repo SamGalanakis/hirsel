@@ -7,6 +7,39 @@
 key index (`ObjectIndex`: `index`, `get`, `shown`). Walking and positional access use core's
 `match`, `seq.len` and `indexed.get`. A key or a Str is read through `text.as_string`.
 
+## JSON for codec types
+
+Use `json.typed()` with a result type of `Result[json.Format[T], json.TypedError]`
+to prepare a format once. T must have a codec. Preparation refuses tuples,
+options whose element already admits `null`, lists with zero-byte elements,
+maps with zero-byte entries, and schema cycles that can recur without consuming
+a codec byte. A schema refusal includes the relevant codec opcode.
+
+`decode_typed(format, take input, byte_limit)` reads one UTF-8 JSON value.
+The byte bound covers decoding scratch and allocations made by T's decoder.
+Record members may arrive in any order. Absent fields use their declared
+defaults, or None for optional fields. The decoder refuses duplicate and
+unknown members. The codec's decoder still enforces `via` validation and
+duplicate map keys. An input refusal gives a byte offset and an RFC 6901
+JSON Pointer. The empty path denotes the root. `Capacity` reports a separate
+resource refusal.
+
+`encode_typed` writes T's codec bytes into reusable caller-owned scratch.
+It measures the JSON, calls the supplied length callback, then streams the JSON
+bytes to the sink. For a value already encoded by the codec, use `typed_length`
+and `write_typed`. Both passes use a fixed 64-entry traversal stack and allocate
+no heap storage. A sink refusal can leave a prefix. The length pass refuses
+nesting over 64 before any output is sent.
+
+The format follows [HTTP B-4 and B-5](../../../docs/spec/http.md#b-4-lexical-forms-json-path-and-query).
+In particular, 64-bit integers are strings, Bytes use padded base64, and maps
+are arrays of pairs in insertion order. Records are written in declaration
+order. The writer uses `\u00XX` for control characters and shortest round-trip
+decimal digits at the original float width. It preserves negative zero.
+Named nonfinite values are JSON strings.
+
+## Documents, callback readers and writers
+
 Use `decode` to read one complete value into an owned type. Compose
 `record_of` for object members, `list_of` for arrays, and `read_f64` for
 numbers. A record reader receives decoded keys in their input order and

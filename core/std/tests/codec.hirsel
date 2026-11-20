@@ -2408,3 +2408,54 @@ fn structural_tuple() -> (bool, bool, bool, u64, bool) {
     let schema = result.unwrap(codec.schema(c)) == unhex("03 00000000 0e 12 02000000 06 0d")
     (enc(c, xs) == b && again(c, b), prefixes(c, b), schema, codec.least(c), tuple_option("a", unhex("01000000 01000000 61 0700000000000000")))
 }
+
+type JsonWireRow: codec {
+    range: DRange,
+    score: i64 = 7
+}
+
+fn json_bytes(s: String) -> Bytes {
+    result.unwrap(string.into_bytes(result.unwrap(string.from(s))))
+}
+
+// HTTP B-4 and SEM-10. Missing members use declared defaults, and a codec's
+// via validator and Map key equality still decide whether the assembly is valid.
+// expect: run typed_json_codec_admission() = true
+fn typed_json_codec_admission() -> bool {
+    let f: json.Format[JsonWireRow] = result.unwrap(json.typed())
+    let decoded_row = result.unwrap(json.decode_typed(f, json_bytes("{\"range\":{\"hi\":\"9\",\"lo\":\"2\"}}"), 65536))
+    let c: codec.Codec[JsonWireRow] = codec.of()
+    let mut wire_value: Bytes = list.new()
+    result.unwrap(codec.encode(c, decoded_row, mut wire_value))
+    let mut json_output: Bytes = list.new()
+    let measured = result.unwrap(json.typed_length(f, wire_value))
+    let written = result.unwrap(json.write_typed(f, wire_value, scoped fn(byte: u8) -> Result[(), Capacity] {
+        codec.put_u8(byte, mut json_output)
+    }))
+    let canonical = json_bytes("{\"range\":{\"lo\":\"2\",\"hi\":\"9\"},\"score\":\"7\"}")
+    let correct = json_output == canonical && list.len(canonical) == measured && measured == written
+    let reversed = match json.decode_typed(f, json_bytes("{\"score\":\"6\",\"range\":{\"hi\":\"2\",\"lo\":\"9\"}}"), 65536) {
+        Error(Input(21, path, CodecValue(Value(0)))) => path == "/range",
+        _ => false,
+    }
+    let pairs: json.Format[Map[u64, bool]] = result.unwrap(json.typed())
+    let duplicate = match json.decode_typed(pairs, json_bytes("[[\"7\",false],[\"\\u0037\",true]]"), 65536) {
+        Error(Input(14, path, CodecValue(Duplicate(13)))) => path == "/1/0",
+        _ => false,
+    }
+    let nullable: Result[json.Format[Option[Option[u32]]], json.TypedError] = json.typed()
+    let zero: Result[json.Format[List[()]], json.TypedError] = json.typed()
+    let refused_option = match take nullable {
+        Error(Schema(16, NullableOption)) => true,
+        _ => false,
+    }
+    let refused_list = match take zero {
+        Error(Schema(14, EmptyListElement)) => true,
+        _ => false,
+    }
+    let exhausted = match json.decode_typed(f, json_bytes("{\"range\":{\"hi\":\"9\",\"lo\":\"2\"}}"), 0) {
+        Error(Capacity(_)) => true,
+        _ => false,
+    }
+    correct && decoded_row.range.w.lo == 2 && decoded_row.range.w.hi == 9 && decoded_row.score == 7 && reversed && duplicate && refused_option && refused_list && exhausted
+}

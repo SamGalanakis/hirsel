@@ -1679,22 +1679,40 @@ pub fn shortest64(x: f64) -> (u64, i64) {
     if let Some((c, p)) = ryu(bits) {
         return strip(c, p)
     }
-    shortest_decimal64(m, e)
+    shortest_decimal(m, e, 4503599627370496, -1074, 17)
 }
 
-fn shortest_decimal64(m: u64, e: i64) -> (u64, i64) {
+/// The shortest decimal that parses back to a finite f32, as (c, p) with
+/// |x| = c × 10^p and no trailing zeros. (0, 0) for a zero. Allocates nothing.
+pub fn shortest32(x: f32) -> (u64, i64) {
+    let bits = float.to_bits32(x)
+    let biased: i64 = int.widen((bits >> 23) & 255)
+    if biased == 255 {
+        fail("float.shortest32: x is not finite")
+    }
+    let fraction: u64 = int.widen(bits & 0x7fffff)
+    if biased == 0 {
+        if fraction == 0 {
+            return (0, 0)
+        }
+        return shortest_decimal(fraction, -149, 8388608, -149, 9)
+    }
+    shortest_decimal(fraction | 8388608, biased - 150, 8388608, -149, 9)
+}
+
+fn shortest_decimal(m: u64, e: i64, normal: u64, min_exp: i64, max_digits: i64) -> (u64, i64) {
     let v = exact(m, e)
     // x rounds from the open interval (lower, upper), closed when m is even (ties to even);
     // below a power of two the gap under x is half the gap over it.
     let even = m & 1 == 0
-    let lower = if m == 4503599627370496 && e > -1074 {
+    let lower = if m == normal && e > min_exp {
         exact(4 * m - 1, e - 2)
     } else {
         exact(2 * m - 1, e - 1)
     }
     let upper = exact(2 * m + 1, e - 1)
     let mut len: i64 = 1
-    while len < 18 {
+    while len <= max_digits {
         let p = v.point - len
         let (f, rest) = prefix(v, p)
         if !rest {
@@ -1706,9 +1724,9 @@ fn shortest_decimal64(m: u64, e: i64) -> (u64, i64) {
         let f_in = f > lo || (f == lo && !lo_rest && even)
         let c_in = c < hi || (c == hi && (hi_rest || even))
         if f_in && c_in {
-            // No tie is possible here: the nearer one by the first dropped digit.
             let next: u64 = int.narrow(len)
-            return strip(if v.digits[next] >= 5 {
+            let digit = v.digits[next]
+            return strip(if digit > 5 || (digit == 5 && (next + 1 < v.count || f & 1 != 0)) {
                 c
             } else {
                 f
@@ -1722,7 +1740,7 @@ fn shortest_decimal64(m: u64, e: i64) -> (u64, i64) {
         }
         len += 1
     }
-    fail("float.shortest64: 17 digits always parse back")
+    fail("shortest_decimal: the width determines the maximum digit count")
 }
 
 fn special(bits: u64) -> String {

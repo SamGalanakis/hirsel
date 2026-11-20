@@ -37,6 +37,12 @@ counts or lengths, all four bytes little-endian. The root type uses opcodes 0-19
 `Capacity(requested: count, available: 4294967295)` before writing the count.
 There is no reader for the earlier widths.
 
+**Schema consumers.** `describe(c)` retains the root, nominal definitions, and
+pre-encoded reader defaults. The `schema_root`, `schema_definition`,
+`schema_definitions`, `schema_word`, `schema_next` and `schema_default`
+operations walk that description. [Typed JSON](json.md#json-for-codec-types)
+uses it to prepare its format and passes assembled bytes to `decode`.
+
 **Structural codecs.** Each is `put_list`, `take_list` and `schema_list` (and the Map,
 Option and Result twins) over `of()` of its arguments, which is the code a derived field
 of that type runs. So `of[List[E]]` and a derived `List[E]` field have equal bytes, schema,

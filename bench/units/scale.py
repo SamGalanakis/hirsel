@@ -29,7 +29,7 @@ NOFILE = 524288
 CPU_HZ = os.sysconf("SC_CLK_TCK")
 HOLDS_GAP_S = 15
 QUEUE_BUCKET_NS = 10_000_000
-LOAD_NAMES = {"loadgen", "loadgen_drain", "loadgen_detail"}
+LOAD_NAMES = {"loadgen", "loadgen_drain", "loadgen_detail", "loadgen_churn"}
 
 SCALE_SIDES = ("untied", "S3k7", "tokiow8")
 REC_SIDES = ("untied", "S3k7", "S1w2", "S1w8", "untied (1 GiB)")
@@ -202,7 +202,8 @@ class Runner:
 
     def server_cmd(self, side, cell):
         env = {"HIRSEL_SYNC_HELPERS": str(SYNCS)}
-        base = [PORT, cell["sessions"], PARTITIONS, int(cell["par"]), TOOL_PORT]
+        total_clients = cell["sessions"] + cell.get("churn_per_s", 0) * RUN["dur"]
+        base = [PORT, total_clients, PARTITIONS, int(cell["par"]), TOOL_PORT]
         recorded = cell["rec"]
         nports = 1
         if side == "tokiow8":
@@ -287,7 +288,9 @@ class Runner:
         server_pidfile = self.scratch / "server.pid"
         load_pidfile = self.scratch / "load.pid"
         server_argv, env, nports = self.server_cmd(side, cell)
-        if cell.get("slow_turns"):
+        if cell.get("churn_per_s"):
+            load_name = "loadgen_churn"
+        elif cell.get("slow_turns"):
             load_name = "loadgen_detail"
         else:
             load_name = "loadgen_drain" if profile_mode or "close_after_drain" in cell else "loadgen"
@@ -301,6 +304,8 @@ class Runner:
         ]
         if cell.get("slow_turns"):
             lg_argv.append(f"slow_turns={self.data / (trial_id + '.tsv')}")
+        if cell.get("churn_per_s"):
+            lg_argv.append(f"churn_per_s={cell['churn_per_s']}")
         profile = None
         if profile_mode:
             profile = {"mode": profile_mode, "path": self.data / f"{trial_id}.perf.data"}

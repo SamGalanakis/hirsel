@@ -936,15 +936,20 @@ pub(crate) fn launch(k: usize, input: &crate::entry::OsConfig, run: impl Fn(&cra
 // Wakes: a crossing send queues a synthetic reactor event on the receiver
 // and makes it runnable (no eventfd, no syscall unless a worker must be
 // woken). A sync helper's ready is routed to its issuing unit only. Socket
-// readiness of a parked unit arrives through one shared epoll that holds every
-// unit's own epoll fd (edge-triggered), polled by one idle worker (blocking)
-// or by busy workers between units (non-blocking). Timers of parked units sit
-// in one shared heap.
+// readiness arrives through one pool poller that holds every unit's sockets
+// (edge-triggered, tagged with the owning unit): an idle worker blocks in it,
+// or a busy or searching worker polls it when no worker is blocked there.
+// Each event joins the owning unit's arrival queue in the order it reached the
+// unit, and the unit takes the queue at its next switch. Timers of parked
+// units sit in one shared heap.
+//
+// Idle workers: a searcher watches the queued count for a few microseconds,
+// then parks on its own handle. A wake hands one parked worker the searching
+// role, so a burst of newly runnable units wakes one worker at a time.
 use std::cell::{RefCell as URefCell, UnsafeCell};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize};
-use std::sync::Condvar;
 
 /// mc-units-untied: a thread-local Cell whose every access computes the slot
 /// address inside a call that is never inlined, so no per-thread address
@@ -1062,6 +1067,11 @@ pub(crate) struct Unit {
     /// crossing events and the shared poller's socket edges. The unit's
     /// scheduler takes them at its next turn, in this order.
     xready: Mutex<Vec<(u64, u32)>>,
+    /// Set with the lock held whenever `xready` gains an entry, so an empty
+    /// take costs one load.
+    xpending: AtomicBool,
+    /// The running unit's batch buffer, swapped with `xready` at a take.
+    xspare: UnsafeCell<Vec<(u64, u32)>>,
     status: AtomicU8,
     stop_fd: Cell<i32>,
     slice_start: Cell<u64>,
@@ -1130,10 +1140,12 @@ struct Pool {
     /// counted: only their own worker takes them.
     queued: AtomicUsize,
     searching: AtomicUsize,
-    sleepers: Mutex<usize>,
-    /// Mirrors `sleepers` so a wake need not take the lock when none sleeps.
+    /// Parked workers, most recent last, and their count for a lock-free check.
+    idle: Mutex<Vec<usize>>,
     nsleep: AtomicUsize,
-    cv: Condvar,
+    /// Per worker: its thread, and whether a wake handed it the search role.
+    threads: Vec<OnceLock<std::thread::Thread>>,
+    handed: Vec<AtomicBool>,
     poll: Mutex<()>,
     poller_blocked: AtomicBool,
     poll_until: AtomicU64,
@@ -1256,6 +1268,8 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
         unobserved: URefCell::new(Vec::new()),
         children: Cell::new(0),
         xready: Mutex::new(Vec::new()),
+        xpending: AtomicBool::new(false),
+        xspare: UnsafeCell::new(Vec::new()),
         status: AtomicU8::new(0),
         stop_fd: Cell::new(2),
         slice_start: Cell::new(0),
@@ -1402,21 +1416,32 @@ fn xnotify(unit: u32, id: u64) {
         return;
     }
     let Some(u) = unit_ref(unit) else { return };
-    u.xready.lock().unwrap().push((id, (libc::EPOLLIN | libc::EPOLLOUT) as u32));
+    push_arrival(u, id, (libc::EPOLLIN | libc::EPOLLOUT) as u32);
     bump(S_XNOTIFY);
     wake(u);
 }
-/// Readiness queued for the running unit, as (reactor identity, flags).
+fn push_arrival(u: &Unit, id: u64, flags: u32) {
+    let mut q = u.xready.lock().unwrap();
+    q.push((id, flags));
+    u.xpending.store(true, Ordering::Release);
+}
+/// Readiness queued for the running unit, as (reactor identity, flags), in
+/// the order it reached the unit. A push after the check wakes the unit, so
+/// it is taken at the unit's next switch.
 pub(crate) fn take_xready(mut each: impl FnMut(u64, u32)) {
     // SAFETY: called by the running unit's scheduler.
     let u = unsafe { &*cur() };
-    let mut q = u.xready.lock().unwrap();
-    if q.is_empty() {
+    if !u.xpending.load(Ordering::Acquire) {
         return;
     }
-    let ids = std::mem::take(&mut *q);
-    drop(q);
-    for (id, flags) in ids {
+    // SAFETY: only the running unit touches its spare buffer.
+    let batch = unsafe { &mut *u.xspare.get() };
+    {
+        let mut q = u.xready.lock().unwrap();
+        u.xpending.store(false, Ordering::Relaxed);
+        std::mem::swap(&mut *q, batch);
+    }
+    for (id, flags) in batch.drain(..) {
         each(id, flags);
     }
 }
@@ -1457,9 +1482,17 @@ fn notify_worker(p: &Pool) {
         return;
     }
     if p.nsleep.load(Ordering::SeqCst) > 0 {
-        let s = p.sleepers.lock().unwrap();
-        if *s > 0 {
-            p.cv.notify_one();
+        let mut idle = p.idle.lock().unwrap();
+        if p.searching.load(Ordering::SeqCst) == 0
+            && let Some(w) = idle.pop()
+        {
+            p.nsleep.fetch_sub(1, Ordering::SeqCst);
+            // The woken worker searches on this count; later wakes in the
+            // same burst see a searcher and leave the others parked.
+            p.searching.fetch_add(1, Ordering::SeqCst);
+            p.handed[w].store(true, Ordering::Release);
+            drop(idle);
+            p.threads[w].get().unwrap().unpark();
             bump(S_OS_WAKES);
             return;
         }
@@ -1532,7 +1565,7 @@ fn poll_global(p: &Pool, timeout: i32) {
             let unit = (tag >> hirsel_core_net::SHARED_UNIT_SHIFT) as u32;
             if let Some(u) = unit_ref(unit) {
                 let ident = tag & ((1 << hirsel_core_net::SHARED_UNIT_SHIFT) - 1);
-                u.xready.lock().unwrap().push((ident, e.events));
+                push_arrival(u, ident, e.events);
                 wake(u);
             }
         }
@@ -1662,10 +1695,11 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 WORST.fetch_max(u.status.load(Ordering::Relaxed), Ordering::Relaxed);
                 u.state.store(DONE, Ordering::SeqCst);
                 if p.live.fetch_sub(1, Ordering::SeqCst) == 1 {
-                    {
-                        let _sleepers = p.sleepers.lock().unwrap();
-                        p.stop.store(true, Ordering::SeqCst);
-                        p.cv.notify_all();
+                    p.stop.store(true, Ordering::SeqCst);
+                    let parked = std::mem::take(&mut *p.idle.lock().unwrap());
+                    for w in parked {
+                        p.nsleep.fetch_sub(1, Ordering::SeqCst);
+                        p.threads[w].get().unwrap().unpark();
                     }
                     write_wake(p);
                 }
@@ -1728,27 +1762,36 @@ fn worker_main(p: &'static Pool, ix: usize) {
     crate::fiber::arm();
     WORKER_IX.set(ix);
     let mut host: *mut u8 = std::ptr::null_mut();
+    let _ = p.threads[ix].set(std::thread::current());
+    // A wake handed this worker the search role (already counted).
+    let mut handed = false;
     loop {
         if p.retirement_ready.load(Ordering::Acquire)
             && let Some((u, _owner)) = take_retirement(p)
         {
+            if std::mem::take(&mut handed) {
+                p.searching.fetch_sub(1, Ordering::SeqCst);
+            }
             // SAFETY: the retirement queue delivered exclusive entry.
             unsafe { run_unit(p, ix, u, &mut host) };
             continue;
         }
-        if let Some(u) = find(p, ix) {
+        if !handed && let Some(u) = find(p, ix) {
             // SAFETY: a dequeued unit.
             unsafe { run_unit(p, ix, u, &mut host) };
             continue;
         }
         if p.stop.load(Ordering::SeqCst) && p.queued.load(Ordering::SeqCst) == 0 {
+            if handed {
+                p.searching.fetch_sub(1, Ordering::SeqCst);
+            }
             break;
         }
         // Search: at most half the workers at once. A searcher watches the
         // queued count without taking queue locks, and polls only when no
         // worker is blocked in the poller.
         let mut got = None;
-        if 2 * p.searching.fetch_add(1, Ordering::SeqCst) < p.w {
+        if std::mem::take(&mut handed) || 2 * p.searching.fetch_add(1, Ordering::SeqCst) < p.w {
             let t0 = now();
             let mut i = 0u32;
             loop {
@@ -1798,14 +1841,24 @@ fn worker_main(p: &'static Pool, ix: usize) {
                 p.poller_blocked.store(false, Ordering::SeqCst);
             }
             Err(_) => {
-                let mut s = p.sleepers.lock().unwrap();
+                let mut idle = p.idle.lock().unwrap();
                 p.nsleep.fetch_add(1, Ordering::SeqCst);
-                if p.queued.load(Ordering::SeqCst) == 0 && !p.stop.load(Ordering::SeqCst) {
-                    *s += 1;
-                    s = p.cv.wait(s).unwrap();
-                    *s -= 1;
+                if p.queued.load(Ordering::SeqCst) != 0 || p.stop.load(Ordering::SeqCst) {
+                    p.nsleep.fetch_sub(1, Ordering::SeqCst);
+                    continue;
                 }
-                p.nsleep.fetch_sub(1, Ordering::SeqCst);
+                idle.push(ix);
+                drop(idle);
+                loop {
+                    std::thread::park();
+                    if p.handed[ix].swap(false, Ordering::AcqRel) {
+                        handed = true;
+                        break;
+                    }
+                    if p.stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -1854,9 +1907,10 @@ fn launch_untied(
         retirement_owner: Mutex::new(()),
         queued: AtomicUsize::new(0),
         searching: AtomicUsize::new(0),
-        sleepers: Mutex::new(0),
+        idle: Mutex::new(Vec::with_capacity(w)),
         nsleep: AtomicUsize::new(0),
-        cv: Condvar::new(),
+        threads: (0..w).map(|_| OnceLock::new()).collect(),
+        handed: (0..w).map(|_| AtomicBool::new(false)).collect(),
         poll: Mutex::new(()),
         poller_blocked: AtomicBool::new(false),
         poll_until: AtomicU64::new(u64::MAX),

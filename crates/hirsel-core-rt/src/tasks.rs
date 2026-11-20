@@ -1574,6 +1574,8 @@ impl Scheduler {
             crate::units::take_xready(|id, flags| unsafe {
                 (*net).dispatch(id, flags, |token| readies.enqueue(token))
             });
+            // The pool poller holds every unit's sockets.
+            return;
         }
         if !self.net.is_null() {
             let readies = &self.readies;

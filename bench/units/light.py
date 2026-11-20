@@ -27,11 +27,42 @@ CELLS = {
     "A1-8192": scale.SCALE_CELLS["A1-8192"],
     "F1-256": dict(sessions=256, f=1.0, par=False, rec=False, ready_ack=False),
     "P01-256": dict(sessions=256, f=0.1, par=True, rec=False, ready_ack=False),
+    # The fairness arms (queue waits recorded), for repeats outside the pair.
+    "A2-0": scale.SCALE_CELLS["A1-8192"] | {"hot": False},
+    "A2-1": scale.SCALE_CELLS["A1-8192"] | {"hot": True},
 }
 GUESS = {"A1-256": (20000, 23000), "A1-8192": (14000, 18000), "F1-256": (18000, 19000), "P01-256": (2500, 1200)}
 
 
+SERVER_CPUS = [c for part in part3u.SERVER.split(",") for c in (
+    range(int(part.split("-")[0]), int(part.split("-")[-1]) + 1))]
+
+
+def busy_jiffies(cpus):
+    """Busy time (all but idle and iowait) of each listed CPU, from /proc/stat."""
+    busy = {}
+    for line in open("/proc/stat"):
+        name, *v = line.split()
+        if name.startswith("cpu") and name[3:].isdigit() and int(name[3:]) in cpus:
+            v = list(map(int, v))
+            busy[int(name[3:])] = sum(v[:8]) - v[3] - v[4]
+    return busy
+
+
 class Runner(scale2.Runner):
+    def trial(self, trial_id, side, cell, rate, seed, tool_pid, profile_mode):
+        # Other processes on the server CPUs during the trial (other agents'
+        # searches run unpinned): busy CPU time there minus the server's own.
+        trial_id = f"{trial_id}-{time.monotonic_ns() % 1_000_000}"
+        before = busy_jiffies(SERVER_CPUS)
+        r = super().trial(trial_id, side, cell, rate, seed, tool_pid, profile_mode)
+        after = busy_jiffies(SERVER_CPUS)
+        busy_s = sum(after[c] - before[c] for c in SERVER_CPUS) / scale.CPU_HZ
+        r["server_cpus_busy_s"] = busy_s
+        r["foreign_cpu_s"] = busy_s - r["server_cpu_s"] if r.get("server_cpu_s") is not None else None
+        scale.log(f"{trial_id} foreign {r['foreign_cpu_s']}")
+        return r
+
     def server_cmd(self, side, cell):
         # A side directory may add `env.json`: runtime settings for that side.
         argv, env, ports = super().server_cmd(side, cell)
@@ -39,6 +70,12 @@ class Runner(scale2.Runner):
         if side != "tokiow8" and extra.is_file():
             env |= json.loads(extra.read_text())
         return argv, env, ports
+
+    def profile_setup(self, mode):
+        if mode == "sched-late":
+            # Context switches with stacks over 4.5-7.5 s of the load phase.
+            return 4_500_000_000, ["-e", "sched:sched_switch", "-g"], "3"
+        return super().profile_setup(mode)
 
     def collect_load(self, load, load_pidfile, server_pid, profile):
         # scale.Runner.collect_load with perf on CPUs 6-7 (the host rule here).
@@ -86,8 +123,9 @@ def main():
     f.add_argument("cell", choices=CELLS)
     f.add_argument("rate", type=int)
     f.add_argument("sides", nargs="+")
-    f.add_argument("--profile", choices=("cpu",))
+    f.add_argument("--profile", choices=("cpu", "sched-late"))
     f.add_argument("--repeat", type=int, default=1)
+    f.add_argument("--seed", type=int, default=12345)
     fa = commands.add_parser("fairness")
     fa.add_argument("side")
     fa.add_argument("best_rate", type=int)
@@ -114,7 +152,7 @@ def main():
                 for i in range(args.repeat):
                     sides = args.sides[i % len(args.sides):] + args.sides[:i % len(args.sides)]
                     runner.run_set(out, f"fixed-{args.profile or 'plain'}", args.cell, CELLS[args.cell], 0,
-                                   [(side, args.rate, 12345) for side in sides], args.profile)
+                                   [(side, args.rate, args.seed) for side in sides], args.profile)
             elif args.command == "fairness":
                 for hot in (False, True):
                     cell = CELLS["A1-8192"] | {"hot": hot}

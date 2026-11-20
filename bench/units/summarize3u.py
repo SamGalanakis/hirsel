@@ -5,7 +5,7 @@ import collections, json, statistics, sys
 
 CELL_ORDER = [("base", 0.0, False), ("base", 1.0, False), ("par", 0.5, False), ("par", 0.1, False),
               ("base", 0.0, True), ("par", 0.5, True)]
-SIDES = ["untied", "untied-oo", "S3k7", "tokiow8"]
+SIDES = ["untied", "untied-oo", "untied-rh", "untied-oo-rh", "S3k7", "tokiow8"]
 
 
 def key(c):
@@ -79,26 +79,31 @@ def main(paths):
     rec_on = medians.get((("base", 0.0, True), "untied"))
     if rec_off and rec_on is not None:
         print(f"  recording cost untied base f=0: {1 - rec_on / rec_off:.1%}")
-    rec_off = medians.get((("par", 0.5, False), "untied"))
-    rec_on = medians.get((("par", 0.5, True), "untied"))
-    if rec_off and rec_on is not None:
-        print(f"  recording cost untied par f=0.5: {1 - rec_on / rec_off:.1%}")
+    for v, fv in (("base", 0.0), ("par", 0.5)):
+        for side in ("untied", "untied-oo", "untied-rh", "untied-oo-rh"):
+            off = medians.get(((v, fv, False), "untied"))
+            on = medians.get(((v, fv, True), side))
+            if off and on is not None:
+                print(f"  recording cost {side} {v} f={fv}: {1 - on / off:.1%}")
     print()
     print("untied counters at the best passing run of each search (per turn unless noted):")
     for ck in CELL_ORDER:
-        for g, top, lo, n in best.get((ck, "untied"), []):
+      for side in ("untied", "untied-oo", "untied-rh", "untied-oo-rh"):
+        for g, top, lo, n in best.get((ck, side), []):
             if not top or "ustats" not in top:
                 continue
             u = {k: int(v) for k, v in top["ustats"].items() if v.isdigit()}
             t = top["load"]["completed"]
             dur = top["wall"]
-            print(f"  {ck} g{g} rate={top['rate']:.0f}: cpu={top['server_cpu_s'] / t * 1e6:.0f}us "
+            tw = (f" tape_writes/turn={u['tape_writes'] / t:.2f} tape_bytes/turn={u['tape_bytes'] / t:.0f}"
+                  f" payload/turn={u['tape_payload'] / t:.0f} skipped/turn={u['tape_skipped'] / t:.0f}") if "tape_writes" in u else ""
+            print(f"  {side} {ck} g{g} rate={top['rate']:.0f}: cpu={top['server_cpu_s'] / t * 1e6:.0f}us "
                   f"sys={top['server_sys_s'] / t * 1e6:.0f}us gpolls={u['gpolls'] / t:.1f} "
                   f"gpoll_blocks={u['gpoll_blocks'] / t:.2f} unit_epoll_waits={u['unit_epoll_waits'] / t:.1f} "
                   f"os_wakes={u['os_wakes'] / t:.2f} steals/s={u['steals'] / dur:.0f} steals/turn={u['steals'] / t:.2f} "
                   f"resumes={u['resumes'] / t:.1f} lifo={u['lifo'] / t:.2f} units={u['units']} "
                   f"create_us={u['create_ns_avg'] / 1e3:.1f} tape_MB={top.get('tape_bytes', 0) / 1e6:.0f} "
-                  f"tape_B/turn={top.get('tape_bytes', 0) / t:.0f}")
+                  f"tape_B/turn={top.get('tape_bytes', 0) / t:.0f}" + tw)
 
 
 main(sys.argv[1:])

@@ -30,7 +30,7 @@ UBIN, UBIN_REC = "/tmp/mcut/progs/session_u", "/tmp/mcut/progs_rec/session_u"
 STORE = "/tmp/mcu/store"
 STORES = ["/tmp/mcu/store", "/tmp/mcut/store"]
 TAPES = "/tmp/mcu/tapes"
-TAPE_DIRS = {"untied": "/tmp/mcut/tapes", "untied-oo": "/tmp/mcut/tapes"}
+TAPE_DIRS = {s: "/tmp/mcut/tapes" for s in ("untied", "untied-oo", "untied-rh", "untied-oo-rh")}
 WORK = "/tmp/mcut/p3"
 SERVER = "0-3,8-11"
 SERVER_LIST = [0, 1, 2, 3, 8, 9, 10, 11]
@@ -70,6 +70,12 @@ def side_cmd(side, par, rec, k=None):
             pins = SERVER_LIST[:k] + ([SERVER_LIST[k]] if k < len(SERVER_LIST) else [])
             env["HIRSEL_UNIT_CPUS"] = ",".join(map(str, pins))
         return [exe] + base + ["1"], env, SERVER, k
+    if side.endswith("-rh"):
+        # Attribution variant (marked): process retention headroom raised from
+        # 48 MiB to 1 GiB, so per-unit tape buffers no longer crowd out the
+        # reuse of task stacks.
+        argv, env, cpus, nports = side_cmd(side.removesuffix("-rh"), par, rec)
+        return argv, env | {"HIRSEL_RETENTION_MB": "1024"}, cpus, nports
     if side == "untied-oo":
         # Order-only recording (not replayable): payloads over 256 bytes are
         # recorded as their length only. Recorded cells only.

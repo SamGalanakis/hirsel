@@ -4,6 +4,17 @@
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 const HEADROOM: usize = 48 << 20;
+/// mc-units-untied attribution variant: `HIRSEL_RETENTION_MB` overrides the
+/// headroom (throwaway switch; the budget itself is unchanged).
+fn headroom() -> usize {
+    static H: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *H.get_or_init(|| {
+        std::env::var("HIRSEL_RETENTION_MB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map_or(HEADROOM, |mb| mb << 20)
+    })
+}
 pub(crate) static RETENTION: Budget = Budget::new();
 
 pub(crate) struct Budget {
@@ -20,7 +31,7 @@ impl Budget {
     pub(crate) fn retain(&self, bytes: usize) -> Option<Retained<'_>> {
         self.used
             .fetch_update(Relaxed, Relaxed, |used| {
-                used.checked_add(bytes).filter(|&next| next <= HEADROOM)
+                used.checked_add(bytes).filter(|&next| next <= headroom())
             })
             .ok()?;
         Some(Retained {

@@ -1,9 +1,12 @@
 //! Part 3 open-loop load generator. Arrivals are Poisson at `rate` turns/s,
 //! with one burst (rate * burst_x for burst_len s starting at burst_at s).
 //! Each arrival goes to a session (uniform, or skew: half to session 0);
-//! a session runs its turns one at a time, and latency is measured from the
-//! intended arrival, so queueing behind a slow server counts.
-//! Server-added latency = (completion - intended arrival) - tool held ns.
+//! a session runs its turns one at a time; queueing inside the server counts
+//! in the latency, and a server that falls behind leaves turns late.
+//! Server-added latency = (completion - ready) - tool held ns, where ready is
+//! the later of the intended arrival and the session's previous reply: the
+//! wait behind the session's own previous turn (mostly its tool holds) is not
+//! the server's. The old measure from the intended arrival is kept as e2e_*.
 //! Every reply's checksum is checked against the digest table.
 //! Usage: loadgen key=value... ; prints one JSON line.
 use std::collections::HashMap;
@@ -12,7 +15,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use units_bench::*;
 
-struct Rec { intended: u64, done: u64, held: u64, ok: bool }
+// `ready`: when this turn could first be sent, the later of its intended
+// arrival and the reply to the session's previous turn.
+struct Rec { intended: u64, ready: u64, done: u64, held: u64, ok: bool }
 
 fn main() {
     let kv: HashMap<String, String> = std::env::args().skip(1)
@@ -71,6 +76,7 @@ fn main() {
             let mut timeouts = 0u64;
             let mut reply = [0u8; REPLY];
             let mut dead = false;
+            let mut prev_done = 0u64;
             while let Some((turn, intended)) = rx.recv().await {
                 if dead { timeouts += 1; continue; }
                 let left = deadline.saturating_sub(now_ns());
@@ -86,7 +92,8 @@ fn main() {
                         let acc = u64::from_le_bytes(reply[8..16].try_into().unwrap());
                         let held = u64::from_le_bytes(reply[16..24].try_into().unwrap());
                         let ok = id == turn.id && acc == turn.expected(&table);
-                        recs.push(Rec { intended, done, held, ok });
+                        recs.push(Rec { intended, ready: intended.max(prev_done), done, held, ok });
+                        prev_done = done;
                     }
                     _ => { timeouts += 1; dead = true; }
                 }
@@ -134,6 +141,7 @@ fn main() {
     });
     let warm_ns = start + (warm * 1e9) as u64;
     let mut lat: Vec<u64> = Vec::new();
+    let mut e2e: Vec<u64> = Vec::new();
     let (mut completed, mut failures, mut timeouts, mut late) = (0u64, 0u64, 0u64, 0u64);
     for (recs, t) in &results {
         timeouts += t;
@@ -142,12 +150,15 @@ fn main() {
             if !r.ok { failures += 1; }
             if r.done > end + 1_000_000_000 { late += 1; }
             if r.intended >= warm_ns {
-                lat.push((r.done - r.intended).saturating_sub(r.held));
+                lat.push((r.done - r.ready).saturating_sub(r.held));
+                e2e.push((r.done - r.intended).saturating_sub(r.held));
             }
         }
     }
     lat.sort_unstable();
+    e2e.sort_unstable();
     let q = |p: f64| if lat.is_empty() { 0 } else { lat[((lat.len() as f64 * p) as usize).min(lat.len() - 1)] };
-    println!("{{\"issued\":{issued},\"completed\":{completed},\"failures\":{failures},\"timeouts\":{timeouts},\"late\":{late},\"rate\":{rate},\"measured\":{},\"p50_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"max_ns\":{}}}",
-        lat.len(), q(0.5), q(0.99), q(0.999), lat.last().copied().unwrap_or(0));
+    let qe = |p: f64| if e2e.is_empty() { 0 } else { e2e[((e2e.len() as f64 * p) as usize).min(e2e.len() - 1)] };
+    println!("{{\"issued\":{issued},\"completed\":{completed},\"failures\":{failures},\"timeouts\":{timeouts},\"late\":{late},\"rate\":{rate},\"measured\":{},\"p50_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"max_ns\":{},\"e2e_p50_ns\":{},\"e2e_p99_ns\":{}}}",
+        lat.len(), q(0.5), q(0.99), q(0.999), lat.last().copied().unwrap_or(0), qe(0.5), qe(0.99));
 }

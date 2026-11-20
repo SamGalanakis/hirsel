@@ -177,7 +177,7 @@ def one_run(side, cell, rate, seed):
         rec_["load"] = None
         rec_["load_err"] = lerr[-800:]
     L = rec_["load"]
-    rec_["pass"] = bool(L and L["failures"] == 0 and L["timeouts"] == 0 and L["completed"] == L["issued"]
+    rec_["pass"] = bool(L and L["failures"] == 0 and L["timeouts"] == 0 and L["completed"] == L["issued"] and L["late"] == 0
                         and L["p99_ns"] <= LIMIT_NS and srv.returncode == 0)
     rec_["correct"] = bool(L and L["failures"] == 0)
     return rec_
@@ -193,7 +193,7 @@ def search(side, cell, guess, out, group):
         r["group"] = group
         runs.append(r)
         L = r["load"] or {}
-        log(f"  {side} {cell} rate={rate:.0f} pass={r['pass']} p99={L.get('p99_ns', 0) / 1e6:.2f}ms "
+        log(f"  {side} {cell} rate={rate:.0f} pass={r['pass']} p99={L.get('p99_ns', 0) / 1e6:.2f}ms e2e99={L.get('e2e_p99_ns', 0) / 1e6:.2f}ms late={L.get('late')} cpu={r.get('server_cpu_s')} "
             f"done={L.get('completed')}/{L.get('issued')} fail={L.get('failures')} to={L.get('timeouts')} tool={r['tool_cpu_s']}")
         return r["pass"]
 

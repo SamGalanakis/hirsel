@@ -48,7 +48,7 @@ def configs():
             C("S3 units pipelined", pi, "S3 units (old)", [XB, "x_pipe", n_pipe, size], "0,1",
               {"HIRSEL_UNITS": "2", "HIRSEL_UNIT_CPUS": "0,1"}, exp_reqrep(n_pipe)),
             C("S1 w1 channel", pp, "S1 w1", [XB, "c_pingpong", 100000, size], "0", {"HIRSEL_S8_WORKERS": "1"}, exp_reqrep(100000)),
-            C("S1 w1 channel pipe", pi, "S1 w1", [XB, "c_pipe", n_pipe, size, 64], "0", {"HIRSEL_S8_WORKERS": "1"}, exp_reqrep(n_pipe)),
+            C("S1 w1 channel pipe", pi, "S1 w1", [XB + "2", "c_pipe", n_pipe, size, 64], "0", {"HIRSEL_S8_WORKERS": "1"}, exp_reqrep(n_pipe)),
         ]
     n = 100000
     for w, cs in ((1, "0"), (4, "0-3"), (8, SRV)):

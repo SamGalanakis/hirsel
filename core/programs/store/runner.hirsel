@@ -52,7 +52,7 @@ pub fn stream_key(c: Caller, number: u32) -> Result[Bytes, Capacity] {
 
 pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes)
 pub type Selection: send = Current(u64) | Install
-pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown
+pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | PublisherStopped
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Draining
@@ -1585,19 +1585,109 @@ type RoundAt: shareable + send { at: u64 }
 
 const ROUND_HALTED: u64 = 18446744073709551615u64
 
-// The publisher's inbox, both ends, and the place's round register with its u64::MAX Arc.
+// The publisher's inbox, both ends, and the place's round register with its reserved Arcs.
 // `post` gives each session a sender; place_head then takes the mailbox whole, its head
 // sending Releases on the same channel.
 pub opaque type Mailbox: send { to: Sender[PubIn], from: Receiver[PubIn], rounds: RoundRegister }
 
-type RoundRegister: send { round: Latest[RoundAt], halted: Arc[RoundAt] }
+// The round register and every Arc a round publishes from (§3 "Admission"): the current
+// value (the publisher's own share), the spares, which no reader reaches through the root,
+// and u64::MAX. `mailbox` reserves one spare and each fenced `Joined` one more, so with at
+// most one share per writer some spare is always unshared. The register fails closed: a
+// publisher that ends by anything but `Halt` (a trap included) publishes R = u64::MAX as it
+// is cleaned, before its inbox closes, so no commit after the trap is released unfenced.
+resource type RoundRegister: send { round: Latest[RoundAt], halted: Arc[RoundAt], current: Arc[RoundAt], spares: List[Arc[RoundAt]] } drop(rounds) {
+    latest.publish(rounds.round, arc.share(rounds.halted))
+}
+
+// `Halt`: the publisher stops on the head's word, and R stays where it is.
+fn round_disarm(take rounds: RoundRegister) {
+    let RoundRegister(round: _, halted: _, current: _, spares: _) = take rounds
+}
 
 pub fn mailbox(n: u64) -> Result[Mailbox, Capacity] {
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(n)?
     let first = result.capacity_only(arc.new(RoundAt(at: 0u64)))?
-    let register = result.capacity_only(latest.new(take first))?
+    let register = result.capacity_only(latest.new(arc.share(first)))?
     let halted = result.capacity_only(arc.new(RoundAt(at: ROUND_HALTED)))?
-    Ok(Mailbox(to: take to, from: take from, rounds: RoundRegister(round: take register, halted: take halted)))
+    let next = result.capacity_only(arc.new(RoundAt(at: 0u64)))?
+    let mut spares: List[Arc[RoundAt]] = list.new()
+    result.capacity_only(list.push(mut spares, take next))?
+    let rounds = result.capacity_only(RoundRegister(round: take register, halted: take halted, current: take first, spares: take spares))?
+    Ok(Mailbox(to: take to, from: take from, rounds: take rounds))
+}
+
+// A session's fence root and the Arcs its fence step publishes from: the current one (the
+// publisher's own share) and two spares. Its writer holds at most one share at a time, so
+// one spare is always unshared.
+type FenceSet: send { root: Latest[Fence], current: Arc[Fence], a: Arc[Fence], b: Arc[Fence] }
+
+// `Joined`'s reservation: the session's two fence spares and one more round spare. A refusal
+// admits nothing and the join is answered with id 0.
+fn fence_reserve(mut rounds: RoundRegister, take root: Latest[Fence]) -> Result[FenceSet, Capacity] {
+    let a = result.capacity_only(arc.new(Fence(prior: 0u64, latest: 0u64)))?
+    let b = result.capacity_only(arc.new(Fence(prior: 0u64, latest: 0u64)))?
+    let spare = result.capacity_only(arc.new(RoundAt(at: 0u64)))?
+    result.capacity_only(list.push(mut rounds.spares, take spare))?
+    let current = latest.read(root)
+    Ok(FenceSet(root: take root, current: take current, a: take a, b: take b))
+}
+
+// Publishes Fence{prior: the current latest, latest: b} from an unshared spare, the old
+// current becoming that spare. A fence already at b is left. False only if no spare is
+// unshared and no Arc can be made.
+fn fence_advance(mut fences: FenceSet, b: u64) -> bool {
+    let prior = fences.current.latest
+    if prior >= b { return true }
+    let in_a = arc.with_unique(mut fences.a, scoped fn(mut f: Fence) { f.prior = prior; f.latest = b })
+    let fresh = if let Some(_) = in_a {
+        let kept = arc.share(fences.current)
+        replace(mut fences.a, take kept)
+    } else {
+        let in_b = arc.with_unique(mut fences.b, scoped fn(mut f: Fence) { f.prior = prior; f.latest = b })
+        if let Some(_) = in_b {
+            let kept = arc.share(fences.current)
+            replace(mut fences.b, take kept)
+        } else {
+            match arc.new(Fence(prior: prior, latest: b)) { Ok(take x) => take x, Error(_) => return false }
+        }
+    }
+    let _ = replace(mut fences.current, take fresh)
+    latest.publish(fences.root, arc.share(fences.current))
+    true
+}
+
+// Publishes R = at from an unshared spare, the old current becoming that spare, and frees
+// spares beyond one per joined session plus one, keeping every shared spare and one unshared
+// one. False only if no spare is unshared and no Arc can be made.
+fn round_advance(mut rounds: RoundRegister, at: u64, live: u64) -> bool {
+    let mut chosen: Option[u64] = None
+    let mut i = 0u64
+    while i < list.len(rounds.spares) {
+        let unique = match arc.with_unique(mut rounds.spares[i], scoped fn(mut v: RoundAt) { v.at = at }) { Some(_) => true, None => false }
+        if unique {
+            if let None = chosen {
+                chosen = Some(i)
+            } else if list.len(rounds.spares) > live + 1u64 {
+                let _ = list.remove(mut rounds.spares, i)
+                continue
+            }
+        }
+        i += 1u64
+    }
+    let index = match chosen {
+        Some(x) => x,
+        None => {
+            let made = match arc.new(RoundAt(at: at)) { Ok(take x) => take x, Error(_) => return false }
+            if let Error(_) = list.push(mut rounds.spares, take made) { return false }
+            list.len(rounds.spares) - 1u64
+        },
+    }
+    let kept = arc.share(rounds.current)
+    let fresh = list.set(mut rounds.spares, index, take kept)
+    let _ = replace(mut rounds.current, take fresh)
+    latest.publish(rounds.round, arc.share(rounds.current))
+    true
 }
 
 // The release check's decision (§3), one function for every transport: R = u64::MAX drops
@@ -1639,7 +1729,10 @@ type Head[G: send, H: send] {
     waiting: List[Waiting],
     group: List[Bytes],
     last: Option[store.Ticket],
-    minted: u64
+    minted: u64,
+    // The publisher refused a Release: it has stopped, and R = u64::MAX is published. The
+    // head commits nothing more and the place ends with OpenError.PublisherStopped.
+    cut: bool
 }
 
 type Publish[G: send, H: send]: send {
@@ -1707,16 +1800,20 @@ fn run_head[G: send, H: send](take db: store.Db, take r: Registry[G, H], take re
             }
         }
     }
-    let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64)
+    let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64, cut: false)
     let served = serve_head(mut hd, take inbox, take drain)
     finish_head(take hd, take publisher_task, take served)
 }
 
 fn finish_head[G: send, H: send](take head: Head[G, H], take publishing: Task[()], take served: Result[(), store.Error]) -> Result[(), OpenError] waits {
-    let Head(db: take kept, out: take last_word, ..) = take head
+    let Head(db: take kept, out: take last_word, cut: cut, ..) = take head
     let _ = channel.send(last_word, PubIn(e: Halt))
-    let _ = task.join(take publishing)
+    let stopped = match task.join(take publishing) { Ok(()) => cut, Error(_) => true }
     match take served { Ok(()) => (), Error(take problem) => return Error(Store(take problem)) }
+    if stopped {
+        let _ = close_store(take kept)
+        return Error(PublisherStopped)
+    }
     close_store(take kept)
 }
 
@@ -2111,6 +2208,7 @@ fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, 
     let mut settled = false
     let mut input: Option[HeadInput] = None
     loop {
+        if head.cut { return Ok(()) }
         if let Some(control) = drain {
             if let Ok(()) = channel.try_receive(control.finish) { return Ok(()) }
             if !closed && closing_at(control.window, control.clock) {
@@ -2406,7 +2504,7 @@ fn commitless[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Out
     let Request(caller: _, stream: take stream, p: p, key: _, arg: _, digest: _, reply_to: take to, live: _, identity: _, seed: _) = take q
     let mut answers: List[Answer] = list.new()
     result.unwrap(list.push(mut answers, Answer(recipient: Recipient(owner: owner, to: take to), row: KeyedDone(stream: take stream, p: p, outcome: take o))))
-    let _ = channel.send(hd.out, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers))))
+    if let Error(_) = channel.send(hd.out, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers)))) { hd.cut = true }
     Ok(())
 }
 
@@ -2431,7 +2529,7 @@ fn gate[G: send, H: send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
             result.unwrap(list.push(mut answers, Answer(recipient: take recipient, row: KeyedDone(stream: take s, p: p, outcome: take each))))
         }
     }
-    let _ = channel.send(hd.out, PubIn(e: Released(Release(version: d, snapshot: Some(store.snapshot(hd.db)), answers: take answers))))
+    if let Error(_) = channel.send(hd.out, PubIn(e: Released(Release(version: d, snapshot: Some(store.snapshot(hd.db)), answers: take answers)))) { hd.cut = true }
     refresh_waiting(mut hd, true)
     Ok(())
 }
@@ -2448,7 +2546,7 @@ fn gate[G: send, H: send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
 // them at its current base, together with any new content or answers for that owner.
 // `ended_at` is the oldest computation version among `ended` (u64::MAX when empty): a waiting
 // Ended keeps the version it was computed at when it is folded into later content.
-type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[(u32, u64, Outcome)], ended_at: u64, reset: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[Latest[Fence]] }
+type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[(u32, u64, Outcome)], ended_at: u64, reset: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet] }
 
 // One try_send to an owner: taken, bounced back by a full inbox, or shut.
 type Offered = Took | Bounced(Notice) | Shut
@@ -2461,13 +2559,16 @@ fn offer(to: Sender[WireEvent], take e: Notice) -> Offered {
     }
 }
 
-fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: store.Snapshot, take from: Receiver[PubIn], take rounds: RoundRegister) -> () waits {
+fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: store.Snapshot, take from: Receiver[PubIn], take register: RoundRegister) -> () waits {
     let mut at = store.version(base)
     let mut b = Board(r: take r, h: take h, base: take base, newest: None, subs: subscriptions())
     let mut joined: List[Joiner] = list.new()
     let mut waiting: List[Replies] = list.new()
     let mut minted = 0u64
-    if !fence_round(joined, Fenced(sessions: list.new(), all: false), at, rounds) { return }
+    // Declared last, so a trap cleans it first (FAIL-8): R = u64::MAX is published before any
+    // owner channel or the inbox closes.
+    let mut rounds = take register
+    fence_round(mut joined, Fenced(sessions: list.new(), all: false), at, mut rounds)
     loop {
         let got = match channel.receive(from) {
             Ok(take x) => take x,
@@ -2476,7 +2577,10 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
         let PubIn(e: take e) = take got
         let mut owes: List[Owe] = list.new()
         match take e {
-            Halt => return,
+            Halt => {
+                round_disarm(take rounds)
+                return
+            },
             Released(take rel) => {
                 let Release(version: v, snapshot: take snap, answers: take answers) = take rel
                 if let Some(take s) = take snap {
@@ -2485,16 +2589,26 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                     let mut fenced = Fenced(sessions: list.new(), all: false)
                     owes = round(mut b, mut fenced)
                     // G2 step 3: every fence of the round, then R, before anything is offered.
-                    if !fence_round(joined, take fenced, v, rounds) { return }
+                    fence_round(mut joined, take fenced, v, mut rounds)
                 }
                 keep_answers(mut waiting, take answers)
             },
             Joined(take j) => {
                 let Join(to: take to, told: take told, mark: take mark, closed: take closed, identity: take id, fence: take fence) = take j
-                minted += 1u64
                 let wake: Option[Sender[WireEvent]] = match closed { Some(_) => Some(channel.sender(to)), _ => None }
-                result.unwrap(list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: take mark, identity: take id, fence: take fence)))
-                let _ = channel.try_send(told, Admit(who: minted, round: latest.handle(rounds.round)))
+                // A fenced session's Arcs are reserved here (§3 "Admission"); a refusal answers id 0.
+                let reserved: Result[Option[FenceSet], Capacity] = match take fence {
+                    Some(take root) => match fence_reserve(mut rounds, take root) { Ok(take fences) => Ok(Some(take fences)), Error(c) => Error(c) },
+                    None => Ok(None),
+                }
+                match take reserved {
+                    Ok(take fences) => {
+                        minted += 1u64
+                        result.unwrap(list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: take mark, identity: take id, fence: take fences)))
+                        let _ = channel.try_send(told, Admit(who: minted, round: latest.handle(rounds.round)))
+                    },
+                    Error(_) => { let _ = channel.try_send(told, Admit(who: 0u64, round: latest.handle(rounds.round))) },
+                }
                 if let Some(sender) = wake { let _ = channel.try_send(sender, wire_event(JoinReady)) }
             },
             Subscribed(who, sub, take key, take arg) =>
@@ -2516,33 +2630,24 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
 // when the round could not tell which (a lost diff resets them all).
 type Fenced { sessions: List[u64], all: bool }
 
-// G2 step 3 (§3 "The release check"): allocate every fence of round b and R = b, then publish
-// the fences, then R. A fence already at b is left as it is. The prior is read from the root,
-// whose only publisher is this task. If an allocation fails, R = u64::MAX is published from
-// its reserved Arc, so every writer drops all content, and the publisher stops (false).
-fn fence_round(joined: List[Joiner], take fenced: Fenced, b: u64, rounds: RoundRegister) -> bool {
+// G2 step 3 (§3 "The release check"): publish every fence of round b, then R = b, each from
+// its reservation. A publisher that cannot is stopped, which publishes R = u64::MAX as it is
+// cleaned (RoundRegister), and the head ends the place when its next Release is refused.
+fn fence_round(mut joined: List[Joiner], take fenced: Fenced, b: u64, mut rounds: RoundRegister) {
     let Fenced(sessions: take sessions, all: all) = take fenced
-    let mut fresh: List[(u64, Arc[Fence])] = list.new()
     let mut i = 0u64
     while i < list.len(joined) {
-        if let Some(root) = joined[i].fence {
-            if all || list.contains(sessions, joined[i].who) {
-                let current = latest.read(root).latest
-                if current < b {
-                    let made = match arc.new(Fence(prior: current, latest: b)) { Ok(take a) => take a, Error(_) => { latest.publish(rounds.round, arc.share(rounds.halted)); return false } }
-                    if let Error(_) = list.push(mut fresh, (i, take made)) { latest.publish(rounds.round, arc.share(rounds.halted)); return false }
-                }
+        if all || list.contains(sessions, joined[i].who) {
+            if let Some(take held) = replace(mut joined[i].fence, None) {
+                let mut fences = take held
+                let published = fence_advance(mut fences, b)
+                joined[i].fence = Some(take fences)
+                if !published { fail("release check: no fence Arc for the round") }
             }
         }
         i += 1u64
     }
-    let next = match arc.new(RoundAt(at: b)) { Ok(take a) => take a, Error(_) => { latest.publish(rounds.round, arc.share(rounds.halted)); return false } }
-    for take entry in fresh {
-        let (index, take made) = take entry
-        if let Some(root) = joined[index].fence { latest.publish(root, take made) }
-    }
-    latest.publish(rounds.round, take next)
-    true
+    if !round_advance(mut rounds, b, list.len(joined)) { fail("release check: no round Arc for the round") }
 }
 
 fn publish_subscription[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe], who: u64, sub: u32, generation: u64, take key: Bytes, take arg: Bytes) {
@@ -3762,7 +3867,60 @@ pub fn law_stale_never_released(c: Clock, r: Random, tasks: Tasks) -> bool waits
         && release_passes(5u64, Fence(prior: 3u64, latest: 9u64), 4u64)
         && !release_passes(5u64, Fence(prior: 3u64, latest: 9u64), 2u64)
         && release_passes(9u64, Fence(prior: 3u64, latest: 9u64), 9u64)
-    table && stale_trace(c, r, tasks)
+    table && stale_trace(c, r, tasks) && trap_trace(c, r, tasks)
+}
+
+// publisher_trap_open: a publisher that traps publishes R = u64::MAX before it goes, so the
+// head's next commit is never released unfenced. The trap is real: one commitless Release
+// carries more answers for one owner than the publisher's byte limit holds, and
+// keep_answers' push unwraps the refusal.
+fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 0u64, 1u64)
+    let base = store.snapshot(db)
+    let v0 = store.version(base)
+    let h = match subs_handles(mut db) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
+    let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = result.unwrap(channel.new(1u64))
+    let p = Publish(place: code.describe(subs_place), n_place: 131072u64, h: take h, base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let publishing = match task.spawn(tasks, bytes 524288u64, take p, publish) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    match channel.receive(ready_from) {
+        Ok(None) => (),
+        _ => return false,
+    }
+    let (s_to, s_from): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(1u64))
+    let (told, hear): (Sender[Admit], Receiver[Admit]) = result.unwrap(channel.new(1u64))
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: channel.sender(s_to), told: take told, mark: None, closed: None, identity: None, fence: None)))) {
+        return false
+    }
+    let Admit(who: s, round: take register) = match channel.receive(hear) {
+        Ok(take a) => take a,
+        Error(_) => return false,
+    }
+    let before = latest.read(register).at == v0
+    let mut answers: List[Answer] = list.new()
+    for i in 0u64 .. 16384u64 {
+        let row = KeyedDone(stream: list.new(), p: i, outcome: Abandoned)
+        result.unwrap(list.push(mut answers, Answer(recipient: Recipient(owner: 999u64, to: channel.sender(s_to)), row: take row)))
+    }
+    let _ = channel.send(to, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers))))
+    let trapped = match task.join(take publishing) {
+        Ok(_) => false,
+        Error(_) => true,
+    }
+    let refused = match channel.send(to, PubIn(e: Drained)) { Error(_) => true, Ok(_) => false }
+    let at = latest.read(register).at
+    let _ = (s_from, take s_to)
+    before && s != 0u64 && trapped && refused && at == ROUND_HALTED && !release_passes(at, Fence(prior: 0u64, latest: 0u64), v0)
 }
 
 fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
@@ -6232,9 +6390,17 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
             if let Some(take admit) = received {
                 let Admit(who: who, round: take register) = take admit
                 let _ = replace(mut s.joining, None)
-                s.joined = Some(who)
-                work.round = Some(take register)
-                if let Some((sub, take ready_sub)) = replace(mut s.subscription, None) { wire_subscribed(mut s, mut work, sub, take ready_sub) }
+                if who == 0u64 {
+                    // The publisher could not reserve this session's fence Arcs.
+                    let _ = replace(mut s.join_lease, None)
+                    let _ = replace(mut s.mark, None)
+                    work.fence = None
+                    if let Some((sub, _)) = replace(mut s.subscription, None) { wire_end(mut s, mut work.output, sub, Refused(Overloaded)) }
+                } else {
+                    s.joined = Some(who)
+                    work.round = Some(take register)
+                    if let Some((sub, take ready_sub)) = replace(mut s.subscription, None) { wire_subscribed(mut s, mut work, sub, take ready_sub) }
+                }
             }
             if !writable { return Ok(None) }
             if s.phase == 4u8 { s.phase = 3u8 }

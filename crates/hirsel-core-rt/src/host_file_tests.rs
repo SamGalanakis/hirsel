@@ -180,6 +180,7 @@ fn native_host_file_child() {
     let setup = OsConfig {
         directory_ops: std::ptr::null(),
         process_ops: std::ptr::null(),
+        socket_activation: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,

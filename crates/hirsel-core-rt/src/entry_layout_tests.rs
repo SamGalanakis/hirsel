@@ -21,6 +21,10 @@ fn published_entry_layout_matches_c_abi() {
         (offset_of!(OsConfig, directory_ops), OS_CONFIG_DIRECTORY_OPS),
         (offset_of!(OsConfig, process_ops), OS_CONFIG_PROCESS_OPS),
         (
+            offset_of!(OsConfig, socket_activation),
+            OS_CONFIG_SOCKET_ACTIVATION,
+        ),
+        (
             offset_of!(OsConfig, parameters_len),
             OS_CONFIG_PARAMETERS_LEN,
         ),

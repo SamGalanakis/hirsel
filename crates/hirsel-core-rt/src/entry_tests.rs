@@ -138,6 +138,7 @@ fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
         net_rules_len: 0,
         directory_ops: std::ptr::null(),
         process_ops: std::ptr::null(),
+        socket_activation: std::ptr::null(),
         target: View {
             data: target.as_ptr(),
             len: target.len(),
@@ -218,6 +219,7 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
     let config = OsConfig {
         directory_ops: std::ptr::null(),
         process_ops: std::ptr::null(),
+        socket_activation: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,
@@ -329,6 +331,7 @@ fn c_constructor_refuses_missing_grants_bad_descriptors_and_invalid_argv_before_
     let config = OsConfig {
         directory_ops: std::ptr::null(),
         process_ops: std::ptr::null(),
+        socket_activation: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,
@@ -418,6 +421,7 @@ fn c_u64_capability_operands_feed_host_requests_and_ok_is_initialized() {
     let config = OsConfig {
         directory_ops: std::ptr::null(),
         process_ops: std::ptr::null(),
+        socket_activation: std::ptr::null(),
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,
@@ -602,6 +606,7 @@ fn broken_pipe_child() {
         let config = OsConfig {
             directory_ops: std::ptr::null(),
             process_ops: std::ptr::null(),
+            socket_activation: std::ptr::null(),
             target: crate::process::View {
                 data: std::ptr::null(),
                 len: 0,

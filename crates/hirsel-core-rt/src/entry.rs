@@ -4,6 +4,7 @@
 use crate::{
     Context,
     os::{DirectoryOperations, OsProvider, hirsel_core_os_directory_ops},
+    os_net::hirsel_core_os_socket_activation,
     process::{Config, View},
     provider::{Buffer, IoError, Provider},
     stop_signals::{StopSignals, hirsel_core_os_process_ops},
@@ -123,6 +124,11 @@ pub struct ProcessOperations {
     pub(crate) install: fn() -> io::Result<StopSignals>,
 }
 
+/// Receives a launcher-owned listener during startup for an OS Net grant.
+pub struct SocketActivation {
+    pub(crate) receive: unsafe fn() -> io::Result<Option<OwnedFd>>,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct OsConfig {
@@ -146,12 +152,15 @@ pub struct OsConfig {
     pub directory_ops: *const DirectoryOperations,
     /// Installed by the native linker for a launch with a live Process grant.
     pub process_ops: *const ProcessOperations,
+    /// Installed by the native linker for a launch with a Net grant.
+    pub socket_activation: *const SocketActivation,
 }
 impl OsConfig {
     fn with_default_operations(&self) -> Self {
         Self {
             directory_ops: &hirsel_core_os_directory_ops,
             process_ops: &hirsel_core_os_process_ops,
+            socket_activation: &hirsel_core_os_socket_activation,
             ..*self
         }
     }
@@ -262,8 +271,10 @@ impl OsProcess {
                 .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
             let launch = Box::new(launch_metadata(target, n_place, describe_mode));
             // Receive before the first dup/open can reuse a missing activation fd.
-            let inherited = if input.grant_mask & (1 << NET) != 0 {
-                crate::os_net::receive_listener()?
+            let inherited = if let Some(activation) = input.socket_activation.as_ref()
+                && input.grant_mask & (1 << NET) != 0
+            {
+                (activation.receive)()?
             } else {
                 None
             };
@@ -533,7 +544,7 @@ pub unsafe extern "C" fn hirsel_core_os_run(
 /// # Safety
 /// Input/name/entry contracts are os_run's; sources follows
 /// abi_sites::hirsel_core_os_process_set_sources through reporting. The native
-/// linker supplies the operations tables for directory and Process grants.
+/// linker supplies the operations tables for directory, Process and Net grants.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_run_with_sources(
     input: *const OsConfig,

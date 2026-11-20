@@ -89,6 +89,21 @@ pub(super) fn emit(
     } else {
         f.constant(0)
     };
+    let net_kind = grant_kind("Net").unwrap();
+    let socket_activation = if plan.tape.is_none() && plan.grant_mask & (1 << net_kind) != 0 {
+        let activation = f
+            .object
+            .declare_data(
+                "hirsel_core_os_socket_activation",
+                Linkage::Import,
+                false,
+                false,
+            )
+            .map_err(error)?;
+        f.address(activation)
+    } else {
+        f.constant(0)
+    };
     for (offset, value) in [
         (abi::OS_CONFIG_ROOT_LIMIT, limit),
         (abi::OS_CONFIG_ARGS, args),
@@ -105,6 +120,7 @@ pub(super) fn emit(
         (abi::OS_CONFIG_TARGET_LEN, target_len),
         (abi::OS_CONFIG_DIRECTORY_OPS, directory_ops),
         (abi::OS_CONFIG_PROCESS_OPS, process_ops),
+        (abi::OS_CONFIG_SOCKET_ACTIVATION, socket_activation),
     ] {
         f.store(value, config, offset);
     }

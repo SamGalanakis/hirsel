@@ -1,6 +1,7 @@
 //! Linux try-first socket attempts. Go's SO_ERROR + getpeername sequence rejects
 //! spurious writable connect events; combined interests live in core-net.
 use crate::{
+    entry::SocketActivation,
     net::{Address, NetworkRequest},
     provider::*,
 };
@@ -27,6 +28,11 @@ pub(crate) static OPERATIONS: Operations = Operations {
     adopt_listener,
 };
 
+#[unsafe(no_mangle)]
+pub static hirsel_core_os_socket_activation: SocketActivation = SocketActivation {
+    receive: receive_listener,
+};
+
 pub(crate) const LISTEN_FD: i32 = 3;
 static LISTENER_RECEIVED: AtomicBool = AtomicBool::new(false);
 
@@ -35,7 +41,7 @@ static LISTENER_RECEIVED: AtomicBool = AtomicBool::new(false);
 /// Matching activation metadata must designate a descriptor this process
 /// inherited at exec and has not otherwise taken into ownership. Receive
 /// before any other thread can access the process environment.
-pub(crate) unsafe fn receive_listener() -> io::Result<Option<OwnedFd>> {
+unsafe fn receive_listener() -> io::Result<Option<OwnedFd>> {
     let Some(pid) = env::var_os("LISTEN_PID") else {
         return Ok(None);
     };

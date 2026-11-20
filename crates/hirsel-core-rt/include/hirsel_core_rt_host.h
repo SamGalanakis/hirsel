@@ -143,6 +143,8 @@ typedef struct HirselCoreDirectoryOperations HirselCoreDirectoryOperations;
 extern const HirselCoreDirectoryOperations hirsel_core_os_directory_ops;
 typedef struct HirselCoreProcessOperations HirselCoreProcessOperations;
 extern const HirselCoreProcessOperations hirsel_core_os_process_ops;
+typedef struct HirselCoreSocketActivation HirselCoreSocketActivation;
+extern const HirselCoreSocketActivation hirsel_core_os_socket_activation;
 typedef struct {
     uint64_t root_limit;
     const HirselCoreView *args;
@@ -160,6 +162,8 @@ typedef struct {
     const HirselCoreDirectoryOperations *directory_ops;
     /* Set to &hirsel_core_os_process_ops for a sourced launch with Process. */
     const HirselCoreProcessOperations *process_ops;
+    /* Set to &hirsel_core_os_socket_activation for a sourced launch with Net. */
+    const HirselCoreSocketActivation *socket_activation;
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;

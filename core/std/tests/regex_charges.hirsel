@@ -40,8 +40,9 @@ fn denied_cache(re: Regex, budget: u64) -> bool {
 fn regex_cache_refusal() -> bool {
     let re = result.unwrap(new("a"))
     // At C=4 the DFA pair uses 48S words and the fixed portion is 182 words.
-    // S=floor((2^32-1)/4)=1073741823. W=51539607686.
-    cache_bytes(re, 0xFFFFFFFFFFFFFFFF) == 206158430744 && denied_cache(re, 0) && denied_cache(re, 16384) && denied_cache(re, 0xFFFFFFFFFFFFFFFF)
+    // A state id is S*C and stays below bit 31: S=floor((2^31-1)/4)=536870911.
+    // W=25769803910.
+    cache_bytes(re, 0xFFFFFFFFFFFFFFFF) == 103079215640 && denied_cache(re, 0) && denied_cache(re, 16384) && denied_cache(re, 0xFFFFFFFFFFFFFFFF)
 }
 
 // expect: run regex_clone_exact_and_search() = true

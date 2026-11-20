@@ -2048,7 +2048,9 @@ fn layout(re: Regex, budget: u64) -> Layout {
     } else {
         0
     }
-    let max_states: u64 = OFFSET_LIMIT / classes
+    // A state id is its transition row's offset (id * classes), so it must
+    // stay below the DFA_MATCH tag bit.
+    let max_states: u64 = DFA_TARGET_LIMIT / classes
     let states: u64 = if fit < 8 {
         8
     } else if fit > max_states {
@@ -3815,11 +3817,14 @@ const DFA_UNKNOWN: u32 = 0xFFFFFFFF
 
 const DFA_MATCH: u32 = 0x80000000
 
-// Targets fit below bit 30 when the state's exclusive limit is at most 2^30.
-// Larger caches keep the full target field and inspect the start key.
+// Targets fit below bit 30 when the state ids' exclusive limit
+// (states * columns) is at most 2^30. Larger caches keep the full target
+// field and inspect the start key.
 const DFA_START: u32 = 0x40000000
 
 const DFA_TARGET: u32 = 0x7FFFFFFF
+
+const DFA_TARGET_LIMIT: u64 = 0x7FFFFFFF
 
 const DFA_DEAD: u32 = 0
 
@@ -3880,7 +3885,7 @@ fn dfa_layout(re: Regex, c: Cache, reverse: bool) -> DfaLayout {
         nr
     } else {
         nf
-    }, has_look: re.has_look, start_bit: if !reverse && re.pref_plan.kind != NO_PREFILTER && re.pref_plan.kind < REVERSE_SUFFIX && s <= 0x40000000 {
+    }, has_look: re.has_look, start_bit: if !reverse && re.pref_plan.kind != NO_PREFILTER && re.pref_plan.kind < REVERSE_SUFFIX && s * columns <= 0x40000000 {
         DFA_START
     } else {
         0
@@ -3943,8 +3948,28 @@ fn dfa_key_hash(work: List[u32], base: u64, len: u64, context: u32) -> u64 {
     hash
 }
 
-// IDs are one-based. A cell is current only when the corresponding state's
-// backlink points here. Resetting the used length invalidates all old cells.
+// A state is named two ways. Its index is one-based and orders spans, hash
+// cells and keys. Its id, the value held in transitions, starts and tagged
+// edges, is index * columns: the offset of its transition row plus one row,
+// so the search loop steps with `transitions - columns + id + class` and no
+// multiply (regex-automata premultiplies its lazy DFA ids the same way).
+// DFA_DEAD stays 0.
+fn dfa_id(d: DfaLayout, index: u64) -> u32 {
+    int.narrow(index * d.columns)
+}
+
+fn dfa_index(d: DfaLayout, id: u32) -> u64 {
+    let wide: u64 = int.widen(id)
+    wide / d.columns
+}
+
+fn dfa_row(d: DfaLayout, id: u32) -> u64 {
+    let wide: u64 = int.widen(id)
+    d.transitions + (wide - d.columns)
+}
+
+// A hash cell is current only when the corresponding state's backlink
+// points here. Resetting the used length invalidates all old cells.
 fn dfa_slot(work: List[u32], d: DfaLayout, used: u64, base: u64, len: u64, context: u32) -> (u64, u32) {
     let slots = 2 * d.states
     let mut slot = dfa_key_hash(work, base, len, context) % slots
@@ -3964,7 +3989,7 @@ fn dfa_slot(work: List[u32], d: DfaLayout, used: u64, base: u64, len: u64, conte
                 i += 1
             }
             if i == len {
-                return (slot, candidate)
+                return (slot, dfa_id(d, id))
             }
         }
         slot += 1
@@ -4000,7 +4025,7 @@ fn dfa_add(mut work: List[u32], d: DfaLayout, start: u64, len: u64, context: u32
     for c in 0u64 .. d.columns {
         work[d.transitions + used * d.columns + c] = DFA_UNKNOWN
     }
-    id
+    dfa_id(d, used + 1)
 }
 
 fn dfa_seen_bytes(work: List[u32], d: DfaLayout) -> u64 {
@@ -4023,7 +4048,7 @@ fn dfa_clear(mut work: List[u32], d: DfaLayout, keep: u32, next_units: u64) -> b
     let mut len: u64 = 0
     let has_key = keep != DFA_DEAD
     if has_key {
-        let id: u64 = int.widen(keep)
+        let id = dfa_index(d, keep)
         let offset: u64 = int.widen(work[d.spans + 2 * (id - 1)])
         old = d.keys + 8 * offset
         len = int.widen(work[old])
@@ -4080,12 +4105,12 @@ fn dfa_intern(mut work: List[u32], d: DfaLayout, from: u32, base: u64, len: u64,
         if !dfa_clear(mut work, d, from, units) {
             return (from, DFA_UNKNOWN)
         }
-        let retained: u32 = if from == DFA_DEAD {
+        let remaining: u64 = if from == DFA_DEAD {
             0
         } else {
             1
         }
-        let remaining: u64 = int.widen(retained)
+        let retained = dfa_id(d, remaining)
         let (cleared_slot, _) = dfa_slot(work, d, remaining, base, len, context)
         return (retained, dfa_add(mut work, d, base, len, context, cleared_slot))
     }
@@ -4195,12 +4220,11 @@ fn dfa_walk(program: List[NfaState], edges: List[NfaEdge], mut work: List[u32], 
 }
 
 fn dfa_transition(program: List[NfaState], edges: List[NfaEdge], mut work: List[u32], d: DfaLayout, state: u32, col: u64, ch: u64, at_boundary: bool,) -> u32 {
-    let id: u64 = int.widen(state)
-    let i = d.transitions + (id - 1) * d.columns + col
-    let cached = work[i]
+    let cached = work[dfa_row(d, state) + col]
     if at_boundary && cached != DFA_UNKNOWN {
         return cached
     }
+    let id = dfa_index(d, state)
     let offset: u64 = int.widen(work[d.spans + 2 * (id - 1)])
     let key = d.keys + 8 * offset
     let len: u64 = int.widen(work[key])
@@ -4235,8 +4259,7 @@ fn dfa_transition(program: List[NfaState], edges: List[NfaEdge], mut work: List[
         target | start_tag
     }
     if at_boundary {
-        let current: u64 = int.widen(from)
-        work[d.transitions + (current - 1) * d.columns + col] = edge
+        work[dfa_row(d, from) + col] = edge
     }
     edge
 }
@@ -4486,7 +4509,7 @@ fn dfa_initial_byte(data: Bytes, width: u64, pos: u64, reverse: bool) -> u64 {
 }
 
 fn dfa_is_start(work: List[u32], d: DfaLayout, state: u32, entry: u64) -> bool {
-    let id: u64 = int.widen(state)
+    let id = dfa_index(d, state)
     let offset: u64 = int.widen(work[d.spans + 2 * (id - 1)])
     let key = d.keys + 8 * offset
     work[key] == 1 && work[key + 2] == int.narrow(entry)
@@ -4550,9 +4573,8 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
                     break
                 }
                 let col: u32 = int.widen(re.class_map[int.widen(ch)])
-                // The cache layout bounds states * columns by OFFSET_LIMIT.
-                let row = int.wrapping_mul(int.wrapping_sub(state, 1), columns)
-                let offset: u64 = int.widen(int.wrapping_add(row, col))
+                // Live ids are at least `columns` and below DFA_TARGET_LIMIT.
+                let offset: u64 = int.widen(int.wrapping_add(int.wrapping_sub(state, columns), col))
                 let transition = work[d.transitions + offset]
                 if transition == DFA_DEAD || (transition & tags) != 0 {
                     break
@@ -4583,8 +4605,7 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
             int.widen(re.class_map[ch])
         }
         let valid = pos == width || (data[pos] & 0xC0) != 0x80
-        let id: u64 = int.widen(state)
-        let cached = work[d.transitions + (id - 1) * d.columns + col]
+        let cached = work[dfa_row(d, state) + col]
         let edge = if !valid || cached == DFA_UNKNOWN {
             dfa_bytes(mut work, d, scanned)
             scanned = 0

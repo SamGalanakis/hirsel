@@ -320,3 +320,25 @@ store, with typed calls whose replies are durable, `seen_at` for the first
 batch at or after a version, relative bounds on the place's clock, and release
 of every resource on `end` or on drop. It runs natively until the evaluator's model
 network provider (W8a) lands.
+
+
+### Store triggers
+
+A place enables the trigger library by calling `triggers.migrate` from its
+schema migration and opening with `runner.operate_with_triggers`. Its
+`TriggerConfig` supplies the explicit entry list, the Caller for triggered
+transactions, and a grant factory for each granted attempt.
+
+A transaction uses `triggers.write(mut tx, tables, entries, target, arg, when)`
+with a typed entry reference from `triggers.transact` or `triggers.granted`.
+The configured list and the registry control which paths the head can dispatch.
+Use `AfterCommit` or `At(T)`, where T is in the units of `store.CallInfo.at`.
+Use `triggers.outcome` to read the terminal result by trigger identity.
+
+A grant factory receives a `TriggerContext`. The run uses `trigger_call` to
+invoke a fenced transaction and `trigger_boundary` to check its attempt and
+any committed cancel request before an outside step. `trigger_hold` commits a
+request fingerprint hold. An operator or activation entry uses
+`triggers.request_cancel` or `triggers.release` in a transaction. Passing a
+revision to release changes the stamp and clears the hold together. The next
+start keeps the trigger identity and increments the attempt.

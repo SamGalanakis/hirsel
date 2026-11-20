@@ -14,7 +14,7 @@ pub type Hold: codec + send = Request(u64, u64, Bytes, Bytes) | Revision(Bytes, 
 
 pub type Terminal: codec + send = Returned(Bytes) | Raised(u32) | OutOfTime(u64) | OutOfBytes(u64, u64) | Gone | Cancelled
 
-pub type Error: send = Store(store.Error) | StaleAttempt | MissingEntry | AlreadyTriggerable | AttemptLimit | IndexLimit | NotHeld
+pub type Error: send = Store(store.Error) | StaleAttempt | MissingEntry | AlreadyTriggerable | AttemptLimit | IndexLimit | NotHeld | CancelRequested | NotDue
 
 type State: codec + send = Waiting | Running | Parked(Hold)
 
@@ -52,7 +52,7 @@ pub opaque type Pending: send {
 
 pub opaque type Attempt: send { id: Id, number: u64 }
 
-pub type Started: send = Body(Attempt) | Held | Cancel(Attempt)
+pub type Started: send = Body(Attempt) | Held
 
 fn rows_name() -> String { "store.triggers.pending" }
 fn outcomes_name() -> String { "store.triggers.outcomes" }
@@ -169,17 +169,17 @@ pub fn allow[A](mut entries: Entries, target: Entry[A]) -> Result[(), Error] {
     room(result.capacity_only(list.push(mut entries.listed, take ref)))
 }
 
-fn listed(entries: Entries, target: EntryRef) -> bool {
+fn listed(entries: Entries, path_bytes: Bytes, schema: Bytes, carries_grants: bool) -> bool {
     for ref in entries.listed {
-        if ref.path == target.path {
-            return ref.schema == target.schema && ref.granted == target.granted
+        if ref.path == path_bytes {
+            return ref.schema == schema && ref.granted == carries_grants
         }
     }
     false
 }
 
 pub fn write[A](mut tx: store.Tx, t: Tables, entries: Entries, target: Entry[A], arg: A, when: Due) -> Result[Id, Error] {
-    if !listed(entries, target.ref) { return Error(MissingEntry) }
+    if !listed(entries, target.ref.path, target.ref.schema, target.ref.granted) { return Error(MissingEntry) }
     let info = store.info(mut tx)
     let mut id = Id(store_hi: info.id.store.hi, store_lo: info.id.store.lo, branch: info.id.branch, version: info.id.version, index: 0u64)
     let shape = store.shape(t.rows)
@@ -216,18 +216,8 @@ pub fn number(a: Attempt) -> u64 { a.number }
 pub fn is_granted(p: Pending) -> bool { p.row.granted }
 pub fn argument(p: Pending) -> View[Bytes] in p { view p.row.arg }
 
-pub fn resolves[A](p: Pending, target: Entry[A]) -> bool {
-    p.row.path == target.ref.path && p.row.granted == target.ref.granted && p.row.schema == target.ref.schema
-}
-
-
 pub fn is_allowed(p: Pending, choices: Entries) -> bool {
-    for target in choices.listed {
-        if p.row.path == target.path {
-            return p.row.granted == target.granted && p.row.schema == target.schema
-        }
-    }
-    false
+    listed(choices, p.row.path, p.row.schema, p.row.granted)
 }
 
 pub fn matches(p: Pending, identity: Bytes, schema: Bytes) -> bool {
@@ -251,9 +241,13 @@ fn running(state: State) -> bool {
     match state { Running => true, _ => false }
 }
 
+fn current_attempt(row: Row, a: Attempt) -> bool {
+    row.attempt == a.number && running(row.state)
+}
+
 fn current(tx: store.Tx, t: Tables, a: Attempt) -> Result[Row, Error] {
     let row = read(tx, t, a.id)?
-    if row.attempt != a.number || !running(row.state) { return Error(StaleAttempt) }
+    if !current_attempt(row, a) { return Error(StaleAttempt) }
     Ok(take row)
 }
 
@@ -262,14 +256,18 @@ pub fn fence(tx: store.Tx, t: Tables, a: Attempt) -> Result[bool, Error] {
     Ok(row.cancel)
 }
 
+pub fn boundary(s: store.Snapshot, t: Tables, a: Attempt) -> Result[bool, Error] {
+    let row = stored(store.get(s, store.shape(t.rows), a.id))?
+    let Some(value) = row else { return Error(StaleAttempt) }
+    if !current_attempt(value, a) { return Error(StaleAttempt) }
+    Ok(value.cancel)
+}
+
 pub fn start(mut tx: store.Tx, t: Tables, p: Pending, revision: Bytes) -> Result[Started, Error] {
+    let at = store.info(mut tx).at
     let mut row = read(tx, t, p.id)?
-    if row.cancel {
-        // The cancellation settlement uses the current attempt without
-        // launching a body, including when the row is held.
-        return Ok(Cancel(Attempt(id: p.id, number: row.attempt)))
-    }
-    if parked(row.state) { return Error(StaleAttempt) }
+    if at < row.due { return Error(NotDue) }
+    if row.cancel || parked(row.state) { return Error(StaleAttempt) }
     if row.attempt != 0u64 && row.revision != revision {
         row.state = Parked(Revision(copy_bytes(row.revision)?, copy_bytes(revision)?))
         stored(store.put(mut tx, t.rows, p.id, row))?
@@ -285,6 +283,7 @@ pub fn start(mut tx: store.Tx, t: Tables, p: Pending, revision: Bytes) -> Result
 
 pub fn hold(mut tx: store.Tx, t: Tables, a: Attempt, step: u64, expected: Bytes, actual: Bytes) -> Result[(), Error] {
     let mut row = current(tx, t, a)?
+    if row.cancel { return Error(CancelRequested) }
     row.state = Parked(Request(a.number, step, copy_bytes(expected)?, copy_bytes(actual)?))
     stored(store.put(mut tx, t.rows, a.id, row))
 }
@@ -322,6 +321,12 @@ pub fn finish(mut tx: store.Tx, t: Tables, a: Attempt, terminal: Terminal) -> Re
     consume(mut tx, t, a.id, terminal)
 }
 
+pub fn finish_cancel(mut tx: store.Tx, t: Tables, p: Pending) -> Result[(), Error] {
+    let row = read(tx, t, p.id)?
+    if !row.cancel { return Error(StaleAttempt) }
+    consume(mut tx, t, p.id, Cancelled)
+}
+
 pub fn finish_transact(mut tx: store.Tx, t: Tables, p: Pending, terminal: Terminal) -> Result[(), Error] {
     let row = read(tx, t, p.id)?
     if row.granted { return Error(StaleAttempt) }
@@ -333,6 +338,24 @@ pub fn outcome(s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Terminal],
 }
 
 
+
+// The journal law harness provides one host directory and a 64 MiB task.
+// Give each law its own directory and the standard small-store fixture.
+pub fn law_directory(d: Dir) -> Dir waits {
+    let mut name = result.unwrap(string.with_capacity(64u64))
+    result.unwrap(string.push(mut name, "trigger-law-"))
+    result.unwrap(host.mkdtemp(d, mut name))
+}
+
+pub fn law_options() -> store.Options {
+    let mut options = store.defaults()
+    options.checkpoint_task_bytes = 1048576u64
+    options.resident_limit = 1048576u64
+    options.pack_bytes = 512u64
+    options.group_commits = 2u32
+    options.group_bytes = 1048576u32
+    options
+}
 
 fn sample_granted(g: Clock, take arg: u64) -> Result[u64, Capacity] waits {
     host.sleep_until(g, host.mono_ns(g))
@@ -354,7 +377,8 @@ fn first(db: store.Db, t: Tables) -> Option[Pending] {
 // while held. Starting on r2 without release, or releasing without restamping,
 // makes this trace fail.
 pub fn journal_law_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let mut before = result.unwrap(store.open(tasks, d, c, r, store.defaults()))
+    let dir = law_directory(d)
+    let mut before = result.unwrap(store.open(tasks, dir, c, r, law_options()))
     result.unwrap(store.run_migration(mut before, tasks, code.describe(migrate)))
     let original = result.unwrap(store.with_schema(before, code.describe(tables)))
     let target: Entry[u64] = result.unwrap(granted(code.describe(sample_granted)))
@@ -377,7 +401,7 @@ pub fn journal_law_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     if number(a1) != 1u64 { return false }
     result.unwrap(store.close(take before))
 
-    let mut db = result.unwrap(store.open(tasks, d, c, r, store.defaults()))
+    let mut db = result.unwrap(store.open(tasks, dir, c, r, law_options()))
     let t = result.unwrap(store.with_schema(db, code.describe(tables)))
     let p = option.unwrap(first(db, t))
     let decision_run = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[Started, Error] {

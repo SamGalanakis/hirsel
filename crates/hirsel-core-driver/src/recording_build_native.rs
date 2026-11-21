@@ -2031,6 +2031,60 @@ fn writes_and_replays(out: Stdout) -> Result[(), ()] {
     inspect_cli();
 }
 
+#[test]
+fn served_scram_replays_with_the_same_send_calls() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    let mut source = std::fs::read_to_string(root.join("core/core/tests/provide.hirsel")).unwrap();
+    source.push_str(
+        r#"
+@test
+fn scram_partial_send(tasks: Tasks) -> Result[(), ()] waits {
+    if served_scram(tasks) { Ok(()) } else { Error(()) }
+}
+"#,
+    );
+    std::fs::write(app.join("main.hirsel"), source).unwrap();
+    let runtime = env_record_runtime().canonicalize().unwrap();
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let (code, out, err) = process::tape_request(
+        &[
+            "test".into(),
+            app.display().to_string(),
+            "--limit".into(),
+            "1048576".into(),
+            "--grant".into(),
+            "Tasks".into(),
+            "--replay".into(),
+            "--expect-verdict".into(),
+            "Sealed".into(),
+            "--runtime".into(),
+            runtime.display().to_string(),
+            "--cc".into(),
+            llvm.join("bin/clang").display().to_string(),
+            "--libraries".into(),
+            root.join("core").display().to_string(),
+            "--source-core".into(),
+            "--store".into(),
+            dir.path().join("store").display().to_string(),
+            "--json".into(),
+        ],
+        dir.path(),
+    );
+    assert_eq!(code, Some(0), "SC9 test --replay: {out}\n{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let tests = report["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 1, "{report}");
+    assert_eq!(tests[0]["definition"], "app@1/main/scram_partial_send");
+    assert_eq!(tests[0]["source"], "executed");
+    assert_eq!(tests[0]["passed"], true);
+}
+
 fn inspect_cli() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

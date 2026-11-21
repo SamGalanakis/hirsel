@@ -112,6 +112,7 @@ impl FunctionEmitter<'_> {
             | HostOp::CallPayload
             | HostOp::PortReply
             | HostOp::ProvideDir
+            | HostOp::ProvideNet
             | HostOp::PortFill
             | HostOp::NetSplit
             | HostOp::NetJoin => {

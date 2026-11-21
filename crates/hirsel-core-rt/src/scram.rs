@@ -202,6 +202,7 @@ pub unsafe extern "C" fn hirsel_core_scram_sha256(
                     os: &crate::os_net::OPERATIONS,
                     tls: &raw mut (*files).tls,
                     pending_write: false,
+                    max_receive: 0,
                 },
                 secret: net::empty_buffer(),
                 origin: secret.origin,

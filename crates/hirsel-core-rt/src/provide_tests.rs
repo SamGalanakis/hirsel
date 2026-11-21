@@ -1,7 +1,11 @@
 use super::*;
 
 fn handle(kind: Kind, state: State) -> Handle {
-    Handle { kind, state }
+    Handle {
+        kind,
+        state,
+        write: None,
+    }
 }
 
 /// A Dir port queues a call only on one of its own live objects of the

@@ -68,3 +68,5 @@ pub const PORT_FILL: u8 = 67;
 // The SCRAM sink issues proof bytes on the live stream and retains a verdict key.
 pub const SCRAM: u8 = 68;
 pub const SCRAM_VERIFY: u8 = 69;
+// A Net port: its sockets and listeners are the port's (core.md, Provide).
+pub const PROVIDE_NET: u8 = 70;

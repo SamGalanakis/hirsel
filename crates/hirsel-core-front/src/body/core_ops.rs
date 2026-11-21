@@ -354,6 +354,7 @@ operations! {
     ("provide", "stdout", Lane::Runtime(Kernel::Provide(HostOp::ProvideStdout)), "B", "provide-r8a-1533", false),
     ("provide", "stderr", Lane::Runtime(Kernel::Provide(HostOp::ProvideStderr)), "B", "provide-r8a-1533", false),
     ("provide", "dir", Lane::Runtime(Kernel::Provide(HostOp::ProvideDir)), "B", "provide-r8a-1533", false),
+    ("provide", "net", Lane::Runtime(Kernel::Provide(HostOp::ProvideNet)), "B", "provide-r8a-1533", false),
     ("provide", "fill", Lane::Runtime(Kernel::Provide(HostOp::PortFill)), "B", "provide-r8a-1533", false),
     ("provide", "next", Lane::Runtime(Kernel::Provide(HostOp::PortNext)), "B", "provide-r8a-1533", false),
     ("provide", "word", Lane::Runtime(Kernel::Provide(HostOp::CallWord)), "B", "provide-r8a-1533", false),
@@ -2488,7 +2489,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if matches!(
             op,
-            HostOp::ProvideStdout | HostOp::ProvideStderr | HostOp::ProvideDir
+            HostOp::ProvideStdout | HostOp::ProvideStderr | HostOp::ProvideDir | HostOp::ProvideNet
         ) {
             // A port's room, with its own record, saturating as the run time's.
             let cell = self.konst(u, hirsel_core_layout::charge::PROVIDE_CELL, n)?;
@@ -2512,7 +2513,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             | HostOp::ProvideProcess
             | HostOp::ProvideStdout
             | HostOp::ProvideStderr
-            | HostOp::ProvideDir => {
+            | HostOp::ProvideDir
+            | HostOp::ProvideNet => {
                 let id = self.runtime_type(result, n)?;
                 let to = self.new_slot(PlaceTy::Declared(id), n);
                 self.runtime_store(to, &[Step::Field(0)], u, value, n);

@@ -62,6 +62,12 @@ struct Port {
     /// The room admitted at construction and the bytes of it in use.
     room: u64,
     used: u64,
+    /// A Net port's caller socket and listener keys (direction bits clear)
+    /// and the server ids they name (NOTES 31).
+    keys: BTreeMap<u64, u64>,
+    /// A Net port's root rules: every address, pinned with the port, so
+    /// `net.narrow` intersects them as any Net grant's.
+    rules: Option<crate::net::RulesStorage>,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +75,7 @@ enum Vocab {
     #[default]
     Stream,
     Dir,
+    Net,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -76,6 +83,8 @@ enum Kind {
     Dir,
     File,
     Entries,
+    Socket,
+    Listener,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,12 +94,31 @@ enum State {
     Closing,
     /// Dropped: `next` delivers `Released(id)` in stamp order (FAIL-13).
     Released(u64),
+    /// A split socket half whose `Released` the server has taken.
+    Gone,
 }
 
 #[derive(Clone, Copy)]
 struct Handle {
     kind: Kind,
+    /// The object's state, or a split socket's read half.
     state: State,
+    /// A split socket's write half; None until `net.split`.
+    write: Option<State>,
+}
+
+impl Handle {
+    fn new(kind: Kind) -> Self {
+        Self {
+            kind,
+            state: State::Live,
+            write: None,
+        }
+    }
+    /// Every part's notice has been taken: the record leaves the room.
+    fn done(&self) -> bool {
+        self.state == State::Gone && self.write.is_none_or(|w| w == State::Gone)
+    }
 }
 
 /// A live handle record's share of the room, with its release notice.
@@ -98,6 +126,13 @@ const HANDLE_ROOM: u64 = 32;
 /// DirOp variants in declaration order (core.md, Provide).
 const DIR_CLOSE: u64 = 18;
 const DIR_RELEASED: u64 = 20;
+/// NetOp variants in declaration order.
+const NET_CONNECT: u64 = 0;
+const NET_LISTEN: u64 = 2;
+const NET_ACCEPT: u64 = 3;
+const NET_RECV: u64 = 4;
+const NET_SEND: u64 = 5;
+const NET_RELEASED: u64 = 8;
 /// DirReply and StreamReply variants as `Reply[Op]` tags.
 const R_DONE: u64 = 0;
 const R_FAILED: u64 = 1;
@@ -108,6 +143,15 @@ const R_STAT: u64 = 5;
 const R_FILE: u64 = 6;
 const R_DIR: u64 = 7;
 const R_ENTRIES: u64 = 8;
+/// NetReply's own variants after the shared Done, Failed and Count.
+const R_SOCKET: u64 = 9;
+const R_LISTENER: u64 = 10;
+/// A port caller's socket and listener keys: the registry's generation-0
+/// band with bit 33 set, so they never meet a registry key (generation 1 and
+/// up) or a model key (small and sequential). Process-wide, so two ports'
+/// keys never meet either (NOTES 31).
+const PORT_KEYS: u64 = 1 << 33;
+static NEXT_PORT_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct PortCall {
     /// The caller's operation; 0 for a Released notice, which has none.
@@ -130,7 +174,26 @@ struct PortCall {
 
 enum Queued {
     Call(u64),
-    Released(u64),
+    /// A handle's notice: its id, and whether it is a split socket's write half.
+    Released(u64, bool),
+}
+
+/// The words of a Released notice for `id`'s `part` (Whole 0, Read 1, Write 2).
+fn notice(vocab: Vocab, id: u64, part: u64) -> [u64; 8] {
+    let mut words = [0; 8];
+    match vocab {
+        Vocab::Net => words[..3].copy_from_slice(&[NET_RELEASED, id, part]),
+        _ => words[..2].copy_from_slice(&[DIR_RELEASED, id]),
+    }
+    words
+}
+
+fn is_notice(vocab: Vocab, op: u64) -> bool {
+    match vocab {
+        Vocab::Stream => false,
+        Vocab::Dir => op == DIR_RELEASED,
+        Vocab::Net => op == NET_RELEASED,
+    }
 }
 
 impl Port {
@@ -194,15 +257,22 @@ impl Port {
         let released = self
             .handles
             .iter()
-            .filter_map(|(&h, r)| match r.state {
-                State::Released(at) => Some((at, h)),
-                _ => None,
+            .flat_map(|(&h, r)| {
+                let read = match r.state {
+                    State::Released(at) => Some((at, h, false)),
+                    _ => None,
+                };
+                let write = match r.write {
+                    Some(State::Released(at)) => Some((at, h, true)),
+                    _ => None,
+                };
+                read.into_iter().chain(write)
             })
             .min();
         match (call, released) {
-            (Some(c), Some((at, h))) if at < c => Some(Queued::Released(h)),
+            (Some(c), Some((at, h, w))) if at < c => Some(Queued::Released(h, w)),
             (Some(c), _) => Some(Queued::Call(c)),
-            (None, Some((_, h))) => Some(Queued::Released(h)),
+            (None, Some((_, h, w))) => Some(Queued::Released(h, w)),
             (None, None) => None,
         }
     }
@@ -211,9 +281,63 @@ impl Port {
             .get(&handle)
             .is_some_and(|h| h.kind == kind && h.state == State::Live)
     }
+    /// A Net caller's socket or listener: its server id, when the key's part
+    /// (whole, read or write half) is live and of the operation's kind.
+    fn socket(&self, key: u64, kind: Kind) -> Option<u64> {
+        let id = *self.keys.get(&(key & !3))?;
+        let h = self.handles.get(&id)?;
+        let state = match key & 3 {
+            0 if h.write.is_none() => h.state,
+            1 if h.write.is_some() => h.state,
+            2 => h.write?,
+            _ => return None,
+        };
+        (h.kind == kind && state == State::Live).then_some(id)
+    }
+    /// A Net call's words: an address operation on the port's Net (its rules
+    /// already permitted the address), or an operation on a live key.
+    fn net_words(&self, request: &Request) -> Option<[u64; 8]> {
+        // SAFETY: every Net adapter pins its NetworkRequest in `path`.
+        let n = unsafe { &*request.path.cast::<crate::net::NetworkRequest>() };
+        let a = n.address;
+        let b = request.buffer;
+        let spare = (b.capacity.saturating_sub(b.len)) as u64;
+        let address = [u64::from(a.family), a.hi, a.lo, u64::from(a.port)];
+        let mut w = [0; 8];
+        match request.operation {
+            CONNECT => {
+                w[0] = NET_CONNECT;
+                w[1..5].copy_from_slice(&address);
+            }
+            LISTEN => {
+                w[0] = NET_LISTEN;
+                w[1..5].copy_from_slice(&address);
+                w[5] = u64::from(n.backlog);
+            }
+            ACCEPT => {
+                let id = self.socket(request.handle, Kind::Listener)?;
+                w[..2].copy_from_slice(&[NET_ACCEPT, id]);
+            }
+            RECV_BOUNDED => {
+                let id = self.socket(request.handle, Kind::Socket)?;
+                w[..4].copy_from_slice(&[NET_RECV, id, spare, n.max_receive]);
+            }
+            SEND_PAIR => {
+                let id = self.socket(request.handle, Kind::Socket)?;
+                // SAFETY: SEND_PAIR pins its tail carrier through delivery.
+                let tail = unsafe { (*n.send_tail).len } as u64;
+                w[..4].copy_from_slice(&[NET_SEND, id, b.len as u64, tail]);
+            }
+            _ => return None,
+        }
+        Some(w)
+    }
     /// The call's words for a caller's request, or None when its handle is
     /// not one of this port's live objects of the operation's kind.
     fn words(&self, request: &Request) -> Option<[u64; 8]> {
+        if self.vocab == Vocab::Net {
+            return self.net_words(request);
+        }
         let h = request.handle;
         let b = request.buffer;
         let spare = (b.capacity.saturating_sub(b.len)) as u64;
@@ -288,6 +412,11 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
             (Vocab::Dir, 2 | 12, 1) | (Vocab::Dir, 13, 2) => buffer,
             (Vocab::Dir, 7, 1) => &path[..call.words[2] as usize],
             (Vocab::Dir, 7, 2) => &path[call.words[2] as usize + 1..],
+            (Vocab::Net, NET_SEND, 1) => buffer,
+            (Vocab::Net, NET_SEND, 2) => {
+                let n = &*r.path.cast::<crate::net::NetworkRequest>();
+                request_bytes((*n.send_tail).data, (*n.send_tail).len)
+            }
             _ => &[],
         }
     }
@@ -298,6 +427,7 @@ fn call_room(vocab: Vocab, words: &[u64; 8]) -> u64 {
     match (vocab, words[0]) {
         (Vocab::Dir, 10 | 19) => words[2],
         (Vocab::Dir, 2 | 11) => words[3],
+        (Vocab::Net, NET_RECV) => words[2],
         _ => 0,
     }
 }
@@ -317,6 +447,15 @@ fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
                     12 | 13 => matches!(reply, R_DONE | R_WRITE_FAILED),
                     16 => reply == R_LOCKED,
                     _ => reply == R_DONE,
+                }
+        }
+        Vocab::Net => {
+            (reply == R_FAILED && op != NET_RELEASED)
+                || match op {
+                    NET_CONNECT | NET_ACCEPT => reply == R_SOCKET,
+                    NET_LISTEN => reply == R_LISTENER,
+                    NET_RECV | NET_SEND => reply == R_COUNT,
+                    _ => false,
                 }
         }
     }
@@ -456,16 +595,28 @@ fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
                 call.held = true;
                 id
             }
-            Some(Queued::Released(handle)) => {
+            Some(Queued::Released(handle, write)) => {
                 // The notice's record was reserved with the handle: it leaves
-                // the room now and becomes a Call that needs no reply.
-                port.handles.remove(&handle);
-                port.used -= HANDLE_ROOM;
+                // the room with the last part's notice, and becomes a Call
+                // that needs no reply.
+                let h = port.handles.get_mut(&handle).expect("released handle");
+                let part = match (h.write, write) {
+                    (None, _) => 0,
+                    (Some(_), false) => 1,
+                    (Some(_), true) => 2,
+                };
+                if write {
+                    h.write = Some(State::Gone);
+                } else {
+                    h.state = State::Gone;
+                }
+                if h.done() {
+                    port.handles.remove(&handle);
+                    port.used -= HANDLE_ROOM;
+                }
                 let id = port.next_id;
                 port.next_id += 1;
-                let mut words = [0; 8];
-                words[0] = DIR_RELEASED;
-                words[1] = handle;
+                let words = notice(port.vocab, handle, part);
                 port.calls.insert(
                     id,
                     PortCall {
@@ -596,7 +747,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                     w[1] = request.buffer.len as u64;
                     Some(w)
                 }
-                Vocab::Dir => p.words(request),
+                Vocab::Dir | Vocab::Net => p.words(request),
             };
             if p.sealed {
                 outcome = p.closed;
@@ -628,8 +779,10 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                 ready_all(servers);
                 return pending();
             } else {
-                // Not this port's live object of the operation's kind.
-                outcome.error = IoError { tag: 2, code: 0 };
+                // Not this port's live object of the operation's kind: Denied
+                // (IoError tag 2, NetError tag 1).
+                let tag = if p.vocab == Vocab::Net { 1 } else { 2 };
+                outcome.error = IoError { tag, code: 0 };
             }
         }
         (Cell::Port(port), CLOSE_CALL) => {
@@ -963,23 +1116,42 @@ fn empty_request(operation: u8, handle: u64, site: u64) -> Request {
 unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bool) -> Outcome {
     // SAFETY: forwarded.
     let files = unsafe { files(context) };
+    // A sealed port answers Closed (IoError tag 4), or for a Net Reset
+    // (NetError tag 5).
+    let closed = if vocab == Vocab::Net { 5 } else { 4 };
     let mut port = Port {
         vocab,
         closed: Outcome {
-            error: IoError { tag: 4, code: 0 },
+            error: IoError {
+                tag: closed,
+                code: 0,
+            },
             ..Outcome::default()
         },
         room: n,
         ..Port::default()
     };
     if vocab == Vocab::Dir {
-        port.handles.insert(
-            0,
-            Handle {
-                kind: Kind::Dir,
-                state: State::Live,
-            },
-        );
+        port.handles.insert(0, Handle::new(Kind::Dir));
+    }
+    let mut root = 0;
+    if vocab == Vocab::Net {
+        // Every address in either direction and family (NOTES 31).
+        let rules = crate::net::RulesStorage::new((0..2).flat_map(|dir| {
+            (0..2).map(move |family| {
+                hirsel_core_net::GrantRule::Address(hirsel_core_net::Rule {
+                    dir,
+                    family,
+                    hi: 0,
+                    lo: 0,
+                    bits: 0,
+                    first: 0,
+                    last: u16::MAX,
+                })
+            })
+        }));
+        root = rules.handle();
+        port.rules = Some(rules);
     }
     let charge = PROVIDE_CELL.saturating_add(n);
     // SAFETY: forwarded.
@@ -992,7 +1164,7 @@ unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bo
         Err(refused) => return refused,
     };
     Outcome {
-        value: files.registry.grant_with_terminal(provider, 0, terminal),
+        value: files.registry.grant_with_terminal(provider, root, terminal),
         written: files.registry.held(provider, 0, CLOSE_SERVED),
         ..Outcome::default()
     }
@@ -1008,6 +1180,84 @@ pub unsafe extern "C" fn hirsel_core_provide_dir(
 ) -> Outcome {
     // SAFETY: forwarded.
     unsafe { provide_port(context, n, Vocab::Dir, false) }
+}
+
+/// # Safety
+/// Context is running.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_provide_net(
+    context: *mut Context,
+    n: u64,
+    _site: u64,
+) -> Outcome {
+    // SAFETY: forwarded.
+    unsafe { provide_port(context, n, Vocab::Net, false) }
+}
+
+/// A caller key's Net port, when `provider` (the socket's recorded one) is
+/// a port's.
+fn net_port(provider: &Provider) -> Option<&Mutex<Port>> {
+    if !owns(provider) {
+        return None;
+    }
+    // SAFETY: the run pins every cell until teardown.
+    match unsafe { cell(provider.state) } {
+        Cell::Port(port) => Some(port),
+        _ => None,
+    }
+}
+
+/// `net.split` on a port's socket: both halves are live and the server is
+/// asked nothing. Allocates nothing.
+pub(crate) fn split_socket(provider: &Provider, key: u64) {
+    if let Some(port) = net_port(provider) {
+        let mut p = lock(port);
+        if let Some(&id) = p.keys.get(&(key & !3))
+            && let Some(h) = p.handles.get_mut(&id)
+        {
+            h.write = Some(State::Live);
+        }
+    }
+}
+
+/// A dropped port socket, half or listener (FAIL-13): queue its `Released`
+/// and ready the servers, allocating nothing. Returns whether the caller now
+/// holds no part of it, so its key is forgotten.
+pub(crate) fn release_socket(provider: &Provider, key: u64) -> bool {
+    let Some(port) = net_port(provider) else {
+        return true;
+    };
+    let mut p = lock(port);
+    let Some(&id) = p.keys.get(&(key & !3)) else {
+        return true;
+    };
+    let stamp = p.next_id;
+    let Some(h) = p.handles.get_mut(&id) else {
+        return true;
+    };
+    let slot = if key & 3 == 2 {
+        h.write.as_mut()
+    } else {
+        Some(&mut h.state)
+    };
+    let marked = match slot {
+        Some(s) if *s == State::Live => {
+            *s = State::Released(stamp);
+            true
+        }
+        _ => false,
+    };
+    let gone = h.state != State::Live && h.write.is_none_or(|w| w != State::Live);
+    if gone {
+        p.keys.remove(&(key & !3));
+    }
+    if marked {
+        p.next_id += 1;
+        let servers = p.servers.iter().map(|&(t, _)| t).collect();
+        drop(p);
+        ready_all(servers);
+    }
+    gone
 }
 
 /// # Safety
@@ -1189,8 +1439,11 @@ fn answer(p: &Port, call: &PortCall, tag: u64, w: [u64; 6]) -> Option<Outcome> {
     if !answers(p.vocab, op, tag) {
         return None;
     }
+    // An IoError's tags are 1 to 5, a NetError's 1 to 9; the code is the
+    // reply word's low 32 bits.
+    let tags = if p.vocab == Vocab::Net { 9 } else { 5 };
     let io = |t: u64, code: u64| {
-        ((1..=5).contains(&t)).then_some(IoError {
+        (1..=tags).contains(&t).then_some(IoError {
             tag: t as u8,
             code: code as u32,
         })
@@ -1219,9 +1472,24 @@ fn answer(p: &Port, call: &PortCall, tag: u64, w: [u64; 6]) -> Option<Outcome> {
             out.error = io(w[1], w[2])?;
             out.written = w[0];
         }
+        R_COUNT if p.vocab == Vocab::Net && op == NET_SEND => {
+            // A send's count is at most the bytes it offered.
+            if w[0] > call.words[2] + call.words[3] {
+                return None;
+            }
+            out.value = w[0];
+        }
         R_COUNT => {
             // A read's count is the bytes it staged; a listing's, its entries.
             if op != 19 && w[0] != call.staged.len() as u64 {
+                return None;
+            }
+            out.value = w[0];
+        }
+        R_SOCKET | R_LISTENER => {
+            // A new socket or listener, at a well-formed address.
+            let v4 = w[1] == 0 && w[2] == 0 && w[3] <= u64::from(u32::MAX);
+            if w[0] == 0 || p.handles.contains_key(&w[0]) || !(v4 || w[1] == 1) || w[4] > 0xffff {
                 return None;
             }
             out.value = w[0];
@@ -1287,7 +1555,7 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
         call.held = false;
     }
     let foreign = registry.file_provider(served).state != provider.state;
-    let notice = !foreign && p.vocab == Vocab::Dir && p.calls[&id].words[0] == DIR_RELEASED;
+    let notice = !foreign && is_notice(p.vocab, p.calls[&id].words[0]);
     if notice {
         // A Released notice needs no reply; `Done` acknowledges it.
         p.prune(id);
@@ -1321,10 +1589,13 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
         unsafe { causes::record(&mut *context, causes::Cause::fail(Default::default(), site)) };
         return CANCELLED;
     };
-    let kind = match tag {
-        R_FILE => Some(Kind::File),
-        R_DIR => Some(Kind::Dir),
-        R_ENTRIES => Some(Kind::Entries),
+    let mut outcome = outcome;
+    let kind = match (p.vocab, tag) {
+        (Vocab::Dir, R_FILE) => Some(Kind::File),
+        (Vocab::Dir, R_DIR) => Some(Kind::Dir),
+        (Vocab::Dir, R_ENTRIES) => Some(Kind::Entries),
+        (Vocab::Net, R_SOCKET) => Some(Kind::Socket),
+        (Vocab::Net, R_LISTENER) => Some(Kind::Listener),
         _ => None,
     };
     if let Some(kind) = kind {
@@ -1336,13 +1607,28 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
             return refused(HANDLE_ROOM, available);
         }
         p.used += HANDLE_ROOM;
-        p.handles.insert(
-            w[0],
-            Handle {
-                kind,
-                state: State::Live,
-            },
-        );
+        p.handles.insert(w[0], Handle::new(kind));
+        if p.vocab == Vocab::Net {
+            // The caller's key, and the address it learns: a listener's
+            // bound one, an accepted socket's peer.
+            let seq = NEXT_PORT_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let key = PORT_KEYS | (seq << 2);
+            p.keys.insert(key, w[0]);
+            outcome.value = key;
+            // SAFETY: the call is unsettled, so its caller's request is pinned.
+            unsafe {
+                let n = (*p.calls[&id].request)
+                    .path
+                    .cast_mut()
+                    .cast::<crate::net::NetworkRequest>();
+                (*n).address = crate::net::Address {
+                    family: w[1] as u8,
+                    hi: w[2],
+                    lo: w[3],
+                    port: w[4] as u16,
+                };
+            }
+        }
     }
     let c = &p.calls[&id];
     if !c.staged.is_empty() {

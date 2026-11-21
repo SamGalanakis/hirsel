@@ -725,3 +725,165 @@ fn provided_terminals() -> bool waits {
     seal(take served_err)
     before && quiet && stdout.is_terminal(o) && !stderr.is_terminal(e)
 }
+
+fn net_answer(mut s: Served[NetOp], take c: Call[NetOp], r: NetReply) -> bool {
+    match provide.reply(mut s, take c, provide.net_reply(r)) {
+        Ok(_) => true,
+        _ => false
+    }
+}
+
+fn loopback(a: Addr, port: u16) -> bool {
+    a.port == port && match a.ip {
+        V4(x) => x == 2130706433,
+        _ => false
+    }
+}
+
+// Sends "he"+"llo" on the socket's write half and receives at most 4 bytes
+// on its read half, then drops the halves.
+fn exchange(take s: Socket) -> bool waits {
+    let (rh, wh) = net.split(take s)
+    let mut r = take rh
+    let mut w = take wh
+    let sent = match host.send_pair(mut w, string.as_bytes("he"), string.as_bytes("llo"), Never) {
+        Ok(k) => k == 5,
+        _ => false
+    }
+    let mut b: Bytes = list.with_capacity(8)
+    let got = match host.recv_bounded(mut r, mut b, 4, Never) {
+        Ok(k) => k == 4 && list.len(b) == 4 && b[0] == 0x61 && b[3] == 0x64,
+        _ => false
+    }
+    let _ = take r
+    let _ = take w
+    sent && got
+}
+
+// Listens, connects to the bound address, accepts, exchanges on the
+// connected socket, then drops every part and connects once more.
+fn net_client(take n: Net) -> bool waits {
+    let (listener, at) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 80), 4))
+    let mut l = take listener
+    let client = result.unwrap(host.connect(n, at, Never))
+    let (accepted, from) = result.unwrap(host.accept(mut l, Never))
+    let exchanged = exchange(take client)
+    let _ = take accepted
+    let _ = take l
+    let again = match host.connect(n, at, Never) {
+        Ok(take s) => {
+            let _ = take s
+            true
+        },
+        Error(_) => false
+    }
+    loopback(at, 8080) && loopback(from, 5000) && exchanged && again
+}
+
+// Take the next call and expect Released(id, part), which Done acknowledges.
+fn net_released(mut s: Served[NetOp], id: u64, part: u64) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Released(id: h, part: p) => h == id && match p {
+                    Whole => part == 0,
+                    Read => part == 1,
+                    Write => part == 2,
+                },
+                _ => false
+            }
+            op && net_answer(mut s, take call, Done)
+        },
+        None => false
+    }
+}
+
+// Take the next call, expect a Connect to 127.0.0.1:8080, and issue
+// Socket(id).
+fn net_connect(mut s: Served[NetOp], id: u64) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Connect(addr) => loopback(addr, 8080),
+                _ => false
+            }
+            op && net_answer(mut s, take call, Socket(id, Addr(ip: V4(2130706433), port: 8080)))
+        },
+        None => false
+    }
+}
+
+// Served Net ports (core.md, Provide). The server binds the listen to port
+// 8080 as Listener(7), answers the connect with Socket(8) and the accept
+// with Socket(9) from 127.0.0.1:5000; takes the send's prefix and tail as
+// payload fields 1 and 2 and answers Count(5); stages "abcdef" for a receive
+// whose room the max of 4 clamps (fill takes 4) and answers Count(4). Each
+// dropped part reaches it as Released in drop order: the split socket's
+// halves as Read and Write, the unsplit socket and listener as Whole. A room
+// of 100 holds three ids (32 bytes each) and the 4 staged bytes, so
+// Socket(10) fits only once the drops refund the ids.
+// expect: run net_echo(tasks) = true
+fn net_echo(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 100)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, net_client)
+    let listened = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Listen(addr, backlog) => loopback(addr, 80) && backlog == 4,
+                _ => false
+            }
+            op && net_answer(mut served, take call, Listener(7, Addr(ip: V4(2130706433), port: 8080)))
+        },
+        None => false
+    }
+    let connected = net_connect(mut served, 8)
+    let accepted = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Accept(listener) => listener == 7,
+                _ => false
+            }
+            op && net_answer(mut served, take call, Socket(9, Addr(ip: V4(2130706433), port: 5000)))
+        },
+        None => false
+    }
+    let sent = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Send(socket, prefix, tail) => socket == 8 && prefix == 2 && tail == 3,
+                _ => false
+            }
+            let mut p: Bytes = list.with_capacity(8)
+            provide.payload(call, 1, mut p)
+            provide.payload(call, 2, mut p)
+            let data = list.len(p) == 5 && p[0] == 0x68 && p[2] == 0x6c && p[4] == 0x6f
+            op && data && net_answer(mut served, take call, Count(5))
+        },
+        None => false
+    }
+    let received = match provide.next(mut served) {
+        Some(take call) => {
+            let mut c = take call
+            let op = match provide.net_op(c) {
+                Recv(socket, room, max) => socket == 8 && room == 4 && max == 4,
+                _ => false
+            }
+            let took = provide.fill(mut served, mut c, string.as_bytes("abcdef"))
+            op && took == 4 && net_answer(mut served, take c, Count(4))
+        },
+        None => false
+    }
+    let halves = net_released(mut served, 8, 1) && net_released(mut served, 8, 2)
+    let wholes = net_released(mut served, 9, 0) && net_released(mut served, 7, 0)
+    let again = net_connect(mut served, 10) && net_released(mut served, 10, 0)
+    let client = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    listened && connected && accepted && sent && received && halves && wholes && again && client && quiet
+}

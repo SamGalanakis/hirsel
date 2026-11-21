@@ -254,6 +254,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::CallPayload
                     | HostOp::PortReply
                     | HostOp::ProvideDir
+                    | HostOp::ProvideNet
                     | HostOp::PortFill
                     | HostOp::NetJoin
                     | HostOp::NetSplit
@@ -300,6 +301,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::CallPayload
                     | HostOp::PortReply
                     | HostOp::ProvideDir
+                    | HostOp::ProvideNet
                     | HostOp::PortFill
                     | HostOp::NetJoin
                     | HostOp::NetSplit => {

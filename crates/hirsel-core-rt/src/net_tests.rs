@@ -967,6 +967,7 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                         os: &crate::os_net::OPERATIONS,
                         tls: ptr::null_mut(),
                         pending_write: false,
+                        max_receive: 0,
                     };
                     let mut r = Request {
                         operation: CONNECT,

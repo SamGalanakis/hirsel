@@ -2406,7 +2406,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             | HostOp::ClockIdle
             | HostOp::ProcessTrigger => &["u64"],
             HostOp::ProvideProcess => &[],
-            HostOp::ProvideDir | HostOp::PortNext => &["u64"],
+            HostOp::ProvideDir | HostOp::ProvideNet | HostOp::PortNext => &["u64"],
             HostOp::ProvideStdout | HostOp::ProvideStderr => &["u64", "bool"],
             HostOp::StreamTerminal => &["u64", "u8"],
             HostOp::CallWord | HostOp::NetJoin => &["u64", "u64"],

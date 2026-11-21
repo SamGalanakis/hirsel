@@ -22,7 +22,7 @@ pub struct TlsRequest {
     pub(crate) state: *mut std::ffi::c_void,
 }
 
-const _: () = assert!(size_of::<NetworkRequest>() == 168);
+const _: () = assert!(size_of::<NetworkRequest>() == 176);
 
 pub(crate) struct HandshakeState {
     pin: TlsTrust,
@@ -207,6 +207,7 @@ unsafe fn connect(
                 os: &crate::os_net::TLS_OPERATIONS,
                 tls: &raw mut (*files).tls,
                 pending_write: false,
+                max_receive: 0,
             },
             name: View {
                 data: canonical.as_ptr(),

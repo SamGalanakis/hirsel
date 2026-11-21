@@ -425,6 +425,7 @@ tags!(HostOp {
     65 => ScramSha256,
     66 => ScramFinalLen,
     67 => ScramVerify,
+    68 => ProvideNet,
 });
 
 tags!(RaiseCause {

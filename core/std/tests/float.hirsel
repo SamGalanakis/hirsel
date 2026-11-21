@@ -495,6 +495,33 @@ fn ryu_shortest64() -> bool {
     true
 }
 
+// Expected coefficients and exponents from Ryū 1.0.23.
+// expect: run shortest64_boundaries() = 0
+fn shortest64_boundaries() -> u64 {
+    let cases: Inline[(u64, u64, i64), 19] =[
+    // Smallest subnormals and the transition to normal values.
+    (0x0000000000000001, 5, -324), (0x0000000000000002, 1, -323), (0x0000000000000003, 15, -324), (0x000fffffffffffff, 2225073858507201, -323), (0x0010000000000000, 22250738585072014, -324), (0x0010000000000001, 2225073858507202, -323),
+    // Neighbours of two decimal powers.
+    (0x01a56e1fc2f8f358, 9999999999999999, -316), (0x01a56e1fc2f8f359, 1, -300), (0x01a56e1fc2f8f35a, 10000000000000002, -316), (0x44b52d02c7e14af5, 9999999999999997, 7), (0x44b52d02c7e14af6, 1, 23), (0x44b52d02c7e14af7, 10000000000000001, 7),
+    // An asymmetric interval and the largest finite magnitude.
+    (0x7fdfffffffffffff, 8988465674311579, 292), (0x7fe0000000000000, 898846567431158, 293), (0x7fe0000000000001, 8988465674311582, 292), (0x7fefffffffffffff, 17976931348623157, 292),
+    // Negative values on both sides of a decimal boundary.
+    (0xbeb0c6f7a0b5ed8c, 9999999999999997, -22), (0xbeb0c6f7a0b5ed8d, 1, -6), (0xbeb0c6f7a0b5ed8e, 10000000000000002, -22),]
+    for row in cases {
+        let (bits, coefficient, exponent) = row
+        let x = float.from_bits64(bits)
+        if float.shortest64(x) != (coefficient, exponent) {
+            return bits
+        }
+        let plain = result.unwrap(float.parse64(shown(x)))
+        let json = result.unwrap(float.parse64(shown_json(x)))
+        if float.to_bits64(plain) != bits || float.to_bits64(json) != bits {
+            return bits
+        }
+    }
+    0
+}
+
 // Ryū 1.0.23 supplied the expected spelling. The inputs are adjacent
 // binary32 values bracketing each 10^p, the width endpoints, signed zeros,
 // and exact decimal ties from tests/f2s_test.rs.

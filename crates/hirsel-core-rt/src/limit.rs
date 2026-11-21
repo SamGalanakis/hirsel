@@ -535,12 +535,13 @@ impl Payer {
             self.settle(bytes);
         }
     }
-    /// A model unit's refund (units_ledger): the harnesses run one unit at a
-    /// time, so it credits the payer's root at once. Never zero bytes: a
-    /// zero-byte charge holds no pin.
+    /// A model unit's refund (units_ledger). A model unit's table is
+    /// touched only by the unit running on it (its helpers run one at a time
+    /// with it, in the checker), so it takes no commit and credits the
+    /// payer's root at once. Never zero bytes: a zero-byte charge holds no pin.
+    #[inline]
     pub(crate) fn unit_refund(self, bytes: u64) {
         debug_assert!(bytes != 0, "a zero-byte unit refund");
-        let _commit = crate::sequencer::enter();
         let f = self.forest();
         let id = self.slot().id;
         let root = f.find(id);
@@ -909,8 +910,15 @@ impl Funding {
     /// A model unit's admission (units_ledger): no injection and no capacity
     /// event; a refusal returns what is available. The bytes stay
     /// outstanding on the returned canonical payer until `unit_refund`.
+    #[inline]
     pub(crate) fn unit_charge(&self, bytes: u64) -> Result<Payer, u64> {
-        let payer = self.payer.get().canonical();
+        let payer = self.payer.get();
+        // SAFETY: as in `unit_refund`, only this unit reads its links.
+        let payer = if unsafe { (*payer.links()).parent.is_none() } {
+            payer
+        } else {
+            payer.canonical()
+        };
         // SAFETY: the unit's handle pins its canonical local record.
         let r = unsafe { &mut *payer.local() };
         if bytes > r.available {

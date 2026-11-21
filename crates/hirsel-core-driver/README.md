@@ -388,7 +388,10 @@ an `Error` pass. The driver does not share a test's run or root bookkeeping.
 Human output is one `pass <definition>` or `fail <definition>: <reason>` line per
 selected test. Error outcomes say `error`; failures, stops and setup refusals
 include the run's stderr, with lines joined by ` | `. `--json` instead retains
-each test's status and captured stdout/stderr or build-stop reason. Exit 0 means
+each test's status and captured stdout/stderr or build-stop reason. Each row
+includes child wall time in milliseconds (`wall_ms` in JSON), excluding build
+and link time. Replay rows sum the recording and replay child times. A refusal
+without a reported child outcome has no time (`null` in JSON). Exit 0 means
 at least one test ran and every selected test passed; 1 means a selected test
 failed; 2 means no tests matched or configuration could not be read. `--backend`
 and `--release` select the same engines and options as `build`; `--output` is a

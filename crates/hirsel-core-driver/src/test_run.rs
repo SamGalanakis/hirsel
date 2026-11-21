@@ -78,6 +78,8 @@ pub struct TestOutcome {
     pub definition: DefPath,
     pub output: Output,
     pub timed_out: bool,
+    /// Time spent launching, running and collecting the child or replay pair.
+    pub wall_time: Duration,
 }
 impl TestOutcome {
     /// PROG-3 maps every Error, failure, stop and not-started outcome to nonzero.
@@ -128,7 +130,7 @@ impl CheckProduct {
             )));
         }
         let built = self.build(test, options)?;
-        let (output, timed_out) = execute(
+        let (output, timed_out, wall_time) = execute(
             &mut runner.command(&std::fs::canonicalize(&built.executable)?),
             timeout,
         )?;
@@ -136,6 +138,7 @@ impl CheckProduct {
             definition: test.clone(),
             output,
             timed_out,
+            wall_time,
         })
     }
 
@@ -165,12 +168,13 @@ impl CheckProduct {
         let built = self.build(test, &record_options)?;
         let mut cmd = runner.command(&std::fs::canonicalize(&built.executable)?);
         cmd.env("HIRSEL_RECORD", &tape_path);
-        let (output, timed_out) = execute(&mut cmd, timeout)?;
+        let (output, timed_out, wall_time) = execute(&mut cmd, timeout)?;
         if timed_out || !output.status.success() {
             return Ok(TestOutcome {
                 definition: test.clone(),
                 output,
                 timed_out,
+                wall_time,
             });
         }
         let record_stderr = String::from_utf8_lossy(&output.stderr);
@@ -192,15 +196,17 @@ impl CheckProduct {
             diagnose: false,
         });
         let replay_built = self.build(test, &replay_options)?;
-        let (replay_output, replay_timed_out) = execute(
+        let (replay_output, replay_timed_out, replay_wall_time) = execute(
             &mut runner.command(&std::fs::canonicalize(&replay_built.executable)?),
             timeout,
         )?;
+        let wall_time = wall_time + replay_wall_time;
         if replay_timed_out {
             return Ok(TestOutcome {
                 definition: test.clone(),
                 output: replay_output,
                 timed_out: true,
+                wall_time,
             });
         }
         let expected = expect_verdict.unwrap_or("Sealed");
@@ -209,6 +215,7 @@ impl CheckProduct {
                 definition: test.clone(),
                 output: replay_output,
                 timed_out: false,
+                wall_time,
             });
         }
         let replay_stderr = String::from_utf8_lossy(&replay_output.stderr);
@@ -220,6 +227,7 @@ impl CheckProduct {
                 definition: test.clone(),
                 output,
                 timed_out: false,
+                wall_time,
             });
         }
         Err(NativeStop::Entry(format!(
@@ -230,7 +238,16 @@ impl CheckProduct {
     }
 }
 
-fn execute(command: &mut Command, timeout: Option<Duration>) -> io::Result<(Output, bool)> {
+fn execute(
+    command: &mut Command,
+    timeout: Option<Duration>,
+) -> io::Result<(Output, bool, Duration)> {
+    let start = Instant::now();
+    let (output, timed_out) = capture(command, timeout)?;
+    Ok((output, timed_out, start.elapsed()))
+}
+
+fn capture(command: &mut Command, timeout: Option<Duration>) -> io::Result<(Output, bool)> {
     let Some(timeout) = timeout else {
         return command.output().map(|output| (output, false));
     };
@@ -281,15 +298,17 @@ mod tests {
 
     #[test]
     fn execution_deadline_retains_output_and_does_not_stop_the_next_run() {
-        let (output, timed_out) = execute(
+        let deadline = Duration::from_millis(50);
+        let (output, timed_out, wall_time) = execute(
             Command::new("sh").args(["-c", "printf before; exec sleep 60"]),
-            Some(Duration::from_millis(50)),
+            Some(deadline),
         )
         .unwrap();
         assert!(timed_out);
+        assert!(wall_time >= deadline);
         assert!(!output.status.success());
         assert_eq!(output.stdout, b"before");
-        let (output, timed_out) = execute(
+        let (output, timed_out, _) = execute(
             Command::new("sh").args(["-c", "printf after"]),
             Some(Duration::from_secs(5)),
         )

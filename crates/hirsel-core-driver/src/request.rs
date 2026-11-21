@@ -889,10 +889,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             let row = match result {
                 Ok(outcome) => {
                     let passed = outcome.passed();
+                    let wall_ms = outcome.wall_time.as_secs_f64() * 1000.0;
                     failed |= !passed;
                     if !json {
                         if passed {
-                            println!("pass {test}");
+                            println!("pass {test} ({wall_ms:.3} ms)");
                         } else {
                             let reason = if outcome.timed_out {
                                 "execution timed out".to_owned()
@@ -904,17 +905,17 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                                     .collect::<Vec<_>>()
                                     .join(" | ")
                             };
-                            println!("fail {test}: {reason}");
+                            println!("fail {test}: {reason} ({wall_ms:.3} ms)");
                         }
                     }
-                    serde_json::json!({"definition":test.to_string(),"passed":passed,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out})
+                    serde_json::json!({"definition":test.to_string(),"passed":passed,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms})
                 }
                 Err(error) => {
                     failed = true;
                     if !json {
-                        println!("fail {test}: {error}");
+                        println!("fail {test}: {error} (time unavailable)");
                     }
-                    serde_json::json!({"definition":test.to_string(),"passed":false,"stopped":error.to_string()})
+                    serde_json::json!({"definition":test.to_string(),"passed":false,"stopped":error.to_string(),"wall_ms":null})
                 }
             };
             rows.push(row);

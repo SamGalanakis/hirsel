@@ -55,6 +55,11 @@ pub fn write_at(mut f: HostFile, at: u64, data: Bytes) -> Result[(), WriteError]
     host.write_at(mut f, at, data)
 }
 
+/// Reports the open file's kind, size and modification time.
+pub fn stat(mut f: HostFile) -> Result[Stat, IoError] waits {
+    host.stat_file(mut f)
+}
+
 /// Closes f and reports the host's close error. `host.close`. Either way f is ended and
 /// its finalizer does not run. Ex: `std.file.close(take src)?`
 pub fn close(take f: HostFile) -> Result[(), IoError] waits {

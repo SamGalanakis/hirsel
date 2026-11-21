@@ -193,6 +193,9 @@ impl Function<'_, '_, '_> {
                     HostOp::Open => (args[1], args[2]),
                     HostOp::Read
                     | HostOp::Write
+                    | HostOp::OpenDir
+                    | HostOp::Stat
+                    | HostOp::NextEntries
                     | HostOp::Mkdir
                     | HostOp::Mkdtemp
                     | HostOp::Remove
@@ -201,6 +204,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::Stderr
                     | HostOp::Random => (args[1], no_mode),
                     HostOp::Close
+                    | HostOp::Entries
+                    | HostOp::StatFile
                     | HostOp::TryLock
                     | HostOp::Unlock
                     | HostOp::WallMs
@@ -295,6 +300,12 @@ impl Function<'_, '_, '_> {
                         &[U, K, Ty::Scalar(Scalar::U32), U, K],
                         &[self.context, args[0], args[1], site],
                     )?,
+                    HostOp::Stat | HostOp::StatFile => self.c_call(
+                        op.io_symbol(),
+                        &[P, K, U, P, K, U],
+                        &[U, K, Ty::Scalar(Scalar::U32), Ty::Scalar(Scalar::I64), K, K],
+                        &[self.context, code, args[0], operand, mode, site],
+                    )?,
                     _ => self.c_call(
                         op.io_symbol(),
                         &[P, K, U, P, K, U],
@@ -319,6 +330,9 @@ impl Function<'_, '_, '_> {
                         outputs[i] = values[i + 1];
                     }
                     8
+                } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
+                    outputs[4] = values[5];
+                    5
                 } else {
                     n
                 }

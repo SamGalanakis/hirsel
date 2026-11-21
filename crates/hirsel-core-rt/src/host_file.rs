@@ -1,4 +1,4 @@
-//! Provider-aware mechanical HostFile ownership. The native carrier is a u64
+//! Provider-aware ownership of mechanical files and listings. The carrier is a u64
 //! run-local key; provider metadata is private and never read inline by emitters.
 use crate::{Context, provider::*};
 use std::{
@@ -13,6 +13,7 @@ struct File {
     provider: Provider,
     handle: u64,
     mode: u8,
+    close_op: u8,
 }
 // SAFETY: transferring the opaque callback descriptor does not access its
 // state. The runtime invokes it under the run's provider calling contract.
@@ -165,6 +166,7 @@ impl Registry {
             provider,
             handle,
             mode: 0,
+            close_op: CLOSE,
         })
     }
     pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {
@@ -198,11 +200,11 @@ unsafe fn close_files(files: &mut BTreeMap<u64, File>, context: *mut Context) {
     }
 }
 
-fn close_request(handle: u64, site: u64) -> Request {
+fn close_request(file: File, site: u64) -> Request {
     Request {
-        operation: CLOSE,
+        operation: file.close_op,
         mode: 0,
-        handle,
+        handle: file.handle,
         path: ptr::null(),
         path_len: 0,
         buffer: Buffer {
@@ -218,20 +220,15 @@ unsafe fn close(context: *mut Context, file: File) {
     // driver's C check and W/I cancellation do not apply under the shield.
     unsafe {
         (*context).cancel_shield += 1;
-        let _ = drive(
-            context,
-            &file.provider,
-            &mut close_request(file.handle, 0),
-            None,
-        );
+        let _ = drive(context, &file.provider, &mut close_request(file, 0), None);
         (*context).cancel_shield -= 1;
     }
 }
 
-/// Open through the selected provider and publish an eight-byte HostFile key.
+/// Open a mechanical file or listing through the selected provider.
 /// No logical admission; registry storage is provider bookkeeping (MEM-24).
 /// # Safety
-/// Live run context, provider and OPEN request; callbacks obey CAP-8 and retain
+/// Live run context, provider and OPEN or ENTRIES request; callbacks obey CAP-8 and retain
 /// their state until the run closes its grants. Success transfers sole ownership.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_file_open(
@@ -243,6 +240,11 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
     unsafe {
         let mut issued = None;
         let mode = (*request).mode;
+        let close_op = if (*request).operation == ENTRIES {
+            CLOSE_ENTRIES
+        } else {
+            CLOSE
+        };
         let mut result = drive(context, provider, request, Some(&mut issued));
         let Some(issued) = issued else {
             return result;
@@ -253,15 +255,17 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
                 provider,
                 handle: result.value,
                 mode,
+                close_op,
             });
         } else if issued.status == 0 && issued.error == IoError::OK {
-            // Delivery failed after a committed open: the unpublished file is ours.
+            // Delivery failed after issue opened a resource. Close the unpublished key.
             close(
                 context,
                 File {
                     provider,
                     handle: issued.value,
                     mode,
+                    close_op,
                 },
             );
         }
@@ -309,7 +313,7 @@ pub unsafe extern "C" fn hirsel_core_host_file(
     }
 }
 
-/// Mechanical drop: consume the file, bypass cancellation, ignore close outcome.
+/// Drop a file or listing, bypassing cancellation and ignoring close errors.
 /// Admits nothing, returns no failure status, and never retries an OS close.
 /// # Safety
 /// File is the sole live carrier in this run, consumed exactly once by this call.

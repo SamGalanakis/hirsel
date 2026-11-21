@@ -181,7 +181,9 @@ fn paths_cannot_escape_grants_and_tree_drop_never_follows_links() {
     f.simple(CLOSE, h, b"", 0);
     let nested = f.root.join("nested");
     std::fs::create_dir(&nested).unwrap();
-    let dir = f.os.grant(&nested).unwrap();
+    let dir = f.simple(OPEN_DIR, f.dir, b"nested", 0);
+    assert_eq!(dir.error, IoError::OK);
+    let dir = dir.value;
     let inside_file = nested.join("original");
     let outside_file = f.root.join("elsewhere");
     std::fs::write(&inside_file, b"original").unwrap();
@@ -193,6 +195,58 @@ fn paths_cannot_escape_grants_and_tree_drop_never_follows_links() {
     std::fs::remove_file(nested.join("name")).unwrap();
     symlink("../elsewhere", nested.join("name")).unwrap();
     assert_eq!(f.simple(OPEN, dir, b"name", 1).error.tag, 2);
+    assert_eq!(f.simple(OPEN_DIR, dir, b"name", 0).error.tag, 2);
+    // The final link is itself metadata inside the grant. Following it would
+    // report the external file size or refuse the confined lookup.
+    let link = f.simple(STAT, dir, b"name", 0);
+    assert_eq!(
+        (link.error, link.kind, link.value),
+        (IoError::OK, 2, 12),
+        "stat reports the link itself"
+    );
+    for path in [b"../elsewhere".as_slice(), b"/elsewhere"] {
+        assert_eq!(f.simple(OPEN_DIR, dir, path, 0).error.tag, 2);
+        assert_eq!(f.simple(STAT, dir, path, 0).error.tag, 2);
+    }
+    symlink("..", nested.join("up")).unwrap();
+    assert_eq!(f.simple(OPEN_DIR, dir, b"up/nested", 0).error.tag, 2);
+    assert_eq!(f.simple(STAT, dir, b"up/elsewhere", 0).error.tag, 2);
+    std::fs::create_dir_all(nested.join("inside/child")).unwrap();
+    symlink("inside", nested.join("through")).unwrap();
+    assert_eq!(f.simple(OPEN_DIR, dir, b"through", 0).error.tag, 2);
+    assert_eq!(
+        f.simple(OPEN_DIR, dir, b"through/child", 0).error,
+        IoError::OK
+    );
+    let listing = f.simple(ENTRIES, dir, b"", 0);
+    assert_eq!(listing.error, IoError::OK);
+    let mut records = [0; 258];
+    let (batch, len) = f.call(NEXT_ENTRIES, listing.value, b"", 0, &mut records, 0);
+    assert_eq!((batch.error, batch.value), (IoError::OK, 5));
+    let mut names = Vec::new();
+    let mut tail = &records[..len];
+    while let Some(([kind, lo, hi], bytes)) = tail.split_first_chunk::<3>() {
+        let (name, rest) = bytes.split_at(u16::from_le_bytes([*lo, *hi]) as usize);
+        names.push((name, *kind));
+        tail = rest;
+    }
+    assert!(tail.is_empty());
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            (b"inside".as_slice(), 1),
+            (b"name", 2),
+            (b"original", 0),
+            (b"through", 2),
+            (b"up", 2)
+        ],
+        "listing sees only direct names and does not dereference links"
+    );
+    assert_eq!(
+        f.simple(CLOSE_ENTRIES, listing.value, b"", 0).error,
+        IoError::OK
+    );
     assert_eq!(std::fs::read(inside_file).unwrap(), b"original");
     assert_eq!(std::fs::read(outside_file).unwrap(), b"outside");
     assert_eq!(f.simple(MKDIR, f.dir, b"tree", 0).error, IoError::OK);
@@ -395,7 +449,7 @@ fn rename_follows_each_sentence_of_core_md() {
 }
 #[test]
 fn invalid_host_paths_are_denied_before_any_effect() {
-    for operation in [OPEN, MKDIR, REMOVE, REMOVE_TREE] {
+    for operation in [OPEN, MKDIR, REMOVE, REMOVE_TREE, OPEN_DIR, STAT] {
         let mut f = Fixture::new();
         std::fs::create_dir(f.root.join("a")).unwrap();
         std::fs::write(f.root.join("keep"), b"root").unwrap();

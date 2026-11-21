@@ -210,7 +210,7 @@ impl Role {
             "Task" => Role::Task,
             "Sender" => Role::Sender,
             "Receiver" => Role::Receiver,
-            "HostFile" => Role::HostFile,
+            "HostFile" | "HostEntries" => Role::HostFile,
             "Socket" | "ReadHalf" | "WriteHalf" | "Listener" => Role::Socket,
             "FixedSpan" => Role::FixedSpan,
             "SeqSpan" => Role::SeqSpan,

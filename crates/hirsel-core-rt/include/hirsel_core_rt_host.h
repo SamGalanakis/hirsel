@@ -4,8 +4,9 @@
 /* Provider operations: Open 0, Read 1, Write 2, Close 3, TryLock 4, Unlock 5,
    Mkdir 6, Mkdtemp 7, Remove 8, RemoveTree 9, WallMs 10, MonoNs 11,
    Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18,
-   Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28, Resolve 40.
-   ReadAt 37, WriteAt 38. Positioned requests carry an eight-byte little-endian
+   Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28.
+   ReadAt 37, WriteAt 38, Resolve 40, OpenDir 43, Entries 44, NextEntries 45,
+   Stat 46, StatFile 47, CloseEntries 48. Positioned requests carry an eight-byte little-endian
    offset in path and the original open mode in mode.
    Open modes: Read 0, Write 1, Append 2, CreateNew 3, ReadWrite 4. */
 typedef struct { uint8_t tag; uint32_t code; } HirselCoreIoError;
@@ -25,7 +26,7 @@ typedef struct {
     uint64_t value;
     HirselCoreIoError error;
     uint64_t written;
-    uint8_t status;
+    uint8_t status, kind;
 } HirselCoreHostOutcome;
 /* Four-state provider ABI (C cancelled at entry, W waiting, I issued, D delivered).
    Wait kind: 0 Ready, 1 Until(deadline_ns), 2 Park. Step kind: 0 Done, 1 Pending
@@ -53,14 +54,17 @@ typedef struct {
 void hirsel_core_ready(uint64_t token);
 HirselCoreHostOutcome hirsel_core_host(HirselCoreContext *, const HirselCoreProvider *, HirselCoreHostRequest *);
 /* FORM #50: outcome layout value@0, error.tag@8, error.code@12, written@16,
-   status@24 (failure convention 3c242a8a). error 0 succeeds; 1..5 are IoError
+   status@24 (failure convention 3c242a8a), kind@25. Stat returns size in value,
+   signed modification nanoseconds in written, and the file kind in kind. error 0 succeeds; 1..5 are IoError
    case + 1. Clock rows ignore status and use value; waiting rows can fail with
-   Cancelled, mkdtemp also Bounds. Only read/mkdtemp update operand.len; data
-   and capacity never change. Capacity 0 borrows storage (even if len > 0).
+   Cancelled. Mkdtemp, positioned I/O and NextEntries can also fail with Bounds.
+   Read, ReadAt, Mkdtemp and NextEntries can update operand.len; data and
+   capacity never change. Capacity 0 borrows storage (even if len > 0).
    No row admits or grows/frees carrier storage. Null operand for no operand. */
 HirselCoreHostOutcome hirsel_core_host_op(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_io(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_clock(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
+HirselCoreHostOutcome hirsel_core_host_stat(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_at(HirselCoreContext *, uint8_t op, uint64_t handle, uint64_t at, HirselCoreBuffer *operand, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_rename(HirselCoreContext *, uint64_t handle, HirselCoreBuffer *from, HirselCoreBuffer *to, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_sleep_until(HirselCoreContext *, uint64_t handle, uint64_t deadline_ns, uint64_t site);
@@ -71,7 +75,7 @@ HirselCoreHostOutcome hirsel_core_host_sleep_until(HirselCoreContext *, uint64_t
 typedef uint64_t HirselCoreHostFile;
 HirselCoreHostOutcome hirsel_core_host_file_open(HirselCoreContext *, const HirselCoreProvider *, HirselCoreHostRequest *);
 HirselCoreHostOutcome hirsel_core_host_file(HirselCoreContext *, HirselCoreHostFile, HirselCoreHostRequest *);
-/* Drop consumes a live key once: no admission, cancellation or failure result;
+/* Drop consumes a live file or listing key once, with no admission or cancellation;
    ignores close errors (MEM-24), never retries close. Remaining files close
    before grants at normal/failure exit; run stops skip cleanup (_exit closes
    descriptors). OS calls retain the guarded foreign-call stack rule. */

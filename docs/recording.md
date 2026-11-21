@@ -78,6 +78,13 @@ and every task the run starts belongs to it.
 **Canonical arguments.** An issue's arguments of 16 bytes or fewer are stored literally,
 and longer ones as their xxh3-64 digest.
 
+**Directory and positioned file operations.** Narrowing and opening a listing
+deliver new object ordinals. Each listing read checks the handle ordinal and
+spare capacity, then supplies whole records in the recorded order. Stat
+operations supply kind, size and signed modification nanoseconds. Positioned
+I/O checks the file ordinal, offset, and spare capacity or input bytes, then
+supplies the read bytes or the committed write count.
+
 **Sockets.** The run checks each LISTEN and CONNECT against its source Net rules, and a
 recording records a denied outcome as the delivery the run received. It records the bound
 LISTEN address and each ACCEPT peer address. It checks socket arguments at issue and stores

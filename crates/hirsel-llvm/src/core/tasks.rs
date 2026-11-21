@@ -69,6 +69,9 @@ impl FunctionEmitter<'_> {
             results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
         } else if op == HostOp::TlsConnect {
             results.extend([U; 4]);
+        } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
+            results[3] = Ty::Scalar(Scalar::I64);
+            results.push(K);
         }
         let mut values = match op {
             HostOp::Connect

@@ -141,6 +141,7 @@ impl AddressOutcome {
             error: self.error,
             written: self.written,
             status: self.status,
+            kind: 0,
         }
     }
 }
@@ -221,6 +222,7 @@ pub(crate) const DENIED: Outcome = Outcome {
     error: IoError { tag: 1, code: 0 },
     written: 0,
     status: 0,
+    kind: 0,
 };
 
 /// Check an address before issue. A tape records the denial for its inner grant
@@ -561,6 +563,7 @@ const RESET: Outcome = Outcome {
     value: 0,
     written: 0,
     status: 0,
+    kind: 0,
 };
 
 unsafe fn write_spent(files: *mut crate::host_file::Files, key: u64) -> bool {
@@ -854,6 +857,7 @@ unsafe fn narrow(context: *mut Context, n: u64, rule: GrantRule) -> Outcome {
                 error: IoError { tag: 2, code: 0 },
                 written: capacity.available,
                 status: 0,
+                kind: 0,
             };
         }
         let rules = RulesStorage::new(intersections);

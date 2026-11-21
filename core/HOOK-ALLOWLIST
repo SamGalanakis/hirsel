@@ -70,10 +70,12 @@ core@1/core/FloatError
 # DECISIONS.md 2026-11-18 (HTTP static bytes)
 core@1/core/FrozenBytes
 core@1/core/Heap
+core@1/core/HostEntries
 core@1/core/HostFile
 core@1/core/IndexedSpan
 core@1/core/IoError
 core@1/core/JoinError
+core@1/core/Kind
 core@1/core/Link
 core@1/core/List
 core@1/core/Log
@@ -99,6 +101,7 @@ core@1/core/SeqSpan
 core@1/core/Site
 core@1/core/SpanBuilder
 core@1/core/StaticFn
+core@1/core/Stat
 core@1/core/Stderr
 core@1/core/Stdin
 core@1/core/Stdout
@@ -184,10 +187,13 @@ core@1/heap/slots_shift
 core@1/heap/slots_take
 core@1/heap/slots_view
 core@1/host/close
+core@1/host/entries
 core@1/host/mkdir
 core@1/host/mkdtemp
 core@1/host/mono_ns
+core@1/host/next_entries
 core@1/host/open
+core@1/host/open_dir
 core@1/host/read
 core@1/host/read_at
 core@1/host/remove
@@ -196,6 +202,8 @@ core@1/host/rename
 # DECISIONS.md 2026-11-16 (CAP-5 / CAP-8, S5c)
 core@1/host/random
 core@1/host/sleep_until
+core@1/host/stat
+core@1/host/stat_file
 # DECISIONS.md 2026-11-18 (service-ops host stop source): the store runner
 # waits for the recorded stop through its Process grant (RUNNER-SPEC §12.4).
 core@1/host/stopped

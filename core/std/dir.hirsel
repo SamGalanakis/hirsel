@@ -1,15 +1,87 @@
 // Module `dir`: directories below a Dir, the capability for one directory tree (CAP-1,
 // CAP-2, CAP-7). Dir is a core capability type, plain and `send`; copying it copies the
 // designation. A run's Dirs come from `main`'s granted parameters (CAP-4) and from
-// `create_temp`. Paths are Strings resolved relative to their Dir, which they may not
+// `create_temp` and `narrow`. Paths are Strings resolved relative to their Dir, which they may not
 // leave (core.md); the seed has no Path type. Every operation is library code over one
 // host primitive, passes the replay point at issue and at delivery (CAP-8) and, being
 // `waits`, is a cancellation point (CONC-7). Field legend: API.md; "Prefix:" says what has
-// happened on the host when the operation fails or is cancelled part way. No operation
-// here admits anything (core.md, "Host").
-//
-// Left out: `narrow` (a Dir for a subdirectory). core.md has no host primitive that
-// returns a Dir for an existing directory, only `host.mkdtemp`.
+// happened on the host when the operation fails or is cancelled part way.
+pub type Entry {
+    name: String,
+    kind: Kind
+}
+
+/// Opens an existing directory below d. The final component cannot be a symlink.
+pub fn narrow(d: Dir, p: String) -> Result[Dir, IoError] waits {
+    host.open_dir(d, p)
+}
+
+/// Opens a listing of d's root. Dropping the handle closes it.
+pub fn entries(d: Dir) -> Result[HostEntries, IoError] waits {
+    host.entries(d)
+}
+
+/// Appends whole records in host order. Fails Bounds with fewer than 258 spare bytes.
+pub fn next_entries(mut h: HostEntries, mut buf: Bytes) -> Result[u64, IoError] waits {
+    host.next_entries(mut h, mut buf)
+}
+
+/// Reports the final component's metadata without following a symbolic link.
+pub fn stat(d: Dir, p: String) -> Result[Stat, IoError] waits {
+    host.stat(d, p)
+}
+
+/// Lists d's direct entries in bytewise name order. Names must be valid UTF-8.
+pub fn list(d: Dir) -> Result[List[Entry], file.Error] waits {
+    let mut handle = match entries(d) {
+        Ok(take h) => take h,
+        Error(e) => return Error(Io(e)),
+    }
+    let mut buf: Bytes = match (list.with_capacity(4096) : Result[Bytes, Capacity]) {
+        Ok(take b) => take b,
+        Error(c) => return Error(Capacity(c)),
+    }
+    let mut result: List[Entry] = list.new()
+    loop {
+        match next_entries(mut handle, mut buf) {
+            Ok(0) => break,
+            Ok(_) => {},
+            Error(e) => return Error(Io(e)),
+        }
+        let mut at: u64 = 0
+        while at < list.len(buf) {
+            let kind: Kind = match buf[at] {
+                0 => File,
+                1 => Directory,
+                2 => Symlink,
+                _ => Other,
+            }
+            let size: u16 = list.word_le(buf, at + 1)
+            let from = at + 3
+            at = from + int.widen(size)
+            let mut name_bytes: Bytes = match (list.with_capacity(int.widen(size)) : Result[Bytes, Capacity]) {
+                Ok(take b) => take b,
+                Error(c) => return Error(Capacity(c)),
+            }
+            if let Error(c) = list.append(mut name_bytes, list.slice(buf, from, at)) {
+                return Error(Capacity(c))
+            }
+            let name = match string.from_utf8(take name_bytes) {
+                Ok(take name) => take name,
+                Error(_) => return Error(NotUtf8),
+            }
+            if let Error((c, _)) = list.push(mut result, Entry(name: take name, kind: kind)) {
+                return Error(Capacity(c))
+            }
+        }
+        list.clear(mut buf)
+    }
+    list.sort(mut result, fn(a: Entry, b: Entry) -> Order {
+        order.compare(a.name, b.name)
+    })
+    Ok(take result)
+}
+
 /// Creates the directory p; its parent must exist. `host.mkdir`.
 /// Fails: Error(Exists | NotFound | Denied | Other(_)).
 /// Prefix: on failure nothing was created; a cancellation observed at delivery leaves the

@@ -237,8 +237,10 @@ class Resolution:
             name = self.packages[member]['name']
             modes = [(False, []), (True, [])]
             if name == 'hirsel-core-rt':
-                # The recording archive adds a dependency as well as local cfgs.
-                modes.append((False, ['--features', 'record']))
+                # The unit harness includes Openat2 recording cases. Keep the
+                # default archive separate and resolve record's optional deps.
+                record = ['--features', 'record']
+                modes = [(False, []), (True, record), (False, record)]
             for testing, feature_args in modes:
                 builds.append((member, testing, feature_args))
                 for config in self.platforms.values():
@@ -252,7 +254,7 @@ class Resolution:
             target_keys = self.add_platforms(graphs)
             graph = graphs[self.host_platform]
             keys = target_keys[self.host_platform]
-            if feature_args:
+            if feature_args and not testing:
                 root_index, = graph['roots']
                 self.record_runtime = keys[root_index]
                 continue

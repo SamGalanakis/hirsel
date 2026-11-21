@@ -773,10 +773,13 @@ impl Args {
     }
 }
 
-/// What an operation of a given op tag carries in its outcome.
+/// Whether the operation encodes an extra byte count in its outcome.
 pub fn writes(op: u8) -> bool {
     use crate::op::*;
-    matches!(op, WRITE | WRITE_AT | STDOUT | STDERR | RANDOM)
+    matches!(
+        op,
+        WRITE | WRITE_AT | STDOUT | STDERR | RANDOM | NEXT_ENTRIES
+    )
 }
 /// One family byte followed by the 16 IP octets.
 pub const RESOLVED_IP_LEN: usize = 17;
@@ -795,6 +798,9 @@ pub fn carries_payload(op: u8) -> bool {
             | SECRET_MAC
             | RESOLVE
             | STDIN_READ
+            | NEXT_ENTRIES
+            | STAT
+            | STAT_FILE
     )
 }
 
@@ -807,7 +813,7 @@ pub struct Out {
     /// Error tag and code, present exactly when `status` is ERROR.
     pub error: (u8, u64),
     pub written: u64,
-    /// Input bytes, a temporary-directory suffix, addresses, or TLS handshake data.
+    /// Delivered bytes, directory records, metadata, socket or TLS data.
     pub payload: Vec<u8>,
 }
 impl Out {
@@ -908,7 +914,7 @@ impl Out {
                 .ok_or(Corrupt),
             op::RESOLVE if self.value != 0 => Err(Corrupt),
             op::RECV_BOUNDED | op::RESOLVE | op::STDIN_READ => Ok(0),
-            op::RANDOM => usize::try_from(self.written).map_err(|_| Corrupt),
+            op::RANDOM | op::NEXT_ENTRIES => usize::try_from(self.written).map_err(|_| Corrupt),
             _ => Ok(self.payload.len()),
         }
     }

@@ -1,6 +1,9 @@
 //! Linux descriptor-relative host operations. No path is authorized by a prior
 //! canonicalization. openat2 resolves every traversal beneath its granted fd.
 use crate::provider::*;
+
+mod listing;
+use listing::Listing;
 use std::{
     collections::BTreeMap,
     ffi::{CStr, CString},
@@ -44,6 +47,7 @@ pub struct OsProvider {
     epoch: u64,
     directories: BTreeMap<u64, OwnedFd>,
     files: BTreeMap<u64, OwnedFd>,
+    listings: BTreeMap<u64, Listing>,
     next: u64,
     temporary: u64,
     pub(crate) inherited_listener: Mutex<Option<OwnedFd>>,
@@ -69,6 +73,7 @@ impl OsProvider {
             epoch: monotonic_ns(),
             directories: BTreeMap::new(),
             files: BTreeMap::new(),
+            listings: BTreeMap::new(),
             next: 1,
             temporary: 0,
             inherited_listener: Mutex::new(None),
@@ -130,7 +135,10 @@ impl OsProvider {
         } else {
             unsafe { std::slice::from_raw_parts(request.path, request.path_len) }
         };
-        if matches!(request.operation, OPEN | MKDIR | REMOVE | REMOVE_TREE) {
+        if matches!(
+            request.operation,
+            OPEN | MKDIR | REMOVE | REMOVE_TREE | OPEN_DIR | STAT
+        ) {
             valid_path(path)?;
         }
         match request.operation {
@@ -148,6 +156,57 @@ impl OsProvider {
                 self.files.insert(id, fd);
                 out.value = id;
             }
+            OPEN_DIR => {
+                let root = self.directories[&request.handle].as_raw_fd();
+                let flags = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_RDONLY;
+                let dir = beneath(root, path, flags).map_err(|error| {
+                    if error.raw_os_error() == Some(libc::ENOTDIR) {
+                        io::Error::from_raw_os_error(libc::EACCES)
+                    } else {
+                        error
+                    }
+                })?;
+                let id = self.id();
+                self.directories.insert(id, dir);
+                out.value = id;
+            }
+            ENTRIES => {
+                let root = self.directories[&request.handle].as_raw_fd();
+                // Open a fresh description so independently opened listings have distinct cursors.
+                let fd = beneath(root, b".", libc::O_RDONLY | libc::O_DIRECTORY)?;
+                let listing = Listing::open(fd)?;
+                let id = self.id();
+                self.listings.insert(id, listing);
+                out.value = id;
+            }
+            NEXT_ENTRIES => {
+                let listing = self
+                    .listings
+                    .get_mut(&request.handle)
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
+                match listing.append(&mut request.buffer) {
+                    Ok(count) => out.value = count,
+                    Err(error) => {
+                        out.error = IoError {
+                            tag: 5,
+                            code: error.raw_os_error().unwrap_or(libc::EIO) as u32,
+                        };
+                    }
+                }
+            }
+            CLOSE_ENTRIES => {
+                let listing = self
+                    .listings
+                    .remove(&request.handle)
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
+                drop(listing);
+            }
+            STAT => {
+                let root = self.directories[&request.handle].as_raw_fd();
+                let fd = beneath(root, path, libc::O_PATH | libc::O_NOFOLLOW)?;
+                return stat(fd.as_raw_fd());
+            }
+            STAT_FILE => return stat(self.files[&request.handle].as_raw_fd()),
             READ | READ_AT => {
                 let fd = self.files[&request.handle].as_raw_fd();
                 let offset = (request.operation == READ_AT).then(|| request.offset());
@@ -873,25 +932,52 @@ fn parent(fd: i32, path: &[u8]) -> io::Result<(OwnedFd, CString)> {
 /// The file type (`S_IFMT` bits) of `name` in `parent`, not following a final link;
 /// `None` when nothing has that name.
 fn leaf_kind(parent: &OwnedFd, name: &CString) -> io::Result<Option<libc::mode_t>> {
-    // SAFETY: zeroed stat is a valid out-parameter for fstatat.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: pinned parent, NUL-terminated leaf, live out-parameter.
+    Ok(leaf_stat(parent.as_raw_fd(), name)?.map(|st| st.st_mode & libc::S_IFMT))
+}
+
+fn leaf_stat(parent: i32, name: &CStr) -> io::Result<Option<libc::stat>> {
+    // SAFETY: the parent descriptor and basename are live. The final link is not followed.
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     let rc = unsafe {
         libc::fstatat(
-            parent.as_raw_fd(),
+            parent,
             name.as_ptr(),
-            &mut st,
+            st.as_mut_ptr(),
             libc::AT_SYMLINK_NOFOLLOW,
         )
     };
-    if rc == 0 {
-        return Ok(Some(st.st_mode & libc::S_IFMT));
+    match syscall(rc as isize) {
+        // SAFETY: a successful fstatat initialized the out parameter.
+        Ok(_) => Ok(Some(unsafe { st.assume_init() })),
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
+        Err(error) => Err(error),
     }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ENOENT) {
-        return Ok(None);
+}
+
+fn stat(fd: i32) -> io::Result<Outcome> {
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the caller retains fd and fstat writes the supplied stat.
+    syscall(unsafe { libc::fstat(fd, st.as_mut_ptr()) } as isize)?;
+    let st = unsafe { st.assume_init() };
+    let overflow = |_| io::Error::from_raw_os_error(libc::EOVERFLOW);
+    let size = u64::try_from(st.st_size).map_err(overflow)?;
+    let nanos = i128::from(st.st_mtime) * 1_000_000_000 + i128::from(st.st_mtime_nsec);
+    let nanos = i64::try_from(nanos).map_err(overflow)?;
+    Ok(Outcome {
+        value: size,
+        written: nanos as u64,
+        kind: file_kind(st.st_mode),
+        ..Outcome::default()
+    })
+}
+
+fn file_kind(mode: libc::mode_t) -> u8 {
+    match mode & libc::S_IFMT {
+        libc::S_IFREG => 0,
+        libc::S_IFDIR => 1,
+        libc::S_IFLNK => 2,
+        _ => 3,
     }
-    Err(error)
 }
 fn remove(fd: i32, name: &CString) -> io::Result<()> {
     // SAFETY: unlinkat never follows the final symlink; directory removal is retried explicitly.

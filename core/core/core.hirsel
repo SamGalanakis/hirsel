@@ -160,6 +160,16 @@ pub type RuleError = Invalid | Capacity(Capacity)
 
 pub opaque resource type HostFile
 
+pub opaque resource type HostEntries
+
+pub type Kind = File | Directory | Symlink | Other
+
+pub type Stat {
+    kind: Kind,
+    size: u64,
+    modified_ns: i64
+}
+
 pub type OpenMode = Read | Write | Append | CreateNew | ReadWrite
 
 pub type Capacity {

@@ -1007,6 +1007,11 @@ pub enum HostOp {
     SendSecret = 23,
     SecretSeal = 30,
     SecretNarrow = 31,
+    OpenDir = hirsel_core_ids::host_op::OPEN_DIR as isize,
+    Entries = hirsel_core_ids::host_op::ENTRIES as isize,
+    NextEntries = hirsel_core_ids::host_op::NEXT_ENTRIES as isize,
+    Stat = hirsel_core_ids::host_op::STAT as isize,
+    StatFile = hirsel_core_ids::host_op::STAT_FILE as isize,
     ReadAt = 37,
     WriteAt = 38,
     SecretHmac = hirsel_core_ids::host_op::SECRET_MAC as isize,
@@ -1025,6 +1030,7 @@ impl HostOp {
     pub fn io_symbol(self) -> &'static str {
         match self {
             Self::WallMs | Self::MonoNs => "hirsel_core_host_clock",
+            Self::Stat | Self::StatFile => "hirsel_core_host_stat",
             Self::Random | Self::Stdout | Self::Stderr | Self::Stopped => "hirsel_core_host_io",
             _ => "hirsel_core_host_op",
         }
@@ -1065,6 +1071,11 @@ impl HostOp {
         HostOp::NetNarrowTls,
         HostOp::NetSplit,
         HostOp::Stopped,
+        HostOp::OpenDir,
+        HostOp::Entries,
+        HostOp::NextEntries,
+        HostOp::Stat,
+        HostOp::StatFile,
         HostOp::ReadAt,
         HostOp::WriteAt,
         HostOp::Resolve,
@@ -1084,6 +1095,11 @@ impl HostOp {
         match self {
             HostOp::Open => "host_open",
             HostOp::Read => "host_read",
+            HostOp::OpenDir => "host_open_dir",
+            HostOp::Entries => "host_entries",
+            HostOp::NextEntries => "host_next_entries",
+            HostOp::Stat => "host_stat",
+            HostOp::StatFile => "host_stat_file",
             HostOp::ReadAt => "host_read_at",
             HostOp::WriteAt => "host_write_at",
             HostOp::Write => "host_write",
@@ -1432,7 +1448,19 @@ impl RtOp {
                     HostOp::ReadAt | HostOp::WriteAt => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::SleepUntil => (vec![V(u64_), V(u64_)], outcome),
+                    HostOp::Stat | HostOp::StatFile => {
+                        let mut metadata = outcome;
+                        metadata[3] = Ty::Scalar(Scalar::I64);
+                        metadata.push(u8_);
+                        let params = if op == HostOp::Stat {
+                            vec![V(u64_), V(p)]
+                        } else {
+                            vec![V(u64_)]
+                        };
+                        (params, metadata)
+                    }
                     HostOp::Close
+                    | HostOp::Entries
                     | HostOp::TryLock
                     | HostOp::Unlock
                     | HostOp::Sync

@@ -395,6 +395,11 @@ tags!(HostOp {
     40 => Resolve,
     41 => NetNarrowResolve,
     42 => SecretVerifyHmac,
+    43 => OpenDir,
+    44 => Entries,
+    45 => NextEntries,
+    46 => Stat,
+    47 => StatFile,
 });
 
 tags!(RaiseCause {

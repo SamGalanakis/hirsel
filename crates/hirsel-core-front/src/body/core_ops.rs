@@ -151,6 +151,11 @@ operations! {
     ("host", "open", Lane::Runtime(Kernel::Host(HostOp::Open)), "B", "core-ops-914", false),
     ("host", "read", Lane::Runtime(Kernel::Host(HostOp::Read)), "B", "core-ops-914", false),
     ("host", "write", Lane::Runtime(Kernel::Host(HostOp::Write)), "B", "core-ops-914", false),
+    ("host", "open_dir", Lane::Runtime(Kernel::Host(HostOp::OpenDir)), "B", "fs-ops-1502", false),
+    ("host", "entries", Lane::Runtime(Kernel::Host(HostOp::Entries)), "B", "fs-ops-1502", false),
+    ("host", "next_entries", Lane::Runtime(Kernel::Host(HostOp::NextEntries)), "B", "fs-ops-1502", false),
+    ("host", "stat", Lane::Runtime(Kernel::Host(HostOp::Stat)), "B", "fs-ops-1502", false),
+    ("host", "stat_file", Lane::Runtime(Kernel::Host(HostOp::StatFile)), "B", "fs-ops-1502", false),
     ("host", "read_at", Lane::Runtime(Kernel::Host(HostOp::ReadAt)), "B", "fs-ops-1502", false),
     ("host", "write_at", Lane::Runtime(Kernel::Host(HostOp::WriteAt)), "B", "fs-ops-1502", false),
     ("host", "close", Lane::Runtime(Kernel::Host(HostOp::Close)), "B", "core-ops-914", false),
@@ -2686,6 +2691,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 | HostOp::Write
                 | HostOp::ReadAt
                 | HostOp::WriteAt
+                | HostOp::NextEntries
+                | HostOp::StatFile
                 | HostOp::Close
                 | HostOp::TryLock
                 | HostOp::Unlock
@@ -2714,6 +2721,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             HostOp::Read
             | HostOp::Write
+            | HostOp::OpenDir
+            | HostOp::NextEntries
+            | HostOp::Stat
             | HostOp::Mkdir
             | HostOp::Mkdtemp
             | HostOp::Remove
@@ -2735,7 +2745,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             // Its failure cleanup must not close the same key a second time.
             self.consume(vals[0], n);
         }
-        let [value, error, code, written] = self.runtime_row(RtOp::Host(op), &args[..len], n)?;
+        let stat = matches!(op, HostOp::Stat | HostOp::StatFile);
+        let (value, error, code, written, kind) = if stat {
+            let [value, error, code, time, kind] =
+                self.runtime_outputs(RtOp::Host(op), &args[..len], n)?;
+            (value, error, code, time, Some(kind))
+        } else {
+            let [value, error, code, written] =
+                self.runtime_row(RtOp::Host(op), &args[..len], n)?;
+            (value, error, code, written, None)
+        };
         if matches!(op, HostOp::WallMs | HostOp::MonoNs) {
             return Some(value);
         }
@@ -2745,15 +2764,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ok,
             n,
             |cx, to, ty| match op {
-                HostOp::Open => {
+                HostOp::Open | HostOp::Entries => {
                     if let Some(to) =
                         cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
                     {
                         cx.runtime_store(to, &[], u64t, value, n);
                     }
                 }
-                HostOp::Read | HostOp::ReadAt | HostOp::Mkdtemp | HostOp::Random => {
-                    cx.runtime_case_payload(to, 0, ty, Some(value), n)
+                HostOp::Read
+                | HostOp::ReadAt
+                | HostOp::Mkdtemp
+                | HostOp::Random
+                | HostOp::OpenDir
+                | HostOp::NextEntries => cx.runtime_case_payload(to, 0, ty, Some(value), n),
+                HostOp::Stat | HostOp::StatFile => {
+                    if let Some(at) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                    {
+                        cx.runtime_stat(ty, at, kind.unwrap(), value, written, n);
+                    }
                 }
                 HostOp::TryLock => {
                     if let Some(boolean) = cx.runtime_nonzero(u64t, value, n) {
@@ -2777,6 +2806,51 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             },
         )
+    }
+
+    fn runtime_stat(
+        &mut self,
+        ty: TyId,
+        at: AddressId,
+        kind: ValueId,
+        size: ValueId,
+        modified_ns: ValueId,
+        n: NodeId,
+    ) {
+        let Some((_, tag)) = self.net_field(ty, at, 0, n) else {
+            return;
+        };
+        self.runtime_store(at, &[Step::Field(1)], Ty::Scalar(Scalar::U64), size, n);
+        self.runtime_store(
+            at,
+            &[Step::Field(2)],
+            Ty::Scalar(Scalar::I64),
+            modified_ns,
+            n,
+        );
+        let join = self.new_block(&[]);
+        for case in 0..3 {
+            let Some(matches) = self.runtime_compare(Ty::Scalar(Scalar::U8), kind, case as u64, n)
+            else {
+                return;
+            };
+            let yes = self.new_block(&[]);
+            let next = self.new_block(&[]);
+            self.runtime_branch(matches, yes, next, n);
+            self.start(yes);
+            self.inst(Inst::SetCase { address: tag, case }, n);
+            self.jump(join, &[], n);
+            self.start(next);
+        }
+        self.inst(
+            Inst::SetCase {
+                address: tag,
+                case: 3,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
     }
 
     /// A HostFile's entire carrier is the opaque u64 key into the run's

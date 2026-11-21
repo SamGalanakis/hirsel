@@ -2304,7 +2304,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             }
             HostOp::ReadAt | HostOp::WriteAt => &["u64", "u64", "ptr"],
             HostOp::SleepUntil => &["u64", "u64"],
-            HostOp::Sync | HostOp::SyncDir => &["u64"],
+            HostOp::Sync | HostOp::SyncDir | HostOp::Entries | HostOp::StatFile => &["u64"],
             _ => &["u64", "ptr"],
         };
         let results: &[&str] = if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
@@ -2315,6 +2315,8 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             &["u64", "u8", "u32", "u64", "u8", "u64", "u64", "u16"]
         } else if op == HostOp::TlsConnect {
             &["u64", "u8", "u32", "u64", "u64", "u64", "u64", "u64"]
+        } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
+            &["u64", "u8", "u32", "i64", "u8"]
         } else if !matches!(op, HostOp::WallMs | HostOp::MonoNs) {
             &["u64", "u8", "u32", "u64"]
         } else {

@@ -134,6 +134,7 @@ pub const REFUSED: Outcome = Outcome {
     error: IoError::OK,
     written: 0,
     status: STATUS_REFUSED,
+    kind: 0,
 };
 
 thread_local! {
@@ -175,8 +176,8 @@ unsafe impl Send for Inner {}
 struct Object {
     /// Record: the source. Replay: none, so nothing can reach the host.
     inner: Option<Inner>,
-    /// A HostFile still open: closed by the tape's end, with no frame.
-    open_file: bool,
+    /// A file or listing still owned by its mechanical carrier.
+    open_resource: bool,
 }
 
 struct Recorder {
@@ -260,8 +261,8 @@ struct Delivery {
 struct State {
     generation: u32,
     live: Option<Live>,
-    /// Record's HostFiles still open when their tape ended, by substitute
-    /// handle: their cleanup closes the inner file with no frame.
+    /// Recorded files and listings still owned at tape end. Their cleanup
+    /// closes the inner resource without writing a frame.
     orphans: BTreeMap<u64, Inner>,
     /// Record's SYNC and SYNC_DIR the inner provider accepted, by request
     /// address. An issued sync cannot be aborted, so its result is consumed
@@ -645,7 +646,10 @@ fn socket_op(op: u8) -> bool {
 }
 
 fn creates_object(op: u8) -> bool {
-    matches!(op, OPEN | MKDTEMP | LISTEN | CONNECT | ACCEPT | TLS_CONNECT)
+    matches!(
+        op,
+        OPEN | OPEN_DIR | ENTRIES | MKDTEMP | LISTEN | CONNECT | ACCEPT | TLS_CONNECT
+    )
 }
 
 fn waiting_io(op: u8) -> bool {
@@ -806,7 +810,7 @@ unsafe fn canonical(r: &Request) -> Args {
                 a.extend_from_slice(path);
                 a
             }
-            READ | RANDOM => (r.buffer.capacity.saturating_sub(r.buffer.len) as u64)
+            READ | RANDOM | NEXT_ENTRIES => (r.buffer.capacity.saturating_sub(r.buffer.len) as u64)
                 .to_le_bytes()
                 .to_vec(),
             READ_AT => {
@@ -815,7 +819,7 @@ unsafe fn canonical(r: &Request) -> Args {
             }
             WRITE_AT => return Args::of_parts(&[path, bytes]),
             WRITE | STDOUT | STDERR | MKDTEMP => bytes.to_vec(),
-            MKDIR | REMOVE | REMOVE_TREE | RENAME => path.to_vec(),
+            MKDIR | REMOVE | REMOVE_TREE | RENAME | OPEN_DIR | STAT => path.to_vec(),
             SLEEP_UNTIL => bytes.to_vec(),
             _ => vec![],
         })
@@ -1121,7 +1125,7 @@ impl Tape {
         };
         live.objects.push(Object {
             inner,
-            open_file: false,
+            open_resource: false,
         });
         let h = handle(generation, live.objects.len());
         Ok((self.cell.provider, h, stored))
@@ -1171,7 +1175,7 @@ fn finish(
         .checked_add(1)
         .unwrap_or_else(|| crate::process::stop(b"TapeSlots"));
     for (i, o) in live.objects.iter().enumerate() {
-        if let (true, Some(inner)) = (o.open_file, o.inner) {
+        if let (true, Some(inner)) = (o.open_resource, o.inner) {
             s.orphans.insert(handle(generation, i + 1), inner);
         }
     }
@@ -1406,13 +1410,13 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     let key = r as *mut Request as usize;
     let mut s = cell.state.lock().unwrap();
     if s.generation != generation_of(h) || s.live.is_none() {
-        let orphan = (r.operation == CLOSE)
+        let orphan = matches!(r.operation, CLOSE | CLOSE_ENTRIES)
             .then(|| s.orphans.remove(&h))
             .flatten();
         drop(s);
         if let Some(inner) = orphan {
             // SAFETY: the inner file is still the run's; nothing records it.
-            let _ = unsafe { sink(inner, request(CLOSE, 0, 0, &[], empty_buffer())) };
+            let _ = unsafe { sink(inner, request(r.operation, 0, 0, &[], empty_buffer())) };
         }
         refuse(Fault::Ended);
         return done(REFUSED);
@@ -1549,14 +1553,14 @@ unsafe fn record_out(
                 provider: inner.provider,
                 handle: o.value,
             }),
-            open_file: r.operation == OPEN,
+            open_resource: matches!(r.operation, OPEN | ENTRIES),
         });
         out.value = live.objects.len() as u64;
         answer.value = handle(generation, live.objects.len());
         created = Some(answer.value);
     }
-    if ok && r.operation == CLOSE {
-        live.objects[ordinal - 1].open_file = false;
+    if ok && matches!(r.operation, CLOSE | CLOSE_ENTRIES) {
+        live.objects[ordinal - 1].open_resource = false;
     }
     if clock(r.operation) {
         let prev = live
@@ -1569,6 +1573,9 @@ unsafe fn record_out(
         // SAFETY: the source wrote the address into the pinned network operand.
         let network = unsafe { &*r.path.cast::<crate::net::NetworkRequest>() };
         out.payload = address_bytes(network.address).to_vec();
+    } else if ok && matches!(r.operation, STAT | STAT_FILE) {
+        out.payload.push(o.kind);
+        out.payload.extend_from_slice(&o.written.to_le_bytes());
     } else if ok && r.operation == RESOLVE {
         // SAFETY: the resolve provider initialized these Ip elements in spare.
         for i in before..r.buffer.len {
@@ -1597,6 +1604,9 @@ unsafe fn record_out(
         out.payload =
             unsafe { std::slice::from_raw_parts(r.buffer.data.add(before), r.buffer.len - before) }
                 .to_vec();
+    }
+    if r.operation == NEXT_ENTRIES {
+        out.written = out.payload.len() as u64;
     }
     (
         out,
@@ -1691,6 +1701,7 @@ unsafe fn replay_out(
         },
         written: out.written,
         status: 0,
+        kind: 0,
     };
     match out.status {
         OK => {}
@@ -1714,7 +1725,7 @@ unsafe fn replay_out(
         }
         live.objects.push(Object {
             inner: None,
-            open_file: false,
+            open_resource: false,
         });
         o.value = handle(generation, live.objects.len());
     }
@@ -1729,6 +1740,19 @@ unsafe fn replay_out(
                 lo: u64::from_le_bytes(bytes.fixed()?),
                 port: u16::from_le_bytes(bytes.fixed()?),
             };
+        }
+    } else if matches!(op, STAT | STAT_FILE) {
+        if ok {
+            let [kind, time @ ..] = out.payload.as_slice() else {
+                return Err(Fault::Corrupt);
+            };
+            if *kind > 3 {
+                return Err(Fault::Corrupt);
+            }
+            o.kind = *kind;
+            o.written = u64::from_le_bytes(time.try_into().map_err(|_| Fault::Corrupt)?);
+        } else if !out.payload.is_empty() {
+            return Err(Fault::Corrupt);
         }
     } else if op == TLS_CONNECT {
         if ok {
@@ -1794,6 +1818,18 @@ unsafe fn replay_out(
             r.buffer.len = 32;
         }
     } else if carries_payload(op) {
+        if op == NEXT_ENTRIES
+            && (!valid_entries(&out.payload, out.value) || (!ok && !out.payload.is_empty()))
+        {
+            return Err(Fault::Corrupt);
+        }
+        if op == NEXT_ENTRIES {
+            // The tape uses the byte extent to join continuation frames.
+            o.written = 0;
+        }
+        if op == READ_AT && !ok && !out.payload.is_empty() {
+            return Err(Fault::Corrupt);
+        }
         let spare = r.buffer.capacity.saturating_sub(r.buffer.len);
         if out.payload.len() > spare {
             return Err(Fault::Corrupt);
@@ -1809,6 +1845,10 @@ unsafe fn replay_out(
             }
             r.buffer.len += out.payload.len();
         }
+    } else if op == WRITE_AT {
+        if out.written > r.buffer.len as u64 || (ok && out.written != r.buffer.len as u64) {
+            return Err(Fault::Corrupt);
+        }
     } else if op == SEND_SECRET {
         if out.value != 0 || (ok && out.written != 0) {
             return Err(Fault::Corrupt);
@@ -1821,6 +1861,26 @@ unsafe fn replay_out(
         }
     }
     Ok(o)
+}
+
+/// Refuse malformed record streams before they reach a caller's Bytes carrier.
+fn valid_entries(mut bytes: &[u8], count: u64) -> bool {
+    let mut records = 0;
+    while let Some(([kind, lo, hi], rest)) = bytes.split_first_chunk::<3>() {
+        let n = u16::from_le_bytes([*lo, *hi]) as usize;
+        if *kind > 3 || !(1..=255).contains(&n) {
+            return false;
+        }
+        let Some((name, tail)) = rest.split_at_checked(n) else {
+            return false;
+        };
+        if matches!(name, b"." | b"..") || name.iter().any(|&b| b == 0 || b == b'/') {
+            return false;
+        }
+        bytes = tail;
+        records += 1;
+    }
+    bytes.is_empty() && records == count
 }
 
 unsafe extern "C" fn resume(state: *mut u8, r: *mut Request, token: u64) -> Step {

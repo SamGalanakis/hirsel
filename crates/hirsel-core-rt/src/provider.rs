@@ -60,6 +60,8 @@ pub struct Outcome {
     pub error: IoError,
     pub written: u64,
     pub status: u8,
+    /// File kind for a successful STAT or STAT_FILE.
+    pub kind: u8,
 }
 
 #[repr(C)]
@@ -180,6 +182,7 @@ pub(crate) const CANCELLED: Outcome = Outcome {
     error: IoError::OK,
     written: 0,
     status: 1,
+    kind: 0,
 };
 /// Run one operation through C, W, I and D. Returns the outcome `deliver`
 /// returned and records in `issued` the one the provider produced (issue,
@@ -221,6 +224,8 @@ unsafe fn drive_with(
             let request = &*request;
             if (operation == MKDTEMP
                 && request.buffer.capacity.saturating_sub(request.buffer.len) < 32)
+                || (operation == NEXT_ENTRIES
+                    && request.buffer.capacity.saturating_sub(request.buffer.len) < 258)
                 || (operation == WRITE_AT
                     && request
                         .offset()

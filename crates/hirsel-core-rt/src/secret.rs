@@ -140,6 +140,7 @@ pub(crate) const INVALID: Outcome = Outcome {
     value: 0,
     written: 0,
     status: 0,
+    kind: 0,
 };
 
 fn admit(payer: Payer, policies: &[Pattern], len: u64) -> Result<Charge, Outcome> {
@@ -151,6 +152,7 @@ fn admit(payer: Payer, policies: &[Pattern], len: u64) -> Result<Charge, Outcome
             value: c.requested,
             written: c.available,
             status: 0,
+            kind: 0,
         }),
     }
 }

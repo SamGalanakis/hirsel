@@ -149,7 +149,7 @@ impl Hooks for TapeHooks {
         }
         live.objects.push(Object {
             inner,
-            open_file: false,
+            open_resource: false,
         });
         (handle(generation, ordinal), Group::root(cell, generation))
     }

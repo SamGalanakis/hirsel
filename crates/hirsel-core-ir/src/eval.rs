@@ -81,18 +81,13 @@ pub struct Checked {
 /// - A clock read returns the number of clock reads so far, itself included,
 ///   both clocks alike: the host clock has started before the run (a law that
 ///   adds to a read relies on it), and a sleep jumps it to the deadline.
-/// - Directories hold flat names: a key is (`Dir` handle, path bytes). `open`
-///   with `Read` needs a file (`NotFound`), `CreateNew` needs no entry (`Exists`),
-///   `Write` truncates or creates, `Append` creates and writes at the end; a
-///   directory is `Denied`. `read` fills the buffer's spare capacity from the
-///   file's cursor. `try_lock` takes the lock unless another open file of the
-///   same key holds it (then 0). `mkdtemp` appends `t<k>` to the name, k from 0,
-///   and returns a new `Dir`; it fails with `Bounds` when the name has fewer than
-///   32 spare bytes. `mkdir` of an existing key is `Exists`; `remove` and
-///   `remove_tree` of a missing one `NotFound`. `rename` moves a file to the
-///   new key, replacing a file there; a directory at either key is `Denied`.
-///   Open files refer to keys, so one open on a renamed or replaced name reads
-///   what is at that name now.
+/// - Directory keys pair a pinned directory identity with a single basename.
+///   Handles keep their file and independent cursor across namespace changes.
+///   Listings snapshot direct entries in the model's deterministic order.
+///   File mtime is the model clock at creation or last write. Directory
+///   metadata is kind Directory, size and mtime zero.
+///   No model operation introduces symbolic links.
+///
 /// - Nothing is ever cancelled.
 #[derive(Default)]
 struct World {
@@ -105,7 +100,9 @@ struct World {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     clock: u64,
-    nodes: std::collections::BTreeMap<(u64, Vec<u8>), Node>,
+    nodes: BTreeMap<DirKey, Node>,
+    directories: u64,
+    listings: Vec<Option<VecDeque<Vec<u8>>>>,
     files: Vec<Option<OpenFile>>,
     temporaries: u64,
     random: u8,
@@ -120,12 +117,14 @@ struct EvalSecret {
     bytes: Arc<Zeroizing<Vec<u8>>>,
 }
 
+type DirKey = (u64, Vec<u8>);
+
 enum Node {
-    File(ModelFile),
-    Dir,
+    File(Arc<Mutex<ModelFile>>),
+    Dir(u64),
 }
 struct OpenFile {
-    key: (u64, Vec<u8>),
+    file: Arc<Mutex<ModelFile>>,
     at: u64,
     locked: bool,
     mode: u8,
@@ -135,6 +134,7 @@ const FILE_PAGE: u64 = 4096;
 #[derive(Default)]
 struct ModelFile {
     len: u64,
+    modified_ns: u64,
     pages: BTreeMap<u64, Box<[u8; FILE_PAGE as usize]>>,
 }
 
@@ -175,6 +175,65 @@ impl ModelFile {
 const HOST_BYTES: u64 = 1 << 32;
 const FILE_BASE: u64 = 0x50_0000;
 const DIR_BASE: u64 = 0x60_0000;
+const LISTING_HANDLE: u64 = 1 << 63;
+
+const NOT_FOUND: u64 = 1;
+const DENIED: u64 = 2;
+const EXISTS: u64 = 3;
+const CLOSED: u64 = 4;
+const OTHER: u64 = 5;
+
+impl World {
+    fn dir_key(&self, mut dir: u64, path: &[u8]) -> Result<DirKey, (u64, u64)> {
+        let parts = path.split(|&b| b == b'/');
+        for part in parts.clone() {
+            if part.is_empty() || matches!(part, b"." | b"..") || part.contains(&0) {
+                return Err((DENIED, 0));
+            }
+            if part.len() > 255 {
+                return Err((OTHER, 36)); // ENAMETOOLONG
+            }
+        }
+        let mut parts = parts.peekable();
+        while let Some(part) = parts.next() {
+            let key = (dir, part.to_vec());
+            if parts.peek().is_none() {
+                return Ok(key);
+            }
+            dir = match self.nodes.get(&key) {
+                Some(Node::Dir(dir)) => *dir,
+                Some(Node::File(_)) => return Err((OTHER, 20)), // ENOTDIR
+                None => return Err((NOT_FOUND, 0)),
+            };
+        }
+        unreachable!("split always supplies a final component")
+    }
+
+    fn new_dir(&mut self, key: DirKey) -> u64 {
+        let dir = DIR_BASE + self.directories;
+        self.directories += 1;
+        self.nodes.insert(key, Node::Dir(dir));
+        dir
+    }
+
+    fn children(&self, dir: u64) -> impl Iterator<Item = (&DirKey, &Node)> {
+        self.nodes
+            .range((dir, Vec::new())..)
+            .take_while(move |((id, _), _)| *id == dir)
+    }
+
+    fn remove_children(&mut self, dir: u64) {
+        let mut directories = vec![dir];
+        while let Some(dir) = directories.pop() {
+            let names: Vec<_> = self.children(dir).map(|(key, _)| key.clone()).collect();
+            for key in names {
+                if let Some(Node::Dir(child)) = self.nodes.remove(&key) {
+                    directories.push(child);
+                }
+            }
+        }
+    }
+}
 
 const FN_BASE: u64 = 0x1000;
 const REGION_BASE: u64 = 0x10_0000;
@@ -2310,11 +2369,11 @@ impl Machine<'_> {
             }
             _ => {}
         }
-        const NOT_FOUND: u64 = 1;
-        const DENIED: u64 = 2;
-        const EXISTS: u64 = 3;
         let ok = |value: u64, written: u64| vec![value, 0, 0, written];
         let error = |e: u64| vec![0, e, 0, 0];
+        let resolve = |(tag, code)| vec![0, tag, code, 0];
+        let stat = |kind: u64, size: u64, time: u64| vec![size, 0, 0, time, kind];
+        let stat_error = |(tag, code)| vec![0, tag, code, 0, 0];
         let file = |h: u64| (h - FILE_BASE) as usize;
         // Every operation but a clock read is a cancellation point at entry
         // (native provider `drive`, `cancellation_point`).
@@ -2467,51 +2526,132 @@ impl Machine<'_> {
                 ok(0, spare as u64)
             }
             HostOp::Open => {
-                let key = (a[0], self.carrier(a[1]).0);
+                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                    Ok(key) => key,
+                    Err(e) => return Ok(resolve(e)),
+                };
                 let w = &mut self.world;
-                let at = match (w.nodes.get(&key), a[2]) {
-                    (Some(Node::Dir), _) => return Ok(error(DENIED)),
+                let mode = a[2] as u8;
+                let file = match (w.nodes.get(&key), mode) {
+                    (Some(Node::Dir(_)), _) => return Ok(error(DENIED)),
                     (None, 0) => return Ok(error(NOT_FOUND)),
                     (Some(_), 3) => return Ok(error(EXISTS)),
-                    (Some(Node::File(c)), 2) => c.len,
-                    (Some(_), 0) => 0,
-                    _ => {
-                        let keep = matches!(a[2], 2 | 4);
-                        let n = w
-                            .nodes
-                            .entry(key.clone())
-                            .or_insert(Node::File(ModelFile::default()));
-                        if let Node::File(c) = n
-                            && !keep
-                        {
-                            *c = ModelFile::default();
-                        }
-                        0
+                    (Some(Node::File(file)), _) => Arc::clone(file),
+                    (None, _) => {
+                        let file = Arc::new(Mutex::new(ModelFile {
+                            modified_ns: w.clock.min(i64::MAX as u64),
+                            ..ModelFile::default()
+                        }));
+                        w.nodes.insert(key, Node::File(Arc::clone(&file)));
+                        file
                     }
                 };
+                if mode == 1 {
+                    *file.lock().unwrap() = ModelFile {
+                        modified_ns: w.clock.min(i64::MAX as u64),
+                        ..ModelFile::default()
+                    };
+                }
                 w.files.push(Some(OpenFile {
-                    key,
-                    at,
+                    file,
+                    at: 0,
                     locked: false,
-                    mode: a[2] as u8,
+                    mode,
                 }));
                 ok(FILE_BASE + w.files.len() as u64 - 1, 0)
+            }
+            HostOp::OpenDir => {
+                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                    Ok(key) => key,
+                    Err((OTHER, 20)) => return Ok(error(DENIED)),
+                    Err(e) => return Ok(resolve(e)),
+                };
+                match self.world.nodes.get(&key) {
+                    Some(Node::Dir(dir)) => ok(*dir, 0),
+                    Some(Node::File(_)) => error(DENIED),
+                    None => error(NOT_FOUND),
+                }
+            }
+            HostOp::Entries => {
+                let records = self
+                    .world
+                    .children(a[0])
+                    .map(|((_, name), node)| {
+                        let kind = u8::from(matches!(node, Node::Dir(_)));
+                        let mut record = vec![kind];
+                        record.extend_from_slice(&(name.len() as u16).to_le_bytes());
+                        record.extend_from_slice(name);
+                        record
+                    })
+                    .collect();
+                let h = LISTING_HANDLE | self.world.listings.len() as u64;
+                self.world.listings.push(Some(records));
+                ok(h, 0)
+            }
+            HostOp::NextEntries => {
+                let (_, data, len, cap) = self.carrier(a[1]);
+                let spare = cap.saturating_sub(len);
+                if spare < 258 {
+                    return Err(Stop::Cause("Bounds"));
+                }
+                let Some(records) = self.world.listings[(a[0] & !LISTING_HANDLE) as usize].as_mut()
+                else {
+                    return Ok(error(CLOSED));
+                };
+                let mut bytes = Vec::new();
+                let mut count = 0;
+                while records
+                    .front()
+                    .is_some_and(|r| bytes.len() as u64 + r.len() as u64 <= spare)
+                {
+                    bytes.extend(records.pop_front().unwrap());
+                    count += 1;
+                }
+                if count != 0 {
+                    self.put(data + len, &bytes);
+                    self.store(a[1] + 8, 8, len + bytes.len() as u64);
+                }
+                ok(count, 0)
+            }
+            HostOp::Stat => {
+                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                    Ok(key) => key,
+                    Err(e) => return Ok(stat_error(e)),
+                };
+                match self.world.nodes.get(&key) {
+                    Some(Node::Dir(_)) => stat(1, 0, 0),
+                    Some(Node::File(f)) => {
+                        let f = f.lock().unwrap();
+                        stat(0, f.len, f.modified_ns)
+                    }
+                    None => stat_error((NOT_FOUND, 0)),
+                }
+            }
+            HostOp::StatFile => {
+                if let Some(f) = &self.world.files[file(a[0])] {
+                    let f = f.file.lock().unwrap();
+                    stat(0, f.len, f.modified_ns)
+                } else {
+                    stat_error((CLOSED, 0))
+                }
             }
             HostOp::Read | HostOp::ReadAt => {
                 let positioned = op == HostOp::ReadAt;
                 let buffer = a[if positioned { 2 } else { 1 }];
                 let (_, data, len, cap) = self.carrier(buffer);
                 let i = file(a[0]);
-                let f = self.world.files[i].as_ref().expect("an open file");
-                let Some(Node::File(c)) = self.world.nodes.get(&f.key) else {
-                    return Ok(error(NOT_FOUND));
+                let Some(f) = self.world.files[i].as_ref() else {
+                    return Ok(error(CLOSED));
                 };
                 if positioned && !matches!(f.mode, 0 | 4) {
                     return Ok(error(DENIED));
                 }
                 let at = if positioned { a[1] } else { f.at };
-                let n = cap.saturating_sub(len).min(c.len.saturating_sub(at)) as usize;
-                let bytes = c.read(at, n);
+                let (n, bytes) = {
+                    let c = f.file.lock().unwrap();
+                    let n = cap.saturating_sub(len).min(c.len.saturating_sub(at)) as usize;
+                    (n, c.read(at, n))
+                };
                 if n > 0 {
                     self.put(data + len, &bytes);
                     self.store(buffer + 8, 8, len + n as u64);
@@ -2528,9 +2668,8 @@ impl Machine<'_> {
                     return Err(Stop::Cause("Bounds"));
                 }
                 let i = file(a[0]);
-                let f = self.world.files[i].as_mut().expect("an open file");
-                let Some(Node::File(c)) = self.world.nodes.get_mut(&f.key) else {
-                    return Ok(error(NOT_FOUND));
+                let Some(f) = self.world.files[i].as_mut() else {
+                    return Ok(error(CLOSED));
                 };
                 if positioned && !matches!(f.mode, 1 | 3 | 4) {
                     return Ok(error(DENIED));
@@ -2538,6 +2677,7 @@ impl Machine<'_> {
                 if bytes.is_empty() {
                     return Ok(ok(0, 0));
                 }
+                let mut c = f.file.lock().unwrap();
                 let at = if positioned {
                     a[1]
                 } else if f.mode == 2 {
@@ -2550,6 +2690,7 @@ impl Machine<'_> {
                     return Ok(vec![0, 5, 27, 0]); // Other(EFBIG)
                 }
                 c.write(at, &bytes);
+                c.modified_ns = self.world.clock.min(i64::MAX as u64);
                 if !positioned {
                     f.at = end;
                 }
@@ -2562,15 +2703,12 @@ impl Machine<'_> {
             }
             HostOp::TryLock | HostOp::Unlock => {
                 let i = file(a[0]);
-                let key = self.world.files[i]
-                    .as_ref()
-                    .expect("an open file")
-                    .key
-                    .clone();
-                let held =
-                    self.world.files.iter().enumerate().any(|(j, f)| {
-                        j != i && f.as_ref().is_some_and(|f| f.locked && f.key == key)
-                    });
+                let open = self.world.files[i].as_ref().expect("an open file");
+                let held = self.world.files.iter().enumerate().any(|(j, f)| {
+                    j != i
+                        && f.as_ref()
+                            .is_some_and(|f| f.locked && Arc::ptr_eq(&f.file, &open.file))
+                });
                 let take = op == HostOp::TryLock;
                 if take && held {
                     return Ok(ok(0, 0));
@@ -2579,25 +2717,34 @@ impl Machine<'_> {
                 ok(u64::from(take), 0)
             }
             HostOp::Mkdir => {
-                let key = (a[0], self.carrier(a[1]).0);
+                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                    Ok(key) => key,
+                    Err(e) => return Ok(resolve(e)),
+                };
                 if self.world.nodes.contains_key(&key) {
                     return Ok(error(EXISTS));
                 }
-                self.world.nodes.insert(key, Node::Dir);
+                self.world.new_dir(key);
                 ok(0, 0)
             }
             HostOp::Rename => {
-                let from = (a[0], self.carrier(a[1]).0);
-                let to = (a[0], self.carrier(a[2]).0);
+                let from = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                    Ok(key) => key,
+                    Err(e) => return Ok(resolve(e)),
+                };
+                let to = match self.world.dir_key(a[0], self.carrier_bytes(a[2])) {
+                    Ok(key) => key,
+                    Err(e) => return Ok(resolve(e)),
+                };
                 // core.md: a regular file `from` takes the name `to` in the one `Dir`,
                 // replacing a regular file there; anything else at either name is
                 // `Denied` and renames nothing.
                 match self.world.nodes.get(&from) {
                     None => return Ok(error(NOT_FOUND)),
-                    Some(Node::Dir) => return Ok(error(DENIED)),
+                    Some(Node::Dir(_)) => return Ok(error(DENIED)),
                     Some(Node::File(_)) => {}
                 }
-                if let Some(Node::Dir) = self.world.nodes.get(&to) {
+                if let Some(Node::Dir(_)) = self.world.nodes.get(&to) {
                     return Ok(error(DENIED));
                 }
                 // The same name: removed and put back, unchanged.
@@ -2606,24 +2753,47 @@ impl Machine<'_> {
                 ok(0, 0)
             }
             HostOp::Remove | HostOp::RemoveTree => {
-                let key = (a[0], self.carrier(a[1]).0);
+                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                    Ok(key) => key,
+                    Err(e) => return Ok(resolve(e)),
+                };
+                if let Some(Node::Dir(dir)) = self.world.nodes.get(&key) {
+                    let dir = *dir;
+                    if op == HostOp::RemoveTree {
+                        self.world.remove_children(dir);
+                    } else if self.world.children(dir).next().is_some() {
+                        return Ok(resolve((OTHER, 39))); // ENOTEMPTY
+                    }
+                }
                 match self.world.nodes.remove(&key) {
                     Some(_) => ok(0, 0),
                     None => error(NOT_FOUND),
                 }
             }
             HostOp::Mkdtemp => {
-                let (_, data, len, cap) = self.carrier(a[1]);
-                if len + 32 > cap {
+                let (prefix, data, len, cap) = self.carrier(a[1]);
+                if cap.saturating_sub(len) < 32 {
                     return Err(Stop::Cause("Bounds"));
                 }
-                let k = self.world.temporaries;
-                self.world.temporaries += 1;
-                let name = format!("t{k}").into_bytes();
-                self.put(data + len, &name);
-                self.store(a[1] + 8, 8, len + name.len() as u64);
-                self.world.nodes.insert((a[0], name), Node::Dir);
-                ok(DIR_BASE + k, 0)
+                if prefix.iter().any(|&b| b == b'/' || b == 0) {
+                    return Ok(error(DENIED));
+                }
+                for _ in 0..128 {
+                    let k = self.world.temporaries;
+                    self.world.temporaries += 1;
+                    let suffix = format!("t{k}").into_bytes();
+                    let full = [prefix.as_slice(), &suffix].concat();
+                    if full.len() > 255 {
+                        return Ok(resolve((OTHER, 36))); // ENAMETOOLONG
+                    }
+                    let key = (a[0], full);
+                    if !self.world.nodes.contains_key(&key) {
+                        self.put(data + len, &suffix);
+                        self.store(a[1] + 8, 8, len + suffix.len() as u64);
+                        return Ok(ok(self.world.new_dir(key), 0));
+                    }
+                }
+                resolve((OTHER, 11)) // EAGAIN
             }
             HostOp::Sync | HostOp::SyncDir => ok(0, 0),
         })
@@ -3083,6 +3253,10 @@ impl Machine<'_> {
             // MEM-24); the trace records the close by its handle.
             FieldTy::Handle(Handle::HostFile) => {
                 let h = self.load(at, 8);
+                if h & LISTING_HANDLE != 0 {
+                    self.world.listings[(h & !LISTING_HANDLE) as usize] = None;
+                    return false;
+                }
                 self.trace.push(h);
                 if let Some(file) = h
                     .checked_sub(FILE_BASE)

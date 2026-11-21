@@ -39,6 +39,7 @@ struct Recorded {
     error: IoError,
     written: u64,
     status: u8,
+    kind: u8,
 }
 impl From<Outcome> for Recorded {
     fn from(o: Outcome) -> Self {
@@ -47,6 +48,7 @@ impl From<Outcome> for Recorded {
             error: o.error,
             written: o.written,
             status: o.status,
+            kind: o.kind,
         }
     }
 }
@@ -71,6 +73,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request) -> Outcome {
                 error: recorded.error,
                 written: recorded.written,
                 status: recorded.status,
+                kind: recorded.kind,
             };
         } else if request.operation == WRITE {
             tape.effects
@@ -183,7 +186,8 @@ fn cap8_conc7_replay_preserves_issue_delivery_and_cancellation_without_repeating
             value: 0,
             error: IoError::from_errno(libc::ENOSPC),
             written: 2,
-            status: 0
+            status: 0,
+            kind: 0,
         }
     );
     assert_eq!(results[1].status, 1);

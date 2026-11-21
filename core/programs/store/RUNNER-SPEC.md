@@ -546,8 +546,8 @@ pub type Refusal: codec + send = NoEntry | Malformed(Bad) | Overloaded | Deadlin
 pub type Fault: codec + send = Raised(u32) | OutOfBytes(Room) | OutOfTime(u64) | Gone
 pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refusal) | Abandoned | InDoubt   // v2.11.4: Superseded deleted (STORE AH2)
 pub type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }   // v2.11.2: `result` is the schema of what `Returned` carries (Result[R, E] for transact)
-pub type RegisterError = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds   // v2.17: Bounds (an allowance sum overflows u64); v2.24.1: NamespaceTwice deleted
-pub type OpenError = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | PublisherStopped   // v2.17: Migrate; v2.24.1: NamespaceChanged deleted; v2.19.3: PublisherStopped (the publisher ended without a Halt; §3 "The release check")
+pub type RegisterError = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds   // v2.17: Bounds (an allowance sum overflows u64)
+pub type OpenError = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | PublisherStopped   // v2.17: Migrate; v2.19.3: PublisherStopped (the publisher ended without a Halt; §3 "The release check")
 pub type Fence: shareable + send { prior: u64, latest: u64 }   // v2.19: a session's release fence (§3 "The release check")
 pub type Caller: codec + send { issuer: u8, subject: Bytes }   // not secret; subject ≤ SUBJECT_MAX; issuer 1 anonymous, later issuers take the next number (§3)
 pub const SUBJECT_MAX: u64 = 64

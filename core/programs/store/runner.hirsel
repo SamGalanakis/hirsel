@@ -6798,8 +6798,7 @@ fn wire_owner_runner[C: send](mut st: WireLoop[C], take held: Box[Service[C]], p
     Some((take service, take next))
 }
 
-// Binds the authenticated principal. None when the allocation pool is gone
-// with the service.
+// Installs the Hello binding's result through the allocation pool.
 fn wire_owner_hello[C: send](mut st: WireLoop[C], take held: Box[Service[C]], pool: Sender[WireAllocation[C]], take identity_result: Option[Caller]) -> Option[Box[Service[C]]] waits {
     let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, st.allocation_to, st.allocation_from, take held, AcceptHello(take identity_result)) {
         Some(take returned) => take returned,

@@ -87,6 +87,13 @@ pub(crate) struct Taken {
     pub(super) value: Value,
 }
 
+impl Taken {
+    /// The item's bytes (units_lang).
+    pub(crate) fn item(&self) -> &[u8] {
+        self.value.item()
+    }
+}
+
 pub(crate) struct ConnCore {
     hot: Hot,
     spares: Box<[ArrivalSlot]>,
@@ -200,7 +207,7 @@ pub(crate) struct Inbox(pub(crate) Arc<ConnCore>);
 impl Inbox {
     /// The bytes of the oldest item taken and not yet received.
     pub(crate) fn front_bytes(&self) -> Option<u64> {
-        self.0.side().taken.front().map(Value::bytes)
+        self.0.side().taken.front().map(|t| t.value.bytes())
     }
 }
 /// A sender's handle. The ABI boxes it, so alignment keeps the client's

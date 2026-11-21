@@ -666,13 +666,13 @@ fn network_outcomes_decode_with_exact_payloads() {
     );
 
     let mut encoded_header = header.encode(header.revision).unwrap();
-    let last = encoded_header.len() - header.map_hash_key.0.len() - 1;
+    assert_eq!(Header::decode(&encoded_header).unwrap(), header);
+    let rules_end = encoded_header.len() - size_of_val(&header.map_hash_key.0);
     let mut reversed = encoded_header.clone();
-    reversed[last] = 0;
-    reversed[last - 1] = 0;
-    reversed[last - 3] = 1;
+    reversed[rules_end - 4..rules_end].copy_from_slice(&[1, 0, 0, 0]);
     assert!(Header::decode(&reversed).is_err(), "reversed range");
-    encoded_header.remove(last);
+    // The rule count is a one-byte varint before three 23-byte address rules.
+    encoded_header[rules_end - 3 * 23 - 1] = 4;
     assert!(Header::decode(&encoded_header).is_err(), "short rule list");
 
     let mut decoder = Decoder::default();
@@ -986,10 +986,11 @@ fn record_closes_the_file_when_the_header_write_fails() {
 #[test]
 fn record_refuses_a_header_that_overflows_block_zero_before_creating_the_file() {
     let mut h = header(REVISION);
-    // Format 7 has 88 fixed bytes, including the 16-byte Map key.
-    // The identity takes 14 bytes plus one length byte, the argument
-    // length takes three bytes and the empty grants length takes one.
-    h.arg = vec![0; MAX_LEN - 107];
+    // Format 8 has 72 fixed bytes plus the 16-byte Map hash key,
+    // 14 identity bytes + 1 length byte, a 3-byte argument length,
+    // and a 1-byte empty grants length.
+    const HEADER_BYTES: usize = 72 + 16 + 14 + 1 + 3 + 1;
+    h.arg = vec![0; MAX_LEN - HEADER_BYTES];
     let mut store = Box::<Store>::default();
     let (tape, _) =
         unsafe { Tape::open(REVISION, store.dir(), b"t", Mode::Record, &h, &expect()) }.unwrap();

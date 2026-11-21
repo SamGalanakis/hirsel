@@ -1075,13 +1075,20 @@ extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
   auto &M = *unwrap(static_cast<LLVMModuleRef>(ModuleRef));
   inlineLoopHelpers(M);
   for (Function &F : M) {
-    if (F.isDeclaration() || F.hasAvailableExternallyLinkage() || F.arg_empty() || !F.getArg(0)->getType()->isPointerTy()) continue;
+    if (F.isDeclaration() || F.hasAvailableExternallyLinkage()) continue;
+    // A wide return puts its sret pointer before the task context. Other
+    // helpers can have no context at all. Follow the producer's parameter
+    // attribute even if LLVM renumbers the arguments or strips their names.
+    auto *Context = find_if(F.args(), [](const Argument &Arg) {
+      return Arg.getType()->isPointerTy() && Arg.hasAttribute("hirsel-task-context");
+    });
+    if (Context == F.arg_end()) continue;
     SmallVector<Instruction *, 16> Accesses;
     SmallVector<CallInst *, 16> Calls;
     SmallVector<ReturnInst *, 8> Returns;
     bool Supported = true;
     for (BasicBlock &BB : F) for (Instruction &I : BB) {
-      if (windowWord(I, F.getArg(0), M.getDataLayout())) Accesses.push_back(&I);
+      if (windowWord(I, Context, M.getDataLayout())) Accesses.push_back(&I);
       if (auto *C = dyn_cast<CallBase>(&I)) {
         if (auto *CI = dyn_cast<CallInst>(C)) {
           if (CI->isMustTailCall()) Supported = false;
@@ -1098,7 +1105,7 @@ extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
     IRBuilder<> B(&*F.getEntryBlock().getFirstInsertionPt());
     auto *Word = B.getInt64Ty();
     auto *Counter = B.CreateAlloca(Word, nullptr, "step.window");
-    auto *Field = B.CreateConstGEP1_64(B.getInt8Ty(), F.getArg(0), 16, "step.field");
+    auto *Field = B.CreateConstGEP1_64(B.getInt8Ty(), Context, 16, "step.field");
     auto Read = [&]() { auto *V = B.CreateLoad(Word, Field); V->setMetadata(LLVMContext::MD_tbaa, Tag); return V; };
     auto Write = [&]() { auto *S = B.CreateStore(B.CreateLoad(Word, Counter), Field); S->setMetadata(LLVMContext::MD_tbaa, Tag); };
     B.CreateStore(Read(), Counter);

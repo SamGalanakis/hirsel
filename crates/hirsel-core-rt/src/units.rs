@@ -35,6 +35,8 @@ use memory::UnitStack;
 mod check;
 #[path = "units_sync.rs"]
 pub(crate) mod sync;
+#[path = "units_ledger.rs"]
+pub(crate) mod ledger;
 use std::{
     cell::Cell,
     collections::{HashMap, VecDeque},

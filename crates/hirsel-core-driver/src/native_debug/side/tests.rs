@@ -239,6 +239,7 @@ fn indexed_scalar_positions_match_the_source_map() {
         map: &map,
         files: FxHashMap::default(),
     };
+    let positions = map.positions();
     for byte in text.char_indices().map(|(i, _)| i).chain([text.len()]) {
         let position = sources
             .position(
@@ -253,7 +254,7 @@ fn indexed_scalar_positions_match_the_source_map() {
                 &mut lines,
             )
             .unwrap();
-        let (_, line, column) = map.position(&product.items[0], byte as u32).unwrap();
+        let (_, line, column) = positions.position(&product.items[0], byte as u32).unwrap();
         assert_eq!(
             (position.line, position.column),
             (u64::from(line), u64::from(column))

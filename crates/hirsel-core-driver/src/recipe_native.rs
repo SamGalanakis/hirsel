@@ -83,6 +83,7 @@ impl CheckProduct {
             .flatten()
             .collect::<Vec<_>>();
         let sources = self.native_sources(&items)?;
+        let sources = sources.positions();
         let mut units = BTreeMap::new();
         for identity in instances {
             let instance = reached.materialized.get(identity);

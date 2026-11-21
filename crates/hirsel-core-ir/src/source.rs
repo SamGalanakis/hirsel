@@ -68,19 +68,56 @@ impl SourceMap {
             })
             .collect())
     }
-    /// Resolve an item-relative byte offset in the current checked source.
-    /// Lines and Unicode scalar columns start at one; a tab counts as one.
+    /// Index this source snapshot once for repeated position lookups.
+    pub fn positions(&self) -> SourcePositions<'_> {
+        let files = self
+            .files
+            .iter()
+            .map(|file| match self.points.get(&file.path) {
+                Some(points) => FilePositions::Ordinals(points),
+                None => {
+                    let mut starts = vec![0];
+                    starts.extend(
+                        file.text
+                            .bytes()
+                            .enumerate()
+                            .filter_map(|(byte, b)| (b == b'\n').then_some(byte + 1)),
+                    );
+                    FilePositions::LineStarts(starts)
+                }
+            })
+            .collect();
+        SourcePositions { map: self, files }
+    }
+}
+
+/// Position lookup for a borrowed source snapshot.
+pub struct SourcePositions<'a> {
+    map: &'a SourceMap,
+    files: Vec<FilePositions<'a>>,
+}
+
+enum FilePositions<'a> {
+    Ordinals(&'a [(u32, u32)]),
+    LineStarts(Vec<usize>),
+}
+
+impl SourcePositions<'_> {
+    /// Resolve an item-relative source offset. Lines and Unicode scalar
+    /// columns start at one, and a tab counts as one.
     pub fn position(&self, item: &DefPath, start: u32) -> Option<(&SourceFile, u32, u32)> {
-        let binding = self.items.get(item)?;
-        let file = &self.files[binding.file as usize];
+        let binding = self.map.items.get(item)?;
+        let index = binding.file as usize;
+        let file = &self.map.files[index];
         let offset = (binding.file_offset + start) as usize;
-        if let Some(points) = self.points.get(&file.path) {
-            let &(line, column) = points.get(offset)?;
-            return Some((file, line, column));
-        }
-        let prefix = &file.text[..offset];
-        let line = prefix.bytes().filter(|b| *b == b'\n').count() as u32 + 1;
-        let column = prefix.rsplit('\n').next().unwrap().chars().count() as u32 + 1;
+        let (line, column) = match &self.files[index] {
+            FilePositions::Ordinals(points) => *points.get(offset)?,
+            FilePositions::LineStarts(starts) => {
+                let line = starts.partition_point(|&start| start <= offset);
+                let column = file.text[starts[line - 1]..offset].chars().count() as u32 + 1;
+                (line as u32, column)
+            }
+        };
         Some((file, line, column))
     }
 }
@@ -216,11 +253,11 @@ mod tests {
                 },
             )]),
         };
-        let (_, line, column) = map.position(&item, 4).unwrap();
+        let (_, line, column) = map.positions().position(&item, 4).unwrap();
         assert_eq!((line, column), (2, 4));
         map.files[0].text.insert_str(0, "\n\n");
         map.items.get_mut(&item).unwrap().file_offset += 2;
-        let (_, line, column) = map.position(&item, 4).unwrap();
+        let (_, line, column) = map.positions().position(&item, 4).unwrap();
         assert_eq!((line, column), (4, 4));
         assert_eq!(site_symbol(&item), symbol);
         assert_ne!(site_symbol(&DefPath::core("another_source_test")), symbol);

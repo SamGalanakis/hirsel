@@ -1,6 +1,7 @@
 //! PROG-10 normal form for checked instance modules.
 
 use crate::decode::{DecodeBudget, DecodeError, DecodeResult};
+use crate::source::SourcePositions;
 use crate::*;
 use hirsel_core_ids::{ContentHash, DefPath, ItemPath, PackageId};
 use hirsel_core_layout::{Case, Field, FieldTy, FuncRef, Handle, Repr, TypeRef, Width};
@@ -744,7 +745,7 @@ pub fn encode(module: &Module, root: FuncId) -> EncodedBody {
 pub fn encode_with_annex(
     module: &Module,
     root: FuncId,
-    sources: &crate::source::SourceMap,
+    sources: &SourcePositions<'_>,
 ) -> (EncodedBody, Annex) {
     let (body, annex) = encode_with_sources(module, root, Some(sources));
     (body, Annex(annex, None))
@@ -754,7 +755,7 @@ pub fn encode_with_annex(
 pub fn prepare_assembly(
     module: &Module,
     root: FuncId,
-    sources: &crate::source::SourceMap,
+    sources: &SourcePositions<'_>,
 ) -> (EncodedBody, Annex, Module) {
     let (body, annex) = encode_with_annex(module, root, sources);
     let (module, _) = decode_payload(&body.bytes, &mut DecodeBudget::unlimited())
@@ -765,7 +766,8 @@ pub fn prepare_assembly(
 /// Materialize the retained module for existing native and evaluator consumers.
 /// Source anchors and hints keep their original facts in the canonical numbering.
 pub fn retain(module: &Module, root: FuncId) -> (EncodedBody, Module) {
-    let (mut code, annex) = encode_with_annex(module, root, &crate::source::SourceMap::default());
+    let sources = crate::source::SourceMap::default();
+    let (mut code, annex) = encode_with_annex(module, root, &sources.positions());
     let mut retained = decode_payload(&code.bytes, &mut DecodeBudget::unlimited())
         .expect("our own normal body decodes")
         .0;
@@ -812,7 +814,7 @@ pub fn retain(module: &Module, root: FuncId) -> (EncodedBody, Module) {
 fn encode_with_sources(
     module: &Module,
     root: FuncId,
-    sources: Option<&crate::source::SourceMap>,
+    sources: Option<&SourcePositions<'_>>,
 ) -> (EncodedBody, Vec<Option<FunctionAnnex>>) {
     let mut order = plan(module, root);
 
@@ -970,7 +972,7 @@ fn write_function<'m>(
     order: &mut ModuleOrder<'m>,
     row: usize,
     body_order: Option<BodyOrder<'m>>,
-    sources: Option<&crate::source::SourceMap>,
+    sources: Option<&SourcePositions<'_>>,
 ) -> (Vec<u8>, Option<FunctionAnnex>) {
     let module = order.module;
     let function = &module.functions[row];
@@ -1056,7 +1058,7 @@ fn write_function<'m>(
 fn function_annex(
     module: &Module,
     order: &BodyOrder<'_>,
-    sources: &crate::source::SourceMap,
+    sources: &SourcePositions<'_>,
 ) -> FunctionAnnex {
     let body = order.body;
     let site = |anchor: Option<Anchor>| {
@@ -1550,6 +1552,7 @@ mod tests {
     fn hints_only_change_the_annex() {
         let a = checked(ORIGINAL);
         let sources = SourceMap::default();
+        let sources = sources.positions();
         let (encoded, original) = encode_with_annex(&a, FuncId(0), &sources);
         for hint in 0..3 {
             let mut b = a.clone();
@@ -1893,6 +1896,7 @@ fn f0 = n0 g0 {
             )]
             .into(),
         };
+        let sources = sources.positions();
         let (a, sites_a) = encode_with_annex(&module, FuncId(0), &sources);
         module.items.swap(0, 1);
         module.functions[0].body.as_mut().unwrap().inst_anchors[1] = anchor(1, 0);

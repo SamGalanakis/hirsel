@@ -148,7 +148,8 @@ impl Fixture {
             "core v1\nsig g0 = {params} -> ()\ninst n0 = app@1/main/{name} [] []\n             fn f0 = n0 g0 {{\nb0{block_params}:\n{code}\n}}\n{externs}"
         ))
         .unwrap();
-        let (body, mut annex) = normal::encode_with_annex(&module, FuncId(0), &Default::default());
+        let sources = hirsel_core_ir::source::SourceMap::default();
+        let (body, mut annex) = normal::encode_with_annex(&module, FuncId(0), &sources.positions());
         if identity(name) == self.recipe.entry {
             annex.1 = Some(vec![]);
         }

@@ -1508,3 +1508,62 @@ fn net_resolve_fail(tasks: Tasks) -> bool waits {
     }
     reset && fail_cause(task.join(take server))
 }
+
+type Timed: send {
+    n: Net,
+    v: Clock
+}
+
+// A resolve bounded by At(v, 100) that the server takes and never answers,
+// then one bounded by At(v, 50) once the clock is already past it.
+fn timed_client(take t: Timed) -> bool waits {
+    let Timed(n, v) = take t
+    let mut out: List[Ip] = list.with_capacity(2)
+    let held = match host.resolve(n, string.from("alpha.test"), mut out, At(v, 100)) {
+        Error(TimedOut) => list.len(out) == 0 && host.mono_ns(v) == 150,
+        _ => false
+    }
+    let late = match host.resolve(n, string.from("beta.test"), mut out, At(v, 50)) {
+        Error(TimedOut) => true,
+        _ => false
+    }
+    held && late
+}
+
+// CONC-7 on a served Net (NOTES 35): a call's `until` is the caller's, not
+// the server's. The server takes the first resolve and holds it; idle shows
+// the caller waiting on 100, and advance_to(150) ends the call TimedOut. The
+// server's reply after that is Withdrawn. The second resolve's deadline has
+// passed when it is issued, so it is TimedOut and never reaches the server.
+// expect: run net_deadline(tasks) = true
+fn net_deadline(tasks: Tasks) -> bool waits {
+    let (v, h) = provide.clock(0, 0)
+    let mut hand = take h
+    let (n, s) = provide.net(bytes 128)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, Timed(n: n, v: v), timed_client)
+    let expired = match resolve_call(mut served, string.from("alpha.test"), 34) {
+        Some(take call) => {
+            let waiting = clock.idle(mut hand) == Some(100)
+            clock.advance_to(mut hand, 150)
+            let client = result.unwrap(task.join(take child))
+            let refused = match provide.reply(mut served, take call, provide.net_reply(Count(0))) {
+                Error(Withdrawn()) => true,
+                _ => false
+            }
+            waiting && client && refused
+        },
+        None => {
+            let _ = task.join(take child)
+            false
+        }
+    }
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    expired && quiet
+}

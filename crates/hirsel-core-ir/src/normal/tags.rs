@@ -383,6 +383,8 @@ tags!(HostOp {
     29 => SendSecret,
     30 => SecretSeal,
     31 => SecretNarrow,
+    40 => Resolve,
+    41 => NetNarrowResolve,
 });
 
 tags!(RaiseCause {

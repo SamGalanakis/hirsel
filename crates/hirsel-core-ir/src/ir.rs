@@ -1005,6 +1005,8 @@ pub enum HostOp {
     SendSecret = 23,
     SecretSeal = 30,
     SecretNarrow = 31,
+    Resolve = hirsel_core_ids::host_op::RESOLVE as isize,
+    NetNarrowResolve = 41,
 }
 
 impl HostOp {
@@ -1050,6 +1052,8 @@ impl HostOp {
         HostOp::NetNarrowTls,
         HostOp::NetSplit,
         HostOp::Stopped,
+        HostOp::Resolve,
+        HostOp::NetNarrowResolve,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -1078,12 +1082,14 @@ impl HostOp {
             HostOp::SyncDir => "host_sync_dir",
             HostOp::Random => "host_random",
             HostOp::Connect => "host_connect",
+            HostOp::Resolve => "host_resolve",
             HostOp::Listen => "host_listen",
             HostOp::Accept => "host_accept",
             HostOp::RecvBounded => "host_recv_bounded",
             HostOp::SendPair => "host_send_pair",
             HostOp::NetNarrow => "net_narrow",
             HostOp::NetNarrowTls => "net_narrow_tls",
+            HostOp::NetNarrowResolve => "net_narrow_resolve",
             HostOp::TlsConnect => "tls_connect",
             HostOp::SendSecret => "send_secret",
             HostOp::SecretSeal => "secret_seal",
@@ -1096,12 +1102,14 @@ impl HostOp {
     pub const fn net_symbol(self) -> &'static str {
         match self {
             Self::Connect => "hirsel_core_host_connect",
+            Self::Resolve => "hirsel_core_host_resolve",
             Self::Listen => "hirsel_core_host_listen",
             Self::Accept => "hirsel_core_host_accept",
             Self::RecvBounded => "hirsel_core_host_recv_bounded",
             Self::SendPair => "hirsel_core_host_send_pair",
             Self::NetNarrow => "hirsel_core_net_narrow",
             Self::NetNarrowTls => "hirsel_core_net_narrow_tls",
+            Self::NetNarrowResolve => "hirsel_core_net_narrow_resolve",
             Self::TlsConnect => "hirsel_core_tls_connect",
             Self::SendSecret => "hirsel_core_host_send_secret",
             Self::SecretSeal => "hirsel_core_secret_seal",
@@ -1119,6 +1127,7 @@ impl HostOp {
                 | HostOp::Random
                 | HostOp::NetNarrow
                 | HostOp::NetNarrowTls
+                | HostOp::NetNarrowResolve
                 | HostOp::SecretSeal
                 | HostOp::SecretNarrow
                 | HostOp::NetSplit
@@ -1304,6 +1313,10 @@ impl RtOp {
                         vec![V(u64_), V(p), V(u64_), V(u8_), V(u64_), V(u64_)],
                         outcome,
                     ),
+                    HostOp::Resolve => {
+                        (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
+                    }
+                    HostOp::NetNarrowResolve => (vec![V(u64_), V(p)], outcome),
                     HostOp::SendPair => {
                         (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
                     }

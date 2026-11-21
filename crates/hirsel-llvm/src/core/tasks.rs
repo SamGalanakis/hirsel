@@ -75,6 +75,8 @@ impl FunctionEmitter<'_> {
             | HostOp::SendPair
             | HostOp::NetNarrow
             | HostOp::NetNarrowTls
+            | HostOp::NetNarrowResolve
+            | HostOp::Resolve
             | HostOp::TlsConnect
             | HostOp::SendSecret
             | HostOp::SecretSeal

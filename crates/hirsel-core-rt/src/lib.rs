@@ -29,6 +29,7 @@ pub mod model_net;
 pub mod net;
 pub mod os;
 mod os_net;
+mod os_resolve;
 mod os_sync;
 mod os_tls;
 #[cfg(any(test, feature = "charge-observation"))]
@@ -36,6 +37,7 @@ pub mod peak;
 pub mod process;
 pub mod provider;
 pub mod region;
+mod resolve;
 mod retention;
 #[cfg(any(test, feature = "testing"))]
 pub mod schedule_script;

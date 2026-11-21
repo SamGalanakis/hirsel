@@ -184,6 +184,7 @@ fn net_rule(rule: &hirsel_core_net::GrantRule) -> String {
             };
             format!("Tls {} {first}-{last} {trust}", rule.pattern_text())
         }
+        GrantRule::Resolve(rule) => format!("Resolve {}", rule.pattern_text()),
     }
 }
 

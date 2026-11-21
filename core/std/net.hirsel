@@ -28,6 +28,23 @@ pub fn finish(take w: WriteHalf, take r: ReadHalf, c: Clock, deadline_ns: u64) -
     }
 }
 
+pub type LookupError: send = Allocation(Capacity) | Network(NetError) | NoAddress
+
+/// Look up at most 16 distinct addresses using a Resolve rule on n.
+/// Alloc: room for 16 addresses, refunded on failure. Waits until lookup or until.
+pub fn lookup(n: Net, name: String, until: Until) -> Result[List[Ip], LookupError] waits {
+    let allocation: Result[List[Ip], Capacity] = list.with_capacity(16)
+    let mut addresses = match allocation {
+        Ok(take value) => take value,
+        Error(capacity) => return Error(Allocation(capacity))
+    }
+    match host.resolve(n, name, mut addresses, until) {
+        Ok(0) => Error(NoAddress),
+        Ok(_) => Ok(take addresses),
+        Error(error) => Error(Network(error))
+    }
+}
+
 /// Invalid(i) identifies the byte where a numeric IP literal is refused,
 /// or the input length when another byte was required.
 pub type ParseIpError = Invalid(u64)

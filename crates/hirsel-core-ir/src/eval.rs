@@ -1875,6 +1875,40 @@ impl Machine<'_> {
         }
         Ok(result)
     }
+    fn network_resolve(&mut self, a: &[u64]) -> Vec<u64> {
+        use hirsel_core_net::{GrantRule, Ip, Name};
+        let Some(name) = std::str::from_utf8(self.carrier_bytes(a[1]))
+            .ok()
+            .and_then(Name::parse)
+        else {
+            return vec![0, 1, 0, 0];
+        };
+        if !self.world.network.grants.get(&a[0]).is_some_and(|rules| {
+            rules
+                .iter()
+                .any(|r| matches!(r, GrantRule::Resolve(rule) if rule.permits(&name)))
+        }) {
+            return vec![0, 1, 0, 0];
+        }
+        if a[3] != 0 && a[5] <= self.world.clock {
+            return vec![0, 6, 0, 0];
+        }
+        let (data, len, cap) = (
+            self.load(a[2], 8),
+            self.load(a[2] + 8, 8),
+            self.load(a[2] + 16, 8),
+        );
+        let model = self.world.network.sockets.model().unwrap();
+        let addresses = model.resolve(&name, cap.saturating_sub(len) as usize);
+        let count = addresses.len() as u64;
+        for (index, address) in addresses.into_iter().enumerate() {
+            let offset = (len + index as u64) * Ip::SIZE as u64;
+            self.put(data + offset, &Ip::from(address).layout_bytes());
+        }
+        self.store(a[2] + 8, 8, len + count);
+        vec![count, 0, 0, 0]
+    }
+
     fn network_attempt(
         &mut self,
         t: &Task,
@@ -2123,6 +2157,7 @@ impl Machine<'_> {
                 | HostOp::MonoNs
                 | HostOp::NetNarrow
                 | HostOp::NetNarrowTls
+                | HostOp::NetNarrowResolve
                 | HostOp::NetSplit
         ) {
             self.check_cancel(t)?;
@@ -2137,6 +2172,17 @@ impl Machine<'_> {
             }
             HostOp::TlsConnect | HostOp::SendSecret | HostOp::SecretSeal | HostOp::SecretNarrow => {
                 unreachable!()
+            }
+            HostOp::Resolve => self.network_resolve(a),
+            HostOp::NetNarrowResolve => {
+                use hirsel_core_net::{GrantRule, ResolveRule};
+                match std::str::from_utf8(self.carrier_bytes(a[1]))
+                    .ok()
+                    .and_then(ResolveRule::new)
+                {
+                    Some(rule) => self.narrow_net(t, a[0], GrantRule::Resolve(rule)),
+                    None => error(1),
+                }
             }
             HostOp::NetNarrowTls => {
                 use hirsel_core_net::{GrantRule, TlsRule, TlsTrust};

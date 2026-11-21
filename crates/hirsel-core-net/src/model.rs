@@ -175,6 +175,7 @@ struct State {
     connections: BTreeMap<u64, Connection>,
     waiters: BTreeMap<u64, Waiter>,
     scripts: BTreeMap<Address, VecDeque<TlsScript>>,
+    dns: BTreeMap<Box<str>, Vec<std::net::IpAddr>>,
     faults: Vec<(u64, Fault)>,
     delivery: Option<u64>,
 }
@@ -204,6 +205,7 @@ impl Model {
             connections: BTreeMap::new(),
             waiters: BTreeMap::new(),
             scripts: BTreeMap::new(),
+            dns: BTreeMap::new(),
             faults: vec![],
             delivery: None,
         })))
@@ -214,6 +216,29 @@ impl Model {
     pub fn owns(key: u64) -> bool {
         key >> 34 == 0
     }
+    /// Supply a deterministic resolver answer for this model.
+    pub fn dns_answer(&self, name: &str, addresses: Vec<std::net::IpAddr>) {
+        let Some(crate::Name::Dns(name)) = crate::Name::parse(name) else {
+            panic!("expected a DNS name");
+        };
+        self.state().dns.insert(name, addresses);
+    }
+
+    pub fn resolve(&self, name: &crate::Name, capacity: usize) -> Vec<std::net::IpAddr> {
+        let state = self.state();
+        let addresses = match name {
+            crate::Name::Ip(ip) => std::slice::from_ref(ip),
+            crate::Name::Dns(name) => state.dns.get(name).map_or(&[][..], Vec::as_slice),
+        };
+        let mut seen = std::collections::HashSet::new();
+        addresses
+            .iter()
+            .copied()
+            .filter(|ip| seen.insert(*ip))
+            .take(capacity)
+            .collect()
+    }
+
     pub fn now(&self) -> u64 {
         self.state().now
     }

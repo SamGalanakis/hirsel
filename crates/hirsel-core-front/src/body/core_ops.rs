@@ -305,6 +305,7 @@ operations! {
     ("stdout", "write_bytes", Lane::Runtime(Kernel::Stream(HostOp::Stdout)), "B", "core-ops-914", false),
     ("stderr", "write_bytes", Lane::Runtime(Kernel::Stream(HostOp::Stderr)), "B", "core-ops-914", false),
     ("host", "connect", Lane::Runtime(Kernel::Net(HostOp::Connect)), "B", "wire-w1a-1063", false),
+    ("host", "resolve", Lane::Runtime(Kernel::Net(HostOp::Resolve)), "B", "dns-resolve-1503", false),
     ("host", "listen", Lane::Runtime(Kernel::Net(HostOp::Listen)), "B", "wire-w1a-1063", false),
     ("host", "accept", Lane::Runtime(Kernel::Net(HostOp::Accept)), "B", "wire-w1a-1063", false),
     ("host", "recv_bounded", Lane::Runtime(Kernel::Net(HostOp::RecvBounded)), "B", "wire-w1a-1063", false),
@@ -2826,6 +2827,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         )?;
         self.jump(join, &[value, error, code, written], n);
         self.start(no);
+        let tls = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 1, n)?;
+        let tls_rule = self.new_block(&[]);
+        let resolve_rule = self.new_block(&[]);
+        self.runtime_branch(tls, tls_rule, resolve_rule, n);
+        self.start(resolve_rule);
+        let names = self.net_read_case(ty, at, 2, 0, n)?;
+        let outputs = self.runtime_row(
+            RtOp::Host(HostOp::NetNarrowResolve),
+            &[Arg::Value(net), Arg::Value(names)],
+            n,
+        )?;
+        self.jump(join, &outputs, n);
+        self.start(tls_rule);
         let names = self.net_read_case(ty, at, 1, 0, n)?;
         let (pair, ports) = self.net_case_field(ty, at, 1, 1, n)?;
         let first = self.net_read_field(pair, ports, 0, n)?;
@@ -3068,7 +3082,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 HostOp::Accept => {
                     operands.extend(self.net_until(self.p.fns[f].params[1].ty, vals[1]?, n)?)
                 }
-                HostOp::RecvBounded | HostOp::SendPair => {
+                HostOp::RecvBounded | HostOp::SendPair | HostOp::Resolve => {
                     operands.extend([vals[1]?, vals[2]?]);
                     operands.extend(self.net_until(self.p.fns[f].params[3].ty, vals[3]?, n)?);
                 }
@@ -3110,7 +3124,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ok,
             n,
             |cx, to, ty| {
-                if policy_result || matches!(op, HostOp::RecvBounded | HostOp::SendPair) {
+                if policy_result
+                    || matches!(op, HostOp::RecvBounded | HostOp::SendPair | HostOp::Resolve)
+                {
                     cx.runtime_case_payload(to, 0, ty, Some(value), n);
                 } else if op == HostOp::Connect {
                     if let Some(at) =

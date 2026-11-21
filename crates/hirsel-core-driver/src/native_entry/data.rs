@@ -93,17 +93,22 @@ pub(super) fn write(
     let mut pointers = Vec::new();
     for rule in plan.net_rules {
         let mut row = [0; size_of::<RuleView>()];
-        let view = match rule {
-            GrantRule::Address(address) => RuleView::address(*address),
+        let (view, patterns) = match rule {
+            GrantRule::Address(address) => (RuleView::address(*address), None),
             GrantRule::Tls(rule) => {
                 let patterns = rule.pattern_text();
-                let view = RuleView::tls(rule, &patterns);
-                let offset = rules.len() + offset_of!(RuleView, patterns);
-                let data = bytes(object, None, patterns.into_bytes(), 1)?;
-                pointers.push((u32::try_from(offset).map_err(error)?, data));
-                view
+                (RuleView::tls(rule, &patterns), Some(patterns))
+            }
+            GrantRule::Resolve(rule) => {
+                let patterns = rule.pattern_text();
+                (RuleView::resolve(&patterns), Some(patterns))
             }
         };
+        if let Some(patterns) = patterns {
+            let offset = rules.len() + offset_of!(RuleView, patterns);
+            let data = bytes(object, None, patterns.into_bytes(), 1)?;
+            pointers.push((u32::try_from(offset).map_err(error)?, data));
+        }
         let address = view.address;
         row[0] = address.dir;
         row[1] = address.family;

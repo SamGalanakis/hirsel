@@ -648,7 +648,7 @@ unsafe fn finish(request: &Request, n: &mut NetworkRequest, mut outcome: Outcome
 /// clock it is the program deadline plus the provider's epoch, as `sleep_wait`
 /// converts it, with no clock read; the caller's fresh read decides expiry. A
 /// substituted clock translates by its own reading, saturating at now.
-unsafe fn pending_deadline(n: &NetworkRequest) -> Option<u64> {
+pub(crate) unsafe fn pending_deadline(n: &NetworkRequest) -> Option<u64> {
     unsafe {
         n.until.and_then(|(p, clock, at)| {
             // This translation is host scheduling, outside the program's clock reads.

@@ -637,7 +637,7 @@ impl Replayer {
 fn socket_op(op: u8) -> bool {
     matches!(
         op,
-        CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR | TLS_CONNECT | SEND_SECRET
+        CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR | TLS_CONNECT | SEND_SECRET | RESOLVE
     )
 }
 
@@ -687,6 +687,13 @@ unsafe fn socket_args(request: &Request) -> Args {
         if request.operation == RECV_BOUNDED {
             let spare = request.buffer.capacity.saturating_sub(request.buffer.len) as u64;
             args.extend_from_slice(&spare.to_le_bytes());
+        }
+        if request.operation == RESOLVE {
+            let resolve = &*request.path.cast::<crate::resolve::ResolveRequest>();
+            let name = buffer_bytes(&resolve.raw_name);
+            put_varint(&mut args, name.len() as u64);
+            args.extend_from_slice(name);
+            args.extend_from_slice(&(crate::resolve::spare(&request.buffer) as u64).to_le_bytes());
         }
         if request.operation == TLS_CONNECT {
             let tls = &*request.path.cast::<crate::tls::TlsRequest>();
@@ -1498,6 +1505,21 @@ unsafe fn record_out(
         // SAFETY: the source wrote the address into the pinned network operand.
         let network = unsafe { &*r.path.cast::<crate::net::NetworkRequest>() };
         out.payload = address_bytes(network.address).to_vec();
+    } else if ok && r.operation == RESOLVE {
+        // SAFETY: the resolve provider initialized these Ip elements in spare.
+        for i in before..r.buffer.len {
+            let ip = unsafe { r.buffer.data.cast::<hirsel_core_net::Ip>().add(i).read() };
+            match std::net::IpAddr::from(ip) {
+                std::net::IpAddr::V4(ip) => {
+                    out.payload.extend_from_slice(&[0; 13]);
+                    out.payload.extend_from_slice(&ip.octets());
+                }
+                std::net::IpAddr::V6(ip) => {
+                    out.payload.push(1);
+                    out.payload.extend_from_slice(&ip.octets());
+                }
+            }
+        }
     } else if ok && r.operation == TLS_CONNECT {
         // SAFETY: the handshake pins both outputs through delivery.
         unsafe {
@@ -1565,11 +1587,11 @@ unsafe fn replay(
         return Err(rep.diverged(Mismatch::Arg));
     }
     let Some(out) = out else {
-        // Without a scheduler nothing else readies a replayed sync, and
+        // Without a scheduler nothing else readies a replayed helper, and
         // nothing else runs before its completion. Ready it only when its
         // recorded Done comes next, as `complete` will accept; any other
         // frame is the divergence `complete` would report.
-        if matches!(op, SYNC | SYNC_DIR) && !crate::tasks::has_provider_task() {
+        if matches!(op, SYNC | SYNC_DIR | RESOLVE) && !crate::tasks::has_provider_task() {
             if !matches!(rep.peek()?, Frame::Done { gap, task: t, .. }
                 if *t == task && live.schedule.last.checked_add(*gap) == Some(live.schedule.events))
             {
@@ -1657,6 +1679,35 @@ unsafe fn replay_out(
                 buffer.len = protocol.len();
                 *tls.peer_out = *digest;
             }
+        }
+    } else if op == RESOLVE {
+        if ok {
+            let count = usize::try_from(out.value).map_err(|_| Fault::Corrupt)?;
+            if count > crate::resolve::spare(&r.buffer) {
+                return Err(Fault::Corrupt);
+            }
+            let mut addresses = Vec::with_capacity(count);
+            let mut seen = std::collections::HashSet::new();
+            for bytes in out
+                .payload
+                .chunks_exact(hirsel_tape_format::RESOLVED_IP_LEN)
+            {
+                let address = match bytes[0] {
+                    0 if bytes[1..13] == [0; 12] => {
+                        std::net::Ipv4Addr::from(<[u8; 4]>::try_from(&bytes[13..]).unwrap()).into()
+                    }
+                    1 => {
+                        std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&bytes[1..]).unwrap()).into()
+                    }
+                    _ => return Err(Fault::Corrupt),
+                };
+                if !seen.insert(address) {
+                    return Err(Fault::Corrupt);
+                }
+                addresses.push(address);
+            }
+            // SAFETY: RESOLVE pins the list with at least count spare slots.
+            unsafe { crate::resolve::append(&mut r.buffer, &addresses) };
         }
     } else if carries_payload(op) {
         let spare = r.buffer.capacity.saturating_sub(r.buffer.len);

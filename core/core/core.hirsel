@@ -152,7 +152,7 @@ pub type NetDirection = Connect | Listen
 
 pub type TlsPin = SystemPin | Sha256(Bytes)
 
-pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16)) | Tls(names: String, ports: (u16, u16), trust: TlsPin)
+pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16)) | Tls(names: String, ports: (u16, u16), trust: TlsPin) | Resolve(names: String)
 
 pub type RuleError = Invalid | Capacity(Capacity)
 

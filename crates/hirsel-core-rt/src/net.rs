@@ -4,7 +4,7 @@ use crate::{
     entry::{hirsel_core_capability_handle, hirsel_core_capability_provider},
     provider::*,
 };
-use hirsel_core_net::{GrantRule, Rule, RuleView, TlsRule, TlsTrust};
+use hirsel_core_net::{GrantRule, ResolveRule, Rule, RuleView, TlsRule, TlsTrust};
 use std::ptr;
 
 #[repr(C)]
@@ -13,6 +13,12 @@ pub struct Rules {
     pub len: usize,
 }
 impl Rules {
+    /// # Safety
+    /// The run pins this grant's immutable rows.
+    pub(crate) unsafe fn permits(&self, test: impl FnMut(&RuleView) -> bool) -> bool {
+        unsafe { self.as_slice() }.iter().any(test)
+    }
+
     /// # Safety
     /// The run pins the configured or narrowed immutable rule list.
     pub unsafe fn as_slice(&self) -> &[RuleView] {
@@ -42,7 +48,7 @@ impl RulesStorage {
     }
 
     /// # Safety
-    /// Each TLS row pins its pattern bytes for this call.
+    /// Each TLS or Resolve row pins its pattern bytes for this call.
     pub(crate) unsafe fn from_views(rows: &[RuleView]) -> Option<Self> {
         let rules = rows
             .iter()
@@ -63,6 +69,10 @@ impl RulesStorage {
                 GrantRule::Tls(rule) => {
                     patterns.push(rule.pattern_text());
                     RuleView::tls(&rule, patterns.last().unwrap())
+                }
+                GrantRule::Resolve(rule) => {
+                    patterns.push(rule.pattern_text());
+                    RuleView::resolve(patterns.last().unwrap())
                 }
             })
             .collect();
@@ -216,6 +226,10 @@ pub(crate) const DENIED: Outcome = Outcome {
 /// Check an address before issue. A tape records the denial for its inner grant
 /// and delivers it at its ordinary provider boundary.
 pub(crate) unsafe fn authorize(provider: &Provider, request: &mut Request) -> bool {
+    if request.operation == RESOLVE {
+        // SAFETY: the resolve adapter pins its request and the Net grant.
+        return unsafe { crate::resolve::authorize(provider, request) };
+    }
     if !matches!(request.operation, CONNECT | LISTEN) {
         return true;
     }
@@ -247,7 +261,7 @@ unsafe fn permitted(request: &Request, handle: u64) -> bool {
 pub(crate) unsafe fn permits_address(handle: u64, address: &Address, dir: u8) -> bool {
     unsafe {
         let rules = &*(handle as *const Rules);
-        rules.as_slice().iter().any(|r| {
+        rules.permits(|r| {
             r.address
                 .permits(dir, address.family, address.hi, address.lo, address.port)
         })
@@ -787,6 +801,26 @@ pub unsafe extern "C" fn hirsel_core_net_narrow_tls(
         }
     }
 }
+/// # Safety
+/// Live run, typed Net grant and its pinned pattern carrier.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_net_narrow_resolve(
+    context: *mut Context,
+    net: u64,
+    patterns: *const Buffer,
+    _site: u64,
+) -> Outcome {
+    // SAFETY: the source pins its String's initialized bytes.
+    let patterns = unsafe { crate::tls::bytes(&*patterns) };
+    match std::str::from_utf8(patterns)
+        .ok()
+        .and_then(ResolveRule::new)
+    {
+        Some(rule) => unsafe { narrow(context, net, GrantRule::Resolve(rule)) },
+        None => DENIED,
+    }
+}
+
 unsafe fn narrow(context: *mut Context, n: u64, rule: GrantRule) -> Outcome {
     unsafe {
         crate::process::deny_describe_capability(context);

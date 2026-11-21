@@ -1215,3 +1215,164 @@ fn simd_versions_preserve_run_tape_and_revision() {
     assert!(replayed.is_empty());
     assert_eq!(std::fs::read(&tape).unwrap(), bytes);
 }
+
+/// NET-11: the host supplies a duplicate IPv6 result followed by IPv4.
+/// Replay must deliver the same list with the resolver disabled.
+#[test]
+fn cli_replays_resolution_without_resolver() {
+    const PROGRAM: &str = r#"pub fn main(n: Net) -> Result[(), Exit] waits {
+    let child = result.unwrap(net.narrow(n, Resolve(names: "dup.test")))
+    let ips = result.unwrap(std.net.lookup(child, "DUP.TEST.", Never))
+    if list.len(ips) != 2 {
+        return Error(Exit(status: 31))
+    }
+    let V6(0, 1) = ips[0] else {
+        return Error(Exit(status: 32))
+    }
+    let V4(3221226001u32) = ips[1] else {
+        return Error(Exit(status: 33))
+    }
+    Ok(())
+}
+"#;
+    const RESOLVER: &str = r#"
+#include <netdb.h>
+#include <netinet/in.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+int __wrap_getaddrinfo(const char *name, const char *service,
+                       const struct addrinfo *hints, struct addrinfo **out) {
+    if (getenv("HIRSEL_NET11_OFFLINE")) {
+        (void)write(2, "offline resolver called\n", 24);
+        return EAI_AGAIN;
+    }
+    if (strcmp(name, "DUP.TEST.") != 0 || service ||
+        !hints || hints->ai_socktype != SOCK_STREAM)
+        return EAI_FAIL;
+    static struct sockaddr_in6 v6 = { .sin6_family = AF_INET6, .sin6_addr = IN6ADDR_LOOPBACK_INIT };
+    static struct sockaddr_in v4 = { .sin_family = AF_INET };
+    static struct addrinfo answer[3];
+    v4.sin_addr.s_addr = htonl(0xc0000211);
+    answer[0] = (struct addrinfo){ .ai_family = AF_INET6, .ai_addr = (struct sockaddr *)&v6,
+                                 .ai_addrlen = sizeof(v6), .ai_next = &answer[1] };
+    answer[1] = answer[0];
+    answer[1].ai_next = &answer[2];
+    answer[2] = (struct addrinfo){ .ai_family = AF_INET, .ai_addr = (struct sockaddr *)&v4,
+                                 .ai_addrlen = sizeof(v4) };
+    *out = answer;
+    (void)write(2, "resolver called\n", 16);
+    return 0;
+}
+void __wrap_freeaddrinfo(struct addrinfo *answer) { (void)answer; }
+"#;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(app.join("main.hirsel"), PROGRAM).unwrap();
+
+    let native = native_options(Backend::Cranelift, dir.path());
+    let source = dir.path().join("resolve.c");
+    let object = dir.path().join("resolve.o");
+    std::fs::write(&source, RESOLVER).unwrap();
+    command(
+        Command::new(native.link.driver())
+            .arg("-c")
+            .arg(source)
+            .arg("-o")
+            .arg(&object),
+    )
+    .unwrap();
+    let linker = appending_driver(
+        dir.path(),
+        "clang-observe-resolve",
+        &format!(
+            "'{}' -Wl,--wrap=getaddrinfo,--wrap=freeaddrinfo",
+            object.display().to_string().replace('\'', "'\\''"),
+        ),
+    );
+    let common = [
+        app.display().to_string(),
+        "--backend".into(),
+        "cranelift".into(),
+        "--runtime".into(),
+        env_record_runtime().display().to_string(),
+        "--cc".into(),
+        linker.display().to_string(),
+        "--libraries".into(),
+        root.join("core").display().to_string(),
+        "--source-core".into(),
+        "--source-std".into(),
+        "--store".into(),
+        dir.path().join("cache").display().to_string(),
+    ];
+    let invoke = |command: &str, args: &[&str]| {
+        let mut call = vec![command.to_owned()];
+        call.extend(common.iter().cloned());
+        call.extend(args.iter().map(|&arg| arg.to_owned()));
+        process::tape_request_command(&call, dir.path())
+    };
+    let tape = dir.path().join("resolve.tape");
+    let path = tape.to_str().unwrap();
+    let rule = "Resolve *.test,2001:db8::1";
+    let record = invoke(
+        "run",
+        &["--grant", &format!("Net={rule}"), "--record", path],
+    )
+    .env_remove("HIRSEL_NET11_OFFLINE")
+    .output()
+    .unwrap();
+    let record_log = String::from_utf8_lossy(&record.stderr);
+    assert_eq!(record.status.code(), Some(0), "{record_log}");
+    assert_eq!(record_log.matches("resolver called\n").count(), 1);
+
+    use hirsel_tape_format::{Blocks, Decoder, END, Frame, op::RESOLVE};
+    let recorded = std::fs::read(&tape).unwrap();
+    let mut bytes = recorded.as_slice();
+    let (mut blocks, header) = Blocks::open(|buf| std::io::Read::read(&mut bytes, buf)).unwrap();
+    assert_eq!(
+        header.net_rules,
+        [hirsel_core_net::GrantRule::parse(rule).unwrap()],
+        "resolve_rule_survives_grant_snapshot"
+    );
+    let (mut issues, mut deliveries) = (0, 0);
+    let mut decoder = Decoder::default();
+    while let Some((flags, payload)) = blocks
+        .next(|buf| std::io::Read::read(&mut bytes, buf))
+        .unwrap()
+    {
+        for frame in decoder.block(payload, flags & END != 0).unwrap() {
+            match frame {
+                Frame::Issue { op: RESOLVE, .. } => issues += 1,
+                Frame::Done { .. } => deliveries += 1,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        (issues, deliveries),
+        (1, 1),
+        "resolve_records_one_issue_and_delivery"
+    );
+
+    let replay = invoke("replay", &["--tape", path])
+        .env("HIRSEL_NET11_OFFLINE", "1")
+        .output()
+        .unwrap();
+    let replay_log = String::from_utf8_lossy(&replay.stderr);
+    assert!(
+        !replay_log.contains("offline resolver called"),
+        "resolve_replay_makes_no_query: {replay_log}"
+    );
+    assert_eq!(
+        replay.status.code(),
+        Some(0),
+        "resolve_replays_recorded_order: {replay_log}"
+    );
+}

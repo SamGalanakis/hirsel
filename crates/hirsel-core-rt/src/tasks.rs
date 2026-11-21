@@ -2162,6 +2162,10 @@ impl Outside {
         readies.lock().reserve(outside);
         Self(readies)
     }
+
+    pub(crate) fn ready(self, token: u64) {
+        self.0.push(token);
+    }
 }
 impl Drop for Outside {
     fn drop(&mut self) {

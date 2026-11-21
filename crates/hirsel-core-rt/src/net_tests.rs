@@ -346,6 +346,7 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
     };
     unsafe {
         match law {
+            "resolve_wait" => resolve_wait_law(context, n, clock),
             "inherited_hold" | "inherited_accept" | "inherited_denied" => {
                 let listener = hirsel_core_host_listen(context, n, 0, 0, 0x7f000001, 0, 16, 1);
                 if law == "inherited_denied" {
@@ -1037,4 +1038,276 @@ unsafe fn scheduler_socket_law(context: *mut Context, cancel: bool, parallel: bo
         hirsel_core_socket_drop(context, halves.value);
         hirsel_core_socket_drop(context, halves.written);
     }
+}
+
+fn name_buffer(name: &str) -> Buffer {
+    Buffer {
+        data: name.as_ptr().cast_mut(),
+        len: name.len(),
+        capacity: 0,
+    }
+}
+
+fn ip_buffer(storage: &mut [hirsel_core_net::Ip], len: usize) -> Buffer {
+    Buffer {
+        data: storage.as_mut_ptr().cast(),
+        len,
+        capacity: storage.len(),
+    }
+}
+
+#[test]
+fn resolve_only_checks_names_and_grants_no_connect_authority() {
+    use crate::{os_resolve::LOOKUP, resolve::hirsel_core_host_resolve};
+    use std::{
+        net::{IpAddr, Ipv4Addr, TcpListener},
+        sync::{Arc, atomic::AtomicUsize},
+    };
+
+    let mut os = crate::os::OsProvider::new(
+        File::create("/dev/null").unwrap().into(),
+        File::create("/dev/null").unwrap().into(),
+    );
+    let provider = os.provider();
+    let parent = RulesStorage::new([hirsel_core_net::GrantRule::parse(
+        "Resolve localhost,*.a.test,127.0.0.1",
+    )
+    .unwrap()]);
+    let mut files = Files::default();
+    let net = files.registry.grant(provider, parent.handle());
+    let mut context = Context::new(1 << 20);
+    context.host_files = &mut files;
+    let queries = Arc::new(AtomicUsize::new(0));
+    let counter = queries.clone();
+    let localhost = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    LOOKUP.set(Some(Arc::new(move |_, _| {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Ok(vec![localhost])
+    })));
+    // SAFETY: the fixture pins the provider, grants and both borrowed carriers.
+    unsafe {
+        let child = hirsel_core_net_narrow_resolve(&mut context, net, &name_buffer("*.test"), 1);
+        assert_eq!(child.error, IoError::OK);
+        let mut addresses = [localhost.into(); 4];
+        let mut out = ip_buffer(&mut addresses, 0);
+        let mut resolve = |grant, name| {
+            hirsel_core_host_resolve(
+                &mut context,
+                grant,
+                &name_buffer(name),
+                &mut out,
+                0,
+                0,
+                0,
+                1,
+            )
+        };
+        let denied = resolve(net, "xa.test").error.tag;
+        let malformed = resolve(net, "bad..a.test").error.tag;
+        let narrowed = resolve(child.value, "other.test").error.tag;
+        let queries_after_denied = queries.load(Ordering::Relaxed);
+        let covered = resolve(child.value, "HOST.A.TEST.").error.tag;
+        let literal = resolve(net, "127.0.0.1");
+        assert_eq!((literal.error, literal.value), (IoError::OK, 1));
+        assert_eq!(queries.load(Ordering::Relaxed), queries_after_denied + 1);
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let IpAddr::V4(ip) = addresses[0].into() else {
+            panic!("the resolver stub returns IPv4");
+        };
+        let connect = hirsel_core_host_connect(
+            &mut context,
+            net,
+            0,
+            0,
+            u64::from(u32::from(ip)),
+            listener.local_addr().unwrap().port(),
+            0,
+            0,
+            0,
+            1,
+        );
+        assert_eq!(
+            (
+                denied,
+                malformed,
+                narrowed,
+                queries_after_denied,
+                covered,
+                connect.error.tag
+            ),
+            (1, 1, 1, 0, 0, 1),
+            "resolve_authority_before_query_narrow_and_connect"
+        );
+        files.close_all(&mut context);
+    }
+    LOOKUP.set(None);
+    crate::os_resolve::WORKERS.with(|workers| {
+        for helper in workers.take() {
+            helper.join().unwrap();
+        }
+    });
+}
+
+#[test]
+fn resolve_socket_wait_discards_aborted_helpers() {
+    isolated("resolve_wait");
+}
+
+unsafe fn resolve_wait_law(context: *mut Context, parent: u64, clock: u64) {
+    use crate::{
+        os_resolve::{LOOKUP, WORKERS},
+        resolve::hirsel_core_host_resolve,
+        tasks::*,
+    };
+    use std::{
+        net::{IpAddr, Ipv6Addr},
+        sync::{Arc, Condvar, Mutex},
+    };
+
+    struct Scenario {
+        net: u64,
+        result: Option<(IoError, usize, IpAddr)>,
+    }
+    unsafe extern "C" fn child(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: run_root pins the fixture through both tasks.
+        unsafe {
+            let scenario = &mut **input.cast::<*mut Scenario>();
+            let mut addresses = [IpAddr::V6(Ipv6Addr::LOCALHOST).into(); 2];
+            let mut out = ip_buffer(&mut addresses, 1);
+            let outcome = hirsel_core_host_resolve(
+                context,
+                scenario.net,
+                &name_buffer("old.test"),
+                &mut out,
+                0,
+                0,
+                0,
+                1,
+            );
+            scenario.result = Some((outcome.error, out.len, addresses[0].into()));
+        }
+        0
+    }
+    unsafe extern "C" fn supervisor(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: run_root pins the fixture until the child joins.
+        unsafe {
+            let task = hirsel_core_spawn(
+                context,
+                0,
+                8192,
+                input,
+                child,
+                crate::tasks_tests::layout::<*mut Scenario, ()>(0),
+                1,
+            )
+            .task;
+            assert!(!task.is_null());
+            checkpoint();
+            assert!(task_waits_for_provider(task), "resolve parked after issue");
+            hirsel_core_cancel(context, task);
+            let joined = hirsel_core_join(context, task, ptr::null_mut(), 2);
+            assert_eq!((joined.kind, joined.status), (0, 0));
+        }
+        0
+    }
+
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let worker_gate = gate.clone();
+    let stale = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+    let fresh = "192.0.2.17".parse::<IpAddr>().unwrap();
+    LOOKUP.set(Some(Arc::new(move |name, _| {
+        if name == c"old.test" {
+            let (lock, changed) = &*worker_gate;
+            drop(
+                changed
+                    .wait_while(lock.lock().unwrap(), |released| !*released)
+                    .unwrap(),
+            );
+            Ok(vec![stale])
+        } else {
+            assert_eq!(name, c"new.test");
+            Ok(vec![fresh])
+        }
+    })));
+    // SAFETY: the context and borrowed buffers remain live throughout the run.
+    unsafe {
+        let provider = *hirsel_core_capability_provider(context, parent);
+        let rules =
+            RulesStorage::new([hirsel_core_net::GrantRule::parse("Resolve *.test").unwrap()]);
+        let net = (*(*context).host_files)
+            .registry
+            .grant(provider, rules.handle());
+        let keep = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        let mut run = Scenario { net, result: None };
+        let mut input = &raw mut run;
+        crate::causes::task_start(&mut *context).unwrap();
+        let failed = run_root(
+            context,
+            supervisor,
+            (&raw mut input).cast(),
+            ptr::null_mut(),
+            size_of::<*mut Scenario>(),
+            0,
+            SchedulerProvider::default(),
+        );
+        assert_eq!(failed, 0);
+        let (cancel, cancelled_len, cancelled_prefix) = run.result.unwrap();
+
+        let now =
+            crate::host_ops::hirsel_core_host_clock(context, MONO_NS, clock, ptr::null_mut(), 0, 1)
+                .value;
+        let mut addresses = [keep.into(); 2];
+        let mut out = ip_buffer(&mut addresses, 1);
+        let timeout = hirsel_core_host_resolve(
+            context,
+            net,
+            &name_buffer("old.test"),
+            &mut out,
+            1,
+            clock,
+            now + 50_000_000,
+            1,
+        );
+        let (timed_out_len, timed_out_prefix) = (out.len, IpAddr::from(addresses[0]));
+
+        let old = WORKERS.with(|workers| workers.take());
+        assert_eq!(old.len(), 2, "both expired operations started a helper");
+        let old = Mutex::new(old);
+        LOOKUP.set(Some(Arc::new(move |name, _| {
+            assert_eq!(name, c"new.test");
+            let (lock, changed) = &*gate;
+            *lock.lock().unwrap() = true;
+            changed.notify_all();
+            for helper in std::mem::take(&mut *old.lock().unwrap()) {
+                helper.join().unwrap();
+            }
+            Ok(vec![fresh])
+        })));
+        let next =
+            hirsel_core_host_resolve(context, net, &name_buffer("new.test"), &mut out, 0, 0, 0, 1);
+        assert_eq!(
+            (
+                cancel.tag,
+                cancelled_len,
+                cancelled_prefix,
+                timeout.error.tag,
+                timed_out_len,
+                timed_out_prefix
+            ),
+            (7, 1, keep, 6, 1, keep),
+            "resolve_abort_leaves_caller_list_untouched"
+        );
+        assert_eq!(
+            (next.error, next.value, out.len, addresses.map(IpAddr::from)),
+            (IoError::OK, 1, 2, [keep, fresh]),
+            "discarded_resolver_answers_never_reach_next_list"
+        );
+    }
+    LOOKUP.set(None);
+    WORKERS.with(|workers| {
+        for worker in workers.take() {
+            worker.join().unwrap();
+        }
+    });
 }

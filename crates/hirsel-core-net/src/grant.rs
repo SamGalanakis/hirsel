@@ -1,27 +1,58 @@
-use crate::{RULE_SYNTAX, Rule, TlsRule, TlsTrust};
+use crate::{Name, Pattern, RULE_SYNTAX, Rule, TlsRule, TlsTrust};
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ResolveRule(Box<[Pattern]>);
+
+impl ResolveRule {
+    pub fn new(patterns: &str) -> Option<Self> {
+        Some(Self(Pattern::parse_list(patterns)?))
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        let mut words = text.split_whitespace();
+        match (words.next(), words.next(), words.next()) {
+            (Some("Resolve"), Some(patterns), None) => Self::new(patterns),
+            _ => None,
+        }
+    }
+
+    pub fn permits(&self, name: &Name) -> bool {
+        self.0.iter().any(|pattern| pattern.covers(name))
+    }
+
+    fn intersect(&self, other: &Self) -> Option<Self> {
+        let patterns = Pattern::intersection(&self.0, &other.0);
+        (!patterns.is_empty()).then_some(Self(patterns))
+    }
+
+    pub fn pattern_text(&self) -> String {
+        Pattern::list_text(&self.0)
+    }
+}
 
 /// An immutable Net grant rule in the launcher and the runtime.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum GrantRule {
     Address(Rule),
     Tls(TlsRule),
+    Resolve(ResolveRule),
 }
 
 impl GrantRule {
     pub fn parse(text: &str) -> Result<Self, String> {
-        if text.split_whitespace().next() == Some("Tls") {
-            TlsRule::parse(text)
-                .map(Self::Tls)
-                .ok_or_else(|| format!("expected --grant {RULE_SYNTAX}: {text}"))
-        } else {
-            Rule::parse(text).map(Self::Address)
+        match text.split_whitespace().next() {
+            Some("Tls") => TlsRule::parse(text).map(Self::Tls),
+            Some("Resolve") => ResolveRule::parse(text).map(Self::Resolve),
+            _ => return Rule::parse(text).map(Self::Address),
         }
+        .ok_or_else(|| format!("expected --grant {RULE_SYNTAX}: {text}"))
     }
 
     pub fn intersect(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::Address(a), Self::Address(b)) => a.intersect(*b).map(Self::Address),
             (Self::Tls(a), Self::Tls(b)) => a.intersect(b).map(Self::Tls),
+            (Self::Resolve(a), Self::Resolve(b)) => a.intersect(b).map(Self::Resolve),
             _ => None,
         }
     }
@@ -30,12 +61,13 @@ impl GrantRule {
         37 + match self {
             Self::Address(_) => 0,
             Self::Tls(rule) => rule.pattern_bytes(),
+            Self::Resolve(rule) => Pattern::list_bytes(&rule.0),
         }
     }
 }
 
-/// C grant row. Direction 2 uses count-delimited UTF-8 patterns and a pinned
-/// trust. The original address fields and offsets are unchanged.
+/// C grant row. Directions 2 (TLS) and 3 (Resolve) use length-delimited UTF-8
+/// patterns. Only TLS carries a trust pin.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RuleView {
@@ -80,10 +112,26 @@ impl RuleView {
         }
     }
 
+    pub fn resolve(patterns: &str) -> Self {
+        Self {
+            patterns: patterns.as_ptr(),
+            patterns_len: patterns.len(),
+            ..Self::address(Rule {
+                dir: 3,
+                family: 0,
+                hi: 0,
+                lo: 0,
+                bits: 0,
+                first: 0,
+                last: 0,
+            })
+        }
+    }
+
     /// # Safety
-    /// A TLS row pins patterns_len readable bytes at patterns.
+    /// A TLS or Resolve row pins patterns_len readable bytes at patterns.
     pub unsafe fn decode(self) -> Option<GrantRule> {
-        if self.address.dir != 2 {
+        if !matches!(self.address.dir, 2 | 3) {
             return self
                 .address
                 .valid()
@@ -94,6 +142,9 @@ impl RuleView {
         }
         let patterns = unsafe { std::slice::from_raw_parts(self.patterns, self.patterns_len) };
         let patterns = std::str::from_utf8(patterns).ok()?;
+        if self.address.dir == 3 {
+            return ResolveRule::new(patterns).map(GrantRule::Resolve);
+        }
         let trust = match self.trust {
             0 => TlsTrust::System,
             1 => TlsTrust::Roots(self.roots),

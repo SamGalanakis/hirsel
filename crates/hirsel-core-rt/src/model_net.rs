@@ -52,6 +52,7 @@ fn modeled(op: u8) -> bool {
             | SEND_SECRET
             | MONO_NS
             | WALL_MS
+            | RESOLVE
             | SLEEP_UNTIL
     )
 }
@@ -107,6 +108,26 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                     },
                     ..Outcome::default()
                 },
+                ..Step::default()
+            };
+        }
+        if r.operation == RESOLVE {
+            let resolve = &*r.path.cast::<crate::resolve::ResolveRequest>();
+            let outcome = if resolve
+                .network
+                .until
+                .is_some_and(|(_, _, at)| at <= p.model.now())
+            {
+                crate::os_net::signal(6)
+            } else {
+                let addresses = p.model.resolve(
+                    resolve.name.as_ref().unwrap(),
+                    crate::resolve::spare(&r.buffer),
+                );
+                crate::resolve::append(&mut r.buffer, &addresses)
+            };
+            return Step {
+                outcome,
                 ..Step::default()
             };
         }

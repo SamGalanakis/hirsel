@@ -111,7 +111,10 @@ empty intersection. A resolved address grants nothing. Connecting to it still ne
 
 The host provider resolves through the system resolver (`getaddrinfo` with a stream
 socket type, so `/etc/hosts` and the configured nameservers apply), as Go's
-`net.LookupIP` with the cgo resolver and Rust's `ToSocketAddrs` do. It runs the lookup on a
+`net.LookupIP` with the cgo resolver and Rust's `ToSocketAddrs` do. The `Resolve` rule
+covers the caller's name, which the provider passes to `getaddrinfo` as written, and the
+host's resolver configuration, including search-list expansion of a relative name, is the
+operator's policy. The provider runs the lookup on a
 helper, so the operation waits after issue and is a cancellation point at issue and while
 it waits ([CONC-7](tasks.md#conc-7-cancellation-points)). Cancellation there gives
 `Aborted`, and a passed `until` gives `TimedOut`. A lookup still running when it is aborted

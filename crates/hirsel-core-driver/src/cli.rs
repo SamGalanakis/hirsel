@@ -296,7 +296,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--grant"],
         Some("KIND"),
         ["build", "publish", "run", "replay", "test"],
-        "Grant a capability kind; Net requires Net=<Connect|Listen> <prefix>/<len> <lo>-<hi>[;<rule>]. Repeat for more kinds."
+        "Grant a capability kind; Net takes explicit Connect, Listen, Tls or Resolve rules separated by semicolons. Repeat for more kinds."
     ),
     option!(
         Filter,

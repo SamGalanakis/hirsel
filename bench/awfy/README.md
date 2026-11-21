@@ -241,10 +241,9 @@ python3 bench/awfy/receipt.py compare "$out/base-samples/receipt.json" \
 The guard requires checked stdout, complete row coverage and instruction
 counters with equal enabled and running times. It checks the exact
 execution argv and CPU affinity, as well as build flags and the
-release compiler, runtime, source, image and fixture hashes. Candidate identity
-also includes whether the build environment set `HIRSEL_STD_SEPARATE`. Older
-receipts may have an unrecorded setting. When candidate identity changes, both
-rows must carry verified build records. The report names the changed values.
+release compiler, runtime, source, image and fixture hashes. When candidate
+identity changes, both rows must carry verified build records. The report
+names the changed values.
 Identical candidate identities across all rows cause an A/A refusal. Use
 `compare --aa` for a deliberate run with identical candidate identities.
 Each LangArena image's workload source hash covers its benchmark group and the

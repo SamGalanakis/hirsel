@@ -561,7 +561,7 @@ def compile_rows(board, out, prepared, fixture, tools):
         label = f"LangArena {mode}"
         fixture_id = receipt.fixture_identity(out / "inputs.json", config)
         sample_env = cargo_scope(env)
-        provenance = build.native_provenance(hirsel, out / "inputs.json", env=sample_env, cwd=out)
+        provenance = build.native_provenance(hirsel, out / "inputs.json", cwd=out)
         commands = [("hirsel", hirsel, out, exe), ("rust", cargo_build, rust, rust_exe)]
         if mode == "edit":
             commands.reverse()
@@ -603,7 +603,7 @@ def compile_rows(board, out, prepared, fixture, tools):
             if side == "hirsel":
                 board.report["instruction_receipt"]["rows"].append({
                     "key": f"compile/{label}", "suite": "compile", "mode": mode,
-                    "flags": provenance["flags"], build.STD_SEPARATE: provenance[build.STD_SEPARATE],
+                    "flags": provenance["flags"],
                     "argv": list(map(str, command)),
                     "build_record": record, "image_sha256": record["image_sha256"],
                     "affinity": sorted(os.sched_getaffinity(0)), "marker": marker + "\n",

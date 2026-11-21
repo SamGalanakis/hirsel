@@ -33,7 +33,6 @@ class InstructionGuard(unittest.TestCase):
             "compiler_sha256": "a" * 64,
             "runtime_archive_sha256": "b" * 64,
             "image_sha256": "f" * 64,
-            build.STD_SEPARATE: "off",
             "marker": stdout,
             "stdout": stdout,
             "sample": {"status": "ok", "verified": True, "instructions": 69_882_571,
@@ -86,7 +85,7 @@ class InstructionGuard(unittest.TestCase):
                 row, = sample_receipt["rows"]
                 row["build_record"] = build_record({
                     "accepted": True, "native": {"linked": True},
-                    "measurement": {key: row[key] for key in (*receipt.CANDIDATE_FIELDS,
+                    "measurement": {key: row[key] for key in (*receipt.CANDIDATE_HASHES,
                                                               "manifest_sha256", "flags")},
                 })
 
@@ -112,18 +111,16 @@ class InstructionGuard(unittest.TestCase):
             self.assertIn(f"Variable compiler_sha256 {'a' * 64} -> {'d' * 64}", result.stdout)
             self.assertIn("(+2.032%) FAIL", result.stdout)
 
-            for field, value in (("image_sha256", "0" * 64), (build.STD_SEPARATE, "on")):
-                with self.subTest(candidate_field=field):
-                    changed = deepcopy(baseline)
-                    changed["rows"][0][field] = value
-                    result = compare(changed)
-                    self.assertEqual(result.returncode, 2)
-                    self.assertIn("requires a verified build record", result.stderr)
-                    record_build(changed)
-                    result = compare(changed)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn(f"Variable {field} ", result.stdout)
-                    self.assertEqual(compare(changed, "--aa").returncode, 2)
+            changed = deepcopy(baseline)
+            changed["rows"][0]["image_sha256"] = "0" * 64
+            result = compare(changed)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("requires a verified build record", result.stderr)
+            record_build(changed)
+            result = compare(changed)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Variable image_sha256 ", result.stdout)
+            self.assertEqual(compare(changed, "--aa").returncode, 2)
 
             paired["rows"][0]["runtime_archive_sha256"] = "e" * 64
             result = compare(paired)
@@ -410,7 +407,7 @@ class NativeProvenance(unittest.TestCase):
             data.write_bytes(b'{"input": 1}')
             toolchain = {"compiler_sha256": build.sha256(compiler), "runtime_archive_sha256": build.sha256(runtime)}
             command = [compiler, "build", "--release", "--runtime", runtime, "--inputs", manifest, "-o", binary]
-            provenance = build.native_provenance(command, manifest, env={build.STD_SEPARATE: ""})
+            provenance = build.native_provenance(command, manifest)
             provenance["rap_sha256"] = build.sha256(data)
             build.write_native_report(binary, json.dumps({
                 "accepted": True, "native": {"linked": True, "executable": str(binary)},
@@ -422,7 +419,6 @@ class NativeProvenance(unittest.TestCase):
 
             mandelbrot = row("Mandelbrot")
             self.assertEqual(mandelbrot["flags"], ["--release", "--runtime", "runtime", "--inputs", "manifest", "-o", "image"])
-            self.assertEqual(mandelbrot[build.STD_SEPARATE], "on")
             json_row = row("Json", '{"input": 1}')
             self.assertEqual(json_row["fixture_files"][str(data)], build.sha256(data))
             self.assertNotEqual(json_row["fixture_sha256"], mandelbrot["fixture_sha256"])

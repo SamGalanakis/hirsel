@@ -54,7 +54,7 @@ def build_hirsel(out, artifacts, rows, env=None, *, debug_lines=False):
         ]
         if debug_lines:
             command += ["--debug-lines", "on"]
-        provenance = native_provenance(command, manifest, env=env)
+        provenance = native_provenance(command, manifest)
         result = subprocess.run([ROOT / "tools/capped", *command], env=env,
                                 stdout=subprocess.PIPE)
         if result.returncode:

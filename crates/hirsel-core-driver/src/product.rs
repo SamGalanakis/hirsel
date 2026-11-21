@@ -31,6 +31,7 @@ impl PackageProduct {
         dependencies: Vec<PackageId>,
     ) -> PackageManifest {
         PackageManifest {
+            namespace: None,
             package: package(name),
             dependencies,
             sources: sources
@@ -40,6 +41,7 @@ impl PackageProduct {
                     captured: Some(hirsel_core_resolve::CapturedSource {
                         bytes: text.as_bytes().into(),
                         name: None,
+                        test: false,
                     }),
                     file: root.join(format!("{module}.hirsel")),
                     modules: vec![(*module).into()],
@@ -427,6 +429,7 @@ mod tests {
         let file = dir.path().join("elsewhere.hirsel");
         std::fs::write(&file, text).unwrap();
         let manifest = PackageManifest {
+            namespace: None,
             package: package("std"),
             dependencies: vec![package("core")],
             sources: vec![ModuleSource {
@@ -448,6 +451,7 @@ mod tests {
         CorpusManifest {
             core: package("core"),
             packages: vec![PackageManifest {
+                namespace: None,
                 package: package("core"),
                 dependencies: vec![],
                 sources: vec![ModuleSource {
@@ -803,6 +807,7 @@ mod tests {
                 &source_root.join("core/core"),
             ));
         request.inputs.packages.push(PackageManifest {
+            namespace: None,
             package: package("std"),
             dependencies: vec![package("core")],
             sources: vec![ModuleSource {
@@ -947,6 +952,7 @@ mod agreement {
                 packages: vec![
                     core.clone(),
                     PackageManifest {
+                        namespace: None,
                         package: package("app"),
                         dependencies: vec![package("core")],
                         sources: vec![ModuleSource {
@@ -1047,6 +1053,7 @@ mod indexed_tests {
             let inputs = CorpusManifest {
                 core: package("core"),
                 packages: vec![PackageManifest {
+                    namespace: None,
                     package: package("core"),
                     dependencies: vec![],
                     sources: vec![hirsel_core_resolve::ModuleSource {

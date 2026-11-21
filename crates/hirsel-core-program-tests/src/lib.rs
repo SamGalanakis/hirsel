@@ -36,6 +36,7 @@ pub(crate) fn source_manifest(
         packages.push(std_manifest());
     }
     packages.push(PackageManifest {
+        namespace: None,
         package: package("app"),
         dependencies,
         sources: vec![ModuleSource {
@@ -140,6 +141,7 @@ pub(crate) fn checked_inputs(
         let package = packages
             .entry(path.package.clone())
             .or_insert_with(|| PackageManifest {
+                namespace: None,
                 dependencies: if path.package == core {
                     vec![]
                 } else {

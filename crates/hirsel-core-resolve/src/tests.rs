@@ -30,6 +30,7 @@ fn packages(sources: &[(&str, &str, &str)], mut symbols: Symbols) -> (NameIndex,
             .any(|m: &PackageManifest| m.package.name == pkg)
         {
             manifests.push(PackageManifest {
+                namespace: None,
                 package: package(pkg),
                 sources: vec![],
                 dependencies: vec![],
@@ -446,6 +447,7 @@ fn record_and_variant_constructor_collision_waits_for_expected_type() {
 fn clean_measurement_keeps_valid_members_of_a_partly_refused_module() {
     let manifests = vec![
         PackageManifest {
+            namespace: None,
             package: package("core"),
             sources: vec![ModuleSource {
                 foreign: false,
@@ -457,6 +459,7 @@ fn clean_measurement_keeps_valid_members_of_a_partly_refused_module() {
             dependencies: vec![],
         },
         PackageManifest {
+            namespace: None,
             package: package("app"),
             sources: vec![ModuleSource {
                 foreign: false,
@@ -733,11 +736,13 @@ fn a_local_wins_at_the_start_of_a_dotted_path() {
 #[test]
 fn clean_measurement_preserves_module_ids_after_removing_a_whole_file() {
     let mut core = PackageManifest {
+        namespace: None,
         package: package("core"),
         sources: vec![],
         dependencies: vec![],
     };
     let mut app = PackageManifest {
+        namespace: None,
         package: package("app"),
         sources: vec![],
         dependencies: vec![package("core")],
@@ -1110,11 +1115,13 @@ fn lang_1_prog_7_columns_count_scalars_and_one_per_tab() {
             core: package("core"),
             packages: vec![
                 PackageManifest {
+                    namespace: None,
                     package: package("core"),
                     sources: vec![],
                     dependencies: vec![],
                 },
                 PackageManifest {
+                    namespace: None,
                     package: package("app"),
                     sources: vec![ModuleSource {
                         foreign: false,

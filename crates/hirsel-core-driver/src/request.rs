@@ -132,8 +132,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let package_command = matches!(command, "lock" | "fetch" | "pack");
     if package_command {
         let directory = invocation.positional.as_deref().unwrap_or(".");
-        let workspace = crate::package_workspace::Workspace::discover(Path::new(directory))?
-            .ok_or_else(|| format!("{directory} has no workspace manifest"))?;
+        let workspace = crate::package_workspace::Workspace::discover_for(
+            Path::new(directory),
+            command == "pack",
+        )?
+        .ok_or_else(|| format!("{directory} has no workspace manifest"))?;
         let selected = (command == "pack")
             .then(|| workspace.selected().cloned())
             .transpose()?;
@@ -146,10 +149,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         if let Some(selected) = selected {
             let out = pack_out.ok_or("pack requires --out FILE")?;
             let (bytes, archive) = resolved.make_archive(&selected)?;
-            crate::package_lock::ensure_pack_output(&resolved, &archive, &lock, &out)?;
+            let output = crate::package_lock::PackOutput::stage(&resolved, &archive, &lock, &out)?;
             lock.commit(&resolved.workspace)?;
             resolved.store.install(&archive)?;
-            crate::package_store::atomic_write(&out, &bytes)?;
+            output.write(&bytes)?;
             println!("{selected} {}", archive.head);
             for (root, library) in &archive.entries {
                 if *root != archive.head {
@@ -817,7 +820,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 _ => PathBuf::from("."),
             }),
             store,
-            library: image.map_or(LibraryInput::Sources, LibraryInput::Image),
+            library: image
+                .clone()
+                .map_or(LibraryInput::Sources, LibraryInput::Image),
             entry: None,
         }
     } else if inspect_std {
@@ -833,24 +838,12 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         };
         test_owner = Some(app.package.package.clone());
         manifest_runs = app.tests.take();
-        let mut request = CheckRequest::from_app(
+        CheckRequest::from_app(
             app,
             &libraries,
             &store,
             native_command || installed.is_some() || inspection.is_some() || image.is_some(),
-        )?;
-        if let Some(image) = image {
-            if !request.use_image(image)? {
-                return Err(format!(
-                    "--image {} does not hold exactly this request's packages",
-                    image_path.unwrap().display()
-                )
-                .into());
-            }
-        } else if let Some(image) = installed_std {
-            request.use_image(image)?;
-        }
-        request
+        )?
     };
     if entry.is_some() {
         request.entry = entry;
@@ -899,6 +892,28 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let selected_entry = request.entry.clone();
     request.capture_sources()?;
     let sources = crate::SourceFiles::of(&request);
+    if let Some(owner) = &test_owner {
+        if let Some(image) = image {
+            if !request.use_image(image)? {
+                return Err(format!(
+                    "--image {} does not hold exactly this request's packages",
+                    image_path.unwrap().display()
+                )
+                .into());
+            }
+        } else if let Some(image) = installed_std {
+            request.use_image(image)?;
+        } else if request.manifest.is_some()
+            && !source_core
+            && !source_std
+            && let Some(image) =
+                crate::image::closure_image(&request, owner, command == "check", &mut meter)?
+            && request.use_image(image)?
+        {
+            meter.result.image_selection = Some("image used: workspace dependencies".into());
+        }
+    }
+
     let native_store = request.store.join("native");
     let store_root = request.store.clone();
     meter.finish("startup/discovery");

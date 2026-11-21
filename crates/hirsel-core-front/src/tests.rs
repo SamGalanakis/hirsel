@@ -53,6 +53,7 @@ fn inputs_in(source: &str, core_dir: &Path, module: &str) -> (NameIndex, Vec<Mod
     let mut symbols = Symbols::default();
     let core = PackageManifest::directory(core_dir, package("core"), true).unwrap();
     let app = PackageManifest {
+        namespace: None,
         package: package("app"),
         sources: vec![ModuleSource {
             foreign: false,

@@ -60,6 +60,7 @@ pub(crate) fn open_directory(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+#[derive(Clone)]
 pub(crate) struct Captured {
     pub(crate) bytes: Arc<[u8]>,
     pub(crate) identity: FileId,

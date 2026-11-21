@@ -105,6 +105,7 @@ fn core_contract_directory_is_not_part_of_the_std_seed() {
     assert_eq!(selected.len(), 1);
     let mut symbols = hirsel_core_syntax::Symbols::default();
     let package = PackageManifest {
+        namespace: None,
         package: package("core"),
         sources: selected,
         dependencies: vec![],
@@ -128,11 +129,13 @@ fn manifest() -> CorpusManifest {
         core: core.clone(),
         packages: vec![
             PackageManifest {
+                namespace: None,
                 package: core.clone(),
                 sources: sources(&root.join("core/core"), &[], true),
                 dependencies: vec![],
             },
             PackageManifest {
+                namespace: None,
                 package: package("std"),
                 sources: std_sources,
                 dependencies: vec![core],

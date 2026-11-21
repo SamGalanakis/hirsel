@@ -1,5 +1,5 @@
 use crate::package_content::{Id, Root};
-use crate::package_files::{FileId, WalkError, walk};
+use crate::package_files::{FileId, WalkError, open_directory, walk};
 use crate::package_resolve::Resolution;
 use crate::package_store::atomic_write;
 use crate::package_workspace::Workspace;
@@ -311,66 +311,73 @@ impl Lock {
         Ok(())
     }
 
-    pub(crate) fn aliases(
+    fn aliases(
         &self,
         workspace: &Workspace,
-        output: &Path,
+        name: &std::ffi::OsStr,
+        parent: FileId,
         identity: Option<FileId>,
     ) -> bool {
-        if self.identity.is_some() && self.identity == identity {
-            return true;
-        }
-        if output.file_name().is_none_or(|name| name != NAME) {
-            return false;
-        }
-        let parent = output
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let Some(parent) = parent.metadata().ok() else {
-            return false;
-        };
-        workspace
-            .root
-            .metadata()
-            .is_ok_and(|root| FileId::of(&root) == FileId::of(&parent))
+        (self.identity.is_some() && self.identity == identity)
+            || (name == NAME
+                && workspace
+                    .root
+                    .metadata()
+                    .is_ok_and(|root| FileId::of(&root) == parent))
     }
 }
 
-pub(crate) fn ensure_pack_output(
-    resolution: &Resolution,
-    archive: &crate::package_content::PackageArchive,
-    lock: &Lock,
-    out: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let identity = out.metadata().ok().map(|meta| FileId::of(&meta));
-    let store = &resolution.store;
-    let existing_store_alias = identity
-        .map(|id| store.identities_include(id))
-        .transpose()?
-        .unwrap_or(false);
-    let new_store_alias = out
-        .file_name()
-        .and_then(|file| file.to_str())
-        .and_then(crate::package_content::parse_digest)
-        .map(Root)
-        .is_some_and(|root| archive.entries.contains_key(&root))
-        && {
-            let parent = out
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            match (parent.metadata(), store.path().metadata()) {
-                (Ok(parent), Ok(directory)) => FileId::of(&parent) == FileId::of(&directory),
-                _ => crate::product::normalized(parent) == crate::product::normalized(store.path()),
-            }
-        };
-    if identity.is_some_and(|id| resolution.workspace.inputs.contains(&id))
-        || lock.aliases(&resolution.workspace, out, identity)
-        || existing_store_alias
-        || new_store_alias
-    {
-        return Err(format!("--out {} is an input of this command", out.display()).into());
+pub(crate) struct PackOutput {
+    directory: std::fs::File,
+    name: std::ffi::OsString,
+}
+
+impl PackOutput {
+    fn path(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", self.directory.as_raw_fd())).join(&self.name)
     }
-    Ok(())
+
+    pub(crate) fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+        atomic_write(&self.path(), bytes)
+    }
+
+    pub(crate) fn stage(
+        resolution: &Resolution,
+        archive: &crate::package_content::PackageArchive,
+        lock: &Lock,
+        out: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let parent = out
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let name = out.file_name().ok_or("--out needs a file name")?.to_owned();
+        let directory = open_directory(parent)?;
+        let parent = FileId::of(&directory.metadata()?);
+        let output = Self { directory, name };
+        let identity = output.path().metadata().ok().map(|meta| FileId::of(&meta));
+        let store = &resolution.store;
+        let existing_store_alias = identity
+            .map(|id| store.identities_include(id))
+            .transpose()?
+            .unwrap_or(false);
+        let new_store_alias = output
+            .name
+            .to_str()
+            .and_then(crate::package_content::parse_digest)
+            .map(Root)
+            .is_some_and(|root| archive.entries.contains_key(&root))
+            && store
+                .path()
+                .metadata()
+                .is_ok_and(|dir| FileId::of(&dir) == parent);
+        if identity.is_some_and(|id| resolution.workspace.input_alias(id))
+            || lock.aliases(&resolution.workspace, &output.name, parent, identity)
+            || existing_store_alias
+            || new_store_alias
+        {
+            return Err(format!("--out {} is an input of this command", out.display()).into());
+        }
+        Ok(output)
+    }
 }

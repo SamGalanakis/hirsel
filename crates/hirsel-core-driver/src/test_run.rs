@@ -130,7 +130,7 @@ impl Source {
     }
 }
 
-const TEST_PASS_SCHEMA: u32 = 1;
+const TEST_PASS_SCHEMA: u32 = 2;
 
 /// PROG-4: of its run's grants a test is granted only those its parameters
 /// take, so a test without parameters is granted nothing and a grant one
@@ -209,6 +209,7 @@ fn test_key(
     test: &DefPath,
     decl: &EntryDecl,
     reached: &Reachable<'_>,
+    site_digest: ContentHash,
     options: &NativeOptions,
 ) -> Option<ContentHash> {
     let address = reached.address(test).ok()?;
@@ -220,8 +221,8 @@ fn test_key(
             ContentHash::of_parts("hirsel.core-environment.v1", [&env[..]])
         }
     };
-    // Keep the executable's launch policy in the key. The code address closes
-    // over called bodies, and source maps only affect failure output.
+    // A test may compare site words or write them in its output. Its annexes
+    // are keyed separately from the address of its code.
     crate::native::key(
         "hirsel.test-pass.v1",
         &(
@@ -229,6 +230,7 @@ fn test_key(
             test,
             decl,
             address,
+            site_digest,
             environment,
             inputs.toolchain.image,
             inputs.recipe.identity,
@@ -529,7 +531,13 @@ impl CheckProduct {
             })
             .zip(parameterless)
             .and_then(|(cache, decl)| {
-                test_key(test, decl, &reached, options).map(|key| (cache, key))
+                let sites = crate::native::recipe_build::test_site_digest(
+                    self,
+                    test,
+                    options.instance_limit,
+                )
+                .ok()?;
+                test_key(test, decl, &reached, sites, options).map(|key| (cache, key))
             });
         if !rerun
             && let Some((cache, key)) = pass

@@ -218,6 +218,7 @@ fn materialize(
             "core" => PackageProduct::bundled_manifest(&checkout().join("core/core")),
             "std" => PackageProduct::bundled_std_manifest(&checkout().join("core/std")),
             spec => PackageManifest {
+                    namespace: None,
                 package: package_id(spec),
                 dependencies: vec![],
                 sources: vec![],
@@ -2266,6 +2267,7 @@ fn checkout_for(root: &Path, step: &Step) -> PathBuf {
         packages: vec![
             PackageProduct::bundled_manifest(&core),
             PackageManifest {
+                    namespace: None,
                 package: package_id("app"),
                 dependencies: vec![package("core")],
                 sources,

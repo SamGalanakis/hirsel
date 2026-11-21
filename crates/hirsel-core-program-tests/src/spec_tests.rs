@@ -219,6 +219,7 @@ fn check_fences(fences: &[&Fence], failures: &mut Vec<String>) {
                 dependencies.push(package("std"));
             }
             packages.push(PackageManifest {
+                namespace: None,
                 package: name.clone(),
                 sources: vec![source],
                 dependencies,

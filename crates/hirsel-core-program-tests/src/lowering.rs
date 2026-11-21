@@ -104,6 +104,7 @@ fn callable_provider_and_identity_words() {
 fn sibling_main_wrapper_executes_the_sibling_body() {
     let app = package("files");
     let manifest = PackageManifest {
+        namespace: None,
         package: app,
         dependencies: vec![],
         sources: ["main", "matched"]

@@ -431,6 +431,31 @@ impl Siblings {
     }
 }
 
+pub(crate) fn environment(
+    inputs: &CorpusManifest,
+    compiler: ContentHash,
+) -> io::Result<ContentHash> {
+    let no_foreign = ContentHash::of_parts("hirsel.foreign-stamp.v1", [&0u64.to_le_bytes()[..]]);
+    let mut namespaces: Vec<_> = inputs
+        .packages
+        .iter()
+        .map(|package| {
+            let namespace = package.namespace.as_ref();
+            (
+                &package.package,
+                &package.dependencies,
+                namespace.and_then(|namespace| namespace.root),
+                namespace.map_or(no_foreign, |namespace| namespace.foreign),
+            )
+        })
+        .collect();
+    namespaces.sort_by_key(|p| p.0);
+    Ok(ContentHash::of_parts(
+        "hirsel.core-environment.v1",
+        [&encode(&(compiler, &inputs.core, namespaces))?[..]],
+    ))
+}
+
 /// Signature inputs for lowering that have no explicit source reference.
 pub(crate) fn implicit_reads(
     index: &NameIndex,
@@ -465,19 +490,8 @@ impl Shape {
     pub(crate) fn new(
         index: &NameIndex,
         modules: &[ModuleInput],
-        inputs: &CorpusManifest,
-        compiler: ContentHash,
+        environment: ContentHash,
     ) -> io::Result<Self> {
-        let mut namespaces: Vec<_> = inputs
-            .packages
-            .iter()
-            .map(|p| (&p.package, &p.dependencies))
-            .collect();
-        namespaces.sort_by_key(|p| p.0);
-        let environment = ContentHash::of_parts(
-            "hirsel.core-environment.v1",
-            [&encode(&(compiler, &inputs.core, namespaces))?[..]],
-        );
         let identities = Demand::new(index.modules.base_len(), index.modules.len());
         let mut headers = Vec::with_capacity(modules.len());
         let items = ContentHash::of_parts_stream("hirsel.key-items.v1", |parts| {

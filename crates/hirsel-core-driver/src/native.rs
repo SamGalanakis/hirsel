@@ -1799,6 +1799,7 @@ pub(crate) mod tests {
             .dependencies
             .push(package("core"));
         request.inputs.packages.push(PackageManifest {
+            namespace: None,
             package: package("core"),
             sources: vec![hirsel_core_resolve::ModuleSource {
                 foreign: false,

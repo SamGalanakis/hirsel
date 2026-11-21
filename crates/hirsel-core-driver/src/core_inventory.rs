@@ -148,6 +148,7 @@ mod tests {
             .collect();
         files.sort();
         PackageManifest {
+            namespace: None,
             package: package(name),
             dependencies: if name == "core" {
                 vec![]
@@ -211,6 +212,7 @@ mod tests {
         )
         .unwrap();
         let lib = PackageManifest {
+            namespace: None,
             package: package("lib"),
             dependencies: vec![package("core"), package("std")],
             sources: vec![ModuleSource {

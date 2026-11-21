@@ -87,23 +87,12 @@ pub(crate) struct Source {
     pub(crate) bytes: Arc<[u8]>,
 }
 
-#[derive(Clone)]
-pub(crate) struct ArchiveRow {
-    pub(crate) path: String,
-    pub(crate) pin: [u8; 32],
-    pub(crate) bytes: Arc<[u8]>,
-}
+pub(crate) use hirsel_core_resolve::{
+    ForeignArchiveCapture as ArchiveRow, ForeignModuleCapture as ForeignModule,
+};
 
-impl ArchiveRow {
-    pub(crate) fn digest(&self) -> [u8; 32] {
-        Sha256::digest(&self.bytes).into()
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct ForeignModule {
-    pub(crate) symbols: String,
-    pub(crate) archives: BTreeMap<String, ArchiveRow>,
+pub(crate) fn archive_digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
 }
 
 #[derive(Clone)]
@@ -115,6 +104,30 @@ pub(crate) struct Content {
 }
 
 impl Content {
+    pub(crate) fn foreign_stamp(&self) -> ContentHash {
+        ContentHash::of_parts_stream("hirsel.foreign-stamp.v1", |hash| {
+            let mut part =
+                |bytes: &[u8]| hash.part_with(bytes.len() as u64, |writer| writer.write_all(bytes));
+            part(&(self.foreign.len() as u64).to_le_bytes())?;
+            for (module, foreign) in &self.foreign {
+                part(&(module.len() as u64).to_le_bytes())?;
+                for component in module {
+                    part(component.as_bytes())?;
+                }
+                part(foreign.symbols.as_bytes())?;
+                part(&(foreign.archives.len() as u64).to_le_bytes())?;
+                for (target, row) in &foreign.archives {
+                    part(target.as_bytes())?;
+                    part(&row.pin)?;
+                    part(&(row.bytes.len() as u64).to_le_bytes())?;
+                    part(&archive_digest(&row.bytes))?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap()
+    }
+
     pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
         let mut out = Writer::new(CONTENT_LIMIT);
         out.number(1);
@@ -256,7 +269,7 @@ impl Content {
                 let pin = input.digest()?;
                 let bytes = input.frame()?.into();
                 let row = ArchiveRow { path, pin, bytes };
-                if row.digest() != pin {
+                if archive_digest(&row.bytes) != pin {
                     return Err(format!(
                         "archive {:?} of {name} for {target} does not match its pin",
                         row.path

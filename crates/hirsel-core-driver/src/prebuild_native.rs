@@ -23,6 +23,7 @@ fn prebuild_corpus(image: &Arc<CoreImage>, store: &Path) -> (Arc<CheckProduct>, 
     let libraries = prebuild_libraries(image);
     let packages = vec![
         PackageManifest {
+                    namespace: None,
             package: package("bfs"),
             sources: vec![
                 source(m1.join("bfs/main.hirsel"), "main"),
@@ -31,6 +32,7 @@ fn prebuild_corpus(image: &Arc<CoreImage>, store: &Path) -> (Arc<CheckProduct>, 
             dependencies: libraries.iter().cloned().chain([package("m1")]).collect(),
         },
         PackageManifest {
+                    namespace: None,
             package: package("m1"),
             sources: vec![source(m1.join("support.hirsel"), "support")],
             dependencies: libraries,

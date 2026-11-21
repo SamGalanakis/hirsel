@@ -321,6 +321,7 @@ fn library_request(app: &str, lib: &str, core: &Path, dir: &Path, store: &str) -
     std::fs::write(&file, lib).unwrap();
     request.inputs.packages[0].dependencies.push(package("lib"));
     request.inputs.packages.push(PackageManifest {
+                    namespace: None,
         package: package("lib"),
         sources: vec![hirsel_core_resolve::ModuleSource {
                     foreign: false,

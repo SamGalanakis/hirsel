@@ -1,5 +1,5 @@
 use crate::package_content::{
-    ARCHIVE_LIMIT, ArchiveRow, Content, ForeignModule, Id, Root, Source, hex,
+    ARCHIVE_LIMIT, ArchiveRow, Content, ForeignModule, Id, Root, Source, archive_digest, hex,
 };
 use crate::package_dir::MANIFEST;
 use crate::package_files::{Captured, FileId, WalkError, open_directory, walk};
@@ -30,14 +30,14 @@ pub(crate) struct Workspace {
     pub(crate) directory: PathBuf,
     pub(crate) member: Option<Id>,
     pub(crate) members: BTreeMap<Id, Member>,
-    pub(crate) inputs: BTreeSet<FileId>,
+    inputs: BTreeSet<FileId>,
+    manifests: Manifests,
 }
 
 struct Discovered {
     dir: File,
     path: PathBuf,
     manifest: Manifest,
-    captured: Captured,
 }
 
 fn parent(directory: &File) -> io::Result<File> {
@@ -78,6 +78,22 @@ fn file_error(path: &Path, field: &str, file: &str, error: &WalkError) -> String
     )
 }
 
+type Manifests = BTreeMap<FileId, Option<Captured>>;
+
+fn capture_manifest(
+    manifests: &mut Manifests,
+    directory: &File,
+    path: &Path,
+) -> Result<Option<Captured>, Box<dyn std::error::Error>> {
+    let id = identity(directory)?;
+    Ok(match manifests.entry(id) {
+        std::collections::btree_map::Entry::Occupied(entry) => entry.get().clone(),
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(read_manifest(directory, path)?).clone()
+        }
+    })
+}
+
 fn read_manifest(dir: &File, path: &Path) -> Result<Option<Captured>, String> {
     let manifest = path.join(MANIFEST);
     let file = match walk(dir, Path::new(MANIFEST)) {
@@ -111,20 +127,22 @@ fn ancestor_spelling(path: &Path) -> PathBuf {
     }
 }
 
-fn discover(dir: &Path) -> Result<Option<(Discovered, Discovered)>, Box<dyn std::error::Error>> {
+fn discover(
+    dir: &Path,
+    manifests: &mut Manifests,
+) -> Result<Option<(Discovered, Discovered)>, Box<dyn std::error::Error>> {
     let mut directory = open_directory(dir)?;
     let mut path = dir.to_path_buf();
     let mut member: Option<Discovered> = None;
     let first;
     loop {
-        if let Some(captured) = read_manifest(&directory, &path)? {
+        if let Some(captured) = capture_manifest(manifests, &directory, &path)? {
             let manifest = Manifest::parse(&captured.bytes, &path.join(MANIFEST))?;
             let workspace = manifest.workspace.is_some();
             let discovered = Discovered {
                 dir: directory.try_clone()?,
                 path: path.clone(),
                 manifest,
-                captured,
             };
             if workspace {
                 first = discovered;
@@ -146,10 +164,6 @@ fn discover(dir: &Path) -> Result<Option<(Discovered, Discovered)>, Box<dyn std:
                     package: None,
                     workspace: None,
                 },
-                captured: Captured {
-                    bytes: member.captured.bytes.clone(),
-                    identity: member.captured.identity,
-                },
             };
             return Ok(Some((same, member)));
         }
@@ -165,10 +179,6 @@ fn discover(dir: &Path) -> Result<Option<(Discovered, Discovered)>, Box<dyn std:
                 package: None,
                 workspace: None,
             },
-            captured: Captured {
-                bytes: first.captured.bytes.clone(),
-                identity: first.captured.identity,
-            },
         },
     };
     Ok(Some((first, requested)))
@@ -176,14 +186,33 @@ fn discover(dir: &Path) -> Result<Option<(Discovered, Discovered)>, Box<dyn std:
 
 impl Workspace {
     pub(crate) fn discover(dir: &Path) -> Result<Option<Self>, Box<dyn std::error::Error>> {
-        let Some((mut root, mut selected)) = discover(dir)? else {
+        Self::discover_for(dir, true)
+    }
+
+    pub(crate) fn discover_for(
+        dir: &Path,
+        needs_package: bool,
+    ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        let mut manifests = BTreeMap::new();
+        let Some((mut root, mut selected)) = discover(dir, &mut manifests)? else {
             return Ok(None);
         };
         let root_id = identity(&root.dir)?;
         let selected_id = identity(&selected.dir)?;
         let root_manifest = root.path.join(MANIFEST);
         let selected_manifest = selected.path.join(MANIFEST);
-        let mut inputs = BTreeSet::from([root.captured.identity, selected.captured.identity]);
+        if needs_package
+            && root_id == selected_id
+            && root.manifest.package.is_none()
+            && selected.manifest.package.is_none()
+        {
+            return Err(format!(
+                "{} is a workspace root, not a package; name a member directory",
+                root_manifest.display()
+            )
+            .into());
+        }
+        let mut inputs = BTreeSet::new();
         let mut opened = BTreeMap::new();
         let mut drafts = BTreeMap::new();
 
@@ -247,9 +276,8 @@ impl Workspace {
                 {
                     selected.manifest
                 } else {
-                    let captured = read_manifest(&dir, &path)?
+                    let captured = capture_manifest(&mut manifests, &dir, &path)?
                         .ok_or_else(|| format!("{}: does not exist", manifest_path.display()))?;
-                    inputs.insert(captured.identity);
                     Manifest::parse(&captured.bytes, &manifest_path)?
                 };
                 if manifest.workspace.is_some() {
@@ -274,8 +302,7 @@ impl Workspace {
                         .into());
                     };
                     let at = root.path.join(relative);
-                    if let Some(captured) = read_manifest(&ancestor, &at)? {
-                        inputs.insert(captured.identity);
+                    if let Some(captured) = capture_manifest(&mut manifests, &ancestor, &at)? {
                         if Manifest::parse(&captured.bytes, &at.join(MANIFEST))?
                             .workspace
                             .is_some()
@@ -465,7 +492,17 @@ impl Workspace {
             member,
             members,
             inputs,
+            manifests,
         }))
+    }
+
+    pub(crate) fn input_alias(&self, identity: FileId) -> bool {
+        self.inputs.contains(&identity)
+            || self
+                .manifests
+                .values()
+                .flatten()
+                .any(|manifest| manifest.identity == identity)
     }
 
     pub(crate) fn selected(&self) -> Result<&Id, String> {
@@ -482,7 +519,7 @@ impl Member {
     pub(crate) fn check_pins(&self) -> Result<(), String> {
         for (module, foreign) in &self.content.foreign {
             for (target, row) in &foreign.archives {
-                let digest = row.digest();
+                let digest = archive_digest(&row.bytes);
                 if digest != row.pin {
                     return Err(format!(
                         "{}: foreign.{}: archive {:?} for {target} does not match its pin: expected sha256 {}, found sha256 {}",

@@ -1231,6 +1231,7 @@ fn recovered_header_cases() -> Vec<String> {
             ("store", "ice_places_358_store", None)
         } else {
             packages.push(PackageManifest {
+                namespace: None,
                 package: package("app"),
                 dependencies: vec![package("core"), package("std")],
                 sources: vec![ModuleSource {
@@ -1306,6 +1307,7 @@ fn flow_transform_rejects() {
         .dependencies
         .push(package("dep"));
     inputs.packages.push(PackageManifest {
+        namespace: None,
         package: package("dep"),
         dependencies: vec![package("core")],
         sources: vec![ModuleSource {
@@ -1390,6 +1392,7 @@ pub fn worker() -> u64 { 0 }
         })
         .collect();
     inputs.packages.push(PackageManifest {
+        namespace: None,
         package: package("dep"),
         dependencies: vec![package("core")],
         sources,

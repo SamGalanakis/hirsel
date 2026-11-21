@@ -95,6 +95,38 @@ fn unit(original: &Module, body: normal::EncodedBody, annex: Annex, module: Modu
     }
 }
 
+/// Hash the current reached annexes in body order for a cached test pass.
+pub(crate) fn test_site_digest(
+    product: &CheckProduct,
+    test: &DefPath,
+    limit: usize,
+) -> Result<ContentHash, NativeStop> {
+    use sha2::{Digest, Sha256};
+
+    let reached = product.reachable(test, limit)?;
+    let instances = reached.require()?;
+    let items = instances
+        .iter()
+        .map(|identity| reached.materialized.get(identity).ir().map(anchored_items))
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let sources = product.native_sources(&items)?;
+    let positions = sources.positions();
+    let mut hashes = BTreeSet::new();
+    for identity in instances {
+        let instance = reached.materialized.get(identity);
+        let unit = prepare_unit(instance.ir()?, instance.function, &positions);
+        hashes.insert((unit.code.body.hash, unit.code.annex.hash));
+    }
+    let mut hash = Sha256::new();
+    for (_, annex) in hashes {
+        hash.update(annex.0);
+    }
+    Ok(ContentHash(hash.finalize().into()))
+}
+
 pub struct Publication {
     pub(crate) root: ContentHash,
     pub(crate) recipe: Recipe,

@@ -127,6 +127,7 @@ impl CheckRequest {
                     source.captured = Some(hirsel_core_resolve::CapturedSource {
                         bytes: source.read()?,
                         name: source.name(self.manifest.as_deref())?,
+                        test: false,
                     });
                 }
             }
@@ -216,20 +217,39 @@ impl CheckRequest {
     }
 
     pub(crate) fn use_image(&mut self, image: Arc<CoreImage>) -> io::Result<bool> {
-        let supplied = &image.directory()?.inputs.packages;
-        if supplied.iter().any(|image_package| {
-            !matches!(image_package.package.name.as_str(), "core" | "std")
-                || !self.inputs.packages.iter().any(|package| {
-                    package.package == image_package.package
-                        && package.dependencies == image_package.dependencies
-                })
-        }) {
-            return Ok(false);
-        }
-        self.inputs.packages.retain(|package| {
-            !supplied
+        self.capture_sources()?;
+        self.inputs.normalise(self.manifest.as_deref());
+        let directory = image.directory()?;
+        let supplied = &directory.inputs.packages;
+        for in_image in supplied {
+            let Some(requested) = self
+                .inputs
+                .packages
                 .iter()
-                .any(|supplied| supplied.package == package.package)
+                .find(|p| p.package == in_image.package)
+            else {
+                return Ok(false);
+            };
+            if in_image.dependencies != requested.dependencies
+                || directory
+                    .stamps
+                    .get(&in_image.package)
+                    .map(|stamp| stamp.hash)
+                    != Some(
+                        image::stamp(requested, self.manifest.as_deref(), self.entry.as_ref())?
+                            .hash,
+                    )
+            {
+                return Ok(false);
+            }
+        }
+        self.inputs.packages.retain_mut(|package| {
+            if !supplied.iter().any(|row| row.package == package.package) {
+                return true;
+            }
+            // Keep this request's native archive captures for assembly.
+            package.sources.clear();
+            package.namespace.is_some()
         });
         self.library = LibraryInput::Image(image);
         Ok(true)
@@ -435,6 +455,9 @@ pub struct CheckProduct {
     pub rechecked: Vec<DefPath>,
     pub root: ContentHash,
     pub snapshot: ContentHash,
+    pub(crate) environment: ContentHash,
+    pub(crate) foreign_inputs:
+        BTreeMap<PackageId, BTreeMap<Vec<String>, hirsel_core_resolve::ForeignModuleCapture>>,
     pub image: Option<Arc<CoreImage>>,
     pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
     native_entry: Option<native::EntryBinding>,
@@ -454,6 +477,8 @@ impl CheckProduct {
             rechecked: vec![],
             root: ContentHash::default(),
             snapshot: ContentHash::default(),
+            environment: ContentHash::default(),
+            foreign_inputs: BTreeMap::new(),
             image: None,
             library: None,
             native_entry: None,
@@ -670,22 +695,37 @@ impl Driver {
             LibraryInput::Image(i) | LibraryInput::ReachableImage(i) => Some(Arc::clone(i)),
             _ => None,
         };
+        let image_directory = image.as_ref().map(|i| i.directory()).transpose()?;
+
+        let mut resolution_inputs = request.inputs.clone();
+        if let Some(directory) = &image_directory {
+            for package in &directory.inputs.packages {
+                if !resolution_inputs
+                    .packages
+                    .iter()
+                    .any(|p| p.package == package.package)
+                {
+                    let mut package = package.clone();
+                    package.sources.clear();
+                    package.namespace = directory
+                        .stamps
+                        .get(&package.package)
+                        .ok_or_else(|| io::Error::other("image package is missing its stamp"))?
+                        .namespace
+                        .clone();
+                    resolution_inputs.packages.push(package);
+                }
+            }
+        }
+        let environment = reuse::environment(&resolution_inputs, compiler)?;
         let produce = matches!(request.library, LibraryInput::Produce);
         let reachable_only = matches!(request.library, LibraryInput::ReachableImage(_));
         // A file is read for its bytes alone: the snapshot names each source
         // by its module, digest and manifest-relative name, never by where
         // the checkout lives.
         let source_stamps: Vec<_> = sources.iter().map(|s| (&s.0, s.1, s.3, &s.4)).collect();
-        let dependencies: Vec<_> = request
-            .inputs
-            .packages
-            .iter()
-            .map(|p| (&p.package, &p.dependencies))
-            .collect();
         let snapshot = ContentHash::of_bytes(&encode(&(
-            compiler,
-            &request.inputs.core,
-            dependencies,
+            environment,
             source_stamps,
             image.as_ref().map(|i| i.identity),
             produce,
@@ -713,23 +753,7 @@ impl Driver {
         let prior = check_index::ProgramIndex::open(&store)?;
         let mut publication = check_index::Publication::new();
         meter.finish("load/program index");
-        let image_directory = image.as_ref().map(|i| i.directory()).transpose()?;
         meter.finish("package index demand");
-
-        let mut resolution_inputs = request.inputs.clone();
-        if let Some(directory) = &image_directory {
-            for package in &directory.inputs.packages {
-                if !resolution_inputs
-                    .packages
-                    .iter()
-                    .any(|p| p.package == package.package)
-                {
-                    let mut package = package.clone();
-                    package.sources.clear();
-                    resolution_inputs.packages.push(package);
-                }
-            }
-        }
         let mut symbols = image_directory
             .as_ref()
             .map_or_else(Symbols::default, |i| i.index.symbols.as_ref().clone());
@@ -819,6 +843,17 @@ impl Driver {
             result.resources.extend(directory.resources.iter().cloned());
         }
         result.snapshot = snapshot;
+        result.environment = environment;
+        result.foreign_inputs = request
+            .inputs
+            .packages
+            .iter()
+            .filter_map(|package| {
+                let namespace = package.namespace.as_ref()?;
+                (!namespace.foreign_inputs.is_empty())
+                    .then(|| (package.package.clone(), namespace.foreign_inputs.clone()))
+            })
+            .collect();
         // Modules are the sources in order, one file each.
         for (file, d) in syntax_diagnostics {
             let m = &modules[file];
@@ -839,7 +874,7 @@ impl Driver {
         // The gate (OPTION-L L2): the shape reads the environment and every
         // item header, never a resolution, so it is decided before resolve.
         // The store selects this shape's record of declared tables, or not.
-        let shape = reuse::Shape::new(&index, &modules, &resolution_inputs, compiler)?;
+        let shape = reuse::Shape::new(&index, &modules, environment)?;
         publication.shape = shape.key(&encode(&(
             &request.entry,
             image.as_ref().map(|i| i.identity),

@@ -12,6 +12,7 @@ pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
         inputs: CorpusManifest {
             core: package("core"),
             packages: vec![PackageManifest {
+                namespace: None,
                 package: package("app"),
                 sources: vec![hirsel_core_resolve::ModuleSource {
                     foreign: false,
@@ -1577,6 +1578,7 @@ fn reachable_census_retains_a_named_function_without_a_native_body() {
     std::fs::write(&library, "pub fn external() -> u8\n").unwrap();
     req.inputs.packages[0].dependencies.push(package("core"));
     req.inputs.packages.push(PackageManifest {
+        namespace: None,
         package: package("core"),
         sources: vec![hirsel_core_resolve::ModuleSource {
             foreign: false,
@@ -1823,6 +1825,7 @@ fn lowered_runtime_operation_needs_no_outside_body() {
     std::fs::write(&core, "pub fn check_cancel()\n").unwrap();
     req.inputs.packages[0].dependencies.push(package("core"));
     req.inputs.packages.push(PackageManifest {
+        namespace: None,
         package: package("core"),
         sources: vec![hirsel_core_resolve::ModuleSource {
             foreign: false,
@@ -1931,6 +1934,7 @@ fn indexed_combined_libraries_keep_existing_module_extensions() {
         let file = dir.join(format!("{name}-{module}.hirsel"));
         std::fs::write(&file, body).unwrap();
         PackageManifest {
+            namespace: None,
             package: package(name),
             dependencies: deps,
             sources: vec![hirsel_core_resolve::ModuleSource {
@@ -2721,6 +2725,7 @@ fn m2b_requests(root: &Path, dir: &Path) -> Vec<(String, CheckRequest)> {
     )
     .unwrap();
     let installed = |name: &str, dependencies: Vec<PackageId>| PackageManifest {
+        namespace: None,
         package: package(name),
         sources: corpus_files(&root.join("core").join(name), false)
             .into_iter()
@@ -2814,6 +2819,7 @@ fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckReq
                 req.inputs.packages.insert(
                     0,
                     PackageManifest {
+                        namespace: None,
                         package: package(owner),
                         sources: vec![],
                         dependencies: vec![],
@@ -3217,16 +3223,19 @@ fn langarena_inputs(root: &Path, core: &Path, langarena: &Path) -> CorpusManifes
         core: package("core"),
         packages: vec![
             PackageManifest {
+                namespace: None,
                 package: package("core"),
                 sources: corpus_files(core, false),
                 dependencies: vec![],
             },
             PackageManifest {
+                namespace: None,
                 package: package("std"),
                 sources: corpus_files(&root.join("core/std"), false),
                 dependencies: vec![package("core")],
             },
             PackageManifest {
+                namespace: None,
                 package: package("langarena"),
                 sources: corpus_files(langarena, true),
                 dependencies: vec![package("core"), package("std")],

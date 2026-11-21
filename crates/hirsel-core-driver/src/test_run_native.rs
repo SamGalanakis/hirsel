@@ -1248,3 +1248,215 @@ archives = []
         assert_eq!(names, [expected_name]);
     }
 }
+
+fn package_test_row(output: (Option<i32>, String, String), status: i32) -> serde_json::Value {
+    assert_eq!(output.0, Some(status), "{}\n{}", output.1, output.2);
+    let results: serde_json::Value = serde_json::from_str(&output.1).unwrap();
+    let tests = results["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 1);
+    tests[0].clone()
+}
+
+#[test]
+fn package_l7_pins_reach_the_check_and_test_keys() {
+    let law = PackageLaw::new();
+    law.fixture_json();
+    let app_source = r#"
+pub fn main() -> Result[(), Exit] {
+    if json.version() == 1u64 { Ok(()) } else { Error(Exit(status: 3u8)) }
+}
+@test
+fn version() -> Result[(), ()] { if json.version() > 0u64 { Ok(()) } else { Error(()) } }
+"#;
+    let select = |root: &str, archive: &str| {
+        law.app("app", &format!("[dependencies]\njson = {{ major = 1, root = \"{root}\", archive = \"vendor/{archive}.hpkg\" }}\n[tests]\nlimit = 67108864\n"));
+        law.write("app/main.hirsel", app_source);
+        law.write(&format!("app/vendor/{archive}.hpkg"),
+            std::fs::read(law.path(&format!("vendor/{archive}.hpkg"))).unwrap());
+    };
+    select(PACKAGE_X, "jx");
+    let tested = || law.run(&["test", "app", "--json"]);
+    let checked = |law: &PackageLaw| {
+        let stdout = PackageLaw::pass(law.run(&["check", "app", "--json"]));
+        serde_json::from_str::<serde_json::Value>(&stdout).unwrap()
+    };
+    let row = package_test_row(tested(), 0);
+    assert_eq!(row["source"], "executed");
+    let first = PackageLaw::pass(law.run(&["publish", "app"]));
+    let alternate = PackageLaw::pass(law.with_store(&["publish", "app"], "alternate"));
+    assert_eq!(first, alternate);
+    select(PACKAGE_Y, "jy");
+    let warm = checked(&law);
+    let cold = PackageLaw::new();
+    for file in ["hirsel.toml", "main.hirsel", "vendor/jy.hpkg"] {
+        let file = format!("app/{file}");
+        cold.write(&file, std::fs::read(law.path(&file)).unwrap());
+    }
+    assert_eq!(warm["rechecked"], checked(&cold)["rechecked"]);
+    assert!(warm["rechecked"].as_u64().unwrap() > 0);
+    let row = package_test_row(tested(), 0);
+    assert_eq!(row["source"], "executed");
+    let affected = |which| PackageLaw::pass(law.run(&["inspect", "app", "--affected-tests", which]));
+    assert_eq!(affected("json@1"), "app@1/main/version\n");
+    assert_eq!(affected("json@1/json/version"), "app@1/main/version\n");
+
+    law.manifest("unused", "json", 1, "[sources]\n\"json.hirsel\" = \"json\"\n\"unused.hirsel\" = \"unused\"\n");
+    law.write("unused/json.hirsel", PACKAGE_Y_SOURCE);
+    law.write("unused/unused.hirsel", "pub fn never_called() -> u64 { 70u64 }\n");
+    let extra = law.fixture("unused", "vendor/unused.hpkg");
+    let (_, root) = extra.trim().split_once(' ').unwrap();
+    select(root, "unused");
+    let row = package_test_row(tested(), 0);
+    assert_eq!(row["source"], "cached");
+    assert_eq!(affected("json@1"), "app@1/main/version\n");
+
+    law.write("work/hirsel.toml", "[workspace]\nmembers = [\"app\", \"json\"]\n");
+    law.library("work/json", "json", 1, PACKAGE_X_SOURCE, "");
+    law.app("work/app", "[dependencies]\njson = { major = 1, path = \"../json\" }\n");
+    law.write("work/app/main.hirsel", app_source);
+    assert_eq!(PackageLaw::pass(law.run(&["publish", "work/app"])), first);
+}
+
+#[test]
+fn package_l9_moved_sites_end_a_pass_without_changing_the_address() {
+    let law = PackageLaw::new();
+    let initial = "pub fn quot(x: u64, y: u64, z: u64) -> u64 { x / y / z }\n";
+    let edited = initial.replace("x / y / z", "(x / y) / z");
+    let source = r#"
+fn site(take outcome: Result[Result[u64, Causes], Capacity]) -> Option[Site] {
+    match take outcome {
+        Ok(Error(take causes)) => {
+            for cause in causes { return Some(cause.site) }
+            None
+        },
+        _ => None
+    }
+}
+@test
+fn same_site() -> Result[(), ()] {
+    let a = site(isolate(fn() -> u64 { math.quot(8u64, 0u64, 1u64) }))
+    let b = site(isolate(fn() -> u64 { math.quot(8u64, 1u64, 0u64) }))
+    match (a, b) {
+        (Some(x), Some(y)) if x == y => Ok(()),
+        _ => Error(())
+    }
+}
+"#;
+    let write_test = |law: &PackageLaw, root: &str, archive: &str| {
+        law.app("app", &format!("[dependencies]\nmath = {{ major = 1, root = \"{root}\", archive = \"{archive}\" }}\n[tests]\nlimit = 67108864\n[tests.sources]\n\"tests.hirsel\" = \"tests\"\n"));
+        law.write("app/tests.hirsel", source);
+    };
+    let bind = |law: &PackageLaw, fixture: &str, text: &str| {
+        law.library(fixture, "math", 1, text, "");
+        std::fs::create_dir_all(law.path("app")).unwrap();
+        let archive = format!("{fixture}.hpkg");
+        let result = law.fixture(fixture, &format!("app/{archive}"));
+        let (_, root) = result.trim().split_once(' ').unwrap();
+        write_test(law, root, &archive);
+    };
+    bind(&law, "a", initial);
+    let test = |law: &PackageLaw| law.run(&["test", "app", "--json"]);
+    let address = || {
+        let workspace = crate::package_workspace::Workspace::discover(&law.path("app")).unwrap().unwrap();
+        let selected = workspace.selected().unwrap().clone();
+        let resolved = crate::package_resolve::Resolution::resolve(workspace,
+            crate::package_store::PackageStore::new(Some(law.path("packages"))), false).unwrap();
+        let app = crate::package_dir::PackageDir::from_resolution(&resolved, &selected, true).unwrap();
+        let mut request = CheckRequest::from_app(app, &law.libraries, &law.path("address-store"), true).unwrap();
+        request.entry = None;
+        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+        let path = DefPath::from_full("app@1/tests/same_site").unwrap();
+        product.reachable(&path, 65536).unwrap().address(&path).unwrap()
+    };
+    let a = package_test_row(test(&law), 0);
+    assert_eq!(a["source"], "executed");
+    let a_address = address();
+    bind(&law, "b", &edited);
+    let warm = package_test_row(test(&law), 1);
+    assert_eq!(warm["source"], "executed");
+    assert_eq!(warm["passed"], false);
+    assert!(warm["stopped"].is_null(), "{warm}");
+    assert_eq!(address(), a_address);
+
+    let cold = PackageLaw::new();
+    bind(&cold, "b", &edited);
+    let cold = package_test_row(test(&cold), 1);
+    assert_eq!(cold["source"], "executed");
+    assert_eq!(cold["passed"], false);
+    assert!(cold["stopped"].is_null(), "{cold}");
+}
+
+#[test]
+fn package_l14_a_rename_reaches_images_sites_and_the_recipe() {
+    let law = PackageLaw::new();
+    let set_up = |law: &PackageLaw, name: &str| {
+        law.write("work/hirsel.toml", "[workspace]\nmembers = [\"app\", \"json\"]\n");
+        law.app("work/app", "[dependencies]\njson = { major = 1, path = \"../json\" }\n");
+        law.write("work/app/main.hirsel", "pub fn main() -> Result[(), Exit] {\n    let value = json.half(0u64)\n    if value == 0u64 { Ok(()) } else { Error(Exit(status: 1u8)) }\n}\n");
+        law.manifest("work/json", "json", 1, &format!("[sources]\n\"{name}.hirsel\" = \"json\"\n"));
+        law.write(&format!("work/json/{name}.hirsel"), "pub fn half(x: u64) -> u64 { 8u64 / x }\n");
+    };
+    set_up(&law, "old");
+    PackageLaw::pass(law.run(&["check", "work/app"]));
+    assert_eq!(std::fs::read_dir(law.path("compiler-store/package-images")).unwrap().count(), 1);
+    let old = PackageLaw::pass(law.run(&["publish", "work/app"]));
+    std::fs::remove_file(law.path("work/json/old.hirsel")).unwrap();
+    set_up(&law, "new");
+    let (status, stdout, stderr) = law.run(&["run", "work/app"]);
+    assert_ne!(status, Some(0), "{stdout}\n{stderr}");
+    assert!(stderr.contains("json@1/new.hirsel"), "{stdout}\n{stderr}");
+    let renamed = PackageLaw::pass(law.run(&["publish", "work/app"]));
+    assert_ne!(renamed, old);
+    let cold = PackageLaw::new();
+    set_up(&cold, "new");
+    assert_eq!(renamed, PackageLaw::pass(cold.run(&["publish", "work/app"])));
+}
+
+#[test]
+fn package_pack_output_cannot_alias_an_input() {
+    let law = PackageLaw::new();
+    law.library("jx", "json", 1, PACKAGE_X_SOURCE, "");
+    std::fs::hard_link(law.path("jx/json.hirsel"), law.path("linked.hpkg")).unwrap();
+    let store_entry = format!("packages/{}", &PACKAGE_X[7..]);
+    for out in ["jx/hirsel.toml", "linked.hpkg", "jx/hirsel.lock", &store_entry] {
+        PackageLaw::refuse(law.run(&["pack", "jx", "--out", out]), &format!("--out {out} is an input of this command"));
+        assert!(!law.path("jx/hirsel.lock").exists());
+        law.empty_store();
+    }
+    assert_eq!(std::fs::read_to_string(law.path("linked.hpkg")).unwrap(), PACKAGE_X_SOURCE);
+}
+
+#[test]
+fn package_foreign_stamp_uses_captured_bytes_and_every_target() {
+    let law = PackageLaw::new();
+    let target = "x86_64-unknown-linux-gnu";
+    let write = |symbols: &str, extra: &str| {
+        law.manifest("math", "math", 1, &format!(r#"
+[sources]
+"native.hirsel" = "native"
+
+[foreign.native]
+symbols = "{symbols}"
+archives = [
+  {{ target = "{target}", file = "native/x86.a", sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" }},
+  {extra}
+]
+"#));
+    };
+    law.write("math/native.hirsel", "pub fn ping(f: Foreign[Api]) -> u64\n");
+    law.write("math/native/x86.a", b"abc");
+    write("hm_", "");
+    let checked = || crate::package_dir::PackageDir::open(&law.path("math")).unwrap().package.namespace.unwrap();
+    let original = checked();
+
+    write("hn_", "");
+    assert_ne!(checked().foreign, original.foreign);
+    law.write("math/native/arm.a", b"");
+    write("hm_", r#"{ target = "aarch64-unknown-linux-gnu", file = "native/arm.a", sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },"#);
+    assert_ne!(checked().foreign, original.foreign);
+
+    write("hm_", "");
+    law.write("math/native/x86.a", b"abd");
+    assert_ne!(checked().foreign, original.foreign);
+    assert_eq!(original.foreign_inputs[&vec!["native".to_string()]].archives[target].bytes.as_ref(), b"abc");
+}

@@ -3,7 +3,7 @@
 //! configuration. A directory without a manifest is the directory
 //! convention: package `app`, one module per file, `main` in `main`.
 use crate::NativeOptions;
-use hirsel_core_ids::{DefPath, PackageId};
+use hirsel_core_ids::DefPath;
 use hirsel_core_net::{EnvPatterns, GrantRule, RULE_SYNTAX, SecretGrant};
 use hirsel_core_resolve::{ModuleSource, PackageManifest};
 use std::collections::BTreeMap;
@@ -286,13 +286,14 @@ impl PackageDir {
         selected: &crate::package_content::Id,
         include_tests: bool,
     ) -> io::Result<Self> {
-        use hirsel_core_resolve::CapturedSource;
+        use hirsel_core_resolve::{CapturedSource, PackageNamespace};
         use std::collections::BTreeSet;
 
         let make_sources =
             |name: &crate::package_content::Id,
              sources: &BTreeMap<String, crate::package_content::Source>,
-             foreign: &BTreeMap<Vec<String>, crate::package_content::ForeignModule>| {
+             foreign: &BTreeMap<Vec<String>, crate::package_content::ForeignModule>,
+             test: bool| {
                 sources
                     .iter()
                     .map(|(file, source)| {
@@ -309,6 +310,7 @@ impl PackageDir {
                             captured: Some(CapturedSource {
                                 bytes: source.bytes.clone(),
                                 name: Some(logical),
+                                test,
                             }),
                         }
                     })
@@ -330,11 +332,41 @@ impl PackageDir {
                 (content, content.bindings.keys().collect())
             };
             pending.extend(edges.iter().copied().cloned());
-            let mut sources = make_sources(&id, &content.files, &content.foreign);
+            let mut sources = make_sources(&id, &content.files, &content.foreign, false);
             if include_tests && &id == selected {
-                sources.extend(make_sources(&id, &this.tests, &content.foreign));
+                sources.extend(make_sources(&id, &this.tests, &content.foreign, true));
             }
+            let published_bindings = if let Some(member) = resolution.workspace.members.get(&id) {
+                member
+                    .edges
+                    .iter()
+                    .filter_map(|(id, edge)| match edge {
+                        crate::package_workspace::Edge::Published(root, _) => {
+                            Some((id.compiler_id(), hirsel_core_ids::ContentHash(root.0)))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                content
+                    .bindings
+                    .iter()
+                    .filter_map(|(id, root)| {
+                        root.map(|root| (id.compiler_id(), hirsel_core_ids::ContentHash(root.0)))
+                    })
+                    .collect()
+            };
+            let namespace = PackageNamespace {
+                root: resolution
+                    .published
+                    .get(&id)
+                    .map(|root| hirsel_core_ids::ContentHash(root.0)),
+                foreign: content.foreign_stamp(),
+                foreign_inputs: content.foreign.clone(),
+                published_bindings,
+            };
             let manifest = PackageManifest {
+                namespace: Some(namespace),
                 package: id.compiler_id(),
                 dependencies: std::iter::once(crate::package("core"))
                     .chain(edges.into_iter().map(|id| id.compiler_id()))

@@ -34,7 +34,7 @@ use hirsel_core_ir::{Closure, Identity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-pub(crate) const REACH_SCHEMA: u32 = 10;
+pub(crate) const REACH_SCHEMA: u32 = 11;
 
 /// One consulted definition's row: its index identity, the request's body
 /// record for it, and its header when the request owns that header. An image
@@ -162,8 +162,11 @@ enum Section {
     /// Each path's source place in the link that wrote the record: fixed
     /// `(placed, module, file, file offset)` u32 quadruples by path index.
     Places,
+    /// Counted foreign reach summary. There are no foreign entries until the
+    /// compiler can validate and lower a foreign call.
+    Foreign,
 }
-const SECTIONS: usize = 8;
+const SECTIONS: usize = 9;
 /// The bytes of one [`Section::Places`] row.
 const PLACE: usize = 16;
 /// The head: schema, [`Head`], and each section's offset and length in the
@@ -317,6 +320,9 @@ impl Reach {
         let closures = reach.vector_len(Section::Closures)?;
         let section = |s| reach.section(s);
         let constants = section(Section::Constants);
+        if section(Section::Foreign) != 0u32.to_le_bytes() {
+            return None;
+        }
         let places = section(Section::Places);
         let graph = section(Section::Graph);
         let fixed = constants.len() % 4 == 0
@@ -759,6 +765,7 @@ pub(crate) fn selection(
         "hirsel.core-reach.v6",
         &(
             records.digest,
+            product.environment,
             product.image.as_ref().map(|i| i.identity),
             entry,
             decl,
@@ -944,6 +951,7 @@ fn encode_record<'a>(
         closure_bytes.finish()?,
         link,
         place_bytes,
+        0u32.to_le_bytes().to_vec(),
     ];
     let total = HEAD + sections.iter().map(Vec::len).sum::<usize>();
     u32::try_from(total).map_err(|_| Overflow)?;

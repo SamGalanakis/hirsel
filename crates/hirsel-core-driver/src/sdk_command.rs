@@ -187,6 +187,7 @@ pub fn frame_schema(
             });
         }
         packages.push(PackageManifest {
+            namespace: None,
             package: crate::package(name),
             sources,
             dependencies,
@@ -198,6 +199,7 @@ pub fn frame_schema(
         "pub fn main(out: Stdout) -> Result[(), Exit] waits {\n    let c: std.codec.Codec[store.runner.Frame] = std.codec.of()\n    let schema = std.result.unwrap(std.codec.schema(c))\n    match stdout.write_bytes(out, schema) {\n        Ok(()) => Ok(()),\n        Error(_) => Error(Exit(status: 1))\n    }\n}\n",
     )?;
     packages.push(PackageManifest {
+        namespace: None,
         package: sdk,
         dependencies: vec![core.clone(), std, store],
         sources: vec![ModuleSource {

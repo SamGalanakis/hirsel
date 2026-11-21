@@ -121,10 +121,7 @@ impl Inspection {
                     let definition = graph.resolve(&name)?;
                     graph.dependents(definition, self.transitive)
                 }
-                Query::AffectedTests(name) => {
-                    let definition = graph.resolve(&name)?;
-                    graph.affected_tests(definition)?
-                }
+                Query::AffectedTests(name) => graph.affected_tests(&name)?,
                 Query::Unused => graph.unused(entry, self.library),
                 Query::Interface | Query::ForeignHeader(_) => unreachable!(),
             };
@@ -371,7 +368,35 @@ impl<'a> Definitions<'a> {
         self.own_paths(|id| !used.contains(&id))
     }
 
-    fn affected_tests(&self, definition: DefinitionId) -> io::Result<Vec<DefPath>> {
+    fn affected_tests(&self, name: &str) -> io::Result<Vec<DefPath>> {
+        let definitions: BTreeSet<_> = match name.split_once('@') {
+            Some((package, version)) if !version.contains('/') => {
+                let identity = PackageId {
+                    name: package.to_owned(),
+                    version: version.to_owned(),
+                };
+                let bound = self
+                    .product
+                    .index
+                    .symbols
+                    .find(package)
+                    .zip(self.product.index.symbols.find(version))
+                    .and_then(|(name, version)| self.product.index.package(name, version));
+                if bound.is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("unknown package: {name}"),
+                    ));
+                }
+                self.names
+                    .iter()
+                    .filter_map(|(path, definition)| {
+                        (path.0.package == identity).then_some(*definition)
+                    })
+                    .collect()
+            }
+            _ => BTreeSet::from([self.resolve(name)?]),
+        };
         let (implicit, siblings) = reuse::implicit_reads(&self.product.index);
         let mut affected = Vec::new();
         for test in self
@@ -396,7 +421,7 @@ impl<'a> Definitions<'a> {
                 self.reads(id)
                     .chain(siblings.get(&id).into_iter().flatten().copied())
             });
-            if covered.contains(&definition) {
+            if !covered.is_disjoint(&definitions) {
                 affected.push(test.clone());
             }
         }

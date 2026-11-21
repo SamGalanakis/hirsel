@@ -25,6 +25,53 @@ BUCK = ROOT / '.buck2/bin/buck2'
 PROFILE = Path(__file__).with_name('profile.profdata')
 
 
+def check_glibc(prefix):
+    installer = (ROOT / 'site/install.sh').read_text()
+    (floor,) = re.findall(r'^glibc_floor=(\d+\.\d+)$', installer, re.M)
+    ceiling = (*map(int, floor.split('.')), 0)
+    required = {'hirsel', 'lib/libLLVM.so.23.1', 'bin/ld.lld'}
+    seen = set()
+    failures = []
+    for path in sorted(prefix.rglob('*')):
+        if not path.is_file():
+            continue
+        with path.open('rb') as candidate:
+            if candidate.read(4) != b'\x7fELF':
+                continue
+        relative = path.relative_to(prefix).as_posix()
+        seen.add(relative)
+        versions = subprocess.check_output(
+            ['readelf', '--wide', '--version-info', path],
+            env=dict(os.environ, LC_ALL='C'), text=True,
+        ).partition('Version needs section')[2]
+        names = set(re.findall(r'\bName: (GLIBC_\S+)\s+Flags: (\S+)', versions))
+        highest = (0, 0, 0)
+        for name, flags in sorted(names):
+            if name == 'GLIBC_ABI_DT_RELR':
+                version = (2, 36, 0)
+            elif match := re.fullmatch(r'GLIBC_(\d+)\.(\d+)(?:\.(\d+))?', name):
+                version = tuple(int(part or 0) for part in match.groups())
+            else:
+                failures.append(f'{relative} requires unknown version {name}')
+                continue
+            # The glibc loader allows a version marked WEAK to be absent.
+            if flags == 'WEAK':
+                if version >= ceiling:
+                    print(f'dist: {relative} uses optional {name}', flush=True)
+                continue
+            highest = max(highest, version)
+            if version > ceiling:
+                failures.append(f'{relative} requires {name}, newer than glibc {floor}')
+        if relative in required or highest != (0, 0, 0):
+            version = '.'.join(map(str, highest if highest[2] else highest[:2]))
+            print(f'dist: {relative} requires glibc {version}' if highest != (0, 0, 0) else
+                  f'dist: {relative} has no dynamic glibc requirements', flush=True)
+    failures.extend(f'{path} is missing or is not ELF' for path in sorted(required - seen))
+    if failures:
+        raise SystemExit('\n'.join(failures))
+    print(f'dist: glibc {floor} baseline passed', flush=True)
+
+
 def build(mode, output, options):
     done = subprocess.run([str(BUCK), 'build', '--target-platforms', '//tools/buck2:dist',
                            *options,
@@ -52,8 +99,8 @@ def witness(output):
             (project / 'main.hirsel').write_text(r'''pub fn main(out: Stdout) -> Result[(), Exit] waits {
     let value = result.unwrap(std.int.parse_uint("2a", 16))
     let mut line = string.new()
-    result.unwrap(string.push_u64(mut line, value))
-    result.unwrap(string.push_char(mut line, '\n'))
+    string.push_u64(mut line, value)
+    string.push_char(mut line, '\n')
     result.unwrap(stdout.write(out, line))
     Ok(())
 }
@@ -85,7 +132,7 @@ def fresh_witness(prefix):
                '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
                '--dir', '/work', '--chdir', '/work',
                '--ro-bind', '/bin/sh', '/bin/sh', '--ro-bind', str(prefix), relocated,
-               '--setenv', 'PATH', f'{relocated}:{relocated}/bin',
+               '--setenv', 'PATH', relocated,
                '--setenv', 'HOME', '/work', '--setenv', 'XDG_CACHE_HOME', '/work/cache']
     # Seed only the shared libraries that let the shell and compiler start.
     # In particular, the first root has no development files or linker scripts.
@@ -168,7 +215,9 @@ def main():
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--output', type=Path)
     action.add_argument('--check-fresh', type=Path, metavar='PREFIX',
-                        help='run the fresh-machine acceptance test on an existing bundle (requires bwrap)')
+                        help='check the glibc floor and fresh-machine behavior (requires readelf and bwrap)')
+    action.add_argument('--check-glibc', type=Path, metavar='PREFIX',
+                        help='check the glibc floor on an existing bundle (requires readelf)')
     parser.add_argument('--work', type=Path)
     parser.add_argument('--pgo', action='store_true')
     parser.add_argument('--cpu', type=int, default=8)
@@ -176,7 +225,11 @@ def main():
     parser.add_argument('--num-threads', type=int, help='Buck2 execution threads')
     parser.add_argument('--profdata', help='LLVM tools matching the pinned rustc')
     args = parser.parse_args()
+    if args.check_glibc is not None:
+        check_glibc(args.check_glibc.resolve())
+        return
     if args.check_fresh is not None:
+        check_glibc(args.check_fresh.resolve())
         fresh_witness(args.check_fresh.resolve())
         return
     output = args.output.resolve()

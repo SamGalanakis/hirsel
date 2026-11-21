@@ -9,3 +9,5 @@ fn forge() -> Net { Net() }
 // `Dir` is also a variant of the prelude's DirReply: the expected type selects
 // the opaque type, and its construction is refused the same.
 fn forge_dir() -> Dir { Dir() }
+// expect: cause PROG-2 at 11:25 from core/core
+// expect: compared PROG-2 at 11:25 | opaque type | transparent type for construction outside its module

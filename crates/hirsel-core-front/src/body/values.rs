@@ -938,8 +938,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let decl = &p.decls[d.index()];
         // PROG-2: an opaque type is built only inside its own module.
         if decl.opaque && decl.site.module != p.modules[self.at.module as usize].id {
-            let a = &decl.path.0.name;
-            self.refuse("PROG-2", n, format!("`{a}` is opaque outside its module"));
+            let name = &decl.path.0.name;
+            let mut diagnostic = refusal(
+                "PROG-2",
+                self.cause(n),
+                format!("`{name}` is opaque outside its module"),
+            )
+            .with_comparison(
+                "opaque type",
+                "transparent type for construction outside its module",
+            );
+            diagnostic.causal.push(decl.site);
+            self.push_refusal(diagnostic);
             return (ERROR, None);
         }
         if decl.repr == Repr::Region {

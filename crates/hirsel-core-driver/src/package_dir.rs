@@ -11,25 +11,20 @@ use std::error::Error;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-const MANIFEST: &str = "manifest.json";
+pub(crate) const MANIFEST: &str = "hirsel.toml";
 
 pub(crate) fn scaffold_manifest(sources: impl Iterator<Item = &'static str>) -> String {
-    use serde_json::json;
-    let sources = sources
-        .map(|file| json!({"file": file, "modules": [file.trim_end_matches(".hirsel")], "signatures": false}))
-        .collect::<Vec<_>>();
-    let manifest = json!({
-        "packages": [{
-            "package": crate::package("app"),
-            "dependencies": [crate::package("core"), crate::package("std")],
-            "sources": sources,
-        }],
-        "tests": {
-            "sources": [{"file": "tests.hirsel", "modules": ["tests"], "signatures": false}],
-            "limit": 64 * 1024 * 1024,
-        },
-    });
-    format!("{manifest:#}\n")
+    use std::fmt::Write;
+    let mut manifest = String::from(
+        "[package]\nname = \"app\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[dependencies]\nstd = { major = 1 }\n\n[sources]\n",
+    );
+    for file in sources {
+        let module = file.strip_suffix(".hirsel").unwrap();
+        writeln!(manifest, "{file:?} = {module:?}").unwrap();
+    }
+    manifest
+        .push_str("\n[tests]\nlimit = 67108864\n\n[tests.sources]\n\"tests.hirsel\" = \"tests\"\n");
+    manifest
 }
 
 /// One run's grants, as `--dir` and `--grant` give them or a package's
@@ -144,21 +139,41 @@ impl TestRuns {
     }
 }
 
+type Sources = BTreeMap<String, String>;
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
-    packages: Vec<PackageManifest>,
+    package: PackageFile,
     #[serde(default)]
-    entries: Vec<EntryFile>,
+    sources: Sources,
+    #[serde(default)]
+    dependencies: BTreeMap<String, DependencyFile>,
+    #[serde(default)]
+    program: ProgramFile,
     tests: Option<TestFile>,
+    #[serde(rename = "tool")]
+    _tool: Option<toml::Table>,
 }
 
-/// An entry row: the tool fields beside these (workload, grants) are read
-/// by the measurement tools, not here.
 #[derive(serde::Deserialize)]
-struct EntryFile {
-    package: PackageId,
-    module: String,
+#[serde(deny_unknown_fields)]
+struct PackageFile {
+    name: String,
+    major: u32,
+    charge: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DependencyFile {
+    major: u32,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgramFile {
+    module: Option<String>,
     function: Option<String>,
 }
 
@@ -166,8 +181,8 @@ struct EntryFile {
 #[serde(deny_unknown_fields)]
 struct TestFile {
     #[serde(default)]
-    sources: Vec<ModuleSource>,
-    limit: Option<u64>,
+    sources: Sources,
+    limit: u64,
     #[serde(default)]
     grants: Vec<String>,
     #[serde(default)]
@@ -184,6 +199,50 @@ struct RunFile {
     dirs: Option<Vec<String>>,
 }
 
+pub(crate) fn package_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    name.len() <= 64
+        && bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+pub(crate) fn module_path(module: &str) -> Option<Vec<String>> {
+    let mut symbols = hirsel_core_syntax::Symbols::default();
+    let names: Vec<_> = module.split('.').collect();
+    names
+        .iter()
+        .all(|name| {
+            let lexed = hirsel_core_syntax::lex(name, &mut symbols);
+            lexed.diagnostics.is_empty()
+                && lexed.tokens.first().is_some_and(|token| {
+                    token.kind == hirsel_core_syntax::TokenKind::Ident
+                        && token.span.start == 0
+                        && token.span.end as usize == name.len()
+                })
+        })
+        .then(|| names.into_iter().map(str::to_owned).collect())
+}
+
+pub(crate) fn path_rule(path: &str, suffix: &str) -> Result<(), String> {
+    if path.len() > 1024 {
+        return Err("path over 1024 bytes".into());
+    }
+    for component in path.split('/') {
+        if component.len() > 255 {
+            return Err("component over 255 bytes".into());
+        }
+        let mut bytes = component.bytes();
+        let first = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        if !bytes.next().is_some_and(first) || !bytes.all(|b| first(b) || b".-".contains(&b)) {
+            return Err(format!("bad component {component:?}"));
+        }
+    }
+    if !path.ends_with(suffix) {
+        return Err(format!("does not end in {suffix}"));
+    }
+    Ok(())
+}
+
 pub(crate) struct PackageDir {
     /// Its sources' paths joined to the directory, which names them.
     pub package: PackageManifest,
@@ -197,49 +256,126 @@ pub(crate) struct PackageDir {
 
 impl PackageDir {
     pub fn open(dir: &Path) -> io::Result<Self> {
-        let path = dir.join(MANIFEST);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Ok(Self {
-                    package: PackageManifest::directory(dir, crate::package("app"), false)?,
-                    entry: DefPath::from_full("app@1/main/main").unwrap(),
-                    manifest: None,
-                    tests: None,
-                });
+        let mut manifest = None;
+        for parent in dir.ancestors() {
+            let parent = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            };
+            let path = parent.join(MANIFEST);
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    manifest = Some((parent, path, bytes));
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
+        }
+        let Some((dir, path, bytes)) = manifest else {
+            return Ok(Self {
+                package: PackageManifest::directory(dir, crate::package("app"), false)?,
+                entry: DefPath::from_full("app@1/main/main").unwrap(),
+                manifest: None,
+                tests: None,
+            });
         };
         let refuse = |message: String| io::Error::other(format!("{}: {message}", path.display()));
-        let file: File = serde_json::from_slice(&bytes).map_err(|e| refuse(e.to_string()))?;
-        let [mut package] = <[PackageManifest; 1]>::try_from(file.packages)
-            .map_err(|_| refuse("a package directory's manifest lists one package".into()))?;
-        let join = |sources: &mut Vec<ModuleSource>| {
-            for source in sources {
-                source.file = dir.join(&source.file);
+        let file: File =
+            toml::from_str(std::str::from_utf8(&bytes).map_err(|e| refuse(e.to_string()))?)
+                .map_err(|e| refuse(e.to_string()))?;
+        let name = file.package.name;
+        if !package_name(&name) || matches!(name.as_str(), "core" | "std") {
+            return Err(refuse(format!(
+                "package.name: invalid package name {name:?}"
+            )));
+        }
+        if file.package.charge != "charge-v1" {
+            return Err(refuse(format!(
+                "package.charge: unknown charge policy {:?}",
+                file.package.charge
+            )));
+        }
+        let id = PackageId {
+            name,
+            version: file.package.major.to_string(),
+        };
+        let mut dependencies = vec![crate::package("core")];
+        for (name, binding) in file.dependencies {
+            match name.as_str() {
+                "std" if binding.major == 1 => dependencies.push(crate::package("std")),
+                "std" => {
+                    return Err(refuse(format!(
+                        "dependencies.std: the toolchain has std@1, not std@{}",
+                        binding.major
+                    )));
+                }
+                "core" => {
+                    return Err(refuse(
+                        "dependencies.core: core@1 is bound in every package and is not declared"
+                            .into(),
+                    ));
+                }
+                _ => {
+                    return Err(refuse(format!(
+                        "dependencies.{name}: give exactly one of path, root, workspace or a toolchain major"
+                    )));
+                }
             }
+        }
+        let mut listed_paths = BTreeMap::new();
+        let mut sources = |listed: Sources, field| {
+            let mut out = Vec::with_capacity(listed.len());
+            for (file, module) in listed {
+                path_rule(&file, ".hirsel").map_err(|rule| {
+                    refuse(format!("{field}: {file:?} breaks the path rules: {rule}"))
+                })?;
+                let modules = module_path(&module)
+                    .ok_or_else(|| refuse(format!("{field}: {module:?} is not a module path")))?;
+                if let Some(prior) = listed_paths.insert(file.to_ascii_lowercase(), file.clone()) {
+                    return Err(refuse(format!(
+                        "{field}: {prior:?} and {file:?} differ only in case"
+                    )));
+                }
+                out.push(ModuleSource {
+                    file: dir.join(file),
+                    modules,
+                    signatures: false,
+                });
+            }
+            Ok::<_, io::Error>(out)
         };
-        join(&mut package.sources);
-        let mut entries = file.entries.iter().filter(|e| e.package == package.package);
-        let entry = match (entries.next(), entries.next()) {
-            (_, Some(_)) => return Err(refuse("the package names one entry".into())),
-            (Some(e), None) => format!(
-                "{}@{}/{}/{}",
-                package.package.name,
-                package.package.version,
-                e.module,
-                e.function.as_deref().unwrap_or("main")
-            ),
-            (None, None) => format!(
-                "{}@{}/main/main",
-                package.package.name, package.package.version
-            ),
+        if file.sources.is_empty() {
+            return Err(refuse(
+                "sources: a package lists at least one source".into(),
+            ));
+        }
+        let package = PackageManifest {
+            package: id.clone(),
+            dependencies,
+            sources: sources(file.sources, "sources")?,
         };
-        let entry = DefPath::from_full(&entry).ok_or_else(|| refuse(format!("entry {entry}")))?;
+        let module = file.program.module.as_deref().unwrap_or("main");
+        let modules = module_path(module)
+            .ok_or_else(|| refuse(format!("program.module: {module:?} is not a module path")))?;
+        let function = file.program.function.as_deref().unwrap_or("main");
+        if module_path(function).is_none_or(|parts| parts.len() != 1) {
+            return Err(refuse(format!(
+                "program.function: {function:?} is not an identifier"
+            )));
+        }
+        let entry = DefPath::from_full(&format!(
+            "{}@{}/{}/{function}",
+            id.name,
+            id.version,
+            modules.join("/")
+        ))
+        .unwrap();
         let tests = file
             .tests
-            .map(|mut tests| {
-                join(&mut tests.sources);
+            .map(|tests| {
+                let test_sources = sources(tests.sources, "tests.sources")?;
                 let grants = |grants: &[String], dirs: &[String]| {
                     let mut out = Grants {
                         directories: dirs.to_vec(),
@@ -251,9 +387,7 @@ impl PackageDir {
                     Ok::<_, io::Error>(out)
                 };
                 let package = Run {
-                    limit: tests
-                        .limit
-                        .ok_or_else(|| refuse("tests declare their root limit".into()))?,
+                    limit: tests.limit,
                     grants: grants(&tests.grants, &tests.dirs)?,
                 };
                 let mut named = BTreeMap::new();
@@ -269,7 +403,7 @@ impl PackageDir {
                     };
                     named.insert(test, run);
                 }
-                Ok::<_, io::Error>((tests.sources, TestRuns { package, named }))
+                Ok::<_, io::Error>((test_sources, TestRuns { package, named }))
             })
             .transpose()?;
         Ok(Self {

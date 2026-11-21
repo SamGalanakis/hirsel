@@ -1213,15 +1213,13 @@ fn recovered_header_cases() -> Vec<String> {
             crate::std_manifest(),
         ];
         let (owner, module, entry) = if name == "store" {
-            let manifest: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(repo().join("core/programs/store/manifest.json")).unwrap(),
+            let mut request = hirsel_core_driver::CheckRequest::program(
+                &repo().join("core/programs/store"),
+                &repo().join("core"),
+                &files.path().join("store"),
             )
             .unwrap();
-            let mut store: PackageManifest =
-                serde_json::from_value(manifest["packages"][0].clone()).unwrap();
-            for source in &mut store.sources {
-                source.file = repo().join("core/programs/store").join(&source.file);
-            }
+            let mut store = request.inputs.packages.pop().unwrap();
             store.sources.push(ModuleSource {
                 file: path,
                 modules: vec!["ice_places_358_store".into()],

@@ -485,16 +485,24 @@ fn allocation() -> Result[(), Capacity] {
 "#,
     )
     .unwrap();
-    let configure = |tests: serde_json::Value| {
-        let manifest = serde_json::json!({
-            "packages": [{
-                "package": {"name": "app", "version": "1"},
-                "dependencies": [{"name": "core", "version": "1"}],
-                "sources": [{"file": "main.hirsel", "modules": ["main"], "signatures": false}],
-            }],
-            "tests": tests,
-        });
-        std::fs::write(package.join("manifest.json"), manifest.to_string()).unwrap();
+    let configure = |limit, test, test_limit| {
+        let manifest = format!(
+            r#"[package]
+name = "app"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"main.hirsel" = "main"
+
+[tests]
+limit = {limit}
+
+[tests.runs."app@1/main/{test}"]
+limit = {test_limit}
+"#
+        );
+        std::fs::write(package.join("hirsel.toml"), manifest).unwrap();
     };
     let options = native_options(Backend::Cranelift, dir.path());
     let Link::Driver(cc) = options.link else {
@@ -506,10 +514,16 @@ fn allocation() -> Result[(), Capacity] {
         .expect("test runtime archive");
     let cc = cc.canonicalize().expect("test link driver");
     let store = dir.path().join("store");
+    let libraries = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../core")
+        .canonicalize()
+        .unwrap();
     let args = |extra: &[&str]| {
         [
             "test",
             package.to_str().unwrap(),
+            "--libraries",
+            libraries.to_str().unwrap(),
             "--runtime",
             runtime.to_str().unwrap(),
             "--cc",
@@ -561,22 +575,18 @@ fn allocation() -> Result[(), Capacity] {
             .collect();
         assert_eq!(rows, expected);
     };
-    configure(serde_json::json!({"limit": 288, "runs": {"app@1/main/allocation": {"limit": 296}}}));
+    configure(288, "allocation", 296);
     run([("allocation", "executed"), ("good", "executed")]);
     run([("allocation", "cached"), ("good", "cached")]);
-    configure(
-        serde_json::json!({"limit": 288, "runs": {"app@1/main/allocation": {"limit": 4096}}}),
-    );
+    configure(288, "allocation", 4096);
     run([("allocation", "executed"), ("good", "cached")]);
-    configure(
-        serde_json::json!({"limit": 289, "runs": {"app@1/main/allocation": {"limit": 4096}}}),
-    );
+    configure(289, "allocation", 4096);
     run([("allocation", "cached"), ("good", "executed")]);
 
     let (status, stdout, stderr) = request(&args(&["--limit", "4096"]));
     assert_ne!(status, Some(0), "{stdout}");
     assert!(stderr.contains("test takes no --limit"), "{stderr}");
-    configure(serde_json::json!({"limit": 288, "runs": {"app@1/main/missing": {"limit": 296}}}));
+    configure(288, "missing", 296);
     let (status, stdout, stderr) = request(&args(&[]));
     assert_ne!(status, Some(0), "{stdout}");
     assert!(

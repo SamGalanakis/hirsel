@@ -2104,19 +2104,24 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
     let manifest_app = dir.path().join("manifest-app");
     std::fs::create_dir(&manifest_app).unwrap();
     std::fs::write(
-        manifest_app.join("manifest.json"),
-        r#"{
-            "packages": [{
-                "package": {"name": "counter", "version": "2"},
-                "dependencies": [{"name": "core", "version": "1"}],
-                "sources": [{"file": "app.hirsel", "modules": ["counter"], "signatures": false}]
-            }],
-            "entries": [{"package": {"name": "counter", "version": "2"}, "module": "counter"}],
-            "tests": {
-                "sources": [{"file": "laws.hirsel", "modules": ["counter"], "signatures": false}],
-                "limit": 1048576
-            }
-        }"#,
+        manifest_app.join("hirsel.toml"),
+        r#"[package]
+name = "counter"
+major = 2
+charge = "charge-v1"
+
+[sources]
+"app.hirsel" = "counter"
+
+[program]
+module = "counter"
+
+[tests]
+limit = 1048576
+
+[tests.sources]
+"laws.hirsel" = "counter"
+"#,
     )
     .unwrap();
     std::fs::write(

@@ -50,25 +50,12 @@ fn private_runner_launch_hook_is_lowered_and_evaluated() {
 }
 
 fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Arc<CheckProduct> {
-    #[derive(serde::Deserialize)]
-    struct StoreManifest {
-        packages: Vec<PackageManifest>,
-    }
-
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut request =
         CheckRequest::libraries(&root.join("core"), &directory.join("store")).unwrap();
-    let StoreManifest { mut packages } = serde_json::from_slice(
-        &std::fs::read(root.join("core/programs/store/manifest.json")).unwrap(),
-    )
-    .unwrap();
-    for source in packages.iter_mut().flat_map(|package| &mut package.sources) {
-        source.file = root.join("core/programs/store").join(&source.file);
-    }
-    let store = packages
-        .iter_mut()
-        .find(|p| p.package == package("store"))
-        .unwrap();
+    let mut store = package_dir::PackageDir::open(&root.join("core/programs/store"))
+        .unwrap()
+        .package;
     if let Some(path) = runner_override {
         store
             .sources
@@ -82,7 +69,7 @@ fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Ar
         modules: vec!["runner_launch".into()],
         signatures: false,
     });
-    request.inputs.packages.extend(packages);
+    request.inputs.packages.push(store);
     let product = Driver::default()
         .check(request, &mut Meter::new(false))
         .unwrap();

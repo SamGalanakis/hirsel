@@ -879,7 +879,7 @@ pub fn scaffold(directory: &Path, library: bool) -> std::io::Result<()> {
     for (name, source) in [
         ("main.hirsel", main),
         ("tests.hirsel", test),
-        ("manifest.json", &manifest),
+        (crate::package_dir::MANIFEST, &manifest),
     ]
     .into_iter()
     .chain(library.then_some(("lib.hirsel", lib)))

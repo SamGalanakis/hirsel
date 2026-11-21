@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -31,9 +32,17 @@ def main():
                        for path in sorted((ROOT/'core'/name).glob('*.hirsel'))],
         })
     if args.session_only or args.admission_only:
-        store = json.loads((ROOT/'core/programs/store/manifest.json').read_text())['packages'][0]
-        for source in store['sources']:
-            source['file'] = str(ROOT/'core/programs/store'/source['file'])
+        directory = ROOT / 'core/programs/store'
+        with (directory / 'hirsel.toml').open('rb') as file:
+            manifest = tomllib.load(file)
+        package = manifest['package']
+        store = {
+            'package': {'name': package['name'], 'version': str(package['major'])},
+            'dependencies': [core] + [{'name': name, 'version': str(dep['major'])}
+                                      for name, dep in manifest['dependencies'].items()],
+            'sources': [{'file': str(directory / file), 'modules': module.split('.'), 'signatures': False}
+                        for file, module in manifest['sources'].items()],
+        }
         if args.runner:
             next(source for source in store['sources'] if source['modules'] == ['runner'])['file'] = str(args.runner.resolve())
         packages.append(store)

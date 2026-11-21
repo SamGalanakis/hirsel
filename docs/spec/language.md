@@ -596,15 +596,15 @@ fn zero(x: f64) -> u64 { match float.total_order(x, 0.0) { Equal => 1, _ => 2 } 
 ```hirsel
 fn zero(x: f64) -> u64 { match x { 0.0 => 1, _ => 2 } }   // refused: LANG-17, f64 is not key
 ```
-```hirsel unbuilt
-fn read_some(mut input: Option[HostFile], mut buf: Bytes) -> Result[u64, IoError] {
+```hirsel
+fn read_some(mut input: Option[HostFile], mut buf: Bytes) -> Result[u64, IoError] waits {
   match input { Some(mut f) => host.read(mut f, mut buf), None => Ok(0) }
 }
 ```
-```hirsel unbuilt
+```hirsel
 fn whole(mut s: String) { match s { mut t => {} } }      // refused: LANG-17, a mut binding is a payload
 ```
-```hirsel unbuilt
+```hirsel
 fn unpack(mut o: Option[String]) { let Some(mut s) = o else { return } }   // refused: LANG-17
 ```
 

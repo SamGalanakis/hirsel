@@ -3,10 +3,20 @@
 use super::*;
 use hirsel_core_ir::RtOp;
 
+/// How a name pattern binds (OWN-15): a view or copy, an owner (`take`), or the
+/// matched place itself, lent for the arm (`mut`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mode {
+    View,
+    Take,
+    Mut,
+    /// A `take` or `mut` binding already refused: it binds an error.
+    Refused,
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Head {
     Any,
-    Bind(u32, bool),
+    Bind(u32, Mode),
     Product(Option<u32>),
     Range(i128, i128),
 }
@@ -33,6 +43,10 @@ pub(super) struct Patterns {
     escaping: Vec<Freeze>,
     pub(super) guard: bool,
     rebind: bool,
+    /// A guarded arm's first binding: `mut` names bind as views until the guard holds.
+    guarding: bool,
+    /// The freeze records the current scrutinee's selection made; a loan subsumes them.
+    selection: (usize, usize),
     /// A written anchor set, the value it checks and the written type (the freeze site).
     declared_anchors: Option<(anchors::Fact, NodeId, NodeId)>,
     scopes: Vec<Scope>,
@@ -72,8 +86,12 @@ struct Subject {
     ty: TyId,
     value: Option<ValueId>,
     place: Option<At>,
+    /// The storage of `place`, for a part reached by a pattern.
+    address: Option<AddressId>,
     owned: bool,
     viewed: bool,
+    /// `place` is a writable place (OWN-12), so a `mut` binding may lend a part of it.
+    writable: bool,
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -128,16 +146,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let c = self.kids(n);
         match self.kind(n) {
             NodeKind::Wildcard => self.pat_push(n, declared, Head::Any, PoolRange::EMPTY),
-            NodeKind::BindPattern | NodeKind::TakePattern if self.binder(n).is_some() => self
-                .pat_push(
+            NodeKind::BindPattern | NodeKind::TakePattern | NodeKind::MutPattern
+                if self.binder(n).is_some() =>
+            {
+                let mode = match self.kind(n) {
+                    NodeKind::TakePattern => Mode::Take,
+                    NodeKind::MutPattern => Mode::Mut,
+                    _ => Mode::View,
+                };
+                self.pat_push(
                     n,
                     declared,
-                    Head::Bind(
-                        self.binder(n).unwrap(),
-                        self.kind(n) == NodeKind::TakePattern,
-                    ),
+                    Head::Bind(self.binder(n).unwrap(), mode),
                     PoolRange::EMPTY,
-                ),
+                )
+            }
             NodeKind::UnitPattern if ty == UNIT || ty == ERROR => {
                 self.pat_push(n, ty, Head::Product(None), PoolRange::EMPTY)
             }
@@ -478,8 +501,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     ty: ERROR,
                     value: None,
                     place: None,
+                    address: None,
                     owned: false,
                     viewed: false,
+                    writable: false,
                 };
             }
         };
@@ -533,13 +558,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             } else {
                 0
             };
+            let writable = !at.shared
+                && !matches!(self.t.kind(at.ty), TyKind::View(_))
+                && self.type_kind(at.ty) != Kind::Region
+                && self.var(at.place.slot).origin.writable();
             return Subject {
                 anchors,
                 ty,
                 value,
                 place: Some(at),
+                address: None,
                 owned: consume && !viewed,
                 viewed,
+                writable,
             };
         }
         let (ty, value) = self.expr(n, want);
@@ -553,20 +584,84 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ty,
             value,
             place: None,
+            address: None,
             owned: !viewed,
             viewed,
+            writable: false,
         }
     }
     fn pattern_takes(&self, id: u32) -> bool {
         if id == 0 {
             return false;
         }
-        if matches!(self.pat_head(id), Head::Bind(_, true)) {
+        if matches!(self.pat_head(id), Head::Bind(_, Mode::Take)) {
             return true;
         }
         let fields = self.pat_fields(id);
         (0..fields.len)
             .any(|i| self.pattern_takes(self.patterns.fields[(fields.start + i) as usize]))
+    }
+    /// The site of the first `mut` binding of pattern `id` and of its first `take`.
+    fn pattern_marks(&self, id: u32, lend: &mut Option<NodeId>, take: &mut Option<NodeId>) {
+        if id == 0 {
+            return;
+        }
+        match self.pat_head(id) {
+            Head::Bind(_, Mode::Mut) => *lend = lend.or(Some(self.pat(id).site)),
+            Head::Bind(_, Mode::Take) => *take = take.or(Some(self.pat(id).site)),
+            _ => {}
+        }
+        let fields = self.pat_fields(id);
+        for i in 0..fields.len {
+            self.pattern_marks(
+                self.patterns.fields[(fields.start + i) as usize],
+                lend,
+                take,
+            );
+        }
+    }
+    /// LANG-17, OWN-15: a `mut` binding is a part of an arm's pattern, never its
+    /// whole pattern nor in a `let` or `for` pattern, and a chosen pattern does not
+    /// both take and lend. True when the pattern lends.
+    fn check_lends(&mut self, id: u32, arm: bool) -> bool {
+        let (mut lend, mut take) = (None, None);
+        self.pattern_marks(id, &mut lend, &mut take);
+        let Some(site) = lend else {
+            return false;
+        };
+        if !arm {
+            self.refuse(
+                "LANG-17",
+                site,
+                "a `mut` binding is written in a `match` arm, `if let` or `while let`",
+            );
+            self.refuse_marks(id, false);
+            return false;
+        }
+        if matches!(self.pat_head(id), Head::Bind(_, Mode::Mut)) {
+            self.refuse(
+                "LANG-17",
+                site,
+                "a `mut` binding names a part of the scrutinee, not all of it",
+            );
+            self.refuse_marks(id, false);
+            return false;
+        }
+        if let Some(take) = take {
+            let later = if self.span(take).start > self.span(site).start {
+                take
+            } else {
+                site
+            };
+            self.refuse(
+                "OWN-15",
+                later,
+                "a pattern either takes or lends `mut`, not both",
+            );
+            self.refuse_marks(id, true);
+            return false;
+        }
+        true
     }
     fn pattern_at(
         &mut self,
@@ -581,10 +676,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.steps.extend_from_within(
                 at.place.start as usize..(at.place.start + at.place.len) as usize,
             );
-            self.steps.push(if case.is_some() {
-                PStep::Any
-            } else {
-                PStep::Field(field)
+            self.steps.push(match case {
+                Some(case) => PStep::Case(case, field),
+                None => PStep::Field(field),
             });
             at.place.start = start;
             at.place.len += 1;
@@ -592,10 +686,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             at
         });
         let compact = self.compact_adt(subject.ty).is_some();
+        let mut address = None;
         let value = if self.live() && compact {
             // A compact value's field is found in its blob (MEM-9, MEM-11).
             subject.value.and_then(|header| {
                 let (a, _) = self.compact_field(header, subject.ty, case, field, n)?;
+                address = Some(a);
                 match self.rep_at(ty, n)? {
                     Rep::Scalar(t) => Some(self.read_bits(a, t, n)),
                     Rep::Place(_) => Some(self.pointer(a, n)),
@@ -614,6 +710,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 ty,
                                 value: None,
                                 place,
+                                address: None,
                                 ..subject
                             };
                         }
@@ -625,6 +722,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         Rep::Scalar(_) => {
                             let t = r.ty().unwrap();
                             let a = self.address(base, &[step], PlaceTy::Value(t), n);
+                            address = Some(a);
                             let result = self.value(t);
                             self.inst(
                                 Inst::Read {
@@ -638,6 +736,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         }
                         Rep::Place(id) => {
                             let a = self.address(base, &[step], PlaceTy::Declared(id), n);
+                            address = Some(a);
                             let p = self.pointer(a, n);
                             // A resource's block is freed when it is taken apart (T3.7),
                             // so its parts are copied out of it.
@@ -670,6 +769,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ty,
             value,
             place,
+            address,
+            // A compact value's blob is region storage, never written (OWN-12).
+            writable: subject.writable && !compact,
             ..subject
         }
     }
@@ -790,9 +892,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if pat.viewed {
             subject.owned = false;
             subject.viewed = true;
+            subject.writable = false;
         }
         match pat.head {
-            Head::Bind(b, take) => {
+            Head::Bind(b, Mode::Mut) if !self.patterns.guarding => {
+                self.lend_binding(b, pat, subject)
+            }
+            Head::Bind(b, Mode::Refused) => self.error_binding(b, pat.site),
+            Head::Bind(b, mode) => {
+                let take = mode == Mode::Take;
                 if take && subject.viewed {
                     if self.vars[b as usize].is_none_or(|v| v.ty != ERROR) {
                         self.refuse("OWN-15", pat.site, "a pattern cannot take through a view");
@@ -917,6 +1025,91 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => {}
         }
     }
+    /// A refused binding declares an error binder, so using it refuses nothing more.
+    fn error_binding(&mut self, b: u32, site: NodeId) {
+        if self.patterns.rebind {
+            let var = self.vars[b as usize].as_mut().expect("guard binding");
+            var.ty = ERROR;
+            var.binding = Binding::Value(None);
+        } else {
+            self.declare(b, ERROR, Binding::Value(None), Origin::LetMut, site);
+            self.scope_slots.push(b);
+        }
+    }
+    /// After a refused lend, the pattern's `mut` bindings (and, when it also takes, its
+    /// `take` bindings) bind errors.
+    fn refuse_marks(&mut self, id: u32, takes: bool) {
+        if id == 0 {
+            return;
+        }
+        let i = id as usize - 1;
+        if let Head::Bind(b, mode) = self.patterns.pats[i].head
+            && (mode == Mode::Mut || takes && mode == Mode::Take)
+        {
+            self.patterns.pats[i].head = Head::Bind(b, Mode::Refused);
+        }
+        let fields = self.pat_fields(id);
+        for k in 0..fields.len {
+            self.refuse_marks(self.patterns.fields[(fields.start + k) as usize], takes);
+        }
+    }
+    /// OWN-15: `mut x` names the place it matched in a writable scrutinee, lent to the
+    /// arm. The scrutinee stays its owner: `x` owns nothing and has no drop flag, and
+    /// the loan is a hold on the matched place, which subsumes the selection's views.
+    fn lend_binding(&mut self, b: u32, pat: Pat, subject: Subject) {
+        let lent = subject
+            .place
+            .filter(|_| subject.writable && !pat.viewed)
+            .filter(|at| self.step_write(at.place.slot, pat.site));
+        let lent = lent.filter(|at| {
+            let (from, to) = self.patterns.selection;
+            self.check_holds_except(at.place, Act::Write, pat.site, from..to)
+        });
+        let Some(at) = lent else {
+            if subject.place.is_none() {
+                self.refuse(
+                    "OWN-15",
+                    pat.site,
+                    "a `mut` binding names a place, and this scrutinee is a temporary",
+                );
+            } else if !subject.writable || pat.viewed {
+                self.refuse(
+                    "OWN-15",
+                    pat.site,
+                    "a `mut` binding needs a writable scrutinee, not a view",
+                );
+            }
+            self.error_binding(b, pat.site);
+            return;
+        };
+        if subject.address.is_none() && self.live() && !matches!(self.rep(pat.ty), Ok(Rep::None)) {
+            self.gap(
+                pat.site,
+                "a `mut` binding of this payload's representation is not built",
+            );
+        }
+        self.freeze(at.place, Hold::Lent(self.depth), pat.site);
+        let binding = Binding::Slot(subject.address);
+        if self.patterns.rebind {
+            let var = self.vars[b as usize].as_mut().expect("guard binding");
+            var.ty = pat.ty;
+            var.binding = binding;
+            var.origin = Origin::MutParam;
+            var.own = None;
+        } else {
+            self.declare(b, pat.ty, binding, Origin::MutParam, pat.site);
+            self.scope_slots.push(b);
+        }
+        self.vars[b as usize].as_mut().unwrap().lent = Some(at.place);
+        if self.anchor_tracked(pat.ty) {
+            let fact = if subject.anchors == 0 {
+                self.anchor_read(at)
+            } else {
+                subject.anchors
+            };
+            self.lend_anchors(b, fact);
+        }
+    }
     /// The payload transfer of an owned destructure (OWN-14, OWN-15, T3.7): the bound
     /// parts are owners now, so the source is consumed whole and the omitted fields
     /// are dropped in declaration order.
@@ -977,6 +1170,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         anchors: anchors::Fact,
     ) {
         let id = self.pattern(pat, ty);
+        self.check_lends(id, false);
         let matrix = self.patterns.matrix.len();
         self.patterns.matrix.push(id);
         if let Some(missing) = self.pattern_missing(matrix, ty) {
@@ -996,8 +1190,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 ty,
                 value,
                 place: None,
+                address: None,
                 owned,
                 viewed: !owned,
+                writable: false,
             },
             false,
         );
@@ -1014,6 +1210,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let freezes = self.freezes.len();
         let subject = self.subject(value, true, declared.and_then(expect));
         let id = self.pattern(pat, subject.ty);
+        self.check_lends(id, false);
         if let Some(other) = other {
             self.let_else(pat, subject, id, other);
         } else {
@@ -1073,9 +1270,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         projected.then_some(ty)
     }
-    fn holder_subject(&mut self, mut subject: Subject, expected: TyId, n: NodeId) -> Subject {
+    /// Whether a written pattern has a `mut` binding, before it is typed.
+    fn writes_mut_binding(&self, n: NodeId) -> bool {
+        self.kind(n) == NodeKind::MutPattern
+            || self.kids(n).iter().any(|&k| self.writes_mut_binding(k))
+    }
+    fn holder_subject(
+        &mut self,
+        mut subject: Subject,
+        expected: TyId,
+        n: NodeId,
+        lends: bool,
+    ) -> Subject {
         if let Some(at) = subject.place {
-            if let Some(at) = self.payload_view_at(at, expected) {
+            let payload = if lends && subject.writable {
+                self.payload_mut_at(at, expected)
+            } else {
+                self.payload_view_at(at, expected)
+            };
+            if let Some(at) = payload {
                 self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
                 subject.value = if matches!(self.rep(at.ty), Ok(Rep::Place(_))) {
                     self.place_ptr(at, n)
@@ -1087,6 +1300,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 subject.ty = at.ty;
                 subject.viewed = true;
                 subject.owned = false;
+                subject.writable &= !at.shared;
             }
         } else if let Some((ty, value)) =
             self.payload_view_value(subject.ty, subject.value, expected, n)
@@ -1102,13 +1316,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     pub(super) fn match_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
+        let selection = self.freezes.len();
         let mut subject = self.subject(c[0], false, None);
         if let Some(expected) = c[1..]
             .iter()
             .find_map(|&arm| self.pattern_holder_payload(self.kids(arm)[0], subject.ty))
         {
-            subject = self.holder_subject(subject, expected, c[0]);
+            let lends = c[1..]
+                .iter()
+                .any(|&arm| self.writes_mut_binding(self.kids(arm)[0]));
+            subject = self.holder_subject(subject, expected, c[0], lends);
         }
+        let selection = std::mem::replace(
+            &mut self.patterns.selection,
+            (selection, self.freezes.len()),
+        );
         // A scrutinee temporary lives to the statement's end unless the chosen arm
         // takes it; when only some arms do, its flag says which (OWN-15, OWN-18).
         let temp = subject
@@ -1130,6 +1352,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for (i, &arm) in c[1..].iter().enumerate() {
             let a = self.kids(arm);
             let id = self.pattern(a[0], subject.ty);
+            self.check_lends(id, true);
             let guarded = a.len() == 3;
             let no = (i + 2 < c.len() && self.live()).then(|| self.new_block(&[]));
             self.pattern_tests(id, subject, no);
@@ -1140,6 +1363,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let (scope, holds) = (self.scope_slots.len(), self.freezes.len());
             let owners = self.owner_mark();
             if guarded {
+                let guarding = std::mem::replace(&mut self.patterns.guarding, true);
                 self.bind_pattern(
                     id,
                     Subject {
@@ -1148,6 +1372,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     },
                     false,
                 );
+                self.patterns.guarding = guarding;
                 let guard = std::mem::replace(&mut self.patterns.guard, true);
                 let (_, cv) = self.expr(a[1], expect(BOOL));
                 self.patterns.guard = guard;
@@ -1215,6 +1440,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         edges.truncate(edge_mark);
         self.patterns.edges = edges;
         self.pattern_escapes(escape_mark);
+        self.patterns.selection = selection;
         self.dead |= was_dead;
         self.patterns.matrix.truncate(matrix);
         (ty.unwrap_or(NEVER), v)
@@ -1461,8 +1687,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let c = self.kids(n);
         let condition = self.kids(c[0]);
         let cond = self.owner_mark();
+        let selection = self.freezes.len();
         let subject = self.subject(condition[1], false, None);
         let id = self.pattern(condition[0], subject.ty);
+        self.check_lends(id, true);
+        let selection = std::mem::replace(
+            &mut self.patterns.selection,
+            (selection, self.freezes.len()),
+        );
         let mark = self.log.len();
         let was_dead = self.dead;
         let no_block = self.live().then(|| self.new_block(&[]));
@@ -1486,6 +1718,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.end_owners(cond, None, true, condition[0]);
         let (yt, yv) = self.result_expr(c[1], if c.len() == 2 { expect(UNIT) } else { want });
         self.pattern_scope_end(scope, holds, cond, c[1], yt, yv);
+        self.patterns.selection = selection;
         self.depth -= 1;
         let yes = self.arm_edge(mark);
         self.goto(join, yt, yv, c[1]);
@@ -1539,8 +1772,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.frames[fi].header = header;
         let freezes = self.freezes.len();
         let cond = self.owner_mark();
+        let selection = self.freezes.len();
         let subject = self.subject(condition[1], false, None);
         let id = self.pattern(condition[0], subject.ty);
+        self.check_lends(id, true);
+        let selection = std::mem::replace(
+            &mut self.patterns.selection,
+            (selection, self.freezes.len()),
+        );
         self.exit_edge(fi);
         let exit = self.frames[fi].exit;
         let out = self.live().then(|| self.new_block(&[]));
@@ -1564,6 +1803,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.end_owners(cond, None, true, condition[0]);
         self.loop_body(c[1]);
         self.close_scope(scope, freezes, c[1], UNIT);
+        self.patterns.selection = selection;
         self.end_owners(cond, None, false, c[1]);
         self.depth -= 1;
         self.source_step(n);
@@ -1843,10 +2083,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ty: error,
             value,
             place: None,
+            address: None,
             owned: true,
             viewed: false,
+            writable: false,
         };
         let id = self.pattern(pat, error);
+        self.check_lends(id, false);
         let matrix = self.patterns.matrix.len();
         self.patterns.matrix.push(id);
         if let Some(missing) = self.pattern_missing(matrix, error) {

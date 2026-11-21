@@ -1,0 +1,29 @@
+// OWN-20, OWN-15: the freeze a result anchored to `mut s` opens is on the scrutinee's
+// payload place and outlives the arm, so the scrutinee is not replaced while it lives.
+// expect: refuse OWN-10 at 14:5
+// expect: refuse OWN-10 at 22:13
+type Source = Text(String) | Count(u64)
+
+fn grow(mut s: String) -> View[String] in s {
+    let _ = string.push(mut s, "b");
+    string.slice(s, 0, string.byte_len(s))
+}
+
+fn escape_then_retag(mut src: Source) -> u64 {
+    let v = match src { Text(mut s) => grow(mut s), Count(_) => return 0 }
+    src = Count(1)
+    string.byte_len(v)
+}
+
+fn within_arm(mut src: Source) -> u64 {
+    match src {
+        Text(mut s) => {
+            let v = grow(mut s);
+            s = string.new();
+            string.byte_len(v)
+        }
+        Count(_) => 0
+    }
+}
+// expect: cause OWN-10 at 14:5 from 13:13
+// expect: cause OWN-10 at 22:13 from 21:26

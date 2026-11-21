@@ -155,6 +155,7 @@ pub enum NodeKind {
     Binary,
     BindPattern,
     TakePattern,
+    MutPattern,
     Wildcard,
     TuplePattern,
     UnitPattern,
@@ -263,6 +264,7 @@ impl ResolutionSize {
                 self.binders += 1;
             }
             NodeKind::TakePattern
+            | NodeKind::MutPattern
             | NodeKind::Generic
             | NodeKind::RegionGeneric
             | NodeKind::Parameter

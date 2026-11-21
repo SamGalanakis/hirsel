@@ -1,0 +1,46 @@
+// expect: run caught() = 7 used 32
+// expect: run cancelled(0) = 1
+// OWN-15, FAIL-8: a failure or a cancellation while a payload is lent to `mut s`
+// leaves the last installed payload in the scrutinee, whose owner drops it once:
+// every admission is refunded, so nothing leaks and nothing is freed twice.
+type Source = Text(String) | Count(u64)
+
+fn fill(mut s: String) {
+    s = result.unwrap(string.from("a longer replacement payload"));
+    fail("x")
+}
+
+fn body() -> u64 {
+    let mut src = Text(result.unwrap(string.from("ab")))
+    match src { Text(mut s) => fill(mut s), Count(_) => {} }
+    0
+}
+
+fn caught() -> u64 {
+    match isolate(fn() -> u64 { body() }) {
+        Ok(Ok(n)) => n,
+        Ok(Error(_)) => 7,
+        Error(_) => 9
+    }
+}
+
+fn read_into(mut s: String) {
+    s = result.unwrap(string.from("a longer replacement payload"));
+    task.check_cancel()
+}
+
+fn child(take n: u64) -> u64 {
+    let mut src = Text(result.unwrap(string.from("ab")))
+    match src { Text(mut s) => read_into(mut s), Count(_) => {} }
+    n
+}
+
+fn cancelled(tasks: Tasks) -> u64 waits {
+    let mut h = result.unwrap(task.spawn(tasks, bytes 65536, 41u64, child))
+    task.cancel(mut h)
+    match task.join(take h) {
+        Ok(n) => n,
+        Error(Cancelled(take c)) => { let _ = take c; 1 }
+        Error(Failed(take c)) => { let _ = take c; 2 }
+    }
+}

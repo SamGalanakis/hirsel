@@ -1735,6 +1735,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.refuse("SEM-11", n, "a vector cannot be captured");
             self.vars[slot as usize] = Some(Var {
                 ty: ERROR,
+                lent: None,
                 ..original
             });
             return;
@@ -1845,6 +1846,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 original.frame_level
             },
             depth: if owning { 0 } else { original.depth },
+            // A capture is its callback's own slot; the capture itself held the
+            // scrutinee place a `mut` pattern binding names (OWN-15).
+            lent: None,
             ..original
         });
         if kind(&self.p.decls, &self.t, original.ty, &self.params) == Kind::Region {
@@ -1876,6 +1880,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         avail: Avail::Live,
                         holds: 0,
                         own: None,
+                        lent: None,
                         ..original
                     });
                 }

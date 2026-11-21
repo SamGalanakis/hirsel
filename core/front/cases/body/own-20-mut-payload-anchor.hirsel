@@ -1,0 +1,15 @@
+// expect: run escape() = 2
+// OWN-20, OWN-15: a result anchored to `mut s` for a payload binding freezes the
+// payload place of the scrutinee, so the view may leave the arm.
+type Source = Text(String) | Count(u64)
+
+fn grow(mut s: String) -> View[String] in s {
+    let _ = string.push(mut s, "b");
+    string.slice(s, 0, string.byte_len(s))
+}
+
+fn escape() -> u64 {
+    let mut src = Text(result.unwrap(string.from("a")))
+    let v = match src { Text(mut s) => grow(mut s), Count(_) => return 0 }
+    string.byte_len(v)
+}

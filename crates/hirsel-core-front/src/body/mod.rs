@@ -1045,6 +1045,8 @@ struct Var {
     anchors: anchors::Fact,
     /// A borrowed mut parameter, including an alias captured by a nested callback.
     mut_anchor: bool,
+    /// For a `mut` pattern binding, the scrutinee place it names (OWN-15).
+    lent: Option<Place>,
 }
 
 /// A place and its type.

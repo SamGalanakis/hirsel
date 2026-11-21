@@ -969,7 +969,9 @@ impl<'a> Resolver<'a, '_> {
                     self.bind(n, t, BinderKind::Local);
                 }
             }
-            NodeKind::TakePattern => self.bind(n, token.unwrap(), BinderKind::Local),
+            NodeKind::TakePattern | NodeKind::MutPattern => {
+                self.bind(n, token.unwrap(), BinderKind::Local)
+            }
             NodeKind::ConstructorPattern => {
                 let c = self.children(n);
                 if let Some((&path, fields)) = c.split_first() {

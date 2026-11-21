@@ -1546,6 +1546,10 @@ impl Parser<'_> {
             let n = self.name()?;
             return Ok(self.node(s, NodeKind::TakePattern, Some(n), &[]));
         }
+        if self.eat(sym::MUT) {
+            let n = self.name()?;
+            return Ok(self.node(s, NodeKind::MutPattern, Some(n), &[]));
+        }
         if self.eat(sym::LPAREN) {
             let c = self.list(sym::RPAREN, |p| p.pattern())?;
             return Ok(self.node(

@@ -1,0 +1,12 @@
+// expect: accept
+// OWN-15: an opaque resource payload is lent `mut` to a waiting provider call in
+// place; the option stays its owner and closes it afterwards.
+type Reader { file: Option[HostFile], buf: Bytes }
+
+fn pull(mut r: Reader) -> u64 waits {
+    match r.file {
+        Some(mut f) => match host.read(mut f, mut r.buf) { Ok(n) => n, Error(_) => 0 },
+        None => 0
+    }
+}
+

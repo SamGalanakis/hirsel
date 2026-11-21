@@ -872,6 +872,35 @@ impl FunctionEmitter<'_> {
             );
         }
         if resource {
+            let paths = hirsel_core_layout::foreign_cleanup(
+                &self.module.types,
+                self.recipes,
+                TypeRef(t as u32),
+            );
+            if !paths.is_empty() {
+                let count = paths.len() as u64;
+                let name = format!("core_foreign_cleanup_{t}");
+                let bytes: Vec<_> = paths.into_iter().flat_map(u64::to_le_bytes).collect();
+                self.items.global(Global {
+                    name: name.clone().into(),
+                    linkage: Linkage::Private,
+                    constant: true,
+                    externally_initialized: false,
+                    ty: Type::bytes(bytes.len() as u64),
+                    init: Some(Value::Bytes(bytes)),
+                    align: 8,
+                    absolute_symbol: false,
+                });
+                self.runtime_void(
+                    "hirsel_core_foreign_cleanup",
+                    &[
+                        ptr(CONTEXT),
+                        ptr(base.clone()),
+                        ptr(Value::global(name)),
+                        word(int(count)),
+                    ],
+                );
+            }
             self.runtime_void(
                 "hirsel_core_finalizer_end",
                 &[ptr(CONTEXT), ptr(base.clone())],

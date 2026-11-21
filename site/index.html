@@ -960,30 +960,61 @@ SC.authority = (g) => {
   };
 };
 
-/* an agent: a standing figure, feet at (x, y), h tall. Same flat ink as the ram-mark, built from
-   blocks: a round head, a coat squared at the shoulders and wider at the hem, two legs. step
-   swings the legs while it walks; face turns the head a hair toward where it looks. */
-function agent(x, y, h, face, a, step) {
-  if (a <= .01) return;
-  const u = h / 10, sw = (step || 0) * u * .7;
-  ctx.save(); ctx.globalAlpha = a * .09; ctx.fillStyle = INK; ctx.beginPath(); ctx.ellipse(x, y + u * .15, u * 2.6, u * .7, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.globalAlpha = a; ctx.fillStyle = INK; ctx.beginPath();
-  ctx.roundRect(x - u * 1.55 - sw * .4, y - u * 3.6, u * 1.25, u * 3.6, u * .25);
-  ctx.roundRect(x + u * .3 + sw * .4, y - u * 3.6, u * 1.25, u * 3.6, u * .25);
-  ctx.moveTo(x - u * 1.6, y - u * 7.1); ctx.lineTo(x + u * 1.6, y - u * 7.1); ctx.lineTo(x + u * 2, y - u * 3.2); ctx.lineTo(x - u * 2, y - u * 3.2); ctx.closePath();
-  ctx.moveTo(x + u * .25 * face + u * 1.25, y - u * 8.85); ctx.arc(x + u * .25 * face, y - u * 8.85, u * 1.25, 0, Math.PI * 2);
-  ctx.fill(); ctx.restore();
+/* an agent: the hill's working dog, a border collie, in its working crouch, seen side on as the
+   ram-mark is. Same flat ink and the same construction: bands of even width bent at bevelled
+   corners, legs as wide as a ram's. A level back, a deep chest, the head carried low and forward,
+   a small ear, front legs splayed, hind legs gathered under, the tail out low. Feet on y, chest
+   over x, nose toward face (1 right, -1 left); s is a ram's size. o: crouch (0..1, a shade
+   lower), tail (-1..1, a flick of the tip), step (-1..1, legs swinging as it travels).
+   Returns its nose and the top of its head, for its view and its label. */
+function dog(x, y, s, face, a, o) {
+  o = o || {};
+  const f = face > 0 ? 1 : -1, c = (o.crouch || 0) * .035, tl = (o.tail || 0) * .06, sw = (o.step || 0) * .07;
+  const P = (X, Y) => [x + f * X * s, y + Y * s];
+  const hc = c * 1.3 + .07, nose = P(.8, -.29 + hc), head = P(.5, -.56 + hc);
+  if (a <= .01) return { nose, head };
+  const band = (w, pts) => { ctx.lineWidth = w * s; ctx.beginPath(); pts.forEach((q, j) => { const p = P(q[0], q[1]); j ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); }); ctx.stroke(); };
+  const poly = pts => { ctx.beginPath(); pts.forEach((q, j) => { const p = P(q[0], q[1]); j ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); }); ctx.closePath(); ctx.fill(); };
+  ctx.save(); ctx.globalAlpha = a * .085; ctx.fillStyle = INK; ctx.beginPath(); ctx.ellipse(x, y + s * .02, s * .62, s * .095, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = a; ctx.fillStyle = ctx.strokeStyle = INK; ctx.lineJoin = 'bevel'; ctx.lineCap = 'butt';
+  /* legs: front pair splayed, one reaching; hind pair gathered under, bent at the hock */
+  band(.1, [[.25, -.36 + c], [.37 + sw, 0]]);
+  band(.1, [[.1, -.36 + c], [.05 - sw, 0]]);
+  band(.1, [[-.32, -.36 + c], [-.46 + sw * .5, -.15], [-.39 + sw, 0]]);
+  band(.1, [[-.2, -.36 + c], [-.33 - sw * .5, -.15], [-.26 - sw, 0]]);
+  /* body, level, with the chest deepening at the front */
+  band(.21, [[-.5, -.415 + c], [.26, -.415 + c]]);
+  poly([[.02, -.5 + c], [.3, -.5 + c], [.33, -.27 + c], [.06, -.29 + c]]);
+  /* neck running down from the withers, the head carried low, the muzzle */
+  band(.17, [[.16, -.44 + c], [.47, -.38 + hc]]);
+  poly([[.4, -.47 + hc], [.56, -.47 + hc], [.62, -.42 + hc], [.8, -.35 + hc], [.8, -.27 + hc], [.6, -.25 + hc], [.42, -.29 + hc]]);
+  /* a small ear, set back on the skull */
+  poly([[.42, -.46 + hc], [.45, -.56 + hc], [.53, -.53 + hc], [.53, -.46 + hc]]);
+  /* the tail, out low behind, the tip lifting a hair */
+  band(.08, [[-.49, -.48 + c], [-.72, -.3 + c * .5], [-.84, -.31 + c * .5 - tl]]);
+  /* the collie's white: a ruff down the front of the chest */
+  if (s > 26) { ctx.fillStyle = BG; ctx.globalAlpha = a * .95; poly([[.26, -.39 + c], [.36, -.37 + c], [.335, -.27 + c], [.24, -.285 + c]]); }
+  ctx.restore();
+  return { nose, head };
 }
 /* Local. Agents read the flock: each stands on one patch, sees that patch and the two it names, and
    nothing else on the hill. Their views never overlap; each moves on to a new patch in turn. */
 const LOCAL_ROTA = {};
 SC.local = (g) => {
   const b = g.box, ids = [], CO = 4, NP = 12;
-  const cw = Math.min(b.w * (MOB ? .96 / 3.4 : .92 / 3.9), b.h * .8 / 2.3, 210 * VS), ch = cw * .5, s = Math.min(cw * .32, 40 * VS), ah = s * 1.3;
+  const cw = Math.min(b.w * (MOB ? .96 / 3.4 : .92 / 3.9), b.h * .8 / 2.3, 210 * VS), ch = cw * .5, s = Math.min(cw * .32, 40 * VS), ds = s * 1.15, ah = ds * .6;
   const P = isoGrid(b.x + b.w * .5, b.y + b.h * .56, CO, 3, cw);
   const slots = P.map((p, k) => ({ x: p[0] + cw * .1, y: p[1] + ch * .1, s, a: 1, rx: cw * .06, ry: ch * .1, slot: k }));
-  /* where an agent stands on a patch: its left corner, turned to the sheep */
-  const stand = k => [P[k][0] - cw * .17, P[k][1] + ch * .12];
+  /* where the dog works a patch: at its left corner, side on, nose toward the sheep; at its right
+     corner, turned, where the left would put it off the screen */
+  const side = k => P[k][0] - cw * .14 - ds * 1.75 > 6 ? -1 : 1;
+  const stand = k => side(k) < 0 ? [P[k][0] - cw * .14 - ds * .8, P[k][1] + ch * .08] : [P[k][0] + cw * .36 + ds * .8, P[k][1] + ch * .08];
+  /* its pose at a tick: a slow seeded shift in the crouch, now and then a flick of the tail */
+  const dogPose = (a2, q) => {
+    if (q.walking) return { crouch: 1, step: Math.sin(q.f * .5) * (1 - sm((q.f - WALK + 14) / 14)), tail: 0 };
+    const ph = hh(a2, 71) * 600, fl = ((q.f + ph) % 260) / 26;
+    return { crouch: .5 + .5 * Math.sin((q.f + ph) * .021), tail: fl < 1 ? Math.sin(fl * Math.PI * 2) : 0 };
+  };
   const nA = !MOB && W >= 1500 ? 3 : 2, C = 600, WALK = 80;
   /* the rota: jobs start in turn, one agent every C / nA ticks. A new job (a patch and the two
      patches it names) shares no patch with any job running when it starts, nor with that agent's
@@ -1019,7 +1050,7 @@ SC.local = (g) => {
     const v = t + (nA - a) * C / nA, r = Math.floor(v / C), f = v - r * C, J = jobs[a][r % R], Jp = jobs[a][(r + R - 1) % R];
     const w = ease(cl01(f / WALK)), from = stand(Jp[0]), to = stand(J[0]);
     const vis = sm((f - WALK + 10) / 40) * (1 - sm((f - C + 50) / 40));
-    return { J, x: lerp(from[0], to[0], w), y: lerp(from[1], to[1], w), walking: f < WALK, f, vis, face: f < WALK ? (to[0] >= from[0] ? 1 : -1) : 1 };
+    return { J, x: lerp(from[0], to[0], w), y: lerp(from[1], to[1], w), walking: f < WALK, f, vis, face: f < WALK && Math.abs(to[0] - from[0]) > 1 ? (to[0] >= from[0] ? 1 : -1) : -side(J[0]) };
   };
   /* how lit each patch is: its own (an agent stands on it) or named */
   const lit = t => {
@@ -1033,42 +1064,47 @@ SC.local = (g) => {
     pose(i, l, t) {
       const g2 = graze(i * 7 + 3, gT), [own, nm] = lit(t), o = own[l.slot], n = nm[l.slot];
       const base = i === REDI ? .55 : .22;
-      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3], face: o > .5 ? -1 : g2[2], a: base + (1 - base) * Math.max(o, n * .55) };
+      return { x: l.x + g2[0] * l.rx, y: l.y + g2[1] * l.ry - g2[3], face: o > .5 ? side(l.slot) : g2[2], a: base + (1 - base) * Math.max(o, n * .55) };
     },
     ground(t, a) {
       const [own, nm] = lit(t);
       P.forEach((p, k) => patch(p[0], p[1], cw * .44, ch * .44, a * (.42 + .58 * Math.max(own[k], nm[k] * .6))));
       for (let a2 = 0; a2 < nA; a2++) {
         const q = st(a2, t), p = P[q.J[0]], v = q.vis * a; if (v <= .01) continue;
-        /* its view: the patch it stands on, lit, with a soft fan from its eyes across it */
+        /* its view: the patch it works, lit, and a short soft wedge of attention from its nose onto it */
         fillDia(p[0], p[1], cw * .44, ch * .44, GROUND2, v);
         ctx.save(); ctx.globalAlpha = v * .5; ctx.strokeStyle = INK; ctx.lineWidth = 1; dia(p[0], p[1], cw * .44, ch * .44); ctx.stroke(); ctx.restore();
-        const ex = q.x, ey = q.y - ah * .86;
-        const gr = ctx.createLinearGradient(ex, ey, p[0] + cw * .3, p[1]);
-        gr.addColorStop(0, 'rgba(17,17,15,.13)'); gr.addColorStop(1, 'rgba(17,17,15,0)');
-        ctx.save(); ctx.globalAlpha = v; ctx.fillStyle = gr; ctx.beginPath(); ctx.moveTo(ex, ey);
-        ctx.lineTo(p[0] + cw * .2, p[1] - ch * .42); ctx.lineTo(p[0] + cw * .44, p[1]); ctx.lineTo(p[0] + cw * .2, p[1] + ch * .42); ctx.closePath(); ctx.fill(); ctx.restore();
+        const d = dog(q.x, q.y, ds, q.face, 0, dogPose(a2, q)), [nx, ny] = d.nose, [ex, ey] = d.head;
+        const tx = lerp(nx, p[0] + cw * .06, .8), ty = lerp(ny, p[1], .8), wl = Math.hypot(tx - nx, ty - ny) || 1, wx = -(ty - ny) / wl * ch * .2, wy = (tx - nx) / wl * ch * .2;
+        const gr = ctx.createLinearGradient(nx, ny, tx, ty);
+        gr.addColorStop(0, 'rgba(17,17,15,.12)'); gr.addColorStop(1, 'rgba(17,17,15,0)');
+        ctx.save(); ctx.globalAlpha = v; ctx.fillStyle = gr; ctx.beginPath(); ctx.moveTo(nx, ny);
+        ctx.lineTo(tx + wx, ty + wy); ctx.lineTo(tx - wx, ty - wy); ctx.closePath(); ctx.fill(); ctx.restore();
         /* the two things it names: an outline on their ground, a dashed sight-line to each */
         q.J.slice(1).forEach(k => {
           const n = P[k]; ctx.save(); ctx.globalAlpha = v * .45; ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.setLineDash([3, 4]); dia(n[0], n[1], cw * .4, ch * .4); ctx.stroke(); ctx.restore();
-          dashed([[ex + 3, ey], [n[0], n[1] - ch * .05]], v * .55);
+          dashed([[ex, ey], [n[0], n[1] - ch * .05]], v * .55);
         });
       }
     },
     over(t, a) {
       for (let a2 = 0; a2 < nA; a2++) {
-        const q = st(a2, t), step = q.walking ? Math.sin(q.f * .45) * (1 - sm((q.f - WALK + 12) / 12)) : 0;
-        agent(q.x, q.y, ah, q.face, a, step);
-        if (a2 === 0) { const hy = q.y - ah; note('agent', q.x + 6, hy - 20, a * .9, { to: [q.x + 1, hy - 5] }); }
+        const q = st(a2, t);
+        /* a sheep standing nearer than the dog stands in front of it */
+        ctx.save(); const cut = new Path2D(); cut.rect(0, 0, W, H);
+        rend.forEach((r, i) => { if (r.a > .01 && r.y > q.y && Math.abs(r.x - q.x) < ds * 1.3 + r.s && r.y - r.s < q.y) { const k = r.s / 225, m = new DOMMatrix().translate(r.x, r.y).scale(r.face > 0 ? -k : k, k).translate(-128, -236); cut.addPath(MARK, m); } });
+        ctx.clip(cut, 'evenodd');
+        const d = dog(q.x, q.y, ds, q.face, a, dogPose(a2, q)); ctx.restore();
+        if (a2 === 0) { const [hx, hy] = d.head; note('agent', hx + 6, hy - 20, a * .9, { to: [hx + 1, hy - 5] }); }
         if (a2 === 1) {
           /* on one of its sight-lines, at the point with the most clear ground round it */
-          const ex = q.x + 3, ey = q.y - ah * .86, others = [0, 1, 2].slice(0, nA).map(o => st(o, t));
+          const [ex, ey] = d.head, others = [0, 1, 2].slice(0, nA).map(o => st(o, t));
           let best = null, bc = -1;
           for (const k of [q.J[1], q.J[2]]) for (let f = .3; f <= .8; f += .05) for (const sd of [-1, 1]) {
             const n = P[k], dx = n[0] - ex, dy = n[1] - ey, dl = Math.hypot(dx, dy) || 1, x = lerp(ex, n[0], f) + dy / dl * 12 * sd, y = lerp(ey, n[1], f) - dx / dl * 12 * sd - 2;
             let c = 1e9;
             for (const l of slots) c = Math.min(c, Math.hypot((x - l.x) * .55, y - (l.y - s * .5)) - s * .45);
-            for (const o of others) c = Math.min(c, Math.hypot((x - o.x) * .55, y - (o.y - ah * .6)) - ah * .4, Math.hypot((x - o.x) * .55, y - (o.y - ah - 20)) - 8);
+            for (const o of others) c = Math.min(c, Math.hypot((x - o.x) * .32, y - (o.y - ah * .6)) - ah * .4, Math.hypot((x - o.x) * .55, y - (o.y - ah - 20)) - 8);
             if (c > bc) { bc = c; best = [x, y]; }
           }
           note('names', best[0], best[1], a * .8 * q.vis);

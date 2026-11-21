@@ -155,6 +155,85 @@ impl Run {
             }
         }
     }
+
+    /// # Safety
+    /// The current finalizer exclusively owns its resource and context.
+    unsafe fn cleanup_handle(&self, context: *mut Context, ordinal: u64) {
+        let Some(kind) = self.handles.kind(ordinal) else {
+            return;
+        };
+        let mut argument = [ordinal, 0];
+        let kinds = [std::ptr::from_ref(kind)];
+        let handles = handles::Operands {
+            table: &raw const self.handles,
+            arguments: &raw mut argument,
+            kinds: kinds.as_ptr(),
+            count: 1,
+            result: None,
+            release: true,
+        };
+        // SAFETY: table preflight recognizes a racing use or explicit release.
+        // Keep the sole argument and kind table pinned through the cleanup.
+        unsafe {
+            if handles.prepare(context, 0) == 0 {
+                self.perform(
+                    context,
+                    Invocation {
+                        thunk: kind.release,
+                        args: argument.as_mut_ptr(),
+                        handles: Some(handles),
+                        result_tag: 0,
+                    },
+                    kind.waits,
+                    false,
+                    0,
+                );
+            }
+        }
+    }
+}
+
+/// Release the foreign owners that remain in a resource after its finalizer.
+///
+/// # Safety
+/// The descriptor is the exact layout's foreign cleanup paths, and the
+/// exclusive payload stays pinned until cleanup completes. Context belongs
+/// to its task, under the finalizer's shield.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_foreign_cleanup(
+    context: *mut Context,
+    payload: *const u8,
+    paths: *const u64,
+    len: usize,
+) {
+    // SAFETY: the current task pins the table or the run has no foreign owners.
+    let Some(run) = (unsafe { (*context).foreign.as_ref() }) else {
+        return;
+    };
+    // SAFETY: this is the emitted immutable cleanup descriptor.
+    let paths = unsafe { std::slice::from_raw_parts(paths, len) };
+    let mut before = None;
+    loop {
+        let ordinal = hirsel_core_layout::next_foreign_handle(paths, before, |offset, width| {
+            // SAFETY: each active path names an initialized tag or ordinal.
+            unsafe {
+                let ptr = payload.add(offset as usize);
+                match width {
+                    1 => u64::from(ptr.read()),
+                    2 => u64::from(ptr.cast::<u16>().read_unaligned()),
+                    4 => u64::from(ptr.cast::<u32>().read_unaligned()),
+                    8 => ptr.cast::<u64>().read_unaligned(),
+                    _ => unreachable!("foreign cleanup tag width"),
+                }
+            }
+        });
+        if ordinal == 0 {
+            break;
+        }
+        // SAFETY: emitter pins the released resource under its finalizer shield.
+        unsafe { run.cleanup_handle(context, ordinal) };
+        before = Some(ordinal);
+    }
 }
 
 #[derive(Clone, Copy)]

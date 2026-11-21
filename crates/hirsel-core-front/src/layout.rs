@@ -281,6 +281,10 @@ impl<T: TyRead> Shapes<'_, T> {
                         self.shapes[r.index()].codec = self.structural_codec(r, d, ty, &args);
                         return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
+                    Some(Role::ForeignHandle) => {
+                        let body = record(vec![("handle", FieldTy::Scalar(Scalar::U64))]);
+                        return self.fill(r, ty, LRepr::Own, body, None, None);
+                    }
                     Some(Role::Map) => {
                         let entries = self.map_field(&args)?;
                         self.shapes[r.index()].codec = self.structural_codec(r, d, ty, &args);
@@ -644,6 +648,7 @@ impl<T: TyRead> Shapes<'_, T> {
                     FieldTy::Scalar(Scalar::U64)
                 }
                 Some(Role::Capability) => FieldTy::Handle(Handle::Capability),
+                Some(Role::ForeignHandle) => FieldTy::Inline(self.shape(ty)?),
                 _ if handle(&self.decls[d.index()]) => FieldTy::Scalar(Scalar::U64),
                 Some(Role::Task) => FieldTy::Handle(Handle::Task),
                 Some(Role::Sender) => FieldTy::Handle(Handle::Sender),

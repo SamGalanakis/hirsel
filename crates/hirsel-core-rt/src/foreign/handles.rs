@@ -278,6 +278,15 @@ impl Table {
 }
 
 impl Handles {
+    pub(crate) fn kind(&self, ordinal: u64) -> Option<&'static Kind> {
+        self.0
+            .lock()
+            .unwrap()
+            .entries
+            .get(&ordinal)
+            .map(|handle| handle.kind)
+    }
+
     /// Take the most recently made remaining obligation after the last task.
     pub(crate) fn pop(&self) -> Option<(&'static Kind, Argument)> {
         let mut state = self.0.lock().unwrap();

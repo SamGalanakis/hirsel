@@ -2052,8 +2052,16 @@ pub(crate) mod tests {
             &adapter,
             r#"
 #include <stdint.h>
+static uint8_t cell;
+static uint64_t released;
 uint64_t hfl_measure(int8_t s, float f) { return s == -3 && f == 1.25f ? 42 : 0; }
-#define ABI "hfl_measure waits (i8, f32) -> u64\n"
+void *hfl_make(void) { return &cell; }
+void hfl_free(void *p) { if (p == &cell) released++; }
+uint64_t hfl_freed(void) { return released; }
+#define ABI "hfl_measure waits (i8, f32) -> u64\n" \
+            "hfl_make stack () -> new ffi_laws@1/laws/Obj\n" \
+            "hfl_free waits (take ffi_laws@1/laws/Obj) -> ()\n" \
+            "hfl_freed stack () -> u64\n"
 __attribute__((used, section(".hirsel_abi")))
 static const char abi[sizeof(ABI) - 1] = ABI;
 "#,
@@ -2085,10 +2093,15 @@ static const char abi[sizeof(ABI) - 1] = ABI;
             module: DefPath::from_full("ffi_laws@1/native").unwrap(),
             symbols: "hfl_".into(),
             targets: vec![],
-            functions: vec![ForeignFunction {
-                identity: Identity::plain(DefPath::from_full("ffi_laws@1/native/measure").unwrap()),
-                header: "(core@1/core/Foreign[ffi_laws@1/laws/Laws],i8,f32)->u64 waits".into(),
-            }],
+            functions: [
+                ("measure", "(core@1/core/Foreign[ffi_laws@1/laws/Laws],i8,f32)->u64 waits"),
+                ("make", "(core@1/core/Foreign[ffi_laws@1/laws/Laws])->core@1/core/Option[core@1/foreign/Ptr[ffi_laws@1/laws/Obj]]"),
+                ("free", "(core@1/core/Foreign[ffi_laws@1/laws/Laws],take core@1/foreign/Ptr[ffi_laws@1/laws/Obj])->()waits"),
+                ("freed", "(core@1/core/Foreign[ffi_laws@1/laws/Laws])->u64"),
+            ].into_iter().map(|(name, header)| ForeignFunction {
+                identity: Identity::plain(DefPath::from_full(&format!("ffi_laws@1/native/{name}")).unwrap()),
+                header: header.into(),
+            }).collect(),
         };
         let mut archives = LinkArchives::default();
         archives
@@ -2098,12 +2111,28 @@ static const char abi[sizeof(ABI) - 1] = ABI;
             r#"
 core v1
 type t0 = own "Result" | Ok { } | Error { }
+type t1 = own "core@1/foreign/Ptr[ffi_laws@1/laws/Obj]" value u64 { handle: u64 }
+type t2 = own "core@1/core/Option[core@1/foreign/Ptr[ffi_laws@1/laws/Obj]]" | None { } | Some { p: t1 }
+type t3 = resource "ffi_laws@1/laws/Owner" drop f4 { p: t2 }
 sig g0 = (u64) -> () dest t0
 sig g1 = (u64, i8, f32) -> (u64)
+sig g2 = (u64) -> () dest t2
+sig g3 = (u64, u64) -> ()
+sig g4 = (ptr) -> ()
+sig g5 = (u64) -> (u64)
 inst n0 = ffi_laws@1/laws/main [] []
 inst n1 = ffi_laws@1/native/measure [] []
+inst n2 = ffi_laws@1/native/make [] []
+inst n3 = ffi_laws@1/native/free [] []
+inst n4 = ffi_laws@1/laws/finalize [] []
+inst n5 = ffi_laws@1/native/freed [] []
 fn f0 = n0 g0 {
+ slot s0 = t3
  addr a0 = v0 : t0
+ addr a1 = s0 : t3
+ addr a2 = s0 : ptr
+ addr a3 = v9 : t3
+ addr a4 = a3 field 0 : t2
 b0(v0: ptr, v1: u64):
  address a0
  v2: i8 = const -3
@@ -2111,15 +2140,43 @@ b0(v0: ptr, v1: u64):
  v4: u64 = call f1 g1 (v1, v2, v3)
  v5: u64 = const 42
  v6: bool = eq v4, v5
- branch v6, b1, b2
+ branch v6, b1, b3
 b1:
- set_case a0, 0
- return
+ v7: u64 = const 16
+ v8: u64 = const 48
+ v9: ptr, v10: u64 = alloc resource grant 0 v7 align 8 charge v8
+ v11: ptr = const 0x0
+ v12: bool = ne v9, v11
+ branch v12, b2, b3
 b2:
+ live s0
+ address a1
+ address a2
+ address a3
+ address a4
+ call f2 g2 (&a4, v1)
+ store a2, v9
+ drop a1 t3
+ dead s0
+ v13: u64 = call f5 g5 (v1)
+ v14: u64 = const 1
+ v15: bool = eq v13, v14
+ branch v15, b4, b3
+b3:
  set_case a0, 1
+ return
+b4:
+ set_case a0, 0
  return
 }
 fn f1 = n1 g1 extern
+fn f2 = n2 g2 extern
+fn f3 = n3 g3 extern
+fn f4 = n4 g4 {
+b0(v0: ptr):
+ return
+}
+fn f5 = n5 g5 extern
 "#,
         )
         .unwrap();

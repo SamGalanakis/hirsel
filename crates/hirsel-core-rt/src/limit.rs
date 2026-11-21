@@ -44,7 +44,8 @@ pub struct LimitRecord {
 // foreign commit can inspect links or change pins while the owner debits.
 struct Links {
     refs: usize,
-    parent: Option<usize>,
+    // The union edge owns a pin, just like the lexical parent in Live.
+    parent: Option<Payer>,
     rank: u32,
     live: Live,
     next_free: Option<NonNull<Slot>>,
@@ -64,6 +65,7 @@ pub(crate) struct Slot {
     /// The dirty slots this record leads, while it is a union-find root.
     queue: UnsafeCell<Queue>,
     handover: Cell<Option<u64>>,
+    #[cfg(test)]
     id: usize,
 }
 const _: () = assert!(std::mem::offset_of!(Slot, local) == crate::abi_layout::LIMIT_AVAILABLE);
@@ -71,7 +73,7 @@ const _: () = assert!(std::mem::offset_of!(Slot, domain) == crate::abi_layout::S
 const _: () = assert!(std::mem::offset_of!(Domain, pending) == crate::abi_layout::DOMAIN_PENDING);
 
 impl Slot {
-    fn vacant(domain: NonNull<Domain>, id: usize) -> Self {
+    fn vacant(domain: NonNull<Domain>, _id: usize) -> Self {
         Self {
             local: UnsafeCell::new(LimitRecord {
                 available: 0,
@@ -92,20 +94,77 @@ impl Slot {
             queue: UnsafeCell::new(Queue::EMPTY),
             handover: Cell::new(None),
             domain,
-            id,
+            #[cfg(test)]
+            id: _id,
         }
     }
 }
 
 const PAGE_LEN: usize = 64;
 
+#[derive(Default)]
+struct SmallChunks {
+    one: Option<Box<[Slot; 1]>>,
+    two: Option<Box<[Slot; 2]>>,
+    four: Option<Box<[Slot; 4]>>,
+    eight: Option<Box<[Slot; 8]>>,
+    sixteen: Option<Box<[Slot; 16]>>,
+    thirty_two: Option<Box<[Slot; 32]>>,
+}
+impl SmallChunks {
+    fn get_or_allocate(&mut self, domain: NonNull<Domain>, start: usize) -> &[Slot] {
+        match start {
+            1 => self
+                .one
+                .get_or_insert_with(|| Forest::allocate_slots(domain, start))
+                .as_slice(),
+            2 => self
+                .two
+                .get_or_insert_with(|| Forest::allocate_slots(domain, start))
+                .as_slice(),
+            4 => self
+                .four
+                .get_or_insert_with(|| Forest::allocate_slots(domain, start))
+                .as_slice(),
+            8 => self
+                .eight
+                .get_or_insert_with(|| Forest::allocate_slots(domain, start))
+                .as_slice(),
+            16 => self
+                .sixteen
+                .get_or_insert_with(|| Forest::allocate_slots(domain, start))
+                .as_slice(),
+            32 => self
+                .thirty_two
+                .get_or_insert_with(|| Forest::allocate_slots(domain, start))
+                .as_slice(),
+            _ => unreachable!(),
+        }
+    }
+
+    fn slices(&self) -> [&[Slot]; 6] {
+        [
+            self.one.as_deref().map_or(&[], |chunk| chunk.as_slice()),
+            self.two.as_deref().map_or(&[], |chunk| chunk.as_slice()),
+            self.four.as_deref().map_or(&[], |chunk| chunk.as_slice()),
+            self.eight.as_deref().map_or(&[], |chunk| chunk.as_slice()),
+            self.sixteen
+                .as_deref()
+                .map_or(&[], |chunk| chunk.as_slice()),
+            self.thirty_two
+                .as_deref()
+                .map_or(&[], |chunk| chunk.as_slice()),
+        ]
+    }
+}
+
 struct Forest {
     // Points to the first slot in the same domain allocation.
     first: NonNull<Slot>,
     // Each small chunk starts at the ID equal to its length. Together with
     // the inline first slot they fill the ID range of one page.
-    small: [Option<Box<[Slot]>>; PAGE_LEN.ilog2() as usize],
-    pages: Vec<Box<[Slot]>>,
+    small: SmallChunks,
+    pages: Vec<Box<[Slot; PAGE_LEN]>>,
     length: usize,
     free: Option<NonNull<Slot>>,
     // Read/written only after the last local handle retires.
@@ -117,62 +176,68 @@ struct Forest {
     fail: Option<(usize, bool)>,
 }
 impl Forest {
-    #[inline(always)]
-    fn slot(&self, id: usize) -> &Slot {
-        if id >= PAGE_LEN {
-            &self.pages[id / PAGE_LEN - 1][id % PAGE_LEN]
-        } else if id == 0 {
-            // SAFETY: the enclosing domain owns this slot and outlives the forest.
-            unsafe { self.first.as_ref() }
+    fn first(&self) -> &Slot {
+        // SAFETY: the enclosing domain owns this slot and outlives the forest.
+        unsafe { self.first.as_ref() }
+    }
+
+    fn slots(&self) -> impl Iterator<Item = &Slot> {
+        std::iter::once(self.first())
+            .chain(self.small.slices().into_iter().flatten())
+            .chain(self.pages.iter().flat_map(|page| page.iter()))
+            .take(self.length)
+    }
+
+    fn outstanding(&self) -> u64 {
+        // SAFETY: retirement has exclusive custody of all local balances.
+        if self.length == 1 {
+            unsafe { (*self.first().local.get()).outstanding }
         } else {
-            let chunk = id.ilog2() as usize;
-            &self.small[chunk].as_ref().unwrap()[id - (1 << chunk)]
+            self.slots()
+                .map(|slot| unsafe { (*slot.local.get()).outstanding })
+                .sum()
         }
     }
+
     #[inline(always)]
-    fn record(&self, id: usize) -> &Links {
-        // SAFETY: the sequencer owns routing, or the retired mailbox owner.
-        unsafe { &*self.slot(id).links.get() }
+    fn record(&self, payer: Payer) -> &Links {
+        // SAFETY: the payer is pinned and the caller owns routing through the
+        // sequencer or retired mailbox.
+        unsafe { &*payer.links() }
     }
     #[inline(always)]
-    fn record_mut(&mut self, id: usize) -> &mut Links {
-        // SAFETY: as record, with exclusive sequencer access.
-        unsafe { &mut *self.slot(id).links.get() }
-    }
-    #[inline(always)]
-    unsafe fn balance(&self, id: usize) -> *mut LimitRecord {
-        self.slot(id).local.get()
+    fn record_mut(&mut self, payer: Payer) -> &mut Links {
+        // SAFETY: as record, with exclusive access to the links.
+        unsafe { &mut *payer.links() }
     }
     #[inline]
-    fn retain(&mut self, id: usize) {
-        self.record_mut(id).refs += 1;
+    fn retain(&mut self, payer: Payer) {
+        self.record_mut(payer).refs += 1;
     }
-    fn release(&mut self, mut id: usize) {
+    fn release(&mut self, mut payer: Payer) {
         loop {
-            let slot = NonNull::from(self.slot(id));
-            // SAFETY: this task owns the table; a structural pin or charge retains slot.
-            let r = self.record_mut(id);
+            let r = self.record_mut(payer);
             r.refs -= 1;
-            if r.refs != 0 || unsafe { (*slot.as_ref().local.get()).outstanding } != 0 {
+            if r.refs != 0 || unsafe { (*payer.local()).outstanding } != 0 {
                 return;
             }
-            let parent = r.parent.or_else(|| r.live.parent.map(|p| p.slot().id));
+            let parent = r.parent.or(r.live.parent);
             // SAFETY: a queued slot pins its root through its charge or edge.
-            debug_assert!(unsafe { (*slot.as_ref().queue.get()).is_empty() });
+            debug_assert!(unsafe { (*payer.slot().queue.get()).is_empty() });
             // The free list takes over the final slot pin until its next use.
             r.refs = 1;
             r.parent = None;
             r.rank = 0;
             // SAFETY: the initialized record and its domain stay live through release.
-            unsafe { r.live.inbox.as_ref().release(slot.as_ref().domain.as_ref()) };
+            unsafe { r.live.inbox.as_ref().release(payer.domain()) };
             r.live = Live::EMPTY;
             #[cfg(any(test, feature = "testing"))]
             {
                 r.occupied = false;
             }
-            self.return_vacant(slot);
-            if let Some(p) = parent {
-                id = p;
+            self.return_vacant(payer.0);
+            if let Some(parent) = parent {
+                payer = parent;
             } else {
                 return;
             }
@@ -181,19 +246,25 @@ impl Forest {
     #[cold]
     fn fresh(&mut self, domain: NonNull<Domain>) -> NonNull<Slot> {
         let id = self.length;
-        if id >= PAGE_LEN && id.is_multiple_of(PAGE_LEN) {
-            self.pages.push(Self::allocate_slots(domain, id, PAGE_LEN));
-        } else if id < PAGE_LEN && id.is_power_of_two() {
-            self.small[id.ilog2() as usize] = Some(Self::allocate_slots(domain, id, id));
-        }
+        let slot = if id >= PAGE_LEN {
+            if id.is_multiple_of(PAGE_LEN) {
+                self.pages.push(Self::allocate_slots(domain, id));
+            }
+            &self.pages.last().unwrap()[id % PAGE_LEN]
+        } else {
+            let start = 1 << id.ilog2();
+            &self.small.get_or_allocate(domain, start)[id - start]
+        };
         self.length += 1;
-        NonNull::from(self.slot(id))
+        NonNull::from(slot)
     }
 
-    fn allocate_slots(domain: NonNull<Domain>, start: usize, count: usize) -> Box<[Slot]> {
-        let mut slots = Box::new_uninit_slice(count);
-        for (i, slot) in slots.iter_mut().enumerate() {
-            slot.write(Slot::vacant(domain, start + i));
+    fn allocate_slots<const N: usize>(domain: NonNull<Domain>, start: usize) -> Box<[Slot; N]> {
+        let mut slots = Box::<[Slot; N]>::new_uninit();
+        let elements = slots.as_mut_ptr().cast::<Slot>();
+        for i in 0..N {
+            // SAFETY: elements points to the start of the N-slot allocation.
+            unsafe { elements.add(i).write(Slot::vacant(domain, start + i)) };
         }
         // SAFETY: the loop initialized every element in the allocation.
         unsafe { slots.assume_init() }
@@ -247,24 +318,24 @@ impl Forest {
         }
         Payer(slot)
     }
-    fn root(&self, mut id: usize) -> usize {
-        while let Some(parent) = self.record(id).parent {
-            id = parent;
+    fn root(&self, mut payer: Payer) -> Payer {
+        while let Some(parent) = self.record(payer).parent {
+            payer = parent;
         }
-        id
+        payer
     }
     #[inline(always)]
-    fn find(&mut self, id: usize) -> usize {
-        match self.record(id).parent {
-            None => id,
+    fn find(&mut self, payer: Payer) -> Payer {
+        match self.record(payer).parent {
+            None => payer,
             Some(parent) if self.record(parent).parent.is_none() => parent,
-            Some(_) => self.compress(id),
+            Some(_) => self.compress(payer),
         }
     }
     #[cold]
-    fn compress(&mut self, id: usize) -> usize {
-        let root = self.root(id);
-        let mut node = id;
+    fn compress(&mut self, payer: Payer) -> Payer {
+        let root = self.root(payer);
+        let mut node = payer;
         while let Some(p) = self.record(node).parent {
             if p == root {
                 break;
@@ -272,23 +343,23 @@ impl Forest {
             self.retain(root);
             self.record_mut(node).parent = Some(root);
             // Transfer the old edge to this traversal until its next step.
-            if node != id {
+            if node != payer {
                 self.release(node);
             }
             node = p;
         }
-        if node != id {
+        if node != payer {
             self.release(node);
         }
         root
     }
     /// Join the records and return (winner, loser). The caller gives the
     /// winner the loser's queued slots (`Remote::unite`).
-    fn merge(&mut self, child: usize, original_parent: usize, unused: u64) -> (usize, usize) {
+    fn merge(&mut self, child: Payer, original_parent: Payer, unused: u64) -> (Payer, Payer) {
         let parent = self.find(original_parent);
         // SAFETY: the recipient owns both the original parent and the merged
         // record through this fold.
-        let parent_available = unsafe { (*self.balance(parent)).available }.wrapping_add(unused);
+        let parent_available = unsafe { (*parent.local()).available }.wrapping_add(unused);
         let parent_live = self.record(parent).live;
         let (winner, loser) = if self.record(child).rank > self.record(parent).rank {
             (child, parent)
@@ -303,46 +374,44 @@ impl Forest {
             // SAFETY: the winner's replacement transfers its live-record pin.
             unsafe {
                 parent_live.inbox.as_ref().retain();
-                previous_inbox
-                    .as_ref()
-                    .release(self.slot(winner).domain.as_ref());
+                previous_inbox.as_ref().release(winner.domain());
             }
         }
         self.record_mut(winner).live = parent_live;
-        unsafe { (*self.balance(winner)).available = parent_available };
+        unsafe { (*winner.local()).available = parent_available };
         self.retain(winner);
         self.record_mut(loser).parent = Some(winner);
         self.release(original_parent);
         (winner, loser)
     }
 
-    fn refund(&mut self, id: usize, bytes: u64) {
+    fn refund(&mut self, payer: Payer, bytes: u64) {
         if bytes == 0 {
             self.zeros -= 1;
-            self.release(id);
+            self.release(payer);
         } else {
-            let root = self.find(id);
-            self.refund_rooted(id, root, bytes);
+            let root = self.find(payer);
+            self.refund_rooted(payer, root, bytes);
         }
     }
     #[inline(always)]
-    fn refund_rooted(&mut self, id: usize, root: usize, bytes: u64) {
+    fn refund_rooted(&mut self, payer: Payer, root: Payer, bytes: u64) {
         if bytes == 0 {
             self.zeros -= 1;
-            self.release(id);
+            self.release(payer);
             return;
         }
         // SAFETY: the recipient owns credits along this ordered route.
         let outstanding = unsafe {
-            let recipient = self.balance(root);
+            let recipient = root.local();
             (*recipient).available = (*recipient).available.wrapping_add(bytes);
-            let original = self.balance(id);
+            let original = payer.local();
             (*original).outstanding = (*original).outstanding.wrapping_sub(bytes);
             (*original).outstanding
         };
-        if self.record(id).refs == 0 && outstanding == 0 {
-            self.record_mut(id).refs = 1;
-            self.release(id);
+        if self.record(payer).refs == 0 && outstanding == 0 {
+            self.record_mut(payer).refs = 1;
+            self.release(payer);
         }
     }
 }
@@ -493,17 +562,13 @@ impl Payer {
         let _commit = crate::sequencer::enter();
         // SAFETY: local task exclusively owns the local record fields.
         if unsafe { (*self.links()).parent.is_none() } {
-            // SAFETY: canonical identities are untagged stable slot pointers.
-            Self(unsafe { NonNull::new_unchecked(self.local().cast()) })
+            self
         } else {
-            let f = self.forest();
-            let id = f.find(self.slot().id);
-            Self(NonNull::from(f.slot(id)))
+            self.forest().find(self)
         }
     }
     fn root(self) -> Self {
-        let f = self.forest();
-        Self(NonNull::from(f.slot(f.root(self.slot().id))))
+        self.forest().root(self)
     }
     #[inline(always)]
     pub(crate) fn admit(self, bytes: Option<u64>) -> Result<(), Capacity> {
@@ -540,7 +605,7 @@ impl Payer {
     pub(crate) fn pin_zero(self) {
         let _commit = crate::sequencer::enter();
         let f = self.forest();
-        f.retain(self.slot().id);
+        f.retain(self);
         f.zeros += 1;
     }
     #[inline(always)]
@@ -601,8 +666,7 @@ impl Payer {
                 r.available = r.available.wrapping_add(bytes);
                 r.outstanding = r.outstanding.wrapping_sub(bytes);
             } else {
-                self.forest()
-                    .refund_rooted(self.slot().id, root.slot().id, bytes);
+                self.forest().refund_rooted(self, root, bytes);
             }
         } else {
             self.remote_refund(bytes);
@@ -614,7 +678,7 @@ impl Payer {
         let mut remote = d.remote.lock().unwrap();
         if remote.retired {
             let f = self.forest();
-            f.refund(self.slot().id, bytes);
+            f.refund(self, bytes);
             f.retired_bytes -= bytes;
             let empty = f.retired_bytes == 0 && f.zeros == 0;
             let domain = self.slot().domain;
@@ -635,15 +699,15 @@ impl Payer {
         let parent = self.canonical();
         let f = self.forest();
         // SAFETY: this reservation draws from the payer's current owner.
-        unsafe { (*f.balance(parent.slot().id)).outstanding -= bytes };
-        f.retain(parent.slot().id);
+        unsafe { (*parent.local()).outstanding -= bytes };
+        f.retain(parent);
+        let live = f.record(parent).live;
         let payer = f.take(
             self.slot().domain,
             Live {
-                owner: f.record(parent.slot().id).live.owner,
-                inbox: f.record(parent.slot().id).live.inbox,
                 capacity: bytes,
                 parent: Some(parent),
+                ..live
             },
         );
         self.domain().handles.set(self.domain().handles.get() + 1);
@@ -655,12 +719,11 @@ impl Payer {
     /// Hand a reservation's record over to the scope it leads to, returning the
     /// cell's charge with it. The record is its own root until this handover
     /// and its cell is its only charge, so the charge goes back to the record's
-    /// balance and `end_id` hands it to the live limit together with the unused
+    /// balance and the merge hands it to the live limit together with the unused
     /// bytes (MEM-20), whichever task drops the cell: never to the inbox of the
     /// task that reserved it, which may have ended.
     pub(crate) fn finish_reserved(self, charge: u64) {
         let _commit = crate::sequencer::enter();
-        let child = self.slot().id;
         // SAFETY: the cell owns this unmerged record; no other handle charges it.
         unsafe {
             let r = &mut *self.local();
@@ -674,7 +737,7 @@ impl Payer {
         // The hand-over merges the record or leaves a prepaid queue pin for
         // the recipient. The reservation cell releases its own pin in either case.
         funding.end();
-        funding.payer.get().forest().release(child);
+        funding.payer.get().forest().release(self);
         std::mem::forget(funding);
     }
 }
@@ -692,13 +755,13 @@ impl Funding {
     /// Unlike `enter`, the context keeps its own pin on this scope, so the
     /// record's parent edge takes a pin of its own: the cell may outlive the
     /// scope (a caught failure's replacement cell lives until the task's
-    /// Context drops), and `end_id` releases that edge when the cell finishes.
+    /// Context drops), and the merge releases that edge when the cell finishes.
     pub(crate) fn isolate_reserve(&mut self, bytes: u64) -> Result<Payer, Capacity> {
         let _commit = crate::sequencer::enter();
         let live = self.reserve_scope(bytes)?;
         let domain = unsafe { self.payer.get().0.as_ref().domain };
         let forest = unsafe { &mut *domain.as_ref().forest.get() };
-        forest.retain(self.payer.get().slot().id);
+        forest.retain(self.payer.get());
         let payer = forest.take(domain, live);
         unsafe {
             let record = &mut *payer.local();
@@ -860,23 +923,24 @@ impl Funding {
         while let Some(slot) = remote.pop(owner) {
             // SAFETY: the dirty node retains a charge/zero pin until delivery;
             // pop cleared its intrusive link under the same domain mutex.
-            let slot = unsafe { slot.as_ref() };
+            let payer = Payer(slot);
+            let slot = payer.slot();
             if let Some(unused) = slot.handover.take() {
-                let original_parent = f.record_mut(slot.id).parent.take().unwrap();
-                let (winner, loser) = f.merge(slot.id, original_parent, unused);
-                remote.unite(NonNull::from(f.slot(winner)), NonNull::from(f.slot(loser)));
-                f.release(slot.id);
+                let original_parent = f.record_mut(payer).parent.take().unwrap();
+                let (winner, loser) = f.merge(payer, original_parent, unused);
+                remote.unite(winner.0, loser.0);
+                f.release(payer);
             }
             let bytes = slot.pending.swap(0, Ordering::Relaxed);
             let zeros = slot.pending_zeros.swap(0, Ordering::Relaxed);
             if bytes != 0 {
-                f.refund(slot.id, bytes);
+                f.refund(payer, bytes);
                 if retired {
                     f.retired_bytes -= bytes;
                 }
             }
             for _ in 0..zeros {
-                f.refund(slot.id, 0);
+                f.refund(payer, 0);
             }
         }
     }
@@ -920,17 +984,13 @@ impl Funding {
     }
     pub(crate) fn owner(&self) -> u64 {
         let _commit = crate::sequencer::enter();
-        self.payer
-            .get()
-            .forest()
-            .record(self.payer.get().slot().id)
-            .live
-            .owner
+        let payer = self.payer.get();
+        payer.forest().record(payer).live.owner
     }
     pub(crate) fn task_owner(&self, owner: u64) {
         let _commit = crate::sequencer::enter();
         let payer = self.payer.get().canonical();
-        let old = payer.forest().record(payer.slot().id).live;
+        let old = payer.forest().record(payer).live;
         if old.owner != owner {
             let domain = payer.domain();
             let mut remote = domain.remote.lock().unwrap();
@@ -938,7 +998,7 @@ impl Funding {
             let inbox = remote.inbox(owner);
             // SAFETY: the replacing live record takes over this inbox pin.
             unsafe { inbox.as_ref().retain() };
-            let live = &mut payer.forest().record_mut(payer.slot().id).live;
+            let live = &mut payer.forest().record_mut(payer).live;
             live.owner = owner;
             live.inbox = inbox;
             // SAFETY: the map retains the previous inbox until the next reap.
@@ -950,14 +1010,8 @@ impl Funding {
     /// The receiving limit and its task at the current hand-over position.
     fn handover_destination(&self) -> (Payer, u64) {
         let child = self.payer.get();
-        let parent = child
-            .forest()
-            .record(child.slot().id)
-            .live
-            .parent
-            .unwrap()
-            .root();
-        let owner = parent.forest().record(parent.slot().id).live.owner;
+        let parent = child.forest().record(child).live.parent.unwrap().root();
+        let owner = parent.forest().record(parent).live.owner;
         (parent, owner)
     }
 
@@ -968,7 +1022,7 @@ impl Funding {
         let _turn = (owner != crate::tasks::current_id()).then(crate::tasks::before_commit);
         let (_, owner) = self.handover_destination();
         if owner == crate::tasks::current_id() {
-            self.end_id();
+            self.merge_with_parent();
         } else {
             self.drain_notified();
             self.transfer();
@@ -985,7 +1039,7 @@ impl Funding {
         let _turn = (owner != active || creator != active).then(crate::tasks::before_commit);
         self.drain();
         let child = self.payer.get();
-        let live = child.forest().record(child.slot().id).live;
+        let live = child.forest().record(child).live;
         let (_, owner) = self.handover_destination();
         if owner != live.owner {
             self.transfer();
@@ -1005,26 +1059,25 @@ impl Funding {
         crate::tasks::commit_refund(owner, unused, || {
             let mut remote = d.remote.lock().unwrap();
             let f = child.forest();
-            let id = child.slot().id;
-            let live = f.record(id).live;
-            debug_assert!(f.record(id).parent.is_none());
-            f.retain(id);
-            f.record_mut(id).parent = Some(live.parent.unwrap().slot().id);
+            let lexical_parent = f.record(child).live.parent.unwrap();
+            debug_assert!(f.record(child).parent.is_none());
+            f.retain(child);
+            f.record_mut(child).parent = Some(lexical_parent);
             // The child's queued slots now lead to the destination root.
             remote.unite(parent.0, child.0);
             remote.enqueue_handover(child, unused, parent);
         });
     }
 
-    fn end_id(&self) -> usize {
+    fn merge_with_parent(&self) -> Payer {
         let payer = self.payer.get();
         let f = payer.forest();
-        let child = f.find(payer.slot().id);
-        let original_parent = f.record(child).live.parent.unwrap().slot().id;
-        let unused = unsafe { (*f.balance(child)).available };
+        let child = f.find(payer);
+        let original_parent = f.record(child).live.parent.unwrap();
+        let unused = unsafe { (*child.local()).available };
         let (winner, loser) = f.merge(child, original_parent, unused);
         let mut remote = payer.domain().remote.lock().unwrap();
-        remote.unite(NonNull::from(f.slot(winner)), NonNull::from(f.slot(loser)));
+        remote.unite(winner.0, loser.0);
         winner
     }
 
@@ -1041,8 +1094,8 @@ impl Funding {
     fn normalize_merged(&self) {
         let canonical = self.payer.get().canonical();
         let f = self.payer.get().forest();
-        f.retain(canonical.slot().id);
-        f.release(self.payer.get().slot().id);
+        f.retain(canonical);
+        f.release(self.payer.get());
         self.payer.set(canonical);
     }
     #[inline(always)]
@@ -1155,11 +1208,9 @@ impl Funding {
     #[cold]
     fn exit_rank_zero_survivor(&mut self, parent: Payer) -> bool {
         let child = self.payer.get();
-        let child_id = child.slot().id;
-        let parent_id = parent.slot().id;
         let f = child.forest();
-        let child_record = f.record(child_id);
-        let parent_record = f.record(parent_id);
+        let child_record = f.record(child);
+        let parent_record = f.record(parent);
         let child_parent = child_record.parent;
         let child_rank = child_record.rank;
         let child_refs = child_record.refs;
@@ -1181,11 +1232,11 @@ impl Funding {
         let unused = unsafe { (*child.local()).available };
         unsafe { (*parent.local()).available = (*parent.local()).available.wrapping_add(unused) };
         if parent_rank == 0 {
-            f.record_mut(parent_id).rank += 1;
+            f.record_mut(parent).rank += 1;
         }
-        f.record_mut(child_id).parent = Some(parent_id);
-        f.record_mut(child_id).refs = 0;
-        f.record_mut(parent_id).refs += 1;
+        f.record_mut(child).parent = Some(parent);
+        f.record_mut(child).refs = 0;
+        f.record_mut(parent).refs += 1;
         child
             .domain()
             .remote
@@ -1258,11 +1309,11 @@ impl Funding {
     }
     fn exit_general(&mut self) {
         let old = self.payer.get();
-        let winner = self.end_id();
+        let winner = self.merge_with_parent();
         let f = old.forest();
         f.retain(winner);
-        f.release(old.slot().id);
-        self.payer.set(Payer(NonNull::from(f.slot(winner))));
+        f.release(old);
+        self.payer.set(winner);
     }
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn inject(&self, n: usize, later: bool) {
@@ -1280,7 +1331,9 @@ impl Funding {
     pub(crate) fn records(&self) -> usize {
         let _commit = crate::sequencer::enter();
         let f = self.payer.get().forest();
-        (0..f.length).filter(|&id| f.record(id).occupied).count()
+        f.slots()
+            .filter(|slot| unsafe { (*slot.links.get()).occupied })
+            .count()
     }
 
     #[cfg(test)]
@@ -1291,14 +1344,15 @@ impl Funding {
         let mut forwarding = 0;
         let mut charged_slots = 0;
         let mut charged_bytes = 0u64;
-        for id in 0..f.length {
-            let record = f.record(id);
+        for slot in f.slots() {
+            let payer = Payer(NonNull::from(slot));
+            let record = f.record(payer);
             if !record.occupied {
                 continue;
             }
             occupied += 1;
             forwarding += usize::from(record.parent.is_some());
-            let outstanding = unsafe { (*f.balance(id)).outstanding };
+            let outstanding = unsafe { (*payer.local()).outstanding };
             if outstanding != 0 {
                 charged_slots += 1;
                 charged_bytes += outstanding;
@@ -1312,7 +1366,7 @@ impl Clone for Funding {
         let _commit = crate::sequencer::enter();
         let d = self.payer.get().domain();
         d.handles.set(d.handles.get() + 1);
-        self.payer.get().forest().retain(self.payer.get().slot().id);
+        self.payer.get().forest().retain(self.payer.get());
         Self {
             payer: Cell::new(self.payer.get()),
         }
@@ -1325,10 +1379,7 @@ impl Drop for Funding {
         let d = self.payer.get().domain();
         d.handles.set(d.handles.get() - 1);
         if d.handles.get() != 0 {
-            self.payer
-                .get()
-                .forest()
-                .release(self.payer.get().slot().id);
+            self.payer.get().forest().release(self.payer.get());
             return;
         }
         if BOUND.get().is_some_and(|binding| binding.domain == domain) {
@@ -1337,14 +1388,9 @@ impl Drop for Funding {
         let mut remote = d.remote.lock().unwrap();
         remote.retired = true;
         let f = self.payer.get().forest();
-        f.retired_bytes = (0..f.length)
-            .map(|id| unsafe { (*f.balance(id)).outstanding })
-            .sum();
+        f.retired_bytes = f.outstanding();
         self.drain_locked(&mut remote, true);
-        self.payer
-            .get()
-            .forest()
-            .release(self.payer.get().slot().id);
+        self.payer.get().forest().release(self.payer.get());
         let empty =
             self.payer.get().forest().retired_bytes == 0 && self.payer.get().forest().zeros == 0;
         drop(remote);

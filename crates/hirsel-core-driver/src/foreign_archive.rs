@@ -464,8 +464,9 @@ impl SealedArchive {
         let abi = std::str::from_utf8(abi).unwrap_or("");
         for function in &leaf.functions {
             let symbol = format!("{}{}", leaf.symbols, function.identity.definition.0.name);
-            let expected = abi_line(&symbol, &function.header)
-                .ok_or(AdmissionError::Binding("invalid foreign function header"))?;
+            let expected = crate::foreign_header::Abi::parse(&function.header)
+                .ok_or(AdmissionError::Binding("invalid foreign function header"))?
+                .line(&symbol);
             let mut lines = abi
                 .split_inclusive('\n')
                 .filter_map(|line| line.strip_suffix('\n'))
@@ -683,68 +684,4 @@ fn forbidden_section(name: &[u8]) -> bool {
             name.strip_prefix(*prefix)
                 .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(b"."))
         })
-}
-
-// PROG-9 writes the types in this header with aliases expanded and no parameter names.
-fn abi_line(symbol: &str, header: &str) -> Option<String> {
-    let (params, result) = header.strip_prefix('(')?.split_once(")->")?;
-    let (result, mode) = result
-        .strip_suffix("waits")
-        .map_or((result, "stack"), |r| (r.trim_end(), "waits"));
-    let mut params = params.split(',');
-    let interface = params
-        .next()?
-        .strip_prefix("core@1/core/Foreign[")?
-        .strip_suffix(']')?;
-    definition_path(interface)?;
-    let mut args = Vec::new();
-    for param in params {
-        let text = match param {
-            "core@1/core/List[u8]" => "bytes".into(),
-            "mut core@1/core/List[u8]" => "mut bytes".into(),
-            scalar if ffi_scalar(scalar) => scalar.into(),
-            param => {
-                let (value, mode) = param
-                    .strip_prefix("take ")
-                    .map_or((param, "handle"), |argument| (argument, "take"));
-                format!("{mode} {}", handle_kind(value)?)
-            }
-        };
-        args.push(text);
-    }
-    let result = match result {
-        "()" => "()".into(),
-        scalar if ffi_scalar(scalar) => scalar.into(),
-        result => format!(
-            "new {}",
-            handle_kind(
-                result
-                    .strip_prefix("core@1/core/Option[")?
-                    .strip_suffix(']')?
-            )?
-        ),
-    };
-    Some(format!("{symbol} {mode} ({}) -> {result}", args.join(", ")))
-}
-
-fn ffi_scalar(text: &str) -> bool {
-    matches!(
-        text,
-        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64"
-    )
-}
-
-fn handle_kind(text: &str) -> Option<&str> {
-    definition_path(
-        text.strip_prefix("core@1/foreign/Ptr[")?
-            .strip_suffix(']')?,
-    )
-}
-
-fn definition_path(text: &str) -> Option<&str> {
-    (text
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"_@/%".contains(&b))
-        && DefPath::from_full(text).is_some())
-    .then_some(text)
 }

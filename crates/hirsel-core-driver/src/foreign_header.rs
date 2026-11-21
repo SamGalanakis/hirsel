@@ -1,10 +1,197 @@
 //! FFI-3's C declaration and ABI text, derived from the checked headers.
 use hirsel_core_front::{AbiParameter, AbiResult, ModuleInput, Program};
 use hirsel_core_ids::DefPath;
-use hirsel_core_layout::Scalar;
+use hirsel_core_ir::{Loan, Module, Param, PlaceTy, Signature};
+use hirsel_core_layout::{Body, Carried, FieldTy, Repr, Scalar, Ty};
 use hirsel_core_resolve::{CorpusManifest, ModulePath, SourceId};
 use std::fmt::Write;
 use std::io;
+
+const BYTES: &str = "core@1/core/List[u8]";
+
+#[derive(Clone, Copy)]
+pub(crate) enum Argument<'a> {
+    Scalar(Scalar),
+    Bytes { mutable: bool },
+    Handle { kind: &'a str, release: bool },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Return<'a> {
+    Unit,
+    Scalar(Scalar),
+    New(&'a str),
+}
+
+/// A PROG-9 header as carried by a foreign leaf. Admission and codegen must
+/// interpret the same header the archive's ABI text was checked against.
+pub(crate) struct Abi<'a> {
+    pub interface: &'a str,
+    pub waits: bool,
+    arguments: &'a str,
+    pub result: Return<'a>,
+}
+
+impl<'a> Abi<'a> {
+    pub(crate) fn parse(header: &'a str) -> Option<Self> {
+        let (parameters, result) = header.strip_prefix('(')?.split_once(")->")?;
+        let (result, waits) = result
+            .strip_suffix("waits")
+            .map_or((result, false), |r| (r.trim_end(), true));
+        let (interface, arguments) = match parameters.split_once(',') {
+            Some((_, "")) => return None,
+            Some(parts) => parts,
+            None => (parameters, ""),
+        };
+        let interface = definition_path(
+            interface
+                .strip_prefix("core@1/core/Foreign[")?
+                .strip_suffix(']')?,
+        )?;
+        let result = match result {
+            "()" => Return::Unit,
+            scalar if ffi_scalar(scalar).is_some() => Return::Scalar(ffi_scalar(scalar)?),
+            result => Return::New(handle_kind(
+                result
+                    .strip_prefix("core@1/core/Option[")?
+                    .strip_suffix(']')?,
+            )?),
+        };
+        let mut releases = 0;
+        let mut count = 0;
+        if !arguments.is_empty() {
+            for argument in arguments.split(',') {
+                releases += usize::from(matches!(
+                    argument_kind(argument)?,
+                    Argument::Handle { release: true, .. }
+                ));
+                count += 1;
+            }
+        }
+        if releases != 0 && (count != 1 || matches!(result, Return::New(_))) {
+            return None;
+        }
+        Some(Self {
+            interface,
+            waits,
+            arguments,
+            result,
+        })
+    }
+
+    pub(crate) fn arguments(&self) -> impl Iterator<Item = Argument<'a>> {
+        self.arguments
+            .split_terminator(',')
+            .map(|arg| argument_kind(arg).unwrap())
+    }
+
+    pub(crate) fn line(&self, symbol: &str) -> String {
+        let args: Vec<_> = self
+            .arguments()
+            .map(|arg| match arg {
+                Argument::Scalar(s) => s.name().to_owned(),
+                Argument::Bytes { mutable: false } => "bytes".into(),
+                Argument::Bytes { mutable: true } => "mut bytes".into(),
+                Argument::Handle { kind, release } => {
+                    let mode = if release { "take" } else { "handle" };
+                    format!("{mode} {kind}")
+                }
+            })
+            .collect();
+        let result = match self.result {
+            Return::Unit => "()".into(),
+            Return::Scalar(s) => s.name().to_owned(),
+            Return::New(kind) => format!("new {kind}"),
+        };
+        let mode = if self.waits { "waits" } else { "stack" };
+        format!("{symbol} {mode} ({}) -> {result}", args.join(", "))
+    }
+
+    pub(crate) fn matches_slot(&self, slot: &Signature, module: &Module) -> bool {
+        let Some((&Param::Value(Ty::Scalar(Scalar::U64)), params)) = slot.params.split_first()
+        else {
+            return false;
+        };
+        if slot.never || params.len() != self.arguments().count() {
+            return false;
+        }
+        if !params.iter().zip(self.arguments()).all(|(&param, arg)| match arg {
+            Argument::Scalar(s) => param == Param::Value(Ty::Scalar(s)),
+            Argument::Handle { .. } => param == Param::Value(Ty::Scalar(Scalar::U64)),
+            Argument::Bytes { mutable } => {
+                let Param::Address { place: PlaceTy::Declared(ty), loan } = param else {
+                    return false;
+                };
+                let shape = &module.types[ty.index()];
+                let items = |ty: &FieldTy| {
+                    matches!(ty, FieldTy::Seq(element) if **element == FieldTy::Scalar(Scalar::U8))
+                };
+                loan == (if mutable { Loan::Mut } else { Loan::View })
+                    && shape.name == BYTES
+                    && shape.carried == Carried::Address
+                    && shape.repr == Repr::Own
+                    && matches!(&shape.body, Body::Record(fields) if matches!(fields.as_slice(), [field] if items(&field.ty)))
+                    && shape.held.as_ref().is_some_and(items)
+                    && shape.finalizer.is_none()
+            }
+        }) {
+            return false;
+        }
+        match self.result {
+            Return::Unit => slot.results.is_empty() && slot.dest.is_none(),
+            Return::Scalar(s) => slot.results == [Ty::Scalar(s)] && slot.dest.is_none(),
+            Return::New(kind) => slot.results.is_empty() && slot.dest.is_some_and(|ty| {
+                let shape = &module.types[ty.index()];
+                shape.name.strip_prefix("core@1/core/Option[")
+                    .and_then(|name| name.strip_suffix(']'))
+                    .and_then(handle_kind) == Some(kind)
+                    && shape.carried == Carried::Address
+                    && shape.repr == Repr::Own
+                    && shape.finalizer.is_none()
+                    && matches!(&shape.body, Body::Variant(cases) if matches!(cases.as_slice(),
+                        [none, some] if none.name == "None" && none.fields.is_empty()
+                            && some.name == "Some"
+                            && matches!(some.fields.as_slice(), [field] if field.ty == FieldTy::Scalar(Scalar::U64))))
+            }),
+        }
+    }
+}
+
+fn argument_kind(text: &str) -> Option<Argument<'_>> {
+    match text {
+        BYTES => Some(Argument::Bytes { mutable: false }),
+        "mut core@1/core/List[u8]" => Some(Argument::Bytes { mutable: true }),
+        scalar if ffi_scalar(scalar).is_some() => Some(Argument::Scalar(ffi_scalar(scalar)?)),
+        handle => {
+            let (value, release) = handle
+                .strip_prefix("take ")
+                .map_or((handle, false), |value| (value, true));
+            Some(Argument::Handle {
+                kind: handle_kind(value)?,
+                release,
+            })
+        }
+    }
+}
+
+fn ffi_scalar(text: &str) -> Option<Scalar> {
+    Scalar::from_name(text).filter(|s| !matches!(s, Scalar::Bool | Scalar::Char))
+}
+
+fn handle_kind(text: &str) -> Option<&str> {
+    definition_path(
+        text.strip_prefix("core@1/foreign/Ptr[")?
+            .strip_suffix(']')?,
+    )
+}
+
+fn definition_path(text: &str) -> Option<&str> {
+    (text
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"_@/%".contains(&b))
+        && DefPath::from_full(text).is_some())
+    .then_some(text)
+}
 
 pub(crate) fn symbol_prefix(
     resolution: &crate::package_resolve::Resolution,

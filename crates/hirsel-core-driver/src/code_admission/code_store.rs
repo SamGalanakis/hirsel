@@ -362,13 +362,32 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
 
     let mut fixture = Fixture::new("entry");
     fixture.recipe.launch.grants.push(grant);
-    fixture.recipe.foreign_modules.push(leaf);
+    fixture.recipe.foreign_modules.push(leaf.clone());
     fixture.recipe.foreign_archives.push(archive);
     let externs = "inst n1 = app@1/native/f [] []\nfn f1 = n1 g0 extern\n";
     let body = fixture.body("entry", "(u64)", externs, "call f1 g0 (v0)\nreturn");
     fixture.recipe.address = fixture.group(&[(body, vec![Binding::External(address)])], 0);
     let error = admit(&fixture, b"abc").to_string();
     assert!(error.ends_with("is not an indexed ar archive"), "{error}");
+
+    // An exact FFI-9 address and matching identity cannot substitute for the
+    // slot's machine signature. A recipe may otherwise make the shared bridge
+    // return through a different register class than its caller expects.
+    let mut wrong_abi = Fixture::new("entry");
+    wrong_abi.recipe.launch.grants = fixture.recipe.launch.grants.clone();
+    wrong_abi.recipe.foreign_modules.push(leaf);
+    wrong_abi.recipe.foreign_archives.push(archive);
+    let body = wrong_abi.body(
+        "entry",
+        "(u64)",
+        "sig g1 = (u64) -> (f64)\ninst n1 = app@1/native/f [] []\nfn f1 = n1 g1 extern\n",
+        "v1: f64 = call f1 g1 (v0)\nreturn",
+    );
+    wrong_abi.recipe.address = wrong_abi.group(&[(body, vec![Binding::External(address)])], 0);
+    assert!(matches!(
+        admit(&wrong_abi, b"abc"),
+        AdmissionError::Binding("slot signature differs from its bound foreign header")
+    ));
 
     fixture.recipe.foreign_modules[0].targets.insert(
         0,

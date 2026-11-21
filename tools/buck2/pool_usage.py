@@ -2,12 +2,12 @@
 """What hirsel reserves on the pool against what it uses, read-only.
 
     python3 tools/buck2/pool_usage.py --hours 6 --trace /tmp/trace-*.jsonl --usage /tmp/usage-*.log
-    python3 tools/buck2/pool_usage.py --hours 6 --ssh-cache <cache host> --ssh-workers <worker> ...
+    python3 tools/buck2/pool_usage.py --ssh-cache <host> --remote-trace-dir <directory> \
+      --ssh-workers <worker> ... --remote-usage <log> ...
 
-The scheduler's usage events (kiln-resource-hints `trace/*.jsonl` on the cache
-host) give each execution its client identity (`repo:<repo>|lane:...`), the
-CPUs and memory it was placed with, its CPU time, wall time and PSS peak. The
-workers' `actions.log` rows name an execution's test target by its operation
+The scheduler's JSONL trace records each execution's client identity
+(`repo:<repo>|lane:...`), reserved CPUs and memory, CPU time, wall time and peak
+PSS. The workers' `actions.log` rows name an execution's test target by its operation
 (`test=run:<shard>:root//:<target>`); other actions are named by their
 category. Over the last N hours before the newest event, an execution reserves
 CPUs x wall and memory x wall, and uses its CPU time and PSS peak x wall (an
@@ -27,19 +27,18 @@ from collections import defaultdict
 import json
 from pathlib import Path
 import re
+import shlex
 import subprocess
 
 from action_sizes_from_log import join
 import event_logs
 
-TRACE_DIR = '/var/lib/kiln-resource-hints/trace'
-USAGE_LOGS = ('/workspace/kiln-executor/usage/actions.log.1', '/workspace/kiln-executor/usage/actions.log')
 HOUR_MS = 3_600_000
 GIB_KB = 1 << 20
 
 
 def ssh_cat(host, command):
-    return subprocess.run(['ssh', host, command], capture_output=True, text=True, check=True).stdout
+    return subprocess.run(['ssh', '--', host, command], capture_output=True, text=True, check=True).stdout
 
 
 def executions(lines):
@@ -200,15 +199,24 @@ def main():
     parser.add_argument('--events', nargs='*', default=[], help='Buck2 JSONL or compressed .pb.zst logs')
     parser.add_argument('--event-dir', type=Path, default=event_logs.directory(),
                         help='shared retained logs (default: HIRSEL_BUCK2_LOG_DIR or ~/.cache/hirsel-buck2/event-logs)')
-    parser.add_argument('--ssh-cache', help=f'read {TRACE_DIR} on this host with ssh and sudo -n')
-    parser.add_argument('--ssh-workers', nargs='*', default=[], help='read the usage logs on these hosts')
+    parser.add_argument('--ssh-cache', help='read scheduler trace files on this host with SSH and sudo -n')
+    parser.add_argument('--remote-trace-dir', help='directory of JSONL trace files on --ssh-cache')
+    parser.add_argument('--ssh-workers', nargs='+', help='read usage logs on these hosts with SSH and sudo -n')
+    parser.add_argument('--remote-usage', nargs='+', help='usage log paths on each --ssh-workers host')
     args = parser.parse_args()
+    if bool(args.ssh_cache) != bool(args.remote_trace_dir):
+        parser.error('--ssh-cache and --remote-trace-dir must be supplied together')
+    if bool(args.ssh_workers) != bool(args.remote_usage):
+        parser.error('--ssh-workers and --remote-usage must be supplied together')
     trace = [line for path in args.trace for line in Path(path).read_text().splitlines()]
     if args.ssh_cache:
-        trace += ssh_cat(args.ssh_cache, f'cd {TRACE_DIR} && sudo -n cat *.jsonl').splitlines()
+        directory = shlex.quote(args.remote_trace_dir)
+        trace += ssh_cat(args.ssh_cache, f'sudo -n cat -- {directory}/*.jsonl').splitlines()
     usage = [line for path in args.usage for line in Path(path).read_text().splitlines()]
-    for host in args.ssh_workers:
-        usage += ssh_cat(host, 'sudo -n cat ' + ' '.join(USAGE_LOGS)).splitlines()
+    if args.ssh_workers:
+        command = 'sudo -n cat -- ' + shlex.join(args.remote_usage)
+        for host in args.ssh_workers:
+            usage += ssh_cat(host, command).splitlines()
     events = executions(trace)
     if not events:
         parser.error('no usage events: pass --trace or --ssh-cache')

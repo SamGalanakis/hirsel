@@ -26,11 +26,8 @@ No lane commits a generated file, so no rebase can conflict on one
   before starting Buck and refuses stale inputs with the command
   `python3 tools/buck2/sync.py --if-stale`. It compares content digests,
   existence probes and glob matches; fresh inputs are never regenerated.
-  `kill`, `status` and `log` bypass the check. Where the root BUCK is
-  missing, Buck2 reads the committed `BUCK.unsynced` (`[buildfile]` in
-  `.buckconfig`), which fails saying to run `sync.py`. The files are
-  byte-identical to the committed ones they replace, so every action key, and
-  so remote execution and its cache, is unchanged.
+  `kill`, `status` and `log` bypass the check. Use `prepare.py` in a fresh
+  checkout to install the wrapper and generate the build files.
 - **Files many lanes add to merge themselves.** `.gitattributes` gives
   `third-party/NOTICES.md` and the `modules.rs` registries the `hirsel` merge
   driver, which `bootstrap.py` installs. The driver keeps notice additions from
@@ -469,10 +466,10 @@ memory-kill retries are sized from measured peaks, without preserving the
 scheduler's geometric escalation overshoot forever. Unfinished memory kills
 keep a conservative floor of twice their failed request times 1.2.
 
-The inputs are read-only copies: each worker's `actions.log` and
-`actions.log.1` (`TEST_TARGET` and CPU per test run), the scheduler's usage
-events (`trace/*.jsonl` of kiln-resource-hints on the cache host: PSS peaks by
-operation) and the workers' `kiln-executor` journal lines for memory kills:
+Pass read-only copies of the remote-execution logs. The worker usage logs
+(`actions.log` and `actions.log.1`) report the test target and CPU per run. The
+scheduler's JSONL trace reports peak PSS by operation. The optional worker
+executor journal supplies memory-kill records.
 
 ```sh
 python3 tools/buck2/test_sizes_from_usage.py --usage /tmp/usage-*.log \
@@ -506,6 +503,9 @@ JSONL logs with `--events`:
 python3 tools/buck2/pool_usage.py --hours 6 --trace /tmp/trace-*.jsonl \
   --usage /tmp/usage-*.log --events /tmp/build.pb.zst
 ```
+
+To read logs over SSH, pair `--ssh-cache` with `--remote-trace-dir` and
+`--ssh-workers` with one or more paths under `--remote-usage`.
 
 This reuses the compile-sizing tool's unique time/request match, separately for
 each action category, so native observations and other helpers also get their

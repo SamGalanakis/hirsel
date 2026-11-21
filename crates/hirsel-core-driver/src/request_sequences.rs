@@ -9,7 +9,7 @@
 // other bytes, so a store that publishes on the second request with one shape holds
 // a generation before B. Cases: the programs of option-l-review-1034, the request
 // sequences of l-body-review-1036 and the shapes of l-body-review-1039 (fixtures
-// and RUN receipts under /workspace/code/hirsel-briefs/<review>/).
+// and RUN receipts in the corresponding review's evidence directory).
 
 /// A source's text: literal, or a file of this checkout with one replacement
 /// (`find` empty: `with` appended).

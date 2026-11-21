@@ -18,7 +18,7 @@ Method:
 - `perf stat -e instructions:u` over the whole process, 5 samples per point.
 - A per-operation figure is the median at N minus the median at 0, divided by N. This removes process start and, for the durable twin, the 64-commit history.
 - Peak RSS from GNU time; syscall counts from `strace -c`.
-- The raw samples, the strace tables, the hashes and the script (`measure.sh`) are in /workspace/code/hirsel-briefs/std-seed-api-889/w6/.
+- The raw samples, strace tables, hashes and `measure.sh` are in `w6/` in the std-seed-api-889 evidence archive.
 
 ## Durable one-key commit (M4-PLAN §4 matched workload)
 

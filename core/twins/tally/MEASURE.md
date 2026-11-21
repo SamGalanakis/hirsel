@@ -13,7 +13,7 @@ Method:
 - Runs are pinned to CPU 16 while holding /tmp/hirsel-langarena-measure.lock.
 - Counts are `perf stat -e instructions:u` over the whole process, with 5 samples per point; wall is the median of 5 unprofiled runs.
 - Per add = (median at N=250,000 − median at N=0) / 1,000,000 adds.
-- Raw samples, the scripts and the worker's disassembly are in /workspace/code/hirsel-briefs/std-seed-api-889/tally/.
+- Raw samples, scripts and the worker's disassembly are in `tally/` in the std-seed-api-889 evidence archive.
 
 | per add (wall: whole run at N=250,000) | optimised | Cranelift release | development |
 |---|---:|---:|---:|

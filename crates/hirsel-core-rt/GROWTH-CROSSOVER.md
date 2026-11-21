@@ -33,7 +33,7 @@ Every output is exactly capacity 2B with the expected checksum.
 Kernel instructions are per cycle. Faults are totals over 200,000 cycles; every
 major-fault count is zero. Sub-instruction kernel differences include counter
 reads and do not choose the threshold. Raw rows and harness scripts are in
-`/workspace/code/hirsel-briefs/core-memory-900/shared-crossover/`.
+`shared-crossover/` in the core-memory-900 evidence archive.
 These are later measurements, not M2 or a replacement for the inline crossover
 experiment. The former 64 KiB classic fault anomaly remains observed and
 unexplained; it is outside this new five-point series.

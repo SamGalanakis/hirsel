@@ -27,7 +27,7 @@ from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_se
 
 ROOT = build.ROOT
 CAP = ROOT / "tools/capped"
-LOCK = Path("/run/user/1000/hirsel-board.lock")
+LOCK = Path("/run/user") / str(os.getuid()) / "hirsel-board.lock"
 PINS = {
     "awfy": "f35aed0a61171594804a44efe9d75f1f35360700",
     "resid": "0ab89f373829776d3ea285bfb25f3f1505d7be35",
@@ -87,8 +87,14 @@ def run(command, *, env, cwd=ROOT, **kwargs):
 
 
 def cargo_scope(env):
-    """Stay inside tools/capped instead of starting another, wider user scope."""
-    return env | {"KILN_CARGO_CGROUP": "off"}
+    """Pass an optional NAME=VALUE setting to Cargo inside tools/capped."""
+    setting = env.get("HIRSEL_BOARD_CARGO_ENV")
+    if not setting:
+        return env
+    name, separator, value = setting.partition("=")
+    if not name or not separator:
+        raise ValueError("HIRSEL_BOARD_CARGO_ENV must be NAME=VALUE")
+    return env | {name: value}
 
 
 def release_flags(artifacts):

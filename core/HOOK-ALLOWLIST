@@ -1,9 +1,8 @@
 # The frozen allowlist of the M4 deciding experiment (M4-PLAN §3, W5): the core
 # declarations and glue operations the hook libraries (codec, fault, store,
 # runner, record) may reach. It is core as of 2026-11-15 (main db332188) and
-# grows only by an addition recorded as a ruling in
-# /workspace/code/hirsel-briefs/DECISIONS.md: the lane that adds the core
-# declaration adds its entry, with a comment naming the ruling and its date.
+# grows only by an addition recorded as a ruling in DECISIONS.md. The lane that
+# adds the core declaration adds its entry and cites the ruling and its date.
 #
 # //:hirsel-core-driver-unittest, case gated_libraries_reach_only_allowlisted_core,
 # is red when an entry is not a core declaration, or when a gated library

@@ -90,7 +90,7 @@ class CpuRequests(unittest.TestCase):
         source_dir = ROOT / 'tools/buck2'
         paths = {name: Path(os.environ.get('HIRSEL_TEST_' + name.upper(), source_dir / (name + '.bzl')))
                  for name in ('platforms', 'test_requirements', 'test_sizes', 'exec_sizes')}
-        config = {'tests': mode, 'remote_properties': 'kiln_executor_runtime=fixture-runtime'}
+        config = {'tests': mode, 'remote_properties': 'executor_runtime=fixture-runtime'}
         if priority is not None:
             config['priority'] = str(priority)
         def fail(message):
@@ -145,6 +145,7 @@ class CpuRequests(unittest.TestCase):
                 request = module['test_request'](binary)
                 self.assertEqual(request, [1 if mode == 'focus' else measured[0], *measured[1:]])
                 props = module['test_executor'](*request)['remote_execution_properties']
+                self.assertEqual(props['executor_runtime'], 'fixture-runtime')
                 self.assertNotIn('cpu_affinity', props)
                 self.assertNotIn('exact_cpus', props)
 

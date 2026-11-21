@@ -1,7 +1,6 @@
 # Correspondence with the spec lane's draft
 
-Compared directly with the draft at
-`/home/sam/.t3/worktrees/hirsellang/t3-837f2de3-22280e0c230eb9f2/docs/spec/examples.md`
+Compared directly with the spec lane's draft of `docs/spec/examples.md`
 on 2026-11-12, before measuring. These are gaps or deliberate workload specializations;
 none is silently treated as an executed v1 program. The spec lane owns Hirsel sources.
 

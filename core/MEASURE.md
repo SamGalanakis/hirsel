@@ -129,7 +129,7 @@ runtime lanes report their curves separately from these physical-memory baseline
 ## Reproduction and reporting
 
 ```sh
-python3 core/tools/measure.py --out /workspace/code/hirsel-briefs/core-corpus-885/measurement-new
+python3 core/tools/measure.py --out ../measurement-new
 ```
 
 The evidence directory must be new and outside the repo. The script writes the table

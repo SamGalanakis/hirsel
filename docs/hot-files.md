@@ -24,9 +24,9 @@ git config merge.hirsel.driver 'python3 tools/buck2/merging.py %O %A %B %P'
 Run `tools/check-hot-files` to check that each registry contains only unique
 module declarations and that its harness includes it.
 
-Publish benchmark measurements, raw sessions, profiles and reproduction scripts
-under `/workspace/code/hirsel-briefs/<lane>/`. LangArena and the tasks app default
-to external session directories. Keep only a short result row or archive link in
+Keep benchmark measurements, raw sessions, profiles and reproduction scripts
+in the lane's evidence directory outside the checkout. LangArena and the tasks
+app default to external session directories. Keep only a short result row or archive link in
 an existing results file; do not add per-lane result files to the public repo.
 Never union-merge Markdown tables: adjacent rows can have different headings,
 units, sessions and interpretation.

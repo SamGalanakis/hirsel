@@ -187,6 +187,6 @@ Whole-suite all50 native build instruction ratios below; upstream twin only. Com
 | build-edit | 2.6349 | 0.1306 | release/3a7b4a7027da; shipping-release-fat-lto/a18f790fcd68 |
 
 
-The old run/check notes and all raw counters remain in the lane report under `/workspace/code/hirsel-briefs/langs-numeric-920/`. Old check ratios were censored by std.arena gaps. Current check rows are complete. The Rust twins of all23 numeric configurations are approved by langs-text-921.
+The old run/check notes and all raw counters remain in the langs-numeric-920 evidence archive. The TSV report paths are relative to the archive's parent directory. Old check ratios were censored by std.arena gaps. Current check rows are complete. The Rust twins of all23 numeric configurations are approved by langs-text-921.
 
 Runtime command: first `python3 core/tools/measurement_artifacts.py`, then `python3 core/langarena/run.py --compiler <helper compiler> --runtime <helper runtime> --compiler-profile release --module <module> --task <task> --backend <llvm|cranelift> --idiomatic <approved Rust binary> --resume <previous report> --out <new external directory>`. Use the admitted `--root-mib 128` for Obj and256 for Arena. Build/check command replaces the module/task arguments with `--module suite --task All::Build --build-only --suite`, resuming the previous whole-suite report. Frozen initial source is8416d12b; fill follow-up source3200f088 includes9cf5a4d9. Final post-fill samples replace the initial fill-set samples, never averaged.

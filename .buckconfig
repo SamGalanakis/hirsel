@@ -1,7 +1,7 @@
 # Buck2 build of the Cargo workspace (tools/buck2/README.md). Cargo manifests and
 # Cargo.lock stay the source of truth; tools/buck2/sync.py derives the root and
-# third-party BUCK files, which are gitignored. Where one is missing, Buck2 reads
-# the committed BUCK.unsynced beside it, which fails saying to run sync.py.
+# third-party BUCK files, which are gitignored. The Buck2 client wrapper
+# checks that they are current before running build or test.
 # Remote execution settings live in the ignored, generated .buckconfig.local.
 [cells]
 root = .
@@ -18,7 +18,7 @@ buck = none
 [external_cells]
 prelude = disabled
 [buildfile]
-name = BUCK,BUCK.unsynced
+name = BUCK
 [parser]
 target_platform_detector_spec = target:root//...->root//tools/buck2:checked target:toolchains//...->prelude//platforms:default
 [build]
@@ -45,13 +45,7 @@ clean_stale_low_disk_adaptive_unmaterialize_active = false
 [project]
 ignore = .git, buck-out, .buck2, target, tools/buck2/bin
 [buck2_re_client]
-# Remote actions one daemon keeps in flight: each lane's share of the pool.
-# The pool (144 CPUs on 2026-11-10, shared with Lash and others whose ordinary
-# lanes queue at 100, above Hirsel lanes at 50)
-# ran 141-144 CPUs reserved with 28-33 actions queued while about
-# five Hirsel lanes were active; single lanes peaked at 55-80 CPUs, and
-# actions of 4+ CPUs or 4+ GiB (links, std precompute) waited 356 s at p90,
-# up to 20 min. At 32 actions (about 2 CPUs each) five lanes fit the pool.
+# Bound the number of remote actions one daemon keeps in flight.
 execution_concurrency_limit = 32
 max_concurrent_uploads_per_action = 1
 [test]

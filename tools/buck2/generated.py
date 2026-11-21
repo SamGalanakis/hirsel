@@ -3,8 +3,7 @@
 BUILD_INPUTS are what sync.py derives from the Cargo workspace and the
 committed measurements and pins. They are gitignored and generated on demand:
 bootstrap.py writes them, and `sync.py --if-stale` regenerates the parts
-whose inputs changed. Without them Buck2 reads the committed BUCK.unsynced
-stubs, which direct contributors to sync.py.
+whose inputs changed. The client wrapper checks freshness before builds and tests.
 
 The stamp records, for each part of the build inputs, what its generation
 read (`Reads`: file contents, existence tests and glob matches, including the
@@ -34,7 +33,6 @@ PARTS = {
 }
 BUILD_INPUTS = tuple(sorted(path for outputs in PARTS.values() for path in outputs))
 STAMP = '.buck2/sync-stamp.json'
-SYNC_HINT = 'run python3 tools/buck2/sync.py'
 
 
 CHANGED = 'changed during generation'

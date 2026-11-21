@@ -31,7 +31,7 @@ RSS comes from the default shipping runtime. Balance figures come from separate 
 
 All 12 default and 12 observed outputs match their expected outputs. Binarytrees Obj uses 128 MiB and preserves the exact 83,894,520 B logical peak; native Fixed32 changes physical requests only. Words has identical observed balances on both engines; the earlier single LLVM+3.4% page-count fluctuation is not a logical-charge increase.
 
-Evidence: `/workspace/code/hirsel-briefs/core-memory-900/m2/`; canonical `artifacts.json`, frozen copies/identities, counter logs, per-side RSS and observed reports. Earlier STEP2 measurements are not used as M2 rows because their artifact identities differ.
+Evidence: `m2/` in the core-memory-900 evidence archive; canonical `artifacts.json`, frozen copies/identities, counter logs, per-side RSS and observed reports. Earlier STEP2 measurements are not used as M2 rows because their artifact identities differ.
 
 ## Bounded channel and general-own follow-up
 
@@ -57,7 +57,7 @@ The general own shim already compared a masked original payer with current. The 
 
 Both backends' extra instructions/pair are16.000 when equal and76.000..76.002 when different, against the identical allocator/size/alignment/zeroing baseline. Different means another canonical same-task payer, with no recorder; actual cross-task event/mailbox work is not folded into that number. The equal case improves the old18, but still misses12 by4. Those four instructions are the dynamic payer-word load/current comparison/branch work that the static unchanged-current proof can omit. No MEM rule mandates16 or76 machine instructions; original-payer lookup remains semantically necessary on mismatch. Per the bounded request, no second optimization attempt followed the miss. Tests extend the existing own sequence with exit/re-entry survivors and the context-first C refund hook, without changing the independent balance oracle.
 
-Evidence `/workspace/code/hirsel-briefs/core-memory-900/bounded-followup/`: provider/current/final Callgrind annotations, native-current/final rows, own-final rows, exact first-party baseline96283fdf, build/source environments. Profile helper uses the same production charge.rs and runtime source, not a second implementation. Raw traces and compiled pilots are removed at lane end; source/samples/annotations remain.
+Evidence `bounded-followup/` in the core-memory-900 evidence archive: provider/current/final Callgrind annotations, native-current/final rows, own-final rows, exact first-party baseline96283fdf, build/source environments. Profile helper uses the same production charge.rs and runtime source, not a second implementation. Raw traces and compiled pilots are removed at lane end; source/samples/annotations remain.
 
 ## Optional Arc recording gate
 
@@ -72,7 +72,7 @@ No-sink meets1.5x. The gated taken path adds79 instructions/pair over untaken, i
 
 CONTEXT_EVENTS=8 is a new frozen word, zero without an event sink, otherwise the task's pinned pointer. Root sets it before execution, child inherits recording and installs its own pointer before publication, and it stays immutable during execution. After inline atomic count/test: if context.events !=0, call hirsel_core_arc_initialized(context), hirsel_core_arc_shared(context,node), hirsel_core_arc_released(context,last) or hirsel_core_arc_unwrapped(context,unique). Release records before final cleanup/refund. These hooks have no status, admission, allocation or count mutation. Existing runtime task/channel dispatch remains unchanged. Native runtime count helpers keep their existing internal event route. The C hooks now require nonzero context.events, as generated code proves.
 
-Evidence `/workspace/code/hirsel-briefs/core-memory-900/arc-dispatch-cost/`: copied LLVM function/twin/caller sources, results.tsv, per-configuration stdout/stderr, source environment and disassembly. The archived previous61/113 rows are the LLVM lane's measured source3337b72a, not a fresh resample. Root/child inheritance, actual zero hook-entry count with no sink, recorded stream and schedule tests execute in the runtime suite. Cranelift's stream exposed missing C bool zero-extension after adding the context argument; declaring those C parameters uext preserves the exact0/1 event values.
+Evidence `arc-dispatch-cost/` in the core-memory-900 evidence archive: copied LLVM function/twin/caller sources, results.tsv, per-configuration stdout/stderr, source environment and disassembly. The archived previous61/113 rows are the LLVM lane's measured source3337b72a, not a fresh resample. Root/child inheritance, actual zero hook-entry count with no sink, recorded stream and schedule tests execute in the runtime suite. Cranelift's stream exposed missing C bool zero-extension after adding the context argument; declaring those C parameters uext preserves the exact0/1 event values.
 
 ## Frozen inline regions and matched own pairs
 
@@ -97,7 +97,7 @@ When lowering cannot prove the payer remains current, generic inline_own_free re
 
 The region kernel directly reads/writes abi_layout.rs offsets: compare payer/current, admit once, add the per-run charge, compare cursor/end and bump, then store. It calls region_alloc only for a payer transition and region_refill only for an exhausted chunk. There is no call on the usual bump path. Both allocate one million u64 values and bulk close. Region chunks retain8,060,928 bytes versus bumpalo8,387,200,0.961x, including chunk slack but excluding fixed region/table and vector metadata. Both inline instruction and retained-byte targets pass. This row supersedes the earlier38.51 generic-entry cost as the emitter fast-path measurement.
 
-Evidence: `/workspace/code/hirsel-briefs/core-memory-900/{own-twelve-score,inline-matched-final}/`, including raw instructions, disassembly, stderr byte counters and environment. Reproduce with measure.py --workloads region alloc16 alloc64 alloc256 alloc4096 --modes rust matched inline current. `inline` on own means the general payer check, `current` means the lowering proof; region `inline` is the frozen-offset shim. These are runtime instruction shims, not end-to-end native source benchmarks.
+Evidence: `{own-twelve-score,inline-matched-final}/` in the core-memory-900 evidence archive, including raw instructions, disassembly, stderr byte counters and environment. Reproduce with measure.py --workloads region alloc16 alloc64 alloc256 alloc4096 --modes rust matched inline current. `inline` on own means the general payer check, `current` means the lowering proof; region `inline` is the frozen-offset shim. These are runtime instruction shims, not end-to-end native source benchmarks.
 
 ## Task-local custody integration
 
@@ -115,7 +115,7 @@ Local admission, refund and scope entry use the task-local table. Growth admits 
 
 `hirsel_core_arc_shared(node)`, `hirsel_core_arc_released(last)` and `hirsel_core_arc_unwrapped(unique)` are the completion hooks LLVM needed, on main since22ef2b37. This slice adds `hirsel_core_arc_initialized()` and moves these memory ABI declarations into abi.rs/the base header. It has no status, allocation, admission or count mutation. Event codes NEW/SHARE/RELEASE/UNWRAP are frozen in abi_layout.rs and the C header. Rc uses ordinary u64 initialization/counts; Arc initializes aligned atomic u64 to 1 before publication, shares with checked relaxed CAS, releases with release decrement/acquire fence at zero, and tests uniqueness with acquire. The scheduler event turn covers inline count and hook; release publishes before last-release glue/refunds.
 
-Evidence: `/workspace/code/hirsel-briefs/core-memory-900/task-local-compact-cost/`; reference `/workspace/code/hirsel-briefs/core-tasks-provider-907/MEASUREMENTS.md`. Reproduce with measure-tasks.py --models core --workloads spawn roundtrip pipeline. Optional memcheck acceptance builds and Rust tests register alternate stacks via the isolated Valgrind helpers moved to hirsel-stack; normal archives add no registration instructions.
+Evidence: `task-local-compact-cost/` in the core-memory-900 evidence archive; reference `MEASUREMENTS.md` from core-tasks-provider-907. Reproduce with measure-tasks.py --models core --workloads spawn roundtrip pipeline. Optional memcheck acceptance builds and Rust tests register alternate stacks via the isolated Valgrind helpers moved to hirsel-stack; normal archives add no registration instructions.
 
 ## Allocating bounds and emitted growth
 
@@ -142,7 +142,7 @@ The emitted growth shim carries pointer/length/capacity and calls allocation, co
 
 The earlier system Rust Vec result was 14.44. Later isolated functions produce 17.44 under the same flags, so fresh ratios include code-generation differences. Against the earlier 14.44 baseline, emitted 15.19 is 1.052x. The absolute three-instruction wrapper removal and absence of calls on the non-growing path are the supported implementation claims.
 
-Evidence: `/workspace/code/hirsel-briefs/core-memory-900/{bound-cold-entry-score,bound-growth-qualified,bound-attribution}/`. Provider task cost, inline region cost and matched own-pair overhead remain pending.
+Evidence: `{bound-cold-entry-score,bound-growth-qualified,bound-attribution}/` in the core-memory-900 evidence archive. Provider task cost, inline region cost and matched own-pair overhead remain pending.
 
 ## Earlier representation rewrite samples
 
@@ -171,11 +171,11 @@ System allocation remains the default, using native malloc/free and posix_memali
 
 Task-local paged payer slots replace synchronized funding references. Outstanding bytes retain slots; structural pins remain only for handles, union edges and zero-charge blocks. Regions aggregate by payer run and a writer keeps its trim token and previous charge. Remote refunds use prepaid mailboxes, folded at the payer’s next event. Each task pays for its own growth and holds custody of the grant while running a finalizer.
 
-Reproduce with `python3 crates/hirsel-core-rt/measure.py --out <new-directory>`. Raw samples, environment and logs are in `/workspace/code/hirsel-briefs/core-memory-900/rewrite-endstate/`; the old baseline remains in `measurement/`. The driver compiles the unchanged charge-policy module directly, excluding unrelated shape-serialization dependencies. Build starts wait for load <=32; every compile and sample uses tools/capped at 2 GiB and one CPU. Final C ABI smoke passes against both allocator archives.
+Reproduce with `python3 crates/hirsel-core-rt/measure.py --out <new-directory>`. Raw samples, environment and logs are in `rewrite-endstate/` in the core-memory-900 evidence archive; the old baseline remains in `measurement/`. The driver compiles the unchanged charge-policy module directly, excluding unrelated shape-serialization dependencies. Build starts wait for load <=32; every compile and sample uses tools/capped at 2 GiB and one CPU. Final C ABI smoke passes against both allocator archives.
 
 ## Provider operations
 
-Release build (`--target-platforms //tools/buck2:release`, runtime `hirsel-core-rt-archives`), `perf stat -e instructions:u`, median of five on CPU 4, a0e660e5 against 61c29695 (before the four-state provider ABI). The Hirsel programs are review 1025's (`/workspace/code/hirsel-briefs/provider-abi-review-1025/programs`), built with the release compiler on each side.
+Release build (`--target-platforms //tools/buck2:release`, runtime `hirsel-core-rt-archives`), `perf stat -e instructions:u`, median of five on CPU 4, a0e660e5 against 61c29695 (before the four-state provider ABI). The Hirsel programs come from `programs/` in the provider-abi-review-1025 evidence archive, built with the release compiler on each side.
 
 | program | engine | 61c29695 | a0e660e5 | change |
 |---|---|---:|---:|---:|

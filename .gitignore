@@ -36,7 +36,7 @@ __pycache__/
 *.swp
 *~
 
-# Measurement sessions and analyzer scratch belong under hirsel-briefs.
+# Keep measurement sessions and analyzer scratch out of Git.
 /bench/**/reports/
 /bench/**/results/
 /bench/**/RESULTS-*

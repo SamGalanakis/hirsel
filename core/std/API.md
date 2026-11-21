@@ -1,7 +1,19 @@
 # Hirsel standard library seed: API contracts
 
-The seed holds the library contracts that the nine M1 workloads (`NINE.md`) need, plus the few
-operations that complete their families. Each module is one source file in this directory:
+Admit a module to `std` when it meets all three conditions. It is universal across real
+Hirsel services and CLIs. It has one settled, familiar shape with either an RFC or a spec
+behind it or an implementation under about 300 lines. It must get a Hirsel invariant right,
+such as `bound bytes` and `Capacity`, `Secret` redaction, `CAP-1` capabilities, constant-time
+cryptography, or R8a deterministic simulation with `Clock` and `Pcg`. As a tie-breaker, put
+it in `std` if an agent would otherwise hand-roll 80 lines of subtle, bug-prone boilerplate.
+
+Keep modules in separate libraries when they pick an opinionated or competing style, as web
+frameworks, ORMs, auth stacks, rich CLI frameworks, and caching or DataLoader policies do.
+The same applies to modules that track vendors or fast-moving protocols, such as database,
+cloud, and LLM SDKs, or that are heavy or specific to one domain, such as media, HTML,
+Markdown, YAML, XML, and domain engines.
+
+Each module is one source file in this directory:
 its types, and each function's signature, contract and body. This document holds what the files
 share: how to read contracts, name modules, and run their contract tests. Every signature and every implementation lives in exactly one place, its `.hirsel`
 file. The [operation index](API-INDEX.md) is generated from those files by

@@ -42,9 +42,19 @@ pub struct OsProvider {
     files: BTreeMap<u64, OwnedFd>,
     next: u64,
     temporary: u64,
+    in_flight_syncs: Vec<*mut crate::os_sync::SyncCell>,
     pub(crate) inherited_listener: Mutex<Option<OwnedFd>>,
     pub stdout: OwnedFd,
     pub stderr: OwnedFd,
+}
+impl Drop for OsProvider {
+    fn drop(&mut self) {
+        for cell in self.in_flight_syncs.drain(..) {
+            // SAFETY: provider is ending with a sync still in flight; detach
+            // its issuer handle so the helper frees the cell on completion.
+            unsafe { crate::os_sync::SyncCell::detach(cell) };
+        }
+    }
 }
 impl OsProvider {
     #[cfg(test)]
@@ -67,6 +77,7 @@ impl OsProvider {
             files: BTreeMap::new(),
             next: 1,
             temporary: 0,
+            in_flight_syncs: Vec::new(),
             inherited_listener: Mutex::new(None),
             stdout,
             stderr,
@@ -595,10 +606,19 @@ pub(crate) mod probe {
 unsafe fn socket_operations(request: *const Request) -> &'static crate::os_net::Operations {
     unsafe { (*(*request).path.cast::<crate::net::NetworkRequest>()).os }
 }
-/// Only socket operations enter I under the OS provider.
-unsafe extern "C" fn resume(_: *mut u8, request: *mut Request, token: u64) -> Step {
+/// Only socket and sync operations enter I under the OS provider.
+unsafe extern "C" fn resume(state: *mut u8, request: *mut Request, token: u64) -> Step {
     if unsafe { matches!((*request).operation, SYNC | SYNC_DIR) } {
-        return crate::os_sync::resume(token);
+        // SAFETY: pinned SYNC/SYNC_DIR request whose `path` holds its SyncCell.
+        let (step, consumed) = unsafe { crate::os_sync::resume(request) };
+        if let Some(cell) = consumed {
+            // SAFETY: state is this run's live OsProvider.
+            let os = unsafe { &mut *state.cast::<OsProvider>() };
+            if let Some(i) = os.in_flight_syncs.iter().position(|&c| c == cell) {
+                os.in_flight_syncs.swap_remove(i);
+            }
+        }
+        return step;
     }
     unsafe { (socket_operations(request).step)(request, token, false) }
 }
@@ -657,16 +677,21 @@ unsafe fn sync_file(state: *mut u8, request: *mut Request, token: u64) -> Option
 
 unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: forwarded caller contract; `sync_file` checked the handle.
-    let (os, request) = unsafe { (&*state.cast::<OsProvider>(), &*request) };
-    let directory = request.operation == SYNC_DIR;
+    let (os, req) = unsafe { (&mut *state.cast::<OsProvider>(), &*request) };
+    let directory = req.operation == SYNC_DIR;
     let fd = if directory {
-        &os.directories[&request.handle]
+        &os.directories[&req.handle]
     } else {
-        &os.files[&request.handle]
+        &os.files[&req.handle]
     }
     .as_raw_fd();
     let token = SUBMIT.get().0;
-    SUBMIT.set((token, crate::os_sync::submit(fd, directory, token)));
+    // SAFETY: pinned SYNC/SYNC_DIR request.
+    let (step, untracked) = unsafe { crate::os_sync::submit(fd, directory, token, request) };
+    if let Some(cell) = untracked {
+        os.in_flight_syncs.push(cell);
+    }
+    SUBMIT.set((token, step));
     Outcome::default()
 }
 

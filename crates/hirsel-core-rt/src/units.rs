@@ -1063,6 +1063,7 @@ pub(crate) struct Unit {
     next_local: Cell<u32>,
     deliveries: Arc<AtomicU64>,
     unobserved: URefCell<Vec<(usize, Unobserved)>>,
+    sync_cells: URefCell<Vec<*mut crate::os_sync::SyncCell>>,
     children: Cell<u32>,
     /// Readiness for this unit's keys, as (reactor identity, epoll flags):
     /// crossing events and the shared poller's socket edges. The unit's
@@ -1275,6 +1276,7 @@ fn create_unit(id: u32, role: u32) -> &'static Unit {
         next_local: Cell::new(0),
         deliveries: Arc::new(AtomicU64::new(0)),
         unobserved: URefCell::new(Vec::new()),
+        sync_cells: URefCell::new(Vec::new()),
         children: Cell::new(0),
         xready: Mutex::new(Vec::new()),
         xpending: AtomicBool::new(false),
@@ -1390,6 +1392,37 @@ pub(crate) fn running() -> Option<&'static Unit> {
 }
 pub(crate) fn unit_id(u: &Unit) -> u32 {
     u.id
+}
+
+/// Record an in-flight sync cell on the running pooled unit so unit teardown
+/// detaches it if the unit ends before completion. Returns `true` if tracked.
+pub(crate) fn track_sync(cell: *mut crate::os_sync::SyncCell) -> bool {
+    if !untied() {
+        return false;
+    }
+    let u = cur();
+    if u.is_null() {
+        return false;
+    }
+    // SAFETY: only the running unit's worker touches its `sync_cells`.
+    unsafe { (*u).sync_cells.borrow_mut().push(cell) };
+    true
+}
+
+/// Remove a completed sync cell from the running pooled unit's tracking list.
+pub(crate) fn untrack_sync(cell: *mut crate::os_sync::SyncCell) {
+    if !untied() {
+        return;
+    }
+    let u = cur();
+    if u.is_null() {
+        return;
+    }
+    // SAFETY: only the running unit's worker touches its `sync_cells`.
+    let mut cells = unsafe { (*u).sync_cells.borrow_mut() };
+    if let Some(i) = cells.iter().position(|&c| c == cell) {
+        cells.swap_remove(i);
+    }
 }
 
 /// Requeue the running unit if its slice is over and another unit waits.
@@ -1813,6 +1846,11 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
             After::Done => {
                 WORST.fetch_max(u.status.load(Ordering::Relaxed), Ordering::Relaxed);
                 u.state.store(DONE, Ordering::SeqCst);
+                for cell in u.sync_cells.borrow_mut().drain(..) {
+                    // SAFETY: unit has ended; detach any sync still in flight so
+                    // the helper frees the cell on completion and delivers nothing.
+                    unsafe { crate::os_sync::SyncCell::detach(cell) };
+                }
                 // The terminal switch returned to the host stack. DONE
                 // rejects further wakes, and nothing can resume this stack.
                 p.memory.put_unit_stack((*u.stack.get()).take().unwrap());

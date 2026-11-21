@@ -1939,6 +1939,14 @@ impl Readies {
         tokens.clear();
         found
     }
+    #[cfg(test)]
+    pub(crate) fn has_outside(&self) -> bool {
+        self.outside()
+    }
+    #[cfg(test)]
+    pub(crate) fn take_for_test(&self, token: u64) -> bool {
+        self.take(token)
+    }
 }
 /// Every live waiter: each run's scheduler, and a scheduler-less operation
 /// while it waits. A token is unique in the process, so a ready reaches every
@@ -2050,6 +2058,13 @@ impl Outside {
     /// Publish to the issuing waiter before releasing its outside work.
     pub(crate) fn complete(self, token: u64) {
         self.0.push(token);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_readies(readies: Arc<Readies>) -> Self {
+        let outside = readies.outside.fetch_add(1, Ordering::SeqCst) + 1;
+        readies.lock().reserve(outside);
+        Self(readies)
     }
 }
 impl Drop for Outside {

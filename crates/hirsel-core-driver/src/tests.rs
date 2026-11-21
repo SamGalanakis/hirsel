@@ -1,6 +1,9 @@
 use super::*;
 use hirsel_core_ir::{FuncId, eval};
 
+#[path = "diagnostic_hints.rs"]
+mod diagnostic_hints;
+
 pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
     let source_file = dir.join("main.hirsel");
     std::fs::write(&source_file, source).unwrap();

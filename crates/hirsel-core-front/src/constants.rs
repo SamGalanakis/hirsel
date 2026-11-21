@@ -216,6 +216,22 @@ impl Program<'_> {
             Err("LANG-11")
         }
     }
+    pub(crate) fn constant_field_refusal(
+        &self,
+        rule: &str,
+        site: Site,
+        value: ConstValue,
+        name: &str,
+    ) -> Refusal {
+        let refusal = refusal(rule, site, "constant field is absent or opaque");
+        if rule == "LANG-11"
+            && let TyKind::Adt(d, _) = self.types.kind(value.ty)
+        {
+            let path = self.decls[d.index()].path.clone();
+            return refusal.with_unresolved(name, hirsel_core_resolve::NameScope::Field(path));
+        }
+        refusal
+    }
     fn const_refuse(&mut self, at: ItemRef, n: NodeId, message: &str) {
         self.refusals
             .push(refusal("LANG-20", self.site(at, n), message));
@@ -248,10 +264,11 @@ impl ConstCx<'_, '_> {
         {
             Ok(field) => Some(field),
             Err(rule) => {
-                self.p.refusals.push(refusal(
+                self.p.refusals.push(self.p.constant_field_refusal(
                     rule,
                     self.p.site(self.at, n),
-                    "constant field is absent or opaque",
+                    value,
+                    name,
                 ));
                 None
             }

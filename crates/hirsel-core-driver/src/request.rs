@@ -1063,15 +1063,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     // write after a stored build.
     if let Some(key) = key
         && (output.stopped.is_none() || undelivered.is_some())
-    {
-        let value = crate::request_record::Value::of(crate::request_record::Answer {
+        && let Some(value) = crate::request_record::Value::of(crate::request_record::Answer {
             product: &product,
             diagnostics: &output.diagnostics,
             incomplete: &output.incomplete,
             resources: &output.resources,
             reach: reach.as_ref(),
             native: output.native.as_ref().or(undelivered.as_ref()),
-        });
+        })
+    {
         crate::request_record::publish(&store_root, key, &value)?;
         meter.finish("request record/publish");
     }
@@ -1190,6 +1190,9 @@ fn finish(
             eprintln!("{}: {} {}", sources.render(&d.primary), d.rule, d.message);
             for site in &d.causal {
                 eprintln!("  caused by {}", sources.render(site));
+            }
+            if let Some(hint) = &d.hint {
+                eprintln!("  {hint}");
             }
         }
         for g in &output.incomplete {

@@ -1,6 +1,7 @@
 //! Tool encoding of PROG-7 sites. Cached item-local anchors bind to current file bytes.
 use super::*;
-use hirsel_core_syntax::Span;
+use hirsel_core_resolve::{DefinitionKind, ModulePath, NameScope, Namespace};
+use hirsel_core_syntax::{Span, Symbol};
 
 #[derive(Serialize)]
 pub struct SourceSite {
@@ -17,6 +18,20 @@ pub struct Diagnostic<'a> {
     pub declared: Option<&'a str>,
     pub required: Option<&'a str>,
     pub message: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<DiagnosticHint>,
+}
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DiagnosticHint {
+    DidYouMean { replacement: String },
+}
+impl std::fmt::Display for DiagnosticHint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DidYouMean { replacement } => write!(f, "did you mean `{replacement}`?"),
+        }
+    }
 }
 #[derive(Serialize)]
 pub struct IncompleteDiagnostic<'a> {
@@ -86,6 +101,7 @@ impl CheckProduct {
                     declared: r.declared.as_deref(),
                     required: r.required.as_deref(),
                     message: &r.message,
+                    hint: hirsel_core_ids::published::catch_io(|| Ok(name_hint(&self.index, r)))?,
                 })
             })
             .collect()
@@ -127,6 +143,147 @@ impl CheckProduct {
             })
             .collect()
     }
+}
+
+fn name_hint(index: &NameIndex, refusal: &Refusal) -> Option<DiagnosticHint> {
+    let lookup = refusal.unresolved.as_deref()?;
+    let from = refusal.primary.module;
+    let module_at = |path: &ModulePath| index.module_at(&path.package, &path.modules);
+    let best = match &lookup.scope {
+        NameScope::ModuleMember {
+            module,
+            namespace,
+            constructor,
+        } => {
+            let module = module_at(module)?;
+            let names = index.member_names_in(module).filter(|&name| {
+                visible_member(index, from, module, name, *namespace, *constructor).is_some()
+            });
+            closest_name(index, &lookup.written, names)
+        }
+        NameScope::ModulePrefix {
+            module,
+            children_of,
+            namespace,
+        } => {
+            let module = module_at(module)?;
+            let parent = module_at(children_of)?;
+            let children = index.child_names(parent).chain(index.child_names(module));
+            let constants = index.member_names_in(module).filter(|&name| {
+                *namespace == Namespace::Value
+                    && visible_member(index, from, module, name, Namespace::Value, false)
+                        == Some(DefinitionKind::Constant)
+            });
+            let names = children
+                .chain(constants)
+                .filter(|&name| parent == module || index.child(parent, name) != Some(module));
+            closest_name(index, &lookup.written, names)
+        }
+        NameScope::Field(path) | NameScope::Variant(path) => {
+            let path = &path.0;
+            let module = index.module_at(&path.package, &path.modules)?;
+            let name = index.symbols.find(&path.name)?;
+            let definition = index.member(module, name, Namespace::Type, false)?;
+            let row = index.get(definition);
+            if module != from
+                && (row.opaque
+                    || !row.public
+                    || !index.reachable(from, index.module_package(module)))
+            {
+                return None;
+            }
+            if matches!(lookup.scope, NameScope::Field(_)) {
+                closest_name(
+                    index,
+                    &lookup.written,
+                    index.field_names(definition).iter().copied(),
+                )
+            } else {
+                let names = index
+                    .variant_names(definition)
+                    .iter()
+                    .copied()
+                    .filter(|&name| {
+                        index.member(from, name, Namespace::Value, false).is_none()
+                            && index.prelude(name, Namespace::Value, false).is_none()
+                    });
+                closest_name(index, &lookup.written, names)
+            }
+        }
+    }?;
+    Some(DiagnosticHint::DidYouMean {
+        replacement: index.symbols.text(best).into(),
+    })
+}
+
+fn visible_member(
+    index: &NameIndex,
+    from: ModuleId,
+    module: ModuleId,
+    name: Symbol,
+    ns: Namespace,
+    constructor: bool,
+) -> Option<DefinitionKind> {
+    let mut members = index.members_named(from, module, name, ns, false);
+    let (id, ambiguous) = if let Some(id) = members.next() {
+        (id, members.next().is_some())
+    } else if constructor {
+        let mut types = index.members_named(from, module, name, Namespace::Type, true);
+        (types.next()?, types.next().is_some())
+    } else {
+        return None;
+    };
+    let row = index.get(id);
+    (!ambiguous
+        && (row.site.module == from || row.public && !(constructor && row.opaque))
+        && (!constructor || row.kind != DefinitionKind::Type || index.variant_names(id).is_empty()))
+    .then_some(row.kind)
+}
+
+fn closest_name(
+    index: &NameIndex,
+    written: &str,
+    candidates: impl Iterator<Item = Symbol>,
+) -> Option<Symbol> {
+    let written: Vec<char> = written.chars().collect();
+    let mut best_distance = (written.len() / 3).max(1);
+    let mut best = None;
+    let mut tied = false;
+    let mut row = vec![0; written.len() + 1];
+    for name in candidates {
+        let candidate = index.symbols.text(name);
+        if written.len().abs_diff(candidate.chars().count()) > best_distance {
+            continue;
+        }
+        let distance = edit_distance(&written, candidate, &mut row);
+        if distance == 0 || distance > best_distance {
+            continue;
+        }
+        if best.is_none() || distance < best_distance {
+            best_distance = distance;
+            best = Some(name);
+            tied = false;
+        } else if best != Some(name) {
+            tied = true;
+        }
+    }
+    best.filter(|_| !tied)
+}
+
+fn edit_distance(written: &[char], candidate: &str, row: &mut [usize]) -> usize {
+    for (i, cell) in row.iter_mut().enumerate() {
+        *cell = i;
+    }
+    for (i, ch) in candidate.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, &other) in written.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(ch != other)).min(1 + above.min(row[j]));
+            diagonal = above;
+        }
+    }
+    row[written.len()]
 }
 
 /// The terminal form of PROG-7 sites: `path:line:column`, from the request's

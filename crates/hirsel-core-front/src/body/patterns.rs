@@ -267,11 +267,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => false,
         };
         if !visible || decl.opaque && decl.site.module != from {
-            self.refuse(
+            let mut refusal = refusal(
                 "LANG-17",
-                n,
+                self.cause(n),
                 "this constructor is not visible for the scrutinee's type",
             );
+            if let Some(Target::ContextualConstructor { name }) = target {
+                refusal = refusal.with_unresolved(
+                    p.index.symbols.text(name),
+                    NameScope::Variant(decl.path.clone()),
+                );
+            }
+            self.push_refusal(refusal);
             return fail(self);
         }
         let name = match target {
@@ -319,7 +326,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     continue;
                 };
                 let Some(i) = fs.iter().position(|f| f.name == name) else {
-                    self.refuse("LANG-17", arg, "unknown pattern field");
+                    let mut refusal = refusal("LANG-17", self.cause(arg), "unknown pattern field");
+                    if case.is_none() {
+                        refusal =
+                            refusal.with_unresolved(name, NameScope::Field(decl.path.clone()));
+                    }
+                    self.push_refusal(refusal);
                     require_all = false;
                     continue;
                 };

@@ -36,7 +36,7 @@ use hirsel_core_ir::{
 use hirsel_core_layout::{
     Carried, FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef,
 };
-use hirsel_core_resolve::{Refusal, Target};
+use hirsel_core_resolve::{NameScope, Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use simd::SimdCall;

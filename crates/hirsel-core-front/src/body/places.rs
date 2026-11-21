@@ -566,7 +566,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let Some((i, ft)) = found else {
             if inner != ERROR {
-                self.refuse("LANG-9", n, format!("this type has no field `{name}`"));
+                let mut refusal = refusal(
+                    "LANG-9",
+                    self.cause(n),
+                    format!("this type has no field `{name}`"),
+                );
+                if let TyKind::Adt(d, _) = self.t.kind(inner) {
+                    let decl = &self.p.decls[d.index()];
+                    refusal = refusal.with_unresolved(name, NameScope::Field(decl.path.clone()));
+                }
+                self.push_refusal(refusal);
             }
             return Err(());
         };

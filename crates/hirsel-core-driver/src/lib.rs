@@ -52,7 +52,8 @@ pub use reachability::{GapStop, Reachable};
 pub use test_run::{Runner, TestOutcome};
 mod meter;
 pub use diagnostics::{
-    Diagnostic, IncompleteDiagnostic, ResourceDiagnostic, SourceFiles, SourceSite, line_column,
+    Diagnostic, DiagnosticHint, IncompleteDiagnostic, ResourceDiagnostic, SourceFiles, SourceSite,
+    line_column,
 };
 pub use image::{CoreImage, LibraryInput};
 pub use instances::{InstanceStop, Units, collect_instances};

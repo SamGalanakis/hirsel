@@ -586,8 +586,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 (ERROR, None)
             }
             &Target::Definition(id) if self.p.constant_ids[id.0 as usize].is_some() => {
-                let constant = self.p.constant_ids[id.0 as usize].unwrap();
-                let Some(value) = self.p.constants[constant as usize].value else {
+                let p = self.p;
+                let constant = p.constant_ids[id.0 as usize].unwrap();
+                let Some(value) = p.constants[constant as usize].value else {
                     self.halt();
                     return (ERROR, None);
                 };
@@ -596,14 +597,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     &self.item.tree.tokens[u.projections.start as usize..u.projections.end as usize]
                 {
                     if token.kind == TokenKind::Ident {
-                        let field = match self.p.constant_field(
-                            self.p.modules[self.at.module as usize].id,
+                        let name = p.index.symbols.text(token.symbol);
+                        let field = match p.constant_field(
+                            p.modules[self.at.module as usize].id,
                             value,
-                            self.p.index.symbols.text(token.symbol),
+                            name,
                         ) {
                             Ok(field) => field,
                             Err(rule) => {
-                                self.refuse(rule, n, "constant field is absent or opaque");
+                                self.push_refusal(p.constant_field_refusal(
+                                    rule,
+                                    self.cause(n),
+                                    value,
+                                    name,
+                                ));
                                 return (ERROR, None);
                             }
                         };
@@ -611,7 +618,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     }
                 }
                 if let crate::ConstData::StaticString(id) = value.data {
-                    let p = self.p;
                     return self.static_string_value(
                         &p.constant_strings[id as usize],
                         value.ty,
@@ -844,7 +850,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let Some((case, fields, labelled)) = found else {
             let a = self.shown(want.map_or(ERROR, |w| w.ty));
             let message = format!("expected `{a}`, found variant `{text}`");
-            self.refuse_compared("LANG-11", n, text, a, message);
+            self.push_refusal(
+                refusal("LANG-11", self.cause(n), message)
+                    .with_comparison(text, a)
+                    .with_unresolved(text, NameScope::Variant(decl.path.clone())),
+            );
             return (ERROR, None);
         };
         self.construct(n, d, case, fields, labelled, args, want)

@@ -20,6 +20,7 @@ bounds `shareable` against required `send`; parameter mode view against required
 Sites are a module path with a byte span; a source that is not valid UTF-8 is reported at
 the span of its first invalid bytes. The encoding is a tool format outside the
 language; the rule explanations shown with refusals are generated from this specification.
+Suggested corrections are non-normative tool output.
 
 **Terminal sites.** Without `--json`, the CLI prints each site of a file the request read
 as `path:line:column`, adding `-column` or `-line:column` for a span end that differs. The

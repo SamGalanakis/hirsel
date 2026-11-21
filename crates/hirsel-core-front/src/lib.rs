@@ -86,6 +86,7 @@ pub(crate) fn refusal(rule: &str, primary: Site, message: impl Into<String>) -> 
         declared: None,
         required: None,
         message: message.into(),
+        unresolved: None,
     }
 }
 

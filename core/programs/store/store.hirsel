@@ -8329,7 +8329,7 @@ fn disk_load(d: Dir, ceiling: u64) -> Result[DiskLoaded, Error] waits {
 
 fn disk_load_manifest(d: Dir, raw: Bytes, ceiling: u64) -> Result[DiskLoaded, Error] waits {
     let preload = disk_decode_manifest(d, raw)?
-    disk_finish_load(take preload, ceiling)
+    disk_finish_load(preload, ceiling)
 }
 
 type DiskDecoded: send {
@@ -8391,14 +8391,16 @@ fn disk_decode_packs(d: Dir, id: StoreId, take manifest: DiskManifest) -> Result
 
 // Open decodes rows on its caller. Only the persistent per-node account is
 // constructed under the checkpoint task's reserved allowance (Q1a, section3.4).
-fn disk_finish_load(take preload: DiskDecoded, ceiling: u64) -> Result[DiskLoaded, Error] {
-    let DiskDecoded(store: id, manifest: take manifest, roots: take main_roots, all: take all,
-                    ids: take ids, locations: take locations, stats: take stats) = take preload
+// Reads a view of the decoded manifest, so its caller can run it inside
+// isolate; what the loaded state keeps is shared or copied here.
+fn disk_finish_load(preload: DiskDecoded, ceiling: u64) -> Result[DiskLoaded, Error] {
+    let manifest: DiskManifest = clone(preload.manifest)
+    let main_roots = share_roots(preload.roots)
     let mut graph = disk_graph()
-    let _ = capacity(disk_track_roots(mut graph, all))?
-    graph.pack_stats = take stats
-    for node_id in ids {
-        let place = option.unwrap(map.get(locations, node_id))
+    let _ = capacity(disk_track_roots(mut graph, preload.all))?
+    graph.pack_stats = disk_index_share(preload.stats)
+    for node_id in preload.ids {
+        let place = option.unwrap(map.get(preload.locations, node_id))
         let present = capacity(disk_index_update(mut graph.nodes, node_id, fn(mut row: DiskNodeRecord) -> u64 {
             row.pack = place.0;
             row.size = place.1;
@@ -8413,7 +8415,7 @@ fn disk_finish_load(take preload: DiskDecoded, ceiling: u64) -> Result[DiskLoade
     if graph.live > ceiling {
         return Error(Full(Capacity(requested: graph.live, available: ceiling)))
     }
-    Ok(DiskLoaded(store: id, manifest: take manifest, roots: take main_roots, graph: take graph))
+    Ok(DiskLoaded(store: preload.store, manifest: take manifest, roots: take main_roots, graph: take graph))
 }
 
 fn disk_root_ids(roots: Roots) -> DiskRoots {
@@ -9663,7 +9665,9 @@ type DiskWorker: send {
     state: DiskState,
     cap: u64,
     receive: Receiver[DiskCut],
-    send: Sender[DiskCutAck]
+    send: Sender[DiskCutAck],
+    done: Sender[DiskCutDone],
+    from: Receiver[DiskCutDone]
 }
 
 type DiskCutDone = Result[(DiskState, DiskCutAck), Error]
@@ -9733,8 +9737,7 @@ fn disk_cut_run(d: Dir, tasks: Tasks, state: DiskState, take cut: DiskCut, cap: 
 }
 
 fn disk_worker(take input: DiskWorker) -> Result[(), Error] waits {
-    let DiskWorker(d: d, tasks: tasks, state: take initial, cap: cap, receive: take receive, send: take send) = take input
-    let (done, from): (Sender[DiskCutDone], Receiver[DiskCutDone]) = channel.new(1)
+    let DiskWorker(d: d, tasks: tasks, state: take initial, cap: cap, receive: take receive, send: take send, done: take done, from: take from) = take input
     let mut state = take initial
     while let Ok(take cut) = channel.receive(receive) {
         let generation = cut.generation
@@ -9783,7 +9786,8 @@ pub fn disk_law_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
     let state = DiskState(store: db.store, manifest: take manifest, lease: None, graph: disk_graph())
     let (send, receive): (Sender[DiskCut], Receiver[DiskCut]) = channel.new(1)
     let (acks, received): (Sender[DiskCutAck], Receiver[DiskCutAck]) = channel.new(1)
-    let input = DiskWorker(d: d, tasks: tasks, state: take state, cap: 512, receive: take receive, send: take acks)
+    let (outcomes, outcome_from): (Sender[DiskCutDone], Receiver[DiskCutDone]) = channel.new(1)
+    let input = DiskWorker(d: d, tasks: tasks, state: take state, cap: 512, receive: take receive, send: take acks, done: take outcomes, from: take outcome_from)
     let worker = task.spawn(tasks, bytes 131072, take input, disk_worker)
     for k in 0u64 .. 96 {
         if !put_one(mut db, k, k + 1) {
@@ -10062,7 +10066,9 @@ type DiskBootstrap: send {
     options: Options,
     ready: Sender[Result[DiskStartup, Error]],
     receive: Receiver[DiskCut],
-    send: Sender[DiskCutAck]
+    send: Sender[DiskCutAck],
+    done: Sender[DiskCutDone],
+    from: Receiver[DiskCutDone]
 }
 
 // The branches and then the pins, in the manifest's order, which is `all`'s.
@@ -10134,8 +10140,21 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskD
 
 fn disk_bootstrap(take input: DiskBootstrap) -> Result[(), Error] waits {
     let DiskBootstrap(d: d, tasks: tasks, startup: take initial, preload: take preload, options: options,
-                      ready: take ready, receive: take receive, send: take send) = take input
-    let assembled = disk_finish_load(take preload, 18446744073709551615)
+                      ready: take ready, receive: take receive, send: take send, done: take done, from: take from) = take input
+    // R1: a refused admission while loading raises Capacity. The load does not
+    // wait, so isolate is its boundary; the refusal reaches open as Full, the
+    // way a refused cut does, and nothing on disk has changed.
+    let caught = isolate(fn() -> Result[DiskLoaded, Error] {
+        disk_finish_load(preload, 18446744073709551615)
+    })
+    let assembled = match take caught {
+        Ok(Ok(take loaded)) => take loaded,
+        Ok(Error(causes)) => match raised_capacity(causes) {
+            Some(c) => Error(Full(c)),
+            None => fail("store: loading the disk graph failed"),
+        },
+        Error(c) => Error(Full(c)),
+    }
     match take assembled {
         Error(take e) => {
             let _ = channel.send(ready, Error(take e));
@@ -10148,7 +10167,7 @@ fn disk_bootstrap(take input: DiskBootstrap) -> Result[(), Error] waits {
             if let Error(_) = channel.send(ready, Ok(take startup)) {
                 return Ok(())
             }
-            let worker = DiskWorker(d: d, tasks: tasks, state: take state, cap: options.pack_bytes, receive: take receive, send: take send)
+            let worker = DiskWorker(d: d, tasks: tasks, state: take state, cap: options.pack_bytes, receive: take receive, send: take send, done: take done, from: take from)
             disk_worker(take worker)
         }
     }
@@ -10182,10 +10201,11 @@ fn disk_session(tasks: Tasks, d: Dir, clock: Clock, r: Random, options: Options)
     let (send, receive): (Sender[DiskCut], Receiver[DiskCut]) = channel.new(1)
     let (acks, received): (Sender[DiskCutAck], Receiver[DiskCutAck]) = channel.new(1)
     let (ready, waiting): (Sender[Result[DiskStartup, Error]], Receiver[Result[DiskStartup, Error]]) = channel.new(1)
+    let (done, from): (Sender[DiskCutDone], Receiver[DiskCutDone]) = channel.new(1)
     let prepared = disk_start(d, r, options)?
     let (take initial, take preload) = take prepared
     let input = DiskBootstrap(d: d, tasks: tasks, startup: take initial, preload: take preload, options: options,
-                              ready: take ready, receive: take receive, send: take acks)
+                              ready: take ready, receive: take receive, send: take acks, done: take done, from: take from)
     let worker = task.spawn(tasks, bytes options.checkpoint_task_bytes, take input, disk_bootstrap)
     let startup = result.unwrap(channel.receive(waiting))?
     Ok(DiskSession(lock: take lock, startup: take startup, send: take send, acks: take received, worker: take worker))
@@ -10784,7 +10804,38 @@ pub fn disk_law_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     let value = result.unwrap(get(snapshot(reopened), shape(t), 1))
     let good = version(snapshot(reopened)) == 3 && value == None
     result.unwrap(close(take reopened))
-    good
+    if !good {
+        return false
+    }
+    // Loading the graph in the worker can be refused too. Each room either
+    // opens at version3 or refuses with Full; a refusal leaves MANIFEST at
+    // generation3 and releases LOCK, so the next open goes ahead.
+    let mut load_refused: u64 = 0
+    let mut load_opened: u64 = 0
+    let rooms: Inline[u64, 4] =[128, 1024, 8192, 131072]
+    for room in rooms {
+        let mut small = options
+        small.checkpoint_task_bytes = room
+        match open(tasks, d, c, r, small) {
+            Ok(take opened) => {
+                load_opened += 1
+                let at = version(snapshot(opened))
+                result.unwrap(close(take opened))
+                if at != 3 {
+                    return false
+                }
+            },
+            Error(Full(_)) => {
+                load_refused += 1
+                let kept = result.unwrap(disk_load(d, 2097152))
+                if kept.manifest.generation != 3 {
+                    return false
+                }
+            },
+            Error(_) => return false,
+        }
+    }
+    load_refused > 0 && load_opened > 0
 }
 
 @test

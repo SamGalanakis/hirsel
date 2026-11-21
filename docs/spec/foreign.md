@@ -171,7 +171,8 @@ entry's closure reaches, in strictly ascending order of the module's identity en
 leaf holds the module's identity encoding, its symbol prefix as a text, its whole archive
 table, and its reached functions. The table is the number of rows and then each row in
 ascending order of target, as the target text, the 32-byte pin and the byte length as a
-number, which are exactly the bytes FFI-9's archive-set digest is taken over. The reached
+number. The rows, without the count before them, are exactly the bytes FFI-9's archive-set
+digest is taken over. The reached
 functions are their number and then each function, in strictly ascending order of identity
 encoding, as that encoding and its PROG-9 header text `S` as a text. So a reader with no
 source recomputes every foreign function's address from the leaf, and selects the row for
@@ -451,8 +452,9 @@ reserved ([reserved](reserved.md), R5).
 A foreign function has no checked IR. Its code address ([PROG-10](programs.md#prog-10-code-addresses))
 is `H("hirsel.code-foreign.v1", e ‖ s ‖ x ‖ a)`. `e` is its identity encoding, and `s` its
 PROG-9 header text `S` as a text. `x` is its C symbol as a text. `a` is the module's
-**archive-set digest**: SHA-256 over the module's archive table, each row written in ascending
-order of target as the target text, the 32-byte pin and the file's byte length as an unsigned
+**archive-set digest**: SHA-256 over the module's archive table, with no row count, each row
+written in ascending order of target as the target text (its length as an unsigned LEB128
+number, then its bytes), the 32-byte pin and the file's byte length as an unsigned
 LEB128 number. A slot that names a foreign function is bound `External` to that address. So
 the address, and each caller's address and revision ([PROG-9](programs.md#prog-9-code-descriptors)),
 is the same on every target, and it changes when any target's archive changes, when a row is

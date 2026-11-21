@@ -91,8 +91,10 @@ components with trailing dots are not refused. A module path is one or more iden
 archives through a handle on the member's directory, never by re-resolving a pathname. It
 opens each path one component at a time relative to the directory handle it holds (as
 `openat` does), and checks every opened object on its handle (as `fstat` does). A component
-may be a symbolic link. The tool follows it by resolving its target the same way, from the
-package directory, and the walk must never leave the package directory. The final object must
+may be a symbolic link. The tool follows it by resolving its target the same way: a relative
+target from the directory that holds the link, one component at a time, and `..` steps to
+the walk's parent directory; an absolute target is refused. The walk must never leave the
+package directory, not even on the way to a file inside it. The final object must
 be a regular file. Then the listed path names that file's bytes, and nothing about the link is
 recorded. A path is refused (section 9) when it leaves the package, when it ends at a
 directory or at nothing, when it meets a link loop, and when the host cannot open relative to
@@ -289,7 +291,7 @@ workspace as follows:
    depending on where a command runs. If there is no such manifest, M's directory is a
    single-package workspace.
 3. If M has `[workspace]` and no `[package]`, it is a root and not a package. A command that
-   needs one package (check, build, publish, run, test, inspect, pack) is refused there.
+   needs one package (check, build, publish, run, test, inspect, replay, sdk, pack) is refused there.
    `lock` and `fetch` act on the whole workspace.
 
 The lock is `hirsel.lock` in the workspace root's directory. Directories are compared by the
@@ -354,7 +356,7 @@ refusal stops it:
    the ones a build links.
 3. **Content.** Acquire the `C` of every published root reached, in rounds, until no new root
    appears. A **pending** root is one reached and not yet decoded, and pending roots are taken
-   in order of identity and then root. In each round:
+   in order of the `name@major` their edges expect, and then of root. In each round:
    1. each pending root whose store entry is present and undamaged is opened from the store;
    2. each pending root left that has a declared source, a `url` or `archive` in a
       declaration that binds it, is fetched from its lock source (section 8), the first such
@@ -362,9 +364,12 @@ refusal stops it:
       its failure is the refusal. A fetched archive puts all its entries in the store
       (section 7), so it can satisfy other pending roots;
    3. only when the first two steps have nothing left to do, each pending root left is
-      fetched from the declared source of a published package whose `C` binds it, the first
-      such package in identity order, even when that package itself came from the store,
-      because its archive holds its whole closure;
+      fetched from the declared source of its nearest **carrier**: follow the bindings back
+      from the root, through published packages whose `C` binds it and then their binders,
+      to the first published root that has a declared source, taking the least path in the
+      order of section 5's refusal paths. That root's archive holds its whole closure, so it
+      holds the pending root, and it is fetched even when that root itself came from the
+      store;
    4. a root still pending is refused as `no source`, the least first.
 
    Each `C` opened is decoded (section 1) once per root, and its bindings join the walk. Then,
@@ -639,8 +644,11 @@ Roots are always written in full.
 |---|---|
 | unknown key | `hirsel: <manifest>: unknown key <dotted.key>` |
 | bad field | `hirsel: <manifest>: <dotted.key>: <what is wrong>`, for example `package.name: "Json" is not [a-z][a-z0-9_]*` |
-| bad path | `hirsel: <manifest>: sources: "<path>" breaks the path rules: <which rule>` |
-| case collision | `hirsel: <manifest>: sources: "<a>" and "<b>" differ only in case` |
+| bad path | `hirsel: <manifest>: sources: "<path>" breaks the path rules: <which rule>`, the rule one of `bad component "<c>"`, `component over 255 bytes`, `path over 1024 bytes`, `does not end in .hirsel` (or `.a` for an archive) |
+| case collision | `hirsel: <manifest>: <field>: "<a>" and "<b>" differ only in case`, with `<field>` `sources` or `foreign.<module>` for the later path, in the tree order of section 1 |
+| file as directory | `hirsel: <manifest>: <field>: "<a>" is a file and also a directory of "<b>"` |
+| directory spelling | `hirsel: <manifest>: <field>: "<a>" and "<b>" spell directory "<d>" differently` |
+| one file, two rows | `hirsel: <manifest>: foreign.<module>: "<file>" is named by two archive rows` |
 | source missing | `hirsel: <manifest>: sources: "<path>" does not exist` |
 | symlink escapes | `hirsel: <manifest>: sources: "<path>" resolves outside the package` |
 | not a regular file | `hirsel: <manifest>: sources: "<path>" does not resolve to a regular file` |
@@ -692,7 +700,8 @@ identities. It gains each published package's library root, a coalesced member's
 (section 6), and each package's foreign stamp (below). So a record checked against one
 pin of `json@1` is never found under another, even for a body whose own bytes and named
 headers are equal. That holds whatever reads a future key might fail to list, at no cost to
-reuse within one pin, because a root never changes. A member contributes no root: its files
+reuse within one pin, because a root never changes. A member that no published binding names
+contributes no root: its files
 reach every key through their bytes, exactly as a package's do today, so editing a member does
 not invalidate every record of the workspace.
 
@@ -884,8 +893,8 @@ component bytes although its frame `01 02 61 61` is bytewise greater than `01 01
 manifest's row order does not matter. These are wire vectors: the archive bytes are not `ar`
 archives, and only FFI-3 at link time asks that they be. The decoder refuses three variants,
 each reported as `hirsel: demo@1: archive:demo.hpkg is not a package archive: <failure>` when
-it is the head of an archive `app` binds by `{ major = 1, root = "<its own root>", archive =
-"demo.hpkg" }`:
+it is the head of an archive `app` binds by `{ major = 1, root = "<D>", archive = "demo.hpkg" }`,
+because decoding comes before the root check (section 7):
 
 - the same `C` with the two module entries swapped: `foreign modules out of order at aa`, whose
   root, `sha256:b8b4134afbaded2a97a56700b11e35346406eb32701216283453befa2712b428`, a lenient

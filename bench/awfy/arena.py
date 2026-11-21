@@ -41,12 +41,13 @@ def build_hirsel(out, artifacts, rows, env=None, *, debug_lines=False):
         binary = out / f"{module}-{mib}"
         manifest = out / f"{binary.name}-inputs.json"
         manifest.write_text(json.dumps(group_inputs(module)))
+        task_grant = ("--grant", "Tasks") if module == "matmul" else ()
         command = [
             artifacts["compiler"], "build",
             "--inputs", manifest, "--entry", f"langarena@1/{module}/main",
             "--store", out / "store", "--backend", "llvm", "--release",
             "--runtime", artifacts["runtime"], "--cc", llvm_path() / "bin/clang",
-            "--dir", out, "--grant", "Stdout", "--grant", "Tasks", "--limit", str(mib << 20),
+            "--dir", out, "--grant", "Stdout", *task_grant, "--limit", str(mib << 20),
             "--json", "-o", binary,
         ]
         if debug_lines:

@@ -66,6 +66,14 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         crate::host::run(invocation)?;
         std::process::exit(0);
     }
+    if command == "replay"
+        && invocation
+            .options
+            .iter()
+            .any(|(option, _)| *option == Opt::HostState)
+    {
+        std::process::exit(crate::host::replay(invocation)?);
+    }
     if command == "call" {
         std::process::exit(crate::call::run(crate::call::Options::read(invocation)?)?);
     }
@@ -344,6 +352,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::AdmitTimeout
             | Opt::HostMemory
             | Opt::StartRetries
+            | Opt::TapeRetention
             | Opt::CallTimeout => {
                 unreachable!("CLI early command option")
             }

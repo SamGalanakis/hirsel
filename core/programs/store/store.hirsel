@@ -10006,6 +10006,7 @@ type DiskStartup: send {
     next_table: u32,
     generation: u64,
     cut_first: u64,
+    recorded_after: u64,
     seq: u64,
     segment: HostFile,
     end_file: HostFile
@@ -10059,7 +10060,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskD
             disk_publish_manifest(d, id, manifest)?
             disk_io(host.sync_dir(d))?
             let genesis = capacity(main_state(empty_roots(), 0, 0))?
-            let startup = DiskStartup(store: id, fence: 0, state: take genesis, live: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, seq: 1, segment: take segment, end_file: take end_file)
+            let startup = DiskStartup(store: id, fence: 0, state: take genesis, live: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file)
             let mut all: List[Roots] = list.new()
             capacity(result.capacity_only(list.push(mut all, empty_roots())))?
             let preload = DiskDecoded(store: id, manifest: take manifest, roots: empty_roots(), all: take all,
@@ -10069,6 +10070,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskD
         Error(take e) => return Error(take e)
     }
     let manifested = capacity(manifest_state(loaded.manifest, loaded.all))?
+    let recorded_after = manifested.tips[0].head
     let initial = JournalReplay(state: take manifested, next_node: loaded.manifest.next_node - 1)
     let recovered = journal_recover(d, loaded.store, loaded.manifest.first_live, take initial)?
     let JournalRecovered(replay: take replay, seq: last_seq, end: last_end) = take recovered
@@ -10083,7 +10085,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskD
     // NotFound also needs the fence if an interrupted open already unlinked it.
     disk_io(host.sync_dir(d))?
     let (take segment, take end_file) = disk_new_segment(d, loaded.store, seq, last_end)?
-    let startup = DiskStartup(store: loaded.store, fence: loaded.manifest.fence, state: take state, live: live, next_node: next_node, next_table: loaded.manifest.next_table, generation: loaded.manifest.generation, cut_first: loaded.manifest.first_live, seq: seq, segment: take segment, end_file: take end_file)
+    let startup = DiskStartup(store: loaded.store, fence: loaded.manifest.fence, state: take state, live: live, next_node: next_node, next_table: loaded.manifest.next_table, generation: loaded.manifest.generation, cut_first: loaded.manifest.first_live, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file)
     Ok((take startup, take loaded))
 }
 
@@ -10253,7 +10255,8 @@ type DiskPending {
     // `changes` when the cut was taken: equal at the ack means the cut's
     // account is the current state's.
     changes: u64,
-    resident: u64
+    resident: u64,
+    recorded_after: u64,
 }
 
 type DiskConnection {
@@ -10272,6 +10275,7 @@ type DiskConnection {
     // `recorded` scans from there, and a refused cut restores the earlier one.
     record_cut: u64,
     previous_record_cut: u64,
+    recorded_after: u64,
     send: Sender[DiskCut],
     acks: Receiver[DiskCutAck],
     worker: Task[Result[(), Error]]
@@ -10283,6 +10287,11 @@ fn open_number(db: Db) -> u64 {
     } else {
         db.disk[0].open
     }
+}
+
+// A main-branch record at or before this version is below the live journal.
+pub fn retained_main_after(db: Db) -> u64 {
+    if is_disk(db) { db.disk[0].recorded_after } else { 0u64 }
 }
 
 fn healthy(db: Db) -> Result[(), Error] {
@@ -10311,7 +10320,7 @@ pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Resu
     if options.group_bytes == 0 { return Error(Missing("group_bytes")) }
     let session = disk_session(tasks, d, c, r, options)?
     let DiskSession(lock: take lock, startup: take startup, send: take send, acks: take acks, worker: take worker) = take session
-    let DiskStartup(store: id, fence: fence, state: take state, live: live, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, seq: seq, segment: take segment, end_file: take end_file) = take startup
+    let DiskStartup(store: id, fence: fence, state: take state, live: live, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file) = take startup
     let mut db = empty_db(c, id, options)
     open_heads(mut db, take state)?
     db.fence = fence
@@ -10320,7 +10329,7 @@ pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Resu
     db.file_seq = seq
     db.resident = live
     db.checkpointed = generation
-    capacity(result.capacity_only(list.push(mut db.disk, DiskConnection(lock: take lock, d: d, open: seq, options: options, lease: None, imported: None, reserving: None, target: None, pending: None, refused_cut: None, cut_live: live, record_cut: cut_first, previous_record_cut: cut_first, send: take send, acks: take acks, worker: take worker))))?
+    capacity(result.capacity_only(list.push(mut db.disk, DiskConnection(lock: take lock, d: d, open: seq, options: options, lease: None, imported: None, reserving: None, target: None, pending: None, refused_cut: None, cut_live: live, record_cut: cut_first, previous_record_cut: cut_first, recorded_after: recorded_after, send: take send, acks: take acks, worker: take worker))))?
     let group_count: u64 = int.widen(options.group_commits)
     let (frames, queued): (Sender[JournalMsg], Receiver[JournalMsg]) = capacity(channel.new(group_count * 2))?
     // Y1: one ack per frame, at most 2g queued + g in the group + 1 held back
@@ -10376,6 +10385,7 @@ fn apply_cut_ack(mut db: Db, take ack: DiskCutAck) -> Result[(), Error] {
                 let pending = disk_pending(db)
                 db.checkpointed = g
                 if let Some(p) = pending {
+                    db.disk[0].recorded_after = p.recorded_after
                     if db.changes == p.changes {
                         db.resident = live
                         db.settled = db.changes
@@ -10452,11 +10462,12 @@ fn disk_begin_cut(mut db: Db, take s: State) -> Result[Ticket, Error] waits {
     }
     db.file_seq = seq
     db.file_end = 72
+    let recorded_after = s.tips[0].head
     let cut = DiskCut(generation: generation, fence: db.fence, lease: db_lease(db), target: db_target(db), state: take s, next_node: db.next_node + 1, next_table: db.next_table, first_live: seq)
     let record_previous = db.disk[0].record_cut
     db.disk[0].previous_record_cut = record_previous
     db.disk[0].record_cut = seq
-    db.disk[0].pending = Some(DiskPending(generation: generation, changes: db.changes, resident: db.resident))
+    db.disk[0].pending = Some(DiskPending(generation: generation, changes: db.changes, resident: db.resident, recorded_after: recorded_after))
     let _ = disk_send(db.disk[0], take cut)
     Ok(Ticket(store: db.store, open: open_number(db), mark: Cut(generation)))
 }
@@ -10474,7 +10485,7 @@ pub fn checkpoint(mut db: Db) -> Result[Ticket, Error] waits {
 }
 
 fn disk_close_connection(take connection: DiskConnection) -> Result[(), Error] waits {
-    let DiskConnection(lock: take lock, d: _, open: _, options: _, lease: _, imported: _, reserving: _, target: _, pending: _, refused_cut: _, cut_live: _, record_cut: _, previous_record_cut: _, send: _, acks: _, worker: take worker) = take connection
+    let DiskConnection(lock: take lock, d: _, open: _, options: _, lease: _, imported: _, reserving: _, target: _, pending: _, refused_cut: _, cut_live: _, record_cut: _, previous_record_cut: _, recorded_after: _, send: _, acks: _, worker: take worker) = take connection
     let joined = task.join(take worker)
     let _ = take lock
     result.unwrap(take joined)

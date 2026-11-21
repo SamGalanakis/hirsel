@@ -15,6 +15,7 @@
 //! dropping a tape advances its cell's generation, so every handle made
 //! through it then fails before issue and never uses its source.
 mod dispatch;
+mod managed;
 pub mod run;
 pub(crate) mod schedule;
 pub(crate) use dispatch::{narrow_net, net_rules, owns, source};

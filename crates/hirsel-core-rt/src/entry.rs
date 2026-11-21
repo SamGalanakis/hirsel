@@ -267,7 +267,7 @@ unsafe fn bytes<'a>(view: View) -> &'a [u8] {
         unsafe { std::slice::from_raw_parts(view.data, view.len) }
     }
 }
-fn prepare_hex<const N: usize>(text: &[u8]) -> io::Result<[u8; N]> {
+pub(crate) fn prepare_hex<const N: usize>(text: &[u8]) -> io::Result<[u8; N]> {
     let invalid = || io::Error::from_raw_os_error(libc::EINVAL);
     if text.len() != 2 * N {
         return Err(invalid());
@@ -307,6 +307,11 @@ impl StartupError {
     }
 }
 impl OsProcess {
+    #[cfg(feature = "record")]
+    pub(crate) fn host_launch(&self) -> Option<&HostLaunch> {
+        self.host.as_ref()
+    }
+
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     /// Matching socket activation metadata is consumed during process startup,
     /// before other threads can access the environment.

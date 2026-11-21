@@ -66,6 +66,7 @@ pub enum OptionId {
     AdmitTimeout,
     HostMemory,
     StartRetries,
+    TapeRetention,
 }
 struct OptionSpec {
     id: OptionId,
@@ -138,8 +139,15 @@ static OPTIONS: &[OptionSpec] = &[
         HostState,
         ["--state"],
         Some("DIR"),
-        ["host"],
+        ["host", "replay"],
         "Private host state directory."
+    ),
+    option!(
+        TapeRetention,
+        ["--tape-retention"],
+        Some("DAYS"),
+        ["host"],
+        "Retain a recording's pinned image for this many days. Default 30."
     ),
     option!(
         Workdir,
@@ -285,8 +293,8 @@ static OPTIONS: &[OptionSpec] = &[
         Record,
         ["--record"],
         Some("TAPE"),
-        ["run"],
-        "Build the recording build and record all program grants and scheduling to a new, owner-only tape."
+        ["run", "host"],
+        "Build with recording enabled. Run writes TAPE. Host writes owner-only recordings in TAPE as a directory."
     ),
     option!(
         Tape,

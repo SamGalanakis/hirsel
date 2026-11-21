@@ -1339,9 +1339,9 @@ A failure after the activation commit and before `Ready` leaves the new activati
 - `main` returns `Ok(())` for `Stopped`. For `Forced(n)` and for a `StartError` it writes one stderr line and returns `Error(Exit(status: 1u8))`. The line is `place: forced at the drain deadline, n sends abandoned`, or the error.
 
 **Readiness is read through a status route on the place's own listener.** The place serves `GET /hirsel/status` as a raw route (HTTP-11), beside `GET /hirsel` (http.md §6).
-- The handler calls `latest.read(status)`. It answers 200 when the phase is `Ready` and 503 when it is `Draining`.
+- The handler calls `latest.read(status)`. It answers 200 when the phase is `Ready` or `Paused` and 503 when it is `Draining`.
 - The body is one JSON object, with its keys in this order:
-  - `phase`: `"ready"` or `"draining"`;
+  - `phase`: `"ready"`, `"paused"` or `"draining"`;
   - `digest`: lowercase hex, empty when unavailable;
   - `target`;
   - `n_place`;

@@ -1,6 +1,9 @@
 //! One supervisor owns the listener, serving children and deployment records.
 mod child;
+mod recording;
 mod records;
+
+pub(crate) use recording::replay;
 
 use crate::{
     AssemblyRecord, Link, NativeOptions, Publication,
@@ -65,6 +68,8 @@ pub(crate) fn run(invocation: Invocation) -> Result<(), Error> {
     let mut workdir = std::env::current_dir()?;
     let mut scratch = None;
     let mut listen = None;
+    let mut recording = None;
+    let mut pin_seconds = 30 * 86400;
     let mut added = false;
     let mut max_pause = 2_000;
     let mut memory = 2 << 30;
@@ -79,6 +84,14 @@ pub(crate) fn run(invocation: Invocation) -> Result<(), Error> {
             Opt::Workdir => workdir = PathBuf::from(value).canonicalize()?,
             Opt::Scratch => scratch = Some(PathBuf::from(value)),
             Opt::Listen => listen = Some(value),
+            Opt::Record => recording = Some(private_dir(PathBuf::from(value))?),
+            Opt::TapeRetention => {
+                pin_seconds = value
+                    .parse::<u64>()?
+                    .checked_mul(86400)
+                    .filter(|&seconds| seconds != 0)
+                    .ok_or("invalid tape retention")?;
+            }
             Opt::GrantAdded => added = true,
             Opt::MaxPause => max_pause = value.parse()?,
             Opt::MaxRecipeBytes => admission.recipe_bytes = value.parse()?,
@@ -152,13 +165,15 @@ pub(crate) fn run(invocation: Invocation) -> Result<(), Error> {
         assembly_stage,
         children,
         listener,
+        recording,
+        pin_seconds,
         max_pause,
         memory,
         retries,
         args: invocation.arguments,
     };
-    let (mut active, mut live) = host.open_place(root, source.as_ref())?;
     let admin = bind_control(&socket)?;
+    let (mut active, mut live) = host.open_place(root, source.as_ref())?;
     loop {
         match ControlConnection::accept(&admin) {
             Ok(mut operator) => {
@@ -264,6 +279,8 @@ struct Host {
     assembly_stage: PathBuf,
     children: child::Children,
     listener: TcpListener,
+    recording: Option<PathBuf>,
+    pin_seconds: u64,
     max_pause: u64,
     memory: u64,
     retries: u32,
@@ -272,6 +289,7 @@ struct Host {
 
 struct Running {
     active: Active,
+    retain_from: u64,
     assembly: AssemblyRecord,
     recipe: Recipe,
 }
@@ -298,9 +316,12 @@ impl Host {
         let launch = &publication.recipe().launch;
         let installed = crate::installation::Installed::discover(&std::env::current_exe()?)?
             .ok_or("host assembly requires an installed toolchain")?;
-        let runtime = installed
-            .runtime(&launch.target)
-            .ok_or("missing installed runtime")?;
+        let runtime = if self.recording.is_some() {
+            installed.recording_runtime(&launch.target)
+        } else {
+            installed.runtime(&launch.target)
+        }
+        .ok_or("missing installed runtime")?;
         let link = installed
             .link(&launch.target)
             .ok_or("missing installed linker")?;
@@ -314,6 +335,7 @@ impl Host {
             output,
         );
         native.optimize = launch.backend == hirsel_core_ir::release_recipe::Backend::Llvm;
+        native.recording = self.recording.is_some();
         let product = publication.assemble(&native, Default::default())?;
         let record = product.assembly.ok_or("assembly returned no record")?;
         self.records
@@ -363,7 +385,22 @@ impl Host {
         if recipe.launch.root_limit > self.memory {
             return Err("Memory".into());
         }
-        let image = self.records.verify_image(assembly.digest)?;
+        let recording = self
+            .recording
+            .as_deref()
+            .map(recording::Recording::new)
+            .transpose()?;
+        let image = self.admission.under_collection(|_| -> io::Result<_> {
+            let image = self.records.verify_image(assembly.digest)?;
+            if let Some(recording) = &recording {
+                let expires = recording::unix_seconds()?
+                    .checked_add(self.pin_seconds)
+                    .ok_or(io::ErrorKind::InvalidInput)?;
+                self.records
+                    .keep_pin(recording.id, assembly.identity, expires)?;
+            }
+            Ok(image)
+        })?;
         Ok(child::Place::start(
             &self.children,
             child::Launch {
@@ -374,6 +411,7 @@ impl Host {
                 activation: version,
                 n_place: recipe.launch.n_place,
                 args: &self.args,
+                recording: recording.as_ref(),
             },
         )?)
     }
@@ -413,7 +451,7 @@ impl Host {
                     Ok((running, place)) if running.active.store == active.store => {
                         self.records.set_active(running.active)?;
                         self.records.reconcile_pending()?;
-                        self.collect()?;
+                        self.collect(running.active.store, running.retain_from)?;
                         return Ok((running, place));
                     }
                     Ok(_) => return Err("recovered a different store".into()),
@@ -452,20 +490,22 @@ impl Host {
         recipe: Recipe,
         recover: bool,
     ) -> Result<(Running, child::Place), Error> {
-        let (found, child) = match recover.then(|| self.reopen(assembly.identity, 1)) {
-            Some(Ok((running, child))) => (running.active, child),
+        let (found, retain_from, child) = match recover.then(|| self.reopen(assembly.identity, 1)) {
+            Some(Ok((running, child))) => (running.active, running.retain_from, child),
             _ => {
                 let mut child = self.start(&assembly, &recipe, 0)?;
-                let ready = opened(&mut child, assembly.identity, recipe.launch.n_place)?;
-                (ready, child)
+                let (ready, retain_from) =
+                    opened(&mut child, assembly.identity, recipe.launch.n_place)?;
+                (ready, retain_from, child)
             }
         };
         self.records.set_active(found)?;
         self.records.reconcile_pending()?;
-        self.collect()?;
+        self.collect(found.store, retain_from)?;
         Ok((
             Running {
                 active: found,
+                retain_from,
                 assembly,
                 recipe,
             },
@@ -477,13 +517,14 @@ impl Host {
         let assembly = self.records.assembly(key)?;
         let recipe = self.recipe(assembly.recipe)?;
         let mut child = self.start(&assembly, &recipe, version)?;
-        let active = opened(&mut child, key, recipe.launch.n_place)?;
+        let (active, retain_from) = opened(&mut child, key, recipe.launch.n_place)?;
         if active.version != version {
             return Err("ready activation differs from selected activation".into());
         }
         Ok((
             Running {
                 active,
+                retain_from,
                 assembly,
                 recipe,
             },
@@ -763,7 +804,7 @@ impl Host {
                         record.state = State::Refused;
                         self.records.write_deploy(&record)?;
                         self.records.clear_pending(record.attempt)?;
-                        self.collect()?;
+                        self.collect(old.active.store, old.retain_from)?;
                         report.refused = Some(format!("Refused({error})"));
                         return Ok((report, None));
                     }
@@ -793,17 +834,17 @@ impl Host {
                         replacement = self.start(&assembly, &recipe, at)?;
                         ready = opened(&mut replacement, assembly.identity, recipe.launch.n_place);
                     }
-                    let observed = match ready {
-                        Ok(observed)
+                    let (observed, retain_from) = match ready {
+                        Ok((observed, retain_from))
                             if observed.store == active.store && observed.version == at =>
                         {
-                            observed
+                            (observed, retain_from)
                         }
                         refused => {
                             record.state = State::Failed;
                             self.records.write_deploy(&record)?;
                             let detail = match refused {
-                                Ok(found) => {
+                                Ok((found, _)) => {
                                     format!("unexpected store or activation {}", found.version)
                                 }
                                 Err(error) => error.to_string(),
@@ -819,8 +860,11 @@ impl Host {
                     self.records.clear_pending(record.attempt)?;
                     report.activation = Some(at);
                     report.pause_ms = pause.elapsed().as_millis();
+                    live.wait_retired(START_TIMEOUT)?;
+                    self.collect(observed.store, retain_from)?;
                     *old = Running {
                         active: observed,
+                        retain_from,
                         assembly,
                         recipe,
                     };
@@ -858,9 +902,10 @@ impl Host {
         }
     }
 
-    fn collect(&self) -> Result<(), Error> {
+    fn collect(&self, store: Attempt, retain_from: u64) -> Result<(), Error> {
         self.admission.under_collection(|reserved| {
-            let assemblies = self.records.roots()?;
+            self.records.retire_activations(store, retain_from)?;
+            let assemblies = self.records.roots(recording::unix_seconds()?)?;
             let mut images = BTreeSet::new();
             let mut code = BTreeSet::new();
             for name in &assemblies {
@@ -919,7 +964,11 @@ impl Drop for Scratch {
 }
 
 enum Reply {
-    Opened { store: Attempt, version: u64 },
+    Opened {
+        store: Attempt,
+        version: u64,
+        retain_from: u64,
+    },
     Current(u64),
     Refused(String),
     Exported(u64, String),
@@ -945,7 +994,15 @@ impl Reply {
                 if wire.bytes()?.len() != 32 {
                     return Err("ready release digest length".into());
                 }
-                Self::Opened { store, version }
+                let retain_from = wire.word()?;
+                if retain_from == 0 || retain_from > version {
+                    return Err("invalid release retention floor".into());
+                }
+                Self::Opened {
+                    store,
+                    version,
+                    retain_from,
+                }
             }
             1 => {
                 let version = wire.word()?;
@@ -978,15 +1035,26 @@ impl Reply {
     }
 }
 
-fn opened(place: &mut child::Place, assembly: ContentHash, max: u64) -> Result<Active, Error> {
+fn opened(
+    place: &mut child::Place,
+    assembly: ContentHash,
+    max: u64,
+) -> Result<(Active, u64), Error> {
     place.control().set_read_timeout(Some(START_TIMEOUT))?;
     let frame = read_frame(place.control(), usize::try_from(max)?)?;
     match Reply::read(&frame)? {
-        Reply::Opened { store, version } => Ok(Active {
+        Reply::Opened {
             store,
             version,
-            assembly,
-        }),
+            retain_from,
+        } => Ok((
+            Active {
+                store,
+                version,
+                assembly,
+            },
+            retain_from,
+        )),
         reply => Err(reply.error()),
     }
 }

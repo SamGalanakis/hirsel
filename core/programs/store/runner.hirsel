@@ -313,6 +313,7 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
     let mut online = false
     let mut retiring = false
     let mut store_id = (0u64, 0u64)
+    let mut retain_from = 0u64
     let mut expired = false
     let mut settled = false
     let mut serve_done: Option[u64] = None
@@ -382,10 +383,11 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
                 publish_phase(status, watch, mut current, Starting(Activating))?
                 let _ = channel.try_send(head_to, HeadContinue)
             },
-            Activated(take release, version, identity) => {
+            Activated(take release, version, identity, retained) => {
                 current.release = take release
                 current.activation = version
                 store_id = identity
+                retain_from = retained
                 if stopped {
                     publish_phase(status, None, mut current, Draining)?
                     let _ = channel.try_send(head_to, HeadClose)
@@ -416,7 +418,7 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
                     if let Some(host) = hosting {
                         let copied: Result[Bytes, Capacity] = clone(current.release)
                         let release = match take copied { Ok(take raw) => take raw, Error(c) => return Error(Full(c)) }
-                        let _ = channel.try_send(host.answer, PlaceOpened(PlaceReady(version: current.activation, store_hi: store_id.0, store_lo: store_id.1, release: take release)))
+                        let _ = channel.try_send(host.answer, PlaceOpened(PlaceReady(version: current.activation, store_hi: store_id.0, store_lo: store_id.1, release: take release, retain_from: retain_from)))
                     }
                 }
             },
@@ -857,14 +859,27 @@ fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] {
     }
 }
 
-pub fn activation_version(db: store.Db) -> Result[u64, store.Error] {
+fn activation_window(db: store.Db) -> Result[(u64, u64), store.Error] {
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     let table = store.system_table(db, "hirsel.runner.releases", std.codec.key_u64(), codec)?
     let mut rows = store.scan(store.snapshot(db), store.shape(table), Unbounded, Unbounded)?
     let mut latest: u64 = 0
-    while let Some((version, _)) = store.next(mut rows)? { latest = version }
+    let mut previous = 0u64
+    let mut live = 0u64
+    let first_record = int.saturating_add(store.retained_main_after(db), 1u64)
+    while let Some((version, _)) = store.next(mut rows)? {
+        previous = latest
+        latest = version
+        if version <= first_record { live = version }
+    }
     if latest == 0u64 { return Error(Missing("activation version")) }
-    Ok(latest)
+    let recent = if previous == 0u64 { latest } else { previous }
+    Ok((latest, if live == 0u64 { recent } else { std.order.min(recent, live) }))
+}
+
+pub fn activation_version(db: store.Db) -> Result[u64, store.Error] {
+    let (version, _) = activation_window(db)?
+    Ok(version)
 }
 
 // Keep these options in Args so they are also present during Run tape replay.
@@ -2293,7 +2308,7 @@ fn start_publisher[G: send, H: send](owned: store.Db, place: StaticFn[fn(mut Reg
 
 type DrainWindow: shareable + send { admission: u64, deadline: u64 }
 
-type LifeEvent: send = StopRequested | Recovered | Activated(Bytes, u64, (u64, u64)) | Published(Sender[PubIn]) | ServePrepared | Settled | HeadEnded(Result[(), StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
+type LifeEvent: send = StopRequested | Recovered | Activated(Bytes, u64, (u64, u64), u64) | Published(Sender[PubIn]) | ServePrepared | Settled | HeadEnded(Result[(), StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
     | WritesPaused | WritesResumed | RetirePlace
 
 pub type HeadInput: send = RunRequest(Req) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome])
@@ -2310,7 +2325,7 @@ pub type KeepImport: send { built: store.Imported, answer: Sender[Result[Inline[
 
 type HostCommand: codec + send = HostExport(Bytes, bool) | HostImport(Bytes, Bytes, Bytes)
     | HostCutover(Bytes, Bytes, u64, bool) | HostAbort(Bytes)
-type PlaceReady: codec + send { version: u64, store_hi: u64, store_lo: u64, release: Bytes }
+type PlaceReady: codec + send { version: u64, store_hi: u64, store_lo: u64, release: Bytes, retain_from: u64 }
 type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String)
     | PlaceExported(u64, String) | PlaceImported(Bytes) | PlaceInstalled(u64) | PlaceDrift | PlaceAborted | PlaceUncertain
 
@@ -2576,10 +2591,10 @@ fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Re
         None => None,
     }
     // A place directory reopens a disk store at this version (RUNNER-SPEC §13.3).
-    let version = if persistent {
-        match activation_version(db) { Ok(found) => found, Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) } }
-    } else { 0u64 }
-    if !head_advance(to, inbox, Activated(take release, version, store.identity_words(db))) { return head_closed(take db) }
+    let (version, retain_from) = if persistent {
+        match activation_window(db) { Ok(found) => found, Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) } }
+    } else { (0u64, 0u64) }
+    if !head_advance(to, inbox, Activated(take release, version, store.identity_words(db), retain_from)) { return head_closed(take db) }
     let mail = match mailbox(PUBLISHER_INBOX) {
         Ok(take mail) => take mail,
         Error(cap) => { let _ = close_store(take db); return Error(Full(cap)) },

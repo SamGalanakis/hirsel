@@ -76,6 +76,19 @@ pub(crate) fn arm_host_parent() -> std::io::Result<()> {
 /// The context and its configuration are pinned for the current run.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_launch_handle(context: *mut Context, field: u64) -> u64 {
+    #[cfg(feature = "record")]
+    {
+        let _commit = crate::sequencer::enter();
+        // SAFETY: the run pins Files and the sequencer serializes handle transfers.
+        let managed = unsafe { &mut (*(*context).host_files).managed_control };
+        if managed.1 != 0 {
+            return match field {
+                0 => std::mem::take(&mut managed.0),
+                1 => managed.1,
+                _ => 0,
+            };
+        }
+    }
     let Some(host) = (unsafe { crate::entry::launch_host((*context).run) }) else {
         return 0;
     };

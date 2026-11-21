@@ -310,6 +310,14 @@ so the store's `releases` rows keep their format, and a recording pin names the 
 the run it records and is synced before `Pinned` is answered. A retained digest whose image is
 missing gives `Unknown(ImageGone)`.
 
+`hirsel host --record DIRECTORY` assembles with the recording runtime. The host
+assigns each serving process a recording ID and syncs its pin before launching
+the process. A pin names the assembly record and carries its expiry. The
+default retention period is 30 days, set by `--tape-retention DAYS`.
+`hirsel replay --state HOST_STATE --tape TAPE` resolves the recording ID through
+the pin and runs the verified image from the host image store. Replay takes the
+arguments and launch metadata from the recording.
+
 When the host starts, before any collection, it reconciles every attempt. Staging with no
 pending record is removed. For each pending record it probes the place as hot deploy's recovery
 does: if the recovered activation is the attempt's (a cut after install but before its

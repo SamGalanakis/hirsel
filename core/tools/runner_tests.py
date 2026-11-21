@@ -340,7 +340,7 @@ def l10_holds(values):
 CRASHES = ('runner-cross', 'runner-order')
 POISON = 'poison-segment'
 STOP_CASES = ('runner-deadline', 'runner-stop-early', 'runner-stop-twice')
-HOST_LAWS = ('two_recipes_one_digest', 'installed_before_index')
+HOST_LAWS = ('two_recipes_one_digest', 'installed_before_index', 'pinned_recording_uses_retained_image')
 
 
 def host_law(args, root, work, engine, name):
@@ -413,9 +413,9 @@ def host_law(args, root, work, engine, name):
                 return int.from_bytes(frame[-8:], 'little')
 
     @contextmanager
-    def running_host():
+    def running_host(*options):
         with tempfile.TemporaryFile(mode='w+') as log:
-            host = subprocess.Popen(command, stdout=log, stderr=log)
+            host = subprocess.Popen([*command, *options], stdout=log, stderr=log)
             try:
                 deadline = time.monotonic() + 120
                 while time.monotonic() < deadline and host.poll() is None:
@@ -430,6 +430,12 @@ def host_law(args, root, work, engine, name):
                     log.seek(0)
                     raise RuntimeError(f'place did not become Ready: {log.read()}')
                 yield host, status
+            except Exception as error:
+                log.seek(0)
+                detail = log.read().strip()
+                if detail:
+                    error.add_note(detail)
+                raise
             finally:
                 if host.poll() is None:
                     comm = subprocess.check_output(['ps', '-o', 'comm=', '-p', str(host.pid)], text=True)
@@ -438,6 +444,50 @@ def host_law(args, root, work, engine, name):
                 host.wait(timeout=15)
 
     index = state / 'activations'
+    if name == 'pinned_recording_uses_retained_image':
+        recordings = work / 'recordings'
+        with running_host('--record', str(recordings)) as (_, old):
+            tapes = list(recordings.glob('*.tape'))
+            assert len(tapes) == 1, 'the first activation did not start a recording'
+            tape = tapes[0]
+            checked(deploy, engine=engine, case=f'{name}:retire-recording')
+
+        with running_host() as (_, _):
+            plain_deploy = deploy.copy()
+            plain_deploy[2] = old_recipe
+            checked(plain_deploy, engine=engine, case=f'{name}:assemble-with-plain-runtime')
+            assert ready()['digest'] != old['digest'], 'the second runtime did not change the image'
+            pinned = (state / 'pins' / tape.stem).read_bytes()[-32:].hex()
+            active = (state / 'active').read_bytes()[-32:].hex()
+            recorded_assembly = (state / 'assemblies' / pinned).read_bytes()
+            plain_assembly = (state / 'assemblies' / active).read_bytes()
+            assert recorded_assembly[:32] == plain_assembly[:32], 'toolchain switch changed the recipe'
+            assert recorded_assembly[32:64] != plain_assembly[32:64], 'toolchain fingerprint did not change'
+            checked(deploy, engine=engine, case=f'{name}:retire-last-recorded-activation')
+        assert not any(entry.name.endswith('-0000000000000001') for entry in index.iterdir()), 'recording pin test kept the old activation indexed'
+        assert not any(entry.name.endswith('-0000000000000002') for entry in index.iterdir()), 'the previous recording still roots its image through the index'
+
+        # The replay launcher has no assembly toolchain. A successful replay
+        # can only use the immutable recording image in the host image store.
+        installed = Path(compiler).parent
+        replay_only = work / 'replay-only'
+        replay_only.mkdir()
+        shutil.copyfile(compiler, replay_only / 'hirsel')
+        (replay_only / 'hirsel').chmod(0o700)
+        (replay_only / 'lib').symlink_to(installed / 'lib', target_is_directory=True)
+        replay = [str(replay_only / 'hirsel'), 'replay', '--state', str(state), '--tape', str(tape)]
+        result = checked(replay, engine=engine, case=f'{name}:replay')
+        assert result.stdout.strip() == 'Sealed', 'replay did not seal against the pinned image'
+        pin = state / 'pins' / tape.stem
+        withheld = work / 'withheld-pin'
+        pin.rename(withheld)
+        try:
+            refused = run_case(f'{name}:missing-pin', engine, replay, capture_output=True, text=True)
+            assert refused.returncode == 3 and refused.stderr.strip() == 'Unknown(ImageGone)', refused.stderr
+        finally:
+            withheld.rename(pin)
+        return
+
     with running_host() as (host, old):
         assert old['n_place'] == old_n_place, 'OLD started with the wrong allowance'
         assert welcome_n_place() == old_n_place, 'OLD Welcome used the wrong allowance'

@@ -12,7 +12,7 @@ pub(super) type Attempt = [u8; 16];
 
 pub(super) struct Records {
     root: PathBuf,
-    _owner: File,
+    _owner: Option<File>,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +44,7 @@ pub(super) struct Deploy {
 
 const HEADER: &[u8; 10] = b"HIRDEPLY\x02\x00";
 const RECORD_BYTES: usize = 10 + 16 + 16 + 3 * 32 + 1 + 8;
+const PIN_HEADER: &[u8; 8] = b"HIRPIN\x01\x00";
 
 impl Deploy {
     fn encode(&self) -> Vec<u8> {
@@ -102,7 +103,14 @@ impl Records {
         sync_dir(&root)?;
         Ok(Self {
             root,
-            _owner: owner,
+            _owner: Some(owner),
+        })
+    }
+
+    pub(super) fn read_only(root: &Path) -> io::Result<Self> {
+        Ok(Self {
+            root: root.canonicalize()?,
+            _owner: None,
         })
     }
 
@@ -157,13 +165,41 @@ impl Records {
 
     pub(super) fn verify_image(&self, digest: ContentHash) -> io::Result<PathBuf> {
         let path = self.image_path(digest);
-        let mut file = File::open(&path)?;
+        let _ = self.open_image(digest)?;
+        Ok(path)
+    }
+
+    pub(super) fn open_image(&self, digest: ContentHash) -> io::Result<File> {
+        let mut file = File::open(self.image_path(digest))?;
         let mut hash = Sha256::new();
         io::copy(&mut file, &mut hash)?;
         if <[u8; 32]>::from(hash.finalize()) != digest.0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "image digest"));
         }
-        Ok(path)
+        Ok(file)
+    }
+
+    pub(super) fn keep_pin(
+        &self,
+        id: Attempt,
+        assembly: ContentHash,
+        expires: u64,
+    ) -> io::Result<()> {
+        let mut bytes = Vec::with_capacity(48);
+        bytes.extend_from_slice(PIN_HEADER);
+        bytes.extend_from_slice(&expires.to_le_bytes());
+        bytes.extend_from_slice(&assembly.0);
+        let path = self.root.join("pins").join(crate::call::hex(&id));
+        write_record(&path, &bytes, 0o400, true)
+    }
+
+    pub(super) fn pin(&self, id: Attempt, now: u64) -> io::Result<ContentHash> {
+        let path = self.root.join("pins").join(crate::call::hex(&id));
+        let (key, expires) = read_pin(&path)?;
+        if now >= expires {
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        Ok(key)
     }
 
     pub(super) fn pending(&self, attempt: Attempt, assembly: ContentHash) -> io::Result<()> {
@@ -187,7 +223,25 @@ impl Records {
         sync_dir(&dir)
     }
 
-    pub(super) fn roots(&self) -> io::Result<BTreeSet<ContentHash>> {
+    pub(super) fn retire_activations(&self, store: Attempt, retain_from: u64) -> io::Result<()> {
+        let prefix = format!("{}-", crate::call::hex(&store));
+        let directory = self.root.join("activations");
+        for item in fs::read_dir(&directory)? {
+            let item = item?;
+            if let Some(name) = item
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_prefix(&prefix))
+                && let Ok(version) = u64::from_str_radix(name, 16)
+                && version < retain_from
+            {
+                fs::remove_file(item.path())?;
+            }
+        }
+        sync_dir(&directory)
+    }
+
+    pub(super) fn roots(&self, now: u64) -> io::Result<BTreeSet<ContentHash>> {
         let mut roots = BTreeSet::new();
         for directory in ["activations", "pending", "pins"] {
             let path = self.root.join(directory);
@@ -197,7 +251,17 @@ impl Records {
                     fs::remove_file(row.path())?;
                     continue;
                 }
-                let [hash] = read_hashes(&row.path())?;
+                let hash = if directory == "pins" {
+                    let (key, expires) = read_pin(&row.path())?;
+                    if now >= expires {
+                        fs::remove_file(row.path())?;
+                        continue;
+                    }
+                    key
+                } else {
+                    let [hash] = read_hashes(&row.path())?;
+                    hash
+                };
                 roots.insert(hash);
             }
             sync_dir(&path)?;
@@ -302,6 +366,20 @@ impl Records {
     fn key(&self, directory: &str, hash: ContentHash) -> PathBuf {
         self.root.join(directory).join(crate::call::hex(&hash.0))
     }
+}
+
+fn read_pin(path: &Path) -> io::Result<(ContentHash, u64)> {
+    let mut record = [0; 48];
+    let mut file = File::open(path)?;
+    file.read_exact(&mut record)?;
+    if &record[..8] != PIN_HEADER || file.read(&mut [0])? != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "recording pin format",
+        ));
+    }
+    let expires = u64::from_le_bytes(record[8..16].try_into().unwrap());
+    Ok((ContentHash(record[16..].try_into().unwrap()), expires))
 }
 
 fn read_hashes<const N: usize>(path: &Path) -> io::Result<[ContentHash; N]> {

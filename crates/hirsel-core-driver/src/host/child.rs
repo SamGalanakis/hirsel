@@ -23,6 +23,7 @@ pub(super) struct Launch<'a> {
     pub(super) activation: u64,
     pub(super) n_place: u64,
     pub(super) args: &'a [String],
+    pub(super) recording: Option<&'a super::recording::Recording>,
 }
 
 impl Children {
@@ -122,6 +123,7 @@ impl Place {
             activation,
             n_place,
             args,
+            recording,
         } = launch;
         let (control, peer) = UnixStream::pair()?;
         let listen_fd = outside_launch_slots(listener.as_raw_fd())?;
@@ -143,7 +145,12 @@ impl Place {
             .env("HIRSEL_CONTROL_FD", "4")
             .env("HIRSEL_SCRATCH", scratch)
             .env_remove("LISTEN_FDNAMES")
-            .env_remove("LISTEN_PIDFDID");
+            .env_remove("LISTEN_PIDFDID")
+            .env_remove("HIRSEL_RECORD")
+            .env_remove("HIRSEL_RECORD_ID");
+        if let Some(recording) = recording {
+            recording.attach(&mut command);
+        }
         arm(&mut command);
         // SAFETY: dup2 installs two owned descriptors in the forked child, and
         // the source descriptors avoid both destination slots.
@@ -169,6 +176,14 @@ impl Place {
 
     pub(super) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         self.child.try_wait()
+    }
+
+    pub(super) fn wait_retired(&mut self, timeout: Duration) -> io::Result<()> {
+        let end = Instant::now() + timeout;
+        while self.try_wait()?.is_none() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
     }
 }
 

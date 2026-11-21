@@ -11,14 +11,18 @@ RC1's L31 checks that the disk store never writes the plaintext Hello credential
 """
 import argparse
 import base64
+from contextlib import contextmanager
 import json
 import shlex
 import os
+import socket
 import sys
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
+from urllib.request import urlopen
 
 from case_progress import run_case
 from std_native import MODEL_NET_RULES, ROOT
@@ -336,6 +340,137 @@ def l10_holds(values):
 CRASHES = ('runner-cross', 'runner-order')
 POISON = 'poison-segment'
 STOP_CASES = ('runner-deadline', 'runner-stop-early', 'runner-stop-twice')
+HOST_LAWS = ('two_recipes_one_digest', 'installed_before_index')
+
+
+def host_law(args, root, work, engine, name):
+    manifest_path = manifest(root, work, name, extra=[
+        (root / 'core/programs/store/runner_crash.hirsel', 'runner_crash')])
+    sources = json.loads(manifest_path.read_text())
+    for package in sources['packages']:
+        for source in package['sources']:
+            path = Path(source['file'])
+            frozen = work / 'sources' / path.relative_to(root)
+            frozen.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, frozen)
+            source['file'] = str(frozen)
+    manifest_path.write_text(json.dumps(sources))
+
+    compiler = str(args.compiler.resolve())
+    publish_store = work / 'published'
+    launch_store = work / 'place'
+    (launch_store / 'live').mkdir(parents=True)
+    state = work / 'host-state'
+    control = work / 'admin.sock'
+
+    def publish(n_place):
+        command = [compiler, 'publish', '--inputs', str(manifest_path), '--source-core', '--source-std',
+                   '--entry', 'store@1/runner_crash/host_main', '--backend', engine,
+                   '--code-store', str(publish_store), '--store', str(work / 'publish-cache'),
+                   '--limit', '268435456', '--n-place', str(n_place), '--dir', 'live',
+                   '--grant', 'Net=Listen 127.0.0.0/8 0-65535']
+        for capability in ('Clock', 'Random', 'Tasks', 'Process'):
+            command += ['--grant', capability]
+        return checked(command, engine=engine, case=f'{name}:publish-{n_place}').stdout.strip()
+
+    old_n_place, new_n_place = 1048576, 2097152
+    old_recipe, new_recipe = publish(old_n_place), publish(new_n_place)
+    assert old_recipe != new_recipe, 'the two allowances must produce distinct recipes'
+
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        address = f'127.0.0.1:{probe.getsockname()[1]}'
+    command = [compiler, 'host', old_recipe, '--control', str(control), '--state', str(state),
+               '--listen', address, '--workdir', str(launch_store), '--code-store', str(publish_store)]
+    deploy = [compiler, 'deploy', new_recipe, '--control', str(control), '--code-store', str(publish_store)]
+
+    def ready():
+        with urlopen(f'http://{address}/hirsel/status', timeout=0.2) as response:
+            status = json.load(response)
+        assert status['phase'] == 'ready', status
+        return status
+
+    def welcome_n_place():
+        with socket.create_connection(('127.0.0.1', int(address.split(':')[1])), timeout=5) as peer:
+            with peer.makefile('rb') as stream:
+                peer.sendall((f'GET /hirsel HTTP/1.1\r\nHost: {address}\r\n'
+                              'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+                              'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: hirsel.2\r\n'
+                              'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n').encode())
+                assert stream.readline().startswith(b'HTTP/1.1 101 '), 'place refused the test session'
+                for line in stream:
+                    if line == b'\r\n':
+                        break
+                # Hello(Some(credential), []) binds the fixture's application Caller.
+                hello = b'\0' * 4 + b'\x01\0\0\0\x10\0\0\0' + os.urandom(16) + b'\0' * 4
+                mask = os.urandom(4)
+                masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(hello))
+                peer.sendall(bytes([0x82, 0x80 | len(hello)]) + mask + masked)
+                opcode, length = stream.read(2)
+                assert opcode == 0x82 and 12 <= length < 126, f'unexpected Welcome frame header {opcode:#x} {length}'
+                frame = stream.read(length)
+                assert frame[:4] == b'\x04\0\0\0' and len(frame) == length, 'first server frame was not Welcome'
+                return int.from_bytes(frame[-8:], 'little')
+
+    @contextmanager
+    def running_host():
+        with tempfile.TemporaryFile(mode='w+') as log:
+            host = subprocess.Popen(command, stdout=log, stderr=log)
+            try:
+                deadline = time.monotonic() + 120
+                while time.monotonic() < deadline and host.poll() is None:
+                    try:
+                        status = ready() if control.exists() else None
+                    except OSError:
+                        status = None
+                    if status is not None:
+                        break
+                    time.sleep(0.025)
+                else:
+                    log.seek(0)
+                    raise RuntimeError(f'place did not become Ready: {log.read()}')
+                yield host, status
+            finally:
+                if host.poll() is None:
+                    comm = subprocess.check_output(['ps', '-o', 'comm=', '-p', str(host.pid)], text=True)
+                    assert comm.strip() == 'hirsel', comm
+                    host.kill()
+                host.wait(timeout=15)
+
+    index = state / 'activations'
+    with running_host() as (host, old):
+        assert old['n_place'] == old_n_place, 'OLD started with the wrong allowance'
+        assert welcome_n_place() == old_n_place, 'OLD Welcome used the wrong allowance'
+        if name == 'installed_before_index':
+            saved = state / 'saved-activations'
+            index.rename(saved)
+            try:
+                attempt = run_case(name, engine, deploy, capture_output=True, text=True, timeout=150)
+                assert attempt.returncode != 0, 'deploy confirmed with its activation index unavailable'
+                assert host.wait(timeout=15) != 0, 'host continued after losing the index write'
+                assert len(list((state / 'pending').iterdir())) == 1, 'the installed attempt lost its pending root'
+            finally:
+                saved.rename(index)
+        else:
+            deployed = json.loads(checked(deploy, engine=engine, case=f'{name}:deploy').stdout)
+            assert deployed['activation'] == 2, 'cutover did not publish activation 2'
+            assert ready()['n_place'] == new_n_place, 'NEW started with the wrong allowance'
+            assert f'grant Dir={launch_store / "live"}' in deployed['preview'], 'preview resolved Dir outside --workdir'
+            assert (launch_store / 'live' / 'MANIFEST').is_file(), 'place opened outside --workdir'
+
+    with running_host() as (_, new):
+        assert new['n_place'] == new_n_place, 'restart did not recover the installed assembly'
+        assert welcome_n_place() == new_n_place, 'recovered Welcome used the wrong allowance'
+        assert new['digest'] == old['digest'], 'varying only n_place changed the image digest'
+        assert len(list((state / 'images').iterdir())) == 1, 'the shared image was duplicated or removed'
+        records = sorted(index.iterdir())
+        assert len(records) == 2, 'the activation index did not retain both activations'
+        names = [entry.read_bytes().hex() for entry in records]
+        assert names[0] != names[1], 'one mutable record replaced the two assemblies'
+        for key, recipe in zip(names, (old_recipe, new_recipe), strict=True):
+            assembly = (state / 'assemblies' / key).read_bytes()
+            assert assembly[:32].hex() == recipe, 'activation selected another recipe'
+        assert not list((state / 'pending').iterdir()), 'recovery left an installed pending record'
 
 
 def crashes(args, root, work, engine, name):
@@ -791,7 +926,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root', type=Path, default=ROOT)
     p.add_argument('--compiler', type=Path)
-    p.add_argument('--evaluator', type=Path, required=True)
+    p.add_argument('--evaluator', type=Path)
     p.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
     p.add_argument('--schedule-runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_SCRIPTED_ARCHIVE'))
     p.add_argument('--observed', type=Path,
@@ -803,13 +938,25 @@ def main():
     p.add_argument('--activation-legacy-rev')
     p.add_argument('--stop-case', choices=STOP_CASES)
     p.add_argument('--call-law', action='append', choices=CALLS)
+    p.add_argument('--host-law', choices=HOST_LAWS)
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     p.add_argument('--session-law', action='append', choices=SESSION_LAWS)
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'full_head_waits', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max', *SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS])
-    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1', 'host'])
     args = p.parse_args()
+    if args.part == 'host':
+        if not args.host_law or not args.compiler or len(args.backend or []) != 1 or args.backend == ['evaluator']:
+            p.error('host requires an installed --compiler, one native --backend, and --host-law')
+        with tempfile.TemporaryDirectory(prefix='hirsel-host-law-') as tmp:
+            host_law(args, args.root.resolve(), Path(tmp), args.backend[0], args.host_law)
+        print(f'{args.backend[0]} host {args.host_law}: passed', flush=True)
+        return 0
+    if args.host_law:
+        p.error('--host-law requires --part host')
+    if not args.evaluator:
+        p.error('--evaluator is required')
     if args.stop_case and args.part != 'deadline':
         p.error('--stop-case requires --part deadline')
     r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1', 'calls')

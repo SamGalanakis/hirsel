@@ -70,6 +70,55 @@ impl CodeStore {
         Ok(file)
     }
 
+    /// Make a private, already verified admission file durable and visible.
+    pub(crate) fn publish_staged(
+        &self,
+        kind: ObjectKind,
+        hash: ContentHash,
+        staged: &Path,
+    ) -> io::Result<()> {
+        let path = self.path(kind, hash);
+        let parent = path.parent().unwrap();
+        fs::create_dir_all(parent)?;
+        let file = File::open(staged)?;
+        file.set_permissions(Permissions::from_mode(0o400))?;
+        file.sync_all()?;
+        match fs::hard_link(staged, &path) {
+            Ok(()) => (),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error),
+        }
+        sync_dir(parent)?;
+        sync_dir(&self.root)
+    }
+
+    pub(crate) fn collect(&self, keep: impl Fn(ObjectKind, ContentHash) -> bool) -> io::Result<()> {
+        for kind in [
+            ObjectKind::Recipe,
+            ObjectKind::Group,
+            ObjectKind::Body,
+            ObjectKind::Annex,
+        ] {
+            let directory = self.root.join(kind.directory());
+            let rows = match fs::read_dir(&directory) {
+                Ok(rows) => rows,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            for row in rows {
+                let row = row?;
+                if let Some(name) = row.file_name().to_str()
+                    && let Ok(hash) = crate::native::recipe_build::parse_root(name)
+                    && !keep(kind, hash)
+                {
+                    fs::remove_file(row.path())?;
+                }
+            }
+            sync_dir(&directory)?;
+        }
+        Ok(())
+    }
+
     /// Publish one checked object, with an atomic, non-replacing name.
     pub fn put(&self, kind: ObjectKind, bytes: &[u8]) -> io::Result<ObjectRef> {
         let object = ObjectRef {

@@ -58,7 +58,7 @@ pub fn describe_child(
     n_place: u64,
     timeout: Duration,
 ) -> Result<Vec<u8>, DescribeError> {
-    child(executable, n_place, timeout, None)
+    child(executable, n_place, timeout, None, None)
 }
 
 pub fn preview_child(
@@ -67,13 +67,23 @@ pub fn preview_child(
     timeout: Duration,
     old: &[u8],
 ) -> Result<Vec<u8>, DescribeError> {
+    preview_child_at(executable, n_place, timeout, old, None)
+}
+
+pub(crate) fn preview_child_at(
+    executable: &Path,
+    n_place: u64,
+    timeout: Duration,
+    old: &[u8],
+    workdir: Option<&Path>,
+) -> Result<Vec<u8>, DescribeError> {
     if old.len() as u64 > n_place {
         return Err(DescribeError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
             "preview input exceeds n_place",
         )));
     }
-    child(executable, n_place, timeout, Some(old))
+    child(executable, n_place, timeout, Some(old), workdir)
 }
 
 fn child(
@@ -81,6 +91,7 @@ fn child(
     n_place: u64,
     timeout: Duration,
     old: Option<&[u8]>,
+    workdir: Option<&Path>,
 ) -> Result<Vec<u8>, DescribeError> {
     let deadline = Instant::now()
         .checked_add(timeout)
@@ -101,6 +112,9 @@ fn child(
         ("--hirsel-describe", Stdio::null())
     };
     let mut command = Command::new(std::path::absolute(executable)?);
+    if let Some(workdir) = workdir {
+        command.current_dir(workdir);
+    }
     command
         .arg(kind)
         .arg(format!("--hirsel-n-place={n_place}"))

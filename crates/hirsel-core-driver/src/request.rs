@@ -62,6 +62,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         crate::cli::Action::Invoke(invocation) => invocation,
     };
     let command = invocation.command.name;
+    if matches!(command, "host" | "deploy") {
+        crate::host::run(invocation)?;
+        std::process::exit(0);
+    }
     if command == "call" {
         std::process::exit(crate::call::run(crate::call::Options::read(invocation)?)?);
     }
@@ -326,6 +330,20 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::ListRules
             | Opt::SdkOut
             | Opt::Url
+            | Opt::Control
+            | Opt::HostState
+            | Opt::Workdir
+            | Opt::Listen
+            | Opt::Scratch
+            | Opt::GrantAdded
+            | Opt::MaxPause
+            | Opt::MaxRecipeBytes
+            | Opt::MaxClosure
+            | Opt::MaxDecodeBytes
+            | Opt::StagingBytes
+            | Opt::AdmitTimeout
+            | Opt::HostMemory
+            | Opt::StartRetries
             | Opt::CallTimeout => {
                 unreachable!("CLI early command option")
             }

@@ -102,6 +102,26 @@ fn want(ok: bool, take what: String) {
     }
 }
 
+// H4 uses the same registry and durable counter as the W2 crash scenarios.
+pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, process: Process) -> Result[(), Exit] waits {
+    let serve = scoped fn(take stopping: Receiver[()]) -> Result[(), Exit] waits {
+        let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+        wire.n_pool = 4194304u64
+        wire.socket.max_frame = 131072u64
+        let mut disk = options()
+        disk.lock_wait_ms = 10000u64
+        let config: runner.PlaceConfig[(), Hd, ()] = runner.PlaceConfig(
+            backing: Disk(d, disk), selection: runner.launch_selection(argv)?, place: code.describe(place), n_place: N_PLACE,
+            migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 4u64,
+            proxies: list.new(), n_publisher: 3145728u64,
+            listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
+            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None)
+        let serving = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None)
+        match take serving { Ok(_) => Ok(()), Error(_) => Error(Exit(status: 1u8)) }
+    }
+    runner.main(argv, process, tasks, code.describe(place), serve)
+}
+
 // A client verdict: empty when every call was answered as expected.
 fn clean(take verdict: String) {
     if verdict != "" {

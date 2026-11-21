@@ -72,6 +72,7 @@ pub enum AdmissionError {
     Unsupported(&'static str),
     Limit(Limit),
     Disconnected,
+    Refused(String),
     Io(io::Error),
 }
 
@@ -93,6 +94,7 @@ impl fmt::Display for AdmissionError {
             Self::Unsupported(reason) => write!(out, "Unsupported({reason})"),
             Self::Limit(limit) => write!(out, "Limit({limit:?})"),
             Self::Disconnected => out.write_str("admission peer disconnected"),
+            Self::Refused(reason) => out.write_str(reason),
             Self::Io(error) => error.fmt(out),
         }
     }
@@ -179,7 +181,7 @@ impl BackendSemantics for NativeSemantics {
         match backend {
             Backend::Cranelift | Backend::Llvm => match tag {
                 EngineTag::Instruction(tag) => tag <= 43,
-                EngineTag::Runtime(tag) => tag <= 37,
+                EngineTag::Runtime(tag) => tag <= 40,
                 EngineTag::Host(tag) => tag <= 31,
                 EngineTag::Flow(tag) => tag <= 8,
                 EngineTag::Terminator(tag) => tag <= 6,
@@ -309,6 +311,14 @@ impl ReleaseLease<'_> {
             .iter()
             .filter(|(_, row)| row.received)
             .map(|(&key, _)| (key, self.0.staged_path(key).expect("received in staging")))
+    }
+
+    pub(crate) fn publish(&self, store: &CodeStore, recipe: &[u8]) -> io::Result<()> {
+        for (key, path) in self.staged_objects() {
+            store.publish_staged(key.kind, key.hash, &path)?;
+        }
+        store.put(ObjectKind::Recipe, recipe)?;
+        Ok(())
     }
 }
 

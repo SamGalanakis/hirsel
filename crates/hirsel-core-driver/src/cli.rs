@@ -52,6 +52,20 @@ pub enum OptionId {
     NPlace,
     Url,
     CallTimeout,
+    Control,
+    HostState,
+    Workdir,
+    Listen,
+    Scratch,
+    GrantAdded,
+    MaxPause,
+    MaxRecipeBytes,
+    MaxClosure,
+    MaxDecodeBytes,
+    StagingBytes,
+    AdmitTimeout,
+    HostMemory,
+    StartRetries,
 }
 struct OptionSpec {
     id: OptionId,
@@ -77,6 +91,8 @@ commands! {
     "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
     "manifest", "manifest show PATH", "Print a release manifest.";
+    "host", "host RECIPE --control SOCKET --state DIR --listen ADDR [options] [-- arguments...]", "Supervise a place and accept deploy requests.";
+    "deploy", "deploy RECIPE --control SOCKET --code-store DIR [options]", "Submit a recipe and its missing code objects to a host.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
@@ -108,8 +124,106 @@ static OPTIONS: &[OptionSpec] = &[
         CodeStore,
         ["--code-store"],
         Some("DIR"),
-        ["build", "publish"],
+        ["build", "publish", "host", "deploy"],
         "Select the immutable code store."
+    ),
+    option!(
+        Control,
+        ["--control"],
+        Some("SOCKET"),
+        ["host", "deploy"],
+        "Host control socket."
+    ),
+    option!(
+        HostState,
+        ["--state"],
+        Some("DIR"),
+        ["host"],
+        "Private host state directory."
+    ),
+    option!(
+        Workdir,
+        ["--workdir"],
+        Some("DIR"),
+        ["host"],
+        "Working directory for each place launch."
+    ),
+    option!(
+        Listen,
+        ["--listen"],
+        Some("ADDR"),
+        ["host"],
+        "TCP address for the inherited listener."
+    ),
+    option!(
+        Scratch,
+        ["--scratch"],
+        Some("DIR"),
+        ["host"],
+        "Private scratch directory for exports and prepare."
+    ),
+    option!(
+        GrantAdded,
+        ["--grant-added"],
+        None,
+        ["deploy"],
+        "Allow the proposed recipe to widen grants."
+    ),
+    option!(
+        MaxPause,
+        ["--max-pause"],
+        Some("MS"),
+        ["host"],
+        "Bound the pre-install write pause. Default 2000 ms."
+    ),
+    option!(
+        MaxRecipeBytes,
+        ["--max-recipe-bytes"],
+        Some("BYTES"),
+        ["host"],
+        "Maximum recipe size."
+    ),
+    option!(
+        MaxClosure,
+        ["--max-closure"],
+        Some("COUNT"),
+        ["host"],
+        "Maximum number of code objects per deploy."
+    ),
+    option!(
+        MaxDecodeBytes,
+        ["--max-decode-bytes"],
+        Some("BYTES"),
+        ["host"],
+        "Cumulative allocation budget for decoding one recipe."
+    ),
+    option!(
+        StagingBytes,
+        ["--staging-bytes"],
+        Some("BYTES"),
+        ["host"],
+        "Total space available for incoming objects."
+    ),
+    option!(
+        AdmitTimeout,
+        ["--admit-timeout"],
+        Some("SECONDS"),
+        ["host", "deploy"],
+        "Deadline for the recipe and Need exchange."
+    ),
+    option!(
+        HostMemory,
+        ["--memory"],
+        Some("BYTES"),
+        ["host"],
+        "Combined limit for serving and candidate launches."
+    ),
+    option!(
+        StartRetries,
+        ["--start-retries"],
+        Some("COUNT"),
+        ["host"],
+        "Retries before reporting a failed start."
     ),
     option!(
         ReleaseManifest,
@@ -604,7 +718,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         arguments: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
-        if argument == "--" && matches!(name.as_str(), "run" | "call") {
+        if argument == "--" && matches!(name.as_str(), "run" | "call" | "host") {
             invocation.arguments.extend(arguments);
             break;
         }

@@ -550,14 +550,14 @@ with key `0x04 || Qx || Qy` and signature `R || S`.
 | **SV10** charge | a kernel lowered as library code that loops, or a charge per byte or per block | `bound bytes 0 { bound steps 1 { ed25519.verify(k, m, s) } }` gives `Ok(Ok(true))` for TEST 1. The same scope over `p256.verify` gives `Ok(Ok(true))` for NIST record 4, whose message is 128 bytes, and over `p256.verify_der` gives `Ok(Ok(true))` for tcId 5. The arguments are locals bound outside the scopes. The expected value follows by hand from MEM-30: a core call is one step and admits nothing. |
 
 The laws are cases in the core contract harness, in `core/core/tests/ed25519.hirsel` and
-`core/core/tests/p256.hirsel`, run by the shared walker on the evaluator, Cranelift and LLVM
-([README](../../core/std/tests/README.md)).
+`core/core/tests/p256.hirsel`. They take no capability, so the shared walker's `--backend all`
+runs each on the evaluator, Cranelift dev and LLVM release ([README](../../core/std/tests/README.md)).
 
 ### Build slice
 
 | slice | size | depends on | contents | laws |
 |---|---|---|---|---|
-| **SV** signature verification | S | — | `core/core/ed25519.hirsel` and `core/core/p256.hirsel` with the three bodiless headers, and their rows in `core_ops.rs` as `Lane::Value` kernels. One function in `hirsel-core-net` wraps ring 0.17.14's `ED25519`, `ECDSA_P256_SHA256_FIXED` and `ECDSA_P256_SHA256_ASN1`. The `RtOp`s `Ed25519Verify`, `P256Verify` and `P256VerifyDer` take key, message and signature pointer and length pairs and return a `u64` 0 or 1. The C entries `hirsel_core_ed25519_verify`, `hirsel_core_p256_verify` and `hirsel_core_p256_verify_der` in `hirsel-core-rt` call that function, and so does the evaluator's `RtOp` arm, so both engines answer from the same code. Cranelift and LLVM lower these as native calls, as `Sha256Blocks` is lowered. There is no `HostOp`, provider path or recording change. The module row's `unbuilt` mark is removed when the slice lands. | SV1–SV10 |
+| **SV** signature verification | S | — | `core/core/ed25519.hirsel` and `core/core/p256.hirsel` with the three bodiless headers, and their rows in `core_ops.rs` as `Lane::Value` kernels. One function in `hirsel-core-net` wraps ring 0.17.14's `ED25519`, `ECDSA_P256_SHA256_FIXED` and `ECDSA_P256_SHA256_ASN1`. The `RtOp`s `Ed25519Verify`, `P256Verify` and `P256VerifyDer` take key, message and signature pointer and length pairs and return a `u64` 0 or 1. The C entries `hirsel_core_ed25519_verify`, `hirsel_core_p256_verify` and `hirsel_core_p256_verify_der` in `hirsel-core-rt` call that function, and so does the evaluator's `RtOp` arm (its `eval` feature already links `hirsel-core-net`), so compiled code and the evaluator answer from the same code. Cranelift and LLVM lower these as native calls, as `Sha256Blocks` is lowered. There is no `HostOp`, provider path or recording change. The module row's `unbuilt` mark is removed when the slice lands. | SV1–SV10 |
 
 ## Provide
 

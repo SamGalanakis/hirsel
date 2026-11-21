@@ -20,8 +20,8 @@
 //! for reuse, and their native pages go back to the host once a worker has
 //! waited `RELEASE_DELAY_MS` with nothing to run (`purge`). A
 //! heap reuses the closest suitable resident dedicated extent, even when
-//! the new block has a different stride. Its live plus retained backing
-//! never exceeds its peak live backing.
+//! the new block has a different stride. Reusing reserved space allows a
+//! bounded margin over peak live backing for other extents in the same burst.
 mod slabs;
 
 use crate::{abi_layout::own_prefix, limit::Payer};
@@ -37,6 +37,8 @@ const GROWTH_RESERVE_FACTOR: usize = 8;
 const MIN_GROWTH_RESERVATION: usize = 256 * 1024;
 // Bound clean reservations and their external descriptors.
 const EMPTY_DEDICATED_LIMIT: usize = 8;
+// A reused reservation may coexist with other warm extents from its growth sequence.
+const DEDICATED_REUSE_MARGIN: usize = 4 << 20;
 // Detached empty slabs a parked task keeps, each with its header resident.
 const EMPTY_SLAB_LIMIT: usize = 8;
 /// How long a worker waits with nothing to run before it releases retained pages.
@@ -795,14 +797,22 @@ impl State {
 }
 
 impl DedicatedCache {
-    /// When backing grows, return older stock above the peak live footprint.
-    /// Moving the same backing between the live and retained sets adds nothing.
-    fn add_live(&mut self, from: usize, to: usize, grew: bool) {
+    /// When backing grows, return older stock above the live high-water mark.
+    /// Reusing a reservation can bring back a later phase of the same
+    /// workload, so leave room for its other extents.
+    fn add_live(&mut self, from: usize, to: usize, grew: bool, reused_reservation: bool) {
         self.demand = self.demand - from + to;
         self.peak_demand = self.peak_demand.max(self.demand);
-        while grew
-            && !self.retained.is_empty()
-            && self.demand + self.retained_bytes > self.peak_demand
+        if !grew {
+            return;
+        }
+        let margin = if reused_reservation {
+            (self.peak_demand / 6).min(DEDICATED_REUSE_MARGIN)
+        } else {
+            0
+        };
+        while !self.retained.is_empty()
+            && self.demand + self.retained_bytes > self.peak_demand + margin
         {
             let oldest = self.remove_retained(0);
             self.purge(oldest);
@@ -1086,10 +1096,13 @@ impl Heap {
             if !slab {
                 let payload = (*page.as_ref().slots.get()).first;
                 let backing = page.as_ref().backing.dedicated();
+                let reused_reservation = backing.born.get() != 0;
                 backing.born.set(class.stride);
                 let before = backing.backed(payload);
                 let after = backing.use_extent(payload, class.stride);
-                state.dedicated.add_live(0, after, after > before);
+                state
+                    .dedicated
+                    .add_live(0, after, after > before, reused_reservation);
             }
             if (*page.as_ref().slots.get()).free.is_null() {
                 extend(&mut state, page, class);
@@ -1300,6 +1313,7 @@ pub(crate) unsafe fn try_grow_in_place(
         let key = Page::key(page);
         let class = Class::for_block(bytes, align, kind, true);
         let backing = header.backing.dedicated();
+        let reused_reservation = class.stride <= backing.writable.get();
         if !backing.extend(payload, class.stride) {
             return false;
         }
@@ -1307,7 +1321,7 @@ pub(crate) unsafe fn try_grow_in_place(
         let after = backing.use_extent(payload, class.stride);
         heap.lock()
             .dedicated
-            .add_live(before, after, after > before);
+            .add_live(before, after, after > before, reused_reservation);
         header.key.get().write(Key { class, ..key });
         #[cfg(feature = "memcheck")]
         {
@@ -2125,6 +2139,19 @@ mod tests {
             "restarting growth lost residency at the end of the grown extent"
         );
         free(start_again, GROWN);
+        purge();
+
+        // A smaller, prefix-bearing extent has to use a separate mapping.
+        // It remains warm while a previously cleaned large reservation
+        // comes back into use in the same burst.
+        let recent = allocate(SMALL, block::GRAPH);
+        free(recent, SMALL);
+        let large_again = allocate_unwritten(LARGE, block::PLAIN);
+        assert!(
+            resident(recent),
+            "reusing a reservation discarded the recent extent"
+        );
+        free(large_again, LARGE);
         purge();
 
         // A GRAPH buffer's cleanup frame uses the preceding native page;

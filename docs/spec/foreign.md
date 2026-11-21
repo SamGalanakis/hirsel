@@ -101,9 +101,9 @@ object on the module's source entry, with the same rules.
 
 ```hirsel unbuilt
 // native.hirsel, module native of package sqlite, marked foreign
-pub fn open_memory(f: Foreign[sqlite.Sqlite], mut err: Bytes) -> Option[foreign.Ptr]
-pub fn exec(f: Foreign[sqlite.Sqlite], db: foreign.Ptr, sql: Bytes) -> i32 waits
-pub fn close(f: Foreign[sqlite.Sqlite], take db: foreign.Ptr) -> i32 waits
+pub fn open_memory(f: Foreign[sqlite.Sqlite], mut e: Bytes) -> Option[foreign.Ptr] waits
+pub fn exec(f: Foreign[sqlite.Sqlite], db: foreign.Ptr, sql: Bytes, mut e: Bytes) -> i32 waits
+pub fn close(f: Foreign[sqlite.Sqlite], take db: foreign.Ptr, mut e: Bytes) -> i32 waits
 ```
 ```hirsel unbuilt
 // native.hirsel, marked foreign
@@ -190,7 +190,7 @@ run, and the archive pin already binds the bytes. A second switch would gate not
 these two leave open.
 
 ```hirsel unbuilt
-pub fn main(out: Stdout, db: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.Error] waits {
+pub fn main(out: Stdout, db: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
   let mut c = sqlite.open_memory(db)?
   sqlite.exec(mut c, "create table t (x integer)")?
   sqlite.close(take c)
@@ -281,9 +281,9 @@ the type: a field of a type that is not such a resource, a type argument of anyt
 than `Option`, `Result` or a tuple, a constant, a `pub` function of a non-foreign module, and
 every position in another package. So outside its package a handle exists only inside an
 opaque resource, and that resource's finalizer runs exactly once
-([FAIL-11](failure.md#fail-11-resources)). The type is copyable, so the wrapper can keep a
-parent's handle beside a child's, as a statement keeps its connection's. A copy is checked
-like the original, because the check reads the table, not the value.
+([FAIL-11](failure.md#fail-11-resources)). The type is copyable, so a wrapper may hold one handle in two
+places, for example a parent's handle beside a child's. A copy is checked like the original,
+because the check reads the table, not the value.
 
 **States.** An ordinal is **live**, **in flight** or **consumed**. A new handle is live. A call
 moves each handle argument from live to in flight before it enters C. When C returns, a `take`
@@ -323,7 +323,7 @@ when the run ends is leaked to the process and released by its exit.
 ```hirsel unbuilt
 // in module sqlite of package sqlite
 pub opaque resource type Db { f: Foreign[Sqlite], p: foreign.Ptr }
-  drop(d) { let _ = native.close(d.f, d.p) }
+  drop(d) { let mut e = list.new(); let _ = native.close(d.f, d.p, mut e) }
 ```
 ```hirsel unbuilt
 // in module sqlite of package sqlite
@@ -363,8 +363,10 @@ steps in order:
    becomes a handle or `None`, the helper returns to the pool and the task resumes with the
    result.
 
-A task parked at steps 3 to 5 is waiting on the host, so it is an outstanding operation
-under [FAIL-15](failure.md#fail-15-run-stops)'s `Deadlock` rule. While a helper runs, the
+A task parked at steps 4 and 5 is in an **issued** foreign call. It is waiting on the host, so
+it is an outstanding operation under [FAIL-15](failure.md#fail-15-run-stops)'s `Deadlock`
+rule. A task at step 3 waits only while every helper runs an issued call, so the run is never
+deadlocked while one waits. While a helper runs, the
 other tasks keep running. **Shutdown with a call in flight**: a run ends only after its tasks
 end, and a task parked in a `waits` call ends only after delivery. Its own cancellation and
 cleanup wait for C as well ([CONC-8](tasks.md#conc-8-abandoned-handles)), so an orderly end
@@ -445,9 +447,16 @@ so that the pinned archive can be rebuilt and checked.
 `SQLITE_THREADSAFE=1`, `SQLITE_TEMP_STORE=3`, `SQLITE_OMIT_LOAD_EXTENSION`,
 `SQLITE_OMIT_DESERIALIZE`, `SQLITE_USE_URI=0`, `SQLITE_DQS=0` and
 `SQLITE_DEFAULT_FOREIGN_KEYS=1`. It is built with no other `SQLITE_` option and no extension.
-`SQLITE_THREADSAFE=1` (serialized) is chosen because tasks move between threads and a
-statement and its connection are separate handles: SQLite then serializes any two calls on
-one connection.
+`SQLITE_THREADSAFE=1` (serialized) is chosen because tasks move between threads, helpers are
+threads, and a statement and its connection are separate handles that two tasks may use at
+once. Under `SQLITE_OS_OTHER=1` that setting alone selects SQLite's no-op mutex, so the adapter
+supplies real ones: before its first `sqlite3_initialize`, run once per process with
+`pthread_once`, it calls `sqlite3_config(SQLITE_CONFIG_MUTEX, &m)`, where `m` implements the
+`sqlite3_mutex_methods` over `pthread_mutex_t`, with `PTHREAD_MUTEX_RECURSIVE` for
+`SQLITE_MUTEX_RECURSIVE` and the static mutexes allocated once. SQLite then serializes any two
+calls on one connection. When the adapter reads an error message, it holds
+`sqlite3_db_mutex` across the failing call and `sqlite3_errmsg`, so another call on the same
+connection cannot replace the message in between.
 
 **OS layer.** With `SQLITE_OS_OTHER` the adapter supplies `sqlite3_os_init` and
 `sqlite3_os_end`, and it registers its VFSes itself. The OS layer gives SQLite no ambient
@@ -477,47 +486,72 @@ The public API, in module `sqlite`:
 
 ```hirsel unbuilt
 pub opaque type Sqlite {}
-pub type Error { code: i32, message: String }
+pub type SqliteError { code: i32, message: String }
 pub type Step = Row | Done
 pub opaque resource type Db { f: Foreign[Sqlite], p: foreign.Ptr }
-  drop(d) { let _ = native.close(d.f, d.p) }
-pub opaque resource type Stmt { f: Foreign[Sqlite], p: foreign.Ptr, db: foreign.Ptr }
-  drop(s) { let _ = native.finalize(s.f, s.p) }
-pub fn open_memory(f: Foreign[Sqlite]) -> Result[Db, Error] waits
-pub fn exec(mut db: Db, sql: String) -> Result[(), Error] waits
-pub fn prepare(mut db: Db, sql: String) -> Result[Stmt, Error] waits
-pub fn bind_i64(mut s: Stmt, i: u32, v: i64) -> Result[(), Error]
-pub fn bind_f64(mut s: Stmt, i: u32, v: f64) -> Result[(), Error]
-pub fn bind_bytes(mut s: Stmt, i: u32, v: Bytes) -> Result[(), Error]
-pub fn bind_text(mut s: Stmt, i: u32, v: String) -> Result[(), Error]
-pub fn bind_null(mut s: Stmt, i: u32) -> Result[(), Error]
-pub fn step(mut s: Stmt) -> Result[Step, Error] waits
+  drop(d) { let mut e = list.new(); let _ = native.close(d.f, d.p, mut e) }
+pub opaque resource type Stmt { f: Foreign[Sqlite], p: foreign.Ptr }
+  drop(s) { let mut e = list.new(); let _ = native.finalize(s.f, s.p, mut e) }
+pub fn open_memory(f: Foreign[Sqlite]) -> Result[Db, SqliteError] waits
+pub fn exec(mut db: Db, sql: String) -> Result[(), SqliteError] waits
+pub fn prepare(mut db: Db, sql: String) -> Result[Stmt, SqliteError] waits
+pub fn bind_i64(mut s: Stmt, i: u32, v: i64) -> Result[(), SqliteError]
+pub fn bind_f64(mut s: Stmt, i: u32, v: f64) -> Result[(), SqliteError]
+pub fn bind_bytes(mut s: Stmt, i: u32, v: Bytes) -> Result[(), SqliteError]
+pub fn bind_text(mut s: Stmt, i: u32, v: String) -> Result[(), SqliteError]
+pub fn bind_null(mut s: Stmt, i: u32) -> Result[(), SqliteError]
+pub fn step(mut s: Stmt) -> Result[Step, SqliteError] waits
 pub fn column_kind(s: Stmt, i: u32) -> Kind
 pub fn column_i64(s: Stmt, i: u32) -> i64
 pub fn column_f64(s: Stmt, i: u32) -> f64
 pub fn column_bytes(s: Stmt, i: u32, mut out: Bytes)
-pub fn reset(mut s: Stmt) -> Result[(), Error] waits
-pub fn finalize(take s: Stmt) -> Result[(), Error] waits
-pub fn close(take db: Db) -> Result[(), Error] waits
+pub fn reset(mut s: Stmt) -> Result[(), SqliteError] waits
+pub fn finalize(take s: Stmt) -> Result[(), SqliteError] waits
+pub fn close(take db: Db) -> Result[(), SqliteError] waits
 pub type Kind = Integer | Float | Text | Blob | Null
 ```
 
 - **Contract.** `open_memory`, `exec`, `prepare`, `step`, `reset`, `finalize` and `close` are
   `waits` in both slices. They can touch disk once slice 2 lands, and `step` and `exec` can
   run for as long as a query does. Declaring them `waits` now keeps one API across both slices.
-  The `bind_` and `column_` functions run on the host stack. The adapter binds every text and
+  The `bind_` and `column_` functions run on the host stack. A statement call passes the
+  statement's handle only, and the adapter reaches its connection with `sqlite3_db_handle`. The adapter binds every text and
   blob with `SQLITE_TRANSIENT`, so SQLite copies them before the bind returns and keeps no
   loaned pointer. `column_bytes` appends the column's bytes to `out`, through
   `column_len`/`column_copy` as in FFI-5, before any other call on the statement. An empty
-  blob and `NULL` are told apart by `column_kind`. Every `Error` holds the extended result code
-  and a copy of `sqlite3_errmsg` that the adapter makes inside the same adapter call. `close`
-  binds `sqlite3_close_v2`, and `finalize` binds `sqlite3_finalize`. Both consume their handle
-  whatever they return (FFI-6), and they report SQLite's code as an `Error`. A statement may
-  outlive its connection's `close`: SQLite keeps the connection as a zombie until the last
-  statement is finalized, and a later call that passes the statement's copy of the closed
-  connection's handle fails with `Fail("foreign handle released")`. A resource literal whose
-  admission is refused has its C object released by the wrapper, and the wrapper then raises
-  `Capacity` (MEM-21).
+  blob and `NULL` are told apart by `column_kind`.
+- **Errors.** Every native function that can fail takes a last parameter `mut e: Bytes`, an
+  **error buffer** that the wrapper's private `error_buffer()` makes as 260 zero bytes with
+  `list.fill`. A native function with an `i32` result returns the extended result code. On
+  failure the adapter writes that code as 4 little-endian bytes at offset 0, then the bytes of
+  `sqlite3_errmsg` from offset 4. It writes at most 256 of them, cut at a UTF-8 character
+  boundary, and leaves the rest zero. `open_memory`'s `None` means failure, and its code is
+  read from the buffer. The adapter writes nothing into a buffer shorter than 260 bytes, so a
+  finalizer passes an empty `list.new()` and allocates nothing. The wrapper reads the code with `list.word_le[i32](e, 0)` and the
+  message as the bytes from offset 4 up to the first zero byte, converted by
+  `string.from_utf8`, in its private `read_error(e)`. A `SqliteError` is that code and message.
+- **Release.** `close` binds `sqlite3_close_v2` and `finalize` binds `sqlite3_finalize`.
+  Each consumes its handle whatever it returns (FFI-6). The public `close` and `finalize` end
+  their resource by a whole destructure, so its finalizer does not run
+  ([FAIL-11](failure.md#fail-11-resources)), and then release the handle once:
+
+  ```hirsel unbuilt
+  pub fn close(take db: Db) -> Result[(), SqliteError] waits {
+    let Db(f: f, p: p) = take db          // db ends without its finalizer
+    let mut e = error_buffer()
+    let rc = native.close(f, p, mut e)
+    if rc == 0 { Ok(()) } else { Error(read_error(e)) }
+  }
+  ```
+
+  A `Db` or `Stmt` dropped without these is released by its finalizer, and the result is
+  discarded. A statement may outlive its connection's `close`. `sqlite3_close_v2` then returns
+  `SQLITE_OK` and keeps the connection as a zombie until the last statement is finalized, so
+  every later call on the statement is a valid C call and returns SQLite's own code.
+- **A refused admission.** When a `Db` or `Stmt` literal returns `Error((c, (f, p)))`, the
+  wrapper releases `p` with `native.close` or `native.finalize`. It then returns
+  `Error(SqliteError(code: 7, message: "sqlite: no capacity for the handle"))`, where 7 is
+  `SQLITE_NOMEM`.
 - **Native bounds.** A query's native time and SQLite's heap are not charged (FFI-7).
   `sqlite3_interrupt`, progress-handler budgets and a heap limit are later work
   ([reserved](reserved.md), R5).
@@ -538,10 +572,10 @@ its WAL, its `-shm` and any super-journal. Temporary files never reach a directo
   `Fail("foreign call needs a host Dir")` before C runs. The run makes the descriptor at the
   call's issue. A failure to make it, such as the descriptor table being full, is delivered as
   `d_fd = -1`, and the callee returns its own error.
-- **API.** `pub fn open(f: Foreign[Sqlite], d: Dir, name: String) -> Result[Db, Error] waits`.
+- **API.** `pub fn open(f: Foreign[Sqlite], d: Dir, name: String) -> Result[Db, SqliteError] waits`.
   `name` is 1 to 200 bytes of `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_` and `-`. It does not start
   with `.`, and it does not end with `-journal`, `-wal` or `-shm`. Any other name gives
-  `Error(code: 14, message: "sqlite: name is not one leaf in the directory")`
+  `SqliteError(code: 14, message: "sqlite: name is not one leaf in the directory")`
   (`SQLITE_CANTOPEN`) before C runs. A read-only `Dir` opens with `SQLITE_OPEN_READONLY`.
 - **The `hirsel-dir` VFS.** The adapter registers one VFS, `hirsel-dir`, and passes its name to
   `sqlite3_open_v2`. `xFullPathname` maps a leaf to `/hirsel-dir/<k>/<leaf>`, where `k` is the
@@ -592,7 +626,7 @@ interface is `Laws`.
 | **FL6** an FFI-reaching test refused a cached pass | a pass key made for a test whose reach holds C | A parameterless test calls `probe(None)`, where `fn probe(f: Option[Foreign[Laws]]) -> u64 { match f { Some(f) => native.freed(f), None => 0 } }`, and passes. Run `hirsel test` twice with one cache: both runs report it executed, and neither reports it reused. A parameterless test beside it that does not call `probe` is reported reused on the second run. The same holds when the only path to `native` is a resource's finalizer. |
 | **FL7** `--replay` refused before C runs | a live recording half that enters native code | `hirsel test --replay` of a test that calls `native.touch` fails with a line ending `refused: FFI-8: a recording build cannot reach foreign code: ffi_laws@1/tests/touches reaches ffi_laws@1/native/touch`. Its stderr holds no `touched`, and no recording file exists. `hirsel replay` of an entry that reaches `touch`, given any tape path, exits 2 with `replay: refused: FFI-8: …` and does not open the tape. `hirsel build --recording` is refused the same way. |
 | **FL8** SQLite round trip | a loan, `SQLITE_TRANSIENT` or `NULL`/empty mistake | In `sqlite`'s own tests, with grant `Foreign=sqlite@1/sqlite/Sqlite`: create `t(b blob)`, insert `x''`, `NULL` and `x'00ff'` with `bind_bytes` and `bind_null`, after which the bound list is cleared and refilled. Selecting in insertion order gives `Blob` with 0 bytes, `Null`, and `Blob` with `00 ff`. |
-| **FL9** SQLite release paths | close of a zombie, or finalize after close | Prepare `s`, `close` the connection, then `step(mut s)` yields `Row` from a `select 1`, and `finalize` returns `Ok(())`. `sqlite3_memory_used()`, read through an adapter function `heap`, is 0 after both. A use of the statement's copy of the connection handle after `close` fails with `Fail("foreign handle released")`. |
+| **FL9** SQLite release paths | an explicit `close` or `finalize` whose finalizer runs as well, or a busy close | Four tests, each preparing `s` from `select 1` on a fresh connection `db`: (a) `finalize(take s)` then `close(take db)`; (b) `close(take db)` then `finalize(take s)`; (c) `close(take db)` with `s` dropped at scope end; (d) both dropped at scope end, in either order. Every explicit call returns `Ok(())`, because `sqlite3_close_v2` returns `SQLITE_OK` with a statement pending. Every test passes with no cause, so no finalizer met a consumed handle. |
 | **FL10** no ambient input | the OS layer reading the clock or the host's randomness | `select random()` returns the same value in two runs of a fresh process. `select date('now')` returns `NULL`. `attach ':memory:' as x` fails with `SQLITE_AUTH` (23). |
 | **FL11** directory confinement (slice 2) | a sidecar, temp file or attach outside the grant | In a granted scratch `Dir` whose parent holds a sentinel directory: open `a.db`, run a WAL transaction from two connections, then a rollback-journal transaction. The files created are exactly `a.db`, `a.db-wal` and `a.db-shm` (WAL), and `a.db-journal` only while the journal transaction runs. The parent and the sentinel are unchanged. `open(f, d, "../x")` and `open(f, d, "file:a.db?vfs=unix")` give code 14 before C runs. A journal whose super-journal name is `/tmp/evil` fails recovery with `SQLITE_CANTOPEN`. A `sort` over 10⁶ rows creates no file. |
 

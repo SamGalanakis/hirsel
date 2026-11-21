@@ -324,7 +324,7 @@ every package into the package store and prints one line per package of the arch
 first:
 
 ```text
-json@1 sha256:cf1efc3f7d9e355df7542fd17bdc0745bcad162517075a52c2e33a5dc81178cb
+json@1 sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58
 ```
 
 Publishing never edits a manifest. Inside the producing workspace the member binding stays a
@@ -431,7 +431,7 @@ edges = ["json@1", "std@1"]
 
 [[package]]
 id = "json@1"
-root = "sha256:cf1efc3f7d9e355df7542fd17bdc0745bcad162517075a52c2e33a5dc81178cb"
+root = "sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58"
 source = "archive:vendor/jx.hpkg"
 edges = []
 
@@ -603,7 +603,7 @@ charge = "charge-v1"
 ```
 
 In `jx`, `json.hirsel` is the 33 bytes `pub fn version() -> u64 { 1u64 }` (32 characters)
-followed by a line feed. In `jy` the `1u64` is `2u64`. `jx`'s `C` is these 71 bytes, grouped
+followed by a line feed. In `jy` the `1u64` is `2u64`. `jx`'s `C` is these 72 bytes, grouped
 by field:
 
 ```text
@@ -617,15 +617,16 @@ by field:
 01 04 6a736f6e                      module path: one component, "json"
 21 70756220666e2076657273696f6e2829202d3e20753634207b2031753634207d0a
                                     the 33 (0x21) file bytes
+00                                  no foreign modules
 ```
 
 The roots are
 
-- X = `sha256:cf1efc3f7d9e355df7542fd17bdc0745bcad162517075a52c2e33a5dc81178cb` for `jx`, and
-- Y = `sha256:9ff83987f4a1683f7d24af414b5f1ca6045f689c5bd1f4955e64e5a5a418efa8` for `jy`.
+- X = `sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58` for `jx`, and
+- Y = `sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99` for `jy`.
 
 Here X is SHA-256 over the 8-byte little-endian 22, `hirsel.library-root.v1`, the 8-byte
-little-endian 71 and the 71 bytes. `hirsel pack jx --out jx.hpkg` prints
+little-endian 72 and the 72 bytes. `hirsel pack jx --out jx.hpkg` prints
 `json@1 <X>` and `hirsel pack jy --out jy.hpkg` prints `json@1 <Y>`. This law catches any
 encoding drift: a wrong order, a missing frame, a hash over the archive instead of over `C`,
 or a shortened root.
@@ -639,8 +640,8 @@ is exactly:
 
 ```text
 hirsel: json@1 is bound to more than one root:
-  app@1 -> a@1 -> json@1 = sha256:cf1efc3f7d9e355df7542fd17bdc0745bcad162517075a52c2e33a5dc81178cb
-  app@1 -> b@1 -> json@1 = sha256:9ff83987f4a1683f7d24af414b5f1ca6045f689c5bd1f4955e64e5a5a418efa8
+  app@1 -> a@1 -> json@1 = sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58
+  app@1 -> b@1 -> json@1 = sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99
 ```
 
 `app@1` is the only top member, and `a` sorts before `b`. With `b` changed to bind `<X>` and
@@ -657,7 +658,7 @@ coalesce. With `b` binding `json` major 2 to the root of a `json@2` fixture, the
 
   ```text
   hirsel: hirsel.lock is stale under --locked:
-    json@1: root sha256:cf1efc3f7d9e355df7542fd17bdc0745bcad162517075a52c2e33a5dc81178cb -> sha256:9ff83987f4a1683f7d24af414b5f1ca6045f689c5bd1f4955e64e5a5a418efa8
+    json@1: root sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58 -> sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99
     json@1: source archive:vendor/jx.hpkg -> archive:vendor/jy.hpkg
   ```
 
@@ -675,7 +676,7 @@ coalesce. With `b` binding `json` major 2 to the root of a `json@2` fixture, the
 empty, and its stderr is exactly:
 
 ```text
-hirsel: json@1 sha256:cf1efc3f7d9e355df7542fd17bdc0745bcad162517075a52c2e33a5dc81178cb is not in the package store, and --frozen does not fetch (source url:https://hirsel.invalid/jx.hpkg)
+hirsel: json@1 sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58 is not in the package store, and --frozen does not fetch (source url:https://hirsel.invalid/jx.hpkg)
 ```
 
 `.invalid` never resolves, so a command that tried to fetch would report `fetching … failed`
@@ -707,7 +708,7 @@ inventory that walks the directory, and one that keys exclusion by module instea
 
 **L6. A mismatched fetch keeps nothing.** `app` binds `<X>` with `archive = "vendor/jy.hpkg"`.
 `hirsel check app` exits 2 with
-`hirsel: json@1: archive:vendor/jy.hpkg holds sha256:9ff83987f4a1683f7d24af414b5f1ca6045f689c5bd1f4955e64e5a5a418efa8, but the binding pins sha256:cf1efc3f7d9e355df7542fd17bdc0745bcad162517075a52c2e33a5dc81178cb`,
+`hirsel: json@1: archive:vendor/jy.hpkg holds sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99, but the binding pins sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58`,
 and the store has no entry named by Y or by X.
 
 **L7. A dependency change reaches each key.** `app`'s test calls `json.version()`, and the lock

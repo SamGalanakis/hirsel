@@ -47,6 +47,7 @@ mod sha256;
 mod standalone_allocator;
 pub mod steps;
 mod stop_signals;
+#[cfg(feature = "record")]
 pub mod tape;
 mod task_heap;
 pub mod tasks;

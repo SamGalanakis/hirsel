@@ -11,6 +11,7 @@ crate-type = ["rlib", "staticlib"]
 [features]
 # Only a standalone program owns the process allocator. Rust embeddings keep theirs.
 standalone = []
+record = []
 testing = []
 memcheck = []
 charge-observation = []

@@ -154,7 +154,9 @@ pub struct Task {
     /// an input recomputes it; the constructors start it set.
     pub(crate) arc_hooks: bool,
     cancel: AtomicBool,
+    #[cfg(feature = "record")]
     replay: bool,
+    #[cfg(feature = "record")]
     latest_pair: bool,
     polls_left: u32,
     context: *mut Context,
@@ -177,6 +179,7 @@ pub struct Task {
     all_previous: *mut Task,
     state: State,
     id: u64,
+    #[cfg(feature = "record")]
     group: Option<crate::tape::schedule::Group>,
     stack: Option<Stack>,
     sp: *mut u8,
@@ -357,14 +360,17 @@ impl Waiters {
     }
 }
 
+#[cfg(feature = "record")]
 use crate::tape::schedule::Group;
 
+#[cfg(feature = "record")]
 struct LiveTape {
     group: Group,
     opened: u64,
     members: usize,
 }
 
+#[cfg(feature = "record")]
 #[derive(Default)]
 struct Tapes {
     live: Vec<LiveTape>,
@@ -373,6 +379,7 @@ struct Tapes {
     take_inputs: Option<unsafe fn(&mut Scheduler)>,
 }
 
+#[cfg(feature = "record")]
 impl Tapes {
     fn open(&mut self, group: Group) {
         let opened = self.next_open;
@@ -1241,7 +1248,7 @@ struct Scheduler {
     provider: SchedulerProvider,
     #[cfg(any(test, feature = "testing"))]
     script: Option<Arc<crate::schedule_script::ScheduleScript>>,
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(all(feature = "record", any(test, feature = "testing")))]
     script_groups: Vec<crate::tape::schedule::Group>,
     readies: Arc<Readies>,
     ready_tokens: Vec<u64>,
@@ -1251,7 +1258,9 @@ struct Scheduler {
     /// Cancellation requests for tasks parked in a provider operation, in
     /// request order, taken at the next scheduler turn.
     cancels: Vec<*mut Task>,
+    #[cfg(feature = "record")]
     outside_cancels: Vec<*mut Task>,
+    #[cfg(feature = "record")]
     tapes: Tapes,
     net: *mut hirsel_core_net::Sockets,
     model: Option<Arc<dyn ModelClock>>,
@@ -1298,11 +1307,15 @@ impl Scheduler {
     /// with no posted credit: its tape records them, an open LATEST pair
     /// closes on them, something else observes them, or a serial run with
     /// sockets checks for readiness at every event.
-    fn arc_hooks(&self, task: &Task) -> bool {
-        task.group.is_some()
-            || task.latest_pair
-            || self.arc_observed()
-            || (self.pool.is_none() && !self.net.is_null())
+    fn arc_hooks(
+        &self,
+        #[cfg_attr(not(feature = "record"), allow(unused_variables))] task: &Task,
+    ) -> bool {
+        #[cfg(feature = "record")]
+        if task.group.is_some() || task.latest_pair {
+            return true;
+        }
+        self.arc_observed() || (self.pool.is_none() && !self.net.is_null())
     }
 
     fn id(&mut self) -> u64 {
@@ -1351,6 +1364,7 @@ impl Scheduler {
     unsafe fn pop(&mut self) -> *mut Task {
         // SAFETY: only the idle scheduler manipulates the ready queues.
         unsafe {
+            #[cfg(feature = "record")]
             for entry in &self.tapes.live {
                 let group = entry.group;
                 use crate::tape::schedule::Turn;
@@ -1391,6 +1405,7 @@ impl Scheduler {
     ) -> *mut Task {
         // SAFETY: pop holds the dispatcher and head is ready.
         unsafe {
+            #[cfg(feature = "record")]
             if let Some(group) = (*self.head).group {
                 if group.replaying() || group.fifo() {
                     return self.head;
@@ -1417,7 +1432,11 @@ impl Scheduler {
             let mut runnable = Vec::new();
             let mut task = self.head;
             while !task.is_null() {
-                if (*task).group.is_none() {
+                #[cfg(feature = "record")]
+                let untaped = (*task).group.is_none();
+                #[cfg(not(feature = "record"))]
+                let untaped = true;
+                if untaped {
                     runnable.push(task);
                 }
                 task = (*task).ready;
@@ -1429,6 +1448,7 @@ impl Scheduler {
         }
     }
 
+    #[cfg(feature = "record")]
     unsafe fn live_group_tasks(
         &self,
         group: crate::tape::schedule::Group,
@@ -1451,6 +1471,7 @@ impl Scheduler {
         live
     }
 
+    #[cfg(feature = "record")]
     unsafe fn group_task(&self, group: crate::tape::schedule::Group, id: u64) -> *mut Task {
         let mut task = self.all;
         // SAFETY: scheduler owns the creation list; retired tasks are unlinked.
@@ -1521,6 +1542,7 @@ impl Scheduler {
     /// next cancellation point (CONC-7). Readiness before timers is the network
     /// rule that readiness wins a tie with a deadline (net-proposal-999 D3).
     unsafe fn capture_wakes(&mut self, captured: &mut Vec<ReadyArm>, net_timeout: i32) {
+        #[cfg(feature = "record")]
         if let Some(take_inputs) = self.tapes.take_inputs {
             // SAFETY: idle owns every task and operation frame.
             unsafe { take_inputs(self) };
@@ -1604,6 +1626,7 @@ impl Scheduler {
         }
     }
 
+    #[cfg(feature = "record")]
     unsafe fn take_tape_inputs(&mut self) {
         // SAFETY: idle owns tasks; retirement removes queued requests.
         unsafe {
@@ -1682,17 +1705,25 @@ impl Scheduler {
 
     fn has_outside_wait(&self) -> bool {
         // A queued or running sync's ready is still to come.
-        self.readies.outside()
-            // SAFETY: each entry points to its pinned provider operation.
-            || self.parked.live.values().any(|arm| unsafe {
-            let task = arm.task;
-            !(*task)
-                .group
-                .is_some_and(|group| group.drives_replay((*(*task).operation).provider))
-        })
+        #[cfg(feature = "record")]
+        {
+            self.readies.outside()
+                // SAFETY: each entry points to its pinned provider operation.
+                || self.parked.live.values().any(|arm| unsafe {
+                    let task = arm.task;
+                    !(*task)
+                        .group
+                        .is_some_and(|group| group.drives_replay((*(*task).operation).provider))
+                })
+        }
+        #[cfg(not(feature = "record"))]
+        {
+            self.readies.outside() || !self.parked.live.is_empty()
+        }
     }
 
     fn stop_quiescent(&mut self) -> ! {
+        #[cfg(feature = "record")]
         if let Some((id, fault)) = self.tapes.seal_deadlock() {
             let tape = u128::from_be_bytes(id);
             let verdict = match fault {
@@ -1861,6 +1892,7 @@ impl Scheduler {
                     // A cancel in W still runs wait at the wake (REPLAY-SPEC §3).
                     // Cancellation wins even if the callback returns Ready.
                     if wake == Wake::Cancel {
+                        #[cfg(feature = "record")]
                         if let Some(group) = (*task).group {
                             group.cancel_wait(request);
                         }
@@ -1873,6 +1905,7 @@ impl Scheduler {
                             return true;
                         }
                         WAIT_READY => {
+                            #[cfg(feature = "record")]
                             if let Some(group) = (*task).group {
                                 group.wake(request);
                             }
@@ -2632,7 +2665,9 @@ unsafe fn alone(
 }
 
 /// Replay dispatches before the first read or mutation of shared state.
+#[inline(always)]
 pub(crate) fn before_commit() -> crate::sequencer::Guard {
+    #[cfg(feature = "record")]
     replay_boundary(false);
     crate::sequencer::enter()
 }
@@ -2642,11 +2677,20 @@ pub(crate) fn before_commit() -> crate::sequencer::Guard {
 pub(crate) fn can_fuse_receives() -> bool {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins the task while this fiber is executing.
-    unsafe { !task.is_null() && !WORKER.get().is_null() && !(*task).replay }
+    #[cfg(feature = "record")]
+    unsafe {
+        !task.is_null() && !WORKER.get().is_null() && !(*task).replay
+    }
+    #[cfg(not(feature = "record"))]
+    {
+        !task.is_null() && !WORKER.get().is_null()
+    }
 }
 
 /// An Arc count commit, which the sole live unit may keep for its next one.
+#[inline(always)]
 pub(crate) fn before_arc_commit() -> crate::sequencer::Guard {
+    #[cfg(feature = "record")]
     replay_boundary(false);
     crate::sequencer::enter_keepable()
 }
@@ -2655,19 +2699,24 @@ pub(crate) fn before_arc_commit() -> crate::sequencer::Guard {
 /// Inline: a task that is not replaying pays one field read for the boundary.
 #[inline(always)]
 pub(crate) fn before_provider_entry() -> crate::sequencer::Guard {
-    let task = CURRENT.get();
-    // SAFETY: CURRENT pins this task.
-    if !task.is_null() && unsafe { (*task).replay } {
-        replay_boundary(true);
+    #[cfg(feature = "record")]
+    {
+        let task = CURRENT.get();
+        // SAFETY: CURRENT pins this task.
+        if !task.is_null() && unsafe { (*task).replay } {
+            replay_boundary(true);
+        }
     }
     crate::sequencer::enter()
 }
 
+#[cfg(feature = "record")]
 pub(crate) fn before_tape_frame(group: Group, ending: bool) -> crate::sequencer::Guard {
     tape_boundary(group, ending);
     crate::sequencer::enter()
 }
 
+#[cfg(feature = "record")]
 fn tape_boundary(group: Group, ending: bool) {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins the live opener; checkpoint borrows no task fields.
@@ -2691,6 +2740,7 @@ fn tape_boundary(group: Group, ending: bool) {
     }
 }
 
+#[cfg(feature = "record")]
 #[inline(never)]
 fn replay_boundary(provider_entry: bool) {
     let task = CURRENT.get();
@@ -2749,6 +2799,7 @@ fn replay_boundary(provider_entry: bool) {
     }
 }
 
+#[cfg(feature = "record")]
 unsafe fn live_index(task: *mut Task, group: crate::tape::schedule::Group) -> u64 {
     if group.task == 0 {
         return 0;
@@ -2773,6 +2824,7 @@ unsafe fn live_index(task: *mut Task, group: crate::tape::schedule::Group) -> u6
     index
 }
 
+#[cfg(feature = "record")]
 pub(crate) fn group_index() -> u64 {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins the task while a provider issues synchronously.
@@ -2848,23 +2900,27 @@ unsafe fn record_folded(task_pointer: *mut Task, kind: u8, object: u64, value: u
                 },
             );
         }
-        let opens_pair = matches!(kind, LATEST_READ | LATEST_PUBLISH);
-        let was_pair = task.latest_pair;
-        if let Some(group) = task.group {
-            if was_pair
-                && task.replay
-                && !matches!(
-                    group.turn(),
-                    crate::tape::schedule::Turn::Fifo | crate::tape::schedule::Turn::Event(Some(_))
-                )
-            {
-                group.fail();
+        #[cfg(feature = "record")]
+        {
+            let opens_pair = matches!(kind, LATEST_READ | LATEST_PUBLISH);
+            let was_pair = task.latest_pair;
+            if let Some(group) = task.group {
+                if was_pair
+                    && task.replay
+                    && !matches!(
+                        group.turn(),
+                        crate::tape::schedule::Turn::Fifo
+                            | crate::tape::schedule::Turn::Event(Some(_))
+                    )
+                {
+                    group.fail();
+                }
+                group.event(|| live_index(task_pointer, group), kind == END);
             }
-            group.event(|| live_index(task_pointer, group), kind == END);
-        }
-        if (*task_pointer).latest_pair != opens_pair {
-            (*task_pointer).latest_pair = opens_pair;
-            (*task_pointer).arc_hooks = (*(*task_pointer).run).arc_hooks(&*task_pointer);
+            if (*task_pointer).latest_pair != opens_pair {
+                (*task_pointer).latest_pair = opens_pair;
+                (*task_pointer).arc_hooks = (*(*task_pointer).run).arc_hooks(&*task_pointer);
+            }
         }
     }
 }
@@ -2923,7 +2979,10 @@ unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
         // leaves the processor by its own logic (park, provider wait, poll
         // turn, slice end, end), which replay reaches by itself.
         let preemptible = || match (*run).pool {
+            #[cfg(feature = "record")]
             None => !(*task).group.is_some_and(|group| group.fifo()),
+            #[cfg(not(feature = "record"))]
+            None => true,
             Some(_) => hirsel_core_layout::event::is_poll(kind, value),
         };
         if !(*run).net.is_null() && preemptible() {
@@ -3026,6 +3085,7 @@ pub(crate) fn flow_parallel() -> bool {
     !WORKER.get().is_null()
 }
 
+#[cfg(feature = "record")]
 pub(crate) fn recorded_chooser() -> u8 {
     #[cfg(any(test, feature = "testing"))]
     {
@@ -3042,6 +3102,7 @@ pub(crate) fn recorded_chooser() -> u8 {
 pub(crate) fn has_provider_task() -> bool {
     !CURRENT.get().is_null() || !CALLBACK_TASK.get().is_null()
 }
+#[cfg(feature = "record")]
 pub(crate) fn provider_group() -> Option<crate::tape::schedule::Group> {
     let task = if CURRENT.get().is_null() {
         CALLBACK_TASK.get()
@@ -3064,6 +3125,7 @@ pub(crate) fn current_heap() -> *const crate::task_heap::Heap {
     }
 }
 
+#[cfg(feature = "record")]
 pub(crate) fn current_group() -> Option<crate::tape::schedule::Group> {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins its task, or is null outside a task.
@@ -3135,6 +3197,7 @@ fn poll_timeout(deadline: Option<u64>) -> i32 {
     })
 }
 
+#[cfg(feature = "record")]
 pub(crate) fn attach_tape(group: Group) {
     let _commit = crate::sequencer::enter();
     let task = CURRENT.get();
@@ -3157,6 +3220,7 @@ pub(crate) fn attach_tape(group: Group) {
     }
 }
 
+#[cfg(feature = "record")]
 pub(crate) fn detach_tape(group: Group) {
     let _commit = crate::sequencer::enter();
     let task = CURRENT.get();
@@ -3187,18 +3251,23 @@ pub(crate) fn flow_script() -> Option<(Arc<crate::schedule_script::ScheduleScrip
     let _commit = crate::sequencer::enter();
     let run = unsafe { &mut *task.run };
     let script = run.script.clone()?;
-    let Some(group) = task.group else {
-        return Some((script, UNTAPED));
-    };
-    let domain = run
-        .script_groups
-        .iter()
-        .position(|g| g.same(group))
-        .unwrap_or_else(|| {
-            run.script_groups.push(group);
-            run.script_groups.len() - 1
-        });
-    Some((script, domain as u64))
+    #[cfg(feature = "record")]
+    {
+        let Some(group) = task.group else {
+            return Some((script, UNTAPED));
+        };
+        let domain = run
+            .script_groups
+            .iter()
+            .position(|g| g.same(group))
+            .unwrap_or_else(|| {
+                run.script_groups.push(group);
+                run.script_groups.len() - 1
+            });
+        Some((script, domain as u64))
+    }
+    #[cfg(not(feature = "record"))]
+    Some((script, UNTAPED))
 }
 /// Whether a task is running on this thread (tests assert where callbacks run).
 #[cfg(test)]
@@ -3330,6 +3399,7 @@ pub(crate) unsafe fn delegate(
         if task.is_null() || WORKER.get().is_null() {
             return Some(crate::sequencer::enter());
         }
+        #[cfg(feature = "record")]
         if (*task).replay {
             return Some(before_commit());
         }
@@ -3364,8 +3434,11 @@ pub(crate) unsafe fn delegable(request: &Delegated) -> bool {
         let task = request.task;
         let run = (*task).run;
         let poll = hirsel_core_layout::event::is_poll(request.kind, 0);
-        !(*task).replay
-            && !cancel_takes_effect(&*request.context, cancel_flag(task))
+        #[cfg(feature = "record")]
+        if (*task).replay {
+            return false;
+        }
+        !cancel_takes_effect(&*request.context, cancel_flag(task))
             && !(*request.pending).load(Ordering::Acquire)
             && !(poll && (*task).polls_left <= 1)
             && ((*run).net.is_null() || ((*run).pool.is_some() && !poll))
@@ -3456,6 +3529,7 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
         let _commit = before_commit();
         record_event(task, END, (*task).id, (*task).failed as u64);
         (*task).state = State::Ended;
+        #[cfg(feature = "record")]
         if let Some(group) = (*task).group
             && let Some(members) = (*(*task).run).tapes.membership(group)
         {
@@ -3553,7 +3627,7 @@ pub unsafe fn run_root(
         provider,
         #[cfg(any(test, feature = "testing"))]
         script: crate::schedule_script::installed(),
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(all(feature = "record", any(test, feature = "testing")))]
         script_groups: Vec::new(),
         readies: Readies::new(),
         ready_tokens: Vec::new(),
@@ -3561,7 +3635,9 @@ pub unsafe fn run_root(
         #[cfg(feature = "testing")]
         measure: measurement_enabled(),
         cancels: Vec::new(),
+        #[cfg(feature = "record")]
         outside_cancels: Vec::new(),
+        #[cfg(feature = "record")]
         tapes: Tapes::default(),
         net: ptr::null_mut(),
         model: None,
@@ -3597,7 +3673,9 @@ pub unsafe fn run_root(
         arc_runtime: false,
         arc_hooks: true,
         cancel: AtomicBool::new(false),
+        #[cfg(feature = "record")]
         replay: false,
+        #[cfg(feature = "record")]
         latest_pair: false,
         polls_left: POLLS_PER_TURN,
         context,
@@ -3618,6 +3696,7 @@ pub unsafe fn run_root(
         all_previous: ptr::null_mut(),
         state: State::Ready,
         id: 0,
+        #[cfg(feature = "record")]
         group: None,
         stack: Some(run.stacks.take()),
         sp: ptr::null_mut(),
@@ -3813,12 +3892,16 @@ impl RunPtr {
                     // An idle native run can collect readiness in its wait.
                     // Ready tokens are still applied before any expired timer.
                     let run = &mut *run;
+                    #[cfg(feature = "record")]
+                    let no_live_tapes = run.tapes.live.is_empty();
+                    #[cfg(not(feature = "record"))]
+                    let no_live_tapes = true;
                     let wait_for_net = pool.is_none()
                         && !run.net.is_null()
                         && run.model.is_none()
                         && run.head.is_null()
                         && run.deferred.is_null()
-                        && run.tapes.live.is_empty()
+                        && no_live_tapes
                         && run.cancels.is_empty()
                         && !run.readies.pending.load(Ordering::Acquire)
                         && run.has_outside_wait();
@@ -4124,7 +4207,7 @@ unsafe fn spawn_in(
     input: *mut u8,
     body: Body,
     layout: TaskLayout,
-    group: Option<crate::tape::schedule::Group>,
+    #[cfg(feature = "record")] group: Option<crate::tape::schedule::Group>,
 ) -> Spawned {
     // SAFETY: spawn is invoked by the current parent in its exclusive context.
     unsafe {
@@ -4148,7 +4231,9 @@ unsafe fn spawn_in(
             arc_runtime: false,
             arc_hooks: true,
             cancel: AtomicBool::new(false),
+            #[cfg(feature = "record")]
             replay: false,
+            #[cfg(feature = "record")]
             latest_pair: false,
             polls_left: POLLS_PER_TURN,
             context: ptr::null_mut(),
@@ -4169,6 +4254,7 @@ unsafe fn spawn_in(
             all_previous: ptr::null_mut(),
             state: State::Ready,
             id,
+            #[cfg(feature = "record")]
             group: group.map(|group| group.child()),
             stack: stack.take(),
             sp: ptr::null_mut(),
@@ -4184,14 +4270,21 @@ unsafe fn spawn_in(
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::allocated((&*task as *const Task).cast(), size_of::<Task>());
         let task = Box::into_raw(task);
-        (*task).arc_runtime =
-            (*run).pool.is_some() && ((*task).group.is_some() || (*run).arc_observed());
-        if let Some(group) = (*task).group {
-            (*task).replay = group.replaying();
-            (*task).arc_runtime |= (*task).replay;
-            if let Some(members) = (*run).tapes.membership(group) {
-                *members += 1;
+        #[cfg(feature = "record")]
+        {
+            (*task).arc_runtime =
+                (*run).pool.is_some() && ((*task).group.is_some() || (*run).arc_observed());
+            if let Some(group) = (*task).group {
+                (*task).replay = group.replaying();
+                (*task).arc_runtime |= (*task).replay;
+                if let Some(members) = (*run).tapes.membership(group) {
+                    *members += 1;
+                }
             }
+        }
+        #[cfg(not(feature = "record"))]
+        {
+            (*task).arc_runtime = (*run).pool.is_some() && (*run).arc_observed();
         }
         (*task).arc_hooks = (*run).arc_hooks(&*task);
         (*task).context = (*task).owned_context.as_mut().unwrap();
@@ -4274,8 +4367,10 @@ unsafe fn spawn_committed(
     // SAFETY: the caller passes its generated operands through unchanged.
     unsafe {
         let _commit = crate::sequencer::enter();
-        let group = current_group();
-        let spawned = spawn_in(stack, context, bytes, input, body, layout, group);
+        #[cfg(feature = "record")]
+        let spawned = spawn_in(stack, context, bytes, input, body, layout, current_group());
+        #[cfg(not(feature = "record"))]
+        let spawned = spawn_in(stack, context, bytes, input, body, layout);
         Spawn {
             task: spawned.task,
             available: spawned.available,
@@ -4291,6 +4386,7 @@ pub unsafe extern "C" fn hirsel_core_cancel(_: *mut Context, task: *mut Task) {
     // SAFETY: parent owns the child's handle and requests without touching its stack.
     unsafe {
         let _commit = before_commit();
+        #[cfg(feature = "record")]
         if let Some(group) = (*task).group
             && !current_group().is_some_and(|source| source.same(group))
         {
@@ -4319,6 +4415,7 @@ unsafe fn retire(task: *mut Task) {
     // SAFETY: task ended, is not queued, and its sole handle is being consumed.
     unsafe {
         let run = (*task).run;
+        #[cfg(feature = "record")]
         (*run).outside_cancels.retain(|&t| t != task);
         let (previous, next) = ((*task).all_previous, (*task).all);
         if previous.is_null() {
@@ -4605,6 +4702,7 @@ mod ready_routing_laws {
                 next: 1,
                 provider: SchedulerProvider::default(),
                 script: None,
+                #[cfg(feature = "record")]
                 script_groups: Vec::new(),
                 readies: Readies::new(),
                 ready_tokens: Vec::new(),
@@ -4612,7 +4710,9 @@ mod ready_routing_laws {
                 #[cfg(feature = "testing")]
                 measure: false,
                 cancels: Vec::new(),
+                #[cfg(feature = "record")]
                 outside_cancels: Vec::new(),
+                #[cfg(feature = "record")]
                 tapes: Tapes::default(),
                 net: ptr::null_mut(),
                 model: None,
@@ -4642,7 +4742,9 @@ mod ready_routing_laws {
                         arc_runtime: false,
                         arc_hooks: true,
                         cancel: AtomicBool::new(false),
+                        #[cfg(feature = "record")]
                         replay: false,
+                        #[cfg(feature = "record")]
                         latest_pair: false,
                         polls_left: POLLS_PER_TURN,
                         context: &mut context,
@@ -4663,6 +4765,7 @@ mod ready_routing_laws {
                         all_previous: ptr::null_mut(),
                         state: State::Provider,
                         id: i as u64,
+                        #[cfg(feature = "record")]
                         group: None,
                         stack: Some(Stack::new()),
                         sp: ptr::null_mut(),

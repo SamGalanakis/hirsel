@@ -652,6 +652,7 @@ unsafe fn pending_deadline(n: &NetworkRequest) -> Option<u64> {
     unsafe {
         n.until.and_then(|(p, clock, at)| {
             // This translation is host scheduling, outside the program's clock reads.
+            #[cfg(feature = "record")]
             let (p, clock) = if crate::tape::owns(&p) {
                 crate::tape::source(&p, clock)?
             } else {

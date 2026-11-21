@@ -453,12 +453,18 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
                 + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-archives',
                               library=f'//:{name}-standalone',
                               archive_name=f"lib{attrs['crate']}.a")
+                + '\n' + call('hirsel_library', name=f'{name}-standalone-record',
+                              deps=declared_deps(package, packages),
+                              **{**attrs, 'features': ['standalone', 'record']})
+                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-record-archives',
+                              library=f'//:{name}-standalone-record',
+                              archive_name=f"lib{attrs['crate']}.a")
                 + '\n' + call('hirsel_library', name=f'{name}-test-pool',
-                               deps=declared_deps(package, packages),
-                               **{**attrs, 'features': ['standalone', 'testing']})
+                              deps=declared_deps(package, packages),
+                              **{**attrs, 'features': ['standalone', 'testing']})
                 + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-test-pool-archives',
-                               library=f'//:{name}-test-pool',
-                               archive_name=f"lib{attrs['crate']}.a"))
+                              library=f'//:{name}-test-pool',
+                              archive_name=f"lib{attrs['crate']}.a"))
     return call('hirsel_core_runtime_archives', name=f'{name}-archives',
                 library=f'//:{name}', archive_name=f"lib{attrs['crate']}.a")
 
@@ -706,17 +712,26 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="core-memory-report", script="tools/tests/core_memory_report.py",
         files_env={"HIRSEL_REPORT_COMPILER": "//:hirsel-core-driver-bin-hirsel", "HIRSEL_REPORT_EVALUATOR": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval", "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives", "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives"},
         data=Raw('glob(["crates/hirsel-core-rt/include/**", "core/core/**", "core/std/**"]) + ["crates/hirsel-core-rt/testdata/memory_report.c"]')))
+    rt_deps = declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages)
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-native-fixture", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
-        srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["testing", "memcheck", "charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
+        srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["testing", "memcheck", "charge-observation"], deps=rt_deps,
+        manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
+    out.append("\n" + call("hirsel_library", name="hirsel-core-rt-record-native-fixture", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
+        srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["testing", "memcheck", "charge-observation", "record"], deps=rt_deps,
+        manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
+    out.append("\n" + call("hirsel_library", name="hirsel-core-rt-record", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
+        srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["record"], deps=rt_deps,
         manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_library", name="core-llvm-runtime-fixture",
         crate="core_llvm_runtime_fixture", crate_root="crates/hirsel-llvm/tests/core_runtime/lib.rs",
         srcs=["crates/hirsel-llvm/tests/core_runtime/lib.rs"], features=[], deps=["//:hirsel-core-rt-native-fixture"],
         manifest_dir="crates/hirsel-llvm", package_name="hirsel-llvm", version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-scripted-runtime-pic", library=":hirsel-core-rt-native-fixture"))
+    out.append("\n" + call("hirsel_pic_staticlib", name="core-scripted-record-runtime-pic", library=":hirsel-core-rt-record-native-fixture"))
     out.append("\n" + call("hirsel_core_runtime_archives", name="core-scripted-runtime-archives", library=":hirsel-core-rt-native-fixture", archive_name="libhirsel_core_rt.a"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-native-runtime-fixture-pic", library=":core-llvm-runtime-fixture"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-runtime-pic", library=":hirsel-core-rt"))
+    out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-record-runtime-pic", library=":hirsel-core-rt-record"))
     out.append("\n" + call("hirsel_core_runtime_archives", name="core-cranelift-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_cranelift_fixture.a"))
     if unguarded:
         raise SystemExit("these binary and test roots do not install the memory guard; add "

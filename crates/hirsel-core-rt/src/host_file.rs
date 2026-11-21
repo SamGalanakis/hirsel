@@ -89,6 +89,7 @@ pub(crate) struct Files {
     pub(crate) connected: std::collections::BTreeMap<u64, (crate::net::Address, Provider)>,
     pub(crate) tls: crate::os_tls::Streams,
     pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
+    #[cfg(feature = "record")]
     pub(crate) net_tape: Option<crate::net::SocketTape>,
     pub(crate) secrets: Mutex<crate::secret::Secrets>,
     pub(crate) tls_writes: BTreeMap<u64, crate::secret::TlsWrite>,

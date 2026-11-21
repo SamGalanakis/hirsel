@@ -722,9 +722,13 @@ _core_runtime_archives = rule(
 )
 
 def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
-    files_env = {"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"}
+    files_env = {
+        "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+        "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic",
+    }
     if case_filter == "native::tests::":
         files_env["HIRSEL_CORE_RT_SCRIPTED_ARCHIVE"] = "//:core-scripted-runtime-pic"
+        files_env["HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE"] = "//:core-scripted-record-runtime-pic"
         files_env["HIRSEL_TEST_TAIL_CONTEXT"] = "//crates/hirsel-llvm-lazy/bridge:tail-context-test"
     cases = OPENAT2_TEST_CASES["hirsel-core-driver-unittest"] if case_filter == "native::tests::" else []
     common = dict(

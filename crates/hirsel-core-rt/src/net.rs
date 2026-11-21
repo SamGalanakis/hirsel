@@ -160,12 +160,14 @@ pub(crate) struct NetworkRequest {
 }
 /// A CLI run substitutes all Net grants on one tape. A socket carrier
 /// keeps the tape's object ordinal and the usual two direction bits.
+#[cfg(feature = "record")]
 #[derive(Clone, Copy)]
 pub(crate) struct SocketTape {
     provider: Provider,
     generation: u64,
 }
 
+#[cfg(feature = "record")]
 impl SocketTape {
     pub(crate) fn new(provider: Provider, handle: u64) -> Self {
         Self {
@@ -219,15 +221,18 @@ pub(crate) unsafe fn authorize(provider: &Provider, request: &mut Request) -> bo
     }
     // SAFETY: CONNECT and LISTEN carry the Net adapter's pinned extension.
     unsafe {
-        if !crate::tape::owns(provider) {
-            return permitted(request, request.handle);
+        #[cfg(feature = "record")]
+        if crate::tape::owns(provider) {
+            if let Some((_, handle)) = crate::tape::source(provider, request.handle) {
+                let denied = !permitted(request, handle);
+                (*request.path.cast_mut().cast::<NetworkRequest>()).denied = denied;
+            }
+            return true;
         }
-        if let Some((_, handle)) = crate::tape::source(provider, request.handle) {
-            let denied = !permitted(request, handle);
-            (*request.path.cast_mut().cast::<NetworkRequest>()).denied = denied;
-        }
+        #[cfg(not(feature = "record"))]
+        let _ = provider;
+        permitted(request, request.handle)
     }
-    true
 }
 
 unsafe fn permitted(request: &Request, handle: u64) -> bool {
@@ -356,8 +361,10 @@ unsafe fn address_op(
             site,
         };
         let provider = hirsel_core_capability_provider(context, n);
+        #[cfg_attr(not(feature = "record"), allow(unused_mut))]
         let mut outcome = hirsel_core_host(context, provider, &mut request);
         let _commit = crate::sequencer::enter();
+        #[cfg(feature = "record")]
         if let Some(tape) = (*files).net_tape {
             outcome = tape.carrier(outcome);
         }
@@ -384,6 +391,7 @@ unsafe fn owned_op(
 ) -> AddressOutcome {
     unsafe {
         let files = (*context).host_files;
+        #[cfg(feature = "record")]
         let tape = (*files).net_tape;
         if op == SEND_PAIR && write_spent(files, key) {
             return AddressOutcome::new(RESET, Address::default());
@@ -419,6 +427,7 @@ unsafe fn owned_op(
             buffer,
             site,
         };
+        #[cfg(feature = "record")]
         let outcome = if let Some(tape) = tape {
             request.handle = tape.handle(key);
             let outcome = hirsel_core_host(context, &tape.provider, &mut request);
@@ -428,6 +437,11 @@ unsafe fn owned_op(
                 outcome
             }
         } else {
+            let provider = socket_provider(context, key);
+            hirsel_core_host(context, &provider, &mut request)
+        };
+        #[cfg(not(feature = "record"))]
+        let outcome = {
             let provider = socket_provider(context, key);
             hirsel_core_host(context, &provider, &mut request)
         };
@@ -622,11 +636,13 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             patterns: secret.patterns,
             committed: 0,
         };
-        let tape = (*files).net_tape;
-        let (provider, handle) = tape.map_or_else(
+        #[cfg(feature = "record")]
+        let (provider, handle) = (*files).net_tape.map_or_else(
             || (socket_provider(context, key), key),
             |tape| (tape.provider, tape.handle(key)),
         );
+        #[cfg(not(feature = "record"))]
+        let (provider, handle) = (socket_provider(context, key), key);
         let mut request = Request {
             operation: SEND_SECRET,
             mode: 0,
@@ -658,6 +674,7 @@ pub unsafe extern "C" fn hirsel_core_net_split(
     let _commit = crate::sequencer::enter();
     unsafe {
         let files = (*context).host_files;
+        #[cfg(feature = "record")]
         let (read, write) = if let Some(tape) = (*files).net_tape {
             if let Some(source) = tape.source(key) {
                 (*files).sockets.split(source);
@@ -666,6 +683,8 @@ pub unsafe extern "C" fn hirsel_core_net_split(
         } else {
             (*files).sockets.split(key)
         };
+        #[cfg(not(feature = "record"))]
+        let (read, write) = (*files).sockets.split(key);
         Outcome {
             value: read,
             written: write,
@@ -683,10 +702,13 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
         if key & 3 == 2 {
             (*files).tls_writes.remove(&(key & !3));
         }
+        #[cfg(feature = "record")]
         let source = match (*files).net_tape {
             Some(tape) => tape.source(key),
             None => Some(key),
         };
+        #[cfg(not(feature = "record"))]
+        let source = Some(key);
         if let Some(source) = source {
             if source & 3 == 2
                 && let Some(stream) = (*files).tls.sessions.get_mut(&(source & !3))
@@ -770,12 +792,16 @@ unsafe fn narrow(context: *mut Context, n: u64, rule: GrantRule) -> Outcome {
         crate::process::deny_describe_capability(context);
         let provider = *hirsel_core_capability_provider(context, n);
         let parent = hirsel_core_capability_handle(context, n);
+        #[cfg(feature = "record")]
         let taped = crate::tape::owns(&provider);
+        #[cfg(feature = "record")]
         let rules_handle = if taped {
             crate::tape::net_rules(&provider, parent)
         } else {
             parent
         };
+        #[cfg(not(feature = "record"))]
+        let rules_handle = parent;
         let rules = (*(rules_handle as *const Rules)).as_slice();
         let intersections: Vec<_> = rules
             .iter()
@@ -803,12 +829,15 @@ unsafe fn narrow(context: *mut Context, n: u64, rule: GrantRule) -> Outcome {
             payer,
             charge: charge.unwrap(),
         });
+        #[cfg(feature = "record")]
         let value = if taped {
             let (handle, _group) = crate::tape::narrow_net(&provider, parent, handle);
             (*files).registry.grant(provider, handle)
         } else {
             (*files).registry.grant(provider, handle)
         };
+        #[cfg(not(feature = "record"))]
+        let value = (*files).registry.grant(provider, handle);
         Outcome {
             value,
             ..Outcome::default()

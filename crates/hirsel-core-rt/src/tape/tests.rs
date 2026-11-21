@@ -986,9 +986,11 @@ fn record_closes_the_file_when_the_header_write_fails() {
 #[test]
 fn record_refuses_a_header_that_overflows_block_zero_before_creating_the_file() {
     let mut h = header(REVISION);
-    // Format 4 has 72 fixed bytes, 14 identity bytes + 1 length byte,
-    // a 3-byte argument length and a 1-byte empty grants length.
-    h.arg = vec![0; MAX_LEN - 91];
+    // Format 8 has 72 fixed bytes plus the 16-byte Map hash key,
+    // 14 identity bytes + 1 length byte, a 3-byte argument length,
+    // and a 1-byte empty grants length.
+    const HEADER_BYTES: usize = 72 + 16 + 14 + 1 + 3 + 1;
+    h.arg = vec![0; MAX_LEN - HEADER_BYTES];
     let mut store = Box::<Store>::default();
     let (tape, _) =
         unsafe { Tape::open(REVISION, store.dir(), b"t", Mode::Record, &h, &expect()) }.unwrap();

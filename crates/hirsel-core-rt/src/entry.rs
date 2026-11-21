@@ -298,11 +298,12 @@ pub(crate) fn duplicate(fd: i32) -> io::Result<OwnedFd> {
     }
 }
 /// A closed inherited stream is still an entry grant. Its terminal bit is
-/// false and any later write reports the descriptor error.
+/// false and any later write reports the descriptor error. A negative
+/// descriptor is invalid launcher input.
 pub(crate) fn duplicate_stream(fd: i32) -> io::Result<Option<OwnedFd>> {
     match duplicate(fd) {
         Ok(owned) => Ok(Some(owned)),
-        Err(error) if error.raw_os_error() == Some(libc::EBADF) => Ok(None),
+        Err(error) if fd >= 0 && error.raw_os_error() == Some(libc::EBADF) => Ok(None),
         Err(error) => Err(error),
     }
 }

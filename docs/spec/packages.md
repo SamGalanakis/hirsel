@@ -39,7 +39,12 @@ byte length as such a number followed by its UTF-8 bytes. `C` holds, in order:
    root;
 5. its **files**: their count, then each file, sorted by path bytewise. A file is its path (a
    text), its module path (the number of components, then each component as a text), and its
-   bytes (their length as a number, then the raw bytes).
+   bytes (their length as a number, then the raw bytes);
+6. its **foreign modules** ([FFI-2](foreign.md#ffi-2-foreign-modules)): their count, then each,
+   sorted by module path bytewise. One is its module path, its symbol prefix (a text) and its
+   archive rows: their count, then each row, sorted by target bytewise, as the target (a text),
+   the file's path (a text), the 32-byte pin, and the archive's bytes (their length as a
+   number, then the raw bytes).
 
 `core@1` is bound in every package and is never written as a binding. `std@1` is a toolchain
 package (section 2) and is written with tag `0`, so a library root says which std major it
@@ -48,7 +53,7 @@ Its content is the toolchain's and enters every key through the compiler and the
 identity, as it does today.
 
 **Inventory.** The files of `C` are exactly the package's `[sources]` (section 2), with their
-modules. Nothing else in the package directory enters: not `[tests]` sources, `[program]`,
+modules, and its archives are exactly the rows of its `[foreign]` tables. Nothing else in the package directory enters: not `[tests]` sources, `[program]`,
 `[tool]`, `hirsel.lock`, any other manifest field, a build or cache directory, or a file the
 manifest does not list. A test-only file that joins a library module, as `assembly_laws.hirsel`
 joins module `store`, is left out, and the module keeps exactly its `[sources]` files. The manifest enters only through items 2
@@ -80,7 +85,8 @@ points, because a directory-convention package is never a dependency and never p
 **Decoding.** A reader accepts `C` only in this exact encoding. It refuses an unknown
 version, a redundant LEB128 byte, a text that is not UTF-8, a path or module path that breaks
 the rules above, bindings or files out of order or repeated, a tag other than 0 or 1, a tag
-`0` on a name other than `std`, a binding of `core`, bytes left over at the end, and an
+`0` on a name other than `std`, a foreign module that is not a module of its files, an archive
+whose bytes do not match its pin, a binding of `core`, bytes left over at the end, and an
 encoding over the limits. So decoding and re-encoding give the same bytes, and two packages
 with one root have one meaning.
 
@@ -134,6 +140,10 @@ dirs = ["."]
 [tests.runs."store@1/store/frame_size_boundary"]
 limit = 134217728         # replaces limit, grants or dirs for one test
 
+[foreign.native]          # optional; module native is a foreign module (FFI-2)
+symbols = "hsq_"
+archives = [{ target = "x86_64-unknown-linux-gnu", file = "native/x86_64/libsq.a", sha256 = "…" }]
+
 [tool.workloads]          # anything; hirsel never reads [tool]
 s1 = { module = "main", grants = ["Stdout"] }
 ```
@@ -180,6 +190,10 @@ other build. A test-only file may join a library module or form a module of its 
 `[tests.runs]` keys are test definition paths (`store@1/store/frame_size_boundary`), and each
 run replaces any of `limit`, `grants` and `dirs` for that test alone. A run naming a test the
 package does not have is refused. A dependency's `[tests]` is never read and never enters `C`.
+
+**`[foreign]`.** Each key is a module of `[sources]` that is a foreign module, with its symbol
+prefix and archive table. [FFI-2](foreign.md#ffi-2-foreign-modules) defines the fields and their
+refusals.
 
 **`[tool]`.** This table is for other tools: hirsel ignores its contents, and they never
 enter `C`, the lock or any key.
@@ -530,7 +544,8 @@ address covers the checked IR of every instance the test reaches, in any package
 dependency's content reaches the key through every body the test can run. A changed body in a
 reached dependency changes the address, and the test runs again. A changed file in a
 dependency that the test never reaches leaves the pass reused, which is correct, because the
-outcome depends only on code that runs. Nothing new enters the test key.
+outcome depends only on code that runs. Nothing new enters the test key. A test whose reach
+holds a foreign function has no key ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)).
 
 **`hirsel inspect --affected-tests`.** The argument is a definition path in any package of the
 member's closure (`json@1/json/version`), or a package identity alone (`json@1`). For a
@@ -540,7 +555,8 @@ definition of that package. So after a lock change from `json@1 sha256:A` to `sh
 
 **The recipe.** R already covers everything a dependency contributes to an executable: every
 reached body and its annex is in the recipe, and a body's hash covers its checked IR. The
-recipe format does not change. A dependency's file names in annexes are `name@major/path`
+recipe's foreign-archives part ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking))
+holds each linked archive by its digest. A dependency's file names in annexes are `name@major/path`
 (section 1), so R never depends on where the package store is. Two builds of one program
 over one closure give one R, on any machine and with any store path.
 

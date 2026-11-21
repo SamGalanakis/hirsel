@@ -3,7 +3,8 @@
 ### CAP-1: Authority is explicit
 
 Files, directories, network, processes, clocks, randomness, standard streams, environment
-variables, tasks and credentials ([`Secret`](tls.md#tls-5-secrets)) are reached only
+variables, tasks, credentials ([`Secret`](tls.md#tls-5-secrets)) and native code
+([`Foreign[I]`](foreign.md#ffi-4-the-foreign-capability)) are reached only
 through operations that take a capability argument.
 These capability values are the only way a program affects or observes the world outside
 its values. A function holds authority only through its parameters (CAP-3). Top-level `const` values cannot hold capabilities.
@@ -19,7 +20,8 @@ fn stamp() -> u64 { host.mono_ns() }                     // refused: CAP-1, no C
 
 A capability type is an opaque type ([PROG-2](programs.md#prog-2-visibility)) of the
 standard library. Its values are made only by its own module, from entry grants (CAP-4) or
-by attenuation (CAP-7), so no program can forge one.
+by attenuation (CAP-7), so no program can forge one. `Foreign[I]` is made only from an
+entry grant ([FFI-4](foreign.md#ffi-4-the-foreign-capability)).
 A `Secret` can also be sealed from bytes the program already holds
 ([TLS-5](tls.md#tls-5-secrets)). Sealing gives the program no authority it did not have
 before, because it already held those bytes. A capability is also made by **virtual
@@ -74,8 +76,9 @@ the host.
 
 ### CAP-5: Provider operations
 
-The **provider operations** are exactly the host primitives listed in [core](core.md); the
-standard library's capability modules are ordinary code over them, and a program cannot
+The **provider operations** are exactly the host primitives listed in [core](core.md). A
+foreign call ([foreign](foreign.md)) is not one: it has no provider, no virtual form and no
+replay point. The standard library's capability modules are ordinary code over them, and a program cannot
 declare another. Each is carried out by a **provider**: the implementation behind the
 capability, chosen by the run's configuration: the host, or a controlled provider such as
 a simulation that a test configures. A program may also select a provider itself, by
@@ -186,7 +189,9 @@ arguments, which include its grants, its root limit and its launch metadata
 from host entropy. The key belongs to the run and every task uses it. A replay entry
 restores the recorded key without requesting host entropy. A provider operation passes it twice: at issue, before any host
 effect, and at delivery, before its result reaches the task. Each input enters the run once,
-at its own point, and nothing outside the run reaches a value except through such a point.
+at its own point, and nothing outside the run reaches a value except through such a point,
+or through a foreign call, which is not a replay point and which no recording build reaches
+([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)).
 A scheduler choice is an input; the result of an event is not, since the order and the
 run's other inputs determine it, so the same choices give the same `receive`,
 `try_receive`, `latest.read` and count. Once issued, an operation delivers exactly one

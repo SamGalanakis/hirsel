@@ -42,8 +42,15 @@ declared. A later layout or foreign declaration never reinterprets an existing t
 requires an explicit release contract. Foreign callbacks obey declared capture/thread/alias
 rules. No language failure unwinds across foreign frames; foreign crash/stack overflow is
 environmental termination. Unsafe/foreign operations require explicit authority and are
-outside replay unless an explicit model/provider contract admits them." *v1:* no foreign
-code; FAIL-15 makes stack exhaustion a run stop.
+outside replay unless an explicit model/provider contract admits them." *v1:* FFI-1 to FFI-9
+([foreign](foreign.md)): audited archives pinned per target, entry-granted `Foreign[I]`,
+call-scoped loans, checked handles, and no recording, replay or reused pass for a program that
+reaches foreign code; FAIL-15 makes Hirsel stack exhaustion a run stop. *Later:* callbacks
+into Hirsel; contained execution of untrusted native code, compiled to Wasm or run out of
+process; a provider contract that records a foreign call so that replay admits it; native time
+and memory budgets with `sqlite3_interrupt` or a progress handler as fuel; a cause of its own
+for a refused handle, in place of `Fail` texts; varargs, arbitrary pointers, dynamic loading and
+macOS.
 
 **R6.** `String`/`List` and `Text`/`FixedSpan` are distinct types; compact fields declare
 inline or linked storage and links stay in one blob; wire formats are separate;
@@ -149,7 +156,9 @@ declared by `grant` (MEM-27).
 **R15.** "`View[T]` promises typed access and an anchor, not a contiguous aligned pointer.
 A raw-byte/FFI operation requires an explicit contiguous/alignment contract or conversion;
 column and packed projections retain the same lexical freeze/overlap rules. New layout
-attributes do not change existing unannotated declarations." *v1:* OWN-8, MEM-13.
+attributes do not change existing unannotated declarations." *v1:* OWN-8, MEM-13; the only
+raw-byte contract is FFI-5's: a `Bytes` loan is its initialized bytes as one contiguous `(ptr,
+len)` range ([foreign](foreign.md#ffi-5-argument-and-result-types)).
 
 **R16.** Scoped types declare every anchor; their owned fields make them move; they never
 escape their anchors, enter storable fields or move to a task; ordinary generic `T` stays
@@ -243,7 +252,8 @@ allocator chunk size becomes a logical capacity (MEM-28).
 
 User-made shared limits; mutexes and cells; atomics, which are not planned (R3); weak counted references; catching
 failures other than by `isolate`; deadlines and timeouts other than `host.sleep_until` and the network operations' declared `until`; task sets and selection; `@noalloc`; compile-time
-evaluation beyond `const`; unsafe code and foreign functions; layout declarations other
+evaluation beyond `const`; unsafe code; foreign functions other than FFI-2's, and every R5
+*Later* item; layout declarations other
 than `@compact`; methods, traits and implementation contracts; imports; list and map
 literals (an `Inline` array literal is not one); format strings; `forget`; static brands;
 conversion of errors by `?`; ranges over `char`, which would need to step over the surrogate

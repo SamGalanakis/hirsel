@@ -32,6 +32,12 @@ the recording runtime. These commands make one:
 | `hirsel replay app --tape PATH` | builds the recording build and replays PATH with it |
 | `hirsel test app --limit N --replay` | runs each selected test in the recording build, recording on, then replays it ([Testing with recordings](#testing-with-recordings)) |
 
+A program whose entry reaches a foreign function has no recording build. Each of these
+commands refuses it before building, reading a tape or running native code, as
+[FFI-8](spec/foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)
+says: `hirsel replay` exits 2 with `replay: refused: FFI-8: …`, and `hirsel test --replay`
+fails each foreign-reaching test alone.
+
 `--release`, `--backend` and `--target` select the engine, optimisation and target of a
 recording build as they do for any other build.
 

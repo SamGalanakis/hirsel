@@ -335,7 +335,8 @@ and `drop` on a declaration that is not `resource` are refused. A parameter mark
 is a byte count of type `u64`, and its argument is written `bytes e`; the mark is part of the
 signature, as `take` is, and an argument whose mark does not match its parameter is
 refused by [OWN-7](ownership.md#own-7-parameter-modes), at the argument. In a file of the package `core` ([core](core.md)) a function may end at
-its header, with no body, and a type with no body is built in; in any other package a
+its header, with no body, and a type with no body is built in. A function of a foreign
+module ([FFI-2](foreign.md#ffi-2-foreign-modules)) ends at its header too. In any other place a
 function without a body is refused here, at the end of its header. Malformed syntax with no
 more specific rule is LANG-5.
 

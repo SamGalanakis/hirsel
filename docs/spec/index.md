@@ -30,11 +30,13 @@ These goals decide between designs. A rule that would break one of them is wrong
    ([OWN-1](ownership.md#own-1-representation-is-declared-once)). Costs follow from the
    declaration, not from an analysis.
 3. **Safe.** Accepted programs have no undefined behaviour, no data races, no use after
-   free and no leaked resources.
+   free and no leaked resources. Native code a program calls through a foreign module is
+   trusted, not checked: these goals hold while it keeps the native contract
+   ([FFI-1](foreign.md#ffi-1-hirsel-trusts-audited-native-code-and-does-not-contain-it)).
 4. **Authority is explicit.** Files, network, clocks, randomness, tasks and output are
    values passed as parameters ([capabilities](capabilities.md)).
 5. **Deterministic.** Given the same outside inputs and limits, every run that no run
-   stop ends behaves identically on every engine and build ([SEM-8](semantics.md#sem-8-determinism)),
+   stop ends, and that reaches no foreign code, behaves identically on every engine and build ([SEM-8](semantics.md#sem-8-determinism)),
    including where it runs out of memory ([MEM-24](budgets.md#mem-24-logical-charges)).
 6. **One meaning.** No flag, build mode, optimiser or engine changes what is accepted or
    what a program means ([PROG-6](programs.md#prog-6-one-meaning)).
@@ -57,6 +59,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Programs](programs.md) | PROG-1 to PROG-6, PROG-9, PROG-10 |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
 | [Packages](packages.md) | |
+| [Foreign calls](foreign.md) | FFI-1 to FFI-9 |
 | [Core library](core.md) | |
 | [Reserved](reserved.md) | |
 | [Examples](examples.md) | |
@@ -88,6 +91,9 @@ workspaces, library roots and package archives. It is unbuilt design.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over
 `String` with the Rust `regex` crate's syntax and meaning.
 
+The [foreign calls specification](foreign.md) defines foreign modules over pinned native
+archives, the `Foreign[I]` capability, the call ABI and its handles, and the `sqlite` package.
+
 ## Glossary
 
 | term | defined in |
@@ -108,6 +114,7 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 | event | [CONC-10](tasks.md#conc-10-event-order) |
 | extent, view | [OWN-8](ownership.md#own-8-views) |
 | failure, error, run stop | [FAIL-1](failure.md#fail-1-errors-failures-and-run-stops) |
+| foreign module, foreign function, interface, handle, loan, helper, foreign-reaching, environmental termination | [foreign](foreign.md) |
 | grant | [MEM-27](budgets.md#mem-27-finalizer-grants) |
 | construction in place, inline bytes | [MEM-31](memory.md#mem-31-construction-in-place) |
 | engine obligations | [MEM-32](memory.md#mem-32-engine-obligations) |

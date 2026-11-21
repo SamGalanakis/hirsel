@@ -268,7 +268,8 @@ is core's plain record `{ steps: u64 }`.
   User code entered without a call expression takes one step on entry: a finalizer when
   cleanup runs it, and a callable a core function calls back (a callable argument, a codec's
   `via`). Iteration (SEM-6), operators, field and index access, literals and constructors,
-  `?`, patterns and `match` run no user code and take none. A core function's call is one
+  `?`, patterns and `match` run no user code and take none. A core function's call, and a
+  foreign function's ([FFI-7](foreign.md#ffi-7-host-stack-and-waits)), is one
   step whatever it does; nothing inside it is counted but the user code it enters. The one
   exception is `secret.scram_sha256`, which takes one further step for each PBKDF2 iteration
   it admits, at the call and before any derivation, because its work is chosen by an untrusted

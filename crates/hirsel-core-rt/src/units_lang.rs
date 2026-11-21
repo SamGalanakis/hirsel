@@ -455,8 +455,10 @@ pub unsafe extern "C" fn hirsel_core_client_drop(_context: *mut Context, client:
 
 #[repr(C)]
 pub struct SendOutcome {
-    /// 0 accepted (x moved), 1 closed, 2 full, 3 cancelled, 4 failed `Bounds`;
-    /// x stays the caller's unless accepted.
+    /// 0 accepted (x moved), 1 closed, 2 full; x stays the caller's unless
+    /// accepted.
+    pub outcome: u8,
+    /// 1: the task failed (`Cancelled` at the wait, or `Bounds`), x still its.
     pub status: u8,
 }
 
@@ -472,14 +474,18 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
     site: u64,
     wait: bool,
 ) -> SendOutcome {
-    let out = |status| SendOutcome { status };
+    let out = |outcome| SendOutcome { outcome, status: 0 };
+    let failed = SendOutcome {
+        outcome: 0,
+        status: 1,
+    };
     // SAFETY: the caller pins the client, the value and the descriptor.
     unsafe {
         let item = &*item;
         let owners = item.owners();
         let mut commit = tasks::before_commit();
         if wait && tasks::check_cancel(context, site) != 0 {
-            return out(3);
+            return failed;
         }
         let u = unit();
         let charge = item_charge(value, owners);
@@ -495,7 +501,7 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
             }
             Sent::Bounds => {
                 causes::record(&mut *context, Cause::new(causes::BOUNDS, site));
-                return out(4);
+                return failed;
             }
             Sent::Closed(v) => {
                 u.ctx.drop_value(v);
@@ -530,7 +536,7 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
                 }
                 Some(_) => {
                     u.waits -= 1;
-                    return out(3);
+                    return failed;
                 }
                 None => {}
             }
@@ -551,10 +557,12 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
 
 #[repr(C)]
 pub struct ReceiveOutcome {
-    /// 0 received, 1 closed, 2 Capacity, 3 empty, 4 cancelled.
-    pub status: u8,
+    /// 0 received, 1 closed, 2 Capacity (the item stays queued), 3 empty.
+    pub outcome: u8,
     pub requested: u64,
     pub available: u64,
+    /// 1: the task failed with `Cancelled` at the wait.
+    pub status: u8,
 }
 
 /// `conn.receive` (`wait`) and `conn.try_receive`.
@@ -569,10 +577,11 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
     site: u64,
     wait: bool,
 ) -> ReceiveOutcome {
-    let out = |status, requested, available| ReceiveOutcome {
-        status,
+    let out = |outcome, requested, available| ReceiveOutcome {
+        outcome,
         requested,
         available,
+        status: 0,
     };
     // SAFETY: the inbox borrow pins the handle and its connection.
     unsafe {
@@ -586,7 +595,10 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
                 if waited {
                     unit().waits -= 1;
                 }
-                return out(4, 0, 0);
+                return ReceiveOutcome {
+                    status: 1,
+                    ..out(0, 0, 0)
+                };
             }
             let u = unit();
             let side = h.inbox.0.side();
@@ -737,13 +749,14 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
     n: u64,
     input: *mut u8,
     body: Body,
-    layout: TaskLayout,
+    layout: *const TaskLayout,
     x: *const Cross,
     r: *const Cross,
     _site: u64,
 ) -> SpawnUnit {
     // SAFETY: the spawner owns its context and `input` until the spawn commits.
     unsafe {
+        let layout = *layout;
         let x = &*x;
         let rx = &*r;
         let refused = |requested, available| SpawnUnit {
@@ -856,7 +869,11 @@ fn helper_main(
         drop(data);
         PENDING.with(|p| *p.borrow_mut() = Some((hctx, shared)));
         let mut result = vec![0u8; layout.result.bytes.max(rb as usize)];
-        let provider = (*run).scheduler;
+        let provider = if run.is_null() {
+            tasks::SchedulerProvider::default()
+        } else {
+            (*run).scheduler
+        };
         let failed = tasks::run_root(
             &mut context,
             body,
@@ -1047,3 +1064,7 @@ pub(crate) unsafe fn abandon(context: *mut Context, task: *mut tasks::Task) -> u
         0
     }
 }
+
+#[cfg(test)]
+#[path = "units_lang_tests.rs"]
+mod tests;

@@ -69,7 +69,7 @@ pub(crate) unsafe fn replace(
         payer.settle_in(context, refund);
         return Ok(old);
     }
-    let replacement = task_heap::Heap::allocate(heap, payer, bytes, align, kind, reuse);
+    let replacement = task_heap::Heap::allocate(context, payer, bytes, align, kind, reuse);
     // SAFETY: the new slot is disjoint and large enough for the retained
     // elements. Install the carrier before publishing the old payer's refund.
     unsafe {

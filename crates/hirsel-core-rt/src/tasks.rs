@@ -4074,14 +4074,14 @@ impl RunPtr {
                     State::Provider if (*run).wake_operation(task, Wake::Parked) => direct = task,
                     _ => {}
                 }
-                let trim = waiting_heap(task, direct).cloned();
+                // The commit keeps custody with this dispatcher until the
+                // waiting heap has finished its local trim.
+                if let Some(heap) = waiting_heap(task, direct) {
+                    heap.trim();
+                }
                 // The outgoing active unit is live across release. This
                 // publishes every receiver's already-counted hand-off first.
                 drop(commit);
-                // A woken task that resumes elsewhere meanwhile waits on the heap lock.
-                if let Some(heap) = trim {
-                    heap.trim();
-                }
                 // The worker-private stock unmaps an excess stack outside the commit.
                 if let Some(stack) = ended {
                     (*worker).stock.recycle_shared(stack, &pool.spare);

@@ -320,7 +320,7 @@ fn emitted_own_sequence_refunds_current_foreign_and_handed_over_payers() {
         let block = inline_own_alloc(&ctx, Some(8), 8, 8).unwrap();
         let payer = hirsel_core_block_payer(block);
         hirsel_core_refund_in(&ctx, payer, 8);
-        crate::task_heap::release(block);
+        crate::task_heap::release(&ctx, block);
     }
     assert_eq!(ctx.available(), 128);
 }
@@ -623,6 +623,124 @@ fn shared_page_keeps_other_heaps_live_after_a_foreign_return() {
     assert_eq!(second.available(), LIMIT);
 }
 
+fn pause_foreign_return(
+    block: Block,
+) -> (
+    std::sync::Arc<std::sync::Barrier>,
+    std::thread::JoinHandle<()>,
+) {
+    let charge = block.charge();
+    let address = block.into_raw().as_ptr().expose_provenance();
+    let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let peer = gate.clone();
+    let foreign = std::thread::spawn(move || {
+        crate::task_heap::before_foreign_return(move || {
+            peer.wait();
+            peer.wait();
+        });
+        let pointer =
+            std::ptr::NonNull::new(std::ptr::with_exposed_provenance_mut(address)).unwrap();
+        // SAFETY: this thread owns the transferred slot and its exact charge.
+        unsafe { hirsel_core_free(pointer, charge) };
+    });
+    gate.wait();
+    (gate, foreign)
+}
+
+#[test]
+fn migrated_context_keeps_the_slot_of_an_in_flight_foreign_return() {
+    const LIMIT: u64 = 64;
+    const CHARGE: u64 = 8;
+    const BYTES: usize = 32 * 1024;
+    struct Custody(*mut Context);
+    // SAFETY: only the receiving worker uses the context after native unbind.
+    unsafe impl Send for Custody {}
+    impl Custody {
+        unsafe fn resume(
+            self,
+            saved: usize,
+            gate: std::sync::Arc<std::sync::Barrier>,
+            foreign: std::thread::JoinHandle<()>,
+        ) {
+            // SAFETY: the original worker unbound the context before sending it.
+            unsafe {
+                hirsel_core_task_bind(self.0);
+                let context = &*self.0;
+                let refunded = context.available();
+                let other = Block::new(context, Some(CHARGE), BYTES, 8).unwrap();
+                let unpublished_was_reused = other.pointer().addr().get() == saved;
+                gate.wait();
+                foreign.join().unwrap();
+                assert_eq!(refunded, LIMIT, "migration left the original refund behind");
+                assert!(
+                    !unpublished_was_reused,
+                    "migration reused an unpublished slot"
+                );
+                let replacement = Block::new(context, Some(CHARGE), BYTES, 8).unwrap();
+                assert_eq!(
+                    replacement.pointer().addr().get(),
+                    saved,
+                    "the new owner lost the published return",
+                );
+                assert_eq!(context.available(), LIMIT - 2 * CHARGE);
+                drop((other, replacement));
+                assert_eq!(context.available(), LIMIT, "the charge was refunded twice");
+                hirsel_core_task_bind(std::ptr::null());
+                hirsel_core_context_free(self.0);
+            }
+        }
+    }
+    // SAFETY: exclusive native context custody moves once. The foreign return
+    // receives only the live block and may continue while the context migrates.
+    unsafe {
+        let context = Custody(hirsel_core_context_new(LIMIT));
+        let block = Block::new(&*context.0, Some(CHARGE), BYTES, 8).unwrap();
+        let saved = block.pointer().addr().get();
+        let (gate, foreign) = pause_foreign_return(block);
+        hirsel_core_task_bind(std::ptr::null());
+        std::thread::spawn(move || context.resume(saved, gate, foreign))
+            .join()
+            .unwrap();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn close_hands_an_in_flight_foreign_return_to_idle_purge() {
+    if reexecute_heap_test(
+        "tests::close_hands_an_in_flight_foreign_return_to_idle_purge",
+        "HIRSEL_FOREIGN_CLOSE_TEST_CHILD",
+    ) {
+        return;
+    }
+    const LIMIT: u64 = 64;
+    let context = Context::new(LIMIT);
+    let block = Block::new(&context, Some(LIMIT), 128 * 1024, 8).unwrap();
+    let address = block.pointer().addr().get();
+    let mapped = || {
+        let mut flag = 0;
+        // SAFETY: mincore checks the mapping without accessing the payload.
+        unsafe { libc::mincore(address as *mut _, crate::task_heap::page_bytes(), &mut flag) == 0 }
+    };
+    let (gate, foreign) = pause_foreign_return(block);
+    context.current.drain();
+    let refunded = context.available();
+    drop(context);
+    let mapped_while_publishing = mapped();
+    gate.wait();
+    foreign.join().unwrap();
+    assert_eq!(
+        refunded, LIMIT,
+        "close saw the charge after physical publication"
+    );
+    assert!(
+        mapped_while_publishing,
+        "close unmapped the publisher's slot"
+    );
+    crate::task_heap::purge();
+    assert!(!mapped(), "the return to a closed heap escaped reclamation");
+}
+
 #[test]
 fn same_size_own_blocks_reuse_mappings_and_pack_small_slots() {
     // This law observes a cold mapping before measuring reuse. Run it apart
@@ -893,7 +1011,7 @@ fn repeated_sequence_growth_keeps_peak_rss_bounded() {
         let payer = context.payer();
         crate::block::admit_storage(payer, Some(START as u64)).unwrap();
         let heap = context.heap.get_or_init(std::sync::Arc::default);
-        let initial = crate::task_heap::Heap::allocate(heap, payer, START, 8, PLAIN, true);
+        let initial = crate::task_heap::Heap::allocate(&context, payer, START, 8, PLAIN, true);
         let mut carrier = Carrier {
             data: initial.as_ptr(),
             len: 0,

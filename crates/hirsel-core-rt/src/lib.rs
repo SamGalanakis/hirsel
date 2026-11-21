@@ -215,8 +215,9 @@ impl Drop for Context {
         while self.bound_depth != 0 {
             self.limit_exit();
         }
-        if let Some(heap) = self.heap.get() {
-            heap.close();
+        if let Some(heap) = self.heap.take() {
+            // SAFETY: context destruction has exclusive custody and runs once.
+            unsafe { heap.close() };
         }
     }
 }

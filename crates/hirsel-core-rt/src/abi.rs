@@ -858,10 +858,9 @@ pub unsafe extern "C" fn hirsel_core_promote_frame_list(
     let Some(payer) = task.frame_lists.remove(old) else {
         return data;
     };
-    let heap = task.heap.get_or_init(std::sync::Arc::default);
     // A matching record proves both sizes fit the frame slot.
     let replacement = crate::task_heap::Heap::allocate(
-        heap,
+        task,
         payer,
         capacity as usize * stride,
         8,
@@ -1119,7 +1118,7 @@ pub unsafe fn inline_own_free_current(
             (*context.limit_record()).available.wrapping_add(charge);
         (*context.limit_record()).outstanding =
             (*context.limit_record()).outstanding.wrapping_sub(charge);
-        crate::task_heap::release(pointer);
+        crate::task_heap::release(context, pointer);
     }
 }
 

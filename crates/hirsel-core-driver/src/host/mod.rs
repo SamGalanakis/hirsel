@@ -1,5 +1,7 @@
 //! One supervisor owns the listener, serving children and deployment records.
 mod child;
+#[cfg(test)]
+pub(crate) use child::terminal_fixture;
 mod recording;
 mod records;
 

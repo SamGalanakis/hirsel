@@ -490,3 +490,121 @@ fn omitting_the_trace_preserves_prefix_and_seed_choices() {
     close(&unrecorded, [b.0, b.1, b.2]);
     assert!(unrecorded.decisions().is_empty());
 }
+
+#[test]
+fn starttls_refuses_unread_scripted_plaintext() {
+    let model = Model::default();
+    let address = address();
+    let inject = b"S\x52\x00\x00\x00\x08\x00\x00\x00\x00";
+    model.script_tls_peer(
+        address,
+        TlsScript {
+            handshake: TlsHandshake::After {
+                delay_ns: 0,
+                result: Ok(TlsIdentity {
+                    protocol: None,
+                    peer: [0; 32],
+                    binding: Default::default(),
+                }),
+            },
+            steps: vec![TlsStep::BeforeHandshake {
+                expect: Vec::new(),
+                send: inject.to_vec(),
+            }],
+        },
+    );
+    let key = model
+        .attempt(Operation::Connect(address), &[], 0, 1)
+        .unwrap()
+        .value;
+    let (read, _) = model.split(key);
+    let reply = model.attempt(Operation::Recv(read), &[], 1, 2).unwrap();
+    assert_eq!(reply.bytes, b"S");
+    assert!(model.rejoin_client(key));
+    let reply = model.attempt_tls(key, &[] as &[&[u8]], 3).unwrap();
+    assert_eq!((reply.error, reply.code), (9, 4));
+    assert_eq!(model.queued_bytes(key), [0; 3]);
+    model.release(key);
+    assert_eq!((model.live_handles(), model.live_tls_sessions()), (0, 0));
+}
+
+#[test]
+fn scram_peer_script_checks_the_exact_proof() {
+    use crate::scram::{Binding, Error, Transcript, verify};
+
+    const CLIENT: &[u8] = b"n,,n=user,r=rOprNGfwEbeRWgbNEkqO";
+    const SERVER: &[u8] =
+        b"r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+    const PROOF: &[u8] = b"c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=";
+    const FINAL: &[u8] = b"v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=";
+    let model = Model::default();
+    let address = address();
+    model.script_tls_peer(
+        address,
+        TlsScript {
+            handshake: TlsHandshake::After {
+                delay_ns: 0,
+                result: Ok(TlsIdentity {
+                    protocol: None,
+                    peer: [0; 32],
+                    binding: Binding::default(),
+                }),
+            },
+            steps: vec![
+                TlsStep::Expect(PROOF.to_vec()),
+                TlsStep::Send(FINAL.to_vec()),
+            ],
+        },
+    );
+    let key = model
+        .attempt(Operation::Connect(address), &[], 0, 1)
+        .unwrap()
+        .value;
+    let secured = model.attempt_tls(key, &[] as &[&[u8]], 2).unwrap();
+    assert_eq!(secured.error, 0);
+    let (r, w) = model.split(key);
+    let binding = secured.binding;
+    for (client, server) in [
+        (
+            b"n,,n=,r=abc".as_slice(),
+            b"r=xyz,s=c2FsdA==,i=4096".as_slice(),
+        ),
+        (b"n,,n=,r=abc", b"r=abc,s=c2FsdA==,i=4096"),
+        (b"n,,n=,r=abc", b"m=required,r=abcd,s=c2FsdA==,i=4096"),
+        (b"n,a=admin,n=,r=abc", b"r=abcd,s=c2FsdA==,i=4096"),
+        (b"n,,n=,r=abc", b"r=abcd,s=invalid!,i=4096"),
+    ] {
+        assert!(matches!(
+            Transcript::parse(client, server, &binding),
+            Err(Error::Transcript)
+        ));
+        assert_eq!(model.queued_bytes(w), [0; 3]);
+    }
+    let transcript = Transcript::parse(CLIENT, SERVER, &binding).unwrap();
+    assert_eq!(transcript.final_len(), 106);
+    let (message, signature) = transcript.derive(b"pencil");
+    let mut committed = 0;
+    let parts = [b"".as_slice(), &message, b""];
+    loop {
+        if let Some(sent) = model.attempt_secret(w, parts, &mut committed, 3) {
+            assert_eq!(sent.error, 0);
+            break;
+        }
+        assert_eq!(model.poll(None, true), [3]);
+    }
+    let mut received = Vec::new();
+    while received.len() < FINAL.len() {
+        match model.attempt(Operation::Recv(r), &[], FINAL.len() - received.len(), 4) {
+            Some(reply) => {
+                assert_eq!(reply.error, 0);
+                assert_ne!(reply.value, 0);
+                received.extend(reply.bytes);
+            }
+            None => assert_eq!(model.poll(None, true), [4]),
+        }
+    }
+    assert_eq!(received, FINAL);
+    assert!(verify(&signature, &received));
+    model.release(w);
+    model.release(r);
+}

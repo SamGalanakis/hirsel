@@ -189,7 +189,7 @@ fn echo_writer(take o: Stdout) -> bool waits {
 // ended, next waits until every task waits and returns None.
 // expect: run echo(tasks) = true
 fn echo(tasks: Tasks) -> bool waits {
-    let (o, s) = provide.stdout(bytes 64)
+    let (o, s) = provide.stdout(bytes 64, false)
     let mut served = take s
     let child = task.spawn(tasks, bytes 65536, o, echo_writer)
     let first = match provide.next(mut served) {
@@ -238,7 +238,7 @@ fn lone_writer(take o: Stdout) -> bool waits {
 // to its taken call is Withdrawn, and the writer ends Cancelled.
 // expect: run withdrawn(tasks) = true
 fn withdrawn(tasks: Tasks) -> bool waits {
-    let (o, s) = provide.stdout(bytes 64)
+    let (o, s) = provide.stdout(bytes 64, false)
     let mut served = take s
     let mut child = task.spawn(tasks, bytes 65536, o, lone_writer)
     let refused = match provide.next(mut served) {
@@ -281,7 +281,7 @@ fn seal(take s: Served[StreamOp]) {
 // Call afterwards changes nothing.
 // expect: run sealed(tasks) = true
 fn sealed(tasks: Tasks) -> bool waits {
-    let (o, s) = provide.stdout(bytes 64)
+    let (o, s) = provide.stdout(bytes 64, false)
     let mut served = take s
     let a = task.spawn(tasks, bytes 65536, o, closed_writer)
     let b = task.spawn(tasks, bytes 65536, o, closed_writer)
@@ -302,8 +302,8 @@ fn sealed(tasks: Tasks) -> bool waits {
 // one: the reply is Withdrawn and its writer sees Closed with nothing written.
 // expect: run foreign_call(tasks) = true
 fn foreign_call(tasks: Tasks) -> bool waits {
-    let (o, s) = provide.stdout(bytes 64)
-    let (_, t) = provide.stderr(bytes 64)
+    let (o, s) = provide.stdout(bytes 64, false)
+    let (_, t) = provide.stderr(bytes 64, false)
     let mut served = take s
     let mut other = take t
     let child = task.spawn(tasks, bytes 65536, o, closed_writer)
@@ -699,4 +699,29 @@ fn dir_handle_room(tasks: Tasks) -> bool waits {
         Error(_) => false
     }
     closed && short && first
+}
+
+// expect: run provided_terminals() = true
+fn provided_terminals() -> bool waits {
+    let (o, s) = provide.stdout(bytes 64, true)
+    let (e, t) = provide.stderr(bytes 64, false)
+    let mut served_out = take s
+    let mut served_err = take t
+    let before = stdout.is_terminal(o) && !stderr.is_terminal(e)
+    let quiet = match provide.next(mut served_out) {
+        None => true,
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+    } && match provide.next(mut served_err) {
+        None => true,
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+    }
+    seal(take served_out)
+    seal(take served_err)
+    before && quiet && stdout.is_terminal(o) && !stderr.is_terminal(e)
 }

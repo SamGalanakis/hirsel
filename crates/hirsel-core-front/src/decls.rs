@@ -192,6 +192,9 @@ pub enum Role {
 }
 impl Role {
     fn of(path: &DefPath) -> Option<Role> {
+        if path.package_is("core", "1") && path.0.modules == ["secret"] && path.0.name == "Scram" {
+            return Some(Role::HostFile);
+        }
         if !is_core_prelude(path, &[]) {
             return None;
         }

@@ -509,26 +509,31 @@ fn fixture(scripted: bool, scenario: Scenario, args: &[&[u8]]) -> (u8, Box<State
             kind: crate::entry::DIR,
             provider: &provider,
             handle: state.directory,
+            terminal: false,
         },
         Grant {
             kind: crate::entry::CLOCK,
             provider: &provider,
             handle: 0,
+            terminal: false,
         },
         Grant {
             kind: crate::entry::STDOUT,
             provider: &provider,
             handle: 0,
+            terminal: false,
         },
         Grant {
             kind: crate::entry::STDERR,
             provider: &provider,
             handle: 0,
+            terminal: false,
         },
         Grant {
             kind: crate::entry::ARGS,
             provider: &provider,
             handle: 0,
+            terminal: false,
         },
     ];
     let carriers = args.iter().map(|a| literal(a)).collect::<Vec<_>>();

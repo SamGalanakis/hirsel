@@ -217,11 +217,13 @@ fn model_native_provider_uses_virtual_timers_with_and_without_scheduler() {
                 kind: crate::entry::NET,
                 provider: &provider,
                 handle: (&view as *const Rules) as u64,
+                terminal: false,
             },
             crate::entry::Grant {
                 kind: crate::entry::CLOCK,
                 provider: &provider,
                 handle: 0,
+                terminal: false,
             },
         ];
         let config = crate::process::Config {

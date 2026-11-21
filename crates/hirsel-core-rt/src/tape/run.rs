@@ -425,7 +425,7 @@ unsafe extern "C" fn invoke(
             .then(|| crate::net::RulesStorage::new(startup.net_rules));
         let replay_env = startup.env.map(crate::env::Env::new);
         let files = (*context).host_files;
-        (*files).secret_mac_tape = Some(tape.secret_mac(run.mode != 0));
+        (*files).secret_mac_tape = Some(tape.secret_mac());
         let mut secret_grants = startup.secret_grants.into_iter();
         for i in 0..run.requirements_len {
             let req = &*run.requirements.add(i);
@@ -453,8 +453,16 @@ unsafe extern "C" fn invoke(
                 } else {
                     (*(*config).provider, 0)
                 };
-                match tape.on_tape(req.kind, (provider, handle)) {
-                    Ok((p, h)) => {
+                let taped = if format::is_stream_grant(req.kind) {
+                    let terminal = run.mode == 0
+                        && (*(*config).capabilities.add((source - 1) as usize)).terminal;
+                    tape.on_tape_stream(req.kind, (provider, handle), terminal)
+                } else {
+                    tape.on_tape(req.kind, (provider, handle))
+                        .map(|(p, h)| (p, h, false))
+                };
+                match taped {
+                    Ok((p, h, terminal)) => {
                         if req.kind == entry::NET {
                             if run.mode != 0 && !run.launch.is_describe() {
                                 let Some(rules) = &replay_net_rules else {
@@ -501,7 +509,7 @@ unsafe extern "C" fn invoke(
                             };
                             (*files).registry.grant(p, handle)
                         } else {
-                            (*files).registry.grant(p, h)
+                            (*files).registry.grant_with_terminal(p, h, terminal)
                         }
                     }
                     Err(f) => return stopped(run, f),
@@ -659,12 +667,13 @@ unsafe fn run_taped(
     unsafe {
         let input = &*input;
         let sink = match (
-            entry::duplicate(input.stderr_fd),
-            entry::duplicate(input.stderr_fd),
+            entry::duplicate_stream(input.stderr_fd),
+            entry::duplicate_stream(input.stderr_fd),
         ) {
-            (Ok(out), Ok(err)) => Box::new(crate::os::OsProvider::new(out, err)),
+            (Ok(out), Ok(err)) => Box::new(crate::os::OsProvider::from_streams(out, err)),
             _ => return process::NOT_STARTED,
         };
+        let stderr = sink.stderr_fd();
         let mut run = Run {
             entry,
             requirements: input.parameters,
@@ -675,7 +684,7 @@ unsafe fn run_taped(
             revision: *revision,
             mode,
             sources,
-            stderr: input.stderr_fd,
+            stderr,
             diagnostic: vec![],
             stop: None,
             record_truncated: None,
@@ -720,6 +729,7 @@ unsafe fn run_taped(
                         kind: (*input.parameters.add(i)).kind,
                         provider: &no_host,
                         handle: 0,
+                        terminal: false,
                     });
                 }
                 Config {
@@ -733,7 +743,7 @@ unsafe fn run_taped(
                     diagnostic,
                     describe: Some(describe),
                     scheduler: crate::tasks::SchedulerProvider::default(),
-                    stop_fd: input.stderr_fd,
+                    stop_fd: stderr,
                     capabilities: metadata.as_ptr(),
                     capabilities_len: metadata.len(),
                     close_grants: None,

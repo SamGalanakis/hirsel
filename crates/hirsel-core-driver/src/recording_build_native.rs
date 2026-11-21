@@ -2018,22 +2018,33 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
             .output()
             .unwrap();
         let out = String::from_utf8(output.stdout).unwrap();
-        assert_eq!(output.status.code(), Some(0), "{invocation:?}\n{out}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{invocation:?}\n{out}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         out.split_once(process::CHILD_MARK).unwrap().1.to_owned()
     };
     let inspect = |args| command("inspect", &app, args);
     let interface: serde_json::Value =
         serde_json::from_str(&inspect(&["--interface", "--json"])).unwrap();
-    assert_eq!(interface, serde_json::json!({
-        "version": 1,
-        "package": {"name": "app", "version": "1"},
-        "modules": [{"path": ["main"], "extends_core": false, "items": [
-            {"definition": "app@1/main/Token", "name": "Token", "kind": "type", "signature": "pub opaque type Token"},
-            {"definition": "app@1/main/echo", "name": "echo", "kind": "function", "signature": "pub fn echo[T: plain](x: T, output: Stdout) -> T waits"},
-            {"definition": "app@1/main/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"}
-        ]}],
-    }));
-    assert_eq!(inspect(&["--dependents", "main/base"]), "app@1/main/middle\n");
+    assert_eq!(
+        interface,
+        serde_json::json!({
+            "version": 1,
+            "package": {"name": "app", "version": "1"},
+            "modules": [{"path": ["main"], "extends_core": false, "items": [
+                {"definition": "app@1/main/Token", "name": "Token", "kind": "type", "signature": "pub opaque type Token"},
+                {"definition": "app@1/main/echo", "name": "echo", "kind": "function", "signature": "pub fn echo[T: plain](x: T, output: Stdout) -> T waits"},
+                {"definition": "app@1/main/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"}
+            ]}],
+        })
+    );
+    assert_eq!(
+        inspect(&["--dependents", "main/base"]),
+        "app@1/main/middle\n"
+    );
     assert_eq!(
         inspect(&["--dependents", "app@1/main/base", "--transitive"]),
         "app@1/main/from_base\napp@1/main/middle\n",
@@ -2049,19 +2060,35 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
     let executed = || {
         let clang = llvm.join("bin/clang");
         let output: serde_json::Value = serde_json::from_str(&command(
-            "test", &app, &[
-                "--json", "--limit", "1048576", "--runtime", runtime.to_str().unwrap(),
-                "--cc", clang.to_str().unwrap(),
+            "test",
+            &app,
+            &[
+                "--json",
+                "--limit",
+                "1048576",
+                "--runtime",
+                runtime.to_str().unwrap(),
+                "--cc",
+                clang.to_str().unwrap(),
             ],
-        )).unwrap();
+        ))
+        .unwrap();
         let tests = output["tests"].as_array().unwrap();
         assert_eq!(tests.len(), 3);
-        tests.iter()
+        tests
+            .iter()
             .filter(|row| row["source"] == "executed")
             .map(|row| row["definition"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>()
     };
-    assert_eq!(executed(), ["app@1/main/from_base", "app@1/main/from_constant", "app@1/main/independent"]);
+    assert_eq!(
+        executed(),
+        [
+            "app@1/main/from_base",
+            "app@1/main/from_constant",
+            "app@1/main/independent"
+        ]
+    );
 
     let affected = inspect(&["--affected-tests", "main/base"]);
     assert_eq!(affected, "app@1/main/from_base\n");
@@ -2113,15 +2140,18 @@ pub fn spare() -> u64 { 0u64 }
     let inspect = |args| command("inspect", &manifest_app, args);
     let interface: serde_json::Value =
         serde_json::from_str(&inspect(&["--interface", "--json"])).unwrap();
-    assert_eq!(interface, serde_json::json!({
-        "version": 1,
-        "package": {"name": "counter", "version": "2"},
-        "modules": [{"path": ["counter"], "extends_core": false, "items": [
-            {"definition": "counter@2/counter/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"},
-            {"definition": "counter@2/counter/count", "name": "count", "kind": "function", "signature": "pub fn count() -> u64"},
-            {"definition": "counter@2/counter/spare", "name": "spare", "kind": "function", "signature": "pub fn spare() -> u64"}
-        ]}],
-    }));
+    assert_eq!(
+        interface,
+        serde_json::json!({
+            "version": 1,
+            "package": {"name": "counter", "version": "2"},
+            "modules": [{"path": ["counter"], "extends_core": false, "items": [
+                {"definition": "counter@2/counter/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"},
+                {"definition": "counter@2/counter/count", "name": "count", "kind": "function", "signature": "pub fn count() -> u64"},
+                {"definition": "counter@2/counter/spare", "name": "spare", "kind": "function", "signature": "pub fn spare() -> u64"}
+            ]}],
+        })
+    );
     assert_eq!(
         inspect(&["--affected-tests", "counter/start"]),
         "counter@2/counter/counts\n",
@@ -2235,4 +2265,253 @@ fn rejected() -> Result[(), ()] { Error(()) }
     assert_eq!(run(&rerun_with_dir, 0), "pass executed app@1/main/good\n");
     assert_eq!(run(&with_dir, 0), "pass cached app@1/main/good\n");
     assert!(!missing.exists());
+}
+
+#[test]
+fn run_tape_replays_granted_terminal_bits() {
+    use crate::host::terminal_fixture;
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let bits = dir.path().join("bits");
+    let tape = dir.path().join("terminals.tape");
+    let product = terminal_fixture::product(dir.path());
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = terminal_fixture::options(Backend::Cranelift, dir.path());
+    options.runtime = env_record_runtime();
+    options.recording = true;
+    let record = product.build(&entry, &options).unwrap();
+    let (_master, slave) = terminal_fixture::pty();
+    let output = Command::new(&record.executable)
+        .env("HIRSEL_RECORD", &tape)
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave))
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(std::fs::read(&bits).unwrap(), [1, 1, 0]);
+    std::fs::remove_file(&bits).unwrap();
+
+    options.grant_mask = 0;
+    options.directories.clear();
+    options.replay = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: false,
+    });
+    let replay = product.build(&entry, &options).unwrap();
+    let output = Command::new(replay.executable)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(!bits.exists());
+}
+
+#[test]
+fn run_tape_records_scram_outcome_without_key_material() {
+    use hirsel_core_net::{GrantRule, SecretGrant};
+    use rustls::{
+        ServerConfig, ServerConnection, StreamOwned,
+        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    };
+    use std::{
+        io::{Read, Write},
+        net::{Ipv4Addr, TcpListener},
+        sync::Arc,
+    };
+
+    const CA: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/ca.pem");
+    const LEAF: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/alpha.pem");
+    const KEY: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/alpha.key.pem");
+    const CLIENT_FINAL: &[u8] = b"c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=";
+    const SERVER_FINAL: &[u8] = b"v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=";
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from_pem_slice(LEAF).unwrap()],
+                PrivateKeyDer::from_pem_slice(KEY).unwrap(),
+            )
+            .unwrap();
+
+    let source = r#"
+pub fn main(n: Net, password: Secret, out: Stdout) -> Result[(), Exit] waits {
+    let peer = Addr(ip: V4(2130706433u32), port: 12345u16)
+    let socket = result.unwrap(host.connect(n, peer, Never))
+    let alpn: List[String] = list.new()
+    let (r, w, _) = result.unwrap(tls.connect(n, take socket, "alpha.test", System, alpn, Never))
+    let mut read = take r
+    let mut write = take w
+    let client: Bytes = b"n,,n=user,r=rOprNGfwEbeRWgbNEkqO"
+    let server: Bytes = b"r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
+    let empty: Bytes = list.new()
+    if result.unwrap(secret.scram_final_len(write, client, server)) != 106 {
+        return Error(Exit(status: 1))
+    }
+    let mut response: Bytes = list.with_capacity(46)
+    let check = result.unwrap(secret.scram_sha256(mut write, password, client, server, empty, empty, Never))
+    while list.len(response) < 46 {
+        if result.unwrap(host.recv_bounded(mut read, mut response, 46, Never)) == 0 {
+            return Error(Exit(status: 2))
+        }
+    }
+    if !secret.scram_verify(take check, response) {
+        return Error(Exit(status: 3))
+    }
+    result.unwrap(stdout.write(out, "verified"))
+    Ok(())
+}
+"#.replace("12345", &port.to_string());
+    let dir = tempfile::tempdir().unwrap();
+    let roots = dir.path().join("roots.pem");
+    std::fs::write(&roots, CA).unwrap();
+    let tape = dir.path().join("scram.tape");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let mut request = source_request(&source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root, package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = (1 << grant_kind("Net").unwrap()) | (1 << grant_kind("Stdout").unwrap());
+    options.runtime = env_record_runtime();
+    options.recording = true;
+    options.net_rules = [
+        format!("Connect 127.0.0.1/32 {port}-{port}"),
+        format!("Tls alpha.test {port}-{port} System"),
+    ]
+    .map(|text| GrantRule::parse(&text).unwrap())
+    .into();
+    options.secret_grants =
+        vec![SecretGrant::new("password", "env:HIRSEL_SCRAM_PASSWORD", "alpha.test").unwrap()];
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let record = product.build(&entry, &options).unwrap();
+
+    let peer = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let mut peer = StreamOwned::new(ServerConnection::new(Arc::new(config)).unwrap(), socket);
+        let mut proof = [0; 106];
+        peer.read_exact(&mut proof).unwrap();
+        assert_eq!(&proof, CLIENT_FINAL);
+        peer.write_all(SERVER_FINAL).unwrap();
+        peer.conn.send_close_notify();
+        peer.flush().unwrap();
+    });
+    let output = Command::new(record.executable)
+        .env("SSL_CERT_FILE", &roots)
+        .env_remove("SSL_CERT_DIR")
+        .env("HIRSEL_SCRAM_PASSWORD", "pencil")
+        .env("HIRSEL_RECORD", &tape)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"verified");
+    peer.join().unwrap();
+
+    let sealed = std::fs::read(&tape).unwrap();
+    let key_material = [
+        "c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d",
+        "a60fc923d67e8644a92d16b96eda5ef4656b0c725c484374be25535576996e8b",
+        "586e5df283e6dceb5c3e791d8b8528ec191e664045ce971792e2e6b5bb13e2a6",
+        "c1f3cbc1c13a9d35a14c0990eed97629ea225863e566a4314ab99f3f00e5d9d5",
+        "747cdb65aa56224e2352137e52d7bdcad6a0f738df30782caa69a2cfb0277554",
+    ];
+    let check_absent = |bytes: &[u8]| {
+        for form in [
+            bytes,
+            crate::call::hex(bytes).as_bytes(),
+            crate::call::base64(bytes).as_bytes(),
+        ] {
+            assert!(
+                !sealed.windows(form.len()).any(|window| window == form),
+                "SCRAM key material in tape"
+            );
+        }
+    };
+    check_absent(b"pencil");
+    for hex in key_material {
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        check_absent(&bytes);
+    }
+    assert!(
+        sealed
+            .windows(SERVER_FINAL.len())
+            .any(|window| window == SERVER_FINAL)
+    );
+
+    let mut input = sealed.as_slice();
+    let (mut blocks, _) = hirsel_tape_format::Blocks::open(|buffer| input.read(buffer)).unwrap();
+    let mut decoder = hirsel_tape_format::Decoder::default();
+    let mut calls = Vec::new();
+    let mut issued = std::collections::BTreeMap::new();
+    while let Some((flags, payload)) = blocks.next(|buffer| input.read(buffer)).unwrap() {
+        use hirsel_tape_format::{Frame, op};
+        for frame in decoder
+            .block(payload, flags & hirsel_tape_format::END != 0)
+            .unwrap()
+        {
+            let (operation, out) = match frame {
+                Frame::Issue { task, op, .. } => {
+                    issued.insert(task, op);
+                    continue;
+                }
+                Frame::Op { op, out, .. } => (op, out),
+                Frame::Done { task, out, .. } => (issued.remove(&task).unwrap(), out),
+                _ => continue,
+            };
+            if matches!(operation, op::SCRAM | op::SCRAM_VERIFY) {
+                assert_eq!(out.status, hirsel_tape_format::OK);
+                assert!(out.payload.is_empty());
+                calls.push(operation);
+            }
+        }
+    }
+    assert_eq!(
+        calls,
+        [
+            hirsel_tape_format::op::SCRAM,
+            hirsel_tape_format::op::SCRAM_VERIFY
+        ]
+    );
+
+    options.grant_mask = 0;
+    options.net_rules.clear();
+    options.secret_grants.clear();
+    options.backend = Backend::Llvm;
+    options.replay = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: false,
+    });
+    let replay = product.build(&entry, &options).unwrap();
+    let output = Command::new(replay.executable)
+        .env_remove("HIRSEL_SCRAM_PASSWORD")
+        .env_remove("SSL_CERT_FILE")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
 }

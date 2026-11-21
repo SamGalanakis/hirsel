@@ -85,11 +85,15 @@ impl FunctionEmitter<'_> {
             | HostOp::Resolve
             | HostOp::TlsConnect
             | HostOp::SendSecret
+            | HostOp::ScramSha256
+            | HostOp::ScramFinalLen
+            | HostOp::ScramVerify
             | HostOp::SecretSeal
             | HostOp::SecretNarrow
             | HostOp::SecretHmac
             | HostOp::SecretVerifyHmac
             | HostOp::StdinRead
+            | HostOp::StreamTerminal
             | HostOp::EnvGet
             | HostOp::EnvLen
             | HostOp::EnvName
@@ -109,7 +113,8 @@ impl FunctionEmitter<'_> {
             | HostOp::PortReply
             | HostOp::ProvideDir
             | HostOp::PortFill
-            | HostOp::NetSplit => {
+            | HostOp::NetSplit
+            | HostOp::NetJoin => {
                 let mut operands = vec![ptr(CONTEXT)];
                 for (p, value) in RtOp::Host(op).signature().params.iter().zip(args) {
                     let hirsel_core_ir::Param::Value(t) = p else {
@@ -117,6 +122,7 @@ impl FunctionEmitter<'_> {
                     };
                     operands.push(match *t {
                         Ty::Ptr => ptr(value.clone()),
+                        Ty::Scalar(Scalar::Bool) => zeroext(Type::I1, value.clone()),
                         Ty::Scalar(Scalar::U8) => zeroext(Type::I8, value.clone()),
                         Ty::Scalar(Scalar::U16) => zeroext(Type::Int(16), value.clone()),
                         _ => word(value.clone()),

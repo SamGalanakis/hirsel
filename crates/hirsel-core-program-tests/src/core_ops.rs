@@ -790,6 +790,7 @@ fn exit(n: Net, c: Clock, kind: u64) -> u64 waits {
             1, 2, 3, 4, 5, 6, 7, 8, 17, 18, 19, 20, 21, 22, 23, 24, 33, 34, 35, 36, 37, 38, 39, 40,
             49, 50, 51, 52, 53, 54, 55, 56,
         ],
+        binding: Default::default(),
     };
     run(
         "prefix",
@@ -906,6 +907,7 @@ fn f(n: Net, c: Clock) -> u64 waits {
                 result: Ok(TlsIdentity {
                     protocol: None,
                     peer: [7; 32],
+                    binding: Default::default(),
                 }),
             },
             steps: vec![TlsStep::Expect(b"A".to_vec()), TlsStep::Send(b"!".to_vec())],

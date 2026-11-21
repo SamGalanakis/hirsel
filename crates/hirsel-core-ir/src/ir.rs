@@ -1042,6 +1042,11 @@ pub enum HostOp {
     PortReply = hirsel_core_ids::host_op::PORT_REPLY as isize,
     ProvideDir = hirsel_core_ids::host_op::PROVIDE_DIR as isize,
     PortFill = hirsel_core_ids::host_op::PORT_FILL as isize,
+    ScramSha256 = hirsel_core_ids::host_op::SCRAM as isize,
+    ScramVerify = hirsel_core_ids::host_op::SCRAM_VERIFY as isize,
+    StreamTerminal = 96,
+    NetJoin = 97,
+    ScramFinalLen = 98,
 }
 
 impl HostOp {
@@ -1119,6 +1124,11 @@ impl HostOp {
         HostOp::PortReply,
         HostOp::ProvideDir,
         HostOp::PortFill,
+        HostOp::StreamTerminal,
+        HostOp::NetJoin,
+        HostOp::ScramSha256,
+        HostOp::ScramFinalLen,
+        HostOp::ScramVerify,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -1169,6 +1179,10 @@ impl HostOp {
             HostOp::SecretHmac => "secret_hmac_sha256",
             HostOp::SecretVerifyHmac => "secret_verify_hmac_sha256",
             HostOp::NetSplit => "net_split",
+            HostOp::NetJoin => "net_join",
+            HostOp::ScramSha256 => "scram_sha256",
+            HostOp::ScramFinalLen => "scram_final_len",
+            HostOp::ScramVerify => "scram_verify",
             HostOp::Stopped => "host_stopped",
             HostOp::StdinRead => "stdin_read",
             HostOp::EnvGet => "env_get",
@@ -1190,6 +1204,7 @@ impl HostOp {
             HostOp::PortReply => "port_reply",
             HostOp::ProvideDir => "provide_dir",
             HostOp::PortFill => "port_fill",
+            HostOp::StreamTerminal => "stream_is_terminal",
         }
     }
     /// C entry of a host operation that has its own adapter.
@@ -1211,6 +1226,10 @@ impl HostOp {
             Self::SecretHmac => "hirsel_core_secret_hmac_sha256",
             Self::SecretVerifyHmac => "hirsel_core_secret_verify_hmac_sha256",
             Self::NetSplit => "hirsel_core_net_split",
+            Self::NetJoin => "hirsel_core_net_join",
+            Self::ScramSha256 => "hirsel_core_scram_sha256",
+            Self::ScramFinalLen => "hirsel_core_scram_final_len",
+            Self::ScramVerify => "hirsel_core_scram_verify",
             Self::StdinRead => "hirsel_core_stdin_read",
             Self::EnvGet => "hirsel_core_env_get",
             Self::EnvLen => "hirsel_core_env_len",
@@ -1231,6 +1250,7 @@ impl HostOp {
             Self::PortReply => "hirsel_core_port_reply",
             Self::ProvideDir => "hirsel_core_provide_dir",
             Self::PortFill => "hirsel_core_port_fill",
+            Self::StreamTerminal => "hirsel_core_stream_is_terminal",
             _ => unreachable!(),
         }
     }
@@ -1249,6 +1269,9 @@ impl HostOp {
                 | HostOp::SecretHmac
                 | HostOp::SecretVerifyHmac
                 | HostOp::NetSplit
+                | HostOp::NetJoin
+                | HostOp::ScramFinalLen
+                | HostOp::ScramVerify
                 | HostOp::EnvGet
                 | HostOp::EnvLen
                 | HostOp::EnvName
@@ -1265,6 +1288,7 @@ impl HostOp {
                 | HostOp::PortReply
                 | HostOp::ProvideDir
                 | HostOp::PortFill
+                | HostOp::StreamTerminal
         )
     }
 }
@@ -1511,6 +1535,22 @@ impl RtOp {
                         vec![V(u64_), V(p), V(u64_), V(p), V(u8_), V(u64_), V(u64_)],
                         outcome,
                     ),
+                    HostOp::ScramSha256 => (
+                        vec![
+                            V(u64_),
+                            V(u64_),
+                            V(p),
+                            V(p),
+                            V(p),
+                            V(p),
+                            V(u8_),
+                            V(u64_),
+                            V(u64_),
+                        ],
+                        outcome,
+                    ),
+                    HostOp::ScramFinalLen => (vec![V(u64_), V(p), V(p)], outcome),
+                    HostOp::ScramVerify => (vec![V(u64_), V(p)], outcome),
                     HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
                     HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
                     HostOp::SecretHmac | HostOp::SecretVerifyHmac => {
@@ -1533,11 +1573,12 @@ impl RtOp {
                     | HostOp::ClockIdle
                     | HostOp::ProcessTrigger => (vec![V(u64_)], outcome),
                     HostOp::ProvideProcess => (vec![], outcome),
-                    HostOp::ProvideStdout
-                    | HostOp::ProvideStderr
-                    | HostOp::ProvideDir
-                    | HostOp::PortNext => (vec![V(u64_)], outcome),
-                    HostOp::CallWord => (vec![V(u64_), V(u64_)], outcome),
+                    HostOp::ProvideDir | HostOp::PortNext => (vec![V(u64_)], outcome),
+                    HostOp::ProvideStdout | HostOp::ProvideStderr => {
+                        (vec![V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome)
+                    }
+                    HostOp::StreamTerminal => (vec![V(u64_), V(u8_)], outcome),
+                    HostOp::CallWord | HostOp::NetJoin => (vec![V(u64_), V(u64_)], outcome),
                     HostOp::CallPayload => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::PortReply => (vec![V(u64_); 9], outcome),
                     HostOp::PortFill => (vec![V(u64_), V(u64_), V(p)], outcome),

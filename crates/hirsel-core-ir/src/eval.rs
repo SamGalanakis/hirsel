@@ -98,6 +98,7 @@ struct World {
     launch: Option<hirsel_core_ids::launch::Metadata>,
     args: Vec<u64>,
     stdin: std::collections::VecDeque<u8>,
+    terminals: [bool; 3],
     env_patterns: Vec<hirsel_core_net::EnvPatterns>,
     env_entries: Vec<(String, u64, Option<u64>)>,
     stdout: Vec<u8>,
@@ -112,7 +113,9 @@ struct World {
     network: Network,
     grant_charges: Vec<(Limit, u64)>,
     secrets: Vec<EvalSecret>,
-    tls_writes: BTreeMap<u64, (Name, bool)>,
+    tls_writes: BTreeMap<u64, (Name, bool, hirsel_core_net::scram::Binding)>,
+    next_scram: u64,
+    scrams: BTreeMap<u64, ([u8; 32], Limit)>,
     /// `provide` cells: cell `i`'s capability and its hand or trigger are both
     /// `CELL_BASE + i` (native hirsel-core-rt `provide`).
     cells: Vec<VirtualCell>,
@@ -121,6 +124,7 @@ struct World {
     port_handles: Vec<(usize, u64)>,
 }
 const CELL_BASE: u64 = 0x80_0000;
+const SCRAM_BASE: u64 = 1 << 60;
 const PORT_HANDLE: u64 = 1 << 61;
 /// A port's `Served` end is `SERVED_BASE + i` for cell `i`; its call `id` is
 /// `CALL_BASE + (i << 32) + id`.
@@ -173,6 +177,7 @@ enum VirtualCell {
     },
     Port {
         dir: bool,
+        terminal: bool,
         sealed: bool,
         /// The order of calls and Released notices.
         next: u64,
@@ -1365,6 +1370,38 @@ pub fn run_stdio(
     )
     .0
 }
+/// Evaluate a host launch with supplied input and environment snapshots. The
+/// granted standard descriptors are probed once, before the evaluator starts.
+pub fn run_host_stdio(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    stdin: &[u8],
+    env: Option<hirsel_core_net::EnvSnapshot>,
+    granted: [bool; 3],
+) -> Report {
+    use std::io::IsTerminal;
+    let terminals = [
+        granted[0] && std::io::stdin().is_terminal(),
+        granted[1] && std::io::stdout().is_terminal(),
+        granted[2] && std::io::stderr().is_terminal(),
+    ];
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            stdin,
+            env,
+            terminals,
+            ..WorldInput::default()
+        },
+    )
+    .0
+}
+
 struct WorldInput<'a> {
     map_hash_key: [u8; 16],
     network: Option<Network>,
@@ -1375,6 +1412,7 @@ struct WorldInput<'a> {
     argv: &'a [&'a str],
     env: Option<hirsel_core_net::EnvSnapshot>,
     stdin: &'a [u8],
+    terminals: [bool; 3],
     nans: Nans,
     destination: Option<&'a mut [u8]>,
     instructions: u64,
@@ -1395,6 +1433,7 @@ impl Default for WorldInput<'_> {
             argv: &[],
             env: None,
             stdin: &[],
+            terminals: [false; 3],
             nans: Nans::Canonical,
             destination: None,
             instructions: u64::MAX,
@@ -1441,6 +1480,7 @@ fn run_world(
         mach.world.args.push(carrier);
     }
     mach.world.stdin.extend(input.stdin);
+    mach.world.terminals = input.terminals;
     if let Some(env) = input.env.take() {
         mach.world.env_patterns.push(env.patterns);
         for (name, value) in env.entries {
@@ -2621,6 +2661,7 @@ impl Machine<'_> {
                 let dir = op == HostOp::ProvideDir;
                 let port = VirtualCell::Port {
                     dir,
+                    terminal: !dir && a[1] != 0,
                     sealed: false,
                     next: 0,
                     calls: BTreeMap::new(),
@@ -2635,6 +2676,16 @@ impl Machine<'_> {
                 };
                 let h = new(&mut self.world, port);
                 ok(h, h - CELL_BASE + SERVED_BASE)
+            }
+            HostOp::StreamTerminal => {
+                let terminal = match self.cell(a[0]) {
+                    Some(c) => match self.world.cells[c] {
+                        VirtualCell::Port { terminal, .. } => terminal,
+                        _ => unreachable!(),
+                    },
+                    None => self.world.terminals[a[1] as usize],
+                };
+                ok(u64::from(terminal), 0)
             }
             HostOp::PortNext => {
                 let c = (a[0] - SERVED_BASE) as usize;
@@ -3339,7 +3390,9 @@ impl Machine<'_> {
         }
         self.world.network.sockets.split(key);
         let name = hirsel_core_net::tls::verification_name(self.carrier_bytes(a[2])).unwrap();
-        self.world.tls_writes.insert(key & !3, (name, false));
+        self.world
+            .tls_writes
+            .insert(key & !3, (name, false, reply.binding));
         let protocol = if reply.bytes.is_empty() {
             0
         } else {
@@ -3448,7 +3501,7 @@ impl Machine<'_> {
 
     fn send_secret(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[0];
-        let Some((name, spent)) = self.world.tls_writes.get(&(key & !3)) else {
+        let Some((name, spent, _)) = self.world.tls_writes.get(&(key & !3)) else {
             return Ok(vec![0, 1, 0, 0]);
         };
         if *spent {
@@ -3487,8 +3540,89 @@ impl Machine<'_> {
         Ok(vec![0, reply.error.into(), reply.code.into(), 0])
     }
 
+    fn scram_send(&mut self, t: &mut Task, args: &[u64]) -> X<Vec<u64>> {
+        use hirsel_core_net::scram::Transcript;
+        let key = args[0];
+        let Some((name, spent, binding)) = self.world.tls_writes.get(&(key & !3)) else {
+            return Ok(vec![0, 1, 0, 0]);
+        };
+        let secret = &self.world.secrets[args[1] as usize];
+        if !secret
+            .policy
+            .patterns
+            .iter()
+            .any(|pattern| pattern.covers(name))
+        {
+            return Ok(vec![0, 1, 0, 0]);
+        }
+        let (spent, binding, password) = (*spent, *binding, secret.bytes.clone());
+        let client_first = self.carrier_bytes(args[2]).to_vec();
+        let server_first = self.carrier_bytes(args[3]).to_vec();
+        let transcript = match Transcript::parse(&client_first, &server_first, &binding) {
+            Ok(transcript) => transcript,
+            Err(error) => return Ok(vec![0, error as u64, 0, 0]),
+        };
+        self.take_steps(t, transcript.iterations().into())?;
+        let payer = t.limits.last().unwrap().clone();
+        const CHARGE: u64 = 32;
+        if let Err(available) = self.admit(&payer, CHARGE) {
+            return Ok(vec![CHARGE, 6, 0, available]);
+        }
+        if spent {
+            self.refund(payer, CHARGE);
+            return Ok(vec![0, 5, 0, 5]);
+        }
+        if let Err(cancelled) = self.check_cancel(t) {
+            self.refund(payer, CHARGE);
+            return Err(cancelled);
+        }
+        let before = self.carrier_bytes(args[4]).to_vec();
+        let after = self.carrier_bytes(args[5]).to_vec();
+        let (message, signature) = transcript.derive(&password);
+        let model = self.world.network.sockets.model().unwrap().clone();
+        model.advance_to(self.world.clock);
+        let deadline = self.until(args, 6);
+        let mut committed = 0;
+        let reply = self.network_attempt(t, &model, deadline, |token| {
+            model.attempt_secret(key, [&before, &message, &after], &mut committed, token)
+        });
+        if reply.error != 0 {
+            self.refund(payer, CHARGE);
+            if committed != 0 {
+                self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
+            }
+            return Ok(vec![0, 5, reply.code.into(), reply.error.into()]);
+        }
+        let id = SCRAM_BASE + self.world.next_scram;
+        self.world.next_scram += 1;
+        self.world.scrams.insert(id, (signature, payer));
+        Ok(vec![id, 0, 0, 0])
+    }
+
+    fn scram_final_len(&self, args: &[u64]) -> Vec<u64> {
+        use hirsel_core_net::scram::Transcript;
+        let Some((_, _, binding)) = self.world.tls_writes.get(&(args[0] & !3)) else {
+            return vec![0, 1, 0, 0];
+        };
+        match Transcript::parse(
+            self.carrier_bytes(args[1]),
+            self.carrier_bytes(args[2]),
+            binding,
+        ) {
+            Ok(transcript) => vec![transcript.final_len() as u64, 0, 0, 0],
+            Err(error) => vec![0, error as u64, 0, 0],
+        }
+    }
+
+    fn scram_verify(&mut self, args: &[u64]) -> Vec<u64> {
+        let (signature, payer) = self.world.scrams.remove(&args[0]).unwrap();
+        let result = hirsel_core_net::scram::verify(&signature, self.carrier_bytes(args[1]));
+        self.refund(payer, 32);
+        vec![u64::from(result), 0, 0, 0]
+    }
+
     /// A provider row against [`World`]: an outcome `value, error, code, written`.
-    fn host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
+    fn host(&mut self, t: &mut Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
         if op == HostOp::SecretSeal {
             return Ok(self.secret_policy(t, op, a));
         }
@@ -3499,6 +3633,9 @@ impl Machine<'_> {
         match op {
             HostOp::TlsConnect => return self.tls_connect(t, a),
             HostOp::SendSecret => return self.send_secret(t, a),
+            HostOp::ScramSha256 => return self.scram_send(t, a),
+            HostOp::ScramFinalLen => return Ok(self.scram_final_len(a)),
+            HostOp::ScramVerify => return Ok(self.scram_verify(a)),
             HostOp::SecretNarrow => return Ok(self.secret_policy(t, op, a)),
             HostOp::SecretHmac | HostOp::SecretVerifyHmac => return Ok(self.secret_mac(op, a)),
             HostOp::EnvGet | HostOp::EnvLen | HostOp::EnvName | HostOp::EnvNarrow => {
@@ -3531,6 +3668,7 @@ impl Machine<'_> {
                 | HostOp::NetNarrowTls
                 | HostOp::NetNarrowResolve
                 | HostOp::NetSplit
+                | HostOp::NetJoin
         ) {
             self.check_cancel(t)?;
         }
@@ -3544,6 +3682,9 @@ impl Machine<'_> {
             }
             HostOp::TlsConnect
             | HostOp::SendSecret
+            | HostOp::ScramSha256
+            | HostOp::ScramFinalLen
+            | HostOp::ScramVerify
             | HostOp::SecretSeal
             | HostOp::SecretNarrow
             | HostOp::SecretHmac
@@ -3566,7 +3707,8 @@ impl Machine<'_> {
             | HostOp::CallPayload
             | HostOp::PortReply
             | HostOp::ProvideDir
-            | HostOp::PortFill => {
+            | HostOp::PortFill
+            | HostOp::StreamTerminal => {
                 unreachable!()
             }
             HostOp::Resolve => self.network_resolve(a),
@@ -3603,6 +3745,24 @@ impl Machine<'_> {
             HostOp::NetSplit => {
                 let (read, write) = self.world.network.sockets.split(a[0]);
                 vec![read, 0, 0, write]
+            }
+            HostOp::NetJoin => {
+                let (read, write) = (a[0], a[1]);
+                let key = read & !3;
+                if key != write & !3
+                    || self.world.tls_writes.contains_key(&key)
+                    || !self
+                        .world
+                        .network
+                        .sockets
+                        .model()
+                        .unwrap()
+                        .rejoin_client(key)
+                {
+                    vec![read, 1, 0, write]
+                } else {
+                    ok(key, 0)
+                }
             }
             HostOp::NetNarrow => {
                 let r = hirsel_core_net::Rule {
@@ -4428,6 +4588,11 @@ impl Machine<'_> {
                     self.world.listings[(h & !LISTING_HANDLE) as usize] = None;
                     return false;
                 }
+                if (SCRAM_BASE..PORT_HANDLE).contains(&h) {
+                    let (_, payer) = self.world.scrams.remove(&h).unwrap();
+                    self.refund(payer, 32);
+                    return false;
+                }
                 self.trace.push(h);
                 if (PORT_HANDLE..CALL_BASE).contains(&h) {
                     // A served Dir's file or listing: the server learns by
@@ -4847,6 +5012,39 @@ impl Machine<'_> {
             let (l, n) = (c.limit.take().unwrap(), c.charge);
             self.refund(l, n);
         }
+    }
+
+    fn take_steps(&mut self, t: &mut Task, mut count: u64) -> X<()> {
+        while count != 0 {
+            let Some(bound) = t.step_bounds.last_mut() else {
+                self.steps += count;
+                break;
+            };
+            if bound.left == 0 {
+                let id = bound.id;
+                let site = self.site(t);
+                self.record(
+                    t,
+                    Cause {
+                        kind: "OutOfTime",
+                        message: [id, 0, 0],
+                        site,
+                    },
+                );
+                return Err(Stop::Chained);
+            }
+            let amount = count.min(bound.left).min(65_536 - t.slice_steps);
+            bound.left -= amount;
+            count -= amount;
+            t.slice_steps += amount;
+            self.steps += amount;
+            if t.slice_steps == 65_536 {
+                t.slice_steps = 0;
+                self.event(hirsel_core_layout::event::STEP_SLICE, 0, 65_536);
+                self.park_turn(None, false);
+            }
+        }
+        Ok(())
     }
 
     fn step_bound(&mut self, left: u64) -> StepBound {
@@ -6292,31 +6490,7 @@ impl Machine<'_> {
                     self.free(ptr(blk, 0));
                 }
             }
-            Inst::Step { .. } => {
-                if let Some(bound) = t.step_bounds.last_mut() {
-                    if bound.left == 0 {
-                        let id = bound.id;
-                        let site = self.site(t);
-                        self.record(
-                            t,
-                            Cause {
-                                kind: "OutOfTime",
-                                message: [id, 0, 0],
-                                site,
-                            },
-                        );
-                        return Err(Stop::Chained);
-                    }
-                    bound.left -= 1;
-                    t.slice_steps += 1;
-                    if t.slice_steps == 65_536 {
-                        t.slice_steps = 0;
-                        self.event(hirsel_core_layout::event::STEP_SLICE, 0, 65_536);
-                        self.park_turn(None, false);
-                    }
-                }
-                self.steps += 1;
-            }
+            Inst::Step { .. } => self.take_steps(t, 1)?,
             Inst::LimitEnter {
                 admitted,
                 available,

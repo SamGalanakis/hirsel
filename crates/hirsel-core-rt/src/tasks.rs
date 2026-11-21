@@ -2338,7 +2338,7 @@ unsafe fn operation<C: Calls>(
             let start = Start::Entry(Some(wait));
             return slow(context, task, provider, request, token, start, issued);
         }
-        let step = (provider.issue)(provider.state, request, token);
+        let step = crate::provider::issue(provider, request, token);
         if step.kind != STEP_DONE {
             let start = Start::Issued(step);
             return slow(context, task, provider, request, token, start, issued);
@@ -2514,7 +2514,7 @@ unsafe fn parked(
                 Some(step) => step,
                 None => match op.state {
                     OperationState::ReadyToIssue => {
-                        (op.provider.issue)(op.provider.state, request, token)
+                        crate::provider::issue(&op.provider, request, token)
                     }
                     OperationState::ReadyToDeliver(outcome) => break outcome,
                     _ => unreachable!("resumed provider operation has no next action"),
@@ -2691,7 +2691,7 @@ unsafe fn alone(
                 _ => crate::process::stop(b"Provider"),
             }
         }
-        let mut step = (p.issue)(p.state, request, token);
+        let mut step = crate::provider::issue(p, request, token);
         loop {
             match step.kind {
                 STEP_DONE => return Some(step.outcome),

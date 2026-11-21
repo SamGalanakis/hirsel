@@ -36,6 +36,10 @@ fn net_split_admits_nothing() {
     isolated("split");
 }
 #[test]
+fn net_join_refuses_without_provider_effects() {
+    isolated("join");
+}
+#[test]
 fn net_laws_child() {
     let Ok(law) = std::env::var("WIRE_W1A_LAW") else {
         return;
@@ -230,11 +234,13 @@ fn stdin_stream_preserves_bytes_across_timeout_and_abort() {
             kind: STDIN,
             provider: &provider,
             handle: std::ptr::from_ref(&stream) as u64,
+            terminal: false,
         },
         crate::entry::Grant {
             kind: CLOCK,
             provider: &provider,
             handle: 0,
+            terminal: false,
         },
     ];
     unsafe extern "C" fn diagnostic(_: *mut u8, _: *const u8, _: usize) {}
@@ -479,6 +485,60 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
     unsafe {
         match law {
             "resolve_wait" => resolve_wait_law(context, n, clock),
+            "join" => {
+                let (listener, client, server) = connected(context, n, 0);
+                let (other_listener, other_client, other_server) = connected(context, n, 0);
+                let c = hirsel_core_net_split(context, client, 4);
+                let s = hirsel_core_net_split(context, server, 4);
+                let other = hirsel_core_net_split(context, other_client, 4);
+                let other_peer = hirsel_core_net_split(context, other_server, 4);
+                crate::os::probe::CALLS.set(Some(Vec::new()));
+                let cross = hirsel_core_net_join(context, c.value, other.written, 5);
+                let accepted = hirsel_core_net_join(context, s.value, s.written, 6);
+                assert!(crate::os::probe::CALLS.take().unwrap().is_empty());
+                assert_eq!(
+                    (cross.error.tag, cross.value, cross.written),
+                    (1, c.value, other.written)
+                );
+                assert_eq!(
+                    (accepted.error.tag, accepted.value, accepted.written),
+                    (1, s.value, s.written)
+                );
+                for (write, read, expected) in [
+                    (cross.written, other_peer.value, 0x61),
+                    (accepted.written, cross.value, 0x62),
+                ] {
+                    let mut byte = [expected];
+                    let prefix = carrier(&mut byte, 1);
+                    let tail = carrier(&mut [], 0);
+                    let sent =
+                        hirsel_core_host_send_pair(context, write, &prefix, &tail, 0, 0, 0, 7);
+                    assert_eq!((sent.error, sent.value), (IoError::OK, 1));
+                    let mut received = [0];
+                    let mut input = carrier(&mut received, 0);
+                    let reply =
+                        hirsel_core_host_recv_bounded(context, read, &mut input, 1, 0, 0, 0, 8);
+                    assert_eq!(
+                        (reply.error, reply.value, received[0]),
+                        (IoError::OK, 1, expected)
+                    );
+                }
+                for key in [
+                    listener,
+                    other_listener,
+                    c.value,
+                    c.written,
+                    s.value,
+                    s.written,
+                    other.value,
+                    other.written,
+                    other_peer.value,
+                    other_peer.written,
+                ] {
+                    hirsel_core_socket_drop(context, key);
+                }
+            }
+
             "inherited_hold" | "inherited_accept" | "inherited_denied" => {
                 let listener = hirsel_core_host_listen(context, n, 0, 0, 0x7f000001, 0, 16, 1);
                 if law == "inherited_denied" {

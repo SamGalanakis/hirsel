@@ -50,6 +50,7 @@ fn modeled(op: u8) -> bool {
             | SEND_PAIR
             | TLS_CONNECT
             | SEND_SECRET
+            | SCRAM
             | MONO_NS
             | WALL_MS
             | RESOLVE
@@ -130,7 +131,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
         if r.operation == TLS_CONNECT {
             return tls_step(&p.model, r, token);
         }
-        if r.operation == SEND_SECRET {
+        if matches!(r.operation, SEND_SECRET | SCRAM) {
             return secret_step(&p.model, r, token);
         }
         let n = &mut *r.path.cast_mut().cast::<NetworkRequest>();
@@ -283,6 +284,10 @@ unsafe fn tls_step(model: &Model, request: &Request, token: u64) -> Step {
             }
             protocol.len = reply.bytes.len();
             *tls.peer_out = reply.peer;
+            let binding = reply.binding.bytes();
+            let out = &mut *tls.binding_out;
+            std::ptr::copy_nonoverlapping(binding.as_ptr(), out.data, binding.len());
+            out.len = binding.len();
             (*tls.network.sockets).split(key);
         } else {
             tls_release(tls, key);
@@ -337,7 +342,7 @@ unsafe extern "C" fn abort(
             tls_release(&mut *r.path.cast_mut().cast::<TlsRequest>(), r.handle);
         }
         let mut out = outcome(&reply);
-        if r.operation == SEND_SECRET {
+        if matches!(r.operation, SEND_SECRET | SCRAM) {
             out.written = (*r.path.cast::<crate::secret::SendRequest>()).committed as u64;
         }
         out

@@ -12,9 +12,9 @@ pub fn process() -> (Process, StopTrigger)
 // queued on the port; `next` takes the oldest, and returns None only once
 // every task waits. A Call's Op holds scalars: a data field is its byte
 // length, which `payload` appends to `out`.
-pub fn stdout(bytes n: u64) -> (Stdout, Served[StreamOp])
+pub fn stdout(bytes n: u64, terminal: bool) -> (Stdout, Served[StreamOp])
 
-pub fn stderr(bytes n: u64) -> (Stderr, Served[StreamOp])
+pub fn stderr(bytes n: u64, terminal: bool) -> (Stderr, Served[StreamOp])
 
 pub fn dir(bytes n: u64) -> (Dir, Served[DirOp])
 

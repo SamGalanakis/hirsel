@@ -101,7 +101,7 @@ typedef struct {
     void (*event)(void *, HirselCoreEvent);
     size_t reserved;
 } HirselCoreSchedulerProvider;
-typedef struct { uint8_t kind; const HirselCoreProvider *provider; uint64_t handle; } HirselCoreEntryGrant;
+typedef struct { uint8_t kind; const HirselCoreProvider *provider; uint64_t handle; bool terminal; } HirselCoreEntryGrant;
 typedef struct { uint8_t kind; size_t index; } HirselCoreEntryRequirement;
 /* Grant kinds: Dir 0, Net 1, Clock 2, Random 3, Stdout 4, Stderr 5,
    Stdin 6, Env 7, Process 8, Tasks 9, Args 10. Capability/Args operands
@@ -139,6 +139,7 @@ uint8_t hirsel_core_check_cancel(HirselCoreContext *, uint64_t site);
 /* Constructor fills cfg.grants[i] in main parameter order from requirements.
    Main takes one uint64_t per parameter. entry_grant returns zero when missing.
    Args uses the same u64 operand convention; args_len/get also take context. */
+HirselCoreHostOutcome hirsel_core_stream_is_terminal(HirselCoreContext *, uint64_t, uint8_t, uint64_t);
 uint64_t hirsel_core_entry_grant(const HirselCoreProcessConfig *, uint8_t kind, size_t index);
 bool hirsel_core_entry_grants_present(const HirselCoreProcessConfig *, const HirselCoreEntryRequirement *, size_t);
 const HirselCoreProvider *hirsel_core_capability_provider(const HirselCoreContext *, uint64_t);
@@ -260,8 +261,8 @@ HirselCoreHostOutcome hirsel_core_process_trigger(HirselCoreContext *, uint64_t 
  * capability's grant and written = the Served key; next answers written 1 with
  * value = the Call key, or written 0 at quiescence; reply answers value 1 for
  * Withdrawn. */
-HirselCoreHostOutcome hirsel_core_provide_stdout(HirselCoreContext *, uint64_t n, uint64_t);
-HirselCoreHostOutcome hirsel_core_provide_stderr(HirselCoreContext *, uint64_t n, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_stdout(HirselCoreContext *, uint64_t n, bool terminal, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_stderr(HirselCoreContext *, uint64_t n, bool terminal, uint64_t);
 HirselCoreHostOutcome hirsel_core_port_next(HirselCoreContext *, uint64_t served, uint64_t);
 HirselCoreHostOutcome hirsel_core_call_word(HirselCoreContext *, uint64_t call, uint64_t i, uint64_t);
 HirselCoreHostOutcome hirsel_core_call_payload(HirselCoreContext *, uint64_t call, uint64_t field, HirselCoreBuffer *out, uint64_t);
@@ -275,7 +276,8 @@ HirselCoreHostOutcome hirsel_core_host_send_pair(HirselCoreContext *, uint64_t, 
 /* TLS_CONNECT (22). Only the TLS fields in this extension are public.
    ALPN is a sequence of one-byte lengths followed by the protocol bytes.
    protocol_out points to a 255-byte buffer with length initially zero.
-   peer_out points to 32 writable bytes. Success returns the stream key.
+   peer_out points to 32 writable bytes. binding_out points to a 64-byte
+   buffer with length initially zero. Success returns the stream key.
    NetError tag 9 carries the TLS case in the low byte and detail in the second.
    The input Socket is consumed on all returns. */
 #define HIRSEL_CORE_TLS_CONNECT 22
@@ -287,6 +289,7 @@ typedef struct {
     HirselCoreView alpn;
     HirselCoreBuffer *protocol_out;
     uint8_t *peer_out;
+    HirselCoreBuffer *binding_out;
     void *runtime_state;
 } HirselCoreTlsRequest;
 HirselCoreHostOutcome hirsel_core_host_tls_connect(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreView *, uint8_t, const HirselCoreBuffer *, const HirselCoreView *, HirselCoreBuffer *, uint8_t *, uint8_t, uint64_t, uint64_t, uint64_t);
@@ -302,11 +305,17 @@ typedef struct {
 HirselCoreHostOutcome hirsel_core_host_send_secret(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t, const HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_seal(HirselCoreContext *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_narrow(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
+#define HIRSEL_CORE_SCRAM 68
+#define HIRSEL_CORE_SCRAM_VERIFY 69
+HirselCoreHostOutcome hirsel_core_scram_sha256(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_scram_final_len(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_scram_verify(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
 #define HIRSEL_CORE_SECRET_MAC 39
 HirselCoreHostOutcome hirsel_core_secret_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint8_t *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_verify_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow_tls(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint16_t, uint16_t, uint8_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, uint8_t, uint16_t, uint16_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_net_join(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_split(HirselCoreContext *, uint64_t, uint64_t);
 void hirsel_core_socket_drop(HirselCoreContext *, uint64_t);
 

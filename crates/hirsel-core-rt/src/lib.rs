@@ -43,6 +43,7 @@ mod resolve;
 mod retention;
 #[cfg(any(test, feature = "testing"))]
 pub mod schedule_script;
+mod scram;
 pub mod secret;
 mod sequencer;
 mod sha1;

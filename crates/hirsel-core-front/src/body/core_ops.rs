@@ -9,6 +9,7 @@ mod flow;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kernel {
     Stream(HostOp),
+    StreamTerminal(u8),
     CarrierMove,
     CarrierView,
     StringShorten,
@@ -323,6 +324,9 @@ operations! {
     ("host", "recv_bounded", Lane::Runtime(Kernel::Net(HostOp::RecvBounded)), "B", "wire-w1a-1063", false),
     ("host", "send_pair", Lane::Runtime(Kernel::Net(HostOp::SendPair)), "B", "wire-w1a-1063", false),
     ("stdin", "read", Lane::Runtime(Kernel::Net(HostOp::StdinRead)), "B", "stdin-env-1501", false),
+    ("stdin", "is_terminal", Lane::Runtime(Kernel::StreamTerminal(0)), "B", "small-host-impl-1576", false),
+    ("stdout", "is_terminal", Lane::Runtime(Kernel::StreamTerminal(1)), "B", "small-host-impl-1576", false),
+    ("stderr", "is_terminal", Lane::Runtime(Kernel::StreamTerminal(2)), "B", "small-host-impl-1576", false),
     ("env", "get", Lane::Runtime(Kernel::Env(HostOp::EnvGet)), "B", "stdin-env-1501", false),
     ("env", "len", Lane::Runtime(Kernel::Env(HostOp::EnvLen)), "B", "stdin-env-1501", false),
     ("env", "name", Lane::Runtime(Kernel::Env(HostOp::EnvName)), "B", "stdin-env-1501", false),
@@ -334,8 +338,12 @@ operations! {
     ("secret", "narrow", Lane::Runtime(Kernel::Net(HostOp::SecretNarrow)), "B", "tls-t4-1447", false),
     ("secret", "hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretHmac)), "B", "hmac-1504", false),
     ("secret", "verify_hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretVerifyHmac)), "B", "hmac-1504", false),
+    ("secret", "scram_sha256", Lane::Runtime(Kernel::Net(HostOp::ScramSha256)), "B", "small-host-impl-1576", false),
+    ("secret", "scram_final_len", Lane::Runtime(Kernel::Net(HostOp::ScramFinalLen)), "B", "small-host-impl-1576", false),
+    ("secret", "scram_verify", Lane::Runtime(Kernel::Net(HostOp::ScramVerify)), "B", "small-host-impl-1576", false),
     ("secret", "render", Lane::Runtime(Kernel::SecretRender), "A", "tls-t4-1447", false),
     ("net", "split", Lane::Runtime(Kernel::Net(HostOp::NetSplit)), "B", "wire-w1a-1063", false),
+    ("net", "join", Lane::Runtime(Kernel::Net(HostOp::NetJoin)), "B", "small-host-impl-1576", false),
     ("provide", "clock", Lane::Runtime(Kernel::Provide(HostOp::ProvideClock)), "B", "provide-r8a-1533", false),
     ("provide", "random", Lane::Runtime(Kernel::Provide(HostOp::ProvideRandom)), "B", "provide-r8a-1533", false),
     ("provide", "process", Lane::Runtime(Kernel::Provide(HostOp::ProvideProcess)), "B", "provide-r8a-1533", false),
@@ -768,6 +776,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::Env(op) => self.runtime_env(op, vals, result, n),
             Kernel::Provide(op) => self.runtime_provide(op, vals, result, n),
             Kernel::Stream(op) => self.runtime_stream(op, vals, result, n),
+            Kernel::StreamTerminal(stream) => {
+                let kind = self.konst(Ty::Scalar(Scalar::U8), stream.into(), n)?;
+                let [value, ..] = self.runtime_row(
+                    RtOp::Host(HostOp::StreamTerminal),
+                    &[Arg::Value(vals[0]?), Arg::Value(kind)],
+                    n,
+                )?;
+                self.runtime_nonzero(Ty::Scalar(Scalar::U64), value, n)
+            }
             Kernel::Host(op) => self.runtime_host(op, f, vals, result, n),
             Kernel::Net(op) => self.runtime_net(op, f, vals, result, n),
             Kernel::SecretSeal => self.runtime_net(HostOp::SecretSeal, f, vals, result, n),
@@ -1516,6 +1533,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
     fn ambient(k: Kernel) -> bool {
         match k {
             Kernel::Stream(_)
+            | Kernel::StreamTerminal(_)
             | Kernel::Host(_)
             | Kernel::Net(_)
             | Kernel::ArgsLen
@@ -3234,6 +3252,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if matches!(op, HostOp::SecretHmac | HostOp::SecretVerifyHmac) {
             return self.runtime_secret_mac(op, vals, result, n);
         }
+        if matches!(
+            op,
+            HostOp::ScramSha256 | HostOp::ScramFinalLen | HostOp::ScramVerify
+        ) {
+            return self.runtime_scram(op, f, vals, result, n);
+        }
         let u = Ty::Scalar(Scalar::U64);
         let key = if matches!(
             op,
@@ -3242,6 +3266,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 | HostOp::SendPair
                 | HostOp::SendSecret
                 | HostOp::NetSplit
+                | HostOp::NetJoin
         ) {
             self.runtime_key(vals[0]?, n)
         } else {
@@ -3292,6 +3317,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     operands.push(vals[1]?)
                 }
                 HostOp::NetSplit => {}
+                HostOp::NetJoin => operands.push(self.runtime_key(vals[1]?, n)),
                 _ => unreachable!(),
             }
         }
@@ -3313,6 +3339,44 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.runtime_store(to, &[Step::Field(0)], u, value, n);
             self.runtime_store(to, &[Step::Field(1)], u, written, n);
             return Some(self.pointer(to, n));
+        }
+        if op == HostOp::NetJoin {
+            self.consume(vals[0], n);
+            self.consume(vals[1], n);
+            let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
+            return self.runtime_result(
+                result,
+                ok,
+                n,
+                |cx, to, ty| {
+                    if let Some(at) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                    {
+                        cx.runtime_store(at, &[], u, value, n);
+                    }
+                },
+                |cx, to, ty| {
+                    if let Some(at) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                    {
+                        cx.inst(
+                            Inst::SetCase {
+                                address: at,
+                                case: 0,
+                            },
+                            n,
+                        );
+                        cx.runtime_store(at, &[Step::CaseField { case: 0, field: 0 }], u, value, n);
+                        cx.runtime_store(
+                            at,
+                            &[Step::CaseField { case: 0, field: 1 }],
+                            u,
+                            written,
+                            n,
+                        );
+                    }
+                },
+            );
         }
         let policy_result = matches!(
             op,
@@ -3377,6 +3441,96 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         cx.runtime_net_error(at, ty, error, code, n);
                     }
                 }
+            },
+        )
+    }
+
+    fn runtime_scram(
+        &mut self,
+        op: HostOp,
+        f: usize,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u = Ty::Scalar(Scalar::U64);
+        let k = Ty::Scalar(Scalar::U8);
+        let mut args = vec![Arg::Value(self.runtime_key(vals[0]?, n))];
+        let send = op == HostOp::ScramSha256;
+        let before_until = if send { 6 } else { vals.len() };
+        for &value in &vals[1..before_until] {
+            args.push(Arg::Value(value?));
+        }
+        if send {
+            let until = self.net_until(self.p.fns[f].params[6].ty, vals[6]?, n)?;
+            args.extend(until.map(Arg::Value));
+        }
+        if op == HostOp::ScramVerify {
+            self.consume(vals[0], n);
+        }
+        let [value, error, code, written] = self.runtime_row(RtOp::Host(op), &args, n)?;
+        if op == HostOp::ScramVerify {
+            return self.runtime_nonzero(u, value, n);
+        }
+        if send {
+            let maximum = self.konst(k, 5, n)?;
+            let valid = self.test(CompareOp::Le, error, maximum, n);
+            self.raise_unless(valid, value, written, n);
+        }
+        let ok = self.runtime_compare(k, error, 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                {
+                    cx.runtime_store(at, &[], u, value, n);
+                }
+            },
+            |cx, to, ty| {
+                let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                else {
+                    return;
+                };
+                let join = cx.new_block(&[]);
+                let last = if send { 4 } else { 3 };
+                for case in 0..last {
+                    let on = cx
+                        .runtime_compare(k, error, u64::from(case + 1), n)
+                        .unwrap();
+                    let yes = cx.new_block(&[]);
+                    let no = cx.new_block(&[]);
+                    cx.runtime_branch(on, yes, no, n);
+                    cx.start(yes);
+                    cx.inst(Inst::SetCase { address: at, case }, n);
+                    cx.jump(join, &[], n);
+                    cx.start(no);
+                }
+                cx.inst(
+                    Inst::SetCase {
+                        address: at,
+                        case: last,
+                    },
+                    n,
+                );
+                if send && let Some((net_ty, net)) = cx.net_case_field(ty, at, 4, 0, n) {
+                    let tag = cx.value(k);
+                    cx.inst(
+                        Inst::Convert {
+                            result: tag,
+                            flag: None,
+                            operand: written,
+                            mode: ConvertMode::Truncate,
+                        },
+                        n,
+                    );
+                    cx.runtime_net_error(net, net_ty, tag, code, n);
+                }
+                cx.jump(join, &[], n);
+                cx.start(join);
             },
         )
     }

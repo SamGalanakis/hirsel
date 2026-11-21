@@ -39,7 +39,7 @@ one nonblocking attempt to send it ([TLS-2](tls.md#tls-2-plaintext-on-a-tls-stre
 The last owner closes the descriptor once. Dropping an unsplit socket or a
 listener closes it once. No finalizer waits or enables positive linger.
 
-```hirsel unbuilt
+```hirsel core
 pub type Unjoined = Unjoined(ReadHalf, WriteHalf)
 pub fn join(take r: ReadHalf, take w: WriteHalf) -> Result[Socket, Unjoined]
 ```
@@ -75,24 +75,26 @@ For PostgreSQL before 17, the go-ahead is one byte. The client sends the 8-byte
 `SSLRequest`, `00 00 00 08 04 D2 16 2F` (length 8, then request code 80877103), and the
 server answers `S` to proceed with TLS or `N` to refuse it:
 
-```hirsel unbuilt
+```hirsel
 pub type StartTls = Secured(ReadHalf, WriteHalf, Handshake) | Declined(ReadHalf, WriteHalf, u8) | Ended() | NotClient()
 
 fn pg_starttls(n: Net, take s: Socket, name: String, trust: Trust, until: Until) -> Result[StartTls, NetError] waits {
-  let (mut r, mut w) = net.split(take s)
+  let (r, w) = net.split(take s)
+  let mut read = take r
+  let mut write = take w
   let req: Bytes = b"\x00\x00\x00\x08\x04\xD2\x16\x2F"
   let mut sent: u64 = 0
-  while sent < 8 { sent += host.send_pair(mut w, list.slice(req, sent, 8), list.slice(req, 8, 8), until)? }
+  while sent < 8 { sent += host.send_pair(mut write, list.slice(req, sent, 8), list.slice(req, 8, 8), until)? }
   let mut reply: Bytes = list.with_capacity(1)
-  if host.recv_bounded(mut r, mut reply, 1, until)? == 0 { return Ok(Ended()) }
+  if host.recv_bounded(mut read, mut reply, 1, until)? == 0 { return Ok(Ended()) }
   match list.get(reply, 0) {
     Some(0x53) => {},                                                     // `S`: go ahead
-    Some(b) => return Ok(Declined(take r, take w, b)),                     // `N`, or anything else
+    Some(b) => return Ok(Declined(take read, take write, b)),                     // `N`, or anything else
     None => return Ok(Ended()),
   }
-  match net.join(take r, take w) {
-    Ok(s) => match tls.connect(n, take s, name, trust, list.new(), until) {
-      Ok((r, w, h)) => Ok(Secured(take r, take w, h)),
+  match net.join(take read, take write) {
+    Ok(take joined) => match tls.connect(n, take joined, name, trust, list.new(), until) {
+      Ok((take secure_read, take secure_write, h)) => Ok(Secured(take secure_read, take secure_write, h)),
       Error(e) => Error(e),
     },
     Error(_) => Ok(NotClient()),

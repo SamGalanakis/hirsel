@@ -25,7 +25,7 @@ pub enum TlsFailure {
 }
 
 impl TlsFailure {
-    fn reply(self) -> Reply {
+    pub(super) fn reply(self) -> Reply {
         let code = match self {
             Self::Certificate(failure) => (failure as u32) << 8,
             Self::Name => 1,
@@ -47,6 +47,7 @@ pub struct TlsIdentity {
     /// The peer's selected ALPN bytes, which must occur in the client's offer.
     pub protocol: Option<Vec<u8>>,
     pub peer: [u8; 32],
+    pub binding: crate::scram::Binding,
 }
 
 #[derive(Debug)]
@@ -60,6 +61,11 @@ pub enum TlsHandshake {
 
 #[derive(Debug)]
 pub enum TlsStep {
+    /// Expect a plaintext request and make the reply readable before TLS starts.
+    BeforeHandshake {
+        expect: Vec<u8>,
+        send: Vec<u8>,
+    },
     /// Compare the next plaintext from the client, across any send boundaries.
     Expect(Vec<u8>),
     Send(Vec<u8>),
@@ -113,6 +119,9 @@ impl ScriptedPeer {
         key: u64,
         offered: &[impl AsRef<[u8]>],
     ) -> Option<Reply> {
+        if self.mismatch || matches!(self.steps.front(), Some(TlsStep::BeforeHandshake { .. })) {
+            return Some(PROTOCOL_ERROR.reply());
+        }
         let Handshake::Waiting(TlsHandshake::After { delay_ns, .. }, at) = &mut self.handshake
         else {
             return None;
@@ -125,7 +134,11 @@ impl ScriptedPeer {
         else {
             unreachable!()
         };
-        let TlsIdentity { protocol, peer } = match result {
+        let TlsIdentity {
+            protocol,
+            peer,
+            binding,
+        } = match result {
             Ok(identity) => identity,
             Err(error) => return Some(error.reply()),
         };
@@ -140,6 +153,7 @@ impl ScriptedPeer {
             value: key,
             bytes: protocol.unwrap_or_default(),
             peer,
+            binding,
             ..Reply::default()
         })
     }
@@ -166,11 +180,37 @@ impl ScriptedPeer {
     }
 
     pub(super) fn drive(&mut self, [client, server]: &mut [Direction; 2], window: usize) {
-        if !self.established() || self.mismatch {
+        if self.mismatch {
             return;
         }
         loop {
             let done = match self.steps.front() {
+                Some(TlsStep::BeforeHandshake { expect, send }) if !self.established() => {
+                    let remaining = &expect[self.offset.min(expect.len())..];
+                    let n = remaining.len().min(client.readable.len());
+                    if !client
+                        .readable
+                        .drain(..n)
+                        .eq(remaining[..n].iter().copied())
+                    {
+                        self.mismatch = true;
+                        return;
+                    }
+                    self.offset += n;
+                    if self.offset < expect.len() {
+                        return;
+                    }
+                    let remaining = &send[self.offset - expect.len()..];
+                    let n = remaining.len().min(window - server.readable.len());
+                    server.readable.extend(&remaining[..n]);
+                    self.offset += n;
+                    self.offset - expect.len() == send.len()
+                }
+                _ if !self.established() => return,
+                Some(TlsStep::BeforeHandshake { .. }) => {
+                    self.mismatch = true;
+                    return;
+                }
                 Some(TlsStep::Expect(bytes)) => {
                     let remaining = &bytes[self.offset..];
                     let n = remaining.len().min(client.readable.len());

@@ -172,7 +172,7 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
             .unwrap();
         }
         main.push_str(
-            "{ memset(&world,0,sizeof world); HirselCoreEntryGrant grants[1]={{0,&provider,7}};\n",
+            "{ memset(&world,0,sizeof world); HirselCoreEntryGrant grants[1]={{0,&provider,7,false}};\n",
         );
         if run.matrix.is_none() && run.function == FuncId(0) {
             main.push_str("grants[0].kind=4; grants[0].handle=0;\n");

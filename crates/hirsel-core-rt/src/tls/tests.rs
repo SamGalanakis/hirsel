@@ -218,8 +218,12 @@ unsafe fn upgrade(
 }
 
 fn certificate_config(protocols: &[&[u8]]) -> ServerConfig {
-    let cert = CertificateDer::from_pem_slice(ALPHA).unwrap();
-    let key = PrivateKeyDer::from_pem_slice(ALPHA_KEY).unwrap();
+    certificate_for(ALPHA, ALPHA_KEY, protocols)
+}
+
+fn certificate_for(leaf: &[u8], key: &[u8], protocols: &[&[u8]]) -> ServerConfig {
+    let cert = CertificateDer::from_pem_slice(leaf).unwrap();
+    let key = PrivateKeyDer::from_pem_slice(key).unwrap();
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -690,4 +694,441 @@ fn os_tls_loopback_laws() {
     committed_prefix(&mut run);
     release_on_exit(&mut run);
     assert_eq!(fds(), baseline);
+}
+
+#[test]
+fn starttls_loopback_laws() {
+    if std::env::var_os("HIRSEL_STARTTLS_LAWS_CHILD").is_none() {
+        let out = crate::test_process::command()
+            .args([
+                "--exact",
+                "tls::tests::starttls_loopback_laws",
+                "--nocapture",
+            ])
+            .env("HIRSEL_STARTTLS_LAWS_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    const REQUEST: &[u8] = b"\x00\x00\x00\x08\x04\xd2\x16\x2f";
+    let mut run = Run::new();
+    let baseline = fds();
+    for reply in [
+        b"S".as_slice(),
+        b"N".as_slice(),
+        b"SR\x00\x00\x00\x08\x00\x00\x00\x00".as_slice(),
+    ] {
+        let listener = listener();
+        let port = listener.local_addr().unwrap().port();
+        let peer = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 8];
+            socket.read_exact(&mut request).unwrap();
+            assert_eq!(request, REQUEST);
+            socket.write_all(reply).unwrap();
+            let mut message = [0; 5];
+            if reply == b"S" {
+                let server = ServerConnection::new(Arc::new(certificate_config(&[]))).unwrap();
+                StreamOwned::new(server, socket)
+                    .read_exact(&mut message)
+                    .unwrap();
+                assert_eq!(&message, b"hello");
+            } else if reply == b"N" {
+                socket.read_exact(&mut message).unwrap();
+                assert_eq!(&message, b"hello");
+            } else {
+                // Closing with unread bytes can give EOF or ECONNRESET.
+                match socket.read(&mut message) {
+                    Ok(n) => assert_eq!(n, 0, "the client sent bytes before refusing"),
+                    Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::ConnectionReset),
+                }
+            }
+        });
+        let key = run.connect(port);
+        let context = &raw mut *run.context;
+        let halves = unsafe { hirsel_core_net_split(context, key, 1) };
+        let sent = unsafe {
+            hirsel_core_host_send_pair(
+                context,
+                halves.written,
+                &input(REQUEST),
+                &input(b""),
+                0,
+                0,
+                0,
+                2,
+            )
+        };
+        assert_eq!((sent.error, sent.value), (IoError::OK, 8));
+        let mut byte = [0];
+        let mut go_ahead = Buffer {
+            data: byte.as_mut_ptr(),
+            len: 0,
+            capacity: 1,
+        };
+        let read = unsafe {
+            hirsel_core_host_recv_bounded(context, halves.value, &mut go_ahead, 1, 0, 0, 0, 3)
+        };
+        assert_eq!(
+            (read.error, read.value, byte[0]),
+            (IoError::OK, 1, reply[0])
+        );
+        let write = if byte[0] == b'N' {
+            halves.written
+        } else {
+            let available = run.context.available();
+            let joined = unsafe { hirsel_core_net_join(context, halves.value, halves.written, 4) };
+            assert_eq!((joined.error, joined.value), (IoError::OK, key));
+            assert_eq!(run.context.available(), available);
+            let secured = run.upgrade(joined.value, b"alpha.test", Some(CA), &[]);
+            if reply.len() != 1 {
+                assert_error(secured.outcome, tls_failure(4, 0));
+                peer.join().unwrap();
+                assert_eq!(fds(), baseline);
+                continue;
+            }
+            assert_eq!(secured.outcome.error, IoError::OK);
+            let digest = ALPHA_DIGEST.trim();
+            assert_eq!(
+                secured.peer,
+                std::array::from_fn(|i| {
+                    u64::from_str_radix(&digest[i * 16..i * 16 + 16], 16).unwrap()
+                })
+            );
+            let failed = unsafe {
+                hirsel_core_net_join(
+                    context,
+                    secured.outcome.value | 1,
+                    secured.outcome.value | 2,
+                    5,
+                )
+            };
+            assert_eq!(failed.error.tag, 1);
+            assert_eq!(
+                (failed.value, failed.written),
+                (secured.outcome.value | 1, secured.outcome.value | 2)
+            );
+            failed.written
+        };
+        let sent = unsafe {
+            hirsel_core_host_send_pair(context, write, &input(b"hello"), &input(b""), 0, 0, 0, 6)
+        };
+        assert_eq!((sent.error, sent.value), (IoError::OK, 5));
+        peer.join().unwrap();
+        run.release_halves(write & !3);
+        assert_eq!(fds(), baseline);
+    }
+}
+
+const CLIENT_FIRST: &[u8] = b"n,,n=user,r=rOprNGfwEbeRWgbNEkqO";
+const SERVER_FIRST: &[u8] =
+    b"r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+const CLIENT_FINAL: &[u8] = b"c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=";
+const SERVER_FINAL: &[u8] = b"v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=";
+
+impl Run {
+    fn seal_secret(&mut self, password: &[u8], names: &[u8]) -> u64 {
+        let secret = unsafe {
+            crate::secret::hirsel_core_secret_seal(
+                &raw mut *self.context,
+                &input(password),
+                &input(names),
+                10,
+            )
+        };
+        assert_eq!(secret.error, IoError::OK);
+        secret.value
+    }
+
+    fn scram_len(&mut self, key: u64, client: &[u8], server: &[u8]) -> Outcome {
+        unsafe {
+            crate::scram::hirsel_core_scram_final_len(
+                &raw mut *self.context,
+                key | 2,
+                &input(client),
+                &input(server),
+                11,
+            )
+        }
+    }
+
+    fn scram_send(&mut self, key: u64, secret: u64, client: &[u8], server: &[u8]) -> Outcome {
+        unsafe {
+            crate::scram::hirsel_core_scram_sha256(
+                &raw mut *self.context,
+                key | 2,
+                secret,
+                &input(client),
+                &input(server),
+                &input(b""),
+                &input(b""),
+                0,
+                0,
+                0,
+                12,
+            )
+        }
+    }
+
+    fn scram_verify(&mut self, scram: u64, final_message: &[u8]) -> bool {
+        let verdict = unsafe {
+            crate::scram::hirsel_core_scram_verify(
+                &raw mut *self.context,
+                scram,
+                &input(final_message),
+                13,
+            )
+        };
+        assert_eq!(verdict.error, IoError::OK);
+        verdict.value == 1
+    }
+
+    fn scram_peer(
+        &mut self,
+        config: ServerConfig,
+        ca: &[u8],
+        receive: usize,
+    ) -> (u64, thread::JoinHandle<Vec<u8>>) {
+        let (port, peer) = serve(listener(), config, move |mut server| {
+            server_handshake(&mut server).unwrap();
+            let mut bytes = vec![0; receive];
+            server.read_exact(&mut bytes).unwrap();
+            let mut extra = [0u8; 1];
+            assert_eq!(server.read(&mut extra).unwrap(), 0);
+            bytes
+        });
+        let key = self.connect(port);
+        let tls = self.upgrade(key, b"alpha.test", Some(ca), &[]).outcome;
+        assert_eq!(tls.error, IoError::OK);
+        (tls.value, peer)
+    }
+}
+
+fn rfc_scram_and_normalization(run: &mut Run) {
+    let distinct_server = [
+        b"r=rOprNGfwEbeRWgbNEkqOmore,".as_slice(),
+        b"s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096",
+    ]
+    .concat();
+    for (password, suffix, verdict, accepted) in [
+        (b"pencil".as_slice(), CLIENT_FINAL, SERVER_FINAL, true),
+        ("pen\u{ad}cil".as_bytes(), CLIENT_FINAL, SERVER_FINAL, true),
+        (
+            b"pencil",
+            CLIENT_FINAL,
+            b"v=7rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=",
+            false,
+        ),
+        (b"pencil", CLIENT_FINAL, b"e=invalid-proof", false),
+        (
+            b"pen\xffcil",
+            b"p=udNjQvoDM/dE+e/v63Vs504VHmXCmsAHQp5FC38JZcU=",
+            SERVER_FINAL,
+            false,
+        ),
+        (
+            "pen\u{e000}cil".as_bytes(),
+            b"p=S0CJLeozN1oaedLBR16sXAg8qzxE/6wMKY16FfthmYo=",
+            SERVER_FINAL,
+            false,
+        ),
+    ] {
+        let secret = run.seal_secret(password, b"alpha.test");
+        let (key, peer) = run.scram_peer(certificate_config(&[]), CA, 106);
+        let len = run.scram_len(key, CLIENT_FIRST, SERVER_FIRST);
+        assert_eq!((len.error, len.value), (IoError::OK, 106));
+        let before = run.context.available();
+        let result = run.scram_send(key, secret, CLIENT_FIRST, SERVER_FIRST);
+        assert_eq!(result.error, IoError::OK);
+        assert_eq!(run.context.available(), before - 32);
+        assert_eq!(run.scram_verify(result.value, verdict), accepted);
+        assert_eq!(run.context.available(), before);
+        run.release_halves(key);
+        let observed = peer.join().unwrap();
+        if suffix.len() == CLIENT_FINAL.len() {
+            assert_eq!(observed, CLIENT_FINAL);
+        } else {
+            let proof_at = 106 - suffix.len();
+            assert_eq!(&observed[..proof_at], &CLIENT_FINAL[..proof_at]);
+            assert_eq!(&observed[proof_at..], suffix);
+        }
+    }
+    let secret = run.seal_secret(b"pencil", b"alpha.test");
+    // 2 + 4 + 3 + len("rOprNGfwEbeRWgbNEkqOmore") + 3 + 44.
+    let (key, peer) = run.scram_peer(certificate_config(&[]), CA, 80);
+    let result = run.scram_send(key, secret, CLIENT_FIRST, &distinct_server);
+    assert_eq!(result.error, IoError::OK);
+    assert!(!run.scram_verify(result.value, SERVER_FINAL));
+    run.release_halves(key);
+    peer.join().unwrap();
+}
+
+fn scram_checks(run: &mut Run) {
+    let secret = run.seal_secret(b"pencil", b"alpha.test");
+    let denied = run.seal_secret(b"pencil", b"beta.test");
+    let (key, peer) = run.scram_peer(certificate_config(&[]), CA, 0);
+    let (server_prefix, _) = SERVER_FIRST.split_at(SERVER_FIRST.len() - b"4096".len());
+    let mut count = |field: &[u8], tag| {
+        let server = [server_prefix, field].concat();
+        let context = &raw mut *run.context;
+        // The compiler charges the call before entering the adapter.
+        assert!(unsafe { crate::steps::hirsel_core_step_enter(context, 1) });
+        assert!(unsafe { crate::steps::scram_iterations(context, 1, 1) });
+        let refused = run.scram_send(key, secret, CLIENT_FIRST, &server);
+        assert_eq!((refused.status, refused.error.tag), (0, tag));
+        unsafe { crate::steps::hirsel_core_step_leave(context) };
+    };
+    for (field, tag) in [
+        (b"4095".as_slice(), 3),
+        (b"1000001", 3),
+        (b"0", 3),
+        (b"04096", 2),
+        (b"", 2),
+    ] {
+        count(field, tag);
+    }
+    for (client, server) in [
+        (
+            b"n,,n=,r=abc".as_slice(),
+            b"r=other,s=c2FsdA==,i=4096".as_slice(),
+        ),
+        (b"n,,n=,r=abc", b"r=abc,s=c2FsdA==,i=4096"),
+        (b"n,,n=,r=abc", b"m=required,r=abcd,s=c2FsdA==,i=4096"),
+        (b"n,a=admin,n=,r=abc", b"r=abcd,s=c2FsdA==,i=4096"),
+        (b"n,,n=,r=abc", b"r=abcd,s=invalid!,i=4096"),
+        (b"n,,n=,r=abc", b"r=abcd,s=c2FsdA=="),
+    ] {
+        assert_eq!(run.scram_send(key, secret, client, server).error.tag, 2);
+    }
+    // Authority is checked before the malformed transcript.
+    assert_eq!(run.scram_send(key, denied, b"", b"").error.tag, 1);
+    run.release_halves(key);
+    assert!(peer.join().unwrap().is_empty());
+
+    let listener = listener();
+    let socket = run.connect(listener.local_addr().unwrap().port());
+    let (mut peer, _) = listener.accept().unwrap();
+    let halves = unsafe { hirsel_core_net_split(&raw mut *run.context, socket, 1) };
+    assert_eq!(
+        run.scram_send(halves.written, secret, CLIENT_FIRST, SERVER_FIRST)
+            .error
+            .tag,
+        1
+    );
+    run.release_halves(socket);
+    assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+
+    let (key, peer) = run.scram_peer(certificate_config(&[]), CA, 106);
+    let server = [server_prefix, b"1000000"].concat();
+    let sent = run.scram_send(key, secret, CLIENT_FIRST, &server);
+    assert_eq!(sent.error, IoError::OK);
+    let before_drop = run.context.available();
+    unsafe { crate::host_file::hirsel_core_hostfile_drop(&raw mut *run.context, sent.value) };
+    assert_eq!(run.context.available(), before_drop + 32);
+    run.release_halves(key);
+    let observed = peer.join().unwrap();
+    assert_eq!(&observed[..62], &CLIENT_FINAL[..62]);
+    assert_eq!(
+        &observed[62..],
+        b"q3vxYsMrFMG9Eyps4rvfV3vdUuiXJOVRpsmqNUzyjUw="
+    );
+}
+
+fn scram_iteration_steps(run: &mut Run) {
+    crate::causes::task_start(&mut run.context).unwrap();
+    let secret = run.seal_secret(b"pencil", b"alpha.test");
+    for budget in [4097, 4096] {
+        let (key, peer) = run.scram_peer(
+            certificate_config(&[]),
+            CA,
+            if budget == 4097 { 106 } else { 0 },
+        );
+        let context = &raw mut *run.context;
+        assert!(unsafe { crate::steps::hirsel_core_step_enter(context, budget) });
+        assert!(unsafe { crate::steps::scram_iterations(context, 1, 1) });
+        let result = run.scram_send(key, secret, CLIENT_FIRST, SERVER_FIRST);
+        if budget == 4097 {
+            assert_eq!((result.status, result.error), (0, IoError::OK));
+            unsafe { crate::steps::hirsel_core_step_leave(context) };
+            assert!(run.scram_verify(result.value, SERVER_FINAL));
+        } else {
+            assert_ne!(result.status, 0);
+            assert!(unsafe { crate::steps::hirsel_core_step_catch(context) });
+        }
+        run.release_halves(key);
+        let observed = peer.join().unwrap();
+        assert_eq!(observed, if budget == 4097 { CLIENT_FINAL } else { b"" });
+    }
+}
+
+fn scram_channel_binding(run: &mut Run) {
+    const BINDING_CA: &[u8] = include_bytes!("../../testdata/tls/binding-ca.pem");
+    const SHA384_LEAF: &[u8] = include_bytes!("../../testdata/tls/alpha-sha384.pem");
+    const SHA384_KEY: &[u8] = include_bytes!("../../testdata/tls/alpha-sha384.key.pem");
+    const ED25519_LEAF: &[u8] = include_bytes!("../../testdata/tls/alpha-ed25519.pem");
+    const ED25519_KEY: &[u8] = include_bytes!("../../testdata/tls/alpha-ed25519.key.pem");
+    let secret = run.seal_secret(b"pencil", b"alpha.test");
+    let original = run.net;
+    let new_ca = run.grant("Tls alpha.test 0-65535 Roots=sha256:4398b17f3dee153317fa713ea5d8e105037a1e4e212b6dce9732e60dda880c9b");
+    let connecting = run.grant("Connect 127.0.0.0/8 1-65535");
+    let client = b"p=tls-server-end-point,,n=,r=abc";
+    let server = b"r=abcd,s=c2FsdA==,i=4096";
+    for (leaf, private, ca, cbind, len) in [
+        (ALPHA, ALPHA_KEY, CA,
+            b"cD10bHMtc2VydmVyLWVuZC1wb2ludCwsDNTzaSy63NwAkiwJE8efmIi+HGTUlwqVM47Ch/Mc1ps=".as_slice(),
+            132),
+        (SHA384_LEAF, SHA384_KEY, BINDING_CA,
+            b"cD10bHMtc2VydmVyLWVuZC1wb2ludCwskQt2Yucxjnj1T8Vrz/+WSRZnZWWH5rd80WG14f8BGkyNOdBa8gHV6cokKzLpbOcU",
+            152),
+        (ED25519_LEAF, ED25519_KEY, BINDING_CA, b"", 0),
+    ] {
+        let (port, peer) = serve(listener(), certificate_for(leaf, private, &[]), move |mut server| {
+            server_handshake(&mut server).unwrap();
+            let mut bytes = vec![0; len];
+            server.read_exact(&mut bytes).unwrap();
+            assert_eq!(server.read(&mut [0; 1]).unwrap(), 0);
+            bytes
+        });
+        run.net = connecting;
+        let key = run.connect(port);
+        run.net = if ca == CA { original } else { new_ca };
+        let secure = run.upgrade(key, b"alpha.test", Some(ca), &[]).outcome;
+        assert_eq!(secure.error, IoError::OK);
+        let key = secure.value;
+        let unknown = b"p=tls-unique,,n=,r=abc";
+        assert_eq!(run.scram_len(key, unknown, server).error.tag, 4);
+        assert_eq!(run.scram_send(key, secret, unknown, server).error.tag, 4);
+        let checked = run.scram_len(key, client, server);
+        let sent = run.scram_send(key, secret, client, server);
+        if len == 0 {
+            assert_eq!((checked.error.tag, sent.error.tag), (4, 4));
+        } else {
+            assert_eq!((checked.error, checked.value), (IoError::OK, len as u64));
+            assert_eq!(sent.error, IoError::OK);
+            unsafe { crate::host_file::hirsel_core_hostfile_drop(&raw mut *run.context, sent.value) };
+        }
+        run.release_halves(key);
+        let received = peer.join().unwrap();
+        if len != 0 {
+            assert_eq!(&received[..2], b"c=");
+            assert_eq!(&received[2..2 + cbind.len()], cbind);
+            assert_eq!(&received[2 + cbind.len()..2 + cbind.len() + 10], b",r=abcd,p=");
+        }
+    }
+    run.net = original;
+}
+
+#[test]
+fn scram_loopback_laws() {
+    let mut run = Run::new();
+    rfc_scram_and_normalization(&mut run);
+    scram_checks(&mut run);
+    scram_iteration_steps(&mut run);
+    scram_channel_binding(&mut run);
 }

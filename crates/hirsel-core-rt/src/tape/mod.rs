@@ -678,14 +678,22 @@ impl Replayer {
 fn socket_op(op: u8) -> bool {
     matches!(
         op,
-        CONNECT | LISTEN | ACCEPT | RECV_BOUNDED | SEND_PAIR | TLS_CONNECT | SEND_SECRET | RESOLVE
+        CONNECT
+            | LISTEN
+            | ACCEPT
+            | RECV_BOUNDED
+            | SEND_PAIR
+            | TLS_CONNECT
+            | SEND_SECRET
+            | RESOLVE
+            | SCRAM
     )
 }
 
 fn creates_object(op: u8) -> bool {
     matches!(
         op,
-        OPEN | OPEN_DIR | ENTRIES | MKDTEMP | LISTEN | CONNECT | ACCEPT | TLS_CONNECT
+        OPEN | OPEN_DIR | ENTRIES | MKDTEMP | LISTEN | CONNECT | ACCEPT | TLS_CONNECT | SCRAM
     )
 }
 
@@ -765,6 +773,27 @@ unsafe fn socket_args(request: &Request) -> Args {
         } else {
             args.push(0);
         }
+        if request.operation == SCRAM {
+            let scram = &*request.path.cast::<crate::scram::ScramRequest<'_>>();
+            let (kind, ordinal) = match scram.send.origin {
+                crate::secret::Origin::Granted(ordinal) => (0, ordinal),
+                crate::secret::Origin::Sealed(ordinal) => (1, ordinal),
+            };
+            args.push(kind);
+            put_varint(&mut args, ordinal);
+            let patterns = hirsel_core_net::Pattern::list_text(&scram.send.patterns);
+            let pieces = [
+                patterns.as_bytes(),
+                scram.client_first,
+                scram.server_first,
+                buffer_bytes(&request.buffer),
+                buffer_bytes(&*n.send_tail),
+            ];
+            for piece in pieces {
+                put_varint(&mut args, piece.len() as u64);
+            }
+            return Args::of_parts(&[&args, pieces[0], pieces[1], pieces[2], pieces[3], pieces[4]]);
+        }
         if matches!(request.operation, SEND_PAIR | SEND_SECRET) {
             if request.operation == SEND_SECRET {
                 let send = &*request.path.cast::<crate::secret::SendRequest>();
@@ -812,6 +841,9 @@ unsafe fn canonical(r: &Request) -> Args {
                 args.push(0);
             }
             return Args::of(&args);
+        }
+        if r.operation == SCRAM_VERIFY {
+            return Args::of(buffer_bytes(&r.buffer));
         }
         if r.operation == SECRET_MAC {
             let mac = &*r.path.cast::<crate::secret::MacRequest<'_>>();
@@ -871,13 +903,12 @@ impl Tape {
     pub(crate) fn group(&self) -> schedule::Group {
         schedule::Group::root(self.cell, self.generation)
     }
-    fn secret_mac(&self, replay: bool) -> crate::secret::MacTape {
+    fn secret_mac(&self) -> crate::secret::MacTape {
         crate::secret::MacTape {
             provider: self.cell.provider,
             // Object zero is the run-owned MAC sink. The Secret itself is in
             // the canonical args, including for seals without a grant object.
             handle: handle(self.generation, 0),
-            replay,
         }
     }
     /// Open a recording file at `name` in the Dir `dir` (its provider and
@@ -1073,7 +1104,18 @@ impl Tape {
     /// (provider, provider-local handle). Record writes `GRANT{kind}`;
     /// Replay checks it is the next frame.
     pub fn on_tape(&self, kind: u8, source: (Provider, u64)) -> Result<(Provider, u64), Fault> {
-        self.grant(kind, None, Some(source)).map(|(p, h, _)| (p, h))
+        let args = format::is_stream_grant(kind).then(|| vec![0]);
+        self.grant(kind, args, Some(source)).map(|(p, h, _)| (p, h))
+    }
+
+    fn on_tape_stream(
+        &self,
+        kind: u8,
+        source: (Provider, u64),
+        terminal: bool,
+    ) -> Result<(Provider, u64, bool), Fault> {
+        let (p, h, stored) = self.grant(kind, Some(vec![u8::from(terminal)]), Some(source))?;
+        Ok((p, h, stored[0] == 1))
     }
     /// The label of an across open: the tape's revision is not the
     /// opener's. False for every other open.
@@ -1321,7 +1363,10 @@ fn ordinal_of(h: u64) -> usize {
 }
 
 unsafe fn source_handle(request: &Request, inner: Inner) -> u64 {
-    let direction = if matches!(request.operation, RECV_BOUNDED | SEND_PAIR | SEND_SECRET) {
+    let direction = if matches!(
+        request.operation,
+        RECV_BOUNDED | SEND_PAIR | SEND_SECRET | SCRAM
+    ) {
         // SAFETY: owned network operations pin this operand through delivery.
         unsafe { (*request.path.cast::<crate::net::NetworkRequest>()).direction }
     } else {
@@ -1340,7 +1385,7 @@ unsafe fn denied(request: &Request) -> bool {
 /// that WAIT open until the scheduler records WAKE, or cancellation closes W.
 unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
     // This operation has only immediate frames, in both modes.
-    if unsafe { (*r).operation == SECRET_MAC } {
+    if unsafe { matches!((*r).operation, SECRET_MAC | SCRAM_VERIFY) } {
         return Wait::default();
     }
     let cell = cell_of(state);
@@ -1482,13 +1527,16 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
             }
         };
     }
-    let inner = if r.operation == SECRET_MAC {
-        Inner {
+    let inner = match r.operation {
+        SECRET_MAC => Inner {
             provider: crate::secret::MAC_PROVIDER,
             handle: 0,
-        }
-    } else {
-        live.objects[ordinal - 1].inner.unwrap()
+        },
+        SCRAM_VERIFY => Inner {
+            provider: crate::scram::VERIFY_PROVIDER,
+            handle: 0,
+        },
+        _ => live.objects[ordinal - 1].inner.unwrap(),
     };
     let before = r.buffer.len;
     drop(s);
@@ -1499,7 +1547,7 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     } else {
         r.handle = unsafe { source_handle(r, inner) };
         // SAFETY: source callback, in the task, with its own handle.
-        let step = unsafe { (inner.provider.issue)(inner.provider.state, r, token) };
+        let step = unsafe { crate::provider::issue(&inner.provider, r, token) };
         r.handle = h;
         step
     };
@@ -1629,9 +1677,13 @@ unsafe fn record_out(
         // SAFETY: the handshake pins both outputs through delivery.
         unsafe {
             let tls = &*r.path.cast::<crate::tls::TlsRequest>();
-            out.payload
-                .extend_from_slice(buffer_bytes(&*tls.protocol_out));
+            let protocol = buffer_bytes(&*tls.protocol_out);
+            let binding = tls.binding();
+            out.payload.push(protocol.len() as u8);
+            out.payload.extend_from_slice(protocol);
             out.payload.extend_from_slice(&*tls.peer_out);
+            out.payload.push(binding.len() as u8);
+            out.payload.extend_from_slice(binding);
         }
     } else if ok && carries_payload(r.operation) && r.buffer.len > before {
         // SAFETY: source initialized these bytes in the request's spare carrier.
@@ -1695,7 +1747,7 @@ unsafe fn replay(
         return Err(rep.diverged(Mismatch::Arg));
     }
     let Some(out) = out else {
-        if op == SECRET_MAC {
+        if matches!(op, SECRET_MAC | SCRAM_VERIFY) {
             return Err(Fault::Corrupt);
         }
         // Without a scheduler nothing else readies a replayed helper, and
@@ -1790,8 +1842,8 @@ unsafe fn replay_out(
         }
     } else if op == TLS_CONNECT {
         if ok {
-            let (protocol, digest) = out.payload.split_last_chunk::<32>().ok_or(Fault::Corrupt)?;
-            // SAFETY: TLS_CONNECT pins the offer and both output buffers.
+            let (protocol, digest, binding) = tls_connect_payload(&out.payload)?;
+            // SAFETY: TLS_CONNECT pins the offer and its output buffers.
             unsafe {
                 let tls = &*r.path.cast::<crate::tls::TlsRequest>();
                 let buffer = &mut *tls.protocol_out;
@@ -1805,6 +1857,12 @@ unsafe fn replay_out(
                 }
                 buffer.len = protocol.len();
                 *tls.peer_out = *digest;
+                let out = &mut *tls.binding_out;
+                if binding.len() > out.capacity {
+                    return Err(Fault::Corrupt);
+                }
+                ptr::copy_nonoverlapping(binding.as_ptr(), out.data, binding.len());
+                out.len = binding.len();
             }
         }
     } else if op == RESOLVE {
@@ -1885,6 +1943,10 @@ unsafe fn replay_out(
         }
     } else if op == SEND_SECRET {
         if out.value != 0 || (ok && out.written != 0) {
+            return Err(Fault::Corrupt);
+        }
+    } else if op == SCRAM_VERIFY {
+        if !ok || out.value > 1 {
             return Err(Fault::Corrupt);
         }
     } else if op == SEND_PAIR && ok {

@@ -227,11 +227,15 @@ impl Function<'_, '_, '_> {
                     | HostOp::Resolve
                     | HostOp::TlsConnect
                     | HostOp::SendSecret
+                    | HostOp::ScramSha256
+                    | HostOp::ScramFinalLen
+                    | HostOp::ScramVerify
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
                     | HostOp::SecretHmac
                     | HostOp::SecretVerifyHmac
                     | HostOp::StdinRead
+                    | HostOp::StreamTerminal
                     | HostOp::EnvGet
                     | HostOp::EnvLen
                     | HostOp::EnvName
@@ -251,6 +255,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::PortReply
                     | HostOp::ProvideDir
                     | HostOp::PortFill
+                    | HostOp::NetJoin
                     | HostOp::NetSplit
                     | HostOp::Stopped => (null, no_mode),
                 };
@@ -268,11 +273,15 @@ impl Function<'_, '_, '_> {
                     | HostOp::Resolve
                     | HostOp::TlsConnect
                     | HostOp::SendSecret
+                    | HostOp::ScramSha256
+                    | HostOp::ScramFinalLen
+                    | HostOp::ScramVerify
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
                     | HostOp::SecretHmac
                     | HostOp::SecretVerifyHmac
                     | HostOp::StdinRead
+                    | HostOp::StreamTerminal
                     | HostOp::EnvGet
                     | HostOp::EnvLen
                     | HostOp::EnvName
@@ -292,6 +301,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::PortReply
                     | HostOp::ProvideDir
                     | HostOp::PortFill
+                    | HostOp::NetJoin
                     | HostOp::NetSplit => {
                         let signature = op_signature(op);
                         let count = signature.len();

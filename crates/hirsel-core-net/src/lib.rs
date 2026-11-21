@@ -124,6 +124,7 @@ pub use grant::{GrantRule, ResolveRule, RuleView};
 mod reactor;
 pub use reactor::{Poller, Sockets};
 pub mod model;
+pub mod scram;
 pub mod tls;
 mod tls_rule;
 pub use tls_rule::{Name, Pattern, TlsRule, TlsTrust};

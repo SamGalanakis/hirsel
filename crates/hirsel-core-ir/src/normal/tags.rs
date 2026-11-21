@@ -420,6 +420,11 @@ tags!(HostOp {
     60 => PortReply,
     61 => ProvideDir,
     62 => PortFill,
+    63 => StreamTerminal,
+    64 => NetJoin,
+    65 => ScramSha256,
+    66 => ScramFinalLen,
+    67 => ScramVerify,
 });
 
 tags!(RaiseCause {

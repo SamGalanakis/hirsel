@@ -374,7 +374,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
     #[cfg(test)]
     ATTEMPTS.set(ATTEMPTS.get() + 1);
     unsafe {
-        let write = matches!(request.operation, CONNECT | SEND_PAIR | SEND_SECRET);
+        let write = matches!(request.operation, CONNECT | SEND_PAIR | SEND_SECRET | SCRAM);
         let sockets = &mut *n.sockets;
         let key = n.connecting.unwrap_or(request.handle);
         if !first && request.operation != LISTEN {
@@ -510,7 +510,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                     Err(e) => Err(e),
                 }
             }
-            SEND_SECRET => {
+            SEND_SECRET | SCRAM => {
                 let Some(stream) = n
                     .tls
                     .as_mut()
@@ -640,7 +640,7 @@ unsafe fn finish(request: &Request, n: &mut NetworkRequest, mut outcome: Outcome
             }
         }
     }
-    if request.operation == SEND_SECRET && outcome.error != IoError::OK {
+    if matches!(request.operation, SEND_SECRET | SCRAM) && outcome.error != IoError::OK {
         // SAFETY: this operation pins its distinct progress field through delivery.
         outcome.written =
             unsafe { (*request.path.cast::<crate::secret::SendRequest>()).committed as u64 };
@@ -757,7 +757,7 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
             due.host()
         };
         let key = n.connecting.unwrap_or(request.handle);
-        let write = matches!(request.operation, CONNECT | SEND_PAIR | SEND_SECRET);
+        let write = matches!(request.operation, CONNECT | SEND_PAIR | SEND_SECRET | SCRAM);
         if let Err(e) = (*n.sockets).arm(key, write, token) {
             return finish(request, n, error(e.raw_os_error().unwrap_or(libc::EIO)));
         }
@@ -784,7 +784,7 @@ pub(crate) unsafe fn abort(request: *mut Request, token: u64, reason: u8) -> Out
         let key = n.connecting.unwrap_or(r.handle);
         (*n.sockets).disarm(
             key,
-            matches!(r.operation, CONNECT | SEND_PAIR | SEND_SECRET),
+            matches!(r.operation, CONNECT | SEND_PAIR | SEND_SECRET | SCRAM),
         );
         finish(r, n, signal(if reason == ABORT_CANCEL { 7 } else { 6 })).outcome
     }
@@ -800,6 +800,24 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
         let sockets = &mut *n.sockets;
         let s = &mut *tls.state.cast::<HandshakeState>();
         if first {
+            let mut byte = 0u8;
+            let peek = libc::recv(
+                sockets.fd(key),
+                (&raw mut byte).cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            );
+            let refusal = match peek {
+                0 => Some(crate::net::tls_failure(5, 0)),
+                1 => Some(crate::net::tls_failure(4, 0)),
+                _ => {
+                    let e = errno();
+                    (e != libc::EAGAIN && e != libc::EWOULDBLOCK).then(|| error(e))
+                }
+            };
+            if let Some(outcome) = refusal {
+                return tls_finish(tls, key, outcome);
+            }
             let roots = s.roots.take().unwrap_or_else(|| {
                 streams
                     .system
@@ -822,7 +840,12 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
             Ok(Ok(())) => {
                 let protocol = &mut *tls.protocol_out;
                 let out = std::slice::from_raw_parts_mut(protocol.data, protocol.capacity);
-                protocol.len = stream.handshake_result(out, &mut *tls.peer_out);
+                let (len, binding) = stream.handshake_result(out, &mut *tls.peer_out);
+                protocol.len = len;
+                let binding_out = &mut *tls.binding_out;
+                let binding = binding.bytes();
+                ptr::copy_nonoverlapping(binding.as_ptr(), binding_out.data, binding.len());
+                binding_out.len = binding.len();
                 streams
                     .sessions
                     .insert(key, Box::new(s.stream.take().unwrap()));

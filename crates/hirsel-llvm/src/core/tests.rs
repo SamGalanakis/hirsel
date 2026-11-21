@@ -2394,6 +2394,9 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             HostOp::NetNarrowResolve => &["u64", "ptr"],
             HostOp::Resolve => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
             HostOp::SendSecret => &["u64", "ptr", "u64", "ptr", "u8", "u64", "u64"],
+            HostOp::ScramSha256 => &["u64", "u64", "ptr", "ptr", "ptr", "ptr", "u8", "u64", "u64"],
+            HostOp::ScramFinalLen => &["u64", "ptr", "ptr"],
+            HostOp::ScramVerify => &["u64", "ptr"],
             HostOp::SecretSeal => &["ptr", "ptr"],
             HostOp::SecretNarrow => &["u64", "ptr"],
             HostOp::NetSplit
@@ -2403,11 +2406,10 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             | HostOp::ClockIdle
             | HostOp::ProcessTrigger => &["u64"],
             HostOp::ProvideProcess => &[],
-            HostOp::ProvideStdout
-            | HostOp::ProvideStderr
-            | HostOp::ProvideDir
-            | HostOp::PortNext => &["u64"],
-            HostOp::CallWord => &["u64", "u64"],
+            HostOp::ProvideDir | HostOp::PortNext => &["u64"],
+            HostOp::ProvideStdout | HostOp::ProvideStderr => &["u64", "bool"],
+            HostOp::StreamTerminal => &["u64", "u8"],
+            HostOp::CallWord | HostOp::NetJoin => &["u64", "u64"],
             HostOp::CallPayload => &["u64", "u64", "ptr"],
             HostOp::PortReply => &["u64"; 9],
             HostOp::PortFill => &["u64", "u64", "ptr"],

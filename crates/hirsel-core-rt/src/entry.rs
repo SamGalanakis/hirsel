@@ -40,6 +40,7 @@ pub struct Grant {
     pub kind: u8,
     pub provider: *const Provider,
     pub handle: u64,
+    pub terminal: bool,
 }
 #[repr(C)]
 pub struct Requirement {
@@ -120,6 +121,31 @@ pub unsafe extern "C" fn hirsel_core_capability_handle(
         }
     }
 }
+/// Query the immutable terminal bit on a granted or virtual stream.
+/// # Safety
+/// Context is running and handle designates a stream grant in this run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_stream_is_terminal(
+    context: *mut Context,
+    handle: u64,
+    _kind: u8,
+    _site: u64,
+) -> crate::provider::Outcome {
+    // SAFETY: operands designate a valid entry or run-owned virtual grant.
+    let terminal = unsafe {
+        crate::process::deny_describe_capability(context);
+        if handle & crate::host_file::DYNAMIC_GRANT != 0 {
+            (*(*context).host_files).registry.grant_terminal(handle)
+        } else {
+            (*(*(*context).run).capabilities.add((handle - 1) as usize)).terminal
+        }
+    };
+    crate::provider::Outcome {
+        value: u64::from(terminal),
+        ..Default::default()
+    }
+}
+
 /// Operations required by a live Process grant. The generated launcher names
 /// this table only when main can receive Process.
 pub struct ProcessOperations {
@@ -270,6 +296,16 @@ pub(crate) fn duplicate(fd: i32) -> io::Result<OwnedFd> {
         Ok(unsafe { OwnedFd::from_raw_fd(raw) })
     }
 }
+/// A closed inherited stream is still an entry grant. Its terminal bit is
+/// false and any later write reports the descriptor error.
+pub(crate) fn duplicate_stream(fd: i32) -> io::Result<Option<OwnedFd>> {
+    match duplicate(fd) {
+        Ok(owned) => Ok(Some(owned)),
+        Err(error) if error.raw_os_error() == Some(libc::EBADF) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 unsafe fn bytes<'a>(view: View) -> &'a [u8] {
     if view.len == 0 {
         &[]
@@ -436,15 +472,23 @@ impl OsProcess {
             if host_control.is_some() && (describe_mode || prepare_path.is_some()) {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
             }
+            let terminal = [
+                (libc::STDIN_FILENO, STDIN),
+                (input.stdout_fd, STDOUT),
+                (input.stderr_fd, STDERR),
+            ]
+            .map(|(fd, kind)| {
+                !describe_mode && input.grant_mask & (1 << kind) != 0 && libc::isatty(fd) == 1
+            });
             let stdin = (!describe_mode && input.grant_mask & (1 << STDIN) != 0)
                 .then(|| Box::new(crate::stdin::Stream::new(duplicate(libc::STDIN_FILENO))));
-            let mut os = Box::new(OsProvider::new(
-                duplicate(if !describe_mode && input.grant_mask & (1 << STDOUT) != 0 {
+            let mut os = Box::new(OsProvider::from_streams(
+                duplicate_stream(if !describe_mode && input.grant_mask & (1 << STDOUT) != 0 {
                     input.stdout_fd
                 } else {
                     input.stderr_fd
                 })?,
-                duplicate(input.stderr_fd)?,
+                duplicate_stream(input.stderr_fd)?,
             ));
             if !describe_mode && prepare_path.is_none() {
                 *os.inherited_listener.get_mut().unwrap() = inherited;
@@ -542,6 +586,7 @@ impl OsProcess {
                     kind: SECRET,
                     provider: provider_pointer,
                     handle: (secret as *const crate::secret::Granted) as u64,
+                    terminal: false,
                 }));
             }
             if describe_mode {
@@ -554,6 +599,7 @@ impl OsProcess {
                             kind,
                             provider: provider_pointer,
                             handle: 0,
+                            terminal: false,
                         });
                     }
                 }
@@ -563,6 +609,7 @@ impl OsProcess {
                         kind: DIR,
                         provider: provider_pointer,
                         handle,
+                        terminal: false,
                     });
                 }
                 for kind in NET..=TASKS {
@@ -580,6 +627,12 @@ impl OsProcess {
                                 ENV => env.as_ref().unwrap().handle(),
                                 _ => 0,
                             },
+                            terminal: match kind {
+                                STDIN => terminal[0],
+                                STDOUT => terminal[1],
+                                STDERR => terminal[2],
+                                _ => false,
+                            },
                         });
                     }
                 }
@@ -588,12 +641,14 @@ impl OsProcess {
                 kind: ARGS,
                 provider: provider_pointer,
                 handle: 0,
+                terminal: false,
             });
             let host = host_control.zip(host_scratch).map(|(control, handle)| {
                 metadata.push(Grant {
                     kind: DIR,
                     provider: provider_pointer,
                     handle,
+                    terminal: false,
                 });
                 HostLaunch {
                     control: Mutex::new(Some(control)),
@@ -612,7 +667,7 @@ impl OsProcess {
                 diagnostic,
                 describe: Some(describe),
                 scheduler: crate::tasks::SchedulerProvider::default(),
-                stop_fd: os.stderr.as_raw_fd(),
+                stop_fd: os.stderr_fd(),
                 capabilities: metadata.as_ptr(),
                 capabilities_len: metadata.len(),
                 close_grants: Some(close_grants),
@@ -722,7 +777,7 @@ unsafe extern "C" fn diagnostic(state: *mut u8, data: *const u8, len: usize) {
     // SAFETY: run owns its sink until diagnostics finish, before grant closure.
     unsafe {
         let process = &*state.cast::<OsProcess>();
-        crate::os::diagnostic(process.os.as_ref().unwrap().stderr.as_raw_fd(), data, len);
+        crate::os::diagnostic(process.os.as_ref().unwrap().stderr_fd(), data, len);
     }
 }
 unsafe extern "C" fn describe(state: *mut u8, cause: *const crate::causes::Cause) -> View {

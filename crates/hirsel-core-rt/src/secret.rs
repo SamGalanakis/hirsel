@@ -88,6 +88,7 @@ fn read_file(path: &str) -> Option<Zeroizing<Vec<u8>>> {
 pub(crate) struct TlsWrite {
     pub(crate) name: Name,
     pub(crate) spent: bool,
+    pub(crate) binding: hirsel_core_net::scram::Binding,
 }
 
 struct Charge(Payer, u64);
@@ -175,13 +176,7 @@ pub unsafe extern "C" fn hirsel_core_secret_seal(
             Ok(charge) => charge,
             Err(error) => return error,
         };
-        #[cfg(feature = "record")]
-        let replay = (*(*context).host_files)
-            .secret_mac_tape
-            .is_some_and(|tape| tape.replay);
-        #[cfg(not(feature = "record"))]
-        let replay = false;
-        let owned = (!replay).then(|| Arc::new(Zeroizing::new(bytes.to_vec())));
+        let owned = Arc::new(Zeroizing::new(bytes.to_vec()));
         if (*source).capacity != 0 && (*source).len != 0 {
             std::slice::from_raw_parts_mut((*source).data, (*source).len).zeroize();
         }
@@ -192,7 +187,7 @@ pub unsafe extern "C" fn hirsel_core_secret_seal(
             Secret {
                 origin,
                 policy,
-                bytes: owned,
+                bytes: Some(owned),
             },
             Some(charge),
         );
@@ -252,7 +247,6 @@ pub struct SendRequest {
 pub(crate) struct MacTape {
     pub(crate) provider: Provider,
     pub(crate) handle: u64,
-    pub(crate) replay: bool,
 }
 
 pub(crate) struct MacRequest<'a> {

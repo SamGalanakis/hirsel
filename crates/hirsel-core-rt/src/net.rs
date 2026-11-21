@@ -558,7 +558,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_pair(
         .outcome()
     }
 }
-const RESET: Outcome = Outcome {
+pub(crate) const RESET: Outcome = Outcome {
     error: IoError { tag: 5, code: 0 },
     value: 0,
     written: 0,
@@ -576,7 +576,7 @@ unsafe fn write_spent(files: *mut crate::host_file::Files, key: u64) -> bool {
     }
 }
 
-unsafe fn socket_provider(context: *mut Context, key: u64) -> Provider {
+pub(crate) unsafe fn socket_provider(context: *mut Context, key: u64) -> Provider {
     let _commit = crate::sequencer::enter();
     unsafe {
         (*(*context).host_files)
@@ -654,31 +654,46 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             patterns: secret.policy.patterns,
             committed: 0,
         };
-        #[cfg(feature = "record")]
-        let (provider, handle) = (*files).net_tape.map_or_else(
-            || (socket_provider(context, key), key),
-            |tape| (tape.provider, tape.handle(key)),
-        );
-        #[cfg(not(feature = "record"))]
-        let (provider, handle) = (socket_provider(context, key), key);
-        let mut request = Request {
+        let request = Request {
             operation: SEND_SECRET,
             mode: 0,
-            handle,
+            handle: key,
             path: (&raw mut send).cast(),
             path_len: size_of::<crate::secret::SendRequest>(),
             buffer: *before,
             site,
         };
+        send_sink(context, request)
+    }
+}
+
+/// SEND_SECRET and SCRAM borrow this extension's shared prefix.
+pub(crate) unsafe fn send_sink(context: *mut Context, mut request: Request) -> Outcome {
+    unsafe {
+        let files = (*context).host_files;
+        let key = request.handle;
+        let provider = socket_provider(context, key);
+        #[cfg(feature = "record")]
+        let provider = if let Some(tape) = (*files).net_tape {
+            request.handle = tape.handle(key);
+            tape.provider
+        } else {
+            provider
+        };
         let outcome = hirsel_core_host(context, &provider, &mut request);
+        let committed = (*request.path.cast::<crate::secret::SendRequest>()).committed;
         if (outcome.status != 0 || outcome.error != IoError::OK)
-            && (outcome.written != 0 || send.committed != 0)
+            && (outcome.written != 0 || committed != 0)
         {
-            let _commit = crate::sequencer::enter();
-            (*files).tls_writes.get_mut(&(key & !3)).unwrap().spent = true;
+            spend_write(files, key);
         }
         outcome
     }
+}
+
+unsafe fn spend_write(files: *mut crate::host_file::Files, key: u64) {
+    let _commit = crate::sequencer::enter();
+    unsafe { (*files).tls_writes.get_mut(&(key & !3)).unwrap().spent = true };
 }
 
 /// # Safety
@@ -710,6 +725,48 @@ pub unsafe extern "C" fn hirsel_core_net_split(
         }
     }
 }
+/// Reunite the halves of one plain client socket in the run's registry.
+/// # Safety
+/// Both keys are live, uniquely owned halves. Failure returns both unchanged.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_net_join(
+    context: *mut Context,
+    read: u64,
+    write: u64,
+    _site: u64,
+) -> Outcome {
+    let _commit = crate::sequencer::enter();
+    unsafe {
+        let files = (*context).host_files;
+        let key = read & !3;
+        if key != write & !3
+            || (*files).tls_writes.contains_key(&key)
+            || !(*files).connected.contains_key(&key)
+        {
+            return Outcome {
+                value: read,
+                written: write,
+                error: IoError { tag: 1, code: 0 },
+                ..Outcome::default()
+            };
+        }
+        #[cfg(feature = "record")]
+        let source = match (*files).net_tape {
+            Some(tape) => tape.source(key),
+            None => Some(key),
+        };
+        #[cfg(not(feature = "record"))]
+        let source = Some(key);
+        if let Some(source) = source {
+            (*files).sockets.rejoin_client(source);
+        }
+        Outcome {
+            value: key,
+            ..Outcome::default()
+        }
+    }
+}
+
 /// # Safety
 /// Consumes one live socket, directional half or listener carrier exactly once.
 #[unsafe(no_mangle)]

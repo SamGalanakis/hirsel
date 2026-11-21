@@ -215,7 +215,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     HirselCoreEntryGrant caps[16]; uint64_t grants[16];
     for(size_t i=0;i<input->parameters_len;i++) {
         uint8_t kind=input->parameters[i].kind;
-        caps[i]=(HirselCoreEntryGrant){kind,&provider,kind==0?7:0}; grants[i]=i+1;
+        caps[i]=(HirselCoreEntryGrant){kind,&provider,kind==0?7:0,false}; grants[i]=i+1;
     }
     static const char *phases[]={"init","write","read","reopen"};
     static const uint64_t reopen_order[]={0,1,3,2};

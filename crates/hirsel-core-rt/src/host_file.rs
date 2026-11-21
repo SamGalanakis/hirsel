@@ -32,11 +32,22 @@ struct Vector {
 // the owning entry between workers leaves the bytes and views in place.
 unsafe impl Send for Vector {}
 
+struct DynamicGrant {
+    provider: Provider,
+    handle: u64,
+    terminal: bool,
+}
+
+// SAFETY: the provider descriptor is immutable and its state is only accessed
+// under the run's provider calling contract.
+unsafe impl Send for DynamicGrant {}
+unsafe impl Sync for DynamicGrant {}
+
 #[derive(Default)]
 struct Entries {
     next: u64,
     live: Option<Resources<File>>,
-    grants: BTreeMap<u64, Arc<File>>,
+    grants: BTreeMap<u64, Arc<DynamicGrant>>,
     vectors: BTreeMap<u64, Vector>,
 }
 /// Install cleanup together with the first owned resource. A run that never
@@ -156,19 +167,29 @@ impl Registry {
             .remove(&key)
             .unwrap()
     }
-    fn insert_grant(&self, file: File) -> u64 {
+    pub(crate) fn grant(&self, provider: Provider, handle: u64) -> u64 {
+        self.grant_with_terminal(provider, handle, false)
+    }
+    pub(crate) fn grant_with_terminal(
+        &self,
+        provider: Provider,
+        handle: u64,
+        terminal: bool,
+    ) -> u64 {
         let mut registry = self.0.lock().unwrap();
         let id = DYNAMIC_GRANT | registry.id();
-        registry.grants.insert(id, Arc::new(file));
+        registry.grants.insert(
+            id,
+            Arc::new(DynamicGrant {
+                provider,
+                handle,
+                terminal,
+            }),
+        );
         id
     }
-    pub(crate) fn grant(&self, provider: Provider, handle: u64) -> u64 {
-        self.insert_grant(File {
-            provider,
-            handle,
-            mode: 0,
-            close_op: CLOSE,
-        })
+    pub(crate) fn grant_terminal(&self, handle: u64) -> bool {
+        self.0.lock().unwrap().grants[&handle].terminal
     }
     pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {
         let file = Arc::as_ptr(&self.0.lock().unwrap().grants[&handle]);
@@ -244,6 +265,10 @@ unsafe fn close(context: *mut Context, file: File) {
     // SAFETY: sole file owner; cleanup cannot observe cancellation, so the
     // driver's C check and W/I cancellation do not apply under the shield.
     unsafe {
+        if file.close_op == crate::scram::CLOSE_SCRAM {
+            crate::scram::drop_state(file.handle);
+            return;
+        }
         (*context).cancel_shield += 1;
         let _ = drive(context, &file.provider, &mut close_request(file, 0), None);
         (*context).cancel_shield -= 1;

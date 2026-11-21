@@ -86,10 +86,28 @@ pub const STEP_PENDING: u8 = 1;
 /// operation except the clock reads (CONC-7; REPLAY-SPEC section 3, C).
 #[inline(always)]
 pub(crate) fn cancellation_point(operation: u8) -> bool {
-    !matches!(operation, WALL_MS | MONO_NS | SECRET_MAC)
+    !matches!(operation, WALL_MS | MONO_NS | SECRET_MAC | SCRAM_VERIFY)
 }
 pub const ABORT_CANCEL: u8 = 1;
 pub const ABORT_DEADLINE: u8 = 2;
+
+/// # Safety
+/// Provider and request obey the pinned callback contract for a first issue.
+#[inline(always)]
+pub(crate) unsafe fn issue(provider: &Provider, request: *mut Request, token: u64) -> Step {
+    unsafe {
+        if (*request).operation == SCRAM {
+            #[cfg(feature = "record")]
+            let live = !crate::tape::owns(provider);
+            #[cfg(not(feature = "record"))]
+            let live = true;
+            if live {
+                crate::scram::issue(&*request);
+            }
+        }
+        (provider.issue)(provider.state, request, token)
+    }
+}
 
 /// The four-state provider ABI (REPLAY-SPEC section 3): an operation is C (cancelled
 /// at entry), W (waiting before issue), I (issued, in progress) or D (delivered).

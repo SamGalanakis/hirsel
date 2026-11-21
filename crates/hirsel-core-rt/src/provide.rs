@@ -960,7 +960,7 @@ fn empty_request(operation: u8, handle: u64, site: u64) -> Request {
 /// `Served` key; a refusal answers as `Cells::add`.
 /// # Safety
 /// Context is running.
-unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab) -> Outcome {
+unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bool) -> Outcome {
     // SAFETY: forwarded.
     let files = unsafe { files(context) };
     let mut port = Port {
@@ -992,7 +992,7 @@ unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab) -> Outcome {
         Err(refused) => return refused,
     };
     Outcome {
-        value: files.registry.grant(provider, 0),
+        value: files.registry.grant_with_terminal(provider, 0, terminal),
         written: files.registry.held(provider, 0, CLOSE_SERVED),
         ..Outcome::default()
     }
@@ -1007,7 +1007,7 @@ pub unsafe extern "C" fn hirsel_core_provide_dir(
     _site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { provide_port(context, n, Vocab::Dir) }
+    unsafe { provide_port(context, n, Vocab::Dir, false) }
 }
 
 /// # Safety
@@ -1016,10 +1016,11 @@ pub unsafe extern "C" fn hirsel_core_provide_dir(
 pub unsafe extern "C" fn hirsel_core_provide_stdout(
     context: *mut Context,
     n: u64,
+    terminal: bool,
     _site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { provide_port(context, n, Vocab::Stream) }
+    unsafe { provide_port(context, n, Vocab::Stream, terminal) }
 }
 
 /// # Safety
@@ -1028,10 +1029,11 @@ pub unsafe extern "C" fn hirsel_core_provide_stdout(
 pub unsafe extern "C" fn hirsel_core_provide_stderr(
     context: *mut Context,
     n: u64,
+    terminal: bool,
     _site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { provide_port(context, n, Vocab::Stream) }
+    unsafe { provide_port(context, n, Vocab::Stream, terminal) }
 }
 
 /// `provide.next(mut s) -> Option[Call[Op]] waits`: `written` 1 and `value`

@@ -1788,7 +1788,7 @@ pub(crate) fn deliver(output: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn source_request(source: &str, dir: &Path) -> CheckRequest {
@@ -1953,7 +1953,7 @@ mod tests {
         assert!(result.stdout.is_empty());
         assert!(result.stderr.is_empty());
     }
-    fn native_options(backend: Backend, dir: &Path) -> NativeOptions {
+    pub(crate) fn native_options(backend: Backend, dir: &Path) -> NativeOptions {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         NativeOptions {
             recording: false,

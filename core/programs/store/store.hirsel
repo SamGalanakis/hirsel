@@ -697,7 +697,7 @@ fn cause_number(causes: Causes) -> u32 {
     for cause in causes {
         return match cause.kind {
             Overflow => 1u32, Bounds => 2u32, Division => 3u32, Unwrap => 4u32,
-            Fail(_) => 5u32, Cancelled => 6u32, Capacity => 7u32, OutOfTime => 8u32, Tape => 9u32
+            Fail(_) => 5u32, Cancelled => 6u32, Capacity => 7u32, OutOfTime => 8u32
         }
     }
     0u32

@@ -158,8 +158,6 @@ pub type RuleError = Invalid | Capacity(Capacity)
 
 pub opaque resource type HostFile
 
-pub opaque resource type Tape
-
 pub type OpenMode = Read | Write | Append | CreateNew
 
 pub type Capacity {
@@ -194,7 +192,7 @@ pub type Cause {
     site: Site
 }
 
-pub type CauseKind = Overflow | Bounds | Division | Unwrap | Fail(String) | Cancelled | Capacity | Tape | OutOfTime
+pub type CauseKind = Overflow | Bounds | Division | Unwrap | Fail(String) | Cancelled | Capacity | OutOfTime
 
 pub type BuildError = Capacity(Capacity) | Overflow
 

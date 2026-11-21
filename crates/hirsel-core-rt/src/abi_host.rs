@@ -76,16 +76,8 @@ pub(crate) unsafe fn format_cause_at(
         "Fail",
         "Cancelled",
         "Capacity",
-        "Tape",
         "OutOfTime",
     ][cause.kind() as usize];
-    // A Tape cause has no payload; it names the reason the tape refused
-    // (D-B4: "Tape(diverged at 812, Op) at <site>").
-    if cause.kind() == crate::causes::TAPE
-        && let Some(fault) = crate::tape::last_fault()
-    {
-        return format!("{name}({fault}) at {site}");
-    }
     // SAFETY: cause chain pins its canonical immutable String carrier and bytes.
     unsafe {
         if let Some(message) = cause.message() {

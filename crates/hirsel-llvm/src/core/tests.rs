@@ -2368,7 +2368,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             "sret([32 x i8])"
         };
         assert!(ir.contains(storage), "{}: {storage}", op.name());
-        // Every provider row branches on its status: a tape can refuse any of them.
+        // Every provider row branches on its failure status.
         assert!(ir.contains("icmp ne i8"), "{} status", op.name());
     }
 }

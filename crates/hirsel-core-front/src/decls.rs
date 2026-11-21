@@ -163,7 +163,6 @@ pub enum Role {
     Sender,
     Receiver,
     HostFile,
-    Tape,
     FixedSpan,
     SeqSpan,
     IndexedSpan,
@@ -207,7 +206,6 @@ impl Role {
             "Receiver" => Role::Receiver,
             "HostFile" => Role::HostFile,
             "Socket" | "ReadHalf" | "WriteHalf" | "Listener" => Role::Socket,
-            "Tape" => Role::Tape,
             "FixedSpan" => Role::FixedSpan,
             "SeqSpan" => Role::SeqSpan,
             "IndexedSpan" => Role::IndexedSpan,
@@ -261,7 +259,6 @@ impl Role {
             | Role::Receiver
             | Role::Socket
             | Role::HostFile
-            | Role::Tape
             | Role::Latest
             | Role::Flow => Kind::Resource,
         }
@@ -2199,7 +2196,6 @@ impl Program<'_> {
                     | Role::Receiver
                     | Role::Socket
                     | Role::HostFile
-                    | Role::Tape
                     | Role::Latest
                     | Role::Flow,
                 ) => H_RESOURCE,
@@ -2905,14 +2901,7 @@ fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) ->
         Some(Role::Rc) => SHAREABLE | (meet() & (KEY | ORDERED)),
         Some(Role::Arc) => SHAREABLE | SEND | (meet() & (KEY | ORDERED)),
         Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
-        Some(
-            Role::Sender
-            | Role::Receiver
-            | Role::Socket
-            | Role::HostFile
-            | Role::Tape
-            | Role::Latest,
-        ) => SEND,
+        Some(Role::Sender | Role::Receiver | Role::Socket | Role::HostFile | Role::Latest) => SEND,
         Some(Role::Map) => meet() & (SHAREABLE | SEND | CODEC),
         Some(Role::Capability) => PLAIN | SHAREABLE | SEND,
         Some(_) => 0,

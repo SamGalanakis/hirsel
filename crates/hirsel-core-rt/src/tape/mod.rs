@@ -14,7 +14,6 @@
 //! The tape's state lives in a process slot table (section 8). Ending or
 //! dropping a tape advances its cell's generation, so every handle made
 //! through it then fails before issue and never uses its source.
-pub mod abi;
 mod dispatch;
 pub mod run;
 pub(crate) mod schedule;
@@ -125,8 +124,10 @@ pub struct Expect<'a> {
     pub across: bool,
 }
 
-/// An operation that the tape refused: the task fails before issue with cause
-/// `Tape` (the runtime records it, `STATUS_REFUSED`).
+/// Internal refusal status returned by the tape provider on fault/divergence.
+pub(crate) const STATUS_REFUSED: u8 = 2;
+
+/// An operation that the tape refused.
 pub const REFUSED: Outcome = Outcome {
     value: 0,
     error: IoError::OK,

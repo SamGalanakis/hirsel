@@ -151,7 +151,7 @@ struct Cause {
     site: Option<Anchor>,
 }
 /// `CauseKind` in declaration order, its case ordinals.
-const CAUSE_KINDS: [&str; 9] = [
+const CAUSE_KINDS: [&str; 8] = [
     "Overflow",
     "Bounds",
     "Division",
@@ -159,7 +159,6 @@ const CAUSE_KINDS: [&str; 9] = [
     "Fail",
     "Cancelled",
     "Capacity",
-    "Tape",
     "OutOfTime",
 ];
 /// A cause cell: core's `Cause` (32 bytes: the `Fail` carrier at 0, `Site` at 24),
@@ -170,9 +169,6 @@ const CAUSE_CAPACITY: u64 = 16;
 const CAUSE_SITE: u64 = 24;
 
 const CAUSE_KIND_START: u64 = 1 << 63;
-
-/// The evaluator's gap for every tape row (D-B3): a run stop by name.
-const NO_TAPE: &str = "tape.open: no tape provider on the evaluator (S2)";
 
 /// Why an instruction stopped: a new cause, or a callee's failure already chained.
 #[derive(Debug)]
@@ -2805,9 +2801,6 @@ impl Machine<'_> {
                 }
                 failed
             }
-            // The evaluator has no tape provider (REPLAY-SPEC S2), so no Tape
-            // reaches a drop.
-            FieldTy::Handle(Handle::Tape) => panic!("{NO_TAPE}"),
             FieldTy::Handle(Handle::Flow) => panic!("flow execution uses the native reference"),
             FieldTy::Handle(Handle::Socket) => {
                 let h = self.load(at, 8);
@@ -3461,9 +3454,6 @@ impl Machine<'_> {
                 vec![self.dests]
             }
             RtOp::ArgsLen => vec![self.world.args.len() as u64],
-            RtOp::TapeOpen | RtOp::TapeEnd | RtOp::TapeGrant | RtOp::TapeAcross => {
-                panic!("{NO_TAPE}")
-            }
             RtOp::ArgsGet => vec![self.world.args.get(a[1] as usize).copied().unwrap_or(0)],
             RtOp::LaunchWord => vec![self.world.launch.as_ref().unwrap().word(a[0], a[1])],
             RtOp::DescribeEmit => {

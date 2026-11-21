@@ -46,12 +46,6 @@ pub(crate) enum Kernel {
     CodeRevision,
     CodeCallable,
     CodeDescribe,
-    TapeOpen,
-    /// `true` ends with returned Bytes, `false` with a Causes chain and its kind.
-    TapeEnd(bool),
-    /// The substitute of a capability of this `entry` kind.
-    TapeGrant(u8),
-    TapeAcross,
     Flow(FlowOp),
 }
 
@@ -165,16 +159,6 @@ operations! {
     ("host", "remove_tree", Lane::Runtime(Kernel::Host(HostOp::RemoveTree)), "B", "core-ops-914", false),
     ("host", "wall_ms", Lane::Runtime(Kernel::Host(HostOp::WallMs)), "B", "core-ops-914", false),
     ("host", "mono_ns", Lane::Runtime(Kernel::Host(HostOp::MonoNs)), "B", "core-ops-914", false),
-    ("tape", "open_raw", Lane::Runtime(Kernel::TapeOpen), "B", "tape-build-1037", true),
-    ("tape", "end_returned", Lane::Runtime(Kernel::TapeEnd(true)), "B", "tape-build-1037", true),
-    ("tape", "end_causes", Lane::Runtime(Kernel::TapeEnd(false)), "B", "tape-build-1037", true),
-    ("tape", "clock", Lane::Runtime(Kernel::TapeGrant(2)), "B", "tape-build-1037", false),
-    ("tape", "dir", Lane::Runtime(Kernel::TapeGrant(0)), "B", "tape-build-1037", false),
-    ("tape", "stdout", Lane::Runtime(Kernel::TapeGrant(4)), "B", "tape-build-1037", false),
-    ("tape", "stderr", Lane::Runtime(Kernel::TapeGrant(5)), "B", "tape-build-1037", false),
-    ("tape", "tasks", Lane::Runtime(Kernel::TapeGrant(9)), "B", "tape-s2-1074", false),
-    ("tape", "args", Lane::Runtime(Kernel::TapeGrant(10)), "B", "tape-build-1037", false),
-    ("tape", "across", Lane::Runtime(Kernel::TapeAcross), "B", "tape-build-1037", false),
     ("indexed", "get", Lane::Language, "A", "core-check-895", false),
     ("int", "wrapping_add", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "wrapping_sub", Lane::Numeric, "A", "core-check-index-912", false),
@@ -784,38 +768,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::CodeCallable => self.runtime_code_callable(vals[0]?, result, n),
             Kernel::CodeDescribe => self.runtime_code_describe(result, n),
             Kernel::Flow(op) => self.runtime_flow(op, types, vals, result, n),
-            Kernel::TapeOpen => self.runtime_tape_open(f, vals, result, n),
-            Kernel::TapeEnd(returned) => {
-                let tape = self.runtime_key(vals[0]?, n);
-                // END consumes the Tape on every path: the runtime takes its key.
-                self.consume(vals[0], n);
-                let (kind, operand) = if returned {
-                    (self.konst(Ty::Scalar(Scalar::U8), 0, n)?, vals[1]?)
-                } else {
-                    (vals[1]?, self.runtime_handle(vals[2]?, n))
-                };
-                let [code, ..] = self.runtime_row(
-                    RtOp::TapeEnd,
-                    &[Arg::Value(tape), Arg::Value(kind), Arg::Value(operand)],
-                    n,
-                )?;
-                Some(code)
-            }
-            Kernel::TapeGrant(kind) => {
-                let tape = self.runtime_key(vals[0]?, n);
-                let kind = self.konst(Ty::Scalar(Scalar::U8), u64::from(kind), n)?;
-                let [value, ..] = self.runtime_row(
-                    RtOp::TapeGrant,
-                    &[Arg::Value(tape), Arg::Value(kind), Arg::Value(vals[1]?)],
-                    n,
-                )?;
-                Some(value)
-            }
-            Kernel::TapeAcross => {
-                let tape = self.runtime_key(vals[0]?, n);
-                let [differs, ..] = self.runtime_row(RtOp::TapeAcross, &[Arg::Value(tape)], n)?;
-                Some(differs)
-            }
         }
     }
 
@@ -1519,11 +1471,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::Host(_)
             | Kernel::Net(_)
             | Kernel::ArgsLen
-            | Kernel::ArgsGet
-            | Kernel::TapeOpen
-            | Kernel::TapeEnd(_)
-            | Kernel::TapeGrant(_)
-            | Kernel::TapeAcross => true,
+            | Kernel::ArgsGet => true,
             Kernel::CarrierMove
             | Kernel::CarrierView
             | Kernel::SecretSeal
@@ -1610,7 +1558,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                     )
                     || entry.module == "map"
                     || entry.module == "list" && entry.name.starts_with("slots_")
-                    || matches!(entry.module, "deque" | "heap" | "tape")
+                    || matches!(entry.module, "deque" | "heap")
             );
         }
     }
@@ -2720,7 +2668,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         )
     }
 
-    /// A HostFile's or Tape's entire carrier is the opaque u64 key into the run's
+    /// A HostFile's entire carrier is the opaque u64 key into the run's
     /// registry, not provider metadata.
     fn runtime_key(&mut self, value: ValueId, n: NodeId) -> ValueId {
         let u64t = Ty::Scalar(Scalar::U64);
@@ -2728,7 +2676,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.read_bits(at, u64t, n)
     }
 
-    /// A fieldless enum operand (`OpenMode`, `tape.Mode`) passes its case as a u8.
+    /// A fieldless enum operand (`OpenMode`) passes its case as a u8.
     fn runtime_mode(
         &mut self,
         f: usize,
@@ -2757,37 +2705,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         );
         Some(mode)
-    }
-
-    /// `tape.open_raw`: Ok carries the Tape's key, Error the runtime's open word.
-    fn runtime_tape_open(
-        &mut self,
-        f: usize,
-        vals: &[Option<ValueId>],
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let u64t = Ty::Scalar(Scalar::U64);
-        let mode = self.runtime_mode(f, 2, vals[2]?, n)?;
-        let mut args = [Arg::Value(mode); 8];
-        for i in [0, 1, 3, 4, 5, 6, 7] {
-            args[i] = Arg::Value(vals[i]?);
-        }
-        let [tape, code, ..] = self.runtime_row(RtOp::TapeOpen, &args, n)?;
-        let ok = self.runtime_compare(u64t, code, 0, n)?;
-        self.runtime_result(
-            result,
-            ok,
-            n,
-            |cx, to, ty| {
-                if let Some(to) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
-                {
-                    cx.runtime_store(to, &[], u64t, tape, n);
-                }
-            },
-            |cx, to, ty| cx.runtime_case_payload(to, 1, ty, Some(code), n),
-        )
     }
 }
 

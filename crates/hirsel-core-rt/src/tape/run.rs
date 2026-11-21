@@ -315,11 +315,7 @@ unsafe extern "C" fn invoke(
             };
             run.describe_tape = match tape.on_tape(entry::STDOUT, (source, 0)) {
                 Ok(p) => p,
-                Err(f) => {
-                    refuse(f);
-                    causes::record(&mut *context, Cause::new(causes::TAPE, 0));
-                    return 1;
-                }
+                Err(f) => return stopped(run, f),
             };
         }
         if tape.revision_differs() {
@@ -345,11 +341,7 @@ unsafe extern "C" fn invoke(
                 }
                 match tape.on_tape_args(&argv) {
                     Ok(v) => (*files).registry.vector(v),
-                    Err(f) => {
-                        refuse(f);
-                        causes::record(&mut *context, Cause::new(causes::TAPE, 0));
-                        return 1;
-                    }
+                    Err(f) => return stopped(run, f),
                 }
             } else {
                 let (provider, handle) = if run.mode == 0 {
@@ -401,14 +393,10 @@ unsafe extern "C" fn invoke(
                             secret.origin = crate::secret::Origin::Granted(ordinal_of(h) as u64);
                             (*files).secrets.lock().unwrap().register(secret)
                         } else {
-                            (*files).registry.taped_grant(p, h, tape.group())
+                            (*files).registry.grant(p, h)
                         }
                     }
-                    Err(f) => {
-                        refuse(f);
-                        causes::record(&mut *context, Cause::new(causes::TAPE, 0));
-                        return 1;
-                    }
+                    Err(f) => return stopped(run, f),
                 }
             };
             run.grants.push(value);
@@ -424,13 +412,7 @@ unsafe extern "C" fn invoke(
         let outcome = ending(context, failed, &*result);
         match tape.end(&outcome) {
             Ok(()) => failed,
-            Err(f) => {
-                refuse(f);
-                if failed == 0 {
-                    causes::record(&mut *context, Cause::new(causes::TAPE, 0));
-                }
-                1
-            }
+            Err(f) => stopped(run, f),
         }
     }
 }

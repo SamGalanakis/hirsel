@@ -393,8 +393,7 @@
 //! of the place holding its carrier, Views). Every `host`, `stdout` and `stderr`
 //! row returns the outcome `value: u64, error: u8, code: u32, written: u64`,
 //! from which the producer builds the `Result`. Every provider row adds the
-//! failure status (Native ABI): it fails with `Tape` when its tape refuses it
-//! before issue (CAP-9); the rows that `wait` also fail with `Cancelled` when
+//! failure status (Native ABI): the rows that `wait` fail with `Cancelled` when
 //! cancellation is pending, `host_mkdtemp` also with `Bounds` when the name has
 //! fewer than 32 spare bytes. `host_wall_ms` and `host_mono_ns` return the `u64`
 //! and `host_random` nothing besides the status. The `args` rows cannot fail. The run time reads and writes the carrier: `host_read` fills spare
@@ -489,7 +488,7 @@
 //! The `Cause` is in core's layout (32 bytes): `Fail`'s `String` carrier at 0 and the
 //! `Site` (u64) at 24. `CauseKind` is that carrier's capacity niche (FORM #75): kind
 //! `k` (declaration order: Overflow 0, Bounds 1, Division 2, Unwrap 3, Fail 4,
-//! Cancelled 5, Capacity 6, Tape 7, OutOfTime 8) other than `Fail` is the capacity 2^63 + k. `View[Cause]`
+//! Cancelled 5, Capacity 6, OutOfTime 7) other than `Fail` is the capacity 2^63 + k. `View[Cause]`
 //! is that pointer, valid while the `Causes` lives. A `Fail` cause owns its message;
 //! cleaning the `Causes` frees it when its capacity is not 0.
 //!

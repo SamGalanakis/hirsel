@@ -59,7 +59,6 @@ tags!(Handle {
     4 => Capability,
     5 => Causes,
     6 => HostFile,
-    7 => Tape,
     8 => Socket,
     9 => Flow,
 });
@@ -336,10 +335,6 @@ tags!(RtOp {
     20 => ArgsLen,
     21 => ArgsGet,
     22 => Host(part0),
-    23 => TapeOpen,
-    24 => TapeEnd,
-    25 => TapeGrant,
-    26 => TapeAcross,
     27 => IsolateEnter,
     28 => IsolateLeave,
     29 => IsolateCatch,

@@ -804,8 +804,8 @@ unsafe fn narrow(context: *mut Context, n: u64, rule: GrantRule) -> Outcome {
             charge: charge.unwrap(),
         });
         let value = if taped {
-            let (handle, group) = crate::tape::narrow_net(&provider, parent, handle);
-            (*files).registry.taped_grant(provider, handle, group)
+            let (handle, _group) = crate::tape::narrow_net(&provider, parent, handle);
+            (*files).registry.grant(provider, handle)
         } else {
             (*files).registry.grant(provider, handle)
         };

@@ -488,35 +488,7 @@ pub fn main(tasks: Tasks, net: Net, clock: Clock, dir: Dir, out: Stdout, err: St
         result.unwrap(stdout.write(out, receipt(connections * count, sum)))
         return Ok(())
     }
-    if let Some(mode) = args.get(argv, 3) {
-        let Some(path) = args.get(argv, 4) else { return Error(Exit(status: 2)) }
-        let operation: tape.Mode = if mode == "record" {
-            Record
-        } else if mode == "replay" {
-            Replay
-        } else {
-            return Error(Exit(status: 2))
-        }
-        // The workload arguments are checked by the checksum on both runs.
-        let header = tape.Header(id: (1, 1), identity: "multicore-regimes", arg: list.new(), limit: ROOT_BYTES)
-        let mut recording = match tape.open(dir, path, operation, header) {
-            Ok(take value) => take value,
-            Error(_) => return Error(Exit(status: 3)),
-        }
-        let recorded_tasks = tape.tasks(mut recording, tasks)
-        let (completed, sum) = run(recorded_tasks, clock, err, name, count, grain)
-        let line = receipt(completed, sum)
-        let mut outcome: Bytes = list.new()
-        for i in 0 .. 8u64 {
-            result.unwrap(list.push(mut outcome, int.truncate(sum >> (8 * i))))
-        }
-        match tape.end(take recording, Ok(take outcome)) {
-            Sealed => result.unwrap(stdout.write(out, line)),
-            Faulted(_) => return Error(Exit(status: 4)),
-        }
-    } else {
-        let (completed, sum) = run(tasks, clock, err, name, count, grain)
-        result.unwrap(stdout.write(out, receipt(completed, sum)))
-    }
+    let (completed, sum) = run(tasks, clock, err, name, count, grain)
+    result.unwrap(stdout.write(out, receipt(completed, sum)))
     Ok(())
 }

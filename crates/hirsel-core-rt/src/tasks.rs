@@ -4263,35 +4263,18 @@ pub unsafe extern "C" fn hirsel_core_spawn(
 #[allow(clippy::too_many_arguments)]
 unsafe fn spawn_committed(
     context: *mut Context,
-    tasks: u64,
+    _tasks: u64,
     bytes: u64,
     input: *mut u8,
     body: Body,
     layout: TaskLayout,
-    site: u64,
+    _site: u64,
     stack: &mut Option<Stack>,
 ) -> Spawn {
     // SAFETY: the caller passes its generated operands through unchanged.
     unsafe {
         let _commit = crate::sequencer::enter();
-        let group = if tasks & crate::host_file::DYNAMIC_GRANT != 0 {
-            (*(*context).host_files).registry.grant_group(tasks)
-        } else if tasks == 0 && (*context).run.is_null() {
-            current_group()
-        } else {
-            None
-        };
-        if let Some(group) = group
-            && let Err(f) = group.check()
-        {
-            crate::tape::refuse(f);
-            causes::record(&mut *context, Cause::new(causes::TAPE, site));
-            return Spawn {
-                task: ptr::null_mut(),
-                available: 0,
-                status: 1,
-            };
-        }
+        let group = current_group();
         let spawned = spawn_in(stack, context, bytes, input, body, layout, group);
         Spawn {
             task: spawned.task,

@@ -935,15 +935,6 @@ pub enum RtOp {
     ArgsGet,
     /// A provider operation of `host`, `stdout` or `stderr` (CAP-5).
     Host(HostOp),
-    /// `tape.open` (CAP-9): open a Run tape in a Dir.
-    TapeOpen,
-    /// `tape.end`: end a tape with its domain's outcome, consuming it.
-    TapeEnd,
-    /// `tape.clock`, `tape.dir`, `tape.stdout`, `tape.stderr`, `tape.args`:
-    /// a capability's substitute on a tape.
-    TapeGrant,
-    /// `tape.across`: whether an Across open's revision differs.
-    TapeAcross,
     /// `isolate`'s entry: reserve a cause cell (crate docs, "Isolation").
     IsolateEnter,
     /// `isolate`'s body returned: refund the innermost reservation.
@@ -1185,10 +1176,6 @@ impl RtOp {
     /// | `host_mkdtemp` | `Dir: u64`, name `ptr` | outcome |
     /// | `host_wall_ms`, `host_mono_ns` | `Clock: u64` | `u64` |
     /// | `stdout_write`, `stderr_write` | stream `u64`, string `ptr` | outcome |
-    /// | `tape_open` | `Dir: u64`, name `ptr`, `mode: u8`, identity `ptr`, arg `ptr`, `limit: u64`, `id0: u64`, `id1: u64` | `Tape: u64` (0 unless opened), `code: u64` |
-    /// | `tape_end` | `Tape: u64`, `kind: u8`, operand `ptr` | `code: u64` |
-    /// | `tape_grant` | `Tape: u64`, `kind: u8`, capability `u64` | substitute `u64` |
-    /// | `tape_across` | `Tape: u64` | `bool` |
     /// | `isolate_enter` | | `bool`: reserved; `available: u64` (0 when reserved) |
     /// | `isolate_leave` | | |
     /// | `isolate_catch` | | `Causes` `ptr`: the caught chain's head |
@@ -1197,7 +1184,7 @@ impl RtOp {
     /// with `Bounds`; `send`, `receive`, `join` and `check_cancel` fail with
     /// `Cancelled` when they observe it (CONC-7). `isolate_catch` fails, adding no
     /// cause, when the chain it would catch has the primary cause `Cancelled`. Every
-    /// provider row and `tape_grant` can fail with `Tape` (CAP-9). These are the rows
+    /// provider row can fail (for example `Cancelled` or `Bounds`). These are the rows
     /// that can fail
     /// ([`RtOp::fails`]); the others never do.
     ///
@@ -1258,13 +1245,6 @@ impl RtOp {
             RtOp::LaunchTarget { view } => (vec![out(view)], vec![]),
             RtOp::DescribeEmit => (vec![V(p)], vec![bool_]),
             RtOp::Flow(_) => (vec![V(p), V(p), V(p)], vec![]),
-            RtOp::TapeOpen => (
-                vec![V(u64_), V(p), V(u8_), V(p), V(p), V(u64_), V(u64_), V(u64_)],
-                vec![u64_, u64_],
-            ),
-            RtOp::TapeEnd => (vec![V(u64_), V(u8_), V(p)], vec![u64_]),
-            RtOp::TapeGrant => (vec![V(u64_), V(u8_), V(u64_)], vec![u64_]),
-            RtOp::TapeAcross => (vec![V(u64_)], vec![bool_]),
             RtOp::StepEnter => (vec![V(u64_)], vec![bool_]),
             RtOp::StepLeave => (vec![], vec![]),
             RtOp::StepCatch => (vec![], vec![bool_]),
@@ -1416,7 +1396,6 @@ impl RtOp {
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
                 | RtOp::IsolateCatch
-                | RtOp::TapeGrant
                 | RtOp::Flow(_)
         ) || matches!(self, RtOp::Host(_))
     }
@@ -1453,10 +1432,6 @@ impl RtOp {
             | RtOp::DescribeEmit
             | RtOp::Flow(_)
             | RtOp::Host(_)
-            | RtOp::TapeOpen
-            | RtOp::TapeEnd
-            | RtOp::TapeGrant
-            | RtOp::TapeAcross
             | RtOp::IsolateEnter
             | RtOp::IsolateLeave
             | RtOp::IsolateCatch

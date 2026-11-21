@@ -19,7 +19,7 @@ an own value held inline in its slot, built in the caller's place
 `Text` copy is refused: it raises `Capacity`, the failure cleans the region and leaves the
 bound scope, and `isolate` returns its causes.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError) | Mem(Capacity)
 type Word[in r] { text: Text in r, len: u64 }
 
@@ -88,7 +88,7 @@ puts land at offsets 0, 9, 18, 27 and 36, and the root is the last, at 36, so th
 needs 45 bytes. In 32 bytes the fourth put (27 + 9 > 32) writes nothing and returns
 `Overflow`. Each `Child` carries the destination's identity, and every put checks it.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError)
 @compact(u32) type Expr = Num(u64) | Add(Link[Expr], Link[Expr])
 
@@ -158,7 +158,7 @@ first push grows an empty `List[u64]` to 4 elements (32 bytes). The fifth push g
 push raises `Capacity` with `requested` 64. The failure cleans `xs` and leaves the bound,
 and `isolate` returns it as a value.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError)
 
 fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
@@ -240,7 +240,7 @@ Refused edits:
 Pieces are counted. The undo list shares the first piece, so `try_unwrap` cannot take it
 and returns the handle.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError)
 type Piece: shareable { text: String }
 
@@ -307,7 +307,7 @@ may call waiting operations. `close` ends a step without its finalizer. Values a
 in reverse order on every exit edge; the second call fails after two steps exist, so they
 are dropped before the failure reaches the run.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError) | Mem(Capacity)
 
 resource type Step { name: String, out: Stdout }
@@ -369,7 +369,7 @@ another, and `main` sums what arrives. The endpoints travel as spawn payloads. E
 last sender closes its channel when the task is cleaned, which ends the next loop. The
 output does not depend on the schedule.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError) | Join(JoinError)
 type Ends: send { input: Receiver[u64], output: Sender[u64] }
 
@@ -441,7 +441,7 @@ Refused edits:
 The child adds two `u8` values of 200 and fails with `Overflow`. Its cleanup runs in the
 child; the joiner receives `Failed` with the cause chain as an error value and carries on.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError)
 
 fn sum(take xs: List[u8]) -> u8 {
@@ -512,7 +512,7 @@ usual separate charges. Inside `bound bytes 72` the admission is refused with
 bound, and `isolate` returns it. With a guessed `bytes 4096` instead, `finish_trim`
 would refund 4016 at publication and keep 80.
 
-```hirsel
+```hirsel run
 type AppError = Io(WriteError) | Build(BuildError) | Syntax(u64)
 @compact(u32) type Json = Null | False | True | Num(u64) | Str(Text) | Arr(IndexedSpan[Json])
 

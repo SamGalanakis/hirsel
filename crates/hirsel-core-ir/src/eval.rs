@@ -994,7 +994,8 @@ pub fn run_nans_into(
 }
 
 /// Run an entry with the root task's startup charge and teardown, as the native
-/// process entry does. May supply a deterministic network and record CONC-10 events.
+/// process entry does. The limit must cover startup. May supply a deterministic
+/// network and record CONC-10 events.
 /// A cause's site word is `sites[item] + start` (`SourceMap::item_sites` over the
 /// module's items); an empty `sites` means the module's own (`source::module_sites`).
 #[allow(clippy::too_many_arguments)]
@@ -1002,6 +1003,7 @@ pub fn run_entry(
     m: &Module,
     f: FuncId,
     args: &[u64],
+    limit: u64,
     nans: Nans,
     destination: Option<&mut [u8]>,
     instructions: u64,
@@ -1015,7 +1017,7 @@ pub fn run_entry(
         m,
         f,
         args,
-        u64::MAX,
+        limit,
         WorldInput {
             nans,
             destination,
@@ -1312,7 +1314,7 @@ fn run_world(
     let root = mach.root().clone();
     let primary_charge = if input.process_entry {
         mach.admit(&root, charge::TASK_RECORD + charge::CAUSE_CELL)
-            .expect("the entry has an unbounded root limit");
+            .expect("the entry limit covers its startup charge");
         charge::CAUSE_CELL
     } else {
         // A host call borrows a task with a primary cell outside its allowance.

@@ -53,7 +53,7 @@ effects on its `mut` arguments stand, and so does an installed value.
 
 ```hirsel
 fn put(mut q: List[HostFile], take f: HostFile) {
-  list.push(mut q, take f)              // refused: q unchanged, f dropped by the failure's cleanup
+  list.push(mut q, take f)              // on refusal: q unchanged, f dropped by the failure's cleanup
 }
 ```
 

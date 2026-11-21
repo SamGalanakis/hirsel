@@ -114,6 +114,7 @@ fn run(
         module,
         function,
         &handles,
+        u64::MAX,
         eval::Nans::Scrambled,
         destination.as_deref_mut(),
         setting.instructions,

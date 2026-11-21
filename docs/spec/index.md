@@ -72,6 +72,9 @@ Every code block is a self-contained program fragment: it declares each type it 
 the core library does not, and a block whose comment says `refused` is refused only where
 the comment says. A block marked `hirsel unbuilt` belongs to its rule but shows what the
 built `hirsel` does not implement yet; the mark is removed when it does.
+`hirsel core` uses the core declaration rules. A `hirsel run` block is a complete
+program. The next fence is `text` with its exact stdout, followed by an `Outcome:`
+line that states success or failure.
 
 The [Net socket declarations and ownership rules](net.md) define the network
 capability and its explicit grant syntax.

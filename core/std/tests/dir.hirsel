@@ -88,14 +88,14 @@ fn remove_tree_keeps_completed_prefix(d: Dir) -> bool waits {
 // expect: run list_small_batches(dir) = true
 fn list_small_batches(d: Dir) -> bool waits {
     result.unwrap(dir.create_dir(d, "scan"))
-    let d = result.unwrap(dir.narrow(d, "scan"))
+    let scan = result.unwrap(dir.narrow(d, "scan"))
     let b = result.unwrap(string.repeat("b", 255))
     let a = result.unwrap(string.repeat("a", 254))
     let c = result.unwrap(string.repeat("C", 253))
-    result.unwrap(dir.create_dir(d, b))
-    result.unwrap(file.write(d, a, string.as_bytes("a")))
-    result.unwrap(file.write(d, c, string.as_bytes("C")))
-    let mut handle = result.unwrap(dir.entries(d))
+    result.unwrap(dir.create_dir(scan, b))
+    result.unwrap(file.write(scan, a, string.as_bytes("a")))
+    result.unwrap(file.write(scan, c, string.as_bytes("C")))
+    let mut handle = result.unwrap(dir.entries(scan))
     let mut buf: Bytes = result.unwrap(list.with_capacity(258))
     let mut seen: u8 = 0
     loop {
@@ -130,6 +130,6 @@ fn list_small_batches(d: Dir) -> bool waits {
     if seen != 7 {
         fail("an entry was lost between batches")
     }
-    let sorted = result.unwrap(dir.list(d))
+    let sorted = result.unwrap(dir.list(scan))
     list.len(sorted) == 3 && sorted[0].name == c && sorted[1].name == a && sorted[2].name == b
 }

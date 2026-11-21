@@ -331,7 +331,7 @@ fn reuse(id: u32, flat: bool) -> u8 {
         let cap = if param(1) == 0 { 2 } else { 23 };
         cx.ev(format!("I connection capacity {cap}"));
         let (inbox, client) = if flat {
-            cx.u.conn_new_cross(cap, 8, 64, 8, Box::default())
+            cx.u.conn_new_cross(cap, 4, 64, 4, Box::default())
         } else {
             cx.u.conn_new(cap, 8, 64)
         }
@@ -351,7 +351,7 @@ fn reuse(id: u32, flat: bool) -> u8 {
                     assert_eq!(bytes, 0);
                     assert!(content.is_empty());
                     // SAFETY: the connection reserved this slot for this take.
-                    item = unsafe { src.cast::<u64>().read_unaligned() };
+                    item = u64::from(unsafe { src.cast::<u32>().read_unaligned() });
                     Ok::<_, ()>(())
                 });
                 cx.obs(
@@ -403,8 +403,9 @@ fn reuse(id: u32, flat: bool) -> u8 {
         for k in 1..=ITEMS {
             compute_until(now() + draw(0, param(0)));
             let tag = (id as u64 - 1) * ITEMS + k;
+            let word = tag as u32;
             let sent = if flat {
-                let mut source = CrossSend::new((&raw const tag).cast());
+                let mut source = CrossSend::new((&raw const word).cast());
                 source.tag = tag;
                 // SAFETY: the source stays live through the settlement wait below.
                 let sent = unsafe { UnitCtx::send_cross(&client, source, 0, true, || &mut cx.u) };

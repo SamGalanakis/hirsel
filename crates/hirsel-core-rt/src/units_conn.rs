@@ -101,10 +101,19 @@ pub(crate) struct Taken {
     pub(super) value: Value,
 }
 
+enum FlatSlots {
+    // A one-slot scalar connection needs no payload allocation.
+    Inline(UnsafeCell<MaybeUninit<[u8; 8]>>),
+    Arena(Box<[UnsafeCell<MaybeUninit<u8>>]>),
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<FlatSlots>() == 16);
+
 pub(crate) struct ConnCore {
     hot: Hot,
     spares: Box<[ArrivalSlot]>,
-    flat: Box<[UnsafeCell<MaybeUninit<u8>>]>,
+    flat: FlatSlots,
     pub(crate) stride: usize,
     pub(crate) seqs: Box<[[u64; 4]]>,
     free: Option<Box<Mutex<FreeArrivals>>>,
@@ -147,11 +156,11 @@ impl ConnCore {
     }
 
     fn flat_ptr(&self, i: u32) -> *mut u8 {
-        self.flat
-            .as_ptr()
-            .wrapping_add(i as usize * self.stride)
-            .cast_mut()
-            .cast()
+        let base = match &self.flat {
+            FlatSlots::Inline(first) => first.get().cast::<u8>(),
+            FlatSlots::Arena(slots) => slots.as_ptr().cast_mut().cast(),
+        };
+        base.wrapping_add(i as usize * self.stride)
     }
 
     /// The caller owns this connection's published slot.
@@ -354,15 +363,16 @@ impl UnitCtx {
                 spares: (1..cap)
                     .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
                     .collect(),
-                // Each UnsafeCell contains MaybeUninit, so all bit patterns
-                // are valid and the arena need not be zeroed or faulted in.
-                flat: unsafe {
-                    Box::<[UnsafeCell<MaybeUninit<u8>>]>::new_uninit_slice(
-                        (cap as usize)
-                            .checked_mul(stride)
-                            .expect("connection slot extent"),
-                    )
-                    .assume_init()
+                flat: match (cap as usize)
+                    .checked_mul(stride)
+                    .expect("connection slot extent")
+                {
+                    0..=8 => FlatSlots::Inline(UnsafeCell::new(MaybeUninit::uninit())),
+                    // Each UnsafeCell contains MaybeUninit, so all bit
+                    // patterns are valid and the arena need not be zeroed.
+                    bytes => FlatSlots::Arena(unsafe {
+                        Box::<[UnsafeCell<MaybeUninit<u8>>]>::new_uninit_slice(bytes).assume_init()
+                    }),
                 },
                 stride,
                 seqs,

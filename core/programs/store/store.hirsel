@@ -3310,7 +3310,14 @@ pub fn stage_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migratio
             task.spawn(tasks, bytes (c.available - 288), take returned, prepare_migration)
         },
     }
-    if let Error(_) = task.join(take running) { return Error(MigrationFault) }
+    match task.join(take running) {
+        Ok(()) => (),
+        Error(Failed(causes)) => return Error(match raised_capacity(causes) {
+            Some(c) => Full(c),
+            None => MigrationFault,
+        }),
+        Error(Cancelled(_)) => return Error(MigrationFault),
+    }
     Ok(StagedMigration(plan: result.unwrap(channel.receive(from))?))
 }
 

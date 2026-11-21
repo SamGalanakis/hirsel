@@ -594,7 +594,13 @@ fn adapt_compute[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.c
         Ok(Ok(Ok(Ok(Ok(take o))))) => take o,
         Ok(Ok(Ok(Ok(Error(d))))) => Refused(Malformed(bad(d.e))),
         Ok(Ok(Ok(Error(e)))) => Failed(OutOfTime(e.steps)),
-        Ok(Ok(Error(cs))) => Failed(Raised(raised(cs))),
+        Ok(Ok(Error(cs))) => {
+            for cause in cs {
+                if let Capacity(c) = cause.kind { return Failed(OutOfBytes(room(c))) }
+                break
+            }
+            Failed(Raised(raised(cs)))
+        },
         Ok(Error(c)) => Failed(OutOfBytes(room(c))),
         Error(c) => Refused(Budget(room(c))),
     }

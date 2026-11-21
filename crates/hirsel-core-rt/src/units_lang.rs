@@ -869,7 +869,10 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
                 return out(1 << 8, 0, 0);
             }
             if c.side().taken.is_empty() && u.ctx.port.pending() {
-                if u.waits <= usize::from(waited) && u.ctx.take_single_item(c) {
+                // A lone item for this inbox is all the port holds, so no
+                // other wait of this unit (a helper, another task) has
+                // anything to take from it.
+                if u.ctx.take_single_item(c) {
                     take_sockets(u, &*inbox);
                 } else {
                     pump_for(u, waited);

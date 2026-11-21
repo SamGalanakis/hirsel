@@ -1711,15 +1711,27 @@ impl Scheduler {
                 // SAFETY: each entry points to its pinned provider operation.
                 || self.parked.live.values().any(|arm| unsafe {
                     let task = arm.task;
-                    !(*task)
-                        .group
-                        .is_some_and(|group| group.drives_replay((*(*task).operation).provider))
+                    let provider = &(*(*task).operation).provider;
+                    !crate::provide::owns(provider)
+                        && !(*task)
+                            .group
+                            .is_some_and(|group| group.drives_replay(*provider))
                 })
         }
         #[cfg(not(feature = "record"))]
         {
-            self.readies.outside() || !self.parked.live.is_empty()
+            self.readies.outside()
+                // SAFETY: each entry points to its pinned provider operation.
+                || self.parked.live.values().any(|arm| unsafe {
+                    !crate::provide::owns(&(*(*arm.task).operation).provider)
+                })
         }
+    }
+
+    /// Quiescence first wakes the run's own `clock.idle` waits (FAIL-15);
+    /// returns whether it did, so the scheduler takes their readies.
+    fn quiesce(&self) -> bool {
+        crate::provide::quiesce(&|token| self.parked.live.contains_key(&ReadyToken(token)))
     }
 
     fn stop_quiescent(&mut self) -> ! {
@@ -1790,6 +1802,9 @@ impl Scheduler {
                     std::thread::park();
                     return;
                 }
+                if self.quiesce() {
+                    return;
+                }
                 self.stop_quiescent();
             }
             return;
@@ -1813,6 +1828,9 @@ impl Scheduler {
             }
             None => {
                 if !self.has_outside_wait() && !flow_pending {
+                    if self.quiesce() {
+                        return;
+                    }
                     self.stop_quiescent();
                 }
                 if !self.net.is_null() {
@@ -2634,6 +2652,10 @@ unsafe fn alone(
                     block(Some(w.deadline_ns));
                 }
                 WAIT_PARK => {
+                    // Only the program readies a cell's wait, and no other task runs.
+                    if crate::provide::owns(p) && !crate::provide::quiesce(&|t| t == token) {
+                        crate::process::stop(b"Deadlock");
+                    }
                     block(None);
                 }
                 _ => crate::process::stop(b"Provider"),
@@ -4124,6 +4146,10 @@ impl RunPtr {
                 && deadline.is_none()
                 && !run.has_outside_wait()
             {
+                if run.quiesce() {
+                    pool.wake(index);
+                    return;
+                }
                 run.stop_quiescent();
             }
             #[cfg(test)]

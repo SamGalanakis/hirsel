@@ -324,8 +324,9 @@ unsafe fn step(request: *mut Request, token: u64, issue: bool) -> Step {
             return done(Outcome::default());
         }
         let read = &mut *request.path.cast_mut().cast::<ReadRequest>();
+        let due = crate::os_net::deadline(read.until, token);
         if issue {
-            read.deadline = crate::os_net::host_deadline(read.until).unwrap_or(0);
+            read.deadline = due.host().unwrap_or(0);
         }
         let stream = &*(request.handle as *const Stream);
         let helper = match stream.helper() {
@@ -343,7 +344,7 @@ unsafe fn step(request: *mut Request, token: u64, issue: bool) -> Step {
         let outcome = state
             .deliver(token, read.deadline, &mut request.buffer)
             .or_else(|| {
-                (read.deadline != 0 && read.deadline <= crate::os::monotonic_ns()).then(|| {
+                (due == crate::os_net::Due::Passed).then(|| {
                     state.remove(token);
                     crate::os_net::signal(6)
                 })

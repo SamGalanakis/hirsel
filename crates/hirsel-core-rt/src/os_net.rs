@@ -650,42 +650,81 @@ unsafe fn finish(request: &Request, n: &mut NetworkRequest, mut outcome: Outcome
         ..Step::default()
     }
 }
-/// A network deadline in the scheduler's host CLOCK_MONOTONIC domain. On the OS
-/// clock it is the program deadline plus the provider's epoch, as `sleep_wait`
-/// converts it, with no clock read; the caller's fresh read decides expiry. A
-/// substituted clock translates by its own reading, saturating at now.
-pub(crate) unsafe fn host_deadline(
+/// Where a network deadline stands (CONC-7): the deadline lives on its own
+/// Clock's timers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Due {
+    /// No deadline.
+    Never,
+    /// Reached: the operation times out.
+    Passed,
+    /// Not reached; the scheduler's timer fires at this host deadline.
+    Host(u64),
+    /// Not reached; the clock itself readies the operation's token when it is
+    /// (a virtual clock's `advance_to`). No host timer stands in for it.
+    Clock,
+}
+impl Due {
+    pub(crate) fn host(self) -> Option<u64> {
+        match self {
+            Due::Host(at) => Some(at),
+            _ => None,
+        }
+    }
+}
+/// The deadline `until` for the operation `token`. On the OS clock it is the
+/// program deadline plus the provider's epoch, as `sleep_wait` converts it,
+/// against a fresh host read. Any other clock answers its own SLEEP_UNTIL wait
+/// for this token: ready when reached, Until in the scheduler's domain, or
+/// Park, after which the clock readies the token when the deadline is reached.
+/// Host time never translates another clock's reading.
+pub(crate) unsafe fn deadline(
     until: Option<(crate::provider::Provider, u64, u64)>,
-) -> Option<u64> {
+    token: u64,
+) -> Due {
     unsafe {
-        until.and_then(|(p, clock, at)| {
-            // This translation is host scheduling, outside the program's clock reads.
-            #[cfg(feature = "record")]
-            let (p, clock) = if crate::tape::owns(&p) {
-                crate::tape::source(&p, clock)?
+        let Some((p, clock, at)) = until else {
+            return Due::Never;
+        };
+        // This is host scheduling, outside the program's clock reads.
+        #[cfg(feature = "record")]
+        let Some((p, clock)) = (if crate::tape::owns(&p) {
+            crate::tape::source(&p, clock)
+        } else {
+            Some((p, clock))
+        }) else {
+            return Due::Never;
+        };
+        let host = |at: u64| {
+            if at <= crate::os::monotonic_ns() {
+                Due::Passed
             } else {
-                (p, clock)
-            };
-            if crate::os::owns(&p) {
-                return Some(crate::os::epoch(p.state).saturating_add(at));
+                Due::Host(at)
             }
-            let mut r = Request {
-                operation: MONO_NS,
-                mode: 0,
-                handle: clock,
-                path: ptr::null(),
-                path_len: 0,
-                buffer: Buffer {
-                    data: ptr::null_mut(),
-                    len: 0,
-                    capacity: 0,
-                },
-                site: 0,
-            };
-            let step = (p.issue)(p.state, &mut r, 0);
-            let now = (p.deliver)(p.state, &mut r, step.outcome).value;
-            Some(crate::os::monotonic_ns().saturating_add(at.saturating_sub(now)))
-        })
+        };
+        if crate::os::owns(&p) {
+            return host(crate::os::epoch(p.state).saturating_add(at));
+        }
+        let mut bytes = at.to_ne_bytes();
+        let mut r = Request {
+            operation: crate::provider::SLEEP_UNTIL,
+            mode: 0,
+            handle: clock,
+            path: ptr::null(),
+            path_len: 0,
+            buffer: Buffer {
+                data: bytes.as_mut_ptr(),
+                len: 8,
+                capacity: 8,
+            },
+            site: 0,
+        };
+        let w = (p.wait)(p.state, &mut r, token);
+        match w.kind {
+            crate::provider::WAIT_READY => Due::Passed,
+            crate::provider::WAIT_UNTIL => host(w.deadline_ns),
+            _ => Due::Clock,
+        }
     }
 }
 pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Step {
@@ -700,22 +739,22 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
                 .as_ref()
                 .is_none_or(|tls| !tls.sessions.contains_key(&(request.handle & !3)));
         let deadline = if drained {
-            let deadline = host_deadline(n.until);
+            let due = deadline(n.until, token);
             // Even a drained reader gets one try at an already-expired deadline.
-            if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
+            if due == Due::Passed {
                 let outcome = attempt(request, n, first).unwrap_or_else(|| signal(6));
                 return finish(request, n, outcome);
             }
-            deadline
+            due.host()
         } else {
             if let Some(outcome) = attempt(request, n, first) {
                 return finish(request, n, outcome);
             }
-            let deadline = host_deadline(n.until);
-            if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
+            let due = deadline(n.until, token);
+            if due == Due::Passed {
                 return finish(request, n, signal(6));
             }
-            deadline
+            due.host()
         };
         let key = n.connecting.unwrap_or(request.handle);
         let write = matches!(request.operation, CONNECT | SEND_PAIR | SEND_SECRET);
@@ -797,10 +836,11 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
                 }
             }
             Ok(Err(write)) => {
-                let deadline = host_deadline(n.until);
-                if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
+                let due = deadline(n.until, token);
+                if due == Due::Passed {
                     return tls_finish(tls, key, signal(6));
                 }
+                let deadline = due.host();
                 n.pending_write = write;
                 if let Err(e) = sockets.arm(key, write, token) {
                     return tls_finish(tls, key, error(e.raw_os_error().unwrap_or(libc::EIO)));

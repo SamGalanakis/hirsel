@@ -162,6 +162,12 @@ pub opaque resource type HostFile
 
 pub opaque resource type HostEntries
 
+// The hand that moves a `provide.clock` Clock, and the trigger that stops a
+// `provide.process` Process (core.md, Provide).
+pub opaque resource type ClockHand
+
+pub opaque resource type StopTrigger
+
 pub type Kind = File | Directory | Symlink | Other
 
 pub type Stat {

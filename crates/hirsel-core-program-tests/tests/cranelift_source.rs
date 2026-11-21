@@ -104,13 +104,24 @@ fn waiting() -> u64 waits {
     let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
     result.unwrap(channel.receive(rx))
 }
+
+// A virtual Clock's deadline fires only from advance_to; its hand is held but
+// never moved, so the run is quiescent: Deadlock (FAIL-15), not a host timer.
+fn virtual_sleep() -> u64 waits {
+    let (c, h) = provide.clock(0, 0)
+    host.sleep_until(c, 1)
+    1
+}
 "#;
     let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
-    assert_eq!(
-        eval::run(&module, names["waiting"], &[], 1_000_000).outcome,
-        Outcome::Stopped("Deadlock")
-    );
-    execute(&module, &[(names["waiting"], vec![])], false);
+    for name in ["waiting", "virtual_sleep"] {
+        assert_eq!(
+            eval::run(&module, names[name], &[], 1_000_000).outcome,
+            Outcome::Stopped("Deadlock"),
+            "{name}"
+        );
+        execute(&module, &[(names[name], vec![])], false);
+    }
 }
 
 use hirsel_core_program_tests::wire_socket;

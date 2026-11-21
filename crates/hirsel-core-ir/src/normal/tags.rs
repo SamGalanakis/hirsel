@@ -400,6 +400,13 @@ tags!(HostOp {
     45 => NextEntries,
     46 => Stat,
     47 => StatFile,
+    48 => ProvideClock,
+    49 => ProvideRandom,
+    50 => ProvideProcess,
+    51 => ClockAdvance,
+    52 => ClockSetWall,
+    53 => ClockIdle,
+    54 => ProcessTrigger,
 });
 
 tags!(RaiseCause {

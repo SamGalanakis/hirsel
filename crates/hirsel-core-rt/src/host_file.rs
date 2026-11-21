@@ -101,6 +101,8 @@ pub(crate) struct Files {
     pub(crate) tls_writes: BTreeMap<u64, crate::secret::TlsWrite>,
     // Children inherit these entries without borrowing the scheduler's sockets.
     pub(crate) registry: Registry,
+    /// The run's virtual clock, random and process cells (`provide`).
+    pub(crate) cells: crate::provide::Cells,
 }
 impl Registry {
     /// Pin a substitute Args vector and return its handle.
@@ -176,6 +178,23 @@ impl Registry {
     pub(crate) fn grant_handle(&self, handle: u64) -> u64 {
         self.0.lock().unwrap().grants[&handle].handle
     }
+    /// A cell's ClockHand or StopTrigger: a live resource whose drop closes
+    /// nothing but itself (CLOSE_CELL).
+    pub(crate) fn cell(&self, provider: Provider) -> u64 {
+        self.insert(File {
+            provider,
+            handle: 0,
+            mode: 0,
+            close_op: CLOSE_CELL,
+        })
+    }
+    pub(crate) fn file_provider(&self, key: u64) -> Provider {
+        self.file(key).provider
+    }
+    /// Consume a live StopTrigger without closing it.
+    pub(crate) fn take_cell(&self, key: u64) -> Provider {
+        self.take_file(key).provider
+    }
 }
 impl Files {
     pub(crate) unsafe fn close_all(&mut self, context: *mut Context) {
@@ -189,6 +208,7 @@ impl Files {
             // SAFETY: the run's Context and providers remain pinned.
             unsafe { files.close(context) };
         }
+        crate::provide::forget(&mut self.cells);
     }
 }
 

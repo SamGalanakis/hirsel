@@ -110,6 +110,31 @@ struct World {
     grant_charges: Vec<(Limit, u64)>,
     secrets: Vec<EvalSecret>,
     tls_writes: BTreeMap<u64, (Name, bool)>,
+    /// `provide` cells: cell `i`'s capability and its hand or trigger are both
+    /// `CELL_BASE + i` (native hirsel-core-rt `provide`).
+    cells: Vec<VirtualCell>,
+}
+const CELL_BASE: u64 = 0x80_0000;
+enum VirtualCell {
+    Clock {
+        mono: u64,
+        wall: u64,
+        /// Tasks waiting on a deadline of this clock, in registration order.
+        timers: Vec<(u64, usize)>,
+        /// Tasks in `clock.idle`, and whether quiescence has woken each.
+        idle: Vec<(usize, bool)>,
+    },
+    Random(u64),
+    Process {
+        stopped: bool,
+        waiters: Vec<usize>,
+    },
+}
+/// A deadline on the host model's clock or on a virtual clock's own timers.
+#[derive(Clone, Copy)]
+enum Due {
+    Host(u64),
+    Cell(usize, u64),
 }
 #[derive(Clone)]
 struct EvalSecret {
@@ -1447,6 +1472,10 @@ fn drive(mach: Machine<'_>, process_entry: bool) -> (Box<Machine<'_>>, Outcome, 
                     continue;
                 }
             }
+            if s.ready.is_empty() && baton.quiesce() {
+                continue;
+            }
+            let s = &mut baton.sched;
             let Some(k) = s.ready.pop_front() else {
                 baton
                     .world
@@ -1751,6 +1780,290 @@ impl<'m> Machine<'m> {
 }
 
 impl Machine<'_> {
+    fn cell(&self, handle: u64) -> Option<usize> {
+        handle
+            .checked_sub(CELL_BASE)
+            .map(|i| i as usize)
+            .filter(|&i| i < self.world.cells.len())
+    }
+    /// An operation's optional `Until` triple at `a[i..i + 3]`: present, clock, at.
+    fn until(&self, a: &[u64], i: usize) -> Option<Due> {
+        (a[i] != 0).then(|| match self.cell(a[i + 1]) {
+            Some(c) => Due::Cell(c, a[i + 2]),
+            None => Due::Host(a[i + 2]),
+        })
+    }
+    fn passed(&self, due: Due) -> bool {
+        match due {
+            Due::Host(at) => at <= self.world.clock,
+            Due::Cell(c, at) => match self.world.cells[c] {
+                VirtualCell::Clock { mono, .. } => at <= mono,
+                _ => unreachable!("an Until names a Clock"),
+            },
+        }
+    }
+    fn cell_timer(&mut self, c: usize, at: u64, k: usize) {
+        if let VirtualCell::Clock { timers, .. } = &mut self.world.cells[c]
+            && !timers.iter().any(|&(_, j)| j == k)
+        {
+            timers.push((at, k));
+        }
+    }
+    fn ready_provider(&mut self, k: usize) {
+        if self.sched.tasks[k].state == State::Provider {
+            self.sched.tasks[k].state = State::Ready;
+            self.sched.ready.push_back(k);
+        }
+    }
+    /// Park the running task on a cell until `done` holds; a cancellation that
+    /// takes effect there fails the wait Cancelled (native W park).
+    fn cell_wait(
+        &mut self,
+        t: &Task,
+        c: usize,
+        register: fn(&mut VirtualCell, usize),
+        done: fn(&VirtualCell, usize) -> bool,
+    ) -> X<()> {
+        while !done(&self.world.cells[c], t.k) {
+            register(&mut self.world.cells[c], t.k);
+            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+            self.park(Some(Wait::Network(None)));
+            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                self.check_cancel(t)?;
+            }
+        }
+        Ok(())
+    }
+    /// The run is quiescent: wake its `clock.idle` waits after pruning deadlines
+    /// no parked task waits on (native `provide::quiesce`).
+    fn quiesce(&mut self) -> bool {
+        let tasks = &self.sched.tasks;
+        let parked = |k: usize| tasks[k].state == State::Provider;
+        let mut woken = Vec::new();
+        for cell in &mut self.world.cells {
+            if let VirtualCell::Clock { timers, idle, .. } = cell {
+                timers.retain(|&(_, k)| parked(k));
+                for (k, flag) in idle.iter_mut() {
+                    if !*flag && parked(*k) {
+                        *flag = true;
+                        woken.push(*k);
+                    }
+                }
+            }
+        }
+        for &k in &woken {
+            self.ready_provider(k);
+        }
+        !woken.is_empty()
+    }
+
+    /// The `provide` rows, and Clock, Random and Process operations on a cell.
+    fn provide(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Option<X<Vec<u64>>> {
+        let ok = |value: u64, written: u64| vec![value, 0, 0, written];
+        if matches!(
+            op,
+            HostOp::ProvideClock | HostOp::ProvideRandom | HostOp::ProvideProcess
+        ) {
+            // A cell holds PROVIDE_CELL until the run ends, as a narrowed grant
+            // (MEM-24); a refusal answers 0 with the available bytes.
+            let payer = t.limits.last().unwrap();
+            let charge = hirsel_core_layout::charge::PROVIDE_CELL;
+            if let Err(available) = self.admit(payer, charge) {
+                return Some(Ok(ok(0, available)));
+            }
+            self.world.grant_charges.push((payer.clone(), charge));
+        }
+        let new = |w: &mut World, cell| {
+            w.cells.push(cell);
+            CELL_BASE + w.cells.len() as u64 - 1
+        };
+        let reply = match op {
+            HostOp::ProvideClock => {
+                let h = new(
+                    &mut self.world,
+                    VirtualCell::Clock {
+                        mono: a[0],
+                        wall: a[1],
+                        timers: Vec::new(),
+                        idle: Vec::new(),
+                    },
+                );
+                ok(h, h)
+            }
+            HostOp::ProvideRandom => ok(new(&mut self.world, VirtualCell::Random(a[0])), 0),
+            HostOp::ProvideProcess => {
+                let process = VirtualCell::Process {
+                    stopped: false,
+                    waiters: Vec::new(),
+                };
+                let h = new(&mut self.world, process);
+                ok(h, h)
+            }
+            HostOp::ClockAdvance => {
+                let c = self.cell(a[0]).unwrap();
+                let VirtualCell::Clock { mono, timers, .. } = &mut self.world.cells[c] else {
+                    unreachable!()
+                };
+                *mono = (*mono).max(a[1]);
+                let now = *mono;
+                let mut due: Vec<_> = timers
+                    .iter()
+                    .copied()
+                    .filter(|&(at, _)| at <= now)
+                    .collect();
+                timers.retain(|&(at, _)| at > now);
+                due.sort_by_key(|&(at, _)| at);
+                for (_, k) in due {
+                    self.ready_provider(k);
+                }
+                ok(0, 0)
+            }
+            HostOp::ClockSetWall => {
+                let c = self.cell(a[0]).unwrap();
+                if let VirtualCell::Clock { wall, .. } = &mut self.world.cells[c] {
+                    *wall = a[1];
+                }
+                ok(0, 0)
+            }
+            HostOp::ProcessTrigger => {
+                let c = self.cell(a[0]).unwrap();
+                let VirtualCell::Process { stopped, waiters } = &mut self.world.cells[c] else {
+                    unreachable!()
+                };
+                *stopped = true;
+                for k in std::mem::take(waiters) {
+                    self.ready_provider(k);
+                }
+                ok(0, 0)
+            }
+            HostOp::ClockIdle => {
+                let c = self.cell(a[0]).unwrap();
+                if let Err(cancelled) = self.check_cancel(t) {
+                    return Some(Err(cancelled));
+                }
+                let waited = self.cell_wait(
+                    t,
+                    c,
+                    |cell, k| {
+                        if let VirtualCell::Clock { idle, .. } = cell
+                            && !idle.iter().any(|&(j, _)| j == k)
+                        {
+                            idle.push((k, false));
+                        }
+                    },
+                    |cell, k| match cell {
+                        VirtualCell::Clock { idle, .. } => {
+                            idle.iter().any(|&(j, woken)| j == k && woken)
+                        }
+                        _ => unreachable!(),
+                    },
+                );
+                if let VirtualCell::Clock { idle, .. } = &mut self.world.cells[c] {
+                    idle.retain(|&(j, _)| j != t.k);
+                }
+                if let Err(cancelled) = waited {
+                    return Some(Err(cancelled));
+                }
+                let VirtualCell::Clock { timers, .. } = &self.world.cells[c] else {
+                    unreachable!()
+                };
+                match timers.iter().map(|&(at, _)| at).min() {
+                    Some(at) => ok(at, 1),
+                    None => ok(0, 0),
+                }
+            }
+            HostOp::WallMs
+            | HostOp::MonoNs
+            | HostOp::SleepUntil
+            | HostOp::Random
+            | HostOp::Stopped => {
+                let c = self.cell(a[0])?;
+                if !matches!(op, HostOp::WallMs | HostOp::MonoNs)
+                    && let Err(cancelled) = self.check_cancel(t)
+                {
+                    return Some(Err(cancelled));
+                }
+                match op {
+                    HostOp::WallMs | HostOp::MonoNs => {
+                        let VirtualCell::Clock { mono, wall, .. } = self.world.cells[c] else {
+                            unreachable!()
+                        };
+                        vec![if op == HostOp::MonoNs { mono } else { wall }]
+                    }
+                    HostOp::SleepUntil => {
+                        let at = a[1];
+                        loop {
+                            let VirtualCell::Clock { mono, .. } = self.world.cells[c] else {
+                                unreachable!()
+                            };
+                            if at <= mono {
+                                break;
+                            }
+                            self.cell_timer(c, at, t.k);
+                            self.sched.tasks[t.k].cancellable =
+                                t.shield == 0 && t.obligations.len() == 1;
+                            self.park(Some(Wait::Network(None)));
+                            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                                if let VirtualCell::Clock { timers, .. } = &mut self.world.cells[c]
+                                {
+                                    timers.retain(|&(_, k)| k != t.k);
+                                }
+                                if let Err(cancelled) = self.check_cancel(t) {
+                                    return Some(Err(cancelled));
+                                }
+                            }
+                        }
+                        ok(0, 0)
+                    }
+                    HostOp::Random => {
+                        let (_, data, len, cap) = self.carrier(a[1]);
+                        let spare = cap.saturating_sub(len) as usize;
+                        let VirtualCell::Random(state) = &mut self.world.cells[c] else {
+                            unreachable!()
+                        };
+                        let mut bytes = Vec::with_capacity(spare);
+                        while bytes.len() < spare {
+                            // SplitMix64: eight little-endian bytes a step.
+                            *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                            let mut z = *state;
+                            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                            let step = (z ^ (z >> 31)).to_le_bytes();
+                            let n = (spare - bytes.len()).min(8);
+                            bytes.extend_from_slice(&step[..n]);
+                        }
+                        self.put(data + len, &bytes);
+                        self.store(a[1] + 8, 8, len + spare as u64);
+                        ok(0, spare as u64)
+                    }
+                    _ => {
+                        let waited = self.cell_wait(
+                            t,
+                            c,
+                            |cell, k| {
+                                if let VirtualCell::Process { waiters, .. } = cell
+                                    && !waiters.contains(&k)
+                                {
+                                    waiters.push(k);
+                                }
+                            },
+                            |cell, _| matches!(cell, VirtualCell::Process { stopped: true, .. }),
+                        );
+                        if let VirtualCell::Process { waiters, .. } = &mut self.world.cells[c] {
+                            waiters.retain(|&k| k != t.k);
+                        }
+                        if let Err(cancelled) = waited {
+                            return Some(Err(cancelled));
+                        }
+                        vec![]
+                    }
+                }
+            }
+            _ => return None,
+        };
+        Some(Ok(reply))
+    }
+
     fn park_task(&mut self, t: &Task, condition: Condition) {
         self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
         self.park(Some(Wait::Task(condition)));
@@ -2030,7 +2343,11 @@ impl Machine<'_> {
             HostOp::SendPair | HostOp::RecvBounded => 3,
             _ => 2,
         };
-        let deadline = (op != HostOp::Listen && a[until] != 0).then(|| a[until + 2]);
+        let deadline = if op == HostOp::Listen {
+            None
+        } else {
+            self.until(a, until)
+        };
         let spare = if op == HostOp::RecvBounded {
             cap.saturating_sub(len).min(a[2]) as usize
         } else {
@@ -2084,7 +2401,7 @@ impl Machine<'_> {
         }) {
             return vec![0, 1, 0, 0];
         }
-        if a[3] != 0 && a[5] <= self.world.clock {
+        if self.until(a, 3).is_some_and(|due| self.passed(due)) {
             return vec![0, 6, 0, 0];
         }
         let (data, len, cap) = (
@@ -2107,7 +2424,7 @@ impl Machine<'_> {
         &mut self,
         t: &Task,
         model: &hirsel_core_net::model::Model,
-        deadline: Option<u64>,
+        deadline: Option<Due>,
         mut attempt: impl FnMut(u64) -> Option<hirsel_core_net::model::Reply>,
     ) -> hirsel_core_net::model::Reply {
         let token = t.k as u64 + 1;
@@ -2115,11 +2432,19 @@ impl Machine<'_> {
             if let Some(reply) = attempt(token) {
                 break reply;
             }
-            if deadline.is_some_and(|at| at <= model.now()) {
+            if deadline.is_some_and(|due| self.passed(due)) {
                 break model.abort(token, false);
             }
             self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
-            self.park(Some(Wait::Network(deadline)));
+            let host = match deadline {
+                Some(Due::Host(at)) => Some(at),
+                Some(Due::Cell(c, at)) => {
+                    self.cell_timer(c, at, t.k);
+                    None
+                }
+                None => None,
+            };
+            self.park(Some(Wait::Network(host)));
             if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
                 break model.abort(token, true);
             }
@@ -2178,7 +2503,7 @@ impl Machine<'_> {
             return Err(cancelled);
         }
         model.advance_to(self.world.clock);
-        let deadline = (a[6] != 0).then_some(a[8]);
+        let deadline = self.until(a, 6);
         let reply = self.network_attempt(t, &model, deadline, |token| {
             model.attempt_tls(key, &offered, token)
         });
@@ -2329,7 +2654,7 @@ impl Machine<'_> {
         self.check_cancel(t)?;
         let model = self.world.network.sockets.model().unwrap().clone();
         model.advance_to(self.world.clock);
-        let deadline = (a[4] != 0).then_some(a[6]);
+        let deadline = self.until(a, 4);
         let mut committed = 0;
         let reply = self.network_attempt(t, &model, deadline, |token| {
             model.attempt_secret(
@@ -2351,6 +2676,9 @@ impl Machine<'_> {
             return Ok(self.secret_policy(t, op, a));
         }
         self.deny_describe_capability();
+        if let Some(reply) = self.provide(t, op, a) {
+            return reply;
+        }
         match op {
             HostOp::TlsConnect => return self.tls_connect(t, a),
             HostOp::SendSecret => return self.send_secret(t, a),
@@ -2406,7 +2734,14 @@ impl Machine<'_> {
             | HostOp::EnvGet
             | HostOp::EnvLen
             | HostOp::EnvName
-            | HostOp::EnvNarrow => {
+            | HostOp::EnvNarrow
+            | HostOp::ProvideClock
+            | HostOp::ProvideRandom
+            | HostOp::ProvideProcess
+            | HostOp::ClockAdvance
+            | HostOp::ClockSetWall
+            | HostOp::ClockIdle
+            | HostOp::ProcessTrigger => {
                 unreachable!()
             }
             HostOp::Resolve => self.network_resolve(a),
@@ -3259,6 +3594,11 @@ impl Machine<'_> {
                     return false;
                 }
                 self.trace.push(h);
+                if (CELL_BASE..LISTING_HANDLE).contains(&h) {
+                    // A dropped ClockHand freezes its clock; a dropped
+                    // StopTrigger never stops its process.
+                    return false;
+                }
                 if let Some(file) = h
                     .checked_sub(FILE_BASE)
                     .and_then(|i| self.world.files.get_mut(i as usize))

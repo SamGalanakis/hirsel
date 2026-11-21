@@ -547,7 +547,9 @@ pub fn trigger(take t: StopTrigger)
   `process.trigger` has run, including a trigger before the call; dropping a `StopTrigger`
   without triggering never stops. Dropping a `ClockHand` freezes its clock: pending sleeps
   and deadlines on it never fire.
-- **Replay.** A virtual provider's operations pass the replay point as every provider
-  operation does ([CAP-8](capabilities.md#cap-8-the-replay-point)). A seeded simulation is a
-  test-run configuration over today's task order, not an order promise.
+- **Replay.** A virtual provider's results are computed by the run, so they are not
+  inputs of [CAP-8](capabilities.md#cap-8-the-replay-point): a replay recomputes them. The
+  host operations a server makes pass the replay point as every provider operation does.
+  A seeded simulation is a test-run configuration over today's task order, not an order
+  promise.
 

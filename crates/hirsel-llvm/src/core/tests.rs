@@ -2337,7 +2337,14 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             HostOp::SendSecret => &["u64", "ptr", "u64", "ptr", "u8", "u64", "u64"],
             HostOp::SecretSeal => &["ptr", "ptr"],
             HostOp::SecretNarrow => &["u64", "ptr"],
-            HostOp::NetSplit | HostOp::Stopped | HostOp::EnvLen => &["u64"],
+            HostOp::NetSplit
+            | HostOp::Stopped
+            | HostOp::EnvLen
+            | HostOp::ProvideRandom
+            | HostOp::ClockIdle
+            | HostOp::ProcessTrigger => &["u64"],
+            HostOp::ProvideProcess => &[],
+            HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => &["u64", "u64"],
             HostOp::StdinRead => &["u64", "ptr", "u8", "u64", "u64"],
             HostOp::EnvName => &["u64", "u64"],
             HostOp::Open => &["u64", "ptr", "u8"],

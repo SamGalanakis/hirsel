@@ -113,11 +113,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
         }
         if r.operation == RESOLVE {
             let resolve = &*r.path.cast::<crate::resolve::ResolveRequest>();
-            let outcome = if resolve
-                .network
-                .until
-                .is_some_and(|(_, _, at)| at <= p.model.now())
-            {
+            let outcome = if due(&p.model, resolve.network.until, token).is_err() {
                 crate::os_net::signal(6)
             } else {
                 let addresses = p.model.resolve(
@@ -194,14 +190,36 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                 ..Step::default()
             };
         }
-        let deadline = n.until.map(|(_, _, at)| at);
-        if deadline.is_some_and(|at| at <= p.model.now()) {
-            return Step {
+        match due(&p.model, n.until, token) {
+            Err(()) => Step {
                 outcome: outcome(&p.model.abort(token, false)),
                 ..Step::default()
-            };
+            },
+            Ok(deadline) => pending(deadline),
         }
-        pending(deadline)
+    }
+}
+
+/// The model's deadline for `until`: `Err` once reached, else the model-time
+/// timer to arm (`None` for no timer). A provide.clock deadline lives on that
+/// Clock's own timers (CONC-7): only its advance_to reaches it, and it readies
+/// the token, so no model timer stands in for it.
+unsafe fn due(
+    model: &Model,
+    until: Option<(Provider, u64, u64)>,
+    token: u64,
+) -> Result<Option<u64>, ()> {
+    match until {
+        None => Ok(None),
+        Some((clock, _, _)) if crate::provide::owns(&clock) => {
+            // SAFETY: the request pins its clock grant through settlement.
+            match unsafe { crate::os_net::deadline(until, token) } {
+                crate::os_net::Due::Passed => Err(()),
+                _ => Ok(None),
+            }
+        }
+        Some((_, _, at)) if at <= model.now() => Err(()),
+        Some((_, _, at)) => Ok(Some(at)),
     }
 }
 
@@ -219,15 +237,15 @@ unsafe fn secret_step(model: &Model, request: &Request, token: u64) -> Step {
         let send = &mut *request.path.cast_mut().cast::<crate::secret::SendRequest>();
         let parts = [&request.buffer, &send.secret, &*send.network.send_tail]
             .map(|part| crate::tls::bytes(part));
-        let deadline = send.network.until.map(|(_, _, at)| at);
         let reply = if let Some(reply) =
             model.attempt_secret(request.handle, parts, &mut send.committed, token)
         {
             reply
-        } else if deadline.is_some_and(|at| at <= model.now()) {
-            model.abort(token, false)
         } else {
-            return pending(deadline);
+            match due(model, send.network.until, token) {
+                Err(()) => model.abort(token, false),
+                Ok(deadline) => return pending(deadline),
+            }
         };
         let mut out = outcome(&reply);
         if reply.error != 0 {
@@ -246,13 +264,13 @@ unsafe fn tls_step(model: &Model, request: &Request, token: u64) -> Step {
         let tls = &mut *request.path.cast_mut().cast::<TlsRequest>();
         let state = &mut *tls.state.cast::<HandshakeState>();
         let key = request.handle;
-        let deadline = tls.network.until.map(|(_, _, at)| at);
         let reply = if let Some(reply) = model.attempt_tls(key, &state.alpn, token) {
             reply
-        } else if deadline.is_some_and(|at| at <= model.now()) {
-            model.abort(token, false)
         } else {
-            return pending(deadline);
+            match due(model, tls.network.until, token) {
+                Err(()) => model.abort(token, false),
+                Ok(deadline) => return pending(deadline),
+            }
         };
         if reply.error == 0 {
             let protocol = &mut *tls.protocol_out;

@@ -1,0 +1,9 @@
+// Virtual providers (core.md, Provide; CAP-2). Each returns a capability whose
+// provider is the run itself: its reads answer at once, and its waits are
+// readied only by the program (`clock.advance_to`, `process.trigger`) or by
+// quiescence (`clock.idle`).
+pub fn clock(start_mono_ns: u64, start_wall_ms: u64) -> (Clock, ClockHand)
+
+pub fn random(seed: u64) -> Random
+
+pub fn process() -> (Process, StopTrigger)

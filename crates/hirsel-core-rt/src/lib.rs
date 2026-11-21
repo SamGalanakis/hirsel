@@ -36,6 +36,7 @@ mod os_tls;
 #[cfg(any(test, feature = "charge-observation"))]
 pub mod peak;
 pub mod process;
+mod provide;
 pub mod provider;
 pub mod region;
 mod resolve;

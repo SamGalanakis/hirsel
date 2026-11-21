@@ -242,6 +242,20 @@ HirselCoreHostOutcome hirsel_core_env_get(HirselCoreContext *, uint64_t, const H
 HirselCoreHostOutcome hirsel_core_env_len(HirselCoreContext *, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_env_name(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_env_narrow(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
+/* provide cells (core.md, Provide). Constructors admit one cell from the
+   current limit; a refusal returns value 0 with written = available. Clock
+   answers (value = Clock grant, written = ClockHand key), random answers its
+   Random grant, process answers (value = Process grant, written = StopTrigger
+   key). The last argument of each call is the site. */
+HirselCoreHostOutcome hirsel_core_provide_clock(HirselCoreContext *, uint64_t mono, uint64_t wall, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_random(HirselCoreContext *, uint64_t seed, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_process(HirselCoreContext *, uint64_t);
+HirselCoreHostOutcome hirsel_core_clock_advance_to(HirselCoreContext *, uint64_t hand, uint64_t mono, uint64_t);
+HirselCoreHostOutcome hirsel_core_clock_set_wall(HirselCoreContext *, uint64_t hand, uint64_t wall, uint64_t);
+/* Suspends until every other task waits, then Outcome.value is the earliest
+   waited deadline and written is 1 when there is one. */
+HirselCoreHostOutcome hirsel_core_clock_idle(HirselCoreContext *, uint64_t hand, uint64_t);
+HirselCoreHostOutcome hirsel_core_process_trigger(HirselCoreContext *, uint64_t trigger, uint64_t);
 /* SEND_PAIR (26): buffer borrows the first prefix. The first word at path
    is a const HirselCoreBuffer * borrowing the second prefix. Both remain
    pinned through deliver. Outcome.value counts their concatenated prefix. */

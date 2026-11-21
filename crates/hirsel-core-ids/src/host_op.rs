@@ -38,3 +38,13 @@ pub const NEXT_ENTRIES: u8 = 45;
 pub const STAT: u8 = 46;
 pub const STAT_FILE: u8 = 47;
 pub const CLOSE_ENTRIES: u8 = 48;
+// Virtual providers (core.md, Provide). The constructors and hand operations
+// change run-local state only; CLOSE_CELL is a hand's or trigger's cleanup.
+pub const PROVIDE_CLOCK: u8 = 49;
+pub const PROVIDE_RANDOM: u8 = 50;
+pub const PROVIDE_PROCESS: u8 = 51;
+pub const CLOCK_ADVANCE: u8 = 52;
+pub const CLOCK_SET_WALL: u8 = 53;
+pub const CLOCK_IDLE: u8 = 54;
+pub const PROCESS_TRIGGER: u8 = 55;
+pub const CLOSE_CELL: u8 = 56;

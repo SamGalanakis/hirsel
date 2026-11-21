@@ -1021,6 +1021,13 @@ pub enum HostOp {
     EnvLen = 34,
     EnvName = 35,
     EnvNarrow = 36,
+    ProvideClock = hirsel_core_ids::host_op::PROVIDE_CLOCK as isize,
+    ProvideRandom = hirsel_core_ids::host_op::PROVIDE_RANDOM as isize,
+    ProvideProcess = hirsel_core_ids::host_op::PROVIDE_PROCESS as isize,
+    ClockAdvance = hirsel_core_ids::host_op::CLOCK_ADVANCE as isize,
+    ClockSetWall = hirsel_core_ids::host_op::CLOCK_SET_WALL as isize,
+    ClockIdle = hirsel_core_ids::host_op::CLOCK_IDLE as isize,
+    ProcessTrigger = hirsel_core_ids::host_op::PROCESS_TRIGGER as isize,
 }
 
 impl HostOp {
@@ -1083,6 +1090,13 @@ impl HostOp {
         HostOp::EnvLen,
         HostOp::EnvName,
         HostOp::EnvNarrow,
+        HostOp::ProvideClock,
+        HostOp::ProvideRandom,
+        HostOp::ProvideProcess,
+        HostOp::ClockAdvance,
+        HostOp::ClockSetWall,
+        HostOp::ClockIdle,
+        HostOp::ProcessTrigger,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -1139,6 +1153,13 @@ impl HostOp {
             HostOp::EnvLen => "env_len",
             HostOp::EnvName => "env_name",
             HostOp::EnvNarrow => "env_narrow",
+            HostOp::ProvideClock => "provide_clock",
+            HostOp::ProvideRandom => "provide_random",
+            HostOp::ProvideProcess => "provide_process",
+            HostOp::ClockAdvance => "clock_advance_to",
+            HostOp::ClockSetWall => "clock_set_wall",
+            HostOp::ClockIdle => "clock_idle",
+            HostOp::ProcessTrigger => "process_trigger",
         }
     }
     /// C entry of a host operation that has its own adapter.
@@ -1165,6 +1186,13 @@ impl HostOp {
             Self::EnvLen => "hirsel_core_env_len",
             Self::EnvName => "hirsel_core_env_name",
             Self::EnvNarrow => "hirsel_core_env_narrow",
+            Self::ProvideClock => "hirsel_core_provide_clock",
+            Self::ProvideRandom => "hirsel_core_provide_random",
+            Self::ProvideProcess => "hirsel_core_provide_process",
+            Self::ClockAdvance => "hirsel_core_clock_advance_to",
+            Self::ClockSetWall => "hirsel_core_clock_set_wall",
+            Self::ClockIdle => "hirsel_core_clock_idle",
+            Self::ProcessTrigger => "hirsel_core_process_trigger",
             _ => unreachable!(),
         }
     }
@@ -1187,6 +1215,12 @@ impl HostOp {
                 | HostOp::EnvLen
                 | HostOp::EnvName
                 | HostOp::EnvNarrow
+                | HostOp::ProvideClock
+                | HostOp::ProvideRandom
+                | HostOp::ProvideProcess
+                | HostOp::ClockAdvance
+                | HostOp::ClockSetWall
+                | HostOp::ProcessTrigger
         )
     }
 }
@@ -1439,7 +1473,15 @@ impl RtOp {
                         ],
                         outcome,
                     ),
-                    HostOp::NetSplit | HostOp::EnvLen => (vec![V(u64_)], outcome),
+                    HostOp::NetSplit
+                    | HostOp::EnvLen
+                    | HostOp::ProvideRandom
+                    | HostOp::ClockIdle
+                    | HostOp::ProcessTrigger => (vec![V(u64_)], outcome),
+                    HostOp::ProvideProcess => (vec![], outcome),
+                    HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => {
+                        (vec![V(u64_), V(u64_)], outcome)
+                    }
                     HostOp::EnvGet | HostOp::EnvName => {
                         let input = if op == HostOp::EnvGet { p } else { u64_ };
                         (

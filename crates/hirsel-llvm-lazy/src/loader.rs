@@ -82,6 +82,11 @@ type Program = unsafe extern "C" fn(
     Deliver,
     Option<CounterRangeReport>,
     *mut libc::c_void,
+    *const u8,
+    usize,
+    usize,
+    *const libc::c_char,
+    Option<Deliver>,
     *mut Output,
 );
 pub(crate) enum ProgramUnit<'a> {
@@ -312,6 +317,7 @@ pub(crate) fn compile_module(
         0,
         &mut crate::Unheld,
         None,
+        crate::Lend::None,
     )?;
     Ok(program
         .objects
@@ -329,8 +335,9 @@ pub(crate) fn program(
     jobs: u32,
     held: &mut dyn crate::Held,
     folds: Option<&mut crate::CounterRangeFolds>,
+    lend: crate::Lend<'_>,
 ) -> Result<crate::Program, String> {
-    emit(units, exports, true, target, jobs, held, folds)
+    emit(units, exports, true, target, jobs, held, folds, lend)
 }
 
 struct Receiver<'a> {
@@ -428,6 +435,13 @@ unsafe fn ir_key(ir: *const u8, len: usize) -> [u8; 32] {
     let bytes = unsafe { std::slice::from_raw_parts(ir, len) };
     bytes.try_into().expect("a part key is 32 bytes")
 }
+unsafe extern "C" fn lend_bodies(receiver: *mut libc::c_void, lent: *const u8, len: usize) {
+    // SAFETY: as in `deliver_part`.
+    unsafe {
+        let receiver = &mut *(receiver as *mut Receiver<'_>);
+        receiver.program.lent = std::slice::from_raw_parts(lent, len).to_vec();
+    }
+}
 unsafe extern "C" fn deliver_part(receiver: *mut libc::c_void, object: *const u8, len: usize) {
     // SAFETY: as in `reuse_part`; the object is copied before the callback returns.
     unsafe {
@@ -464,7 +478,14 @@ fn emit(
     jobs: u32,
     held: &mut dyn crate::Held,
     folds: Option<&mut crate::CounterRangeFolds>,
+    lend: crate::Lend<'_>,
 ) -> Result<crate::Program, String> {
+    let (lent, limit, lend_to): (&[u8], usize, Option<Deliver>) = match lend {
+        crate::Lend::None => (&[], 0, None),
+        crate::Lend::Borrow(lent) => (lent, 0, None),
+        crate::Lend::Lend { limit } => (&[], limit, Some(lend_bodies)),
+    };
+    let own = CString::new(crate::LENT_NAMESPACE).unwrap();
     let triple = CString::new(target.triple()).unwrap();
     let cpu = CString::new(target.cpu()).unwrap();
     let features = CString::new(target.llvm_features()).unwrap();
@@ -527,6 +548,11 @@ fn emit(
             deliver_part,
             report,
             &mut receiver as *mut Receiver<'_> as *mut libc::c_void,
+            lent.as_ptr(),
+            lent.len(),
+            limit,
+            own.as_ptr(),
+            lend_to,
             &mut output,
         );
         let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();

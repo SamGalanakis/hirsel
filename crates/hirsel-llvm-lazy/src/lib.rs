@@ -49,10 +49,12 @@ pub fn emit_program_for_target(
     exports: &[String],
     target: hirsel_core_layout::Target,
 ) -> Result<Vec<u8>, String> {
-    Ok(emit_program_parts(units, exports, target, 0, &mut Unheld)?
-        .objects
-        .pop()
-        .expect("an unreused program is generated"))
+    Ok(
+        emit_program_parts(units, exports, target, 0, &mut Unheld, Lend::None)?
+            .objects
+            .pop()
+            .expect("an unreused program is generated"),
+    )
 }
 
 /// Checked operations folded by CounterRangePass in named functions, keyed by LLVM symbol bytes.
@@ -73,6 +75,7 @@ pub fn emit_program_with_counter_range_folds_for_test(
         0,
         &mut Unheld,
         Some(&mut folds),
+        Lend::None,
     )?;
     Ok((
         program
@@ -92,7 +95,28 @@ pub struct Program {
     /// section per such part; [`core::split_native_object`] cuts either per
     /// part. Empty when every part was reused.
     pub objects: Vec<Vec<u8>>,
+    /// The bodies a library program lends ([`Lend::Lend`]), as bitcode.
+    pub lent: Vec<u8>,
 }
+
+/// What a release program lends or borrows of a separately generated library.
+#[derive(Clone, Copy)]
+pub enum Lend<'a> {
+    None,
+    /// The program is over a library that lent these bodies: its inliner may
+    /// copy one into a caller; each call it keeps reaches the library's part.
+    Borrow(&'a [u8]),
+    /// The program is a library: [`Program::lent`] gets each body of at most
+    /// `limit` instructions, under the name its part's object defines once
+    /// each local definition's name has [`LENT_NAMESPACE`] after it.
+    Lend {
+        limit: usize,
+    },
+}
+
+/// What a library's link contract appends to each of its strong definitions
+/// that it does not export.
+pub const LENT_NAMESPACE: &str = "$std";
 /// One out-of-line definition, by its content-derived symbol. The empty name
 /// is a whole module that cannot be cut per definition: its only part.
 pub struct Part {
@@ -161,6 +185,7 @@ impl ReleaseUnit {
         exports: &[String],
         jobs: u32,
         held: &mut dyn Held,
+        lend: Lend<'_>,
     ) -> Result<Program, String> {
         loader::program(
             vec![loader::ProgramUnit::Native(self.module)],
@@ -169,6 +194,7 @@ impl ReleaseUnit {
             jobs,
             held,
             None,
+            lend,
         )
     }
 }
@@ -184,6 +210,7 @@ pub fn emit_program_parts(
     target: hirsel_core_layout::Target,
     jobs: u32,
     held: &mut dyn Held,
+    lend: Lend<'_>,
 ) -> Result<Program, String> {
     loader::program(
         lower_program_units(units, target)?,
@@ -192,6 +219,7 @@ pub fn emit_program_parts(
         jobs,
         held,
         None,
+        lend,
     )
 }
 
@@ -296,6 +324,7 @@ b0(v0: u64):
             hirsel_core_layout::Target::X86_64Linux,
             1,
             &mut super::Unheld,
+            super::Lend::None,
         )
         .unwrap();
         let [bytes] = program.objects.try_into().unwrap();

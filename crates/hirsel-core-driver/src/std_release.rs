@@ -16,6 +16,12 @@
 //!   own namespace (`$std`), so no name the unit defines meets a program's;
 //! - site: the unit's site references name source items, whose words the
 //!   program's source map assigns over the unit's points and its own.
+//!
+//! The unit also lends its bodies of at most [`LEND_LIMIT`] instructions,
+//! after its own optimiser, to each program's inliner
+//! ([`hirsel_llvm_lazy::Lend`]). A body copied into a program keeps the
+//! unit's site references and step charges; each call it keeps reaches the
+//! unit's part under the same five contracts.
 use super::*;
 use crate::native::{NativeOptions, NativeStop, ObjectProduct};
 use hirsel_core_ir::step_contexts::Summary;
@@ -23,7 +29,12 @@ use hirsel_core_ir::{FuncId, Identity};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-const STD_SCHEMA: u32 = 1;
+const STD_SCHEMA: u32 = 2;
+
+/// The largest body, in LLVM instructions after the std's optimiser, the std
+/// lends a program's inliner. LLVM's inline cost decides each call site; this
+/// bounds what each program reads and links.
+const LEND_LIMIT: usize = 2000;
 
 /// The release std's publication record, stored under the std key.
 #[derive(Serialize, Deserialize)]
@@ -37,6 +48,8 @@ struct StdRecord {
     points: BTreeMap<String, Vec<(u32, u32)>>,
     /// The unit's parts in the shared parts cache, in link order.
     parts: Vec<ContentHash>,
+    /// The shared-store key of the bodies the unit lends, as bitcode.
+    lent: ContentHash,
 }
 
 /// A separately lowered release std, as a program's assembly takes it.
@@ -47,10 +60,12 @@ pub(crate) struct StdSide {
     pub summaries: BTreeMap<ContentHash, Summary>,
     pub points: BTreeMap<String, Vec<(u32, u32)>>,
     pub objects: Vec<ObjectProduct>,
+    /// The bodies the std lends a program's inliner, as bitcode.
+    pub lent: Vec<u8>,
 }
 
 /// The suffix of the std's own hidden names.
-const STD_NAMESPACE: &str = "$std";
+const STD_NAMESPACE: &str = hirsel_llvm_lazy::LENT_NAMESPACE;
 
 impl CheckProduct {
     /// The library image's plain roots: a plain identity of each non-generic
@@ -131,8 +146,12 @@ impl CheckProduct {
                 compiled: false,
             });
         }
+        let lent = shared
+            .get(record.lent)?
+            .ok_or_else(|| NativeStop::Entry("the release std's lent bodies are missing".into()))?;
         Ok(StdSide {
             key,
+            lent,
             roots: record.roots.into_iter().collect(),
             summaries: record.summaries.into_iter().collect(),
             points: record.points,
@@ -258,6 +277,7 @@ impl CheckProduct {
             target,
             hirsel_guard::jobs() as u32,
             &mut hirsel_llvm_lazy::Unheld,
+            hirsel_llvm_lazy::Lend::Lend { limit: LEND_LIMIT },
         )
         .map_err(emit)?;
         let parts: Vec<ContentHash> = (0..program.parts.len())
@@ -318,12 +338,15 @@ impl CheckProduct {
         if body_keys.is_empty() {
             return Err(NativeStop::Entry("the release std holds no body".into()));
         }
+        let lent = crate::native::key("hirsel.core-std-lent.v1", &key)?;
+        shared.put_keyed(lent, &program.lent)?;
         Ok(StdRecord {
             schema: STD_SCHEMA,
             roots,
             summaries: codes.into_iter().zip(summaries).collect(),
             points,
             parts,
+            lent,
         })
     }
 }

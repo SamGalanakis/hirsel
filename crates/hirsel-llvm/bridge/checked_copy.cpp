@@ -823,6 +823,20 @@ static bool stepWord(Instruction &I, Value *Context, const DataLayout &DL) {
   int64_t Offset = 0;
   return GetPointerBaseWithConstantOffset(P, Offset, DL) == Context && Offset == 16;
 }
+// Any word access at the Step window's address, tagged or not: a body imported
+// from a library and inlined here keeps the untagged window reads and writes
+// its own cold paths and step-free dispatch were given there.
+static bool windowWord(Instruction &I, Value *Context, const DataLayout &DL) {
+  if (stepWord(I, Context, DL)) return true;
+  Value *P = nullptr;
+  Type *T = nullptr;
+  if (auto *L = dyn_cast<LoadInst>(&I); L && L->isSimple()) P = L->getPointerOperand(), T = L->getType();
+  if (auto *S = dyn_cast<StoreInst>(&I); S && S->isSimple())
+    P = S->getPointerOperand(), T = S->getValueOperand()->getType();
+  if (!P || !T->isIntegerTy(64)) return false;
+  int64_t Offset = 0;
+  return GetPointerBaseWithConstantOffset(P, Offset, DL) == Context && Offset == 16;
+}
 // A callee's price for the expansion budgets: its instructions, less the
 // lifetime markers, which generate no code (LLVM's inline cost skips them too).
 static unsigned expansionCost(const Function &F) {
@@ -1065,7 +1079,7 @@ extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
     SmallVector<ReturnInst *, 8> Returns;
     bool Supported = true;
     for (BasicBlock &BB : F) for (Instruction &I : BB) {
-      if (stepWord(I, F.getArg(0), M.getDataLayout())) Accesses.push_back(&I);
+      if (windowWord(I, F.getArg(0), M.getDataLayout())) Accesses.push_back(&I);
       if (auto *C = dyn_cast<CallBase>(&I)) {
         if (auto *CI = dyn_cast<CallInst>(C)) {
           if (CI->isMustTailCall()) Supported = false;
@@ -1076,7 +1090,9 @@ extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
       if (auto *R = dyn_cast<ReturnInst>(&I)) Returns.push_back(R);
     }
     if (Accesses.empty() || !Supported) continue;
-    auto *Tag = Accesses.front()->getMetadata(LLVMContext::MD_tbaa);
+    MDNode *Tag = nullptr;
+    for (Instruction *I : Accesses)
+      if (!Tag) Tag = I->getMetadata(LLVMContext::MD_tbaa);
     IRBuilder<> B(&*F.getEntryBlock().getFirstInsertionPt());
     auto *Word = B.getInt64Ty();
     auto *Counter = B.CreateAlloca(Word, nullptr, "step.window");

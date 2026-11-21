@@ -281,10 +281,20 @@ pub(super) fn emit_release_image(
     std: Option<(
         &BTreeMap<ContentHash, hirsel_core_ir::step_contexts::Summary>,
         ContentHash,
+        &[u8],
     )>,
 ) -> Result<Emitted, NativeStop> {
     let no_summaries = BTreeMap::new();
-    let (summaries, std_key) = std.map_or((&no_summaries, None), |(s, k)| (s, Some(k)));
+    let (summaries, std_key, lent) =
+        std.map_or((&no_summaries, None, &[][..]), |(s, k, l)| (s, Some(k), l));
+    // The bodies a program imports shape its code, so they key its parts.
+    let lent_key =
+        (!lent.is_empty()).then(|| ContentHash::of_parts("hirsel.core-std-lent.v1", [lent]));
+    let lend = if lent.is_empty() {
+        hirsel_llvm_lazy::Lend::None
+    } else {
+        hirsel_llvm_lazy::Lend::Borrow(lent)
+    };
     let jobs = hirsel_guard::jobs() as u32;
     let entry = &instance.definition;
     let compiler = compiler_identity()?;
@@ -352,6 +362,7 @@ pub(super) fn emit_release_image(
             instance,
             closed_executable,
             std_key,
+            lent_key,
             &refs,
         ),
         &consumed.iter().map(Vec::as_slice).collect::<Vec<_>>(),
@@ -383,7 +394,14 @@ pub(super) fn emit_release_image(
         sites = std::mem::take(&mut release.sites);
         let key = crate::native::key(
             "hirsel.core-release-ir.v2",
-            &(&generator, runtime, instance, std_key, release.ir_key()),
+            &(
+                &generator,
+                runtime,
+                instance,
+                std_key,
+                lent_key,
+                release.ir_key(),
+            ),
         )?;
         if let Some((mut record, objects)) = load_parts(store, &shared, key)? {
             record.sites.clone_from(&sites);
@@ -416,10 +434,10 @@ pub(super) fn emit_release_image(
         };
         let exports = [instance.symbol()];
         let program = match lowered {
-            Some(release) => release.emit(&exports, jobs, &mut reuse),
-            None => {
-                hirsel_llvm_lazy::emit_program_parts(&units, &exports, target, jobs, &mut reuse)
-            }
+            Some(release) => release.emit(&exports, jobs, &mut reuse, lend),
+            None => hirsel_llvm_lazy::emit_program_parts(
+                &units, &exports, target, jobs, &mut reuse, lend,
+            ),
         }
         .map_err(emit)?;
         if let Some(error) = failure {

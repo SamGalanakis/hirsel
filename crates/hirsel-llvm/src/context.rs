@@ -202,6 +202,8 @@ impl<'context> Module<'context> {
                     prepay_steps: LLVMBool,
                     report: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize, c_uint)>,
                     receiver: *mut c_void,
+                    lent: *const u8,
+                    lent_len: usize,
                 ) -> LLVMErrorRef;
                 fn hirsel_llvm_specialize_release(
                     module: LLVMModuleRef,
@@ -218,8 +220,16 @@ impl<'context> Module<'context> {
                 ) -> LLVMErrorRef;
             }
             hirsel_llvm_inline_snapshot_calls(self.raw);
-            let mut error =
-                hirsel_llvm_optimize_release(self.raw, machine.raw, 0, 0, None, ptr::null_mut());
+            let mut error = hirsel_llvm_optimize_release(
+                self.raw,
+                machine.raw,
+                0,
+                0,
+                None,
+                ptr::null_mut(),
+                std::ptr::null(),
+                0,
+            );
             if error.is_null() {
                 unsafe extern "C" {
                     fn hirsel_llvm_scalarize_aggregate_phis(

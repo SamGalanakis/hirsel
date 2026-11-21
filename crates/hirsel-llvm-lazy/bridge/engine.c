@@ -29,7 +29,8 @@ extern LLVMBool hirsel_llvm_emit_object(LLVMTargetMachineRef machine, LLVMModule
 extern void hirsel_llvm_align_release_functions(LLVMModuleRef module);
 typedef void (*HirselLlvmCounterRangeReport)(void *, const char *, size_t, unsigned);
 extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
-    LLVMBool prune, LLVMBool prepay_steps, HirselLlvmCounterRangeReport report, void *receiver);
+    LLVMBool prune, LLVMBool prepay_steps, HirselLlvmCounterRangeReport report, void *receiver,
+    const uint8_t *lent, size_t lent_len);
 extern LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_cleanup_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_sweep_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
@@ -49,7 +50,8 @@ typedef void (*HirselLlvmKeepTail)(void *, const char *, size_t, const uint8_t *
 extern void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     HirselLlvmFindTail find, HirselLlvmKeepTail keep, void *context);
 extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
-    HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *context, char **error);
+    HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *context, size_t lend_limit,
+    const char *own, HirselLlvmDeliver lend, char **error);
 static pthread_once_t initialized = PTHREAD_ONCE_INIT;
 static void initialize(void) {
     // Dense control flow leaves many copies of the same rematerializable
@@ -452,7 +454,8 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
                           HirselLlvmFindTail find, HirselLlvmKeepTail keep,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver,
                           HirselLlvmCounterRangeReport report, void *receiver,
-                          HirselLlvmOutput *out) {
+                          const uint8_t *lent, size_t lent_len, size_t lend_limit, const char *own,
+                          HirselLlvmDeliver lend, HirselLlvmOutput *out) {
     unsigned major, minor, patch;
     LLVMGetVersion(&major, &minor, &patch);
     if (major != 23 || minor != 1 || patch != 5) {
@@ -536,7 +539,8 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         hirsel_llvm_inline_snapshot_calls(module);
         LLVMValueRef refill = LLVMGetNamedFunction(module, "hirsel_core_step_out");
         LLVMErrorRef e = hirsel_llvm_optimize_release(module, machine, export_count != 0,
-                                                      refill && LLVMGetFirstUse(refill), report, receiver);
+                                                      refill && LLVMGetFirstUse(refill), report, receiver,
+                                                      lent, lent_len);
         if (!e) e = hirsel_llvm_specialize_release(module, machine);
         if (!e) {
             hirsel_llvm_inline_recursive_leaves(module);
@@ -574,7 +578,8 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     // holds is generated per part on `jobs` threads, or with `jobs` 0 as one
     // object to cut per part; a standalone module, which keeps its order, as
     // one object.
-    if (export_count) failed = hirsel_llvm_emit_parts(module, machine, jobs, reuse, deliver, receiver, &message);
+    if (export_count) failed = hirsel_llvm_emit_parts(module, machine, jobs, reuse, deliver, receiver,
+                                                      lend_limit, own, lend, &message);
     else {
         failed = hirsel_llvm_emit_object(machine, module, &message, &buffer);
         if (!failed && buffer) {
@@ -597,7 +602,10 @@ done:
 // is asked for each definition's release tail and `keep` gets each one run,
 // `reuse` is asked first for each part, `deliver` gets each missed part's object on
 // `jobs` threads, or with `jobs` 0 the one object generated, if any, and `out`
-// is empty or holds the error.
+// is empty or holds the error. `lent` is a library's bodies (`lend` of an
+// earlier program), offered to the optimizer's inliner and then dropped; with
+// `lend`, this program is such a library, and `lend` gets its bodies of up to
+// `lend_limit` instructions, local names suffixed with `own`.
 __attribute__((visibility("default")))
 void hirsel_llvm_program_v9(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
@@ -606,15 +614,17 @@ void hirsel_llvm_program_v9(const HirselLlvmUnit *units, size_t count,
                           HirselLlvmFindTail find, HirselLlvmKeepTail keep,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver,
                           HirselLlvmCounterRangeReport report, void *receiver,
-                          HirselLlvmOutput *out) {
+                          const uint8_t *lent, size_t lent_len, size_t lend_limit, const char *own,
+                          HirselLlvmDeliver lend, HirselLlvmOutput *out) {
     emit_program(units, count, exports, export_count, speed, triple, cpu, features, jobs, find, keep,
-                 reuse, deliver, report, receiver, out);
+                 reuse, deliver, report, receiver, lent, lent_len, lend_limit, own, lend, out);
 }
 __attribute__((visibility("default")))
 void hirsel_llvm_compile_v2(const uint8_t *ir, size_t len, uint8_t speed, const char *triple,
                            const char *cpu, const char *features, HirselLlvmOutput *out) {
     HirselLlvmUnit unit = { ir, len, NULL };
-    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, features, 0, NULL, NULL, NULL, NULL, NULL, NULL, out);
+    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, features, 0, NULL, NULL, NULL, NULL, NULL, NULL,
+                 NULL, 0, 0, NULL, NULL, out);
 }
 
 extern const void *hirsel_llvm_no_folder_api(void);

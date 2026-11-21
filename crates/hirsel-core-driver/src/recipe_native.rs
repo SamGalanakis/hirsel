@@ -739,6 +739,10 @@ impl Publication {
             "hirsel.assembly-environment.v1",
             &(
                 std.as_ref().map(|std| std.key),
+                // The bodies the program imports shape its code.
+                std.as_ref().filter(|std| !std.lent.is_empty()).map(|std| {
+                    ContentHash::of_parts("hirsel.core-std-lent.v1", [std.lent.as_slice()])
+                }),
                 emitter,
                 tools.image,
                 tools.runtime,
@@ -787,7 +791,8 @@ impl Publication {
                     tools.runtime,
                     &store,
                     link.uses_hirsel_launcher(),
-                    std.as_ref().map(|std| (&std.summaries, std.key)),
+                    std.as_ref()
+                        .map(|std| (&std.summaries, std.key, std.lent.as_slice())),
                 )?;
                 release_sites = emitted.release_sites;
                 let mut objects = emitted.objects;

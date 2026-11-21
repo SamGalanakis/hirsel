@@ -1,20 +1,84 @@
-// The release std (std-reuse-1520 S1). Two laws over the image-backed std:
+// The release std (std-reuse-1520 S1, S2). Two laws over the image-backed std:
 //
-// Independence: the std's parts are a function of the std product. Two
-// programs over the same image, each lowering the std cold into its own parts
-// store, hold equal record and part bytes. Mutant: the std's roots less the
-// definitions a program reaches, red on "the std's record".
+// Independence: the std's parts, and the bodies it lends, are a function of
+// the std product. Two programs over the same image, each lowering the std
+// cold into its own parts store, hold equal record and part bytes. Mutant: the
+// std's roots less the definitions a program reaches, red on "the std's record".
 //
-// Semantic differential: a program assembled over the separately lowered std
-// does and reports what the same program assembled whole does: its exit,
-// output and failure report, its logical charge report, its failure under a
-// root step limit, and how its recorded tape replays. Oracle: today's whole assembly of
-// the same publication. Mutant: the std's site points left out of the
-// program's source map, red on "what the program does and reports" (fails).
+// Semantic differential: a program assembled over the separately lowered std,
+// calling it out of line (Parts) or importing and inlining its small bodies
+// (Imported), does and reports what the same program assembled whole does: its
+// exit, output and failure report, its logical charge report, its failure
+// under a root step limit, and how its recorded tape replays. Oracle: the
+// out-of-line assembly over the same std parts. Mutants: the std's site points
+// left out of the program's source map, and imported bodies whose site rows
+// are rebased to the program, each red on "fails plain Imported: what the
+// program does and reports"; imported bodies that charge one step more than
+// their parts, red on the same assertion (the printed step thresholds).
 
-/// A program failing inside a plain std function, whose site only the std's
-/// points place.
-const STD_FAILS: (&str, &str) = ("fails", "pub fn main() -> Result[(), Exit] {\n    let mut s = string.new()\n    let _ = string.push_uint(mut s, 5, 1u32, 0, ' ')\n    Ok(())\n}\n");
+/// A program over small plain std bodies the program imports and inlines (the
+/// std part holds each out of line): it prints the fewest steps under which three
+/// std calls finish, which the bodies' step charges fix, then fails inside a
+/// std function, whose site only the std's points place.
+const STD_FAILS: (&str, &str) = (
+    "fails",
+    r#"pub fn main(out: Stdout) -> Result[(), Exit] {
+    let s = "the quick brown fox jumps over the lazy dog"
+    let mut n = 0u64
+    let mut done = false
+    while !done {
+        let found = bound steps n {
+            string.find(s, 0, "dog")
+        }
+        match found {
+            Ok(_) => {
+                done = true
+            }
+            Error(_) => {
+                n += 1
+            }
+        }
+    }
+    let mut m = 0u64
+    done = false
+    while !done {
+        let parsed = bound steps m {
+            int.parse_uint("123456789012345678", 10u32)
+        }
+        match parsed {
+            Ok(_) => {
+                done = true
+            }
+            Error(_) => {
+                m += 1
+            }
+        }
+    }
+    let mut k = 0u64
+    done = false
+    while !done {
+        let finite = bound steps k {
+            float.is_finite(float.from_bits64(k))
+        }
+        match finite {
+            Ok(_) => {
+                done = true
+            }
+            Error(_) => {
+                k += 1
+            }
+        }
+    }
+    let mut line = string.new()
+    let _ = string.push_uint(mut line, n, 10u32, 0, ' ')
+    let _ = string.push_uint(mut line, m, 10u32, 1, ' ')
+    let _ = string.push_uint(mut line, k, 10u32, 1, ' ')
+    result.unwrap(stdout.write(out, line));
+    let _ = char.digit('a', 1u32)
+    Ok(())
+}
+"#,
+);
 
 /// One check of `source` as project `project` over std imaged into `cache`.
 fn std_checked(dir: &Path, project: &str, source: &str, cache: &str) -> Arc<CheckProduct> {
@@ -42,9 +106,20 @@ fn std_of(product: &CheckProduct, options: &NativeOptions) -> crate::native::std
 /// What a run of a program shows: exit, stdout, stderr, charge report, tape.
 type Shown = (Option<i32>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 
-/// Assemble `product`'s entry whole, or over its separately lowered std, and
-/// run it with a fresh charge report and tape.
-fn std_run(product: &CheckProduct, options: &NativeOptions, separate: bool, dir: &Path) -> Shown {
+/// How a program's build takes the std.
+#[derive(Clone, Copy, Debug)]
+enum StdBuild {
+    /// Composed with the program.
+    Whole,
+    /// Over the std's parts alone: each call reaches the out-of-line part.
+    Parts,
+    /// Over the std's parts, with its lent bodies imported for inlining.
+    Imported,
+}
+
+/// Assemble `product`'s entry as `build` takes the std, and run it with a
+/// fresh charge report and tape.
+fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir: &Path) -> Shown {
     use crate::native::recipe_build::Publication;
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let code = crate::code_store::CodeStore::new(dir.join("code"));
@@ -52,7 +127,11 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, separate: bool, dir:
     let publication = product
         .publish_release(&entry, &reached, options, &code, 16 * 1024 * 1024)
         .unwrap();
-    let std = separate.then(|| std_of(product, options));
+    let std = match build {
+        StdBuild::Whole => None,
+        StdBuild::Parts => Some(crate::native::std_release::StdSide { lent: Vec::new(), ..std_of(product, options) }),
+        StdBuild::Imported => Some(std_of(product, options)),
+    };
     if let Some(std) = &std {
         assert!(!std.roots.is_empty(), "the std holds roots");
     }
@@ -97,11 +176,13 @@ fn a_separate_std_is_the_std_products_alone() {
         let record = shared.get(std.key).unwrap().expect("the std record");
         let bytes: Vec<Vec<u8>> =
             std.objects.iter().map(|object| std::fs::read(&object.path).unwrap()).collect();
-        parts.push((std.key, record, bytes));
+        assert!(!std.lent.is_empty(), "the std lends bodies");
+        parts.push((std.key, record, bytes, std.lent));
     }
     assert_eq!(parts[0].0, parts[1].0, "the std key");
     assert!(parts[0].1 == parts[1].1, "the std's record");
     assert!(parts[0].2 == parts[1].2, "the std's parts");
+    assert!(parts[0].3 == parts[1].3, "the std's lent bodies");
 }
 
 /// Each corpus program, assembled whole and over the separate std, under each
@@ -133,6 +214,8 @@ fn std_differential(modes: &[&str]) -> usize {
                     ..base.clone()
                 },
                 "limited" => NativeOptions { root_limit: 40, ..base.clone() },
+                // The release unit, whose failures name their site rows.
+                "release" => NativeOptions { debug_lines: false, ..base.clone() },
                 "recorded" => NativeOptions {
                     recording: true,
                     runtime: runtime("HIRSEL_CORE_RT_RECORD_ARCHIVE"),
@@ -140,21 +223,28 @@ fn std_differential(modes: &[&str]) -> usize {
                 },
                 _ => unreachable!("{mode}"),
             };
-            let whole = std_run(&product, &options, false, &project);
-            let separate = std_run(&product, &options, true, &project);
-            assert_eq!(
-                (whole.0, &whole.1, &whole.2),
-                (separate.0, &separate.1, &separate.2),
-                "{name} {mode}: what the program does and reports"
-            );
-            assert_eq!(whole.3, separate.3, "{name} {mode}: the charge report");
+            // The out-of-line parts are the oracle: a composed build, and an
+            // inlined copy of a std body, does and reports what its part does.
+            let parts = std_run(&product, &options, StdBuild::Parts, &project);
+            let builds = [StdBuild::Parts, StdBuild::Whole, StdBuild::Imported];
+            let mut tapes = vec![(StdBuild::Parts, parts.4.clone())];
+            for build in [StdBuild::Whole, StdBuild::Imported] {
+                let shown = std_run(&product, &options, build, &project);
+                assert_eq!(
+                    (parts.0, &parts.1, &parts.2),
+                    (shown.0, &shown.1, &shown.2),
+                    "{name} {mode} {build:?}: what the program does and reports"
+                );
+                assert_eq!(parts.3, shown.3, "{name} {mode} {build:?}: the charge report");
+                assert_eq!(parts.4.is_some(), shown.4.is_some(), "{name} {mode} {build:?}: a tape");
+                tapes.push((build, shown.4));
+            }
             // A tape names its executable's launch image, so two builds' tapes
-            // differ there; each must replay on the other build as on its own.
-            assert_eq!(whole.4.is_some(), separate.4.is_some(), "{name} {mode}: a tape");
-            for (label, tape) in [("whole", &whole.4), ("separate", &separate.4)] {
+            // differ there; each must replay on every build as on its own.
+            for (label, tape) in &tapes {
                 let Some(tape) = tape else { continue };
                 taped += 1;
-                let path = project.join(format!("{label}.tape"));
+                let path = project.join(format!("{label:?}.tape"));
                 std::fs::write(&path, tape).unwrap();
                 let replay = NativeOptions {
                     replay: Some(crate::ReplayPlan {
@@ -164,19 +254,21 @@ fn std_differential(modes: &[&str]) -> usize {
                     grant_mask: 0,
                     ..options.clone()
                 };
-                let on_whole = std_run(&product, &replay, false, &project);
-                let on_separate = std_run(&product, &replay, true, &project);
-                assert_eq!(
-                    (on_whole.0, &on_whole.1, &on_whole.2),
-                    (on_separate.0, &on_separate.1, &on_separate.2),
-                    "{name}: the {label} build's tape replayed on each build"
-                );
+                let on_parts = std_run(&product, &replay, StdBuild::Parts, &project);
+                for build in builds {
+                    let on = std_run(&product, &replay, build, &project);
+                    assert_eq!(
+                        (on_parts.0, &on_parts.1, &on_parts.2),
+                        (on.0, &on.1, &on.2),
+                        "{name}: the {label:?} build's tape replayed on {build:?}"
+                    );
+                }
                 // A faithful replay ends 0 and repeats no live write, even of
                 // a failed run (RL1).
                 assert_eq!(
-                    (on_whole.0, on_whole.1.is_empty()),
+                    (on_parts.0, on_parts.1.is_empty()),
                     (Some(0), true),
-                    "{name}: the {label} build's tape replays"
+                    "{name}: the {label:?} build's tape replays"
                 );
             }
         }
@@ -187,7 +279,7 @@ fn std_differential(modes: &[&str]) -> usize {
 #[test]
 #[ignore = "explicit native integration target"]
 fn a_program_over_a_separate_std_does_what_it_does_whole() {
-    std_differential(&["plain", "charges", "limited"]);
+    std_differential(&["plain", "release", "charges", "limited"]);
 }
 
 /// Recording opens the tape's directory through the OS Dir provider (openat2),

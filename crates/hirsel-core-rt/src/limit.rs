@@ -542,6 +542,17 @@ impl Payer {
     #[inline]
     pub(crate) fn unit_refund(self, bytes: u64) {
         debug_assert!(bytes != 0, "a zero-byte unit refund");
+        // SAFETY: as above; a root that keeps a pin or other bytes is
+        // credited in place, as `refund_rooted` does with `root == id`.
+        unsafe {
+            let links = &*self.links();
+            let r = &mut *self.local();
+            if links.parent.is_none() && (links.refs != 0 || r.outstanding != bytes) {
+                r.available = r.available.wrapping_add(bytes);
+                r.outstanding = r.outstanding.wrapping_sub(bytes);
+                return;
+            }
+        }
         let f = self.forest();
         let id = self.slot().id;
         let root = f.find(id);

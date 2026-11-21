@@ -889,6 +889,15 @@ archives = [
         let first = publish(b"");
         let second = publish(b"abc");
         assert_ne!(first, second);
+        law.write("ffi_laws/main.hirsel", r#"
+fn probe(value: Option[Foreign[laws.Laws]]) -> i32 {
+    match value { Some(f) => native.touch(f), None => 0 }
+}
+pub fn main() -> Result[(), Exit] {
+    if probe(None) == 0 { Ok(()) } else { Error(Exit(status: 4)) }
+}
+"#);
+        let without_grant = PackageLaw::pass(law.run(&["publish", "ffi_laws", "--backend", engine]));
         std::fs::remove_dir_all(law.path("ffi_laws")).unwrap();
         let build = |root: &str| law.run(&["build", "--recipe", root, "-o", "sealed-program"]);
         for root in [&first, &second] {
@@ -897,6 +906,10 @@ archives = [
             assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
             assert_eq!(run.stderr, b"freed 3\nfreed 2\nfreed 1\n");
         }
+        PackageLaw::pass(build(without_grant.trim()));
+        let run = Command::new(law.path("sealed-program")).output().unwrap();
+        assert!(run.status.success(), "{run:?}");
+        assert!(run.stderr.is_empty(), "{run:?}");
         let root = crate::native::recipe_build::parse_root(&second).unwrap();
         let bytes = std::fs::read(store.path(ObjectKind::Recipe, root)).unwrap();
         let mut recipe = Recipe::decode(&bytes, &mut DecodeBudget::unlimited()).unwrap();
@@ -1812,6 +1825,8 @@ fn sqlite_hot_journal(db: &[u8], super_name: Option<&[u8]>) -> Vec<u8> {
 fn sqlite_directory_recovery_locking_and_sync() {
     use std::fs;
     use std::io::{BufRead, BufReader, Read};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::ExitStatusExt;
     use std::process::Stdio;
 
     crate::openat2_required::require();
@@ -1904,7 +1919,7 @@ int fsync(int fd) {
     let alias = law.path("data/b.db");
     for backend in ["cranelift", "llvm"] {
         fs::create_dir(law.path("data")).unwrap();
-        let exe = law.path(&format!("sqlite-{backend}"));
+        let exe = law.path(if backend == "llvm" { "sqlite-llvm" } else { "sqlite-cl" });
         PackageLaw::pass(law.run(&[
             "build", "core/programs/sqlite", "--entry", "sqlite@1/boundary/main",
             "--backend", backend, "--source-core", "--source-std", "--limit", "67108864",
@@ -1922,10 +1937,23 @@ int fsync(int fd) {
         let run = |mode| success(child(mode).output().unwrap());
         run("init");
         let baseline = fs::read(&db).unwrap();
-        let mut holder = child("holder").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-        let mut signal = String::new();
-        BufReader::new(holder.stdout.take().unwrap()).read_line(&mut signal).unwrap();
-        assert_eq!(signal, "locked\n");
+        let start_holder = || {
+            let mut holder = Command::new(&exe)
+                .arg("holder")
+                .current_dir(law.dir.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn().unwrap();
+            let output = holder.stdout.take().unwrap();
+            let mut poll = libc::pollfd { fd: output.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: the child output remains open and poll borrows one initialized row.
+            assert_eq!(unsafe { libc::poll(&raw mut poll, 1, 15_000) }, 1);
+            let mut signal = String::new();
+            BufReader::new(output).read_line(&mut signal).unwrap();
+            assert_eq!(signal, "locked\n");
+            holder
+        };
+        let mut holder = start_holder();
         run("compete");
         drop(holder.stdin.take());
         assert!(holder.wait().unwrap().success());
@@ -1952,6 +1980,16 @@ int fsync(int fd) {
             fs::remove_file(&journal).unwrap();
         }
         run("wal");
+        let mut dead = start_holder();
+        assert!(shm.is_file());
+        let identity = Command::new("ps")
+            .args(["-o", "comm=", "-p", &dead.id().to_string()])
+            .output().unwrap();
+        assert!(identity.status.success());
+        assert_eq!(String::from_utf8_lossy(&identity.stdout).trim(), exe.file_name().unwrap().to_str().unwrap());
+        dead.kill().unwrap();
+        assert_eq!(dead.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert!(shm.is_file(), "the killed connection must leave its shared index behind");
         fs::write(&shm, [0xff; 32768]).unwrap();
         let mut stale = fs::File::open(&shm).unwrap();
         run("read");
@@ -2088,5 +2126,140 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
         assert!(output.is_empty());
         assert_eq!(error, format!("replay: refused: {REFUSAL}\n"));
         fs::remove_dir_all(&state).unwrap();
+    }
+}
+
+#[test]
+fn foreign_archive_refusals_precede_the_linker() {
+    use crate::code_store::ObjectKind;
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    const TARGET: &str = "x86_64-unknown-linux-gnu";
+    const ARM: &str = "aarch64-unknown-linux-gnu";
+    const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    const GRANT: &str = "Foreign=ffi_laws@1/laws/Laws";
+    const PREFIX: &str = "FFI-3: archive laws.a of ffi_laws@1/native for x86_64-unknown-linux-gnu";
+
+    let law = PackageLaw::new();
+    let fixture = law.libraries.join("programs/ffi_laws");
+    let original = fs::read_to_string(fixture.join("hirsel.toml")).unwrap();
+    for file in ["laws.hirsel", "native.hirsel"] {
+        law.write(&format!("ffi_laws/{file}"), fs::read(fixture.join(file)).unwrap());
+    }
+    law.write("ffi_laws/main.hirsel", r#"
+pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
+    let _ = native.make(f)
+    Ok(())
+}
+pub fn pure() -> Result[(), Exit] { Ok(()) }
+"#);
+    law.write("ffi_laws/tests.hirsel", r#"
+@test
+fn ungranted() -> Result[(), ()] { Ok(()) }
+@test
+fn granted(f: Foreign[laws.Laws]) -> Result[(), ()] {
+    let _ = native.make(f)
+    Ok(())
+}
+"#);
+    let pinned = fs::read(fixture.join("libffi_laws.a")).unwrap();
+    let repin = |bytes: &[u8], pin: &str| {
+        law.write("ffi_laws/laws.a", bytes);
+        law.write("ffi_laws/hirsel.toml", original.replace("libffi_laws.a", "laws.a")
+            .replace(crate::package_manifest::STAGED_FOREIGN[0].3, pin));
+    };
+    let pinned_options = native_options(Backend::Cranelift, law.dir.path());
+    let Link::Driver(cc) = pinned_options.link else { unreachable!() };
+    let ld = cc.with_file_name("ld.lld");
+    let ar = cc.with_file_name("llvm-ar");
+    let called = law.path("linker-called");
+    // Clang's dry run still describes the real link, but it selects this
+    // wrapper, so link execution leaves a marker and recipe capture does not.
+    law.write("clang-wrapper", format!("#!/bin/sh\nexec '{}' --ld-path='{}' \"$@\"\n", cc.display(), law.path("ld.lld").display()));
+    law.write("ld.lld", format!("#!/bin/sh\n: > '{}'\nexec '{}' \"$@\"\n", called.display(), ld.display()));
+    for script in ["clang-wrapper", "ld.lld"] {
+        fs::set_permissions(law.path(script), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let runtime = pinned_options.runtime.canonicalize().unwrap();
+    let invoke = |action, engine, args: &[&str]| {
+        let mut request = [
+            action, "ffi_laws", "--backend", engine, "--cc", law.path("clang-wrapper").to_str().unwrap(),
+            "--libraries", law.libraries.to_str().unwrap(), "--runtime", runtime.to_str().unwrap(),
+            "--store", law.path("build").to_str().unwrap(),
+            "--package-store", law.path("packages").to_str().unwrap(), "-o", "image",
+        ].into_iter().map(str::to_owned).collect::<Vec<_>>();
+        request.extend(args.iter().map(|arg| (*arg).to_owned()));
+        process::tape_request(&request, law.dir.path())
+    };
+    let fail_build = |engine, target, expected: &str| {
+        let (status, output, error) = invoke("build", engine, &["--target", target, "--grant", GRANT]);
+        assert_eq!(status, Some(2), "{output}\n{error}");
+        assert!(error.lines().any(|line| line == expected), "{error}");
+        assert!(!called.exists(), "the linker ran before FFI-3 refusal");
+    };
+    for engine in ["cranelift", "llvm"] {
+        repin(b"abc", EMPTY);
+        fail_build(engine, TARGET, &format!("{PREFIX} does not match its pin: expected sha256 {EMPTY}, found sha256 {ABC}"));
+        repin(b"abc", ABC);
+        fail_build(engine, TARGET, &format!("{PREFIX} is not an indexed ar archive"));
+        repin(&pinned, crate::package_manifest::STAGED_FOREIGN[0].3);
+        fail_build(engine, ARM, "FFI-3: ffi_laws@1/native has no archive for target aarch64-unknown-linux-gnu; its archives are for x86_64-unknown-linux-gnu");
+        let (_, _, pure_error) = invoke("build", engine, &["--target", ARM, "--entry", "ffi_laws@1/main/pure"]);
+        assert!(!pure_error.contains("FFI-3"), "{pure_error}");
+        assert!(called.exists(), "the non-foreign control reached the linker");
+        fs::remove_file(&called).unwrap();
+    }
+
+    law.write("ffi_laws/laws.c", r#"
+extern long write(int, const void *, unsigned long);
+void *hfl_make(void) { return 0; }
+int hfl_free(void *p) { (void)p; return 0; }
+__attribute__((constructor)) static void init(void) { write(2, "ctor\n", 5); }
+"#);
+    let dir = law.path("ffi_laws");
+    let compile = |target| {
+        command(Command::new(&cc).current_dir(&dir).args(["-target", target, "-fPIC", "-c", "laws.c", "-o", "laws.o"])).unwrap();
+    };
+    let archive = |flags| {
+        command(Command::new(&ar).current_dir(&dir).args([flags, "candidate.a", "laws.o"])).unwrap();
+        let bytes = fs::read(dir.join("candidate.a")).unwrap();
+        fs::remove_file(dir.join("candidate.a")).unwrap();
+        bytes
+    };
+    let pin_bytes = |bytes: Vec<u8>| repin(&bytes, &crate::call::hex(&ObjectKind::ForeignArchive.hash(&bytes).0));
+    compile(TARGET);
+    let thin = archive("rcsT");
+    let initializer = archive("rcs");
+    let mut stale_index = initializer.clone();
+    let member_symbol = {
+        let ar = object::read::archive::ArchiveFile::parse(stale_index.as_slice()).unwrap();
+        let member = ar.members().next().unwrap().unwrap();
+        let bytes = member.data(stale_index.as_slice()).unwrap();
+        let inside = bytes.windows(9).position(|word| word == b"hfl_make\0").unwrap();
+        bytes.as_ptr().addr() - stale_index.as_ptr().addr() + inside
+    };
+    stale_index[member_symbol] = b'x';
+    compile(ARM);
+    let wrong_machine = archive("rcs");
+    for engine in ["cranelift", "llvm"] {
+        pin_bytes(thin.clone());
+        fail_build(engine, TARGET, &format!("{PREFIX} is a thin archive; its members are not inside the pinned bytes"));
+        pin_bytes(wrong_machine.clone());
+        fail_build(engine, TARGET, &format!("{PREFIX}: member laws.o is not a relocatable object for {TARGET}"));
+        pin_bytes(stale_index.clone());
+        fail_build(engine, TARGET, &format!("{PREFIX} does not define hfl_make, declared at ffi_laws@1/native/make"));
+        pin_bytes(initializer.clone());
+        let refusal = format!("{PREFIX}: member laws.o has section .init_array of type SHT_INIT_ARRAY, which is not an admitted object feature");
+        fail_build(engine, TARGET, &refusal);
+        let (status, output, error) = invoke("test", engine, &["--grant", GRANT, "--json"]);
+        assert_eq!(status, Some(1), "{output}\n{error}");
+        assert!(output.contains(&refusal), "{output}\n{error}");
+        assert!(!output.contains("ctor") && !error.contains("ctor"), "{output}\n{error}");
+        let rows: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(rows["tests"].as_array().unwrap().iter().any(|row| {
+            row["definition"] == "ffi_laws@1/tests/ungranted" && row["passed"] == true
+        }));
+        fs::remove_file(&called).unwrap();
     }
 }

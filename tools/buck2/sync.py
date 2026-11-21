@@ -112,7 +112,7 @@ TEST_DATA = {
     "hirsel-core-program-tests-test-cranelift_source": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],
     "hirsel-core-program-tests-test-cranelift_source_aarch64": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],
     "hirsel-core-program-tests-test-llvm_source": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],
-    "hirsel-core-driver-unittest": ["core/core/**", "core/front/**", "core/std/**", "core/programs/m1/**", "core/programs/m2b/**", "core/programs/ffi_laws/**", "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml", "core/langarena/**/*.hirsel", "core/HOOK-ALLOWLIST", "crates/hirsel-core-rt/include/**"],
+    "hirsel-core-driver-unittest": ["core/core/**", "core/programs/ffi_laws/**", "core/programs/sqlite/**", "core/front/**", "core/std/**", "core/programs/m1/**", "core/programs/m2b/**", "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml", "core/langarena/**/*.hirsel", "core/HOOK-ALLOWLIST", "crates/hirsel-core-rt/include/**"],
     "hirsel-cranelift-test-core_native": ["core/front/**", "core/core/**"],
     "hirsel-cranelift-test-core_aarch64": ["core/front/**", "core/core/**"],
 }

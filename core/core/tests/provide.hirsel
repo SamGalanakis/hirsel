@@ -1214,13 +1214,13 @@ fn forward(onward: Net, s: Secret) -> bool waits {
     }
 }
 
-// The onward server: the proof reaches it only as Send calls, from the
-// first byte it has not taken (core.md, Net authority). It takes 100 of the
-// 106 bytes, then the last 6.
+// SC9: the server first takes 10 bytes of the RFC 7677 client-final
+// message. The next Send must offer exactly the remaining 96 bytes.
 fn proof_server(take s: Served[NetOp]) -> bool waits {
     let mut served = take s
     let dialed = net_connect(mut served, 5, 5432)
     let shaken = answer_handshake(mut served, 5)
+    let expected = "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
     let first = match provide.next(mut served) {
         Some(take call) => {
             let op = match provide.net_op(call) {
@@ -1230,26 +1230,26 @@ fn proof_server(take s: Served[NetOp]) -> bool waits {
             let mut p: Bytes = list.with_capacity(128)
             provide.payload(call, 1, mut p)
             let data = match string.from_utf8(take p) {
-                Ok(text) => text == "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=",
+                Ok(text) => text == expected,
                 Error(_) => false
             }
-            op && data && net_answer(mut served, take call, Count(100))
+            op && data && net_answer(mut served, take call, Count(10))
         },
         None => false
     }
     let rest = match provide.next(mut served) {
         Some(take call) => {
             let op = match provide.net_op(call) {
-                Send(socket, prefix, tail) => socket == 5 && prefix == 6 && tail == 0,
+                Send(socket, prefix, tail) => socket == 5 && prefix == 96 && tail == 0,
                 _ => false
             }
-            let mut p: Bytes = list.with_capacity(8)
+            let mut p: Bytes = list.with_capacity(96)
             provide.payload(call, 1, mut p)
             let data = match string.from_utf8(take p) {
-                Ok(text) => text == "AndVQ=",
+                Ok(text) => text == string.slice(expected, 10, 106),
                 Error(_) => false
             }
-            op && data && net_answer(mut served, take call, Count(6))
+            op && data && net_answer(mut served, take call, Count(96))
         },
         None => false
     }
@@ -1262,6 +1262,15 @@ fn proof_server(take s: Served[NetOp]) -> bool waits {
         None => true
     }
     dialed && shaken && first && rest && halves && quiet
+}
+
+// expect: run served_scram(tasks) = true
+fn served_scram(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let server = task.spawn(tasks, bytes 65536, take s, proof_server)
+    let verified = forward(n, sealed_pencil("alpha.test"))
+    let proven = result.unwrap(task.join(take server))
+    verified && proven
 }
 
 // TLS-5, virtual streams (NOTES 6): send_secret on a served stream with a
@@ -1332,7 +1341,7 @@ fn handshake_server(take s: Served[NetOp]) -> bool waits {
     dialed && shaken && halves && quiet
 }
 
-// TLS-5 and TLS-6, virtual streams: a served Net's stream never satisfies a
+// TLS-5 and SC6, virtual streams: a served Net's stream never satisfies a
 // Secret from an entry grant, here granted to alpha.test. send_secret and
 // SCRAM on it are Denied before issue, so the server sees only the halves'
 // Released.

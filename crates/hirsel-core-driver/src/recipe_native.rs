@@ -168,7 +168,7 @@ impl CheckProduct {
             return Err(NativeStop::ForeignRecording(reason));
         }
         let decl = self.entry_decl(entry)?;
-        let foreign = self.release_foreign(reached, entry, options, decl, store)?;
+        let foreign = self.release_foreign(reached, options, decl, store)?;
         let entry = Identity::plain(entry.clone());
         let names = decl.parameters.iter().map(|p| p.name.clone()).collect();
         let (units, groups, addresses) = self.release_units(&entry, reached, store, Some(names))?;
@@ -300,7 +300,6 @@ impl CheckProduct {
     fn release_foreign(
         &self,
         reached: &Reachable<'_>,
-        entry: &DefPath,
         options: &NativeOptions,
         decl: &EntryDecl,
         store: &CodeStore,
@@ -348,7 +347,6 @@ impl CheckProduct {
         };
         let (reached_archives, link_archives) = self.check_foreign_archives(
             &modules,
-            entry,
             target,
             native_link
                 .as_ref()
@@ -449,7 +447,6 @@ impl CheckProduct {
     fn check_foreign_archives<'a>(
         &'a self,
         modules: &BTreeMap<String, ForeignLeaf>,
-        entry: &DefPath,
         target: &str,
         link: Option<(&Path, &crate::tool_inputs::LinkRecipe)>,
     ) -> Result<
@@ -466,7 +463,7 @@ impl CheckProduct {
             let (_, capture) = self.foreign_capture(function)?;
             let row = select_archive(&leaf.module, capture, target)?;
             let object = archive_ref(row);
-            sealed.admit(object, leaf, target, entry, Some(&row.path), || {
+            sealed.admit(object, leaf, target, Some(&row.path), || {
                 Ok(row.bytes.to_vec())
             })?;
             selected.insert(object.hash, row);
@@ -481,7 +478,6 @@ impl CheckProduct {
     pub(super) fn preflight_foreign_link(
         &self,
         reached: &Reachable<'_>,
-        entry: &DefPath,
         options: &NativeOptions,
     ) -> Result<LinkArchives, NativeStop> {
         if options.recording || reached.materialized.foreign.is_empty() {
@@ -494,7 +490,6 @@ impl CheckProduct {
         reached.require()?;
         let (_, sealed) = self.check_foreign_archives(
             &self.reached_foreign_modules(reached)?,
-            entry,
             &options.target,
             Some((&options.runtime, &inputs.recipe)),
         )?;

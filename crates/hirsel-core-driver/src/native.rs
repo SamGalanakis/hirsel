@@ -532,7 +532,7 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable_for(entry, options)?;
-        self.preflight_foreign_link(&reached, entry, options)?;
+        self.preflight_foreign_link(&reached, options)?;
         if !(matches!(options.backend, Backend::Llvm) && options.optimize) {
             return Ok(self.emit_reached(entry, &reached, options)?.0);
         }
@@ -813,7 +813,7 @@ impl CheckProduct {
         // An optimised LLVM build is assembled from its published recipe over
         // the separately lowered release std, like `build`.
         if matches!(options.backend, Backend::Llvm) && options.optimize {
-            self.preflight_foreign_link(reached, entry, options)?;
+            self.preflight_foreign_link(reached, options)?;
             reached.require_native(entry, options)?;
             let code = crate::code_store::CodeStore::new(options.store.join("code"));
             return self
@@ -869,7 +869,7 @@ impl CheckProduct {
         options: &NativeOptions,
         damaged: &BTreeSet<Identity>,
     ) -> Result<Linked, NativeStop> {
-        let link_archives = self.preflight_foreign_link(reached, entry, options)?;
+        let link_archives = self.preflight_foreign_link(reached, options)?;
         let instances = reached.require_native(entry, options)?;
         let foreign_modules = self.reached_foreign_modules(reached)?;
         let address = reached.address(entry)?;
@@ -2113,7 +2113,7 @@ static const char abi[sizeof(ABI) - 1] = ABI;
         };
         let mut archives = LinkArchives::default();
         archives
-            .admit(archive, &leaf, TARGET, &entry, None, || Ok(bytes))
+            .admit(archive, &leaf, TARGET, None, || Ok(bytes))
             .unwrap();
         let module = hirsel_core_ir::text::parse(
             r#"

@@ -79,6 +79,15 @@ fn slot_push_kind(path: &DefPath) -> Option<slots::SlotPush> {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// These shapes give an inner closure its own callable expectation even
+    /// when the enclosing argument still contains a hole elsewhere.
+    pub(super) fn structured_argument_type(&self, ty: TyId) -> bool {
+        matches!(
+            self.t.kind(ty),
+            TyKind::Fn(..) | TyKind::Tuple(_) | TyKind::Array(..)
+        )
+    }
+
     /// LANG-11 step 3 extends the existing literal-operand deferral only to
     /// tuples and arrays whose leaves are all unsuffixed numeric literals.
     /// Mixed aggregates and constructor calls still infer left to right.
@@ -371,6 +380,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut slot_push = None;
         let mut map_key_at = None;
         let mut map_insertion = None;
+        let prior_refusals = self.out.refusals.len();
         for (i, &a) in args.iter().enumerate() {
             let a_mode = g.params[i].mode;
             let a = self.step_argument(a, a_mode);
@@ -493,7 +503,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         want.and_then(|w| self.payload_argument(g.result, pt, w))
                     {
                         self.expr_hinted(e, Some(hint))
-                    } else if matches!(self.kind(e), NodeKind::Closure | NodeKind::ScopedClosure)
+                    } else if self.structured_argument_type(pt)
+                        || matches!(self.kind(e), NodeKind::Closure | NodeKind::ScopedClosure)
                         || self.kind(e) == NodeKind::Path
                             && matches!(self.p.target(self.at, e), Some(Target::Definition(id))
                                 if matches!(self.p.by_definition[id.0 as usize], Some(Def::Fn(_))))
@@ -583,16 +594,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
         }
+        // A refused argument could have fixed the type of a deferred literal.
+        let argument_refused = self.out.refusals.len() != prior_refusals;
         for &(i, e) in later.iter() {
             match self.known_rooted(g.params[i].ty, found, roots) {
                 Some(t) => vals[i] = self.expr(e, expect(t)).1,
-                None => {
+                None if !argument_refused => {
                     self.refuse(
                         "LANG-11",
                         e,
                         "a literal argument needs a fixed parameter type; suffix its numbers",
                     );
                 }
+                None => {}
             }
         }
         // Region generics are erased from the instance identity and may remain

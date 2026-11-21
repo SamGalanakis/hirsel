@@ -1,0 +1,45 @@
+// LANG-11. Refuse the first omitted parameter of a mixed header, a closure
+// without a callable expectation, and a callable with an open parameter.
+// LANG-13. The expected callable cannot supply an omitted ownership mode.
+// expect: refuse LANG-11 at 10:45
+// expect: refuse LANG-11 at 17:16
+// expect: refuse LANG-11 at 28:27
+// expect: refuse LANG-13 at 35:37
+// expect: compared LANG-13 at 35:37 | view | take
+fn mixed() -> u64 {
+    let f: fn(u64, u64) -> u64 = fn(a: u64, b) {
+        a + b
+    }
+    f(1, 2)
+}
+
+fn uncontextual() -> u64 {
+    let _ = fn(n) -> u64 {
+        n
+    }
+    0
+}
+
+fn fold[A, T](xs: List[T], combine: fn(A, T) -> A, take init: A) -> A {
+    init
+}
+
+fn open_parameter(xs: List[u64]) -> u64 {
+    let sum = fold(xs, fn(acc, x) {
+        acc + x
+    }, 0)
+    sum
+}
+
+fn wrong_mode() -> u64 {
+    let f: fn(take String) -> u64 = fn(s) {
+        string.byte_len(s)
+    }
+    f("text")
+}
+
+fn top_level(x) -> u64 {
+    0
+}
+// expect: refuse LANG-5 at 41:15
+// expect: compared LANG-5 at 41:15 | ) | :

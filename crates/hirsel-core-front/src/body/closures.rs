@@ -897,6 +897,58 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .or(Some(crate::types::Root::Local(slot as u32)))
     }
 
+    /// The forward visit has already substituted arguments that are fixed.
+    /// A caller's own type parameter is a type, while an unset argument is a hole.
+    fn infer_closure_params(
+        &mut self,
+        closure: NodeId,
+        params: &[NodeId],
+        expected: Option<TyId>,
+    ) -> Result<Option<TyId>, ()> {
+        let Some(&first) = params.iter().find(|&&param| self.kids(param).is_empty()) else {
+            return Ok(None);
+        };
+        if params.iter().any(|&param| !self.kids(param).is_empty()) {
+            self.refuse(
+                "LANG-11",
+                first,
+                "write every closure parameter type or omit them all",
+            );
+            return Err(());
+        }
+        let Some((ty, expected_params)) = expected.and_then(|ty| match self.t.kind(ty) {
+            TyKind::Fn(params, ..) => Some((ty, params)),
+            _ => None,
+        }) else {
+            self.refuse(
+                "LANG-11",
+                first,
+                "omitted closure parameter types need an expected callable type",
+            );
+            return Err(());
+        };
+        if expected_params.iter().any(|&(_, ty)| has_hole(&self.t, ty)) {
+            self.refuse(
+                "LANG-11",
+                first,
+                "the expected callable still has an open parameter type",
+            );
+            return Err(());
+        }
+        if expected_params.len() != params.len() {
+            let count = |n| crate::decls::counted(n, "parameter");
+            self.refuse_compared(
+                "LANG-13",
+                closure,
+                count(params.len()),
+                count(expected_params.len()),
+                "the closure's parameter count does not fit the expected callable type",
+            );
+            return Err(());
+        }
+        Ok(Some(ty))
+    }
+
     pub(super) fn closure(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let mut fd = self.fd.as_ref().clone();
         fd.drop_of = None;
@@ -917,45 +969,64 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if matches!(self.t.kind(ty), TyKind::Fn(..)) {
                     Some(ty)
                 } else {
-                    self.result_parts(ty).map(|(_, ok, _)| ok)
+                    let (_, ok, error) = self.result_parts(ty)?;
+                    (error.is_some()
+                        && matches!(
+                            self.t.kind(ok),
+                            TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend)
+                        ))
+                    .then_some(ok)
                 }
             });
         let expected_kind = expected.and_then(|ty| match self.t.kind(ty) {
             TyKind::Fn(_, _, _, k) => Some(*k),
             _ => None,
         });
+        let params = self.kids(self.kids(n)[0]);
+        let Ok(inferred) = self.infer_closure_params(n, params, expected) else {
+            return (ERROR, None);
+        };
         self.closure_header_params.clear();
         let mut written_result = false;
         let mut callable_result = UNIT;
         for &child in self.kids(n) {
             match self.kind(child) {
                 NodeKind::Parameters => {
-                    for &param in self.kids(child) {
-                        let Some(token) = self.item.tree.node(param).token else {
-                            return self.gap_ty(
-                                param,
-                                "closure parameters require written names and types",
-                            );
+                    for (i, &param) in params.iter().enumerate() {
+                        let token = self.item.tree.node(param).token.unwrap();
+                        let mode = crate::decls::callable_mode_of(self.kind(param));
+                        let (ty_node, ty) = if let Some(inferred) = inferred {
+                            let TyKind::Fn(types, ..) = self.t.kind(inferred) else {
+                                unreachable!("parameter types come from a callable");
+                            };
+                            let (expected_mode, ty) = types[i];
+                            if mode != expected_mode {
+                                self.refuse_compared(
+                                    "LANG-13", n, mode.keyword(), expected_mode.keyword(),
+                                    "the closure's parameter mode does not fit the expected callable type",
+                                );
+                                self.closure_header_params.clear();
+                                return (ERROR, None);
+                            }
+                            (param, ty)
+                        } else {
+                            let ty_node = self.kids(param)[0];
+                            (ty_node, self.ty(ty_node))
                         };
-                        let ty_node = self.kids(param)[0];
-                        let ty = self.ty(ty_node);
                         let ty = self.outside_vector(ty_node, ty, "part of a callable type");
-                        if self.kind(param) == NodeKind::BytesParameter
-                            && ty != scalar(Scalar::U64)
-                            && ty != ERROR
-                        {
+                        if mode == Mode::Bytes && ty != scalar(Scalar::U64) && ty != ERROR {
                             self.refuse("LANG-5", param, "a `bytes` parameter has type `u64`");
                         }
                         if let Some(slot) = self.binder(param) {
                             self.closure_header_params.push((slot, ty));
                         }
                         fd.params.push(crate::decls::ParamDecl {
-                            bytes: self.kind(param) == NodeKind::BytesParameter,
+                            bytes: mode == Mode::Bytes,
                             name: self.item.symbol(token),
-                            mode: if self.kind(param) == NodeKind::StepsParameter {
-                                Mode::Steps
+                            mode: if mode == Mode::Bytes {
+                                Mode::View
                             } else {
-                                crate::decls::mode_of(self.kind(param))
+                                mode
                             },
                             ty,
                             site: self.p.site(self.at, param),
@@ -1013,7 +1084,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !written_result
             && let Some(ty) = expected
             && let TyKind::Fn(_, result, _, _) = self.t.kind(ty)
-            && *result != HOLE
+            && !has_hole(&self.t, *result)
         {
             callable_result = *result;
             fd.result =

@@ -479,7 +479,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         // An arm of type Never constrains nothing (LANG-11).
         let other_want = want
-            .filter(|w| w.payload == 0)
+            .filter(|w| self.fixed_want(*w))
             .or(if yt == NEVER { None } else { expect(yt) })
             .or(want);
         let (ot, ov) = self.result_expr(other, other_want);
@@ -519,12 +519,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         hint: Option<Want>,
     ) {
         let exit = self.new_join();
+        let ty = hint.filter(|w| self.fixed_want(*w)).map(|w| w.ty);
         self.frames.push(Frame {
             label,
             kind,
             header: None,
             exit,
-            ty: hint.filter(|w| w.payload == 0).map(|w| w.ty),
+            ty,
             hint,
             left: false,
             mark: self.log.len(),

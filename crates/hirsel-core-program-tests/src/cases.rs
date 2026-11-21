@@ -1486,6 +1486,17 @@ fn expression_ascription() {
 }
 
 #[test]
+fn closure_expected_parameters() {
+    for case in [
+        "closure-expected-parameters",
+        "closure-expected-parameters-refused",
+    ] {
+        let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
+}
+
+#[test]
 fn literal_aggregate_call_inference() {
     for case in ["generic-instances", "call-undetermined"] {
         let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));

@@ -2647,11 +2647,19 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.expr_into(n, want, self.expression_destination(self.node))
     }
 
+    /// A partial expectation guides the expression's parts. The expression
+    /// and its joins keep the type they find for the enclosing call to unify.
+    fn fixed_want(&self, want: Want) -> bool {
+        want.payload == 0 && !has_hole(&self.t, want.ty)
+    }
+
     /// Check `n` against `want` when given; a construct that passes `want` inward checks
     /// it there and returns `want`'s type, so the outer check here passes.
     fn expr(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         self.out.counts.nodes += 1;
+        let want = want.filter(|w| w.ty != HOLE);
         let (mut t, mut v) = self.checked(n, want);
+        let want = want.filter(|w| w.payload != 0 || self.fixed_want(*w));
         if let Some(w) = want.filter(|w| w.payload == 0)
             && let Some((payload, value)) = self.payload_view_value(t, v, w.ty, n)
         {

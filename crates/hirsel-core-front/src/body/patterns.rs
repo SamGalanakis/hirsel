@@ -1120,7 +1120,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let matrix = self.patterns.matrix.len();
         let edge_mark = self.patterns.edges.len();
         let escape_mark = self.patterns.escaping.len();
-        let mut ty = want.filter(|w| w.payload == 0).map(|w| w.ty);
+        let mut ty = want.filter(|w| self.fixed_want(*w)).map(|w| w.ty);
         for (i, &arm) in c[1..].iter().enumerate() {
             let a = self.kids(arm);
             let id = self.pattern(a[0], subject.ty);
@@ -1489,7 +1489,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (ot, ov) = if let Some(&other) = c.get(2) {
             self.result_expr(
                 other,
-                want.filter(|w| w.payload == 0)
+                want.filter(|w| self.fixed_want(*w))
                     .or_else(|| {
                         (yt != NEVER).then_some(Want {
                             ty: yt,

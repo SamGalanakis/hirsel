@@ -10,7 +10,7 @@
 //!
 //! The trace is regenerated with `export.py` in the model directory.
 use super::conn::{Client, Inbox, Received, Sent};
-use super::{BoardCore, Fin, NAMING, Shared, Took, UnitCtx, Value};
+use super::{BoardCore, Fin, NAMING, Released, Shared, TakeInfo, Took, UnitCtx, Value};
 use std::{
     collections::{HashMap, HashSet},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -378,9 +378,10 @@ impl Run {
             }
             "conn_clean_items" => {
                 let c = self.conns[&id(a[1])].inbox.0.clone();
-                let causes = ctx(&mut self.units, u.unwrap()).clean(&Inbox(c));
+                let uid = u.unwrap();
+                let (causes, took) = ctx(&mut self.units, uid).clean(&Inbox(c));
                 let wl: Vec<&str> = w[0].split(',').collect();
-                if causes.is_empty() {
+                let causes = if causes.is_empty() {
                     "-".into()
                 } else {
                     let mut names = Vec::new();
@@ -388,7 +389,8 @@ impl Run {
                         names.push(self.bind(v, wl.get(i).copied()));
                     }
                     names.join(",")
-                }
+                };
+                format!("{causes} {}", self.release_took(uid, took))
             }
             "conn_drop_client" => {
                 let cl = self
@@ -398,8 +400,9 @@ impl Run {
                     .clients
                     .pop()
                     .expect("no client left");
-                ctx(&mut self.units, u.unwrap()).drop_client(cl);
-                String::new()
+                let uid = u.unwrap();
+                let took = ctx(&mut self.units, uid).drop_client(cl);
+                self.release_took(uid, took)
             }
             "take_arrivals" => {
                 let n = w.iter().filter(|t| !t.is_empty() && !t.starts_with("new_shared=")).count();
@@ -410,20 +413,7 @@ impl Run {
                         got.push("<none>".to_string());
                         break;
                     };
-                    let ident = arr.as_ref().map_or("<unnamed>".into(), |n| n.ident.clone());
-                    match t {
-                        Took::HelperEnd => {
-                            let label = ident.strip_prefix("helper_end:").unwrap();
-                            let hid = self.by_label[label];
-                            self.units.insert(hid, Slot::Gone);
-                        }
-                        Took::Closed(sid) => {
-                            let v = ctx(&mut self.units, uid).closed_value(sid).unwrap();
-                            self.put(v);
-                        }
-                        _ => {}
-                    }
-                    got.push(ident);
+                    got.push(self.took(uid, t, arr));
                 }
                 got.join(" ")
             }
@@ -438,6 +428,36 @@ impl Run {
             _ => String::new(),
         };
         out + &made
+    }
+}
+
+impl Run {
+    /// Act on one take as the language runtime would; its identity.
+    fn took(&mut self, uid: u64, t: Took, arr: TakeInfo) -> String {
+        let ident = arr.as_ref().map_or("<unnamed>".into(), |n| n.ident.clone());
+        match t {
+            Took::HelperEnd => {
+                let label = ident.strip_prefix("helper_end:").unwrap();
+                let hid = self.by_label[label];
+                self.units.insert(hid, Slot::Gone);
+            }
+            Took::Closed(sid) => {
+                let v = ctx(&mut self.units, uid).closed_value(sid).unwrap();
+                self.put(v);
+            }
+            _ => {}
+        }
+        ident
+    }
+
+    /// Rule 6: the prefix an owner's own release took, `took=0` when none.
+    fn release_took(&mut self, uid: u64, took: Vec<Released>) -> String {
+        let mut out = format!("took={}", took.len());
+        for (t, _, arr) in took {
+            out.push(' ');
+            out += &self.took(uid, t, arr);
+        }
+        out
     }
 }
 

@@ -449,6 +449,23 @@ impl Port {
     }
 
     /// Push one arrival. Wakes the unit only if it was parked on the port.
+    /// Whether a publish here reaches `to`: the same port, or a closed port
+    /// that forwards there. A helper's port forwards to its owner from the
+    /// owner's end take on.
+    pub(crate) fn leads_to(&self, to: &Port) -> bool {
+        let mut p = self;
+        loop {
+            if ptr::eq(p, to) {
+                return true;
+            }
+            if p.head.load(Ordering::Acquire) != FORWARD {
+                return false;
+            }
+            // SAFETY: `fwd` is stored before FORWARD and never changes after.
+            p = unsafe { &*p.fwd.load(Ordering::Acquire) };
+        }
+    }
+
     pub(crate) fn publish(&self, a: ArrivalRef) {
         let a = a.into_raw();
         // A parked publisher can see the same head address after a pop and
@@ -963,6 +980,10 @@ pub(crate) enum Took {
     SealAnswer,
     Cancel,
 }
+
+/// One take made inside an owner's own release: what was taken, its
+/// `took_ident`, and its names in test builds.
+pub(crate) type Released = (Took, usize, TakeInfo);
 
 /// One unit's runtime state, touched only by the thread running the unit.
 pub(crate) struct UnitCtx {
@@ -1901,6 +1922,31 @@ impl UnitCtx {
         };
         self.took_ident = ident;
         (t, info)
+    }
+
+    /// An owner's own release is a take for its own retirement: take, in
+    /// port order, everything up to and including the retirement notice of
+    /// `conn` just published to this unit. The takes are returned in order
+    /// for the caller to act on, as if it had taken them itself. A notice
+    /// never jumps the queue; a peer's release waits for the next take.
+    #[cold]
+    pub(crate) fn release_take(&mut self, conn: usize, #[cfg(test)] label: &str) -> Vec<Released> {
+        #[cfg(test)]
+        if self.held.is_some() {
+            // Hooked: the notice reaches the unit now, behind what had
+            // reached it already; other held arrivals stay held.
+            let r = self.reach(&format!("retire:{label}"));
+            debug_assert!(r.is_some(), "the retirement notice was not published here");
+        }
+        let mut took = Vec::new();
+        while let Some((t, info)) = self.take() {
+            let done = t == Took::LastRelease && self.took_ident == conn;
+            took.push((t, self.took_ident, info));
+            if done {
+                break;
+            }
+        }
+        took
     }
 
     /// The value of a waiting send settled `Closed`, back to its sender.

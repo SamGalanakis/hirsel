@@ -11,7 +11,7 @@
 //! wait, the service of waiting sends, a withdrawal, the seal, the last client
 //! and the cleaning's end.
 use super::super::sync::{AtomicU64, Mutex};
-use super::{Arrival, ArrivalRef, Body, Cap, Credit, Kind, RecRef, Settle, UnitCtx, Value};
+use super::{Arrival, ArrivalRef, Body, Cap, Credit, Kind, RecRef, Released, Settle, UnitCtx, Value};
 use std::{
     cell::UnsafeCell,
     collections::VecDeque,
@@ -725,12 +725,10 @@ impl UnitCtx {
     /// After the seal answer: drop the unreceived items, last accepted first,
     /// then split the room. The room joins the admitting record (its
     /// survivors are charged there from now on) and the header plus the
-    /// unused room stay charged until the last-release notice is taken.
-    pub(crate) fn clean(&mut self, inbox: &Inbox) -> Vec<Value> {
-        self.clean_with_release(inbox).0
-    }
-
-    pub(crate) fn clean_with_release(&mut self, inbox: &Inbox) -> (Vec<Value>, bool) {
+    /// unused room stay charged until the last-release notice is taken. When
+    /// no client is left the cleaning is the owner's own release: it takes
+    /// through its notice before returning (`release_take`).
+    pub(crate) fn clean(&mut self, inbox: &Inbox) -> (Vec<Value>, Vec<Released>) {
         let c = &*inbox.0;
         let side = c.side();
         assert!(
@@ -758,11 +756,14 @@ impl UnitCtx {
             s.retained = retained;
             s.clients == 0
         };
-        if last {
-            Self::last_release(&inbox.0, retained);
-        }
         self.connections.remove(&Arc::as_ptr(&inbox.0).addr());
-        (causes, last)
+        let took = if last {
+            Self::last_release(&inbox.0, retained);
+            self.own_release(&inbox.0)
+        } else {
+            Vec::new()
+        };
+        (causes, took)
     }
 
     fn last_release(c: &Arc<ConnCore>, retained: u64) {
@@ -782,18 +783,15 @@ impl UnitCtx {
 
     /// Drop a client. The last one closes an unsealed inbox, and retires a
     /// cleaned connection.
-    pub(crate) fn drop_client(&mut self, cl: Client) {
-        self.drop_client_with_release(cl);
-    }
-
-    /// Report a retirement performed by its own unit to the language runtime.
-    pub(crate) fn drop_client_with_release(&mut self, cl: Client) -> Option<usize> {
+    /// cleaned connection; when this unit owns it, that is its own release
+    /// and it takes through the notice before returning.
+    pub(crate) fn drop_client(&mut self, cl: Client) -> Vec<Released> {
         let c = &*cl.0;
         let (close, last) = {
             let mut s = c.slow.lock().unwrap();
             s.clients -= 1;
             if s.clients > 0 {
-                return None;
+                return Vec::new();
             }
             let sealed = c.hot.word.load(Ordering::Acquire) & SEALED != 0;
             let close = !sealed && !s.close_sent;
@@ -808,12 +806,27 @@ impl UnitCtx {
             );
             c.owner.publish(a);
         }
-        if let Some(r) = last {
-            Self::last_release(&cl.0, r);
-            if Arc::ptr_eq(&self.port, &c.owner) {
-                return Some(Arc::as_ptr(&cl.0).addr());
+        match last {
+            Some(r) => {
+                Self::last_release(&cl.0, r);
+                self.own_release(&cl.0)
             }
+            None => Vec::new(),
         }
-        None
+    }
+
+    /// After a retirement notice was published: when it went to this unit
+    /// (the owner, or a helper whose port now forwards here), this was the
+    /// owner's own release and it takes through the notice. A peer's release
+    /// takes nothing; its notice waits for the owner's next take.
+    fn own_release(&mut self, c: &Arc<ConnCore>) -> Vec<Released> {
+        if !c.owner.leads_to(&self.port) {
+            return Vec::new();
+        }
+        self.release_take(
+            Arc::as_ptr(c).addr(),
+            #[cfg(test)]
+            &c.label,
+        )
     }
 }

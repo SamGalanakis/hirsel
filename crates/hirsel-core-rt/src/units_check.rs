@@ -1416,6 +1416,16 @@ pub(super) static CASES: &[Case] = &[
         pct: None,
     },
     Case {
+        name: "conn_release_race",
+        workers: 2,
+        units: 2,
+        body: conn::release_race,
+        producers: &[],
+        goals: 0b11,
+        params: conn::params_release_race,
+        pct: None,
+    },
+    Case {
         name: "conn_slot_reuse",
         workers: 3,
         units: 3,
@@ -1851,6 +1861,10 @@ mod tests {
     #[test]
     fn conn_helper_forward() {
         check("conn_helper_forward");
+    }
+    #[test]
+    fn conn_release_race() {
+        check("conn_release_race");
     }
     #[test]
     fn conn_slot_reuse() {

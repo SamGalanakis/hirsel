@@ -321,20 +321,21 @@ impl Machine<'_> {
         self.take_unit_notices();
     }
 
-    /// Apply a local retirement immediately. A peer's release travels with
-    /// its retirement notice and becomes spendable at the owner's next take.
+    /// A retirement travels with its notice to the owner. A peer's release
+    /// becomes spendable at the owner's next take; the owner's own release is
+    /// a take for its own retirement, through its notice in order.
     fn conn_freed(&mut self, i: usize) {
         let c = &mut self.conns[i];
         if c.clients == 0
             && !c.inbox
             && let Some(limit) = c.limit.take()
         {
-            if c.owner == self.sched.tasks[self.sched.current].unit {
-                limit.find().subtract(c.charge);
-            } else {
-                self.sched.tasks[c.owner]
-                    .notices
-                    .push_back(UnitNotice::Refund(limit, c.charge));
+            let owner = c.owner;
+            self.sched.tasks[owner]
+                .notices
+                .push_back(UnitNotice::Refund(limit, c.charge));
+            if owner == self.sched.tasks[self.sched.current].unit {
+                self.take_unit_notices();
             }
         }
     }

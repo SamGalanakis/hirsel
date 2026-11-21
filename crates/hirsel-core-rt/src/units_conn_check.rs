@@ -17,7 +17,7 @@
 //!   units' sends, and no limit sees it apart from those send decisions.
 use super::{FLAG, PARAM, compute_until, draw, now, param, served, this_unit, wait_flag};
 use crate::units::ledger::conn::{Client, Inbox, Received, Sent};
-use crate::units::ledger::{NAMING, Shared, TakeInfo, Took, UnitCtx, Value};
+use crate::units::ledger::{NAMING, Released, Shared, TakeInfo, Took, UnitCtx, Value};
 use crate::units::wake_id;
 use crate::units_lang::CrossSend;
 use std::sync::atomic::Ordering;
@@ -146,6 +146,14 @@ impl Cx {
         self.ev(format!("I take {} [{}]", n.ident, n.content));
         self.obs("took", "");
     }
+    /// An owner's release: how many arrivals it took (Rule 6), then each one,
+    /// all inputs; whether the peer released first decides the count.
+    fn released(&self, took: &[Released]) {
+        self.ev(format!("I release_take {}", took.len()));
+        for (_, _, a) in took {
+            self.took(a);
+        }
+    }
     fn send(&mut self, c: &Client, v: Value, blocking: bool) -> Sent {
         let r = self.u.send(c, v, blocking);
         self.sent(&r);
@@ -257,10 +265,15 @@ fn retire(cx: &mut Cx, inbox: &Inbox) -> u64 {
     cx.obs("seal", "");
     while cx.wait() != Took::SealAnswer {}
     let cleaned = inbox.0.side().taken.len() as u64;
-    let causes = cx.u.clean(inbox);
+    let (causes, took) = cx.u.clean(inbox);
     assert!(causes.is_empty());
+    cx.released(&took);
     cx.obs("clean", cleaned);
-    while cx.wait() != Took::LastRelease {}
+    // The owner's own release took through its notice; a peer's release
+    // (the last client dropped first) waits for the owner's next take.
+    if !took.iter().any(|t| t.0 == Took::LastRelease) {
+        while cx.wait() != Took::LastRelease {}
+    }
     assert!(
         inbox.0.side().taken.is_empty(),
         "an item came in after the cleaning"
@@ -488,12 +501,77 @@ pub(super) fn helper_forward(id: u32) -> u8 {
     0
 }
 
+/// 6. Both drop orders of a two-client connection (Rule 6). Unit 0 makes a
+/// connection charging all of its 88-byte root (`64 + 1 x 8` header, 16
+/// room), hands one client to unit 1, seals, cleans and drops its own client
+/// at a random moment; unit 1 drops the other at a random moment. Whoever
+/// drops last retires the connection. When that is unit 0, its drop is a
+/// take for its own retirement: it takes through the notice and has the 88
+/// bytes back within the drop. When it is unit 1, its notice waits for
+/// unit 0's next take, so unit 0's 88-byte allocation right after its drop is
+/// refused. The determinism law sees the two orders apart only through that
+/// take: a release that refunded without taking would let the same inputs
+/// give a refusal in one order and a success in the other.
+pub(super) fn release_race(id: u32) -> u8 {
+    match id {
+        0 => {
+            let mut cx = Cx::root(0, 88);
+            let (inbox, client) = cx.u.conn_new(1, 8, 16).unwrap();
+            cx.obs("conn_new", "");
+            CLIENT.put(client.clone_client());
+            FLAG[0].store(true, Ordering::SeqCst);
+            wake_id(1);
+            cx.u.seal(&inbox);
+            cx.obs("seal", "");
+            while cx.wait() != Took::SealAnswer {}
+            let (causes, took) = cx.u.clean(&inbox);
+            assert!(causes.is_empty() && took.is_empty(), "unit 0 still holds a client");
+            cx.released(&took);
+            cx.obs("clean", "");
+            compute_until(now() + draw(0, param(0)));
+            let took = cx.u.drop_client(client);
+            cx.released(&took);
+            cx.obs("drop_client", "");
+            loop {
+                match cx.u.alloc_block(88) {
+                    Ok(v) => {
+                        cx.obs("alloc", "ok");
+                        cx.drop_value(v);
+                        break;
+                    }
+                    Err(c) => {
+                        cx.obs("alloc", format!("cap {} {}", c.req, c.avail));
+                        while cx.wait() != Took::LastRelease {}
+                    }
+                }
+            }
+            assert_eq!(cx.used(), 0, "the owner's root kept a charge");
+            served(0, "unit 0 has its 88 bytes back");
+        }
+        _ => {
+            wait_flag(0);
+            let client = CLIENT.take();
+            let mut cx = Cx::root(1, 0);
+            compute_until(now() + draw(0, param(1)));
+            let took = cx.u.drop_client(client);
+            assert!(took.is_empty(), "a peer's release took at the owner");
+            cx.obs("drop_client", "");
+            served(1, "unit 1 dropped its client");
+        }
+    }
+    0
+}
+
 pub(super) fn params_wait_serve(r: &mut dyn FnMut(u64, u64) -> u64) {
     PARAM[0].store(r(0, 2_000), Ordering::Relaxed); // longest pause before a receive
 }
 pub(super) fn params_seal_in_flight(r: &mut dyn FnMut(u64, u64) -> u64) {
     PARAM[0].store(r(0, 4_000), Ordering::Relaxed); // the owner seals after this
     PARAM[1].store(r(0, 1_000), Ordering::Relaxed); // longest pause between sends
+}
+pub(super) fn params_release_race(r: &mut dyn FnMut(u64, u64) -> u64) {
+    PARAM[0].store(r(0, 3_000), Ordering::Relaxed); // unit 0 drops its client after this
+    PARAM[1].store(r(0, 3_000), Ordering::Relaxed); // unit 1 drops its client after this
 }
 pub(super) fn params_helper_forward(r: &mut dyn FnMut(u64, u64) -> u64) {
     PARAM[0].store(r(0, 3_000), Ordering::Relaxed); // the helper works before ending

@@ -22,7 +22,7 @@ use crate::{
     net::{CrossedSocket, CrossingSockets, SocketCrossing},
     tasks::{self, Body, Readies, TaskLayout, Waiters},
     units::ledger::conn::{Client, Inbox, MAX_CAP, MAX_ROOM, Sent},
-    units::ledger::{Took, UnitCtx},
+    units::ledger::{Released, Took, UnitCtx},
 };
 use hirsel_core_layout::cross::{CLIENT, SEQ, SOCKET};
 use std::{
@@ -358,9 +358,18 @@ pub(crate) struct LangUnit {
 }
 
 impl LangUnit {
+    /// Drop a client. The owner's own release of a cleaned connection takes
+    /// through its notice; each take wakes what waits on it, as in `pump`.
     fn drop_client(&mut self, client: Client) {
-        if let Some(id) = self.ctx.drop_client_with_release(client) {
-            self.refund_retained(id);
+        let took = self.ctx.drop_client(client);
+        self.on_released(took);
+    }
+
+    fn on_released(&mut self, took: Vec<Released>) {
+        let wake = self.waits > 0;
+        for (t, id, _) in took {
+            // SAFETY: a release runs in a commit that owns the unit.
+            unsafe { on_take(self, t, id, wake) };
         }
     }
 
@@ -452,48 +461,57 @@ unsafe fn pump_for(u: &mut LangUnit, receiving: bool) {
     loop {
         while let Some((took, _a)) = u.ctx.take() {
             let id = u.ctx.took_ident;
-            // SAFETY: every registered frame and handle is pinned while registered.
-            unsafe {
-                match took {
-                    Took::Item | Took::Close | Took::SealAnswer => {
-                        if let Some(&h) = u.inboxes.get(&id) {
-                            if took == Took::Item {
-                                take_sockets(u, &*h);
-                            }
-                            if wake_inboxes {
-                                Waiters::wake_all(&raw mut (*h).waiters);
-                            }
-                        }
-                    }
-                    Took::Accepted(s) | Took::Closed(s) | Took::Withdrawn(s) => {
-                        if let Took::Closed(s) = took
-                            && let Some(v) = u.ctx.closed_value(s)
-                        {
-                            u.ctx.drop_value(v);
-                        }
-                        if let Some(w) = u.sends.remove(&s) {
-                            (*w).settled = Some(took);
-                            Waiters::wake_all(&raw mut (*w).waiters);
-                        }
-                    }
-                    Took::HelperEnd => {
-                        if let Some(h) = u.helpers.get(&id) {
-                            (**h).ended = true;
-                            Waiters::wake_all(&raw mut (**h).waiters);
-                        }
-                    }
-                    Took::LastRelease => u.refund_retained(id),
-                    Took::Credits => {}
-                    Took::Cancel => {
-                        if !u.root.is_null() {
-                            tasks::hirsel_core_cancel(ptr::null_mut(), u.root);
-                        }
-                    }
-                }
-            }
+            // SAFETY: as in `on_take`.
+            unsafe { on_take(u, took, id, wake_inboxes) };
         }
         if u.ctx.port.arm() {
             return;
+        }
+    }
+}
+
+/// Wake what waits on one take.
+/// # Safety
+/// The caller owns the unit for this commit; every registered frame and
+/// handle is pinned while registered.
+unsafe fn on_take(u: &mut LangUnit, took: Took, id: usize, wake_inboxes: bool) {
+    // SAFETY: by the contract.
+    unsafe {
+        match took {
+            Took::Item | Took::Close | Took::SealAnswer => {
+                if let Some(&h) = u.inboxes.get(&id) {
+                    if took == Took::Item {
+                        take_sockets(u, &*h);
+                    }
+                    if wake_inboxes {
+                        Waiters::wake_all(&raw mut (*h).waiters);
+                    }
+                }
+            }
+            Took::Accepted(s) | Took::Closed(s) | Took::Withdrawn(s) => {
+                if let Took::Closed(s) = took
+                    && let Some(v) = u.ctx.closed_value(s)
+                {
+                    u.ctx.drop_value(v);
+                }
+                if let Some(w) = u.sends.remove(&s) {
+                    (*w).settled = Some(took);
+                    Waiters::wake_all(&raw mut (*w).waiters);
+                }
+            }
+            Took::HelperEnd => {
+                if let Some(h) = u.helpers.get(&id) {
+                    (**h).ended = true;
+                    Waiters::wake_all(&raw mut (**h).waiters);
+                }
+            }
+            Took::LastRelease => u.refund_retained(id),
+            Took::Credits => {}
+            Took::Cancel => {
+                if !u.root.is_null() {
+                    tasks::hirsel_core_cancel(ptr::null_mut(), u.root);
+                }
+            }
         }
     }
 }
@@ -890,17 +908,15 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
         }
         let key = Arc::as_ptr(&h.inbox.0) as usize;
         u.inboxes.remove(&key);
-        let (_, last) = u.ctx.clean_with_release(&h.inbox);
         let mut h = Box::from_raw(inbox);
         if let Some(held) = h.charge.take() {
-            if last {
-                held.refund_at_unit();
-            } else {
-                u.retained.insert(key, held);
-            }
+            u.retained.insert(key, held);
         }
+        // With no client left the cleaning is the owner's own release: it
+        // takes through the notice, which refunds the retained charge.
+        let (_, took) = u.ctx.clean(&h.inbox);
         drop(h);
-        // The last release may already be on the port.
+        u.on_released(took);
         pump(u);
         drop(commit);
         0

@@ -360,8 +360,9 @@ pub(crate) unsafe extern "C" fn hirsel_unit_seal(u: *mut UnitCtx, inbox: *const 
 /// Clean the inbox after its seal answer was taken: drop the items not
 /// received, last accepted first, and split the room. Failing finalizers'
 /// causes are joined into one value in `cause` (true returned). The
-/// connection's header and unused room come back with `TOOK_LAST_RELEASE`
-/// once the last client is gone.
+/// connection's header and unused room come back with its last release; with
+/// no client left that is this call, which takes in port order through the
+/// notice (the arrivals before it are applied as by `hirsel_unit_take`).
 /// # Safety
 /// `u` owns the inbox and took its seal answer; it was not cleaned before;
 /// `cause` is a writable, empty slot.
@@ -369,7 +370,7 @@ pub(crate) unsafe extern "C" fn hirsel_unit_clean(u: *mut UnitCtx, inbox: *const
     // SAFETY: by the contract.
     let u = unsafe { &mut *u };
     // SAFETY: by the contract.
-    let causes = u.clean(unsafe { &*inbox });
+    let (causes, _) = u.clean(unsafe { &*inbox });
     if causes.is_empty() {
         return false;
     }
@@ -386,7 +387,8 @@ pub(crate) unsafe extern "C" fn hirsel_unit_inbox_free(inbox: *mut Inbox) {
 }
 
 /// Drop a client. The last one closes an unsealed inbox (`TOOK_CLOSE` at its
-/// owner) or, after the cleaning, retires the connection.
+/// owner) or, after the cleaning, retires the connection; the owner's own
+/// retirement takes through its notice, as `hirsel_unit_clean` does.
 /// # Safety
 /// `u` is the calling pool unit's; `c` is a live client not used again.
 pub(crate) unsafe extern "C" fn hirsel_unit_client_drop(u: *mut UnitCtx, c: *mut Client) {

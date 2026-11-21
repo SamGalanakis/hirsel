@@ -1,4 +1,4 @@
-pub fn version(f: u64) -> u64
+pub fn version(f: Foreign[wrapper.Laws]) -> u64
 pub fn with_body(f: u64) -> u64 { 3 }
 fn private(f: u64) -> u64
 pub type Record {}

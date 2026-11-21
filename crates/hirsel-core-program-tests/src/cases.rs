@@ -1481,58 +1481,106 @@ fn corpus() {
 }
 
 #[test]
-fn foreign_module_headers_and_uses() {
-    let fixture = root().join("cases/ffi/headers");
-    let manifest = std::fs::read(fixture.join("manifest.json")).unwrap();
-    let mut packages: Vec<PackageManifest> = serde_json::from_slice(&manifest).unwrap();
+fn foreign_frontend_cases() {
+    for name in ["headers", "types"] {
+        foreign_case(name);
+    }
+}
+
+fn foreign_case(name: &str) {
+    let fixture = root().join("cases/ffi").join(name);
+    let files = tempfile::tempdir().unwrap();
+    let mut request = crate::CheckRequest::program(
+        &fixture.join("app"),
+        &repo().join("core"),
+        &files.path().join("check"),
+    )
+    .unwrap();
+    request.entry = None;
     let mut sources = HashMap::new();
-    for package in &mut packages {
-        for source in &mut package.sources {
-            source.file = fixture.join(&source.file);
+    for package in request
+        .inputs
+        .packages
+        .iter()
+        .filter(|p| p.package.name != "core")
+    {
+        for source in &package.sources {
+            let file = source.name(request.manifest.as_deref()).unwrap().unwrap();
             let module = format!(
                 "{}@{}/{}",
                 package.package.name,
                 package.package.version,
                 source.modules.join("/")
             );
-            sources.insert(module, std::fs::read_to_string(&source.file).unwrap());
+            let text = String::from_utf8(source.read().unwrap().to_vec()).unwrap();
+            sources.insert(file, (module, text));
         }
     }
-    packages.push(PackageManifest::directory(&core_dir(), package("core"), true).unwrap());
-    let checked = Checked::check(
-        CorpusManifest {
-            core: package("core"),
-            packages,
-        },
-        tempfile::tempdir().unwrap(),
-        None,
-    );
+    let checked = crate::Driver::default()
+        .check(request, &mut crate::Meter::new(false))
+        .unwrap();
+    let diagnostics = checked.machine_diagnostics().unwrap();
     let mut expected = Vec::new();
-    for (module, source) in &sources {
+    for (file, (module, source)) in &sources {
         for expectation in case_source::expectations(source) {
             let words: Vec<_> = expectation.split_whitespace().collect();
-            if let Some(DiagnosticExpectation::Refuse { rule, at }) =
-                DiagnosticExpectation::parse(expectation, &words)
-            {
-                expected.push((module.as_str(), rule, at.to_owned()));
+            match DiagnosticExpectation::parse(expectation, &words) {
+                Some(DiagnosticExpectation::Refuse { rule, at }) => {
+                    expected.push((file.as_str(), rule, at.to_owned()));
+                }
+                Some(DiagnosticExpectation::Message { rule, at, text }) => {
+                    let wanted = expected_site(source, at);
+                    assert!(
+                        diagnostics.iter().any(|d| {
+                            &d.primary.module == file
+                                && d.primary.span.start as usize == wanted
+                                && d.rule == rule
+                                && d.message == text
+                        }),
+                        "{module}: missing {rule} at {at} with message {text:?}"
+                    );
+                }
+                _ => {
+                    let ["emit", name] = words.as_slice() else {
+                        panic!("{module}: unexpected case assertion {expectation}");
+                    };
+                    let path = DefPath::from_full(&format!("{module}/{name}")).unwrap();
+                    let body = &checked.definitions[&path];
+                    assert!(body.check.function.is_some(), "{path} did not emit");
+                }
             }
         }
     }
-    let diagnostics = checked.product.machine_diagnostics().unwrap();
     let mut actual: Vec<_> = diagnostics
         .iter()
         .map(|d| {
-            let module = d.primary.module.as_str();
-            let before = &sources[module][..d.primary.span.start as usize];
+            let file = d.primary.module.as_str();
+            let before = &sources[file].1[..d.primary.span.start as usize];
             let line = before.bytes().filter(|&b| b == b'\n').count() + 1;
             let column = before.rsplit('\n').next().unwrap().chars().count() + 1;
-            (module, d.rule, format!("{line}:{column}"))
+            (file, d.rule, format!("{line}:{column}"))
         })
         .collect();
     expected.sort_unstable();
     actual.sort_unstable();
     assert_eq!(actual, expected);
-    assert!(checked.product.resources.is_empty());
+    assert!(checked.resources.is_empty());
+}
+
+fn expected_site(source: &str, at: &str) -> usize {
+    let (line, column) = at.split_once(':').unwrap();
+    let line: usize = line.parse().unwrap();
+    let column: usize = column.parse().unwrap();
+    let mut rows = source.split_inclusive('\n');
+    let offset = rows.by_ref().take(line - 1).map(str::len).sum::<usize>();
+    offset
+        + rows
+            .next()
+            .unwrap()
+            .char_indices()
+            .nth(column - 1)
+            .unwrap()
+            .0
 }
 
 #[test]

@@ -822,9 +822,10 @@ pub(crate) fn carried(
     })
 }
 
-/// A capability or `Args`: a `u64` provider handle (FORM e68de117).
+/// A capability, `Args` or a foreign handle: an opaque word with no holder cleanup.
 pub(crate) fn handle(decl: &crate::decls::TypeDecl) -> bool {
-    decl.role == Some(Role::Capability) || crate::decls::is_core_prelude(&decl.path, &["Args"])
+    matches!(decl.role, Some(Role::Capability | Role::ForeignHandle))
+        || crate::decls::is_core_prelude(&decl.path, &["Args"])
 }
 
 fn record(fields: Vec<(&str, FieldTy)>) -> Body {

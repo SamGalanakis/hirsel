@@ -320,7 +320,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 self.unify(g.result, r, &mut scratch.found);
             }
-            self.determined(f, &scratch.found, &mut scratch.checked, n);
+            self.determined(f, &scratch.found, &mut scratch.checked, n, n);
         }
         if scratch
             .found
@@ -1731,6 +1731,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let owning = frame.owning;
         let index = frame.captures.len();
+        if crate::foreign::holds_raw_handle(&self.p.decls, &self.t, original.ty) {
+            self.refuse("FFI-6", n, "a raw handle cannot be captured");
+            self.vars[slot as usize] = Some(Var {
+                ty: ERROR,
+                lent: None,
+                ..original
+            });
+            return;
+        }
         if self.vector_shape(original.ty).is_some() {
             self.refuse("SEM-11", n, "a vector cannot be captured");
             self.vars[slot as usize] = Some(Var {

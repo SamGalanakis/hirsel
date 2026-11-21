@@ -1,2 +1,0 @@
-fn from_dep() -> u64 { ffi_laws.native.version(1) }
-// expect: refuse FFI-2 at 1:40

@@ -91,15 +91,19 @@ pub const H_SCOPED: u8 = 4;
 pub const H_REGION: u8 = 8;
 /// An owner without a copy contract (OWN-2).
 pub const H_OPAQUE: u8 = 16;
+/// A foreign handle outside its owning resource (OWN-2 and FFI-6).
+pub const H_RAW_HANDLE: u8 = 32;
 
 /// What a rigid type parameter may hold (OWN-2): every category its bounds do not
 /// exclude. `plain` and `shareable` exclude resources, scoped values and region
-/// references. `inert`, and `codec`, which implies it, exclude all five held categories,
-/// including capabilities.
+/// references, and `shareable` also excludes raw handles. `inert` and `codec` exclude
+/// every held category.
 pub fn param_holds(bounds: u16) -> u8 {
-    let all = H_RESOURCE | H_CAPABILITY | H_SCOPED | H_REGION | H_OPAQUE;
+    let all = H_RESOURCE | H_CAPABILITY | H_SCOPED | H_REGION | H_OPAQUE | H_RAW_HANDLE;
     if bounds & (CODEC | INERT) != 0 {
         0
+    } else if bounds & SHAREABLE != 0 {
+        H_CAPABILITY
     } else if bounds & (PLAIN | SHAREABLE) != 0 {
         all & !(H_RESOURCE | H_SCOPED | H_REGION | H_OPAQUE)
     } else {
@@ -189,11 +193,15 @@ pub enum Role {
     Flow,
     FlowEndpoint,
     FrozenBytes,
+    ForeignHandle,
 }
 impl Role {
     fn of(path: &DefPath) -> Option<Role> {
         if path.package_is("core", "1") && path.0.modules == ["secret"] && path.0.name == "Scram" {
             return Some(Role::HostFile);
+        }
+        if path.is_core("foreign.Ptr") {
+            return Some(Role::ForeignHandle);
         }
         if !is_core_prelude(path, &[]) {
             return None;
@@ -237,7 +245,7 @@ impl Role {
             "Into" | "Port" | "Sink" => Role::FlowEndpoint,
 
             "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin" | "Env"
-            | "Process" | "Tasks" | "Secret" => Role::Capability,
+            | "Process" | "Tasks" | "Secret" | "Foreign" => Role::Capability,
             _ => return None,
         })
     }
@@ -264,7 +272,8 @@ impl Role {
             | Role::Child
             | Role::Link
             | Role::StaticFn
-            | Role::FlowEndpoint => Kind::Plain,
+            | Role::FlowEndpoint
+            | Role::ForeignHandle => Kind::Plain,
             Role::Task
             | Role::Sender
             | Role::Receiver
@@ -484,6 +493,11 @@ pub(crate) enum Pending {
         ty: TyId,
         at: ItemRef,
         node: NodeId,
+    },
+    ForeignMarker {
+        marker: crate::foreign::Marker,
+        ty: TyId,
+        site: Site,
     },
 }
 
@@ -1477,6 +1491,15 @@ impl Program<'_> {
         }
         let arg_tys: Vec<TyId> = args.iter().map(|a| a.0).collect();
         let role = d.role;
+        if let Some(marker) = crate::foreign::Marker::of(d)
+            && let [ty] = arg_tys.as_slice()
+        {
+            self.pending.push(Pending::ForeignMarker {
+                marker,
+                ty: *ty,
+                site,
+            });
+        }
         if !d.structural {
             for (i, (t, s)) in args.iter().enumerate() {
                 self.pending.push(Pending::NotScoped {
@@ -1828,11 +1851,23 @@ impl Program<'_> {
         self.bound_conditions();
         self.encodings();
         self.holds();
+        self.mark_raw_handle_summaries();
+        self.check_raw_handle_positions();
         self.check_declared_bounds();
         self.check_codec_declarations();
         let pending = std::mem::take(&mut self.pending);
         for p in pending {
             match p {
+                Pending::ForeignMarker { marker, ty, site } => {
+                    if ty != ERROR
+                        && !self
+                            .foreign_names()
+                            .admits(self, &self.types, marker, ty, site.module)
+                    {
+                        self.refusals
+                            .push(refusal(marker.rule(), site, marker.message()));
+                    }
+                }
                 Pending::Bound {
                     ty,
                     bounds,
@@ -1881,6 +1916,14 @@ impl Program<'_> {
                     }
                 }
                 Pending::Array { ty, params, site } => {
+                    if crate::foreign::holds_raw_handle(&self.decls, &self.types, ty) {
+                        self.refusals.push(refusal(
+                            "FFI-6",
+                            site,
+                            "a raw handle cannot be an Inline element",
+                        ));
+                        continue;
+                    }
                     let element_kind = kind(&self.decls, &self.types, ty, &params);
                     if element_kind == Kind::Scoped {
                         self.refusals.push(
@@ -1924,6 +1967,14 @@ impl Program<'_> {
                     }
                 }
                 Pending::NotScoped { ty, site, log } => {
+                    if crate::foreign::holds_raw_handle(&self.decls, &self.types, ty) {
+                        self.refusals.push(refusal(
+                            "FFI-6",
+                            site,
+                            "a raw handle cannot be this type argument",
+                        ));
+                        continue;
+                    }
                     if kind(&self.decls, &self.types, ty, &[]) == Kind::Scoped {
                         let (rule, wanted, message) = if log {
                             (
@@ -2908,7 +2959,17 @@ fn bounds_inner<const ENCODING: bool>(
     let row = t.kind(ty);
     let all = PLAIN | SHAREABLE | SEND | KEY | ORDERED;
     let plain_extra = if kind_row(decls, t, row, params) == Kind::Plain {
-        PLAIN | SHAREABLE | SEND
+        let shareable = match row {
+            TyKind::Adt(d, _)
+                if decls[d.index()].role == Some(Role::ForeignHandle)
+                    || decls[d.index()].structural =>
+            {
+                0
+            }
+            TyKind::Tuple(_) | TyKind::Anchored(..) => 0,
+            _ => SHAREABLE,
+        };
+        PLAIN | shareable | SEND
     } else {
         0
     };
@@ -2984,6 +3045,7 @@ fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) ->
         Some(Role::Sender | Role::Receiver | Role::Socket | Role::HostFile | Role::Latest) => SEND,
         Some(Role::Map) => meet() & (SHAREABLE | SEND | CODEC),
         Some(Role::Capability) => PLAIN | SHAREABLE | SEND,
+        Some(Role::ForeignHandle) => PLAIN | SEND,
         Some(_) => 0,
         None if decl.structural => meet(),
         None => {

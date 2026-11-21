@@ -1,0 +1,11 @@
+pub fn make(f: Foreign[laws.Laws]) -> Option[foreign.Ptr[laws.Obj]]
+pub fn free(f: Foreign[laws.Laws], p: foreign.Ptr[laws.Obj]) -> i32 waits
+pub fn use_b(f: Foreign[laws.Laws], p: foreign.Ptr[laws.B]) -> i32
+pub fn bad_text(f: Foreign[laws.Laws], label: String) -> i32
+pub fn raw(f: Foreign[laws.Laws]) -> foreign.Ptr[laws.Obj]
+pub fn replace(f: Foreign[laws.Laws], take p: foreign.Ptr[laws.Obj], x: u64) -> i32
+// expect: refuse FFI-5 at 1:46
+// expect: message FFI-5 at 1:46 | a made foreign handle kind has exactly one release
+// expect: refuse FFI-5 at 4:40
+// expect: refuse FFI-5 at 5:38
+// expect: refuse FFI-5 at 6:8

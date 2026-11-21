@@ -1,0 +1,12 @@
+[package]
+name = "ffi_laws"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"native.hirsel" = "native"
+"wrapper.hirsel" = "wrapper"
+
+[foreign.native]
+symbols = "hfl_"
+archives = []

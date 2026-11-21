@@ -1,0 +1,2 @@
+pub fn use_laws(f: Foreign[laws.Laws]) -> i32
+// expect: refuse FFI-4 at 1:8

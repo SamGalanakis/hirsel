@@ -1,0 +1,5 @@
+fn as_value() -> fn(Foreign[Laws]) -> u64 { native.version }
+fn describe() { let _ = code.describe(native.version) }
+pub opaque type Laws {}
+// expect: refuse FFI-2 at 1:52
+// expect: refuse FFI-2 at 2:46

@@ -20,6 +20,34 @@ fn clone_body_law() -> u64 {
     q.a.n * 1000000 + q.b.n * 1000 + test_dup(seed, 9) + list.len(q.a.xs)
 }
 
+// Eight bytes admit the first clone's one u64. The second needs 24 for a String.
+// expect: run clone_body_refusal_law() = true used 32
+fn clone_body_refusal_law() -> bool {
+    let mut left: List[u64] = list.with_capacity(1)
+    list.push(mut left, 4)
+    let mut right: List[String] = list.with_capacity(1)
+    list.push(mut right, "right")
+    let p = TestPair(a: TestCopy(xs: take left, n: 5), b: TestCopy(xs: take right, n: 7))
+    let r = isolate(fn() -> Result[(), Capacity] {
+        bound bytes 8 {
+            let _: TestPair = clone(p)
+        }
+    })
+    match take r {
+        Ok(Error(take causes)) => {
+            for cause in causes {
+                return match cause.kind {
+                    Capacity(c) => c.requested == 24 && c.available == 0 &&
+                        p.a.xs[0] == 4 && p.b.xs[0] == "right",
+                    _ => false,
+                }
+            }
+            false
+        },
+        _ => false,
+    }
+}
+
 type TestSlotCopy[T] { s: Slots[T], n: u64 }
 clone[T](t: TestSlotCopy[T]) {
     TestSlotCopy(s: slots_empty(), n: t.n + 100)
@@ -28,7 +56,7 @@ type TestSlotPair { value: TestSlotCopy[u64] }
 // A declared body stops the structural walk before its private Slots field.
 // expect: run clone_kernel_hook_law() = 1050
 fn clone_kernel_hook_law() -> u64 {
-    let mut s: Slots[u64] = result.unwrap(slots_new(1))
+    let mut s: Slots[u64] = slots_new(1)
     slots_put(mut s, 0, 7)
     let p = TestSlotPair(value: TestSlotCopy(s: take s, n: 5))
     let q: TestSlotPair = clone(p)

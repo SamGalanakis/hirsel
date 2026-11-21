@@ -498,13 +498,13 @@ mod tests {
         );
     }
 
-    /// MEM-17 clone bodies (oracle: the body adds 100 to `n`, which no field walk does,
-    /// and refuses `n == 0` with (7, 3)). `TestCopy` is declared in the prelude and its
+    /// MEM-17 clone bodies add 100 to `n`, which no field walk does.
+    /// `TestCopy` is declared in the prelude and its
     /// body in `list`, where the private kernel `test_bump` lives, as the Map's body sits
     /// beside its kernels; the body clones `List[T]` for an unbounded `T`, admitted only
     /// by the clone assumption. The derived clone calls each generic instance's body at
-    /// depth and inside a generic body, and on a refusal drops what it already copied
-    /// (`used` is 0) and returns the body's request.
+    /// depth and inside a generic body. When the second field's clone raises Capacity,
+    /// cleanup drops the first field's copy and refunds its eight bytes.
     const CLONE_PRELUDE: &str =
         include_str!("../../../../core/front/fixtures/slots-clone-prelude.hirsel");
     const CLONE_LAWS: &str =

@@ -66,6 +66,9 @@ fn private_slot_contracts_and_misuse() {
     for line in laws.lines() {
         if let Some(expect) = line.strip_prefix("// expect: run ") {
             let (call, want) = expect.split_once(" = ").unwrap();
+            let (want, held) = want
+                .split_once(" used ")
+                .map_or((want, 0), |(v, n)| (v, n.parse().unwrap()));
             let name = call.strip_suffix("()").unwrap();
             let f = functions[name];
             eprintln!("running {name}");
@@ -79,7 +82,7 @@ fn private_slot_contracts_and_misuse() {
                 )]),
                 "{name}"
             );
-            assert_eq!(report.used, 0, "{name} leaked its admission");
+            assert_eq!(report.used, held, "{name} leaked its admission");
             passed += 1;
         } else if let Some(fault) = line.strip_prefix("// expect: slot-fault ") {
             pending_fault = Some(fault);

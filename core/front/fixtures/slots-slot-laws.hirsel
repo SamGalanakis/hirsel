@@ -3,7 +3,7 @@
 
 // expect: run slots_move_law() = 11
 fn slots_move_law() -> u64 {
-    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    let mut s: Slots[u64] = slots_new(4)
     slots_put(mut s, 1, 11)
     slots_shift(mut s, 1, 3)
     let got = slots_take(mut s, 3)
@@ -13,7 +13,7 @@ fn slots_move_law() -> u64 {
 
 // expect: run slots_owned_law() = true
 fn slots_owned_law() -> bool {
-    let mut s: Slots[String] = result.unwrap(slots_new(4))
+    let mut s: Slots[String] = slots_new(4)
     slots_put(mut s, 0, string.from("abc"))
     slots_shift(mut s, 0, 2)
     let text = slots_take(mut s, 2)
@@ -22,19 +22,28 @@ fn slots_owned_law() -> bool {
     text == "abc" && another == "xyz"
 }
 
-// expect: run slots_capacity_law() = 32
+// expect: run slots_capacity_law() = 32 used 32
 fn slots_capacity_law() -> u64 {
-    let r = bound bytes 0 {
-        let s: Result[Slots[u64], Capacity] = slots_new(4)
-        s
+    let r = isolate(fn() -> Result[Slots[u64], Capacity] {
+        bound bytes 0 {
+            slots_new(4)
+        }
+    })
+    match take r {
+        Ok(Error(take causes)) => {
+            for cause in causes {
+                return match cause.kind { Capacity(c) => c.requested, _ => 99 }
+            }
+            99
+        },
+        _ => 99,
     }
-    match r { Ok(Error(c)) => c.requested, _ => 99 }
 }
 
 // expect: run slots_zero_size_law() = true
 fn slots_zero_size_law() -> bool {
-    let mut a: Slots[()] = result.unwrap(slots_new(4))
-    let mut b: Slots[()] = result.unwrap(slots_new(4))
+    let mut a: Slots[()] = slots_new(4)
+    let mut b: Slots[()] = slots_new(4)
     slots_put(mut a, 0, ())
     slots_put(mut a, 1, ())
     slots_put(mut b, 0, ())
@@ -49,14 +58,14 @@ fn slots_zero_size_law() -> bool {
 
 // expect: slot-fault put over the live slot
 fn slots_double_put() {
-    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    let mut s: Slots[u64] = slots_new(4)
     slots_put(mut s, 0, 1)
     slots_put(mut s, 0, 2)
 }
 
 // expect: slot-fault read of the empty slot
 fn slots_double_take() -> u64 {
-    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    let mut s: Slots[u64] = slots_new(4)
     slots_put(mut s, 0, 1)
     let _ = slots_take(mut s, 0)
     slots_take(mut s, 0)
@@ -64,7 +73,7 @@ fn slots_double_take() -> u64 {
 
 // expect: slot-fault read of the empty slot
 fn slots_empty_view() -> u64 {
-    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    let mut s: Slots[u64] = slots_new(4)
     slots_put(mut s, 1, 7)
     let _ = slots_take(mut s, 1)
     let x: u64 = slots_view(s, 1)
@@ -73,14 +82,14 @@ fn slots_empty_view() -> u64 {
 
 // expect: slot-fault free of a block whose slot
 fn slots_free_live() {
-    let mut s: Slots[String] = result.unwrap(slots_new(4))
+    let mut s: Slots[String] = slots_new(4)
     slots_put(mut s, 3, string.from("abc"))
     slots_free(take s)
 }
 
 // expect: slot-fault put over the live slot
 fn slots_move_over_live() {
-    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    let mut s: Slots[u64] = slots_new(4)
     slots_put(mut s, 0, 1)
     slots_put(mut s, 1, 2)
     slots_shift(mut s, 0, 1)
@@ -88,8 +97,8 @@ fn slots_move_over_live() {
 
 // expect: run slots_cross_block_law() = 711
 fn slots_cross_block_law() -> u64 {
-    let mut a: Slots[u64] = result.unwrap(slots_new(2))
-    let mut b: Slots[u64] = result.unwrap(slots_new(4))
+    let mut a: Slots[u64] = slots_new(2)
+    let mut b: Slots[u64] = slots_new(4)
     slots_put(mut a, 1, 7)
     slots_put(mut b, 3, 11)
     slots_move(mut a, 1, mut b, 0, 1)
@@ -101,7 +110,7 @@ fn slots_cross_block_law() -> u64 {
 }
 // expect: run slots_forget_ring_law() = true
 fn slots_forget_ring_law() -> bool {
-    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    let mut s: Slots[u64] = slots_new(4)
     slots_put(mut s, 3, 11)
     slots_put(mut s, 0, 7)
     slots_forget_ring(mut s, 3)

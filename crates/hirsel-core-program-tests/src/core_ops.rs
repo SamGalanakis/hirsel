@@ -7,57 +7,94 @@ use std::path::Path;
 fn canonical(source: &str) -> (NameIndex, Vec<ModuleInput>) {
     inputs_with_core(source, &crate::repo().join("core/core"))
 }
+
+// FAIL-16 reserves a cause cell before running the allocation. Add its MEM-24
+// charge to the test limit so the allocation itself still sees the stated room.
+const ISOLATE_CELL_BYTES: u64 = 32;
+
+fn capacity_refusal(body: &str, requested: u64, available: u64) -> String {
+    format!(
+        r#"fn f() -> bool {{
+    let attempt = isolate(fn() -> u64 {{ {body}; 0u64 }})
+    match take attempt {{
+        Ok(Error(take causes)) => {{
+            for cause in causes {{
+                return match cause.kind {{
+                    Capacity(c) => c.requested == {requested}u64 && c.available == {available}u64,
+                    _ => false
+                }}
+            }}
+            false
+        }},
+        _ => false
+    }}
+}}"#
+    )
+}
+
 #[test]
 fn channel_rows_preserve_values_charges_and_closed_errors() {
     let prefix = "fn close(take rx: Receiver[u64]) {}\nfn close_tx(take tx: Sender[u64]) {}\n";
     let cases = [
         // Two FIFO values, a cloned sender, then a closed/empty receiver.
         (
-            "fn f() -> u64 waits { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(2); let (tx,rx) = result.unwrap(take c); let tx2 = channel.sender(tx); result.unwrap(channel.send(tx,7u64)); result.unwrap(channel.send(tx2,11u64)); let a = result.unwrap(channel.receive(rx)); let b = result.unwrap(channel.receive(rx)); close_tx(take tx); close_tx(take tx2); match channel.receive(rx) { Ok(_) => 0u64, Error(Closed(())) => a*100u64+b } }",
+            "fn f() -> u64 waits { let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(2); let tx2 = channel.sender(tx); result.unwrap(channel.send(tx,7u64)); result.unwrap(channel.send(tx2,11u64)); let a = result.unwrap(channel.receive(rx)); let b = result.unwrap(channel.receive(rx)); close_tx(take tx); close_tx(take tx2); match channel.receive(rx) { Ok(_) => 0u64, Error(Closed(())) => a*100u64+b } }".to_owned(),
             1000,
             eval::Outcome::Returned(vec![711]),
+            0,
         ),
         // A full queue returns its value; a closed queue returns its value with
         // the distinct Closed tag, and cleaning the queue drops the first item.
         (
-            "fn f() -> u64 { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1); let (tx,rx) = result.unwrap(take c); result.unwrap(channel.try_send(tx,7u64)); let a = match channel.try_send(tx,11u64) { Ok(()) => 0u64, Error(Full(x)) => x, Error(Closed(_)) => 1u64 }; close(take rx); let b = match channel.try_send(tx,13u64) { Ok(()) => 0u64, Error(Full(_)) => 1u64, Error(Closed(x)) => x }; a*100u64+b }",
+            "fn f() -> u64 { let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(1); result.unwrap(channel.try_send(tx,7u64)); let a = match channel.try_send(tx,11u64) { Ok(()) => 0u64, Error(Full(x)) => x, Error(Closed(_)) => 1u64 }; close(take rx); let b = match channel.try_send(tx,13u64) { Ok(()) => 0u64, Error(Full(_)) => 1u64, Error(Closed(x)) => x }; a*100u64+b }".to_owned(),
             1000,
             eval::Outcome::Returned(vec![1113]),
+            0,
         ),
         (
-            "fn f() -> u64 waits { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1); let (tx,rx) = result.unwrap(take c); close(take rx); match channel.send(tx,17u64) { Ok(()) => 0u64, Error(Closed(x)) => x } }",
+            "fn f() -> u64 waits { let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(1); close(take rx); match channel.send(tx,17u64) { Ok(()) => 0u64, Error(Closed(x)) => x } }".to_owned(),
             1000,
             eval::Outcome::Returned(vec![17]),
+            0,
         ),
         // 64 + 2*8 = 80. Refusal admits nothing and reports the original room.
         (
-            "fn f() -> u64 { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(2); match take c { Ok(_) => 0u64, Error(e) => e.requested+e.available } }",
-            79,
-            eval::Outcome::Returned(vec![159]),
-        ),
-        (
-            "fn f() -> bool { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(18446744073709551615u64); match take c { Ok(_) => false, Error(e) => e.requested == 18446744073709551615u64 && e.available == 1000u64 } }",
-            1000,
+            capacity_refusal("let _: (Sender[u64], Receiver[u64]) = channel.new(2)", 80, 79),
+            79 + ISOLATE_CELL_BYTES,
             eval::Outcome::Returned(vec![1]),
+            ISOLATE_CELL_BYTES,
         ),
         (
-            "fn f() { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(0); let _ = take c }",
+            capacity_refusal(
+                "let _: (Sender[u64], Receiver[u64]) = channel.new(18446744073709551615u64)",
+                u64::MAX,
+                1000,
+            ),
+            1000 + ISOLATE_CELL_BYTES,
+            eval::Outcome::Returned(vec![1]),
+            ISOLATE_CELL_BYTES,
+        ),
+        (
+            "fn f() { let _: (Sender[u64], Receiver[u64]) = channel.new(0) }".to_owned(),
             1000,
             eval::Outcome::Failed(vec!["Bounds".into()]),
+            0,
         ),
         (
-            "fn f() -> u64 { task.check_cancel(); 42u64 }",
+            "fn f() -> u64 { task.check_cancel(); 42u64 }".to_owned(),
             1000,
             eval::Outcome::Returned(vec![42]),
+            0,
         ),
         // After an earlier gap the runtime adapter must not emit or panic.
         (
-            "fn f[T:send]() { let unsupported = int; let c: Result[(Sender[T],Receiver[T]),Capacity] = channel.new(1); let _ = take c; task.check_cancel() }",
+            "fn f[T:send]() { let unsupported = int; let c: (Sender[T],Receiver[T]) = channel.new(1); let _ = take c; task.check_cancel() }".to_owned(),
             1000,
             eval::Outcome::Returned(vec![]),
+            0,
         ),
     ];
-    for (source, limit, expected) in cases {
+    for (source, limit, expected, held) in cases {
         let text = format!("{prefix}{source}");
         let (index, modules) = canonical(&text);
         let p = Program::declare(&index, &modules);
@@ -78,7 +115,7 @@ fn channel_rows_preserve_values_charges_and_closed_errors() {
 
         let run = eval::run(&module, functions["f"], &[], limit);
         assert_eq!(run.outcome, expected, "{source}");
-        assert_eq!(run.used, 0, "{source}: unrefunded channel storage");
+        assert_eq!(run.used, held, "{source}: unrefunded channel storage");
     }
 }
 
@@ -92,7 +129,7 @@ fn spawn_adapts_scalar_place_and_unit_results_and_returns_refused_input() {
         ),
         // 256 record + 32 primary cell + 8 result + 64 reservation = 360.
         (
-            "fn child(take x: u64) -> u64 { x }\nfn f(tasks: Tasks) -> u64 { let c = task.spawn(tasks, bytes 64, 41u64, child); match take c { Ok(_) => 0u64, Error((e,x)) => e.requested+e.available+x } }",
+            "fn child(take x: u64) -> u64 { x }\nfn f(tasks: Tasks) -> u64 { let c = task.try_spawn(tasks, bytes 64, 41u64, child); match take c { Ok(_) => 0u64, Error((e,x)) => e.requested+e.available+x } }",
             359,
             eval::Outcome::Returned(vec![760]),
         ),
@@ -137,7 +174,7 @@ pub(crate) fn arc_share_refund_fold_source(share: bool) -> String {
         ""
     };
     format!(
-        "fn child(take x: u64) -> u64 {{ x }}\nfn room() -> u64 {{ let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(18446744073709551615u64); match take c {{ Ok(_) => 0u64, Error(e) => e.available }} }}\nfn folded(tasks: Tasks) -> u64 waits {{ let a = arc.new(7u64); let h = task.spawn(tasks, bytes 64, 41u64, child); {polls}{share}let first = room(); let second = room(); let _ = result.unwrap(task.join(take h)); second - first }}\n"
+        "fn child(take x: u64) -> u64 {{ x }}\nfn room() -> u64 {{ let mut xs: List[u64] = list.new(); match list.try_reserve(mut xs, 18446744073709551615u64) {{ Ok(_) => 0u64, Error(e) => e.available }} }}\nfn folded(tasks: Tasks) -> u64 waits {{ let a = arc.new(7u64); let h = task.spawn(tasks, bytes 64, 41u64, child); {polls}{share}let first = room(); let second = room(); let _ = result.unwrap(task.join(take h)); second - first }}\n"
     )
 }
 
@@ -161,21 +198,75 @@ fn arc_share_folds_a_pending_refund_like_any_owner_event() {
 #[test]
 fn counted_and_box_kernels_preserve_payloads_handback_and_exact_refunds() {
     let mut cases = vec![
-        ("fn f() -> u64 { box.unbox(box.new(7u64)) }".to_owned(), 8, eval::Outcome::Returned(vec![7])),
-        ("fn f() -> u64 { box.unbox(box.new(())); 7u64 }".to_owned(), 0, eval::Outcome::Returned(vec![7])),
-        ("fn f() -> u64 { let r = box.new(7u64); match take r { Ok(_) => 0u64, Error((e,x)) => e.requested+e.available+x } }".to_owned(), 7, eval::Outcome::Returned(vec![22])),
-        ("fn f() -> u64 { let r = bound bytes 0 { box.new(7u64) }; match take r { Ok(Error((e,x))) => e.requested+x, _ => 0u64 } }".to_owned(), 1000, eval::Outcome::Returned(vec![15])),
+        (
+            "fn f() -> u64 { box.unbox(box.new(7u64)) }".to_owned(),
+            8,
+            eval::Outcome::Returned(vec![7]),
+            0,
+        ),
+        (
+            "fn f() -> u64 { box.unbox(box.new(())); 7u64 }".to_owned(),
+            0,
+            eval::Outcome::Returned(vec![7]),
+            0,
+        ),
+        (
+            capacity_refusal("let _ = box.new(7u64)", 8, 7),
+            7 + ISOLATE_CELL_BYTES,
+            eval::Outcome::Returned(vec![1]),
+            ISOLATE_CELL_BYTES,
+        ),
+        (
+            capacity_refusal("let _ = bound bytes 0 { box.new(7u64) }", 8, 0),
+            1000,
+            eval::Outcome::Returned(vec![1]),
+            ISOLATE_CELL_BYTES,
+        ),
         // Resource R has a 16-byte block, but its holder in a channel is 8.
-        ("resource type R:send { a:u64,b:u64 }\nfn f() -> u64 { let c: Result[(Sender[R],Receiver[R]),Capacity] = channel.new(1); match take c { Ok(_) => 0u64, Error(e) => e.requested+e.available } }".to_owned(), 71, eval::Outcome::Returned(vec![143])),
+        (
+            format!(
+                "resource type R:send {{ a:u64,b:u64 }}\n{}",
+                capacity_refusal("let _: (Sender[R],Receiver[R]) = channel.new(1)", 72, 71)
+            ),
+            71 + ISOLATE_CELL_BYTES,
+            eval::Outcome::Returned(vec![1]),
+            ISOLATE_CELL_BYTES,
+        ),
         // R's own block + cell costs 48. Box[R] admits a further eight, so
-        // seven remaining bytes refuse, returning the live resource unchanged.
-        ("resource type R:send { a:u64,b:u64 }\nfn f() -> u64 { let r = result.unwrap(R(a:7u64,b:11u64)); let c = box.new(take r); match take c { Ok(_) => 0u64, Error((e,take back)) => e.requested*10000u64+e.available*100u64+back.a+back.b } }".to_owned(), 55, eval::Outcome::Returned(vec![80718])),
+        // seven remaining bytes refuse, and failure cleanup drops the resource.
+        (
+            format!(
+                "resource type R:send {{ a:u64,b:u64 }}\n{}",
+                capacity_refusal(
+                    "let r = result.unwrap(R(a:7u64,b:11u64)); let _ = box.new(take r)",
+                    8,
+                    7
+                )
+            ),
+            55 + ISOLATE_CELL_BYTES,
+            eval::Outcome::Returned(vec![1]),
+            ISOLATE_CELL_BYTES,
+        ),
     ];
     for (module, ty) in [("rc", "Rc"), ("arc", "Arc")] {
-        cases.push((format!("fn end(take h:{ty}[u64]) {{}}\nfn f() -> u64 {{ let h = result.unwrap({module}.new(7u64)); let other = {module}.share(h); let h = match {module}.try_unwrap(take h) {{ Ok(_) => return 0u64, Error(take back) => back }}; end(take other); result.unwrap({module}.try_unwrap(take h)) }}").replace("let h = match", "let last = match").replace("try_unwrap(take h))", "try_unwrap(take last))"),16,eval::Outcome::Returned(vec![7])));
-        cases.push((format!("type Data:shareable+send {{ a:u8,b:Box[u64] }}\nfn f() -> u64 {{ let b = box.new(41u64); let data = Data(a:7u8,b:take b); let r = {module}.new(take data); match take r {{ Ok(_) => 0u64, Error((e,take back)) => {{ let Data(a:_,b:take boxed) = take back; let v = box.unbox(take boxed); e.requested*10000u64+e.available*100u64+v }} }} }}"),31,eval::Outcome::Returned(vec![242341])));
+        cases.push((format!("fn end(take h:{ty}[u64]) {{}}\nfn f() -> u64 {{ let h = {module}.new(7u64); let other = {module}.share(h); let last = match {module}.try_unwrap(take h) {{ Ok(_) => return 0u64, Error(take back) => back }}; end(take other); result.unwrap({module}.try_unwrap(take last)) }}"),16,eval::Outcome::Returned(vec![7]), 0));
+        // The live eight-byte box leaves 23 bytes for a 24-byte counted node.
+        // Refusal must drop the boxed payload as part of the surrounding value.
+        let refusal = capacity_refusal(
+            &format!(
+                "let b = box.new(41u64); let data = Data(a:7u8,b:take b); let _ = {module}.new(take data)"
+            ),
+            24,
+            23,
+        );
+        cases.push((
+            format!("type Data:shareable+send {{ a:u8,b:Box[u64] }}\n{refusal}"),
+            31 + ISOLATE_CELL_BYTES,
+            eval::Outcome::Returned(vec![1]),
+            ISOLATE_CELL_BYTES,
+        ));
     }
-    for (source, limit, expected) in cases {
+    for (source, limit, expected, held) in cases {
         let (index, modules) = canonical(&source);
         let p = Program::declare(&index, &modules);
         assert!(p.refusals.is_empty(), "{source}: {:?}", p.refusals);
@@ -183,7 +274,7 @@ fn counted_and_box_kernels_preserve_payloads_handback_and_exact_refunds() {
             crate::SourceProgram::from_inputs(&index, &modules, |d| d.package_is("app", "1"));
         let run = eval::run(&module, functions["f"], &[], limit);
         assert_eq!(run.outcome, expected, "{source}");
-        assert_eq!(run.used, 0, "{source}: leaked payload, holder or node");
+        assert_eq!(run.used, held, "{source}: leaked payload, holder or node");
     }
 }
 
@@ -518,7 +609,7 @@ fn f(n: Net, c: Clock, tasks: Tasks) -> u64 waits {
     let mut h = task.spawn(tasks, bytes 4096, Input(r: take sr), reader)
     host.sleep_until(c, 10)
     task.cancel(mut h)
-    let payload = result.unwrap(b"x")
+    let payload = b"x"
     let sent = result.unwrap(host.send_pair(mut cw, payload, string.as_bytes(""), Never))
     let (signal, r0) = result.unwrap(task.join(take h))
     let mut r = r0
@@ -839,10 +930,10 @@ fn secret_mac_authority_is_an_intersection() {
     let source = r#"
 fn f() -> u64 {
     let data = string.as_bytes("what do ya want for nothing?")
-    let key = result.unwrap(string.into_bytes("Jefe"))
+    let key = string.into_bytes("Jefe")
     let mac = result.unwrap(secret.seal(take key, "mac"))
     let tag = result.unwrap(secret.hmac_sha256(mac, data))
-    let mut tag_data: Bytes = result.unwrap(list.with_capacity(32))
+    let mut tag_data: Bytes = list.with_capacity(32)
     if !bytebuf.append_inline(mut tag_data, tag, 0, 32) { return 1 }
     let verify = result.unwrap(secret.narrow(mac, "verify"))
     let narrowed = result.unwrap(secret.narrow(verify, "mac"))
@@ -852,7 +943,7 @@ fn f() -> u64 {
     }
     if !result.unwrap(secret.verify_hmac_sha256(narrowed, data, tag_data)) { return 3 }
     if result.unwrap(secret.verify_hmac_sha256(narrowed, data, list.slice(tag_data, 0, 31))) { return 4 }
-    let other_key = result.unwrap(string.into_bytes("Jefe"))
+    let other_key = string.into_bytes("Jefe")
     let no_use = result.unwrap(secret.seal(take other_key, "alpha.test"))
     match secret.narrow(no_use, "mac") {
         Error(Invalid) => {},

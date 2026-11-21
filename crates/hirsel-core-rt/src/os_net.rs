@@ -524,7 +524,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                     }
                     let part = &part[skip..];
                     let len = part.len();
-                    let answer = stream.send(fd, part, &[])?;
+                    let answer = stream.with(|stream| stream.send(fd, part, &[]))?;
                     if answer.error != IoError::OK {
                         return Some(answer);
                     }
@@ -535,7 +535,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                     skip = 0;
                 }
                 // Success requires flushing the final committed record too.
-                return stream.send(fd, &[], &[]);
+                return stream.with(|stream| stream.send(fd, &[], &[]));
             }
             RECV_BOUNDED | SEND_PAIR => {
                 let b = &mut request.buffer;
@@ -548,14 +548,16 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 {
                     let fd = sockets.fd(key);
                     if let Some(tail) = tail {
-                        return stream.send(fd, crate::tls::bytes(b), crate::tls::bytes(tail));
+                        return stream.with(|stream| {
+                            stream.send(fd, crate::tls::bytes(b), crate::tls::bytes(tail))
+                        });
                     }
                     let spare = if b.capacity <= b.len {
                         &mut [][..]
                     } else {
                         std::slice::from_raw_parts_mut(b.data.add(b.len), b.capacity - b.len)
                     };
-                    let result = stream.receive(fd, spare);
+                    let result = stream.with(|stream| stream.receive(fd, spare));
                     if let Some(outcome) = result {
                         b.len += outcome.value as usize;
                     }
@@ -776,9 +778,10 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
                 let protocol = &mut *tls.protocol_out;
                 let out = std::slice::from_raw_parts_mut(protocol.data, protocol.capacity);
                 protocol.len = stream.handshake_result(out, &mut *tls.peer_out);
-                streams
-                    .sessions
-                    .insert(key, Box::new(s.stream.take().unwrap()));
+                streams.sessions.insert(
+                    key,
+                    crate::os_tls::Session::Local(Box::new(s.stream.take().unwrap())),
+                );
                 sockets.split(key);
                 Step {
                     outcome: Outcome {

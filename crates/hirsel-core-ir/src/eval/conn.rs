@@ -1,26 +1,23 @@
 //! Units and connections on the evaluator (CONC-15, CONC-17).
 //!
-//! The evaluator runs every unit's tasks on its one scheduler, in its one event
-//! order, so a helper unit is a task whose entry and result cross as the native
-//! runtime's do: the owners `cross` allows (sequence buffers and clients) are
-//! listed by `hirsel_core_layout::cross::owners`; a buffer's content is copied
-//! into the receiving side at its length and the original freed, and a client
-//! moves. A connection is a queue of `cap` slots and a room of `b` bytes; an item
-//! is charged to the room from acceptance until a receive admits it into the
-//! receiving limit. Refunds and credits that cross units natively at a later take
-//! apply here at once, which no program can tell apart within one unit.
+//! The evaluator uses one scheduler for every unit. It keeps each unit's
+//! connection arrivals in order and applies them at that unit's scheduler
+//! turns and at the waits and empty receives that take arrivals natively.
 use super::*;
-use hirsel_core_layout::cross::{self, CLIENT, SEQ};
+use hirsel_core_layout::cross::{self, CLIENT, SEQ, SOCKET};
 
 /// Client of connection `i` is `CONN_BASE + 2i`, its inbox `CONN_BASE + 2i + 1`.
 pub(super) const CONN_BASE: u64 = 0x80_0000;
 
 pub(super) struct Conn {
     item: TypeRef,
+    owner: usize,
     cap: u64,
     room: u64,
     used: u64,
     queue: VecDeque<Item>,
+    taken: usize,
+    closed: bool,
     /// Tickets of waiting sends, oldest first.
     waiting: VecDeque<u64>,
     tickets: u64,
@@ -30,10 +27,17 @@ pub(super) struct Conn {
     limit: Option<Limit>,
 }
 
+pub(super) enum UnitNotice {
+    Item(usize),
+    Close(usize),
+    Refund(Limit, u64),
+    HelperEnd(usize),
+}
+
 pub(super) struct Item {
     bytes: Vec<u8>,
     seqs: Vec<Vec<u8>>,
-    charge: u64,
+    pub(super) charge: u64,
 }
 
 fn conn(handle: u64) -> usize {
@@ -41,6 +45,18 @@ fn conn(handle: u64) -> usize {
 }
 
 impl Machine<'_> {
+    pub(super) fn take_unit_notices(&mut self) {
+        let unit = self.sched.tasks[self.sched.current].unit;
+        while let Some(notice) = self.sched.tasks[unit].notices.pop_front() {
+            match notice {
+                UnitNotice::Item(i) => self.conns[i].taken += 1,
+                UnitNotice::Close(i) => self.conns[i].closed = true,
+                UnitNotice::Refund(limit, amount) => limit.find().subtract(amount),
+                UnitNotice::HelperEnd(i) => self.children[i].end_taken = true,
+            }
+        }
+    }
+
     pub(super) fn cross_owners(&self, ty: TypeRef) -> Vec<[u64; 4]> {
         cross::owners(&self.m.types, &self.recipes, ty)
     }
@@ -106,13 +122,16 @@ impl Machine<'_> {
         }
     }
 
-    /// Drop a crossing value that nobody took: its buffers left with its charge,
-    /// so only its clients remain to clean.
-    fn cross_discard(&mut self, item: &Item, owners: &[[u64; 4]]) {
-        for o in owners.iter().filter(|o| o[1] == CLIENT) {
-            let mut word = [0u8; 8];
-            word.copy_from_slice(&item.bytes[o[0] as usize..o[0] as usize + 8]);
-            self.client_drop(u64::from_le_bytes(word));
+    /// Drop the handles owned by a crossing value that nobody took.
+    pub(super) fn cross_discard(&mut self, item: &Item, owners: &[[u64; 4]]) {
+        for o in owners.iter().filter(|o| matches!(o[1], CLIENT | SOCKET)) {
+            let at = o[0] as usize;
+            let key = u64::from_le_bytes(item.bytes[at..at + 8].try_into().unwrap());
+            match o[1] {
+                CLIENT => self.client_drop(key),
+                SOCKET => self.socket_drop(key),
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -137,10 +156,13 @@ impl Machine<'_> {
         }
         self.conns.push(Conn {
             item,
+            owner: self.sched.tasks[self.sched.current].unit,
             cap,
             room,
             used: 0,
             queue: VecDeque::new(),
+            taken: 0,
+            closed: false,
             waiting: VecDeque::new(),
             tickets: 0,
             clients: 1,
@@ -173,6 +195,9 @@ impl Machine<'_> {
         let c = &mut self.conns[i];
         c.used += item.charge;
         c.queue.push_back(item);
+        self.sched.tasks[c.owner]
+            .notices
+            .push_back(UnitNotice::Item(i));
         self.wake(Condition::ConnReceive(i));
     }
 
@@ -202,6 +227,7 @@ impl Machine<'_> {
         self.conns[i].tickets += 1;
         self.conns[i].waiting.push_back(ticket);
         loop {
+            self.take_unit_notices();
             // A withdrawal that wins fails the task with `Cancelled`.
             if let Err(stop) = self.check_cancel(t) {
                 self.conns[i].waiting.retain(|&w| w != ticket);
@@ -238,8 +264,11 @@ impl Machine<'_> {
             if wait {
                 self.check_cancel(t)?;
             }
-            if let Some(front) = self.conns[i].queue.front() {
-                let charge = front.charge;
+            if self.conns[i].taken == 0 {
+                self.take_unit_notices();
+            }
+            if self.conns[i].taken != 0 {
+                let charge = self.conns[i].queue.front().unwrap().charge;
                 if let Err(available) = self.admit(cur, charge) {
                     return Ok(vec![2, charge, available]);
                 }
@@ -247,10 +276,11 @@ impl Machine<'_> {
                 let owners = self.cross_owners(self.conns[i].item);
                 self.cross_put(dest, &item, &owners, cur);
                 self.conns[i].used -= charge;
+                self.conns[i].taken -= 1;
                 self.wake(Condition::ConnSend(i));
                 return Ok(vec![0, 0, 0]);
             }
-            if self.conns[i].clients == 0 {
+            if self.conns[i].closed {
                 return Ok(vec![1, 0, 0]);
             }
             if !wait {
@@ -264,7 +294,11 @@ impl Machine<'_> {
     pub(super) fn client_drop(&mut self, client: u64) {
         let i = conn(client);
         self.conns[i].clients -= 1;
-        if self.conns[i].clients == 0 {
+        let c = &self.conns[i];
+        if c.clients == 0 && c.inbox {
+            self.sched.tasks[c.owner]
+                .notices
+                .push_back(UnitNotice::Close(i));
             self.wake(Condition::ConnReceive(i));
         }
         self.conn_freed(i);
@@ -275,30 +309,32 @@ impl Machine<'_> {
     pub(super) fn inbox_drop(&mut self, inbox: u64) {
         let i = conn(inbox);
         self.conns[i].inbox = false;
+        self.take_unit_notices();
         self.wake(Condition::ConnSend(i));
         let owners = self.cross_owners(self.conns[i].item);
         while let Some(item) = self.conns[i].queue.pop_back() {
             self.conns[i].used -= item.charge;
             self.cross_discard(&item, &owners);
         }
+        self.conns[i].taken = 0;
         self.conn_freed(i);
+        self.take_unit_notices();
     }
 
-    /// The last release retires the connection by a notice to its admitting
-    /// record (CONC-17), taken at a later take position even when that unit made
-    /// the release: here the owner's next event, as a pending refund.
+    /// Apply a local retirement immediately. A peer's release travels with
+    /// its retirement notice and becomes spendable at the owner's next take.
     fn conn_freed(&mut self, i: usize) {
         let c = &mut self.conns[i];
         if c.clients == 0
             && !c.inbox
-            && let Some(l) = c.limit.take()
+            && let Some(limit) = c.limit.take()
         {
-            let n = c.charge;
-            let owner = l.find().0.owner;
-            if owner < self.sched.tasks.len() {
-                self.sched.tasks[owner].refunds.push((l, n));
+            if c.owner == self.sched.tasks[self.sched.current].unit {
+                limit.find().subtract(c.charge);
             } else {
-                self.refund(l, n);
+                self.sched.tasks[c.owner]
+                    .notices
+                    .push_back(UnitNotice::Refund(limit, c.charge));
             }
         }
     }

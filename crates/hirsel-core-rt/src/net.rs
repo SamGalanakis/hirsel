@@ -706,6 +706,137 @@ pub unsafe extern "C" fn hirsel_core_net_split(
         }
     }
 }
+fn publish_modeled_readiness(model: &hirsel_core_net::model::Model) {
+    for token in model.poll(None, false) {
+        crate::tasks::hirsel_core_ready(token);
+    }
+}
+
+/// Owns exactly the resources of one socket carrier while it is in transit.
+pub(crate) struct CrossedSocket {
+    carrier: Option<hirsel_core_net::SocketTransfer>,
+    connected: Option<(Address, Provider)>,
+    session: Option<crate::os_tls::Session>,
+    write: Option<crate::secret::TlsWrite>,
+    direction: u64,
+}
+
+// SAFETY: the provider descriptor moves as opaque data and is used only
+// under its existing calling contract. The TLS session synchronizes its state.
+unsafe impl Send for CrossedSocket {}
+
+impl CrossedSocket {
+    pub(crate) fn detach(files: &mut crate::host_file::Files, key: u64) -> Self {
+        #[cfg(feature = "record")]
+        if files.net_tape.is_some() {
+            crate::process::stop(b"UnitRecording");
+        }
+        let (carrier, sibling) = files
+            .sockets
+            .detach(key)
+            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+        let base = key & !3;
+        let direction = key & 3;
+        let connected = if sibling {
+            files.connected.get(&base).copied()
+        } else {
+            files.connected.remove(&base)
+        };
+        let mut session = files.tls.sessions.remove(&base);
+        if sibling && let Some(both) = session {
+            let (stay, moved) = both.split();
+            files.tls.sessions.insert(base, stay);
+            session = Some(moved);
+        }
+        Self {
+            carrier: Some(carrier),
+            connected,
+            session,
+            write: (direction == 2)
+                .then(|| files.tls_writes.remove(&base))
+                .flatten(),
+            direction,
+        }
+    }
+
+    pub(crate) fn attach(mut self, files: &mut crate::host_file::Files) -> u64 {
+        let key = files
+            .sockets
+            .attach(self.carrier.take().unwrap())
+            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+        let base = key & !3;
+        if let Some(connected) = self.connected.take() {
+            files.connected.insert(base, connected);
+        }
+        if let Some(session) = self.session.take() {
+            files.tls.sessions.insert(base, session);
+        }
+        if let Some(write) = self.write.take() {
+            files.tls_writes.insert(base, write);
+        }
+        key
+    }
+}
+
+impl Drop for CrossedSocket {
+    fn drop(&mut self) {
+        if self.direction == 2
+            && let Some(session) = &mut self.session
+            && let Some(fd) = self
+                .carrier
+                .as_ref()
+                .and_then(hirsel_core_net::SocketTransfer::fd)
+        {
+            session.with(|stream| stream.shutdown(fd));
+        }
+        let model = self
+            .carrier
+            .as_ref()
+            .and_then(|carrier| carrier.model())
+            .cloned();
+        drop(self.carrier.take());
+        if let Some(model) = model {
+            publish_modeled_readiness(&model);
+        }
+    }
+}
+
+/// Sockets taken from a waiting send are held jointly by its item and the
+/// issuing call, which needs them back if the send is refused or withdrawn.
+pub(crate) type CrossingSockets = std::sync::Arc<std::sync::Mutex<SocketCrossing>>;
+
+pub(crate) enum SocketCrossing {
+    InTransit(Vec<CrossedSocket>),
+    Taken(Vec<u64>),
+}
+
+impl SocketCrossing {
+    pub(crate) fn take(&mut self, files: &mut crate::host_file::Files) {
+        if let Self::InTransit(sockets) = self {
+            let keys = sockets
+                .drain(..)
+                .map(|socket| socket.attach(files))
+                .collect();
+            *self = Self::Taken(keys);
+        }
+    }
+
+    pub(crate) fn keys(&mut self, files: &mut crate::host_file::Files) -> Vec<u64> {
+        self.take(files);
+        let Self::Taken(keys) = self else {
+            unreachable!()
+        };
+        std::mem::take(keys)
+    }
+
+    pub(crate) fn discard(&mut self) -> Vec<u64> {
+        match std::mem::replace(self, Self::Taken(Vec::new())) {
+            Self::InTransit(_) => Vec::new(),
+            Self::Taken(keys) => keys,
+        }
+    }
+}
+
 /// # Safety
 /// Consumes one live socket, directional half or listener carrier exactly once.
 #[unsafe(no_mangle)]
@@ -727,11 +858,14 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             if source & 3 == 2
                 && let Some(stream) = (*files).tls.sessions.get_mut(&(source & !3))
             {
-                stream.shutdown((*files).sockets.fd(source));
+                stream.with(|stream| stream.shutdown((*files).sockets.fd(source)));
             }
             if (*files).sockets.release(source) {
                 (*files).connected.remove(&(key & !3));
                 (*files).tls.sessions.remove(&(source & !3));
+            }
+            if let Some(model) = (*files).sockets.model() {
+                publish_modeled_readiness(model);
             }
         } else {
             (*files).connected.remove(&(key & !3));

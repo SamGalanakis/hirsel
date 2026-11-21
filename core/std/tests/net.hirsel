@@ -44,3 +44,52 @@ fn upstream_invalid_ip_literals() -> bool {
     }
     true
 }
+
+// test-env: HIRSEL_UNTIED=4
+fn serve_crossed_socket(take ready: Client[Client[Socket]]) waits {
+    let (sockets, incoming): (Client[Socket], Inbox[Socket]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(ready, take sockets))
+    let socket = result.unwrap(conn.receive(incoming))
+    let (read, write) = net.split(take socket)
+    let mut r = take read
+    let mut w = take write
+    let mut data: Bytes = result.unwrap(list.with_capacity(1))
+    result.unwrap(host.recv_bounded(mut r, mut data, 1, Never))
+    let _ = result.unwrap(host.send_pair(mut w, data, string.as_bytes(""), Never))
+}
+
+// expect: run socket_served_by_receiving_unit(network) = true
+fn socket_served_by_receiving_unit(n: Net, _clock: Clock, tasks: Tasks) -> bool waits {
+    let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let mut listener = take listening
+    let client = result.unwrap(host.connect(n, addr, Never))
+    let (socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let (ready, inbox): (Client[Client[Socket]], Inbox[Client[Socket]]) = result.unwrap(conn.new(1, bytes 0))
+    let helper = result.unwrap(task.spawn_unit(tasks, bytes 4096, take ready, serve_crossed_socket))
+    let sockets = result.unwrap(conn.receive(inbox))
+    let (read, write) = net.split(take client)
+    let mut r = take read
+    let mut w = take write
+    result.unwrap(host.send_pair(mut w, string.as_bytes("x"), string.as_bytes(""), Never))
+    result.unwrap(conn.send(sockets, take socket))
+    let mut reply: Bytes = result.unwrap(list.with_capacity(1))
+    let received = result.unwrap(host.recv_bounded(mut r, mut reply, 1, Never))
+    result.unwrap(task.join(take helper))
+    received == 1 && reply == string.as_bytes("x")
+}
+
+// The inbox cleans an unread socket at its seal. A peer sees EOF.
+// expect: run inbox_seal_closes_socket(network) = true
+fn inbox_seal_closes_socket(n: Net, _clock: Clock, _tasks: Tasks) -> bool waits {
+    let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let mut listener = take listening
+    let client = result.unwrap(host.connect(n, addr, Never))
+    let (socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let (sockets, inbox): (Client[Socket], Inbox[Socket]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(sockets, take socket))
+    let _ = take inbox
+    let (read, _) = net.split(take client)
+    let mut r = take read
+    let mut data: Bytes = result.unwrap(list.with_capacity(1))
+    result.unwrap(host.recv_bounded(mut r, mut data, 1, Never)) == 0
+}

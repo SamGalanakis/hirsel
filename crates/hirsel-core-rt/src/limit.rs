@@ -535,6 +535,16 @@ impl Payer {
             self.settle(bytes);
         }
     }
+    /// Connection charges settle in their owning unit at the release or take.
+    pub(crate) fn settle_at_unit(self, bytes: u64) {
+        let _commit = crate::sequencer::enter();
+        if !crate::tasks::parallel() && self.domain().owner == Some(thread()) {
+            self.forest().refund(self.slot().id, bytes);
+        } else {
+            self.settle(bytes);
+        }
+    }
+
     #[inline]
     pub(crate) fn settle(self, bytes: u64) {
         let _commit = crate::sequencer::enter();

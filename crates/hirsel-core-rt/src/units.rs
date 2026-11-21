@@ -3,7 +3,8 @@
 //! without it a helper runs on its own OS thread (units_lang.rs). A unit is one
 //! order of events: its entry chain, scheduler, tasks, reactor and budget live
 //! on its own stack and heap records. Units meet only through connections
-//! (units_lang.rs over the ledger, units_ledger.rs), never through sockets.
+//! (units_lang.rs over the ledger, units_ledger.rs). A socket can move as an
+//! owned item over a connection.
 //!
 //! A unit recording (not built). A unit's events are a function of its inputs,
 //! and the only inputs that come from another unit are arrivals, which it takes
@@ -13,6 +14,9 @@
 //! each one (the connection, the item's bytes with its owners' content, a
 //! retirement notice and its refund, a helper's end with its result or causes).
 //! Sends, and every effect on other units, are outputs and are not recorded.
+//! A take that attaches a socket would record its identity, direction and
+//! already observed protocol and readiness state. Later takes would record
+//! the new registration's edges and the outcomes of its host operations.
 //! Replaying u alone answers its take positions from the recording, so each unit
 //! replays without the others. Today a recorded run (HIRSEL_RECORD) records its
 //! root alone, and its helpers are not recorded.

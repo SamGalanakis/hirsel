@@ -185,6 +185,7 @@ struct ValueExtra {
     /// A helper's packed result, including its sequence contents.
     /// Empty for values the ledger makes itself.
     item: Vec<u8>,
+    sockets: Option<crate::net::CrossingSockets>,
 }
 
 /// An owned value with exclusive charges and optional resource or share data.
@@ -194,6 +195,13 @@ pub(crate) struct Value {
     pub(crate) tag: u64,
 }
 
+type CrossRoom = Box<[std::mem::MaybeUninit<u64>]>;
+
+struct SocketItem {
+    room: CrossRoom,
+    sockets: crate::net::CrossingSockets,
+}
+
 enum ValueData {
     Empty,
     One(Charge),
@@ -201,7 +209,8 @@ enum ValueData {
     Extra(Box<ValueExtra>),
     // Flat bytes live in the reserved arrival slot. The room allocation is
     // empty or begins with its logical charge followed by native owner bytes.
-    Cross(Box<[std::mem::MaybeUninit<u64>]>),
+    Cross(CrossRoom),
+    CrossSockets(Box<SocketItem>),
 }
 
 impl Value {
@@ -220,7 +229,7 @@ impl Value {
 
     fn charges(&self) -> &[Charge] {
         match &self.data {
-            ValueData::Empty | ValueData::Cross(..) => &[],
+            ValueData::Empty | ValueData::Cross(_) | ValueData::CrossSockets(_) => &[],
             ValueData::One(charge) => std::slice::from_ref(charge),
             ValueData::Many(charges) => charges,
             ValueData::Extra(extra) => &extra.charges,
@@ -229,7 +238,7 @@ impl Value {
 
     fn charges_mut(&mut self) -> &mut [Charge] {
         match &mut self.data {
-            ValueData::Empty | ValueData::Cross(..) => &mut [],
+            ValueData::Empty | ValueData::Cross(_) | ValueData::CrossSockets(_) => &mut [],
             ValueData::One(charge) => std::slice::from_mut(charge),
             ValueData::Many(charges) => charges,
             ValueData::Extra(extra) => &mut extra.charges,
@@ -253,20 +262,24 @@ impl Value {
             ValueData::One(first) => self.data = ValueData::Many(vec![*first, charge]),
             ValueData::Many(charges) => charges.push(charge),
             ValueData::Extra(extra) => extra.charges.push(charge),
-            ValueData::Cross(..) => unreachable!(),
+            ValueData::Cross(_) | ValueData::CrossSockets(_) => unreachable!(),
         }
     }
 
     pub(crate) fn bytes(&self) -> u64 {
-        match &self.data {
-            ValueData::Cross(room) => Self::cross_bytes(room),
-            _ => self.charges().iter().map(|c| c.size).sum(),
-        }
+        self.cross_room().map_or_else(
+            || self.charges().iter().map(|c| c.size).sum(),
+            Self::cross_bytes,
+        )
     }
 
-    fn cross(room: Box<[std::mem::MaybeUninit<u64>]>) -> Self {
+    fn cross(room: CrossRoom, sockets: Option<crate::net::CrossingSockets>) -> Self {
+        let data = match sockets {
+            Some(sockets) => ValueData::CrossSockets(Box::new(SocketItem { room, sockets })),
+            None => ValueData::Cross(room),
+        };
         Self {
-            data: ValueData::Cross(room),
+            data,
             #[cfg(test)]
             tag: 0,
         }
@@ -274,13 +287,20 @@ impl Value {
 
     fn cross_bytes(room: &[std::mem::MaybeUninit<u64>]) -> u64 {
         // SAFETY: the room's first word, if present, is its logical charge.
-        room.first().map_or(0, |header| unsafe { header.assume_init() })
+        room.first()
+            .map_or(0, |header| unsafe { header.assume_init() })
+    }
+
+    fn cross_room(&self) -> Option<&[std::mem::MaybeUninit<u64>]> {
+        match &self.data {
+            ValueData::Cross(room) => Some(room),
+            ValueData::CrossSockets(item) => Some(&item.room),
+            _ => None,
+        }
     }
 
     fn cross_parts(&self) -> (u64, *const u8) {
-        let ValueData::Cross(room) = &self.data else {
-            unreachable!();
-        };
+        let room = self.cross_room().unwrap();
         let content = if room.is_empty() {
             room.as_ptr()
         } else {
@@ -298,8 +318,18 @@ impl Value {
         }
     }
 
-    pub(crate) fn set_item(&mut self, item: Vec<u8>) {
-        self.extra_mut().item = item;
+    pub(crate) fn item_sockets(&self) -> Option<&crate::net::CrossingSockets> {
+        match &self.data {
+            ValueData::Extra(extra) => extra.sockets.as_ref(),
+            ValueData::CrossSockets(item) => Some(&item.sockets),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_item(&mut self, item: Vec<u8>, sockets: Option<crate::net::CrossingSockets>) {
+        let extra = self.extra_mut();
+        extra.item = item;
+        extra.sockets = sockets;
     }
 }
 
@@ -310,7 +340,7 @@ impl ValueData {
             Self::One(charge) => Charges::One(charge),
             Self::Many(charges) => Charges::Many(charges),
             Self::Extra(extra) => return *extra,
-            Self::Cross(..) => unreachable!(),
+            Self::Cross(_) | Self::CrossSockets(_) => unreachable!(),
         };
         ValueExtra {
             charges,
@@ -441,8 +471,7 @@ impl Port {
         // SAFETY: only this port's owner removes published nodes. A
         // publisher can prepend a node but cannot change the visible head.
         if unsafe {
-            !(*head).next.is_null()
-                || !matches!((*head).body, Body::Item(conn, _) if conn == c)
+            !(*head).next.is_null() || !matches!((*head).body, Body::Item(conn, _) if conn == c)
         } {
             return None;
         }
@@ -581,7 +610,7 @@ pub(crate) enum Body {
     Credits(Vec<Credit>),
     /// A connection's retirement: its retained header and unused room.
     /// The credit, and the identity of the retired connection.
-    LastRelease(Credit, usize),
+    LastRelease(Credit, Arc<conn::ConnCore>),
     /// A helper's end, carrying the whole helper.
     HelperEnd(HelperEnd),
     /// The settlement of a waiting send, to its sender.
@@ -597,7 +626,12 @@ pub(crate) enum Body {
 impl Body {
     #[cfg(test)]
     fn content(&self) -> String {
-        let amounts = |cs: &[Credit]| cs.iter().map(|c| c.amount.to_string()).collect::<Vec<_>>().join(",");
+        let amounts = |cs: &[Credit]| {
+            cs.iter()
+                .map(|c| c.amount.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         match self {
             Body::Credits(cs) => amounts(cs),
             Body::LastRelease(c, _) => c.amount.to_string(),
@@ -605,7 +639,11 @@ impl Body {
             Body::HelperEnd(e) => {
                 let h = unsafe { e.0.as_ref() };
                 let info = h.helper.as_ref().unwrap();
-                format!("root {} ret {}", h.used(info.root), info.ret.as_ref().map_or(0, |v| v.bytes()))
+                format!(
+                    "root {} ret {}",
+                    h.used(info.root),
+                    info.ret.as_ref().map_or(0, |v| v.bytes())
+                )
             }
             Body::Settlement(_, Settle::Accepted(cs)) => amounts(cs),
             Body::Settlement(_, Settle::Closed(v) | Settle::Withdrawn(v)) => {
@@ -800,7 +838,9 @@ unsafe impl Send for Shared {}
 impl Shared {
     pub(crate) fn share(&self) -> Shared {
         // SAFETY: a live share keeps the node alive.
-        unsafe { self.0.as_ref() }.count.fetch_add(1, Ordering::Relaxed);
+        unsafe { self.0.as_ref() }
+            .count
+            .fetch_add(1, Ordering::Relaxed);
         Shared(self.0)
     }
     pub(crate) fn same(&self, o: &Shared) -> bool {
@@ -1073,12 +1113,9 @@ impl UnitCtx {
         match rec.kind {
             // SAFETY: as in `used`.
             Kind::Room(c) => unsafe { &*c }.room_sub(n),
-            _ => rec.used.set(
-                rec.used
-                    .get()
-                    .checked_sub(n)
-                    .expect("a negative balance"),
-            ),
+            _ => rec
+                .used
+                .set(rec.used.get().checked_sub(n).expect("a negative balance")),
         }
     }
 
@@ -1338,7 +1375,13 @@ impl UnitCtx {
         };
         let mut h = Box::new(UnitCtx::blank(label.clone()));
         let root = h.new_rec(n, Some(cur), Kind::HelperRoot, true, Some(label.clone()));
-        let cell_res = h.new_rec(CELL, Some(cur), Kind::CellRes, false, Some(format!("{label}/cell")));
+        let cell_res = h.new_rec(
+            CELL,
+            Some(cur),
+            Kind::CellRes,
+            false,
+            Some(format!("{label}/cell")),
+        );
         h.rec(cell_res).used.set(CELL);
         h.cell = Some(Charge {
             size: CELL,
@@ -1365,7 +1408,10 @@ impl UnitCtx {
                 size: TASK_FIXED,
                 payer: cur,
             },
-            result: Charge { size: r, payer: cur },
+            result: Charge {
+                size: r,
+                payer: cur,
+            },
             state: HState::Running,
         }));
         Ok((k, h, arg))
@@ -1378,7 +1424,11 @@ impl UnitCtx {
     /// this is the helper's last touch of it; the pointer returned may be
     /// read only by a caller that knows the end has not been taken (the
     /// single-threaded ledger law).
-    pub(crate) fn end_helper(mut self: Box<Self>, ret: Option<Value>, with_cell: bool) -> NonNull<UnitCtx> {
+    pub(crate) fn end_helper(
+        mut self: Box<Self>,
+        ret: Option<Value>,
+        with_cell: bool,
+    ) -> NonNull<UnitCtx> {
         let cell = self.cell.take().expect("only a helper ends this way");
         let ret = if with_cell {
             Some(match ret {
@@ -1426,7 +1476,10 @@ impl UnitCtx {
         let info = h.helper.take().unwrap();
         let fixed = {
             let hd = self.helpers[info.k].as_ref().unwrap();
-            assert!(matches!(hd.state, HState::Running), "a helper end taken twice");
+            assert!(
+                matches!(hd.state, HState::Running),
+                "a helper end taken twice"
+            );
             hd.fixed
         };
         self.refund(fixed);
@@ -1502,7 +1555,11 @@ impl UnitCtx {
         Shared(NonNull::from(Box::leak(n)))
     }
 
-    pub(crate) fn make_shared(&mut self, size: u64, payload: Option<Value>) -> Result<Shared, (Cap, Option<Value>)> {
+    pub(crate) fn make_shared(
+        &mut self,
+        size: u64,
+        payload: Option<Value>,
+    ) -> Result<Shared, (Cap, Option<Value>)> {
         let r = match self.admit(size) {
             Ok(r) => r,
             Err(c) => return Err((c, payload)),
@@ -1573,7 +1630,12 @@ impl UnitCtx {
     }
 
     pub(crate) fn board_read(&self, b: &BoardCore) -> Shared {
-        b.st.lock().unwrap().cur.as_ref().expect("a released board").share()
+        b.st.lock()
+            .unwrap()
+            .cur
+            .as_ref()
+            .expect("a released board")
+            .share()
     }
 
     pub(crate) fn board_post(&mut self, b: &BoardCore, s: Shared) {
@@ -1601,7 +1663,9 @@ impl UnitCtx {
         let rel = {
             let mut st = b.st.lock().unwrap();
             st.handles -= 1;
-            (st.handles == 0 && !st.poster).then(|| st.cur.take()).flatten()
+            (st.handles == 0 && !st.poster)
+                .then(|| st.cur.take())
+                .flatten()
         };
         self.board_release(b, rel);
     }
@@ -1613,9 +1677,9 @@ impl UnitCtx {
         let label = b.label.clone();
         let a = named!(
             ArrivalRef::boxed(Body::Credits(vec![Credit {
-            amount: b.root.size,
-            to: b.root.payer,
-        }])),
+                amount: b.root.size,
+                to: b.root.payer,
+            }])),
             format!("board:{label}"),
             format!("credits:{label}")
         );
@@ -1726,9 +1790,9 @@ impl UnitCtx {
                 }
                 (Took::Credits, 0)
             }
-            Body::LastRelease(c, ident) => {
+            Body::LastRelease(c, conn) => {
                 self.apply(c);
-                (Took::LastRelease, ident)
+                (Took::LastRelease, Arc::as_ptr(&conn).addr())
             }
             Body::HelperEnd(e) => {
                 // SAFETY: the end arrival owns the ended helper's context.

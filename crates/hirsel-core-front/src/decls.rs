@@ -2957,15 +2957,8 @@ fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) ->
         Some(Role::Rc) => SHAREABLE | (meet() & (KEY | ORDERED)),
         Some(Role::Arc) => SHAREABLE | SEND | (meet() & (KEY | ORDERED)),
         Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
-        Some(
-            Role::Sender
-            | Role::Receiver
-            | Role::Socket
-            | Role::HostFile
-            | Role::Latest
-            | Role::Inbox,
-        ) => SEND,
-        Some(Role::Client) => SEND | CROSS,
+        Some(Role::Sender | Role::Receiver | Role::HostFile | Role::Latest | Role::Inbox) => SEND,
+        Some(Role::Client | Role::Socket) => SEND | CROSS,
         Some(Role::Map) => meet() & (SHAREABLE | SEND | CODEC),
         Some(Role::Capability) => PLAIN | SHAREABLE | SEND | CROSS,
         Some(_) => 0,

@@ -12,15 +12,38 @@ use rustls::{
 use std::{
     collections::BTreeMap,
     io::{self, IoSlice, Read, Write},
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 const RECORD: usize = 16 * 1024;
 
 #[derive(Default)]
 pub(crate) struct Streams {
-    pub sessions: BTreeMap<u64, Box<dyn SecureStream>>,
+    pub sessions: BTreeMap<u64, Session>,
     pub system: Arc<OnceLock<RootCertStore>>,
+}
+
+/// The provider owns the TLS record state. It is shared only when its two
+/// directional handles no longer use the same registry slot.
+pub(crate) enum Session {
+    Local(Box<dyn SecureStream>),
+    Shared(Arc<Mutex<Box<dyn SecureStream>>>),
+}
+impl Session {
+    pub(crate) fn split(self) -> (Self, Self) {
+        let shared = match self {
+            Self::Local(stream) => Arc::new(Mutex::new(stream)),
+            Self::Shared(stream) => stream,
+        };
+        (Self::Shared(shared.clone()), Self::Shared(shared))
+    }
+
+    pub(crate) fn with<R>(&mut self, f: impl FnOnce(&mut dyn SecureStream) -> R) -> R {
+        match self {
+            Self::Local(stream) => f(&mut **stream),
+            Self::Shared(stream) => f(&mut **stream.lock().unwrap()),
+        }
+    }
 }
 
 pub(crate) struct Stream {

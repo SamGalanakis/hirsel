@@ -319,18 +319,6 @@ impl Model {
     pub fn release(&self, key: u64) {
         self.state().release(key);
     }
-    pub(crate) fn release_all(&self, key: u64) {
-        let mut s = self.state();
-        let owners = match &s.records[&key] {
-            Record::Endpoint { owners, .. } => *owners,
-            Record::Listener { .. } => 1,
-        };
-        for direction in 0..3 {
-            if owners & (1 << direction) != 0 {
-                s.release(key | direction);
-            }
-        }
-    }
     pub fn live_handles(&self) -> usize {
         self.state().records.len()
     }

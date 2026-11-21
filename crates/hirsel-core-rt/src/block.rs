@@ -254,6 +254,18 @@ impl Block {
             charge: charge.unwrap(),
         })
     }
+    pub(crate) fn refund_at_unit(self) {
+        let charge = self.charge;
+        let pointer = self.into_raw();
+        // SAFETY: the live block pins its payer and its page through the refund.
+        unsafe {
+            let page = task_heap::page_of(pointer);
+            let payer = *task_heap::Page::funding(page);
+            payer.settle_at_unit(charge);
+            task_heap::release_page(page, pointer);
+        }
+    }
+
     pub fn into_raw(self) -> NonNull<u8> {
         let pointer = self.pointer;
         std::mem::forget(self);

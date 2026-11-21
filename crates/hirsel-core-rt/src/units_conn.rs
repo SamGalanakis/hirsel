@@ -107,6 +107,12 @@ enum FlatSlots {
     Arena(Box<[UnsafeCell<MaybeUninit<u8>>]>),
 }
 
+impl Taken {
+    pub(crate) fn value(&self) -> &Value {
+        &self.value
+    }
+}
+
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<FlatSlots>() == 16);
 
@@ -116,6 +122,7 @@ pub(crate) struct ConnCore {
     flat: FlatSlots,
     pub(crate) stride: usize,
     pub(crate) seqs: Box<[[u64; 4]]>,
+    pub(crate) socket_offsets: Box<[u64]>,
     free: Option<Box<Mutex<FreeArrivals>>>,
     cap: u64,
     b: u64,
@@ -267,7 +274,12 @@ impl Inbox {
     /// If admission fails, the callback leaves the destination and queue alone.
     pub(crate) fn receive_cross<E>(
         &self,
-        copy: impl FnOnce(u64, *const u8, *const u8) -> Result<(), E>,
+        copy: impl FnOnce(
+            u64,
+            *const u8,
+            *const u8,
+            Option<&crate::net::CrossingSockets>,
+        ) -> Result<(), E>,
     ) -> Option<Result<(), E>> {
         let c = &*self.0;
         let side = c.side();
@@ -276,7 +288,7 @@ impl Inbox {
         #[cfg(test)]
         crate::units::sync::read_arrival(ptr);
         let (bytes, content) = front.value.cross_parts();
-        if let Err(e) = copy(bytes, ptr, content) {
+        if let Err(e) = copy(bytes, ptr, content, front.value.item_sockets()) {
             return Some(Err(e));
         }
         let slot = front.slot;
@@ -329,7 +341,7 @@ impl UnitCtx {
     /// A connection with `cap` slots of `elem` bytes of header each and a
     /// room of `b` bytes, both admitted here; this unit owns its inbox.
     pub(crate) fn conn_new(&mut self, cap: u64, elem: u64, b: u64) -> Result<(Inbox, Client), Cap> {
-        self.conn_new_cross(cap, elem, b, 0, Box::default())
+        self.conn_new_cross(cap, elem, b, 0, &[])
     }
 
     pub(crate) fn conn_new_cross(
@@ -338,7 +350,7 @@ impl UnitCtx {
         elem: u64,
         b: u64,
         stride: usize,
-        seqs: Box<[[u64; 4]]>,
+        owners: &[[u64; 4]],
     ) -> Result<(Inbox, Client), Cap> {
         assert!(cap > 0 && cap <= MAX_CAP && b <= MAX_ROOM);
         let h = 64 + cap * elem;
@@ -375,7 +387,16 @@ impl UnitCtx {
                     }),
                 },
                 stride,
-                seqs,
+                seqs: owners
+                    .iter()
+                    .copied()
+                    .filter(|o| o[1] == hirsel_core_layout::cross::SEQ)
+                    .collect(),
+                socket_offsets: owners
+                    .iter()
+                    .filter(|o| o[1] == hirsel_core_layout::cross::SOCKET)
+                    .map(|o| o[0])
+                    .collect(),
                 free: (cap > u64::from(BITMAP_CAP)).then(|| {
                     Box::new(Mutex::new(FreeArrivals {
                         returned: Vec::with_capacity(cap as usize),
@@ -431,7 +452,8 @@ impl UnitCtx {
             Outgoing::Cross(source) => unsafe {
                 #[cfg(test)]
                 let tag = source.tag;
-                let v = Value::cross(source.copy_into(c.flat_ptr(index), c.stride, &c.seqs, bytes));
+                let room = source.copy_into(c.flat_ptr(index), c.stride, &c.seqs, bytes);
+                let v = Value::cross(room, source.sockets);
                 #[cfg(test)]
                 let v = Value { tag, ..v };
                 v
@@ -701,13 +723,20 @@ impl UnitCtx {
     /// survivors are charged there from now on) and the header plus the
     /// unused room stay charged until the last-release notice is taken.
     pub(crate) fn clean(&mut self, inbox: &Inbox) -> Vec<Value> {
+        self.clean_with_release(inbox).0
+    }
+
+    pub(crate) fn clean_with_release(&mut self, inbox: &Inbox) -> (Vec<Value>, bool) {
         let c = &*inbox.0;
         let side = c.side();
-        assert!(side.seal_taken && !side.cleaned, "cleaning before the seal answer, or twice");
+        assert!(
+            side.seal_taken && !side.cleaned,
+            "cleaning before the seal answer, or twice"
+        );
         let mut causes = Vec::new();
         while let Some(Taken { slot, value }) = side.taken.pop_back() {
             side.freed += 1;
-            if let super::ValueData::Cross(ref room) = value.data {
+            if let Some(room) = value.cross_room() {
                 c.release_item(slot, Value::cross_bytes(room));
             } else {
                 c.release_item(slot, 0);
@@ -726,20 +755,20 @@ impl UnitCtx {
             s.clients == 0
         };
         if last {
-            Self::last_release(c, retained);
+            Self::last_release(&inbox.0, retained);
         }
         self.connections.remove(&Arc::as_ptr(&inbox.0).addr());
-        causes
+        (causes, last)
     }
 
-    fn last_release(c: &ConnCore, retained: u64) {
+    fn last_release(c: &Arc<ConnCore>, retained: u64) {
         let a = named!(
             ArrivalRef::boxed(Body::LastRelease(
                 Credit {
                     amount: retained,
                     to: c.admitting,
                 },
-                c as *const ConnCore as usize,
+                c.clone(),
             )),
             format!("retire:{}", c.label),
             format!("last_release:{}", c.label)
@@ -750,12 +779,17 @@ impl UnitCtx {
     /// Drop a client. The last one closes an unsealed inbox, and retires a
     /// cleaned connection.
     pub(crate) fn drop_client(&mut self, cl: Client) {
+        self.drop_client_with_release(cl);
+    }
+
+    /// Report a retirement performed by its own unit to the language runtime.
+    pub(crate) fn drop_client_with_release(&mut self, cl: Client) -> Option<usize> {
         let c = &*cl.0;
         let (close, last) = {
             let mut s = c.slow.lock().unwrap();
             s.clients -= 1;
             if s.clients > 0 {
-                return;
+                return None;
             }
             let sealed = c.hot.word.load(Ordering::Acquire) & SEALED != 0;
             let close = !sealed && !s.close_sent;
@@ -771,7 +805,11 @@ impl UnitCtx {
             c.owner.publish(a);
         }
         if let Some(r) = last {
-            Self::last_release(c, r);
+            Self::last_release(&cl.0, r);
+            if Arc::ptr_eq(&self.port, &c.owner) {
+                return Some(Arc::as_ptr(&cl.0).addr());
+            }
         }
+        None
     }
 }

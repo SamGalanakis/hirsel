@@ -31,8 +31,7 @@ fn items_cross_with_their_clients() -> bool waits {
 }
 
 // conn.new[u64](2, bytes 8) asks 64 + 16 + 8 = 88: refused at 87 with exactly
-// that, and made at 88 with nothing left. (The refund at the last release is
-// taken at a later take position, CONC-16, so no law here relies on its moment.)
+// that, and made at 88 with nothing left.
 // expect: run new_charges_header_slots_and_room() = true
 fn new_charges_header_slots_and_room() -> bool {
     let refused = bound bytes 87 {
@@ -262,4 +261,67 @@ fn helper_refusals(tasks: Tasks) -> bool {
         Ok(a) => a && second,
         _ => false,
     }
+}
+
+// Both release orders return the whole charge within the owner's operation.
+// expect: run owner_releases_and_remakes() = true
+fn owner_releases_and_remakes() -> bool {
+    let repeated = bound bytes 88 {
+        for n in 0u64 .. 8 {
+            let (client, inbox): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(2, bytes 8))
+            if n % 2 == 0 {
+                let _ = take inbox
+                let _ = take client
+            } else {
+                let _ = take client
+                let _ = take inbox
+            }
+        }
+        true
+    }
+    result.unwrap(repeated)
+}
+
+type ReleaseJob: cross {
+    last: Client[u64],
+    ready: Client[Client[()]],
+    done: Client[()]
+}
+
+fn release_from_peer(take job: ReleaseJob) waits {
+    let ReleaseJob(last: last, ready: ready, done: done) = take job
+    let (go, wait_go): (Client[()], Inbox[()]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(ready, take go))
+    result.unwrap(conn.receive(wait_go))
+    let _ = take last
+    result.unwrap(conn.send(done, ()))
+}
+
+// The helper cannot release until the successful send of go. Only the next
+// receive can take its notice, which precedes the helper's done message.
+// expect: run peer_refunds_at_owner_take(tasks) = true
+fn peer_refunds_at_owner_take(tasks: Tasks) -> bool waits {
+    let (ready, ready_in): (Client[Client[()]], Inbox[Client[()]]) = result.unwrap(conn.new(1, bytes 0))
+    let (done, done_in): (Client[()], Inbox[()]) = result.unwrap(conn.new(1, bytes 0))
+    let checked = bound bytes 4456 {
+        let (last, inbox): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+        let job = ReleaseJob(last: take last, ready: take ready, done: take done)
+        let helper = result.unwrap(task.spawn_unit(tasks, bytes 4096, take job, release_from_peer))
+        let go = result.unwrap(conn.receive(ready_in))
+        let _ = take inbox
+        result.unwrap(conn.try_send(go, ()))
+        let before = match arc.new(0u64) {
+            Error((c, _)) => c.requested == 16 && c.available == 0,
+            Ok(_) => false,
+        }
+        result.unwrap(conn.receive(done_in))
+        let remade: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 0)
+        let after = match remade {
+            Ok(_) => true,
+            Error(_) => false,
+        }
+        result.unwrap(task.join(take helper))
+        before && after
+    }
+    result.unwrap(checked)
 }

@@ -70,7 +70,9 @@ impl Law {
                     continue;
                 }
                 let input = e.starts_with("I ");
-                if let Some((other, (_, s))) = node.iter().find(|(o, _)| !input || !o.starts_with("I ")) {
+                if let Some((other, (_, s))) =
+                    node.iter().find(|(o, _)| !input || !o.starts_with("I "))
+                {
                     return Some(format!(
                         "unit {u}, event {k}: seed {seed} has `{e}` where seed {s} has `{other}` after the same inputs"
                     ));
@@ -259,7 +261,10 @@ fn retire(cx: &mut Cx, inbox: &Inbox) -> u64 {
     assert!(causes.is_empty());
     cx.obs("clean", cleaned);
     while cx.wait() != Took::LastRelease {}
-    assert!(inbox.0.side().taken.is_empty(), "an item came in after the cleaning");
+    assert!(
+        inbox.0.side().taken.is_empty(),
+        "an item came in after the cleaning"
+    );
     assert_eq!(cx.used(), 0, "the owner's root kept a charge");
     cleaned
 }
@@ -286,7 +291,10 @@ pub(super) fn seal_in_flight(id: u32) -> u8 {
                 ACCEPTED.load(Ordering::SeqCst),
                 "an accepted item was not cleaned exactly once"
             );
-            served(0, "unit 0 cleaned every accepted item and its root is back to zero");
+            served(
+                0,
+                "unit 0 cleaned every accepted item and its root is back to zero",
+            );
         }
         _ => {
             wait_flag(0);
@@ -331,7 +339,7 @@ fn reuse(id: u32, flat: bool) -> u8 {
         let cap = if param(1) == 0 { 2 } else { 23 };
         cx.ev(format!("I connection capacity {cap}"));
         let (inbox, client) = if flat {
-            cx.u.conn_new_cross(cap, 4, 64, 4, Box::default())
+            cx.u.conn_new_cross(cap, 4, 64, 4, &[])
         } else {
             cx.u.conn_new(cap, 8, 64)
         }
@@ -347,7 +355,7 @@ fn reuse(id: u32, flat: bool) -> u8 {
             let (tag, value) = if flat {
                 let tag = inbox.front_tag();
                 let mut item = 0;
-                let got = inbox.receive_cross(|bytes, src, _| {
+                let got = inbox.receive_cross(|bytes, src, _, _| {
                     assert_eq!(bytes, 0);
                     // SAFETY: the connection reserved this slot for this take.
                     item = u64::from(unsafe { src.cast::<u32>().read_unaligned() });
@@ -490,4 +498,49 @@ pub(super) fn params_seal_in_flight(r: &mut dyn FnMut(u64, u64) -> u64) {
 pub(super) fn params_helper_forward(r: &mut dyn FnMut(u64, u64) -> u64) {
     PARAM[0].store(r(0, 3_000), Ordering::Relaxed); // the helper works before ending
     PARAM[1].store(r(0, 6_000), Ordering::Relaxed); // unit 2 drops its share after this
+}
+
+/// An edge queued before the send belongs to the receiving registration.
+#[test]
+fn socket_crosses_pending_readiness() {
+    use hirsel_core_net::Sockets;
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+    use std::os::unix::net::UnixStream;
+
+    let (socket, mut peer) = UnixStream::pair().unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let mut sender = Sockets::default();
+    let key = sender.insert(socket.into()).unwrap();
+    let stale = sender.arm(key, false, 1).unwrap();
+    sender.disarm(key, false);
+    let source = sender.poller().unwrap();
+    sender.dispatch_polled(source.poll(0).unwrap().unwrap(), |_| unreachable!());
+    peer.write_all(b"x").unwrap();
+
+    let (moving, sibling) = sender.detach(key).unwrap();
+    assert!(!sibling);
+    let old = source.poll(0).unwrap().unwrap();
+    assert_eq!(sender.dispatch_polled(old, |_| unreachable!()), 0);
+
+    let (replacement, _peer) = UnixStream::pair().unwrap();
+    let replacement = sender.insert(replacement.into()).unwrap();
+    sender.arm(replacement, false, 2).unwrap();
+    sender.dispatch(stale, libc::EPOLLIN as u32, |_| {
+        panic!("stale readiness reached the sender")
+    });
+
+    let mut receiver = Sockets::default();
+    let key = receiver.attach(moving).unwrap();
+    receiver.arm(key, false, 3).unwrap();
+    let mut ready = Vec::new();
+    receiver.poll(0, |token| ready.push(token)).unwrap();
+    assert_eq!(ready, [3]);
+    // SAFETY: dup creates a new descriptor, which the test alone owns.
+    let fd = unsafe { libc::dup(receiver.fd(key)) };
+    assert!(fd >= 0);
+    let mut socket = unsafe { UnixStream::from_raw_fd(fd) };
+    let mut data = [0];
+    socket.read_exact(&mut data).unwrap();
+    assert_eq!(data, *b"x");
 }

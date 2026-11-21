@@ -512,6 +512,9 @@ struct Child {
     n: u64,
     limit: Option<Limit>,
     joined: bool,
+    unit_owner: Option<usize>,
+    end_taken: bool,
+    crossed_result: Option<conn::Item>,
     /// The child's used cells: those of the chain it failed with.
     cells: Vec<(Limit, u64)>,
     /// Its primary cell when unused at its end, refunded when it is joined.
@@ -719,6 +722,8 @@ struct Rec {
     /// Refunds from other tasks to limits it owns, applied at its next event
     /// (MEM-20; native `drain_refunds` in `tasks::event`).
     refunds: Vec<(Limit, u64)>,
+    unit: usize,
+    notices: VecDeque<conn::UnitNotice>,
 }
 #[derive(Default)]
 struct Sched {
@@ -1240,6 +1245,8 @@ fn run_world(
         cancelled: false,
         start: Some((task, f, arguments)),
         refunds: Vec::new(),
+        unit: 0,
+        notices: VecDeque::new(),
     });
     mach.sched.ready.push_back(0);
     let (mut mach, outcome, chain) = drive(mach, input.process_entry);
@@ -1253,6 +1260,11 @@ fn run_world(
     for k in 0..mach.sched.tasks.len() {
         for (l, n) in std::mem::take(&mut mach.sched.tasks[k].refunds) {
             l.find().subtract(n);
+        }
+        for notice in std::mem::take(&mut mach.sched.tasks[k].notices) {
+            if let conn::UnitNotice::Refund(l, n) = notice {
+                l.find().subtract(n);
+            }
         }
     }
     if let Some(remaining) = input.network_out {
@@ -1331,10 +1343,12 @@ fn drive(mach: Machine<'_>, process_entry: bool) -> (Box<Machine<'_>>, Outcome, 
             };
             s.current = k;
             s.tasks[k].state = State::Running;
+            let start = s.tasks[k].start.take();
+            baton.take_unit_notices();
             if resumes.len() <= k {
                 resumes.resize_with(k + 1, || None);
             }
-            if let Some((task, f, args)) = s.tasks[k].start.take() {
+            if let Some((task, f, args)) = start {
                 let (tx, rx) = mpsc::channel();
                 resumes[k] = Some(tx);
                 let link = Link {
@@ -1710,7 +1724,16 @@ impl Machine<'_> {
         if let (Ok(values), Carried::Value(ty)) = (&returned, self.m.types[r.index()].carried) {
             self.store(rb, bytes_of(ty), values[0]);
         }
-        self.end_limit(t.limits.pop().unwrap(), None);
+        let limit = t.limits.pop().unwrap();
+        let unit_owner = self.children[i].unit_owner;
+        if unit_owner.is_some() {
+            if returned.is_ok() {
+                let owners = self.cross_owners(r);
+                self.children[i].crossed_result = Some(self.cross_take(rb, r, &owners));
+            }
+        } else {
+            self.end_limit(limit, None);
+        }
         let status = match t.chain.first().map(|c| c.kind) {
             _ if returned.is_ok() => 0,
             Some("Cancelled") => 2,
@@ -1724,6 +1747,11 @@ impl Machine<'_> {
         let id = self.sched.tasks[t.k].id;
         self.event(END, id, u64::from(status != 0));
         self.sched.tasks[t.k].state = State::Ended;
+        if let Some(owner) = unit_owner {
+            self.sched.tasks[owner]
+                .notices
+                .push_back(conn::UnitNotice::HelperEnd(i));
+        }
         self.wake(Condition::Join(i));
     }
 
@@ -2840,6 +2868,23 @@ impl Machine<'_> {
         }
         failed
     }
+    fn socket_drop(&mut self, key: u64) {
+        if key & 3 == 2 {
+            self.world.tls_writes.remove(&(key & !3));
+        }
+        self.world.network.sockets.release(key);
+    }
+
+    fn child_end_taken(&mut self, child: usize) -> bool {
+        if self.children[child].unit_owner.is_none() {
+            return self.sched.tasks[child + 1].state == State::Ended;
+        }
+        if !self.children[child].end_taken {
+            self.take_unit_notices();
+        }
+        self.children[child].end_taken
+    }
+
     fn drop_field(&mut self, t: &mut Task, at: u64, ty: &FieldTy) -> bool {
         match ty {
             FieldTy::Scalar(_)
@@ -2861,11 +2906,7 @@ impl Machine<'_> {
             }
             FieldTy::Handle(Handle::Flow) => panic!("flow execution uses the native reference"),
             FieldTy::Handle(Handle::Socket) => {
-                let h = self.load(at, 8);
-                if h & 3 == 2 {
-                    self.world.tls_writes.remove(&(h & !3));
-                }
-                self.world.network.sockets.release(h);
+                self.socket_drop(self.load(at, 8));
                 false
             }
             // The provider closes the file and ignores the outcome (core.md,
@@ -2896,7 +2937,7 @@ impl Machine<'_> {
                 let id = self.sched.tasks[i + 1].id;
                 t.shield += 1;
                 self.cancel(i);
-                while self.sched.tasks[i + 1].state != State::Ended {
+                while !self.child_end_taken(i) {
                     self.park_task(t, Condition::Join(i));
                 }
                 self.event(JOIN, id, 2);
@@ -2905,13 +2946,18 @@ impl Machine<'_> {
                     (c.status, c.result, c.r)
                 };
                 // CONC-8: an abandoned handle cleans the result or the chain.
-                let failed = status == 0 && self.drop_value(t, result, r);
+                let failed = if let Some(item) = self.children[i].crossed_result.take() {
+                    self.cross_discard(&item, &self.cross_owners(r));
+                    false
+                } else {
+                    status == 0 && self.drop_value(t, result, r)
+                };
                 for c in std::mem::take(&mut self.children[i].chain) {
                     if c.message[2] != 0 {
                         self.free(c.message[0]);
                     }
                 }
-                for (l, n) in self.settle_child(i) {
+                for (l, n) in self.settle_child(i, 0) {
                     self.refund(l, n);
                 }
                 t.shield -= 1;
@@ -3141,11 +3187,15 @@ impl Machine<'_> {
     /// charge holds the child's first primary cell, which may have left with a
     /// chain: a used cell is among the cells returned to go with its `Causes`, or
     /// went with one the child caught.
-    fn settle_child(&mut self, i: usize) -> Vec<(Limit, u64)> {
+    fn settle_child(&mut self, i: usize, moved: u64) -> Vec<(Limit, u64)> {
         let c = &mut self.children[i];
         assert!(!c.joined, "task handle used twice");
         c.joined = true;
-        let (l, n) = (c.limit.take().unwrap(), c.charge - c.n - charge::CAUSE_CELL);
+        let unused = if c.unit_owner.is_some() { moved } else { c.n };
+        let (l, n) = (
+            c.limit.take().unwrap(),
+            c.charge - unused - charge::CAUSE_CELL,
+        );
         let cells = std::mem::take(&mut c.cells);
         let primary = c.primary.take();
         self.refund(l, n);
@@ -3365,7 +3415,12 @@ impl Machine<'_> {
                     return Ok(vec![0, moved, n]);
                 }
                 // The child's limit serves the child, the next scheduler record.
-                let lim = Limit::new(n, Some(cur.clone()), false, self.sched.tasks.len());
+                let lim = Limit::new(
+                    n,
+                    (!unit).then(|| cur.clone()),
+                    false,
+                    self.sched.tasks.len(),
+                );
                 let xb = self.block(self.held(x), None, 0, None);
                 if unit {
                     let item = self.cross_take(a[1], x, &owners);
@@ -3419,6 +3474,9 @@ impl Machine<'_> {
                     n,
                     limit: Some(cur.clone()),
                     joined: false,
+                    unit_owner: unit.then(|| self.sched.tasks[t.k].unit),
+                    end_taken: false,
+                    crossed_result: None,
                     cells: Vec::new(),
                     chain: Vec::new(),
                     primary: None,
@@ -3435,6 +3493,12 @@ impl Machine<'_> {
                     cancelled: false,
                     start: Some((child, f, args)),
                     refunds: Vec::new(),
+                    unit: if unit {
+                        i + 1
+                    } else {
+                        self.sched.tasks[t.k].unit
+                    },
+                    notices: VecDeque::new(),
                 });
                 self.links.push(None);
                 self.sched.ready.push_back(i + 1);
@@ -3451,19 +3515,26 @@ impl Machine<'_> {
                 // CONC-6: a cancellation point at entry and at each wait.
                 loop {
                     self.check_cancel(t)?;
-                    if self.sched.tasks[i + 1].state == State::Ended {
+                    if self.child_end_taken(i) {
                         break;
                     }
                     self.park_task(t, Condition::Join(i));
                 }
                 let status = self.children[i].status;
+                let mut moved = 0;
                 if status == 0 {
-                    let n = self.held(TypeRef(r.0)) as usize;
-                    let bytes = self.get(self.children[i].result, n).to_vec();
-                    self.put(a[1], &bytes);
+                    if let Some(item) = self.children[i].crossed_result.take() {
+                        let payer = self.children[i].limit.as_ref().unwrap().clone();
+                        self.cross_put(a[1], &item, &self.cross_owners(TypeRef(r.0)), &payer);
+                        moved = item.charge;
+                    } else {
+                        let n = self.held(TypeRef(r.0)) as usize;
+                        let bytes = self.get(self.children[i].result, n).to_vec();
+                        self.put(a[1], &bytes);
+                    }
                 }
                 self.event(JOIN, id, u64::from(status != 0));
-                let cells = self.settle_child(i);
+                let cells = self.settle_child(i, moved);
                 if status == 0 {
                     vec![0, 0]
                 } else {

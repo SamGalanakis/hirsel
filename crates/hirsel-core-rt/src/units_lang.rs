@@ -14,16 +14,23 @@
 //!
 //! An item's flat bytes occupy its reserved arrival slot. Sequence content
 //! (a `List` of plain elements or a `String`) occupies the room at length
-//! capacity. Clients move as handles in the flat bytes.
+//! capacity. Clients move as handles. Sockets move with their registrations detached.
 use crate::{
     Capacity, Context,
     block::{self, Block},
     causes::{self, Cause, Causes, Cell},
+    net::{CrossedSocket, CrossingSockets, SocketCrossing},
     tasks::{self, Body, Readies, TaskLayout, Waiters},
     units::ledger::conn::{Client, Inbox, MAX_CAP, MAX_ROOM, Sent},
     units::ledger::{Took, UnitCtx},
 };
-use std::{collections::HashMap, mem::MaybeUninit, ptr, sync::Arc};
+use hirsel_core_layout::cross::{CLIENT, SEQ, SOCKET};
+use std::{
+    collections::HashMap,
+    mem::MaybeUninit,
+    ptr,
+    sync::{Arc, Mutex},
+};
 
 /// Keyed by addresses and slot ids; a fixed seed keeps lookups cheap.
 type Map<K, V> = HashMap<K, V, foldhash::fast::FixedState>;
@@ -33,10 +40,6 @@ fn map<K, V>() -> Map<K, V> {
 
 /// The ledger roots never refuse: the program's limits decide every admission.
 const UNREFUSED: u64 = 1 << 62;
-/// A seq owner: pointer, length, capacity.
-const SEQ: u64 = 0;
-/// A client handle.
-const CLIENT: u64 = 1;
 
 /// The owners of a `cross` type, as the emitter writes them: per owner
 /// `[offset, kind, element bytes, element logical size]`.
@@ -92,6 +95,52 @@ unsafe fn item_charge(value: *const u8, owners: &[[u64; 4]]) -> u64 {
     total
 }
 
+fn socket_offsets(owners: &[[u64; 4]]) -> impl Iterator<Item = u64> {
+    owners.iter().filter(|o| o[1] == SOCKET).map(|o| o[0])
+}
+
+unsafe fn detach_sockets(
+    context: *mut Context,
+    value: *const u8,
+    offsets: impl Iterator<Item = u64>,
+) -> Option<CrossingSockets> {
+    let sockets: Vec<_> = offsets
+        .map(|offset| {
+            // SAFETY: the item exclusively owns each socket in this unit.
+            unsafe {
+                let key = word(value.add(offset as usize));
+                CrossedSocket::detach(&mut *(*context).host_files, key)
+            }
+        })
+        .collect();
+    (!sockets.is_empty()).then(|| Arc::new(Mutex::new(SocketCrossing::InTransit(sockets))))
+}
+
+/// Install the socket keys in a received value or give a refused send its
+/// sockets back.
+unsafe fn attach_sockets(
+    context: *mut Context,
+    value: *mut u8,
+    offsets: impl Iterator<Item = u64>,
+    sockets: Option<&CrossingSockets>,
+) {
+    if let Some(sockets) = sockets {
+        // SAFETY: the caller owns the destination and runs in its registry's unit.
+        unsafe {
+            let files = &mut *(*context).host_files;
+            let keys = sockets.lock().unwrap().keys(files);
+            for (offset, key) in offsets.zip(keys) {
+                set_word(value.add(offset as usize), key);
+            }
+            if tasks::in_task()
+                && let Some(poller) = files.sockets.active_poller()
+            {
+                tasks::attach_net(&raw mut files.sockets, poller);
+            }
+        }
+    }
+}
+
 /// Copy `value` and its owners' content into one buffer.
 unsafe fn pack(value: *const u8, bytes: u64, owners: &[[u64; 4]]) -> Vec<u8> {
     // SAFETY: `value` is an initialized item of `bytes` bytes.
@@ -118,6 +167,7 @@ unsafe fn pack(value: *const u8, bytes: u64, owners: &[[u64; 4]]) -> Vec<u8> {
 /// owners until the send has published or its settlement is taken.
 pub(crate) struct CrossSend {
     value: *const u8,
+    pub(crate) sockets: Option<CrossingSockets>,
     #[cfg(test)]
     pub(crate) tag: u64,
 }
@@ -126,6 +176,7 @@ impl CrossSend {
     pub(crate) fn new(value: *const u8) -> Self {
         Self {
             value,
+            sockets: None,
             #[cfg(test)]
             tag: 0,
         }
@@ -134,7 +185,7 @@ impl CrossSend {
     /// The connection owns the destination slot. Only the flat bytes go
     /// there; sequence contents occupy the connection's room.
     pub(crate) unsafe fn copy_into(
-        self,
+        &self,
         slot: *mut u8,
         stride: usize,
         seqs: &[[u64; 4]],
@@ -197,6 +248,7 @@ unsafe fn unpack(
     context: *mut Context,
     payer: crate::limit::Payer,
     data: &[u8],
+    sockets: Option<&CrossingSockets>,
     dest: *mut u8,
     bytes: u64,
     owners: &[[u64; 4]],
@@ -204,6 +256,7 @@ unsafe fn unpack(
     // SAFETY: `data` was packed for the same layout and `dest` is writable.
     unsafe {
         ptr::copy_nonoverlapping(data.as_ptr(), dest, bytes as usize);
+        attach_sockets(context, dest, socket_offsets(owners), sockets);
         unpack_owners(
             context,
             payer,
@@ -252,15 +305,27 @@ unsafe fn unpack_owners(
     }
 }
 
-/// Drop the clients inside a packed item that no one received.
-unsafe fn drop_packed_clients(unit: &mut LangUnit, flat: *const u8, owners: &[[u64; 4]]) {
+/// Drop the moved owners of an item that no one received.
+unsafe fn drop_packed_owners(
+    context: *mut Context,
+    unit: &mut LangUnit,
+    flat: *const u8,
+    owners: &[[u64; 4]],
+    sockets: Option<&CrossingSockets>,
+) {
+    if let Some(sockets) = sockets {
+        let keys = sockets.lock().unwrap().discard();
+        for key in keys {
+            // SAFETY: the item owned this socket in the current unit.
+            unsafe { crate::net::hirsel_core_socket_drop(context, key) };
+        }
+    }
     for o in owners {
         if o[1] == CLIENT {
-            // SAFETY: `pack` copied the inline handle word.
+            // SAFETY: the item holds this inline handle and owns the client.
             let h = unsafe { word(flat.add(o[0] as usize)) } as *mut ClientH;
             if !h.is_null() {
-                // SAFETY: the item owned this client.
-                unit.ctx.drop_client(unsafe { Box::from_raw(h) }.client);
+                unit.drop_client(unsafe { Box::from_raw(h) }.client);
             }
         }
     }
@@ -278,6 +343,7 @@ struct SendWait {
 
 pub(crate) struct LangUnit {
     pub(crate) ctx: Box<UnitCtx>,
+    pub(crate) socket_registry: *mut hirsel_core_net::Sockets,
     inboxes: Map<usize, *mut InboxH>,
     sends: Map<u32, *mut SendWait>,
     helpers: Map<usize, *mut HelperH>,
@@ -292,6 +358,22 @@ pub(crate) struct LangUnit {
 }
 
 impl LangUnit {
+    fn drop_client(&mut self, client: Client) {
+        if let Some(id) = self.ctx.drop_client_with_release(client) {
+            self.refund_retained(id);
+        }
+    }
+
+    fn refund_retained(&mut self, id: usize) {
+        if let Some(held) = self.retained.remove(&id) {
+            held.refund_at_unit();
+        }
+    }
+
+    pub(crate) fn has_peer(&self) -> bool {
+        self.helper.is_some() || !self.helpers.is_empty()
+    }
+
     fn new(
         ctx: Box<UnitCtx>,
         readies: &Arc<Readies>,
@@ -301,6 +383,7 @@ impl LangUnit {
         ctx.port.arm();
         Box::new(LangUnit {
             ctx,
+            socket_registry: ptr::null_mut(),
             inboxes: map(),
             sends: map(),
             helpers: map(),
@@ -373,8 +456,13 @@ unsafe fn pump_for(u: &mut LangUnit, receiving: bool) {
             unsafe {
                 match took {
                     Took::Item | Took::Close | Took::SealAnswer => {
-                        if wake_inboxes && let Some(h) = u.inboxes.get(&id) {
-                            Waiters::wake_all(&raw mut (**h).waiters);
+                        if let Some(&h) = u.inboxes.get(&id) {
+                            if took == Took::Item {
+                                take_sockets(u, &*h);
+                            }
+                            if wake_inboxes {
+                                Waiters::wake_all(&raw mut (*h).waiters);
+                            }
                         }
                     }
                     Took::Accepted(s) | Took::Closed(s) | Took::Withdrawn(s) => {
@@ -394,9 +482,7 @@ unsafe fn pump_for(u: &mut LangUnit, receiving: bool) {
                             Waiters::wake_all(&raw mut (**h).waiters);
                         }
                     }
-                    Took::LastRelease => {
-                        u.retained.remove(&id);
-                    }
+                    Took::LastRelease => u.refund_retained(id),
                     Took::Credits => {}
                     Took::Cancel => {
                         if !u.root.is_null() {
@@ -408,6 +494,25 @@ unsafe fn pump_for(u: &mut LangUnit, receiving: bool) {
         }
         if u.ctx.port.arm() {
             return;
+        }
+    }
+}
+
+/// Register sockets when the receiving unit takes an arrival.
+unsafe fn take_sockets(u: &mut LangUnit, h: &InboxH) {
+    if let Some(sockets) = h
+        .inbox
+        .0
+        .side()
+        .taken
+        .back()
+        .and_then(|item| item.value().item_sockets())
+    {
+        // SAFETY: the inbox belongs to this unit, which owns its host files.
+        let files = unsafe { &mut *h.files };
+        sockets.lock().unwrap().take(files);
+        if files.sockets.active_poller().is_some() {
+            u.socket_registry = &raw mut files.sockets;
         }
     }
 }
@@ -424,6 +529,7 @@ unsafe fn unit() -> &'static mut LangUnit {
 // ---------------------------------------------------------------------------
 
 pub struct InboxH {
+    files: *mut crate::host_file::Files,
     inbox: Inbox,
     waiters: Waiters,
     owners: Vec<[u64; 4]>,
@@ -488,13 +594,13 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
         let _commit = tasks::before_commit();
         let u = unit();
         let owners = (*item).owners();
-        let seqs = owners.iter().copied().filter(|o| o[1] == SEQ).collect();
         let (inbox, client) = u
             .ctx
-            .conn_new_cross(cap, logical, b, (*item).bytes as usize, seqs)
+            .conn_new_cross(cap, logical, b, (*item).bytes as usize, owners)
             .unwrap_or_else(|_| crate::process::stop(b"UnitLedger"));
         let key = Arc::as_ptr(&inbox.0) as usize;
         let ih = Box::into_raw(Box::new(InboxH {
+            files: (*context).host_files,
             inbox,
             waiters: Waiters::default(),
             owners: owners.iter().copied().filter(|o| o[1] == CLIENT).collect(),
@@ -531,7 +637,7 @@ pub unsafe extern "C" fn hirsel_core_client_drop(_context: *mut Context, client:
     unsafe {
         let h = Box::from_raw(client);
         let _commit = tasks::before_commit();
-        unit().ctx.drop_client(h.client);
+        unit().drop_client(h.client);
     }
 }
 
@@ -569,18 +675,28 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
             return failed;
         }
         let charge = item_charge(value, owners);
-        let source = CrossSend::new(value);
+        let offsets = || client.0.socket_offsets.iter().copied();
+        let sockets = detach_sockets(context, value, offsets());
+        let mut source = CrossSend::new(value);
+        source.sockets = sockets.clone();
         let id = match UnitCtx::send_cross(client, source, charge, wait, || &mut unit().ctx) {
             Sent::Accepted => {
                 free_owners(value, owners);
                 return out(0);
             }
             Sent::Bounds => {
+                attach_sockets(context, value, offsets(), sockets.as_ref());
                 causes::record(&mut *context, Cause::new(causes::BOUNDS, site));
                 return failed;
             }
-            Sent::Closed(_) => return out(1),
-            Sent::Full(_) => return out(2),
+            Sent::Closed(_) => {
+                attach_sockets(context, value, offsets(), sockets.as_ref());
+                return out(1);
+            }
+            Sent::Full(_) => {
+                attach_sockets(context, value, offsets(), sockets.as_ref());
+                return out(2);
+            }
             Sent::Waiting(id) => id,
         };
         let u = unit();
@@ -602,10 +718,12 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
                     return out(0);
                 }
                 Some(Took::Closed(_)) => {
+                    attach_sockets(context, value, offsets(), sockets.as_ref());
                     u.waits -= 1;
                     return out(1);
                 }
                 Some(_) => {
+                    attach_sockets(context, value, offsets(), sockets.as_ref());
                     u.waits -= 1;
                     return failed;
                 }
@@ -669,13 +787,14 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
                 return out(1 << 8, 0, 0);
             }
             let u = unit();
-            if c.side().taken.is_empty()
-                && u.ctx.port.pending()
-                && (u.waits > usize::from(waited) || !u.ctx.take_single_item(c))
-            {
-                pump_for(u, waited);
+            if c.side().taken.is_empty() && u.ctx.port.pending() {
+                if u.waits <= usize::from(waited) && u.ctx.take_single_item(c) {
+                    take_sockets(u, &*inbox);
+                } else {
+                    pump_for(u, waited);
+                }
             }
-            let received = input.receive_cross(|bytes, flat, content| {
+            let received = input.receive_cross(|bytes, flat, content, sockets| {
                 if c.seqs.is_empty() {
                     if c.stride != 0 {
                         ptr::copy_nonoverlapping(flat, dest, c.stride);
@@ -688,6 +807,7 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
                     ptr::copy_nonoverlapping(flat, dest, c.stride);
                     unpack_owners(context, payer, content, dest, &c.seqs);
                 }
+                attach_sockets(context, dest, c.socket_offsets.iter().copied(), sockets);
                 Ok::<_, Capacity>(())
             });
             if let Some(result) = received {
@@ -751,15 +871,25 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
         u.waits -= 1;
         (*context).cancel_shield -= 1;
         let side = h.inbox.0.side();
-        for v in side.taken.iter() {
-            drop_packed_clients(u, h.inbox.flat_ptr(v), &h.owners);
+        for v in side.taken.iter().rev() {
+            drop_packed_owners(
+                context,
+                u,
+                h.inbox.flat_ptr(v),
+                &h.owners,
+                v.value().item_sockets(),
+            );
         }
         let key = Arc::as_ptr(&h.inbox.0) as usize;
         u.inboxes.remove(&key);
-        u.ctx.clean(&h.inbox);
+        let (_, last) = u.ctx.clean_with_release(&h.inbox);
         let mut h = Box::from_raw(inbox);
         if let Some(held) = h.charge.take() {
-            u.retained.insert(key, held);
+            if last {
+                held.refund_at_unit();
+            } else {
+                u.retained.insert(key, held);
+            }
         }
         drop(h);
         // The last release may already be on the port.
@@ -870,6 +1000,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             .spawn_helper(n, r_size, None)
             .unwrap_or_else(|_| crate::process::stop(b"UnitLedger"));
         let data = pack(input, x.bytes, x.owners());
+        let sockets = detach_sockets(context, input, socket_offsets(x.owners()));
         free_owners(input, x.owners());
         let shared = Arc::new(HelperShared {});
         let h = Box::into_raw(Box::new(HelperH {
@@ -889,6 +1020,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         let job = SendPtr((
             hctx,
             data,
+            sockets,
             x.bytes,
             x.owned(),
             rx.bytes,
@@ -901,8 +1033,10 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         ));
         let start = move || {
             let job = job;
-            let (hctx, data, xb, xo, rb, ro, run, body, layout, n, shared) = job.0;
-            helper_main(hctx, data, xb, xo, rb, ro, run, body, layout, n, shared);
+            let (hctx, data, sockets, xb, xo, rb, ro, run, body, layout, n, shared) = job.0;
+            helper_main(
+                hctx, data, sockets, xb, xo, rb, ro, run, body, layout, n, shared,
+            );
         };
         // On the pool the helper is a unit beside its owner; without one it
         // has a thread of its own.
@@ -926,6 +1060,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
 fn helper_main(
     hctx: Box<UnitCtx>,
     data: Vec<u8>,
+    sockets: Option<CrossingSockets>,
     xb: u64,
     xo: Vec<[u64; 4]>,
     rb: u64,
@@ -952,7 +1087,15 @@ fn helper_main(
         if xs > 0 && block::admit_storage(payer, Some(xs)).is_err() {
             crate::process::stop(b"UnitLedger");
         }
-        unpack(&mut context, payer, &data, input.as_mut_ptr(), xb, &xo);
+        unpack(
+            &mut context,
+            payer,
+            &data,
+            sockets.as_ref(),
+            input.as_mut_ptr(),
+            xb,
+            &xo,
+        );
         drop(data);
         let mut adopted: *mut LangUnit = ptr::null_mut();
         PENDING.with(|p| *p.borrow_mut() = Some((hctx, shared, &raw mut adopted)));
@@ -985,7 +1128,9 @@ fn helper_main(
             .alloc_block(0)
             .unwrap_or_else(|_| crate::process::stop(b"UnitLedger"));
         if failed == 0 {
-            ret.set_item(pack(result.as_ptr(), rb, &ro));
+            let data = pack(result.as_ptr(), rb, &ro);
+            let sockets = detach_sockets(&mut context, result.as_ptr(), socket_offsets(&ro));
+            ret.set_item(data, sockets);
             free_owners(result.as_ptr(), &ro);
         }
         RESULTS
@@ -1065,12 +1210,19 @@ unsafe fn consume(context: *mut Context, h: *mut HelperH, dest: *mut u8) -> (boo
                     context,
                     payer,
                     v.item(),
+                    v.item_sockets(),
                     dest,
                     hb.result.bytes,
                     &hb.result.owners,
                 );
             } else if let Some(v) = ret.as_ref() {
-                drop_packed_clients(u, v.item().as_ptr(), &hb.result.owners);
+                drop_packed_owners(
+                    context,
+                    u,
+                    v.item().as_ptr(),
+                    &hb.result.owners,
+                    v.item_sockets(),
+                );
             }
         } else {
             for (kind, site) in &ended.causes {

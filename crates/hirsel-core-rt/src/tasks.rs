@@ -1552,7 +1552,15 @@ impl Scheduler {
         self.poll_net(net_timeout);
         if !self.lang.is_null() {
             // SAFETY: the run pins its unit; no task runs.
-            unsafe { crate::units_lang::pump(&mut *self.lang) };
+            unsafe {
+                crate::units_lang::pump(&mut *self.lang);
+                let sockets = (*self.lang).socket_registry;
+                if self.net != sockets
+                    && let Some(poller) = sockets.as_ref().and_then(|s| s.active_poller())
+                {
+                    self.set_net(sockets, poller);
+                }
+            }
         }
         // SAFETY: no task is running; every parked operation's frame is pinned.
         unsafe {
@@ -1755,12 +1763,37 @@ impl Scheduler {
             .as_ref()
             .map_or_else(crate::os::monotonic_ns, |m| m.now())
     }
+    fn set_net(
+        &mut self,
+        sockets: *mut hirsel_core_net::Sockets,
+        poller: Arc<hirsel_core_net::Poller>,
+    ) {
+        let attached = self.net == sockets;
+        self.net = sockets;
+        // A serial run's tasks all use this thread. Pool tasks keep their hook byte.
+        let mut at = if self.pool.is_none() && !attached {
+            self.all
+        } else {
+            ptr::null_mut()
+        };
+        while !at.is_null() {
+            // SAFETY: this scheduler owns the pinned task list.
+            unsafe {
+                (*at).arc_hooks = self.arc_hooks(&*at);
+                at = (*at).all;
+            }
+        }
+        *self.readies.net.lock().unwrap_or_else(|e| e.into_inner()) = Some(poller);
+    }
+
     fn poll_net(&mut self, timeout: i32) {
         if let Some(model) = &self.model {
             // Readiness is taken before timers by take_wakes, including ties.
             let deadline = self.timers.deadline();
+            // A modeled network can serve several units. The scheduler
+            // that polls it need not own the operation that became ready.
             for token in model.poll(deadline, timeout != 0) {
-                self.readies.push(token);
+                hirsel_core_ready(token);
             }
             return;
         }
@@ -1818,9 +1851,15 @@ impl Scheduler {
                 && deadline.is_none_or(|at| at > now)
                 && !flow_pending
             {
-                if syncing {
-                    // Simulated time does not run a host sync: wait for its ready.
-                    std::thread::park();
+                // SAFETY: the scheduler pins its unit for this turn.
+                let peer = unsafe { self.lang.as_ref() }.is_some_and(|unit| unit.has_peer());
+                if syncing || peer {
+                    // The modeled clock cannot make a host sync or a peer run.
+                    if crate::units::untied() {
+                        crate::units::park(None);
+                    } else {
+                        std::thread::park();
+                    }
                     return;
                 }
                 self.stop_quiescent();
@@ -3301,33 +3340,14 @@ pub(crate) fn attach_net(
     if task.is_null() {
         task = CALLBACK_TASK.get();
     }
-    let readies = if task.is_null() {
-        alone_waiter()
+    if task.is_null() {
+        *alone_waiter().net.lock().unwrap_or_else(|e| e.into_inner()) = Some(poller);
     } else {
-        // SAFETY: the callback/task pins the run and its shared registry.
-        unsafe {
-            let run = &mut *(*task).run;
-            // Hooks read only whether the run has sockets, and tasks spawned
-            // since the first attach computed theirs with them, so a repeat
-            // attach of the same sockets leaves every byte as it is.
-            let attached = run.net == sockets;
-            run.net = sockets;
-            // Sockets change only a serial run's hooks, and its tasks all run
-            // on this thread; pool tasks keep their byte and are not touched.
-            let mut at = if run.pool.is_none() && !attached {
-                run.all
-            } else {
-                ptr::null_mut()
-            };
-            while !at.is_null() {
-                (*at).arc_hooks = run.arc_hooks(&*at);
-                at = (*at).all;
-            }
-            run.readies.clone()
-        }
-    };
-    *readies.net.lock().unwrap_or_else(|e| e.into_inner()) = Some(poller);
+        // SAFETY: the callback or task pins the scheduler and its registry.
+        unsafe { (*(*task).run).set_net(sockets, poller) };
+    }
 }
+
 fn poll_timeout(deadline: Option<u64>) -> i32 {
     deadline.map_or(-1, |at| {
         at.saturating_sub(crate::os::monotonic_ns())
@@ -3415,7 +3435,6 @@ pub(crate) fn request_flow_fixture_cancel() {
     unsafe { cancel_flag(CURRENT.get()).store(true, Ordering::Release) };
 }
 
-#[cfg(test)]
 pub(crate) fn in_task() -> bool {
     !CURRENT.get().is_null()
 }
@@ -3866,6 +3885,14 @@ pub unsafe fn run_root(
         lang_owned: false,
     };
     run.lang = crate::units_lang::adopt(&run.readies);
+    // A helper's entry can carry sockets already registered for this unit.
+    // SAFETY: the caller pins the context and its registry through the run.
+    if let Some(files) = unsafe { (*context).host_files.as_mut() }
+        && let Some(poller) = files.sockets.active_poller()
+    {
+        run.net = &raw mut files.sockets;
+        *run.readies.net.lock().unwrap() = Some(poller);
+    }
     let pool = (workers > 1).then(|| {
         // SAFETY: the caller pins the root context through worker teardown.
         let funding = unsafe { (*context).current.cache_domain() };

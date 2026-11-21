@@ -1,13 +1,15 @@
 //! What a `cross` value owns as it moves between units (CONC-15, CONC-17): each
 //! sequence buffer and each client handle, by byte offset in the value. The
 //! runtime copies a buffer's content into the receiving unit and moves a client;
-//! the checker refuses every other owner in a `cross` type.
+//! moves a socket with its host state, outside either poller until it is taken.
 use crate::{Body, FieldTy, Handle, Layout, Recipe, Shape, TypeRef, field_size};
 
 /// A sequence carrier (pointer, length, capacity).
 pub const SEQ: u64 = 0;
 /// A `Client[T]` handle word.
 pub const CLIENT: u64 = 1;
+/// A socket, listener or directional half handle word.
+pub const SOCKET: u64 = 2;
 
 /// Each owner of a value of row `ty`, as `[offset, kind, element bytes, element
 /// logical size]`, in field order.
@@ -37,6 +39,7 @@ fn held(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy, at: u64, out: &mut V
             out.push([at, SEQ, bytes, logical]);
         }
         FieldTy::Handle(Handle::Client) => out.push([at, CLIENT, 0, 0]),
+        FieldTy::Handle(Handle::Socket) => out.push([at, SOCKET, 0, 0]),
         FieldTy::Array(e, n) => {
             let (stride, _, _) = field_size(shapes, recipes, e);
             for i in 0..*n {

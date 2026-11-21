@@ -1446,17 +1446,18 @@ fn enqueue(p: &Pool, u: &Unit) {
         // Woken by the unit running on this worker: it runs here next.
         let prev = p.lifo[ix].swap((u as *const Unit).cast_mut(), Ordering::AcqRel);
         if !prev.is_null() {
-            p.locals[ix].lock().unwrap().push_back(UP(prev));
-            p.queued.fetch_add(1, Ordering::SeqCst);
-            notify_worker(p);
+            publish(p, &p.locals[ix], UP(prev));
         }
         return;
     }
-    if ix < p.w {
-        p.locals[ix].lock().unwrap().push_back(UP(u));
-    } else {
-        p.injector.lock().unwrap().push_back(UP(u));
-    }
+    publish(p, if ix < p.w { &p.locals[ix] } else { &p.injector }, UP(u));
+}
+
+/// Put `up` on queue `q`, count it and tell the pool. Every unit that becomes
+/// counted work comes through here, so a sleeping worker or a poller blocked
+/// with no deadline always hears of it.
+fn publish(p: &Pool, q: &Mutex<VecDeque<UP>>, up: UP) {
+    q.lock().unwrap().push_back(up);
     p.queued.fetch_add(1, Ordering::SeqCst);
     notify_worker(p);
 }
@@ -1604,8 +1605,13 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
                 bump(S_LIFO);
                 return Some(UP(l));
             }
-            p.locals[ix].lock().unwrap().push_back(UP(l));
-            p.queued.fetch_add(1, Ordering::SeqCst);
+            // Out of private runs: the unit goes behind this worker's queue,
+            // or runs now if that queue is empty, as it would come first.
+            if p.locals[ix].lock().unwrap().is_empty() {
+                p.lifo_runs[ix].store(0, Ordering::Relaxed);
+                return Some(UP(l));
+            }
+            publish(p, &p.locals[ix], UP(l));
         }
     }
     p.lifo_runs[ix].store(0, Ordering::Relaxed);
@@ -1695,9 +1701,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
             After::Yield => {
                 u.state.swap(QUEUED, Ordering::SeqCst);
                 mark_queued(p, u);
-                p.injector.lock().unwrap().push_back(up);
-                p.queued.fetch_add(1, Ordering::SeqCst);
-                notify_worker(p);
+                publish(p, &p.injector, up);
             }
             After::Wait(deadline) => {
                 if let Some(at) = deadline {
@@ -1712,8 +1716,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                     bump(S_NOTIFIED_REQUEUE);
                     u.state.swap(QUEUED, Ordering::SeqCst);
                     mark_queued(p, u);
-                    p.locals[ix].lock().unwrap().push_back(up);
-                    p.queued.fetch_add(1, Ordering::SeqCst);
+                    publish(p, &p.locals[ix], up);
                 }
             }
             After::Run => crate::process::stop(b"UnitLeftWithoutReason"),

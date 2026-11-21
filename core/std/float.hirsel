@@ -1683,22 +1683,154 @@ pub fn shortest64(x: f64) -> (u64, i64) {
 }
 
 /// The shortest decimal that parses back to a finite f32, as (c, p) with
-/// |x| = c × 10^p and no trailing zeros. (0, 0) for a zero. Allocates nothing.
+/// |x| = c × 10^p and no trailing zeros. (0, 0) for either signed zero.
+/// Fails: Fail when x is not finite. Alloc: nothing. Cost: O(1) for binary32.
 pub fn shortest32(x: f32) -> (u64, i64) {
     let bits = float.to_bits32(x)
     let biased: i64 = int.widen((bits >> 23) & 255)
     if biased == 255 {
         fail("float.shortest32: x is not finite")
     }
-    let fraction: u64 = int.widen(bits & 0x7fffff)
-    if biased == 0 {
-        if fraction == 0 {
-            return (0, 0)
-        }
-        return shortest_decimal(fraction, -149, 8388608, -149, 9)
+    let fraction = bits & 0x7fffff
+    if biased == 0 && fraction == 0 {
+        return (0, 0)
     }
-    shortest_decimal(fraction | 8388608, biased - 150, 8388608, -149, 9)
+    ryu32(fraction, biased)
 }
+
+// Binary32 interval scaling and digit removal adapted from Ryū f2s.rs.
+// Copyright 2018 Ulf Adams, Apache-2.0. See third-party/NOTICES.md.
+fn ryu32(fraction: u32, biased: i64) -> (u64, i64) {
+    let (m, e) = if biased == 0 {
+        (fraction, -151i64)
+    } else {
+        (fraction | 0x800000, biased - 152)
+    }
+    // Use two extra bits to represent both endpoints exactly. Only powers
+    // of two above the smallest normal have a narrower gap below them.
+    let center = m << 2
+    let upper = center + 2
+    let wider_below = fraction != 0 || biased <= 1
+    let lower = center - if wider_below {
+        2
+    } else {
+        1
+    }
+    let even = m & 1 == 0
+    let mut vr: u32 = 0
+    let mut vp: u32 = 0
+    let mut vm: u32 = 0
+    let mut vr_exact = false
+    let mut vm_exact = false
+    let mut last: u32 = 0
+    let scale_power = if e >= 0 {
+        let q = (e * 78913) >> 18
+        let shift = q + ryu32_pow5_bits(q) + 60 - e
+        let factor = RYU32_INV_POW5[int.truncate(q)]
+        vr = ryu32_mul_shift(center, factor, shift)
+        vp = ryu32_mul_shift(upper, factor, shift)
+        vm = ryu32_mul_shift(lower, factor, shift)
+        if q != 0 && (vp - 1) / 10 <= vm / 10 {
+            let finer = q - 1
+            let finer_shift = finer + ryu32_pow5_bits(finer) + 60 - e
+            last = ryu32_mul_shift(center, RYU32_INV_POW5[int.truncate(finer)], finer_shift) % 10
+        }
+        if q <= 9 {
+            let divisor: u32 = int.truncate(POW5_U64[int.truncate(q)])
+            if center % 5 == 0 {
+                vr_exact = center % divisor == 0
+            } else if even {
+                vm_exact = lower % divisor == 0
+            } else if upper % divisor == 0 {
+                vp -= 1
+            }
+        }
+        q
+    } else {
+        let q = ((-e) * 732923) >> 20
+        let i = -e - q
+        let shift = q + 61 - ryu32_pow5_bits(i)
+        let factor = RYU32_POW5[int.truncate(i)]
+        vr = ryu32_mul_shift(center, factor, shift)
+        vp = ryu32_mul_shift(upper, factor, shift)
+        vm = ryu32_mul_shift(lower, factor, shift)
+        if q != 0 && (vp - 1) / 10 <= vm / 10 {
+            let finer = i + 1
+            let finer_shift = q + 60 - ryu32_pow5_bits(finer)
+            last = ryu32_mul_shift(center, RYU32_POW5[int.truncate(finer)], finer_shift) % 10
+        }
+        if q <= 1 {
+            vr_exact = true
+            if even {
+                vm_exact = wider_below
+            } else {
+                vp -= 1
+            }
+        } else if q < 31 {
+            let zero_bits: u32 = int.truncate(q - 1)
+            vr_exact = (center & ((1u32 << zero_bits) - 1)) == 0
+        }
+        q + e
+    }
+    // Remove a digit while the resulting interval still contains a candidate.
+    let mut removed: i64 = 0
+    if vm_exact || vr_exact {
+        while vp / 10 > vm / 10 {
+            vm_exact = vm_exact && vm % 10 == 0
+            vr_exact = vr_exact && last == 0
+            last = vr % 10
+            vr /= 10
+            vp /= 10
+            vm /= 10
+            removed += 1
+        }
+        if vm_exact {
+            while vm % 10 == 0 {
+                vr_exact = vr_exact && last == 0
+                last = vr % 10
+                vr /= 10
+                vm /= 10
+                removed += 1
+            }
+        }
+        if vr_exact && last == 5 && vr & 1 == 0 {
+            last = 4
+        }
+    } else {
+        while vp / 10 > vm / 10 {
+            last = vr % 10
+            vr /= 10
+            vp /= 10
+            vm /= 10
+            removed += 1
+        }
+    }
+    if (vr == vm && !vm_exact) || last >= 5 {
+        vr += 1
+    }
+    strip(int.widen(vr), scale_power + removed)
+}
+
+fn ryu32_pow5_bits(n: i64) -> i64 {
+    ((n * 1217359) >> 19) + 1
+}
+
+// The scaled value fits u32 and the shift is between 32 and 64. Each
+// partial product fits u64, including their sum after dropping the low limb.
+fn ryu32_mul_shift(m: u32, factor: u64, shift: i64) -> u32 {
+    let value: u64 = int.widen(m)
+    let low = int.wrapping_mul(value, factor & 0xffffffff)
+    let high = int.wrapping_mul(value, factor >> 32)
+    let sum = int.wrapping_add(high, low >> 32)
+    let distance: u64 = int.truncate(shift - 32)
+    int.truncate(sum >> distance)
+}
+
+// floor(2^(bit_length(5^q) + 60) / 5^q) + 1 for q in 0..=30.
+const RYU32_INV_POW5: Inline[u64, 31] =[2305843009213693953, 1844674407370955162, 1475739525896764130, 1180591620717411304, 1888946593147858086, 1511157274518286469, 1208925819614629175, 1934281311383406680, 1547425049106725344, 1237940039285380275, 1980704062856608440, 1584563250285286752, 1267650600228229402, 2028240960365167043, 1622592768292133634, 1298074214633706908, 2076918743413931052, 1661534994731144842, 1329227995784915873, 2126764793255865397, 1701411834604692318, 1361129467683753854, 2177807148294006167, 1742245718635204933, 1393796574908163947, 2230074519853062315, 1784059615882449852, 1427247692705959882, 2283596308329535810, 1826877046663628648, 1461501637330902919]
+
+// floor(5^q × 2^(61 - bit_length(5^q))) for q in 0..=47.
+const RYU32_POW5: Inline[u64, 48] =[1152921504606846976, 1441151880758558720, 1801439850948198400, 2251799813685248000, 1407374883553280000, 1759218604441600000, 2199023255552000000, 1374389534720000000, 1717986918400000000, 2147483648000000000, 1342177280000000000, 1677721600000000000, 2097152000000000000, 1310720000000000000, 1638400000000000000, 2048000000000000000, 1280000000000000000, 1600000000000000000, 2000000000000000000, 1250000000000000000, 1562500000000000000, 1953125000000000000, 1220703125000000000, 1525878906250000000, 1907348632812500000, 1192092895507812500, 1490116119384765625, 1862645149230957031, 1164153218269348144, 1455191522836685180, 1818989403545856475, 2273736754432320594, 1421085471520200371, 1776356839400250464, 2220446049250313080, 1387778780781445675, 1734723475976807094, 2168404344971008868, 1355252715606880542, 1694065894508600678, 2117582368135750847, 1323488980084844279, 1654361225106055349, 2067951531382569187, 1292469707114105741, 1615587133892632177, 2019483917365790221, 1262177448353618888]
 
 fn shortest_decimal(m: u64, e: i64, normal: u64, min_exp: i64, max_digits: i64) -> (u64, i64) {
     let v = exact(m, e)

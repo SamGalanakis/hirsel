@@ -18,6 +18,10 @@ It spells them as serde_json does, with a fractional zero for finite
 integers in decimal form, signed exponents in scientific form, and `null`
 for nonfinite values. `std.json.write_f64` uses this formatter.
 
+`shortest32` returns the coefficient and exponent of the shortest round-trip
+decimal. The binary32 width bounds the cost of its integer products and
+digit removal. It allocates nothing.
+
 `sin`, `cos`, and `sin_cos` take radians and use Rust libm's binary64
 kernels and argument reduction. `sin_cos` returns the sine first and shares
 one reduction. All finite inputs, including signed zero and the largest

@@ -480,6 +480,16 @@ impl CheckProduct {
     ) -> Result<Vec<Identity>, InstanceStop> {
         {
             observe(key, "start");
+            if self
+                .foreign_inputs
+                .get(&key.definition.0.package)
+                .is_some_and(|modules| modules.contains_key(&key.definition.0.modules))
+            {
+                return Err(InstanceStop::Incomplete {
+                    definition: key.definition.clone(),
+                    message: "foreign modules are not enabled yet".into(),
+                });
+            }
             if let Some((_, expand)) = records
                 && let Some(i) = expand.entry(key)
             {

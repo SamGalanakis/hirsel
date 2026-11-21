@@ -1543,6 +1543,45 @@ fn foreign_case(name: &str) {
                         "{module}: missing {rule} at {at} with message {text:?}"
                     );
                 }
+                _ if let ["call", name, callee] = words.as_slice() => {
+                    let path = DefPath::from_full(&format!("{module}/{name}")).unwrap();
+                    let body = &checked.definitions[&path];
+                    let ir = body.ir().unwrap();
+                    let function = &ir.functions[body.check.function.unwrap().index()];
+                    let target = DefPath::from_full(callee).unwrap();
+                    let body = function.body.as_ref().unwrap();
+                    let anchor = body
+                        .insts
+                        .iter()
+                        .zip(&body.inst_anchors)
+                        .find_map(|(inst, anchor)| {
+                            let hirsel_core_ir::Inst::Call { call } = inst else {
+                                return None;
+                            };
+                            let hirsel_core_ir::Callee::Direct(callee) =
+                                body.calls[call.index()].callee
+                            else {
+                                return None;
+                            };
+                            let foreign = &ir.functions[callee.index()];
+                            (foreign.body.is_none()
+                                && ir.instances[foreign.instance.index()].definition == target)
+                                .then_some(*anchor)
+                        })
+                        .unwrap_or_else(|| panic!("{path}: missing call to {callee}"));
+                    assert!(anchor.is_some(), "{path}: call has no source location");
+                    assert_eq!(
+                        body.insts
+                            .iter()
+                            .zip(&body.inst_anchors)
+                            .filter(|(i, at)| {
+                                matches!(i, hirsel_core_ir::Inst::Step { .. }) && **at == anchor
+                            })
+                            .count(),
+                        1,
+                        "{path}: a foreign call takes one step"
+                    );
+                }
                 _ => {
                     let ["emit", name] = words.as_slice() else {
                         panic!("{module}: unexpected case assertion {expectation}");

@@ -692,12 +692,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             self.partial_rooted(g.result, found, roots)
         };
-        if p.index.modules[g.site.module.0 as usize].foreign {
-            if !self.broken {
-                self.gap(n, "foreign calls");
-            }
-            return (result, None);
-        }
         if result == NEVER {
             self.dead = true;
         }

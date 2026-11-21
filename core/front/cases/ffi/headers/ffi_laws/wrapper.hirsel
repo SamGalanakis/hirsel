@@ -3,3 +3,6 @@ fn describe() { let _ = code.describe(native.version) }
 pub opaque type Laws {}
 // expect: refuse FFI-2 at 1:52
 // expect: refuse FFI-2 at 2:46
+
+pub fn version(f: Foreign[Laws]) -> u64 { native.version(f) }
+// expect: call version ffi_laws@1/native/version

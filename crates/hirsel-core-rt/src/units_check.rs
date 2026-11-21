@@ -1047,7 +1047,7 @@ fn pool_state() -> String {
         p.poller_blocked.raw(),
         rel(p.poll_until.raw()),
         rel(p.next_timer.raw()),
-        p.live.raw(),
+        super::LIVE.raw(),
         p.stop.raw()
     );
     for ix in 0..p.w {
@@ -1490,6 +1490,7 @@ pub(super) static CASES: &[Case] = &[
                 return 0;
             }
             host_for(param(0));
+            host_for(param(0));
             maybe_yield();
             FLAG[0].store(true, Ordering::SeqCst);
             wake_id(1);
@@ -1718,6 +1719,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     (case.params)(&mut |lo, hi| lo + st.rand() % (hi - lo + 1));
     NEEDED.store(case.goals, Ordering::Relaxed);
     let spare = handoff.then(|| std::sync::Arc::new(super::Spare::new()));
+    super::LIVE.store(case.units as usize, Ordering::SeqCst);
     let _ = POOL.set(Pool {
         w,
         locals: (0..w).map(|_| super::Mutex::new(VecDeque::new())).collect(),
@@ -1733,7 +1735,8 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         idle: super::Mutex::new(Vec::with_capacity(w)),
         nsleep: super::AtomicUsize::new(0),
         threads: (0..w).map(|_| std::sync::Mutex::new(None)).collect(),
-        handoff_ns: if handoff { HOST_THRESHOLD } else { 0 },
+        handoff_ticks: if handoff { 4 } else { 0 },
+        handoff_tick_ns: HOST_THRESHOLD / 4,
         host_calls: (0..w)
             .map(|_| super::HostCall(super::AtomicU64::new(0)))
             .collect(),
@@ -1750,7 +1753,6 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         net_used: super::AtomicBool::new(true),
         timers: super::Mutex::new(std::collections::BTreeSet::new()),
         next_timer: super::AtomicU64::new(u64::MAX),
-        live: super::AtomicUsize::new(case.units as usize),
         stop: super::AtomicBool::new(false),
         last_poll: super::AtomicU64::new(0),
         spin_ns: 5_000,
@@ -1785,7 +1787,8 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     n(addr(&p.poll_until), "poll_until".into());
     n(addr(&p.next_timer), "next_timer".into());
     n(addr(&p.last_poll), "last_poll".into());
-    n(addr(&p.live), "live".into());
+    n(addr(&super::LIVE), "live".into());
+    n(addr(&super::HOST_TICK.0), "host clock tick".into());
     n(addr(&p.stop), "stop".into());
     n(addr(&p.injector), "injector".into());
     n(addr(&p.idle), "idle list".into());

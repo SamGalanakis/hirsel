@@ -19,7 +19,7 @@ def inputs(work, source=PROGRAM / "main.hirsel", store_sources=None):
     store = json.loads((PROGRAM.parent / "store/manifest.json").read_text())["packages"][0]
     store_sources = store_sources or {}
     store["sources"] = [
-        {**item, "file": str(store_sources.get(item["modules"][0], ROOT / item["file"]))}
+        {**item, "file": str(store_sources.get(item["modules"][0], PROGRAM.parent / "store" / item["file"]))}
         for item in store["sources"] if item["modules"] in (["store"], ["triggers"], ["runner"], ["ingress"])
     ]
     core = {"name": "core", "version": "1"}

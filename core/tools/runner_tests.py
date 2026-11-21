@@ -6,6 +6,12 @@ fixtures. Its L4/L20 cases compare exact retained bytes across native runs.
 R1 owns calls and admission. The wire target runs the socket cases.
 Without --part, both R0 and R1 run.
 
+The package's own tests run natively under `hirsel test core/programs/store`
+(store_tests.py). Natively this driver keeps what that cannot express: the
+generated p19 and L12 modules, the calls laws that link an event observer
+through --cc or need the scheduled runtime, retained bytes, crash cuts, the
+socket cases and the host laws.
+
 The crash adapter runs the W2 filesystem cuts and one failed journal sync.
 RC1's L31 checks that the disk store never writes the plaintext Hello credential.
 """
@@ -710,11 +716,13 @@ def activation_body_edit(root, work):
     return selected
 
 
-def frame_module(root, path):
+def frame_module(root):
     """Construct values beside the shared, hand-derived byte oracle, never from it."""
     vectors = json.loads((root / 'core/programs/store/frame-vectors.json').read_text())['vectors']
     helpers = (root / 'core/programs/store/frame-vector-helpers.hirsel').read_text()
-    lines = [helpers, '', 'pub fn law_frame_vectors() -> bool {',
+    lines = ['// Generated from frame-vectors.json by core/tools/runner_tests.py, then',
+             '// formatted; the r0 frame_vectors part refuses a stale copy.', helpers, '',
+             'pub fn law_frame_vectors() -> bool {',
              '    let out = result.unwrap(std.wsock.outbound(Server, runner.wire_defaults(0u64, 0u64).socket, None))']
     for v in vectors:
         payload = bytes.fromhex(v['hex'])
@@ -734,27 +742,24 @@ def frame_module(root, path):
             lines += [f'    if !wire(out, {v["value"]}, b("{(bytes([0x82]) + size + payload).hex()}")) {{ return false }}']
     lines += ['    true', '}', '', '@test', 'fn test_frame_vectors() -> Result[(), ()] {',
               '    if law_frame_vectors() { Ok(()) } else { Error(()) }', '}', '']
-    path.write_text('\n'.join(lines))
-    return len(vectors)
+    return '\n'.join(lines), len(vectors)
 
 
 def frame_vectors(args, root, work, engines, row):
-    module = work / 'runner_wire.hirsel'
-    count = frame_module(root, module)
+    """The package's runner_wire.hirsel is this generator's formatted output;
+    `hirsel test` runs it natively."""
+    module = root / 'core/programs/store/runner_wire.hirsel'
+    text, count = frame_module(root)
+    if args.compiler is not None:
+        formatted = run_case('frame_vectors:fmt', 'fmt', [str(args.compiler.resolve()), 'fmt', '--stdin'],
+                             input=text, capture_output=True, text=True)
+        current = formatted.returncode == 0 and formatted.stdout == module.read_text()
+        row(engine='fmt', law='frame_vectors_current', passed=current,
+            result=formatted.stderr or 'regenerate core/programs/store/runner_wire.hirsel')
     selected = manifest(root, work, 'wire', extra=[(module, 'runner_wire')])
-    definition = 'store@1/runner_wire/law_frame_vectors'
     if 'evaluator' in engines:
-        value, report = evaluate(args.evaluator.resolve(), selected, definition)
+        value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/runner_wire/law_frame_vectors')
         row(engine='evaluator', law='frame_vectors', vectors=count, passed=value == 1, result=report)
-    for engine in (e for e in engines if e != 'evaluator'):
-        if args.compiler is None or args.runtime is None:
-            raise ValueError('native frame vectors require --compiler and --runtime')
-        definition = 'store@1/runner_wire/test_frame_vectors'
-        code, report = native_run(args, engine, selected, work / f'wire-store-{engine}', definition)
-        tests = report.get('tests', [])
-        row(engine=engine, law='frame_vectors', vectors=count,
-            passed=code == 0 and [t['definition'] for t in tests] == [definition]
-            and all(t.get('passed') for t in tests), result=report)
 
 
 
@@ -785,19 +790,6 @@ def session_laws(args, root, work, engines, row):
             value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/runner/law_' + name)
             holds = value == 1 and (name != 'children_joined_on_close' or children_joined(report))
             row(engine='evaluator', law=name, passed=holds, result=report)
-    native_laws = []
-    if any(name != READER_CANCELLATION for name in names):
-        native_laws.append('wire_session')
-    if READER_CANCELLATION in names:
-        native_laws.append(READER_CANCELLATION)
-    for engine in (e for e in engines if e != 'evaluator'):
-        for law in native_laws:
-            definition = 'store@1/runner/test_' + law
-            code, report = native_run(args, engine, selected, work / f'session-store-{engine}', definition)
-            tests = report.get('tests', [])
-            row(engine=engine, law=law, passed=code == 0
-                and [t['definition'] for t in tests] == [definition]
-                and all(t.get('passed') for t in tests), result=report)
 
 
 SETTLEMENT_LAWS = ('after_publication', 'settled_callinfo')
@@ -829,19 +821,6 @@ def admission_laws(args, root, work, engines, row):
         for name in names:
             value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/runner/law_' + name)
             row(engine='evaluator', law=name, passed=value == 1, result=report)
-    for engine in (e for e in engines if e != 'evaluator'):
-        groups = [('wire_admission', state), ('durable_wire_admission', durable),
-                  ('wire_replacement_generation', ('wire_replacement_generation',))]
-        groups.extend((name, (name,)) for name in (*SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS))
-        for group, members in groups:
-            if not any(name in names for name in members):
-                continue
-            definition = 'store@1/runner/test_' + group
-            code, report = native_run(args, engine, selected, work / f'{group}-store-{engine}', definition)
-            tests = report.get('tests', [])
-            row(engine=engine, law=group, passed=code == 0
-                and [t['definition'] for t in tests] == [definition]
-                and all(t.get('passed') for t in tests), result=report)
 
 
 def socket_laws(args, root, work, engines, row):
@@ -1015,6 +994,9 @@ def main():
     engines = args.backend or ['evaluator', 'cranelift', 'llvm']
     if engines == ['evaluator'] and NATIVE_ONLY_CALLS.intersection(args.call_law or ()):
         p.error('drain_reopened and lag_window require a native backend')
+    retired = sorted(set(args.call_law or ()) - set(COUNTS) - set(PLACEMENT_OBSERVERS))
+    if retired and engines != ['evaluator']:
+        p.error(f'{", ".join(retired)} run natively under `hirsel test core/programs/store`; pass --backend evaluator')
     if args.part == 'rc1' and (not args.compiler or not args.runtime or engines == ['evaluator']):
         p.error('RC1 requires a native backend, --compiler and --runtime')
     rows = []
@@ -1117,12 +1099,8 @@ def main():
             l12_want = {'store@1/runner_l12/test_l12_describe', 'store@1/runner_l12/test_l12_revision'}
             # p19's place builds as its own program, in the store the laws primed and in a
             # fresh one: at 10,000 entries it reaches over 10,000 functions, each described.
-            # R1's calls build alone under --part r1; 'store@1/runner_l' selects runner_laws and runner_l12.
-            subs = ('subs', [], 'store@1/runner/', 'shared', {f'store@1/runner/test_{n}' for n in SUBS})
-            groups = ((subs,) if args.part != 'calls' else ()) if r1 else ()
-            groups += () if not r0 else (
-                      ('laws', [(l12, 'runner_l12')], 'store@1/runner_l', 'shared',
-                       {f'store@1/runner_laws/test_{n}' for n in LAWS} | l12_want),
+            groups = () if not r0 else (
+                      ('l12', [(l12, 'runner_l12')], 'store@1/runner_l12/', 'shared', l12_want),
                       ('p19', [(p19, 'runner_p19')], 'store@1/runner_p19/', 'shared',
                        {'store@1/runner_p19/test_p19_place_twice'}),
                       ('p19_fresh', [(p19, 'runner_p19')], 'store@1/runner_p19/', 'fresh',
@@ -1140,7 +1118,8 @@ def main():
                     row(engine=engine, group=group, selection=f'{len(selected & want)}/{len(want)}',
                         passed=code == 0 and selected == want,
                         result=sorted(want ^ selected) or report.get('stderr', ''))
-                for name in selected_calls if r1 else ():
+                # The other calls laws run in the package under `hirsel test`.
+                for name in (n for n in selected_calls if n in COUNTS or n in PLACEMENT_OBSERVERS) if r1 else ():
                     definition = f'store@1/runner_calls/test_{name}'
                     cc = counting_cc(args, root, base, name) if name in COUNTS or name in PLACEMENT_OBSERVERS else None
                     runtime = args.schedule_runtime if name == 'calls_deadline_hung' else args.runtime

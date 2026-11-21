@@ -290,8 +290,15 @@ mod tests {
         struct Manifest {
             packages: Vec<PackageManifest>,
         }
-        let all: Manifest =
-            serde_json::from_slice(&std::fs::read(root.join(manifest)).unwrap()).unwrap();
+        let path = root.join(manifest);
+        let all: Manifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // A package directory's manifest (one package, PROG-4) names its
+        // sources from its directory; a corpus manifest from the repository.
+        let base = if all.packages.len() == 1 {
+            path.parent().unwrap().to_owned()
+        } else {
+            root.to_owned()
+        };
         let mut pending = vec![name.to_string()];
         let mut out: Vec<PackageManifest> = vec![];
         while let Some(next) = pending.pop() {
@@ -308,7 +315,7 @@ mod tests {
                 .clone();
             p.sources
                 .iter_mut()
-                .for_each(|s| s.file = root.join(&s.file));
+                .for_each(|s| s.file = base.join(&s.file));
             pending.extend(p.dependencies.iter().map(|d| d.name.clone()));
             out.push(p);
         }

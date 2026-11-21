@@ -33,7 +33,7 @@ def main():
     if args.session_only or args.admission_only:
         store = json.loads((ROOT/'core/programs/store/manifest.json').read_text())['packages'][0]
         for source in store['sources']:
-            source['file'] = str(ROOT/source['file'])
+            source['file'] = str(ROOT/'core/programs/store'/source['file'])
         if args.runner:
             next(source for source in store['sources'] if source['modules'] == ['runner'])['file'] = str(args.runner.resolve())
         packages.append(store)

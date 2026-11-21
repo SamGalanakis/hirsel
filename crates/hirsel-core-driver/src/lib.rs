@@ -31,6 +31,7 @@ mod native_entry;
 mod native_facts;
 mod native_object;
 mod native_sources;
+mod package_dir;
 mod prebuild;
 mod release_manifest;
 pub use prebuild::Prebuilt;
@@ -117,6 +118,18 @@ impl CheckRequest {
         Ok(manifest)
     }
 
+    /// A package directory over core and std: the directory convention
+    /// depends on both, a manifest names its own dependencies.
+    fn app(dir: &Path) -> io::Result<package_dir::PackageDir> {
+        let mut app = package_dir::PackageDir::open(dir)?;
+        if app.manifest.is_none() {
+            app.package
+                .dependencies
+                .extend([package("core"), package("std")]);
+        }
+        Ok(app)
+    }
+
     pub fn libraries(libraries: &Path, store: &Path) -> io::Result<Self> {
         let core = if libraries == Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core") {
             PackageProduct::bundled_manifest(&libraries.join("core"))
@@ -136,24 +149,26 @@ impl CheckRequest {
         })
     }
     pub fn with_image(dir: &Path, store: &Path, image: Arc<CoreImage>) -> io::Result<Self> {
-        let mut app = PackageManifest::directory(dir, package("app"), false)?;
-        app.dependencies.extend(
-            image
-                .directory()?
-                .inputs
-                .packages
-                .iter()
-                .map(|p| p.package.clone()),
-        );
+        let mut app = package_dir::PackageDir::open(dir)?;
+        if app.manifest.is_none() {
+            app.package.dependencies.extend(
+                image
+                    .directory()?
+                    .inputs
+                    .packages
+                    .iter()
+                    .map(|p| p.package.clone()),
+            );
+        }
         Ok(Self {
-            manifest: None,
+            manifest: app.manifest,
             inputs: CorpusManifest {
                 core: image.directory()?.inputs.core.clone(),
-                packages: vec![app],
+                packages: vec![app.package],
             },
             store: store.to_owned(),
             library: LibraryInput::Image(image),
-            entry: Some(DefPath::from_full("app@1/main/main").unwrap()),
+            entry: Some(app.entry),
         })
     }
     /// Installed program libraries are the published root modules, not their contract-test corpus.
@@ -164,21 +179,20 @@ impl CheckRequest {
         {
             return Self::directory(dir, libraries, store);
         }
-        let mut app = PackageManifest::directory(dir, package("app"), false)?;
-        app.dependencies.extend([package("core"), package("std")]);
+        let app = Self::app(dir)?;
         Ok(Self {
-            manifest: None,
+            manifest: app.manifest,
             inputs: CorpusManifest {
                 core: package("core"),
                 packages: vec![
                     PackageProduct::bundled_manifest(&libraries.join("core")),
                     PackageProduct::bundled_std_manifest(&libraries.join("std")),
-                    app,
+                    app.package,
                 ],
             },
             store: store.to_owned(),
             library: LibraryInput::Sources,
-            entry: Some(DefPath::from_full("app@1/main/main").unwrap()),
+            entry: Some(app.entry),
         })
     }
     pub fn directory(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
@@ -188,17 +202,16 @@ impl CheckRequest {
             PackageManifest::directory(&libraries.join("core"), package("core"), true)?
         };
         let std = Self::source_std(&libraries.join("std"))?;
-        let mut app = PackageManifest::directory(dir, package("app"), false)?;
-        app.dependencies.extend([package("core"), package("std")]);
+        let app = Self::app(dir)?;
         Ok(Self {
-            manifest: None,
+            manifest: app.manifest,
             inputs: CorpusManifest {
                 core: package("core"),
-                packages: vec![core, std, app],
+                packages: vec![core, std, app.package],
             },
             store: store.to_owned(),
             library: LibraryInput::Sources,
-            entry: Some(DefPath::from_full("app@1/main/main").unwrap()),
+            entry: Some(app.entry),
         })
     }
 }

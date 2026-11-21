@@ -132,12 +132,41 @@ impl Source {
 
 const TEST_PASS_SCHEMA: u32 = 1;
 
-fn clear_test_grants(options: &mut NativeOptions) {
-    options.grant_mask = 0;
-    options.directories.clear();
-    options.net_rules.clear();
-    options.secret_grants.clear();
-    options.env_patterns = None;
+/// PROG-4: of its run's grants a test is granted only those its parameters
+/// take, so a test without parameters is granted nothing and a grant one
+/// test needs never reaches another test's launch.
+fn grant_parameters(decl: &EntryDecl, options: &mut NativeOptions) {
+    let kind = |ty: &str| ty.strip_prefix("core@1/core/").and_then(crate::grant_kind);
+    let named = |name: &str| crate::grant_kind(name).unwrap();
+    let mut taken = 0u64;
+    let mut directories = 0;
+    for parameter in &decl.parameters {
+        if let Some(kind) = kind(&parameter.ty) {
+            taken |= 1 << kind;
+            directories += usize::from(kind == named("Dir"));
+        }
+    }
+    options.grant_mask &= taken;
+    options.directories.truncate(directories);
+    if taken & (1 << named("Net")) == 0 {
+        options.net_rules.clear();
+    }
+    if taken & (1 << named("Env")) == 0 {
+        options.env_patterns = None;
+    }
+    options.secret_grants.retain(|grant| {
+        decl.parameters
+            .iter()
+            .any(|p| kind(&p.ty) == Some(named("Secret")) && p.name == grant.parameter)
+    });
+}
+
+/// PROG-4: each test run starts in a working directory of its own, empty
+/// when it starts; a relative directory grant resolves against it.
+fn private_directory(command: &mut Command) -> io::Result<tempfile::TempDir> {
+    let directory = tempfile::Builder::new().prefix("hirsel-test-").tempdir()?;
+    command.current_dir(directory.path());
+    Ok(directory)
 }
 
 /// Reused passes of determined tests (PROG-4).
@@ -246,6 +275,8 @@ enum TestLaunch<'a> {
 struct TestProcess<'a> {
     command: Command,
     pass: Option<(&'a TestCache, ContentHash)>,
+    /// Removed once the run is collected.
+    _directory: tempfile::TempDir,
 }
 
 impl TestProcess<'_> {
@@ -267,6 +298,7 @@ impl TestProcess<'_> {
 }
 
 pub(crate) struct TestBatch<'a> {
+    pub runs: &'a crate::package_dir::TestRuns,
     pub jobs: NonZeroUsize,
     pub timeout: Option<Duration>,
     pub runner: &'a Runner,
@@ -284,14 +316,16 @@ impl TestBatch<'_> {
         options: &NativeOptions,
         mut report: impl FnMut(&DefPath, TestResult),
     ) {
-        let output = |test: &DefPath| {
-            options
+        // Each test's own run configuration; one test's never changes another's.
+        let configure = |test: &DefPath| {
+            let mut test_options = self.runs.options(test, options);
+            test_options.output = options
                 .output
                 .join(crate::request::hex(ContentHash::of_bytes(
                     test.to_string().as_bytes(),
-                )))
+                )));
+            test_options
         };
-        let mut test_options = options.clone();
         if self.jobs.get() == 1
             || tests.len() <= 1
             || self.replay
@@ -301,7 +335,7 @@ impl TestBatch<'_> {
             || !matches!(self.runner, Runner::Native)
         {
             for test in tests {
-                test_options.output = output(test);
+                let test_options = configure(test);
                 let result = if self.replay {
                     product
                         .run_test_with_replay(
@@ -344,7 +378,8 @@ impl TestBatch<'_> {
             };
             let mut running = 0;
             for (index, test) in tests.iter().enumerate() {
-                let exclusive = product.test_needs_exclusive_run(test, options);
+                let test_options = configure(test);
+                let exclusive = product.test_needs_exclusive_run(test, &test_options);
                 let slots = if exclusive { 0 } else { self.jobs.get() - 1 };
                 while running > slots {
                     let (index, outcome) =
@@ -353,7 +388,6 @@ impl TestBatch<'_> {
                     running -= 1;
                 }
 
-                test_options.output = output(test);
                 if exclusive {
                     complete(
                         index,
@@ -482,16 +516,9 @@ impl CheckProduct {
             )));
         };
         let parameterless = parameterless_test(decl);
-        // PROG-4 grants the test's parameters. An unused launch grant can
-        // otherwise touch host state before a parameterless test starts.
-        let mut effective_options;
-        let options = if parameterless.is_some() {
-            effective_options = options.clone();
-            clear_test_grants(&mut effective_options);
-            &effective_options
-        } else {
-            options
-        };
+        // An unused launch grant could otherwise touch host state before the
+        // test starts.
+        let options = &self.granted(test, options);
         let reached = self.reachable_for(test, options)?;
         let pass = cache
             .filter(|_| {
@@ -516,14 +543,29 @@ impl CheckProduct {
             }));
         }
         let built = self.build_reachable(test, &reached, options)?;
-        let command = runner.test_command(&std::fs::canonicalize(&built.executable)?);
-        Ok(TestLaunch::Run(TestProcess { command, pass }))
+        let mut command = runner.test_command(&std::fs::canonicalize(&built.executable)?);
+        let directory = private_directory(&mut command)?;
+        Ok(TestLaunch::Run(TestProcess {
+            command,
+            pass,
+            _directory: directory,
+        }))
+    }
+
+    /// `options` reduced to what `test`'s parameters take.
+    fn granted(&self, test: &DefPath, options: &NativeOptions) -> NativeOptions {
+        let mut options = options.clone();
+        if let Some(Ok(decl)) = self.test_entries.get(test) {
+            grant_parameters(decl, &mut options);
+        }
+        options
     }
 
     fn test_needs_exclusive_run(&self, test: &DefPath, options: &NativeOptions) -> bool {
         let Some(Ok(entry)) = self.test_entries.get(test) else {
             return false;
         };
+        let options = &self.granted(test, options);
         let grants = |kind| options.grant_mask & (1 << crate::grant_kind(kind).unwrap()) != 0;
         entry
             .parameters
@@ -532,7 +574,12 @@ impl CheckProduct {
                 // Unbound grants can open host handles during startup, but only a
                 // bound parameter can use one. Drain even unbound runs before
                 // starting a test that could change another run's startup inputs.
-                "core@1/core/Dir" => !options.directories.is_empty(),
+                // A directory inside the run's own working directory is
+                // the run's alone.
+                "core@1/core/Dir" => !options
+                    .directories
+                    .iter()
+                    .all(|d| crate::package_dir::private_directory(d)),
                 "core@1/core/Net" => grants("Net"),
                 "core@1/core/Stdin" => grants("Stdin"),
                 "core@1/core/Secret" => !options.secret_grants.is_empty(),
@@ -559,24 +606,23 @@ impl CheckProduct {
         expect_verdict: Option<&str>,
     ) -> Result<TestOutcome, NativeStop> {
         use std::os::unix::fs::PermissionsExt;
-        let Some(decl) = self.test_entries.get(test) else {
+        if !self.test_entries.contains_key(test) {
             return Err(NativeStop::Entry(format!(
                 "{test} is not a discovered @test"
             )));
-        };
+        }
         let tape_dir = tempfile::tempdir()?;
         std::fs::set_permissions(tape_dir.path(), std::fs::Permissions::from_mode(0o700))?;
         let tape_path = tape_dir.path().join("test.tape");
-        let mut record_options = options.clone();
-        if decl.as_ref().is_ok_and(|decl| decl.parameters.is_empty()) {
-            clear_test_grants(&mut record_options);
-        }
+        let mut record_options = self.granted(test, options);
         record_options.recording = true;
         record_options.replay = None;
         let built = self.build(test, &record_options)?;
         let mut cmd = runner.test_command(&std::fs::canonicalize(&built.executable)?);
         cmd.env("HIRSEL_RECORD", &tape_path);
+        let directory = private_directory(&mut cmd)?;
         let (output, timed_out, wall_time) = execute(&mut cmd, timeout)?;
+        drop(directory);
         if timed_out || !output.status.success() {
             return Ok(TestOutcome {
                 definition: test.clone(),
@@ -603,10 +649,9 @@ impl CheckProduct {
             diagnose: false,
         });
         let replay_built = self.build(test, &replay_options)?;
-        let (replay_output, replay_timed_out, replay_wall_time) = execute(
-            &mut runner.test_command(&std::fs::canonicalize(&replay_built.executable)?),
-            timeout,
-        )?;
+        let mut replay = runner.test_command(&std::fs::canonicalize(&replay_built.executable)?);
+        let _directory = private_directory(&mut replay)?;
+        let (replay_output, replay_timed_out, replay_wall_time) = execute(&mut replay, timeout)?;
         let wall_time = wall_time + replay_wall_time;
         if replay_timed_out {
             return Ok(TestOutcome {

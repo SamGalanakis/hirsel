@@ -1221,7 +1221,7 @@ fn recovered_header_cases() -> Vec<String> {
             let mut store: PackageManifest =
                 serde_json::from_value(manifest["packages"][0].clone()).unwrap();
             for source in &mut store.sources {
-                source.file = repo().join(&source.file);
+                source.file = repo().join("core/programs/store").join(&source.file);
             }
             store.sources.push(ModuleSource {
                 file: path,

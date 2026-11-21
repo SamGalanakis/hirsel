@@ -212,11 +212,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut test_rerun = false;
     let mut expect_verdict = None;
     let mut diagnose = false;
-    let mut directories = Vec::new();
-    let mut grant_mask = 0;
-    let mut net_rules = Vec::new();
-    let mut secret_grants = Vec::new();
-    let mut env_patterns: Option<hirsel_core_net::EnvPatterns> = None;
+    let mut grants = crate::package_dir::Grants::default();
     let mut json = false;
     use crate::cli::OptionId as Opt;
     for (option, value) in invocation.options {
@@ -251,50 +247,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 )
             }
             Opt::CoreProduct => core_product = Some(PathBuf::from(value)),
-            Opt::Dir => directories.push(value),
-            Opt::Grant => {
-                if value == "Secret" || value.starts_with("Secret:") {
-                    let grant = hirsel_core_net::SecretGrant::parse(&value)
-                        .ok_or(hirsel_core_net::SecretGrant::SYNTAX)?;
-                    if secret_grants
-                        .iter()
-                        .any(|old: &hirsel_core_net::SecretGrant| old.parameter == grant.parameter)
-                    {
-                        return Err("a Secret parameter can be granted only once".into());
-                    }
-                    secret_grants.push(grant);
-                    continue;
-                }
-                if value == "Net" {
-                    return Err(
-                        format!("Net requires --grant {}", hirsel_core_net::RULE_SYNTAX).into(),
-                    );
-                }
-                if let Some(rules) = value.strip_prefix("Net=") {
-                    for rule in rules.split(';') {
-                        net_rules.push(hirsel_core_net::GrantRule::parse(rule)?);
-                    }
-                    grant_mask |= 1 << 1;
-                    continue;
-                }
-                if value == "Env" {
-                    return Err(hirsel_core_net::EnvPatterns::SYNTAX.into());
-                }
-                if let Some(patterns) = value.strip_prefix("Env=") {
-                    let patterns = hirsel_core_net::EnvPatterns::parse(patterns)
-                        .ok_or(hirsel_core_net::EnvPatterns::SYNTAX)?;
-                    if let Some(granted) = &mut env_patterns {
-                        granted.extend(patterns);
-                    } else {
-                        env_patterns = Some(patterns);
-                    }
-                    grant_mask |= 1 << 7;
-                    continue;
-                }
-                let kind = crate::grant_kind(&value)
-                    .filter(|kind| (1..=9).contains(kind)).ok_or("expected Net, Clock, Random, Stdout, Stderr, Stdin, Env, Process or Tasks; use --dir for Dir; Args is always present")?;
-                grant_mask |= 1 << kind;
-            }
+            Opt::Dir => grants.directories.push(value),
+            Opt::Grant => grants.grant(&value)?,
             Opt::Filter => test_filter = Some(value),
             Opt::TestJobs => {
                 test_jobs = Some(
@@ -392,7 +346,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     }
     let mut replay_plan = None;
     if replay_command {
-        if !directories.is_empty() || grant_mask != 0 || !secret_grants.is_empty() {
+        if !grants.is_empty() {
             return Err("replay takes no host grants".into());
         }
         let mut path = replay_tape.ok_or("replay requires --tape TAPE")?;
@@ -434,9 +388,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             || explicit_target
             || explicit_limit
             || n_place.is_some()
-            || !directories.is_empty()
-            || grant_mask != 0
-            || !secret_grants.is_empty()
+            || !grants.is_empty()
         {
             return Err("--recipe supplies source, target, limits and grants".into());
         }
@@ -455,9 +407,6 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         (Some(emulator), Some(sysroot)) => crate::Runner::qemu(&emulator, &sysroot, &target)?,
         _ => return Err("--emulator and --sysroot must be supplied together".into()),
     };
-    if test_command && !explicit_limit {
-        return Err("test requires an explicit --limit <bytes> for each run".into());
-    }
     if test_command && entry.is_some() {
         return Err("test selects marked functions with --filter, not --entry".into());
     }
@@ -705,6 +654,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     if command == "image" && image.is_some() {
         return Err("image production takes sources, not an image".into());
     }
+    let explicit_inputs = manifest.is_some();
+    let package_dir = dir.clone();
     let mut request = if let Some(manifest) = manifest {
         CheckRequest {
             inputs: serde_json::from_slice::<CorpusManifest>(&std::fs::read(&manifest)?)?,
@@ -732,8 +683,53 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     if entry.is_some() {
         request.entry = entry;
     }
-    if test_command {
+    // PROG-4: each test's run configuration, from the package's manifest
+    // when it declares one, else from the command line.
+    let test_runs = if test_command {
         request.entry = None;
+        let app = match &package_dir {
+            Some(dir) if !explicit_inputs => Some(crate::package_dir::PackageDir::open(dir)?),
+            _ => None,
+        };
+        Some(match app {
+            Some(crate::package_dir::PackageDir {
+                package,
+                tests: Some((sources, runs)),
+                ..
+            }) => {
+                if explicit_limit || !grants.is_empty() {
+                    return Err("the package's manifest declares its tests' run configuration; test takes no --limit, --dir or --grant".into());
+                }
+                request
+                    .inputs
+                    .packages
+                    .iter_mut()
+                    .find(|p| p.package == package.package)
+                    .ok_or("the package's manifest names no checked package")?
+                    .sources
+                    .extend(sources);
+                runs
+            }
+            _ => {
+                if !explicit_limit {
+                    return Err("test requires an explicit --limit <bytes> for each run".into());
+                }
+                // A test runs in a working directory of its own; a directory
+                // the command line names is the invoker's.
+                for directory in &mut grants.directories {
+                    *directory = std::path::absolute(&*directory)?
+                        .to_str()
+                        .ok_or("directory path is not UTF-8")?
+                        .to_owned();
+                }
+                crate::package_dir::TestRuns::given(root_limit, grants.clone())
+            }
+        })
+    } else {
+        None
+    };
+    if test_command && let Some(path) = &mut logical_charge_report {
+        *path = std::path::absolute(&*path)?;
     }
     let selected_entry = request.entry.clone();
     let sources = crate::SourceFiles::of(&request);
@@ -775,11 +771,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             options.backend = backend.unwrap_or(options.backend);
             options.debug_lines = debug_lines.unwrap_or(options.debug_lines);
             options.root_limit = root_limit;
-            options.directories = directories;
-            options.grant_mask = grant_mask;
-            options.net_rules = net_rules;
-            options.secret_grants = secret_grants;
-            options.env_patterns = env_patterns;
+            grants.apply(&mut options);
             options.logical_charge_report = logical_charge_report;
             options.recording = needs_recording;
             options.replay = replay_plan;
@@ -887,6 +879,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     if test_command {
         use crate::{Source, TestCache};
 
+        let test_runs = test_runs.expect("a test request has its run configuration");
+        test_runs.check_names(&product.tests().collect())?;
         let tests: Vec<_> = product
             .tests()
             .filter(|path| {
@@ -904,6 +898,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         let mut rows = Vec::new();
         let mut failed = false;
         let batch = crate::test_run::TestBatch {
+            runs: &test_runs,
             jobs: test_jobs.map_or_else(crate::test_run::affinity_jobs, Ok)?,
             timeout: test_timeout,
             runner: &runner,

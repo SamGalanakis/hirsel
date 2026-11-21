@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run the store's S2 laws from checkout sources with exact body selection."""
+"""Run the store's S2 evaluator laws and its native crash cuts.
+
+The disk tests themselves run with the rest of the store package under
+`hirsel test core/programs/store` (store_tests.py).
+"""
 import argparse
 import contextlib
 import json
@@ -8,7 +12,6 @@ from pathlib import Path
 import re
 import tempfile
 
-from case_progress import run_case
 from std_native import ROOT, Evaluator
 from store_tests import inputs
 from store_crash_tests import run_crashes
@@ -18,7 +21,6 @@ INSTRUCTION_ALLOWANCES = {'pack_bound': 1_622_341_249}  # measured 1_297_872_999
 
 LAWS = ('frames', 'manifest', 'nodes', 'graph', 'packs', 'load', 'compact', 'import_read_boundaries',
         'draft_refusal', 'worker_refusal', 'opening', 'db', 'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound', 'branches', 'migrate')
-NATIVE_TESTS = {'store@1/store/disk_test_' + name for name in LAWS if name != 'pack_bound'}
 
 # Orchestrator ruling: these evaluator assembly defects ride with owner914.
 # Execute and report every law; only this exact failure family is nonblocking.
@@ -51,13 +53,8 @@ def main():
         corpus = inputs(args.root.resolve())
         crash_manifest = work / 'crash-inputs.json'
         crash_manifest.write_text(json.dumps(corpus))
-        library = corpus['packages'][-1]['sources'][0]
-        law_source = work / 'store-with-import-read-laws.hirsel'
-        law_source.write_text(Path(library['file']).read_text() + '\n' +
-                              (args.root / 'core/programs/store/import_read_laws.hirsel').read_text())
-        library['file'] = str(law_source)
         manifest = work / 'inputs.json'
-        manifest.write_text(json.dumps(corpus))
+        manifest.write_text(json.dumps(inputs(args.root.resolve(), tests=True)))
         evaluator = resources.enter_context(Evaluator(args.evaluator.resolve())) if args.evaluator else None
         for engine in args.backend or ['evaluator', 'cranelift', 'llvm', 'llvm-release']:
             if engine == 'evaluator':
@@ -76,43 +73,6 @@ def main():
             else:
                 if args.compiler is None or args.runtime is None or args.bridge is None:
                     p.error('native backends require --compiler, --runtime and --bridge')
-                host = work / (engine + '-host')
-                host.mkdir()
-                command = [str(args.compiler.resolve()), 'test', '--inputs', str(manifest),
-                           '--source-core', '--source-std', '--backend', 'llvm' if engine == 'llvm-release' else engine,
-                           '--runtime', str(args.runtime.resolve()), '--store', str(work / engine), '--json',
-                           '--filter', 'store@1/store/disk_test_', '--dir', str(host), '--limit', str(64 * 1024 * 1024),
-                           '--grant', 'Clock', '--grant', 'Random', '--grant', 'Tasks', '--grant', 'Stderr']
-                if engine == 'llvm-release':
-                    command.append('--release')
-                if args.cc:
-                    command += ['--cc', str(args.cc.resolve())]
-                result = run_case('store@1/store/disk_test_', engine, command, capture_output=True, text=True)
-                try:
-                    report = json.loads(result.stdout)
-                except ValueError:
-                    report = {'stdout': result.stdout, 'stderr': result.stderr}
-                tests = report.get('tests', [])
-                good = (result.returncode == 0 and len(tests) == len(NATIVE_TESTS)
-                        and {t['definition'] for t in tests} == NATIVE_TESTS and all(t.get('passed') for t in tests))
-                rows.append(dict(engine=engine, passed=good, result=report))
-                print(f'{engine}: {sum(bool(t.get("passed")) for t in tests)}/{len(NATIVE_TESTS)} passed', flush=True)
-                # New L25 case keeps36MiB of rows plus a40MiB pack and the
-                # default262MiB child reservation; other laws retain64MiB.
-                large = list(command)
-                large[large.index('--filter') + 1] = 'store@1/store/disk_pack_bound'
-                large[large.index('--limit') + 1] = str(512 * 1024 * 1024)
-                result = run_case('store@1/store/disk_pack_bound', engine, large, capture_output=True, text=True)
-                try:
-                    report = json.loads(result.stdout)
-                except ValueError:
-                    report = {'stdout': result.stdout, 'stderr': result.stderr}
-                tests = report.get('tests', [])
-                good = (result.returncode == 0 and len(tests) == 1
-                        and tests[0].get('definition') == 'store@1/store/disk_pack_bound'
-                        and tests[0].get('passed'))
-                rows.append(dict(engine=engine, law='pack_bound', passed=good, result=report))
-                print(f'{engine} pack_bound: {"PASS" if good else "FAIL"}', flush=True)
                 try:
                     cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
                                        args.cc, crash_manifest, work, engine,

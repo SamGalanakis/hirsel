@@ -63,7 +63,7 @@ fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Ar
     )
     .unwrap();
     for source in packages.iter_mut().flat_map(|package| &mut package.sources) {
-        source.file = root.join(&source.file);
+        source.file = root.join("core/programs/store").join(&source.file);
     }
     let store = packages
         .iter_mut()

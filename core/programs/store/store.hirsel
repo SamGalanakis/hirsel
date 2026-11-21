@@ -8644,35 +8644,51 @@ fn disk_graph_draft(graph: DiskGraph, roots: Roots) -> Result[DiskGraph, Capacit
 // Q1/L28 table component: a bounded draft may fail after any metadata
 // allocation. Every refused draft leaves the installed root/counts untouched.
 pub fn disk_law_draft_refusal(c: Clock) -> bool {
-    let mut db = test_db(c, 1073741824)
+    let mut writing = test_db(c, 1073741824)
     for k in 0u64 .. 96 {
-        if !put_one(mut db, k, k + 1) {
+        if !put_one(mut writing, k, k + 1) {
             return false
         }
     }
-    let mut installed = disk_graph()
-    let _ = result.unwrap(disk_track(mut installed, db.heads[0].roots))
-    let count = disk_index_len(installed.nodes)
-    let saved: List[u64] = clone(installed.roots)
+    let mut tracking = disk_graph()
+    let _ = result.unwrap(disk_track(mut tracking, writing.heads[0].roots))
+    let count = disk_index_len(tracking.nodes)
+    let saved: List[u64] = clone(tracking.roots)
     for k in 0u64 .. 64 {
-        if !put_one(mut db, k, k + 101) {
+        if !put_one(mut writing, k, k + 101) {
             return false
         }
     }
+    // R1: a refused admission inside the draft raises Capacity; isolate outside
+    // the bound observes it as the refusal it is.
+    let installed = take tracking
+    let db = take writing
     let mut refusals: u64 = 0
     let mut accepted: u64 = 0
     let limits: Inline[u64, 6] =[64, 512, 2048, 8192, 32768, 1048576]
     for limit in limits {
-        let trial: Result[DiskGraph, Capacity] = result.unwrap(bound bytes limit {
-            disk_graph_draft(installed, db.heads[0].roots)
+        let trial = isolate(fn() -> Result[Result[DiskGraph, Capacity], Capacity] {
+            bound bytes limit {
+                disk_graph_draft(installed, db.heads[0].roots)
+            }
         })
         match take trial {
-            Error(_) => {
-                refusals += 1
+            Ok(Ok(take entered)) => match take entered {
+                Ok(Ok(_)) => {
+                    accepted += 1
+                },
+                Ok(Error(_)) => {
+                    refusals += 1
+                },
+                Error(_) => return false,
             },
-            Ok(_) => {
-                accepted += 1
-            }
+            Ok(Error(causes)) => match raised_capacity(causes) {
+                Some(_) => {
+                    refusals += 1
+                },
+                None => return false,
+            },
+            _ => return false,
         }
         if installed.live != 96 * 86 || disk_index_len(installed.nodes) != count || installed.roots != saved {
             return false

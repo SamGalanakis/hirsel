@@ -5,6 +5,29 @@ of a place, as a library over v1 (reserved R13). R0 has `Registry[G, H]`, `compu
 `granted`, `describe`, `call`, `start` and `finish`. R1 adds `transact`, the head
 (`place_head`), its internal publisher, and sessions (`connect`, `ask`, `hang_up`).
 
+## No authentication, no authorization
+
+Hirsel and `runner` contain no authentication and no authorization (RUNNER-SPEC
+v2.24 rule 13, ruling R6). The runner checks no token, signature, password or
+key, mints no credential, keeps no allow or deny list, and makes no access
+decision by Caller. There is no badge maker, no Caller-based policy, no per-caller
+grant and no `Arc[G]`. Your application does both:
+
+- **Authentication** is your binding, `runner.wire(grant, Some(bind), ..)`: a
+  function from a copy of your grant and the client's credential bytes (the
+  Hello `credential`, or the HTTP `Authorization` value) to `Ok(Caller)` or
+  `Error(())`. An `Error` refuses the Hello with Close 1008, or the HTTP request
+  with 401. The runner never reads the credential itself.
+- **Authorization** is your entry bodies. Transact, query and granted bodies
+  receive the Caller and decide access in their own code, for example by reading
+  a membership row in the same transaction.
+
+With no binding, every session gets a fresh, unguessable anonymous Caller
+(issuer 1, 16 random bytes drawn at Hello). Saved replies are keyed by Caller,
+so they never cross sessions; deduplication across reconnects needs a binding.
+
+## Running a place
+
 `runner.main(args, process, tasks, place, serve)` passes a stop receiver to
 `serve` on the normal launch path. Pass that receiver to `runner.operate`.
 The first [process stop](process.md) closes the channel and starts the drain
@@ -44,7 +67,12 @@ outcomes are:
 
 The decoder's peak memory therefore counts against n. `start(r, tasks, g, key,
 arg)` spawns a task under the entry's `bytes n` that holds the grant g and decodes and runs
-the granted entry. A spawn the place cannot grant returns `Budget`. `finish` joins
+the granted entry, a body `fn(G, Caller, take A) -> Result[R, Capacity] waits`. A trigger
+moves its attempt's `G` into `start`. A wire call reaches a granted entry only when the
+place gives `PlaceConfig.wire` a `runner.wire(grant, ..)`, which requires `G: plain + send`
+(Dir, Net, Clock, Random, Secret and records of them); each wire call then runs with its
+own copy of the grant, so no call consumes it. Without it a wire call to a granted entry
+is `Refused(NotAllowed)`. A movable `G` stays trigger-only. A spawn the place cannot grant returns `Budget`. `finish` joins
 that task, and a task that fails or is cancelled gives `Failed(Raised)`. A key that
 names no entry of the kind being asked for gives `NoEntry`.
 
@@ -212,21 +240,22 @@ native engines in `core-runner-r0` after a push, and in `core-runner-wire`.
 `ingress.start` owns the shared mint and call buckets, with at most 8192 keys of
 each kind and a 256-item inbox. Every ask has a fresh capacity-one reply, answered
 by `try_send`. Only full inactive buckets retire. Socket leases return on drop;
-Hello binds a 21-byte anonymous bearer or mints one. Defaults are 32 sessions per
-source, ten new principals per minute, and 20 calls/second per principal with
-burst 40. Hello refusal is Close 1013; call refusal is `Refused(Overloaded)`.
+Hello passes its credential to the application's binding, or, with none, binds a fresh
+anonymous Caller. Defaults are 32 sessions per source and 20 calls/second per Caller
+with burst 40. Hello refusal is Close 1013; call refusal is `Refused(Overloaded)`.
 
-`runner.admitted` carries the authenticated `Caller`, attenuated entry keys,
-recorded arrival and decision times, and byte allowances. Ingress derives the
-anonymous Caller at Hello or from the HTTP Bearer value. The wire owner transfers
-the token to the Welcome frame and retains the Caller. Pure `prepare` resolves
+`runner.admitted` carries the bound `Caller`, attenuated entry keys,
+recorded arrival and decision times, and byte allowances. Ingress binds the
+Caller at Hello or at the HTTP request. The wire owner sends the Caller in the
+Welcome frame and retains it; no credential byte is kept. Pure `prepare` resolves
 current/gone/unknown keys, applies attenuation, decodes under byte and step
 bounds, computes the digest, and forms `caller_key || u32-BE(stream)`.
 `caller_key` writes the issuer byte, subject length byte and up to 64 subject bytes.
 
 Deploy RC1 with a fresh runner store directory. Older stores hold bearer tokens
 in stream keys. The SDK starts a fresh recovery generation and reports prior
-pending work as locally unknown.
+pending work as locally unknown. An anonymous session's pending work never
+survives a reconnect (v2.24), since the next connection is a new Caller.
 The composition root supplies retained activation keys through `retain_gone`.
 `Send` is opaque. The same policy and preparation functions serve other transports.
 
@@ -277,15 +306,16 @@ caller-supplied reservation. Logical reservations, live charge, virtual stacks a
 quantities.
 
 RUNNER-SPEC v2.19 defines the Caller in slices RC1, RS, RR and RC4. `Caller{issuer: u8, subject: Bytes}` names the admitted caller. It is not
-secret, and its subject is at most 64 bytes. Issuer 1 is anonymous: its subject is the first
-16 bytes of SHA-256 over a versioned domain tag and the bearer token. A later issuer
-(a keyed-op sender, an account) takes the next unused number when its spec lands. Ingress computes the
-Caller once, at Hello or at the HTTP Bearer check. `Admitted` and each request carry it, and the
+secret, and its subject is at most 64 bytes. Issuer 1 is anonymous: its subject is 16
+random bytes drawn at Hello (v2.24). A binding uses its own issuer number from the
+fixed table; a later issuer takes the next unused number when its spec lands. Ingress binds the
+Caller once, at Hello or at the HTTP request. `Admitted` and each request carry it, and the
 store's stream key becomes `caller_key || u32-BE(stream)`, so no token byte is
 stored. `caller_key` is the issuer, the subject's length and the subject. RC1
-requires a fresh store and starts a fresh SDK recovery generation. The store does no
-authorization: a body receives the Caller and decides access itself.
-Transact bodies take `(mut Tx, H, Caller, A)` and query bodies `(Tx, H, Caller, A)`.
+requires a fresh store and starts a fresh SDK recovery generation. Neither the store nor
+the runner does authorization: a body receives the Caller and decides access itself.
+Transact bodies take `(mut Tx, H, Caller, A)`, query bodies `(Tx, H, Caller, A)` and
+granted bodies `(G, Caller, A)`.
 Queued subscription content is re-checked against current state before it is
 sent (RUNNER-SPEC §3). Each content unit carries the version it was computed at.
 Its writer loads the place's round register and then its session's fence after it

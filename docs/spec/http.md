@@ -625,9 +625,9 @@ Every request from any transport passes the same four steps, in this order. WebS
 
 **1. Source.** The transport classifies the source with WIRE-SPEC §2.1's sanitized rule (W-D5): the TCP peer, or the one `X-Forwarded-For` literal from a trusted `ingress` peer, normalized once. HTTP and WebSocket share that code.
 
-**2. `Ingress`, the policy task.** It owns the state that crosses connections and sessions: principal minting, per-IP limits and per-principal call rates.
-- **Minting.** `anon:` + 16 bytes from `host.random` (21 B), at most 10 new principals per source IP per minute.
-- **Rates.** 20 calls/s per principal, burst 40, shared by every transport.
+**2. `Ingress`, the limits task.** It owns the state that crosses connections and sessions: per-IP limits and per-Caller call rates. It authenticates nothing and authorizes nothing (RUNNER-SPEC v2.24 rule 13, ruling R6).
+- **The Caller.** The application's binding (`runner.wire`, RUNNER-SPEC §3) maps the credential to a Caller, or refuses it. With no binding, each session, and each HTTP request, gets a fresh anonymous Caller of 16 bytes from `host.random`. Ingress mints no principal.
+- **Rates.** 20 calls/s per Caller, burst 40, shared by every transport.
 - **State bound.** Rate state lives in a fixed table of `buckets_max` entries (8192 per key kind). A bucket is dropped only when it has refilled to full, because a full bucket carries no information; dropping never resets an active limit. When the table is full of non-full buckets, a request with a new key is refused as overload.
 - **Inbox.** Capacity `ingress_inbox` (256). A caller sends `Ask(source, principal, kind, reply)`, where `reply` is a fresh 1-slot channel, so Ingress answers every ask by `try_send` and never waits. A caller that finds the inbox full is refused as overload without asking.
 - **What it decides, and nothing more.** It does no entry lookup, decoding or validation, so its work per ask is constant.
@@ -650,8 +650,8 @@ Every request from any transport passes the same four steps, in this order. WebS
 
 **Refusals are phase-specific** (RUNNER-SPEC §3's threat table, WIRE W-D2):
 - limits known before upgrade or before a request is read (per-IP sockets, pending sockets): HTTP 503 at `serve` while a refusal slot is free, and otherwise a bare close with no response (HTTP-1);
-- limits learned from Hello (new principals per IP, a refused token): WebSocket Close 1013;
-- minting over the per-IP limit at `POST /.hirsel/principal`: HTTP 429;
+- limits learned from Hello: WebSocket Close 1013;
+- a credential the application's binding refuses: WebSocket Close 1008, HTTP 401;
 - a call over its principal's rate: `Refused(Overloaded)`, which HTTP answers 429;
 - a full Ingress inbox or bucket table, a full relay or slot table: `Refused(Overloaded)` from capacity, which HTTP answers 503 (B-7 tells them apart).
 
@@ -771,10 +771,9 @@ runner.bind(mut r: Registry[G, H], take b: HttpBinding) -> Result[(), BindError]
 - `stream` is canonical decimal and at most 2^32−1. `position` is canonical decimal and at most 2^64−1.
 - A missing header gives 400. Any other spelling gives 400.
 
-**The principal.** It is authenticated separately, by `Authorization: Bearer <base64url of the principal, unpadded>`.
-- A rung-1 principal is 21 B and comes from `POST /.hirsel/principal` (B-2's minting; 201 with `{"principal": "<base64url>"}`, or 429 over the per-IP limit).
-- A missing or invalid principal gives 401.
-- The stream key is the WebSocket one: `caller_key ‖ u32-BE(stream)` (RUNNER-SPEC v2.15). The same token gives the same Caller, and so the same streams, over both transports (RUNNER-SPEC law L29).
+**The Caller.** The runner authenticates nothing (RUNNER-SPEC v2.24 rule 13). The request's `Authorization` value goes, unread, to the application's binding.
+- A binding's `Error(())` gives 401. With no binding, the request is its own anonymous session with a fresh Caller, so a `Stream` binding's dedup across requests needs an application binding. There is no `POST /.hirsel/principal`.
+- The stream key is the WebSocket one: `caller_key ‖ u32-BE(stream)` (RUNNER-SPEC v2.15). A credential the binding maps to one Caller gives the same streams over both transports (RUNNER-SPEC law L29).
 
 **Behaviour.**
 - The send is one send under RUNNER-SPEC V1-V5, held by the relay (B-8): one unit, its own deadline (`deadline_ms` from arrival), and exactly one Outcome.
@@ -789,7 +788,7 @@ runner.bind(mut r: Registry[G, H], take b: HttpBinding) -> Result[(), BindError]
 |---|---|
 | Framing and route errors | HTTP-4 and HTTP-11 |
 | Missing or invalid `Idempotency-Key` | 400 |
-| Missing or invalid principal | 401 |
+| A credential the application's binding refuses (RUNNER-SPEC v2.24) | 401 |
 
 **Refusals from `Ingress`, `prepare` and the relay (nothing recorded)**
 
@@ -1044,6 +1043,8 @@ pub type Retirement: send { verifier: Verifier }   // the same verifier kind and
 
 ### K-2: The principal and the verifiers
 
+**R6 conflict, recorded (RUNNER-SPEC v2.24).** The verifiers below check secrets inside the runner, and R6 puts every credential check in application code. They are kept here as design only: when Part B is built, each is re-expressed as an application binding over `runner.wire`, and the runner keeps only the key and claim mechanics.
+
 A claim is scoped by its principal. The verifier decides the principal and the key. It runs before `prepare`; a failure gives 401 and records nothing. Every check below is constant-time in the secret.
 
 **The sender selector.** A signed verifier needs to know which secret to check. The sender is **transport metadata, not an argument field**: it is selected by the reserved route capture `{sender}` on the binding's route, and by the last segment of the alias `POST /.hirsel/op/{op}/{sender}` (B-12). B-3 rule 4 counts `{sender}` as no field's source. The selector only chooses a secret; the signature proves the request came from its holder, so the original route and the alias give the same principal, key and claim for the same request.
@@ -1235,7 +1236,7 @@ A check read is taken only between operations, never inside one, so a phase make
 - each send's offered buffers and deadline, checked at issue, and accepted count, including partial sends;
 - each readiness or deadline wake;
 - each clock read named above, with its point and kind;
-- each `host.random` delivery (principal minting).
+- each `host.random` delivery (an anonymous Caller's subject).
 
 **The scheduler's choices** are inputs too (CONC-10). These include the 16-request batch point (HTTP-9), every admission that returns `Capacity`, and each `try_send` and `try_receive` outcome (Ingress, the relay, the stream timer, an ending session's `Drained`, and the publisher's sweep of retirement marks). Part B adds the recovery queue's starts (K-8).
 

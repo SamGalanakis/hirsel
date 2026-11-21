@@ -845,29 +845,32 @@ fn f{entry} = n{instance} g{g} {{
         } else if source.contains("Map[u64,u64]") {
             let mut addresses = String::new();
             let mut build = String::new();
+            // SipHash-1-3 under the evaluator's zero key, with the matching
+            // private index words after the entry rows and metadata.
             for (i, (offset, bits)) in [
-                (0, 0x49ec259204a234c2u64),
+                (0, 0x6634b0bda4fe8a7bu64),
                 (8, 1),
                 (16, 7),
                 (24, 70),
-                (32, 0xe1e0cd537ed145b8),
+                (32, 0x157dbcb1260ec7ee),
                 (40, 0),
                 (48, 11),
                 (56, 110),
-                (64, 0xaddb2134e9f8658d),
+                (64, 0x53d1166d79c4dddf),
                 (72, 1),
                 (80, 13),
                 (88, 130),
                 (96, 2),  // live count differs from the three occupied slots
                 (104, 8), // cached index length, independent of capacity=3
-                (112, 0xe1e0cd537ed145ba),
+                (112, 0),
                 (120, 0),
-                (128, 0x49ec259204a234c1),
-                (136, 0),
+                (128, 0),
+                (136, 0x6634b0bda4fe8a79),
                 (144, 0),
-                (152, 0xaddb2134e9f8658b),
-                (160, 0),
-                (168, 0),
+                (152, 0),
+                (160, 0x157dbcb1260ec7ea),
+                (168, 0x53d1166d79c4dddb),
+
             ]
             .into_iter()
             .enumerate()

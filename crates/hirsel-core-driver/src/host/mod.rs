@@ -1076,6 +1076,12 @@ impl Host {
                         hash: pair.annex.hash,
                     });
                 }
+                for archive in recipe.foreign_archives {
+                    code.insert(ObjectKey {
+                        kind: ObjectKind::ForeignArchive,
+                        hash: archive.hash,
+                    });
+                }
             }
             self.records.collect(&assemblies, &images)?;
             self.code.collect(|kind, hash| {

@@ -416,6 +416,15 @@ fn verify_release(
         let annex = Annex::decode(&raw, &body.module, budget)?;
         Body::new(body, annex, budget)
     })?;
+    if recipe.has_foreign() {
+        check_foreign_archive_inventory(&recipe, budget)?;
+        for archive in &recipe.foreign_archives {
+            load(ObjectKind::ForeignArchive, archive, budget)?;
+        }
+        return Err(AdmissionError::Unsupported(
+            "foreign modules are not enabled yet",
+        ));
+    }
     closure::check(&recipe, &groups, &bodies, semantics, budget)?;
     budget.check()?;
     Ok(VerifiedRelease {
@@ -425,6 +434,52 @@ fn verify_release(
         groups,
         bodies,
     })
+}
+
+fn check_foreign_archive_inventory(
+    recipe: &Recipe,
+    budget: &mut DecodeBudget,
+) -> Result<(), AdmissionError> {
+    charge_rows::<bool>(budget, recipe.foreign_archives.len())?;
+    let mut selected = vec![false; recipe.foreign_archives.len()];
+    let mut visit = |archive: ObjectRef| {
+        budget.check()?;
+        let at = recipe
+            .foreign_archives
+            .binary_search_by_key(&archive.hash, |row| row.hash)
+            .map_err(|_| AdmissionError::Missing(archive.hash))?;
+        if recipe.foreign_archives[at].len != archive.len {
+            return Err(AdmissionError::Binding(
+                "inconsistent lengths for a foreign archive",
+            ));
+        }
+        selected[at] = true;
+        Ok(())
+    };
+    for leaf in &recipe.foreign_modules {
+        let target = &recipe.launch.target;
+        let i = leaf
+            .targets
+            .binary_search_by(|row| row.target.cmp(target))
+            .map_err(|_| {
+                AdmissionError::Refused(format!("Missing(archive of {} for {target})", leaf.module))
+            })?;
+        visit(leaf.targets[i].archive)?;
+    }
+    for grant in &recipe.launch.grants {
+        if let Some(archive) = grant.archive {
+            visit(archive)?;
+        }
+    }
+    match recipe
+        .foreign_archives
+        .iter()
+        .zip(selected)
+        .find(|(_, selected)| !selected)
+    {
+        Some((extra, _)) => Err(AdmissionError::Extra(extra.hash)),
+        None => Ok(()),
+    }
 }
 
 fn deadline(limits: &AdmissionLimits) -> Result<Instant, AdmissionError> {
@@ -449,16 +504,12 @@ fn listed_objects(
     limits: &AdmissionLimits,
     budget: &mut DecodeBudget,
 ) -> Result<Listing, AdmissionError> {
-    if recipe.has_foreign() {
-        return Err(AdmissionError::Unsupported(
-            "foreign modules are not enabled yet",
-        ));
-    }
     let count = recipe
         .bodies
         .len()
         .checked_mul(2)
         .and_then(|n| n.checked_add(recipe.groups.len()))
+        .and_then(|n| n.checked_add(recipe.foreign_archives.len()))
         .filter(|&n| n <= limits.closure_objects)
         .ok_or(AdmissionError::Limit(Limit::ClosureObjects))?;
     if recipe.groups.len() > limits.members {
@@ -476,7 +527,13 @@ fn listed_objects(
                 (ObjectKind::Body, &row.body),
                 (ObjectKind::Annex, &row.annex),
             ]
-        }));
+        }))
+        .chain(
+            recipe
+                .foreign_archives
+                .iter()
+                .map(|object| (ObjectKind::ForeignArchive, object)),
+        );
     for (kind, row) in rows {
         budget.check()?;
         let key = ObjectKey {

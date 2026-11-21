@@ -233,6 +233,7 @@ fn read_need(peer: &mut UnixStream) -> Option<Vec<ObjectKey>> {
                     1 => ObjectKind::Group,
                     2 => ObjectKind::Body,
                     3 => ObjectKind::Annex,
+                    4 => ObjectKind::ForeignArchive,
                     tag => panic!("unexpected Need tag {tag}"),
                 },
                 hash: ContentHash(read(peer)),
@@ -246,6 +247,7 @@ fn object_header(key: ObjectKey) -> Vec<u8> {
         ObjectKind::Group => 1,
         ObjectKind::Body => 2,
         ObjectKind::Annex => 3,
+        ObjectKind::ForeignArchive => 4,
         ObjectKind::Recipe => panic!("recipe object frame"),
     }];
     bytes.extend_from_slice(&key.hash.0);
@@ -268,6 +270,53 @@ fn start(peer: &mut UnixStream, fixture: &Fixture) -> Vec<ObjectKey> {
 #[track_caller]
 fn failure(result: Result<AdmittedRelease<'_>, AdmissionError>) -> AdmissionError {
     result.err().expect("admission must refuse before assembly")
+}
+
+#[test]
+fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
+    use hirsel_core_ir::release_recipe::{GrantBinding, GrantKind};
+
+    let harness = Harness::new(LARGE);
+    let local = tempfile::tempdir().unwrap();
+    let store = CodeStore::new(local.path());
+    let archive = store.put(ObjectKind::ForeignArchive, b"abc").unwrap();
+    assert_eq!(
+        crate::call::hex(&archive.hash.0),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    let mut fixture = Fixture::leaf();
+    fixture.recipe.launch.grants.push(GrantBinding {
+        ordinal: 0,
+        kind: GrantKind::Foreign,
+        values: vec!["ffi_laws@1/laws/Laws".into()],
+        archive: Some(archive),
+    });
+    let admit = |fixture: &Fixture, archive_bytes: &[u8]| {
+        failure(harness.run(limits(), &NativeSemantics, |peer| {
+            for key in start(peer, fixture) {
+                let bytes = if key.kind == ObjectKind::ForeignArchive {
+                    archive_bytes
+                } else {
+                    &fixture.objects[&key]
+                };
+                send_object(peer, key, bytes);
+            }
+            peer.write_all(&[0]).unwrap();
+        }))
+    };
+    assert!(
+        matches!(admit(&fixture, b"abc"), AdmissionError::Missing(hash) if hash == archive.hash)
+    );
+
+    fixture.recipe.foreign_archives.push(archive);
+    assert!(matches!(admit(&fixture, b"abd"), AdmissionError::Hash(hash) if hash == archive.hash));
+    assert!(matches!(
+        admit(&fixture, b"abc"),
+        AdmissionError::Unsupported("foreign modules are not enabled yet")
+    ));
+
+    fixture.recipe.launch.grants.clear();
+    assert!(matches!(admit(&fixture, b"abc"), AdmissionError::Extra(hash) if hash == archive.hash));
 }
 
 // DESIGN §6.2 M1: the attested hash covers the exact bytes in every object kind.

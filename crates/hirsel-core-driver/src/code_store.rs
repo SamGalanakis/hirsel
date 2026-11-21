@@ -2,6 +2,7 @@
 
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::release_recipe::ObjectRef;
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions, Permissions},
     io::{self, Write},
@@ -15,6 +16,7 @@ pub enum ObjectKind {
     Annex,
     Group,
     Recipe,
+    ForeignArchive,
 }
 
 impl ObjectKind {
@@ -24,20 +26,40 @@ impl ObjectKind {
             Self::Annex => "annexes",
             Self::Group => "groups",
             Self::Recipe => "recipes",
+            Self::ForeignArchive => "archives",
         }
     }
 
-    pub(crate) fn domain(self) -> &'static str {
-        match self {
+    fn domain(self) -> Option<&'static str> {
+        Some(match self {
             Self::Body => hirsel_core_ir::normal::BODY_HASH_DOMAIN,
             Self::Annex => "hirsel.code-annex.v1",
             Self::Group => "hirsel.code-group.v1",
             Self::Recipe => hirsel_core_ir::release_recipe::HASH_DOMAIN,
-        }
+            Self::ForeignArchive => return None,
+        })
     }
 
     pub fn hash(self, bytes: &[u8]) -> ContentHash {
-        ContentHash::of_parts(self.domain(), [bytes])
+        match self.domain() {
+            Some(domain) => ContentHash::of_parts(domain, [bytes]),
+            None => ContentHash(Sha256::digest(bytes).into()),
+        }
+    }
+
+    pub(crate) fn hash_stream(
+        self,
+        length: u64,
+        emit: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+    ) -> io::Result<ContentHash> {
+        match self.domain() {
+            Some(domain) => ContentHash::of_stream(domain, length, emit),
+            None => {
+                let mut hash = Sha256::new();
+                emit(&mut hash)?;
+                Ok(ContentHash(hash.finalize().into()))
+            }
+        }
     }
 }
 
@@ -98,6 +120,7 @@ impl CodeStore {
             ObjectKind::Group,
             ObjectKind::Body,
             ObjectKind::Annex,
+            ObjectKind::ForeignArchive,
         ] {
             let directory = self.root.join(kind.directory());
             let rows = match fs::read_dir(&directory) {

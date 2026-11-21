@@ -13,6 +13,7 @@ struct File {
     provider: Provider,
     handle: u64,
     mode: u8,
+    read_only_dir: bool,
     close_op: u8,
 }
 // SAFETY: transferring the opaque callback descriptor does not access its
@@ -89,7 +90,7 @@ impl<T> Drop for Resources<T> {
 
 fn next_id(next: &mut u64) -> u64 {
     *next += 1;
-    if *next == DYNAMIC_GRANT {
+    if *next == hirsel_core_ids::host_op::DIR_READ_ONLY {
         crate::process::stop(b"HostHandles");
     }
     *next
@@ -234,6 +235,7 @@ impl Registry {
             provider,
             handle,
             mode: 0,
+            read_only_dir: false,
             close_op,
         })
     }
@@ -337,6 +339,17 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
     provider: *const Provider,
     request: *mut Request,
 ) -> Outcome {
+    // SAFETY: forwarded for a caller with no attenuated Dir operand.
+    unsafe { open_file(context, provider, request, false) }
+}
+
+/// As in `hirsel_core_host_file_open`, with the originating Dir's read-only right.
+pub(crate) unsafe fn open_file(
+    context: *mut Context,
+    provider: *const Provider,
+    request: *mut Request,
+    read_only_dir: bool,
+) -> Outcome {
     // SAFETY: exclusive operation borrows; no registry borrow spans a callback.
     unsafe {
         let mut issued = None;
@@ -360,6 +373,7 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
                 provider,
                 handle: result.value,
                 mode,
+                read_only_dir,
                 close_op,
             });
         } else if issued.status == 0 && issued.error == IoError::OK {
@@ -370,6 +384,7 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
                     provider,
                     handle: issued.value,
                     mode,
+                    read_only_dir,
                     close_op,
                 },
             );
@@ -402,6 +417,9 @@ pub unsafe extern "C" fn hirsel_core_host_file(
         } else {
             (*registry).registry.file(file)
         };
+        if owned.read_only_dir && matches!((*request).operation, WRITE | WRITE_AT) {
+            return crate::host_ops::denied(context, (*request).site);
+        }
         (*request).handle = owned.handle;
         if matches!((*request).operation, READ_AT | WRITE_AT) {
             (*request).mode = owned.mode;

@@ -15,6 +15,7 @@ mod simd;
 
 use crate::*;
 use hirsel_core_ids::ContentHash;
+use hirsel_core_ids::host_op::{DIR_READ_ONLY, needs_writable_dir};
 use hirsel_core_layout::{
     Body as Shaped, Cleanup, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, cleanup_class,
     compute, field_size, map_entry,
@@ -175,6 +176,7 @@ struct PortHandle {
     kind: u8,
     state: PortState,
     write: Option<PortState>,
+    read_only_file: bool,
 }
 impl PortHandle {
     fn new(kind: u8) -> Self {
@@ -182,6 +184,7 @@ impl PortHandle {
             kind,
             state: PortState::Live,
             write: None,
+            read_only_file: false,
         }
     }
     fn done(&self) -> bool {
@@ -374,6 +377,7 @@ struct OpenFile {
     at: u64,
     locked: bool,
     mode: u8,
+    read_only_dir: bool,
 }
 const FILE_PAGE: u64 = 4096;
 
@@ -431,6 +435,7 @@ const OTHER: u64 = 5;
 
 impl World {
     fn dir_key(&self, mut dir: u64, path: &[u8]) -> Result<DirKey, (u64, u64)> {
+        dir &= !DIR_READ_ONLY;
         let parts = path.split(|&b| b == b'/');
         for part in parts.clone() {
             if part.is_empty() || matches!(part, b"." | b"..") || part.contains(&0) {
@@ -463,6 +468,7 @@ impl World {
     }
 
     fn children(&self, dir: u64) -> impl Iterator<Item = (&DirKey, &Node)> {
+        let dir = dir & !DIR_READ_ONLY;
         self.nodes
             .range((dir, Vec::new())..)
             .take_while(move |((id, _), _)| *id == dir)
@@ -2344,6 +2350,14 @@ impl Machine<'_> {
                 self.port_release(a[0]);
             }
         })?;
+        if matches!(op, HostOp::Write | HostOp::WriteAt)
+            && let VirtualCell::Port { handles, .. } = &self.world.cells[c]
+            && handles
+                .get(&h)
+                .is_some_and(|file| file.read_only_file && file.state == PortState::Live)
+        {
+            return Ok(vec![0, DENIED, 0, 0]);
+        }
         let spare = |m: &Self, carrier: u64| {
             let (_, _, len, cap) = m.carrier(carrier);
             cap.saturating_sub(len)
@@ -2429,10 +2443,22 @@ impl Machine<'_> {
         let VirtualCell::Port { handles, .. } = &self.world.cells[c] else {
             unreachable!()
         };
-        let live = handles.get(&h) == Some(&PortHandle::new(kind));
+        let live = handles.get(&h).is_some_and(|handle| {
+            handle.kind == kind && handle.state == PortState::Live && handle.write.is_none()
+        });
         let mut w = [0; 8];
         w[..words.len()].copy_from_slice(&words);
-        self.port_call(t, c, w, fields, out, live)
+        let mut answer = self.port_call(t, c, w, fields, out, live)?;
+        if a[0] & DIR_READ_ONLY != 0 && answer[1] == 0 {
+            if matches!(op, HostOp::OpenDir | HostOp::Mkdtemp) {
+                answer[0] |= DIR_READ_ONLY;
+            } else if op == HostOp::Open {
+                let (_, file) = self.port_handle(answer[0]).expect("a registered file");
+                let (_, handles, ..) = self.world.cells[c].port();
+                handles.get_mut(&file).unwrap().read_only_file = true;
+            }
+        }
+        Ok(answer)
     }
 
     /// A dropped HostFile or HostEntries of a served Dir (FAIL-13): marked
@@ -3156,7 +3182,7 @@ impl Machine<'_> {
             | HostOp::Unlock
             | HostOp::Close
             | HostOp::NextEntries => {
-                let (c, h) = self.port_handle(a[0])?;
+                let (c, h) = self.port_handle(a[0] & !DIR_READ_ONLY)?;
                 return Some(self.dir_call(t, op, c, h, a));
             }
             HostOp::WallMs
@@ -4246,6 +4272,11 @@ impl Machine<'_> {
             return Ok(self.secret_policy(t, op, a));
         }
         self.deny_describe_capability();
+        let mode = if op == HostOp::Open { a[2] as u8 } else { 0 };
+        if needs_writable_dir(op as u8, mode) && a[0] & DIR_READ_ONLY != 0 {
+            self.check_cancel(t)?;
+            return Ok(vec![0, DENIED, 0, 0]);
+        }
         if let Some(reply) = self.provide(t, op, a) {
             return reply;
         }
@@ -4509,6 +4540,7 @@ impl Machine<'_> {
                     at: 0,
                     locked: false,
                     mode,
+                    read_only_dir: a[0] & DIR_READ_ONLY != 0,
                 }));
                 ok(FILE_BASE + w.files.len() as u64 - 1, 0)
             }
@@ -4519,7 +4551,7 @@ impl Machine<'_> {
                     Err(e) => return Ok(resolve(e)),
                 };
                 match self.world.nodes.get(&key) {
-                    Some(Node::Dir(dir)) => ok(*dir, 0),
+                    Some(Node::Dir(dir)) => ok(*dir | (a[0] & DIR_READ_ONLY), 0),
                     Some(Node::File(_)) => error(DENIED),
                     None => error(NOT_FOUND),
                 }
@@ -4616,10 +4648,16 @@ impl Machine<'_> {
             HostOp::Write | HostOp::WriteAt => {
                 let positioned = op == HostOp::WriteAt;
                 let (bytes, ..) = self.carrier(a[if positioned { 2 } else { 1 }]);
+                let i = file(a[0]);
+                if self.world.files[i]
+                    .as_ref()
+                    .is_some_and(|f| f.read_only_dir)
+                {
+                    return Ok(error(DENIED));
+                }
                 if positioned && a[1].checked_add(bytes.len() as u64).is_none() {
                     return Err(Stop::Cause("Bounds"));
                 }
-                let i = file(a[0]);
                 let Some(f) = self.world.files[i].as_mut() else {
                     return Ok(error(CLOSED));
                 };

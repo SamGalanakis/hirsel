@@ -133,3 +133,50 @@ fn list_small_batches(d: Dir) -> bool waits {
     let sorted = result.unwrap(dir.list(scan))
     list.len(sorted) == 3 && sorted[0].name == c && sorted[1].name == a && sorted[2].name == b
 }
+
+fn read_only_open_denied(r: Result[HostFile, IoError]) -> bool {
+    match r {
+        Error(Denied) => true,
+        _ => false,
+    }
+}
+
+fn read_only_write_denied(r: Result[(), WriteError]) -> bool {
+    match r {
+        Error(e) => e.written == 0 && io(Error(e.error)) == 2,
+        Ok(()) => false,
+    }
+}
+
+// expect: run read_only_dir_denies_writes(dir) = true
+fn read_only_dir_denies_writes(d: Dir) -> bool waits {
+    result.unwrap(host.mkdir(d, "nested"))
+    result.unwrap(file.write(d, "nested/value", string.as_bytes("kept")))
+    let ro = host.read_only(host.read_only(d))
+    let child = result.unwrap(host.open_dir(ro, "nested"))
+    if !read_only_open_denied(host.open(child, "value", Write)) || !read_only_open_denied(host.open(child, "value", Append)) || !read_only_open_denied(host.open(child, "new", CreateNew)) || !read_only_open_denied(host.open(child, "value", ReadWrite)) {
+        return false
+    }
+    if io(host.mkdir(child, "new")) != 2 || io(host.remove(child, "value")) != 2 || io(host.rename(child, "value", "renamed")) != 2 || io(host.remove_tree(ro, "nested")) != 2 {
+        return false
+    }
+    let mut name = string.new()
+    match host.mkdtemp(ro, mut name) {
+        Error(Denied) => {},
+        _ => return false,
+    }
+    let mut f = result.unwrap(host.open(child, "value", Read))
+    let replacement = string.as_bytes("lost")
+    if !read_only_write_denied(host.write(mut f, replacement)) || !read_only_write_denied(host.write_at(mut f, 0, replacement)) {
+        return false
+    }
+    let mut got: Bytes = list.with_capacity(4)
+    let read = result.unwrap(host.read(mut f, mut got))
+    result.unwrap(host.close(take f))
+    let info = result.unwrap(host.stat(child, "value"))
+    let mut entries = result.unwrap(host.entries(child))
+    let mut encoded: Bytes = list.with_capacity(258)
+    let count = result.unwrap(host.next_entries(mut entries, mut encoded))
+    result.unwrap(host.sync_dir(child))
+    read == 4 && got == b"kept" && info.size == 4 && count == 1 && string.byte_len(name) == 0
+}

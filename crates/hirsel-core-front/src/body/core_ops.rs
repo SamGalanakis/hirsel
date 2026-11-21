@@ -17,6 +17,7 @@ pub(crate) enum Kernel {
     StringList(&'static str),
     Unique,
     Host(HostOp),
+    ReadOnlyDir,
     Net(HostOp),
     SecretSeal,
     SecretRender,
@@ -170,6 +171,7 @@ operations! {
     ("host", "read", Lane::Runtime(Kernel::Host(HostOp::Read)), "B", "core-ops-914", false),
     ("host", "write", Lane::Runtime(Kernel::Host(HostOp::Write)), "B", "core-ops-914", false),
     ("host", "open_dir", Lane::Runtime(Kernel::Host(HostOp::OpenDir)), "B", "fs-ops-1502", false),
+    ("host", "read_only", Lane::Runtime(Kernel::ReadOnlyDir), "A", "ffi-impl-1582", false),
     ("host", "entries", Lane::Runtime(Kernel::Host(HostOp::Entries)), "B", "fs-ops-1502", false),
     ("host", "next_entries", Lane::Runtime(Kernel::Host(HostOp::NextEntries)), "B", "fs-ops-1502", false),
     ("host", "stat", Lane::Runtime(Kernel::Host(HostOp::Stat)), "B", "fs-ops-1502", false),
@@ -806,6 +808,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.runtime_nonzero(Ty::Scalar(Scalar::U64), value, n)
             }
             Kernel::Host(op) => self.runtime_host(op, f, vals, result, n),
+            Kernel::ReadOnlyDir => {
+                let ty = Ty::Scalar(Scalar::U64);
+                let rights = self.konst(ty, hirsel_core_ids::host_op::DIR_READ_ONLY, n)?;
+                let output = self.value(ty);
+                self.inst(
+                    Inst::Binary {
+                        result: output,
+                        op: BinaryOp::BitOr,
+                        left: vals[0]?,
+                        right: rights,
+                        fail: None,
+                    },
+                    n,
+                );
+                Some(output)
+            }
             Kernel::Net(op) => self.runtime_net(op, f, vals, result, n),
             Kernel::SecretSeal => self.runtime_net(HostOp::SecretSeal, f, vals, result, n),
             Kernel::SecretRender => self.static_string(b"[secret]", self.bare(result), n),
@@ -1603,6 +1621,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::Env(_) => true,
             // A virtual provider observes only run state the program made.
             Kernel::Provide(_)
+            | Kernel::ReadOnlyDir
             | Kernel::CarrierMove
             | Kernel::CarrierView
             | Kernel::SecretSeal

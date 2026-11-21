@@ -41,7 +41,6 @@ import ast
 import collections
 import functools
 import json
-import os
 import pathlib
 import re
 import subprocess
@@ -52,7 +51,8 @@ import tomllib
 from action_sizes_from_log import CALIBRATED_CPUS, CPU_CLASSES, MAX_CPUS, compile_cpus
 import generated
 import prepare
-from cargo_units import Resolution, configured
+import rust_environment
+from cargo_units import Resolution, configured, relocate
 from test_sizes_from_usage import requests_bzl
 
 
@@ -126,19 +126,14 @@ PATH_ATTR = re.compile(r'#\[path\s*=\s*"([^"]+)"\s*\]')
 IGNORED = ("target", ".git", "buck-out", ".buck2")
 
 
-def run(command, **kwargs) -> str:
-    return subprocess.run(command, check=True, capture_output=True, text=True, **kwargs).stdout
-
-
-def cargo() -> str:
-    return os.environ.get("CARGO", "cargo")
-
-
-def metadata(manifest: pathlib.Path, locked: bool = True) -> dict:
-    command = [cargo(), "metadata", "--format-version", "1", "--manifest-path", str(manifest)]
+def metadata(manifest: pathlib.Path, env: dict, cargo_home: pathlib.Path, locked: bool = True) -> dict:
+    command = [env["CARGO"], "metadata", "--format-version", "1", "--manifest-path", str(manifest)]
     if locked:
         command.append("--locked")
-    return json.loads(run(command, cwd=ROOT))
+    result = rust_environment.run_offline(command, cwd=ROOT, env=env,
+                                          label=f"Cargo metadata ({manifest})")
+    # Keep the shared unit-graph cache key independent of the temporary home.
+    return relocate(json.loads(result.stdout), {}, env["CARGO_HOME"], str(cargo_home))
 
 
 def starlark(value, indent: int = 4) -> str:
@@ -214,7 +209,8 @@ def third_party_manifest(meta: dict) -> str:
 THIRD_PARTY_OUTPUTS = ("BUCK", "Cargo.toml", "Cargo.lock", "lib.rs", "units.json")
 
 
-def write_third_party(meta: dict, out: pathlib.Path, resolution: Resolution) -> generated.Reads:
+def write_third_party(meta: dict, out: pathlib.Path, resolution: Resolution,
+                      env: dict, cargo_home: pathlib.Path) -> generated.Reads:
     """Run Reindeer in a scratch package, then replace the outputs whose bytes
     changed; returns what it read."""
     reads = generated.Reads(ROOT)
@@ -235,15 +231,16 @@ def write_third_party(meta: dict, out: pathlib.Path, resolution: Resolution) -> 
         # package, choosing nothing new.
         lock = reads.bytes(ROOT / "Cargo.lock")
         (work / "Cargo.lock").write_bytes(lock)
-        metadata(work / "Cargo.toml", locked=False)
+        metadata(work / "Cargo.toml", env, cargo_home, locked=False)
         workspace = {(p["name"], p["version"]) for p in tomllib.loads(lock.decode())["package"]}
         for package in tomllib.loads((work / "Cargo.lock").read_text())["package"]:
             if package["name"] != "hirsel-third-party" and (package["name"], package["version"]) not in workspace:
                 raise SystemExit(f"third-party resolution chose {package['name']} {package['version']}, which Cargo.lock does not have")
-        subprocess.run(
-            [str(REINDEER), "--config", str(work / "reindeer.toml"), "buckify"],
-            check=True, cwd=work, stdout=subprocess.DEVNULL,
+        result = rust_environment.run_offline(
+            [str(REINDEER), "--cargo-path", env["CARGO"], "--config", str(work / "reindeer.toml"), "buckify"],
+            cwd=work, env=env, label="Reindeer buckify", stdout=subprocess.DEVNULL,
         )
+        sys.stderr.write(result.stderr)
         write(work / "BUCK", resolution.third_party((work / "BUCK").read_text()))
         write(work / "units.json", resolution.external_json())
         for name in THIRD_PARTY_OUTPUTS:
@@ -970,14 +967,19 @@ def check_test_data(buck: str) -> None:
 def generate(out_root: pathlib.Path, parts=tuple(generated.PARTS)) -> dict[str, generated.Reads]:
     """Write the named parts' outputs under `out_root`, each only where its
     bytes change; returns what each part read."""
-    meta = metadata(ROOT / "Cargo.toml")
-    resolution = Resolution(ROOT, meta)
-    # Both generators use the same exact Cargo identities, including when only
-    # the first-party inventory is stale. Reindeer templates remain available
-    # from the current third-party output for that case.
     found = {}
-    if "third-party" in parts:
-        found["third-party"] = write_third_party(meta, out_root / "third-party", resolution)
+    env = rust_environment.environment(ROOT)
+    cargo_home = rust_environment.cargo_home(ROOT, env)
+    with tempfile.TemporaryDirectory(prefix="hirsel-sync-cargo-") as temporary:
+        offline = rust_environment.private_cargo_environment(
+            pathlib.Path(temporary), env, cargo_home, rust_environment.cargo_config(cargo_home),
+        )
+        meta = metadata(ROOT / "Cargo.toml", offline, cargo_home)
+        resolution = Resolution(ROOT, meta)
+        if "third-party" in parts:
+            found["third-party"] = write_third_party(meta, out_root / "third-party", resolution, offline, cargo_home)
+    # Both generators use the same Cargo identities. When only first-party
+    # inventory is stale the current third-party output supplies the templates.
     if "first-party" in parts:
         if "third-party" not in parts:
             resolution.load_external((out_root / "third-party/units.json").read_text())

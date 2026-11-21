@@ -15,7 +15,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import subprocess
 import tempfile
 import tomllib
 
@@ -97,12 +96,6 @@ def relocate(value, package_ids, source, destination):
     return value
 
 
-def cargo_config(directory):
-    # Cargo prefers the extensionless file when both forms exist.
-    return next((path for name in ('config', 'config.toml')
-                 if (path := directory / name).is_file()), None)
-
-
 def config_inputs(paths):
     files = {}
     while paths:
@@ -127,28 +120,15 @@ def query_graphs(root, commands, env, cargo_home, user_config):
         target_dir = home / 'target'
         target_dir.mkdir(parents=True)
         home_prefix = f'{home}/'
-        for name in ('registry', 'git'):
-            (home / name).symlink_to(cargo_home / name, target_is_directory=True)
-        if user_config and user_config.suffix == '.toml':
-            # An include keeps config-relative paths relative to the original file.
-            (home / 'config.toml').write_text(f'include = [{json.dumps(str(user_config), ensure_ascii=False)}]\n')
-        elif user_config:
-            (home / 'config').symlink_to(user_config)
-        # Cargo 1.99 still takes an exclusive .package-cache lock offline.
-        # Each worker owns that lock and the GC database for its private home.
-        offline = env | {'CARGO_HOME': str(home), 'CARGO_NET_OFFLINE': 'true',
-                         'CARGO_CACHE_AUTO_CLEAN_FREQUENCY': 'never', 'RUSTC_BOOTSTRAP': '1'}
+        offline = rust_environment.private_cargo_environment(home, env, cargo_home, user_config)
+        offline['RUSTC_BOOTSTRAP'] = '1'
         results = []
         for index, args in batch:
             command = [env['CARGO'], *args, '--manifest-path', str(root / 'Cargo.toml'),
                        '--target-dir', str(target_dir), '--locked', '--unit-graph',
                        '-Z', 'unstable-options']
-            result = subprocess.run(command, cwd=root, env=offline, capture_output=True, text=True)
-            if result.returncode:
-                error = result.stderr.strip()
-                if 'offline' in error:
-                    error += '\nRun cargo fetch --locked once, then retry sync.'
-                raise SystemExit(f"Cargo unit graph failed ({' '.join(args)})\n{error}")
+            result = rust_environment.run_offline(command, cwd=root, env=offline,
+                                                  label=f"Cargo unit graph ({' '.join(args)})")
             graph = json.loads(result.stdout)
             if graph['version'] != 1:
                 raise ValueError('unsupported Cargo unit graph version')
@@ -176,8 +156,8 @@ def query_graphs(root, commands, env, cargo_home, user_config):
 def unit_graphs(root, meta, platform_source, commands):
     cache_home = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'hirsel/cargo-units'
     env = rust_environment.environment(root)
-    cargo_home = (root / env.get('CARGO_HOME', Path.home() / '.cargo')).resolve()
-    user_config = cargo_config(cargo_home)
+    cargo_home = rust_environment.cargo_home(root, env)
+    user_config = rust_environment.cargo_config(cargo_home)
     marker = '<workspace>'
     package_ids = {}
     manifests = {root / name for name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml')}
@@ -190,7 +170,7 @@ def unit_graphs(root, meta, platform_source, commands):
 
     def read_inputs():
         configs = [path for ancestor in (root, *root.parents)
-                   if (path := cargo_config(ancestor / '.cargo')) is not None]
+                   if (path := rust_environment.cargo_config(ancestor / '.cargo')) is not None]
         if user_config and user_config not in configs:
             configs.append(user_config)
         return ([[str(path), hashlib.sha256(path.read_bytes()).hexdigest()] for path in sorted(manifests)],

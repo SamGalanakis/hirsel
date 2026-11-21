@@ -726,8 +726,10 @@ def first_party(meta: dict) -> str:
         files_env={"HIRSEL_PIPE_COMPILER": "//:hirsel-core-driver-bin-hirsel"},
         data=Raw('glob(["core/core/**", "core/std/**"])')))
     out.append("\n" + call("hirsel_script_test", name="core-store-no-sync", script="tools/tests/core_store_no_sync.py",
-        files_env={"HIRSEL_SYNC_COMPILER": "//:hirsel-core-driver-bin-hirsel", "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives"},
-        data=Raw('glob(["core/core/**", "core/std/**"])')))
+        files_env={"HIRSEL_SYNC_COMPILER": "//:hirsel-core-driver-bin-hirsel",
+                   "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives",
+                   "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic"},
+        data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-driver/src/tape_tls_observe.c"]')))
     out.append("\n" + call("hirsel_script_test", name="core-memory-report", script="tools/tests/core_memory_report.py",
         files_env={"HIRSEL_REPORT_COMPILER": "//:hirsel-core-driver-bin-hirsel", "HIRSEL_REPORT_EVALUATOR": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval", "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives", "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives"},
         data=Raw('glob(["crates/hirsel-core-rt/include/**", "core/core/**", "core/std/**"]) + ["crates/hirsel-core-rt/testdata/memory_report.c"]')))

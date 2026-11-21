@@ -13,9 +13,12 @@ the compiler and its subprocesses.
 
 import argparse
 import os
+import shlex
+import socketserver
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from typing import NamedTuple
@@ -192,6 +195,113 @@ class StoreNoSync(unittest.TestCase):
                 self.assertEqual(reported, [dirty])
                 self.assertEqual(changed_paths(before, tree(root)), set(reported))
                 self.assertEqual(dirty.read_text(), "fn helper() {}\n")
+
+    def test_recipe_and_replay_after_removing_inputs(self):
+        cc = (Path(os.environ["LLVM_SYS_231_PREFIX"]) / "bin/clang").resolve()
+        archive = (Path(os.environ["HIRSEL_CORE_RT_DEFAULT_ARCHIVES"]).resolve()
+                   / "x86_64-unknown-linux-gnu/libhirsel_core_rt.a")
+        recording = Path(os.environ["HIRSEL_CORE_RT_RECORD_ARCHIVE"]).resolve()
+        with tempfile.TemporaryDirectory(prefix="hirsel-offline-") as scratch:
+            root = Path(scratch).resolve()
+            work = root / "work"
+            work.mkdir()
+            tools = root / "tools"
+            tools.mkdir()
+            recipe_linker = tools / "plain-clang"
+            recipe_linker.write_text(f'#!/bin/sh\nexec {shlex.quote(str(cc))} "$@"\n')
+            recipe_linker.chmod(0o755)
+            env = dict(os.environ, XDG_CACHE_HOME=str(root / "cache"))
+            env.pop("HIRSEL_TL9_REPLAY", None)
+
+            def cli(*args, replay=False):
+                run_env = dict(env, HIRSEL_TL9_REPLAY="1") if replay else env
+                return subprocess.run([self.compiler, *args], cwd=work, env=run_env,
+                                      capture_output=True, text=True)
+
+            with self.subTest(command="build --recipe"):
+                app = work / "published"
+                app.mkdir()
+                (app / "main.hirsel").write_text(
+                    "pub fn main() -> Result[(), Exit] { Error(Exit(status: 7)) }\n"
+                )
+                code = root / "code"
+                published = cli("publish", app, "--libraries", ROOT / "core", "--backend", "cranelift",
+                                "--store", root / "publish-store", "--code-store", code)
+                self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
+                recipe = published.stdout.strip()
+                self.assertRegex(recipe, r"\A[0-9a-f]{64}\Z")
+                app.rename(root / "moved")
+                binary = root / "recipe-program"
+                built = cli("build", "--recipe", recipe, "--code-store", code, "--cc", recipe_linker,
+                            "--runtime", archive, "--store", root / "build-store", "-o", binary)
+                self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                ran = subprocess.run([binary], cwd=work, capture_output=True, text=True)
+                self.assertEqual((ran.returncode, ran.stdout, ran.stderr), (7, "", ""))
+
+            with self.subTest(command="replay"):
+                self.assert_offline_replay(root, cc, recording, cli)
+
+    def assert_offline_replay(self, root, cc, recording, cli):
+        # The recording gets its exit status from the peer. The existing tape
+        # observer replaces the replay's live provider with a counting refuser.
+        received = []
+
+        class Peer(socketserver.BaseRequestHandler):
+            def handle(self):
+                self.request.sendall(b"\x2a")
+                received.append(self.client_address)
+
+        observer = root / "provider.o"
+        subprocess.run([cc, "-c", ROOT / "crates/hirsel-core-driver/src/tape_tls_observe.c",
+                        "-I", ROOT / "crates/hirsel-core-rt/include", "-o", observer], check=True)
+        linker = root / "tools/recording-clang"
+        linker.write_text(
+            f"#!/bin/sh\nexec {shlex.quote(str(cc))} \"$@\" {shlex.quote(str(observer))} "
+            "-Wl,--wrap=hirsel_core_run,--wrap=hirsel_core_host_io\n"
+        )
+        linker.chmod(0o755)
+        app = root / "client"
+        app.mkdir()
+        tape = root / "run.tape"
+        common = [app, "--libraries", ROOT / "core", "--backend", "cranelift",
+                  "--cc", linker, "--runtime", recording]
+        with socketserver.TCPServer(("127.0.0.1", 0), Peer) as server:
+            port = server.server_address[1]
+            (app / "main.hirsel").write_text(f"""pub fn main(n: Net, out: Stdout) -> Result[(), Exit] waits {{
+    let peer = Addr(ip: V4(2130706433u32), port: {port}u16)
+    let socket = result.unwrap(host.connect(n, peer, Never))
+    let (reader, _) = net.split(take socket)
+    let mut read = take reader
+    let mut response: Bytes = list.with_capacity(1)
+    if result.unwrap(host.recv_bounded(mut read, mut response, 1, Never)) != 1 {{
+        return Error(Exit(status: 1))
+    }}
+    let status = response[0]
+    let text = result.unwrap(string.from_utf8(take response))
+    result.unwrap(stdout.write(out, text))
+    Error(Exit(status: status))
+}}
+""")
+            serve = threading.Thread(target=server.serve_forever)
+            serve.start()
+            try:
+                recorded = cli("run", *common, "--store", root / "record-store",
+                               "-o", root / "record-program", "--record", tape,
+                               "--grant", f"Net=Connect 127.0.0.1/32 {port}-{port}",
+                               "--grant", "Stdout")
+            finally:
+                server.shutdown()
+                serve.join()
+        self.assertEqual((recorded.returncode, recorded.stdout, recorded.stderr), (42, "*", "*"))
+        self.assertEqual(len(received), 1)
+        sealed = tape.read_bytes()
+        replayed = cli("replay", *common, "--store", root / "replay-store",
+                       "-o", root / "replay-program", "--tape", tape, replay=True)
+        # Sealed exits 0 and guarantees the recorded outcome. The observer
+        # also sees the replayed output while the CLI suppresses live Stdout.
+        self.assertEqual((replayed.returncode, replayed.stdout, replayed.stderr),
+                         (0, "", "*inner calls: 0\n"))
+        self.assertEqual(tape.read_bytes(), sealed)
 
     def assert_publication_syncs(self, calls, root, *, staging=None):
         objects = {}

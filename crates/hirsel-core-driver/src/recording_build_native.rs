@@ -1647,11 +1647,22 @@ fn rl1_recording_changes_nothing() {
         (
             "capacity_and_args",
             r#"
-pub fn main(a: Args, out: Stdout) -> Result[(), Exit] {
-    let refused = match (bound bytes 4 { box.new(1u64) }) {
-        Ok(Error(_)) => "cap",
-        _ => "other",
+fn refused_box() -> bool {
+    let attempted = isolate(fn() -> Result[Box[u64], Capacity] {
+        bound bytes 4 { box.new(1u64) }
+    })
+    let Ok(Error(take causes)) = take attempted else { return false }
+    for c in causes {
+        return match c.kind {
+            Capacity(k) => k.requested == 8 && k.available == 4,
+            _ => false,
+        }
     }
+    false
+}
+
+pub fn main(a: Args, out: Stdout) -> Result[(), Exit] {
+    let refused = if refused_box() { "cap" } else { "other" }
     result.unwrap(stdout.write(out, refused))
     match args.get(a, 0) {
         Some(v) => {

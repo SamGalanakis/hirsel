@@ -6,7 +6,9 @@ fn expect_row(step: sqlite.Step) {
 }
 
 fn expect_error(e: sqlite.SqliteError, code: i32, text: String) {
-    if e.code != code || e.message != text { fail("unexpected SQLite error") }
+    if e.code != code || e.message != text {
+        fail("unexpected SQLite error")
+    }
 }
 
 @test
@@ -30,7 +32,6 @@ fn fl8_blob_round_trip(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteErr
     list.fill(mut src, 2, 9)
     let _ = sqlite.step(mut insert)?
     sqlite.finalize(take insert)?
-
     let mut select = sqlite.prepare(mut db, "select b from t order by rowid")?
     let mut out: Bytes = list.new()
     expect_row(sqlite.step(mut select)?)
@@ -39,7 +40,9 @@ fn fl8_blob_round_trip(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteErr
         _ => fail("empty blob changed kind"),
     }
     sqlite.column_bytes(mut select, 0, mut out)?
-    if list.len(out) != 0 { fail("empty blob changed length") }
+    if list.len(out) != 0 {
+        fail("empty blob changed length")
+    }
     expect_row(sqlite.step(mut select)?)
     match sqlite.column_kind(mut select, 0) {
         Null => {},
@@ -51,7 +54,9 @@ fn fl8_blob_round_trip(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteErr
         _ => fail("blob changed kind"),
     }
     sqlite.column_bytes(mut select, 0, mut out)?
-    if list.len(out) != 2 || out[0] != 0 || out[1] != 255 { fail("bound bytes changed") }
+    if list.len(out) != 2 || out[0] != 0 || out[1] != 255 {
+        fail("bound bytes changed")
+    }
     sqlite.finalize(take select)?
     sqlite.close(take db)
 }
@@ -92,7 +97,9 @@ fn fl9_final_release_error(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.Sqlit
     let mut db = sqlite.open_memory(f)?
     let mut s = sqlite.prepare(mut db, "select abs(-9223372036854775808)")?
     match sqlite.step(mut s) {
-        Error(e) => if e.code != 1 { fail("expected a SQL error") },
+        Error(e) => if e.code != 1 {
+            fail("expected a SQL error")
+        },
         _ => fail("expected a SQL error"),
     }
     sqlite.close(take db)?
@@ -105,7 +112,9 @@ fn fl9_final_release_error(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.Sqlit
 
 fn denied(take r: Result[(), sqlite.SqliteError]) {
     match r {
-        Error(e) => if e.code != 23 { fail("expected SQLITE_AUTH") },
+        Error(e) => if e.code != 23 {
+            fail("expected SQLITE_AUTH")
+        },
         _ => fail("SQL unexpectedly obtained authority"),
     }
 }
@@ -123,7 +132,9 @@ fn fl10_ambient_authority(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.Sqlite
     }
     sqlite.finalize(take s)?
     match sqlite.prepare(mut db, "attach ':memory:' as x") {
-        Error(e) => if e.code != 23 { fail("expected SQLITE_AUTH") },
+        Error(e) => if e.code != 23 {
+            fail("expected SQLITE_AUTH")
+        },
         _ => fail("ATTACH unexpectedly succeeded"),
     }
     denied(sqlite.exec(mut db, "vacuum"))
@@ -177,7 +188,9 @@ fn expect_failure(take outcome: Result[i64, JoinError], expected: String) {
         Error(Failed(take cs)) => {
             for c in cs {
                 match c.kind {
-                    Fail(text) => if text == expected { return },
+                    Fail(text) => if text == expected {
+                        return
+                    },
                     _ => {},
                 }
                 break
@@ -263,7 +276,9 @@ fn bind_repeatedly(take s: sqlite.Stmt) waits {
     for i in 0i64 .. 1000i64 {
         no_error(sqlite.bind_i64(mut stmt, 1, i))
         expect_row(result.unwrap(sqlite.step(mut stmt)))
-        if sqlite.column_i64(mut stmt, 0) != i { fail("bind changed under contention") }
+        if sqlite.column_i64(mut stmt, 0) != i {
+            fail("bind changed under contention")
+        }
         no_error(sqlite.reset(mut stmt))
     }
 }
@@ -284,8 +299,7 @@ fn unrelated(take done: Sender[u8]) waits {
 fn fl21_contention(f: Foreign[sqlite.Sqlite], tasks: Tasks) -> Result[(), sqlite.SqliteError] waits {
     let mut db = sqlite.open_memory(f)?
     sqlite.exec(mut db, "create table u(x unique); insert into u values(1)")?
-    let count = sqlite.prepare(mut db,
-        "with recursive c(x) as (select 1 union all select x+1 from c where x < 1000000) select count(*) from c")?
+    let count = sqlite.prepare(mut db, "with recursive c(x) as (select 1 union all select x+1 from c where x < 1000000) select count(*) from c")?
     let bound_stmt = sqlite.prepare(mut db, "select ?1")?
     let dup = sqlite.prepare(mut db, "insert into u values (1)")?
     let (done, completed): (Sender[u8], Receiver[u8]) = channel.new(2)
@@ -295,9 +309,13 @@ fn fl21_contention(f: Foreign[sqlite.Sqlite], tasks: Tasks) -> Result[(), sqlite
     let binder = task.spawn(tasks, bytes 65536, take bound_stmt, bind_repeatedly)
     let conflicting = task.spawn(tasks, bytes 65536, take dup, duplicates)
     let independent = task.spawn(tasks, bytes 65536, take done, unrelated)
-    if result.unwrap(channel.receive(completed)) != 0 { fail("SQLite blocked the scheduler") }
+    if result.unwrap(channel.receive(completed)) != 0 {
+        fail("SQLite blocked the scheduler")
+    }
     result.unwrap(task.join(take independent))
-    if result.unwrap(task.join(take counter)) != 1000000 { fail("recursive query count changed") }
+    if result.unwrap(task.join(take counter)) != 1000000 {
+        fail("recursive query count changed")
+    }
     join_success(task.join(take binder))
     join_success(task.join(take conflicting))
     sqlite.close(take db)
@@ -315,4 +333,135 @@ fn fl10_random(f: Foreign[sqlite.Sqlite], out: Stdout) -> Result[(), sqlite.Sqli
     result.unwrap(stdout.write(out, text))
     sqlite.finalize(take s)?
     sqlite.close(take db)
+}
+
+fn file_count(d: Dir) -> u64 waits {
+    let mut entries = result.unwrap(host.entries(d))
+    let mut rows: Bytes = list.with_capacity(4096)
+    result.unwrap(host.next_entries(mut entries, mut rows))
+}
+
+fn one_int(mut db: sqlite.Db, sql: String) -> Result[i64, sqlite.SqliteError] waits {
+    let mut s = sqlite.prepare(mut db, sql)?
+    expect_row(sqlite.step(mut s)?)
+    let value = sqlite.column_i64(mut s, 0)
+    sqlite.finalize(take s)?
+    Ok(value)
+}
+
+fn expect_cantopen(take opened: Result[sqlite.Db, sqlite.SqliteError]) {
+    match opened {
+        Error(e) => if e.code != 14 {
+            fail("expected SQLITE_CANTOPEN")
+        },
+        _ => fail("SQLite opened a refused name"),
+    }
+}
+
+@test
+fn fl11_directory_confinement(f: Foreign[sqlite.Sqlite], workspace: Dir) -> Result[(), sqlite.SqliteError] waits {
+    result.unwrap(host.mkdir(workspace, "sentinel"))
+    result.unwrap(host.mkdir(workspace, "left"))
+    result.unwrap(host.mkdir(workspace, "right"))
+    let sent = result.unwrap(host.open_dir(workspace, "sentinel"))
+    let mut marker = result.unwrap(host.open(sent, "marker", CreateNew))
+    result.unwrap(host.write(mut marker, b"untouched"))
+    result.unwrap(host.close(take marker))
+    let left = result.unwrap(host.open_dir(workspace, "left"))
+    let right = result.unwrap(host.open_dir(workspace, "right"))
+    expect_cantopen(sqlite.open(f, left, "../x"))
+    expect_cantopen(sqlite.open(f, left, "file:a.db?vfs=unix"))
+    let mut a = sqlite.open(f, left, "a.db")?
+    let mut b = sqlite.open(f, right, "a.db")?
+    sqlite.exec(mut a, "pragma journal_mode=wal; create table t(x); insert into t values(19)")?
+    sqlite.exec(mut b, "create table t(x); insert into t values(23)")?
+    let mut a2 = sqlite.open(f, left, "a.db")?
+    sqlite.exec(mut a2, "begin immediate; insert into t values(37); commit")?
+    if one_int(mut a, "select min(x) from t")? != 19 || one_int(mut b, "select x from t")? != 23 {
+        fail("SQLite crossed directory grants")
+    }
+    let _ = result.unwrap(host.stat(left, "a.db"))
+    let _ = result.unwrap(host.stat(left, "a.db-wal"))
+    let _ = result.unwrap(host.stat(left, "a.db-shm"))
+    if file_count(left) != 3 {
+        fail("unexpected WAL files")
+    }
+    if one_int(mut a, "with recursive c(x) as (select 1 union all select x+1 from c where x < 1000000) select x from c order by x desc")? != 1000000 || file_count(left) != 3 {
+        fail("SQLite sort changed files")
+    }
+    sqlite.close(take a2)?
+    sqlite.close(take a)?
+    sqlite.close(take b)?
+    let mut rollback = sqlite.open(f, left, "a.db")?
+    sqlite.exec(mut rollback, "pragma journal_mode=delete; begin immediate; insert into t values(41)")?
+    let _ = result.unwrap(host.stat(left, "a.db-journal"))
+    if file_count(left) != 2 {
+        fail("unexpected rollback files")
+    }
+    sqlite.exec(mut rollback, "rollback")?
+    sqlite.close(take rollback)?
+    if file_count(left) != 1 || file_count(right) != 1 || file_count(workspace) != 3 {
+        fail("SQLite left unexpected files")
+    }
+    let mut examine = result.unwrap(host.open(host.read_only(sent), "marker", Read))
+    let mut bytes_seen: Bytes = list.with_capacity(9)
+    result.unwrap(host.read(mut examine, mut bytes_seen))
+    result.unwrap(host.close(take examine))
+    if bytes_seen != b"untouched" || file_count(sent) != 1 {
+        fail("SQLite touched the sentinel")
+    }
+    Ok(())
+}
+
+fn expect_code(take outcome: Result[(), sqlite.SqliteError], code: i32) {
+    match outcome {
+        Error(e) => if e.code != code {
+            fail("unexpected SQLite result code")
+        },
+        _ => fail("SQLite unexpectedly succeeded"),
+    }
+}
+
+@test
+fn fl22_locks_and_read_only(f: Foreign[sqlite.Sqlite], d: Dir) -> Result[(), sqlite.SqliteError] waits {
+    let mut a = sqlite.open(f, d, "a.db")?
+    sqlite.exec(mut a, "create table t(x); insert into t values(19)")?
+    let mut b = sqlite.open(f, d, "a.db")?
+    let sibling = sqlite.open(f, d, "a.db")?
+    sqlite.exec(mut a, "begin immediate")?
+    expect_code(sqlite.exec(mut b, "begin immediate"), 5)
+    sqlite.close(take sibling)?
+    expect_code(sqlite.exec(mut b, "begin immediate"), 5)
+    sqlite.exec(mut a, "rollback")?
+    sqlite.close(take b)?
+    let read_only = host.read_only(d)
+    let mut r = sqlite.open(f, read_only, "a.db")?
+    if one_int(mut r, "select x from t")? != 19 {
+        fail("read-only database changed")
+    }
+    expect_code(sqlite.exec(mut r, "insert into t values(29)"), 8)
+    sqlite.close(take r)?
+    if one_int(mut a, "select x from t")? != 19 || file_count(d) != 1 {
+        fail("read-only database write reached disk")
+    }
+    sqlite.exec(mut a, "pragma journal_mode=wal; insert into t values(23)")?
+    let mut wal_reader = sqlite.open(f, read_only, "a.db")?
+    expect_code(sqlite.exec(mut wal_reader, "select x from t"), 14)
+    sqlite.close(take wal_reader)?
+    sqlite.close(take a)
+}
+
+fn try_virtual(take args: (Foreign[sqlite.Sqlite], Dir)) -> i64 waits {
+    let (f, d) = args
+    let _ = sqlite.open(f, host.read_only(d), "a.db")
+    0
+}
+
+@test
+fn fl11_virtual_dir_refused(f: Foreign[sqlite.Sqlite], t: Tasks) -> Result[(), ()] waits {
+    let (d, served) = provide.dir(bytes 4096)
+    let call = task.spawn(t, bytes 65536, (f, d), try_virtual)
+    expect_failure(task.join(take call), "foreign call needs a host Dir")
+    let _ = take served
+    Ok(())
 }

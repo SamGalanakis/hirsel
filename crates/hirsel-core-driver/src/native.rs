@@ -523,6 +523,7 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable_for(entry, options)?;
+        self.preflight_foreign_link(&reached, entry, options)?;
         Ok(self.emit_reached(entry, &reached, options, false)?.objects)
     }
     /// The reached instances' objects in link order, and for a Cranelift
@@ -535,7 +536,6 @@ impl CheckProduct {
         closed_executable: bool,
     ) -> Result<Emitted, NativeStop> {
         let inputs = reached.native.as_ref().expect("a build's reachable set");
-        self.preflight_foreign_link(reached, entry, options)?;
         let instances = reached.require_native(entry, options)?;
         // Only the executable is invoked by our launcher with an empty bound
         // stack. Objects returned to a caller must work in any task context.
@@ -841,7 +841,7 @@ impl CheckProduct {
         options: &NativeOptions,
         damaged: &BTreeSet<Identity>,
     ) -> Result<Linked, NativeStop> {
-        self.preflight_foreign_link(reached, entry, options)?;
+        let link_archives = self.preflight_foreign_link(reached, entry, options)?;
         let instances = reached.require_native(entry, options)?;
         let address = reached.address(entry)?;
         let inputs = reached
@@ -977,6 +977,7 @@ impl CheckProduct {
         link_objects(
             &entry_plan,
             &objects,
+            &link_archives,
             image.as_ref(),
             options,
             sources,
@@ -1547,6 +1548,7 @@ fn open_objects(
 fn link_objects(
     entry_plan: &crate::native_entry::Plan<'_>,
     objects: &[ObjectProduct],
+    link_archives: &crate::foreign_archive::LinkArchives,
     image: Option<&Store>,
     options: &NativeOptions,
     sources_digest: ContentHash,
@@ -1568,13 +1570,14 @@ fn link_objects(
         "development-link-O0"
     };
     let identities: Vec<_> = objects.iter().map(|o| o.identity).collect();
-    // v5: the image objects are linked as their image unit. The source map
+    let archive_pins: Vec<_> = link_archives.pins().collect();
+    // The image objects are linked as their image unit. The source map
     // enters by its digest, and the runtime headers by the compiler identity,
     // which embeds them.
     let link_key = match assembly {
         Some(assembly) => key("hirsel.recipe-final-link.v1", &assembly)?,
         None => key(
-            "hirsel.core-executable.v5",
+            "hirsel.core-executable.v6",
             &(
                 compiler_identity()?,
                 toolchain,
@@ -1582,6 +1585,7 @@ fn link_objects(
                 DIRECT_LINK_SUPPORT_LIBS,
                 entry_plan,
                 &identities,
+                &archive_pins,
                 sources_digest,
                 &options.target,
                 options.backend,
@@ -1731,14 +1735,22 @@ fn link_objects(
             std::fs::write(&debug_path, debug)?;
             inputs.push(debug_path);
         }
-        inputs.push(options.runtime.clone());
-        if let Err(first) = direct_link(
-            &recipe,
-            &inputs,
-            DIRECT_LINK_SUPPORT_LIBS,
-            &output,
-            options.optimize,
-        ) {
+        let link = |recipe| {
+            let mut inputs = inputs.clone();
+            link_archives.append_link_inputs(&mut inputs, &options.runtime, recipe)?;
+            inputs.push(options.runtime.clone());
+            direct_link(
+                recipe,
+                &inputs,
+                DIRECT_LINK_SUPPORT_LIBS,
+                &output,
+                options.optimize,
+            )
+        };
+        if let Err(first) = link(&recipe) {
+            if matches!(first, NativeStop::Archive(_)) {
+                return Err(first);
+            }
             let missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
             if missing.is_empty() {
                 return Err(first);
@@ -1755,13 +1767,7 @@ fn link_objects(
                         .join(", ")
                 )));
             }
-            direct_link(
-                &refreshed,
-                &inputs,
-                DIRECT_LINK_SUPPORT_LIBS,
-                &output,
-                options.optimize,
-            )?;
+            link(&refreshed)?;
         }
         drop((unit, files));
         let bytes = std::fs::read(output)?;

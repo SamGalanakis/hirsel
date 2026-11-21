@@ -6,7 +6,7 @@ use crate::code_admission::{
     AdmissionError, AdmissionLimits, NativeSemantics, VerifiedRelease, admit_local,
 };
 use crate::code_store::{CodeStore, ObjectKind};
-use crate::foreign_archive::{ArchiveOrigin, SealedArchive};
+use crate::foreign_archive::LinkArchives;
 use hirsel_core_ir::{
     FuncId, ItemId,
     address::{Binding, Group, builtin_semantics_number, foreign_address},
@@ -137,6 +137,7 @@ pub struct Publication {
     pub(crate) recipe: Recipe,
     pub(super) units: BTreeMap<Identity, Unit>,
     addresses: BTreeMap<Identity, ContentHash>,
+    link_archives: LinkArchives,
 }
 
 const GRANT_NAMES: [&str; 13] = [
@@ -254,6 +255,7 @@ impl CheckProduct {
             recipe,
             units,
             addresses,
+            link_archives: foreign.link_archives,
         })
     }
 }
@@ -263,6 +265,7 @@ struct ForeignRelease {
     archives: Vec<ObjectRef>,
     addresses: BTreeMap<Identity, ContentHash>,
     grants: Vec<GrantBinding>,
+    link_archives: LinkArchives,
 }
 
 fn archive_ref(row: &ForeignArchiveCapture) -> ObjectRef {
@@ -322,16 +325,15 @@ impl CheckProduct {
         } else {
             Some(crate::tool_inputs::toolchain(&options.link, target, &options.runtime)?.1)
         };
-        selected.extend(
-            self.check_foreign_archives(
-                &modules,
-                entry,
-                target,
-                native_link
-                    .as_ref()
-                    .map(|link| (options.runtime.as_path(), link)),
-            )?,
-        );
+        let (reached_archives, link_archives) = self.check_foreign_archives(
+            &modules,
+            entry,
+            target,
+            native_link
+                .as_ref()
+                .map(|link| (options.runtime.as_path(), link)),
+        )?;
+        selected.extend(reached_archives);
         let mut addresses = BTreeMap::new();
         for leaf in modules.values_mut() {
             let mut rows = Vec::new();
@@ -366,6 +368,7 @@ impl CheckProduct {
             archives,
             addresses,
             grants,
+            link_archives,
         })
     }
 
@@ -409,54 +412,30 @@ impl CheckProduct {
         entry: &DefPath,
         target: &str,
         link: Option<(&Path, &crate::tool_inputs::LinkRecipe)>,
-    ) -> Result<BTreeMap<ContentHash, &'a ForeignArchiveCapture>, NativeStop> {
+    ) -> Result<
+        (
+            BTreeMap<ContentHash, &'a ForeignArchiveCapture>,
+            LinkArchives,
+        ),
+        NativeStop,
+    > {
         let mut selected = BTreeMap::new();
-        let mut sealed = BTreeMap::new();
-        let mut checked = Vec::new();
+        let mut sealed = LinkArchives::default();
         for leaf in modules.values() {
             let function = &leaf.functions[0].identity.definition;
             let (_, capture) = self.foreign_capture(function)?;
             let row = select_archive(&leaf.module, capture, target)?;
             let object = archive_ref(row);
-            if let std::collections::btree_map::Entry::Vacant(at) = sealed.entry(object.hash) {
-                at.insert(SealedArchive::open(
-                    row.bytes.to_vec(),
-                    object,
-                    &leaf.module,
-                    target,
-                    Some(&row.path),
-                )?);
-            }
-            sealed[&object.hash].check_headers(object, leaf, target, entry, Some(&row.path))?;
-            checked.push(ArchiveOrigin {
-                object,
-                module: &leaf.module,
-                path: Some(&row.path),
-            });
+            sealed.admit(object, leaf, target, entry, Some(&row.path), || {
+                Ok(row.bytes.to_vec())
+            })?;
             selected.insert(object.hash, row);
         }
-        let symbols = crate::foreign_archive::check_distinct_definitions(
-            checked
-                .into_iter()
-                .map(|origin| (&sealed[&origin.object.hash], origin)),
-            &mut DecodeBudget::unlimited(),
-        )?;
+        let symbols = sealed.definitions(&mut DecodeBudget::unlimited())?;
         if let Some((runtime, link)) = link {
-            symbols.check_link_input(&std::fs::read(runtime)?, "the runtime")?;
-            let closure = crate::link_closure::closure(
-                &link.args,
-                crate::tool_inputs::INPUT_MARKER,
-                crate::tool_inputs::SUPPORT_LIBS,
-                true,
-            )?;
-            for input in closure.binaries {
-                symbols.check_link_input(
-                    &std::fs::read(&input)?,
-                    &format!("link input {}", input.display()),
-                )?;
-            }
+            symbols.check_tool_inputs(runtime, link)?;
         }
-        Ok(selected)
+        Ok((selected, sealed))
     }
 
     pub(super) fn preflight_foreign_link(
@@ -464,22 +443,22 @@ impl CheckProduct {
         reached: &Reachable<'_>,
         entry: &DefPath,
         options: &NativeOptions,
-    ) -> Result<(), NativeStop> {
+    ) -> Result<LinkArchives, NativeStop> {
         if options.recording || reached.materialized.foreign.is_empty() {
-            return Ok(());
+            return Ok(LinkArchives::default());
         }
         let inputs = reached
             .native
             .as_ref()
             .ok_or_else(|| NativeStop::Entry("a foreign build needs a link recipe".into()))?;
         reached.require()?;
-        self.check_foreign_archives(
+        let (_, sealed) = self.check_foreign_archives(
             &self.reached_foreign_modules(reached)?,
             entry,
             &options.target,
             Some((&options.runtime, &inputs.recipe)),
         )?;
-        Ok(())
+        Ok(sealed)
     }
 
     fn foreign_capture(
@@ -843,7 +822,8 @@ impl Publication {
 
     /// Consume admission's decoded data. Host callers retain the collection
     /// lease until the assembly record and image are durably rooted.
-    pub fn from_verified(release: VerifiedRelease) -> Self {
+    pub fn from_verified(mut release: VerifiedRelease) -> Self {
+        let link_archives = std::mem::take(&mut release.link_archives);
         let (root, recipe, groups, decoded) = release.into_parts();
         let mut bodies: BTreeMap<_, _> = recipe
             .bodies
@@ -899,6 +879,7 @@ impl Publication {
             recipe,
             units,
             addresses,
+            link_archives,
         }
     }
 }
@@ -1305,6 +1286,7 @@ impl Publication {
         let result = link_objects(
             &plan,
             &objects,
+            &self.link_archives,
             None,
             &options,
             ContentHash::default(),

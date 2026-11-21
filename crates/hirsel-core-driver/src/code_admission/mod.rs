@@ -242,6 +242,7 @@ pub struct VerifiedRelease {
     recipe: Recipe,
     groups: Vec<Group>,
     bodies: Vec<Body>,
+    pub(crate) link_archives: crate::foreign_archive::LinkArchives,
 }
 
 pub type VerifiedParts = (ContentHash, Recipe, Vec<Group>, Vec<(DecodedBody, Annex)>);
@@ -436,13 +437,12 @@ fn verify_release(
         check_foreign_archive_inventory(&recipe, budget)?;
     }
     closure::check(&recipe, &groups, &bodies, semantics, budget)?;
+    let mut link_archives = crate::foreign_archive::LinkArchives::default();
     if recipe.has_foreign() {
-        let mut sealed = std::collections::BTreeMap::new();
         charge_rows::<crate::foreign_archive::ArchiveOrigin<'_>>(
             budget,
             recipe.foreign_modules.len(),
         )?;
-        let mut selected = Vec::with_capacity(recipe.foreign_modules.len());
         for leaf in &recipe.foreign_modules {
             let target = &recipe.launch.target;
             let row = leaf
@@ -450,35 +450,18 @@ fn verify_release(
                 .binary_search_by(|row| row.target.cmp(target))
                 .expect("the checked archive inventory selects a row for each leaf");
             let archive = leaf.targets[row].archive;
-            let mut check = || {
-                let bytes = load(ObjectKind::ForeignArchive, &archive, budget)?;
-                crate::foreign_archive::SealedArchive::open(
-                    bytes,
-                    archive,
-                    &leaf.module,
-                    target,
-                    None,
-                )
-            };
-            let sealed = match sealed.entry(archive.hash) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => entry.insert(check()?),
-            };
-            sealed.check_headers(archive, leaf, target, &recipe.entry.definition, None)?;
-            selected.push(crate::foreign_archive::ArchiveOrigin {
-                object: archive,
-                module: &leaf.module,
-                path: None,
-            });
+            link_archives.admit(
+                archive,
+                leaf,
+                target,
+                &recipe.entry.definition,
+                None,
+                || load(ObjectKind::ForeignArchive, &archive, budget),
+            )?;
         }
-        crate::foreign_archive::check_distinct_definitions(
-            selected
-                .into_iter()
-                .map(|origin| (&sealed[&origin.object.hash], origin)),
-            budget,
-        )?;
+        link_archives.definitions(budget)?;
         for archive in &recipe.foreign_archives {
-            if !sealed.contains_key(&archive.hash) {
+            if !link_archives.contains(archive.hash) {
                 load(ObjectKind::ForeignArchive, archive, budget)?;
             }
         }
@@ -493,6 +476,7 @@ fn verify_release(
         recipe,
         groups,
         bodies,
+        link_archives,
     })
 }
 

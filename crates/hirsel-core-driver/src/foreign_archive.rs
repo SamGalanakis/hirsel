@@ -11,15 +11,107 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 
 const AR: &[u8] = b"!<arch>\n";
 const THIN: &[u8] = b"!<thin>\n";
 const LLVM_ADDRSIG: elf::SectionType = elf::SectionType(0x6fff_4c03);
 
 pub(crate) struct SealedArchive {
-    _file: File,
+    file: File,
     indexed: BTreeMap<Vec<u8>, IndexedSymbol>,
     members: Vec<Member>,
+}
+
+/// One sealed input per pin. The module and path are those of the first
+/// selecting row and name the archive in collision diagnostics.
+#[derive(Default)]
+pub(crate) struct LinkArchives(BTreeMap<ContentHash, StagedArchive>);
+
+struct StagedArchive {
+    archive: SealedArchive,
+    module: DefPath,
+    object: ObjectRef,
+    path: Option<String>,
+}
+
+impl LinkArchives {
+    pub(crate) fn admit(
+        &mut self,
+        object: ObjectRef,
+        leaf: &ForeignLeaf,
+        target: &str,
+        entry: &DefPath,
+        path: Option<&str>,
+        bytes: impl FnOnce() -> Result<Vec<u8>, AdmissionError>,
+    ) -> Result<(), AdmissionError> {
+        let row = match self.0.entry(object.hash) {
+            std::collections::btree_map::Entry::Occupied(at) => at.into_mut(),
+            std::collections::btree_map::Entry::Vacant(at) => at.insert(StagedArchive {
+                archive: SealedArchive::open(bytes()?, object, &leaf.module, target, path)?,
+                module: leaf.module.clone(),
+                object,
+                path: path.map(str::to_owned),
+            }),
+        };
+        row.archive.check_headers(object, leaf, target, entry, path)
+    }
+
+    pub(crate) fn pins(&self) -> impl Iterator<Item = ContentHash> + '_ {
+        self.0.keys().copied()
+    }
+
+    pub(crate) fn contains(&self, pin: ContentHash) -> bool {
+        self.0.contains_key(&pin)
+    }
+
+    pub(crate) fn definitions(
+        &self,
+        budget: &mut DecodeBudget,
+    ) -> Result<ForeignDefinitions<'_>, AdmissionError> {
+        budget.charge_bytes(self.0.len().saturating_mul(size_of::<&StagedArchive>()))?;
+        let mut rows: Vec<_> = self.0.values().collect();
+        rows.sort_unstable_by(|a, b| a.module.cmp(&b.module));
+        check_distinct_definitions(
+            rows.into_iter().map(|row| {
+                (
+                    &row.archive,
+                    ArchiveOrigin {
+                        module: &row.module,
+                        object: row.object,
+                        path: row.path.as_deref(),
+                    },
+                )
+            }),
+            budget,
+        )
+    }
+
+    /// Check the actual generated inputs, then give LLD only the sealed
+    /// descriptors. The owner lives across LLD's invocation.
+    pub(crate) fn append_link_inputs(
+        &self,
+        inputs: &mut Vec<PathBuf>,
+        runtime: &Path,
+        recipe: &crate::tool_inputs::LinkRecipe,
+    ) -> Result<(), AdmissionError> {
+        if self.0.is_empty() {
+            return Ok(());
+        }
+        let symbols = self.definitions(&mut DecodeBudget::unlimited())?;
+        symbols.check_tool_inputs(runtime, recipe)?;
+        for input in &*inputs {
+            symbols.check_link_input(&std::fs::read(input)?, "the generated code")?;
+        }
+        let pid = std::process::id();
+        inputs.extend(
+            self.0.values().map(|row| {
+                PathBuf::from(format!("/proc/{pid}/fd/{}", row.archive.file.as_raw_fd()))
+            }),
+        );
+        Ok(())
+    }
 }
 
 struct IndexedSymbol {
@@ -103,6 +195,27 @@ fn collision(symbol: &[u8], archive: ArchiveOrigin<'_>, other: &str) -> Admissio
 }
 
 impl ForeignDefinitions<'_> {
+    pub(crate) fn check_tool_inputs(
+        &self,
+        runtime: &Path,
+        recipe: &crate::tool_inputs::LinkRecipe,
+    ) -> Result<(), AdmissionError> {
+        self.check_link_input(&std::fs::read(runtime)?, "the runtime")?;
+        let closure = crate::link_closure::closure(
+            &recipe.args,
+            crate::tool_inputs::INPUT_MARKER,
+            crate::tool_inputs::SUPPORT_LIBS,
+            true,
+        )?;
+        for input in closure.binaries {
+            self.check_link_input(
+                &std::fs::read(&input)?,
+                &format!("link input {}", input.display()),
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn check_link_input(&self, bytes: &[u8], label: &str) -> Result<(), AdmissionError> {
         let unsupported =
             || AdmissionError::Refused(format!("FFI-3: cannot read symbol definitions of {label}"));
@@ -288,7 +401,7 @@ impl SealedArchive {
             members.push(member);
         }
         Ok(Self {
-            _file: file,
+            file,
             indexed: symbols,
             members,
         })

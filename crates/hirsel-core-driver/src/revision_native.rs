@@ -587,6 +587,7 @@ fn link_weak_adapter_order(
     let linked = link_objects(
         &plan,
         &emitted.objects,
+        &crate::foreign_archive::LinkArchives::default(),
         None,
         options,
         crate::reach::sources_digest(product, &rows).unwrap(),

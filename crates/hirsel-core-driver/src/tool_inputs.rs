@@ -1453,7 +1453,9 @@ mod tests {
     #[test]
     fn sealed_foreign_archives_check_pin_object_features_and_abi() {
         use crate::code_store::ObjectKind;
-        use crate::foreign_archive::{ArchiveOrigin, SealedArchive, check_distinct_definitions};
+        use crate::foreign_archive::{
+            ArchiveOrigin, LinkArchives, SealedArchive, check_distinct_definitions,
+        };
         use hirsel_core_ids::DefPath;
         use hirsel_core_ir::Identity;
         use hirsel_core_ir::decode::DecodeBudget;
@@ -1553,6 +1555,13 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
         valid
             .check_headers(valid_object, &leaf, target, &entry, None)
             .unwrap();
+        let archive_path = fixture.path().join("laws.a");
+        let mut staged = LinkArchives::default();
+        staged
+            .admit(valid_object, &leaf, target, &entry, Some("laws.a"), || {
+                Ok(std::fs::read(&archive_path)?)
+            })
+            .unwrap();
         let second_module = DefPath::from_full("other@1/native").unwrap();
         let origin = ArchiveOrigin {
             object: valid_object,
@@ -1617,6 +1626,59 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
                 crate::call::hex(&valid_object.hash.0),
                 crate::call::hex(&second_object.hash.0),
             )
+        );
+        // The path now names the second archive, which lacks hfl_touch.
+        let caller = fixture.path().join("caller.o");
+        let source = fixture.path().join("caller.c");
+        std::fs::write(
+            &source,
+            "int hfl_touch(void); int caller(void) { return hfl_touch(); }",
+        )
+        .unwrap();
+        let compiled = Command::new(llvm.join("clang"))
+            .args([format!("--target={target}").as_str(), "-fPIC", "-c"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&caller)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let plan = LinkRecipe {
+            schema: 0,
+            target: target.into(),
+            linker: llvm.join("ld.lld"),
+            args: vec![],
+            files: vec![],
+            source_files: vec![],
+            absent: vec![],
+            identity: ContentHash::default(),
+        };
+        let collision = staged
+            .append_link_inputs(&mut vec![fixture.path().join("laws.o")], &caller, &plan)
+            .unwrap_err();
+        assert_eq!(
+            collision.to_string(),
+            "FFI-3: symbol hfl_shared is defined by archive laws.a of ffi_laws@1/native and by the generated code",
+        );
+        let mut inputs = vec![caller.clone()];
+        staged
+            .append_link_inputs(&mut inputs, &caller, &plan)
+            .unwrap();
+        let linked = Command::new(&plan.linker)
+            .args(["--shared", "--no-undefined"])
+            .args(inputs)
+            .arg("-o")
+            .arg(fixture.path().join("sealed.so"))
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&linked.stderr)
         );
         let runtime = std::fs::read(fixture.path().join("laws.a")).unwrap();
         let collision = definitions

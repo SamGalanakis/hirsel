@@ -26,7 +26,7 @@ fn limits() -> AdmissionLimits {
         edges: 64,
         nesting: 32,
         outstanding: 64,
-        timeout: Duration::from_secs(10),
+        timeout: Some(Duration::from_secs(10)),
     }
 }
 
@@ -693,7 +693,7 @@ fn m8_bounds_and_releases_every_reservation() {
     let pin = harness.cache(&fixture, ObjectKind::Body, body);
     let error = failure(harness.run(
         AdmissionLimits {
-            timeout: Duration::from_secs(1),
+            timeout: Some(Duration::from_secs(1)),
             ..limits()
         },
         &NativeSemantics,
@@ -817,7 +817,7 @@ fn m8_bounds_and_releases_every_reservation() {
     let control = UnixListener::bind(&socket).unwrap();
     let mut peer = UnixStream::connect(&socket).unwrap();
     let mut connection = ControlConnection::accept(&control).unwrap();
-    let mut exchange = Exchange::new(&mut connection, Instant::now() + limits().timeout);
+    let mut exchange = Exchange::new(&mut connection, deadline(&limits()).unwrap());
     peer.write_all(b"half").unwrap();
     peer.shutdown(Shutdown::Write).unwrap();
     let mut staged = Vec::new();
@@ -890,7 +890,13 @@ fn sender_streams_only_need_in_dependency_order() {
         sender.join().unwrap().unwrap();
     });
 
-    let local = admit_local(&store, root, &limits(), &NativeSemantics).unwrap();
+    let local = admit_local(
+        &store,
+        root,
+        &crate::request::local_admission_limits(),
+        &NativeSemantics,
+    )
+    .unwrap();
     let (verified_root, recipe, groups, bodies) = local.into_parts();
     assert_eq!(verified_root, root);
     assert_eq!(recipe.address, fixture.recipe.address);

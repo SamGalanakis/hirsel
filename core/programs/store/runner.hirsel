@@ -118,6 +118,44 @@ pub fn status_root() -> Result[Latest[Status], Capacity] {
     result.capacity_only(latest.new(take shared))
 }
 
+fn status_hex(input: Bytes) -> Result[String, Capacity] {
+    let digits = string.as_bytes("0123456789abcdef")
+    let mut out: Bytes = list.with_capacity(2u64 * list.len(input))?
+    for value in input {
+        result.unwrap(list.push(mut out, digits[int.widen(value >> 4)]))
+        result.unwrap(list.push(mut out, digits[int.widen(value & 15)]))
+    }
+    Ok(result.unwrap(string.from_utf8(take out)))
+}
+
+fn status_response(value: Status) -> Result[(bool, String), Capacity] {
+    let (ready, phase) = match value.phase {
+        Ready => (true, "ready"),
+        Draining => (false, "draining"),
+        Starting(_) => (false, "starting"),
+    }
+    let digest = status_hex(value.digest)?
+    let release = status_hex(value.release)?
+    let mut allowance = string.new()
+    string.push_u64(mut allowance, value.n_place)?
+    let mut body = string.new()
+    std.json.write(mut body, false, scoped fn(json: std.json.Writer) -> Result[(), Capacity] {
+        std.json.object(json, 0u64, scoped fn(w: std.json.Writer, mut keys: std.json.Items) -> Result[(), Capacity] {
+            std.json.write_member(w, mut keys, "phase")?
+            std.json.write_string_value(w, phase)?
+            std.json.write_member(w, mut keys, "digest")?
+            std.json.write_string_value(w, digest)?
+            std.json.write_member(w, mut keys, "target")?
+            std.json.write_string_value(w, value.target)?
+            std.json.write_member(w, mut keys, "n_place")?
+            std.json.write_number_spelling(w, allowance)?
+            std.json.write_member(w, mut keys, "release")?
+            std.json.write_string_value(w, release)
+        })
+    })?
+    Ok((ready, take body))
+}
+
 type IncomingStop: send { from: Receiver[()], to: Sender[LifeEvent] }
 
 fn watch_stop(take seed: IncomingStop) -> () waits {
@@ -293,7 +331,8 @@ pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take sto
                     let target = match string.from(current.target) { Ok(take name) => take name, Error(cap) => return Error(Full(cap)) }
                     let serving_config = ServePlace(listener: take listener, config: session_config, tasks: tasks, clock: clock, policy: take ingress_policy,
                         max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, place: place,
-                        head: channel.sender(head_to), inbox: take from_serve, to: channel.sender(serve_to), events: channel.sender(to), drain: latest.handle(drain))
+                        head: channel.sender(head_to), inbox: take from_serve, to: channel.sender(serve_to), events: channel.sender(to), drain: latest.handle(drain),
+                        status: latest.handle(status))
                     let run: fn(take ServePlace[G, H]) -> () waits = run_serve_place
                     serving = match task.spawn(tasks, bytes serving_reserve, take serving_config, run) {
                         Ok(take handle) => Some(take handle), Error((cap, _)) => { start_failure = Some(Full(cap)); let _ = channel.try_send(head_to, HeadClose); continue },
@@ -6564,7 +6603,14 @@ fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] 
         } else { true }
     }
     let mut abandoned = 0u64
-    let received = std.wsock.server_with_site(take socket, take slot, peer, proxies, c.socket, clock, accepted, c.site, admission)
+    let raw = scoped fn(path: Bytes) -> Result[Option[(bool, String)], Capacity] {
+        if path != string.as_bytes("/hirsel/status") { return Ok(None) }
+        match control {
+            Some(life) => Ok(Some(status_response(latest.read(life.status))?)),
+            None => Ok(None),
+        }
+    }
+    let received = std.wsock.server_with_site(take socket, take slot, peer, proxies, c.socket, clock, accepted, c.site, raw, admission)
     let result: Result[(), std.wsock.Error] = match take received {
         Ok(None) => Ok(()),
         Ok(Some(take up)) => wire_owner(WireOwner(upgraded: take up, service: take service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take control), allocation, mut abandoned),
@@ -6586,7 +6632,7 @@ pub fn serve_admitted[C: send](take listener: Listener, tasks: Tasks, clock: Clo
 
 type ServeInput: send = AcceptedSocket(Socket, Ip, u64) | AcceptEnded(NetError) | OwnerReady(u64, Sender[WireEvent], Sender[()]) | OwnerEnded(u64, u64) | ServeStart | ServeWake
 
-type OwnerControl: send { id: u64, to: Sender[ServeInput], drain: Latest[Option[DrainWindow]] }
+type OwnerControl: send { id: u64, to: Sender[ServeInput], drain: Latest[Option[DrainWindow]], status: Latest[Status] }
 
 resource type OwnerCompletion: send { to: Sender[ServeInput], id: u64, abandoned: u64 } drop(completion) {
     let _ = channel.try_send(completion.to, OwnerEnded(completion.id, completion.abandoned))
@@ -6620,7 +6666,7 @@ type ServeTransport {
     limit: u64, proxies: List[std.wsock.Prefix], publisher: Sender[PubIn], inbox: Receiver[ServeInput], to: Sender[ServeInput],
 }
 
-type ServeDrain { events: Sender[LifeEvent], window: Latest[Option[DrainWindow]] }
+type ServeDrain { events: Sender[LifeEvent], window: Latest[Option[DrainWindow]], status: Latest[Status] }
 
 fn serve_closing(lifecycle: Option[ServeDrain], clock: Clock) -> bool {
     match lifecycle { Some(control) => closing_at(control.window, clock), _ => false }
@@ -6630,7 +6676,7 @@ type ServePlace[G: send, H: send]: send {
     listener: Listener, config: WireConfig, tasks: Tasks, clock: Clock, policy: ingress.Ingress,
     max_sessions: u64, proxies: List[std.wsock.Prefix], target: String, publisher: Sender[PubIn],
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], head: Sender[HeadInput],
-    inbox: Receiver[ServeInput], to: Sender[ServeInput], events: Sender[LifeEvent], drain: Latest[Option[DrainWindow]],
+    inbox: Receiver[ServeInput], to: Sender[ServeInput], events: Sender[LifeEvent], drain: Latest[Option[DrainWindow]], status: Latest[Status],
 }
 
 fn run_serve_place[G: send, H: send](take seed: ServePlace[G, H]) -> () waits {
@@ -6642,7 +6688,7 @@ fn run_serve_place[G: send, H: send](take seed: ServePlace[G, H]) -> () waits {
 fn supervise_serve[G: send, H: send](take seed: ServePlace[G, H]) -> Result[u64, StartError] waits {
     let ServePlace(listener: take listener, config: config, tasks: tasks, clock: clock, policy: take access_gate,
         max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place,
-        head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain) = take seed
+        head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status) = take seed
     let make: scoped[view] fn() -> Service[WireSession[G, H]] = fn() -> Service[WireSession[G, H]] {
         let initial: Registry[G, H] = registry()
         let mut service = wire_service_with_head(take initial, access_gate, LifecycleHead(channel.sender(head_to)), clock, tasks, config, result.unwrap(clone(target)))
@@ -6651,7 +6697,7 @@ fn supervise_serve[G: send, H: send](take seed: ServePlace[G, H]) -> Result[u64,
     }
     let transport = ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock, policy: Some(ingress.share(access_gate)),
         limit: limit, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to)
-    match serve_sockets(take transport, Some(ServeDrain(events: take events, window: take drain)), make) {
+    match serve_sockets(take transport, Some(ServeDrain(events: take events, window: take drain, status: take status)), make) {
         Ok(count) => Ok(count), Error(Allocation(cap)) => Error(Full(cap)), Error(Network(problem)) => Error(Listen(problem)), _ => Error(Missing("socket")),
     }
 }
@@ -6734,7 +6780,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                 let boxed = match box.new(take service) { Ok(take held) => take held, Error(_) => { start_socket_refusal(tasks, take socket, clock, at, config, to, id, mut refusing); continue } }
                 let completion = match OwnerCompletion(to: channel.sender(to), id: id, abandoned: 0u64) { Ok(take completion) => take completion, Error(_) => continue }
                 let control: Option[OwnerControl] = match lifecycle {
-                    Some(life) => Some(OwnerControl(id: id, to: channel.sender(to), drain: latest.handle(life.window))), _ => None,
+                    Some(life) => Some(OwnerControl(id: id, to: channel.sender(to), drain: latest.handle(life.window), status: latest.handle(life.status))), _ => None,
                 }
                 let job = WireAccept(socket: take socket, peer: peer, accepted: at, slot: take slot, proxies: take prefixes,
                     policy: match access_gate { Some(rules) => Some(ingress.share(rules)), _ => None }, service: take boxed, publisher: channel.sender(pub_to), c: config,

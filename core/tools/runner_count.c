@@ -215,7 +215,8 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         fprintf(stderr, "ready: incomplete place cleanup (%d starts, %d live publishers)\n", places, publisher_live);
         return 105;
     }
-    if (first_permits != 1 || second_permits != 0 || place_permits != 0 || premature_accept) {
+    /* The first place grants its initial permit and renews it after the status probe. */
+    if (first_permits != 2 || second_permits != 0 || place_permits != 0 || premature_accept) {
         fprintf(stderr, "ready: accept enabled %d times, %d outside Ready\n", first_permits, premature_accept);
         return 105;
     }

@@ -198,7 +198,7 @@ pub fn send_release(
     limits: &AdmissionLimits,
 ) -> Result<(), AdmissionError> {
     let deadline = super::deadline(limits)?;
-    let mut budget = super::budget(limits, deadline);
+    let mut budget = super::budget(limits, Some(deadline));
     let bytes = read_recipe(store, root, limits.recipe_bytes, &budget)?;
     let len = bytes.len() as u64;
     let mut recipe = Recipe::decode(&bytes, &mut budget)?;

@@ -50,7 +50,7 @@ pub(crate) fn local_admission_limits() -> crate::code_admission::AdmissionLimits
         edges: usize::MAX,
         nesting: 512,
         outstanding: 0,
-        timeout: Duration::from_secs(24 * 60 * 60),
+        timeout: None,
     }
 }
 fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {

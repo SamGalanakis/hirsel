@@ -42,7 +42,8 @@ pub struct AdmissionLimits {
     pub edges: usize,
     pub nesting: usize,
     pub outstanding: usize,
-    pub timeout: Duration,
+    /// Required for the socket exchange. Local verification has no deadline.
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -319,8 +320,7 @@ pub fn admit_local(
     limits: &AdmissionLimits,
     semantics: &impl BackendSemantics,
 ) -> Result<VerifiedRelease, AdmissionError> {
-    let deadline = deadline(limits)?;
-    let mut budget = budget(limits, deadline);
+    let mut budget = budget(limits, None);
     let bytes = read_recipe(store, root, limits.recipe_bytes, &budget)?;
     let recipe = Recipe::decode(&bytes, &mut budget)?;
     listed_objects(&recipe, limits, &mut budget)?;
@@ -351,7 +351,7 @@ impl AdmissionStore {
         let (root, recipe_bytes) = exchange.recipe(limits.recipe_bytes)?;
         check_hash(Recipe::hash(&recipe_bytes), root)?;
 
-        let mut budget = budget(limits, deadline);
+        let mut budget = budget(limits, Some(deadline));
         let recipe = Recipe::decode(&recipe_bytes, &mut budget)?;
         let objects = listed_objects(&recipe, limits, &mut budget)?;
         let mut reservation = self.reserve(root, objects, limits.outstanding, &mut budget)?;
@@ -418,18 +418,19 @@ fn verify_release(
 }
 
 fn deadline(limits: &AdmissionLimits) -> Result<Instant, AdmissionError> {
-    Instant::now()
-        .checked_add(limits.timeout)
+    limits
+        .timeout
+        .and_then(|timeout| Instant::now().checked_add(timeout))
         .ok_or(AdmissionError::Limit(Limit::Deadline))
 }
 
-fn budget(limits: &AdmissionLimits, deadline: Instant) -> DecodeBudget {
+fn budget(limits: &AdmissionLimits, deadline: Option<Instant>) -> DecodeBudget {
     DecodeBudget::new(DecodeLimits {
         bytes: limits.decoded_bytes,
         members: limits.members,
         slots: limits.edges,
         depth: limits.nesting,
-        deadline: Some(deadline),
+        deadline,
     })
 }
 

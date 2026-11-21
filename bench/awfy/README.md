@@ -46,7 +46,14 @@ python3 bench/awfy/profiles.py "$out/build" "$out/awfy/samples.json" \
 
 Each AWFY execution selects one benchmark by name and takes an outer iteration
 count and an inner size. A sample runs one outer iteration at the size in
-`rebench.conf`. The runtime sample counts process-tree user instructions and
+`rebench.conf`. For fixed-input workloads the sampler also supplies the
+reference data to all three ports as a fourth argument. Queens reads a
+cyclic sequence of board sizes, with one digit per search and ten searches
+per inner iteration. The board uses `88888888`. The other numeric workloads
+read comma-separated values, one per inner iteration. Json and JsonPool
+receive the upstream RAP document as text.
+
+The runtime sample counts process-tree user instructions and
 takes peak RSS from GNU time. The startup sample measures monotonic elapsed time
 from the spawn request to the first line confirming the work. For Hello that
 line is the greeting. For AWFY it follows one complete checked outer iteration.

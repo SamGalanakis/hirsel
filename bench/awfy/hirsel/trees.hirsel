@@ -26,10 +26,10 @@ fn next_random(mut seed: u32) -> u32 {
     small.next_random(mut seed)
 }
 
-pub fn storage() -> Result[u32, Capacity] {
+pub fn storage(depth: u64) -> Result[u32, Capacity] {
     let mut count = 0u32
     let mut seed = 74755u32
-    let tree = build_tree(7, mut seed, mut count)?
+    let tree = build_tree(depth, mut seed, mut count)?
     Ok(count)
 }
 
@@ -73,9 +73,9 @@ fn move_disks(mut towers: Towers, n: u64, from: u64, to: u64) -> bool {
     move_disks(mut towers, n - 1, from, other) && move_disks(mut towers, 1, from, to) && move_disks(mut towers, n - 1, other, to)
 }
 
-pub fn towers_benchmark() -> Result[u32, Capacity] {
+pub fn towers_benchmark(count: u64) -> Result[u32, Capacity] {
     let mut towers = Towers(piles:[None, None, None], moves: 0)
-    let mut disks = 14u64
+    let mut disks = count + 1
     while disks > 0 {
         disks -= 1
         let disk = result.capacity_only(box.new(Disk(size: disks, next: None)))?
@@ -83,7 +83,7 @@ pub fn towers_benchmark() -> Result[u32, Capacity] {
             return Ok(0)
         }
     }
-    if move_disks(mut towers, 13, 0, 1) {
+    if move_disks(mut towers, count, 0, 1) {
         Ok(towers.moves)
     } else {
         Ok(0)

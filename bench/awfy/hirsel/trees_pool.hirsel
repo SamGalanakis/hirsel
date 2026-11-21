@@ -28,10 +28,10 @@ fn build(mut doc: Document, depth: u32, mut seed: u32) -> Result[TreeRef, Capaci
     Ok(handle)
 }
 
-pub fn benchmark() -> Result[u64, Capacity] {
+pub fn benchmark(depth: u64) -> Result[u64, Capacity] {
     let mut doc = Document(trees: list.new(), slots: list.new())
     let mut seed = 74755u32
-    let root = build(mut doc, 7, mut seed)?
+    let root = build(mut doc, int.narrow(depth), mut seed)?
     let index: u64 = int.widen(root.index - 1)
     if doc.trees[index].count == 4 {
         Ok(list.len(doc.trees))

@@ -333,8 +333,7 @@ impl Parser<'_> {
     }
 }
 
-pub fn benchmark() -> usize {
-    let input = include_bytes!("rap.json");
+pub fn benchmark(input: &[u8]) -> usize {
     let mut parser = Parser {
         input,
         index: 0,

@@ -36,9 +36,9 @@ fn length(pool: List[Element], node: u64) -> u64 {
     if node == NONE { 0 } else { 1 + length(pool, pool[node].next) }
 }
 
-pub fn list_benchmark() -> Result[u64, Capacity] {
+pub fn list_benchmark(first: u64) -> Result[u64, Capacity] {
     let mut pool: List[Element] = list.new()
-    let x = make_list(mut pool, 15)?
+    let x = make_list(mut pool, int.narrow(first))?
     let y = make_list(mut pool, 10)?
     let z = make_list(mut pool, 6)?
     Ok(length(pool, tail(pool, x, y, z)))
@@ -78,14 +78,14 @@ fn move_disks(mut towers: Towers, count: u64, from: u64, to: u64) -> bool {
     }
 }
 
-pub fn towers_benchmark() -> Result[u64, Capacity] {
+pub fn towers_benchmark(count: u64) -> Result[u64, Capacity] {
     let mut towers = Towers(piles: [NONE, NONE, NONE], disks: list.new(), moves: 0)
-    let mut size = 14i64
+    let mut size: i64 = int.narrow(count + 1)
     while size > 0 {
         size -= 1
         let disk = list.len(towers.disks)
         result.capacity_only(list.push(mut towers.disks, Element(value: size, next: NONE)))?
         if !push(mut towers, disk, 0) { return Ok(0) }
     }
-    Ok(if move_disks(mut towers, 13, 0, 1) { towers.moves } else { 0 })
+    Ok(if move_disks(mut towers, count, 0, 1) { towers.moves } else { 0 })
 }

@@ -229,9 +229,9 @@ fn packet_chain(mut s: Scheduler, count: u64, identity: u64, is_work: bool) -> R
     Ok(head)
 }
 
-pub fn benchmark() -> Result[bool, Capacity] {
+pub fn benchmark(count: u64) -> Result[bool, Capacity] {
     let mut s = Scheduler(packets: list.new(), tasks: list.new(), table:[0; 6], head: None, current: 0, current_identity: 0, queue_count: 0, hold_count: 0)
-    create_task(mut s, IDLE, 0, None, false, Idle(1, 10000))?
+    create_task(mut s, IDLE, 0, None, false, Idle(1, count))?
     let worker = packet_chain(mut s, 2, WORKER, true)?
     create_task(mut s, WORKER, 1000, worker, true, Worker(HANDLER_A, 0))?
     let first = packet_chain(mut s, 3, DEVICE_A, false)?

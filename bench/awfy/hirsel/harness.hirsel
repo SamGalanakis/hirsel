@@ -4,8 +4,12 @@ pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
         return Error(Exit(status: 2))
     }
     let (outer, inner) = iterations(argv)?
+    let input = match args.get(argv, 3) {
+        Some(value) => value,
+        None => name,
+    }
     for _ in 0 .. outer {
-        match run(name, inner) {
+        match run(name, inner, input) {
             Ok(true) => {},
             Ok(false) => return Error(Exit(status: 1)),
             Error(_) => return Error(Exit(status: 3)),
@@ -39,9 +43,26 @@ pub fn iterations(argv: Args) -> Result[(u64, u64), Exit] {
     Ok((outer, inner))
 }
 
-fn repeat(inner: u64, check: scoped fn() -> Result[bool, Capacity]) -> Result[bool, Capacity] {
+pub fn next_number(input: String, mut at: u64, limit: u64) -> Option[u64] {
+    let digits = string.as_bytes(input)
+    let size = list.len(digits)
+    let start = at
+    while at < size && digits[at] != 44 {
+        at += 1
+    }
+    let parsed: Result[u64, ParseError] = int.parse(string.slice(input, start, at))
+    at = if at == size { 0 } else { at + 1 }
+    let Ok(n) = parsed else { return None }
+    if n > 0 && n <= limit { Some(n) } else { None }
+}
+
+fn repeat_number(inner: u64, input: String, limit: u64, check: scoped fn(u64) -> Result[bool, Capacity]) -> Result[bool, Capacity] {
+    let mut at = 0u64
     for _ in 0 .. inner {
-        if !check()? {
+        let Some(n) = next_number(input, mut at, limit) else {
+            return Ok(false)
+        }
+        if !check(n)? {
             return Ok(false)
         }
     }
@@ -51,13 +72,13 @@ fn repeat(inner: u64, check: scoped fn() -> Result[bool, Capacity]) -> Result[bo
 // Each workload is its own entry, reached through a function value as Rust's
 // harness reaches its per-benchmark entries, so no workload is compiled into the
 // dispatcher and one workload's code never shares a register allocation with another's.
-type Entry = fn(u64) -> Result[bool, Capacity]
+type Entry = fn(u64, String) -> Result[bool, Capacity]
 
-fn run(name: String, inner: u64) -> Result[bool, Capacity] {
+fn run(name: String, inner: u64, input: String) -> Result[bool, Capacity] {
     let Some(workload) = entry(name) else {
         return Ok(false)
     }
-    workload(inner)
+    workload(inner, input)
 }
 
 fn entry(name: String) -> Option[Entry] {
@@ -78,76 +99,75 @@ fn entry(name: String) -> Option[Entry] {
     None
 }
 
-fn run_cd(inner: u64) -> Result[bool, Capacity] {
+fn run_cd(inner: u64, _input: String) -> Result[bool, Capacity] {
     cd.benchmark(inner)
 }
 
-fn run_bounce(inner: u64) -> Result[bool, Capacity] {
-    repeat(inner, fn() -> Result[bool, Capacity] {
-        Ok(small.bounce() == 1331)
+fn run_bounce(inner: u64, input: String) -> Result[bool, Capacity] {
+    repeat_number(inner, input, 50, fn(steps: u64) -> Result[bool, Capacity] {
+        Ok(small.bounce(steps) == 1331)
     })
 }
 
-fn run_deltablue(inner: u64) -> Result[bool, Capacity] {
+fn run_deltablue(inner: u64, _input: String) -> Result[bool, Capacity] {
     deltablue.benchmark(inner)
 }
 
-fn run_havlak(inner: u64) -> Result[bool, Capacity] {
+fn run_havlak(inner: u64, _input: String) -> Result[bool, Capacity] {
     havlak.benchmark(inner)
 }
 
-fn run_json(inner: u64) -> Result[bool, Capacity] {
-    repeat(inner, fn() -> Result[bool, Capacity] {
-        json_parse.benchmark(rap.document())
+fn run_json(inner: u64, input: String) -> Result[bool, Capacity] {
+    for _ in 0 .. inner {
+        if !json_parse.benchmark(input)? { return Ok(false) }
+    }
+    Ok(true)
+}
+
+fn run_list(inner: u64, input: String) -> Result[bool, Capacity] {
+    repeat_number(inner, input, 15, fn(first: u64) -> Result[bool, Capacity] {
+        Ok(lists.list_benchmark(first)? == 10)
     })
 }
 
-fn run_list(inner: u64) -> Result[bool, Capacity] {
-    repeat(inner, fn() -> Result[bool, Capacity] {
-        Ok(lists.list_benchmark()? == 10)
-    })
-}
-
-fn run_mandelbrot(inner: u64) -> Result[bool, Capacity] {
+fn run_mandelbrot(inner: u64, _input: String) -> Result[bool, Capacity] {
     Ok(numeric.mandelbrot(inner))
 }
 
-fn run_nbody(inner: u64) -> Result[bool, Capacity] {
+fn run_nbody(inner: u64, _input: String) -> Result[bool, Capacity] {
     Ok(numeric.nbody(inner))
 }
 
-fn run_permute(inner: u64) -> Result[bool, Capacity] {
-    repeat(inner, fn() -> Result[bool, Capacity] {
-        Ok(small.permute() == 8660)
+fn run_permute(inner: u64, input: String) -> Result[bool, Capacity] {
+    repeat_number(inner, input, 6, fn(size: u64) -> Result[bool, Capacity] {
+        Ok(small.permute(size) == 8660)
     })
 }
 
-fn run_queens(inner: u64) -> Result[bool, Capacity] {
-    repeat(inner, fn() -> Result[bool, Capacity] {
-        Ok(small.queens())
+fn run_queens(inner: u64, input: String) -> Result[bool, Capacity] {
+    Ok(small.queens(inner, string.as_bytes(input)))
+}
+
+fn run_richards(inner: u64, input: String) -> Result[bool, Capacity] {
+    repeat_number(inner, input, 10000, fn(count: u64) -> Result[bool, Capacity] {
+        richards.benchmark(count)
     })
 }
 
-fn run_richards(inner: u64) -> Result[bool, Capacity] {
-    repeat(inner, fn() -> Result[bool, Capacity] {
-        richards.benchmark()
+fn run_sieve(inner: u64, input: String) -> Result[bool, Capacity] {
+    repeat_number(inner, input, 5000, fn(size: u64) -> Result[bool, Capacity] {
+        Ok(small.sieve(size) == 669)
     })
 }
 
-fn run_sieve(inner: u64) -> Result[bool, Capacity] {
-    repeat(inner, fn() -> Result[bool, Capacity] {
-        Ok(small.sieve() == 669)
+fn run_storage(inner: u64, input: String) -> Result[bool, Capacity] {
+    repeat_number(inner, input, 7, fn(depth: u64) -> Result[bool, Capacity] {
+        Ok(trees.storage(depth)? == 5461)
     })
 }
 
-fn run_storage(inner: u64) -> Result[bool, Capacity] {
-    repeat(inner, fn() -> Result[bool, Capacity] {
-        Ok(trees.storage()? == 5461)
-    })
-}
-
-fn run_towers(inner: u64) -> Result[bool, Capacity] {
-    repeat(inner, fn() -> Result[bool, Capacity] {
-        Ok(trees.towers_benchmark()? == 8191)
+fn run_towers(inner: u64, input: String) -> Result[bool, Capacity] {
+    repeat_number(inner, input, 13, fn(disks: u64) -> Result[bool, Capacity] {
+        Ok(trees.towers_benchmark(disks)? == 8191)
     })
 }

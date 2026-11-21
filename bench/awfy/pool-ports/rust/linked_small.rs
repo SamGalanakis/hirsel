@@ -54,9 +54,9 @@ fn length(pool: &[Element], node: usize) -> usize {
     }
 }
 
-pub fn list() -> usize {
+pub fn list(first: i64) -> usize {
     let mut pool = Vec::new();
-    let x = make_list(&mut pool, 15);
+    let x = make_list(&mut pool, first);
     let y = make_list(&mut pool, 10);
     let z = make_list(&mut pool, 6);
     length(&pool, tail(&pool, x, y, z))
@@ -97,20 +97,20 @@ impl Towers {
     }
 }
 
-pub fn towers() -> usize {
+pub fn towers(count: usize) -> usize {
     let mut towers = Towers {
         piles: [NONE; 3],
         disks: Vec::new(),
         moves: 0,
     };
-    for size in (0..14).rev() {
+    for size in (0..=count).rev() {
         let disk = towers.disks.len();
         towers.disks.push(Element {
-            value: size,
+            value: size as i64,
             next: NONE,
         });
         towers.push(disk, 0);
     }
-    towers.move_disks(13, 0, 1);
+    towers.move_disks(count, 0, 1);
     towers.moves
 }

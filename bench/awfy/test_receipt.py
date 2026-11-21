@@ -401,18 +401,20 @@ class NativeProvenance(unittest.TestCase):
                 "accepted": True, "native": {"linked": True, "executable": str(binary)},
             }), provenance)
 
-            def row(name):
-                return runtime_case("awfy", name, directory, [binary, name, "1", "500"],
+            def row(name, *inputs):
+                return runtime_case("awfy", name, directory, [binary, name, "1", "500", *inputs],
                                     b"verified\n", fixture_identity(manifest, fixture), toolchain)
 
             mandelbrot = row("Mandelbrot")
             self.assertEqual(mandelbrot["flags"], ["--release", "--runtime", "runtime", "--inputs", "manifest", "-o", "image"])
-            json_row = row("Json")
+            json_row = row("Json", '{"input": 1}')
             self.assertEqual(json_row["fixture_files"][str(data)], build.sha256(data))
             self.assertNotEqual(json_row["fixture_sha256"], mandelbrot["fixture_sha256"])
+            with self.assertRaisesRegex(ValueError, "JSON argument differs from the fixture"):
+                row("Json", '{"input": 2}')
             data.write_bytes(b'{"input": 2}')
             with self.assertRaisesRegex(ValueError, "JSON fixture differs from the build"):
-                row("Json")
+                row("Json", '{"input": 1}')
             binary.write_bytes(b"replacement image")
             with self.assertRaisesRegex(ValueError, "image_sha256 differs from the build"):
                 row("Mandelbrot")

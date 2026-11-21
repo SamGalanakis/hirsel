@@ -33,9 +33,9 @@ recursive fn length(pool: const Element[:], node: i64) -> i64 {
     return if node < 0 { 0 } else { 1 + length(pool, pool[node].next) };
 }
 
-fn list_benchmark() -> bool {
+fn list_benchmark(first: i64) -> bool {
     var pool: Element[>..] = [];
-    let x = make_list(pool, 15);
+    let x = make_list(pool, first);
     let y = make_list(pool, 10);
     let z = make_list(pool, 6);
     return length(pool, tail(pool, x, y, z)) == 10;

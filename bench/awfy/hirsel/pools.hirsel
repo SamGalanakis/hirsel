@@ -3,15 +3,18 @@ pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
         return Error(Exit(status: 2))
     }
     let (outer, inner) = harness.iterations(argv)?
+    let Some(input) = args.get(argv, 3) else {
+        return Error(Exit(status: 2))
+    }
     let Some((workload, expected)) = pool(name) else {
         return Error(Exit(status: 2))
     }
-    run_pool(out, workload, expected, outer, inner)
+    run_pool(out, workload, expected, outer, inner, input)
 }
 
 // Each pool is its own entry, reached through a function value as in the main
 // harness, so neither workload is compiled into the other's loop.
-type Pool = fn() -> Result[u64, Capacity]
+type Pool = fn(String, mut u64) -> Result[u64, Capacity]
 
 fn pool(name: String) -> Option[(Pool, u64)] {
     if name == "JsonPool" { return Some((json_document, 156u64)) }
@@ -19,19 +22,21 @@ fn pool(name: String) -> Option[(Pool, u64)] {
     None
 }
 
-fn json_document() -> Result[u64, Capacity] {
-    json_pool.benchmark(rap.document())
+fn json_document(input: String, mut _at: u64) -> Result[u64, Capacity] {
+    json_pool.benchmark(input)
 }
 
-fn storage_document() -> Result[u64, Capacity] {
-    trees_pool.benchmark()
+fn storage_document(input: String, mut at: u64) -> Result[u64, Capacity] {
+    let Some(depth) = harness.next_number(input, mut at, 7) else { return Ok(0) }
+    trees_pool.benchmark(depth)
 }
 
-fn run_pool(out: Stdout, workload: Pool, expected: u64, outer: u64, inner: u64) -> Result[(), Exit] waits {
+fn run_pool(out: Stdout, workload: Pool, expected: u64, outer: u64, inner: u64, input: String) -> Result[(), Exit] waits {
     for _ in 0 .. outer {
         let mut checksum = 0u64
+        let mut at = 0u64
         for _ in 0 .. inner {
-            match workload() {
+            match workload(input, mut at) {
                 Ok(value) => { checksum = value },
                 Error(_) => return Error(Exit(status: 3)),
             }

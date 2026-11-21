@@ -26,9 +26,9 @@ recursive fn build(doc: Document&, depth: i64, random: small::Random&) -> TreeRe
     return handle;
 }
 
-fn benchmark() -> i64 {
+fn benchmark(depth: i64) -> i64 {
     var doc = Document { .. };
     var random = small::Random {};
-    let root = build(doc, 7, random);
+    let root = build(doc, depth, random);
     return if doc.trees[root.index - 1].count == 4 { doc.trees.len } else { 0 };
 }

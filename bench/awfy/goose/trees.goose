@@ -25,11 +25,11 @@ recursive fn build_tree(pool: TreePool&, depth: i64, random: small::Random&, cou
     return index;
 }
 
-fn storage() -> bool {
+fn storage(depth: i64) -> bool {
     var pool = TreePool { .. };
     var random = small::Random {};
     var count = 0;
-    build_tree(pool, 7, random, count);
+    build_tree(pool, depth, random, count);
     return count == 5461;
 }
 
@@ -65,15 +65,15 @@ recursive fn move_disks(state: Towers&, pool: Disk[>..]&, count: i64, from: i64,
     }
 }
 
-fn towers() -> bool {
+fn towers(count: i64) -> bool {
     var state = Towers { piles: [-1, -1, -1] };
     var pool: Disk[>..] = [];
-    var size = 14;
+    var size = count + 1;
     while size > 0 {
         size -= 1;
         pool.push(Disk { size: size, next: -1 });
         state.push(pool, pool.len - 1, 0);
     }
-    state.move_disks(pool, 13, 0, 1);
+    state.move_disks(pool, count, 0, 1);
     return state.moves == 8191;
 }

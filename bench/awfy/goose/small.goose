@@ -38,7 +38,7 @@ fn step(ball: Ball&) -> bool {
     return bounced;
 }
 
-fn bounce() -> bool {
+fn bounce(steps: i64) -> bool {
     var random = Random {};
     var balls: Ball[100] = [Ball { x: 0, y: 0, vx: 0, vy: 0 }; 100];
     for i in balls.len {
@@ -48,7 +48,7 @@ fn bounce() -> bool {
         };
     }
     var count = 0;
-    for _ in 50 {
+    for _ in steps {
         for i in balls.len {
             if balls[i].step() { count += 1; }
         }
@@ -79,9 +79,9 @@ recursive fn visit(p: Permutation&, n: i64) {
     }
 }
 
-fn permute() -> bool {
+fn permute(size: i64) -> bool {
     var p = Permutation { values: [0; 6], count: 0 };
-    p.visit(6);
+    p.visit(size);
     return p.count == 8660;
 }
 
@@ -102,37 +102,48 @@ fn set_available(b: Board&, r: i64, c: i64, free: bool) {
     b.mins[c - r + 7] = free;
 }
 
-recursive fn place_queen(b: Board&, column: i64) -> bool {
-    for row in 8 {
+recursive fn place_queen(b: Board&, column: i64, size: i64) -> bool {
+    for row in size {
         if b.available(row, column) {
             b.queen_rows[row] = column;
             b.set_available(row, column, false);
-            if column == 7 || b.place_queen(column + 1) { return true; }
+            if column + 1 == size || b.place_queen(column + 1, size) { return true; }
             b.set_available(row, column, true);
         }
     }
     return false;
 }
 
-fn solve_queens() -> bool {
+fn solve_queens(size: i64) -> bool {
     var board = Board { rows: [true; 8], maxs: [true; 16], mins: [true; 16], queen_rows: [-1; 8] };
-    return board.place_queen(0);
+    return board.place_queen(0, size);
 }
 
-fn queens() -> bool {
-    var valid = true;
-    for _ in 10 { valid = valid && solve_queens(); }
-    return valid;
+fn queens(inner: i64, sizes: const u8[:]) -> bool {
+    if sizes.len == 0 { return false; }
+    var at = 0;
+    for _ in inner {
+        var solved = 0;
+        for _ in 10 {
+            let digit = sizes[at];
+            if digit < 52 || digit > 56 { return false; }
+            if solve_queens(digit as i64 - 48) { solved += 1; }
+            at += 1;
+            if at == sizes.len { at = 0; }
+        }
+        if solved != 10 { return false; }
+    }
+    return true;
 }
 
-fn sieve() -> bool {
+fn sieve(size: i64) -> bool {
     var flags: bool[5000] = [true; 5000];
     var count = 0;
-    for i in 2..5001 {
+    for i in 2..size + 1 {
         if flags[i - 1] {
             count += 1;
             var multiple = i + i;
-            while multiple <= 5000 {
+            while multiple <= size {
                 flags[multiple - 1] = false;
                 multiple += i;
             }

@@ -223,10 +223,10 @@ fn packet_chain(s: Scheduler&, count: i64, identity: i64, is_work: bool) -> i64 
     return head;
 }
 
-fn benchmark() -> bool {
+fn benchmark(count: i64) -> bool {
     var s = Scheduler { packets: [], tasks: [], table: [0; 6],
         head: -1, current: 0, current_identity: 0, queue_count: 0, hold_count: 0 };
-    create_task(s, IDLE, 0, -1, false, Action.Idle { control: 1, count: 10000 });
+    create_task(s, IDLE, 0, -1, false, Action.Idle { control: 1, count: count });
     let worker = packet_chain(s, 2, WORKER, true);
     create_task(s, WORKER, 1000, worker, true, Action.Worker { destination: HANDLER_A, count: 0 });
     let first = packet_chain(s, 3, DEVICE_A, false);

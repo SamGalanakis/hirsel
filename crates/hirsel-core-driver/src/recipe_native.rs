@@ -698,6 +698,22 @@ pub(crate) fn display_grants(recipe: &Recipe) -> Vec<String> {
     grants
 }
 
+pub(crate) fn foreign_grant_refusal(
+    recipe: &Recipe,
+    approved: &BTreeSet<String>,
+) -> Option<String> {
+    let interface = recipe
+        .launch
+        .grants
+        .iter()
+        .filter(|grant| grant.kind == GrantKind::Foreign)
+        .filter_map(|grant| grant.values.first())
+        .find(|interface| !approved.contains(*interface))?;
+    Some(format!(
+        "the recipe grants Foreign={interface}; pass --grant Foreign={interface}"
+    ))
+}
+
 pub(crate) fn foreign_grant_lines(
     recipe: &Recipe,
     root: ContentHash,

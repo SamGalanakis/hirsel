@@ -540,7 +540,7 @@ static OPTIONS: &[OptionSpec] = &[
         Grant,
         ["--grant"],
         Some("KIND"),
-        ["build", "publish", "run", "replay", "test"],
+        ["build", "publish", "run", "replay", "test", "deploy"],
         "Grant a capability kind. Net takes explicit Connect, Listen, Tls or Resolve rules separated by semicolons. Env requires Env=<pattern>[,<pattern>]. Repeat for more kinds."
     ),
     option!(

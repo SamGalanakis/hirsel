@@ -379,7 +379,7 @@ impl AdmissionStore {
         limits: &AdmissionLimits,
         semantics: &impl BackendSemantics,
     ) -> Result<AdmittedRelease<'_>, AdmissionError> {
-        self.admit_for_runtime(connection, limits, semantics, false)
+        self.admit_for_runtime(connection, limits, semantics, false, None)
     }
 
     pub(crate) fn admit_for_runtime(
@@ -388,6 +388,7 @@ impl AdmissionStore {
         limits: &AdmissionLimits,
         semantics: &impl BackendSemantics,
         recording: bool,
+        approved_foreign: Option<&std::collections::BTreeSet<String>>,
     ) -> Result<AdmittedRelease<'_>, AdmissionError> {
         let deadline = deadline(limits)?;
         let mut exchange = Exchange::new(connection, deadline);
@@ -401,6 +402,13 @@ impl AdmissionStore {
         {
             return Err(AdmissionError::RecordingForeign(reason));
         }
+        if let Some(approved) = approved_foreign
+            && let Some(reason) =
+                crate::native::recipe_build::foreign_grant_refusal(&recipe, approved)
+        {
+            return Err(AdmissionError::Refused(reason));
+        }
+        let allow_foreign = approved_foreign.is_some() && staged_local_recipe(&recipe);
         let objects = listed_objects(&recipe, limits, &mut budget)?;
         let mut reservation = self.reserve(root, objects, limits.outstanding, &mut budget)?;
         transfer(
@@ -416,7 +424,7 @@ impl AdmissionStore {
             recipe,
             &mut budget,
             semantics,
-            false,
+            allow_foreign,
             |kind, object, budget| {
                 let key = ObjectKey {
                     kind,

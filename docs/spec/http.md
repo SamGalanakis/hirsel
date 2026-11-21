@@ -649,7 +649,7 @@ Every request from any transport passes the same four steps, in this order. WebS
 
 **Refusals are phase-specific** (RUNNER-SPEC §3's threat table, WIRE W-D2):
 - limits known before upgrade or before a request is read (per-IP sockets, pending sockets): HTTP 503 at `serve` while a refusal slot is free, and otherwise a bare close with no response (HTTP-1);
-- limits learned from Hello: WebSocket Close 1013;
+- a full per-connection frame pool after upgrade: WebSocket Close 1013;
 - a credential the application's binding refuses: WebSocket Close 1008, HTTP 401;
 - a full Ingress inbox or bucket table, a full relay or slot table: `Refused(Overloaded)` from capacity, which HTTP answers 503.
 
@@ -1273,7 +1273,7 @@ The WebSocket upgrade moves onto std `http`. The parallel parse and serve paths 
 - `pending_max` (1024) is `conns_max`, released at Hello accepted for an upgrade, and at the first response's end for HTTP.
 - `upgrade_ms` (5000) is `first_head_ms`, measured from accept: a socket's first head must be complete within it, whatever the route.
 - `hello_ms` (10000) stays the session's, from the 101.
-- The per-IP socket limit is answered 503 at `serve`, before any upgrade, while a refusal slot is free; otherwise the socket gets a bare close with no response (HTTP-1). Limits learned from Hello are WebSocket Close 1013 (B-2).
+- The per-IP socket limit is answered 503 at `serve`, before any upgrade, while a refusal slot is free; otherwise the socket gets a bare close with no response (HTTP-1). A full per-connection frame pool after upgrade is WebSocket Close 1013 (B-2).
 
 ## 7. Build slices and acceptance laws
 

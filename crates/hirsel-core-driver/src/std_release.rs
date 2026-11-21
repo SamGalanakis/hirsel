@@ -1,16 +1,19 @@
 //! The release std: every plain instance of the library image a program is
-//! checked against, lowered as one unit from the image alone. Its roots are
-//! the image's non-generic functions the image checked whole, read from the
-//! image, never from a program's reach, so what the unit holds and how it is
-//! optimised is a function of the image and the generator. Every root is an
-//! export of the unit; a program calls it by its symbol and holds none of its
-//! bodies.
+//! checked against, and every instance they reach, lowered as one unit from
+//! the image alone. Its roots are the image's non-generic functions the image
+//! checked whole, read from the image, never from a program's reach, so what
+//! the unit holds and how it is optimised is a function of the image and the
+//! generator. Every instance the unit holds is an export; a program calls it
+//! by its symbol and holds none of its bodies. Every optimised LLVM build
+//! takes one: a program lowers only the library instances the unit does not
+//! hold, which its own type and closure arguments make.
 //!
 //! The unit and a program meet at five contracts:
-//! - callable: each root is defined under its plain instance symbol, and a
-//!   root with a step-free body also under that body's code symbol;
-//! - step: each root's [`Summary`] (step-free body, opens a bound, launches)
-//!   stands in the program's step specialisation for the body it calls;
+//! - callable: each instance is defined under its instance symbol, and one
+//!   with a step-free body also under that body's code symbol;
+//! - step: each instance's [`Summary`] (step-free body, opens a bound,
+//!   launches) stands in the program's step specialisation for the body it
+//!   calls;
 //! - width: neither side resolves a blob's `W` over the other's bodies;
 //! - link: every other strong definition of the unit is renamed into its
 //!   own namespace (`$std`), so no name the unit defines meets a program's;
@@ -30,7 +33,7 @@ use hirsel_core_ir::{FuncId, Identity};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-const STD_SCHEMA: u32 = 3;
+const STD_SCHEMA: u32 = 4;
 
 /// How many std sides each toolchain and variant's index names, most recent
 /// first. One that falls off is lowered again when a build needs it.
@@ -40,20 +43,6 @@ const INDEX_LENGTH: usize = 8;
 /// lends a program's inliner. LLVM's inline cost decides each call site; this
 /// bounds what each program reads and links.
 const LEND_LIMIT: usize = 2000;
-
-/// Definitions whose callers need the program to lower them and the plain
-/// roots they reach to pass Guard B.
-const ALWAYS_IMPORT: &[&str] = &[
-    "std@1/json/parse",
-    "std@1/json/write",
-    "std@1/regex/next_captures",
-    "std@1/string/next_split",
-];
-
-fn always_imported(definition: &DefPath) -> bool {
-    let path = definition.to_string();
-    ALWAYS_IMPORT.contains(&path.as_str())
-}
 
 /// Whether `definition` is the library's: a side holds these units only.
 fn library(definition: &DefPath) -> bool {
@@ -69,13 +58,14 @@ struct StdRecord {
     whole: bool,
     /// The plain roots the side was asked to lower, in identity order.
     requested: Vec<Identity>,
-    /// The plain roots the unit defines, in identity order.
+    /// The units the side defines under their instance symbols, in identity
+    /// order: every unit it holds, plain or not.
     roots: Vec<Identity>,
     /// Every unit the side lowered, with its owner (its body, annex and
     /// builtins), in identity order. The side's code is a function of these
     /// and of its toolchain and variant alone.
     units: Vec<(Identity, ContentHash)>,
-    /// Each root's step summary, by the root's code identity.
+    /// Each export's step summary, by its code identity.
     summaries: Vec<(ContentHash, Summary)>,
     /// The source points the unit's site references name, by file.
     points: BTreeMap<String, Vec<(u32, u32)>>,
@@ -105,8 +95,7 @@ struct SideUnits {
 }
 
 /// The plain library roots a program's `units` hold besides its `entry`, and
-/// the units they reach. What an always-imported entry reaches stays the
-/// program's to lower.
+/// the units they reach.
 fn program_side(
     units: &BTreeMap<Identity, Unit>,
     entry: &Identity,
@@ -136,18 +125,7 @@ fn program_side(
             && identity.closures.is_empty()
             && identity.dictionaries.is_empty()
     };
-    let held = reach(
-        units
-            .keys()
-            .filter(|i| plain(i) && always_imported(&i.definition))
-            .cloned()
-            .collect(),
-    );
-    let roots: Vec<Identity> = units
-        .keys()
-        .filter(|i| plain(i) && !held.contains(*i))
-        .cloned()
-        .collect();
+    let roots: Vec<Identity> = units.keys().filter(|i| plain(i)).cloned().collect();
     let reached = reach(roots.clone());
     (roots, reached)
 }
@@ -180,20 +158,7 @@ impl CheckProduct {
     /// plain root the image checked whole and what it reaches, prepared as a
     /// recipe names them. Reads the library image and `instance_limit` only.
     fn image_side(&self, instance_limit: usize) -> Result<SideUnits, NativeStop> {
-        let mut plain = self.std_plain_roots()?;
-        // What an always-imported entry reaches stays the program's to lower.
-        let mut held = BTreeSet::new();
-        for root in plain
-            .iter()
-            .filter(|root| always_imported(&root.definition))
-        {
-            let mut scratch = crate::instances::InstanceSet::default();
-            if let Ok(walked) = self.instances_into([root.clone()], instance_limit, &mut scratch) {
-                held.extend(walked);
-            }
-            held.insert(root.clone());
-        }
-        plain.retain(|root| !held.contains(root));
+        let plain = self.std_plain_roots()?;
         let mut materialized = crate::instances::InstanceSet::default();
         let mut reached = BTreeSet::new();
         let mut roots = Vec::new();
@@ -274,7 +239,8 @@ impl CheckProduct {
 /// for a program checked without a library image, one lowered for the plain
 /// roots it reaches next. Else one lowered from `product`'s library image, or
 /// without one from the program's own plain library units, and stored in the
-/// shared cache. None when the program reaches no plain library root.
+/// shared cache. A program checked without a library image that holds no
+/// plain library unit takes the empty side, which defines nothing.
 pub(crate) fn std_side(
     units: &BTreeMap<Identity, Unit>,
     entry: &Identity,
@@ -282,13 +248,21 @@ pub(crate) fn std_side(
     prebuilt: Option<&Path>,
     options: &NativeOptions,
     runtime: ContentHash,
-) -> Result<Option<StdSide>, NativeStop> {
+) -> Result<StdSide, NativeStop> {
     let (roots, reached) = program_side(units, entry);
-    if roots.is_empty() {
-        return Ok(None);
-    }
     let generator = Generator::of(options, runtime);
     let kin = generator.kin()?;
+    let image = product.filter(|product| product.image.is_some());
+    if roots.is_empty() && image.is_none() {
+        return Ok(StdSide {
+            key: side_key(kin, false, &[], &[])?,
+            roots: BTreeSet::new(),
+            summaries: BTreeMap::new(),
+            points: BTreeMap::new(),
+            objects: Vec::new(),
+            lent: Vec::new(),
+        });
+    }
     let owners = units
         .iter()
         .map(|(identity, unit)| Ok((identity, unit.owner()?)))
@@ -304,7 +278,6 @@ pub(crate) fn std_side(
             .iter()
             .all(|root| record.requested.binary_search(root).is_ok())
     };
-    let image = product.filter(|product| product.image.is_some());
     let shared = Store::new(&options.parts)?;
     let prebuilt = prebuilt
         .map(Path::to_owned)
@@ -333,7 +306,7 @@ pub(crate) fn std_side(
     };
     if let Some(i) = chosen {
         let (store, key, record) = candidates.swap_remove(i);
-        return side(store, key, record).map(Some);
+        return side(store, key, record);
     }
     let lowered = match image {
         Some(product) => product.image_side(options.instance_limit)?,
@@ -355,7 +328,7 @@ pub(crate) fn std_side(
             "the release std lowered for this program holds other bodies than it".into(),
         ));
     }
-    side(&shared, key, record).map(Some)
+    side(&shared, key, record)
 }
 
 impl SideUnits {
@@ -398,10 +371,12 @@ fn lower(
         .values()
         .map(|unit| Cow::Borrowed(&unit.module))
         .collect();
+    // Every unit the side holds is an export: a program calls it by its
+    // instance symbol and lowers only the instances the side does not hold.
     let body_keys = crate::callable_variants::prepare_inputs(
         &mut modules,
         &reached,
-        crate::callable_variants::Roots::All(&roots),
+        crate::callable_variants::Roots::All(&reached),
         options.instance_limit,
         |identity| {
             let owner = units[identity].owner()?;
@@ -418,9 +393,9 @@ fn lower(
         .ok_or_else(|| NativeStop::Entry("the image has no plain function".into()))?;
     let (mut module, _) = release::join_modules(&first, &reached, &modules, |_| FuncId(0))?;
     drop(modules);
-    // Each root's function: the row holding its own body.
+    // Each unit's function: the row holding its own body.
     let mut functions: BTreeMap<Identity, FuncId> = BTreeMap::new();
-    let wanted: BTreeSet<&Identity> = roots.iter().collect();
+    let wanted: BTreeSet<&Identity> = reached.iter().collect();
     for (f, function) in module.functions.iter().enumerate() {
         let id = FuncId(f as u32);
         if function.body.is_none() || module.code_variants.contains_key(&id) {
@@ -432,9 +407,9 @@ fn lower(
         }
     }
     drop(wanted);
-    let roots: Vec<Identity> = roots
+    let roots: Vec<Identity> = reached
         .into_iter()
-        .filter(|root| functions.contains_key(root))
+        .filter(|unit| functions.contains_key(unit))
         .collect();
     let ids: Vec<FuncId> = roots.iter().map(|root| functions[root]).collect();
     let codes: Vec<ContentHash> = ids.iter().map(|&f| module.code_identity(f)).collect();

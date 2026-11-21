@@ -508,19 +508,23 @@ fn weak_adapter_link_orders() {
     }
 
     let mut expected = None;
-    for (backend, optimize) in [(Backend::Cranelift, false), (Backend::Llvm, true)] {
-        for reverse in [false, true] {
-            let at = dir.path().join(format!("{backend:?}-{reverse}"));
-            let options = NativeOptions {
-                optimize,
-                ..native_options(backend, &at)
-            };
-            let built =
-                link_weak_adapter_order(&product, &main, [&left, &right], reverse, &options);
-            run_clean(&built.executable, 0);
-            assert_eq!(built.revision, *expected.get_or_insert(built.revision));
-        }
+    for reverse in [false, true] {
+        let at = dir.path().join(format!("Cranelift-{reverse}"));
+        let options = native_options(Backend::Cranelift, &at);
+        let built = link_weak_adapter_order(&product, &main, [&left, &right], reverse, &options);
+        run_clean(&built.executable, 0);
+        assert_eq!(built.revision, *expected.get_or_insert(built.revision));
     }
+    // A release build joins its recipe's units in identity order, whichever
+    // order they were reached in; its image has the development build's revision.
+    let at = dir.path().join("Llvm-release");
+    let options = NativeOptions {
+        optimize: true,
+        ..native_options(Backend::Llvm, &at)
+    };
+    let built = product.build(&main.definition, &options).unwrap();
+    run_clean(&built.executable, 0);
+    assert_eq!(Some(built.revision), expected);
 }
 
 fn link_weak_adapter_order(
@@ -537,34 +541,13 @@ fn link_weak_adapter_order(
     let [a, b] = owners.map(|owner| instances.iter().position(|i| i == owner).unwrap());
     assert!(a < b);
     // The reach walk keeps its sorted table. Reverse just the inputs to the
-    // native object link or to LLVM's release composition.
-    let mut emitted = if options.optimize {
-        let mut order = instances.to_vec();
-        if reverse {
-            order.swap(a, b);
-        }
-        product
-            .emit_release(
-                entry,
-                &order,
-                &reached.materialized,
-                options,
-                inputs.toolchain.runtime,
-                &Store::new(&options.store).unwrap(),
-                inputs.recipe.uses_hirsel_launcher(),
-            )
-            .unwrap()
-    } else {
-        let mut emitted = product
-            .emit_reached(entry, &reached, options, true)
-            .unwrap();
-        assert_eq!(&emitted.objects[a].instance, owners[0]);
-        assert_eq!(&emitted.objects[b].instance, owners[1]);
-        if reverse {
-            emitted.objects.swap(a, b);
-        }
-        emitted
-    };
+    // native object link.
+    let (mut objects, _) = product.emit_reached(entry, &reached, options).unwrap();
+    assert_eq!(&objects[a].instance, owners[0]);
+    assert_eq!(&objects[b].instance, owners[1]);
+    if reverse {
+        objects.swap(a, b);
+    }
     let items: Vec<_> = instances
         .iter()
         .flat_map(|i| reached.materialized.items(i).unwrap())
@@ -578,15 +561,14 @@ fn link_weak_adapter_order(
         entry.to_string(),
         &abi,
         cleanup.as_ref().map(|o| o.instance.symbol()),
-        emitted.launch_digest_unused,
+        false,
         options,
     )
-    .unwrap()
-    .with_release_sites(&emitted.release_sites);
-    emitted.objects.extend(cleanup);
+    .unwrap();
+    objects.extend(cleanup);
     let linked = link_objects(
         &plan,
-        &emitted.objects,
+        &objects,
         &crate::foreign_archive::LinkArchives::default(),
         None,
         options,
@@ -594,7 +576,7 @@ fn link_weak_adapter_order(
         || product.source_map(&rows),
         inputs.toolchain.image,
         inputs.recipe.clone(),
-        emitted.closed_image,
+        false,
         reached.counters,
         |_| Ok(0),
         reached.address(entry).unwrap(),

@@ -161,7 +161,7 @@ impl CheckProduct {
         store: &CodeStore,
         n_place: u64,
     ) -> Result<Publication, NativeStop> {
-        let instances = reached.require()?;
+        reached.require()?;
         if options.recording
             && let Some(reason) = reached.recording_refusal(entry)
         {
@@ -170,63 +170,9 @@ impl CheckProduct {
         let decl = self.entry_decl(entry)?;
         let foreign = self.release_foreign(reached, entry, options, decl, store)?;
         let entry = Identity::plain(entry.clone());
-        let items = instances
-            .iter()
-            .map(|i| reached.materialized.get(i).ir().map(anchored_items))
-            .collect::<io::Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let sources = self.native_sources(&items)?;
-        let sources = sources.positions();
-        let mut units = BTreeMap::new();
-        for identity in instances {
-            let instance = reached.materialized.get(identity);
-            let original = instance.ir()?;
-            let (body, mut annex, module) =
-                normal::prepare_assembly(original, instance.function, &sources);
-            if identity == &entry {
-                annex.1 = Some(decl.parameters.iter().map(|p| p.name.clone()).collect());
-            }
-            let builtins = body
-                .slots
-                .iter()
-                .map(|slot| slot.identity(original))
-                .filter_map(|identity| builtin_semantics_number(&identity.definition))
-                .collect();
-            let code = BodyRef {
-                body: store.put(ObjectKind::Body, &body.bytes)?,
-                annex: store.put(ObjectKind::Annex, &annex.encode())?,
-            };
-            units.insert(
-                identity.clone(),
-                Unit {
-                    code,
-                    module,
-                    annex,
-                    builtins,
-                },
-            );
-        }
-        let mut groups = Vec::new();
-        let mut pending = Vec::new();
-        let addresses = reached
-            .materialized
-            .groups(
-                instances,
-                None,
-                [entry.clone()],
-                &foreign.addresses,
-                |_, bytes| {
-                    pending.push(bytes);
-                },
-            )
-            .ok_or_else(|| NativeStop::Entry("incomplete or inconsistent recipe closure".into()))?;
-        for bytes in pending {
-            groups.push(store.put(ObjectKind::Group, &bytes)?);
-        }
-        groups.sort_unstable_by_key(|group| group.hash);
-        units.retain(|identity, _| addresses.contains_key(identity));
+        let names = decl.parameters.iter().map(|p| p.name.clone()).collect();
+        let (units, groups, addresses) =
+            self.release_units(&entry, reached, store, Some(names), &foreign.addresses)?;
         let mut bodies = units.values().map(|unit| unit.code).collect::<Vec<_>>();
         bodies.sort_unstable_by_key(|body| body.body.hash);
         let launch = Launch {
@@ -257,6 +203,81 @@ impl CheckProduct {
             addresses,
             link_archives: foreign.link_archives,
         })
+    }
+
+    /// The units of `entry`'s reached closure, each body and annex put in
+    /// `store`, with its groups and each unit's address; `names` are the
+    /// entry's startup parameter names, when it is a program entry, and
+    /// `foreign` the addresses of its reached foreign slots.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn release_units(
+        &self,
+        entry: &Identity,
+        reached: &Reachable<'_>,
+        store: &CodeStore,
+        names: Option<Vec<String>>,
+        foreign: &BTreeMap<Identity, ContentHash>,
+    ) -> Result<
+        (
+            BTreeMap<Identity, Unit>,
+            Vec<hirsel_core_ir::release_recipe::ObjectRef>,
+            BTreeMap<Identity, ContentHash>,
+        ),
+        NativeStop,
+    > {
+        let instances = reached.require()?;
+        let items = instances
+            .iter()
+            .map(|i| reached.materialized.get(i).ir().map(anchored_items))
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let sources = self.native_sources(&items)?;
+        let sources = sources.positions();
+        let mut units = BTreeMap::new();
+        for identity in instances {
+            let instance = reached.materialized.get(identity);
+            let original = instance.ir()?;
+            let (body, mut annex, module) =
+                normal::prepare_assembly(original, instance.function, &sources);
+            if identity == entry {
+                annex.1.clone_from(&names);
+            }
+            let builtins = body
+                .slots
+                .iter()
+                .map(|slot| slot.identity(original))
+                .filter_map(|identity| builtin_semantics_number(&identity.definition))
+                .collect();
+            let code = BodyRef {
+                body: store.put(ObjectKind::Body, &body.bytes)?,
+                annex: store.put(ObjectKind::Annex, &annex.encode())?,
+            };
+            units.insert(
+                identity.clone(),
+                Unit {
+                    code,
+                    module,
+                    annex,
+                    builtins,
+                },
+            );
+        }
+        let mut groups = Vec::new();
+        let mut pending = Vec::new();
+        let addresses = reached
+            .materialized
+            .groups(instances, None, [entry.clone()], foreign, |_, bytes| {
+                pending.push(bytes);
+            })
+            .ok_or_else(|| NativeStop::Entry("incomplete or inconsistent recipe closure".into()))?;
+        for bytes in pending {
+            groups.push(store.put(ObjectKind::Group, &bytes)?);
+        }
+        groups.sort_unstable_by_key(|group| group.hash);
+        units.retain(|identity, _| addresses.contains_key(identity));
+        Ok((units, groups, addresses))
     }
 }
 
@@ -1076,8 +1097,8 @@ impl Publication {
     }
 
     /// [`Self::assemble`] of a program checked as `product`. An optimised
-    /// LLVM build takes the program's plain library units from a separately
-    /// lowered release std ([`std_side`]): the program holds none of their
+    /// LLVM build takes every library instance a separately lowered release
+    /// std holds from it ([`std_side`]): the program holds none of their
     /// bodies and calls each by its exported symbol. That std is read first
     /// from `prebuilt` (a library image's store), else from `product`'s image.
     pub(crate) fn assemble_with(
@@ -1119,6 +1140,7 @@ impl Publication {
             &options,
             runtime,
         )
+        .map(Some)
     }
 
     /// The options the recipe's launch fixes over `options`, and its entry's
@@ -1134,9 +1156,10 @@ impl Publication {
         launch_options(&self.recipe, names, options)
     }
 
-    /// Assemble the program over `std` (a separately lowered release std)
-    /// when given: the program holds none of its roots' bodies and calls each
-    /// by its exported symbol.
+    /// Assemble the program; an optimised LLVM build over `std`, the
+    /// separately lowered release std ([`Self::std_side`]), which every such
+    /// build takes and no other does: the program holds none of its exports'
+    /// bodies and calls each by its exported symbol.
     pub(crate) fn assemble_over(
         mut self,
         options: &NativeOptions,
@@ -1156,6 +1179,12 @@ impl Publication {
                 crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?
             }
         };
+        let optimised = matches!(options.backend, Backend::Llvm) && options.optimize;
+        if optimised != std.is_some() {
+            return Err(NativeStop::Entry(
+                "an optimised LLVM build, and only one, assembles over a release std".into(),
+            ));
+        }
         if let Some(std) = &std {
             self.units
                 .retain(|identity, _| identity == &entry_identity || !std.roots.contains(identity));
@@ -1208,61 +1237,36 @@ impl Publication {
         )?;
         let store = Store::new(&options.store)?;
         let mut release_sites = Vec::new();
-        let (mut objects, closed_image, launch_digest_unused) =
-            if matches!(options.backend, Backend::Llvm) && options.optimize {
-                let reached = self.units.keys().cloned().collect::<Vec<_>>();
-                let mut modules = self
-                    .units
-                    .values()
-                    .map(|unit| Cow::Borrowed(&unit.module))
-                    .collect();
-                let body_keys = crate::callable_variants::prepare_inputs(
-                    &mut modules,
-                    &reached,
-                    crate::callable_variants::Roots::Entry(&entry.definition),
-                    options.instance_limit,
-                    |identity| {
-                        let owner = self.units[identity].owner()?;
-                        Ok((
-                            FuncId(0),
-                            owner,
-                            !identity.closures.is_empty() || !identity.dictionaries.is_empty(),
-                        ))
-                    },
-                )?;
-                let joined = release::join_modules(entry, &reached, &modules, |_| FuncId(0))?;
-                let emitted = release::emit_release_image(
-                    entry,
-                    &reached,
-                    &body_keys,
-                    joined,
-                    &options,
-                    tools.runtime,
-                    &store,
-                    link.uses_hirsel_launcher(),
-                    std.as_ref()
-                        .map(|std| (&std.summaries, std.key, std.lent.as_slice())),
-                )?;
-                release_sites = emitted.release_sites;
-                let mut objects = emitted.objects;
-                if let Some(std) = std {
-                    objects.extend(std.objects);
-                }
-                (objects, emitted.closed_image, emitted.launch_digest_unused)
-            } else {
-                let objects = self
-                    .units
-                    .iter()
-                    .map(|(identity, unit)| {
-                        let object_key = key(
-                            "hirsel.recipe-native-object.v2",
-                            &(emitter, identity, &unit.module, &unit.builtins),
-                        )?;
-                        object(&store, &options, object_key, identity, &unit.module)
-                    })
-                    .collect::<Result<Vec<_>, NativeStop>>()?;
-                (objects, false, false)
-            };
+        let (mut objects, closed_image, launch_digest_unused) = if let Some(std) = std {
+            let emitted = release_objects(
+                &self.units,
+                entry,
+                std,
+                &options,
+                tools.runtime,
+                &store,
+                link.uses_hirsel_launcher(),
+            )?;
+            release_sites = emitted.release_sites;
+            (
+                emitted.objects,
+                emitted.closed_image,
+                emitted.launch_digest_unused,
+            )
+        } else {
+            let objects = self
+                .units
+                .iter()
+                .map(|(identity, unit)| {
+                    let object_key = key(
+                        "hirsel.recipe-native-object.v2",
+                        &(emitter, identity, &unit.module, &unit.builtins),
+                    )?;
+                    object(&store, &options, object_key, identity, &unit.module)
+                })
+                .collect::<Result<Vec<_>, NativeStop>>()?;
+            (objects, false, false)
+        };
         let cleanup = if let Some(module) = cleanup {
             let identity = cleanup_identity(&module);
             let cleanup_key = key(
@@ -1313,6 +1317,53 @@ impl Publication {
             )),
         }
     }
+}
+
+/// The release objects of `units`, which hold `entry`'s closure apart from
+/// the exports of `std`, over `std`: the program's image parts and the std's
+/// objects. `closed_executable`: the hirsel launcher alone enters the image.
+pub(super) fn release_objects(
+    units: &BTreeMap<Identity, Unit>,
+    entry: &Identity,
+    std: StdSide,
+    options: &NativeOptions,
+    runtime: ContentHash,
+    store: &Store,
+    closed_executable: bool,
+) -> Result<Emitted, NativeStop> {
+    let reached = units.keys().cloned().collect::<Vec<_>>();
+    let mut modules = units
+        .values()
+        .map(|unit| Cow::Borrowed(&unit.module))
+        .collect();
+    let body_keys = crate::callable_variants::prepare_inputs(
+        &mut modules,
+        &reached,
+        crate::callable_variants::Roots::Entry(&entry.definition),
+        options.instance_limit,
+        |identity| {
+            let owner = units[identity].owner()?;
+            Ok((
+                FuncId(0),
+                owner,
+                !identity.closures.is_empty() || !identity.dictionaries.is_empty(),
+            ))
+        },
+    )?;
+    let joined = release::join_modules(entry, &reached, &modules, |_| FuncId(0))?;
+    let mut emitted = release::emit_release_image(
+        entry,
+        &reached,
+        &body_keys,
+        joined,
+        options,
+        runtime,
+        store,
+        closed_executable,
+        (&std.summaries, std.key, std.lent.as_slice()),
+    )?;
+    emitted.objects.extend(std.objects);
+    Ok(emitted)
 }
 
 pub(crate) fn parse_root(text: &str) -> Result<ContentHash, &'static str> {

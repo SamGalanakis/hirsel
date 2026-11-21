@@ -504,9 +504,9 @@ enum Linked {
     Damaged(Vec<Identity>, usize, crate::reach::ReachCounters),
 }
 
+/// A release image's objects and what its link needs to know of them.
 struct Emitted {
     objects: Vec<ObjectProduct>,
-    table: Option<Table>,
     /// The image was specialized for the hirsel launcher alone entering it
     /// (`step_contexts::specialize`): the entry runs with no step bound current.
     closed_image: bool,
@@ -515,8 +515,10 @@ struct Emitted {
 }
 
 impl CheckProduct {
-    /// Dev keeps each checked body as an independent object. LLVM release
-    /// composes owned bodies and published inline imports into one codegen unit.
+    /// The objects of `entry`'s reached closure: each checked body as an
+    /// independent development object, or, for an optimised LLVM build, the
+    /// release image parts of the closure over the release std, and the std's
+    /// objects.
     pub fn emit_reachable(
         &self,
         entry: &DefPath,
@@ -524,7 +526,24 @@ impl CheckProduct {
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable_for(entry, options)?;
         self.preflight_foreign_link(&reached, entry, options)?;
-        Ok(self.emit_reached(entry, &reached, options, false)?.objects)
+        if !(matches!(options.backend, Backend::Llvm) && options.optimize) {
+            return Ok(self.emit_reached(entry, &reached, options)?.0);
+        }
+        reached.require_native(entry, options)?;
+        let inputs = reached.native.as_ref().expect("a build's reachable set");
+        let root = Identity::plain(entry.clone());
+        let code = crate::code_store::CodeStore::new(options.store.join("code"));
+        let (mut units, _, _) =
+            self.release_units(&root, &reached, &code, None, &BTreeMap::new())?;
+        let runtime = inputs.toolchain.runtime;
+        let std = std_release::std_side(&units, &root, Some(self), None, options, runtime)?;
+        units.retain(|identity, _| identity == &root || !std.roots.contains(identity));
+        recipe_build::bind_annexes(&mut units, &std.points, false)?;
+        let store = Store::new(&options.store)?;
+        Ok(
+            recipe_build::release_objects(&units, &root, std, options, runtime, &store, false)?
+                .objects,
+        )
     }
     /// The reached instances' objects in link order, and for a Cranelift
     /// development build whose walk drafted a reach record, their table.
@@ -533,37 +552,21 @@ impl CheckProduct {
         entry: &DefPath,
         reached: &Reachable<'_>,
         options: &NativeOptions,
-        closed_executable: bool,
-    ) -> Result<Emitted, NativeStop> {
+    ) -> Result<(Vec<ObjectProduct>, Option<Table>), NativeStop> {
         let inputs = reached.native.as_ref().expect("a build's reachable set");
         let instances = reached.require_native(entry, options)?;
-        // Only the executable is invoked by our launcher with an empty bound
-        // stack. Objects returned to a caller must work in any task context.
         if matches!(options.backend, Backend::Llvm) && options.optimize {
-            return self.emit_release(
-                entry,
-                instances,
-                &reached.materialized,
-                options,
-                inputs.toolchain.runtime,
-                &Store::new(&options.store)?,
-                closed_executable && inputs.recipe.uses_hirsel_launcher(),
-            );
+            return Err(NativeStop::Entry(
+                "an optimised LLVM build is assembled from its recipe over the release std".into(),
+            ));
         }
-        let (objects, table) = self.emit_instances(
+        self.emit_instances(
             instances,
             &reached.materialized,
             inputs,
             reached.reach.as_ref(),
             options,
-        )?;
-        Ok(Emitted {
-            objects,
-            table,
-            closed_image: false,
-            launch_digest_unused: false,
-            release_sites: Vec::new(),
-        })
+        )
     }
     /// Emit `instances` for `options`, each a hit on its stored object or
     /// compiled and published under its key, with the table `reach`'s draft
@@ -585,7 +588,7 @@ impl CheckProduct {
         let store = Store::new(&options.store)?;
         if matches!(options.backend, Backend::Llvm) && options.optimize {
             return Err(NativeStop::Entry(
-                "an optimised build composes its program's module from an entry".into(),
+                "an optimised LLVM build is assembled from its recipe over the release std".into(),
             ));
         }
         let library_store = self
@@ -798,6 +801,22 @@ impl CheckProduct {
         reached: &Reachable<'_>,
         options: &NativeOptions,
     ) -> Result<BuildProduct, NativeStop> {
+        // An optimised LLVM build is assembled from its published recipe over
+        // the separately lowered release std, like `build`.
+        if matches!(options.backend, Backend::Llvm) && options.optimize {
+            self.preflight_foreign_link(reached, entry, options)?;
+            reached.require_native(entry, options)?;
+            let code = crate::code_store::CodeStore::new(options.store.join("code"));
+            return self
+                .publish_release(
+                    entry,
+                    reached,
+                    options,
+                    &code,
+                    hirsel_core_ids::launch::DEFAULT_N_PLACE,
+                )?
+                .assemble_with(options, reached.counters, Some(self), None);
+        }
         let mut refused = BTreeSet::new();
         let mut rebuild = BTreeSet::new();
         let mut compiled = 0;
@@ -880,13 +899,7 @@ impl CheckProduct {
             (None, Some(sources)) => sources,
             (None, None) => unreachable!("rows are built without a recorded digest"),
         };
-        let Emitted {
-            mut objects,
-            table,
-            closed_image,
-            launch_digest_unused,
-            release_sites,
-        } = self.emit_reached(entry, reached, options, true)?;
+        let (mut objects, table) = self.emit_reached(entry, reached, options)?;
         let store = Store::new(&options.store)?;
         let (link, cleanup) = match (reach, prior) {
             (Some(reach), Some(prior))
@@ -965,10 +978,9 @@ impl CheckProduct {
             entry.to_string(),
             &link.abi,
             link.cleanup.as_ref().map(|c| c.identity.symbol()),
-            launch_digest_unused,
+            false,
             options,
-        )?
-        .with_release_sites(&release_sites);
+        )?;
         let image = self
             .image
             .as_ref()
@@ -987,7 +999,7 @@ impl CheckProduct {
             },
             inputs.toolchain.image,
             inputs.recipe.clone(),
-            closed_image,
+            false,
             counters,
             record,
             address,

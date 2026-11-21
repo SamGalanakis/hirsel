@@ -1,15 +1,15 @@
-//! Release composition consumes the existing reachable/materialized products.
-//! The release unit is the whole program: every reached body, the program's and
-//! each library's alike, is an internal definition of one LLVM module that the
-//! whole-program pipeline optimises. After cleanup, each definition's release
-//! tail runs alone and is held in the shared parts store under the key of its
-//! part at that cut (`module_key`, a walk of the part's IR in memory, with the
-//! linkage facts the part does not keep), so an edit reruns only the tails whose
-//! input changed. Each out-of-line definition is then a part keyed by its own
-//! IR and the code generator's settings; one code
-//! generation covers every part not already held, and its object is cut per
-//! part. An unchanged definition is generated once, whichever program and
-//! build reached it.
+//! Release emission for a program over its separately lowered std.
+//! The release unit holds the program's own bodies and the library instances
+//! the std side does not hold; the std side's exports stay declarations, with
+//! their small bodies lent `available_externally` so the whole-program pipeline
+//! can inline them. After cleanup, each definition's release tail runs alone
+//! and is held in the shared parts store under the key of its part at that cut
+//! (`module_key`, a walk of the part's IR in memory, with the linkage facts the
+//! part does not keep), so an edit reruns only the tails whose input changed.
+//! Each out-of-line definition is then a part keyed by its own IR and the code
+//! generator's settings; one code generation covers every part not already
+//! held, and its object is cut per part. An unchanged definition is generated
+//! once, whichever program and build reached it.
 use super::*;
 use hirsel_core_ir::{Callee, FuncId, RtOp};
 use serde::{Deserialize, Serialize};
@@ -183,52 +183,6 @@ pub(crate) fn is_unit_record(payload: &[u8]) -> bool {
     decode::<Parts>(payload).is_some_and(|r| r.schema == PARTS_SCHEMA)
 }
 
-impl CheckProduct {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn emit_release(
-        &self,
-        entry: &DefPath,
-        reached: &[Identity],
-        materialized: &crate::instances::InstanceSet,
-        options: &NativeOptions,
-        runtime: ContentHash,
-        store: &Store,
-        closed_executable: bool,
-    ) -> Result<Emitted, NativeStop> {
-        let mut modules: Vec<_> = reached
-            .iter()
-            .map(|instance| materialized.get(instance).ir().map(Cow::Borrowed))
-            .collect::<io::Result<_>>()?;
-        let body_identities = crate::callable_variants::prepare(
-            &mut modules,
-            reached,
-            materialized,
-            crate::callable_variants::Roots::Entry(entry),
-            options.instance_limit,
-        )?;
-        // Exact Step planning needs the same helper bodies LLVM will optimize.
-        // Resolve the existing unit tables before lowering, as the evaluator does.
-        let entry_identity = reached
-            .iter()
-            .find(|i| &i.definition == entry)
-            .expect("reached entry");
-        let joined = join_modules(entry_identity, reached, &modules, |identity| {
-            materialized.get(identity).function
-        })?;
-        emit_release_image(
-            entry_identity,
-            reached,
-            &body_identities,
-            joined,
-            options,
-            runtime,
-            store,
-            closed_executable,
-            None,
-        )
-    }
-}
-
 pub(super) fn join_modules(
     entry: &Identity,
     reached: &[Identity],
@@ -278,15 +232,12 @@ pub(super) fn emit_release_image(
     runtime: ContentHash,
     store: &Store,
     closed_executable: bool,
-    std: Option<(
+    (summaries, std_key, lent): (
         &BTreeMap<ContentHash, hirsel_core_ir::step_contexts::Summary>,
         ContentHash,
         &[u8],
-    )>,
+    ),
 ) -> Result<Emitted, NativeStop> {
-    let no_summaries = BTreeMap::new();
-    let (summaries, std_key, lent) =
-        std.map_or((&no_summaries, None, &[][..]), |(s, k, l)| (s, Some(k), l));
     // The bodies a program imports shape its code, so they key its parts.
     let lent_key =
         (!lent.is_empty()).then(|| ContentHash::of_parts("hirsel.core-std-lent.v1", [lent]));
@@ -299,14 +250,9 @@ pub(super) fn emit_release_image(
     let entry = &instance.definition;
     let compiler = compiler_identity()?;
     let llvm = crate::tool_inputs::llvm_library()?;
-    // The unit holds every body the program can run, so a blob's `W` that every
-    // root reaching its type writes alike is a constant; the unit key below
-    // reads the module after this.
-    // A program beside a separately lowered std does not hold every body that
-    // writes a blob's `W`, so its widths stay dynamic.
-    if std_key.is_none() {
-        hirsel_core_ir::widths::resolve(&mut joined);
-    }
+    // A program beside its separately lowered std does not hold every body
+    // that writes a blob's `W`, so its widths stay dynamic (the width
+    // contract).
     // In a launched executable every code pointer comes from a function or
     // descriptor reference in the image: the launcher supplies only
     // capabilities, and spawn, flow, cleanup and the task entry adapters
@@ -345,7 +291,7 @@ pub(super) fn emit_release_image(
         entry,
         body_identities,
         reached,
-        std_key.as_slice(),
+        std::slice::from_ref(&std_key),
         contained,
     )?;
     let crate::native_facts::ProgramFacts { facts, consumed } =
@@ -515,7 +461,6 @@ pub(super) fn emit_release_image(
         .collect();
     Ok(Emitted {
         objects,
-        table: None,
         closed_image: contained,
         launch_digest_unused,
         release_sites: sites,

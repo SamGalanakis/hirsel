@@ -738,9 +738,7 @@ pub enum Inst {
         query: LayoutQuery,
     },
     /// The `W` of a compact blob holding an encoding of `ty` (a compact type's
-    /// place row, MEM-9): `word`, the blob's header word the body read. A release
-    /// unit in which every root reaching `ty` writes one `W` replaces it with
-    /// that constant ([`crate::widths::resolve`]); anywhere else it is `word`.
+    /// place row, MEM-9): `word`, the blob's header word the body read.
     CompactWidth {
         result: ValueId,
         word: ValueId,
@@ -1903,7 +1901,7 @@ pub struct Body {
     pub edges: Vec<Edge>,
     pub pools: Pools,
     /// The blobs this body roots (MEM-4): each root's type, as a place row, and
-    /// the `W` its blob records. Only [`crate::widths::resolve`] reads them.
+    /// the `W` its blob records.
     pub compact_roots: Vec<CompactRoot>,
 }
 

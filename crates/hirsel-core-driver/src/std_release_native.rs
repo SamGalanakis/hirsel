@@ -142,8 +142,6 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
         .unwrap();
     let std = match build {
         StdBuild::Dev => None,
-        // A program reaching no plain library root lowers its library
-        // instances itself, as every leg does.
         StdBuild::Parts => std_of(product, options, &publication)
             .map(|std| crate::native::std_release::StdSide { lent: Vec::new(), ..std }),
         StdBuild::Imported => std_of(product, options, &publication),
@@ -200,7 +198,7 @@ fn a_separate_std_is_the_std_products_alone() {
         let reached = product.reachable(&entry, options.instance_limit).unwrap();
         let publication =
             product.publish_release(&entry, &reached, &options, &code, 16 * 1024 * 1024).unwrap();
-        let std = std_of(&product, &options, &publication).expect("the program reaches a plain std root");
+        let std = std_of(&product, &options, &publication).expect("an optimised build's std");
         let store = Store::new(if cache == "cache" { &image } else { &options.parts }).unwrap();
         let record = store.get(std.key).unwrap().expect("the std record");
         let bytes: Vec<Vec<u8>> =

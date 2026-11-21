@@ -204,6 +204,7 @@ expected type where one exists, and its type is synthesised otherwise. These are
 arm or exit gives an expression its type.
 
 - a `let` with a written type: its initializer;
+- an ascription `(e : T)` ([LANG-5](syntax.md#lang-5-grammar)): `e`;
 - a call's parameter types and a constructor's declared field types, with what is fixed so
   far filled in, in the order below: each argument or field;
 - the declared type of the place `q` in `q = e` ([OWN-12](ownership.md#own-12-assignment)):
@@ -222,6 +223,15 @@ arm or exit gives an expression its type.
 - the expected type of a tuple or an `Inline` array ([SEM-9](semantics.md#sem-9-inline-arrays)):
   each component or element;
 - `bool` for a condition, a guard and each operand of `!`, `&&` and `||`; `u64` for an index.
+
+An ascription has the type it writes, and it is checked as `let t: T = e` checks its
+initializer: the type is complete, a conversion below applies against it, and an `e` that
+does not then have type `T` is refused here, at the innermost expression `T` reached. It is
+not a cast: `(x : u64)` with `x: u8` is refused. It changes nothing else, so `(e : T)` is
+evaluated, moved, viewed and cleaned as `e` is, and an ascribed place is that place. It
+fixes a call's type parameters from its result, the one way to fix them inside an
+expression: type arguments are never written at a call ([LANG-12](#lang-12-generics)), so
+`f.[T](..)` is not syntax.
 
 An `if` without `else` has type unit, and an arm of type `Never` constrains nothing. An
 expression whose type, after the conversions below, is not its
@@ -261,7 +271,8 @@ declared encoding; and a callable to a callable type it fits ([LANG-13](#lang-13
 A conversion applies to an expression whose type is already synthesised, against its
 expected type; it never settles a type parameter, which the steps above fix as written. So
 a holder nested in a generic call whose result type was fixed from outside is refused, at
-the argument that fixes the parameter second: bind the holder with `let` first.
+the argument that fixes the parameter second: bind the holder with `let` first, or ascribe
+it.
 
 ```hirsel
 fn f() -> u64 { let x: u64 = 7; x }
@@ -282,6 +293,15 @@ fn pick(c: bool) -> u64 { let o = if c { None } else { Some(1u64) }; option.unwr
 type N = Lit(i64)
 fn ev(n: N) -> i64 { match n { Lit(x) => x } }
 fn f() -> i64 { ev(result.unwrap(box.new(Lit(6i64)))) }  // refused: LANG-11, at box.new: T is N
+```
+```hirsel unbuilt
+fn fits(s: String) -> bool { match (int.parse(s) : Result[u8, ParseError]) { Ok(_) => true, Error(_) => false } }
+fn first(s: String) -> Result[u64, ParseError] { let n = (int.parse(s) : Result[u64, ParseError])?; Ok(n + 1) }
+fn none_first(v: Option[u64]) -> bool { (None : Option[u64]) == v }
+fn empty() -> u64 { list.len((list.new() : List[u64])) }
+```
+```hirsel unbuilt
+fn widen(x: u8) -> u64 { (x : u64) }                      // refused: LANG-11, at x: u8 is not u64
 ```
 ```hirsel
 fn f(c: bool, x: u8) -> u16 { if c { x } else { 0 } }     // refused: LANG-11, at x: u8 is not u16
@@ -308,7 +328,8 @@ own payloads, and one still open when the constructor has been typed is refused 
 constructor. Nothing to its right, in its statement or later, fixes it, so the checker emits
 each expression as it types it. So `let x = None`, `let y = Ok(1u64)`, `let xs =
 list.new()` and `let r = if c { None } else { Some(1u64) }` are refused without a written
-type, and `None == v` is refused where `v == None` is accepted. Each use of a
+type, on the binding or as an ascription ([LANG-11](#lang-11-typing-is-local)), and
+`None == v` is refused where `v == None` and `(None : Option[u64]) == v` are accepted. Each use of a
 generic type writes its arguments.
 
 A type definition is refused when following its recursive references requires infinitely
@@ -534,7 +555,8 @@ from its operand's type, so nothing gives the operand an expected error type: an
 type `T` of `e?` reaches `e` only as its payload; whether `e` is a `Result` or an `Option`,
 and its error type, are found from `e` alone, and neither the function's result type nor an enclosing bound is an expected type of `e`.
 A type argument that only the error would fix is refused by
-[LANG-12](#lang-12-generics) at its call; the error type is written on a binding. An expression statement whose
+[LANG-12](#lang-12-generics) at its call; the error type is written on a binding or an
+ascription, `(receipt() : Result[u64, Capacity])?`. An expression statement whose
 value is a `Result` is refused; `let _ = e` discards it explicitly.
 
 ```hirsel

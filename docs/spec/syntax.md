@@ -267,6 +267,7 @@ postfix     = primary, { "(", list(argument), ")" | "[", expression, "]"
                        | ".", ( name | digits(digit) ) | "?" } ;
 argument    = [ name, ":" ], expression | "bytes", expression ;
 primary     = literal | type-path | "(", ")" | "(", expression, ")"
+            | "(", expression, ":", type, ")"
             | "(", expression, ",", list(expression), ")"
             | "[", list(expression), "]" | "[", expression, ";", integer, "]"
             | [ label ], ( block | loop-expr ) | if-expr | match-expr | closure
@@ -312,7 +313,7 @@ Precedence, strongest first:
 | assignment | statement only, no chaining |
 
 The grammar is context-free. Parsing needs no names or types: types appear only after
-`:` and `->`, inside `[ ]` after a type path and on the right of a type definition; expressions never carry type
+`:` and `->`, an **ascription** `(e : T)` included, inside `[ ]` after a type path and on the right of a type definition; expressions never carry type
 arguments, so postfix `[ ]` always indexes; constructors, variants and calls share call
 syntax and are told apart by name resolution; braces after a condition begin a block,
 because records are built with parentheses. On the right of a type definition, two or more

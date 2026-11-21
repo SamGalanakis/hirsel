@@ -670,3 +670,33 @@ fn dir_room(tasks: Tasks) -> bool waits {
     }
     fits && refused && closed && short
 }
+
+fn paired_server(take s: Served[DirOp]) -> bool waits {
+    let mut served = take s
+    let first = issue(mut served, 5)
+    first && issue(mut served, 6)
+}
+
+// core.md, Handles: each issued id holds 32 bytes of the room. In a room of
+// 40, File(5) leaves 8, so a reply issuing File(6) asks 32 of the 8, a
+// Capacity refusal in the server; the second open sees Closed, and the first
+// file, kept past its server's end, still drops.
+// expect: run dir_handle_room(tasks) = true
+fn dir_handle_room(tasks: Tasks) -> bool waits {
+    let (d, s) = provide.dir(bytes 40)
+    let server = task.spawn(tasks, bytes 65536, take s, paired_server)
+    let kept = host.open(d, "a", Read)
+    let closed = opens_closed(d)
+    let short = match join_refusal(task.join(take server)) {
+        Some(c) => c.requested == 32 && c.available == 8,
+        None => false
+    }
+    let first = match take kept {
+        Ok(take f) => {
+            let _ = take f
+            true
+        },
+        Error(_) => false
+    }
+    closed && short && first
+}

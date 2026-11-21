@@ -114,6 +114,7 @@ pub struct Program<'a> {
     pub fns: Rows<FnDecl>,
     pub constants: Rows<Constant>,
     pub constant_parts: Rows<ConstValue>,
+    pub(crate) constant_strings: Rows<Vec<u8>>,
     pub(crate) constant_ids: Rows<Option<u32>>,
     pub by_path: HashMap<DefPath, Def>,
     pub by_definition: Rows<Option<Def>>,
@@ -489,6 +490,9 @@ impl<'a> Program<'a> {
             }),
             constant_parts: library.map_or_else(Rows::default, |l| {
                 Rows::overlay(std::sync::Arc::clone(&l.constant_parts))
+            }),
+            constant_strings: library.map_or_else(Rows::default, |l| {
+                Rows::overlay(std::sync::Arc::clone(&l.constant_strings))
             }),
             constant_ids: {
                 let mut ids = library.map_or_else(Rows::default, |l| {

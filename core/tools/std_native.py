@@ -634,9 +634,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         raise ValueError('TypeScript differential requires 10,000 encoded cases')
                     row['typescript_cases'] = values['cases']
                     if law == 'differential':
-                        function = 'ts_frame_bytes' if frame else 'ts_differential_bytes'
-                        source, count = re.subn(r'(fn ' + function + r'\(\) -> String\s*\{\s*)""(\s*\})',
-                                                lambda m: m[1] + json.dumps(values['hex']) + m[2], source)
+                        pattern = (r'(fn ts_frame_bytes\(\) -> String\s*\{\s*)""'
+                                   if frame else r'(const TS_DIFFERENTIAL_BYTES: String = )""')
+                        source, count = re.subn(pattern, lambda m: m[1] + json.dumps(values['hex']), source)
                         if count != 1:
                             raise ValueError('TypeScript differential must supply exactly one corpus')
                 https = '(https)' in case.call

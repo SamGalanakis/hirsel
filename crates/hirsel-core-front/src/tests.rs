@@ -1213,7 +1213,7 @@ fn invalid_grants_and_constants_keep_their_own_rules_and_sites() {
             "18446744073709551616",
         ),
         ("const BAD: u8 = 256", "LANG-20", "256"),
-        ("const BAD: String = \"hello\"", "LANG-20", "\"hello\""),
+        ("const BAD: String = b\"hello\"", "LANG-20", "b\"hello\""),
     ] {
         let (index, inputs) = program_inputs(source);
         let p = Program::declare(&index, &inputs);

@@ -569,17 +569,13 @@ fn gzip_hello() -> Bytes {
     result.unwrap(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xcb\x48\xcd\xc9\xc9\x07\x00\x86\xa6\x10\x36\x05\x00\x00\x00")
 }
 
-fn identity_tag() -> String {
-    "\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\""
-}
+const IDENTITY_TAG: String = "\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\""
 
-fn gzip_tag() -> String {
-    "\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\""
-}
+const GZIP_TAG: String = "\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\""
 
 fn asset_manifest() -> assets.Manifest {
-    let identity = result.unwrap(assets.representation(Identity, result.unwrap(b"hello"), result.unwrap(string.from(identity_tag()))))
-    let gzip = result.unwrap(assets.representation(Gzip, gzip_hello(), result.unwrap(string.from(gzip_tag()))))
+    let identity = result.unwrap(assets.representation(Identity, result.unwrap(b"hello"), result.unwrap(string.from(IDENTITY_TAG))))
+    let gzip = result.unwrap(assets.representation(Gzip, gzip_hello(), result.unwrap(string.from(GZIP_TAG))))
     let mut formats: List[assets.Representation] = result.unwrap(list.with_capacity(2))
     result.unwrap(list.push(mut formats, take identity))
     result.unwrap(list.push(mut formats, take gzip))
@@ -622,7 +618,7 @@ fn http_asset_validators(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let (listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
     let job = AssetServer(listener: take listener, c, tasks, entries: asset_manifest())
     let server = result.unwrap(task.spawn(tasks, bytes 262144, take job, serve_asset_law))
-    asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nRange: bytes=0-1\r\n\r\n", 200, identity_tag(), "no-cache", "", "5", string.as_bytes("hello")) && asset_wire(n, c, addr, "GET /index-2cf24dba.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: \"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\"\r\n\r\n", 200, gzip_tag(), "public, max-age=31536000, immutable", "gzip", "25", gzip_hello()) && asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: W/\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\"\r\n\r\n", 304, gzip_tag(), "no-cache", "gzip", "", string.as_bytes("")) && asset_wire(n, c, addr, "HEAD /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip;q=0\r\n\r\n", 200, identity_tag(), "no-cache", "", "5", string.as_bytes(""))
+    asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nRange: bytes=0-1\r\n\r\n", 200, IDENTITY_TAG, "no-cache", "", "5", string.as_bytes("hello")) && asset_wire(n, c, addr, "GET /index-2cf24dba.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: \"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\"\r\n\r\n", 200, GZIP_TAG, "public, max-age=31536000, immutable", "gzip", "25", gzip_hello()) && asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: W/\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\"\r\n\r\n", 304, GZIP_TAG, "no-cache", "gzip", "", string.as_bytes("")) && asset_wire(n, c, addr, "HEAD /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip;q=0\r\n\r\n", 200, IDENTITY_TAG, "no-cache", "", "5", string.as_bytes(""))
 }
 
 fn step_work(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {

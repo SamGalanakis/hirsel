@@ -2130,6 +2130,42 @@ fn step_bounds_rules() {
 }
 
 #[test]
+fn static_strings_preserve_budget_law() {
+    let mut failures = vec![];
+    for name in [
+        "LANG-20-static-strings.hirsel",
+        "LANG-20-static-strings-refused.hirsel",
+    ] {
+        failures.extend(run_case(&root().join("cases/rules").join(name)));
+    }
+
+    let source = include_str!("../../../core/front/cases/rules/LANG-20-static-strings.hirsel");
+    let run = |text: &str| {
+        let (program, functions) = crate::SourceProgram::lower(text, None);
+        eval::run(&program, functions["charged"], &[], 8)
+    };
+    let published = run(source);
+    let inline = run(&source.replace("byte_len(TITLE)", "byte_len(\"hirsel\")"));
+    assert_eq!(inline.outcome, eval::Outcome::Returned(vec![24]));
+    assert_eq!(failures, Vec::<String>::new(), "static string conformance");
+    assert_eq!(
+        (
+            published.outcome,
+            published.admissions,
+            published.peak_reserved,
+            published.used
+        ),
+        (
+            inline.outcome,
+            inline.admissions,
+            inline.peak_reserved,
+            inline.used
+        ),
+        "static string uses have the literal's result and charges at an eight-byte limit",
+    );
+}
+
+#[test]
 fn static_bytes_preserve_budget_law() {
     let failures = run_case(&root().join("cases/rules/MEM-28-static-bytes.hirsel"));
     assert!(failures.is_empty(), "{}", failures.join("\n"));

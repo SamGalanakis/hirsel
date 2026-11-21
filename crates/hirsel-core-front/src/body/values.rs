@@ -336,13 +336,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.gap_ty(n, "string literal form is not built");
         };
         let ty = self.t.mk(TyKind::Adt(decl, vec![]));
+        self.static_string_value(&data, ty, n, want)
+    }
+
+    fn static_string_value(
+        &mut self,
+        data: &[u8],
+        ty: TyId,
+        n: NodeId,
+        want: Option<Want>,
+    ) -> (TyId, Option<ValueId>) {
         let viewed = want.is_some_and(|w| matches!(self.t.kind(w.ty), TyKind::View(x) if *x == ty));
         let shown = if viewed {
             self.t.mk(TyKind::View(ty))
         } else {
             ty
         };
-        let v = self.static_string(&data, ty, n);
+        let v = self.static_string(data, ty, n);
         if !viewed {
             self.temp(ty, v);
         }
@@ -665,6 +675,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         };
                         value = field;
                     }
+                }
+                if let crate::ConstData::StaticString(id) = value.data {
+                    let p = self.p;
+                    return self.static_string_value(
+                        &p.constant_strings[id as usize],
+                        value.ty,
+                        n,
+                        want,
+                    );
                 }
                 let emitted = self.constant_value(value, n);
                 (value.ty, emitted)
@@ -1204,7 +1223,7 @@ fn field_step(case: Option<u32>, field: usize) -> Step {
 /// `b".."`, `br#".."#`. Escapes are `\n \t \r \0 \\ \" \'` and `\xNN` (any byte in
 /// byte strings), and in strings `\u{..}` as UTF-8; a raw body is its source bytes. The
 /// lexer has refused every malformed spelling; None marks one anyway.
-fn quoted_bytes(spelling: &str, bytes: bool) -> Option<Vec<u8>> {
+pub(crate) fn quoted_bytes(spelling: &str, bytes: bool) -> Option<Vec<u8>> {
     let spelling = if bytes {
         spelling.strip_prefix('b')?
     } else {

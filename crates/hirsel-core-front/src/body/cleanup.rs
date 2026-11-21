@@ -191,7 +191,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// FORM #114: whether an immutable `let` of `ty` initialised by `value` holds
     /// nothing a drop would free, so it gets no owner and no drop. True only when
     /// `ty` is `String` or an inline array (nested) of `String`, and `value` is the
-    /// same tree written as literals: a string literal (a static carrier, capacity
+    /// same tree written as literals: a string literal or constant (static carrier, capacity
     /// 0, MEM-24 charges nothing), or an `[a, b, ..]` array literal of such trees.
     /// A `let` is never written, lent `mut`, or installed into (OWN-5, OWN-12), so
     /// the capacity stays 0; a value moved out of it is dropped by its new owner.
@@ -207,8 +207,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             TyKind::Adt(d, args) => {
                 args.is_empty()
                     && self.p.decls[d.index()].role == Some(Role::String)
-                    && self.kind(value) == NodeKind::Literal
-                    && self.token_kind(value) == Some(TokenKind::String)
+                    && match self.kind(value) {
+                        NodeKind::Literal => self.token_kind(value) == Some(TokenKind::String),
+                        NodeKind::Path => self.p.resolved(self.at, value).is_some_and(|use_| {
+                            use_.projections.is_empty()
+                                && matches!(use_.target, Target::Definition(id)
+                                    if self.p.constant_ids[id.0 as usize].is_some())
+                        }),
+                        _ => false,
+                    }
             }
             _ => false,
         }

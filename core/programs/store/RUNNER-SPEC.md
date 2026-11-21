@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.24: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.24.1: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -22,6 +22,10 @@ Evidence marks:
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
 
+## CHANGES-v2.24.1 (http.md Part B binds keyed claims through application code; lane http-keyed-noauth-1510)
+
+http.md Part B no longer has verifiers. A keyed binding's principal and key come from an application claim function that is `Wire.bind`'s mechanism (§3 "Binding") with the request's named headers and body as input, run with a copy of the wire grant (http.md K-1, K-2). So v2.17 M3's namespace registry has no place in the runner: `RegisterError.NamespaceTwice` and `OpenError.NamespaceChanged` are deleted, with no replacement. Keyed open refusals (`KeyedOpChanged`, `KeyedNoWire`, `KeyedOpDropped`) are http.md's, as before. Nothing else in this spec changes.
+
 ## CHANGES-v2.24 (ruling R6: wire-callable `Granted` entries copy a `plain + send` grant per call, and the runner does no authentication or authorization; lane lang-spec-r2r7-1493)
 
 Sam ratified R6 on 2026-11-21 (gavel ledger, R6 Option A): "require `G: plain + send` and copy `G` per call; NO auth baked into Hirsel or `runner`", and "make it abundantly clear that we do not bake auth into hirsel." Dropped, and not to be proposed again: a shareable `Arc[G]` capability, a badge maker, or any authentication or policy in the runner (D3).
@@ -41,7 +45,7 @@ Sam ratified R6 on 2026-11-21 (gavel ledger, R6 Option A): "require `G: plain + 
 - **Item 2, where the binding's authority comes from.** The binding takes a copy of the wire grant `G`, so a binding that checks a signature reads its `Secret` from `G` and one that checks expiry reads `G`'s `Clock`. A second plain authority type beside `G` would add a type parameter to `PlaceConfig` for one function. Reversible: `Wire` is opaque, so its fields may change without touching entries.
 - **Item 2, rejection codes.** 1008 and 401 are the codes a refused credential already used (§3, http.md B-6). A binding's `Error` carries no reason, so no oracle on why a credential failed leaves the place.
 - **Item 5.** Without the Caller a granted entry could not decide access, so the ruling's "auth is the application's code" would leave granted calls open to every session. Reversible: the Caller parameter is one adapter argument.
-- **http.md Part B's verifiers** (`StandardWebhooks` and other signed verifiers) check secrets inside the runner. Under R6 they are application bindings, not runner code. v2.24 records the conflict; http.md says so at each verifier, and Part B is re-expressed over `Wire.bind` when it is built.
+- **http.md Part B's verifiers** (`StandardWebhooks` and other signed verifiers) checked secrets inside the runner. Under R6 they are application code: v2.24.1 records that http.md K-2 now binds keyed claims through an application claim function, and that the verifiers are gone.
 
 ## CHANGES-v2.23 (the publisher coalesces as G1 says, and a full head inbox refuses nothing; lane wire-overload-1464)
 
@@ -542,8 +546,8 @@ pub type Refusal: codec + send = NoEntry | Malformed(Bad) | Overloaded | Deadlin
 pub type Fault: codec + send = Raised(u32) | OutOfBytes(Room) | OutOfTime(u64) | Gone
 pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refusal) | Abandoned | InDoubt   // v2.11.4: Superseded deleted (STORE AH2)
 pub type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }   // v2.11.2: `result` is the schema of what `Returned` carries (Result[R, E] for transact)
-pub type RegisterError = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds | NamespaceTwice   // v2.17: Bounds (an allowance sum overflows u64), NamespaceTwice (http.md K-2)
-pub type OpenError = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NamespaceChanged | PublisherStopped   // v2.17: Migrate and NamespaceChanged; v2.19.3: PublisherStopped (the publisher ended without a Halt; §3 "The release check")
+pub type RegisterError = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds   // v2.17: Bounds (an allowance sum overflows u64); v2.24.1: NamespaceTwice deleted
+pub type OpenError = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | PublisherStopped   // v2.17: Migrate; v2.24.1: NamespaceChanged deleted; v2.19.3: PublisherStopped (the publisher ended without a Halt; §3 "The release check")
 pub type Fence: shareable + send { prior: u64, latest: u64 }   // v2.19: a session's release fence (§3 "The release check")
 pub type Caller: codec + send { issuer: u8, subject: Bytes }   // not secret; subject ≤ SUBJECT_MAX; issuer 1 anonymous, later issuers take the next number (§3)
 pub const SUBJECT_MAX: u64 = 64

@@ -88,11 +88,13 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 |---|---|
 | anchor | [OWN-19](ownership.md#own-19-scoped-values) |
 | as if, observables | [SEM-8](semantics.md#sem-8-determinism) |
+| authentication: none in Hirsel or the runner; application code binds the Caller | [HTTP §4](http.md#4-keyed-operations), RUNNER-SPEC rule 13 |
 | blob | [MEM-9](memory.md#mem-9-compact-types) |
 | codec | [SEM-10](semantics.md#sem-10-codecs) |
 | tombstone | [SEM-10](semantics.md#sem-10-codecs) |
 | cancellation point | [CONC-7](tasks.md#conc-7-cancellation-points) |
 | capability | [CAP-1](capabilities.md#cap-1-authority-is-explicit) |
+| claim function, keyed operation | [K-2](http.md#k-2-the-principal-and-the-key-come-from-application-code), [K-1](http.md#k-1-the-declaration) |
 | commit point | [FAIL-3](failure.md#fail-3-commit-points) |
 | copyable | [OWN-3](ownership.md#own-3-kinds) |
 | current limit, limit | [MEM-19](budgets.md#mem-19-limits) |

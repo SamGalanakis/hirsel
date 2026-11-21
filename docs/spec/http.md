@@ -625,7 +625,7 @@ Every request from any transport passes the same four steps, in this order. WebS
 **1. Source.** The transport classifies the source with WIRE-SPEC §2.1's sanitized rule (W-D5): the TCP peer, or the one `X-Forwarded-For` literal from a trusted `ingress` peer, normalized once. HTTP and WebSocket share that code.
 
 **2. `Ingress`, the limits task.** It owns the state that crosses connections and sessions: per-IP limits and per-Caller call rates. It authenticates nothing and authorizes nothing (RUNNER-SPEC v2.24 rule 13, ruling R6).
-- **The Caller.** The application's binding (`runner.wire`, RUNNER-SPEC §3) maps the credential to a Caller, or refuses it. With no binding, each session, and each HTTP request, gets a fresh anonymous Caller of 16 bytes from `host.random`. Ingress mints no principal.
+- **The Caller.** The application's binding (`runner.wire`, RUNNER-SPEC §3) maps the credential to a Caller, or refuses it. With no binding, each session, and each HTTP request, gets a fresh anonymous Caller of 16 bytes from `host.random`. Ingress mints no principal. A keyed binding (Part B) binds its Caller with its own claim function in place of `Wire.bind` (K-2), the same mechanism with the request's named headers and body as input.
 - **Rates.** 20 calls/s per Caller, burst 40, shared by every transport.
 - **State bound.** Rate state lives in a fixed table of `buckets_max` entries (8192 per key kind). A bucket is dropped only when it has refilled to full, because a full bucket carries no information; dropping never resets an active limit. When the table is full of non-full buckets, a request with a new key is refused as overload.
 - **Inbox.** Capacity `ingress_inbox` (256). A caller sends `Ask(source, principal, kind, reply)`, where `reply` is a fresh 1-slot channel, so Ingress answers every ask by `try_send` and never waits. A caller that finds the inbox full is refused as overload without asking.
@@ -663,7 +663,7 @@ Every request from any transport passes the same four steps, in this order. WebS
 There is no new syntax. A binding is immutable library data, registered in `place` after the entries:
 
 ```hirsel unbuilt
-pub type Mode: send = Read | Subscribe | Stream | Keyed(KeyedRule) | Retired(Retirement)
+pub type Mode: send = Read | Subscribe | Stream   // Part B adds Keyed(KeyedRule[G]) and Retired(Retirement[G]), and so the registry's G to Mode and HttpBinding (K-1)
 pub type Source: send = Path | Query | Body
 pub type FieldSource: send { field: String, source: Source }
 pub type HttpBinding: send {
@@ -688,7 +688,7 @@ runner.bind(mut r: Registry[G, H], take b: HttpBinding) -> Result[(), BindError]
 3. **Each durable endpoint binds exactly one entry,** and `op` is unique in the registry and matches `[a-z0-9][a-z0-9_.-]{0,63}` (B-12).
 4. **Fields.**
    - Every field of the argument record has exactly one `FieldSource`. No field has two, and no path capture, query name or body member is shared by two fields.
-   - Every path capture names a field whose source is `Path`, and every `Path` field is captured. The one exception is the reserved `{sender}` selector of a signed keyed binding (Part B, K-2): it is transport metadata, never an argument field.
+   - Every path capture names a field whose source is `Path`, and every `Path` field is captured. There is no reserved capture.
    - `Path` and `Query` fields have B-4's path and query forms.
    - GET has no `Body` fields.
 5. **Shapes.** The argument and result schemas have B-4 forms and pass B-5's analysis; otherwise the refusal names the opcode or the cycle.
@@ -920,7 +920,7 @@ The generator runs `place` (D1) and reads the entries and the bindings from desc
 **OpenAPI 3.1.**
 - JSON Schema for each B-4 form, and for B-9's row envelope.
 - The `Idempotency-Key` and `Authorization` parameters, and every B-7 response.
-- Keyed bindings' verifier headers, their `{sender}` selector and `x-hirsel-retention-ms` are Part B (§4, K-2, K-6).
+- Keyed bindings' claim header names and `x-hirsel-retention-ms` are Part B (§4, K-1, K-6).
 - It is built once at `place` from the registry, so it is deterministic. It is served as immutable bytes at `GET /.hirsel/openapi.json`.
 
 ### B-11: One-shot reads
@@ -943,13 +943,15 @@ A query entry returns an opaque `Cover`, not a codec value (RUNNER-SPEC rule 2, 
 
 - Every binding has an `op`: 1-64 bytes of `[a-z0-9_.-]`, unique in the registry, chosen by the program and independent of its route.
 - **Durable identity uses `op`, never the route.** A route can move without changing any identity.
-- **The alias route.** `POST /.hirsel/op/{op}` reaches every `Stream`-mode binding with the same fields: path fields move into the query. The generated client always uses it. Keyed and `Retired` bindings (Part B) are reached by the same alias, with signed verifiers' selector as a last segment, `POST /.hirsel/op/{op}/{sender}` (K-2).
+- **The alias route.** `POST /.hirsel/op/{op}` reaches every `Stream`-mode binding with the same fields: path fields move into the query. The generated client always uses it. Keyed and `Retired` bindings (Part B) are reached by the same alias, and their claim function sees the same headers and body there as on the route (K-2).
 - **Removed keyed bindings** (Part B) stay answerable through a `Retired` binding and the store's op record until their claims expire (K-9).
 - **Removed `Stream` bindings.** An `op` in the activation table's `previous` bindings but not in `current` stays routed through the alias. Its calls are gone calls (B-2 step 3): `Failed(Gone)` for a new identity, the stored reply for a retried one. The reply is rendered from `previous`'s describe bytes, which hold the entry's result schema, so a removed entry's reply stays decodable. After the next deploy drops `previous`, the op is unrouted (404) and its stream identities are the gone-key set's (RUNNER-SPEC §6).
 - **Rendering.** A durable reply is stored as the runner's `Outcome`. A `Stream` binding's `ok_status` and `error_status` are fixed per `op`: changing them requires a new `op`, which `place` checks against `previous`. So a retry always gets the original status.
 ## 4. Keyed operations
 
 **Part B, unbuilt.** This section is specified but not built; slices H9 and H12 build it (§7). Part A neither builds nor relies on it.
+
+**Hirsel does not authenticate.** Neither Hirsel nor the runner checks a credential, a signature or a secret for a keyed operation: the application's own claim function (K-2) decides who the principal is, exactly as `Wire.bind` decides the Caller ([RUNNER-SPEC](../../core/programs/store/RUNNER-SPEC.md) v2.24 rule 13, ruling R6).
 
 **Purpose.** Some clients bring their own retry key, an opaque string rather than a (stream, position) pair: webhook delivery IDs, payment-style `Idempotency-Key`s, and upstream message IDs. A keyed operation runs a transact entry at most once per **claim** (`op`, principal, key) while the claim is live (K-5).
 
@@ -1001,78 +1003,83 @@ A query entry returns an opaque `Cover`, not a codec value (RUNNER-SPEC rule 2, 
 
 **Standard Webhooks** (github.com/standard-webhooks/standard-webhooks, spec/standard-webhooks.md, "Signature scheme"; cited as a document)
 - **What it does.** `webhook-id` is the idempotency key, and `webhook-signature` is an HMAC over `id.timestamp.body` under the shared secret; receivers check the timestamp against a tolerance.
-- **What Hirsel does with it.** **ADOPTED** as the `StandardWebhooks` verifier (K-2). The dedup key is the verified `webhook-id`.
+- **What Hirsel does with it.** Nothing built in. An app writes it as a claim function (K-2, first worked example) that checks the signature with `secret.verify_hmac_sha256` and the timestamp against its own tolerance, and returns the verified `webhook-id` as the key.
 
 **GitHub webhooks** (docs.github.com, "Validating webhook deliveries"; cited as a document)
 - **What it does.** `X-Hub-Signature-256` is an HMAC-SHA256 over the body alone. `X-GitHub-Delivery` names the delivery, and it is not signed; there is no signed timestamp.
-- **What Hirsel does with it.** **ADAPTED** as the `GitHub` verifier, with its weaker guarantee stated (K-2).
+- **What Hirsel does with it.** Nothing built in. An app writes it as a claim function (K-2, second worked example), and the weaker guarantee that example states is the app's to accept.
 
 ### K-1: The declaration
 
-`Mode.Keyed(KeyedRule)` binds a transact entry (B-3). `Mode.Retired(Retirement)` keeps a removed keyed `op` answerable until its claims have expired (K-9). The binding's `op` (B-12) scopes its claims.
+`Mode.Keyed(KeyedRule[G])` binds a transact entry (B-3). `Mode.Retired(Retirement[G])` keeps a removed keyed `op` answerable until its claims have expired (K-9). The binding's `op` (B-12) scopes its claims. `G` is the registry's grant type, so a claim function gets the place's wire grant (K-2).
 
 ```hirsel unbuilt
-pub type Sender: send { name: String, secret: Bytes }
-pub type Namespace: send { name: String, senders: List[Sender] }   // RUNNER-SPEC v2.17 M3: one identity domain, declared once per place
-pub type Verifier: send =
-    Bearer(String)                          // the key header, e.g. "Idempotency-Key"
-  | StandardWebhooks(Namespace, u64)        // the senders' namespace, timestamp tolerance in seconds
-  | GitHub(Namespace)                       // the senders' namespace
-pub type KeyedRule: send {
-  verifier: Verifier,      // K-2
+pub type ClaimRequest: send { headers: List[(String, Bytes)], body: Bytes }
+pub type Claimed: send { caller: Caller, key: Bytes }
+pub type Claim[G: send]: send {
+  f: StaticFn[fn(G, ClaimRequest) -> Result[Claimed, ()] waits],   // K-2; application code
+  headers: List[String],   // the header names `f` receives, lower-case
+  claim_bytes: u64,        // bounds `f` as `runner.wire`'s bind_bytes bounds `Wire.bind`
+  claim_steps: u64         // and as its bind_steps
+}
+pub type KeyedRule[G: send]: send {
+  claim: Claim[G],         // K-2
   retention_ms: u64,       // K-6; required, no default
   keys_max: u64,           // K-7; claims per op
   principal_keys_max: u64  // K-7; claims per (op, principal)
 }
-pub type Retirement: send { verifier: Verifier }   // the same verifier kind and sender names as the op's record
+pub type Retirement[G: send]: send { claim: Claim[G] }   // the same claim function and header names as the op's record
 ```
 
 `bind` refuses:
 - a `retention_ms` of 0 or above 2^53, or not above the binding's `deadline_ms` (K-6 measures retention from the reply run's start);
 - a `keys_max` of 0, or a `principal_keys_max` of 0 or above `keys_max`;
-- a signed verifier with no senders, a duplicate sender name, or a sender name outside `[a-z0-9_-]{1,32}`;
-- a namespace name outside `[a-z0-9_-]{1,24}`, or **a namespace declared twice in the place** (`NamespaceTwice`, RUNNER-SPEC v2.17 M3). Ownership is place-wide: two signed bindings, keyed or retired, that give the same namespace name must give the same verifier kind and the same `Namespace` value (equal name, sender names and secrets), and then they are one identity domain (RUNNER-SPEC v2.18 M8: the kind is compared at bind, since the store's entry records one kind). Any other second use of the name is refused;
-- a signed verifier whose route has no `{sender}` selector (K-2), or a `Bearer` route that has one;
-- a `StandardWebhooks` tolerance of 0;
+- a claim header name that is not a lower-case RFC 9110 token, or a name listed twice;
 - a `Retired` binding with an `entry`, `fields` or statuses (it has none: its argument schema, field mapping and statuses are the op record's, K-9). `bind` runs before any store is open, so whether its route's captures are the record's `Path` fields is checked at open (below).
 
-**The op record.** A keyed `op`'s policy is fixed at its first admission and kept in the store (K-4 `keyed_ops`): the entry key, the argument schema and the result schema (from describe's `Described.args` and `Described.result`), the field mapping (each field's `FieldSource`: path capture name, query name or body member, in declared field order), the method, `ok_status` and `error_status`, `retention_ms`, `keys_max`, `principal_keys_max`, `arg_max`, the entry's byte and step bounds, `deadline_ms`, and the verifier's kind, namespace name and sender names (never secrets). It never changes. The route is not in it, so a route can move (B-12); a route's captures must still name the record's `Path` fields. At open, the head compares every bound keyed or retired `op` with its record (for a `Retired` binding: method, verifier kind, **namespace name** and sender names, and that its route's captures are exactly the record's `Path` fields plus, for a signed verifier, `{sender}`); any difference refuses the open with `KeyedOpChanged(op, field)`, and the way to change a policy is a new `op`.
+A place with a keyed or retired binding and no wire grant (`PlaceConfig.wire` is `None`) refuses the open with `KeyedNoWire(op)`, because its claim function has no `G` to run with.
 
-**The namespace registry (RUNNER-SPEC v2.17 M3).** The store's `namespaces` tree (K-4) records each namespace at the first admission under it: its verifier kind and its sender names. The entry is kept after every op using it is retired or swept, so a name once used keeps its meaning for the store's life. At open, every bound or retired signed binding's namespace is compared with its entry. A namespace whose kind or sender names differ refuses the open with `NamespaceChanged(name)`. A sender may be added only under a new namespace.
+**The op record.** A keyed `op`'s policy is fixed at its first admission and kept in the store (K-4 `keyed_ops`): the entry key, the argument schema and the result schema (from describe's `Described.args` and `Described.result`), the field mapping (each field's `FieldSource`: path capture name, query name or body member, in declared field order), the method, `ok_status` and `error_status`, `retention_ms`, `keys_max`, `principal_keys_max`, `arg_max`, the entry's byte and step bounds, `deadline_ms`, and the claim function's **identity bytes** (PROG-9) and header names. It holds no secret and no credential. It never changes. The route is not in it, so a route can move (B-12); a route's captures must still name the record's `Path` fields. At open, the head compares every bound keyed or retired `op` with its record (for a `Retired` binding: method, the claim function's identity bytes and header names, and that its route's captures are exactly the record's `Path` fields); any difference refuses the open with `KeyedOpChanged(op, field)`, and the way to change a policy is a new `op`.
 
-### K-2: The principal and the verifiers
+**Why identity bytes and not the code address.** The record must catch a binding that now derives the principal or the key from another function or other inputs, because then a live claim's retry would get another claim and run again. Identity bytes catch that: another function, a rename or a changed signature is another identity. The code address (PROG-10) also changes on every edit to any code the function reaches, std's `hmac` and `base64` included, and on a compiler that lowers a reached body differently. Pinning it would refuse the open after a toolchain upgrade for every keyed op with live claims, and a `Retired` binding, which must run the same function, could not survive any fix to that code. Entries are matched the same way: an entry key holds the identity and the schema fingerprints, not the revision (launch.md), and `Wire.bind` is not pinned at all. A body edit that changes what the function means is the application's to name: it renames the function or binds a new `op`.
 
-**R6 conflict, recorded (RUNNER-SPEC v2.24).** The verifiers below check secrets inside the runner, and R6 puts every credential check in application code. They are kept here as design only: when Part B is built, each is re-expressed as an application binding over `runner.wire`, and the runner keeps only the key and claim mechanics.
+### K-2: The principal and the key come from application code
 
-A claim is scoped by its principal. The verifier decides the principal and the key. It runs before `prepare`; a failure gives 401 and records nothing. Every check below is constant-time in the secret.
+A claim is scoped by its principal. The application decides the principal and the key, in its claim function; Hirsel does not authenticate (RUNNER-SPEC v2.24 rule 13). The claim function is `Wire.bind` for a keyed binding: the same kind of value, run at the same point, under the same rules (RUNNER-SPEC §3, "Binding"), and this rule states only what differs.
+- **Its input.** A copy of the place's wire grant `G`, and a `ClaimRequest`: each received header field whose name, compared case-insensitively, is in `claim.headers`, in arrival order, with its name lower-cased and its value as received (so the function sees a repeated header and decides what to do with it); and the body bytes, as read under `body_max`. `Wire.bind` gets the `Authorization` value alone; a keyed binding that wants it lists `authorization`.
+- **When.** Once per request, before `prepare`, inside `bound bytes claim_bytes` and `bound steps claim_steps`. It runs in place of `Wire.bind` for that request: a keyed binding's Caller is the claim's, and `Wire.bind` is not called. Rates (B-2 step 2) then apply to that Caller.
+- **Its answer.** `Ok(Claimed{caller, key})` makes the claim (`op`, caller, key). The caller follows RUNNER-SPEC's Caller rules (an issuer from the fixed table, a subject of at most `SUBJECT_MAX` = 64 B), and the key K-3's form. `Error(())`, a fault or an exhausted bound gives 401 and records nothing, as a refused `Wire.bind` does.
+- **Required.** A keyed or retired binding always has a claim function. Without one, each request would get a fresh anonymous Caller (RUNNER-SPEC v2.24), so no claim would ever repeat.
+- **What the runner does not do.** It reads none of the headers or the body for identity, holds no secret, keeps no list of senders or tenants, and compares no signature. Constant time is the primitives' guarantee: `secret.verify_hmac_sha256` compares inside the runtime and returns only the verdict, and `hmac.equal` compares in time that depends only on the lengths ([hmac](../../core/std/api/hmac.md)). The runner trusts the claim's answer, as it trusts `Wire.bind`'s.
+- **Time.** A function that checks freshness reads `host.wall_ms` through a `Clock` in its own `G`. That read passes the replay point through the grant (CAP-8), like any read of application code; the runner takes no clock read for it (§5).
+- **Replay.** The function is program code, and its secret operations are provider operations whose verdicts are recorded (hmac "Replay"), so a replay computes the same claim.
+- **The route and the alias give the same claim:** the function sees the same headers and body on both (B-12).
+- **Tenants.** A tenant is a Caller the function chooses. A tenant id that the function reads from a header or the body may select which of its secrets to check; the signature, not the id, is the authority.
 
-**The sender selector.** A signed verifier needs to know which secret to check. The sender is **transport metadata, not an argument field**: it is selected by the reserved route capture `{sender}` on the binding's route, and by the last segment of the alias `POST /.hirsel/op/{op}/{sender}` (B-12). B-3 rule 4 counts `{sender}` as no field's source. The selector only chooses a secret; the signature proves the request came from its holder, so the original route and the alias give the same principal, key and claim for the same request.
+**Worked example: Standard Webhooks.** The app's grant holds one `Secret` per sender, granted for `verify` only (`--grant 'Secret:hook=env:WEBHOOK_KEY verify'`, hmac), and a `Clock`. The binding lists `webhook-id`, `webhook-timestamp` and `webhook-signature`.
 
-**`Bearer(header)`**, for API clients with opaque keys.
-- Principal: B-6's `Authorization: Bearer` principal.
-- Key: the `header` field, exactly one.
+```hirsel unbuilt
+type Hooks: plain + send { hook: Secret, clock: Clock }
+fn claim_hook(g: Hooks, r: ClaimRequest) -> Result[Claimed, ()] waits
+```
 
-**`StandardWebhooks(senders, tolerance_s)`**
-- The selected sender must name one of `senders`; otherwise 401.
-- Exactly one each of `webhook-id`, `webhook-timestamp` and `webhook-signature`; otherwise 401. The timestamp is decimal digits, at most 19, parsed as u64; otherwise 401.
-- The signature is valid when one of the space-separated `v1,<base64>` entries equals HMAC-SHA256(secret, `id.timestamp.body`) over the raw body bytes.
-- The freshness test is `max(now_s, ts) − min(now_s, ts) ≤ tolerance_s`, with `now_s` = ⌊one `host.wall_ms` read / 1000⌋ (§5). It cannot overflow for any reading.
-- Principal: `hook:` ‖ sender name. Key: the verified `webhook-id`. Its Caller (RUNNER-SPEC v2.16 M3, v2.17) has subject `len8 ‖ namespace ‖ len8 ‖ sender`, at most 1 + 24 + 1 + 32 = 58 B. `namespace` is the declared, stable, non-secret name of K-1's `Namespace`, owned place-wide and recorded in the store (K-1 "The namespace registry"). Two providers' senders with the same name therefore have different subjects unless they share one declaration. A route move or a secret rotation keeps the subject.
-- **Guarantee:** a claim's key is authenticated with its body and time, so a replayed delivery inside the tolerance is a duplicate, and one outside it is refused.
+1. Take exactly one of each listed header; otherwise `Error(())`. The timestamp is decimal digits, at most 19, parsed as u64; otherwise `Error(())`.
+2. Build `id.timestamp.body` from the raw bytes. For each space-separated `v1,<base64>` entry of the signature, decode it with `base64.decode` and ask `secret.verify_hmac_sha256(g.hook, data, tag)`. No `Ok(true)`, or a `Denied`, gives `Error(())`.
+3. With `now_s` = ⌊`host.wall_ms(g.clock)` / 1000⌋, require `max(now_s, ts) − min(now_s, ts) ≤ 300` (the tolerance is the app's), which cannot overflow; otherwise `Error(())`.
+4. Answer `Ok(Claimed{caller: Caller{issuer: <the app's issuer>, subject: "hook"}, key: webhook-id})`.
 
-**`GitHub(senders)`**
-- The sender is selected as above.
-- Exactly one each of `X-Hub-Signature-256` (`sha256=` + 64 lowercase hex) and `X-GitHub-Delivery`; otherwise 401.
-- The signature is valid when it equals HMAC-SHA256(secret, body).
-- Principal: `hook:` ‖ sender name. Key: `X-GitHub-Delivery`. Its Caller has the same `len8 ‖ namespace ‖ len8 ‖ sender` subject as StandardWebhooks', under this verifier's own namespace.
-- **Guarantee, weaker and stated in OpenAPI:** the body is authenticated, but the key and freshness are not. Someone who has seen one delivery can resend its body under a new delivery ID, and that is a new claim that runs again. A GitHub-bound entry must therefore be safe to run twice for one body, or must dedup on the body's own content. There is no timestamp check, because GitHub signs no timestamp.
+**Guarantee:** the key is signed with the body and the time, so a delivery replayed inside the tolerance is a duplicate, and one outside it is refused. With several senders, `G` holds a secret per sender, and the function picks one by a selector it chooses (a header it lists) or tries each in turn; the subject names the sender, so senders' claims never meet.
 
-**Tenants.** A tenant is a sender: one secret per tenant, chosen by the selector and proven by its signature. A tenant id in a header or body is never authority.
+**Worked example: GitHub.** The binding lists `x-hub-signature-256` and `x-github-delivery`. The function takes exactly one of each, requires `sha256=` and 64 lower-case hex digits, decodes the hex, asks `secret.verify_hmac_sha256(g.hook, body, tag)`, and answers the delivery id as the key; anything else is `Error(())`. There is no timestamp check, because GitHub signs no timestamp.
+
+**Its guarantee is weaker, and accepting it is the app's choice:** the body is authenticated, but the key and freshness are not. Someone who has seen one delivery can resend its body under a new delivery id, and that is a new claim that runs again. An entry bound this way must therefore be safe to run twice for one body, or must dedup on the body's own content. An app that states this to its clients writes it in its own API description.
+
+**An API client's `Idempotency-Key`.** The binding lists `authorization` and `idempotency-key`. The function maps `authorization` to a Caller exactly as the place's `Wire.bind` does (the app can call the same function), and answers the `idempotency-key` value as the key.
 
 ### K-3: The key
 
-- The key is 1-255 bytes of visible ASCII (0x21-0x7E). Anything else gives 400.
-- A missing key field gives 400 (`Bearer`) or 401 (signed verifiers, where the key is part of what is verified).
+- The key the claim function answers is 1-255 bytes of visible ASCII (0x21-0x7E). Anything else, the empty key included, gives 400 and records nothing.
+- So a function that accepts the request but finds no key answers the empty key (400), and one whose key is part of what it verifies answers `Error(())` (401).
 
 ### K-4: The store control extension
 
@@ -1084,7 +1091,7 @@ Keyed claims live in the store's **control section**, beside `stream_ops`, not i
 - `record` (store.hirsel:1412) accepts a reply for a keyed claim in the control write set, as it accepts a stream reply today. The call record identifies a claim by (`op`, caller key, key) in place of (stream, position).
 - The journal's section encoding and the checkpoint's roots gain the keyed trees. Existing stream keys and their encodings are unchanged, and AE1-AE3 and AH1-AH3 are untouched.
 
-**Trees.** Wherever a key below has `caller`, it holds the caller key `u8 issuer ‖ len8 ‖ subject` (RUNNER-SPEC v2.15), at most 66 B because the subject is at most 64 B (a signed sender's is at most 58 B, K-2). So no token byte is stored. Lengths are bounded before encoding: `op` ≤ 64 B (B-12), the caller key ≤ 66 B, key ≤ 255 B. Write ‖ for concatenation and len8 for a one-byte length.
+**Trees.** Wherever a key below has `caller`, it holds the caller key `u8 issuer ‖ len8 ‖ subject` (RUNNER-SPEC v2.15), at most 66 B because the subject is at most 64 B. It is the Caller the claim function answered (K-2), so no credential byte is stored. Lengths are bounded before encoding: `op` ≤ 64 B (B-12), the caller key ≤ 66 B, key ≤ 255 B. Write ‖ for concatenation and len8 for a one-byte length.
 
 | Tree | Key | Value |
 |---|---|---|
@@ -1094,7 +1101,6 @@ Keyed claims live in the store's **control section**, beside `stream_ops`, not i
 | `claim_pexp` | len8 ‖ op ‖ caller ‖ u64-BE expires_ms ‖ the claim key (≤ 65 + 66 + 8 + 387 = 526 B) | empty |
 | `claim_count` | len8 ‖ op | u64: live-or-unreclaimed rows of this op |
 | `claim_pcount` | len8 ‖ op ‖ caller (≤ 131 B) | u64: live-or-unreclaimed rows of this (op, caller) |
-| `namespaces` (RUNNER-SPEC v2.17 M3) | len8 ‖ namespace (≤ 25 B) | verifier kind u8 ‖ the sender names, each len8-prefixed (≤ 16384 B, as `op_record_max`) |
 | `claim_open` | the claim key | empty: present exactly while the row is Admitted |
 
 - **The digest** is `request_digest(entry key, argument bytes)` (B-2), the same function as for streams.
@@ -1102,7 +1108,7 @@ Keyed claims live in the store's **control section**, beside `stream_ops`, not i
 - **The op record** is written in the commit of the op's first admission, and deleted by the orphan sweep (K-6) once the op is unbound and has no rows.
 - **Counts** are deleted when they reach 0, so count rows exist only for ops and principals with rows.
 - **What the row omits.** It carries no field that only checks the store against itself.
-- **Keyed time.** The extension stores no clock of its own. Keyed time is the `at` of the store run on main that makes the decision: the store sets each run's `at` to max(its one `host.wall_ms` read, the branch's last committed `at`), writes it in the commit's frame and checkpoint, and restores it at reopen (STORE §1.7). So `at` never decreases across commits, restarts and wall-clock rollback. A run that writes nothing need not commit. A decision that judges a row expired either deletes or replaces that row in the same commit (admission, reclaim, the orphan sweep) or, where it leaves the row (K-9's open check), commits its run, so the `at` it relied on is durable before anything depends on it. K-5's expiry test, K-6's expiry, reclaim and orphan sweep, K-8's replies and K-9's open check all read it; K-1, K-2, K-3 and K-7 do not (K-2's freshness test stays on its own raw read).
+- **Keyed time.** The extension stores no clock of its own. Keyed time is the `at` of the store run on main that makes the decision: the store sets each run's `at` to max(its one `host.wall_ms` read, the branch's last committed `at`), writes it in the commit's frame and checkpoint, and restores it at reopen (STORE §1.7). So `at` never decreases across commits, restarts and wall-clock rollback. A run that writes nothing need not commit. A decision that judges a row expired either deletes or replaces that row in the same commit (admission, reclaim, the orphan sweep) or, where it leaves the row (K-9's open check), commits its run, so the `at` it relied on is durable before anything depends on it. K-5's expiry test, K-6's expiry, reclaim and orphan sweep, K-8's replies and K-9's open check all read it; K-1, K-2, K-3 and K-7 do not (a claim function that checks freshness reads its own `Clock`, K-2).
 
 ### K-5: Admission
 
@@ -1126,7 +1132,7 @@ Keyed claims live in the store's **control section**, beside `stream_ops`, not i
 - a send that joins a worker gets that worker's outcome, and a send admitted as a new claim gets the new claim's;
 - when a claim expires while its old reply's delivery is still delayed, a retry with other arguments is admitted as a new claim (the row is absent), and the old send still gets the old outcome, because answers follow send ids, never claim keys. No generation field is stored: the send id carries the identity of the delivery.
 
-**Recording.** Refusals before admission (K-2, K-3, B-4 and `prepare`) record nothing. `Full` records nothing.
+**Recording.** Refusals before admission (the claim function's 401, K-3, B-4 and `prepare`) record nothing. `Full` records nothing.
 
 ### K-6: Retention, expiry and reclaim
 
@@ -1162,7 +1168,7 @@ Keyed claims live in the store's **control section**, beside `stream_ops`, not i
 - `claims`: E(387, max(41 + `arg_max`, 73 + `DONE_MAX`)) (RUNNER-SPEC v2.17 M2: an Admitted row has a 41 B header, a Replied row 73 B);
 - `claim_exp` and `claim_pexp`: E(460, 0) + E(526, 0) (RUNNER-SPEC v2.16 M2: `claim_pexp` nests the caller key twice, 65 + 66 + 8 + 387 = 526);
 - `claim_open` while Admitted: E(387, 0);
-- and per op and per (op, caller) with rows: E(65, 8) and E(131, 8); per op, its record E(65, `op_record_max`); per namespace, E(25, `op_record_max`), kept for the store's life.
+- and per op and per (op, caller) with rows: E(65, 8) and E(131, 8); per op, its record E(65, `op_record_max`).
 
 A binding's resident bound is `keys_max` × (the claim cost) + E(65, 8) + E(65, `op_record_max`) + `keys_max` × E(131, 8). The sum over bound ops counts against the store's `resident_limit`.
 
@@ -1199,7 +1205,7 @@ The store keeps `db.reserved`, the sum of R_t over Admitted claims. Its resident
 ### K-9: Removing a keyed op
 
 A removed keyed op must still answer its live claims' retries, with the original status and body, until they expire.
-- **The program keeps a `Retired` binding** for the `op`: the same method and verifier (kind, namespace name and sender names as the op record; RUNNER-SPEC v2.18 M8, ATTACK-4 M6: a redeclaration under another namespace is refused **at open**, by K-1's comparison with its own op record, since `bind` runs before any store is open), a route whose captures are the record's `Path` fields, and no entry, fields or statuses. It routes on its route and the alias and runs its verifier.
+- **The program keeps a `Retired` binding** for the `op`: the same method, the same claim function and header names as the op record (a different one is refused **at open**, by K-1's comparison with the record, since `bind` runs before any store is open), a route whose captures are the record's `Path` fields, and no entry, fields or statuses. It routes on its route and the alias and runs its claim function (K-2), so a retry gets the same principal and key.
 - **Retired preparation.** In place of B-2 step 3, it calls `runner.prepare_retired(record, a: Admitted, request) -> Result[Send, Refusal]`, which needs no registry entry and no decoder. It checks the op against `a`'s attenuation, as `prepare` checks the entry. It assembles the argument record from the path, query and body by the record's field mapping (B-4's forms and assembly; on the alias, `Path` fields come from the query, B-12), encodes it in declared field order with the record's argument schema inside `bound bytes arg_max`, refusing a value that does not fit the schema (400, `Bad.kind`), and computes `request_digest(record's entry key, those bytes)`. B-4's assembly reads only the schema and the mapping; the live path's decoder only validates the bytes it produced. So the bytes are canonical for the schema, and equal arguments give the original digest even after the entry and its decoder are gone. A `via` validator does not run; it ran when the claim was admitted, and a request whose bytes differ has another digest. It then checks the byte budget and the deadline against `a`'s arrival time, as `prepare` does. Its `Send` holds the record's entry key, the claim key (op, principal, key) in place of a stream key, the argument bytes, the digest, the budget and the deadline.
 - **The answer**, from the store, by K-5's order: liveness first, then digest. A live claim with another digest gets `RequestMismatch` (422). A live Replied claim with an equal digest gets `Duplicate`, rendered from the op record's result schema and statuses. A live Admitted claim with an equal digest is recovered (K-8) as a gone entry, and the send joins that run. An absent claim gets `Failed(Gone)` (B-7's 500 row) with nothing committed. It judges liveness at main's last committed `at`, so it relies on no time the store has not persisted, and it runs nothing.
 - **The open check.** At open, after `db.reserved` is rebuilt (K-7) and before any admission, recovery or sweep, when some op record's `op` is not bound, the head runs one commit on main that writes nothing and judges at its `at` (K-4); the store still writes that commit's frame, so the `at` the decision relies on is durable before the open proceeds. An unbound op with a live row (an Admitted row, or a Replied row not expired (K-5) at that `at`) refuses the open with `KeyedOpDropped(op, last_expiry_ms)`, where `last_expiry_ms` is `Never` when a row's expiry is `NEVER` or the row is Admitted. If the store refuses that commit for room, the open is refused with `Capacity(reserved)`, as K-7's reopen check. So a deploy can never silently strand a live claim, the error says when the `Retired` binding can be dropped, and a later wall-clock rollback cannot make an unbound op's rows live again: every later decision reads an `at` at least as large.
@@ -1227,7 +1233,7 @@ Every value the HTTP library and the runner's bindings receive from outside the 
 
 A check read is taken only between operations, never inside one, so a phase makes at most one check read more than it has operations.
 
-**Part B, unbuilt** (lands with §4): `host.wall_ms` once per signed-verifier check (K-2); `host.mono_ns` as a set read at each arm of the head's recovery timer (K-8). Keyed admission (K-5), the reply commit (K-6), the orphan sweep (K-6) and K-9's open check take no read of their own: each reads its store run's `at`, which comes from the store's one `host.wall_ms` read per run (K-4).
+**Part B, unbuilt** (lands with §4): `host.mono_ns` as a set read at each arm of the head's recovery timer (K-8). Keyed admission (K-5), the reply commit (K-6), the orphan sweep (K-6) and K-9's open check take no read of their own: each reads its store run's `at`, which comes from the store's one `host.wall_ms` read per run (K-4). The runner takes no clock read for a claim function (K-2): a function that checks freshness reads its own `Clock`, which passes the replay point through its grant, as every read of application code does.
 
 **The inputs**, each at issue and at delivery, through the `Net`, `Clock` and `Random` grants:
 - each listener's bound address and each accepted connection's peer address;
@@ -1243,7 +1249,6 @@ A check read is taken only between operations, never inside one, so a phase make
 - parsing, framing and routing;
 - JSON decoding and transcoding;
 - argument bytes and `request_digest`;
-- verifier HMACs;
 - SSE encoding;
 - credit and timer decisions;
 - buffer charges and step accounting (MEM-30 slice ends are events in the run's one order).
@@ -1305,8 +1310,8 @@ The WebSocket upgrade moves onto std `http`. The parallel parse and serve paths 
 
 | # | Slice | Starts | Lands after | Acceptance laws (mutant each catches) |
 |---|---|---|---|---|---|
-| H9 | Keyed operations (§4): store control extension and terminal reserve, admission, verifiers and selector, recovery queue, `Retired` bindings | H5; H6; Part B reviewed | — | **L17** concurrent duplicates: two keyed sends with equal digests run one body, and both get its outcome; the oracle is the body's execution events in the trace, not the reply (`no_join_runs_twice`). **L18** liveness first: at every live row state (Admitted, Replied before expiry) an equal key with another digest gives 422; at and after expiry, with and without reclaim having run, it is a new operation (`replied_before_digest`, `expired_as_mismatch`). **L19** expiry from reply: with admission and reply at distinct recorded times, and a reply delayed past `retention_ms` after admission, the claim is Duplicate at `reply + retention_ms − 1` and new at `reply + retention_ms`; an Admitted row never expires; reply-commit `at` values of 2^64 − 2 − `retention_ms`, 2^64 − 1 − `retention_ms` and `u64::MAX` itself give a finite expiry, `NEVER` and `NEVER`, and a `NEVER` claim is Duplicate at an admission `at` of `u64::MAX`, is never reclaimed or swept, and makes K-9's open check report `Never`; with `retention_ms` 50, a commit at wall 200 followed by a reply commit whose wall read is 100, the reply's expiry is 250 and the claim is Duplicate at the next admission (`expire_from_admit`, `lease_on_admitted`, `expiry_wraps`, `never_reclaimed`, `reply_from_raw_wall`). **L19r** old release, new claim: a claim expires while its old reply's delivery is held back (scripted delay), the same key is admitted again through the relay with other arguments and another outcome, and each send gets its own claim's outcome by send id (`join_across_claims`, `relay_local_keyed_mismatch`). **L20** quotas and bytes: with two bindings and two principals, one principal saturated and one not, the saturated one gets 503 while the other admits; a per-op scope full only of expired rows, behind live rows of unrelated bindings, admits after reclaim; each quota alone (principal full with op free, op full with principal free) refuses or reclaims as K-6 says; a resident-admission refusal is `Full`; `Full` commits nothing; under a 10⁵-key sweep the rows, index entries, count rows and charged bytes stay within K-7's bound; with unrelated bound ops holding rows, the orphan sweep's examined entries per sweep stay ≤ 3 and the head's recovery charge equals K-8's C_members + C_fifo equation (`evict_oldest`, `count_not_deleted`, `reclaim_wrong_scope`). **L20t** terminal reserve: at `resident_limit`, with a snapshot retaining old roots, every admitted claim's control-only reply commits; with two Admitted claims, a success of the first whose application writes would consume the second's reserve is refused and the second's control-only reply still commits, while a success within the first's own reserve commits and releases only its own; after a checkpoint reopen `db.reserved` equals the hand-summed R_t of the open claims before the first admission (`reserve_row_only`, `reserve_ignores_retained`, `terminal_spends_others`, `reserve_not_rebuilt`). **L21k** crash cuts: at every cut of admit, run, reply and reclaim, and across a checkpoint reopen, with two claims Admitted at once: a Success leaves exactly one committed application effect (a counter increment) and its control rows; an `Error` or a `Failed` leaves zero application effects and exactly its control rows (row, indexes, counts, call record); trees and counts agree; the body's execution events are counted per retry and equal the runs the K-8 rules allow (`index_written_after_reply`, `error_drops_claim`, `reclaim_outside_commit`, `error_keeps_effects`). **L21r** recovery: with no client retry and no other traffic, ownerless rows found at a quiet reopen and rows made ownerless in the same open are run from the queue by the recovery timer; a refused front followed by a recoverable claim lets the second recover, and the front ends `Failed(OutOfBytes)` after `recover_max` refusals, counted across re-enqueues and an intervening client retry whose commit is also refused; enqueueing twice runs once; a queued claim completed by a client's run before its recovery turn is never run again and leaves no queue entry; the head's charged bytes include both maps, the timer and its inbox slot at their K-8 equations (`queue_not_rebuilt`, `recovery_needs_traffic`, `front_blocks_queue`, `queue_duplicates`, `stale_queue_entry`, `refusals_reset_on_requeue`, `queue_uncharged`). **L-retire**: two deploys and a result-type change inside retention, the entry and its decoder removed: a retry through a `Retired` binding, on its route and on the alias, with equal arguments gets the original status and body, and with changed arguments gets 422, both for a Replied claim and for an Admitted one (which is recovered as gone); dropping the binding while a claim is live refuses the open with `KeyedOpDropped`; a row expiring at 100, the binding dropped at an open at wall 101, then the wall clock set to 99 before the sweep has run, and a restart at 99: the restart opens and the sweep deletes the row (`open_check_unpersisted`, `expiry_from_raw_wall`); after expiry the sweep removes rows, counts and op record, examining at most 3 entries per sweep and passing bound ops (unrelated bindings with rows) at one examined entry each, within K-6's completion bound (`render_from_current`, `strand_live_claim`, `sweep_unbounded`, `retired_skips_digest`, `retired_needs_decoder`). **L-verify**: each verifier's corpus (valid, wrong secret, wrong sender, stale timestamp, a 19-digit timestamp, missing header) gives its K-2 answer, the original route and the alias give the same principal, key and claim for the same signed request, and a GitHub body resent under a new delivery id is a new claim (`sender_from_header`, `timestamp_unchecked`, `alias_skips_verifier`) |
-| H12 | Keyed replay | H9; H11 | — | **L23k**: L23 extended with keyed admissions on both engines, covering verifier tolerance at its edges, expiry at `−1`, `0` and `+1` ms, reply-commit and admission `at` of `u64::MAX` itself (`NEVER`), wall-clock jumps backwards and forwards with every keyed decision reading its commit's nondecreasing `at`, `Full`, reclaim, reopen with the recovery queue and its timer ticks, the open check, orphan sweeps, and reply-time reads, each read compared with a hand-derived labelled sequence as in L23 (`unrecorded_wall_read`, `queue_order_unrecorded`) |
+| H9 | Keyed operations (§4): store control extension and terminal reserve, admission, claim functions, recovery queue, `Retired` bindings | H5; H6; Part B reviewed | — | **L17** concurrent duplicates: two keyed sends with equal digests run one body, and both get its outcome; the oracle is the body's execution events in the trace, not the reply (`no_join_runs_twice`). **L18** liveness first: at every live row state (Admitted, Replied before expiry) an equal key with another digest gives 422; at and after expiry, with and without reclaim having run, it is a new operation (`replied_before_digest`, `expired_as_mismatch`). **L19** expiry from reply: with admission and reply at distinct recorded times, and a reply delayed past `retention_ms` after admission, the claim is Duplicate at `reply + retention_ms − 1` and new at `reply + retention_ms`; an Admitted row never expires; reply-commit `at` values of 2^64 − 2 − `retention_ms`, 2^64 − 1 − `retention_ms` and `u64::MAX` itself give a finite expiry, `NEVER` and `NEVER`, and a `NEVER` claim is Duplicate at an admission `at` of `u64::MAX`, is never reclaimed or swept, and makes K-9's open check report `Never`; with `retention_ms` 50, a commit at wall 200 followed by a reply commit whose wall read is 100, the reply's expiry is 250 and the claim is Duplicate at the next admission (`expire_from_admit`, `lease_on_admitted`, `expiry_wraps`, `never_reclaimed`, `reply_from_raw_wall`). **L19r** old release, new claim: a claim expires while its old reply's delivery is held back (scripted delay), the same key is admitted again through the relay with other arguments and another outcome, and each send gets its own claim's outcome by send id (`join_across_claims`, `relay_local_keyed_mismatch`). **L20** quotas and bytes: with two bindings and two principals, one principal saturated and one not, the saturated one gets 503 while the other admits; a per-op scope full only of expired rows, behind live rows of unrelated bindings, admits after reclaim; each quota alone (principal full with op free, op full with principal free) refuses or reclaims as K-6 says; a resident-admission refusal is `Full`; `Full` commits nothing; under a 10⁵-key sweep the rows, index entries, count rows and charged bytes stay within K-7's bound; with unrelated bound ops holding rows, the orphan sweep's examined entries per sweep stay ≤ 3 and the head's recovery charge equals K-8's C_members + C_fifo equation (`evict_oldest`, `count_not_deleted`, `reclaim_wrong_scope`). **L20t** terminal reserve: at `resident_limit`, with a snapshot retaining old roots, every admitted claim's control-only reply commits; with two Admitted claims, a success of the first whose application writes would consume the second's reserve is refused and the second's control-only reply still commits, while a success within the first's own reserve commits and releases only its own; after a checkpoint reopen `db.reserved` equals the hand-summed R_t of the open claims before the first admission (`reserve_row_only`, `reserve_ignores_retained`, `terminal_spends_others`, `reserve_not_rebuilt`). **L21k** crash cuts: at every cut of admit, run, reply and reclaim, and across a checkpoint reopen, with two claims Admitted at once: a Success leaves exactly one committed application effect (a counter increment) and its control rows; an `Error` or a `Failed` leaves zero application effects and exactly its control rows (row, indexes, counts, call record); trees and counts agree; the body's execution events are counted per retry and equal the runs the K-8 rules allow (`index_written_after_reply`, `error_drops_claim`, `reclaim_outside_commit`, `error_keeps_effects`). **L21r** recovery: with no client retry and no other traffic, ownerless rows found at a quiet reopen and rows made ownerless in the same open are run from the queue by the recovery timer; a refused front followed by a recoverable claim lets the second recover, and the front ends `Failed(OutOfBytes)` after `recover_max` refusals, counted across re-enqueues and an intervening client retry whose commit is also refused; enqueueing twice runs once; a queued claim completed by a client's run before its recovery turn is never run again and leaves no queue entry; the head's charged bytes include both maps, the timer and its inbox slot at their K-8 equations (`queue_not_rebuilt`, `recovery_needs_traffic`, `front_blocks_queue`, `queue_duplicates`, `stale_queue_entry`, `refusals_reset_on_requeue`, `queue_uncharged`). **L-retire**: two deploys and a result-type change inside retention, the entry and its decoder removed: a retry through a `Retired` binding, on its route and on the alias, with equal arguments gets the original status and body, and with changed arguments gets 422, both for a Replied claim and for an Admitted one (which is recovered as gone); dropping the binding while a claim is live refuses the open with `KeyedOpDropped`; a row expiring at 100, the binding dropped at an open at wall 101, then the wall clock set to 99 before the sweep has run, and a restart at 99: the restart opens and the sweep deletes the row (`open_check_unpersisted`, `expiry_from_raw_wall`); after expiry the sweep removes rows, counts and op record, examining at most 3 entries per sweep and passing bound ops (unrelated bindings with rows) at one examined entry each, within K-6's completion bound (`render_from_current`, `strand_live_claim`, `sweep_unbounded`, `retired_skips_digest`, `retired_needs_decoder`). **L-claim**: a keyed binding's claim function runs once per request, before `prepare`, with a copy of the wire grant and exactly the listed headers (lower-cased, repeats kept, in arrival order) and the body; its `Error(())`, a fault and an exhausted byte or step bound each give 401 with nothing recorded and the entry's decoder never run, and an empty or out-of-form key gives 400; `Wire.bind` is not called for a keyed request; the original route and the alias give the same claim for the same request; a `Retired` or keyed binding whose claim function or header names differ from the op record refuses the open with `KeyedOpChanged`, while an edit to the function's body or to code it reaches does not; a keyed binding on a place with no wire grant refuses the open with `KeyedNoWire`; the oracle is the function's own call count and inputs, recorded by the test program, and the store's rows. The two K-2 worked examples, built as test programs, give their stated answers on Standard Webhooks' published signature vectors and on GitHub's documented example delivery, and a GitHub body resent under a new delivery id is a new claim (`claim_after_prepare`, `claim_unbounded`, `wire_bind_also_runs`, `alias_skips_claim`, `claim_unpinned`, `claim_pinned_to_address`) |
+| H12 | Keyed replay | H9; H11 | — | **L23k**: L23 extended with keyed admissions on both engines, covering a claim function's own clock read and HMAC verdicts at the edges of its tolerance, expiry at `−1`, `0` and `+1` ms, reply-commit and admission `at` of `u64::MAX` itself (`NEVER`), wall-clock jumps backwards and forwards with every keyed decision reading its commit's nondecreasing `at`, `Full`, reclaim, reopen with the recovery queue and its timer ticks, the open check, orphan sweeps, and reply-time reads, each read compared with a hand-derived labelled sequence as in L23 (`unrecorded_wall_read`, `queue_order_unrecorded`) |
 
 **Start now:** H1, and B1's Tokio and hyper sides. B1's Hirsel side starts after H2.
 
@@ -1315,7 +1320,7 @@ The WebSocket upgrade moves onto std `http`. The parallel parse and serve paths 
 **Known failures allowed at landing:** B1's hyper side, if its build lags.
 
 **Failures that block landing:**
-- L4, L5, L10, L11, L15, and in Part B L17-L21k, L19r, L20t, L21r, L-retire and L-verify: a wrong answer there loses data or runs a body twice;
+- L4, L5, L10, L11, L15, and in Part B L17-L21k, L19r, L20t, L21r, L-retire and L-claim: a wrong answer there loses data or runs a body twice;
 - either engine red on any law;
 - any compile, lint or schema red.
 
@@ -1372,7 +1377,7 @@ The WebSocket upgrade moves onto std `http`. The parallel parse and serve paths 
 | 26 | SSE event size | an `event_max` buffer per event | piecewise encoding from the frame; no `event_max` for subscriptions | the same |
 | 27 | One-shot reads of a query | encode `Cover` as a value | a transient subscription on its own session, under a `reads_max` slot, returning the batch envelope, retired as row 36 | the same |
 | 28 | Keyed time unit (Part B, unbuilt) | ns (B9) | ms of `host.wall_ms`, read through the commit's nondecreasing `at` (K-4), with `retention_ms` ≤ 2^53 | the same |
-| 29 | GitHub webhooks (Part B, unbuilt) | refuse them; treat the delivery id as authenticated | accept, with the weaker guarantee stated in OpenAPI | the same; GitHub signs no key or time |
+| 29 | GitHub webhooks (Part B, unbuilt) | refuse them; treat the delivery id as authenticated; a built-in verifier with the weaker guarantee in OpenAPI (earlier draft) | nothing built in: a worked example of a claim function (K-2), with its weaker guarantee stated there | the same; GitHub signs no key or time, and R6 keeps credential checks in application code |
 | 30 | Who holds an HTTP send | the connection task | the runner's relay, with its own units and limit (row 37) | the same |
 | 31 | An oversized initial subscription result | a stream that ends at once | 503 with the budget body and no `Retry-After` | the same: retrying cannot help |
 
@@ -1397,13 +1402,14 @@ The WebSocket upgrade moves onto std `http`. The parallel parse and serve paths 
 | # | Question | Alternatives | Adopted | End state | Reversible |
 |---|---|---|---|---|---|
 | 42 | Where a keyed op's rendering and run policy live | in each claim row; in the current binding | one immutable op record per `op` in the store; a change needs a new `op` | the same: one copy, and old replies stay decodable | until H9 lands; the store format after |
-| 43 | Removing a keyed op with live claims | drop after `previous` (earlier draft); keep secrets in the store | a `Retired` binding keeps the route and verifier; the op record keeps the argument schema and field mapping, so `prepare_retired` recomputes the digest without the decoder; open refuses to strand a live claim | the same: secrets stay in code, and no live retry goes unanswered | until H9 lands |
+| 43 | Removing a keyed op with live claims | drop after `previous` (earlier draft); keep secrets in the store | a `Retired` binding keeps the route and the claim function; the op record keeps the argument schema and field mapping, so `prepare_retired` recomputes the digest without the decoder; open refuses to strand a live claim | the same: no secret is in the store, and no live retry goes unanswered | until H9 lands |
 | 44 | Terminal reply room | reserve the row only (earlier draft); a terminal commit tested against the whole limit (earlier draft) | a terminal reserve R_t per Admitted claim: index entries, call record, frame and retained path copies; other commits see `resident_limit − db.reserved`, a claim's terminal commit `resident_limit − (db.reserved − R_t)`; rebuilt at reopen | the same: a control-only reply can never be refused | until H9 lands; the store format after |
 | 45 | Recovery scheduling | one run per group (earlier draft); a set beside the FIFO, emptied only at dequeue (earlier draft) | a recovery timer, charged member and fifo maps that follow the claim's durable lifecycle, a fresh check before each start, back-of-queue retry, `recover_max` 3 refusals per open then the reserved `Failed` | the same | until H9 lands |
 | 46 | Keyed liveness in the relay | a local digest check (earlier draft) | none: every keyed send is forwarded under its send id, and answers follow send ids | the same: the store alone decides liveness | until H9 lands |
-| 47 | The signed sender | a route capture that is also an argument | transport metadata selected by `{sender}` on the route and the alias's last segment | the same | until H9 lands |
+| 47 | Who decides a keyed claim's principal and key | a route capture that is also an argument; built-in `Bearer`, `StandardWebhooks` and `GitHub` verifiers over a place-wide namespace registry of sender secrets, chosen by a reserved `{sender}` capture (earlier draft) | the application's claim function, `Wire.bind`'s mechanism with the named headers and body as input; secrets checked by `secret.verify_hmac_sha256`; no registry, selector or verifier kinds (ruling R6) | the same: one binding mechanism for the wire and HTTP, and no authentication in Hirsel | until H9 lands |
 | 48 | Expiry overflow | assume `wall_ms` < 2^63; saturate to 2^64 − 1 under the ordinary ≤ test (earlier draft) | `NEVER` = 2^64 − 1 is a reserved non-expiring value, excluded from the one expiry test | the same: erring towards no second run | — |
 | 49 | Which clock decides keyed expiry | a fresh `host.wall_ms` read per decision (earlier draft: a rollback revives a claim the open check judged dead); a separate expiry floor in the control trees | main's commit `at`, max(read, previous `at`), already persisted in each frame and checkpoint; it both sets and tests expiry, and the open check commits before relying on it | the same: one nondecreasing clock the store already keeps, no second copy | until H9 lands |
+| 50 | What the op record keeps of the claim function | its code address or revision (PROG-9, PROG-10); nothing | its identity bytes and header names: a different function or other inputs refuse the open with `KeyedOpChanged` | the same: an address would refuse the open on every std or compiler change for every op with live claims, and entries are matched by identity, not revision | until H9 lands; the store format after |
 
 **Out of rung 1**
 

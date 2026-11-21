@@ -595,48 +595,59 @@ public:
     }
 };
 
-struct Workers {
-    const TargetMachine &tm;
-    std::vector<Miss> &misses;
-    std::vector<size_t> order;
-    std::atomic<size_t> next{0};
-};
-
-// A worker takes the largest part not yet taken until none is left, on a
-// target machine of its own: a machine holds per-module state.
-void *work(void *arg) {
-    Workers &w = *static_cast<Workers *>(arg);
-    std::unique_ptr<TargetMachine> tm(w.tm.getTarget().createTargetMachine(
-        w.tm.getTargetTriple(), w.tm.getTargetCPU(), w.tm.getTargetFeatureString(), w.tm.Options,
-        w.tm.getRelocationModel(), w.tm.getCodeModel(), w.tm.getOptLevel()));
-    ObjectEmitter emitter;
-    for (size_t k; (k = w.next.fetch_add(1)) < w.order.size();) {
-        Miss &miss = w.misses[w.order[k]];
-        if (tm) emitter.generate(*tm, miss);
-        else miss.error = "LLVM could not create the target machine";
-    }
-    return nullptr;
-}
-
-// Generate every miss on up to `jobs` threads, the calling thread one of them.
-// Each thread has the stack the guard gives the compiler's own thread.
-void generate_all(const TargetMachine &tm, std::vector<Miss> &misses, unsigned jobs) {
-    Workers w{tm, misses, std::vector<size_t>(misses.size())};
-    std::iota(w.order.begin(), w.order.end(), 0);
-    std::stable_sort(w.order.begin(), w.order.end(),
-                     [&](size_t a, size_t b) { return misses[a].code.size() > misses[b].code.size(); });
-    size_t width = std::min<size_t>(std::max(jobs, 1u), misses.size());
+// Runs each thread's `start()` on the indices of `order`, taken in order, on up
+// to `jobs` threads, the calling thread one of them. Each thread has a target
+// machine of its own (a machine holds per-module state), or none when LLVM
+// cannot create one, and the stack the guard gives the compiler's own thread.
+template <typename Start>
+void on_threads(const TargetMachine &tm, const std::vector<size_t> &order, unsigned jobs, Start start) {
+    struct Shared {
+        const TargetMachine &tm;
+        const std::vector<size_t> &order;
+        Start &start;
+        std::atomic<size_t> next{0};
+    } shared{tm, order, start};
+    void *(*run)(void *) = [](void *arg) -> void * {
+        Shared &s = *static_cast<Shared *>(arg);
+        std::unique_ptr<TargetMachine> machine(s.tm.getTarget().createTargetMachine(
+            s.tm.getTargetTriple(), s.tm.getTargetCPU(), s.tm.getTargetFeatureString(), s.tm.Options,
+            s.tm.getRelocationModel(), s.tm.getCodeModel(), s.tm.getOptLevel()));
+        auto work = s.start();
+        for (size_t k; (k = s.next.fetch_add(1)) < s.order.size();) work(machine.get(), s.order[k]);
+        return nullptr;
+    };
+    size_t width = std::min<size_t>(std::max(jobs, 1u), order.size());
     std::vector<pthread_t> threads;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, size_t(128) << 20);
     for (size_t i = 1; i < width; ++i) {
         pthread_t t;
-        if (pthread_create(&t, &attr, work, &w) == 0) threads.push_back(t);
+        if (pthread_create(&t, &attr, run, &shared) == 0) threads.push_back(t);
     }
     pthread_attr_destroy(&attr);
-    work(&w);
+    run(&shared);
     for (pthread_t t : threads) pthread_join(t, nullptr);
+}
+
+// The indices of `n` items, largest first: the longest jobs start first.
+template <typename Size>
+std::vector<size_t> largest_first(size_t n, Size size) {
+    std::vector<size_t> order(n);
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return size(a) > size(b); });
+    return order;
+}
+
+// Generate every miss on up to `jobs` threads.
+void generate_all(const TargetMachine &tm, std::vector<Miss> &misses, unsigned jobs) {
+    auto order = largest_first(misses.size(), [&](size_t k) { return misses[k].code.size(); });
+    on_threads(tm, order, jobs, [&] {
+        return [&, emitter = std::make_unique<ObjectEmitter>()](TargetMachine *machine, size_t k) {
+            if (machine) emitter->generate(*machine, misses[k]);
+            else misses[k].error = "LLVM could not create the target machine";
+        };
+    });
 }
 
 }  // namespace
@@ -930,6 +941,148 @@ bool restore(Module &m, Function &f, StringRef held, ArrayRef<MDNode *> debug) {
     order_uses(shared, order);
     return true;
 }
+
+// What a part declares of a global besides its name and type: a tail that
+// changes it for one definition changes the part of every other definition
+// that names it.
+struct Declared {
+    AttributeList attributes;
+    unsigned convention = 0;
+    MaybeAlign align;
+    const Constant *initializer = nullptr;
+    bool constant = false;
+    GlobalValue::UnnamedAddr unnamed{};
+    GlobalValue::VisibilityTypes visibility{};
+    std::string section;
+    bool operator==(const Declared &o) const {
+        return attributes == o.attributes && convention == o.convention && align == o.align &&
+               initializer == o.initializer && constant == o.constant && unnamed == o.unnamed &&
+               visibility == o.visibility && section == o.section;
+    }
+    bool operator!=(const Declared &o) const { return !(*this == o); }
+};
+
+Declared declared(const GlobalValue &g) {
+    Declared d;
+    d.unnamed = g.getUnnamedAddr();
+    d.visibility = g.getVisibility();
+    if (auto *o = dyn_cast<GlobalObject>(&g)) {
+        if (auto *f = dyn_cast<Function>(o)) d.align = f->getAlign();
+        else d.align = cast<GlobalVariable>(o)->getAlign();
+        d.section = o->getSection().str();
+    }
+    if (auto *f = dyn_cast<Function>(&g)) {
+        d.attributes = f->getAttributes();
+        d.convention = f->getCallingConv();
+    } else if (auto *v = dyn_cast<GlobalVariable>(&g)) {
+        d.initializer = v->hasInitializer() ? v->getInitializer() : nullptr;
+        d.constant = v->isConstant();
+    }
+    return d;
+}
+
+std::vector<std::pair<const GlobalValue *, Declared>> declared_all(const Module &m) {
+    std::vector<std::pair<const GlobalValue *, Declared>> all;
+    for (const GlobalValue &g : m.global_values()) all.push_back({&g, declared(g)});
+    return all;
+}
+
+// One definition's release tail. Every part is keyed in module order before
+// any tail runs, the missed parts' tails run on worker threads, and each
+// tail is then applied in module order, so the module goes through exactly
+// the states the tails run one after another in place give it.
+struct Tail {
+    Function *f;
+    std::string name;
+    // Live: runs in place, unkeyed (a body a part cannot lend back exactly).
+    // Held: the caller holds the part after the tail. Missed: a worker runs it.
+    enum Kind { Live, Held, Missed } kind = Live;
+    std::string key;
+    hirsel_key::Digest ir{};
+    SmallVector<MDNode *, 8> debug;
+    // The part at the cut, which a worker reads and `keep` may get.
+    SmallVector<char, 0> input;
+    bool witness = false;
+    // The part after the tail, as `find` answers and `keep` gets it.
+    std::string value;
+    // The program's globals the part names.
+    std::vector<const GlobalValue *> names;
+    // A worker's tail changed what the part declares, or could not run:
+    // the tail runs in place, where its changes are the module's.
+    bool live = false;
+};
+
+// Runs `t`'s tail on its part in a context of its own, as a part read back
+// runs it (tail_context_test.cpp): the part's definitions get back the
+// linkage the key records, the tail runs, and the part after it is written
+// with its use orders.
+void tail_part(TargetMachine &tm, Tail &t, size_t machine_text_size) {
+    LLVMContext context;
+    context.setDiscardValueNames(true);
+    struct Quiet : DiagnosticHandler {
+        bool failed = false;
+        bool handleDiagnostics(const DiagnosticInfo &d) override {
+            failed |= d.getSeverity() == DS_Error;
+            return true;
+        }
+    };
+    auto quiet = std::make_unique<Quiet>();
+    Quiet &heard = *quiet;
+    context.setDiagnosticHandler(std::move(quiet));
+    auto parsed = parseBitcodeFile(MemoryBufferRef(StringRef(t.input.data(), t.input.size()), "hirsel-tail"), context);
+    if (!parsed || heard.failed) {
+        if (!parsed) consumeError(parsed.takeError());
+        t.live = true;
+        return;
+    }
+    Module &p = **parsed;
+    Function *own = p.getFunction(t.name);
+    if (!own || own->isDeclaration()) {
+        t.live = true;
+        return;
+    }
+    StringRef facts = StringRef(t.key).drop_front(machine_text_size);
+    while (!facts.empty()) {
+        auto [line, rest] = facts.split('\n');
+        facts = rest;
+        auto [name, attributes] = line.split(' ');
+        auto [link, tail] = attributes.split(' ');
+        unsigned linkage, visibility;
+        GlobalValue *value = p.getNamedValue(name);
+        if (!value || link.getAsInteger(10, linkage) || tail.split(' ').first.getAsInteger(10, visibility)) {
+            t.live = true;
+            return;
+        }
+        if (!value->isDeclaration()) {
+            value->setVisibility(static_cast<GlobalValue::VisibilityTypes>(visibility));
+            value->setLinkage(static_cast<GlobalValue::LinkageTypes>(linkage));
+        }
+    }
+    SmallVector<MDNode *, 8> debug;
+    if (auto *bindings = p.getNamedMetadata(tail_debug_bindings)) append_range(debug, bindings->operands());
+    auto before = declared_all(p);
+    size_t variables = p.global_size();
+    void *tail = hirsel_llvm_tail_open(wrap(&p), reinterpret_cast<LLVMTargetMachineRef>(&tm));
+    hirsel_llvm_tail_run(tail, wrap(own));
+    hirsel_llvm_tail_close(tail);
+    // Only the definition's own body and attributes may change: in place,
+    // a change to anything else would be the program's.
+    if (p.global_size() != variables || heard.failed) {
+        t.live = true;
+        return;
+    }
+    for (auto &[g, was] : before)
+        if (g != own && declared(*g) != was) {
+            t.live = true;
+            return;
+        }
+    SmallVector<char, 0> after;
+    part_bitcode(p, *own, asm_lines(p), after, nullptr, &debug);
+    uint64_t size = after.size();
+    t.value.assign((const char *)&size, sizeof size);
+    t.value.append(after.data(), after.size());
+    use_orders(*own, t.value);
+}
 }  // namespace
 
 // The release tail (`hirsel_llvm_tail_run`) of every definition of `module`,
@@ -938,11 +1091,19 @@ bool restore(Module &m, Function &f, StringRef held, ArrayRef<MDNode *> debug) {
 // keyed by that part's key (`hirsel_key::module_key`), the machine text, and
 // the linkage the part does not keep: `find` answers 1 with the part after the
 // tail when the caller holds it, the body is restored from it, and otherwise
-// the tail runs in place and `keep` gets the part after it. `find` answers 2
-// when the caller does not hold the tail and wants the part's bitcode at the
-// cut with it. A module that cannot be split is not
-// keyed: a definition the parts do not hold may reach what no part carries.
-extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachineRef machine,
+// the tail runs, on one of `jobs` threads from the part's bitcode when `jobs`
+// is above 1 or else in place, and `keep` gets the part after it. `find`
+// answers 2 when the caller does not hold the tail and wants the part's
+// bitcode at the cut with it. A module that cannot be split is not keyed: a
+// definition the parts do not hold may reach what no part carries.
+//
+// Each part is keyed before any tail runs, and each tail is applied in module
+// order, so the module goes through the states the tails run one after
+// another give it: a part that names a global an earlier tail changed the
+// declaration of is keyed again when its turn comes, and a worker's tail that
+// changes anything besides its definition's body and attributes runs again in
+// place.
+extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     int (*find)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t **, size_t *),
     void (*keep)(void *, const char *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
                  const uint8_t *, size_t),
@@ -972,38 +1133,110 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
     // tables, where it reads as version 0) has "heapallocsite" cleared by
     // name on every instruction that carries metadata, registering it.
     if (keyed) m.getContext().getMDKindID("heapallocsite");
-    std::string machine_key = keyed ? machine_text(*reinterpret_cast<TargetMachine *>(machine)) : "";
+    TargetMachine &tm = *reinterpret_cast<TargetMachine *>(machine);
+    std::string machine_key = keyed ? machine_text(tm) : "";
     StringMap<std::string> sets = keyed ? asm_lines(m) : StringMap<std::string>();
     void *tail = hirsel_llvm_tail_open(module, machine);
-    for (Function *f : bodies) {
-        if (!keyed || !movable(*f)) {
-            hirsel_llvm_tail_run(tail, wrap(f));
-            continue;
-        }
-        std::string key = machine_key;
-        hirsel_key::Digest ir;
-        SmallVector<char, 0> input;
-        SmallVector<MDNode *, 8> debug;
-        auto *bindings = debug_info ? &debug : nullptr;
+    const bool parallel = keyed && jobs > 1;
+    // Keys `t`'s part as the module is now and asks the caller for its tail.
+    auto ask = [&](Tail &t) {
+        t.key = machine_key;
+        t.debug.clear();
+        t.input.clear();
+        t.names.clear();
+        int found = 0;
         const uint8_t *held = nullptr;
         size_t held_len = 0;
-        int found = 0;
-        with_part(m, *f, sets, &key, bindings, [&](Module &p) {
-            ir = hirsel_key::module_key(p);
-            found = find(context, key.data(), key.size(), ir.data(), ir.size(), &held, &held_len);
-            if (found == 2) bitcode(p, input);
+        with_part(m, *t.f, sets, &t.key, debug_info ? &t.debug : nullptr, [&](Module &p) {
+            t.ir = hirsel_key::module_key(p);
+            found = find(context, t.key.data(), t.key.size(), t.ir.data(), t.ir.size(), &held, &held_len);
+            if (found == 2 || (found != 1 && parallel)) bitcode(p, t.input);
+            for (const GlobalValue &g : p.global_values())
+                if (g.getName() != t.f->getName()) {
+                    // A global the part cannot name back is always stale.
+                    const GlobalValue *named = m.getNamedValue(g.getName());
+                    t.names.push_back(g.hasName() ? named : nullptr);
+                }
         });
-        if (found == 1 && restore(m, *f, StringRef((const char *)held, held_len), debug))
-            continue;
-        hirsel_llvm_tail_run(tail, wrap(f));
+        t.witness = found == 2;
+        t.kind = found == 1 ? Tail::Held : Tail::Missed;
+        t.live = false;
+        // The caller's answer is borrowed until its next call.
+        if (found == 1) t.value.assign((const char *)held, held_len);
+        else t.value.clear();
+    };
+    std::vector<Tail> tails(bodies.size());
+    for (size_t k = 0; k < bodies.size(); ++k) {
+        Tail &t = tails[k];
+        t.f = bodies[k];
+        t.name = t.f->getName().str();
+        if (keyed && movable(*t.f)) ask(t);
+    }
+    if (parallel) {
+        std::vector<size_t> missed;
+        for (size_t k = 0; k < tails.size(); ++k)
+            if (tails[k].kind == Tail::Missed) missed.push_back(k);
+        auto order = largest_first(missed.size(), [&](size_t k) { return tails[missed[k]].input.size(); });
+        for (size_t &k : order) k = missed[k];
+        on_threads(tm, order, jobs, [&] {
+            return [&](TargetMachine *worker, size_t k) {
+                if (worker) tail_part(*worker, tails[k], machine_key.size());
+                else tails[k].live = true;
+            };
+        });
+    }
+    // Globals whose declaration an applied tail changed.
+    DenseSet<const GlobalValue *> changed;
+    auto stale = [&](const Tail &t) {
+        return any_of(t.names, [&](const GlobalValue *g) { return !g || changed.contains(g); });
+    };
+    // Runs `t`'s tail in place, noting what it changed besides the body.
+    auto run_live = [&](Tail &t) {
+        if (!keyed) return hirsel_llvm_tail_run(tail, wrap(t.f));
+        auto before = declared_all(m);
+        hirsel_llvm_tail_run(tail, wrap(t.f));
+        for (auto &[g, was] : before)
+            if (declared(*g) != was) changed.insert(g);
+    };
+    // Runs `t`'s tail in place and gives `keep` the part after it.
+    auto run_kept = [&](Tail &t) {
+        run_live(t);
         SmallVector<char, 0> after;
-        part_bitcode(m, *f, sets, after, nullptr, bindings);
+        part_bitcode(m, *t.f, sets, after, nullptr, debug_info ? &t.debug : nullptr);
         uint64_t size = after.size();
         std::string value((const char *)&size, sizeof size);
         value.append(after.data(), after.size());
-        use_orders(*f, value);
-        keep(context, key.data(), key.size(), ir.data(), ir.size(), (const uint8_t *)input.data(),
-             input.size(), (const uint8_t *)value.data(), value.size());
+        use_orders(*t.f, value);
+        keep(context, t.key.data(), t.key.size(), t.ir.data(), t.ir.size(), (const uint8_t *)t.input.data(),
+             t.witness ? t.input.size() : 0, (const uint8_t *)value.data(), value.size());
+    };
+    // Restores `t`'s body from the part after its tail.
+    auto restored = [&](Tail &t) {
+        AttributeList was = t.f->getAttributes();
+        if (!restore(m, *t.f, t.value, t.debug)) return false;
+        if (t.f->getAttributes() != was) changed.insert(t.f);
+        return true;
+    };
+    for (Tail &t : tails) {
+        if (!keyed || !movable(*t.f)) {
+            run_live(t);
+            continue;
+        }
+        // What the part names changed since it was keyed: key it again, now.
+        if (stale(t)) {
+            ask(t);
+            if (t.kind == Tail::Missed) t.live = true;
+        }
+        if (t.kind == Tail::Held) {
+            if (!restored(t)) run_kept(t);
+            continue;
+        }
+        if (parallel && !t.live && restored(t)) {
+            keep(context, t.key.data(), t.key.size(), t.ir.data(), t.ir.size(), (const uint8_t *)t.input.data(),
+                 t.witness ? t.input.size() : 0, (const uint8_t *)t.value.data(), t.value.size());
+            continue;
+        }
+        run_kept(t);
     }
     hirsel_llvm_tail_close(tail);
 }

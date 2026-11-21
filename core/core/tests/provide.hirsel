@@ -165,3 +165,135 @@ fn refusal[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
         _ => None,
     }
 }
+
+// Served stdout ports (core.md, Provide). A write waits as a Call until the
+// server replies: the first is answered Done, the second WriteFailed with one
+// byte written and Other(5), which the writer sees exactly.
+fn echo_writer(take o: Stdout) -> bool waits {
+    let first = match stdout.write(o, "hello") {
+        Ok(_) => true,
+        _ => false
+    }
+    let second = match stdout.write(o, "abc") {
+        Error(e) => e.written == 1 && match e.error {
+            Other(code) => code == 5,
+            _ => false
+        },
+        _ => false
+    }
+    first && second
+}
+
+// The server reads Write(5) and the five bytes "hello", answers Done, then
+// answers the three-byte write WriteFailed(1, Other(5)). Once the writer has
+// ended, next waits until every task waits and returns None.
+// expect: run echo(tasks) = true
+fn echo(tasks: Tasks) -> bool waits {
+    let (o, s) = provide.stdout(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, o, echo_writer)
+    let first = match provide.next(mut served) {
+        Some(take call) => {
+            let len = match provide.stream_op(call) {
+                Write(len) => len
+            }
+            let mut b: Bytes = list.with_capacity(8)
+            provide.payload(call, 0, mut b)
+            let read = len == 5 && list.len(b) == 5 && b[0] == 0x68 && b[1] == 0x65 && b[4] == 0x6f
+            let answered = match provide.reply(mut served, take call, provide.stream_reply(Done)) {
+                Ok(_) => true,
+                _ => false
+            }
+            read && answered
+        },
+        None => false
+    }
+    let second = match provide.next(mut served) {
+        Some(take call) => {
+            let failed = WriteFailed(WriteError(written: 1, error: Other(5)))
+            match provide.reply(mut served, take call, provide.stream_reply(failed)) {
+                Ok(_) => true,
+                _ => false
+            }
+        },
+        None => false
+    }
+    let wrote = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    first && second && wrote && quiet
+}
+
+fn lone_writer(take o: Stdout) -> bool waits {
+    let _ = stdout.write(o, "x")
+    true
+}
+
+// CONC-7 and NOTES 16: once the writer's cancellation is requested, a reply
+// to its taken call is Withdrawn, and the writer ends Cancelled.
+// expect: run withdrawn(tasks) = true
+fn withdrawn(tasks: Tasks) -> bool waits {
+    let (o, s) = provide.stdout(bytes 64)
+    let mut served = take s
+    let mut child = task.spawn(tasks, bytes 65536, o, lone_writer)
+    let refused = match provide.next(mut served) {
+        Some(take call) => {
+            task.cancel(mut child)
+            match provide.reply(mut served, take call, provide.stream_reply(Done)) {
+                Error(Withdrawn()) => true,
+                _ => false
+            }
+        },
+        None => false
+    }
+    let cancelled = match task.join(take child) {
+        Error(Cancelled(take causes)) => {
+            let _ = take causes
+            true
+        },
+        _ => false
+    }
+    refused && cancelled
+}
+
+fn closed_writer(take o: Stdout) -> bool waits {
+    match stdout.write(o, "x") {
+        Error(e) => e.written == 0 && match e.error {
+            Closed => true,
+            _ => false
+        },
+        _ => false
+    }
+}
+
+fn seal(take s: Served[StreamOp]) {
+    let _ = take s
+}
+
+// Cleaning the Served end seals the port: the taken call and the other
+// writer's call (queued, or issued after the seal) complete Closed with
+// nothing written, a later write is Closed at once, and dropping the taken
+// Call afterwards changes nothing.
+// expect: run sealed(tasks) = true
+fn sealed(tasks: Tasks) -> bool waits {
+    let (o, s) = provide.stdout(bytes 64)
+    let mut served = take s
+    let a = task.spawn(tasks, bytes 65536, o, closed_writer)
+    let b = task.spawn(tasks, bytes 65536, o, closed_writer)
+    let taken = provide.next(mut served)
+    seal(take served)
+    let both = result.unwrap(task.join(take a)) && result.unwrap(task.join(take b))
+    let held = match take taken {
+        Some(take call) => {
+            let _ = take call
+            true
+        },
+        None => false
+    }
+    held && both && closed_writer(o)
+}

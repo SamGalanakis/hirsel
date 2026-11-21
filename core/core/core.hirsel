@@ -168,6 +168,17 @@ pub opaque resource type ClockHand
 
 pub opaque resource type StopTrigger
 
+// A served port's server end and one call taken from it (core.md, Provide).
+pub opaque resource type Served[Op]
+
+pub opaque resource type Call[Op]
+
+pub type Withdrawn = Withdrawn()
+
+pub type StreamOp = Write(len: u64)
+
+pub type StreamReply = Done | WriteFailed(WriteError)
+
 pub type Kind = File | Directory | Symlink | Other
 
 pub type Stat {

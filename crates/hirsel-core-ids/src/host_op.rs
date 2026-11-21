@@ -48,3 +48,15 @@ pub const CLOCK_SET_WALL: u8 = 53;
 pub const CLOCK_IDLE: u8 = 54;
 pub const PROCESS_TRIGGER: u8 = 55;
 pub const CLOSE_CELL: u8 = 56;
+// Served ports (core.md, Provide). The constructors admit the port's room;
+// PORT_NEXT waits for a call; CALL_WORD and CALL_PAYLOAD read a taken call;
+// PORT_REPLY commits it. CLOSE_SERVED seals a port and CLOSE_CALL settles an
+// unanswered call as sealed.
+pub const PROVIDE_STDOUT: u8 = 57;
+pub const PROVIDE_STDERR: u8 = 58;
+pub const PORT_NEXT: u8 = 59;
+pub const CALL_WORD: u8 = 60;
+pub const CALL_PAYLOAD: u8 = 61;
+pub const PORT_REPLY: u8 = 62;
+pub const CLOSE_SERVED: u8 = 63;
+pub const CLOSE_CALL: u8 = 64;

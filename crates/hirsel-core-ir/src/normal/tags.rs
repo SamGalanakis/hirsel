@@ -407,6 +407,12 @@ tags!(HostOp {
     52 => ClockSetWall,
     53 => ClockIdle,
     54 => ProcessTrigger,
+    55 => ProvideStdout,
+    56 => ProvideStderr,
+    57 => PortNext,
+    58 => CallWord,
+    59 => CallPayload,
+    60 => PortReply,
 });
 
 tags!(RaiseCause {

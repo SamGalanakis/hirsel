@@ -178,22 +178,28 @@ impl Registry {
     pub(crate) fn grant_handle(&self, handle: u64) -> u64 {
         self.0.lock().unwrap().grants[&handle].handle
     }
-    /// A cell's ClockHand or StopTrigger: a live resource whose drop closes
-    /// nothing but itself (CLOSE_CELL).
-    pub(crate) fn cell(&self, provider: Provider) -> u64 {
+    /// A virtual provider's live resource: a ClockHand or StopTrigger
+    /// (CLOSE_CELL, which closes nothing but itself), a `Served` end
+    /// (CLOSE_SERVED) or a `Call` (CLOSE_CALL, `handle` its call id).
+    pub(crate) fn held(&self, provider: Provider, handle: u64, close_op: u8) -> u64 {
         self.insert(File {
             provider,
-            handle: 0,
+            handle,
             mode: 0,
-            close_op: CLOSE_CELL,
+            close_op,
         })
+    }
+    pub(crate) fn file_handle(&self, key: u64) -> u64 {
+        self.file(key).handle
     }
     pub(crate) fn file_provider(&self, key: u64) -> Provider {
         self.file(key).provider
     }
-    /// Consume a live StopTrigger without closing it.
-    pub(crate) fn take_cell(&self, key: u64) -> Provider {
-        self.take_file(key).provider
+    /// Consume a live StopTrigger or Call without closing it: its provider
+    /// and handle.
+    pub(crate) fn take_held(&self, key: u64) -> (Provider, u64) {
+        let file = self.take_file(key);
+        (file.provider, file.handle)
     }
 }
 impl Files {

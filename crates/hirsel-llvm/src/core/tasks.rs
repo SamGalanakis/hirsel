@@ -101,6 +101,12 @@ impl FunctionEmitter<'_> {
             | HostOp::ClockSetWall
             | HostOp::ClockIdle
             | HostOp::ProcessTrigger
+            | HostOp::ProvideStdout
+            | HostOp::ProvideStderr
+            | HostOp::PortNext
+            | HostOp::CallWord
+            | HostOp::CallPayload
+            | HostOp::PortReply
             | HostOp::NetSplit => {
                 let mut operands = vec![ptr(CONTEXT)];
                 for (p, value) in RtOp::Host(op).signature().params.iter().zip(args) {

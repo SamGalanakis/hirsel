@@ -243,6 +243,12 @@ impl Function<'_, '_, '_> {
                     | HostOp::ClockSetWall
                     | HostOp::ClockIdle
                     | HostOp::ProcessTrigger
+                    | HostOp::ProvideStdout
+                    | HostOp::ProvideStderr
+                    | HostOp::PortNext
+                    | HostOp::CallWord
+                    | HostOp::CallPayload
+                    | HostOp::PortReply
                     | HostOp::NetSplit
                     | HostOp::Stopped => (null, no_mode),
                 };
@@ -276,6 +282,12 @@ impl Function<'_, '_, '_> {
                     | HostOp::ClockSetWall
                     | HostOp::ClockIdle
                     | HostOp::ProcessTrigger
+                    | HostOp::ProvideStdout
+                    | HostOp::ProvideStderr
+                    | HostOp::PortNext
+                    | HostOp::CallWord
+                    | HostOp::CallPayload
+                    | HostOp::PortReply
                     | HostOp::NetSplit => {
                         let signature = op_signature(op);
                         let count = signature.len();

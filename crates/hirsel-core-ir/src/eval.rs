@@ -115,6 +115,22 @@ struct World {
     cells: Vec<VirtualCell>,
 }
 const CELL_BASE: u64 = 0x80_0000;
+/// A port's `Served` end is `SERVED_BASE + i` for cell `i`; its call `id` is
+/// `CALL_BASE + (i << 32) + id`.
+const SERVED_BASE: u64 = 0x90_0000;
+const CALL_BASE: u64 = 1 << 62;
+/// One call on a served port (native `provide::PortCall`). The caller's bytes
+/// are copied at issue: they cannot change while it waits, and `payload`
+/// answers them only while the call is unsettled, as natively.
+struct PortCall {
+    caller: usize,
+    words: [u64; 4],
+    data: Vec<u8>,
+    taken: bool,
+    held: bool,
+    answer: Option<Vec<u64>>,
+    finished: bool,
+}
 enum VirtualCell {
     Clock {
         mono: u64,
@@ -129,7 +145,47 @@ enum VirtualCell {
         stopped: bool,
         waiters: Vec<usize>,
     },
+    Port {
+        sealed: bool,
+        next: u64,
+        calls: BTreeMap<u64, PortCall>,
+        /// Tasks in `next`, and whether quiescence answered each None.
+        servers: Vec<(usize, bool)>,
+    },
 }
+impl VirtualCell {
+    fn queued(&self) -> Option<u64> {
+        let VirtualCell::Port { calls, .. } = self else {
+            unreachable!("a port")
+        };
+        calls
+            .iter()
+            .find(|(_, c)| !c.taken && !c.finished && c.answer.is_none())
+            .map(|(&id, _)| id)
+    }
+    /// Settle an unsettled call; returns its caller.
+    fn settle(&mut self, id: u64, answer: Vec<u64>) -> Option<usize> {
+        let VirtualCell::Port { calls, .. } = self else {
+            unreachable!("a port")
+        };
+        let call = calls.get_mut(&id)?;
+        if call.answer.is_some() || call.finished {
+            return None;
+        }
+        call.answer = Some(answer);
+        Some(call.caller)
+    }
+    fn prune(&mut self, id: u64) {
+        let VirtualCell::Port { calls, .. } = self else {
+            unreachable!("a port")
+        };
+        if calls.get(&id).is_some_and(|c| c.finished && !c.held) {
+            calls.remove(&id);
+        }
+    }
+}
+/// A sealed stream port's answer: `Closed`.
+const PORT_CLOSED: [u64; 4] = [0, 4, 0, 0];
 /// A deadline on the host model's clock or on a virtual clock's own timers.
 #[derive(Clone, Copy)]
 enum Due {
@@ -1851,10 +1907,157 @@ impl Machine<'_> {
                 }
             }
         }
+        if woken.is_empty() {
+            // No idle wait: a `next` with nothing queued answers None.
+            for cell in &mut self.world.cells {
+                if let VirtualCell::Port { .. } = cell
+                    && cell.queued().is_none()
+                    && let VirtualCell::Port { servers, .. } = cell
+                {
+                    for (k, flag) in servers.iter_mut() {
+                        if !*flag && parked(*k) {
+                            *flag = true;
+                            woken.push(*k);
+                        }
+                    }
+                }
+            }
+        }
         for &k in &woken {
             self.ready_provider(k);
         }
         !woken.is_empty()
+    }
+
+    /// The port and call id a `Call` handle designates.
+    fn call_of(h: u64) -> (usize, u64) {
+        let i = h - CALL_BASE;
+        ((i >> 32) as usize, i & 0xffff_ffff)
+    }
+
+    /// A caller's operation on a served port: queue it, ready the servers and
+    /// wait for its answer. A cancellation that takes effect before the
+    /// answer settles the call and fails Cancelled.
+    fn port_call(&mut self, t: &Task, c: usize, words: [u64; 4], data: Vec<u8>) -> X<Vec<u64>> {
+        self.check_cancel(t)?;
+        let VirtualCell::Port {
+            sealed,
+            next,
+            calls,
+            servers,
+        } = &mut self.world.cells[c]
+        else {
+            unreachable!()
+        };
+        if *sealed {
+            return Ok(PORT_CLOSED.to_vec());
+        }
+        let id = *next;
+        *next += 1;
+        calls.insert(
+            id,
+            PortCall {
+                caller: t.k,
+                words,
+                data,
+                taken: false,
+                held: false,
+                answer: None,
+                finished: false,
+            },
+        );
+        let servers: Vec<usize> = servers.iter().map(|&(k, _)| k).collect();
+        for k in servers {
+            self.ready_provider(k);
+        }
+        loop {
+            let VirtualCell::Port { calls, .. } = &mut self.world.cells[c] else {
+                unreachable!()
+            };
+            let call = calls.get_mut(&id).unwrap();
+            if let Some(answer) = call.answer.clone() {
+                call.finished = true;
+                self.world.cells[c].prune(id);
+                return Ok(answer);
+            }
+            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+            self.park(Some(Wait::Network(None)));
+            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                let VirtualCell::Port { calls, .. } = &mut self.world.cells[c] else {
+                    unreachable!()
+                };
+                let call = calls.get_mut(&id).unwrap();
+                if call.answer.is_none() {
+                    call.finished = true;
+                    self.world.cells[c].prune(id);
+                    self.check_cancel(t)?;
+                }
+            }
+        }
+    }
+
+    /// `provide.next`: the oldest queued call, or None once quiescence answers.
+    fn port_next(&mut self, t: &Task, c: usize) -> X<Vec<u64>> {
+        self.check_cancel(t)?;
+        loop {
+            let queued = self.world.cells[c].queued();
+            let VirtualCell::Port { calls, servers, .. } = &mut self.world.cells[c] else {
+                unreachable!()
+            };
+            let quiesced = servers.iter().any(|&(k, q)| k == t.k && q);
+            if queued.is_some() || quiesced {
+                servers.retain(|&(k, _)| k != t.k);
+                let Some(id) = queued else {
+                    return Ok(vec![0, 0, 0, 0]);
+                };
+                let call = calls.get_mut(&id).unwrap();
+                call.taken = true;
+                call.held = true;
+                return Ok(vec![CALL_BASE + ((c as u64) << 32) + id, 0, 0, 1]);
+            }
+            if !servers.iter().any(|&(k, _)| k == t.k) {
+                servers.push((t.k, false));
+            }
+            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+            self.park(Some(Wait::Network(None)));
+            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                if let VirtualCell::Port { servers, .. } = &mut self.world.cells[c] {
+                    servers.retain(|&(k, _)| k != t.k);
+                }
+                self.check_cancel(t)?;
+            }
+        }
+    }
+
+    /// A `Call` dropped without a reply, or the `Served` end cleaned (sealing
+    /// the port): settle as sealed.
+    fn port_drop(&mut self, h: u64) {
+        let mut callers = Vec::new();
+        if h >= CALL_BASE {
+            let (c, id) = Self::call_of(h);
+            let cell = &mut self.world.cells[c];
+            if let VirtualCell::Port { calls, .. } = cell
+                && let Some(call) = calls.get_mut(&id)
+            {
+                call.held = false;
+            }
+            callers.extend(cell.settle(id, PORT_CLOSED.to_vec()));
+            cell.prune(id);
+        } else {
+            let c = (h - SERVED_BASE) as usize;
+            let cell = &mut self.world.cells[c];
+            let VirtualCell::Port { sealed, calls, .. } = cell else {
+                unreachable!()
+            };
+            *sealed = true;
+            let ids: Vec<u64> = calls.keys().copied().collect();
+            for id in ids {
+                callers.extend(cell.settle(id, PORT_CLOSED.to_vec()));
+            }
+        }
+        for k in callers {
+            self.ready_provider(k);
+        }
     }
 
     /// The `provide` rows, and Clock, Random and Process operations on a cell.
@@ -1868,6 +2071,15 @@ impl Machine<'_> {
             // (MEM-24); a refusal answers 0 with the available bytes.
             let payer = t.limits.last().unwrap();
             let charge = hirsel_core_layout::charge::PROVIDE_CELL;
+            if let Err(available) = self.admit(payer, charge) {
+                return Some(Ok(ok(0, available)));
+            }
+            self.world.grant_charges.push((payer.clone(), charge));
+        }
+        if matches!(op, HostOp::ProvideStdout | HostOp::ProvideStderr) {
+            // A port's room with its own record, held until the run ends.
+            let payer = t.limits.last().unwrap();
+            let charge = hirsel_core_layout::charge::PROVIDE_CELL.saturating_add(a[0]);
             if let Err(available) = self.admit(payer, charge) {
                 return Some(Ok(ok(0, available)));
             }
@@ -1917,6 +2129,81 @@ impl Machine<'_> {
                     self.ready_provider(k);
                 }
                 ok(0, 0)
+            }
+            HostOp::ProvideStdout | HostOp::ProvideStderr => {
+                let port = VirtualCell::Port {
+                    sealed: false,
+                    next: 0,
+                    calls: BTreeMap::new(),
+                    servers: Vec::new(),
+                };
+                let h = new(&mut self.world, port);
+                ok(h, h - CELL_BASE + SERVED_BASE)
+            }
+            HostOp::PortNext => {
+                let c = (a[0] - SERVED_BASE) as usize;
+                return Some(self.port_next(t, c));
+            }
+            HostOp::CallWord => {
+                let (c, id) = Self::call_of(a[0]);
+                let VirtualCell::Port { calls, .. } = &self.world.cells[c] else {
+                    unreachable!()
+                };
+                ok(calls[&id].words[a[1].min(3) as usize], 0)
+            }
+            HostOp::CallPayload => {
+                let (c, id) = Self::call_of(a[0]);
+                let VirtualCell::Port { calls, .. } = &self.world.cells[c] else {
+                    unreachable!()
+                };
+                let call = &calls[&id];
+                if call.finished || call.answer.is_some() {
+                    return Some(Ok(ok(0, 0)));
+                }
+                let bytes = call.data.clone();
+                let (_, data, len, cap) = self.carrier(a[2]);
+                if cap.saturating_sub(len) < bytes.len() as u64 {
+                    return Some(Err(Stop::Cause("Bounds")));
+                }
+                self.put(data + len, &bytes);
+                self.store(a[2] + 8, 8, len + bytes.len() as u64);
+                ok(0, bytes.len() as u64)
+            }
+            HostOp::PortReply => {
+                // NOTES 16: a reply after the caller's cancellation is
+                // pending, or after the call was settled, is Withdrawn; a
+                // Call of another port is consumed as a dropped one (NOTES 20).
+                let (c, id) = Self::call_of(a[1]);
+                if c != (a[0] - SERVED_BASE) as usize {
+                    self.port_drop(a[1]);
+                    return Some(Ok(ok(1, 0)));
+                }
+                let VirtualCell::Port { calls, .. } = &mut self.world.cells[c] else {
+                    unreachable!()
+                };
+                let call = calls.get_mut(&id).unwrap();
+                call.held = false;
+                let caller = &self.sched.tasks[call.caller];
+                let pending =
+                    caller.state == State::Provider && caller.cancel && caller.cancellable;
+                let answer = match a[2] {
+                    0 => vec![0, 0, 0, call.words[1]],
+                    _ => vec![0, a[4], a[5], a[3]],
+                };
+                let cell = &mut self.world.cells[c];
+                let reply = if pending {
+                    None
+                } else {
+                    cell.settle(id, answer)
+                };
+                cell.prune(id);
+                match reply {
+                    Some(k) => {
+                        self.ready_provider(k);
+                        ok(0, 0)
+                    }
+                    None => ok(1, 0),
+                }
             }
             HostOp::ClockSetWall => {
                 let c = self.cell(a[0]).unwrap();
@@ -1971,6 +2258,12 @@ impl Machine<'_> {
                     Some(at) => ok(at, 1),
                     None => ok(0, 0),
                 }
+            }
+            HostOp::Stdout | HostOp::Stderr => {
+                let c = self.cell(a[0])?;
+                let (bytes, ..) = self.carrier(a[1]);
+                let words = [0, bytes.len() as u64, 0, 0];
+                return Some(self.port_call(t, c, words, bytes));
             }
             HostOp::WallMs
             | HostOp::MonoNs
@@ -2741,7 +3034,13 @@ impl Machine<'_> {
             | HostOp::ClockAdvance
             | HostOp::ClockSetWall
             | HostOp::ClockIdle
-            | HostOp::ProcessTrigger => {
+            | HostOp::ProcessTrigger
+            | HostOp::ProvideStdout
+            | HostOp::ProvideStderr
+            | HostOp::PortNext
+            | HostOp::CallWord
+            | HostOp::CallPayload
+            | HostOp::PortReply => {
                 unreachable!()
             }
             HostOp::Resolve => self.network_resolve(a),
@@ -3594,6 +3893,12 @@ impl Machine<'_> {
                     return false;
                 }
                 self.trace.push(h);
+                if h >= CALL_BASE || (SERVED_BASE..SERVED_BASE + 0x10_0000).contains(&h) {
+                    // A dropped Call settles its caller as sealed; a cleaned
+                    // Served end seals its port.
+                    self.port_drop(h);
+                    return false;
+                }
                 if (CELL_BASE..LISTING_HANDLE).contains(&h) {
                     // A dropped ClockHand freezes its clock; a dropped
                     // StopTrigger never stops its process.

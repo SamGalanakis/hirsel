@@ -1028,6 +1028,12 @@ pub enum HostOp {
     ClockSetWall = hirsel_core_ids::host_op::CLOCK_SET_WALL as isize,
     ClockIdle = hirsel_core_ids::host_op::CLOCK_IDLE as isize,
     ProcessTrigger = hirsel_core_ids::host_op::PROCESS_TRIGGER as isize,
+    ProvideStdout = hirsel_core_ids::host_op::PROVIDE_STDOUT as isize,
+    ProvideStderr = hirsel_core_ids::host_op::PROVIDE_STDERR as isize,
+    PortNext = hirsel_core_ids::host_op::PORT_NEXT as isize,
+    CallWord = hirsel_core_ids::host_op::CALL_WORD as isize,
+    CallPayload = hirsel_core_ids::host_op::CALL_PAYLOAD as isize,
+    PortReply = hirsel_core_ids::host_op::PORT_REPLY as isize,
 }
 
 impl HostOp {
@@ -1097,6 +1103,12 @@ impl HostOp {
         HostOp::ClockSetWall,
         HostOp::ClockIdle,
         HostOp::ProcessTrigger,
+        HostOp::ProvideStdout,
+        HostOp::ProvideStderr,
+        HostOp::PortNext,
+        HostOp::CallWord,
+        HostOp::CallPayload,
+        HostOp::PortReply,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -1160,6 +1172,12 @@ impl HostOp {
             HostOp::ClockSetWall => "clock_set_wall",
             HostOp::ClockIdle => "clock_idle",
             HostOp::ProcessTrigger => "process_trigger",
+            HostOp::ProvideStdout => "provide_stdout",
+            HostOp::ProvideStderr => "provide_stderr",
+            HostOp::PortNext => "port_next",
+            HostOp::CallWord => "call_word",
+            HostOp::CallPayload => "call_payload",
+            HostOp::PortReply => "port_reply",
         }
     }
     /// C entry of a host operation that has its own adapter.
@@ -1193,6 +1211,12 @@ impl HostOp {
             Self::ClockSetWall => "hirsel_core_clock_set_wall",
             Self::ClockIdle => "hirsel_core_clock_idle",
             Self::ProcessTrigger => "hirsel_core_process_trigger",
+            Self::ProvideStdout => "hirsel_core_provide_stdout",
+            Self::ProvideStderr => "hirsel_core_provide_stderr",
+            Self::PortNext => "hirsel_core_port_next",
+            Self::CallWord => "hirsel_core_call_word",
+            Self::CallPayload => "hirsel_core_call_payload",
+            Self::PortReply => "hirsel_core_port_reply",
             _ => unreachable!(),
         }
     }
@@ -1221,6 +1245,10 @@ impl HostOp {
                 | HostOp::ClockAdvance
                 | HostOp::ClockSetWall
                 | HostOp::ProcessTrigger
+                | HostOp::ProvideStdout
+                | HostOp::ProvideStderr
+                | HostOp::CallWord
+                | HostOp::PortReply
         )
     }
 }
@@ -1479,6 +1507,12 @@ impl RtOp {
                     | HostOp::ClockIdle
                     | HostOp::ProcessTrigger => (vec![V(u64_)], outcome),
                     HostOp::ProvideProcess => (vec![], outcome),
+                    HostOp::ProvideStdout | HostOp::ProvideStderr | HostOp::PortNext => {
+                        (vec![V(u64_)], outcome)
+                    }
+                    HostOp::CallWord => (vec![V(u64_), V(u64_)], outcome),
+                    HostOp::CallPayload => (vec![V(u64_), V(u64_), V(p)], outcome),
+                    HostOp::PortReply => (vec![V(u64_); 6], outcome),
                     HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => {
                         (vec![V(u64_), V(u64_)], outcome)
                     }

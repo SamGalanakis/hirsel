@@ -2344,6 +2344,10 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             | HostOp::ClockIdle
             | HostOp::ProcessTrigger => &["u64"],
             HostOp::ProvideProcess => &[],
+            HostOp::ProvideStdout | HostOp::ProvideStderr | HostOp::PortNext => &["u64"],
+            HostOp::CallWord => &["u64", "u64"],
+            HostOp::CallPayload => &["u64", "u64", "ptr"],
+            HostOp::PortReply => &["u64", "u64", "u64", "u64", "u64", "u64"],
             HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => &["u64", "u64"],
             HostOp::StdinRead => &["u64", "ptr", "u8", "u64", "u64"],
             HostOp::EnvName => &["u64", "u64"],

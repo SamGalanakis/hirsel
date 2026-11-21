@@ -481,7 +481,9 @@ pub fn net(bytes n: u64) -> (Net, Served[NetOp])
 pub fn stdout(bytes n: u64) -> (Stdout, Served[StreamOp])
 pub fn stderr(bytes n: u64) -> (Stderr, Served[StreamOp])
 pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
-pub fn op[Op](c: Call[Op]) -> Op
+pub fn dir_op(c: Call[DirOp]) -> DirOp
+pub fn net_op(c: Call[NetOp]) -> NetOp
+pub fn stream_op(c: Call[StreamOp]) -> StreamOp
 pub fn payload[Op](c: Call[Op], field: u64, mut out: Bytes)
 pub fn fill[Op](mut s: Served[Op], mut c: Call[Op], b: Bytes) -> u64
 pub fn secret(c: Call[NetOp]) -> Secret
@@ -501,10 +503,11 @@ pub fn trigger(take t: StopTrigger)
 `advance_to`, `set_wall` and `idle` are in module `clock`, and `trigger` in module `process`.
 
 - **Served ports.** `provide.dir`, `net`, `stdout` and `stderr` admit the port's room of `n`
-  bytes from the current limit and raise `Capacity` when it is refused; the room is
-  refunded when the `Served` end is cleaned and its last handle is released. Each operation
-  on the capability waits after issue as a `Call` queued on the port, in the order the
-  operations were issued. `provide.next` returns the first queued call. Its `Op` holds
+  bytes, with a cell's 32, from the current limit and raise `Capacity` when it is refused;
+  as a cell's, the room is held until the run ends, since the capability is plain and
+  outlives the `Served` end. Each operation on the capability waits after issue as a `Call`
+  queued on the port, in the order the operations were issued. `provide.next` returns the
+  first queued call, and `provide.dir_op`, `net_op` and `stream_op` read its `Op`, which holds
   only scalars: a path, name or data field is its byte length, which `provide.payload(c,
   field, mut out)` appends to `out` (fields numbered from 0 in declaration order;
   `Bounds` when `out`'s spare capacity is short), and `room` is the spare capacity the
@@ -525,8 +528,9 @@ pub fn trigger(take t: StopTrigger)
   the caller's capacity and completes the operation with the reply's result. If
   cancellation or the call's deadline settled it first
   ([CONC-7](tasks.md#conc-7-cancellation-points)), it returns `Error(Withdrawn)`, discards
-  the staged bytes and issues nothing. A `Released` call needs no reply. A `Call` dropped
-  without a reply settles its caller as a sealed port does.
+  the staged bytes and issues nothing. A `Call` given to the `reply` of another port is
+  consumed as a dropped one and answers `Error(Withdrawn)`. A `Released` call needs no
+  reply. A `Call` dropped without a reply settles its caller as a sealed port does.
 - **Sealing.** Cleaning the `Served` end, or the end of its task, seals the port: every
   queued and later call completes with `Closed` (`Dir`, `Stdout`, `Stderr`) or `Reset`
   (`Net`), and drops of its handles still succeed. `provide.next` returns `None` only at

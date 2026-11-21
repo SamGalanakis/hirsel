@@ -2046,6 +2046,36 @@ unsafe fn cancel_flag<'a>(task: *const Task) -> &'a AtomicBool {
     }
 }
 
+/// Whether the operation `token`, parked in the running task's run, has a
+/// cancellation request it observes that the scheduler has not applied yet. A
+/// served port's reply loses to it (CONC-7; provide NOTES 16), so the outcome
+/// does not depend on whether the server yielded after `task.cancel`.
+pub(crate) fn call_cancelled(token: u64) -> bool {
+    let task = CURRENT.get();
+    if task.is_null() {
+        return false;
+    }
+    // SAFETY: the running task pins its run; a parked task pins its operation.
+    unsafe {
+        let Some(arm) = (*(*task).run).parked.live.get(&ReadyToken(token)) else {
+            return false;
+        };
+        let caller = arm.task;
+        let op = (*caller).operation;
+        !op.is_null() && (*op).observes_cancel && cancel_flag(caller).load(Ordering::Acquire)
+    }
+}
+
+/// The running task's context, for a provider's `deliver`.
+pub(crate) fn current_context() -> *mut Context {
+    let task = CURRENT.get();
+    if task.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: the running task pins its context.
+    unsafe { (*task).context }
+}
+
 /// Whether a cancellation request takes effect on this task now. A finalizer
 /// and a shielded region observe none (CONC-7, tasks.md:129; FAIL-11,
 /// failure.md:173; CONC-8, tasks.md:140): under either the request stays
@@ -2666,6 +2696,11 @@ unsafe fn alone(
             match step.kind {
                 STEP_DONE => return Some(step.outcome),
                 STEP_PENDING => {
+                    // A call on a served port waits on its server, and no
+                    // other task runs to serve it (FAIL-15).
+                    if crate::provide::owns(p) {
+                        crate::process::stop(b"Deadlock");
+                    }
                     let deadline = (step.deadline_ns != 0).then_some(step.deadline_ns);
                     if block(deadline) {
                         step = (p.resume)(p.state, request, token);

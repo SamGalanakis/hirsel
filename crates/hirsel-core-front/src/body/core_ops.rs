@@ -343,6 +343,12 @@ operations! {
     ("clock", "set_wall", Lane::Runtime(Kernel::Provide(HostOp::ClockSetWall)), "B", "provide-r8a-1533", false),
     ("clock", "idle", Lane::Runtime(Kernel::Provide(HostOp::ClockIdle)), "B", "provide-r8a-1533", false),
     ("process", "trigger", Lane::Runtime(Kernel::Provide(HostOp::ProcessTrigger)), "B", "provide-r8a-1533", false),
+    ("provide", "stdout", Lane::Runtime(Kernel::Provide(HostOp::ProvideStdout)), "B", "provide-r8a-1533", false),
+    ("provide", "stderr", Lane::Runtime(Kernel::Provide(HostOp::ProvideStderr)), "B", "provide-r8a-1533", false),
+    ("provide", "next", Lane::Runtime(Kernel::Provide(HostOp::PortNext)), "B", "provide-r8a-1533", false),
+    ("provide", "word", Lane::Runtime(Kernel::Provide(HostOp::CallWord)), "B", "provide-r8a-1533", false),
+    ("provide", "payload", Lane::Runtime(Kernel::Provide(HostOp::CallPayload)), "B", "provide-r8a-1533", false),
+    ("provide", "commit", Lane::Runtime(Kernel::Provide(HostOp::PortReply)), "B", "provide-r8a-1533", false),
     ("string", "new", Lane::Runtime(Kernel::StringList("new")), "A", "core-ops-914", false),
     ("string", "as_bytes", Lane::Runtime(Kernel::CarrierView), "A", "core-ops-914", false),
     ("string", "byte_len", Lane::Runtime(Kernel::StringList("len")), "A", "core-ops-914", false),
@@ -2409,8 +2415,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
-    /// `provide.clock/random/process` and the hand operations (core.md, Provide).
-    /// A constructor's pair is (value, written): the capability and its hand.
+    /// `provide.clock/random/process/stdout/stderr`, the hand operations and
+    /// the served-port operations (core.md, Provide). A constructor's pair is
+    /// (value, written): the capability and its hand or `Served` end.
     fn runtime_provide(
         &mut self,
         op: HostOp,
@@ -2425,11 +2432,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 | HostOp::ClockSetWall
                 | HostOp::ClockIdle
                 | HostOp::ProcessTrigger
+                | HostOp::PortNext
+                | HostOp::PortReply
         );
+        // A resource operand arrives as its key, or as a pointer to it when the
+        // caller lends or hands over a place.
         let mut args = Vec::new();
         for (i, v) in vals.iter().enumerate() {
             let v = (*v)?;
-            args.push(Arg::Value(if i == 0 && hand {
+            let resource = (i == 0
+                && (hand || matches!(op, HostOp::CallWord | HostOp::CallPayload)))
+                || (i == 1 && op == HostOp::PortReply);
+            let by_place = resource && self.b.values[v.index()] == Ty::Ptr;
+            args.push(Arg::Value(if by_place {
                 self.runtime_key(v, n)
             } else {
                 v
@@ -2446,8 +2461,29 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let ok = self.runtime_nonzero(u, value, n)?;
             self.raise_unless(ok, requested, written, n);
         }
+        if matches!(op, HostOp::ProvideStdout | HostOp::ProvideStderr) {
+            // A port's room, with its own record, saturating as the run time's.
+            let cell = self.konst(u, hirsel_core_layout::charge::PROVIDE_CELL, n)?;
+            let requested = self.value(u);
+            self.inst(
+                Inst::IntArith {
+                    result: requested,
+                    flag: None,
+                    op: ArithOp::Add,
+                    mode: ArithMode::Saturating,
+                    left: cell,
+                    right: vals[0]?,
+                },
+                n,
+            );
+            let ok = self.runtime_nonzero(u, value, n)?;
+            self.raise_unless(ok, requested, written, n);
+        }
         match op {
-            HostOp::ProvideClock | HostOp::ProvideProcess => {
+            HostOp::ProvideClock
+            | HostOp::ProvideProcess
+            | HostOp::ProvideStdout
+            | HostOp::ProvideStderr => {
                 let id = self.runtime_type(result, n)?;
                 let to = self.new_slot(PlaceTy::Declared(id), n);
                 self.runtime_store(to, &[Step::Field(0)], u, value, n);
@@ -2466,11 +2502,35 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     |_, _, _| {},
                 )
             }
+            HostOp::PortNext => {
+                // The Call is a resource place holding its key, as `host.open`'s file.
+                let zero = self.konst(u, 0, n)?;
+                let some = self.test(CompareOp::Ne, written, zero, n);
+                self.runtime_result(
+                    result,
+                    some,
+                    n,
+                    |cx, to, ty| {
+                        if let Some(to) =
+                            cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                        {
+                            cx.runtime_store(to, &[], u, value, n);
+                        }
+                    },
+                    |_, _, _| {},
+                )
+            }
+            HostOp::CallWord | HostOp::PortReply => {
+                if op == HostOp::PortReply {
+                    self.consume(vals[1], n);
+                }
+                Some(value)
+            }
             HostOp::ProcessTrigger => {
                 self.consume(vals[0], n);
                 None
             }
-            HostOp::ClockAdvance | HostOp::ClockSetWall => None,
+            HostOp::ClockAdvance | HostOp::ClockSetWall | HostOp::CallPayload => None,
             _ => unreachable!(),
         }
     }

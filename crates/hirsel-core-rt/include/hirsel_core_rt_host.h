@@ -256,6 +256,16 @@ HirselCoreHostOutcome hirsel_core_clock_set_wall(HirselCoreContext *, uint64_t h
    waited deadline and written is 1 when there is one. */
 HirselCoreHostOutcome hirsel_core_clock_idle(HirselCoreContext *, uint64_t hand, uint64_t);
 HirselCoreHostOutcome hirsel_core_process_trigger(HirselCoreContext *, uint64_t trigger, uint64_t);
+/* served ports (core.md, Provide). The constructors answer value = the
+ * capability's grant and written = the Served key; next answers written 1 with
+ * value = the Call key, or written 0 at quiescence; reply answers value 1 for
+ * Withdrawn. */
+HirselCoreHostOutcome hirsel_core_provide_stdout(HirselCoreContext *, uint64_t n, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_stderr(HirselCoreContext *, uint64_t n, uint64_t);
+HirselCoreHostOutcome hirsel_core_port_next(HirselCoreContext *, uint64_t served, uint64_t);
+HirselCoreHostOutcome hirsel_core_call_word(HirselCoreContext *, uint64_t call, uint64_t i, uint64_t);
+HirselCoreHostOutcome hirsel_core_call_payload(HirselCoreContext *, uint64_t call, uint64_t field, HirselCoreBuffer *out, uint64_t);
+HirselCoreHostOutcome hirsel_core_port_reply(HirselCoreContext *, uint64_t served, uint64_t call, uint64_t tag, uint64_t a, uint64_t b, uint64_t c, uint64_t);
 /* SEND_PAIR (26): buffer borrows the first prefix. The first word at path
    is a const HirselCoreBuffer * borrowing the second prefix. Both remain
    pinned through deliver. Outcome.value counts their concatenated prefix. */

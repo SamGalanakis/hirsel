@@ -756,10 +756,11 @@ fn bodied_core_operations(backend: Backend) {
     request.inputs.packages[1]
         .sources
         .push(hirsel_core_resolve::ModuleSource {
+                    foreign: false,
+                    captured: None,
             file,
             modules: vec!["args".into()],
             signatures: true,
-            foreign: false,
         });
     let product = Driver::default()
         .check(request, &mut Meter::new(false))

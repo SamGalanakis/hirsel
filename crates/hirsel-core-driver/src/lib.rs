@@ -31,7 +31,14 @@ mod native_entry;
 mod native_facts;
 mod native_object;
 mod native_sources;
+mod package_content;
 mod package_dir;
+mod package_files;
+mod package_lock;
+mod package_manifest;
+mod package_resolve;
+mod package_store;
+mod package_workspace;
 mod prebuild;
 mod release_manifest;
 pub use prebuild::Prebuilt;
@@ -112,22 +119,24 @@ pub struct CheckRequest {
     pub manifest: Option<PathBuf>,
 }
 impl CheckRequest {
+    pub(crate) fn capture_sources(&mut self) -> io::Result<()> {
+        for package in &mut self.inputs.packages {
+            for source in &mut package.sources {
+                if source.captured.is_none() {
+                    source.captured = Some(hirsel_core_resolve::CapturedSource {
+                        bytes: source.read()?,
+                        name: source.name(self.manifest.as_deref())?,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn source_std(root: &Path) -> io::Result<PackageManifest> {
         let mut manifest = PackageManifest::directory(root, package("std"), true)?;
         manifest.dependencies.push(package("core"));
         Ok(manifest)
-    }
-
-    /// A package directory over core and std: the directory convention
-    /// depends on both, a manifest names its own dependencies.
-    fn app(dir: &Path) -> io::Result<package_dir::PackageDir> {
-        let mut app = package_dir::PackageDir::open(dir)?;
-        if app.manifest.is_none() {
-            app.package
-                .dependencies
-                .extend([package("core"), package("std")]);
-        }
-        Ok(app)
     }
 
     pub fn libraries(libraries: &Path, store: &Path) -> io::Result<Self> {
@@ -149,70 +158,80 @@ impl CheckRequest {
         })
     }
     pub fn with_image(dir: &Path, store: &Path, image: Arc<CoreImage>) -> io::Result<Self> {
-        let mut app = package_dir::PackageDir::open(dir)?;
-        if app.manifest.is_none() {
-            app.package.dependencies.extend(
-                image
-                    .directory()?
-                    .inputs
-                    .packages
-                    .iter()
-                    .map(|p| p.package.clone()),
-            );
+        let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+        let mut request =
+            Self::from_app(package_dir::PackageDir::open(dir)?, &libraries, store, true)?;
+        if !request.use_image(image)? {
+            return Err(io::Error::other(
+                "the image holds packages outside the request",
+            ));
         }
-        Ok(Self {
-            manifest: app.manifest,
-            inputs: CorpusManifest {
-                core: image.directory()?.inputs.core.clone(),
-                packages: vec![app.package],
-            },
-            store: store.to_owned(),
-            library: LibraryInput::Image(image),
-            entry: Some(app.entry),
-        })
+        Ok(request)
     }
-    /// Installed program libraries are the published root modules, not their contract-test corpus.
+
     pub fn program(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
-        if product::normalized(libraries)
-            != product::normalized(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core"))
-            && product::normalized(libraries) != product::normalized(Path::new("core"))
-        {
-            return Self::directory(dir, libraries, store);
-        }
-        let app = Self::app(dir)?;
-        Ok(Self {
-            manifest: app.manifest,
-            inputs: CorpusManifest {
-                core: package("core"),
-                packages: vec![
-                    PackageProduct::bundled_manifest(&libraries.join("core")),
-                    PackageProduct::bundled_std_manifest(&libraries.join("std")),
-                    app.package,
-                ],
-            },
-            store: store.to_owned(),
-            library: LibraryInput::Sources,
-            entry: Some(app.entry),
-        })
+        Self::from_app(package_dir::PackageDir::open(dir)?, libraries, store, true)
     }
+
     pub fn directory(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
-        let core = if libraries == Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core") {
+        Self::from_app(package_dir::PackageDir::open(dir)?, libraries, store, false)
+    }
+
+    pub(crate) fn from_app(
+        app: package_dir::PackageDir,
+        libraries: &Path,
+        store: &Path,
+        program: bool,
+    ) -> io::Result<Self> {
+        let default = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+        let bundled = program
+            && (product::normalized(libraries) == product::normalized(&default)
+                || product::normalized(libraries) == product::normalized(Path::new("core")));
+        let core = if bundled || libraries == default {
             PackageProduct::bundled_manifest(&libraries.join("core"))
         } else {
             PackageManifest::directory(&libraries.join("core"), package("core"), true)?
         };
-        let std = Self::source_std(&libraries.join("std"))?;
-        let app = Self::app(dir)?;
+        let mut packages = vec![core];
+        if app.needs_std() {
+            packages.push(if bundled {
+                PackageProduct::bundled_std_manifest(&libraries.join("std"))
+            } else {
+                Self::source_std(&libraries.join("std"))?
+            });
+        }
+        packages.extend(app.dependencies);
+        packages.push(app.package);
         Ok(Self {
             manifest: app.manifest,
             inputs: CorpusManifest {
                 core: package("core"),
-                packages: vec![core, std, app.package],
+                packages,
             },
             store: store.to_owned(),
             library: LibraryInput::Sources,
             entry: Some(app.entry),
         })
+    }
+
+    pub(crate) fn use_image(&mut self, image: Arc<CoreImage>) -> io::Result<bool> {
+        let supplied = &image.directory()?.inputs.packages;
+        if supplied.iter().any(|image_package| {
+            !matches!(image_package.package.name.as_str(), "core" | "std")
+                || !self.inputs.packages.iter().any(|package| {
+                    package.package == image_package.package
+                        && package.dependencies == image_package.dependencies
+                })
+        }) {
+            return Ok(false);
+        }
+        self.inputs.packages.retain(|package| {
+            !supplied
+                .iter()
+                .any(|supplied| supplied.package == package.package)
+        });
+        self.library = LibraryInput::Image(image);
+        Ok(true)
     }
 }
 
@@ -623,18 +642,14 @@ impl Driver {
                 let bytes = {
                     hirsel_core_front::cost_scope!("non-check", "source file reads");
                     crate::meter::count(crate::meter::Count::FilesOpened, 1);
-                    std::fs::read(&s.file)?
+                    s.read()?
                 };
                 let hash = {
                     hirsel_core_front::cost_scope!("non-check", "source byte hashing");
                     ContentHash::of_bytes(&bytes)
                 };
                 bytes_total += bytes.len();
-                let name = request
-                    .manifest
-                    .as_deref()
-                    .map(|root| hirsel_core_resolve::manifest_name(root, &s.file))
-                    .transpose()?;
+                let name = s.name(request.manifest.as_deref())?;
                 sources.push((
                     ModulePath {
                         package: p.package.clone(),

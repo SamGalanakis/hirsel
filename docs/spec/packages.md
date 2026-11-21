@@ -401,11 +401,13 @@ reachable from X and nothing else from the workspace, as today's compiler input 
 `CorpusManifest` of `--inputs`). Each package has its identity, its sources (a member's files,
 or a published package's verified bytes) and its dependencies: its bindings and `core@1`.
 X's `[tests.sources]` join X's modules in X's test runs and in the queries about X's tests
-(`hirsel inspect --affected-tests`), and in no other build. The tests a command runs or
-inspects are the parameterless tests declared in X's own files, `[sources]` and
-`[tests.sources]`; a dependency's tests are compiled as its other declarations are, for the
-ordinary checks, and are never selected, run or given a per-test configuration. A request
-never holds two packages with one `name@major`, so name resolution reads each identity once.
+(`hirsel inspect --affected-tests`), and in no other build. `hirsel test` runs the tests
+declared in X's own `[sources]` and `[tests.sources]`, including tests with capability
+parameters, as PROG-4 specifies. Only parameterless tests can get a cached pass.
+`hirsel inspect --affected-tests` considers the parameterless tests in those same files.
+A dependency's tests are compiled as its other declarations are, for ordinary checks, and
+are never selected, run or given a per-test configuration. A request never holds two
+packages with one `name@major`, so name resolution reads each identity once.
 
 **Toolchain packages and images.** Resolution comes first, before any image is chosen. The
 toolchain packages a request holds are exactly those X's closure binds: a member that binds

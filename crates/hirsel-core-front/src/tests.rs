@@ -55,10 +55,11 @@ fn inputs_in(source: &str, core_dir: &Path, module: &str) -> (NameIndex, Vec<Mod
     let app = PackageManifest {
         package: package("app"),
         sources: vec![ModuleSource {
+            foreign: false,
+            captured: None,
             file: PathBuf::from("input.hirsel"),
             modules: vec![module.into()],
             signatures: false,
-            foreign: false,
         }],
         dependencies: vec![package("core")],
     };

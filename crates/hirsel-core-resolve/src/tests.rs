@@ -47,10 +47,11 @@ fn packages(sources: &[(&str, &str, &str)], mut symbols: Symbols) -> (NameIndex,
             .find(|p| p.package.name == pkg)
             .unwrap();
         manifest.sources.push(ModuleSource {
+            foreign: false,
+            captured: None,
             file: m.into(),
             modules: vec![m.into()],
             signatures: false,
-            foreign: false,
         });
     }
     for m in &mut manifests {
@@ -447,20 +448,22 @@ fn clean_measurement_keeps_valid_members_of_a_partly_refused_module() {
         PackageManifest {
             package: package("core"),
             sources: vec![ModuleSource {
+                foreign: false,
+                captured: None,
                 file: "string.hirsel".into(),
                 modules: vec!["string".into()],
                 signatures: false,
-                foreign: false,
             }],
             dependencies: vec![],
         },
         PackageManifest {
             package: package("app"),
             sources: vec![ModuleSource {
+                foreign: false,
+                captured: None,
                 file: "main.hirsel".into(),
                 modules: vec!["main".into()],
                 signatures: false,
-                foreign: false,
             }],
             dependencies: vec![package("core")],
         },
@@ -751,10 +754,11 @@ fn clean_measurement_preserves_module_ids_after_removing_a_whole_file() {
     ] {
         let file = std::path::PathBuf::from(format!("{name}.hirsel"));
         let source = ModuleSource {
+            foreign: false,
+            captured: None,
             file: file.clone(),
             modules: vec![name.into()],
             signatures: false,
-            foreign: false,
         };
         if pkg == "core" {
             core.sources.push(source);
@@ -1113,10 +1117,11 @@ fn lang_1_prog_7_columns_count_scalars_and_one_per_tab() {
                 PackageManifest {
                     package: package("app"),
                     sources: vec![ModuleSource {
+                        foreign: false,
+                        captured: None,
                         file: "positions.hirsel".into(),
                         modules: vec!["m".into()],
                         signatures: false,
-                        foreign: false,
                     }],
                     dependencies: vec![],
                 },

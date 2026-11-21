@@ -157,10 +157,11 @@ mod tests {
             sources: files
                 .into_iter()
                 .map(|file| ModuleSource {
+                    foreign: false,
+                    captured: None,
                     modules: vec![file.file_stem().unwrap().to_string_lossy().into()],
                     file,
                     signatures: true,
-                    foreign: false,
                 })
                 .collect(),
         }
@@ -213,10 +214,11 @@ mod tests {
             package: package("lib"),
             dependencies: vec![package("core"), package("std")],
             sources: vec![ModuleSource {
+                foreign: false,
+                captured: None,
                 file,
                 modules: vec!["lib".into()],
                 signatures: false,
-                foreign: false,
             }],
         };
         let product = check(&root, vec![lib], &dir.path().join("store"));

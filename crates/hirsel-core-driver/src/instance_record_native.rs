@@ -323,10 +323,11 @@ fn library_request(app: &str, lib: &str, core: &Path, dir: &Path, store: &str) -
     request.inputs.packages.push(PackageManifest {
         package: package("lib"),
         sources: vec![hirsel_core_resolve::ModuleSource {
+                    foreign: false,
+                    captured: None,
             file,
             modules: vec!["api".into()],
             signatures: false,
-            foreign: false,
         }],
         dependencies: vec![package("core")],
     });

@@ -10,6 +10,14 @@ pub struct ModuleSource {
     pub signatures: bool,
     #[serde(default)]
     pub foreign: bool,
+    #[serde(skip)]
+    pub captured: Option<CapturedSource>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CapturedSource {
+    pub bytes: std::sync::Arc<[u8]>,
+    pub name: Option<String>,
 }
 
 impl ModuleSource {
@@ -21,6 +29,25 @@ impl ModuleSource {
         } else {
             ParseMode::Source
         }
+    }
+
+    pub fn read(&self) -> std::io::Result<std::sync::Arc<[u8]>> {
+        match &self.captured {
+            Some(captured) => Ok(captured.bytes.clone()),
+            None => std::fs::read(&self.file).map(std::sync::Arc::from),
+        }
+    }
+    pub fn name(&self, manifest: Option<&Path>) -> std::io::Result<Option<String>> {
+        if let Some(name) = self
+            .captured
+            .as_ref()
+            .and_then(|capture| capture.name.as_ref())
+        {
+            return Ok(Some(name.clone()));
+        }
+        manifest
+            .map(|root| crate::manifest_name(root, &self.file))
+            .transpose()
     }
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -120,10 +147,11 @@ impl PackageManifest {
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     out.push(ModuleSource {
+                        foreign: false,
+                        captured: None,
                         file: path,
                         modules,
                         signatures,
-                        foreign: false,
                     });
                 }
             }
@@ -148,7 +176,7 @@ impl PackageManifest {
         self.sources
             .iter()
             .map(|s| {
-                let bytes = std::fs::read(&s.file)?;
+                let bytes = s.read()?;
                 Ok(ParsedModule {
                     module: ModulePath {
                         package: self.package.clone(),

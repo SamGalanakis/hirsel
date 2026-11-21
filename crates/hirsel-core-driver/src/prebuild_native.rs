@@ -14,10 +14,11 @@ fn prebuild_libraries(image: &CoreImage) -> Vec<PackageId> {
 fn prebuild_corpus(image: &Arc<CoreImage>, store: &Path) -> (Arc<CheckProduct>, Option<DefPath>) {
     let m1 = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/programs/m1");
     let source = |file: PathBuf, module: &str| hirsel_core_resolve::ModuleSource {
+                    foreign: false,
+                    captured: None,
         file,
         modules: vec![module.into()],
         signatures: false,
-        foreign: false,
     };
     let libraries = prebuild_libraries(image);
     let packages = vec![

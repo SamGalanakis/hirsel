@@ -289,47 +289,39 @@ fn edit_distance(written: &[char], candidate: &str, row: &mut [usize]) -> usize 
 /// The terminal form of PROG-7 sites: `path:line:column`, from the request's
 /// own source files. A site whose file the request did not read (an image's
 /// library source) keeps its module and byte span.
-pub struct SourceFiles(Vec<(String, PathBuf)>);
+pub struct SourceFiles(Vec<(String, PathBuf, Arc<[u8]>)>);
+
 impl SourceFiles {
-    /// Name each request file as `source_site` names it: by its path relative
-    /// to the manifest, or without a manifest by its module.
     pub fn of(request: &CheckRequest) -> Self {
         let mut files = Vec::new();
         for package in &request.inputs.packages {
             for source in &package.sources {
-                let name = match &request.manifest {
-                    Some(root) => match hirsel_core_resolve::manifest_name(root, &source.file) {
-                        Ok(name) => name,
-                        Err(_) => continue,
-                    },
-                    None => format!(
+                let Some(captured) = &source.captured else {
+                    continue;
+                };
+                let name = captured.name.clone().unwrap_or_else(|| {
+                    format!(
                         "{}@{}/{}",
                         package.package.name,
                         package.package.version,
                         source.modules.join("/")
-                    ),
-                };
-                files.push((name, source.file.clone()));
+                    )
+                });
+                files.push((name, source.file.clone(), Arc::clone(&captured.bytes)));
             }
         }
         Self(files)
     }
+
     pub fn none() -> Self {
         Self(Vec::new())
     }
-    /// `path:line:column`, with `-line:column` for the span's end when it
-    /// differs. The bytes are read now, so a file changed since the check
-    /// shows the current text's positions.
+
     pub fn render(&self, site: &SourceSite) -> String {
-        let found = self
-            .0
-            .iter()
-            .find(|(name, _)| *name == site.module)
-            .and_then(|(_, path)| Some((path, std::fs::read(path).ok()?)));
-        let Some((path, text)) = found else {
+        let Some((_, path, text)) = self.0.iter().find(|(name, _, _)| *name == site.module) else {
             return format!("{} {}..{}", site.module, site.span.start, site.span.end);
         };
-        render_span(path, &text, site.span)
+        render_span(path, text, site.span)
     }
 }
 

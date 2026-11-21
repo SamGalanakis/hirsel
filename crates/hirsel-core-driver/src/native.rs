@@ -1801,10 +1801,11 @@ pub(crate) mod tests {
         request.inputs.packages.push(PackageManifest {
             package: package("core"),
             sources: vec![hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file: core,
                 modules: vec!["core".into()],
                 signatures: true,
-                foreign: false,
             }],
             dependencies: vec![],
         });

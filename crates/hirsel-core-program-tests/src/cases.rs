@@ -1221,10 +1221,11 @@ fn recovered_header_cases() -> Vec<String> {
             .unwrap();
             let mut store = request.inputs.packages.pop().unwrap();
             store.sources.push(ModuleSource {
+                foreign: false,
+                captured: None,
                 file: path,
                 modules: vec!["ice_places_358_store".into()],
                 signatures: false,
-                foreign: false,
             });
             packages.push(store);
             ("store", "ice_places_358_store", None)
@@ -1233,10 +1234,11 @@ fn recovered_header_cases() -> Vec<String> {
                 package: package("app"),
                 dependencies: vec![package("core"), package("std")],
                 sources: vec![ModuleSource {
+                    foreign: false,
+                    captured: None,
                     file: path,
                     modules: vec!["main".into()],
                     signatures: false,
-                    foreign: false,
                 }],
             });
             ("app", "main", DefPath::from_full("app@1/main/main"))
@@ -1307,10 +1309,11 @@ fn flow_transform_rejects() {
         package: package("dep"),
         dependencies: vec![package("core")],
         sources: vec![ModuleSource {
+            foreign: false,
+            captured: None,
             file: dep.clone(),
             modules: vec!["api".into()],
             signatures: false,
-            foreign: false,
         }],
     });
     let mut driver = Driver::default();
@@ -1378,10 +1381,11 @@ pub fn worker() -> u64 { 0 }
             let file = files.path().join(format!("{module}.hirsel"));
             std::fs::write(&file, source).unwrap();
             ModuleSource {
+                foreign: false,
+                captured: None,
                 file,
                 modules: vec![module.into()],
                 signatures: false,
-                foreign: false,
             }
         })
         .collect();

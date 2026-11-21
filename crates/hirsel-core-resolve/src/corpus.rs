@@ -58,17 +58,22 @@ impl CorpusManifest {
     /// sources normalises first and takes path-free stamps in traversal order.
     pub fn normalise(&mut self, root: Option<&Path>) {
         self.packages.sort_by(|a, b| a.package.cmp(&b.package));
-        let name = |file: &Path| root.and_then(|root| manifest_name(root, file).ok());
         for p in &mut self.packages {
             p.dependencies.sort();
             p.sources.sort_by(|a, b| {
                 a.modules.cmp(&b.modules).then_with(|| {
-                    (name(&a.file), &a.file, a.signatures, a.foreign).cmp(&(
-                        name(&b.file),
-                        &b.file,
-                        b.signatures,
-                        b.foreign,
-                    ))
+                    (
+                        a.name(root).ok().flatten(),
+                        &a.file,
+                        a.signatures,
+                        a.foreign,
+                    )
+                        .cmp(&(
+                            b.name(root).ok().flatten(),
+                            &b.file,
+                            b.signatures,
+                            b.foreign,
+                        ))
                 })
             });
         }
@@ -84,7 +89,8 @@ impl CorpusManifest {
                         modules: source.modules.clone(),
                     },
                     file: source.file.clone(),
-                    text: std::fs::read_to_string(&source.file)?,
+                    text: String::from_utf8(source.read()?.to_vec())
+                        .map_err(std::io::Error::other)?,
                     mode: source.mode(),
                 });
             }

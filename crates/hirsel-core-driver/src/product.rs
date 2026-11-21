@@ -35,11 +35,15 @@ impl PackageProduct {
             dependencies,
             sources: sources
                 .iter()
-                .map(|(module, _)| ModuleSource {
+                .map(|(module, text)| ModuleSource {
+                    foreign: false,
+                    captured: Some(hirsel_core_resolve::CapturedSource {
+                        bytes: text.as_bytes().into(),
+                        name: None,
+                    }),
                     file: root.join(format!("{module}.hirsel")),
                     modules: vec![(*module).into()],
                     signatures: true,
-                    foreign: false,
                 })
                 .collect(),
         }
@@ -334,7 +338,7 @@ fn bundled_std_selection(input: &PackageManifest) -> Option<Vec<(&'static str, &
             .binary_search_by_key(&name, |(module, _)| module)
             .ok()?;
         let expected = bundled::STD_SOURCES[at];
-        if !matches_source(&source.file, expected.1, &mut bytes) {
+        if !matches_source(source, expected.1, &mut bytes) {
             return None;
         }
         selected.push(expected);
@@ -368,18 +372,21 @@ fn matches_bundle(
             source.signatures
                 && !source.foreign
                 && source.modules == [*module]
-                && matches_source(&source.file, text, &mut bytes)
+                && matches_source(source, text, &mut bytes)
         })
 }
 
-fn matches_source(path: &Path, expected: &str, bytes: &mut Vec<u8>) -> bool {
+fn matches_source(source: &ModuleSource, expected: &str, bytes: &mut Vec<u8>) -> bool {
     use std::io::Read;
 
+    if let Some(captured) = &source.captured {
+        return &*captured.bytes == expected.as_bytes();
+    }
     if bytes.len() < expected.len() {
         bytes.resize(expected.len(), 0);
     }
     let bytes = &mut bytes[..expected.len()];
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let Ok(mut file) = std::fs::File::open(&source.file) else {
         return false;
     };
     // An exact prefix by itself would also accept a longer file.
@@ -423,10 +430,11 @@ mod tests {
             package: package("std"),
             dependencies: vec![package("core")],
             sources: vec![ModuleSource {
+                foreign: false,
+                captured: None,
                 file: file.clone(),
                 modules: vec![name.into()],
                 signatures: true,
-                foreign: false,
             }],
         };
         assert!(bundled_std_selection(&manifest).is_some());
@@ -443,10 +451,11 @@ mod tests {
                 package: package("core"),
                 dependencies: vec![],
                 sources: vec![ModuleSource {
+                    foreign: false,
+                    captured: None,
                     file,
                     modules: vec!["core".into()],
                     signatures: true,
-                    foreign: false,
                 }],
             }],
         }
@@ -468,10 +477,11 @@ mod tests {
                 let file = dir.path().join(format!("{i}.hirsel"));
                 std::fs::write(&file, text).unwrap();
                 core.sources.push(ModuleSource {
+                    foreign: false,
+                    captured: None,
                     file,
                     modules: vec!["ordering".into()],
                     signatures: false,
-                    foreign: false,
                 });
             }
             CorpusManifest {
@@ -796,10 +806,11 @@ mod tests {
             package: package("std"),
             dependencies: vec![package("core")],
             sources: vec![ModuleSource {
+                foreign: false,
+                captured: None,
                 file: std_file,
                 modules: vec!["std_only".into()],
                 signatures: true,
-                foreign: false,
             }],
         });
         request.inputs.packages[0].dependencies = vec![package("core"), package("std")];
@@ -939,10 +950,11 @@ mod agreement {
                         package: package("app"),
                         dependencies: vec![package("core")],
                         sources: vec![ModuleSource {
+                            foreign: false,
+                            captured: None,
                             file: file.clone(),
                             modules: vec!["case".into()],
                             signatures: false,
-                            foreign: false,
                         }],
                     },
                 ],
@@ -1038,10 +1050,11 @@ mod indexed_tests {
                     package: package("core"),
                     dependencies: vec![],
                     sources: vec![hirsel_core_resolve::ModuleSource {
+                        foreign: false,
+                        captured: None,
                         file,
                         modules: vec!["core".into()],
                         signatures: true,
-                        foreign: false,
                     }],
                 }],
             };

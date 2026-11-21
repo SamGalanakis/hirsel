@@ -109,10 +109,11 @@ fn sibling_main_wrapper_executes_the_sibling_body() {
         sources: ["main", "matched"]
             .into_iter()
             .map(|name| ModuleSource {
+                foreign: false,
+                captured: None,
                 file: name.into(),
                 modules: vec![name.into()],
                 signatures: false,
-                foreign: false,
             })
             .collect(),
     };

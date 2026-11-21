@@ -14,10 +14,11 @@ pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
             packages: vec![PackageManifest {
                 package: package("app"),
                 sources: vec![hirsel_core_resolve::ModuleSource {
+                    foreign: false,
+                    captured: None,
                     file: source_file,
                     modules: vec!["main".into()],
                     signatures: false,
-                    foreign: false,
                 }],
                 dependencies: vec![],
             }],
@@ -58,18 +59,20 @@ fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Ar
         .unwrap()
         .package;
     if let Some(path) = runner_override {
-        store
+        let source = store
             .sources
             .iter_mut()
             .find(|source| source.modules == ["runner"])
-            .unwrap()
-            .file = path.to_owned();
+            .unwrap();
+        source.file = path.to_owned();
+        source.captured = None;
     }
     store.sources.push(hirsel_core_resolve::ModuleSource {
+        foreign: false,
+        captured: None,
         file: root.join("crates/hirsel-core-driver/src/testdata/runner_launch.hirsel"),
         modules: vec!["runner_launch".into()],
         signatures: false,
-        foreign: false,
     });
     request.inputs.packages.push(store);
     let product = Driver::default()
@@ -536,10 +539,11 @@ fn prog8_unrelated_parse_failure_does_not_suppress_other_results() {
     req.inputs.packages[0]
         .sources
         .push(hirsel_core_resolve::ModuleSource {
+            foreign: false,
+            captured: None,
             file: bad,
             modules: vec!["broken".into()],
             signatures: false,
-            foreign: false,
         });
     let product = Driver::default()
         .check(req, &mut Meter::new(false))
@@ -755,10 +759,11 @@ fn prog1_prog6_transitive_type_reads_and_discovery_order_have_stable_results() {
         req.inputs.packages[0]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file: other.clone(),
                 modules: vec!["other".into()],
                 signatures: false,
-                foreign: false,
             });
         req
     };
@@ -1114,7 +1119,8 @@ fn prog7_terminal_sites_count_scalar_columns_and_crlf_lines() {
     // `n`, so it is column 45; a byte count would say 51.
     let dir = tempfile::tempdir().unwrap();
     let source = "// \u{fc}\r\nfn good() -> u64 { 42 }\r\nfn bad() -> u64 { /* \u{e9}\u{2192}\u{1f600} */ let n: u16 = 7; n }\r\n";
-    let req = request(source, dir.path());
+    let mut req = request(source, dir.path());
+    req.capture_sources().unwrap();
     let files = crate::SourceFiles::of(&req);
     let path = req.inputs.packages[0].sources[0].file.clone();
     let result = Driver::default()
@@ -1387,10 +1393,11 @@ fn session_id_changes_reuse_and_rebind_cached_refusals() {
         req.inputs.packages[0]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file: earlier.clone(),
                 modules: vec!["aaa".into()],
                 signatures: false,
-                foreign: false,
             });
         req
     };
@@ -1572,10 +1579,11 @@ fn reachable_census_retains_a_named_function_without_a_native_body() {
     req.inputs.packages.push(PackageManifest {
         package: package("core"),
         sources: vec![hirsel_core_resolve::ModuleSource {
+            foreign: false,
+            captured: None,
             file: library,
             modules: vec!["core".into()],
             signatures: true,
-            foreign: false,
         }],
         dependencies: vec![],
     });
@@ -1817,10 +1825,11 @@ fn lowered_runtime_operation_needs_no_outside_body() {
     req.inputs.packages.push(PackageManifest {
         package: package("core"),
         sources: vec![hirsel_core_resolve::ModuleSource {
+            foreign: false,
+            captured: None,
             file: core,
             modules: vec!["task".into()],
             signatures: true,
-            foreign: false,
         }],
         dependencies: vec![],
     });
@@ -1925,10 +1934,11 @@ fn indexed_combined_libraries_keep_existing_module_extensions() {
             package: package(name),
             dependencies: deps,
             sources: vec![hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file,
                 modules: vec![module.into()],
                 signatures: name != "app",
-                foreign: false,
             }],
         }
     }
@@ -2285,10 +2295,11 @@ fn program_request(kind: &str, dir: &Path, store: &Path) -> CheckRequest {
         req.inputs.packages[0]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file,
                 modules: vec![name.into()],
                 signatures: false,
-                foreign: false,
             });
     }
     req
@@ -2714,8 +2725,9 @@ fn m2b_requests(root: &Path, dir: &Path) -> Vec<(String, CheckRequest)> {
         sources: corpus_files(&root.join("core").join(name), false)
             .into_iter()
             .map(|s| hirsel_core_resolve::ModuleSource {
-                signatures: true,
                 foreign: false,
+                captured: None,
+                signatures: true,
                 ..s
             })
             .collect(),
@@ -2815,10 +2827,11 @@ fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckReq
         req.inputs.packages[at]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file,
                 modules: vec![module.to_string()],
                 signatures: false,
-                foreign: false,
             });
     }
     req
@@ -3187,10 +3200,11 @@ fn corpus_files(dir: &Path, tests: bool) -> Vec<hirsel_core_resolve::ModuleSourc
             let rel = p.strip_prefix(dir).unwrap().with_extension("");
             let modules: Vec<String> = rel.iter().map(|m| m.to_string_lossy().into()).collect();
             (tests || modules[0] != "tests").then_some(hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
                 file: p,
                 modules,
                 signatures: dir.ends_with("core"),
-                foreign: false,
             })
         })
         .collect()

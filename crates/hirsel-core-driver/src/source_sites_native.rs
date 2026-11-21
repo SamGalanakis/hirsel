@@ -288,10 +288,11 @@ fn failure_sites_two_files(backend: Backend) {
         request.manifest = manifest.then(|| dir.path().to_owned());
         request.inputs.packages[0].sources = [&a, &b]
             .map(|file| hirsel_core_resolve::ModuleSource {
+                    foreign: false,
+                    captured: None,
                 file: file.clone(),
                 modules: vec!["main".into()],
                 signatures: false,
-                foreign: false,
             })
             .to_vec();
         Driver::default().check(request, &mut Meter::new(false)).unwrap()

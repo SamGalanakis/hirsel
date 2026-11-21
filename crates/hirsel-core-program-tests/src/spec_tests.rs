@@ -203,10 +203,11 @@ fn check_fences(fences: &[&Fence], failures: &mut Vec<String>) {
         let file = files.path().join(format!("{sample}.hirsel"));
         fs::write(&file, &fence.source).unwrap();
         let source = ModuleSource {
+            foreign: false,
+            captured: None,
             file,
             modules: vec![sample.clone()],
             signatures: fence.signatures,
-            foreign: false,
         };
         let pkg = if fence.signatures {
             library.sources.push(source);

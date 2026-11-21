@@ -39,10 +39,11 @@ pub(crate) fn source_manifest(
         package: package("app"),
         dependencies,
         sources: vec![ModuleSource {
+            foreign: false,
+            captured: None,
             file: path,
             modules: vec![module.into()],
             signatures: false,
-            foreign: false,
         }],
     });
     CorpusManifest {
@@ -148,10 +149,11 @@ pub(crate) fn checked_inputs(
                 sources: vec![],
             });
         package.sources.push(ModuleSource {
+            foreign: false,
+            captured: None,
             file,
             modules: path.modules,
             signatures: path.package == core,
-            foreign: false,
         });
     }
     if !packages.contains_key(&core) {

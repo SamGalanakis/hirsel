@@ -109,6 +109,58 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         ))?;
         std::process::exit(0);
     }
+    let mut package_mode = crate::package_lock::Mode::default();
+    let mut package_store = None;
+    let mut pack_out = None;
+    for (option, value) in invocation.options.extract_if(.., |(option, _)| {
+        matches!(
+            option,
+            Opt::Locked | Opt::Frozen | Opt::PackageStore | Opt::PackOut
+        )
+    }) {
+        match option {
+            Opt::Locked if package_mode != crate::package_lock::Mode::Frozen => {
+                package_mode = crate::package_lock::Mode::Locked
+            }
+            Opt::Frozen => package_mode = crate::package_lock::Mode::Frozen,
+            Opt::PackageStore => package_store = value.map(PathBuf::from),
+            Opt::PackOut => pack_out = value.map(PathBuf::from),
+            _ => {}
+        }
+    }
+    let package_store = crate::package_store::PackageStore::new(package_store);
+    let package_command = matches!(command, "lock" | "fetch" | "pack");
+    if package_command {
+        let directory = invocation.positional.as_deref().unwrap_or(".");
+        let workspace = crate::package_workspace::Workspace::discover(Path::new(directory))?
+            .ok_or_else(|| format!("{directory} has no workspace manifest"))?;
+        let selected = (command == "pack")
+            .then(|| workspace.selected().cloned())
+            .transpose()?;
+        let mut resolved = crate::package_resolve::Resolution::resolve(
+            workspace,
+            package_store,
+            package_mode == crate::package_lock::Mode::Frozen,
+        )?;
+        let lock = crate::package_lock::Lock::compare(&resolved, package_mode)?;
+        if let Some(selected) = selected {
+            let out = pack_out.ok_or("pack requires --out FILE")?;
+            let (bytes, archive) = resolved.make_archive(&selected)?;
+            crate::package_lock::ensure_pack_output(&resolved, &archive, &lock, &out)?;
+            lock.commit(&resolved.workspace)?;
+            resolved.store.install(&archive)?;
+            crate::package_store::atomic_write(&out, &bytes)?;
+            println!("{selected} {}", archive.head);
+            for (root, library) in &archive.entries {
+                if *root != archive.head {
+                    println!("{} {root}", library.content.id);
+                }
+            }
+        } else {
+            lock.commit(&resolved.workspace)?;
+        }
+        std::process::exit(0);
+    }
     let replay_command = command == "replay";
     if command == "new" {
         let directory = invocation
@@ -120,6 +172,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             .iter()
             .any(|(id, _)| *id == crate::cli::OptionId::Lib);
         crate::cli::scaffold(Path::new(directory), library)?;
+        crate::package_store::atomic_write(
+            &Path::new(directory).join("hirsel.lock"),
+            crate::package_lock::scaffold().as_bytes(),
+        )?;
         println!(
             "Created {} at {directory}",
             if library {
@@ -324,6 +380,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::Signatures
             | Opt::ListRules
             | Opt::SdkOut
+            | Opt::PackOut
+            | Opt::PackageStore
+            | Opt::Locked
+            | Opt::Frozen
             | Opt::Url
             | Opt::Control
             | Opt::HostState
@@ -347,6 +407,49 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     }
     if expect_verdict.is_some() && !test_replay {
         return Err("--expect-verdict requires --replay".into());
+    }
+    let app_directory = dir.clone().or_else(|| {
+        (manifest.is_none()
+            && recipe_root.is_none()
+            && matches!(command, "check" | "build" | "publish" | "run" | "test"))
+        .then(|| PathBuf::from("."))
+    });
+    let mut workspace_app = None;
+    if manifest.is_some() {
+        package_mode.require_workspace("--inputs")?;
+    } else if recipe_root.is_some() {
+        package_mode.require_workspace("--recipe")?;
+    } else if inspect_std {
+        package_mode.require_workspace("--std")?;
+    } else if matches!(
+        command,
+        "check" | "build" | "publish" | "run" | "test" | "inspect" | "replay"
+    ) {
+        if let Some(directory) = &app_directory {
+            if let Some(workspace) = crate::package_workspace::Workspace::discover(directory)? {
+                let selected = workspace.selected()?.clone();
+                let resolved = crate::package_resolve::Resolution::resolve(
+                    workspace,
+                    package_store,
+                    package_mode == crate::package_lock::Mode::Frozen,
+                )?;
+                crate::package_lock::Lock::compare(&resolved, package_mode)?
+                    .commit(&resolved.workspace)?;
+                let include_tests = test_command
+                    || inspection
+                        .as_ref()
+                        .is_some_and(|option| option.includes_tests());
+                workspace_app = Some(crate::package_dir::PackageDir::from_resolution(
+                    &resolved,
+                    &selected,
+                    include_tests,
+                )?);
+            } else {
+                package_mode.require_workspace("the directory convention")?;
+            }
+        } else {
+            package_mode.require_workspace("the request")?;
+        }
     }
     let mut replay_plan = None;
     if replay_command {
@@ -406,12 +509,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     } else {
         None
     };
-    let dir = dir.or_else(|| {
-        (manifest.is_none()
-            && stored_recipe.is_none()
-            && matches!(command, "check" | "build" | "run" | "test"))
-        .then(|| PathBuf::from("."))
-    });
+    let dir = app_directory;
     let runner = match (emulator, sysroot) {
         (None, None) => crate::Runner::Native,
         (Some(emulator), Some(sysroot)) => crate::Runner::qemu(&emulator, &sysroot, &target)?,
@@ -498,7 +596,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     if profile_front {
         meter.profile_image_index();
     }
-    let installed_std = if installed.is_some() && !libraries_explicit && !source_std && !source_core
+    let installed_std = if installed.is_some()
+        && !libraries_explicit
+        && !source_std
+        && !source_core
+        && workspace_app.as_ref().is_none_or(|app| app.needs_std())
     {
         installed.as_ref().unwrap().product("std")?
     } else {
@@ -684,16 +786,18 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     {
         hirsel_llvm_lazy::llvm_library()?;
     }
-    let image = if let Some(path) = image_path {
-        Some(CoreImage::open(&path)?.ok_or("core image cache miss; rebuild the image")?)
-    } else {
-        None
-    };
+    let image = image_path
+        .as_ref()
+        .map(|path| {
+            CoreImage::open(path)?
+                .ok_or_else(|| std::io::Error::other("core image cache miss; rebuild the image"))
+        })
+        .transpose()?;
     if command == "image" && image.is_some() {
         return Err("image production takes sources, not an image".into());
     }
-    let explicit_inputs = manifest.is_some();
-    let package_dir = dir.clone();
+    let mut manifest_runs = None;
+    let mut test_owner = None;
     let mut request = if let Some(manifest) = manifest {
         CheckRequest {
             inputs: serde_json::from_slice::<CorpusManifest>(&std::fs::read(&manifest)?)?,
@@ -709,39 +813,37 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         CheckRequest::libraries(&libraries, &store)?
     } else if command == "image" {
         CheckRequest::libraries(dir.as_deref().unwrap_or(&libraries), &store)?
-    } else if let Some(image) = image {
-        CheckRequest::with_image(&dir.ok_or("missing package directory")?, &store, image)?
-    } else if let Some(image) = installed_std {
-        CheckRequest::with_image(&dir.ok_or("missing package directory")?, &store, image)?
-    } else if native_command || installed.is_some() || inspection.is_some() {
-        CheckRequest::program(&dir.ok_or("missing package directory")?, &libraries, &store)?
     } else {
-        CheckRequest::directory(&dir.ok_or("missing package directory")?, &libraries, &store)?
+        let mut app = match workspace_app {
+            Some(app) => app,
+            None => crate::package_dir::PackageDir::convention(
+                dir.as_deref().ok_or("missing package directory")?,
+            )?,
+        };
+        test_owner = Some(app.package.package.clone());
+        manifest_runs = app.tests.take();
+        let mut request = CheckRequest::from_app(
+            app,
+            &libraries,
+            &store,
+            native_command || installed.is_some() || inspection.is_some() || image.is_some(),
+        )?;
+        if let Some(image) = image {
+            if !request.use_image(image)? {
+                return Err(format!(
+                    "--image {} does not hold exactly this request's packages",
+                    image_path.unwrap().display()
+                )
+                .into());
+            }
+        } else if let Some(image) = installed_std {
+            request.use_image(image)?;
+        }
+        request
     };
     if entry.is_some() {
         request.entry = entry;
     }
-    let manifest_runs = if (test_command || inspection.as_ref().is_some_and(|i| i.includes_tests()))
-        && !explicit_inputs
-        && let Some(dir) = &package_dir
-        && let crate::package_dir::PackageDir {
-            package,
-            tests: Some((sources, runs)),
-            ..
-        } = crate::package_dir::PackageDir::open(dir)?
-    {
-        request
-            .inputs
-            .packages
-            .iter_mut()
-            .find(|p| p.package == package.package)
-            .ok_or("the package's manifest names no checked package")?
-            .sources
-            .extend(sources);
-        Some(runs)
-    } else {
-        None
-    };
     // PROG-4: each test's run configuration, from the package's manifest
     // when it declares one, else from the command line.
     let test_runs = if test_command {
@@ -775,6 +877,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         *path = std::path::absolute(&*path)?;
     }
     let selected_entry = request.entry.clone();
+    request.capture_sources()?;
     let sources = crate::SourceFiles::of(&request);
     let native_store = request.store.join("native");
     let store_root = request.store.clone();
@@ -923,9 +1026,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         use crate::{Source, TestCache};
 
         let test_runs = test_runs.expect("a test request has its run configuration");
-        test_runs.check_names(&product.tests().collect())?;
-        let tests: Vec<_> = product
-            .tests()
+        let own_tests = || {
+            product.tests().filter(|path| {
+                test_owner
+                    .as_ref()
+                    .is_none_or(|owner| &path.0.package == owner)
+            })
+        };
+        test_runs.check_names(&own_tests().collect())?;
+        let tests: Vec<_> = own_tests()
             .filter(|path| {
                 test_filter
                     .as_ref()

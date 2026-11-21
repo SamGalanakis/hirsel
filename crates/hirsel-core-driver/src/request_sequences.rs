@@ -249,10 +249,11 @@ fn materialize(
             now.insert(file.canonicalize().unwrap());
             let modules: Vec<String> = s.modules.split('/').map(str::to_owned).collect();
             let source = hirsel_core_resolve::ModuleSource {
+                    foreign: false,
+                    captured: None,
                 file,
                 modules,
                 signatures: s.signatures,
-                foreign: false,
             };
             match manifest.sources[..bundled]
                 .iter_mut()
@@ -2249,6 +2250,8 @@ fn checkout_for(root: &Path, step: &Step) -> PathBuf {
     for (file, module, text) in &step.files {
         std::fs::write(app.join(file), text).unwrap();
         sources.push(hirsel_core_resolve::ModuleSource {
+                    foreign: false,
+                    captured: None,
             file: if step.relative.contains(file) {
                 Path::new(step.dir).join("app").join(file)
             } else {
@@ -2256,7 +2259,6 @@ fn checkout_for(root: &Path, step: &Step) -> PathBuf {
             },
             modules: module.split('/').map(str::to_owned).collect(),
             signatures: false,
-            foreign: false,
         });
     }
     let manifest = CorpusManifest {

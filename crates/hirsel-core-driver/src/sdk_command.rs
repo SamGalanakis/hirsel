@@ -44,6 +44,9 @@ impl Options {
                         OptionId::Cc => "--cc",
                         OptionId::Target => "--target",
                         OptionId::Inputs => "--inputs",
+                        OptionId::PackageStore => "--package-store",
+                        OptionId::Locked => "--locked",
+                        OptionId::Frozen => "--frozen",
                         OptionId::Libraries => "--libraries",
                         OptionId::Entry => "--entry",
                         OptionId::Store => "--store",
@@ -98,6 +101,14 @@ fn run_with(
 ) -> Result<(), Error> {
     let work = tempfile::tempdir()?;
     let executable = if options.program.is_file() {
+        if let Some(flag) = ["--frozen", "--locked"]
+            .into_iter()
+            .find(|flag| options.build.iter().any(|option| option == flag))
+        {
+            return Err(
+                format!("{flag} needs a workspace lock; the SDK executable has none").into(),
+            );
+        }
         options.program.canonicalize()?
     } else {
         let executable = work.path().join("server");
@@ -168,10 +179,11 @@ pub fn frame_schema(
             let file = directory.join(format!("{module}.hirsel"));
             std::fs::write(&file, text)?;
             sources.push(ModuleSource {
+                foreign: false,
+                captured: None,
                 file,
                 modules: vec![(*module).into()],
                 signatures,
-                foreign: false,
             });
         }
         packages.push(PackageManifest {
@@ -189,10 +201,11 @@ pub fn frame_schema(
         package: sdk,
         dependencies: vec![core.clone(), std, store],
         sources: vec![ModuleSource {
+            foreign: false,
+            captured: None,
             file: source,
             modules: vec!["main".into()],
             signatures: false,
-            foreign: false,
         }],
     });
     let manifest = work.join("schema.json");
@@ -221,7 +234,10 @@ pub fn frame_schema(
             command
                 .arg(flag)
                 .arg(flags.next().ok_or("missing build option value")?);
-        } else if !matches!(flag.as_str(), "--source-core" | "--source-std") {
+        } else if !matches!(
+            flag.as_str(),
+            "--source-core" | "--source-std" | "--locked" | "--frozen"
+        ) {
             let _ = flags.next();
         }
     }

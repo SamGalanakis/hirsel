@@ -47,6 +47,10 @@ pub enum OptionId {
     Libraries,
     Store,
     Inputs,
+    PackageStore,
+    Locked,
+    Frozen,
+    PackOut,
     Metrics,
     ProfileFront,
     Image,
@@ -99,6 +103,9 @@ macro_rules! commands {
 commands! {
     "help", "help [command]", "Show commands or help for one command.";
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
+    "lock", "lock [package-dir] [options]", "Resolve a workspace and write or verify its lock.";
+    "fetch", "fetch [package-dir] [options]", "Fetch the pinned libraries a workspace uses.";
+    "pack", "pack [package-dir] --out FILE [options]", "Publish a library and its dependency closure to an archive.";
     "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
     "manifest", "manifest show PATH", "Print a release manifest.";
@@ -125,6 +132,43 @@ macro_rules! option {
     }
 }
 static OPTIONS: &[OptionSpec] = &[
+    option!(
+        PackageStore,
+        ["--package-store"],
+        Some("DIR"),
+        [
+            "check", "build", "publish", "run", "test", "inspect", "replay", "sdk", "lock",
+            "fetch", "pack"
+        ],
+        "Select the verified library store."
+    ),
+    option!(
+        Locked,
+        ["--locked"],
+        None,
+        [
+            "check", "build", "publish", "run", "test", "inspect", "replay", "sdk", "lock",
+            "fetch", "pack"
+        ],
+        "Require a current workspace lock."
+    ),
+    option!(
+        Frozen,
+        ["--frozen"],
+        None,
+        [
+            "check", "build", "publish", "run", "test", "inspect", "replay", "sdk", "lock",
+            "fetch", "pack"
+        ],
+        "Require a current workspace lock and use only the package store."
+    ),
+    option!(
+        PackOut,
+        ["--out"],
+        Some("FILE"),
+        ["pack"],
+        "Write the library archive to this file."
+    ),
     option!(
         Interface,
         ["--interface"],
@@ -827,8 +871,10 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         if argument.starts_with('-') {
             let option = OPTIONS
                 .iter()
-                .find(|o| o.names.contains(&argument.as_str()))
-                .filter(|o| o.commands.is_empty() || o.commands.contains(&command.name))
+                .find(|o| {
+                    o.names.contains(&argument.as_str())
+                        && (o.commands.is_empty() || o.commands.contains(&command.name))
+                })
                 .ok_or_else(|| {
                     format!("unknown option `{argument}` for {name}; use help {name}")
                 })?;

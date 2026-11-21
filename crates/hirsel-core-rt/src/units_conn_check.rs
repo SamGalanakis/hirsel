@@ -347,9 +347,8 @@ fn reuse(id: u32, flat: bool) -> u8 {
             let (tag, value) = if flat {
                 let tag = inbox.front_tag();
                 let mut item = 0;
-                let got = inbox.receive_cross(|bytes, src, content| {
+                let got = inbox.receive_cross(|bytes, src, _| {
                     assert_eq!(bytes, 0);
-                    assert!(content.is_empty());
                     // SAFETY: the connection reserved this slot for this take.
                     item = u64::from(unsafe { src.cast::<u32>().read_unaligned() });
                     Ok::<_, ()>(())

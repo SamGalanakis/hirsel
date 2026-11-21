@@ -12,10 +12,9 @@
 //! words, room balances, settlements, helper ends) with roots it never refuses
 //! from; a ledger refusal after the program admitted is a bug (`UnitLedger`).
 //!
-//! An item crosses by copy. Its data is the item's inline bytes followed by
-//! the content of each flat owner in it (a `List` of plain elements, `String`),
-//! at length capacity. The item's charge, which the room holds, is the sum of
-//! those owners' charges. Clients inside an item move as handles.
+//! An item's flat bytes occupy its reserved arrival slot. Sequence content
+//! (a `List` of plain elements or a `String`) occupies the room at length
+//! capacity. Clients move as handles in the flat bytes.
 use crate::{
     Capacity, Context,
     block::{self, Block},
@@ -139,7 +138,8 @@ impl CrossSend {
         slot: *mut u8,
         stride: usize,
         seqs: &[[u64; 4]],
-    ) -> Box<[MaybeUninit<u8>]> {
+        charge: u64,
+    ) -> Box<[MaybeUninit<u64>]> {
         // SAFETY: the reserved slot has the connection's item layout. The
         // sender pins every source buffer through publication.
         unsafe {
@@ -153,8 +153,13 @@ impl CrossSend {
             if seqs.is_empty() {
                 return Box::default();
             }
-            let mut room = Box::new_uninit_slice(seqs.iter().map(|o| content(o).1).sum());
-            let to = room.as_mut_ptr().cast::<u8>();
+            let bytes: usize = seqs.iter().map(|o| content(o).1).sum();
+            if bytes == 0 && charge == 0 {
+                return Box::default();
+            }
+            let mut room = Box::new_uninit_slice(1 + bytes.div_ceil(std::mem::size_of::<u64>()));
+            room[0].write(charge);
+            let to = room.as_mut_ptr().add(1).cast::<u8>();
             let mut at = 0;
             for o in seqs {
                 let (p, n) = content(o);
@@ -681,7 +686,7 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
                         block::admit_storage(payer, Some(bytes))?;
                     }
                     ptr::copy_nonoverlapping(flat, dest, c.stride);
-                    unpack_owners(context, payer, content.as_ptr().cast(), dest, &c.seqs);
+                    unpack_owners(context, payer, content, dest, &c.seqs);
                 }
                 Ok::<_, Capacity>(())
             });

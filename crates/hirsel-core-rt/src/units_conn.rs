@@ -267,7 +267,7 @@ impl Inbox {
     /// If admission fails, the callback leaves the destination and queue alone.
     pub(crate) fn receive_cross<E>(
         &self,
-        copy: impl FnOnce(u64, *const u8, &[MaybeUninit<u8>]) -> Result<(), E>,
+        copy: impl FnOnce(u64, *const u8, *const u8) -> Result<(), E>,
     ) -> Option<Result<(), E>> {
         let c = &*self.0;
         let side = c.side();
@@ -275,8 +275,8 @@ impl Inbox {
         let ptr = c.flat_ptr(front.slot);
         #[cfg(test)]
         crate::units::sync::read_arrival(ptr);
-        let bytes = front.value.bytes();
-        if let Err(e) = copy(bytes, ptr, front.value.cross_content()) {
+        let (bytes, content) = front.value.cross_parts();
+        if let Err(e) = copy(bytes, ptr, content) {
             return Some(Err(e));
         }
         let slot = front.slot;
@@ -431,10 +431,7 @@ impl UnitCtx {
             Outgoing::Cross(source) => unsafe {
                 #[cfg(test)]
                 let tag = source.tag;
-                let v = Value::cross(
-                    bytes,
-                    source.copy_into(c.flat_ptr(index), c.stride, &c.seqs),
-                );
+                let v = Value::cross(source.copy_into(c.flat_ptr(index), c.stride, &c.seqs, bytes));
                 #[cfg(test)]
                 let v = Value { tag, ..v };
                 v
@@ -710,8 +707,8 @@ impl UnitCtx {
         let mut causes = Vec::new();
         while let Some(Taken { slot, value }) = side.taken.pop_back() {
             side.freed += 1;
-            if let super::ValueData::Cross(bytes, _) = value.data {
-                c.release_item(slot, bytes);
+            if let super::ValueData::Cross(ref room) = value.data {
+                c.release_item(slot, Value::cross_bytes(room));
             } else {
                 c.release_item(slot, 0);
                 if let Some(cause) = self.drop_value(value) {

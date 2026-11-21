@@ -199,9 +199,9 @@ enum ValueData {
     One(Charge),
     Many(Vec<Charge>),
     Extra(Box<ValueExtra>),
-    // Flat bytes live in the reserved arrival slot. Only variable-length
-    // owner content travels with the arrival.
-    Cross(u64, Box<[std::mem::MaybeUninit<u8>]>),
+    // Flat bytes live in the reserved arrival slot. The room allocation is
+    // empty or begins with its logical charge followed by native owner bytes.
+    Cross(Box<[std::mem::MaybeUninit<u64>]>),
 }
 
 impl Value {
@@ -259,24 +259,35 @@ impl Value {
 
     pub(crate) fn bytes(&self) -> u64 {
         match &self.data {
-            ValueData::Cross(bytes, _) => *bytes,
+            ValueData::Cross(room) => Self::cross_bytes(room),
             _ => self.charges().iter().map(|c| c.size).sum(),
         }
     }
 
-    fn cross(bytes: u64, content: Box<[std::mem::MaybeUninit<u8>]>) -> Self {
+    fn cross(room: Box<[std::mem::MaybeUninit<u64>]>) -> Self {
         Self {
-            data: ValueData::Cross(bytes, content),
+            data: ValueData::Cross(room),
             #[cfg(test)]
             tag: 0,
         }
     }
 
-    fn cross_content(&self) -> &[std::mem::MaybeUninit<u8>] {
-        let ValueData::Cross(_, content) = &self.data else {
+    fn cross_bytes(room: &[std::mem::MaybeUninit<u64>]) -> u64 {
+        // SAFETY: the room's first word, if present, is its logical charge.
+        room.first().map_or(0, |header| unsafe { header.assume_init() })
+    }
+
+    fn cross_parts(&self) -> (u64, *const u8) {
+        let ValueData::Cross(room) = &self.data else {
             unreachable!();
         };
-        content
+        let content = if room.is_empty() {
+            room.as_ptr()
+        } else {
+            // SAFETY: the owner's native bytes follow the charge word.
+            unsafe { room.as_ptr().add(1) }
+        };
+        (Self::cross_bytes(room), content.cast())
     }
 
     /// A language item's bytes (units_lang); empty for a ledger value.
@@ -534,6 +545,9 @@ pub(crate) struct Arrival {
     #[cfg(test)]
     pub(crate) names: Option<Box<Names>>,
 }
+
+#[cfg(all(not(test), target_arch = "x86_64"))]
+const _: () = assert!(std::mem::size_of::<Arrival>() == 48);
 
 // SAFETY: an arrival is owned by exactly one port or one unit at a time.
 unsafe impl Send for Arrival {}
@@ -1705,60 +1719,54 @@ impl UnitCtx {
             }
         };
         let (body, info, slot) = arrival.into_body();
-        self.took_ident = match &body {
-            Body::Settlement(id, _) => *id as usize,
-            Body::Item(c, _) | Body::SealAnswer(c) => c.addr(),
-            Body::Close(c) => Arc::as_ptr(c).addr(),
-            // SAFETY: the end arrival owns the ended helper's context.
-            Body::HelperEnd(e) => unsafe { e.0.as_ref() }.helper.as_ref().unwrap().k,
-            Body::LastRelease(_, ident) => *ident,
-            Body::Credits(_) | Body::Cancel => 0,
-        };
-        let t = match body {
+        let (t, ident) = match body {
             Body::Credits(cs) => {
                 for c in cs {
                     self.apply(c);
                 }
-                Took::Credits
+                (Took::Credits, 0)
             }
-            Body::LastRelease(c, _) => {
+            Body::LastRelease(c, ident) => {
                 self.apply(c);
-                Took::LastRelease
+                (Took::LastRelease, ident)
             }
             Body::HelperEnd(e) => {
+                // SAFETY: the end arrival owns the ended helper's context.
+                let ident = unsafe { e.0.as_ref() }.helper.as_ref().unwrap().k;
                 self.end_take(e);
-                Took::HelperEnd
+                (Took::HelperEnd, ident)
             }
             Body::Settlement(id, Settle::Accepted(cs)) => {
                 for c in cs {
                     self.apply(c);
                 }
-                Took::Accepted(id)
+                (Took::Accepted(id), id as usize)
             }
             Body::Settlement(id, Settle::Closed(v)) => {
                 self.settled.push((id, v));
-                Took::Closed(id)
+                (Took::Closed(id), id as usize)
             }
             Body::Settlement(id, Settle::Withdrawn(v)) => {
                 self.drop_value(v);
-                Took::Withdrawn(id)
+                (Took::Withdrawn(id), id as usize)
             }
             Body::Item(c, value) => {
                 // SAFETY: as in `intake_one`.
                 unsafe { &*c }.side().taken.push_back(Taken { slot, value });
-                Took::Item
+                (Took::Item, c.addr())
             }
             Body::Close(c) => {
                 c.side().closed = true;
-                Took::Close
+                (Took::Close, Arc::as_ptr(&c).addr())
             }
             Body::SealAnswer(c) => {
                 // SAFETY: as in `intake_one`.
                 unsafe { &*c }.side().seal_taken = true;
-                Took::SealAnswer
+                (Took::SealAnswer, c.addr())
             }
-            Body::Cancel => Took::Cancel,
+            Body::Cancel => (Took::Cancel, 0),
         };
+        self.took_ident = ident;
         Some((t, info))
     }
 

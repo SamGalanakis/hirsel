@@ -56,6 +56,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Semantics](semantics.md) | SEM-1 to SEM-11 |
 | [Programs](programs.md) | PROG-1 to PROG-6, PROG-9, PROG-10 |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
+| [Packages](packages.md) | |
 | [Core library](core.md) | |
 | [Reserved](reserved.md) | |
 | [Examples](examples.md) | |
@@ -82,6 +83,8 @@ The [TLS and secrets specification](tls.md) defines the client TLS provider
 operations and `Secret`.
 The [HTTP specification](http.md) defines std `http`, the runner's HTTP bindings
 and keyed operations. It is unbuilt design.
+The [packages specification](packages.md) defines `hirsel.toml`, `hirsel.lock`, local
+workspaces, library roots and package archives. It is unbuilt design.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over
 `String` with the Rust `regex` crate's syntax and meaning.
 
@@ -113,6 +116,8 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 | hand-over, limit record | [MEM-20](budgets.md#mem-20-limit-records-and-hand-over) |
 | kind | [OWN-3](ownership.md#own-3-kinds) |
 | lane, mask, vector, version | [SEM-11](semantics.md#sem-11-vectors) |
+| library root, package archive, package store | [packages §1, §7](packages.md#1-canonical-library-content) |
+| lock, stale lock | [packages §8](packages.md#8-hirsellock) |
 | mapping propagate | [LANG-18](language.md#lang-18-errors) |
 | model world, simulation | [CAP-9](capabilities.md#cap-9-recording-is-outside-the-program) |
 | outlives | [MEM-6](memory.md#mem-6-roots) |
@@ -130,6 +135,7 @@ The [Regex specification](regex.md) defines std `regex`, regular expressions ove
 | shield | [CONC-7](tasks.md#conc-7-cancellation-points) |
 | sub-view | [OWN-8](ownership.md#own-8-views) |
 | type summary | [OWN-2](ownership.md#own-2-type-summaries) |
+| workspace, member, top member | [packages §4, §5](packages.md#4-workspaces) |
 | writable | [OWN-5](ownership.md#own-5-availability) |
 | writer | [MEM-4](memory.md#mem-4-sized-destinations) |
 

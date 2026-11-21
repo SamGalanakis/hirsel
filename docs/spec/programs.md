@@ -6,7 +6,8 @@ A **package** has a name and a major version and consists of modules; each sourc
 one module, with the module path its package manifest assigns. A definition's identity is
 its package, version, module path and name. Two versions of a package are two packages,
 and their types are distinct. A package names each dependency at one exact version; the
-manifest format is outside the language. A package states the charge policy it was
+manifest format is outside the language, and the `hirsel` tool's is
+[`hirsel.toml`](packages.md). A package states the charge policy it was
 written for ([MEM-24](budgets.md#mem-24-logical-charges)); in v1 that is `charge-v1`.
 
 ### PROG-2: Visibility
@@ -396,3 +397,6 @@ language switches. The one exception is an implementation's resource refusal: a 
 whose checking exceeds the implementation's resources (for example unbounded generic
 instantiation, or instantiation past a depth or count) may be refused with a message that
 names no rule; such a refusal is not a meaning of the program.
+A package's dependencies are fixed by their library roots before the compiler runs
+([packages](packages.md)), so `--locked` and `--frozen` decide only whether a command
+proceeds.

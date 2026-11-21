@@ -534,6 +534,8 @@ fn site_item(site: &Site) -> DefPath {
 fn anchor<'a>(
     seen: &mut HashMap<(&'a str, u32, u32), ItemId>,
     items: &mut Vec<DefPath>,
+    bindings: &mut BTreeMap<DefPath, ItemSource>,
+    unit: Option<&str>,
     site: Option<&'a Site>,
 ) -> Option<hirsel_core_ir::Anchor> {
     let site = site?;
@@ -541,7 +543,14 @@ fn anchor<'a>(
         .entry((site.file.as_str(), site.line, site.column))
         .or_insert_with(|| {
             let index = ItemId(items.len() as u32);
-            items.push(site_item(site));
+            let mut item = site_item(site);
+            if let Some(unit) = unit {
+                let binding = bindings[&item];
+                item.0.modules = vec!["unit".into(), unit.into()];
+                item.0.name = index.0.to_string();
+                bindings.insert(item.clone(), binding);
+            }
+            items.push(item);
             index
         });
     Some(hirsel_core_ir::Anchor {
@@ -556,6 +565,7 @@ fn anchor<'a>(
 pub(super) fn bind_annexes(
     units: &mut BTreeMap<Identity, Unit>,
     extra: &BTreeMap<String, Vec<(u32, u32)>>,
+    relocate: bool,
 ) -> Result<SourceMap, NativeStop> {
     let mut points = BTreeMap::<String, BTreeSet<(u32, u32)>>::new();
     for (file, at) in extra {
@@ -611,7 +621,11 @@ pub(super) fn bind_annexes(
         });
         sources.points.insert(path, points);
     }
-    for unit in units.values_mut() {
+    for (identity, unit) in units {
+        // Cached objects reference a unit's local site numbers. The final link
+        // binds those symbols to the current recipe's absolute positions.
+        let symbol = relocate.then(|| hirsel_core_ir::symbol(identity.digest()));
+        let symbol = symbol.as_deref();
         let module = &mut unit.module;
         let mut items = HashMap::new();
         for (function, hints) in module.functions.iter_mut().zip(&unit.annex.0) {
@@ -619,10 +633,22 @@ pub(super) fn bind_annexes(
                 continue;
             };
             for (at, site) in body.inst_anchors.iter_mut().zip(&hints.instructions) {
-                *at = anchor(&mut items, &mut module.items, site.as_ref());
+                *at = anchor(
+                    &mut items,
+                    &mut module.items,
+                    &mut sources.items,
+                    symbol,
+                    site.as_ref(),
+                );
             }
             for (block, site) in body.blocks.iter_mut().zip(&hints.terminators) {
-                block.anchor = anchor(&mut items, &mut module.items, site.as_ref());
+                block.anchor = anchor(
+                    &mut items,
+                    &mut module.items,
+                    &mut sources.items,
+                    symbol,
+                    site.as_ref(),
+                );
             }
             for (call, &cold) in body.calls.iter_mut().zip(&hints.cold_calls) {
                 call.cold = cold;
@@ -696,17 +722,18 @@ impl Publication {
             self.units
                 .retain(|identity, _| identity == &entry_identity || !std.roots.contains(identity));
         }
+        let entry = &self.recipe.entry;
+        let names = self.units[entry].annex.1.as_deref().ok_or_else(|| {
+            NativeStop::Entry("recipe entry has no startup parameter names".into())
+        })?;
+        let (options, decl) = launch_options(&self.recipe, names, options)?;
         let no_points = BTreeMap::new();
         let sources = bind_annexes(
             &mut self.units,
             std.as_ref().map_or(&no_points, |std| &std.points),
+            !matches!(options.backend, Backend::Llvm) || !options.optimize,
         )?;
-        let entry = &self.recipe.entry;
         let root = &self.units[entry];
-        let names = root.annex.1.as_deref().ok_or_else(|| {
-            NativeStop::Entry("recipe entry has no startup parameter names".into())
-        })?;
-        let (options, decl) = launch_options(&self.recipe, names, options)?;
         let (abi, cleanup) = bound_entry_abi(&decl, &entry.definition, &root.module, FuncId(0))
             .map_err(NativeStop::Entry)?;
         let target = hirsel_core_layout::Target::from_triple(&options.target)
@@ -806,13 +833,8 @@ impl Publication {
                     .iter()
                     .map(|(identity, unit)| {
                         let object_key = key(
-                            "hirsel.recipe-native-object.v1",
-                            &(
-                                emitter,
-                                unit.code.body.hash,
-                                unit.code.annex.hash,
-                                &unit.builtins,
-                            ),
+                            "hirsel.recipe-native-object.v2",
+                            &(emitter, identity, &unit.module, &unit.builtins),
                         )?;
                         object(&store, &options, object_key, identity, &unit.module)
                     })

@@ -204,7 +204,7 @@ impl CheckProduct {
                 super::recipe_build::prepare_unit(instance.ir()?, instance.function, &sources),
             );
         }
-        let points = super::recipe_build::bind_annexes(&mut units, &BTreeMap::new())?.points;
+        let points = super::recipe_build::bind_annexes(&mut units, &BTreeMap::new(), false)?.points;
         let mut modules: Vec<_> = units
             .values()
             .map(|unit| Cow::Borrowed(&unit.module))

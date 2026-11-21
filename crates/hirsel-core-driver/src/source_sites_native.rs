@@ -75,6 +75,26 @@ fn failure_sites_rebind(backend: Backend, optimize: bool, debug_lines: bool) {
     assert!(built.linked, "current source belongs in the fresh link product");
     run(&built, 5);
 
+    if matches!(backend, Backend::Cranelift) && !optimize {
+        let code = crate::code_store::CodeStore::new(dir.path().join("recipe-code"));
+        let build_recipe = |source: &str| {
+            let product = check(source);
+            let reached = product.reachable(&entry, options.instance_limit).unwrap();
+            product
+                .publish_release(&entry, &reached, &options, &code, hirsel_core_ids::launch::DEFAULT_N_PLACE)
+                .unwrap()
+                .assemble(&options, reached.counters)
+                .unwrap()
+        };
+        let cold = build_recipe(source);
+        assert!(cold.compiled > 0 && cold.linked);
+        run(&cold, 2);
+        let relocated = build_recipe(&moved);
+        assert_eq!(relocated.compiled, 0, "moved recipe sites must reuse their objects");
+        assert!(relocated.linked);
+        run(&relocated, 5);
+    }
+
     if matches!(backend, Backend::Llvm) && optimize && !debug_lines && options.target == TARGET {
         let shifted = moved.replace("    x + 1", "    let _ = 0u8\n    x + 1");
         let product = check(&shifted);

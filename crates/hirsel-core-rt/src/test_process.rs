@@ -1,5 +1,5 @@
 //! Reexecute native libtest children through the explicitly selected ARM runner.
-use std::process::Command;
+use std::{ffi::OsStr, process::Command};
 
 pub(crate) fn command() -> Command {
     let executable = std::env::current_exe().unwrap();
@@ -15,4 +15,26 @@ pub(crate) fn command() -> Command {
     }
     #[cfg(not(target_arch = "aarch64"))]
     Command::new(executable)
+}
+
+/// Run one test in its own process. The parent returns true after the
+/// child's test passes. The child returns false and runs the test body.
+pub(crate) fn run_isolated(test: &str) -> bool {
+    const CASE: &str = "HIRSEL_TEST_ISOLATED_CASE";
+    if std::env::var_os(CASE).as_deref() == Some(OsStr::new(test)) {
+        return false;
+    }
+    let output = command()
+        .args(["--exact", test, "--format=terse"])
+        .env(CASE, test)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+        "{test}: {}\n{stdout}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
 }

@@ -2339,7 +2339,13 @@ mod tests {
     /// once the task parks.
     #[test]
     fn every_payer_nurses_its_first_blocks_and_leaves_nothing_after_purge() {
-        let _idle = IDLE.lock().unwrap_or_else(|poison| poison.into_inner());
+        // Another test can share the first payer's slab or reclaim an address
+        // after purge, so measure residency with this test as the sole user.
+        if crate::test_process::run_isolated(
+            "task_heap::tests::every_payer_nurses_its_first_blocks_and_leaves_nothing_after_purge",
+        ) {
+            return;
+        }
         const PAYERS: usize = 3 * NURSERY_BLOCKS as usize;
         const LIMIT: u64 = 1 << 20;
         let contexts: Vec<_> = (0..PAYERS).map(|_| Context::new(LIMIT)).collect();

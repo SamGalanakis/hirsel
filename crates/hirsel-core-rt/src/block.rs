@@ -158,8 +158,8 @@ unsafe fn free_with(payload: NonNull<u8>, charge: u64, context: Option<&Context>
     // first. The page remains live until the physical slot is returned.
     unsafe {
         let page = task_heap::page_of(payload);
-        let payer = *task_heap::Page::funding(page);
-        if charge != 0 || task_heap::Page::kind(page) != RESOURCE {
+        let payer = *page.funding();
+        if charge != 0 || page.kind() != RESOURCE {
             if let Some(context) = context {
                 payer.settle_in(context, charge);
             } else {

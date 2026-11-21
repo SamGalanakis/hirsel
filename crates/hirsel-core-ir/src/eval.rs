@@ -5861,6 +5861,29 @@ impl Machine<'_> {
                 );
                 vec![]
             }
+            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
+                use hirsel_core_net::SignatureAlgorithm;
+                let algorithm = match op {
+                    RtOp::Ed25519Verify => SignatureAlgorithm::Ed25519,
+                    RtOp::P256Verify => SignatureAlgorithm::P256Fixed,
+                    RtOp::P256VerifyDer => SignatureAlgorithm::P256Der,
+                    _ => unreachable!(),
+                };
+                let range = |data, len| {
+                    if len == 0 {
+                        &[]
+                    } else {
+                        self.get(data, len as usize)
+                    }
+                };
+                let valid = hirsel_core_net::verify_signature(
+                    algorithm,
+                    range(a[0], a[1]),
+                    range(a[2], a[3]),
+                    range(a[4], a[5]),
+                );
+                vec![u64::from(valid)]
+            }
             RtOp::ChannelNew { item } => {
                 let item = TypeRef(item.0);
                 if a[0] == 0 {

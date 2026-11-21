@@ -448,6 +448,16 @@ impl Function<'_, '_, '_> {
                 self.c_call("hirsel_core_sha256_blocks", &[P, P, U], &[], &args[..3])?;
                 0
             }
+            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
+                let name = match op {
+                    RtOp::Ed25519Verify => "hirsel_core_ed25519_verify",
+                    RtOp::P256Verify => "hirsel_core_p256_verify",
+                    RtOp::P256VerifyDer => "hirsel_core_p256_verify_der",
+                    _ => unreachable!(),
+                };
+                outputs[0] = self.c_call(name, &[P, U, P, U, P, U], &[U], &args[..6])?[0];
+                1
+            }
             RtOp::CauseNext | RtOp::CauseValue => {
                 let name = if op == RtOp::CauseNext {
                     "hirsel_core_cause_next"

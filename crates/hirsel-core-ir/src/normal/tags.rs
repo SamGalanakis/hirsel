@@ -354,6 +354,9 @@ tags!(RtOp {
     44 => MapHashAddWord,
     45 => MapHashAddBytes,
     46 => MapHashFinish,
+    47 => Ed25519Verify,
+    48 => P256Verify,
+    49 => P256VerifyDer,
 });
 
 tags!(HostOp {

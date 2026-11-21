@@ -1,0 +1,6 @@
+// Module `p256`: ECDSA signature verification with SHA-256.
+/// Verify a 64-byte IEEE P1363 signature against an uncompressed SEC 1 key.
+pub fn verify(key: Bytes, msg: Bytes, sig: Bytes) -> bool
+
+/// Verify a strict DER signature against an uncompressed SEC 1 key.
+pub fn verify_der(key: Bytes, msg: Bytes, sig: Bytes) -> bool

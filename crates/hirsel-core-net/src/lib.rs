@@ -123,6 +123,8 @@ mod grant;
 pub use grant::{GrantRule, ResolveRule, RuleView};
 mod reactor;
 pub use reactor::{Poller, Sockets};
+mod signature;
+pub use signature::{SignatureAlgorithm, verify_signature};
 pub mod model;
 pub mod scram;
 pub mod tls;

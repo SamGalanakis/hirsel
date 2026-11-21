@@ -25,7 +25,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `check` | [check](../../core/core/check.hirsel) | SEM-8, SEM-11, MEM-30 |
 | `sha1` | [sha1](../../core/core/sha1.hirsel) | SEM-8, MEM-30 |
 | `sha256` | [sha256](../../core/core/sha256.hirsel) | SEM-8, MEM-30 |
-| `ed25519`, `p256` | unbuilt: `verify`, `verify_der` | SEM-8, MEM-30; [Signature verification](#signature-verification) |
+| `ed25519`, `p256` | [ed25519](../../core/core/ed25519.hirsel), [p256](../../core/core/p256.hirsel) | SEM-8, MEM-30; [Signature verification](#signature-verification) |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
 | `bytebuf` | [bytebuf](../../core/core/bytebuf.hirsel) | MEM-21, MEM-28 |

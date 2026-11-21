@@ -49,6 +49,7 @@ pub mod secret;
 mod sequencer;
 mod sha1;
 mod sha256;
+mod signature;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
 mod stdin;

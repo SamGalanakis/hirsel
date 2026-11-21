@@ -319,6 +319,26 @@ impl FunctionEmitter<'_> {
                 &[],
                 &[p(&args[0]), p(&args[1]), u(&args[2])],
             ),
+            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
+                let name = match op {
+                    RtOp::Ed25519Verify => "hirsel_core_ed25519_verify",
+                    RtOp::P256Verify => "hirsel_core_p256_verify",
+                    RtOp::P256VerifyDer => "hirsel_core_p256_verify_der",
+                    _ => unreachable!(),
+                };
+                self.native_call(
+                    name,
+                    &[U],
+                    &[
+                        p(&args[0]),
+                        u(&args[1]),
+                        p(&args[2]),
+                        u(&args[3]),
+                        p(&args[4]),
+                        u(&args[5]),
+                    ],
+                )
+            }
             RtOp::CompareBytes => {
                 vec![self.compare_bytes(&args[..4])]
             }

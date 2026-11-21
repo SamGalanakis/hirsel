@@ -968,6 +968,12 @@ pub enum RtOp {
     Xxh3Stripes,
     /// Take the socket or read the scratch grant designated by the place host.
     LaunchHandle,
+    /// Verify a pure Ed25519 signature over a message.
+    Ed25519Verify,
+    /// Verify a fixed-width P-256 ECDSA signature over a message with SHA-256.
+    P256Verify,
+    /// Verify a DER P-256 ECDSA signature over a message with SHA-256.
+    P256VerifyDer,
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1342,6 +1348,7 @@ impl RtOp {
     /// | `xxh3_stripes` | `acc: ptr`, `data: ptr`, `secret: ptr`, `count: u64` | (crate docs, "XXH3") |
     /// | `sha1_blocks` | state `ptr`, `data: ptr`, `len: u64` | (crate docs, "SHA-1") |
     /// | `sha256_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-256") |
+    /// | `ed25519_verify`, `p256_verify`, `p256_verify_der` | key, message and signature pointer/length pairs (lengths `u64`) | `u64`: 1 if valid, 0 otherwise |
     /// | `cause_next` | cell `ptr` | `ptr`: the next cell, null after the last |
     /// | `cause_value` | cell `ptr` | `ptr`: the cell's `Cause` |
     /// | `args_len` | `Args: u64` | `u64` |
@@ -1424,6 +1431,10 @@ impl RtOp {
             RtOp::Xxh3Stripes => (vec![V(p), V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha1Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha256Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
+            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => (
+                vec![V(p), V(u64_), V(p), V(u64_), V(p), V(u64_)],
+                vec![u64_],
+            ),
             RtOp::CauseNext | RtOp::CauseValue => (vec![V(p)], vec![p]),
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
@@ -1679,6 +1690,9 @@ impl RtOp {
             | RtOp::Xxh3Stripes
             | RtOp::Sha1Blocks
             | RtOp::Sha256Blocks
+            | RtOp::Ed25519Verify
+            | RtOp::P256Verify
+            | RtOp::P256VerifyDer
             | RtOp::CauseNext
             | RtOp::CauseValue
             | RtOp::ArgsLen

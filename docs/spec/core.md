@@ -65,7 +65,7 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | tuples, `Option[T]`, `Result[T, E]` | OWN-3 | `shareable`, `send`, `key`, `ordered`, `codec` when T | tuple: sum; variant rule (MEM-24) | T's |
 | `Inline[T, n]` | T's kind (plain or own) | `shareable`, `send`, `key`, `ordered` when T | n × size(T) | T's |
 | `Simd[T, n]` | plain | `shareable`, `send` | n × size(T) | nothing |
-| `Never` | plain | `shareable`, `send`, `key`, `ordered` | 0 | nothing |
+| `Never` | plain | `shareable`, `send`, `key`, `ordered`, `codec` (SEM-10: no valid encoding) | 0 | nothing |
 | `String` | own | `shareable`, `send`, `key`, `ordered`, `codec` | 24 | nothing |
 | `FrozenBytes` | own | `shareable`, `send` | 24 | nothing |
 | `List[T]` | own | `shareable`, `send`, `key`, `ordered`, `codec` when T | 24 | T's |

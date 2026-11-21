@@ -268,8 +268,21 @@ admits nothing, and a call at a type without the bound is refused at that call
 ([LANG-12](language.md#lang-12-generics)), so generic code that needs a codec writes `T:
 codec`. Its `T` is fixed as every type argument is, by the expected type or an earlier
 argument (`let c: codec.Codec[u8] = codec.of()`); `of[T]` names an instance in prose, never a
-call. Each call resolves at its instance's `T`: to the built-in codec of a scalar, `()` or
-`String`, and to the codec generated from the declaration of a nominal type. A nominal type's codec is generated from its declaration as ordinary checked code,
+call. Each call resolves at its instance's `T`: to the built-in codec of a scalar, `()`,
+`String`, `Never` or a tuple, and to the codec generated from the declaration of a nominal
+type.
+
+**Tuples and `Never`.** A tuple's codec is componentwise: it encodes its components in
+order, each with its own codec, decodes them in the same order, and its schema is the
+sequence of theirs, so a tuple is `codec` exactly when each component is, and `(u8, String)`
+and `(String, u8)` are different schemas. `Never` is `codec` with zero valid encodings:
+no bytes decode to a `Never`, and an item that would carry one is `Invalid` at the place it
+begins. Its schema is its own, equal to no other type's, `()` included. So `Result[T,
+Never]` is encoded as every `Result` is: an `Ok` is tag 0 and its `T`, unchanged, and tag 1,
+which would carry the `Never` of an `Error`, decodes as `Invalid(i)`, `i` being where the
+tag begins. Its schema is `Result` over T's and Never's, distinct from that of `Result[T,
+E]` for every other `E`, so bytes written as one never resolve as the other: a changed error
+type is a schema change, as a changed field type is. A nominal type's codec is generated from its declaration as ordinary checked code,
 which visits its fields in declaration order and its variants in declared order. The byte
 format, the framing of a value among others and the encoding of a schema are the library's;
 this rule fixes what every codec does, and how scalars are encoded: integers at their
@@ -351,7 +364,7 @@ the decoded bytes otherwise:
 
 - `Truncated(i)`: the item that starts at `i` runs past the end of the bytes;
 - `Invalid(i)`: the item at `i` encodes no value of its type: a variant tag or `bool` past
-  its values, a float NaN other than SEM-2's canonical one, or a `u32` that is not a
+  its values, a tag whose variant carries a `Never`, a float NaN other than SEM-2's canonical one, or a `u32` that is not a
   Unicode scalar, so not a `char` (`char.from_u32`);
 - `Utf8(i)`: a `String`'s bytes stop being UTF-8 at `i`, the first byte not part of a
   scalar;

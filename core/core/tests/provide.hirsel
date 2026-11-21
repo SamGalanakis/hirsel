@@ -1567,3 +1567,98 @@ fn net_deadline(tasks: Tasks) -> bool waits {
     }
     expired && quiet
 }
+
+fn ten_443(a: Addr) -> bool {
+    a.port == 443 && match a.ip {
+        V4(x) => x == 167772161,
+        _ => false
+    }
+}
+
+// Narrows the served Net twice. The address narrowing (connect to 10/8 on
+// 443) refuses 127.0.0.1 and dials 10.0.0.1. The TLS narrowing (beta.test on
+// 443) refuses alpha.test, consuming the dialed socket, and secures a second
+// socket as beta.test.
+fn narrowed_client(take n: Net) -> bool waits {
+    let ten: Rule = Rule(dir: Connect, prefix: V4(167772160), bits: 8, ports: (443, 443))
+    let near = result.unwrap(net.narrow(n, ten))
+    let refused = match host.connect(near, Addr(ip: V4(2130706433), port: 443), Never) {
+        Ok(take s) => {
+            let _ = take s
+            false
+        },
+        Error(Denied) => true,
+        Error(_) => false
+    }
+    let first = result.unwrap(host.connect(near, Addr(ip: V4(167772161), port: 443), Never))
+    let beta = result.unwrap(net.narrow(n, Tls(names: "beta.test", ports: (443, 443), trust: SystemPin)))
+    let none: List[String] = list.new()
+    let other = tls_denied(tls.connect(beta, take first, string.from("alpha.test"), System, none, Never))
+    let second = result.unwrap(host.connect(n, Addr(ip: V4(167772161), port: 443), Never))
+    let empty: List[String] = list.new()
+    let secured = match tls.connect(beta, take second, string.from("beta.test"), System, empty, Never) {
+        Ok(take stream) => {
+            let (take r, take w, _) = take stream
+            let _ = take r
+            let _ = take w
+            true
+        },
+        Error(_) => false
+    }
+    refused && other && secured
+}
+
+// NOTES 31 and 32: a narrowed served Net is checked against its own rules
+// before queueing, for addresses and for handshakes alike. The refused
+// connect never reaches the server; the refused handshake reaches it only
+// as the consumed socket's Released Whole. The covered connects and the
+// covered handshake are ordinary calls.
+// expect: run narrowed_net(tasks) = true
+fn narrowed_net(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, narrowed_client)
+    let ten = Addr(ip: V4(167772161), port: 443)
+    let dialed = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Connect(addr) => ten_443(addr),
+                _ => false
+            }
+            op && net_answer(mut served, take call, Socket(8, ten))
+        },
+        None => false
+    }
+    let whole = net_released(mut served, 8, 0)
+    let redialed = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Connect(addr) => ten_443(addr),
+                _ => false
+            }
+            op && net_answer(mut served, take call, Socket(9, ten))
+        },
+        None => false
+    }
+    let shaken = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Handshake(socket, name, alpn, system) => socket == 9 && name == 9 && alpn == 0 && system,
+                _ => false
+            }
+            let digest: (u64, u64, u64, u64) = (0, 0, 0, 0)
+            op && net_answer(mut served, take call, Secured(Handshake(protocol: None, peer: digest)))
+        },
+        None => false
+    }
+    let halves = net_released(mut served, 9, 1) && net_released(mut served, 9, 2)
+    let client = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    dialed && whole && redialed && shaken && halves && client && quiet
+}

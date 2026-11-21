@@ -425,7 +425,7 @@ pub(super) fn slot_taken(ix: usize) {
 pub(super) fn during_steal(ix: usize) {
     if me().is_some() && lock().case == "handoff_steal" && ix == 0 && !FLAG[3].raw() {
         FLAG[3].store(true, Ordering::SeqCst);
-        while pool().host_calls[ix].0.raw() != 0 {
+        while pool().host_calls[ix].0.raw() > super::HOST_ARMED {
             sleep_producer(now() + 100);
         }
     }
@@ -1483,10 +1483,16 @@ pub(super) static CASES: &[Case] = &[
     Case {
         name: "handoff_return",
         workers: 1,
-        units: 1,
-        body: |_| {
+        units: 2,
+        body: |id| {
+            if id == 1 {
+                wait_flag(0);
+                return 0;
+            }
             host_for(param(0));
             maybe_yield();
+            FLAG[0].store(true, Ordering::SeqCst);
+            wake_id(1);
             served(0, "unit returns from its host call and keeps running once");
             0
         },
@@ -1558,12 +1564,18 @@ pub(super) static CASES: &[Case] = &[
     Case {
         name: "handoff_wake",
         workers: 1,
-        units: 1,
-        body: |_| {
+        units: 2,
+        body: |id| {
+            if id == 1 {
+                wait_flag(0);
+                return 0;
+            }
             host_until(3);
             // The wake was published while this unit was still running.
             unit_park(None);
             expect_arrivals(&[10, 11]);
+            FLAG[0].store(true, Ordering::SeqCst);
+            wake_id(1);
             served(0, "unit received both arrivals after its host call");
             0
         },
@@ -1722,7 +1734,6 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         nsleep: super::AtomicUsize::new(0),
         threads: (0..w).map(|_| std::sync::Mutex::new(None)).collect(),
         handoff_ns: if handoff { HOST_THRESHOLD } else { 0 },
-        handoff_scan_max_ns: HOST_THRESHOLD,
         host_calls: (0..w)
             .map(|_| super::HostCall(super::AtomicU64::new(0)))
             .collect(),

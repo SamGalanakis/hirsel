@@ -286,7 +286,6 @@ struct Pool {
     /// Per worker: its thread, and whether a wake handed it the search role.
     threads: Vec<std::sync::Mutex<Option<sync::thread::Thread>>>,
     handoff_ns: u64,
-    handoff_scan_max_ns: u64,
     host_calls: Vec<HostCall>,
     spares: Mutex<Vec<Arc<Spare>>>,
     monitor: OnceLock<sync::thread::Thread>,
@@ -593,18 +592,17 @@ pub(crate) fn lost_slot() -> bool {
 }
 
 /// Requeue the running unit when another unit waits and its slice is over.
-#[inline]
+#[inline(always)]
 pub(crate) fn maybe_yield() {
     let p = pool();
     let ix = worker_ix();
-    if ix >= p.w {
-        // The caller has unwound to an ordinary migration point.
-        leave(unsafe { &*cur() }, After::Yield);
+    let Some(private) = p.lifo.get(ix) else {
+        requeue_detached();
         return;
-    }
+    };
     #[cfg(test)]
     check::slot_use(ix);
-    if !work_waiting(p, ix) {
+    if p.queued.load(Ordering::Relaxed) == 0 && private.load(Ordering::Relaxed).is_null() {
         return;
     }
     // SAFETY: called on the unit's own stack while it runs.
@@ -619,6 +617,13 @@ pub(crate) fn maybe_yield() {
     }
     bump(S_YIELDS);
     leave(u, After::Yield);
+}
+
+#[cold]
+fn requeue_detached() {
+    if let Some(unit) = running() {
+        leave(unit, After::Yield);
+    }
 }
 
 /// Publish readiness to the next entry even when the unit already has a
@@ -711,9 +716,25 @@ fn publish_private_slot(p: &Pool, ix: usize) {
     }
 }
 
-// Separate workers' timestamp stores from each other.
+// 0 is idle, 1 is idle with a monitor wake armed. Larger values are
+// monotonic start times. Keep different workers' exchanges on separate lines.
+const HOST_ARMED: u64 = 1;
+
 #[repr(align(64))]
 struct HostCall(AtomicU64);
+
+impl HostCall {
+    fn arm_idle(&self) -> u64 {
+        let stamp = self.0.load(Ordering::Acquire);
+        if stamp == 0 {
+            self.0
+                .compare_exchange(0, HOST_ARMED, Ordering::AcqRel, Ordering::Acquire)
+                .unwrap_or_else(|raced| raced)
+        } else {
+            stamp
+        }
+    }
+}
 
 pub(crate) struct Blocking {
     call: Option<(&'static HostCall, u64)>,
@@ -736,18 +757,24 @@ fn mark_blocking(publish_private: bool) -> Blocking {
     let mut call = None;
     if untied() {
         let p = pool();
-        let ix = worker_ix();
-        if ix < p.w {
-            if p.handoff_ns == 0 {
-                if publish_private {
+        if p.handoff_ns == 0 {
+            if publish_private {
+                let ix = worker_ix();
+                if ix < p.w {
                     publish_private_slot(p, ix);
                 }
-            } else {
-                let stamp = now().max(1);
-                let word = &p.host_calls[ix];
-                word.0.store(stamp, Ordering::Release);
-                call = Some((word, stamp));
             }
+        } else if p.live.load(Ordering::Acquire) > 1
+            && let Some(word) = p.host_calls.get(worker_ix())
+        {
+            // A sole unit is the only thread that could admit a peer.
+            // Its blocked slot has no independent work to run.
+            let stamp = now().max(HOST_ARMED + 1);
+            if word.0.swap(stamp, Ordering::AcqRel) == HOST_ARMED {
+                // Only the monitor arms a slot, after publishing its handle.
+                p.monitor.get().unwrap().unpark();
+            }
+            call = Some((word, stamp));
         }
     }
     Blocking { call }
@@ -815,22 +842,28 @@ impl Spare {
 
 fn watch_blocking(p: &Pool, mut spawn: impl FnMut(Arc<Spare>) -> bool) {
     let _ = p.monitor.set(sync::thread::current());
-    let mut delay = p.handoff_ns;
     while !p.stop.load(Ordering::Acquire) {
-        // Sample time before loading a stamp. An entry after this sample
-        // cannot reuse any stamp that this pass can claim.
+        // Sample time before loading a stamp. A call that starts after this
+        // sample cannot reuse a timestamp old enough for this pass to claim.
         let t = now();
-        delay = delay.saturating_mul(2).min(p.handoff_scan_max_ns);
+        let mut deadline = None;
+        let mut rescan = false;
         for (ix, call) in p.host_calls.iter().enumerate() {
             let stamp = call.0.load(Ordering::Acquire);
-            let age = t.saturating_sub(stamp);
-            if stamp == 0 || age < p.handoff_ns {
+            if stamp <= HOST_ARMED {
+                continue;
+            }
+            let due = stamp.saturating_add(p.handoff_ns);
+            if due > t {
+                deadline = Some(deadline.map_or(due, |at: u64| at.min(due)));
                 continue;
             }
             let mut spares = p.spares.lock().unwrap();
             if spares.is_empty() {
                 let spare = Arc::new(Spare::new());
                 if !spawn(spare.clone()) {
+                    let retry = t.saturating_add(p.handoff_ns);
+                    deadline = Some(deadline.map_or(retry, |at: u64| at.min(retry)));
                     continue;
                 }
                 spares.push(spare);
@@ -846,12 +879,25 @@ fn watch_blocking(p: &Pool, mut spawn: impl FnMut(Arc<Spare>) -> bool) {
                 drop(spares);
                 spare.send(Some(ix));
                 bump(S_HANDOFFS);
-                add_stat(S_HANDOFF_AGE_NS, age);
-                delay = p.handoff_ns;
+                add_stat(S_HANDOFF_AGE_NS, t - stamp);
             }
+            // Claim or exit both clear the word. Scan again before parking
+            // so the slot either has an armed wake or a known deadline.
+            rescan = true;
         }
-        // A quiet pool needs no steady 20 us wake rate.
-        sync::thread::park_timeout(Duration::from_nanos(delay));
+        if rescan {
+            continue;
+        }
+        if let Some(deadline) = deadline {
+            let delay = deadline.saturating_sub(now());
+            if delay != 0 {
+                sync::thread::park_timeout(Duration::from_nanos(delay));
+            }
+        } else if p.host_calls.iter().all(|call| call.arm_idle() <= HOST_ARMED) {
+            // Arm only before an indefinite park. A racing entry either
+            // leaves an active stamp in this pass or supplies an unpark token.
+            sync::thread::park();
+        }
     }
     let spares = std::mem::take(&mut *p.spares.lock().unwrap());
     for spare in spares {
@@ -1123,7 +1169,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) -> bool {
         let u = &*up.0;
         if (*u.sp.get()).is_null() {
             start_stack(p, u);
-            if worker_ix() != ix {
+            if WORKER_IX.get() != ix {
                 publish(p, &p.locals[ix], up);
                 return false;
             }
@@ -1150,7 +1196,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) -> bool {
         CUR.set(std::ptr::null_mut());
         let after = u.after.replace(After::Run);
         u.inside.store(false, Ordering::SeqCst);
-        let mut owns_slot = worker_ix() == ix;
+        let mut owns_slot = WORKER_IX.get() == ix;
         match after {
             After::Done => {
                 WORST.fetch_max(u.status.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -1163,7 +1209,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) -> bool {
                 // The terminal switch returned to the host stack. DONE
                 // rejects further wakes, and nothing can resume this stack.
                 p.memory.put_unit_stack((*u.stack.get()).take().unwrap());
-                owns_slot = worker_ix() == ix;
+                owns_slot = WORKER_IX.get() == ix;
                 *u.sp.get() = std::ptr::null_mut();
                 if u.helper {
                     SPARE_HELPERS.lock().unwrap_or_else(|e| e.into_inner()).push(up);
@@ -1398,7 +1444,6 @@ pub(crate) fn launch(
         nsleep: AtomicUsize::new(0),
         threads: (0..w).map(|_| std::sync::Mutex::new(None)).collect(),
         handoff_ns,
-        handoff_scan_max_ns: handoff_ns.saturating_mul(16),
         host_calls: (0..w).map(|_| HostCall(AtomicU64::new(0))).collect(),
         spares: Mutex::new(Vec::new()),
         monitor: OnceLock::new(),

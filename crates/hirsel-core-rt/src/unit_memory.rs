@@ -204,8 +204,14 @@ impl Memory {
             let _ = send.send(map());
         }));
         self.ready.notify_one();
-        let _blocking = super::blocking();
-        receive.recv().unwrap()
+        match receive.try_recv() {
+            Ok(value) => value,
+            Err(mpsc::TryRecvError::Empty) => {
+                let _blocking = super::blocking();
+                receive.recv().unwrap()
+            }
+            Err(mpsc::TryRecvError::Disconnected) => panic!("memory thread disconnected"),
+        }
     }
 
     pub(crate) fn native_metadata(

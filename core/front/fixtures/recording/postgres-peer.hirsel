@@ -1,0 +1,135 @@
+// Appended to the client module by the native recording tests. One fixed nonce
+// makes the backend transcript reproducible. Drivers normally use host.random.
+fn scripted_connection(n: Net, clock: Clock, password: Secret) -> Result[Conn, Error] waits {
+    let until = At(clock, host.mono_ns(clock) + 5000000000u64)
+    let socket = match host.connect(n, Addr(ip: V4(2130706433u32), port: 12345u16), until) {
+        Ok(take handle) => take handle,
+        Error(e) => return Error(transport(e)),
+    }
+    let session = secure(n, take socket, "alpha.test", System, until)?
+    login(take session, "user", "postgres", password, b"rOprNGfwEbeRWgbNEkqO")
+}
+
+fn startup_law(outcome: Result[Conn, Error], scenario: String) -> bool {
+    let name = string.as_bytes(scenario)
+    match outcome {
+        Error(Protocol(Length)) => equal(name, b"short") || equal(name, b"negative") || equal(name, b"large"),
+        Error(Protocol(Tag(b'?'))) => equal(name, b"tag"),
+        Error(Protocol(UnverifiedServer)) => equal(name, b"signature"),
+        Error(Scram(Transcript)) => equal(name, b"nonce"),
+        Error(MissingAlpn) => equal(name, b"alpn"),
+        _ => false,
+    }
+}
+
+fn malformed_row(mut conn: Conn, scenario: String) -> bool waits {
+    let mut cursor = result.unwrap(query(mut conn, "SELECT 1", list.new()))
+    if let Error(Protocol(Fields)) = next(mut cursor) {
+        conn = finish(take cursor)
+        if let None = transaction(conn) {
+            return equal(string.as_bytes(scenario), b"short-row") || equal(string.as_bytes(scenario), b"trailing")
+        }
+    }
+    false
+}
+
+fn integer_row(rows: Rows, val: i32) -> bool {
+    let Some(current) = row(rows) else {
+        return false
+    }
+    match field(current, 0) {
+        Some(Field(oid: 23, value: Int4(v))) => v == val,
+        _ => false,
+    }
+}
+
+fn sql_failure(e: SqlError) -> bool {
+    equal(string.as_bytes(e.sqlstate), b"22012") && equal(string.as_bytes(e.severity), b"ERROR") && equal(string.as_bytes(e.message), b"division by zero") && match e.detail {
+        Some(d) => equal(string.as_bytes(d), b"scripted detail"),
+        None => false,
+    }
+}
+
+fn reuse_law(mut conn: Conn) -> bool waits {
+    let no_params: List[Param] = list.new()
+    let mut cursor = result.unwrap(query(mut conn, "SELECT 1 / x FROM inputs", no_params))
+    if !result.unwrap(next(mut cursor)) || !integer_row(cursor, 7) {
+        return false
+    }
+    if let Error(Sql(e)) = next(mut cursor) {
+        if !sql_failure(e) {
+            return false
+        }
+    } else {
+        return false
+    }
+    conn = finish(take cursor)
+    if let Some(Idle) = transaction(conn) {} else {
+        return false
+    }
+    let mut following = result.unwrap(query(mut conn, "SELECT 42", no_params))
+    if !result.unwrap(next(mut following)) || !integer_row(following, 42) || result.unwrap(next(mut following)) {
+        return false
+    }
+    conn = finish(take following)
+    if let Error(Sql(late)) = execute(mut conn, "SELECT 'late'", no_params) {
+        if !sql_failure(late) {
+            return false
+        }
+    } else {
+        return false
+    }
+    if let Some(Idle) = transaction(conn) {} else {
+        return false
+    }
+    let _ = result.unwrap(execute(mut conn, "BEGIN", no_params))
+    if let Some(InTransaction) = transaction(conn) {} else {
+        return false
+    }
+    if let Error(Sql(failed)) = execute(mut conn, "SELECT 1 / x FROM inputs", no_params) {
+        if !sql_failure(failed) {
+            return false
+        }
+    } else {
+        return false
+    }
+    if let Some(Failed) = transaction(conn) {} else {
+        return false
+    }
+    if let Error(RollbackRequired) = execute(mut conn, "SELECT 1", no_params) {} else {
+        return false
+    }
+    let _ = result.unwrap(execute(mut conn, "ROLLBACK", no_params))
+    if let Some(Idle) = transaction(conn) {} else {
+        return false
+    }
+    let Some(params) = parameters(conn) else {
+        return false
+    }
+    let Some(strings) = params.standard_conforming_strings else {
+        return false
+    }
+    equal(string.as_bytes(strings), b"off")
+}
+
+pub fn main(n: Net, clock: Clock, password: Secret, arguments: Args) -> Result[(), Exit] waits {
+    let scenario = option.unwrap(args.get(arguments, 0))
+    let outcome = scripted_connection(n, clock, password)
+    let name = string.as_bytes(scenario)
+    if equal(name, b"reuse") || equal(name, b"short-row") || equal(name, b"trailing") {
+        let mut conn = result.unwrap(take outcome)
+        if equal(name, b"reuse") {
+            if !reuse_law(mut conn) {
+                return Error(Exit(status: 2))
+            }
+            result.unwrap(close(take conn))
+        } else {
+            if !malformed_row(mut conn, scenario) {
+                return Error(Exit(status: 3))
+            }
+        }
+    } else if !startup_law(take outcome, scenario) {
+        return Error(Exit(status: 4))
+    }
+    Ok(())
+}

@@ -1,7 +1,9 @@
 //! Per-definition semantics numbers for compiler-implemented core functions.
 
 use hirsel_core_ids::DefPath;
+use std::cmp::Ordering;
 
+// Keep entries ordered by module and name for binary search.
 // Add entries at 1. Increment the entry when its builtin semantics change.
 const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("arc", "new", 2),
@@ -97,33 +99,33 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("host", "accept", 1),
     ("host", "close", 1),
     ("host", "connect", 1),
+    ("host", "entries", 1),
     ("host", "listen", 1),
     ("host", "mkdir", 1),
     ("host", "mkdtemp", 1),
     ("host", "mono_ns", 1),
+    ("host", "next_entries", 1),
     ("host", "open", 1),
+    ("host", "open_dir", 1),
     ("host", "random", 1),
     ("host", "read", 1),
+    ("host", "read_at", 1),
     ("host", "recv_bounded", 1),
     ("host", "remove", 1),
     ("host", "remove_tree", 1),
     ("host", "rename", 1),
     ("host", "send_pair", 1),
     ("host", "sleep_until", 1),
+    ("host", "stat", 1),
+    ("host", "stat_file", 1),
     ("host", "stopped", 1),
     ("host", "sync", 1),
     ("host", "sync_dir", 1),
-    ("host", "open_dir", 1),
-    ("host", "entries", 1),
-    ("host", "next_entries", 1),
-    ("host", "stat", 1),
-    ("host", "stat_file", 1),
-    ("host", "read_at", 1),
-    ("host", "write_at", 1),
     ("host", "try_lock", 1),
     ("host", "unlock", 1),
     ("host", "wall_ms", 1),
     ("host", "write", 1),
+    ("host", "write_at", 1),
     ("indexed", "get", 1),
     ("inline", "copy_from_slice", 1),
     ("inline", "word_be", 1),
@@ -165,11 +167,11 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("list", "pop", 1),
     ("list", "push", 2),
     ("list", "put_lanes", 2),
-    ("list", "set_lanes", 1),
     ("list", "put_word_be", 2),
     ("list", "put_word_le", 2),
     ("list", "reserve", 2),
     ("list", "set", 1),
+    ("list", "set_lanes", 1),
     ("list", "slice", 1),
     ("list", "slots_empty", 1),
     ("list", "slots_finish_list", 1),
@@ -279,6 +281,45 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("writer", "push", 1),
     ("writer", "scalar", 1),
 ];
+
+// str::cmp is not const. Match its byte order for the compile-time check.
+const fn compare(left: &str, right: &str) -> Ordering {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut i = 0;
+    while i < left.len() && i < right.len() {
+        if left[i] != right[i] {
+            return if left[i] < right[i] {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+        }
+        i += 1;
+    }
+    if left.len() < right.len() {
+        Ordering::Less
+    } else if left.len() > right.len() {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
+
+const _: () = {
+    let mut i = 1;
+    while i < BUILTIN_SEMANTICS.len() {
+        let (module, name, _) = BUILTIN_SEMANTICS[i - 1];
+        let (next_module, next_name, _) = BUILTIN_SEMANTICS[i];
+        let ordered = match compare(module, next_module) {
+            Ordering::Less => true,
+            Ordering::Equal => matches!(compare(name, next_name), Ordering::Less),
+            Ordering::Greater => false,
+        };
+        assert!(ordered, "builtin semantics keys must be strictly sorted");
+        i += 1;
+    }
+};
 
 pub(super) fn number(definition: &DefPath) -> Option<u32> {
     let [module] = definition.0.modules.as_slice() else {

@@ -19,6 +19,9 @@
 //! entry or sync, before taking any lock.
 use crate::provider::{IoError, Outcome, Request, STEP_DONE, STEP_PENDING, Step};
 use crate::tasks::Outside;
+// The cell's state goes through the pool's seam, so the pool checker
+// schedules the helper's completion against the issuing unit's take.
+use crate::units::sync::AtomicU8;
 use std::{
     cell::UnsafeCell,
     collections::VecDeque,
@@ -26,7 +29,7 @@ use std::{
     ptr,
     sync::{
         Condvar, Mutex,
-        atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
 };
 
@@ -100,6 +103,25 @@ impl SyncCell {
         // SAFETY: both `CELL_DONE` and `CELL_TAKEN` are set; we are the last owner.
         unsafe { drop(Box::from_raw(cell)) };
         Some(errno)
+    }
+
+    /// For the pool checker: a cell as `submit` makes one, the helper's
+    /// completion, and the issuer's take after its ready.
+    #[cfg(test)]
+    pub(crate) fn for_check(token: u64, outside: Outside) -> *mut Self {
+        Self::new(token, Some(outside))
+    }
+    /// # Safety
+    /// As `complete`.
+    #[cfg(test)]
+    pub(crate) unsafe fn complete_for_check(cell: *mut Self, errno: i32) {
+        unsafe { Self::complete(cell, errno) }
+    }
+    /// # Safety
+    /// As `try_take`.
+    #[cfg(test)]
+    pub(crate) unsafe fn take_for_check(cell: *mut Self) -> Option<i32> {
+        unsafe { Self::try_take(cell) }
     }
 
     /// Detach the issuer handle when a unit or provider ends while a sync is in

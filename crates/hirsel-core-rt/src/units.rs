@@ -30,17 +30,20 @@ use hirsel_core_net::{Crossing, Sockets};
 mod memory;
 pub(crate) use memory::Memory;
 use memory::UnitStack;
+#[cfg(test)]
+#[path = "units_check.rs"]
+mod check;
+#[path = "units_sync.rs"]
+pub(crate) mod sync;
 use std::{
     cell::Cell,
     collections::{HashMap, VecDeque},
     fs::File,
     io::{BufWriter, Read, Write},
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, OnceLock, atomic::Ordering},
 };
+use sync::{AtomicU64, Mutex};
 
 const MAGIC: u32 = 0x7f4d_0000;
 /// Ring bound per direction, in bytes.
@@ -952,7 +955,7 @@ pub(crate) fn launch(k: usize, input: &crate::entry::OsConfig, run: impl Fn(&cra
 // role, so a burst of newly runnable units wakes one worker at a time.
 use std::cell::{RefCell as URefCell, UnsafeCell};
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize};
+use sync::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize};
 
 /// mc-units-untied: a thread-local Cell whose every access computes the slot
 /// address inside a call that is never inlined, so no per-thread address
@@ -1148,7 +1151,7 @@ struct Pool {
     idle: Mutex<Vec<usize>>,
     nsleep: AtomicUsize,
     /// Per worker: its thread, and whether a wake handed it the search role.
-    threads: Vec<OnceLock<std::thread::Thread>>,
+    threads: Vec<OnceLock<sync::thread::Thread>>,
     handed: Vec<AtomicBool>,
     poll: Mutex<()>,
     /// Set while a worker holds `poll`, for a probe or a blocking wait. A
@@ -1198,7 +1201,7 @@ static BASE: OnceLock<Base> = OnceLock::new();
 static WORST: AtomicU8 = AtomicU8::new(0);
 
 fn now() -> u64 {
-    crate::os::monotonic_ns()
+    sync::monotonic_ns()
 }
 
 // Optional timing for the fairness experiment. Maxima are kept per worker
@@ -1571,7 +1574,7 @@ fn notify_worker(p: &Pool) {
 }
 
 /// Wake the most recently parked worker, if any, with the search role.
-fn hand_search(p: &Pool, mut idle: std::sync::MutexGuard<'_, Vec<usize>>) -> bool {
+fn hand_search(p: &Pool, mut idle: sync::MutexGuard<'_, Vec<usize>>) -> bool {
     let Some(w) = idle.pop() else { return false };
     p.nsleep.fetch_sub(1, Ordering::SeqCst);
     // The woken worker searches on this count.
@@ -1601,7 +1604,7 @@ fn keep_poller(p: &Pool) {
 /// The poll turn: `poll` held, with `poll_held` set for the sleepers' check.
 struct PollTurn<'a> {
     p: &'a Pool,
-    _lock: std::sync::MutexGuard<'a, ()>,
+    _lock: sync::MutexGuard<'a, ()>,
 }
 impl<'a> PollTurn<'a> {
     fn take(p: &'a Pool) -> Option<Self> {
@@ -1621,7 +1624,7 @@ fn write_wake(p: &Pool) {
     bump(S_OS_WAKES);
     let one = 1u64;
     // SAFETY: eight-byte write to a live eventfd.
-    unsafe { libc::write(p.gwake, (&one as *const u64).cast(), 8) };
+    unsafe { sync::write(p.gwake, (&one as *const u64).cast(), 8) };
 }
 
 /// Register the parking unit's deadline. `next_timer` is the set's minimum,
@@ -1684,14 +1687,14 @@ fn poll_global(p: &Pool, timeout: i32) {
         bump(S_GPOLL_BLOCKS);
     }
     // SAFETY: a live epoll and a writable event array.
-    let n = unsafe { libc::epoll_wait(p.gep, evs.as_mut_ptr(), evs.len() as i32, timeout) };
+    let n = unsafe { sync::epoll_wait(p.gep, evs.as_mut_ptr(), evs.len() as i32, timeout) };
     p.last_poll.store(now(), Ordering::Relaxed);
     for e in evs.iter().take(n.max(0) as usize) {
         let tag = e.u64;
         if tag == WAKE_TAG {
             let mut v = 0u64;
             // SAFETY: nonblocking eventfd read.
-            unsafe { libc::read(p.gwake, (&mut v as *mut u64).cast(), 8) };
+            unsafe { sync::read(p.gwake, (&mut v as *mut u64).cast(), 8) };
         } else if tag == FRONT_TAG {
             accept_front(p);
         } else {
@@ -1899,7 +1902,7 @@ fn worker_main(p: &'static Pool, ix: usize) {
     crate::fiber::arm();
     WORKER_IX.set(ix);
     let mut host: *mut u8 = std::ptr::null_mut();
-    let _ = p.threads[ix].set(std::thread::current());
+    let _ = p.threads[ix].set(sync::thread::current());
     // A wake handed this worker the search role (already counted).
     let mut handed = false;
     loop {
@@ -1994,7 +1997,7 @@ fn worker_main(p: &'static Pool, ix: usize) {
                 idle.push(ix);
                 drop(idle);
                 loop {
-                    std::thread::park();
+                    sync::thread::park();
                     if p.handed[ix].swap(false, Ordering::AcqRel) {
                         handed = true;
                         break;

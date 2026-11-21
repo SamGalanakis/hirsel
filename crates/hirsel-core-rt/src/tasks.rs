@@ -1876,7 +1876,8 @@ fn cancel_takes_effect(context: &Context, requested: &AtomicBool) -> bool {
 /// Readiness tokens from `hirsel_core_ready`, which may run on any thread.
 pub(crate) struct Readies {
     tokens: Mutex<Vec<u64>>,
-    pending: AtomicBool,
+    /// Through the pool's seam: the pool checker schedules around it.
+    pending: crate::units::sync::AtomicBool,
     worker: std::thread::Thread,
     peers: Mutex<Vec<std::thread::Thread>>,
     net: Mutex<Option<Arc<hirsel_core_net::Poller>>>,
@@ -1895,7 +1896,7 @@ impl Readies {
     pub(crate) fn for_unit(unit: u32) -> Arc<Self> {
         Arc::new(Self {
             tokens: Mutex::new(Vec::new()),
-            pending: AtomicBool::new(false),
+            pending: crate::units::sync::AtomicBool::new(false),
             worker: std::thread::current(),
             peers: Mutex::default(),
             net: Mutex::new(None),
